@@ -71,7 +71,7 @@ public sealed class DeadlocksAzureLoopStateLiveTests
             }, ct);
 
             /* The source-database column sits after the optional plan column; follow the host's own gate. */
-            var withPlan = runner.ShouldCapturePlanXmlFor(name, LiveServerId);
+            var withPlan = runner.ShouldCapturePlanXmlFor(name, LiveServerId, serverCapturePlans: null);
             object[] Row(string graph, object source) => withPlan
                 ? new object[] { T1, "process1", graph, DBNull.Value, source }
                 : new object[] { T1, "process1", graph, source };

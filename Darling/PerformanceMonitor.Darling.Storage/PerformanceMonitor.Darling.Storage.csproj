@@ -15,8 +15,10 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
+    <PackageReference Include="ModelContextProtocol" />
     <PackageReference Include="Npgsql" />
-    <PackageReference Include="System.Security.Cryptography.ProtectedData" VersionOverride="10.0.13" />
+    <PackageReference Include="System.Security.Cryptography.Pkcs" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" />
   </ItemGroup>
 
   <ItemGroup>
@@ -42,5 +44,9 @@
          SAME query text the MCP surface runs. Their ordinal-mapping tests pin the internal Map*Row helpers,
          which followed them; the service kept its own InternalsVisibleTo for everything that stayed there. -->
     <InternalsVisibleTo Include="Darling.Tests" />
+    <!-- #6390: the alert-rule, compose and custom-view code moved here from the Service so the Viewer can call it; the Service keeps
+         forwarders that name the internal members, and the Viewer calls the internal expiry and compose helpers. -->
+    <InternalsVisibleTo Include="PerformanceMonitor.Darling.Service" />
+    <InternalsVisibleTo Include="PerformanceMonitor.Darling.Viewer" />
   </ItemGroup>
 </Project>

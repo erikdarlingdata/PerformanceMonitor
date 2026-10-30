@@ -57,8 +57,15 @@ public partial class ViewerServerTab
     private async Task LoadSessionStatsAsync()
     {
         var (startUtc, endUtc) = GetWindowUtc();
-        var data = await _dataService.GetSessionStatsAsync(_server.ServerId, startUtc, endUtc);
-        RenderSessionStatsChart(data);
+        /* #6388: Sessions by Application beside the trend, the newest per-application snapshot get_session_stats serves. */
+        using var readFanOut = ViewerReadFanOut.Of(2);
+        var dataTask = _dataService.GetSessionStatsAsync(_server.ServerId, startUtc, endUtc);
+        var applicationsTask = _dataService.GetSessionsByApplicationAsync(_server.ServerId);
+        await Task.WhenAll(dataTask, applicationsTask);
+        /* Both reads are done; the engine-gap probe below is a store read, so release or it is priced at this width. */
+        readFanOut.Release();
+        RenderSessionStatsChart(dataTask.Result);
+        await RenderSessionsByApplicationAsync(applicationsTask.Result);
     }
 
     /// <summary>The session-status trend: hands the settable-window bounds + snapshots to the shared

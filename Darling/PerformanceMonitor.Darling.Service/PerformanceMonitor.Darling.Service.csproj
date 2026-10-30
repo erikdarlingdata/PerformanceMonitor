@@ -101,6 +101,9 @@
     <None Include="..\tools\install-darling.ps1" Link="install-darling.ps1" CopyToOutputDirectory="PreserveNewest" Condition="$(DarlingShipsWindowsScripts)" />
     <None Include="..\tools\uninstall-darling.ps1" Link="uninstall-darling.ps1" CopyToOutputDirectory="PreserveNewest" Condition="$(DarlingShipsWindowsScripts)" />
     <None Include="..\tools\upgrade-darling.ps1" Link="upgrade-darling.ps1" CopyToOutputDirectory="PreserveNewest" Condition="$(DarlingShipsWindowsScripts)" />
+    <!-- #6469: the double-click launcher for install-darling.ps1. A .cmd is not Authenticode-signed with the scripts; it only
+         starts PowerShell elevated with the execution policy bypassed for that one process. -->
+    <None Include="..\tools\Install-Darling.cmd" Link="Install-Darling.cmd" CopyToOutputDirectory="PreserveNewest" Condition="$(DarlingShipsWindowsScripts)" />
   </ItemGroup>
 
   <ItemGroup>

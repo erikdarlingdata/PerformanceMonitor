@@ -29,6 +29,7 @@ using PerformanceMonitor.Darling.Service.Hosting;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Notifications;
 using Xunit;
+using PerformanceMonitor.Darling.Storage;
 
 namespace Darling.Tests;
 
@@ -252,7 +253,7 @@ public sealed class AlertNotebookEndpointTests
 
     /* ═══════════════════════════ pure: ScopeServerOf (the registry name the charts scope by) ═══════════════════════════ */
 
-    private static readonly IReadOnlyList<DarlingServerResolver.RegisteredServer> s_registry = new List<DarlingServerResolver.RegisteredServer>
+    private static readonly IReadOnlyList<RegisteredServer> s_registry = new List<RegisteredServer>
     {
         new(7, "registry-key-a", "Orders (display name)"),
         new(8, "registry-key-b", "Billing (display name)"),
@@ -299,7 +300,7 @@ public sealed class AlertNotebookEndpointTests
     public void ScopeServerOf_NothingResolves_IsNull_NeverADisplayName()
     {
         var unregistered = Row(new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc), "High CPU", serverId: 99, serverName: "Gone (display name)");
-        var onlyOne = new List<DarlingServerResolver.RegisteredServer> { new(7, "registry-key-a", "Orders (display name)") };
+        var onlyOne = new List<RegisteredServer> { new(7, "registry-key-a", "Orders (display name)") };
 
         Assert.Null(AlertNotebookEndpoint.ScopeServerOf(s_registry, null, "no such server anywhere"));
         Assert.Null(AlertNotebookEndpoint.ScopeServerOf(s_registry, null, null));

@@ -559,7 +559,8 @@ public sealed class DarlingManagedRolesTests
         Assert.Contains($"GRANT SELECT ON {Six} TO admin, viewer;", flat, StringComparison.Ordinal);
         Assert.Contains($"GRANT SELECT ON {Six} TO mcp;", flat, StringComparison.Ordinal);
 
-        /* mcp: the claim and report columns only, and a note without its state, so an agent's note stays pending. */
+        /* mcp: the claim and report columns, and a note by the columns an agent's proposal sets. Since #6400 mcp also holds the person-only
+           grants below (state on a note, the close columns); the tool policy (NeverAgentTools) keeps an agent from those tools, not this role. */
         Assert.Contains("GRANT UPDATE (state, claimed_by, claim_id, claimed_at, lease_until, claim_count, brief_format, brief, reported_at) ON config.investigation_requests TO mcp;", flat, StringComparison.Ordinal);
         /* #6008: follow_up_at (V193) has its own grant, behind a column check, so a store below V193 commits the rest. */
         Assert.Contains("AND attname = 'follow_up_at' AND NOT attisdropped) THEN EXECUTE $v193u$ GRANT UPDATE (follow_up_at) ON config.investigation_requests TO mcp; $v193u$;", flat, StringComparison.Ordinal);
@@ -582,7 +583,11 @@ public sealed class DarlingManagedRolesTests
            and viewer writes nothing here. */
         Assert.Contains("GRANT INSERT ON config.investigation_request_alerts TO admin;", flat, StringComparison.Ordinal);
         Assert.Contains("ON config.investigation_requests TO admin;", flat, StringComparison.Ordinal);
-        Assert.DoesNotMatch(@"GRANT [A-Z ,()a-z_]*(INSERT|UPDATE|DELETE)[^;]* ON config\.investigation_request_alerts TO (?!admin;)", flat);
+        Assert.DoesNotMatch(@"GRANT [A-Z ,()a-z_]*(INSERT|UPDATE|DELETE)[^;]* ON config\.investigation_request_alerts TO (?!admin;|mcp;)", flat);
+
+        /* #6400: mcp (start_practice_request) copies a case's alert rows too, by the ten columns the copy sets, and never updates or deletes a link. */
+        Assert.Contains("GRANT INSERT (request_id, alert_time, server_id, metric_name, dedup_key, current_value, threshold_value, muted, detail_text, context_json, severity) ON config.investigation_request_alerts TO mcp;", flat, StringComparison.Ordinal);
+        Assert.DoesNotMatch(@"GRANT [A-Z ,()a-z_]*(UPDATE|DELETE)[^;]* ON config\.investigation_request_alerts TO mcp;", flat);
         Assert.DoesNotMatch(@"GRANT (INSERT|UPDATE|DELETE)[^;]* ON config\.(investigation|agent_environment)[a-z_]* TO [a-z_, ]*viewer", flat);
     }
 
@@ -602,7 +607,7 @@ public sealed class DarlingManagedRolesTests
 
         /* The beacon caveat: a config_alert_settings write fires the SECURITY INVOKER bump trigger, which UPDATEs
            config_service — so mcp needs a COLUMN-level UPDATE on JUST the two beacon columns (never paused /
-           capture_plans / mcp_enabled / mcp_port, and never a table-wide config_service UPDATE). */
+           mcp_enabled / mcp_port, and never a table-wide config_service UPDATE). */
         Assert.Contains("GRANT UPDATE (config_version, updated_at) ON config.config_service TO mcp;", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("GRANT UPDATE ON config.config_service TO mcp", sql, StringComparison.Ordinal);
 

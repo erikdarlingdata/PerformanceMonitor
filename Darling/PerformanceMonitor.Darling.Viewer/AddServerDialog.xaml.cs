@@ -8,9 +8,11 @@
 
 using System;
 using System.Globalization;
+using System.Linq;
 using System.Text.Json;
 using System.Threading.Tasks;
 using System.Windows;
+using System.Windows.Controls;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
@@ -143,6 +145,10 @@ public partial class AddServerDialog : Window
             AlertNotificationMode.PerEvent => 2,
             _ => 0
         };
+        /* #6771: prefill the per-server plan-capture choice (null = "Use the service setting"). */
+        CapturePlansBox.SelectedItem = CapturePlansBox.Items.OfType<ComboBoxItem>()
+            .FirstOrDefault(item => string.Equals(item.Tag as string, CapturePlansTagOf(existing.CapturePlans), StringComparison.Ordinal))
+            ?? CapturePlansBox.Items[0];
         FavoriteCheckBox.IsChecked = isFavorite;
 
         EncryptModeComboBox.SelectedIndex = existing.EncryptMode switch
@@ -767,7 +773,7 @@ public partial class AddServerDialog : Window
             /* Preserve the excluded-databases (edited via the dedicated dialog), not lost on a plain save. */
             ExcludedDatabases = _existing?.ExcludedDatabases ?? new System.Collections.Generic.List<string>(),
             MonthlyCostUsd = monthlyCost,
-            CapturePlans = _existing?.CapturePlans,
+            CapturePlans = CapturePlansOfTag((CapturePlansBox.SelectedItem as ComboBoxItem)?.Tag as string),
             AlertDeliveryModeOverride = GetSelectedDeliveryOverride(),
             IsEnabled = EnabledCheckBox.IsChecked == true,
         };
@@ -823,6 +829,23 @@ public partial class AddServerDialog : Window
     {
         1 => AlertNotificationMode.Summary,
         2 => AlertNotificationMode.PerEvent,
+        _ => null
+    };
+
+    /// <summary>#6771: the Tag of the "Capture plans" combo item for a stored value: "service" = use the service setting (null), "on" = true, "off" = false.
+    /// Mapped by Tag, not by position, so reordering the items in the XAML cannot swap On and Off.</summary>
+    internal static string CapturePlansTagOf(bool? capturePlans) => capturePlans switch
+    {
+        true => "on",
+        false => "off",
+        _ => "service"
+    };
+
+    /// <summary>#6771: the stored value for a "Capture plans" combo item Tag (the inverse of <see cref="CapturePlansTagOf"/>).</summary>
+    internal static bool? CapturePlansOfTag(string? tag) => tag switch
+    {
+        "on" => true,
+        "off" => false,
         _ => null
     };
 
@@ -1087,7 +1110,7 @@ public partial class AddServerDialog : Window
             }
 
             /* #6254: the Query Store replica's own result, after the primary's. */
-            return string.Join(" — ", parts) + "." + (ViewerDataService.ProbeReplicaNote(root) is { } replicaNote ? " " + replicaNote : "");
+            return string.Join(" — ", parts) + "." + (ViewerDataService.ProbeReplicaNote(root) is { } replicaNote ? " " + replicaNote : "") + (ViewerDataService.ProbeMissingGrantsNote(root) is { } grantsNote ? " " + grantsNote : "");
         }
         catch (JsonException)
         {
@@ -1115,6 +1138,88 @@ public partial class AddServerDialog : Window
         {
             return null;
         }
+    }
+
+    /// <summary>
+    /// #6472: copies the login and grant script for the server in the form. The principal follows the form's authentication: the SQL
+    /// login typed, the Entra identity placeholder, or, for Windows authentication, the account the service runs as (read from the service's
+    /// registry key on this machine) and a clearly marked placeholder when the service is not on this machine. The script is
+    /// built by <see cref="MonitoringGrantScript"/>, the same list the service's <c>--grant-script</c> command and the connection test read.
+    /// </summary>
+    private void CopyGrantScriptButton_Click(object sender, RoutedEventArgs e)
+    {
+        var host = ServerNameBox.Text.Trim();
+        if (PostgresEngineRadio.IsChecked == true)
+        {
+            StatusText.Text = "The grant script is for SQL Server targets. A PostgreSQL target needs pg_monitor; see the Darling operator guide.";
+            return;
+        }
+
+        if (string.IsNullOrEmpty(host))
+        {
+            StatusText.Text = "Enter the server name first; the script depends on where the server is.";
+            return;
+        }
+
+        string? auth;
+        string? username = null;
+        if (UseProfileRadio.IsChecked == true && ProfileComboBox.SelectedItem is ViewerCredentialProfile profile)
+        {
+            /* MapAuth is null for the interactive Entra modes, which an unattended service cannot use; ChoosePrincipal would read the null
+               as Windows authentication and print a machine-account script for them. */
+            auth = ServerStoreCredential.MapAuth(profile.AuthType);
+            if (auth is null)
+            {
+                StatusText.Text = ServerStoreCredential.UnsupportedAuthMessage;
+                return;
+            }
+
+            username = profile.Username;
+        }
+        else if (SqlAuthRadio.IsChecked == true)
+        {
+            auth = ServerStoreCredential.Sql;
+            username = UsernameBox.Text.Trim();
+        }
+        else if (ServicePrincipalAuthRadio.IsChecked == true)
+        {
+            auth = ServerStoreCredential.ServicePrincipal;
+        }
+        else if (ManagedIdentityAuthRadio.IsChecked == true)
+        {
+            auth = ServerStoreCredential.ManagedIdentity;
+        }
+        else if (WindowsAuthRadio.IsChecked == true)
+        {
+            auth = ServerStoreCredential.Integrated;
+        }
+        else
+        {
+            /* Microsoft Entra MFA, or nothing chosen: not an identity the service can connect with, so no script rather than a guessed principal. */
+            StatusText.Text = ServerStoreCredential.UnsupportedAuthMessage;
+            return;
+        }
+
+        /* The service's account is in its registry key, which any user can read. No key means the service is on another machine: the script
+           then names a placeholder account instead of this machine's, and the status line says so. */
+        var serviceAccount = MonitoringGrantScript.ReadServiceAccountName();
+        var principal = MonitoringGrantScript.ChoosePrincipal(new GrantPrincipalInputs(
+            auth, username, host, serviceAccount, Environment.MachineName, Environment.UserDomainName,
+            ServiceNotOnThisMachine: serviceAccount is null));
+        /* #6889: an Amazon RDS host gets the RDS form (no sysadmin there, and a user in each database instead of CONNECT ANY DATABASE). */
+        var isAzure = MonitoringGrantScript.IsAzureSqlDatabaseHost(host);
+        var isRds = !isAzure && MonitoringGrantScript.IsAwsRdsHost(host);
+        var script = MonitoringGrantScript.Build(
+            principal, GrantScriptFinOpsCheck.IsChecked == true, isAzure, host, awsRds: isRds);
+        /* The shared guard: another process can hold the clipboard, and the operator can click again. */
+        StatusText.Text = !PerformanceMonitor.Ui.ClipboardText.TrySetText(script)
+            ? "Could not reach the clipboard. Try again."
+            : principal.IsPlaceholder
+                ? $"Copied the grant script with a placeholder account ({principal.Name}): the service is not on this machine, so its account is a guess. "
+                    + "Replace it, or run PerformanceMonitor.Darling.Service.exe --grant-script --host <host> on the service's machine for the real one."
+                : isRds
+                    ? $"Copied the Amazon RDS grant script for {principal.Name}. Review it, then run it on {host} as the RDS master user."
+                    : $"Copied the grant script for {principal.Name}. Review it, then run it on {host} as a sysadmin.";
     }
 
     private void CancelButton_Click(object sender, RoutedEventArgs e)

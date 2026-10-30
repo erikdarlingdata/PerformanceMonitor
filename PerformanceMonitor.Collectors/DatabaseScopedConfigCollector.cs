@@ -68,8 +68,7 @@ public sealed class DatabaseScopedConfigCollector : CollectorDefinitionBase<Data
     private const string OnPremDatabaseListQueryText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-SELECT /* PerformanceMonitorLite */
-    d.name
+" + NoDatabaseAccessNote.ScopeProjection + @"
 FROM sys.databases AS d
 LEFT JOIN sys.dm_hadr_database_replica_states AS drs
     ON d.database_id = drs.database_id
@@ -77,8 +76,8 @@ LEFT JOIN sys.dm_hadr_database_replica_states AS drs
 WHERE (d.database_id > 4 OR d.database_id = 2)
 AND   d.database_id < 32761
 AND   d.name <> N'PerformanceMonitor'
+" + DatabaseScopeFilter.VendorControlledDatabaseScreen + @"
 AND   d.state_desc = N'ONLINE'
-AND   HAS_DBACCESS(d.name) = 1 /*a least-privilege login without per-db access raised 916 per db per cycle (#1823); index_object_stats and database_size_stats already self-skip this way. On-prem only: from master on Azure SQL DB this returns 0 for every user database, and Azure SQL DB does not use this enumeration at all (#3755) — the host connects per database there.*/
 AND
 (
     drs.database_id IS NULL          /*not in any AG*/
@@ -86,7 +85,7 @@ AND
 )
 /*EXCLUSION_FILTER*/
 ORDER BY d.name
-OPTION(RECOMPILE);";
+OPTION(RECOMPILE);" + NoDatabaseAccessNote.ScopeResults;
 
     /// <summary>
     /// The per-database read — the ONE body both execution paths run (#3755). Written as ordinary T-SQL

@@ -6,6 +6,9 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
+using System.IO;
+using System.Threading.Tasks;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
@@ -71,6 +74,32 @@ public sealed class DarlingCliCollectorColumnVerbTests
 
         Assert.NotEqual(CommandKind.StoreWrite, DarlingCliCommands.PlanCollectorColumn(CollectorScheduleColumn.RetentionDays, "wait_stats", "0", null).Kind);
     }
+
+    /* The purge reads one retention per collector, so a retention set for one server would be stored and never used. The verb refuses it
+       before it reads config or opens the store; default (clear) with a server stays allowed, to remove a value an older build stored. */
+    [Fact]
+    public async Task TheRetentionVerb_RefusesANumberForOneServer_BeforeTouchingConfigOrTheStore()
+    {
+        var output = new StringWriter();
+        var error = new StringWriter();
+
+        var code = await DarlingCliCommands.SetCollectorColumnAsync(
+            CollectorScheduleColumn.RetentionDays, new[] { "wait_stats", "30", "--server", "sql01", "--config", "C:\\no\\such\\darling.json" },
+            output, error, TestContext.Current.CancellationToken);
+
+        Assert.Equal(DarlingCliCommands.CollectorToggleExitCode.UsageOrConfig, code);
+        Assert.Equal(DarlingCliCommands.PerServerRetentionRefusalText, error.ToString().Trim());
+        Assert.Contains("fleet-wide", error.ToString(), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(true, false, "sql01", true)]
+    [InlineData(true, true, "sql01", false)]
+    [InlineData(true, false, null, false)]
+    [InlineData(true, false, " ", false)]
+    [InlineData(false, false, "sql01", false)]
+    public void ARetentionNumberWithAServer_IsTheOnlyCaseRefused(bool isRetention, bool clears, string? server, bool refused) =>
+        Assert.Equal(refused, DarlingCliCommands.PerServerRetentionRefusal(isRetention, clears, server) is not null);
 
     [Fact]
     public void TheHelpText_ListsBothVerbs()

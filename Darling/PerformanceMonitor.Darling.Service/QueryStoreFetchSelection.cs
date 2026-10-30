@@ -45,7 +45,7 @@ internal static class QueryStoreFetchSelection
     internal const int DefaultTopN = 100;
 
     /// <summary>The largest N the service honours; a larger value reads as this one. Anything at or below zero means "fetch every new plan".</summary>
-    internal const int MaxTopN = 100_000;
+    internal const int MaxTopN = PerformanceMonitor.Darling.Storage.ServiceFlagLimits.FetchTopNMax;
 
     /// <summary>The seven metrics, in the order the reasons name them.</summary>
     internal static readonly IReadOnlyList<string> MetricNames = new[]

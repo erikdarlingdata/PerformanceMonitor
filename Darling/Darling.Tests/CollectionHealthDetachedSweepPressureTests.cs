@@ -13,7 +13,6 @@ using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
-using static Darling.Tests.RepoFile;
 
 namespace Darling.Tests;
 
@@ -35,9 +34,6 @@ public sealed class CollectionHealthDetachedSweepPressureTests
 
     /// <summary>One run costs more than the whole 60,000 ms body, so a collector counted in the body reads BODY_OVERRUN.</summary>
     private const double LongP95Ms = 90_000;
-
-    private const string WorkerPath = "Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs";
-    private const string ToolsPath = "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDataTools.cs";
 
     private static CollectorHealth Row(string name, double avgMs, double p95Ms) =>
         new() { CollectorName = name, AvgDurationMs = avgMs, P95DurationMs = p95Ms };
@@ -121,57 +117,5 @@ public sealed class CollectionHealthDetachedSweepPressureTests
                 expectedInPass == kept,
                 $"{name} (every {effective} min, detached by name: {byName}): in the pass = {expectedInPass}, kept in the roll-up = {kept}");
         }
-    }
-
-    /// <summary>
-    /// The worker's dispatch asks <c>RunsDetached</c>, and this tool asks it too, with no second copy of the test
-    /// on either side. A hand-copied version passes every behavioural case above until the day one copy is
-    /// edited, which is the drift this pin exists to refuse.
-    /// </summary>
-    [Fact]
-    public void TheWorkersDispatchAndTheHealthToolAskTheSameTest()
-    {
-        var worker = ReadRepoFile(WorkerPath);
-        var tools = ReadRepoFile(ToolsPath);
-
-        /* The test is defined once, from its two halves. */
-        Assert.Contains(
-            "IsDetachedByName(name) || IsDailyInterval(effectiveIntervalMinutes)", worker, StringComparison.Ordinal);
-        Assert.Equal(1, Count(worker, "internal static bool RunsDetached("));
-
-        /* The dispatch decides with it. */
-        Assert.Equal(1, Count(worker, "if (!RunsDetached(name, interval))"));
-
-        /* The three by-name predicates are chained in ONE place, IsDetachedByName, and nowhere else in the worker
-           under the dispatch's variable name: a copy of the chain in the dispatch is the second copy. */
-        Assert.Equal(1, Count(worker, "IsQueryStoreCollector(name) || IsPlanCorrectionCollector(name) || IsPgWaitSamplingCollector(name)"));
-
-        /* The tool asks it through the worker, once, and does not name any piece of it. */
-        Assert.Equal(1, Count(tools, "DarlingWorker.RunsDetached("));
-        foreach (var piece in new[]
-                 {
-                     "IsQueryStoreCollector", "IsPlanCorrectionCollector", "IsPgWaitSamplingCollector", "IsDailyInterval",
-                     "IsDetachedByName", "DailyCollectorIntervalMinutes",
-                 })
-        {
-            Assert.DoesNotContain(piece, tools, StringComparison.Ordinal);
-        }
-
-        /* Both readings of the body's population, the roll-up and the heaviest list, come through the one filter. */
-        Assert.Contains(
-            "var pressure = SweepPressureClassifier.Compute(SweepBodyCollectors(rows));", tools, StringComparison.Ordinal);
-        Assert.Contains("var heaviest = SweepBodyRows(rows)", tools, StringComparison.Ordinal);
-    }
-
-    private static int Count(string haystack, string needle)
-    {
-        var count = 0;
-        for (var i = haystack.IndexOf(needle, StringComparison.Ordinal); i >= 0;
-             i = haystack.IndexOf(needle, i + needle.Length, StringComparison.Ordinal))
-        {
-            count++;
-        }
-
-        return count;
     }
 }

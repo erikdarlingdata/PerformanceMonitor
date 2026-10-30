@@ -147,6 +147,33 @@ public sealed class KnownPatternStoreHardeningLiveTests
     }
 
     [Fact]
+    public async Task AnAddPastTheEntryCap_IsRefusedWithTheCountAndTheCap_ForTheStoreAndADirectCall_AndAnEditAndDeleteStillWork()
+    {
+        await WithStoreAsync(async (owner, viewer, _, ct) =>
+        {
+            /* The viewer and web editors write through PgKnownPatternStore (as the viewer role); the function itself is the shared check. */
+            await ExecAsync(owner, $"INSERT INTO config.config_known_patterns (note) SELECT 'bulk ' || g FROM generate_series(1, {KnownPatternMatcher.MaxEntries - 1}) g", ct);
+            var store = new PgKnownPatternStore(viewer);
+            var last = await store.InsertAsync(new KnownPatternInput(null, null, null, null, null, "the 500th", null), "erik", ct);
+            Assert.Equal(KnownPatternMatcher.MaxEntries, await CountAsync(owner, ct));
+
+            var refused = await Assert.ThrowsAsync<PgKnownPatternStore.StoreRefusedException>(() =>
+                store.InsertAsync(new KnownPatternInput(null, null, null, null, null, "the 501st", null), "erik", ct));
+            Assert.Equal("DL409", refused.SqlState);
+            Assert.Equal("Known patterns are capped at 500 entries and 500 exist. Delete entries you no longer need to make room.", refused.Message);
+            var direct = await Assert.ThrowsAsync<PostgresException>(() => ExecAsync(viewer, InsertCall(), ct));
+            Assert.Equal("DL409", direct.SqlState);
+            Assert.Equal(KnownPatternMatcher.MaxEntries, await CountAsync(owner, ct));
+
+            /* Edit and delete are not capped; a delete makes room for exactly one add. */
+            Assert.True(await store.UpdateAsync(last, new KnownPatternInput(null, null, null, null, null, "edited at the cap", null), "priya", ct));
+            Assert.True(await new PgKnownPatternStore(owner).DeleteAsync(last, ct));
+            await store.InsertAsync(new KnownPatternInput(null, null, null, null, null, "back to 500", null), "erik", ct);
+            Assert.Equal(KnownPatternMatcher.MaxEntries, await CountAsync(owner, ct));
+        });
+    }
+
+    [Fact]
     public async Task TheStore_TurnsAServerThatIsNotRegistered_IntoAnArgumentException_ForAnAddAndAnEdit()
     {
         await WithStoreAsync(async (owner, viewer, _, ct) =>
@@ -154,12 +181,14 @@ public sealed class KnownPatternStoreHardeningLiveTests
             var store = new PgKnownPatternStore(viewer);
             var id = await store.InsertAsync(new KnownPatternInput(ServerId, null, null, null, null, "first", null), "erik", ct);
 
-            var add = await Assert.ThrowsAsync<ArgumentException>(() =>
+            var add = await Assert.ThrowsAsync<PgKnownPatternStore.StoreRefusedException>(() =>
                 store.InsertAsync(new KnownPatternInput(987654, null, null, null, null, "ghost", null), "erik", ct));
             Assert.Contains("No monitored server", add.Message, StringComparison.Ordinal);
-            var edit = await Assert.ThrowsAsync<ArgumentException>(() =>
+            var edit = await Assert.ThrowsAsync<PgKnownPatternStore.StoreRefusedException>(() =>
                 store.UpdateAsync(id, new KnownPatternInput(987654, null, null, null, null, "ghost", null), "priya", ct));
             Assert.Contains("No monitored server", edit.Message, StringComparison.Ordinal);
+            Assert.Equal("DL404", add.SqlState);
+            Assert.Equal("DL404", edit.SqlState);
 
             var only = Assert.Single(await store.LoadAllAsync(ct));
             Assert.Equal("first", only.Note);

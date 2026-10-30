@@ -158,8 +158,8 @@ public sealed class DarlingMcpCollectorScheduleToolsLiveTests
             Assert.Equal("changed", (string?)freq["status"]);
             Assert.Null((int?)freq["previous"]!["frequency_minutes"]);
             Assert.Equal(7, (int?)freq["current"]!["frequency_minutes"]);
-            var retention = Parse(await DarlingMcpCollectorScheduleTools.SetCollectorRetention(source, ShipsOff, 11, false, "sched-beta", cancellationToken: ct));
-            Assert.Equal("changed", (string?)retention["status"]);
+            /* A retention for one server is refused (the purge reads the fleet-wide value only), so the row an older build stored is seeded directly. */
+            await ExecAsync(owner, $"INSERT INTO config.config_collector_schedules (server_id, collector_name, enabled, retention_days) VALUES ({ServerB}, '{ShipsOff}', NULL, 11)", ct);
 
             var runnerFleet = await RunnerSeesAsync(source, ShipsOff, ServerA, ct);
             Assert.False(runnerFleet.Enabled);
@@ -171,7 +171,7 @@ public sealed class DarlingMcpCollectorScheduleToolsLiveTests
 
             /* A server row created under a fleet row that is OFF is created OFF too. */
             await DarlingMcpCollectorScheduleTools.DisableCollector(source, Delta, null, cancellationToken: ct);
-            await DarlingMcpCollectorScheduleTools.SetCollectorRetention(source, Delta, 5, false, "sched-alpha", cancellationToken: ct);
+            await DarlingMcpCollectorScheduleTools.SetCollectorFrequency(source, Delta, 5, false, "sched-alpha", cancellationToken: ct);
             Assert.False((await RunnerSeesAsync(source, Delta, ServerA, ct)).Enabled);
 
             /* The read lists what is stored, fleet-wide and per server, with the code default beside it. */
@@ -190,7 +190,7 @@ public sealed class DarlingMcpCollectorScheduleToolsLiveTests
             Assert.Single((JsonArray)alpha["overrides"]!);
 
             /* The undo of each answer puts the previous value back; a previous "none" is a clear. */
-            await CallUndoAsync(source, retention, ct);
+            await DarlingMcpCollectorScheduleTools.SetCollectorRetention(source, ShipsOff, null, true, "sched-beta", cancellationToken: ct);
             await CallUndoAsync(source, freq, ct);
             var afterUndo = await RunnerSeesAsync(source, ShipsOff, ServerB, ct);
             Assert.Equal(CollectorScheduleDefaults.All[ShipsOff].FrequencyMinutes, afterUndo.FrequencyMinutes);
@@ -253,7 +253,7 @@ public sealed class DarlingMcpCollectorScheduleToolsLiveTests
         {
             await ExecAsync(owner, $"UPDATE servers SET display_name = 'Alpha Box' WHERE server_id = {ServerA}", ct);
             await DarlingMcpCollectorScheduleTools.EnableCollector(source, Delta, "sched-alpha", cancellationToken: ct);
-            await DarlingMcpCollectorScheduleTools.SetCollectorRetention(source, Daily, 30, false, "sched-alpha", cancellationToken: ct);
+            await ExecAsync(owner, $"INSERT INTO config.config_collector_schedules (server_id, collector_name, retention_days) VALUES ({ServerA}, '{Daily}', 30)", ct);
 
             var enabled = Parse(await DarlingMcpCollectorScheduleTools.DisableCollector(source, Delta, null, cancellationToken: ct));
             var retention = Parse(await DarlingMcpCollectorScheduleTools.SetCollectorRetention(source, Daily, 90, false, null, cancellationToken: ct));
@@ -305,11 +305,38 @@ public sealed class DarlingMcpCollectorScheduleToolsLiveTests
             Assert.Equal("changed", (string?)undone["status"]);
             Assert.Equal(1, await ScalarAsync(owner, $"SELECT count(*) FROM config.config_collector_schedules WHERE server_id = {ServerA} AND collector_name = '{Daily}' AND frequency_minutes IS NULL", ct));
 
-            var retention = Parse(await DarlingMcpCollectorScheduleTools.SetCollectorRetention(source, Daily, 30, false, "sched-alpha", cancellationToken: ct));
+            /* A retention stored above today's limit is a fleet-wide one now: a per-server value is refused. */
+            await ExecAsync(owner, $"INSERT INTO config.config_collector_schedules (server_id, collector_name, retention_days) VALUES (NULL, '{Daily}', 5000)", ct);
+            var retention = Parse(await DarlingMcpCollectorScheduleTools.SetCollectorRetention(source, Daily, 30, false, null, cancellationToken: ct));
             var retentionUndo = (JsonObject)retention["undo"]!["arguments"]!;
             Assert.True((bool?)retentionUndo["clear"]);
             Assert.False(retentionUndo.ContainsKey("retention_days"));
             Assert.Contains(((JsonArray)retention["notes"]!).Select(n => (string?)n), n => n!.Contains("5000", StringComparison.Ordinal) && n.Contains("cannot be put back", StringComparison.Ordinal));
+        });
+    }
+
+    /* The purge reads one retention per collector (the fleet-wide row), so a retention for one server would be stored and never used: the
+       tool refuses it and writes nothing. A fleet-wide retention still sets, and a clear with a server still removes a value an older
+       build stored there. */
+    [Fact]
+    public async Task Retention_ForOneServer_IsRefused_FleetWideStillSets_AndAServerClearRemovesAStoredValue()
+    {
+        await WithStoreAsync(async (source, owner, ct) =>
+        {
+            var refused = Parse(await DarlingMcpCollectorScheduleTools.SetCollectorRetention(source, Daily, 30, false, "sched-alpha", cancellationToken: ct));
+            Assert.Equal("refused", (string?)refused["status"]);
+            Assert.Equal(DarlingCliCommands.PerServerRetentionRefusalText, (string?)refused["message"]);
+            Assert.Equal(0, await ScalarAsync(owner, "SELECT count(*) FROM config.config_collector_schedules", ct));
+
+            var fleet = Parse(await DarlingMcpCollectorScheduleTools.SetCollectorRetention(source, Daily, 90, false, null, cancellationToken: ct));
+            Assert.Equal("changed", (string?)fleet["status"]);
+            Assert.Equal(90, await ScalarAsync(owner, $"SELECT retention_days FROM config.config_collector_schedules WHERE server_id IS NULL AND collector_name = '{Daily}'", ct));
+
+            await ExecAsync(owner, $"INSERT INTO config.config_collector_schedules (server_id, collector_name, retention_days) VALUES ({ServerA}, '{Daily}', 30)", ct);
+            var cleared = Parse(await DarlingMcpCollectorScheduleTools.SetCollectorRetention(source, Daily, null, true, "sched-alpha", cancellationToken: ct));
+            Assert.Equal("changed", (string?)cleared["status"]);
+            Assert.Null(cleared["undo"]);
+            Assert.Equal(0, await ScalarAsync(owner, $"SELECT count(*) FROM config.config_collector_schedules WHERE server_id = {ServerA} AND retention_days IS NOT NULL", ct));
         });
     }
 

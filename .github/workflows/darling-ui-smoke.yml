@@ -8,19 +8,11 @@ name: Darling UI smoke
 # The screenshot compare is advisory (#5931): a page that differs from its baseline is reported in the job summary and
 # the darling-ui-smoke artifact and does not fail the job. Real breakage still does.
 #
-# Triggers: a pull request touching the web files, the harness or this workflow (a draft pull request is skipped
-# until it is marked ready), the nightly (workflow_call), and a manual dispatch. `pull_request`, never `pull_request_target`: the job runs the
-# pull request's own code, so it runs with the pull request's read-only token and no secrets.
+# Triggers: the nightly (workflow_call) and a manual dispatch. It no longer runs on pull requests (#6656): the pull
+# request workflow (pr.yml) is the one per-PR CI system, so this smoke is a nightly and on-demand check.
 #
-# Not a required check. A workflow that is skipped by its path filter never reports, so it cannot be one; the job
-# name is left free of the names build.yml's ruleset uses.
+# Not a required check; the job name is left free of the names the required checks use.
 on:
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
-    paths:
-      - 'Darling/PerformanceMonitor.Darling.Service/wwwroot/**'
-      - 'tools/ui-smoke/**'
-      - '.github/workflows/darling-ui-smoke.yml'
   # The nightly runs it as a reusable workflow (nightly.yml, outside publish's needs).
   workflow_call:
   # update_baselines: render the four screenshot pages and upload new PNGs as the artifact "darling-ui-smoke-new-baselines"
@@ -43,8 +35,6 @@ concurrency:
 jobs:
   smoke:
     name: Darling web UI smoke
-    # Skip a draft pull request; a dispatch has no pull request and always runs.
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: windows-latest
     # Measured (#5744, five green runs with both caches warm): 3.4 to 5.8 minutes in all. A typical run: checkout and .NET 0.5, service build
     # 1 to 1.2, PostgreSQL 0.2, browser walk and the stale wait 1.7, four screenshots 0.1. A cold pg-runtime cache adds 3. The 20 stays: over 3 times the slowest run.
@@ -56,10 +46,21 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # The exact SDK version from global.json, not its feature band. Given a band, setup-dotnet resolves the newest
+      # patch through aka.ms links, and on 2026-10-25 those links sent every run to a download that failed with HTTP 409.
+      # With an exact version the install script downloads from the release feed and never asks aka.ms.
+      - name: Read the SDK version from global.json
+        id: globaljson_sdk
+        shell: pwsh
+        run: |
+          $version = (Get-Content -Raw (Join-Path $env:GITHUB_WORKSPACE 'global.json') | ConvertFrom-Json).sdk.version
+          if (-not $version) { throw 'global.json names no sdk.version' }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
       - name: Setup .NET 10.0
         uses: actions/setup-dotnet@v6
         with:
-          global-json-file: global.json
+          dotnet-version: ${{ steps.globaljson_sdk.outputs.version }}
           cache: true
           cache-dependency-path: '**/packages.lock.json'
 

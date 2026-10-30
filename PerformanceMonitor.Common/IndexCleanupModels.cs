@@ -472,6 +472,14 @@ namespace PerformanceMonitor.Common
         /// <summary>Dedupe-only was in effect (either requested, or auto-enabled because uptime &lt;= 7 days), so unused indexes were not flagged.</summary>
         public bool DedupeOnlyApplied { get; init; }
 
+        /// <summary>
+        /// Whether the "uptime under 14 days" caveat is worth showing (#6653). It warns that usage data may be incomplete and some "Unused
+        /// Index" findings premature, but dedupe-only mode (uptime of 7 days or less, or requested) flags no unused index at all, so beside
+        /// the dedupe notice the caveat describes findings that are not there and contradicts it. Both the Viewer's banners and the
+        /// get_finops notes (which the web page shows) read this one rule; <see cref="UptimeWarning"/> itself stays the raw fact.
+        /// </summary>
+        public bool ShowUptimeCaveat => UptimeWarning && !DedupeOnlyApplied;
+
         /// <summary>Precisely-surfaced limitations of this data-driven reproduction (e.g. omitted filegroup placement, compression exclusions not reproducible, out-of-scope rules).</summary>
         public IReadOnlyList<string> Notes { get; init; } = Array.Empty<string>();
     }

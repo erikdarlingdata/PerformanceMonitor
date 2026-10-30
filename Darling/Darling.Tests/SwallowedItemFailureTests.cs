@@ -315,7 +315,7 @@ public sealed class SwallowedItemFailureTests
             Assert.Contains(name, catalog);
         }
 
-        foreach (var described in new[] { "deadlocks", "blocked_process_report", "pg_blocking", "pg_xmin_horizon", "long_query_completions", "pg_deadlocks" })
+        foreach (var described in new[] { "deadlocks", "blocked_process_report", "pg_blocking", "pg_xmin_horizon", "long_query_completions", "pg_deadlocks", "attention" })
         {
             Assert.True(CollectorHealthClassifier.IsEventCollector(described), described);
         }
@@ -351,7 +351,7 @@ public sealed class SwallowedItemFailureTests
             Assert.False(CollectorHealthClassifier.IsIntervalSourcedCollector(name), name);
         }
 
-        foreach (var dense in new[] { "memory_grant_stats", "query_stats" })
+        foreach (var dense in new[] { "memory_grant_stats" })
         {
             Assert.Contains(dense, catalog);
             Assert.False(CollectorHealthClassifier.IsActivitySourcedCollector(dense), dense);

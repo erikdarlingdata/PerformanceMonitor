@@ -877,6 +877,17 @@ resume AS (
     }
 
     /// <summary>
+    /// The current row's <see cref="LogTimezoneSql"/> column as written, at <paramref name="ordinal"/>, or null for a
+    /// marker row, a NULL, or a reader without the column (#6866). What the server check of a named local zone is
+    /// given as the zone to render in.
+    /// </summary>
+    public static string? LogTimezoneSetting(DbDataReader reader, int ordinal)
+    {
+        ArgumentNullException.ThrowIfNull(reader);
+        return reader.FieldCount > ordinal && !reader.IsDBNull(ordinal) ? reader.GetString(ordinal) : null;
+    }
+
+    /// <summary>
     /// The target's own <c>log_line_prefix</c>, selected beside the tail body the same way
     /// <see cref="LogTimezoneSql"/> already is (#4501): a consumer that reads each line's label passes it to
     /// <see cref="PgLogEntryAssembler.ForgeryCheckFor"/> so the forgery rule can use the prefix's own
@@ -913,10 +924,11 @@ resume AS (
     /// count label cannot name the setting or the issue, and an operator who finds the count needs both.
     /// </summary>
     public const string ForeignZoneLinesNote =
-        "Skipped log lines stamped in a zone other than UTC, which this target's UTC log_timezone did not write: a "
-        + "client can plant one with a failed login, since %u and %d in log_line_prefix echo its role and database "
-        + "names unescaped, and lines from before a log_timezone change look the same. The read went on without "
-        + "them (#4046)";
+        "Skipped log lines whose time this target's log_timezone did not write. With a UTC setting that is a line "
+        + "stamped in another zone. With a named local zone it is a line whose text no instant in that zone renders "
+        + "back as, or two instants do. A client can forge one with a failed login, since %u and %d in "
+        + "log_line_prefix echo its role and database names unescaped, and lines from before a log_timezone change "
+        + "look the same. The read went on without them (#4046, #6866)";
 
     /// <summary>
     /// Records the lines a read skipped as not the server's own (#4046) on this run's collection-log row. Nothing

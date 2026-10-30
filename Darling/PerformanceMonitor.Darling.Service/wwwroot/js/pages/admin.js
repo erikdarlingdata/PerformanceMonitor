@@ -27,7 +27,7 @@
    it reaches a row. */
 
 import { VIZ } from "../panels.js";
-import { el, mount, loadingStrip, errorStrip, emptyStrip, noticeStrip, listOnlyNote, readTool, apiGet, apiGetFleet, apiWrite, onSessionExpired, localizeIsoText } from "../util.js";
+import { routeHash, el, mount, loadingStrip, errorStrip, emptyStrip, noticeStrip, listOnlyNote, readTool, apiGet, apiGetFleet, apiWrite, onSessionExpired, localizeIsoText, storeHash } from "../util.js";
 import { getSession } from "../views-api.js";
 import { writeNote, startPractice, writeAccess, SIGN_IN_SENTENCE, NOTE_MAX_LENGTH, NOTE_MAX_DAYS, NOTE_DEFAULT_DAYS } from "../investigation-writes.js";
 import { buildAgentChanges, resetAgentChangesStatus } from "./admin-agent-changes.js";
@@ -92,6 +92,7 @@ export const ROUTE_COLUMNS = [
   { key: "match_kind", label: "Kind" },
   { key: "family", label: "Family" },
   { key: "applies_to", label: "Applies to" },
+  { key: "severities", label: "Severity" },
   { key: "status", label: "Status" },
   { key: "channels", label: "Channels set", wrap: true },
   { key: "agent", label: "Agent" },
@@ -114,6 +115,7 @@ const GROUP_LABELS = {
   poison_wait: "Poison wait",
   runnable_queue: "Runnable queue",
   client_timeouts: "Client timeouts",
+  identity_capacity: "Identity capacity",
   long_running_query: "Long-running query",
   tempdb_space: "TempDB space",
   low_disk: "Low disk",
@@ -123,6 +125,10 @@ const GROUP_LABELS = {
   long_running_job: "Long-running job",
   failed_job: "Failed job",
   database_state: "Database state",
+  backup_overdue: "Backup overdue",
+  log_backup_overdue: "Log backup overdue",
+  checkdb_overdue: "CHECKDB overdue",
+  agent_alert_gaps: "Agent alert gaps",
   ag: "Availability Groups",
   delivery: "Delivery",
   health_bands: "Health bands",
@@ -167,7 +173,7 @@ export const SETTING_SECTIONS = [
   {
     title: "Alert thresholds",
     groups: ["cpu", "blocking", "deadlocks", "poison_wait", "runnable_queue", "client_timeouts", "long_running_query", "tempdb_space", "low_disk",
-      "self_alerts", "pvs", "file_growth", "long_running_job", "failed_job", "database_state", "ag", "delivery"],
+      "self_alerts", "pvs", "file_growth", "long_running_job", "failed_job", "database_state", "agent_alert_gaps", "backup_overdue", "log_backup_overdue", "checkdb_overdue", "identity_capacity", "ag", "delivery"],
     top: ["alerts_enabled", "notify_connection_changes", "notify_connection_down_at_startup", "connection_refire_minutes",
       "cooldown_minutes"],
     groupFields: { long_running_query: ["enabled", "threshold_minutes", "max_results"] },
@@ -191,10 +197,12 @@ export const GROUP_FIELDS = {
   cpu: ["enabled", "threshold_percent", "mode"],
   blocking: ["enabled", "count_threshold", "wait_threshold_seconds", "pg_count_threshold"],
   deadlocks: ["enabled", "count_threshold", "pg_count_threshold"],
-  health_bands: ["deadlock_warn_per_hour", "deadlock_critical_per_hour"],
+  health_bands: ["deadlock_warn_per_hour", "deadlock_critical_per_hour", "blocking_warn_per_hour", "blocking_critical_per_hour",
+    "blocking_warn_wait_seconds", "blocking_critical_wait_seconds"],
   poison_wait: ["enabled", "threshold_ms"],
   runnable_queue: ["enabled", "warning_per_scheduler", "critical_per_scheduler"],
   client_timeouts: ["enabled", "warning_per_minute", "critical_per_minute", "warning_multiple", "critical_multiple"],
+  identity_capacity: ["enabled", "warning_percent", "critical_percent"],
   long_running_query: ["enabled", "threshold_minutes", "max_results", "exclude_sp_server_diagnostics", "exclude_wait_for",
     "exclude_backups", "exclude_misc_waits", "exclude_cdc", "excluded_program_name_prefixes", "excluded_logins"],
   tempdb_space: ["enabled", "threshold_percent"],
@@ -206,6 +214,10 @@ export const GROUP_FIELDS = {
   long_running_job: ["enabled", "multiplier"],
   failed_job: ["enabled", "lookback_minutes"],
   database_state: ["enabled"],
+  backup_overdue: ["enabled"],
+  log_backup_overdue: ["enabled"],
+  checkdb_overdue: ["enabled"],
+  agent_alert_gaps: ["enabled"],
   ag: ["enabled", "lag_threshold_seconds", "redo_queue_threshold_kb", "disconnect_refire_minutes"],
   delivery: ["mode", "per_event_max", "cooldown_minutes", "send_resolutions"],
   analysis: ["enabled", "interval_minutes", "notifications_enabled", "notify_severity", "notify_cooldown_minutes",
@@ -297,6 +309,13 @@ export function routeAgentText(r) {
   return "Off";
 }
 
+/** The Severity column (#6928), in the desktop routes window's words: which alerts the route takes by severity. A route read without
+    the field, or with a word this page does not know, reads as Both, the same as the service. */
+export function routeSeveritiesText(r) {
+  const word = r && typeof r.severities === "string" ? r.severities.trim().toLowerCase() : "";
+  return word === "critical" ? "Critical only" : word === "warning" ? "Warning only" : "Both";
+}
+
 /** The Send resolutions column (#5825), in the route dialog's words: send_resolutions null follows each channel's own
     "Send resolutions" setting, true always sends the cleared message to this route's destinations, false never does. A
     route read without the field reads as the channel setting, the same as null. */
@@ -315,6 +334,7 @@ export function routeRows(data) {
     match_kind: r.match_kind,
     family: r.family,
     applies_to: routeScopeText(r),
+    severities: routeSeveritiesText(r),
     status: routeStatusText(r),
     channels: Array.isArray(r.configured_channels) ? r.configured_channels.filter((c) => !isSecretKey(c)).join(", ") : null,
     agent: routeAgentText(r),
@@ -334,7 +354,7 @@ export function serverRows(data) {
    network, so the form built on top of them can be tested rule by rule.
    They mirror the service's edit (PlanEdit and ParseEditChanges in Mcp/DarlingMcpServerAdminTools.Edit.cs):
      - only the fields the form changed are sent, plus the read's opaque modified_at text as expected_modified_at;
-     - a SQL Server edit never sends port (the service refuses it, even 0) and a PostgreSQL edit never sends auth;
+     - a SQL Server edit never sends port (the service refuses a non-zero one; the page has no way to clear a stored one) and a PostgreSQL edit never sends auth;
      - a password is required when the connection of a SQL or ServicePrincipal server changes, because the stored one
        cannot be read back; and the service probes the new connection on ANY connection change (Windows and managed
        identity included) or whenever a password is sent.
@@ -523,7 +543,7 @@ export function validateEdit(original, values, password, externalId) {
         ? "Switching to ServicePrincipal authentication needs the client secret as password."
         : "Switching to SQL authentication needs the password.";
     }
-    return "Changing how this server is reached needs its password again: it is stored encrypted and this surface cannot read it back.";
+    return "Changing the host, port or any other connection setting of this server needs its password sent with the change, because a saved password is only ever sent to the server it was saved for. Send the password together with the new settings.";
   }
   if (!Number.isFinite(next.monthly_cost_usd)) return "Monthly cost must be a number, zero or more.";
   return null;
@@ -706,10 +726,10 @@ function findTab(id) {
 }
 
 function tabBar(active) {
-  return el("nav", { class: "subtabs wrap", "aria-label": "Admin sections" },
+  return el("nav", { class: "subtabs", "aria-label": "Admin sections" },
     TABS.map((t) => el("a", {
       class: "subtab" + (t.id === active.id ? " active" : ""),
-      href: "#/admin/" + t.id,
+      href: storeHash("#/admin/") + t.id,
       "aria-current": t.id === active.id ? "page" : null,
       text: t.label,
     })));
@@ -1256,7 +1276,7 @@ async function buildRoutes(body, generation) {
   /* A failed signing read leaves the strip out; the routes below are the page. */
   const signingNodes = signing && signing.kind === "data" ? signingStatusLines(signing.data).map((t) => noticeStrip(t)) : [];
   mount(body, [
-    ...(access.routes ? routeEditorNodes(options) : routeListOnlyNodes(access.message, access.managed)),
+    ...(access.routes ? routeEditorNodes(options) : routeListOnlyNodes(access.message, access.managed, access.adminWritesOff)),
     noticeStrip(ROUTES_NOTE),
     ...signingNodes,
     VIZ.table({ routes: rows }, {
@@ -1331,7 +1351,7 @@ export const FEEDBACK_NOTE =
   "one that did. A second feedback from the same person replaces their first. Reports are listed newest first.";
 
 /* Shown instead of the form when the store says this dashboard's login may not record (can_record false). */
-export const feedbackListOnly = (managed) => listOnlyNote(managed, "this page is list-only", "To record feedback");
+export const feedbackListOnly = (managed, adminWritesOff) => listOnlyNote(managed, "this page is list-only", "To record feedback", adminWritesOff);
 
 /* What the counts and the list are taken over, in words: the answer's own window (hours_back). */
 export function feedbackWindowLabel(hours) {
@@ -1453,7 +1473,7 @@ async function buildFeedback(body, generation) {
   const rerender = () => buildFeedback(body, generation);
   const canRecord = session.can_edit === true && data.can_record === true;
   const nodes = [noticeStrip(FEEDBACK_NOTE)];
-  if (data.can_record !== true) nodes.push(noticeStrip(feedbackListOnly(session.managed_store === true)));
+  if (data.can_record !== true) nodes.push(noticeStrip(feedbackListOnly(session.managed_store === true, session.admin_writes_off === true)));
   nodes.push(el("h3", { class: "section-title", text: "False positives by alert family" }));
   nodes.push(el("p", { class: "mute-label", "data-fb-window": "1", text: feedbackWindowLabel(data.hours_back) }));
   nodes.push(VIZ.table({ families }, {
@@ -1797,12 +1817,12 @@ async function buildPending(body, generation) {
 
 /* ─────────────────────────── threshold overrides (#5916) ─────────────────────────── */
 
-/* A threshold held for one server (or one database on it) that differs from the global value. The list is GET
+/* A threshold held for one server (or one database on it), or for a server tag (#6926), that differs from the global value. The list is GET
    /api/threshold-overrides; a change is PUT /api/threshold-overrides, accepted only under a store login with the admin role.
    A managed or compose store connects this page as the viewer role, so there the grid is a list: the form and the Remove
    buttons are not drawn, and the note says where to change one. The service checks the key and the bounds again. */
 export const OVERRIDE_COLUMNS = [
-  { key: "server_name", label: "Server" },
+  { key: "scope_text", label: "Scope" },
   { key: "database_text", label: "Database" },
   { key: "key", label: "Key" },
   { key: "value", label: "Value" },
@@ -1813,19 +1833,23 @@ export const OVERRIDE_COLUMNS = [
 ];
 
 const OVERRIDES_NOTE_EDITING =
-  "A threshold held for one server, or for one database on it, that differs from the global value. The alert engine uses it for that server only " +
-  "and applies a change within its reload interval. To silence an alert, mute it.";
-const overridesNoteReadOnly = (managed) =>
-  "A threshold held for one server, or for one database on it, that differs from the global value. " +
-  listOnlyNote(managed, "this page lists them only", "To change an override");
+  "A threshold held for one server, for one database on it, or for a server tag (every server under the tag and the tags below it), that differs from the global value. " +
+  "A database override wins over a server override, then the deepest tag the server is under, then the global value. A change applies within the alert engine's reload interval. To silence an alert, mute it.";
+const overridesNoteReadOnly = (managed, adminWritesOff) =>
+  "A threshold held for one server, for one database on it, or for a server tag, that differs from the global value. " +
+  listOnlyNote(managed, "this page lists them only", "To change an override", adminWritesOff);
 const OVERRIDE_DENIED = "Changing a threshold override needs";
 
 /** The rows of the overrides grid from the list read's body. `database` and `server_id` stay on the row for Edit and Remove. */
 export function overrideRows(data) {
   const list = data && Array.isArray(data.overrides) ? data.overrides : [];
   return list.map((o) => ({
-    server_id: o.server_id,
-    server_name: o.server_name,
+    server_id: o.server_id == null ? null : o.server_id,
+    server_name: o.server_name == null ? null : o.server_name,
+    tag_id: o.tag_id == null ? null : o.tag_id,
+    tag_name: o.tag_name == null ? null : o.tag_name,
+    orphaned: o.orphaned === true,
+    scope_text: o.tag_id == null ? o.server_name : (o.orphaned === true ? "Tag (deleted): orphaned, matches nothing" : "Tag: " + (o.tag_name || "")),
     database: o.database || null,
     database_text: o.database || "Whole server",
     key: o.key,
@@ -1841,7 +1865,10 @@ export function overrideRows(data) {
     inside its bounds, and a database only on a key that takes one. The service applies the same rules again. */
 export function validateOverride(keys, form) {
   const list = Array.isArray(keys) ? keys : [];
-  if (!form || !String(form.server || "").trim()) return "Choose a server.";
+  const hasServer = !!(form && String(form.server || "").trim());
+  const hasTag = !!(form && String(form.tag || "").trim());
+  if (hasServer && hasTag) return "Choose a server or a tag, not both.";
+  if (!hasServer && !hasTag) return "Choose a server or a tag.";
   const entry = list.find((k) => k.key === String(form.key || "").trim());
   if (!entry) return "Choose a key from the list: only a tunable threshold can be overridden.";
   const text = String(form.value == null ? "" : form.value).trim();
@@ -1849,6 +1876,9 @@ export function validateOverride(keys, form) {
   const n = Number(text);
   if (!Number.isSafeInteger(n) || n < entry.min || n > entry.max) {
     return entry.key + " must be a whole number between " + entry.min + " and " + entry.max + ", the same bounds the global setting has.";
+  }
+  if (hasTag && String(form.database || "").trim()) {
+    return "A tag override holds a server-level value, so it takes no database.";
   }
   if (String(form.database || "").trim() && entry.database_scope !== true) {
     return entry.key + " is compared against a server-level figure, so it takes a server override only, not a database.";
@@ -1877,7 +1907,7 @@ export function overrideOutcome(verb, res) {
 }
 
 /* The form's entries and the last answer, in module scope so the 60 s repaint keeps what was typed. */
-const EMPTY_OVERRIDE_FORM = { server: "", key: "", database: "", value: "" };
+const EMPTY_OVERRIDE_FORM = { server: "", tag: "", key: "", database: "", value: "" };
 let overrideEntries = { ...EMPTY_OVERRIDE_FORM };
 let overrideStatus = null;
 let overrideBusy = false;
@@ -1893,7 +1923,9 @@ async function changeOverride(verb, entry) {
   overrideBusy = true;
   let out;
   try {
-    const payload = { server_name: entry.server, key: entry.key, database_name: entry.database || null };
+    const payload = { key: entry.key, database_name: entry.database || null };
+    if (entry.tag) payload.tag = String(entry.tag);
+    else payload.server_name = entry.server;
     if (verb === "clear") payload.clear = true;
     else payload.value = Number(String(entry.value).trim());
     out = overrideOutcome(verb, await apiWrite("PUT", "/api/threshold-overrides", payload));
@@ -1906,19 +1938,22 @@ async function changeOverride(verb, entry) {
   await redrawOverrides();
 }
 
-function overrideFormNode(servers, keys) {
+function overrideFormNode(servers, keys, tags) {
   const field = (label, control) => el("label", { class: "tag-field" }, [el("span", { class: "mute-label", text: label }), control]);
   const choose = (items, textOf) => [el("option", { value: "", text: "(choose)" })].concat(items.map((i) => el("option", { value: textOf(i), text: textOf(i) })));
   const server = el("select", { class: "tag-input", "data-field": "server" }, choose(servers, (s) => s.server_name));
+  const tag = el("select", { class: "tag-input", "data-field": "tag" },
+    [el("option", { value: "", text: "(none)" })].concat((Array.isArray(tags) ? tags : []).map((t) => el("option", { value: String(t.tag_id), text: t.tag_name }))));
   const key = el("select", { class: "tag-input", "data-field": "key" }, choose(keys, (k) => k.key));
   const database = el("input", { type: "text", class: "tag-input", "data-field": "database", placeholder: "blank = whole server" });
   const value = el("input", { type: "text", class: "tag-input", "data-field": "value", inputmode: "numeric" });
   server.value = overrideEntries.server;
+  tag.value = overrideEntries.tag;
   key.value = overrideEntries.key;
   database.value = overrideEntries.database;
   value.value = overrideEntries.value;
-  const sync = () => { overrideEntries = { server: server.value, key: key.value, database: database.value, value: value.value }; };
-  for (const c of [server, key, database, value]) c.addEventListener("input", sync);
+  const sync = () => { overrideEntries = { server: server.value, tag: tag.value, key: key.value, database: database.value, value: value.value }; };
+  for (const c of [server, tag, key, database, value]) c.addEventListener("input", sync);
   const save = el("button", {
     class: "btn primary", type: "button", text: "Save override", "data-action": "save-override",
     onClick: async () => {
@@ -1933,21 +1968,21 @@ function overrideFormNode(servers, keys) {
     },
   });
   return el("div", { class: "tag-form", "data-override-form": "1" }, [
-    field("Server:", server), field("Key:", key), field("Database:", database), field("Value:", value), save,
+    field("Server:", server), field("or Tag:", tag), field("Key:", key), field("Database:", database), field("Value:", value), save,
   ]);
 }
 
 function overrideActions(row) {
   const edit = el("button", {
-    class: "btn", type: "button", text: "Edit", "aria-label": "Edit " + row.key + " for " + row.server_name,
+    class: "btn", type: "button", text: "Edit", "aria-label": "Edit " + row.key + " for " + row.scope_text,
     onClick: async () => {
-      overrideEntries = { server: row.server_name, key: row.key, database: row.database || "", value: String(row.value) };
+      overrideEntries = { server: row.tag_id == null ? row.server_name : "", tag: row.tag_id == null ? "" : String(row.tag_id), key: row.key, database: row.database || "", value: String(row.value) };
       await redrawOverrides();
     },
   });
   const remove = el("button", {
-    class: "btn", type: "button", text: "Remove", "aria-label": "Remove " + row.key + " for " + row.server_name, "data-action": "remove-override",
-    onClick: () => changeOverride("clear", { server: row.server_name, key: row.key, database: row.database }),
+    class: "btn", type: "button", text: "Remove", "aria-label": "Remove " + row.key + " for " + row.scope_text, "data-action": "remove-override",
+    onClick: () => changeOverride("clear", { server: row.tag_id == null ? row.server_name : "", tag: row.tag_id == null ? "" : String(row.tag_id), key: row.key, database: row.database }),
   });
   return el("span", { class: "row-actions" }, [edit, remove]);
 }
@@ -1969,13 +2004,13 @@ async function buildOverrides(body, generation) {
      the store login holds the write grant on this table. */
   const canEdit = session.can_edit === true && !!res.data && res.data.can_edit === true;
   const keys = Array.isArray(res.data && res.data.keys) ? res.data.keys : [];
-  nodes.push(noticeStrip(canEdit ? OVERRIDES_NOTE_EDITING : overridesNoteReadOnly(session.managed_store === true)));
+  nodes.push(noticeStrip(canEdit ? OVERRIDES_NOTE_EDITING : overridesNoteReadOnly(session.managed_store === true, session.admin_writes_off === true)));
   if (res.data && typeof res.data.note === "string" && res.data.note) nodes.push(noticeStrip(res.data.note));
-  if (canEdit) nodes.push(overrideFormNode(Array.isArray(res.data.servers) ? res.data.servers : [], keys));
+  if (canEdit) nodes.push(overrideFormNode(Array.isArray(res.data.servers) ? res.data.servers : [], keys, res.data.tags));
   nodes.push(VIZ.table({ overrides: overrideRows(res.data) }, {
     rowsKey: "overrides",
     columns: overrideColumns(canEdit),
-    emptyText: "No server holds an override: every server uses the global values.",
+    emptyText: "No server or tag holds an override: every server uses the global values.",
   }));
   mount(body, nodes);
 }
@@ -2025,7 +2060,7 @@ function showsServers(hash) {
    another one is seen by nothing else, because no render of this page follows it. A hash that no longer shows the Servers
    tab discards the open form, password first, and drops a by-id read still in flight. Discarding twice is harmless. */
 function onHashChange() {
-  if (!showsServers(String(window.location.hash || ""))) closeEdit();
+  if (!showsServers(routeHash())) closeEdit();
 }
 
 export function renderAdmin(main, tabId) {

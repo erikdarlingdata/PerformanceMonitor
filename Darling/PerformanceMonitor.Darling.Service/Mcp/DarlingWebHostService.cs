@@ -34,6 +34,7 @@ using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Analysis;
+using PerformanceMonitor.Darling.Service.FrontDoor;
 using PerformanceMonitor.Darling.Service.Hosting;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
@@ -41,12 +42,12 @@ using PerformanceMonitor.Notifications;
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
 /// <summary>
-/// Optional hosted service serving Darling's read-only WEB DASHBOARD over HTTP (#1562) — a SECOND, independent
+/// Optional hosted service serving Darling's WEB DASHBOARD over HTTP (#1562) — a SECOND, independent
 /// Kestrel host beside the MCP host (<see cref="DarlingMcpHostService"/>), with its own port (default 5153),
 /// its own kill switch (<c>web.enabled</c> / config_service.web_enabled), its own LAN-exposure block, and its
 /// own firewall rule. Not co-hosted with MCP because MCP owns the root path on its port, the two need
 /// independent enable switches (web must not require mcp_enabled), and they gate different blast radii (the MCP
-/// token guards analyze_server's live outbound SQL connections; the web surface is read-only over the store).
+/// token guards analyze_server's live outbound SQL connections; the web surface reads the store, and its edit seat writes only through the host's gates).
 ///
 /// <para><b>Shape mirrors the MCP host</b> (5s supervisor poll, a pure <see cref="DecideWebAction"/> decision
 /// table, 30s failed-start backoff, <c>StartAsync</c> not <c>RunAsync</c> so the supervisor owns the wait) and
@@ -58,7 +59,8 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// <para><b>Browser auth (network mode only):</b> in network mode EVERY request authenticates, loopback
 /// included — the MCP host's exposed-mode loopback-token SSRF guard, now mirrored here (#1649). Loopback is
 /// exempt from the CIDR test only (127.0.0.1 is not in a LAN CIDR), never from the credential. A
-/// loopback-only dashboard with no token configured registers no auth middleware at all and remains tokenless; one
+/// loopback-only dashboard with no token configured does not start unless <c>web.allowTokenlessLoopback</c> is on, which
+/// serves local browsers with no token, for reads only, and refuses every change; one
 /// with a configured <c>web.network.encryptedToken</c> / <c>token</c> (or that network mode fell back to after its token
 /// resolved, a refused TLS certificate) has this same token-to-cookie gate, because the operator's config says every
 /// client presents the token (<see cref="ResolveLoopbackOnlyToken"/>). A request needs either a valid session
@@ -106,6 +108,9 @@ public sealed class DarlingWebHostService : BackgroundService
     private WebApplication? _app;
     private NpgsqlDataSource? _appDataSource;
 
+    /// <summary>#6600: the second, small pool the Admin writes use on the managed store (null on a store you bring, or with web.allowAdminWrites off).</summary>
+    private WebAdminArm? _adminArm;
+
     /// <summary>The TLS certificate the current network listener presents — the leaf AND the intermediates
     /// that travel with it (#2562) — held for its lifetime. Disposal is not bookkeeping: on Windows the
     /// private key is loaded with <c>MachineKeySet</c> and no <c>PersistKeySet</c>, so disposing is what
@@ -119,6 +124,10 @@ public sealed class DarlingWebHostService : BackgroundService
     private DarlingWebOidcClient? _oidcClient;
 
     private int _runningPort;
+
+    /// <summary>Whether this process has logged <see cref="MissingTokenMessage"/>: a start with no token fails the same
+    /// way on every retry until the config changes, which needs a restart, so the line is logged once.</summary>
+    private bool _missingTokenReported;
 
     /// <summary>How often the supervisor re-reads the live control-plane state (#1562, mirrors the MCP host).</summary>
     internal static readonly TimeSpan SupervisorPollInterval = TimeSpan.FromSeconds(5);
@@ -159,8 +168,14 @@ public sealed class DarlingWebHostService : BackgroundService
     /* #6236: the store's pseudonym key, so the dashboard's investigation export numbers a login as the command line does. */
     private readonly PseudonymKeySource? _pseudonymKeys;
 
-    public DarlingWebHostService(ILogger<DarlingWebHostService> logger, WebRuntimeState state, CollectorRuntimeState collectorState, WebTlsCertificateState certState, BaselineCache? baselineCache = null, ReadLatencyAccumulator? readLatency = null, MonitoredServerRegistryState? registryState = null, SlowReadLog? slowReads = null, ReadAdmission? readAdmission = null, StoreOwnerSource? ownerSource = null, PseudonymKeySource? pseudonymKeys = null)
+    /* #6840: the service's container, null in a host built outside it. The front door's directory and secrets are internal types, so they
+       are looked up here, and only when darling.json has frontDoor.enabled (which replaces the dashboard's endpoint map with
+       DarlingFrontDoorWebProxy). */
+    private readonly IServiceProvider? _services;
+
+    public DarlingWebHostService(ILogger<DarlingWebHostService> logger, WebRuntimeState state, CollectorRuntimeState collectorState, WebTlsCertificateState certState, BaselineCache? baselineCache = null, ReadLatencyAccumulator? readLatency = null, MonitoredServerRegistryState? registryState = null, SlowReadLog? slowReads = null, ReadAdmission? readAdmission = null, StoreOwnerSource? ownerSource = null, PseudonymKeySource? pseudonymKeys = null, IServiceProvider? services = null)
     {
+        _services = services;
         _pseudonymKeys = pseudonymKeys;
         _ownerSource = ownerSource;
         _slowReads = slowReads;
@@ -351,6 +366,9 @@ public sealed class DarlingWebHostService : BackgroundService
             _appDataSource = null;
         }
 
+        _adminArm?.Dispose();
+        _adminArm = null;
+
         /* #3514 follow-up: the served certificate is gone, so stop advertising its expiry to the worker's
            alert sweep. A runtime disable of the dashboard (a no-restart op) reaches here; without the clear
            the worker keeps firing the expiry alert about a dashboard the operator turned off. A port-change
@@ -397,6 +415,9 @@ public sealed class DarlingWebHostService : BackgroundService
             _appDataSource = null;
         }
 
+        try { _adminArm?.Dispose(); } catch { /* best-effort */ }
+        _adminArm = null;
+
         /* #3514 follow-up: a start that published its certificate (before the port-in-use / credential
            bail below it) but never served TLS must not leave the worker alerting on a non-served cert.
            #5288: a refusal or an expired certificate is the exception - the listener is loopback-only on that
@@ -430,25 +451,79 @@ public sealed class DarlingWebHostService : BackgroundService
     }
 
     /// <summary>The answer of <see cref="ResolveLoopbackOnlyToken"/>: the token the loopback-only dashboard's
-    /// token-to-cookie gate compares against (empty when none is configured, which leaves the dashboard open to local
-    /// browsers), and whether the start must stop because a token that IS configured cannot be used.</summary>
-    internal readonly record struct LoopbackTokenResolution(bool Refuse, string Token);
+    /// token-to-cookie gate compares against (empty only when none is configured and <c>web.allowTokenlessLoopback</c>
+    /// is on, which leaves the dashboard open to local browsers for reads only), whether the start must stop, whether it
+    /// stops because no token is configured at all, and why a resolved token is under the length floor
+    /// (<see cref="DarlingHostBinding.DescribeTokenProblem"/>; null when it clears it). A token under the floor still gates
+    /// sign-in, and the dashboard then serves reads only.</summary>
+    internal readonly record struct LoopbackTokenResolution(bool Refuse, string Token, bool MissingToken = false, string? TokenProblem = null);
+
+    /// <summary>The line a start with no token logs when it does not serve the dashboard: the settings to add, how a
+    /// browser presents the token, and the opt-out.</summary>
+    internal const string MissingTokenMessage =
+        "The web dashboard is enabled but has no token, so it is not started. Set web.network.encryptedToken (from "
+        + "--encrypt-password) or web.network.token (the token, env:NAME or file:PATH) in darling.json and restart the "
+        + "service; the dashboard's sign-in page then asks for it. To serve local browsers without a token as before, set "
+        + "web.allowTokenlessLoopback to true instead.";
+
+    /// <summary>The line every start logs while the opt-out serves the dashboard with no token.</summary>
+    internal const string TokenlessLoopbackMessage =
+        "web.allowTokenlessLoopback is on: the web dashboard serves http://localhost with no token, for reads only. Set "
+        + "web.network.encryptedToken or web.network.token to require one and to make changes.";
+
+    /// <summary>The answer to a write the opt-out refuses: the dashboard it serves with no token makes no changes.</summary>
+    internal const string TokenlessWriteRefusedMessage =
+        "This dashboard serves reads only: web.allowTokenlessLoopback serves it with no token. To make changes, set "
+        + "web.network.encryptedToken (or web.network.token) in darling.json, restart the service and sign in with the token.";
+
+    /// <summary>The answer to a write refused because the dashboard's token is under the length floor.</summary>
+    internal static readonly string ShortTokenWriteRefusedMessage =
+        "This dashboard serves reads only: its token (web.network.encryptedToken or web.network.token) needs at least "
+        + DarlingHostBinding.MinimumTokenLength + " characters and " + DarlingHostBinding.MinimumDistinctTokenCharacters
+        + " different ones before it can make changes. Set a longer token in darling.json and restart the service.";
+
+    /// <summary>The host slot of the OIDC redirect-URI line a start logs (#6609): the URI the operator registers at the IdP,
+    /// so an IPv6 listen is bracketed the way the redirect_uri the service sends (built from the request's Host header) is.</summary>
+    internal static string DescribeOidcRedirectHosts(string? listen) =>
+        $"{DarlingListenUrl.FormatHost(listen)} or localhost";
+
+    /// <summary>The line a start logs when its token is under the length floor: <paramref name="problem"/> is
+    /// <see cref="DarlingHostBinding.DescribeTokenProblem"/>'s text, which never holds the token.</summary>
+    internal static string ShortTokenReadsOnlyLine(string problem) =>
+        $"Web dashboard token (web.network.encryptedToken or web.network.token) {problem}. Browsers still sign in with it, but the "
+        + "dashboard serves reads only until a longer token is set.";
 
     /// <summary>
     /// The access token for a loopback-only start (no <c>web.network.listen</c>, or one the bind ladder refused). A
     /// token the operator configured gates the loopback dashboard whatever the bind mode, through the same
-    /// token-to-cookie gate a network-exposed start uses. No token configured is <c>(false, "")</c> and the dashboard
-    /// serves local browsers without one, as it always has. A configured token that resolves to nothing or cannot be
-    /// decrypted returns <c>Refuse</c> with one Critical line shaped like the network-mode token lines, because serving
-    /// the dashboard open would drop the credential the operator asked every client to present. The caller owns what a
-    /// refusal does (it fails the start). Never logs the token.
+    /// token-to-cookie gate a network-exposed start uses. No token configured refuses the start
+    /// (<c>MissingToken</c>), and logs <see cref="MissingTokenMessage"/> when <paramref name="reportMissingToken"/> is
+    /// set, unless <paramref name="allowTokenlessLoopback"/> is on: then it is <c>(false, "")</c>, the dashboard serves
+    /// local browsers without a token for reads only, and the start logs <see cref="TokenlessLoopbackMessage"/>. A token
+    /// under the length floor is returned with its <c>TokenProblem</c>, after one Critical line
+    /// (<see cref="ShortTokenReadsOnlyLine"/>): it still gates sign-in, and the dashboard serves reads only. A configured token that
+    /// resolves to nothing or cannot be decrypted returns <c>Refuse</c> with one Critical line shaped like the
+    /// network-mode token lines, because serving the dashboard open would drop the credential the operator asked every
+    /// client to present. The caller owns what a refusal does (it fails the start). Never logs the token.
     /// </summary>
-    internal static LoopbackTokenResolution ResolveLoopbackOnlyToken(WebNetworkConfig? network, ILogger logger)
+    internal static LoopbackTokenResolution ResolveLoopbackOnlyToken(
+        WebNetworkConfig? network, bool allowTokenlessLoopback, ILogger logger, bool reportMissingToken = true)
     {
         if (network is null
             || (string.IsNullOrWhiteSpace(network.EncryptedToken) && string.IsNullOrWhiteSpace(network.Token)))
         {
-            return new LoopbackTokenResolution(false, "");
+            if (allowTokenlessLoopback)
+            {
+                logger.LogWarning("{Message}", TokenlessLoopbackMessage);
+                return new LoopbackTokenResolution(false, "");
+            }
+
+            if (reportMissingToken)
+            {
+                logger.LogCritical("{Message}", MissingTokenMessage);
+            }
+
+            return new LoopbackTokenResolution(true, "", MissingToken: true);
         }
 
         try
@@ -468,7 +543,13 @@ public sealed class DarlingWebHostService : BackgroundService
                     "(produced by --encrypt-password). This token gates web dashboard access, loopback included.");
             }
 
-            return new LoopbackTokenResolution(false, token);
+            var problem = DarlingHostBinding.DescribeTokenProblem(token);
+            if (problem is not null)
+            {
+                logger.LogCritical("{Message}", ShortTokenReadsOnlyLine(problem));
+            }
+
+            return new LoopbackTokenResolution(false, token, TokenProblem: problem);
         }
         catch (Exception ex)
         {
@@ -511,6 +592,10 @@ public sealed class DarlingWebHostService : BackgroundService
             IPAddress? networkListenIp = null;
             CidrAllowList allowedCidr = default;
             string accessToken = "";
+
+            /* Why the resolved token is under the length floor, or null. A token under it still gates sign-in, but the
+               shared-token seat then serves reads only (ConfigurePipeline's sharedTokenReadsOnlyProblem). */
+            string? writeTokenProblem = null;
             if (networkMode)
             {
                 networkListenIp = IPAddress.Parse(network!.Listen!.Trim());
@@ -538,8 +623,10 @@ public sealed class DarlingWebHostService : BackgroundService
                         _logger.LogCritical(
                             "Web dashboard token {Problem} — refusing to expose; binding loopback-only.",
                             floor.Problem);
+                        _logger.LogCritical("{Message}", ShortTokenReadsOnlyLine(floor.Problem));
                         networkMode = floor.NetworkMode;
                         accessToken = token;
+                        writeTokenProblem = floor.Problem;
                     }
                     else
                     {
@@ -565,18 +652,23 @@ public sealed class DarlingWebHostService : BackgroundService
             {
                 /* A loopback-only start (no web.network.listen, or one the ladder refused) resolves a token the
                    operator configured too, and the pipeline then gates the loopback dashboard on it through the
-                   token-to-cookie gate, as it gates one that network mode fell back to. No token configured leaves accessToken empty and
-                   the dashboard open to local browsers, as it has always been. A configured token that cannot be used
-                   stops this start, because serving the dashboard open would drop the credential the operator asked
-                   every client to present. */
-                var loopbackToken = ResolveLoopbackOnlyToken(network, _logger);
+                   token-to-cookie gate, as it gates one that network mode fell back to. No token configured stops this
+                   start unless web.allowTokenlessLoopback is on, which leaves accessToken empty and the dashboard serving
+                   local browsers with no token, for reads only. The no-token line is logged once per process: the
+                   config is held for the process lifetime, so the 30s retries would only repeat it. A configured token
+                   that cannot be used stops this start, because serving the dashboard open would drop the credential
+                   the operator asked every client to present. */
+                var loopbackToken = ResolveLoopbackOnlyToken(
+                    network, web.AllowTokenlessLoopback, _logger, reportMissingToken: !_missingTokenReported);
                 if (loopbackToken.Refuse)
                 {
+                    _missingTokenReported |= loopbackToken.MissingToken;
                     await DisposeFailedStartAsync();
                     return false;
                 }
 
                 accessToken = loopbackToken.Token;
+                writeTokenProblem = loopbackToken.TokenProblem;
             }
 
             /* OIDC sign-in (#2550) — resolved once per start, like the token and the certificate. A
@@ -641,7 +733,7 @@ public sealed class DarlingWebHostService : BackgroundService
                             ? "none (every signed-in user gets the edit seat, the shared token's reach)"
                             : $"claim '{oidcClient.Options.RoleClaim}' -> {oidcClient.Options.AdminRoles.Count} admin / {oidcClient.Options.ViewerRoles.Count} viewer value(s), unmatched users refused",
                         effectivePort,
-                        $"{network.Listen} or localhost");
+                        DescribeOidcRedirectHosts(network.Listen));
                 }
             }
 
@@ -725,64 +817,113 @@ public sealed class DarlingWebHostService : BackgroundService
                     effectivePort, networkMode, networkMode ? allowedCidr.ToString() : null, stoppingToken);
             }
 
-            /* Managed mode: the WORKER owns the bundled server's lifecycle; the web host only derives the
-               least-privilege VIEWER-role connection string from the stored DPAPI credential. */
-            string? storeConnectionString;
-            if (config.Postgres.Managed)
+            /* #6840: a front door holds no store of its own, so it skips the store wait and everything built on the store connection: the
+               viewer-role pool, the Admin arm and the endpoint map. The web host's sign-in, role gate, Host guard and session cookie are
+               the same ones; only the routes behind them change (DarlingFrontDoorWebProxy replaces DarlingWebEndpoints.MapAll). */
+            NpgsqlDataSource? postgres = null;
+            DarlingFrontDoorWebProxy? frontDoorProxy = null;
+            if (config.IsFrontDoor)
             {
-                if (!OperatingSystem.IsWindows())
+                var frontDoorDirectory = _services?.GetService<IFrontDoorDirectory>();
+                var frontDoorSecrets = _services?.GetService<IFrontDoorSecrets>();
+                if (frontDoorDirectory is null || frontDoorSecrets is null)
                 {
-                    _logger.LogError("Web dashboard not started: postgres.managed = true requires Windows");
+                    _logger.LogError("Web dashboard not started: frontDoor.enabled is set but this host has no front-door directory to route with");
                     await DisposeFailedStartAsync();
                     return false;
                 }
 
-                storeConnectionString = await WaitForManagedConnectionStringAsync(config.Postgres, stoppingToken);
-                if (storeConnectionString is null)
+                frontDoorProxy = DarlingFrontDoorWebProxy.Create(frontDoorDirectory, frontDoorSecrets, config.FrontDoor, _logger, _collectorState.Read);
+
+                /* Every user who signs in with no role mapping holds the edit seat, and through the front door a change they make runs on
+                   whichever store it is sent to. */
+                if (_oidcClient is { } frontDoorOidc && frontDoorOidc.Options.RoleClaim is null)
                 {
-                    await DisposeFailedStartAsync();
-                    return false;
+                    _logger.LogWarning(
+                        "web.network.oidc has no role mapping, so every user who signs in has the edit seat at the front door, and a change they make runs on the store it is sent to. "
+                        + "Set web.network.oidc.roleClaim with adminRoles and viewerRoles to limit who can edit.");
                 }
             }
             else
             {
-                /* #3914: not the owner by default any more — postgres.webConnectionString, the viewer role the
-                   service provisioned on the compose store, or the owner with a warning, in that order. */
-                storeConnectionString = await DarlingStoreLogins.ResolveUnmanagedAsync(
-                    DarlingStoreLogins.Surface.Web, config.Postgres, _logger, stoppingToken);
-                if (storeConnectionString is null)
+                /* Managed mode: the WORKER owns the bundled server's lifecycle; the web host only derives the
+                   least-privilege VIEWER-role connection string from the stored DPAPI credential. */
+                string? storeConnectionString;
+                if (config.Postgres.Managed)
                 {
+                    if (!OperatingSystem.IsWindows())
+                    {
+                        _logger.LogError("Web dashboard not started: postgres.managed = true requires Windows");
+                        await DisposeFailedStartAsync();
+                        return false;
+                    }
+
+                    storeConnectionString = await WaitForManagedConnectionStringAsync(config.Postgres, stoppingToken);
+                    if (storeConnectionString is null)
+                    {
+                        await DisposeFailedStartAsync();
+                        return false;
+                    }
+                }
+                else
+                {
+                    /* #3914: not the owner by default any more — postgres.webConnectionString, the viewer role the
+                       service provisioned on the compose store, or the owner with a warning, in that order. */
+                    storeConnectionString = await DarlingStoreLogins.ResolveUnmanagedAsync(
+                        DarlingStoreLogins.Surface.Web, config.Postgres, _logger, stoppingToken);
+                    if (storeConnectionString is null)
+                    {
+                        await DisposeFailedStartAsync();
+                        return false;
+                    }
+                }
+
+                /* A string Npgsql cannot use throws from the Create below into the catch at the end of this method,
+                   which logs the exception's message, and Npgsql's text for that can quote part of the string (a password
+                   with an unquoted ';' makes the text after it the "keyword", and a password tail that becomes a Host
+                   value with a ':' in it makes the text after the ':' a bad port). So prove it first, with Npgsql's own
+                   construction step (the guard builds and disposes a data source, and opens nothing), and log the
+                   formatter's text instead. The keywords added below (application name, session time zone) take part in
+                   none of Npgsql's construction checks, so a string that passes here does not throw from the Create below
+                   for a parse or a validation reason. */
+                if (DarlingStoreConnection.TryDescribeParseFailure(storeConnectionString) is { } unusableStoreString)
+                {
+                    _logger.LogError(
+                        "Web dashboard not started this attempt: its store connection string (postgres.webConnectionString, or postgres.connectionString when that is not set) is unusable: {Detail}",
+                        unusableStoreString);
                     await DisposeFailedStartAsync();
                     return false;
                 }
-            }
 
-            /* A string Npgsql cannot use throws from the Create below into the catch at the end of this method,
-               which logs the exception's message, and Npgsql's text for that can quote part of the string (a password
-               with an unquoted ';' makes the text after it the "keyword", and a password tail that becomes a Host
-               value with a ':' in it makes the text after the ':' a bad port). So prove it first, with Npgsql's own
-               construction step (the guard builds and disposes a data source, and opens nothing), and log the
-               formatter's text instead. The keywords added below (application name, session time zone) take part in
-               none of Npgsql's construction checks, so a string that passes here does not throw from the Create below
-               for a parse or a validation reason. */
-            if (DarlingStoreConnection.TryDescribeParseFailure(storeConnectionString) is { } unusableStoreString)
-            {
-                _logger.LogError(
-                    "Web dashboard not started this attempt: its store connection string (postgres.webConnectionString, or postgres.connectionString when that is not set) is unusable: {Detail}",
-                    unusableStoreString);
-                await DisposeFailedStartAsync();
-                return false;
-            }
+                /* Lifetime tied to the running app: disposed by StopServerAsync, not this method's scope. #4479:
+                   the viewer-role connection string built by DarlingManagedPostgres already carries
+                   WebApplicationName, but a CONFIGURED (postgres.webConnectionString) or owner-fallback login
+                   never runs through that builder — set-if-absent here so every path this string can take still
+                   names the surface. */
+                /* #6630: a store the operator brings gets the worker's collect/config search path the same way (set-if-absent), because the
+                   bare names the reads use (servers, config_service, ...) only resolve through it, and the database default is best effort. */
+                postgres = DarlingWorker.CreateHostStoreDataSource(storeConnectionString, DarlingManagedPostgres.WebApplicationName);
+                _appDataSource = postgres;
 
-            /* Lifetime tied to the running app: disposed by StopServerAsync, not this method's scope. #4479:
-               the viewer-role connection string built by DarlingManagedPostgres already carries
-               WebApplicationName, but a CONFIGURED (postgres.webConnectionString) or owner-fallback login
-               never runs through that builder — set-if-absent here so every path this string can take still
-               names the surface. */
-            var postgres = NpgsqlDataSource.Create(
-                DarlingStoreConnection.PinSessionTimeZoneUtc(
-                    DarlingStoreConnection.WithApplicationName(storeConnectionString, DarlingManagedPostgres.WebApplicationName)));
-            _appDataSource = postgres;
+                /* #6600: on the managed store, a signed-in admin's Admin writes use a second, small pool on the stored admin login. It opens
+                   nothing until the first such request. A store you bring yourself, or web.allowAdminWrites off, builds none. */
+                if (OperatingSystem.IsWindows())
+                {
+                    _adminArm = WebAdminArm.ForHost(config.Postgres, web.AllowAdminWrites, _logger);
+                }
+
+                /* The MCP host warns the same way while its twin setting is on: the state of this gate is otherwise visible nowhere at start. */
+                if (web.AllowWindowsAuthOverUnverifiedTls)
+                {
+                    _logger.LogWarning(
+                        "{Setting} is on: the dashboard's server add and edit accept Windows authentication with trust_server_certificate or " +
+                        "optional encryption, so a signed-in editor can point this service's own account at a server it cannot verify.",
+                        DarlingUnverifiedWindowsAuthScreen.WebSetting);
+                }
+
+                /* Off Windows there is no managed store and no admin pool, but OIDC without a role mapping still gives every signed-in user the edit seat. */
+                WebAdminArm.WarnWhenOidcHasNoRoleMapping(_oidcClient, DarlingWebStoreWrites.IsManaged(config.Postgres), _adminArm, _logger);
+            }
 
             /* FOOTGUN (load-bearing): pin BOTH the content root AND the web root to the binary's directory. A
                Windows service's CWD is System32, so the parameterless CreateBuilder would 404 every static file
@@ -871,7 +1012,10 @@ public sealed class DarlingWebHostService : BackgroundService
             builder.Logging.SetMinimumLevel(LogLevel.Warning);
 
             /* The VIEWER-role store pool the read endpoints query (registered for DI + passed to MapAll). */
-            builder.Services.AddSingleton<NpgsqlDataSource>(postgres);
+            if (postgres is not null)
+            {
+                builder.Services.AddSingleton<NpgsqlDataSource>(postgres);
+            }
 
             /* #4188: Brotli/gzip for the JSON API and the static JS/CSS/HTML. A services-collection step, so it
                has to run on the BUILDER, ahead of Build() - see ConfigureResponseCompression's own doc for why
@@ -888,8 +1032,8 @@ public sealed class DarlingWebHostService : BackgroundService
                config said every client presents the token. accessToken holds the resolved token in both branches above
                (the network branch, and the loopback-only branch via ResolveLoopbackOnlyToken), so "not network mode,
                token set" covers that state and a loopback-only start whose configured token resolved. A start
-               with no token configured leaves it empty and stays tokenless; a configured token that cannot be used
-               never gets here, the start stops in every mode. */
+               with no token configured gets here only with web.allowTokenlessLoopback on, leaves it empty and serves
+               reads only with no token; a configured token that cannot be used never gets here, the start stops in every mode. */
             var requireTokenWhenLoopbackOnly = !networkMode && accessToken.Length > 0;
 
             /* #6265: a web token with the MCP token's value is refused for web sign-in (the pipeline checks each posted token). The
@@ -904,7 +1048,7 @@ public sealed class DarlingWebHostService : BackgroundService
                was parsed before any degrade and still holds it afterwards, so it goes through the MCP host's
                ResolveHostGuardListenIp (the one rule both hosts share) with the final mode: a start that fell back to
                loopback-only admits loopback names only, whatever it parsed. */
-            ConfigurePipeline(_app, postgres, networkMode, DarlingMcpHostService.ResolveHostGuardListenIp(networkMode, networkListenIp), allowedCidr, accessToken, oidcClient, publicBaseUrlHost, storeHostPostgresConfig, config.Analyzer, requireTokenWhenLoopbackOnly, trustedProxies: trustedProxies, sendHsts: network?.Hsts ?? false, dataDetail: McpDataDetailModes.Resolve(config.Mcp.DataDetail), mcpToken: mcpToken);
+            ConfigurePipeline(_app, postgres, networkMode, DarlingMcpHostService.ResolveHostGuardListenIp(networkMode, networkListenIp), allowedCidr, accessToken, oidcClient, publicBaseUrlHost, storeHostPostgresConfig, config.Analyzer, requireTokenWhenLoopbackOnly, trustedProxies: trustedProxies, sendHsts: network?.Hsts ?? false, dataDetail: McpDataDetailModes.Resolve(config.Mcp.DataDetail), mcpToken: mcpToken, sharedTokenReadsOnlyProblem: writeTokenProblem, adminArm: _adminArm, allowWindowsAuthOverUnverifiedTls: web.AllowWindowsAuthOverUnverifiedTls, frontDoorProxy: frontDoorProxy);
 
             /* #2389: name the authority for each half of what is being started — enabled/port from whichever
                plane the supervisor resolved, listen/allowFrom/token always from darling.json. */
@@ -919,17 +1063,19 @@ public sealed class DarlingWebHostService : BackgroundService
                    listen there is ONE listener, HTTPS for loopback too, and saying otherwise sends a local
                    client to the wrong scheme. With no TLS the text is unchanged. Text only: no listener
                    decision moves. */
+                // install-darling.ps1 waits for this text (#6470): reword both together.
                 _logger.LogInformation(
                     "Starting web dashboard on {Scheme}://{Listen}:{Port} (LAN-exposed to {Cidr} behind a token->cookie gate + in-app CIDR; "
                     + "{Loopback}, and since #1649 it authenticates too) — "
                     + "enabled/port from {Origin}; listen/allowFrom/token/tls from darling.json web.network (file-only, restart-only)",
-                    serverCertificate is null ? "http" : "https", primaryBind, effectivePort, allowedCidr,
+                    serverCertificate is null ? "http" : "https", DarlingListenUrl.FormatHost(primaryBind), effectivePort, allowedCidr,
                     DarlingListenerTls.DescribeLoopbackListener(
                         "loopback also bound over plain HTTP", serverCertificate is not null, primaryBind),
                     origin);
             }
             else
             {
+                // install-darling.ps1 waits for this text (#6470): reword both together.
                 _logger.LogInformation(
                     "Starting web dashboard on http://localhost:{Port} (loopback only){TokenNote} — enabled/port from {Origin}",
                     effectivePort, requireTokenWhenLoopbackOnly ? ", token required" : "", origin);
@@ -985,8 +1131,8 @@ public sealed class DarlingWebHostService : BackgroundService
     /// address this host actually binds: a loopback name/IP (<c>localhost</c>, <c>127.0.0.1</c>, <c>::1</c>) or,
     /// when LAN-exposed, the configured listen IP (<paramref name="networkListenIp"/>). Any port suffix is
     /// ignored (already split into <see cref="HostString.Host"/>), and an empty Host is allowed (HTTP/1.0 / some
-    /// health probes). This rejects a rebound foreign hostname pointed at 127.0.0.1:5153 before the tokenless
-    /// loopback allow, while a direct IP request from the real operator passes.
+    /// health probes). This rejects a rebound foreign hostname pointed at 127.0.0.1:5153 before any auth
+    /// decision, while a direct IP request from the real operator passes.
     ///
     /// <para>#1648 lifted the decision itself into the shared
     /// <see cref="PerformanceMonitor.Common.HostHeaderGuard"/> (via <see cref="DarlingHostBinding"/>) so the two
@@ -1002,17 +1148,17 @@ public sealed class DarlingWebHostService : BackgroundService
 
     /// <summary>
     /// PURE route-auth decision. This method is only ever reached in NETWORK mode, or on a loopback-only server
-    /// that has a configured token (#5288) — the caller registers the auth middleware only for those — so a
-    /// loopback-only dashboard with no token configured is unaffected by every rule here and stays tokenless.
+    /// that has a configured token (#5288) — the caller registers the auth middleware only for those. A
+    /// loopback-only dashboard with no token runs only under <c>web.allowTokenlessLoopback</c>, which registers a
+    /// gate that serves reads only instead of this one.
     ///
     /// <para>Loopback skips the CIDR check (127.0.0.1 is not in a LAN CIDR, so testing it there would 403 the
     /// operator's own browser) but still needs a session cookie or a signed-in token, exactly like any
-    /// other remote. It previously passed tokenless on the grounds that the web surface was read-only; that
+    /// other remote. It previously passed with no credential on the grounds that the web surface was read-only; that
     /// stopped being true when Custom Views v2 added view create/update/delete and <c>/api/compose/run</c>, so
-    /// any local process — a scheduled task, SSRF'd code, another user's session — could read the whole store
-    /// and mutate views with no credential while the host was LAN-exposed (#1649). This now mirrors the MCP
-    /// host's rule verbatim: in exposed mode even a local client presents the token, which IS the loopback
-    /// guard against SSRF and sandboxed sockets.</para>
+    /// any local process could read the whole store and change views with no credential while the host was
+    /// LAN-exposed (#1649). This now mirrors the MCP host's rule verbatim: in exposed mode even a local client
+    /// presents the token.</para>
     ///
     /// <para>A non-loopback remote must additionally be inside <paramref name="allowedCidr"/> (a
     /// null/unverifiable remote fails closed to <see cref="WebAuthAction.Forbid"/>). Then a valid session
@@ -1117,7 +1263,7 @@ public sealed class DarlingWebHostService : BackgroundService
     /// loopback-only (a refused TLS certificate): the operator's config said every client presents the token, so a
     /// lapsed certificate does not leave the local listener open. It is also true for a loopback-only start with a
     /// configured token (<see cref="ResolveLoopbackOnlyToken"/>). A loopback-only server with no token configured
-    /// passes false and registers no auth middleware, as before. The
+    /// passes false and registers the reads-only gate instead of the auth middleware. The
     /// CIDR check inside the gate is a no-op for loopback, the only peers such a server has. Optional, so every
     /// other caller is unchanged.</param>
     /// <param name="sendHsts"><c>web.network.hsts</c>: send <c>Strict-Transport-Security</c> on a response to an
@@ -1131,9 +1277,12 @@ public sealed class DarlingWebHostService : BackgroundService
     /// host starts. The default is the strictest level, so a caller that does not say never serves more than it was told to.</param>
     /// <param name="utcNow">The clock the sign-in gate's per-source wait reads (null is the system clock). A test
     /// passes a settable one so the wait can be crossed without sleeping.</param>
+    /// <param name="sharedTokenReadsOnlyProblem">Why the access token is under the length floor
+    /// (<see cref="DarlingHostBinding.DescribeTokenProblem"/>), or null. When set, a session signed in with the shared token
+    /// serves reads only and a write is answered with <see cref="ShortTokenWriteRefusedMessage"/>; OIDC seats are unchanged.</param>
     internal void ConfigurePipeline(
         WebApplication app,
-        NpgsqlDataSource postgres,
+        NpgsqlDataSource? postgres,
         bool networkMode,
         IPAddress? networkListenIp,
         CidrAllowList allowedCidr,
@@ -1148,8 +1297,16 @@ public sealed class DarlingWebHostService : BackgroundService
         bool sendHsts = false,
         Func<DateTime>? utcNow = null,
         McpDataDetail dataDetail = McpDataDetail.MetadataOnly,
-        string? mcpToken = null)
+        string? mcpToken = null,
+        string? sharedTokenReadsOnlyProblem = null,
+        WebAdminArm? adminArm = null,
+        bool allowWindowsAuthOverUnverifiedTls = false,
+        DarlingFrontDoorWebProxy? frontDoorProxy = null)
     {
+        /* A caller that does not say whether the token is under the length floor gets the same answer the start path
+           computes: a short shared token serves reads only. Without this a forgotten argument meant writes. */
+        sharedTokenReadsOnlyProblem ??= accessToken.Length > 0 ? DarlingHostBinding.DescribeTokenProblem(accessToken) : null;
+
         Func<DateTime> clock = utcNow ?? (() => DateTime.UtcNow);
 
         /* #2479 item 5: the gates below used to refuse silently. Rate-limited per (gate, source),
@@ -1195,8 +1352,8 @@ public sealed class DarlingWebHostService : BackgroundService
 
            The observer is outermost so a throw from compression, the Host guard or the auth gate is logged too. It decides
            nothing about a request before next() runs (no refusal, no write, no read of the body), so it adds no unauthenticated
-           surface ahead of the Host guard, which stays the first app.Use (HostHeaderGuardTests, #1648: that guard is the fix for a
-           previously-exploited hole, and a handler that DECIDED anything ahead of it would be new surface on the tokenless loopback
+           surface ahead of the Host guard, which stays the first app.Use (HostHeaderGuardTests, #1648: that guard is the fix for
+           the #1576 rebinding gap, and a handler that DECIDED anything ahead of it would sit ahead of that guard on the loopback
            bind). Compression only transforms an OUTGOING body (Content-Encoding), never a routing or auth decision, so it costs
            nothing to wrap the gates' own refusal bodies and the login page in it. A throw before the marker below comes from a
            request nobody has authenticated, so the observer's line for it goes through the refusals throttle (round 2, L1). */
@@ -1233,14 +1390,14 @@ public sealed class DarlingWebHostService : BackgroundService
         }
 
         /* DNS-rebinding guard — runs in BOTH modes (the #1576 fix: it previously guarded network mode only,
-           leaving the tokenless loopback write path reachable cross-origin via a DNS rebind). The loopback
-           surface is tokenless unless a token is configured, so a browser ON the host that loads attacker content could be rebound to
-           127.0.0.1:5153 and read/write the whole surface same-origin. Require the Host header to name an
+           leaving the loopback surface reachable cross-origin via a DNS rebind). The loopback surface has no token
+           only under web.allowTokenlessLoopback (which serves reads only), and a page in a browser ON the host could
+           otherwise be rebound to 127.0.0.1:5153 and read the whole surface same-origin. Require the Host header to name an
            address we actually bind — a loopback name/IP (localhost / 127.0.0.1 / [::1]) or, in network mode,
            the configured listen IP. networkListenIp is null in loopback mode, so ONLY loopback Hosts pass
            there; a rebound foreign hostname pointed at 127.0.0.1:5153 is rejected 400 before any auth
            decision, route handler, or static file. publicBaseUrlHost (#4220) is also admitted, in BOTH
-           modes, because it is operator config on this box, not attacker-reachable — see
+           modes, because it is operator config on this box, not something a request chooses — see
            DarlingHostBinding.IsAllowedHost. */
         app.Use(async (context, next) =>
         {
@@ -1262,8 +1419,8 @@ public sealed class DarlingWebHostService : BackgroundService
         /* The auth gate installs in network mode and, on a loopback-only server that has a configured token
            (requireTokenWhenLoopbackOnly, #5288), too: the token-to-cookie gate is the
            one credential check this host has, and the CIDR test inside it exempts loopback, so on a server that
-           only binds loopback it is the token that gates. A loopback-only server with no token configured still
-           registers nothing here. */
+           only binds loopback it is the token that gates. A loopback-only server with no token configured gets here
+           only under web.allowTokenlessLoopback, and registers the reads-only gate in the else branch instead. */
         if (networkMode || requireTokenWhenLoopbackOnly)
         {
             var cidr = allowedCidr;
@@ -1311,6 +1468,18 @@ public sealed class DarlingWebHostService : BackgroundService
                 switch (DecideWebRequest(remote, cidr, isAuthFlowRoute, hasValidCookie, connectionIp))
                 {
                     case WebRequestAction.Allow:
+                        /* A token under the length floor still signs a browser in, but the shared-token seat it grants
+                           serves reads only: the same rule that keeps the MCP write tools off with such a token. */
+                        var shortTokenSeat = sharedTokenReadsOnlyProblem is not null && seat.Subject is null && seat.CanEdit;
+                        if (shortTokenSeat)
+                        {
+                            seat = DarlingWebSeat.ReadsOnly;
+                        }
+
+                        /* #6840: a front door forwarding for a viewer lowers its shared-token session to the reads-only seat for
+                           this one request, so every handler below answers the viewer as it answers any reads-only caller. */
+                        seat = DarlingWebSeat.ApplyFrontDoorRole(context, seat);
+
                         /* The seat rides HttpContext.Items so EVERY downstream consumer — /api/session,
                            the updated_by stamps, endpoints added on any parallel branch — resolves the
                            same identity without per-endpoint wiring. */
@@ -1319,6 +1488,18 @@ public sealed class DarlingWebHostService : BackgroundService
                         /* The group-level write gate (#2550): a read-only seat is refused every
                            mutating request HERE, before routing, so a write endpoint added tomorrow is
                            born gated instead of born exposed. */
+                        if (shortTokenSeat && !DarlingWebSeat.IsRequestAllowed(seat, context.Request.Method, context.Request.Path.Value ?? "/"))
+                        {
+                            refusals.Report(
+                                _logger, "Web dashboard", DarlingRefusalGate.ReadsOnlyDashboard, StatusCodes.Status403Forbidden,
+                                remote,
+                                $"the token is under the length floor, so the dashboard serves reads only and {context.Request.Method} is a change",
+                                DateTime.UtcNow);
+                            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                            await WriteReadsOnlyRefusalAsync(context, ShortTokenWriteRefusedMessage);
+                            return;
+                        }
+
                         if (!DarlingWebSeat.IsRequestAllowed(seat, context.Request.Method, context.Request.Path.Value ?? "/"))
                         {
                             refusals.Report(
@@ -1429,6 +1610,30 @@ public sealed class DarlingWebHostService : BackgroundService
                 }
             });
         }
+        else
+        {
+            /* No gate: the only start that gets here is web.allowTokenlessLoopback. It serves reads only. The seat is
+               stored, so /api/session reports can_edit false and every consumer reads the same seat, and a write is
+               refused here, before routing, so a write route added later is refused too. POST /api/compose/run
+               stays served: it only reads (DarlingWebSeat.IsRequestAllowed). */
+            app.Use(async (context, next) =>
+            {
+                context.Items[DarlingWebSeat.HttpContextItemKey] = DarlingWebSeat.ReadsOnly;
+                if (!DarlingWebSeat.IsRequestAllowed(DarlingWebSeat.ReadsOnly, context.Request.Method, context.Request.Path.Value ?? "/"))
+                {
+                    refusals.Report(
+                        _logger, "Web dashboard", DarlingRefusalGate.ReadsOnlyDashboard, StatusCodes.Status403Forbidden,
+                        context.Connection.RemoteIpAddress,
+                        $"web.allowTokenlessLoopback serves reads only and {context.Request.Method} is a change",
+                        DateTime.UtcNow);
+                    context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                    await WriteReadsOnlyRefusalAsync(context, TokenlessWriteRefusedMessage);
+                    return;
+                }
+
+                await next(context);
+            });
+        }
 
         /* Round 2, L1: past this point a request has passed the auth gate (or, on a server with no gate, the Host guard), so a throw
            from here on is a failure of a caller the service let in and the observer logs it unthrottled, as the #4276 backstop did. */
@@ -1479,7 +1684,17 @@ public sealed class DarlingWebHostService : BackgroundService
             });
         }
 
-        DarlingWebEndpoints.MapAll(app, postgres, _collectorState, _logger, _baselineCache, postgresConfig, _readLatency, analyzerConfig, _registryState, _slowReads, _readAdmission, _ownerSource, dataDetail, _pseudonymKeys);
+        if (frontDoorProxy is not null)
+        {
+            /* #6840: a front door answers the four local routes and forwards the rest of /api/* to a store. It sits exactly where MapAll
+               does, behind the gates above, so a request reaches it only after sign-in, the CIDR test and the role gate. */
+            frontDoorProxy.AddRoutes(app);
+        }
+        else
+        {
+            DarlingWebEndpoints.MapAll(app, postgres ?? throw new ArgumentNullException(nameof(postgres)), _collectorState, _logger, _baselineCache, postgresConfig, _readLatency, analyzerConfig, _registryState, _slowReads, _readAdmission, _ownerSource, dataDetail, _pseudonymKeys, adminArm: adminArm, allowWindowsAuthOverUnverifiedTls: allowWindowsAuthOverUnverifiedTls);
+        }
+
         app.UseDefaultFiles();
 
         /* Static assets carry an ETag/Last-Modified already (the framework default); no-cache (#4188) makes
@@ -1572,6 +1787,13 @@ public sealed class DarlingWebHostService : BackgroundService
     internal static bool IsApiPath(string path)
         => path.Equals("/api", StringComparison.OrdinalIgnoreCase)
             || path.StartsWith("/api/", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Writes the body of a write a reads-only dashboard refuses (the caller sets the 403): <paramref name="message"/> as the JSON error.</summary>
+    private static async Task WriteReadsOnlyRefusalAsync(HttpContext context, string message)
+    {
+        context.Response.ContentType = "application/json; charset=utf-8";
+        await context.Response.WriteAsync("{\"error\": " + System.Text.Json.JsonSerializer.Serialize(message) + "}");
+    }
 
     /// <summary>
     /// PURE per-request decision, composing the sign-in flow around <see cref="DecideWebAuth"/>: the CIDR
@@ -2616,7 +2838,7 @@ public sealed class DarlingWebHostService : BackgroundService
 <form method='post' action='/auth/login'>
   <div class='brand'>
     <h1>Darling Web</h1>
-    <div class='sub'>SQL Server fleet monitor</div>
+    <div class='sub'>SQL Server and PostgreSQL monitor</div>
   </div>
   <label for='token'>Access token</label>
   <input id='token' name='token' type='password' autocomplete='off' autofocus>

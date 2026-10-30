@@ -69,7 +69,7 @@ public sealed class DarlingEmptyEnumerationNoteTests
            cannot drift. Routing the whole enumeration read — items, probe failures, and the composed
            note — through the shared driver does, because there is then no host-side text at all. Lite's
            twin pin asserts the identical routing on its runner. */
-        Assert.Contains("EnumeratedCollectorDriver.ReadEnumerationAsync(enumerationReader, cancellationToken)", source);
+        Assert.Contains("EnumeratedCollectorDriver.ReadEnumerationAsync(enumerationReader, cancellationToken, context.Target.IsAwsRds)", source);
         Assert.Contains("new CollectorRunResult(0, sqlMs, 0, CollectorContext.NoMeasurements, enumeration.Note)", source);
 
         /* Via the shared driver, never a copy of the text — a literal here is exactly the drift this
@@ -93,6 +93,13 @@ public sealed class DarlingEmptyEnumerationNoteTests
         Assert.Contains("EnumeratedCollectorDriver.ClassifyReturnedRun(result.Abandoned)", source);
     }
 
+    /* #6384: the per-server health statement's final SELECT (the lookups these pins read) moved from the service's reader to Storage, so the service's
+       text is read together with it. */
+    private static string MovedHealthStatements(string relative) =>
+        relative.EndsWith("DarlingDataReader.cs", StringComparison.Ordinal)
+            ? ReadRepoFile(Path.Combine("Darling", "PerformanceMonitor.Darling.Storage", "CollectionHealthStatements.cs"))
+            : "";
+
     [Fact]
     public void Last_Error_Stays_Gated_On_Failure_Statuses_Not_On_Message_Presence()
     {
@@ -112,7 +119,7 @@ public sealed class DarlingEmptyEnumerationNoteTests
             Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingDataReader.cs"),
         })
         {
-            var source = ReadRepoFile(relative);
+            var source = ReadRepoFile(relative) + MovedHealthStatements(relative);
             /* EXTENSION_MISSING joined the failing-status set with #3240: its stored sentence IS the
                remedy (the extension, named), so keeping it out would band a collector EXTENSION_MISSING
                beside a blank Last Error. Still a STATUS gate — the broadening this pin refuses is to
@@ -147,7 +154,7 @@ public sealed class DarlingEmptyEnumerationNoteTests
             Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingDataReader.cs"),
         })
         {
-            var source = ReadRepoFile(relative);
+            var source = ReadRepoFile(relative) + MovedHealthStatements(relative);
             Assert.Contains("noted.error_message AS last_note", source);
             Assert.Matches(@"AND\s+t\.status = 'SUCCESS'\s+AND\s+t\.error_message IS NOT NULL", source);
             Assert.Contains("COUNT(CASE WHEN status = 'SUCCESS' THEN error_message END) AS note_count", source);

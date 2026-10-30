@@ -48,6 +48,15 @@ public class BlockedProcessAlertRow
     public string Source { get; set; } = XeReportSource;
 
     public bool HasReportXml => !string.IsNullOrEmpty(BlockedProcessReportXml);
+
+    /// <summary>
+    /// The head blocker's session facts (login time, last request end, open transaction count, transaction log bytes
+    /// used) exist only on a DMV-snapshot row: the report XML carries none of them. When the merge drops a DMV row because a
+    /// report row covers the same pair in the same minute, it calls this on the report row so the facts are not lost with
+    /// the dropped row. A field the report row already has is kept. The base row type has none of the fields, so it does
+    /// nothing; each row type that stores them overrides.
+    /// </summary>
+    public virtual void FillHeadEvidenceFrom(BlockedProcessAlertRow dmvRow) { }
 }
 
 /// <summary>
@@ -71,17 +80,28 @@ public static class BlockedProcessReportMerge
         if (dmvItems is null || dmvItems.Count == 0) return;
 
         // Dedup: keep all BPR rows; add a DMV row only if no BPR row covers the same (blocked, blocker)
-        // SPID within the same minute. BPR is preferred (richer report XML).
+        // SPID within the same minute. BPR is preferred (richer report XML), but the report XML has no head-blocker
+        // session facts, so a dropped DMV row hands its facts to the report rows it lost to.
         var seen = new HashSet<(int, int, long)>();
+        var reportRows = new Dictionary<(int, int, long), List<TRow>>();
         foreach (var b in items)
             if (b.EventTime.HasValue)
-                seen.Add((b.BlockedSpid, b.BlockingSpid, b.EventTime.Value.Ticks / TimeSpan.TicksPerMinute));
+            {
+                var reportKey = (b.BlockedSpid, b.BlockingSpid, b.EventTime.Value.Ticks / TimeSpan.TicksPerMinute);
+                seen.Add(reportKey);
+                if (!reportRows.TryGetValue(reportKey, out var sameKey))
+                    reportRows[reportKey] = sameKey = new List<TRow>();
+                sameKey.Add(b);
+            }
 
         foreach (var d in dmvItems)
         {
             var key = (d.BlockedSpid, d.BlockingSpid, (d.EventTime?.Ticks ?? 0) / TimeSpan.TicksPerMinute);
             if (seen.Add(key))
                 items.Add(d);
+            else if (reportRows.TryGetValue(key, out var covering))
+                foreach (var report in covering)
+                    report.FillHeadEvidenceFrom(d);
         }
 
         // Re-cap to the grid's LIMIT, newest first. OrderByDescending is stable, so BPR rows (added

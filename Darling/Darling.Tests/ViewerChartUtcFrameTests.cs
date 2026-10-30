@@ -133,9 +133,11 @@ public sealed class ViewerChartUtcFrameTests
             foreach (var axis in Regex.Matches(code, @"\.DateTimeTicksBottomUtc\s*\(").Cast<Match>())
             {
                 utcAxes++;
-                if (!ArgumentsAt(code, axis.Index + axis.Length - 1).Contains("ViewerTimeHelper.CurrentDisplayZone", StringComparison.Ordinal))
+                var arguments = ArgumentsAt(code, axis.Index + axis.Length - 1);
+                if (!arguments.Contains("ViewerTimeHelper.CurrentDisplayZone", StringComparison.Ordinal)
+                    && !arguments.Contains("ViewerTimeHelper.FleetWideZone", StringComparison.Ordinal))
                 {
-                    offenders.Add($"{file}: DateTimeTicksBottomUtc without the current display zone");
+                    offenders.Add($"{file}: DateTimeTicksBottomUtc without ViewerTimeHelper.CurrentDisplayZone or ViewerTimeHelper.FleetWideZone");
                 }
             }
         }

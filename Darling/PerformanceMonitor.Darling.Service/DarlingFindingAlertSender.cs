@@ -105,7 +105,8 @@ public sealed class DarlingFindingAlertSender : IFindingAlertSender
                 /* #5632 Phase A (ruling R1): each held page the summary names opens or joins a request, after its row. */
                 if (_investigations is not null)
                 {
-                    await _investigations.DispatchAsync(record, alert.Context, alert.StoryPathHash);
+                    await _investigations.DispatchAsync(record, alert.Context, alert.StoryPathHash,
+                        recurringAtThisHour: alert.RecurringAtThisHour);
                 }
             }
             return delivery;
@@ -169,7 +170,8 @@ public sealed class DarlingFindingAlertSender : IFindingAlertSender
                         alert.StoryPathHash,
                         InvestigationDispatcher.Facts(
                             alert.CurrentValue, alert.Severity, alert.ThresholdValue, alert.NotifyThreshold, muted: false,
-                            alert.DetailText, context is not null ? AlertContextSerializer.Serialize(context) : null));
+                            alert.DetailText, context is not null ? AlertContextSerializer.Serialize(context) : null),
+                        recurringAtThisHour: alert.RecurringAtThisHour);
                 var result = await _core.TrySendAsync(
                     alert.MetricName, alert.ServerName, alert.CurrentValue, alert.ThresholdValue,
                     alert.ServerId, alert.Context, attemptChannels: true, detailText: alert.DeliveredProse,
@@ -186,7 +188,7 @@ public sealed class DarlingFindingAlertSender : IFindingAlertSender
                 if (result.Route is { } route)
                 {
                     context ??= new AlertContext();
-                    context.Route = route.ToDto(result.ChannelOutcomes);
+                    context.Route = route.ToDto(result.ChannelOutcomes, result.GenericDedupKey, result.PagerDutyDedupKey);
                 }
             }
 

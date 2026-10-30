@@ -294,7 +294,7 @@ INSERT INTO config.agent_environment_profiles (scope_server_id, profile_text) VA
 
             var brief = JsonNode.Parse(InvestigationBriefComposer.Compose(sources, DarlingInvestigationBriefTools.Tools, McpDataDetail.Full, Now))!;
             Assert.Equal(4, brief["known_patterns"]!.AsArray().Count);
-            Assert.Contains("written by an operator", brief["known_patterns_note"]!.GetValue<string>(), StringComparison.Ordinal);
+            Assert.Contains("written by a person or an MCP client with write access", brief["known_patterns_note"]!.GetValue<string>(), StringComparison.Ordinal);
 
             /* A store that has not taken V214 has no table: no part, no error. */
             await DarlingMcpTestData.ExecAsync(connection, ct, "DROP TABLE config.config_known_patterns CASCADE");
@@ -302,6 +302,192 @@ INSERT INTO config.agent_environment_profiles (scope_server_id, profile_text) VA
             Assert.NotNull(without);
             Assert.Null(without!.KnownPatterns);
             Assert.DoesNotContain("known_patterns", InvestigationBriefComposer.Compose(without, DarlingInvestigationBriefTools.Tools, McpDataDetail.Full, Now), StringComparison.Ordinal);
+        });
+    }
+
+    /// <summary>
+    /// #6565: one root cause can open a second request when the analysis chain differs (so the story hash differs) or the 30-minute join window
+    /// has passed. The brief of the second
+    /// request names the first one's report and verdict, marked same_root_cause, when it was reported in the last 24 hours and its story has
+    /// the same root fact (key and database) on the same server and family: two stories 45 minutes apart on one root query, different
+    /// hashes (the hash is a pure hash of the story's path). A report on another root query, the same root query in another database, a same-root report 25 hours old, and a request with
+    /// no finding behind its hash are not marked.
+    /// </summary>
+    [Fact]
+    public async Task SameRootFactUnderAnotherStoryHash_ReportedWithin24Hours_IsNamedFirstAndMarked_OthersAreNot()
+    {
+        await RunAsync(async (dataSource, connection, ct) =>
+        {
+            async Task FindingAsync(string hash, string rootKey, string database, DateTime at) =>
+                await DarlingMcpTestData.ExecAsync(connection, ct,
+                    "INSERT INTO analysis_findings (finding_id, analysis_time, server_id, server_name, database_name, severity, confidence, category, story_path, story_path_hash, story_text, root_fact_key, fact_count) " +
+                    "VALUES ($1, $2, $3, $4, $5, 0.8, 0.8, 'queries', $6, $7, 'story', $8, 2)",
+                    CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(at), ServerId, ServerName, database, "path-" + hash, hash, rootKey);
+
+            InvestigationAlert StoryAlert(string hash, DateTime at) =>
+                new(1, ServerId, ServerName, "blocking", "Analysis: queries [" + hash + "]", at, new[] { ServerId + ":" + hash }, hash,
+                    20, 100, LeaseMinutes: 15, ExpiryMinutes: 240);
+
+            async Task<Guid> OpenAsync(string hash, DateTime at) =>
+                (await new InvestigationRequestStore(dataSource, 30, () => at).OpenOrJoinAsync(StoryAlert(hash, at), ct)).RequestId!.Value;
+
+            async Task<Guid> ReportedAsync(string hash, DateTime at, string verdict)
+            {
+                var store = new InvestigationRequestStore(dataSource, 30, () => at);
+                var id = (await store.OpenOrJoinAsync(StoryAlert(hash, at), ct)).RequestId!.Value;
+                var claim = await store.ClaimAsync(id, "agent-a", ct);
+                Assert.Equal(InvestigationSubmitOutcome.Reported, await store.SubmitAsync(new InvestigationReportSubmission(
+                    id, claim.ClaimId!.Value, "agent-a", 1, verdict, "a regressed plan", true, null, "[{\"tool\":\"get_query_store_top\"}]"), ct));
+                return id;
+            }
+
+            await FindingAsync("hashA0001", "BAD_ACTOR_q1", "Sales", Now.AddMinutes(-45));
+            await FindingAsync("hashB0002", "BAD_ACTOR_q1", "Sales", Now);
+            await FindingAsync("hashC0003", "BAD_ACTOR_q2", "Sales", Now.AddMinutes(-50));
+            await FindingAsync("hashD0004", "BAD_ACTOR_q1", "Hr", Now.AddMinutes(-40));
+            await FindingAsync("hashE0005", "BAD_ACTOR_q1", "Sales", Now.AddHours(-25));
+
+            var first = await ReportedAsync("hashA0001", Now.AddMinutes(-45), "real");
+            var otherQuery = await ReportedAsync("hashC0003", Now.AddMinutes(-50), "false_positive");
+            var otherDatabase = await ReportedAsync("hashD0004", Now.AddMinutes(-40), "real");
+            var tooOld = await ReportedAsync("hashE0005", Now.AddHours(-25), "real");
+            var second = await OpenAsync("hashB0002", Now);
+
+            var reader = new PgInvestigationBriefSourceReader(dataSource, utcNow: () => Now);
+            var sources = await reader.ReadAsync(second, ct);
+
+            var marked = Assert.Single(sources!.EarlierReports, r => r.SameRootCause);
+            Assert.Equal(first, marked.RequestId);
+            Assert.Equal("real", marked.Verdict);
+            Assert.Equal(first, sources.EarlierReports[0].RequestId);
+            Assert.Equal(new[] { otherQuery, otherDatabase, tooOld }.OrderBy(g => g), sources.EarlierReports.Where(r => !r.SameRootCause).Select(r => r.RequestId).OrderBy(g => g));
+
+            var brief = JsonNode.Parse(InvestigationBriefComposer.Compose(sources, DarlingInvestigationBriefTools.Tools, McpDataDetail.Full, Now))!;
+            var reports = brief["earlier_reports"]!.AsArray();
+            Assert.Equal(first.ToString(), reports[0]!["request_id"]!.GetValue<string>());
+            Assert.Equal("real", reports[0]!["verdict"]!.GetValue<string>());
+            Assert.True(reports[0]!["same_root_cause"]!.GetValue<bool>());
+            Assert.Single(reports, r => r!["same_root_cause"] is not null);
+            Assert.Contains(brief["read_rules"]!.AsArray(), r => r!.GetValue<string>() == InvestigationBriefComposer.SameRootCauseRule);
+
+            /* A request whose story has no finding behind its hash (another family, so it opens its own request) names nothing, and its brief carries neither the mark nor the rule. */
+            var loneId = (await new InvestigationRequestStore(dataSource, 30, () => Now.AddMinutes(-1)).OpenOrJoinAsync(
+                new InvestigationAlert(1, ServerId, ServerName, "jobs", "Analysis: jobs [hashF0006]", Now.AddMinutes(-1), new[] { ServerId + ":hashF0006" }, "hashF0006",
+                    20, 100, LeaseMinutes: 15, ExpiryMinutes: 240), ct)).RequestId!.Value;
+            var lone = await reader.ReadAsync(loneId, ct);
+            Assert.DoesNotContain(lone!.EarlierReports, r => r.SameRootCause);
+            Assert.DoesNotContain("same_root_cause", InvestigationBriefComposer.Compose(lone, DarlingInvestigationBriefTools.Tools, McpDataDetail.Full, Now), StringComparison.Ordinal);
+        });
+    }
+
+    /// <summary>
+    /// #6582: the root fact is the newest finding for the request's story hash at or before the request opened. The brief composes at claim
+    /// time, so a later analysis run of the same story (another root) must not re-point the match: the earlier report on the root the
+    /// request opened with stays marked, and a report on the later run's root is not.
+    /// </summary>
+    [Fact]
+    public async Task TheRootFact_IsAnchoredToTheRequestsOpenTime_ALaterRunDoesNotRepointIt()
+    {
+        await RunAsync(async (dataSource, connection, ct) =>
+        {
+            async Task FindingAsync(string hash, string rootKey, DateTime at) =>
+                await DarlingMcpTestData.ExecAsync(connection, ct,
+                    "INSERT INTO analysis_findings (finding_id, analysis_time, server_id, server_name, database_name, severity, confidence, category, story_path, story_path_hash, story_text, root_fact_key, fact_count) " +
+                    "VALUES ($1, $2, $3, $4, 'Sales', 0.8, 0.8, 'queries', $5, $6, 'story', $7, 2)",
+                    CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(at), ServerId, ServerName, "path-" + hash, hash, rootKey);
+
+            InvestigationAlert StoryAlert(string hash, DateTime at) =>
+                new(1, ServerId, ServerName, "blocking", "Analysis: queries [" + hash + "]", at, new[] { ServerId + ":" + hash }, hash,
+                    20, 100, LeaseMinutes: 15, ExpiryMinutes: 240);
+
+            async Task<Guid> ReportedAsync(string hash, string rootKey, DateTime at)
+            {
+                await FindingAsync(hash, rootKey, at);
+                var store = new InvestigationRequestStore(dataSource, 30, () => at);
+                var id = (await store.OpenOrJoinAsync(StoryAlert(hash, at), ct)).RequestId!.Value;
+                var claim = await store.ClaimAsync(id, "agent-a", ct);
+                Assert.Equal(InvestigationSubmitOutcome.Reported, await store.SubmitAsync(new InvestigationReportSubmission(
+                    id, claim.ClaimId!.Value, "agent-a", 1, "real", "a regressed plan", true, null, "[{\"tool\":\"get_query_store_top\"}]"), ct));
+                return id;
+            }
+
+            var onTheOpeningRoot = await ReportedAsync("hashA0001", "BAD_ACTOR_q1", Now.AddMinutes(-45));
+            var onTheLaterRoot = await ReportedAsync("hashC0003", "BAD_ACTOR_q9", Now.AddMinutes(-40));
+
+            await FindingAsync("hashB0002", "BAD_ACTOR_q1", Now.AddMinutes(-1));
+            var second = (await new InvestigationRequestStore(dataSource, 30, () => Now).OpenOrJoinAsync(StoryAlert("hashB0002", Now), ct)).RequestId!.Value;
+            await FindingAsync("hashB0002", "BAD_ACTOR_q9", Now.AddMinutes(10));
+
+            var sources = await new PgInvestigationBriefSourceReader(dataSource, utcNow: () => Now.AddMinutes(20)).ReadAsync(second, ct);
+
+            var marked = Assert.Single(sources!.EarlierReports, r => r.SameRootCause);
+            Assert.Equal(onTheOpeningRoot, marked.RequestId);
+            Assert.Contains(sources.EarlierReports, r => r.RequestId == onTheLaterRoot && !r.SameRootCause);
+        });
+    }
+
+    /// <summary>
+    /// #6565: PLAN_REGRESSION is a server-wide root fact (its key names no query), so key and database alone would mark every plan
+    /// regression report on the database. Two stories on one database are the same root cause only when their findings share a force
+    /// target (database and query id). The request's brief marks the report whose finding shares query 101; a report on queries 201 and 202,
+    /// one whose finding has no targets and one with an empty target list are named but not marked. A request whose own finding has no
+    /// targets marks nothing, the query-101 report included.
+    /// </summary>
+    [Fact]
+    public async Task PlanRegression_IsMarkedOnlyWhenTheFindingsShareAForceTarget()
+    {
+        await RunAsync(async (dataSource, connection, ct) =>
+        {
+            static string Action(params long[] queryIds) => AlertContextSerializer.SerializeAction(new PerformanceMonitor.Analysis.RemediationAction(
+                "PLAN_REGRESSION", "force", queryIds.Select(q => new PerformanceMonitor.Analysis.ForcePlanTarget("Sales", q, q + 1000)).ToList()))!;
+
+            async Task FindingAsync(string hash, string? action, DateTime at) =>
+                await DarlingMcpTestData.ExecAsync(connection, ct,
+                    "INSERT INTO analysis_findings (finding_id, analysis_time, server_id, server_name, database_name, severity, confidence, category, story_path, story_path_hash, story_text, root_fact_key, fact_count, remediation_action_json) " +
+                    "VALUES ($1, $2, $3, $4, 'Sales', 0.8, 0.8, 'queries', $5, $6, 'story', 'PLAN_REGRESSION', 2, $7)",
+                    CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(at), ServerId, ServerName, "path-" + hash, hash, action);
+
+            InvestigationAlert StoryAlert(string hash, DateTime at) =>
+                new(1, ServerId, ServerName, "blocking", "Analysis: queries [" + hash + "]", at, new[] { ServerId + ":" + hash }, hash,
+                    20, 100, LeaseMinutes: 15, ExpiryMinutes: 240);
+
+            async Task<Guid> ReportedAsync(string hash, DateTime at)
+            {
+                var store = new InvestigationRequestStore(dataSource, 30, () => at);
+                var id = (await store.OpenOrJoinAsync(StoryAlert(hash, at), ct)).RequestId!.Value;
+                var claim = await store.ClaimAsync(id, "agent-a", ct);
+                Assert.Equal(InvestigationSubmitOutcome.Reported, await store.SubmitAsync(new InvestigationReportSubmission(
+                    id, claim.ClaimId!.Value, "agent-a", 1, "real", "a regressed plan", true, null, "[{\"tool\":\"get_query_store_top\"}]"), ct));
+                return id;
+            }
+
+            await FindingAsync("hashA0001", Action(101), Now.AddMinutes(-45));
+            await FindingAsync("hashC0003", Action(201, 202), Now.AddMinutes(-50));
+            await FindingAsync("hashD0004", null, Now.AddMinutes(-40));
+            await FindingAsync("hashE0005", Action(), Now.AddMinutes(-35));
+            await FindingAsync("hashG0007", null, Now.AddMinutes(-30));
+            await FindingAsync("hashB0002", Action(101, 102), Now);
+
+            var shared = await ReportedAsync("hashA0001", Now.AddMinutes(-45));
+            var otherQueries = await ReportedAsync("hashC0003", Now.AddMinutes(-50));
+            var noTargets = await ReportedAsync("hashD0004", Now.AddMinutes(-40));
+            var emptyTargets = await ReportedAsync("hashE0005", Now.AddMinutes(-35));
+            var targetless = await ReportedAsync("hashG0007", Now.AddMinutes(-30));
+
+            var reader = new PgInvestigationBriefSourceReader(dataSource, utcNow: () => Now);
+
+            /* A request whose own finding has no force targets marks nothing (it was reported, so it is read by id). */
+            var none = await reader.ReadAsync(targetless, ct);
+            Assert.DoesNotContain(none!.EarlierReports, r => r.SameRootCause);
+            Assert.Contains(none.EarlierReports, r => r.RequestId == shared);
+
+            var second = (await new InvestigationRequestStore(dataSource, 30, () => Now).OpenOrJoinAsync(StoryAlert("hashB0002", Now), ct)).RequestId!.Value;
+            var sources = await reader.ReadAsync(second, ct);
+
+            var marked = Assert.Single(sources!.EarlierReports, r => r.SameRootCause);
+            Assert.Equal(shared, marked.RequestId);
+            Assert.Equal(shared, sources.EarlierReports[0].RequestId);
+            Assert.Equal(new[] { otherQueries, noTargets, emptyTargets, targetless }.OrderBy(g => g), sources.EarlierReports.Where(r => !r.SameRootCause).Select(r => r.RequestId).OrderBy(g => g));
         });
     }
 

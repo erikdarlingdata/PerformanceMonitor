@@ -92,7 +92,7 @@ public sealed class QueryStoreIntervalWideHistoryNoteTests
         Assert.EndsWith("Z", printed, StringComparison.Ordinal);
         /* Each surface formats the start where it calls the builder: the MCP top-queries table route, and Compose's panel. */
         Assert.Contains(printed, DarlingMcpDataTools.QueryStoreTableNote(naive, bound), StringComparison.Ordinal);
-        Assert.Contains(printed, DarlingWebEndpoints.QueryStoreHistoryNote(naive, bound), StringComparison.Ordinal);
+        Assert.Contains(printed, ComposePanelRunner.QueryStoreHistoryNote(naive, bound), StringComparison.Ordinal);
     }
 
     public static System.Collections.Generic.IEnumerable<object[]> EveryBound() =>
@@ -112,5 +112,5 @@ public sealed class QueryStoreIntervalWideHistoryNoteTests
     public void ComposeForwarder_CarriesTheManyServersText() =>
         Assert.Equal(
             QueryStoreIntervalWide.HistoryNote(StartText, QueryStoreIntervalWide.WideStartBound.TablePurgeEdge, manyServers: true),
-            PerformanceMonitor.Darling.Service.DarlingWebEndpoints.QueryStoreHistoryNote(Start, QueryStoreIntervalWide.WideStartBound.TablePurgeEdge));
+            PerformanceMonitor.Darling.Storage.ComposePanelRunner.QueryStoreHistoryNote(Start, QueryStoreIntervalWide.WideStartBound.TablePurgeEdge));
 }

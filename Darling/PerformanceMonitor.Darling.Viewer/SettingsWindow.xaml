@@ -2,6 +2,7 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:ui="clr-namespace:PerformanceMonitor.Ui;assembly=PerformanceMonitor.Ui"
+        xmlns:local="clr-namespace:PerformanceMonitor.Darling.Viewer"
         Title="Settings"
         Height="750" Width="750"
         MinHeight="500" MinWidth="600"
@@ -88,8 +89,14 @@
                                 </Grid>
                                 <CheckBox x:Name="CapturePlansCheckBox" Content="Capture execution plans (all servers)" Margin="0,12,0,0"
                                           Foreground="{DynamicResource ForegroundBrush}"/>
+                                <TextBlock Text="Store query and Query Store execution-plan XML across the fleet. Disable to shave storage on a very large fleet; a per-server override lives on each server's dialog."
+                                           FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
+                                           TextWrapping="Wrap" Margin="24,2,0,0"/>
                                 <CheckBox x:Name="QueryStoreBackfillCheckBox" Content="Query Store history backfill (all servers)" Margin="0,12,0,0"
                                           Foreground="{DynamicResource ForegroundBrush}"/>
+                                <TextBlock Text="Fill Query Store history gaps (outages, newly added or freshly restored databases) in bounded background slices. Disable to stop a heavy catch-up — for example after restoring a large database onto a monitored server — live collection is unaffected; re-enabling resumes where it left off."
+                                           FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
+                                           TextWrapping="Wrap" Margin="24,2,0,0"/>
                                 <Grid Margin="0,12,0,0">
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="Auto"/>
@@ -119,12 +126,6 @@
                                 <TextBlock Text="Query text and plan XML are fetched for each database-hour's top N plans on CPU, duration, physical reads, writes, memory grant, tempdb and executions (0-100000, default 100), plus forced plans and plans the engine's plan correction names. A plan outside the top N keeps its runtime statistics, shows as not collected, and is fetched by a later run if it ranks then. 0 fetches every new plan. Takes effect on the next collection cycle, no restart."
                                            FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
                                            TextWrapping="Wrap" Margin="0,4,0,0"/>
-                                <TextBlock Text="Fill Query Store history gaps (outages, newly added or freshly restored databases) in bounded background slices. Disable to stop a heavy catch-up — for example after restoring a large database onto a monitored server — live collection is unaffected; re-enabling resumes where it left off."
-                                           FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
-                                           TextWrapping="Wrap" Margin="24,2,0,0"/>
-                                <TextBlock Text="Store query and Query Store execution-plan XML across the fleet. Disable to shave storage on a very large fleet; a per-server override lives on each server's dialog."
-                                           FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
-                                           Margin="0,4,0,0" TextWrapping="Wrap"/>
                             </StackPanel>
                         </Border>
 
@@ -265,11 +266,11 @@
                                 </WrapPanel>
                                 <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
                                     <!-- #5640: the Client Timeouts alert grades client timeouts and cancels (the sqlserver.attention event: a client cancelled a query
-                                         or its timeout expired) per minute over the covered span of the attention collector's last runs (about 3 minutes). OFF by default:
+                                         or its timeout expired) per minute over the covered span of the attention collector's last runs (about 3 minutes). ON by default since #5736:
                                          the bars are relative to each server's own normal rate (#5736). The two bars are the floors; the two multiples scale the server's baseline. All whole numbers; Critical never below Warning. -->
                                     <CheckBox x:Name="AlertClientTimeoutsCheckBox" Content="Client timeouts and cancels per minute — Warning at" VerticalAlignment="Center"
                                               Foreground="{DynamicResource ForegroundBrush}"
-                                              ToolTip="The Client Timeouts alert counts client timeouts and cancels per minute (the sqlserver.attention event: a client cancelled a query or its timeout expired) over the attention collector's last runs (about 3 minutes). The two bars are floors: the Warning bar is the higher of the first floor and the Warning multiple times the server's own baseline (the p99.9 of its 3-minute average rate over the last 7 days), and the Critical bar the same with the second floor and the Critical multiple. A server with under a day of capture uses the floors. A Warning that worsens to Critical is delivered at once. Off by default."/>
+                                              ToolTip="The Client Timeouts alert counts client timeouts and cancels per minute (the sqlserver.attention event: a client cancelled a query or its timeout expired) over the attention collector's last runs (about 3 minutes). The two bars are floors: the Warning bar is the higher of the first floor and the Warning multiple times the server's own baseline (the p99.9 of its 3-minute average rate over the last 7 days), and the Critical bar the same with the second floor and the Critical multiple. A server with under a day of capture uses the floors. A Warning that worsens to Critical is delivered at once. On by default."/>
                                     <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AlertClientTimeoutsCheckBox}" x:Name="AlertClientTimeoutsWarningBox" Width="45" Text="10" Margin="6,0,0,0" VerticalAlignment="Center"
                                              ToolTip="Warning floor: client timeouts and cancels (attentions) per minute over the covered span. At least 1. Default 10. The bar is the higher of this floor and the Warning multiple times the server's own baseline."/>
                                     <TextBlock Text="Critical at" VerticalAlignment="Center" Margin="6,0,0,0"
@@ -404,6 +405,27 @@
                                     <Button x:Name="ConfigureDatabaseStatesButton" Content="Configure…" Margin="8,0,0,0" Padding="8,2"
                                             VerticalAlignment="Center" Click="ConfigureDatabaseStatesButton_Click"/>
                                 </WrapPanel>
+                                <!-- #6874: off by default. Alerts when the newest SQL Server Agent alert capture shows a gap (no alert for
+                                     severity 19 to 25 or errors 823 to 825, an alert with no operator, an alert off, or none defined). -->
+                                <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
+                                    <CheckBox x:Name="AlertAgentAlertGapsCheckBox" Content="SQL Server Agent alert setup has a gap (off by default)"
+                                              VerticalAlignment="Center" Foreground="{DynamicResource ForegroundBrush}"/>
+                                </WrapPanel>
+                                <!-- #6873: the three database protection alerts. Off by default. -->
+                                <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
+                                    <CheckBox x:Name="AlertBackupOverdueCheckBox" Content="Full backup overdue (older than 7 days)"
+                                              VerticalAlignment="Center" Foreground="{DynamicResource ForegroundBrush}"/>
+                                    <CheckBox x:Name="AlertLogBackupOverdueCheckBox" Content="Log backup overdue (older than 60 minutes)" Margin="12,0,0,0"
+                                              VerticalAlignment="Center" Foreground="{DynamicResource ForegroundBrush}"/>
+                                    <CheckBox x:Name="AlertCheckDbOverdueCheckBox" Content="CHECKDB overdue (older than 14 days)" Margin="12,0,0,0"
+                                              VerticalAlignment="Center" Foreground="{DynamicResource ForegroundBrush}"/>
+                                </WrapPanel>
+                                <!-- #6875: off by default. Alerts when an identity column is at or past the warning bar (70 percent used) or the
+                                     critical bar (90 percent) of its type's capacity. The bars are set with update_alert_settings or a threshold override. -->
+                                <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
+                                    <CheckBox x:Name="AlertIdentityCapacityCheckBox" Content="Identity column running out of values (off by default)"
+                                              VerticalAlignment="Center" Foreground="{DynamicResource ForegroundBrush}"/>
+                                </WrapPanel>
                                 <!-- #3368: Server Health Bands. Its own section, and NOT an alert section — these two tiers
                                      decide what colour a server's Overview card and the fleet roll-up read, not whether
                                      anything is delivered. They are deliberately absent from SetAlertControlsEnabled for
@@ -421,6 +443,26 @@
                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                     <TextBox AutomationProperties.Name="Deadlocks critical at, per hour" x:Name="BandDeadlockCriticalPerHourBox" Width="45" Text="20.0" Margin="6,0,0,0" VerticalAlignment="Center"/>
                                     <TextBlock TextWrapping="Wrap" Text="per hour (1.0 or above; a typical busy server-hour measures 1-2)" VerticalAlignment="Center" Margin="2,0,0,0"
+                                               Foreground="{DynamicResource ForegroundBrush}"/>
+                                </WrapPanel>
+                                <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
+                                    <TextBlock x:Name="BandBlockingWarnPerHourLabel" Text="Blocking warn at" VerticalAlignment="Center"
+                                               Foreground="{DynamicResource ForegroundBrush}"/>
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=BandBlockingWarnPerHourLabel}" x:Name="BandBlockingWarnPerHourBox" Width="45" Text="5.0" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                                    <TextBlock Text="reports per hour; critical at" VerticalAlignment="Center" Margin="2,0,0,0"
+                                               Foreground="{DynamicResource ForegroundBrush}"/>
+                                    <TextBox AutomationProperties.Name="Blocking critical at, reports per hour" x:Name="BandBlockingCriticalPerHourBox" Width="45" Text="20.0" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                                    <TextBlock Text="per hour (1.0 or above)" VerticalAlignment="Center" Margin="2,0,0,0"
+                                               Foreground="{DynamicResource ForegroundBrush}"/>
+                                </WrapPanel>
+                                <WrapPanel Orientation="Horizontal" Margin="20,4,0,0">
+                                    <TextBlock x:Name="BandBlockingWarnWaitSecondsLabel" Text="Longest block warns at" VerticalAlignment="Center"
+                                               Foreground="{DynamicResource ForegroundBrush}"/>
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=BandBlockingWarnWaitSecondsLabel}" x:Name="BandBlockingWarnWaitSecondsBox" Width="55" Text="10.0" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                                    <TextBlock Text="seconds; critical at" VerticalAlignment="Center" Margin="2,0,0,0"
+                                               Foreground="{DynamicResource ForegroundBrush}"/>
+                                    <TextBox AutomationProperties.Name="Longest block critical at, seconds" x:Name="BandBlockingCriticalWaitSecondsBox" Width="55" Text="60.0" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                                    <TextBlock Text="seconds (1.0 or above; critical not below warn)" VerticalAlignment="Center" Margin="2,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                 </WrapPanel>
                                 <TextBlock Text="Normalised over whatever window a surface asks for, so one pair means the same condition on a 1-hour and a 24-hour read."
@@ -830,7 +872,7 @@
                                 </Grid>
                                 <TextBlock Margin="20,8,0,0" TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}">
                                     <Run Text="Placeholders (each is JSON-escaped when substituted): "/>
-                                    <Run FontFamily="Consolas" Text="{}{{metric}} {{server}} {{value}} {{threshold}} {{severity}} {{context}} {{detail}} {{timestamp}}"/>
+                                    <Run FontFamily="Consolas" Text="{}{{metric}} {{server}} {{value}} {{threshold}} {{severity}} {{context}} {{detail}} {{timestamp}} {{status}}"/>
                                 </TextBlock>
                                 <TextBlock Margin="20,4,0,0" TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}">
                                     <Run Text="Automation placeholders — the first two substitute RAW JSON values (use them unquoted, e.g. &quot;context&quot;: {{context_json}}): "/>
@@ -978,7 +1020,7 @@
                                         <ComboBoxItem Content="Use the service's darling.json value (store column cleared)" Tag=""/>
                                     </ComboBox>
                                 </WrapPanel>
-                                <TextBlock Text="Digest and Page take effect in the running service within one collection sweep, no restart, and win over darling.json's analysis.uncorroboratedRoute; the third choice clears the store column so the file governs again. get_alert_settings reports which one is deciding under analysis.uncorroborated_route_source."
+                                <TextBlock Text="{x:Static local:ViewerLabels.UncorroboratedRouteNote}"
                                            FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
                                            Margin="20,2,0,0" TextWrapping="Wrap"/>
                                 <TextBlock Text="Requires SMTP or a webhook configured below for delivery; findings are recorded in the Alerts tab either way."

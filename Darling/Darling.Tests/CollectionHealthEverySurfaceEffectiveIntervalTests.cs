@@ -230,6 +230,8 @@ public sealed class CollectionHealthEverySurfaceEffectiveIntervalTests
                 LastRunTime = then,
                 LastNonSkipTime = then,
                 LastProductiveTime = then,
+                /* The newest run stored rows, so it broke any quiet streak (#6828). */
+                LastZeroRowStreakBreakTime = then,
             };
         }
 

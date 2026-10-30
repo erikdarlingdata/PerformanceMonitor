@@ -13,7 +13,9 @@
  * API reports it (band = Warning, status text verbatim) — never the red offline treatment.
  */
 
-import { el, mount, readTool, apiGetFleet, loadingStrip, errorStrip, emptyStrip, localTime, localClock, relTime, fmtInt, fmtNum, fmtPct, fmtMb, fmtMs, bandClass, rollupTextId, tagPill } from "../util.js";
+import { holdsPage, keepScroll, noteRefreshError, replaceNodes, showPage, showRefreshError } from "../refresh-in-place.js";
+import { el, mount, readTool, apiGetFleet, loadingStrip, errorStrip, emptyStrip, localTime, localClock, relTime, fmtInt, fmtNum, fmtPct, fmtMb, fmtMs, bandClass, rollupTextId, tagPill, frontDoor, currentStore } from "../util.js";
+import { frontDoorStores, healthBandClass, healthLabel, currentFirst, currentMark } from "../store-picker.js";
 import { VIZ, navigateServer } from "../panels.js";
 import { favoritesFirst, onChange as onLocalChange } from "../viewer-local.js";
 import { buildTagGroups, cardMatches } from "../fleet-groups.js";
@@ -254,14 +256,92 @@ function silenceButton(c) {
   return btn;
 }
 
-export async function renderFleet(main) {
+/**
+ * Front door (#6840): one section per store, each with the store's name and health and the roll-up and cards of that
+ * store's own /api/fleet. The sections fill independently: a store whose read fails shows its error inside its own section
+ * and the others still draw. Search, the needs-attention filter, grouping by tag and Silence are the single-store page's
+ * controls over one fleet; here they are left out (a server's Silence is on its own page), and the cards sort worst first.
+ */
+async function renderStoreFleets(main, isPoll) {
+  silenceNotice = null;
+  canEditSilence = false;
+  const current = currentStore();
+  const listed = frontDoorStores();
+  if (!listed.length) {
+    mount(main, [pageHead(null), emptyStrip("The front door lists no stores.")]);
+    return;
+  }
+  const parts = currentFirst(listed, (s) => s.name, current).map((st) => {
+    const body = el("div", { class: "fleet-store-body" }, [loadingStrip("Loading " + st.name + "…")]);
+    const isCurrent = st.name === current;
+    const head = el("h3", { class: "section-title fleet-store-head" + (isCurrent ? " current" : ""), "aria-current": isCurrent ? "true" : null }, [
+      el("span", { class: "dot " + healthBandClass(st.health) }),
+      el("span", { class: "fleet-store-name", text: st.name }),
+      isCurrent ? currentMark() : null,
+      el("span", { class: "fleet-store-health", text: healthLabel(st.health) }),
+      st.server_count != null ? el("span", { class: "muted", text: st.server_count + " server" + (st.server_count === 1 ? "" : "s") }) : null,
+    ]);
+    return { st, body, section: el("section", { class: "fleet-store", dataset: { store: st.name } }, [head, body]) };
+  });
+  /* #6933: a poll over the same stores in the same order keeps each section's body on screen and swaps it when that store's read
+     returns. A store whose read fails keeps what it showed, with the error above it. */
+  const shown = Array.from(main.children).filter((n) => n.dataset && n.dataset.store);
+  const inPlace = holdsPage(main, "fleet-stores", isPoll) && shown.length === parts.length && parts.every((x, i) => shown[i].dataset.store === x.st.name);
+  if (inPlace) {
+    parts.forEach((x, i) => {
+      replaceNodes(shown[i], [shown[i].firstChild], [x.section.firstChild]);
+      x.body = shown[i].children[1];
+    });
+  } else {
+    showPage(main, "fleet-stores", [pageHead(null), ...parts.map((x) => x.section)]);
+  }
+
+  await Promise.all(
+    parts.map(async (x) => {
+      try {
+        const res = await apiGetFleet(x.st.name);
+        if (res.kind !== "data") {
+          showStoreFailure(x.body, inPlace, res.message || "This store's fleet could not be read.");
+          return;
+        }
+        keepScroll(() => mount(x.body, storeFleetBody(res.data, x.st.name, x.st.name === current)));
+      } catch (e) {
+        showStoreFailure(x.body, inPlace, "This store's fleet could not be drawn: " + (e && e.message ? e.message : String(e)));
+      }
+    })
+  );
+}
+
+/** A store section whose read failed: its error replaces the loading line, or sits above the section's old content on a poll. */
+function showStoreFailure(body, inPlace, message) {
+  if (inPlace) noteRefreshError(body, message);
+  else mount(body, [errorStrip(message)]);
+}
+
+function storeFleetBody(d, store, own) {
+  if (!d.total_servers) return [emptyStrip("No servers are enabled in this store yet.")];
+  const cards = (d.cards || []).slice().sort(SORTS.severity);
+  return [rollup(d), el("div", { class: "grid server-grid" }, cards.map((c) => serverCard(c, store, own)))];
+}
+
+export async function renderFleet(main, opts) {
+  /* #6933: the poll reads again with the page still on screen and swaps the new one in when the read returns. */
+  const isPoll = !!(opts && opts.poll === true);
+  if (frontDoor()) {
+    await renderStoreFleets(main, isPoll);
+    return;
+  }
   silenceNotice = null; /* a notice lasts until the next rebuild (the 60 s poll) */
+  const ourHash = location.hash;
   canEditSilence = !!(await api.getSession()).can_edit;
-  mount(main, [pageHead(null), loadingStrip("Loading fleet…")]);
+  /* A poll that lands after the reader went to another page must not draw the fleet over it. */
+  if (location.hash !== ourHash) return;
+  if (!holdsPage(main, "fleet", isPoll)) mount(main, [pageHead(null), loadingStrip("Loading fleet…")]);
 
   const res = await apiGetFleet();
+  if (location.hash !== ourHash) return;
   if (res.kind === "error") {
-    mount(main, [pageHead(null), errorStrip(res.message)]);
+    if (!showRefreshError(main, "fleet", res.message)) mount(main, [pageHead(null), errorStrip(res.message)]);
     return;
   }
 
@@ -270,9 +350,9 @@ export async function renderFleet(main) {
 
   if (!d.total_servers) {
     nodes.push(
-      emptyStrip("No servers are enabled yet. Add servers to darling.json and cards appear here as collection begins.")
+      emptyStrip("No servers are enabled yet. Add one in the desktop Viewer (Add Server) or with --add-server, and cards appear here as collection begins.")
     );
-    mount(main, nodes);
+    showPage(main, "fleet", nodes);
     return;
   }
 
@@ -321,7 +401,7 @@ export async function renderFleet(main) {
   redrawCards();
   nodes.push(gridNode);
 
-  mount(main, nodes);
+  showPage(main, "fleet", nodes);
 }
 
 /** Filter the cached cards by the search term AND the needs-attention toggle, sort by the current choice, and
@@ -625,7 +705,9 @@ export function rollup(d) {
      not a confirmed incident either — warning is the "interrogate this number" class without claiming a
      deadlock happened. A real deadlock keeps critical whatever the coverage: a measured incident outranks an
      incomplete denominator, and the sub-line under it already says the count may be short. */
-  const deadlockClass = d.total_deadlocks > 0 ? "critical" : deadlockSub && deadlockSub.partial ? "warning" : "";
+  /* #6927: banded by the service through the same classifier and the store's tiers as the cards, not on any non-zero count. */
+  const totalClass = (sev) => (sev === "Critical" ? "critical" : sev === "Warning" ? "warning" : "");
+  const deadlockClass = totalClass(d.total_deadlock_severity) || (deadlockSub && deadlockSub.partial ? "warning" : "");
 
   /* Two fixed groups (server-band counts | event counts) split by a divider; a non-zero blocking / deadlock
      total takes a severity color. */
@@ -639,7 +721,7 @@ export function rollup(d) {
     ]),
     el("div", { class: "rollup-divider" }),
     el("div", { class: "rollup-group" }, [
-      tile(d.total_blocking_events, "Blocking (recent)", d.total_blocking_events > 0 ? "warning" : ""),
+      tile(d.total_blocking_events, "Blocking (recent)", totalClass(d.total_blocking_severity)),
       /* The API's own note rides along as the tile's title — the causes and the two windows, in the words the
          service already renders for get_fleet_overview, so the hover is DETAIL on a signal that is already
          visible rather than the only place the signal exists. */
@@ -654,7 +736,10 @@ export function rollup(d) {
   ]);
 }
 
-function serverCard(c) {
+/* `store` (front door only) is the store the card's server is in: the click opens the server in that store. `own` is false for a
+   card of a store other than the one in use, which carries no alert badge, favourite star or Silence button (their ids and
+   state belong to the current store). */
+function serverCard(c, store, own = true) {
   const cls = bandClass(c.band);
   /* #3528: the band's fold skips Unknown, so a card can read Healthy off one measured metric of six —
      say so instead of rendering an unqualified green. The counts are the server's own (R1: read the
@@ -678,7 +763,7 @@ function serverCard(c) {
 
   return el(
     "div",
-    { class: "server-card " + cls, onActivate: () => navigateServer(c.server_name || c.display_name) },
+    { class: "server-card " + cls, onActivate: () => navigateServer(c.server_name || c.display_name, store) },
     [
       el("div", { class: "head" }, [
         el("span", { class: "dot " + cls }),
@@ -686,9 +771,9 @@ function serverCard(c) {
            server stops looking healthy-quiet. The Silence / Unsilence button beside it shows for an editing seat. */
         effectiveSilenced(c) ? el("span", { class: "silenced-bell", title: "Alerts silenced for this server", role: "img", "aria-label": "Alerts silenced" }) : null,
         el("span", { class: "title", text: c.display_name }),
-        alertBadge(c.server_id),
-        favoriteStar(c.server_id),
-        silenceButton(c),
+        own ? alertBadge(c.server_id) : null,
+        own ? favoriteStar(c.server_id) : null,
+        own ? silenceButton(c) : null,
       ]),
       statusLine,
       tagPills(c),
@@ -789,7 +874,7 @@ export function metricBands(c) {
   const collectorsDetail = collectorsStale
     ? "no recent collection · " + (c.last_collection ? "last " + relTime(c.last_collection) : DARK_PAST_WINDOW)
     : c.collector_count > 0
-    ? fmtInt(c.healthy_collector_count) + " healthy · " + fmtInt(c.failed_collector_count) + " failing"
+    ? fmtInt(c.healthy_collector_count) + " healthy · " + (c.warning_collector_count > 0 ? fmtInt(c.warning_collector_count) + " warning · " : "") + fmtInt(c.failed_collector_count) + " failing" + (c.not_collected_collector_count > 0 ? " · " + fmtInt(c.not_collected_collector_count) + " not collected" : "") + (c.no_permission_collector_count > 0 ? " · " + fmtInt(c.no_permission_collector_count) + " no permission" : "")
     : "no collector banded yet";
   const collectorsSeverity = collectorsStale ? "Unknown" : c.collector_severity;
 
@@ -806,7 +891,7 @@ export function metricBands(c) {
       chip("Memory", "n/a", "Unknown", staleDetail),
       chip("Blocking", "n/a", "Unknown", staleDetail),
       chip("Deadlocks", "n/a", "Unknown", staleDetail),
-      chip("Collectors", collectorsValue, collectorsSeverity, collectorsDetail),
+      chip("Collectors", collectorsValue, collectorsSeverity, collectorsDetail, true),
     ]);
   }
 
@@ -818,14 +903,44 @@ export function metricBands(c) {
     chip("Memory", memValue, c.memory_severity, memDetail),
     chip("Blocking", fmtInt(c.blocking_count), c.blocking_severity, blockingDetail),
     chip("Deadlocks", fmtInt(c.deadlock_count), c.deadlock_severity, deadlockDetail),
-    chip("Collectors", collectorsValue, collectorsSeverity, collectorsDetail),
+    chip("Collectors", collectorsValue, collectorsSeverity, collectorsDetail, true),
+    /* #6875: a chip only when a column is at the warning bar or past it. It is not a band: nothing above reads it, and a server without one shows no extra chip. */
+    ...identityCapacityChip(c),
+    /* #6874: a chip only when the server's Agent alert setup has a gap. It is not a band: nothing above reads it, and a
+       server without a gap shows no extra chip. */
+    ...agentAlertChip(c),
+    /* #6873: a chip only when a full backup, a log backup or a CHECKDB is overdue. It is not a band: nothing above reads it, and a
+       server with nothing overdue (or a platform-managed one) shows no extra chip. The words come from the server. */
+    ...databaseProtectionChip(c),
   ]);
+}
+
+function agentAlertChip(c) {
+  const gaps = c.agent_alert_gaps;
+  if (!Array.isArray(gaps) || gaps.length === 0) return [];
+  return [chip("Agent alerts", fmtInt(gaps.length) + (gaps.length === 1 ? " gap" : " gaps"), "Warning", gaps.map((g) => g.message).join(" "))];
+}
+
+function databaseProtectionChip(c) {
+  const overdue = c.database_protection_overdue;
+  if (!Array.isArray(overdue) || overdue.length === 0) return [];
+  return [chip("Protection", fmtInt(overdue.length) + " overdue", "Warning", overdue.map((o) => o.text).join(", "))];
 }
 
 /* A short non-color severity cue so severity isn't conveyed by border color alone (M2). */
 const SEV_BADGE = { Critical: "CRIT", Warning: "WARN" };
 
-function chip(label, value, sev, detail) {
+function identityCapacityChip(c) {
+  const ic = c.identity_capacity;
+  if (!ic || !ic.columns_at_bar) return [];
+  const n = ic.columns_at_bar;
+  return [chip("Identity capacity", fmtInt(n) + (n === 1 ? " column" : " columns"), ic.worst_band === "critical" ? "Critical" : "Warning",
+    "At or past 70% used (the shipped bar, the alert's own bars may differ). The fullest is " + ic.worst_band + ".")];
+}
+
+/* wrapDetail: the Collectors chip's count line is the one detail that carries counts a person acts on (not collected, no permission,
+   #6932), and a nowrap ellipsis cut the newest clause off at every width, so it wraps and the other chips keep their one line. */
+function chip(label, value, sev, detail, wrapDetail) {
   const badge = SEV_BADGE[sev];
   return el("div", { class: "metric-chip sev-" + (sev || "Unknown") }, [
     el("div", { class: "label" }, [
@@ -833,6 +948,6 @@ function chip(label, value, sev, detail) {
       badge ? el("span", { class: "sev-badge", text: badge }) : null,
     ]),
     el("div", { class: "value", text: value }),
-    detail ? el("div", { class: "detail", text: detail }) : null,
+    detail ? el("div", { class: wrapDetail ? "detail wrap" : "detail", text: detail, title: detail }) : null,
   ]);
 }

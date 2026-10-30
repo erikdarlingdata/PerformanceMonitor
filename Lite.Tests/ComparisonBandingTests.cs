@@ -248,7 +248,7 @@ public sealed class ComparisonBandingTests
 
         Assert.Null(ComparisonBanding.BaselinedMetricFor("PAGEIOLATCH_SH"));
         Assert.Null(ComparisonBanding.BaselinedMetricFor("BLOCKING_EVENTS"));
-        Assert.Null(ComparisonBanding.BaselinedMetricFor("IO_WRITE_LATENCY_MS"));
+        Assert.Equal(MetricNames.IoWriteLatency, ComparisonBanding.BaselinedMetricFor("IO_WRITE_LATENCY_MS"));
     }
 
     [Fact]
@@ -738,6 +738,35 @@ public sealed class ComparisonBandingTests
         Assert.All(result.Rows, r => Assert.Equal(ComparisonBanding.BandSourceAbsolute, r.BandSource));
     }
 
+    /// <summary>
+    /// #6696: the write twin of the read-latency banding. The write-latency anomaly gate now judges a window
+    /// against the write bucket (<see cref="MetricNames.IoWriteLatency"/>), so <c>compare_analysis</c> must band
+    /// <c>IO_WRITE_LATENCY_MS</c> against that same bucket. Unmapped, it read <c>absolute</c> /
+    /// <c>baseline_metric: null</c> in the window the detector called the move sigmas. The bucket here is a
+    /// server whose writes sit at 11 ms with MAD 4 (robust sigma 5.93), nowhere near its read series.
+    /// </summary>
+    [Fact]
+    public void AWriteLatencyMove_BandsBySigma_AgainstTheWriteBucket_NotTheReadOne()
+    {
+        var (baseline, comparison) = Scored([Write(11)], [Write(40)]);
+        Assert.Equal(11.0, ComparisonBanding.BaselinedValueFor(baseline[0]));
+        Assert.Equal(new[] { MetricNames.IoWriteLatency }, ComparisonBanding.DispersionMetricsFor(baseline, comparison));
+
+        var worse = Compare(baseline, comparison, WriteBucket(median: 11, mad: 4));
+        Assert.Equal(ComparisonBanding.BandSourceBaseline, worse.BandSource);
+        Assert.Equal(MetricNames.IoWriteLatency, worse.BaselineMetric);
+        Assert.Equal(ComparisonBanding.StatusWorse, worse.Status);
+        Assert.Equal(5.93, worse.BaselineSigma!.Value, precision: 2);
+        Assert.Equal(29 / worse.BaselineSigma!.Value, worse.DeltaSigma!.Value, precision: 2); // 4.89σ
+        Assert.True(worse.BeyondAnomalyCutoff!.Value);
+
+        /* A wobble inside the server's own write dispersion is stable by sigma. */
+        var (sb, sc) = Scored([Write(11)], [Write(14)]);
+        var calm = Compare(sb, sc, WriteBucket(median: 11, mad: 4));
+        Assert.Equal(ComparisonBanding.BandSourceBaseline, calm.BandSource);
+        Assert.Equal(ComparisonBanding.StatusStable, calm.Status);
+    }
+
     /* ── helpers ── */
 
     private static Fact Wait(string type, double fraction) => new()
@@ -755,6 +784,8 @@ public sealed class ComparisonBandingTests
     };
 
     private static Fact Io(double avgReadMs) => new() { Source = "io", Key = "IO_READ_LATENCY_MS", Value = avgReadMs };
+
+    private static Fact Write(double avgWriteMs) => new() { Source = "io", Key = "IO_WRITE_LATENCY_MS", Value = avgWriteMs };
 
     private static Fact Sessions(double total) => new() { Source = "sessions", Key = "SESSION_STATS", Value = total };
 
@@ -786,6 +817,13 @@ public sealed class ComparisonBandingTests
         HourOfDay = 9, DayOfWeek = 2, Tier = BaselineTier.Full,
         Mean = median, StdDev = Math.Max(mad, 1), Median = median, Mad = mad, SampleCount = 20, DistinctDays = 5,
         AbsStdDevFloor = BaselineMath.AbsStdDevFloorFor(MetricNames.Cpu)
+    };
+
+    private static BaselineBucket WriteBucket(double median, double mad) => new()
+    {
+        HourOfDay = 9, DayOfWeek = 2, Tier = BaselineTier.Full,
+        Mean = median, StdDev = Math.Max(mad, 1), Median = median, Mad = mad, SampleCount = 20, DistinctDays = 5,
+        AbsStdDevFloor = BaselineMath.AbsStdDevFloorFor(MetricNames.IoWriteLatency)
     };
 
     private static BaselineBucket SessionsBucket(double median, double mad) => new()

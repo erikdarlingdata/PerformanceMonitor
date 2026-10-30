@@ -257,7 +257,7 @@ public sealed class DarlingMcpMemoryGrantTools
     /// <see cref="McpHelpers.JsonOptions"/> writes rather than drops — the key is present on both so a
     /// caller can read one shape).
     /// </summary>
-    internal static object WindowShape(DarlingMemoryGrantReader.MemoryGrantWindowRow w) => new
+    internal static object WindowShape(MemoryGrantWindowRow w) => new
     {
         resource_semaphore_id = w.ResourceSemaphoreId,
         pool_id = w.PoolId,

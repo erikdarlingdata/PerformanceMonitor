@@ -73,7 +73,11 @@ internal static class DarlingAgentDispatchChecks
             return findings;
         }
 
-        if (mcp.AllowWrites)
+        /* #6542: named tokens and no legacy token. mcp.allowWrites and mcp.allowInvestigations then govern nothing, each token's role
+           decides, so the legacy-token findings below do not apply. */
+        var namedOnly = mcp.HasNamedTokens && string.IsNullOrWhiteSpace(bearerToken) && tokenUnreadable is null;
+
+        if (mcp.AllowWrites && !namedOnly)
         {
             findings.Add(new(AgentDispatchSeverity.Warning, WritesWinMessage));
         }
@@ -83,7 +87,7 @@ internal static class DarlingAgentDispatchChecks
             findings.Add(new(AgentDispatchSeverity.Warning, McpOffMessage));
         }
 
-        if (!mcp.AllowWrites)
+        if (!mcp.AllowWrites && !namedOnly)
         {
             if (tokenUnreadable is not null)
             {
@@ -108,6 +112,34 @@ internal static class DarlingAgentDispatchChecks
             {
                 findings.Add(new(AgentDispatchSeverity.Note, NoAgentRouteMessage));
             }
+        }
+
+        return findings;
+    }
+
+    /// <summary>The sentence for named tokens when no agent token can be served while an enabled route has an agent level (#6542).</summary>
+    internal const string NoAgentTokenMessage =
+        "mcp.tokens has no usable token with the agent role, but an enabled notification route has an agent level above Off, so a " +
+        "request opens and no agent can claim it. Add a token with role agent to mcp.tokens.";
+
+    /// <summary>
+    /// The <c>mcp.tokens</c> findings for <c>--validate-config</c> (#6542), one sentence each, never a token value: the problems
+    /// <see cref="DarlingMcpTokenSet.Check"/> finds, then <see cref="NoAgentTokenMessage"/> when no agent can connect. Empty when
+    /// <c>mcp.tokens</c> is not set. <paramref name="agentRouteCount"/> is null when the store could not be read.
+    /// </summary>
+    internal static IReadOnlyList<string> NamedTokenFindings(McpConfig mcp, string legacyToken, int? agentRouteCount)
+    {
+        if (!mcp.HasNamedTokens)
+        {
+            return Array.Empty<string>();
+        }
+
+        var findings = DarlingMcpTokenSet.Check(mcp, legacyToken, DarlingMcpTokenSet.ResolveEntry, out var usable);
+        var legacyAgent = legacyToken.Length > 0 && mcp.AllowInvestigations && !mcp.AllowWrites;
+        var agentToken = legacyAgent || usable.Exists(t => string.Equals(t.Role, McpTokenEntry.AgentRole, StringComparison.Ordinal));
+        if (!agentToken && agentRouteCount > 0)
+        {
+            findings.Add(NoAgentTokenMessage);
         }
 
         return findings;

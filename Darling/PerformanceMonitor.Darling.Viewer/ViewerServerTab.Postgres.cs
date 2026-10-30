@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -109,6 +109,19 @@ public partial class ViewerServerTab
     // ─────────────────────────────────────────────────────────────────────────────────────────────
 
     /// <summary>
+    /// How often a collector runs on this server, for the panel notes that say so: its schedule override, else the shipped
+    /// default, resolved from the rows this tab already holds (<see cref="_scheduleOverrides"/>, read at most every five
+    /// minutes) so a note costs no read of its own. <paramref name="fallbackMinutes"/> only answers for a collector name the
+    /// shipped schedule does not know, or one with no recurring cadence; a failed read of the overrides gives the shipped cadence.
+    /// </summary>
+    private async Task<int> EffectiveCollectorMinutesAsync(string collectorName, int fallbackMinutes)
+    {
+        var overrides = await _scheduleOverrides.GetAsync();
+        var interval = ViewerTimeRangeWindow.SampleIntervalFor(collectorName, _server.ServerId, overrides);
+        return interval is { } span ? (int)span.TotalMinutes : fallbackMinutes;
+    }
+
+    /// <summary>
     /// What a panel says when it has nothing to show. Three different answers, because they need three
     /// different responses from the person reading them: a collector this engine can never run (the shared
     /// capability sentence — nothing to do), a zero-row window for a collector where zero IS the answer
@@ -119,7 +132,7 @@ public partial class ViewerServerTab
     private string PanelNote(string collectorName, int rowCount, string healthyEmptyText)
     {
         var gap = CollectorEngineCapability.NotCollectedMessage(
-            _server.DisplayName, _server.EngineEdition, _server.EngineKind, collectorName);
+            _server.DisplayName, _server.EngineEdition, _server.EngineKind, collectorName, awsRdsKind: AwsRdsKind.None);
 
         return EmptyNote(gap, _pgOffline, rowCount, healthyEmptyText);
     }
@@ -172,7 +185,7 @@ public partial class ViewerServerTab
     /// spend a round trip proving a permanent gap is still permanent.</summary>
     private bool PgCollectorIsGatedOff(string collectorName) =>
         CollectorEngineCapability.NotCollectedMessage(
-            _server.DisplayName, _server.EngineEdition, _server.EngineKind, collectorName) is not null;
+            _server.DisplayName, _server.EngineEdition, _server.EngineKind, collectorName, awsRdsKind: AwsRdsKind.None) is not null;
 
     // ─────────────────────────────────────────────────────────────────────────────────────────────
     // Tab loaders
@@ -201,7 +214,9 @@ public partial class ViewerServerTab
         PgCollectionCaveatsExpander.Visibility = caveats.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
 
         await LoadPgExtensionsAsync(startUtc, endUtc);
+        await LoadPgConfigChangesAsync(startUtc, endUtc);
         await LoadPgServerConfigAsync();
+        await LoadPgLoggingAuditAsync();
         await LoadPgCpuUtilizationAsync(startUtc, endUtc);
     }
 
@@ -232,8 +247,9 @@ public partial class ViewerServerTab
 
         PgCpuGrid.ItemsSource = rows;
         UpdateTruncationBanner(PgCpuDataStartBanner, await DataStartOrNullAsync(dataStartTask, "PostgreSQL CPU"), startUtc);
+        var cpuMinutes = await EffectiveCollectorMinutesAsync("pg_cpu_utilization", 5);
         PgCpuNote.Text = PanelNote("pg_cpu_utilization", rows.Count,
-            "This collector samples AWS Performance Insights on a 5-minute cadence, so a server added "
+            $"This collector samples AWS Performance Insights {CollectorCadenceText.Every(cpuMinutes)}, so a server added "
             + "recently may have nothing here yet.");
     }
 
@@ -251,6 +267,8 @@ public partial class ViewerServerTab
         if (PgCollectorIsGatedOff("pg_extension_availability"))
         {
             PgExtensionsGrid.ItemsSource = null;
+            PgExtensionCensusGrid.ItemsSource = null;
+            PgExtensionCensusNote.Text = string.Empty;
             PgExtensionsNote.Text = PanelNote("pg_extension_availability", 0, string.Empty);
             return;
         }
@@ -258,12 +276,15 @@ public partial class ViewerServerTab
         var rows = await _dataService.GetPgExtensionAvailabilityAsync(_server.ServerId, startUtc, endUtc);
 
         PgExtensionsGrid.ItemsSource = rows.Select(PgDisplay.Extension).ToList();
+        await LoadPgExtensionInstallCensusAsync(startUtc, endUtc);
 
         var actionable = rows.Count(r => r.IsMonitoringRelevant && string.Equals(r.State, "available", StringComparison.Ordinal));
         var outdated = rows.Count(r => r.IsMonitoringRelevant && string.Equals(r.State, "outdated", StringComparison.Ordinal));
 
+        var extensionMinutes = await EffectiveCollectorMinutesAsync("pg_extension_availability", 1440);
         PgExtensionsNote.Text = PanelNote("pg_extension_availability", rows.Count,
-            "The extension collector runs daily, so a server added in the last day has nothing here yet.")
+            $"The extension collector runs {CollectorCadenceText.Every(extensionMinutes)}, so a server added in the last "
+            + $"{CollectorCadenceText.Span(extensionMinutes)} has nothing here yet.")
             + (rows.Count == 0
                 ? string.Empty
                 : $"  {actionable} extension(s) this product can use are available on this server and NOT "
@@ -275,6 +296,168 @@ public partial class ViewerServerTab
                       : string.Empty)
                   + "  \u201cInstalled\u201d is scoped to the database this server entry connects to — "
                   + "pg_extension is per-database while the server's offer is cluster-wide.");
+    }
+
+    /// <summary>Fills the Extension Install Census under the Extensions grid: one row per extension created anywhere on the server,
+    /// from the same shared read as the web's <c>install_census</c>. The scalars-only row a server with no stored rows produces
+    /// carries the denominators and is left out of the grid, as in the web.</summary>
+    private async Task LoadPgExtensionInstallCensusAsync(DateTime startUtc, DateTime endUtc)
+    {
+        var census = await _dataService.GetPgExtensionInstallCensusAsync(_server.ServerId, startUtc, endUtc);
+        var rows = census.Where(r => r.ExtensionName is not null).Select(PgExtensionCensusGridRow.From).ToList();
+        PgExtensionCensusGrid.ItemsSource = rows;
+        PgExtensionCensusNote.Text = rows.Count == 0
+            ? "Extension Install Census: nothing is created on this server beyond what PostgreSQL installs itself, or the inventory has not been collected yet. "
+              + "This census counts only extensions somebody created; the available-but-absent ones are the actionable rows in the grid above."
+            : $"Extension Install Census: {rows.Count} extension(s) created on this server, one row each, counted across all {census[0].DatabasesTotal:N0} database(s). "
+              + "No row limit touches it.";
+    }
+
+    /// <summary>
+    /// What changed in the window (#6387), above the settings themselves: the parameters whose value differed between
+    /// two consecutive snapshots, old beside new. The same read the web panel and <c>get_pg_server_config_changes</c>
+    /// call, windowed by the toolbar picker. One row past the cap is fetched so a window holding exactly the cap is not
+    /// reported as holding more.
+    /// </summary>
+    private async Task LoadPgConfigChangesAsync(DateTime startUtc, DateTime endUtc)
+    {
+        if (PgCollectorIsGatedOff("pg_server_config"))
+        {
+            PgConfigChangesGrid.ItemsSource = null;
+            PgConfigChangesNote.Text = PanelNote("pg_server_config", 0, string.Empty);
+            PgConfigChangesDataStartBanner.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        /* #4966: where this grid's data starts. The diff compares consecutive snapshots, so a window that begins before the
+           store's coverage reads "no change" when it is "not collected yet"; the probe says which. */
+        using var readFanOut = ViewerReadFanOut.Of(2);
+        var dataStartTask = StartPgDataStartProbe("pg_server_config", startUtc, endUtc);
+        var fetchedTask = _dataService.GetPgServerConfigChangesAsync(
+            _server.ServerId, startUtc, endUtc, ViewerDataService.PgConfigChangesRowCap + 1);
+        await AwaitReadWatchingProbeAsync(fetchedTask, dataStartTask, "PostgreSQL Configuration Changes");
+        var fetched = fetchedTask.Result;
+        readFanOut.Release();
+
+        var (rows, truncated, bannerRowCap) = TrimConfigChanges(fetched);
+
+        PgConfigChangesGrid.ItemsSource = rows.Select(PgDisplay.ConfigChange).ToList();
+        await ShowEventDataStartAsync(PgConfigChangesDataStartBanner, dataStartTask, "PostgreSQL Configuration Changes", startUtc,
+            rows.Select(r => (DateTime?)r.ChangedAtUtc), bannerRowCap);
+
+        var configMinutes = await EffectiveCollectorMinutesAsync("pg_server_config", 60);
+        PgConfigChangesNote.Text = PanelNote("pg_server_config", rows.Count,
+            "No configuration parameter changed value in this window. This compares consecutive snapshots, so an "
+            + "unchanged server is legitimately empty here: it is a finding, not missing data.")
+            + (rows.Count == 0
+                ? string.Empty
+                : $"Configuration changes, newest first. The collector runs {CollectorCadenceText.Every(configMinutes)}, so a change happened in the "
+                  + $"{CollectorCadenceText.Span(configMinutes)} before it was seen."
+                  + (truncated
+                      ? $"  Showing the newest {ViewerDataService.PgConfigChangesRowCap}; narrow the window to see the rest."
+                      : string.Empty));
+    }
+
+    /// <summary>
+    /// The configuration-changes grid's two truncation decisions, made from ONE answer (#6387): the read fetched one row past
+    /// <see cref="ViewerDataService.PgConfigChangesRowCap"/>, so more than the cap means rows were left out, and exactly the cap
+    /// means the window is complete. <c>BannerRowCap</c> is what the "data starts at the oldest row" banner is handed: the cap
+    /// only when the read really had more. <see cref="ViewerEventDataStart.ReadHitCap"/> (<c>count &gt;= cap</c>) over the
+    /// already-trimmed list would otherwise name the oldest row of a complete grid whenever it held exactly the cap.
+    /// </summary>
+    internal static (List<DarlingPgServerConfigReader.PgConfigChangeRow> Rows, bool Truncated, int? BannerRowCap) TrimConfigChanges(
+        List<DarlingPgServerConfigReader.PgConfigChangeRow> fetched)
+    {
+        var truncated = fetched.Count > ViewerDataService.PgConfigChangesRowCap;
+        var rows = truncated ? fetched.Take(ViewerDataService.PgConfigChangesRowCap).ToList() : fetched;
+        return (rows, truncated, truncated ? (int?)ViewerDataService.PgConfigChangesRowCap : null);
+    }
+
+    /// <summary>
+    /// The logging-settings audit (#6387), under the settings grid on the Overview tab because it is judged from the same
+    /// stored configuration snapshot (the pg_server_config collector): whether this target is telling us everything it
+    /// could. Like the settings grid, it takes no window. The same snapshot read and judgment as <c>get_pg_logging_audit</c>
+    /// and the web panel.
+    /// </summary>
+    private async Task LoadPgLoggingAuditAsync()
+    {
+        if (PgCollectorIsGatedOff("pg_server_config"))
+        {
+            PgLoggingAuditGrid.ItemsSource = null;
+            PgLoggingAuditNote.Text = PanelNote("pg_server_config", 0, string.Empty);
+            return;
+        }
+
+        var audit = await _dataService.GetPgLoggingAuditAsync(_server.ServerId);
+        if (audit is null)
+        {
+            PgLoggingAuditGrid.ItemsSource = null;
+            var auditMinutes = await EffectiveCollectorMinutesAsync("pg_server_config", 60);
+            PgLoggingAuditNote.Text =
+                $"No configuration snapshot to audit. pg_server_config runs {CollectorCadenceText.Every(auditMinutes)}, so a server registered in the last "
+                + $"{CollectorCadenceText.Span(auditMinutes)} has not reached its first collection. This is the absence of evidence, not a verdict about "
+                + "the server's logging.";
+            return;
+        }
+
+        PgLoggingAuditGrid.ItemsSource = audit.Facets.Select(PgDisplay.LoggingAudit).ToList();
+
+        var off = audit.Facets.Where(f => f.Verdict == DarlingPgLoggingAudit.Off).Select(f => f.Setting).ToList();
+        var unknown = audit.Facets.Where(f => f.Verdict == DarlingPgLoggingAudit.Unknown).Select(f => f.Setting).ToList();
+        PgLoggingAuditNote.Text =
+            $"From the newest configuration snapshot ({PgDisplay.SnapshotTime(audit.CapturedAt)}), not the live server. "
+            + $"{audit.Facets.Count(f => f.Verdict == DarlingPgLoggingAudit.Instrumented)} setting(s) write every line "
+            + $"they can, {audit.Facets.Count(f => f.Verdict == DarlingPgLoggingAudit.Partial)} are partial (a threshold "
+            + "is filtering, which is the recommended posture for log_min_duration_statement), "
+            + $"{off.Count} are off and {unknown.Count} are not in the snapshot."
+            + (off.Count > 0 ? "  Off: " + string.Join(", ", off) + "." : string.Empty)
+            + (unknown.Count > 0 ? "  Not in the snapshot: " + string.Join(", ", unknown) + "." : string.Empty);
+    }
+
+    /// <summary>
+    /// Double-clicking a deadlock opens its whole wait graph (#6387): the participants, the lock each waited for, who
+    /// blocked whom and each one's statement, as the server wrote them with SQL literals replaced. The same read the web
+    /// "Deadlock Graphs" panel and <c>get_pg_deadlock_detail</c> call, looked up by the identity the clicked row carries.
+    /// </summary>
+    private async void PgDeadlocksGrid_MouseDoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if (PgDeadlocksGrid.SelectedItem is not DarlingPgDeadlockReader.PgDeadlockRow row)
+        {
+            return;
+        }
+
+        try
+        {
+            var detail = await _dataService.GetPgDeadlockDetailAsync(_server.ServerId, row.DeadlockHash);
+            var text = detail.Count == 0
+                ? "No wait graph is stored for this deadlock any more: a report can age out of retention while its row is still on screen."
+                : $"Deadlock at {PgDisplay.SnapshotTime(detail[0].OccurredAtUtc)}, victim PID {detail[0].VictimPid}, "
+                  + $"{detail[0].ParticipantCount} session(s)\n\n{detail[0].GraphText}";
+
+            var window = new Window
+            {
+                Title = "PostgreSQL deadlock graph",
+                Owner = Window.GetWindow(this),
+                Width = 900,
+                Height = 600,
+                WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                Content = new TextBox
+                {
+                    Text = text,
+                    IsReadOnly = true,
+                    TextWrapping = TextWrapping.Wrap,
+                    FontFamily = new System.Windows.Media.FontFamily("Consolas"),
+                    VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                    HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
+                    Margin = new Thickness(8),
+                },
+            };
+            window.Show();
+        }
+        catch (Exception ex)
+        {
+            PgDeadlocksNote.Text = "The deadlock graph could not be read: " + ex.Message;
+        }
     }
 
     /// <summary>
@@ -453,6 +636,7 @@ public partial class ViewerServerTab
         await LoadPgPlanCaptureAsync(startUtc, endUtc);
         await LoadPgDeadlocksAsync(startUtc, endUtc);
         await LoadPgLogEventsAsync(startUtc, endUtc);
+        await LoadPgActivityTrendsAsync(startUtc, endUtc);
     }
 
     /// <summary>
@@ -487,7 +671,7 @@ public partial class ViewerServerTab
             + "and lock-wait families, and it is also what a target with the relevant settings off looks "
             + "like: connection lines need log_connections / log_disconnections, lock waits need "
             + "log_lock_waits, spills need log_temp_files, autovacuum runs need log_autovacuum_min_duration. "
-            + "It is also what an unreadable log, a non-UTC log_timezone or a non-English lc_messages looks "
+            + "It is also what an unreadable log, a log_timezone that is neither UTC nor a named zone, or a non-English lc_messages looks "
             + "like — the Vacuum tab's plan-capture readiness panel reads the same file and reports those.")
             + (page.Rows.Count == 0
                 ? string.Empty
@@ -578,11 +762,11 @@ public partial class ViewerServerTab
         var instrument = await _dataService.GetPgWaitInstrumentAsync(_server.ServerId);
         var serviceTier = instrument is not null
             && string.Equals(instrument.Instrument, PgWaitInstrument.ServiceSampled, StringComparison.Ordinal);
+        var waitMinutes = await EffectiveCollectorMinutesAsync("pg_wait_sampling", 5);
 
         PgWaitSamplingGrid.ItemsSource = PgDisplay.WaitSamplingRows(rows);
         UpdateTruncationBanner(PgWaitSamplingDataStartBanner, await DataStartOrNullAsync(dataStartTask, "PostgreSQL Wait Sampling"), startUtc);
 
-        var attributed = rows.Count(r => r.QueryId != 0);
         var reset = rows.Any(r => r.CounterReset);
 
         PgWaitSamplingNote.Text = rows.Count == 0
@@ -590,30 +774,14 @@ public partial class ViewerServerTab
                 serviceTier
                     ? "No wait samples for this server in this window. This server is on the service-sampled "
                       + "tier (pg_wait_sampling is not installed), so the service polled pg_stat_activity once a "
-                      + "second for a 30-second window each cycle and found nothing worth counting — the healthy "
-                      + "answer at that grain, which under-counts waits shorter than a second."
+                      + "second for a 30-second window each cycle and found nothing worth counting, the healthy "
+                      + "answer at that grain. " + PgWaitInstrument.ServiceSampledCaveat
                     : "No wait samples for this server in this window. The usual cause is that "
                       + "pg_wait_sampling is not in shared_preload_libraries — check the Extensions panel, "
                       + "which says whether it is installed, available or absent. If it IS loaded, an empty "
                       + "grid means the server waited on nothing worth sampling, which is the healthy answer.")
-            : $"{rows.Count:N0} wait event(s), {attributed:N0} attributed to a query. "
-              + (serviceTier
-                  ? "Instrument: SERVICE SAMPLER — pg_wait_sampling is not installed, so this is the "
-                    + "service polling pg_stat_activity once a second for a 30-second window every five "
-                    + "minutes. A floor, not parity: waits shorter than a second are under-counted and "
-                    + "nothing between windows is seen. Installing the extension moves this server to "
-                    + "the 10 ms tier. "
-                  : instrument is not null
-                      ? "Instrument: pg_wait_sampling extension (10 ms in-engine profiler). "
-                      : string.Empty)
-              + "Est. Wait is samples multiplied by the profile period — an estimate from a sampling "
-              + "profiler, not a measured duration, so treat it as a ranking rather than a stopwatch. "
-              + "A Query ID of 0 is a background process rather than an unknown query, and CPU/Running "
-              + "is the backend on processor rather than waiting."
-              + (reset
-                  ? " One or more counters RESET inside this window (a restart, or "
-                    + "pg_wait_sampling_reset_profile), so those rows cover only the time since the reset."
-                  : string.Empty);
+            : PgDisplay.WaitSamplingSummary(rows, serviceTier, instrument is not null,
+                CollectorCadenceText.Every(waitMinutes), reset);
     }
 
     /// <summary>
@@ -790,7 +958,7 @@ public partial class ViewerServerTab
                 ? string.Empty
                 : "  Sightings counts how often the collector saw the SAME report while it stayed inside "
                   + "the log tail it re-reads; a deadlock that genuinely recurred is its own row, because "
-                  + "the process IDs differ.");
+                  + "the process IDs differ.  Double-click a row to see its whole wait graph.");
     }
 
     /// <summary>
@@ -941,6 +1109,7 @@ public partial class ViewerServerTab
             "No wait time was recorded for this server in this window.");
 
         await LoadPgWaitSamplingAsync(startUtc, endUtc);
+        await LoadPgWaitTrendAsync(startUtc, endUtc);
     }
 
     /// <summary>I/O — <c>pg_stat_io</c>, differenced over the window.</summary>
@@ -964,6 +1133,7 @@ public partial class ViewerServerTab
 
         await LoadPgWriteStatsAsync(startUtc, endUtc);
         await LoadPgBufferUsageAsync(startUtc, endUtc);
+        await LoadPgIoTrendAsync(startUtc, endUtc);
     }
 
     /// <summary>
@@ -1385,7 +1555,7 @@ public partial class ViewerServerTab
     }
 
     /// <summary>
-    /// #6133: the Vacuum tab scrolls as a page and each of its grids scrolls inside. A DataGrid marks the
+    /// #6133: the Vacuum tab (and, since #6387, the Overview tab, which reuses this handler) scrolls as a page and each of its grids scrolls inside. A DataGrid marks the
     /// mouse wheel handled even when it has nothing left to scroll, so over a grid the page would not move.
     /// Pass the wheel to the page unless the grid under the pointer can still scroll that way itself.
     /// </summary>

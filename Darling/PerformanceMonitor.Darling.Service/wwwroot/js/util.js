@@ -189,10 +189,12 @@ export function emptyStrip(message) {
 /** #6445: the note a page that lists only shows. The advice depends on the store: a managed store refuses postgres.webConnectionString,
     so it says only that this dashboard lists and the Viewer app makes the change; a store you brought yourself may give the web an
     admin store login. `lists` finishes "so ..." and `toChange` starts the sentence that names the Viewer. The service's own 403
-    sentences come from DarlingWebStoreWrites and say the same. */
-export function listOnlyNote(managedStore, lists, toChange) {
+    sentences come from DarlingWebStoreWrites and say the same. #6600: `adminWritesOff` (the session's admin_writes_off) is true on a managed
+    store whose web.allowAdminWrites is off, and then the note also names that switch, in the 403's words. */
+export function listOnlyNote(managedStore, lists, toChange, adminWritesOff) {
   return managedStore === true
-    ? "This dashboard lists only on this store, so " + lists + ". " + toChange + ", use the Viewer app."
+    ? "This dashboard lists only on this store, so " + lists + ". " + toChange + ", use the Viewer app." +
+      (adminWritesOff === true ? " To let a signed-in admin make it here, set web.allowAdminWrites to true in darling.json and restart the service." : "")
     : "This dashboard's store login cannot make changes, so " + lists + ". " + toChange +
       ", use the Viewer app, or give the web an admin store login (set postgres.webConnectionString to an admin login).";
 }
@@ -282,7 +284,11 @@ export function localizeIsoText(text) {
  */
 export function localizeAlertDetail(text, sample) {
   if (typeof text !== "string") return text;
-  let out = text.replace(/^(\s*(?:Incident Since|Started|Failed At|Snapshot|From|To|Window): )(.*)$/gm,
+  /* #6649: the collection-history audit's sentence says "N source(s)"; the count is known, so the word agrees with it. The audit's
+     body (CollectionHistoryAudit.Render) is ONE line of ". "-joined clauses, so the match is the sentence, up to its ". " or the
+     end of the text, never the line: the clauses after it (the source names, the ranges, the "Not read" list) print as written. */
+  let out = text.replace(/Retained history for .*?(?:\.(?=\s)|$)/gs, (sentence) => plainText(sentence));
+  out = out.replace(/^(\s*(?:Incident Since|Started|Failed At|Snapshot|From|To|Window): )(.*)$/gm,
     (m, lead, value) => lead + localizeIsoText(value));
   const at = sample && typeof sample.instant_utc === "string" ? parseUtc(sample.instant_utc) : null;
   if (at) {
@@ -386,6 +392,20 @@ export function keptWindowStrip(res) {
     return noticeStrip(readLimitText(res.keptHours) + ", so it shows the part of the custom range the store still holds.");
   }
   return noticeStrip(readLimitText(res.keptHours) + ", so it shows the last " + daysText(res.keptHours) + ".");
+}
+
+/**
+ * #6654: the strip over a grid that names `databases_left_out_note` as its `noteKey` (or in `moreNoteKeys`), drawn on an EMPTY answer too. The
+ * populated path already draws a named note; the empty path draws only the read's message, and "no regressions" over a read that left
+ * out a dropped database is not the same statement as "nothing regressed". Null for any other panel, so a note that is not about
+ * omitted databases is not pulled onto an empty answer by this.
+ */
+export function leftOutStrip(data, desc) {
+  if (!desc || !data) return null;
+  const key = "databases_left_out_note";
+  if (desc.noteKey !== key && !(desc.moreNoteKeys || []).includes(key)) return null;
+  const note = data[key];
+  return typeof note === "string" && note.trim() ? noticeStrip(note) : null;
 }
 
 /**
@@ -567,6 +587,18 @@ export function rowsUnder(data, key) {
   if (Array.isArray(data)) return data;
   if (data && Array.isArray(data[key])) return data[key];
   return [];
+}
+
+/**
+ * #6831: an empty answer's sentence for the page. The shared "cut window" sentence says the store's data starts at `effective_start (see
+ * hints)`, which points an MCP caller at a field the page never shows, so the time itself goes in its place, in the page's own clock, from the
+ * `effective_start` the same answer carries under `hints`. With no readable instant the clause says the data starts partway into the window.
+ */
+export function emptyMessageText(body) {
+  const said = String(body.message);
+  const at = body.hints && typeof body.hints.effective_start === "string" ? body.hints.effective_start : null;
+  if (!(at && parseUtc(at))) return plainText(said);
+  return plainText(said.replace(/\beffective_start \(see hints\)/g, localTime(at)));
 }
 
 /** Full localized date-time, or an em dash for null/unparseable. */
@@ -855,14 +887,35 @@ export function buildQuery(params) {
   return parts.length ? "?" + parts.join("&") : "";
 }
 
-/* In-flight read counter (#4191): every apiGet/readTool call counts itself while its fetch is outstanding, so
+/* In-flight read counter (#4191, per page since #6793): every apiGet/readTool call counts itself while its fetch is outstanding, so
    the poll loop (app.js refresh()) can tell whether the page it is about to re-render has already settled
    before firing a whole new set of the same reads on top of it. apiSendRead (a read that must travel as a POST,
    the composed-panel run) IS counted, so a slow panel holds the poll off and the refresh back-off measures it.
    apiGetFleet IS counted too (each caller counts its own wait on the shared request), so a render whose reads are
    fleet reads is timed for as long as it ran. apiSend is deliberately NOT counted: a mutation is not a "page read"
    a poll tick should wait out. */
-let inFlightReads = 0;
+let pageReads = { n: 0 };
+
+/* The page scope (#6793). Reads are counted per page, not globally: a read counts itself on the scope that was current
+   when it started and gives the count back on that same scope. beginPageScope() runs when the user goes to another page.
+   It aborts the reads of the page being left through the hooks the page modules registered with onPageLeave, and it opens
+   a fresh count, so a read of the page left (one that has no signal, or one that has not yet ended after its abort) never
+   holds the next page's poll, Refresh button, tab-return refresh or render-time back-off. A poll or Refresh re-render of
+   the same page does not call it: that page aborts its own older load, as before. One exception: readWithinKeptHistory's retry
+   starts after an await, so it counts on the scope current at the retry. A read with no signal that is refused for its window
+   while the user leaves holds the new page for that one round trip. */
+const pageLeaveHooks = [];
+
+/** Register what a page module aborts when the user goes to another page (its module-level AbortControllers). */
+export function onPageLeave(fn) {
+  pageLeaveHooks.push(fn);
+}
+
+/** Leave the current page: abort its reads and start a fresh read count for the next one. See the scope comment above. */
+export function beginPageScope() {
+  for (const fn of pageLeaveHooks) fn();
+  pageReads = { n: 0 };
+}
 
 /* How many red error strips the page has drawn since it loaded (errorStrip counts each one). The page scheduler compares it before
    and after a render, so the footer's "Updated" time moves only when the render ended without a red strip. It is counted where
@@ -879,7 +932,78 @@ export function readErrorCount() {
 
 /** True while at least one apiGet/readTool call is outstanding — see the counter comment above. */
 export function hasInFlightReads() {
-  return inFlightReads > 0;
+  return pageReads.n > 0;
+}
+
+/* ─────────────────────────── front door (#6840) ───────────────────────────
+   A front door fronts several Darling stores. The page then works inside ONE store at a time: every /api/* request
+   carries X-Darling-Store naming it, and every link to a store-local id carries #/s/{store}/ so a bookmark or a pasted link
+   opens in the same store. With no front door (frontDoor() false) none of this runs: no header, no prefix, and every request
+   and link is exactly what it was before. */
+const STORE_HEADER = "X-Darling-Store";
+const STORE_HASH_PREFIX = "#/s/";
+let frontDoorOn = false;
+let pickedStore = null;
+
+/** True when /api/session said front_door: true (app.js sets it once, at start). */
+export function frontDoor() {
+  return frontDoorOn;
+}
+
+export function setFrontDoor(on) {
+  frontDoorOn = on === true;
+}
+
+/** The store the page is working in, or null when none is picked (or there is no front door). */
+export function currentStore() {
+  return frontDoorOn ? pickedStore : null;
+}
+
+export function setStore(name) {
+  pickedStore = typeof name === "string" && name !== "" ? name : null;
+}
+
+/** `hash` ("#/server/x") with #/s/{store}/ in front of its route. With no store, or no front door and no explicit store, it
+    comes back unchanged. `store` defaults to the current one. */
+export function storeHash(hash, store) {
+  const s = store != null && store !== "" ? store : currentStore();
+  const h = String(hash == null ? "" : hash);
+  if (!s || !h.startsWith("#/")) return h;
+  return STORE_HASH_PREFIX + encodeURIComponent(s) + "/" + h.slice(2);
+}
+
+/** Splits a location hash into the store it names and the route after it: "#/s/use1/server/x" gives { store: "use1",
+    hash: "#/server/x" }. A hash with no #/s/ prefix gives store null and the hash as it came. */
+export function splitStoreHash(hash) {
+  const h = String(hash == null ? "" : hash);
+  if (!h.startsWith(STORE_HASH_PREFIX)) return { store: null, hash: h };
+  const rest = h.slice(STORE_HASH_PREFIX.length);
+  const slash = rest.indexOf("/");
+  const name = slash < 0 ? rest : rest.slice(0, slash);
+  let store = null;
+  try {
+    store = decodeURIComponent(name);
+  } catch {
+    store = null;
+  }
+  if (store === null || store === "") return { store: null, hash: h };
+  const route = slash < 0 ? "" : rest.slice(slash + 1);
+  return { store, hash: route === "" ? "#/fleet" : "#/" + route };
+}
+
+/** The route part of location.hash: the same text with any #/s/{store}/ prefix taken off, for code that reads the hash. */
+export function routeHash() {
+  const raw = typeof location !== "undefined" && location && typeof location.hash === "string" ? location.hash : "";
+  return splitStoreHash(raw).hash;
+}
+
+/** Headers for a request to /api/*: `headers` plus X-Darling-Store when the front door is on and a store is picked (or
+    `store` is given). Without a front door it returns `headers` itself, so a request is byte-for-byte what it was. */
+export function storeHeaders(headers, store) {
+  if (!frontDoorOn) return headers;
+  const s = store != null && store !== "" ? store : pickedStore;
+  if (!s) return headers;
+  return { ...headers, [STORE_HEADER]: s };
 }
 
 /**
@@ -894,18 +1018,19 @@ export function hasInFlightReads() {
  * sidebar, the view list) simply omits it, exactly as before.
  */
 export async function apiGet(path, signal) {
-  inFlightReads++;
+  const scope = pageReads;
+  scope.n++;
   try {
     let resp;
     try {
-      resp = await fetch(path, { headers: { Accept: "application/json" }, signal });
+      resp = await fetch(path, { headers: storeHeaders({ Accept: "application/json" }), signal });
     } catch (e) {
       if (e && e.name === "AbortError") return { kind: "aborted" };
       return { kind: "error", message: "Network error: " + (e && e.message ? e.message : String(e)) };
     }
     return await classifyResponse(resp);
   } finally {
-    inFlightReads--;
+    scope.n--;
   }
 }
 
@@ -926,18 +1051,21 @@ const joinedReads = new Map();
  */
 export async function apiGetJoined(path, signal) {
   if (signal && signal.aborted) return { kind: "aborted" };
-  inFlightReads++;
+  const scope = pageReads;
+  scope.n++;
   let entry = null;
   let onAbort = null;
+  /* The same path in two stores is two reads (#6840): the key carries the store the request will name. */
+  const key = frontDoorOn && pickedStore ? pickedStore + "\n" + path : path;
   try {
-    entry = joinedReads.get(path);
+    entry = joinedReads.get(key);
     if (!entry) {
       const controller = new AbortController();
       const joined = { controller, waiters: 0, body: null };
       joined.body = fetchBody(path, controller.signal).finally(() => {
-        if (joinedReads.get(path) === joined) joinedReads.delete(path);
+        if (joinedReads.get(key) === joined) joinedReads.delete(key);
       });
-      joinedReads.set(path, joined);
+      joinedReads.set(key, joined);
       entry = joined;
     }
 
@@ -950,23 +1078,24 @@ export async function apiGetJoined(path, signal) {
     const shared = await Promise.race([entry.body, cancelled]);
     if (!shared || shared.aborted) return { kind: "aborted" };
     if (shared.transportError) return { kind: "error", message: shared.transportError };
-    return await classifyResponse({ ok: shared.ok, status: shared.status, text: async () => shared.raw });
+    return await classifyResponse({ ok: shared.ok, status: shared.status, text: async () => shared.raw, retryAfter: shared.retryAfter });
   } finally {
     if (signal && onAbort) signal.removeEventListener("abort", onAbort);
     if (entry) {
       entry.waiters--;
-      if (entry.waiters === 0 && joinedReads.get(path) === entry) {
+      if (entry.waiters === 0 && joinedReads.get(key) === entry) {
         /* Nobody is waiting: stop the fetch, and let the next caller start a fresh one. */
-        joinedReads.delete(path);
+        joinedReads.delete(key);
         entry.controller.abort();
       }
     }
-    inFlightReads--;
+    scope.n--;
   }
 }
 
-/* The /api/fleet request every caller in flight at the same moment shares — see apiGetFleet. */
-let fleetRequest = null;
+/* The /api/fleet requests in flight, one per store (one key without a front door), each shared by every caller that asks
+   while it is in flight — see apiGetFleet. */
+const fleetRequests = new Map();
 
 /**
  * GET /api/fleet, classified exactly like apiGet, with ONE request shared by every caller that asks while it is
@@ -979,29 +1108,35 @@ let fleetRequest = null;
  * before, so no page renders an older roll-up than it would have — only the duplicate is gone. And each caller
  * classifies (so parses) the shared body for itself, so every page still owns the cards it was handed.
  */
-export async function apiGetFleet() {
-  inFlightReads++;
+export async function apiGetFleet(store) {
+  const scope = pageReads;
+  scope.n++;
   try {
-    if (!fleetRequest) {
-      fleetRequest = fetchBody("/api/fleet").finally(() => {
-        fleetRequest = null;
+    /* #6840: `store` reads another store's roll-up (the front door's fleet page and sidebar read every store); with none it
+       is the current store's, and without a front door the one key and the one request it always was. */
+    const key = frontDoorOn ? (store != null && store !== "" ? store : pickedStore || "") : "";
+    let request = fleetRequests.get(key);
+    if (!request) {
+      request = fetchBody("/api/fleet", undefined, frontDoorOn ? key : undefined).finally(() => {
+        if (fleetRequests.get(key) === request) fleetRequests.delete(key);
       });
+      fleetRequests.set(key, request);
     }
 
-    const shared = await fleetRequest;
+    const shared = await request;
     if (shared.transportError) return { kind: "error", message: shared.transportError };
     return classifyResponse({ ok: shared.ok, status: shared.status, text: async () => shared.raw });
   } finally {
-    inFlightReads--;
+    scope.n--;
   }
 }
 
 /** Fetch a path and read its whole body once, for a response several callers classify. A failure comes back as a
     value rather than a rejection, so one lost request cannot surface as an unhandled rejection per caller. */
-async function fetchBody(path, signal) {
+async function fetchBody(path, signal, store) {
   try {
-    const resp = await fetch(path, { headers: { Accept: "application/json" }, signal });
-    return { ok: resp.ok, status: resp.status, raw: await resp.text() };
+    const resp = await fetch(path, { headers: storeHeaders({ Accept: "application/json" }, store), signal });
+    return { ok: resp.ok, status: resp.status, raw: await resp.text(), retryAfter: retryAfterOf(resp) };
   } catch (e) {
     if (e && e.name === "AbortError") return { aborted: true };
     return { transportError: "Network error: " + (e && e.message ? e.message : String(e)) };
@@ -1023,7 +1158,7 @@ export async function apiSend(method, path, body) {
   try {
     resp = await fetch(path, {
       method,
-      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      headers: storeHeaders({ Accept: "application/json", "Content-Type": "application/json" }),
       body: hasBody ? JSON.stringify(body) : undefined,
     });
   } catch (e) {
@@ -1058,7 +1193,7 @@ export async function apiWrite(method, path, body) {
   try {
     resp = await fetch(path, {
       method,
-      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      headers: storeHeaders({ Accept: "application/json", "Content-Type": "application/json" }),
       body: body === undefined ? undefined : JSON.stringify(body),
     });
   } catch (e) {
@@ -1081,15 +1216,16 @@ export async function apiWrite(method, path, body) {
   return { status: resp.status, body: parsed };
 }
 
-/** #4666: a READ that has to travel as a POST (the composed-panel run, /api/compose/run). Counted in inFlightReads
+/** #4666: a READ that has to travel as a POST (the composed-panel run, /api/compose/run). Counted in the page's read count
     exactly like apiGet, so the poll's overlap guard (#4191) waits it out and the refresh back-off measures the render
     that contains it. Mutations (saves, deletes, alert validate/test) keep using apiSend, uncounted. */
 export async function apiSendRead(method, path, body) {
-  inFlightReads++;
+  const scope = pageReads;
+  scope.n++;
   try {
     return await apiSend(method, path, body);
   } finally {
-    inFlightReads--;
+    scope.n--;
   }
 }
 
@@ -1135,6 +1271,55 @@ export function reportSessionExpired(message, login) {
  * and-braces detector in case a future gate answers the same way again); anything else (including a 204/empty
  * body -> data:null) -> "data".
  */
+/** The Retry-After header of a response, or null when it has none (or no headers at all). */
+function retryAfterOf(resp) {
+  return resp && resp.headers && typeof resp.headers.get === "function" ? resp.headers.get("Retry-After") : null;
+}
+
+/** Whole seconds from a Retry-After header in its delta-seconds form, or null for none or any other form. */
+function retryAfterSecondsOf(header) {
+  const seconds = Number(header);
+  return header != null && String(header).trim() !== "" && Number.isInteger(seconds) && seconds >= 0 ? seconds : null;
+}
+
+/** #6800: when a read was refused busy (HTTP 429), the seconds to wait before trying again (the reply's Retry-After, at least 1). */
+export function busyRetryAfter(res) {
+  return res && res.kind === "error" && res.status === 429 ? Math.max(1, res.retryAfterSeconds || 5) : null;
+}
+
+/** The strip a page shows while it waits to send a read refused busy again. */
+export function busyRetryStrip(seconds) {
+  return noticeStrip("The service is running as many long reads as it allows. Retrying in " + seconds + (seconds === 1 ? " second…" : " seconds…"));
+}
+
+/**
+ * #6800: runs `read`, and when the service refuses it busy (429) calls `onBusy(seconds)`, waits the Retry-After the reply named and
+ * runs it once more. The second answer is the caller's, whatever it is, so a second refusal shows as the error it is. An abort of
+ * `signal` during the wait returns { kind: "aborted" } without the second read.
+ */
+export async function retryOnceWhenBusy(read, onBusy, signal) {
+  const first = await read();
+  const seconds = busyRetryAfter(first);
+  if (seconds === null) return first;
+  if (signal && signal.aborted) return { kind: "aborted" };
+  if (onBusy) onBusy(seconds);
+  const waited = await new Promise((resolve) => {
+    let onAbort = null;
+    const timer = setTimeout(() => {
+      if (signal && onAbort) signal.removeEventListener("abort", onAbort);
+      resolve(true);
+    }, seconds * 1000);
+    if (signal) {
+      onAbort = () => {
+        clearTimeout(timer);
+        resolve(false);
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
+  });
+  return waited ? read() : { kind: "aborted" };
+}
+
 async function classifyResponse(resp) {
   const raw = await resp.text();
   let body = null;
@@ -1159,7 +1344,9 @@ async function classifyResponse(resp) {
     const msg = body && typeof body.error === "string" ? body.error
       : isEnvelope ? plainText(body.message)
       : "Request failed (HTTP " + resp.status + ")";
-    return { kind: "error", message: msg, status: resp.status };
+    /* #6800: a read refused busy (429) carries the seconds its Retry-After names, for retryOnceWhenBusy. */
+    const retryAfterSeconds = resp.status === 429 ? retryAfterSecondsOf(resp.retryAfter !== undefined ? resp.retryAfter : retryAfterOf(resp)) : null;
+    return retryAfterSeconds === null ? { kind: "error", message: msg, status: resp.status } : { kind: "error", message: msg, status: resp.status, retryAfterSeconds };
   }
 
   /* The envelope is exactly {status, message[, hints]}: a top-level string status AND string message.
@@ -1170,7 +1357,7 @@ async function classifyResponse(resp) {
     }
     /* The message is the one the page shows: the service wrote it for an MCP client, so its internal names are put into
        words here (click-through 3 and 4). The envelope itself, in `data`, stays as the service sent it. */
-    return { kind: "empty", status: body.status, message: plainText(body.message), hints: body.hints || null, data: body };
+    return { kind: "empty", status: body.status, message: emptyMessageText(body), hints: body.hints || null, data: body };
   }
 
   if (resp.ok && raw && body === null) {
@@ -1306,7 +1493,7 @@ const INSTANT_FIELDS = ["sample_time", "time", "collection_time", "event_time", 
 
 /* The range belongs to the server page: a read from any other page is never anchored by it. */
 function liveRange() {
-  const hash = typeof location !== "undefined" && location && typeof location.hash === "string" ? location.hash : "";
+  const hash = routeHash();
   return activeRange && (hash === "" || hash.startsWith("#/server/")) ? activeRange : null;
 }
 
@@ -1393,7 +1580,7 @@ export function getActiveDatabaseFilter() {
 
 /* The filter belongs to the server page: a read or a panel on any other page is never touched by it. */
 function liveDatabaseFilter() {
-  const hash = typeof location !== "undefined" && location && typeof location.hash === "string" ? location.hash : "";
+  const hash = routeHash();
   return activeDatabaseFilter && hash.startsWith("#/server/") ? activeDatabaseFilter : null;
 }
 

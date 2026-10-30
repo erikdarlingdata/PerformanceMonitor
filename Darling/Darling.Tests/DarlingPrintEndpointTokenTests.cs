@@ -150,8 +150,13 @@ public class DarlingPrintEndpointTokenTests
         Assert.DoesNotContain("Remote MCP clients send it", cli, StringComparison.Ordinal);
         Assert.Contains("Every MCP client sends it as the header", cli, StringComparison.Ordinal);
 
+        /* The command the button copies is built by the shared helper (#6474), not spelled in the window. */
+        Assert.Contains(
+            "--header \"Authorization: Bearer <token>\"",
+            PerformanceMonitor.Darling.Storage.DarlingEndpointClientText.ClaudeMcpAddCommand("5151"),
+            StringComparison.Ordinal);
+
         var viewer = ReadRepoSource("PerformanceMonitor.Darling.Viewer", "SettingsWindow.xaml.cs");
-        Assert.Contains("Authorization: Bearer <token>", viewer, StringComparison.Ordinal);
         Assert.Contains("--print-mcp-token", viewer, StringComparison.Ordinal);
     }
 

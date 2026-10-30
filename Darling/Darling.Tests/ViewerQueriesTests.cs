@@ -1241,11 +1241,12 @@ public sealed class ViewerQueriesLivePostgresTests
         {
             /* Query 100 REGRESSED: baseline 2ms dur / 1ms cpu → recent 6ms dur / 4ms cpu.
                CPU regression = (4-1)/1 = 300% (clears the > 25% gate); duration regression = (6-2)/2 = 200%
-               (CRITICAL band); additional = (6-2) * recent exec 5 = 20 ms. */
+               (CRITICAL band); additional = (6-2) * recent exec 500 = 2,000 ms. #6781: 500 recent runs, so the 3 ms CPU rise adds 1.5 s
+               of CPU, over QueryStoreRegressionRules.CostMinAddedCpuMs. */
             await InsertQueryStoreAsync(connection, RegressionsServerId, baseline, "StackOverflow", queryId: 100, planId: 1,
                 execCount: 4, avgDurationUs: 2000, avgCpuUs: 1000, forced: false, maxMemPages: 0, queryText: "SELECT regressed");
             await InsertQueryStoreAsync(connection, RegressionsServerId, recent, "StackOverflow", queryId: 100, planId: 2,
-                execCount: 5, avgDurationUs: 6000, avgCpuUs: 4000, forced: false, maxMemPages: 0, queryText: "SELECT regressed");
+                execCount: 500, avgDurationUs: 6000, avgCpuUs: 4000, forced: false, maxMemPages: 0, queryText: "SELECT regressed");
 
             /* Query 200 STABLE: cpu 1ms → 1.1ms = 10% (below the gate) → excluded. */
             await InsertQueryStoreAsync(connection, RegressionsServerId, baseline, "StackOverflow", queryId: 200, planId: 1,
@@ -1276,9 +1277,9 @@ public sealed class ViewerQueriesLivePostgresTests
             Assert.Equal(6.0, r.RecentDurationMs, 3);
             Assert.Equal(200.0, r.DurationRegressionPercent, 1);
             Assert.Equal(300.0, r.CpuRegressionPercent, 1);
-            Assert.Equal(20.0, r.AdditionalDurationMs, 1); /* (6-2)ms * 5 recent execs */
+            Assert.Equal(2000.0, r.AdditionalDurationMs, 1); /* (6-2)ms * 500 recent execs */
             Assert.Equal(4, r.BaselineExecCount);
-            Assert.Equal(5, r.RecentExecCount);
+            Assert.Equal(500, r.RecentExecCount);
             Assert.Equal("SELECT regressed", r.QueryTextSample);
 
             bodySucceeded = true;

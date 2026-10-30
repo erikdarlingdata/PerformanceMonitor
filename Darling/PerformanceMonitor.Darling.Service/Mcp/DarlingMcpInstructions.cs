@@ -54,22 +54,47 @@ internal static class DarlingMcpInstructions
         DarlingPeerDirectory.Snapshot peers, IReadOnlyCollection<string> catalog, IReadOnlyCollection<string> served)
         => Compose(peers, ToolCensus(catalog, served), served.Contains(MuteTool));
 
-    private static string Compose(DarlingPeerDirectory.Snapshot peers, string census, bool muteServed = true)
+    /// <summary>
+    /// #6542: the instructions for a request that presented a NAMED token, rendered over the tools that token's role is served
+    /// (<paramref name="served"/>) and its policy. The census and the write-policy paragraph name the role, not the
+    /// <c>mcp.allowWrites</c> and <c>mcp.allowInvestigations</c> switches, which do not govern a named token, and the Workflow
+    /// line drops the mute step for a role that is not served it. The legacy token keeps the three-argument overload.
+    /// </summary>
+    internal static string BuildForNamedToken(
+        DarlingPeerDirectory.Snapshot peers, IReadOnlyCollection<string> catalog, IReadOnlyCollection<string> served,
+        DarlingMcpWritePolicy.Effective policy)
+        => Compose(peers, ToolCensus(catalog, served, policy), served.Contains(MuteTool), policy);
+
+    private static string Compose(
+        DarlingPeerDirectory.Snapshot peers, string census, bool muteServed = true, DarlingMcpWritePolicy.Effective? named = null)
     {
         var section = DarlingPeerDirectory.InstructionsSection(peers);
         // The fast path returns the fixed text when the served census equals the catalog census, the mute tool is
         // served, and there are no peers. The census is compared by value: ToolCensus builds a new string on each call.
-        if (section.Length == 0 && census == CatalogCensus && muteServed)
+        if (named is null && section.Length == 0 && census == CatalogCensus && muteServed)
             return Text;
 
         /* #5789 correction: the Workflow line names the mute write as its last step. With the writes off that tool
            is not served, so the step is dropped rather than pointing a client at a tool tools/list lacks. */
         var tail = muteServed ? BodyTail : BodyTail.Replace(WorkflowMuteStep, "", StringComparison.Ordinal);
-        var preamble = section.Length == 0 ? Preamble : Preamble + "\n\n" + section;
+        /* A named token's preamble swaps the settings paragraph for its role's, and says nothing of purge_now unless the role is served it. */
+        var basePreamble = Preamble;
+        if (named is { } role)
+        {
+            basePreamble = basePreamble.Replace(
+                DarlingMcpWritePolicy.InstructionsLine, DarlingMcpWritePolicy.NamedInstructionsLine(role), StringComparison.Ordinal);
+            if (!role.Writes)
+                basePreamble = basePreamble.Replace(PurgeSentence, "", StringComparison.Ordinal);
+        }
+
+        var preamble = section.Length == 0 ? basePreamble : basePreamble + "\n\n" + section;
         return preamble + "\n\n" + BodyHead + "\n\n" + census + "\n\n" + tail;
     }
 
     private const string MuteTool = "mute_analysis_finding";
+
+    /// <summary>The preamble sentence that names <c>purge_now</c>, a write an agent token is never served (#6542).</summary>
+    private const string PurgeSentence = " With writes on, purge_now deletes history older than the retention given.";
 
     /// <summary>The Workflow line's last step, which names a write tool; <see cref="Compose"/> drops it when that
     /// tool is not served. <c>RenderedInstructions_NameOnlyServedTools</c> fails if this stops matching the line.</summary>
@@ -82,6 +107,13 @@ internal static class DarlingMcpInstructions
     /// writes off, the server-tag and onboarding tools (all writes) are gone, while the query-tag read stays.
     /// </summary>
     internal static string ToolCensus(IReadOnlyCollection<string> catalog, IReadOnlyCollection<string> served)
+        => ToolCensus(catalog, served, null);
+
+    /// <summary><see cref="ToolCensus(IReadOnlyCollection{string}, IReadOnlyCollection{string})"/> for a named token's role (#6542) when
+    /// <paramref name="named"/> is set: the sentence that says what is not served names the role, not the settings that govern
+    /// the legacy token. Null leaves the legacy census byte-identical.</summary>
+    internal static string ToolCensus(
+        IReadOnlyCollection<string> catalog, IReadOnlyCollection<string> served, DarlingMcpWritePolicy.Effective? named)
     {
         var count = served.Count;
         var total = catalog.Count;
@@ -101,16 +133,29 @@ internal static class DarlingMcpInstructions
         var investigationsServed = served.Any(DarlingMcpWritePolicy.IsInvestigation);
         var investigationCount = catalog.Count(DarlingMcpWritePolicy.IsInvestigation);
         var off = new List<string>();
-        if (!writesServed)
+        if (named is { } role)
+        {
+            if (role.Investigations)
+                off.Add("this token has the agent role: the write tools beyond the actions an agent may take with an `agent_action` are " +
+                    "served only to an operator token");
+            else
+            {
+                off.Add("this token has the operator role: the investigation tools are served only to an agent token");
+                if (!adminServed)
+                    off.Add($"the {adminCount} tools that add, edit and remove monitored servers, or switch agent actions, need " +
+                        $"both `{DarlingMcpWritePolicy.WritesSetting}` and `{DarlingMcpWritePolicy.ServerAdminSetting}` on");
+            }
+        }
+        else if (!writesServed)
             off.Add($"the write tools are off, so the {writeCount + adminCount - agentActionServed} that change monitoring configuration are not served " +
                     $"(`{DarlingMcpWritePolicy.WritesSetting}` with a token adds {writeCount - agentActionServed}, `{DarlingMcpWritePolicy.ServerAdminSetting}` " +
                     $"{adminCount} more)" + (agentActionServed > 0
-                        ? $"; the {agentActionServed} mute, custom-rule, threshold override, signature merge, plan force, plan evict and session kill tools are served only to an agent with an `agent_action` (Level 2; the plan force, plan evict and session kill tools need Level 3 and the server's own switch)"
+                        ? $"; the {agentActionServed} mute, custom-rule, threshold override, signature merge, plan force, plan evict, session kill, recompile and plan guide tools are served only to an agent with an `agent_action` (Level 2; the last five listed need Level 3 and the server's own switch)"
                         : string.Empty));
         else if (!adminServed)
             off.Add($"`{DarlingMcpWritePolicy.ServerAdminSetting}` is off, so the {adminCount} tools that add, edit and remove " +
                     "monitored servers, or switch agent actions, are not served");
-        if (!investigationsServed && investigationCount > 0)
+        if (named is null && !investigationsServed && investigationCount > 0)
             off.Add(writesServed
                 ? $"the {investigationCount} investigation tools stay off while `{DarlingMcpWritePolicy.WritesSetting}` is on (one token " +
                   "cannot tell an agent from a person)"
@@ -142,7 +187,7 @@ internal static class DarlingMcpInstructions
     /// are identical, so a new tool moves this or fails there.
     /// </summary>
     private const string CatalogCensus =
-        "This server exposes 247 tools. 112 are the same names Lite exposes. The remaining 135 are unique to Darling: " +
+        "This server exposes 276 tools. 112 are the same names Lite exposes. The remaining 164 are unique to Darling: " +
         "thirty-five are the PostgreSQL reads (`get_pg_*`), plus Custom Views, custom-alert-rule, alert-tuning, server/query-tag, " +
         "onboarding and investigation-wait tools, and central-store-only reads (`get_fleet_overview`, `get_ag_health` — Availability Groups — " +
         "`get_sweep_reports`, `get_store_metrics`, `get_store_log`). `get_blocking` = Lite's `get_blocked_process_reports`.";
@@ -191,7 +236,7 @@ internal static class DarlingMcpInstructions
 
         ## What this server can and cannot do
 
-        This server reads previously collected performance data. It cannot run SQL on a monitored server or run ad-hoc diagnostics; only the plan force, plan evict and session kill tools act on one. With writes on, purge_now deletes history older than the retention given.
+        This server reads previously collected performance data. It cannot run SQL on a monitored server or run ad-hoc diagnostics; only the server action tools act on one. With writes on, purge_now deletes history older than the retention given.
 
         """ + DarlingMcpWritePolicy.InstructionsLine;
 
@@ -208,7 +253,7 @@ internal static class DarlingMcpInstructions
 
         When a read comes back with no data, the `status` word says which kind of nothing it is, and the four are not interchangeable. `empty` is a true negative: we looked and there was nothing to find. `unavailable` means this server could have that data and does not have it right now, so collection health is worth a look. `not_collected` means this server does not collect that at all — and when the reason is the engine, the gap is permanent: the collector serving that read does not run on this server's engine (an Azure SQL Database has no system_health session, no default trace and no SQL Agent; a PostgreSQL target collects none of the SQL Server signals at all, and the `get_pg_*` reads are the ones that answer there), so there is no session to start, no collector to enable, and nothing to check. The message names the engine and the collector. Do not send anyone to go and fix it. `precondition` is the one that is worth acting on: this server could have that data, the collector is running, and a setup step on the monitored server is in the way — a Query Store that is off or has gone READ_ONLY, an Extended Events capture session that is not running, an extension that was never created, a grant the monitoring login was refused. The message names the precondition, quotes what the monitored server itself said, and gives the statement or grant that satisfies it. It is re-derived on every read rather than decided when the connection was made, so once somebody does the thing it asked for the next call answers with data — usually with nothing to restart on the monitoring side. A few preconditions are the exception and say so in their own message: the fact that gates them is read once when the service connects to that server and cached for the connection's life, so satisfying them also needs the service to reconnect before collection resumes. Read the message rather than assuming the general case — it tells you which kind you have, and telling somebody to retry a connect-scoped one without reconnecting sends them round a loop that never terminates.
 
-        Every tool failure — an exception the tool caught while reading — is the same envelope with `status` = `error`: `{"status":"error","message":"Error during <tool_name>: <what went wrong>","hints":{"operation":"<tool_name>"}}`. It is the fifth `status` word: the four above say what kind of nothing the store holds, `error` says the read did not complete, so retry it or report it rather than reading it as an all-clear. Branch on `status`, not on the message text. Data results keep their own shape and never carry a top-level `message`, which is how the envelope is told apart from data without a schema. A refusal — a `server_name` that does not resolve, an `hours_back` outside its range, a `limit` past its ceiling, a required parameter that was not sent — is neither a failure nor a miss and has its own word: the same envelope with `status` = `invalid`: `{"status":"invalid","message":"<what was refused, and what is accepted>","hints":{"parameter":"<parameter_name>"}}`. The read did not run because the request as given cannot be served; `hints.parameter` names the knob to change and the message says what it accepts, so fix that and call again — retrying it unchanged answers the same way. It is the word the write tools already use for a body that will not parse, and it means the same thing there. The service runs only a few long reads at once: one that would wait too long for a slot gets `busy`, `{"status":"busy","message":"<why>","hints":{"retry_after_seconds":<n>,"running":<n>,"queued":<n>}}`. The call was correct but did not run (`running`, `queued`: long reads running and waiting then); call again after `retry_after_seconds`. Seven `status` words, then: four kinds of nothing, one failure (`error`: retry or report), one refusal (`invalid`: correct the call), one wait (`busy`: retry later).
+        Every tool failure — an exception the tool caught while reading — is the same envelope with `status` = `error`: `{"status":"error","message":"Error during <tool_name>: <what went wrong>","hints":{"operation":"<tool_name>"}}`. It is the fifth `status` word: the four above say what kind of nothing the store holds, `error` says the read did not complete, so retry it or report it rather than reading it as an all-clear. Branch on `status`, not on the message text. Data results keep their own shape and never carry a top-level `message`, which is how the envelope is told apart from data without a schema. A refusal — a `server_name` that does not resolve, an `hours_back` outside its range, a `limit` past its ceiling, a required parameter that was not sent — is neither a failure nor a miss and has its own word: the same envelope with `status` = `invalid`: `{"status":"invalid","message":"<what was refused, and what is accepted>","hints":{"parameter":"<parameter_name>"}}`. The read did not run because the request as given cannot be served; `hints.parameter` names the knob to change and the message says what it accepts, so fix that and call again — retrying it unchanged answers the same way. It is the word the write tools already use for a body that will not parse, and it means the same thing there. The service runs only a few long reads at once: one that would wait too long for a slot gets `busy`, `{"status":"busy","message":"<why>","hints":{"retry_after_seconds":<n>,"running":<n>,"queued":<n>}}`. The call was correct but did not run (`running`, `queued`: long reads running and waiting then); call again after `retry_after_seconds`.
 
         `window_truncated` true: the window starts before the store's data, not a cut page (`effective_start`, `truncation_note`).
 

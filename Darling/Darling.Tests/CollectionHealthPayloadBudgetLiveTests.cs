@@ -337,7 +337,7 @@ public sealed class CollectionHealthPayloadBudgetLiveTests
     /// on the default shape and on full_detail alike. Until this issue the partial shape carried the flag
     /// with no sentence, so a WARNING row whose only issue was a regression said nothing about why. Seeds one
     /// row of each regression shape through the real read: a dense collector three zero-row runs after its
-    /// last productive one (query_stats), an activity-only collector 73 hours after its last productive run
+    /// last productive one (memory_grant_stats, which has rows whether or not anything runs, so #6453 leaves it out of the activity-sourced set), an activity-only collector 73 hours after its last productive run
     /// (job_history), and a skip regression (wait_stats, PERMISSIONS on every run since it last stored rows).
     /// Beside them, an activity-only collector only 71 hours quiet (waiting_tasks) reads HEALTHY and compacts,
     /// where before #4620 it banded WARNING.
@@ -363,9 +363,9 @@ public sealed class CollectionHealthPayloadBudgetLiveTests
 
             /* Dense: productive every hour until an hour ago, then three zero-row successes. */
             for (var i = 1; i <= 6; i++)
-                await InsertLogRowAsync(connection, "query_stats", now.AddHours(-i), "SUCCESS", 80, 40, null, ct);
+                await InsertLogRowAsync(connection, "memory_grant_stats", now.AddHours(-i), "SUCCESS", 80, 40, null, ct);
             for (var i = 1; i <= 3; i++)
-                await InsertLogRowAsync(connection, "query_stats", now.AddMinutes(-i), "SUCCESS", 20, 0, null, ct);
+                await InsertLogRowAsync(connection, "memory_grant_stats", now.AddMinutes(-i), "SUCCESS", 20, 0, null, ct);
 
             /* Activity-only, last productive 73 hours ago, four zero-row successes since: flagged. */
             await InsertLogRowAsync(connection, "job_history", now.AddHours(-74), "SUCCESS", 80, 12, null, ct);
@@ -400,7 +400,7 @@ public sealed class CollectionHealthPayloadBudgetLiveTests
                     .Select(kv => kv.Key)
                     .OrderBy(n => n, StringComparer.Ordinal)
                     .ToArray();
-                Assert.Equal(new[] { "job_history", "query_stats", "wait_stats" }, regressed);
+                Assert.Equal(new[] { "job_history", "memory_grant_stats", "wait_stats" }, regressed);
                 foreach (var name in regressed)
                 {
                     Assert.True(rows[name].TryGetProperty("regression_finding", out var finding), $"{name} is regressed but carries no regression_finding.");
@@ -409,7 +409,7 @@ public sealed class CollectionHealthPayloadBudgetLiveTests
                     Assert.Equal(CollectorHealthClassifier.Warning, rows[name].GetProperty("status").GetString());
                 }
 
-                Assert.Contains("has recorded SUCCESS with zero rows on 3 runs since", rows["query_stats"].GetProperty("regression_finding").GetString()!, StringComparison.Ordinal);
+                Assert.Contains("has recorded SUCCESS with zero rows on 3 runs since", rows["memory_grant_stats"].GetProperty("regression_finding").GetString()!, StringComparison.Ordinal);
                 Assert.Contains("has recorded SUCCESS with zero rows on 4 runs since", rows["job_history"].GetProperty("regression_finding").GetString()!, StringComparison.Ordinal);
                 Assert.Contains("has reported PERMISSIONS since", rows["wait_stats"].GetProperty("regression_finding").GetString()!, StringComparison.Ordinal);
 
@@ -421,7 +421,7 @@ public sealed class CollectionHealthPayloadBudgetLiveTests
             using var defaultDoc = JsonDocument.Parse(defaultJson);
             var defaultRows = defaultDoc.RootElement.GetProperty("collectors").EnumerateArray()
                 .ToDictionary(r => r.GetProperty("collector").GetString()!, r => r.Clone());
-            foreach (var name in new[] { "job_history", "query_stats", "wait_stats" })
+            foreach (var name in new[] { "job_history", "memory_grant_stats", "wait_stats" })
             {
                 Assert.True(defaultRows[name].TryGetProperty("partial_detail", out var partial) && partial.GetBoolean(), $"{name} must be a partial row by default.");
             }

@@ -137,7 +137,7 @@ public sealed class ProvisionRolesCollisionGuardTests
     [Fact]
     public void TheShownPsqlCommandLines_SkipThePsqlrc()
     {
-        var readmeLine = Regex.Match(RepoFile.ReadRepoFile("Darling", "README.md"), @"(?m)^psql .*provision-roles\.sql.*$");
+        var readmeLine = Regex.Match(RepoFile.ReadRepoFile("docs", "darling", "security.md"), @"(?m)^psql .*provision-roles\.sql.*$"); // #6416: moved from Darling/README.md
         Assert.True(readmeLine.Success, "the README no longer shows the psql command line that runs provision-roles.sql.");
         Assert.Matches(@"^psql -X ", readmeLine.Value);
 
@@ -151,7 +151,7 @@ public sealed class ProvisionRolesCollisionGuardTests
     [Fact]
     public void TheReadme_SaysTheGuardChecksTheMarkerAlone()
     {
-        var readme = RepoFile.ReadRepoFile("Darling", "README.md");
+        var readme = RepoFile.ReadRepoFile("docs", "darling", "security.md"); // #6416: moved from Darling/README.md
 
         Assert.Contains("already exists without Darling's `darling-managed` marker", readme, StringComparison.Ordinal);
         Assert.DoesNotContain("Darling did not create it", readme, StringComparison.Ordinal);
@@ -163,7 +163,7 @@ public sealed class ProvisionRolesCollisionGuardTests
     public void TheScriptAndTheReadme_SayPsql10OrLater()
     {
         var sql = Script();
-        var readme = RepoFile.ReadRepoFile("Darling", "README.md");
+        var readme = RepoFile.ReadRepoFile("docs", "darling", "security.md"); // #6416: moved from Darling/README.md
 
         Assert.Contains("Needs psql 10 or later", sql, StringComparison.Ordinal);
         Assert.Contains("this script needs psql 10 or later", sql, StringComparison.Ordinal);
@@ -176,7 +176,7 @@ public sealed class ProvisionRolesCollisionGuardTests
     [Fact]
     public void TheReadmePsqlCommandLine_SetsNoGlobalOnErrorStop()
     {
-        var readme = RepoFile.ReadRepoFile("Darling", "README.md");
+        var readme = RepoFile.ReadRepoFile("docs", "darling", "security.md"); // #6416: moved from Darling/README.md
 
         var commandLine = Regex.Match(readme, @"(?m)^psql .*provision-roles\.sql.*$");
         Assert.True(commandLine.Success, "the README no longer shows the psql command line that runs provision-roles.sql.");
@@ -348,7 +348,7 @@ public sealed class ProvisionRolesCollisionGuardTests
     [Fact]
     public void TheReadme_DescribesTheNonSuperuserOwnersLimits()
     {
-        var readme = RepoFile.ReadRepoFile("Darling", "README.md");
+        var readme = RepoFile.ReadRepoFile("docs", "darling", "security.md"); // #6416: moved from Darling/README.md
         var sql = Script();
 
         Assert.Contains("GRANT SET ON PARAMETER pg_stat_statements.track_utility", readme, StringComparison.Ordinal);
@@ -490,7 +490,7 @@ public sealed class ProvisionRolesCollisionGuardTests
         Assert.Contains("Or, as a superuser, revoke that ADMIN OPTION (a login that created the role cannot revoke it itself), or drop the role.", line, StringComparison.Ordinal);
         Assert.True(line.IndexOf("run this script as that login", StringComparison.Ordinal) < line.IndexOf("revoke that ADMIN OPTION", StringComparison.Ordinal));
 
-        var readme = RepoFile.ReadRepoFile("Darling", "README.md");
+        var readme = RepoFile.ReadRepoFile("docs", "darling", "security.md"); // #6416: moved from Darling/README.md
         Assert.Contains("To continue, run the script as that login, which the check leaves out.", readme, StringComparison.Ordinal);
         Assert.Contains("A login that created the role cannot revoke the option itself", readme, StringComparison.Ordinal);
         Assert.DoesNotContain("To continue, revoke that option or drop the role", readme, StringComparison.Ordinal);
@@ -503,7 +503,7 @@ public sealed class ProvisionRolesCollisionGuardTests
     public void TheReplicationAndBypassrlsClaims_CarryThePostgres16Qualifier_InTheWarningTheHeaderAndTheReadme()
     {
         var sql = Script();
-        var readme = RepoFile.ReadRepoFile("Darling", "README.md");
+        var readme = RepoFile.ReadRepoFile("docs", "darling", "security.md"); // #6416: moved from Darling/README.md
 
         Assert.Contains("switching it off needs a superuser, or, from PostgreSQL 16, an owner that holds % itself.", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("needs a superuser, or an owner that holds % itself", sql, StringComparison.Ordinal);
@@ -554,7 +554,7 @@ public sealed class ProvisionRolesCollisionGuardTests
         Assert.Contains("log_min_duration_statement set to 0 or more", header, StringComparison.Ordinal);
         Assert.Contains("log_statement set to ddl, mod or all", header, StringComparison.Ordinal);
 
-        var readme = RepoFile.ReadRepoFile("Darling", "README.md");
+        var readme = RepoFile.ReadRepoFile("docs", "darling", "security.md"); // #6416: moved from Darling/README.md
         Assert.Contains("Two settings put the passwords in the server log even when the run succeeds: `log_statement` at `ddl`, `mod` or `all`, and `log_min_duration_statement` at `0` or more.", readme, StringComparison.Ordinal);
         Assert.Contains("Step 0 turns those settings off for the session.", readme, StringComparison.Ordinal);
         Assert.Contains("GRANT SET ON PARAMETER <setting> TO <owner>", readme, StringComparison.Ordinal);
@@ -566,7 +566,7 @@ public sealed class ProvisionRolesCollisionGuardTests
     [Fact]
     public void TheReadme_SaysTheGuardStopsAnOwnerThatCannotChangeTheRoles_AndNamesTheGrant()
     {
-        var readme = RepoFile.ReadRepoFile("Darling", "README.md");
+        var readme = RepoFile.ReadRepoFile("docs", "darling", "security.md"); // #6416: moved from Darling/README.md
 
         Assert.Contains("The guard checks this before it sends a password.", readme, StringComparison.Ordinal);
         Assert.Contains("If the owner cannot change one of the three roles, the run stops at the guard with exit code 3. The message names the roles and the `GRANT` statements to run.", readme, StringComparison.Ordinal);
@@ -592,7 +592,7 @@ public sealed class ProvisionRolesCollisionGuardTests
         Assert.True(check < guard.IndexOf("CREATE ROLE", StringComparison.Ordinal), "the pg_stat_monitor check must come before the guard creates any role.");
         Assert.Contains("RAISE EXCEPTION 'pg_stat_monitor.pgsm_track_utility is on for this session.", guard, StringComparison.Ordinal);
 
-        var readme = RepoFile.ReadRepoFile("Darling", "README.md");
+        var readme = RepoFile.ReadRepoFile("docs", "darling", "security.md"); // #6416: moved from Darling/README.md
         Assert.Contains("`pg_stat_monitor.pgsm_track_utility = off`", readme, StringComparison.Ordinal);
     }
 
@@ -660,7 +660,7 @@ public sealed class ProvisionRolesCollisionGuardTests
         Assert.DoesNotContain("CHANGE_ME_", line, StringComparison.Ordinal);
         Assert.True(sql.IndexOf(line, StringComparison.Ordinal) < Regex.Match(sql, @"(?m)^ALTER ROLE \w+\s+LOGIN PASSWORD").Index);
 
-        var readme = RepoFile.ReadRepoFile("Darling", "README.md");
+        var readme = RepoFile.ReadRepoFile("docs", "darling", "security.md"); // #6416: moved from Darling/README.md
         Assert.Contains("when one of the three roles is a member of a role that would outrank the grants", readme, StringComparison.Ordinal);
     }
 

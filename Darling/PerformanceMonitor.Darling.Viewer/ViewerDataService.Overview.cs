@@ -255,6 +255,22 @@ ORDER BY collection_time DESC
 LIMIT 1";
 
     /// <summary>
+    /// The identity columns at the warning bar or past it on one server (#6875) for its Overview card, from each database's newest scan in the last
+    /// seven days through <see cref="DarlingIdentityCapacityReader.ReadNewestScansAsync"/> (the card needs the columns only, not the listing of databases waiting) and <see cref="IdentityCapacityMath.Band(double)"/>, the read and the band the web
+    /// fleet card, the tool and the alert use. Null when no column is.
+    /// </summary>
+    public async Task<IdentityCapacityCard?> GetIdentityCapacityCardAsync(int serverId, DateTime nowUtc, CancellationToken cancellationToken = default)
+    {
+        var read = await DarlingIdentityCapacityReader.ReadNewestScansAsync(
+            _dataSource, serverId, DatabaseFilter.All, nowUtc.AddHours(-168), nowUtc,
+            ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+        var bands = read.Columns.Select(c => c.Band).Where(b => b is IdentityCapacityMath.BandWarning or IdentityCapacityMath.BandCritical).ToList();
+        return bands.Count == 0
+            ? null
+            : new IdentityCapacityCard(bands.Contains(IdentityCapacityMath.BandCritical) ? IdentityCapacityMath.BandCritical : IdentityCapacityMath.BandWarning, bands.Count);
+    }
+
+    /// <summary>
     /// One server's Overview-card summary — Lite's <c>GetServerSummaryAsync</c> ported to Postgres and
     /// enriched toward the Dashboard's <c>ServerHealthCard</c>. The caller sets
     /// <see cref="ServerSummaryItem.ServerName"/> and applies the freshness-derived status
@@ -535,11 +551,15 @@ LIMIT 1";
         /* Collectors row — REUSE the viewer's own 7-day per-collector health banding (the same STALE /
            FAILING / NEVER_RUN / HEALTHY logic the Collection Health tab renders), mirroring the Dashboard's
            SUM(CASE health_status = 'HEALTHY' / 'FAILING') over report.collection_health. */
-        var (healthyCollectors, failingCollectors, totalCollectors, deadlockBand, pgDeadlockBand) = await GetCollectorHealthCountsAsync(serverId, cancellationToken);
+        var (healthyCollectors, warningCollectors, failingCollectors, notCollectedCollectors, noPermissionCollectors, totalCollectors, deadlockBand, pgDeadlockBand) = await GetCollectorHealthCountsAsync(serverId, cancellationToken);
 
 
+        var protectionChip = await GetDatabaseProtectionChipAsync(serverId, nowUtc, cancellationToken);
+
+        var identityCapacity = await GetIdentityCapacityCardAsync(serverId, nowUtc, cancellationToken);
         return new ServerSummaryItem
         {
+            IdentityCapacity = identityCapacity,
             DisplayName = displayName,
             ServerId = serverId,
             CpuPercent = cpuPercent,
@@ -571,11 +591,17 @@ LIMIT 1";
             ThreadsWaitingForCpu = threadsWaitingForCpu,
             RequestsWaitingForThreads = requestsWaitingForThreads,
             HealthyCollectorCount = healthyCollectors,
+            WarningCollectorCount = warningCollectors,
+            NotCollectedCollectorCount = notCollectedCollectors,
+            NoPermissionCollectorCount = noPermissionCollectors,
             FailedCollectorCount = failingCollectors,
             CollectorCount = totalCollectors,
             DeadlockCollectorBand = deadlockBand,
             PgDeadlockCollectorBand = pgDeadlockBand,
             LastCollectionTime = lastCollection,
+            AgentAlertGaps = await GetAgentAlertGapsAsync(serverId, nowUtc, cancellationToken),
+            DatabaseProtectionChipValue = protectionChip.Value,
+            DatabaseProtectionChipDetail = protectionChip.Detail,
         };
     }
 
@@ -597,6 +623,11 @@ WHERE id = 1";
     /// <para>Values come back RAW; <see cref="DeadlockRateThresholds"/> clamps on read, so a hand-edited row
     /// cannot drive a nonsense threshold.</para>
     /// </summary>
+    /// <summary>The store's blocking-band tiers (#6927), or today's constants when the singleton row is absent. The same read
+    /// the service uses (<see cref="BlockingBandStore"/>).</summary>
+    public Task<BlockingBandThresholds> GetBlockingBandThresholdsAsync(CancellationToken cancellationToken = default) =>
+        BlockingBandStore.ReadAsync(_dataSource, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+
     public async Task<DeadlockRateThresholds> GetDeadlockRateThresholdsAsync(CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(DeadlockRateThresholdSql);
@@ -632,7 +663,7 @@ WHERE id = 1";
     /// terms; this method does not know the engine, so the card carries both and
     /// <see cref="ServerSummaryItem.DeadlockSource"/> picks once <c>IsPostgres</c> is stamped.</para>
     /// </summary>
-    private async Task<(int Healthy, int Failing, int Total, string? DeadlockBand, string? PgDeadlockBand)> GetCollectorHealthCountsAsync(int serverId, CancellationToken cancellationToken)
+    private async Task<(int Healthy, int Warning, int Failing, int NotCollected, int NoPermission, int Total, string? DeadlockBand, string? PgDeadlockBand)> GetCollectorHealthCountsAsync(int serverId, CancellationToken cancellationToken)
     {
         /* #4226: the fleet-wide rollup-backed read, memoized, instead of this server's OWN raw
            CollectionHealthSql scan — the Overview loader's per-server loop now shares one store round trip
@@ -641,16 +672,24 @@ WHERE id = 1";
            per-server scan finding none. */
         var byServer = await GetFleetCollectionHealthByServerAsync(cancellationToken);
         var rows = byServer.TryGetValue(serverId, out var serverRows) ? serverRows : new List<CollectorHealthRow>();
-        var healthy = rows.Count(r => r.HealthStatus == "HEALTHY");
-        var failing = rows.Count(r => r.HealthStatus == "FAILING");
+        /* #6828: the one shared tally, so a WARNING collector is not counted healthy here and the counts match get_collection_health's rows
+           and the service's fleet card for the same server. */
+        var tally = new CollectorHealthClassifier.BandTally();
+        foreach (var row in rows)
+        {
+            tally = tally.Add(row.CollectorName, row.HealthStatus, row.ServerAlwaysOnOff, row.EngineGated);
+        }
+
+        /* #6912: a deadlocks collector the engine does not run keeps its old rows' band, so it reads as no band, as the service's fleet card
+           reads it (DarlingFleetReader.AddCollector). */
         var deadlockBand = rows
             .FirstOrDefault(r => string.Equals(r.CollectorName, DeadlocksCollector.Instance.Name, StringComparison.Ordinal))
-            ?.HealthStatus;
+            is { EngineGated: false } deadlockRow ? deadlockRow.HealthStatus : null;
         var pgDeadlockBand = rows
             .FirstOrDefault(r => string.Equals(r.CollectorName, PgDatabaseStatsCollector.Instance.Name, StringComparison.Ordinal))
             ?.HealthStatus;
         /* #3539 A8d: every banded row is the share's denominator — the service's CollectorCounts.Total. */
-        return (healthy, failing, rows.Count, deadlockBand, pgDeadlockBand);
+        return (tally.Healthy, tally.Warning, tally.Failing, tally.NotCollected, tally.NoPermission, tally.Total, deadlockBand, pgDeadlockBand);
     }
 
     /// <summary>Whole minutes elapsed from a stored naive-UTC instant to now (UTC), floored at 0, or null
@@ -684,6 +723,22 @@ WHERE id = 1";
 /// </summary>
 public sealed class ServerSummaryItem
 {
+    /// <summary>The identity columns at the warning bar or past it (#6875), the same worst band and count the web fleet card's "Identity capacity" chip
+    /// carries. Null when none is, and on a server that never scans. Shown as its own row and never changes the card's band.</summary>
+    public IdentityCapacityCard? IdentityCapacity { get; set; }
+
+    /// <summary>True when the Identity capacity row shows.</summary>
+    public bool HasIdentityCapacity => IdentityCapacity is { ColumnsAtBar: > 0 };
+
+    /// <summary>Identity capacity value, "1 column" or "N columns" (the web chip's words).</summary>
+    public string IdentityCapacityDisplay => IdentityCapacity is null ? "" : IdentityCapacity.ColumnsAtBar == 1 ? "1 column" : $"{IdentityCapacity.ColumnsAtBar} columns";
+
+    /// <summary>Identity capacity detail: the fullest column's band.</summary>
+    public string IdentityCapacityDetail => IdentityCapacity is null ? "" : $"At or past 70% used (the shipped bar, the alert's own bars may differ). The fullest is {IdentityCapacity.WorstBand}.";
+
+    /// <summary>The row's dot and value brush: the card's critical red when the fullest is critical, else its warning amber.</summary>
+    public SolidColorBrush IdentityCapacityBrush => IdentityCapacity?.WorstBand == IdentityCapacityMath.BandCritical ? s_criticalBrush : s_warningBrush;
+
     /* Freshness + per-metric severity thresholds live once in PerformanceMonitor.Common's
        ServerHealthThresholds / ServerHealthClassifier (#1562); this card keeps only the brush mapping. */
 
@@ -900,6 +955,15 @@ public sealed class ServerSummaryItem
     /// <summary>Collectors whose 7-day band is HEALTHY (mirrors report.collection_health).</summary>
     public int HealthyCollectorCount { get; set; }
 
+    /// <summary>#6828: collectors banded WARNING, shown beside the healthy and failing counts so the card does not leave them out or call them healthy.</summary>
+    public int WarningCollectorCount { get; set; }
+
+    /// <summary>#6828: Always On collectors on a server with Always On off, which <c>get_collection_health</c> lists as not_collected.</summary>
+    public int NotCollectedCollectorCount { get; set; }
+
+    /// <summary>#6932: collectors the monitored server refused (NO_PERMISSIONS) or lacks an extension for (EXTENSION_MISSING). Does not change the card's severity.</summary>
+    public int NoPermissionCollectorCount { get; set; }
+
     /// <summary>Collectors whose 7-day band is FAILING (no success in over 24h).</summary>
     public int FailedCollectorCount { get; set; }
 
@@ -907,6 +971,18 @@ public sealed class ServerSummaryItem
     /// denominator <see cref="CollectorSeverity"/> grades the failing count against. Not healthy + failing:
     /// STALE, WARNING, STOPPED and the permission bands are banded collectors that are neither.</summary>
     public int CollectorCount { get; set; }
+
+    /// <summary>#6873: "3 overdue" when a full backup, a log backup or a CHECKDB is overdue on this server, else null. Not a band: nothing reads it for the card's band.</summary>
+    public string? DatabaseProtectionChipValue { get; set; }
+
+    /// <summary>#6873: the overdue facts in words, for the chip's detail. Null with <see cref="DatabaseProtectionChipValue"/>.</summary>
+    public string? DatabaseProtectionChipDetail { get; set; }
+
+    /// <summary>The chip shows only when something is overdue, and not on an offline card (its figures are old).</summary>
+    public bool HasDatabaseProtectionOverdue => DatabaseProtectionChipValue is not null && !IsOffline;
+
+    /// <summary>The chip's colour: always the Warning tone, like the web chip.</summary>
+    public SolidColorBrush DatabaseProtectionBrush => s_warningBrush;
 
     public DateTime? LastCollectionTime { get; set; }
 
@@ -1102,9 +1178,33 @@ public sealed class ServerSummaryItem
         : CollectorCount > 0 ? "OK"
         : "--";
 
+    /// <summary>The gaps in this server's SQL Server Agent alert setup (#6874), from the newest fresh capture: the same gaps the web fleet
+    /// card's "Agent alerts" chip counts. Empty when the setup is complete, the capture is not fresh, or the server never captures. It is
+    /// shown as its own row and never changes the card's band.</summary>
+    public System.Collections.Generic.IReadOnlyList<AgentAlertGap> AgentAlertGaps { get; set; } = System.Array.Empty<AgentAlertGap>();
+
+    /// <summary>True when the Agent alerts row shows (there is at least one gap).</summary>
+    public bool HasAgentAlertGaps => AgentAlertGaps.Count > 0;
+
+    /// <summary>Agent alerts value, "1 gap" or "N gaps" (the web chip's words).</summary>
+    public string AgentAlertsDisplay => AgentAlertGaps.Count == 1 ? "1 gap" : $"{AgentAlertGaps.Count} gaps";
+
+    /// <summary>Agent alerts detail, the gaps' sentences in order.</summary>
+    public string AgentAlertsDetail => string.Join(" ", AgentAlertGaps.Select(g => g.Message));
+
+    /// <summary>The row's dot and value brush: the card's warning amber.</summary>
+    public SolidColorBrush AgentAlertsBrush => s_warningBrush;
+
     /// <summary>Collectors detail — "No recent collection" when offline, else "Healthy: N, Failing: M" (Dashboard's CollectorDetailText).</summary>
     public string CollectorDetail =>
-        IsOffline ? "No recent collection" : $"Healthy: {HealthyCollectorCount}, Failing: {FailedCollectorCount}";
+        IsOffline ? "No recent collection"
+        /* #6828: a WARNING collector is not healthy and is not left out. The warning and not-collected counts show only when there is one,
+           so the card reads as it always did for a server with none. */
+        : $"Healthy: {HealthyCollectorCount}, "
+            + (WarningCollectorCount > 0 ? $"Warning: {WarningCollectorCount}, " : "")
+            + $"Failing: {FailedCollectorCount}"
+            + (NotCollectedCollectorCount > 0 ? $", Not collected: {NotCollectedCollectorCount}" : "")
+            + (NoPermissionCollectorCount > 0 ? $", No permission: {NoPermissionCollectorCount}" : "");
 
     /// <summary>
     /// The stored collection_time is naive UTC; the viewer shows it in the viewer machine's local time
@@ -1238,10 +1338,10 @@ public sealed class ServerSummaryItem
             : null;
 
     /// <summary>Blocking band (#3539 A3) — a 60 s block Critical whatever the rate; else blocking events per
-    /// hour over the window against the shared tiers (20/hr Critical, 5/hr Warning); a 10 s block Warning;
-    /// no source Unknown.</summary>
+    /// hour over the window against the store's tiers (#6927, 20/hr Critical, 5/hr Warning by default); a 10 s block
+    /// Warning by default; no source Unknown.</summary>
     public HealthSeverity BlockingSeverity =>
-        ServerHealthClassifier.BlockingSeverity(BlockingCountForBand, MaxBlockedSeconds, BlockingWindow);
+        ServerHealthClassifier.BlockingSeverity(BlockingCountForBand, MaxBlockedSeconds, BlockingWindow, BlockingBandThresholds);
 
     /// <summary>
     /// The window <see cref="DeadlockCount"/> and <see cref="BlockingCount"/> cover (#3368) — the
@@ -1258,6 +1358,10 @@ public sealed class ServerSummaryItem
     /// read from <c>config_alert_settings</c>, so this card and the service's fleet card cannot disagree
     /// about which numbers are in force.</summary>
     public DeadlockRateThresholds? DeadlockRateThresholds { get; set; }
+
+    /// <summary>The store's blocking-band tiers (#6927), or null to band on today's constants, set by the read from
+    /// <c>config_alert_settings</c> so this card and the service's fleet card agree.</summary>
+    public BlockingBandThresholds? BlockingBandThresholds { get; set; }
 
     /// <summary>Deadlocks per HOUR over <see cref="DeadlockWindow"/> — what the band evaluates (#3368), or
     /// null when the window is too short to normalise. Rendered beside the count so the dot's reason is
@@ -1334,6 +1438,7 @@ public sealed class ServerSummaryItem
            contradicting itself, which is the shape #3281 fixed on the CPU arm. */
         DeadlockWindow = DeadlockWindow,
         DeadlockRateThresholds = DeadlockRateThresholds,
+        BlockingBandThresholds = BlockingBandThresholds,
         TotalThreads = TotalThreads,
         AvailableThreads = AvailableThreads,
         ThreadsWaitingForCpu = ThreadsWaitingForCpu,
@@ -1469,3 +1574,6 @@ public sealed class ServerTagPill
 
     public System.Windows.Media.Brush TextBrush => TagColorBrushes.PillText;
 }
+
+/// <summary>The identity columns at a bar on one server, as the Overview card carries them (#6875): the worst band and how many columns are at warning or critical.</summary>
+public sealed record IdentityCapacityCard(string WorstBand, int ColumnsAtBar);

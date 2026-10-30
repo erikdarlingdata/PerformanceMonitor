@@ -6,7 +6,6 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
-using System;
 using System.Collections.Generic;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
@@ -31,12 +30,12 @@ public sealed class DarlingMcpAddServersPolicy
     /// connection whose server identity is not verified.</summary>
     internal const string UnverifiedWindowsAuthSetting = "mcp.allowWindowsAuthOverUnverifiedTls";
 
-    private readonly bool _allowWindowsAuthOverUnverifiedTls;
+    private readonly DarlingUnverifiedWindowsAuthScreen _screen;
 
     /// <summary>Builds the policy from <c>mcp.allowWindowsAuthOverUnverifiedTls</c>.</summary>
     internal DarlingMcpAddServersPolicy(bool allowWindowsAuthOverUnverifiedTls)
     {
-        _allowWindowsAuthOverUnverifiedTls = allowWindowsAuthOverUnverifiedTls;
+        _screen = new DarlingUnverifiedWindowsAuthScreen(allowWindowsAuthOverUnverifiedTls, UnverifiedWindowsAuthSetting);
     }
 
     /// <summary>The policy of a host whose <c>darling.json</c> says nothing: every setting off.</summary>
@@ -51,35 +50,10 @@ public sealed class DarlingMcpAddServersPolicy
     /// that is not SQL, service principal or managed identity. "Not verified" is <c>TrustServerCertificate</c>, or
     /// an <c>EncryptMode</c> of Optional, the only mode the connector does not map to Mandatory or Strict.</para>
     /// </summary>
-    internal string? Refusal(MonitoredServer server)
-    {
-        if (_allowWindowsAuthOverUnverifiedTls || server.UsesSqlAuth || server.UsesEntra)
-        {
-            return null;
-        }
+    internal string? Refusal(MonitoredServer server) => _screen.Refusal(server);
 
-        var unverified = new List<string>(2);
-        if (server.TrustServerCertificate)
-        {
-            unverified.Add("trust_server_certificate is true");
-        }
-
-        if (string.Equals(server.EncryptMode?.Trim(), "Optional", StringComparison.OrdinalIgnoreCase))
-        {
-            unverified.Add("encrypt_mode is Optional");
-        }
-
-        if (unverified.Count == 0)
-        {
-            return null;
-        }
-
-        return "Not added: Windows authentication presents this service's own computer account to the host you " +
-               $"named, and this entry ({string.Join(" and ", unverified)}) would not confirm that the host is the " +
-               "server you meant. Use auth \"SQL\" with a login instead, or leave trust_server_certificate false and " +
-               "set encrypt_mode to \"Mandatory\" or \"Strict\". An operator can allow this combination by setting " +
-               $"{UnverifiedWindowsAuthSetting} to true in darling.json and restarting the service.";
-    }
+    /// <summary>The same rule as an object of its own, for the web routes to run (they take the rule, not the policy).</summary>
+    internal DarlingUnverifiedWindowsAuthScreen WindowsAuthScreen => _screen;
 
     /// <summary>
     /// Moves every entry <paramref name="policy"/> refuses out of <paramref name="entries"/> and into
@@ -92,26 +66,6 @@ public sealed class DarlingMcpAddServersPolicy
         List<DarlingMcpServerAdminTools.ParsedServerEntry> entries,
         List<DarlingMcpServerAdminTools.ServerResult> results)
     {
-        if (policy is null)
-        {
-            return entries;
-        }
-
-        var allowed = new List<DarlingMcpServerAdminTools.ParsedServerEntry>(entries.Count);
-        foreach (var entry in entries)
-        {
-            var refusal = policy.Refusal(entry.ProbeConfig);
-            if (refusal is null)
-            {
-                allowed.Add(entry);
-            }
-            else
-            {
-                results.Add(new DarlingMcpServerAdminTools.ServerResult(
-                    entry.Order, entry.DisplayName, DarlingMcpServerAdminTools.AddStatus.Invalid, refusal));
-            }
-        }
-
-        return allowed;
+        return DarlingUnverifiedWindowsAuthScreen.Screen(policy?.WindowsAuthScreen, entries, results);
     }
 }

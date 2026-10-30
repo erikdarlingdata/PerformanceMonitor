@@ -29,6 +29,17 @@ namespace PerformanceMonitor.Collectors;
 /// </summary>
 public static class DatabaseScopeFilter
 {
+    /// <summary>
+    /// The vendor-controlled database names (#1565, #6889): Amazon RDS's admin database and Google Cloud SQL's. Every login can
+    /// enter <c>rdsadmin</c> on RDS, so a per-database list that does not screen it collects Amazon's own database (Query Store
+    /// READ_WRITE, its scoped configurations, its user tables). One definition for every default screen: the three Query Store
+    /// lists and the five lists that carry <see cref="VendorControlledDatabaseScreen"/>.
+    /// </summary>
+    public const string VendorControlledDatabaseNames = "N'rdsadmin', N'gcloud_cloudsqladmin'";
+
+    /// <summary>The screen for a list that keeps its own system-database choice (tempdb, master, msdb) but leaves out the vendor names.</summary>
+    public const string VendorControlledDatabaseScreen = "AND   d.name NOT IN (" + VendorControlledDatabaseNames + ")";
+
     /// <param name="scopeDatabaseNames">The resolved allow-list; null/empty = unscoped (no clause).</param>
     /// <param name="columnExpression">SQL column to filter, e.g. "d.name".</param>
     public static (string Clause, List<CollectorParameter> Parameters) Build(

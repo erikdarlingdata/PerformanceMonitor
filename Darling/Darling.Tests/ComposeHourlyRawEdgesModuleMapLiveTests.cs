@@ -411,7 +411,7 @@ public sealed class ComposeHourlyRawEdgesModuleMapLiveTests
     /// <summary>Runs the panel at the store's anchor. By default the window is the explicit pair; with
     /// <paramref name="relativeWindow"/> the body carries <c>hours = 24</c> instead, and the runner computes the same window
     /// itself (end = the anchor, start = 24 h before it). A scope puts the server name in the body's <c>server</c> field.</summary>
-    private static async Task<DarlingWebEndpoints.ComposeRunOutcome> RunAsync(Store store, string panelJson, string? scope = null, bool relativeWindow = false)
+    private static async Task<ComposeRunOutcome> RunAsync(Store store, string panelJson, string? scope = null, bool relativeWindow = false)
     {
         var body = new JsonObject { ["panel"] = JsonNode.Parse(panelJson) };
         if (relativeWindow)

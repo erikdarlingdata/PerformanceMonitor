@@ -127,7 +127,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,'Regular',$8,$9,$9,$10,$11,5000,7000,1,FALSE,0)",
 
     private static async Task<ForcedPlanFact> ForceAsync(Rig rig, string db, long plan, CancellationToken ct)
     {
-        var read = await DarlingForcedPlanStateReader.ReadAsync(rig.Postgres, ServerId, DatabaseFilter.One(db), null, T0.AddHours(-1), AsOf, null, 30, ct);
+        var read = await DarlingForcedPlanStateReader.ReadAsync(rig.Postgres, ServerId, DatabaseFilter.One(db), null, T0.AddHours(-1), AsOf, null, 30, cancellationToken: ct);
         return read.Plans.Single(p => p.PlanId == plan);
     }
 

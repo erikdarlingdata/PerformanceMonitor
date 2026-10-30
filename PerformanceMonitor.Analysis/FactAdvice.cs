@@ -308,8 +308,8 @@ public static class FactAdvice
             // before/after compare frozen on the fact — states the setting, old → new, when it was first
             // observed, and which metrics moved beyond their band (or that none did).
             ConfigChangeAttribution.FactKey => ComposeConfigChanged(factsByKey),
-            // Anomaly facts: state the observed value, how many σ above the hour-of-week baseline, and
-            // the baseline itself — "X is Nσ above its M baseline for this time of week".
+            // Anomaly facts: state the observed value, how many times its usual variation above the hour-of-week normal level, and
+            // the baseline itself — "X is N times its usual variation above its normal level for this time of week".
             "ANOMALY_CPU_SPIKE" => ComposeAnomaly(factsByKey, "ANOMALY_CPU_SPIKE", "peak_cpu", "SQL CPU", Pct, "A brief CPU burst well above what this hour-of-week normally sees.", "avg_cpu_in_window"),
             "ANOMALY_READ_LATENCY" => ComposeAnomaly(factsByKey, "ANOMALY_READ_LATENCY", "current_latency_ms", "Read latency", Ms, "Storage reads ran slower than this hour-of-week normally does.", "avg_latency_ms"),
             "ANOMALY_WRITE_LATENCY" => ComposeAnomaly(factsByKey, "ANOMALY_WRITE_LATENCY", "current_latency_ms", "Write latency", Ms, "Storage writes ran slower than this hour-of-week normally does.", "avg_latency_ms"),
@@ -901,9 +901,7 @@ public static class FactAdvice
                     var sigma = fact.Metadata.TryGetValue(ConfigChangeAttribution.DeltaSigmaKey(key), out var ds) ? ds : (double?)null;
                     var rel = fact.Metadata.TryGetValue(ConfigChangeAttribution.RelativeMoveKey(key), out var rm) ? rm : (double?)null;
                     var magnitude = sigma is not null
-                        ? (Math.Abs(sigma.Value) >= AnomalyThresholds.SigmaDisplayCap - 1e-9
-                            ? $"{(sigma.Value >= 0 ? "at least +" : "at least −")}{AnomalyThresholds.SigmaDisplayCap:0.#}σ"
-                            : $"{(sigma.Value >= 0 ? "+" : string.Empty)}{sigma.Value:0.#}σ")
+                        ? DeviationFromNormalText(sigma.Value)
                         : rel is not null && rel.Value < 1.0
                             ? $"{(worse ? "+" : "−")}{rel.Value * 100:0}%"
                             : worse ? "appeared" : "resolved";
@@ -1109,6 +1107,14 @@ public static class FactAdvice
         var sleeping = FactMeta(facts, "BLOCKING_CHAIN", "worst_apex_sleeping") is > 0;
         var maxWait = FactMeta(facts, "BLOCKING_CHAIN", "worst_chain_max_wait_ms");
         var totalChains = FactMeta(facts, "BLOCKING_CHAIN", "total_reconstructed_chains");
+        // Three states: open (1), ended (0), unknown (key absent: the collector runs too seldom to judge).
+        var openMeta = FactMeta(facts, "BLOCKING_CHAIN", "worst_chain_open_at_end");
+        var open = openMeta is > 0;
+        var unknown = openMeta is null;
+        // An anchored (as_of) window ends in the past: a chain open at ITS end says nothing about locks held now.
+        var anchored = FactMeta(facts, "BLOCKING_CHAIN", "worst_chain_window_anchored") is > 0;
+        var headSpid = FactMeta(facts, "BLOCKING_CHAIN", "worst_apex_spid");
+        var tranClock = FactMeta(facts, "BLOCKING_CHAIN", "worst_apex_tran_started_clock_s");
 
         var inv = new StringBuilder($"The worst blocking chain this window was {Plural(depth.Value, "session")} deep");
         if (victims is > 0)
@@ -1120,9 +1126,28 @@ public static class FactAdvice
             inv.Append($" The longest waiter sat for {Duration(maxWait.Value)}.");
         if (totalChains is > 1)
             inv.Append($" {Plural(totalChains.Value, "separate chain")} formed across the window.");
+        if (open)
+        {
+            // The chain was still being sampled when the window ended: say who is at the head, how long the
+            // longest waiter has waited, and (when the report carried it) since when the head's transaction has
+            // been open, on the monitored server's own clock.
+            inv.Append(" It was still blocking at the end of the window");
+            if (headSpid is > 0)
+                inv.Append($": session {headSpid.Value:0} was at the head");
+            if (maxWait is > 0)
+                inv.Append($", and its longest waiter had been waiting {Duration(maxWait.Value)}");
+            if (tranClock is double clock)
+                inv.Append($", with the head's transaction open since {DateTime.UnixEpoch.AddSeconds(clock):yyyy-MM-dd HH:mm:ss} on the monitored server's clock");
+            inv.Append('.');
+        }
 
-        var rem = new StringBuilder(
-            "This reports a window that has already passed, so the chain cleared long ago — a KILL now buys nothing; aim at the recurrence. ");
+        var rem = new StringBuilder(unknown
+            ? "The blocking collector runs too seldom to tell whether this chain is still open, so check the server's current blocking before acting on it, and aim at the recurrence. "
+            : open && anchored
+            ? "This chain was still blocking at the end of a window that has already passed, so the session may well have ended since — check the server's current blocking before acting on it, and aim at the recurrence. "
+            : open
+            ? "This chain was still blocking at the end of the window, so it may be holding locks right now — look at the head session first, and if it is not doing work you can wait for, ending it (KILL) releases everyone queued behind it, at the cost of rolling back its open transaction. Then aim at the recurrence. "
+            : "This reports a window that has already passed, so the chain cleared long ago — a KILL now buys nothing; aim at the recurrence. ");
         rem.Append(sleeping
             ? "Because the head was sleeping, the fix is the code path that opens a BEGIN TRAN and never reaches COMMIT/ROLLBACK on an error or client-timeout path — and SET XACT_ABORT ON so an aborted batch rolls back automatically."
             : "Because the head was active, the fix is that one slow operation — find it and cut how long it holds locks: shorten the transaction and index it so it touches fewer rows.");
@@ -1133,7 +1158,9 @@ public static class FactAdvice
 
         return fallback with
         {
-            Headline = $"A blocking chain {depth.Value:N0} deep formed — the session at the head held a resource the rest queued behind",
+            Headline = open
+                ? $"A blocking chain {depth.Value:N0} deep was still blocking at the end of the window — the session at the head held a resource the rest queued behind"
+                : $"A blocking chain {depth.Value:N0} deep formed — the session at the head held a resource the rest queued behind",
             Investigation = inv.ToString(),
             Remediation = rem.ToString()
         };
@@ -1637,6 +1664,7 @@ public static class FactAdvice
         if (distinct is > 0)
             inv.Append($", across {Plural(distinct.Value, "distinct query")}");
         inv.Append(". A spill means a query's memory grant was too small for its sort or hash operation, so the overflow went to tempdb — disk-speed work in place of memory-speed.");
+        inv.Append(NamedQueriesSentence(facts, "QUERY_SPILLS", "Most spilled", o => SpilledPagesText(o.Value)));
 
         var rem =
             "Spills are a symptom of under-estimated memory grants, almost always from stale or skewed " +
@@ -1652,6 +1680,16 @@ public static class FactAdvice
             Investigation = inv.ToString(),
             Remediation = rem
         };
+    }
+
+    /// <summary>#6640: " Label: name (figure), name (figure)." for the queries a fact ranks, subject first, or empty when the
+    /// fact ranked none. Unlike <see cref="NameTheRestList"/> it includes entry [0], because these cards have no other sentence
+    /// that names the subject.</summary>
+    private static string NamedQueriesSentence(IReadOnlyDictionary<string, Fact> facts, string key, string label, Func<RankedObject, string> figure)
+    {
+        if (!facts.TryGetValue(key, out var f) || f.Ranked.Count == 0)
+            return string.Empty;
+        return $" {label}: " + string.Join(", ", f.Ranked.Select(o => $"{o.ObjectName} ({figure(o)})")) + ".";
     }
 
     /// <summary>"1,234 pages (9.6 MB)" for a <c>total_spills</c> value: the DMV column counts 8 KB pages, so the
@@ -1712,6 +1750,7 @@ public static class FactAdvice
                 : grantDiv
                     ? " Memory grants diverged sharply across executions — a single plan's grant being wrong for the other parameter values."
                     : " Some executions spilled and others did not — a single plan's grant being wrong for the other parameter values.");
+        inv.Append(NamedQueriesSentence(facts, "PARAMETER_SENSITIVITY", "Worst plans (database/query_hash/query_plan_hash)", o => $"{o.Value:0.#}×"));
 
         var rem =
             "Do NOT force one of these plans — that locks in the wrong shape for the other parameter values. " +
@@ -1915,7 +1954,7 @@ public static class FactAdvice
 
     /// <summary>
     /// Z-score anomaly composed: states the observed value, the σ-deviation above the hour-of-week
-    /// baseline, and the baseline itself — "X reached V, Nσ above its M baseline for this hour-of-week".
+    /// baseline, and the baseline itself — "X reached V, N times its usual variation above its M normal level for this hour-of-week".
     /// <paramref name="observedKey"/> is the metadata key holding the observed peak/current value;
     /// <paramref name="fmt"/> renders both it and the baseline in the metric's unit. Falls back to the
     /// static block when the deviation/baseline metadata is absent.
@@ -1956,8 +1995,8 @@ public static class FactAdvice
                     $"{noun} reached {fmt(observed.Value)} this window. This server's baseline for this hour-of-week is not " +
                     $"thin — it is a measured ZERO: {restsOn}, not one of them above zero. {meaning} That makes this an " +
                     "extremity rather than a deviation: the quantity went from never-happens to this, and there is no " +
-                    "dispersion to divide by precisely because there was nothing to divide. Beyond any σ — no deviation " +
-                    "figure is printed, because none would be honest against a history of zeros. Check whether it lines up " +
+                    "dispersion to divide by precisely because there was nothing to divide. That is far outside its normal range, so no " +
+                    "deviation figure is printed: none would be honest against a history of zeros. Check whether it lines up " +
                     "with a workload change, a deploy, or a one-off job before treating it as chronic.",
                 Remediation =
                     "This is the first time this hour has seen it at all, which makes the change itself the lead: find what " +
@@ -1972,14 +2011,13 @@ public static class FactAdvice
            misstates the arithmetic. A sigma at SigmaDisplayCap is a clamp, not a measurement. */
         var robust = AnomalyUsedRobustFrame(facts, key, out var median);
         var centre = robust ? median : mean.Value;
-        var centreWord = robust ? "baseline median" : "baseline";
-        var inv = new StringBuilder($"{noun} reached {fmt(observed.Value)} this window, {SigmaText(sigma.Value, robust)} above its {fmt(centre)} {centreWord} for this hour-of-week");
+        var inv = new StringBuilder($"{noun} reached {fmt(observed.Value)} this window, {SigmaText(sigma.Value)} above its {fmt(centre)} normal level for this hour-of-week");
         if (samples is > 0)
             inv.Append($" (over {samples.Value:N0} baseline samples)");
         var windowMean = windowMeanKey is null ? null : FactMeta(facts, key, windowMeanKey);
         var meanSigma = FactMeta(facts, key, "mean_deviation_sigma");
         if (windowMean is not null && meanSigma is not null)
-            inv.Append($"; the window's mean of {fmt(windowMean.Value)} sat {SigmaText(meanSigma.Value, robust)} above it (the detector fires only when the mean clears its bar as well, so this is the window running high, not one hot sample)");
+            inv.Append($"; the window's mean of {fmt(windowMean.Value)} sat {SigmaText(meanSigma.Value)} above it (the detector fires only when the mean clears its bar as well, so this is the window running high, not one hot sample)");
         inv.Append($". {meaning} This is a deviation from normal for this time of day and week, not necessarily a sustained problem — check whether it lines up with a workload change, a deploy, or a one-off job before treating it as chronic.");
 
         var rem =
@@ -1989,7 +2027,7 @@ public static class FactAdvice
 
         return fallback with
         {
-            Headline = $"{noun} spiked to {fmt(observed.Value)} — {SigmaText(sigma.Value, robust)} above its {centreWord} for this time of week",
+            Headline = $"{noun} spiked to {fmt(observed.Value)} — {SigmaText(sigma.Value)} above its normal level for this time of week",
             Investigation = inv.ToString(),
             Remediation = rem
         };
@@ -2010,11 +2048,21 @@ public static class FactAdvice
     /// <summary>A stored deviation as words (#5633 item 8). <c>AnomalyGate</c> clamps the stored sigma at
     /// <see cref="AnomalyThresholds.SigmaDisplayCap"/>, so a value AT the cap is a floor ("at least 25 sigma"), not a
     /// measurement. <paramref name="robust"/> names the MAD-derived frame.</summary>
-    internal static string SigmaText(double sigma, bool robust)
+    internal static string SigmaText(double sigma)
     {
         if (sigma >= AnomalyThresholds.SigmaDisplayCap - 1e-9)
-            return $"at least {AnomalyThresholds.SigmaDisplayCap:0.#}{(robust ? " robust σ" : "σ")}";
-        return robust ? $"{sigma:0.#} robust σ" : $"{sigma:0.#}σ";
+            return $"at least {AnomalyThresholds.SigmaDisplayCap:0.#} times its usual variation";
+        return $"{sigma:0.#} times its usual variation";
+    }
+
+    /// <summary>#6925: a signed stored deviation in plain words, for a line that has no centre to name ("6.1 times its
+    /// usual variation above normal"). Same cap rule as <see cref="SigmaText"/>.</summary>
+    internal static string DeviationFromNormalText(double sigma)
+    {
+        var amount = Math.Abs(sigma) >= AnomalyThresholds.SigmaDisplayCap - 1e-9
+            ? $"at least {AnomalyThresholds.SigmaDisplayCap:0.#}"
+            : $"{Math.Abs(sigma):0.#}";
+        return $"{amount} times its usual variation {(sigma >= 0 ? "above" : "below")} normal";
     }
 
     /// <summary>
@@ -2183,7 +2231,7 @@ public static class FactAdvice
             var meanClause = windowMean is null
                 ? ""
                 : meanModifiedZ > 0
-                    ? $"; the window's mean of {windowMean.Value:0.#} ms/sec sat {SigmaText(meanModifiedZ, true)} above the baseline median " +
+                    ? $"; the window's mean of {windowMean.Value:0.#} ms/sec sat {SigmaText(meanModifiedZ)} above its normal level " +
                       "(the detector fires only when the mean clears its bar as well, so this is the profile running heavy across the window, not one hot collection)"
                     : mean > 0
                         ? $"; the window's mean of {windowMean.Value:0.#} ms/sec was roughly {windowMean.Value / mean:0.#}× that baseline " +
@@ -3309,7 +3357,7 @@ public static class FactAdvice
             Headline:
                 "CPU is anomalously elevated compared to its baseline for this time bucket",
             Investigation:
-                "The anomaly detector compares this window's CPU to the same hour-of-week historical baseline over 30 days; 2σ trips the warning, 4σ trips critical. The baseline context — deviation, ratio, baseline mean, sample count — is in the finding. The exact peak timestamp and the sessions active around it are attached. Open the CPU tab and zoom to that peak to see the SQL vs. other-process split. Common drivers: a recently-cached bad plan (check whether PLAN_REGRESSION also fired), a one-off workload (marketing campaign, backfill job), or another process on the host.",
+                "The anomaly detector compares this window's CPU to the same hour-of-week historical baseline over 30 days; a deviation of 2 times its usual variation trips the warning, and 4 times trips critical. The baseline context — deviation, ratio, baseline mean, sample count — is in the finding. The exact peak timestamp and the sessions active around it are attached. Open the CPU tab and zoom to that peak to see the SQL vs. other-process split. Common drivers: a recently-cached bad plan (check whether PLAN_REGRESSION also fired), a one-off workload (marketing campaign, backfill job), or another process on the host.",
             Remediation:
                 "Confirm one-time vs. sustained. Transient (a deploy, an ad-hoc report) needs no action beyond noting it — the anomaly framing means 'unusual right now', not 'automatically bad'. If the elevation persists, the threshold-based CPU_SQL_PERCENT finding will fire on the next analysis window and the standard CPU-pressure playbook applies: tune the top CPU queries, guard parallelism, and force any regressed plans.");
 
@@ -3349,7 +3397,7 @@ public static class FactAdvice
             Headline:
                 "Batch requests per second are anomalously elevated — the server is fielding far more queries than usual",
             Investigation:
-                "Batch rate is the rawest measure of workload, so a sigma spike means traffic surged for this hour-of-week bucket. Open the Perfmon tab and add Batch Requests/sec for the trend. When CPU also spiked, the sessions active at the peak are attached; the high-frequency queries, by execution count, are the ones to rank. Common drivers: an application loop that broke (chatty retries, polling that should be event-driven), a new caller hitting the database directly, or a legitimate burst (marketing event, batch import).",
+                "Batch rate is the rawest measure of workload, so a spike well beyond its usual variation means traffic surged for this hour-of-week bucket. Open the Perfmon tab and add Batch Requests/sec for the trend. When CPU also spiked, the sessions active at the peak are attached; the high-frequency queries, by execution count, are the ones to rank. Common drivers: an application loop that broke (chatty retries, polling that should be event-driven), a new caller hitting the database directly, or a legitimate burst (marketing event, batch import).",
             Remediation:
                 "Confirm intentional vs. broken. Misbehaving application — uncached lookups, retry storms, polling instead of subscribing — is fixed at the source; no amount of SQL tuning will help a server hit with 100,000 unnecessary requests per second. Legitimate burst that's the new normal: scale the workload through app-layer caching, connection pooling, or splitting reads to a replica. If the new load level persists going forward, it'll appear as a new BAD_ACTOR or CPU finding on subsequent analysis windows and the standard playbooks apply.");
 

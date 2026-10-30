@@ -753,7 +753,6 @@ public sealed class CSharpSourceWalkerTests
             "DarlingPostgresAlertReadAdapter.cs",
             "PgAlertStateStore.cs",
             "PgMuteRuleStore.cs",
-            "PgAlertHistoryStore.cs",
             "DarlingSelfAlertEvaluator.cs",
         }.Select(f => Path.Combine(service, f)).Where(File.Exists));
 

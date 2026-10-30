@@ -11,6 +11,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -156,7 +157,12 @@ public partial class AgentChangesTab : UserControl
         {
             /* The write waits for an agent change in progress to finish, up to a minute (#5632), so say so while it does. */
             Status?.Invoke("Waiting for an agent change in progress to finish, if there is one...");
-            await _dataService.SetAgentActionsEnabledAsync(turnOn, _login);
+            if (!await _dataService.SetAgentActionsEnabledAsync(turnOn, _login))
+            {
+                Status?.Invoke(AgentChangeUndo.SwitchStoreNotSetUpMessage);
+                return;
+            }
+
             Status?.Invoke(turnOn ? "Agent changes are on." : "Agent changes are off: the gate refuses every agent change as actions_off.");
             await LoadAsync();
         }

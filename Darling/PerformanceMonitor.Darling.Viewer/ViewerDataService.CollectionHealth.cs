@@ -160,7 +160,13 @@ public sealed partial class ViewerDataService
                 MAX(CASE WHEN status IS NULL
                           OR status NOT IN ({CollectorRuntimePrecondition.NamedSkipStatusSqlList})
                          THEN collection_time END) AS last_non_skip_time,
-                MAX(CASE WHEN rows_collected > 0 THEN collection_time END) AS last_productive_time
+                MAX(CASE WHEN rows_collected > 0 THEN collection_time END) AS last_productive_time,
+                -- #6828: the newest run that was NOT a zero-row SUCCESS, the fleet read's own aggregate, so this grid bands a
+                -- collector that stopped storing rows the way the Overview card and get_collection_health do. APPENDED.
+                MAX(CASE WHEN NOT (status = 'SUCCESS'
+                                   AND COALESCE(rows_collected, 0) = 0
+                                   AND NOT {EnumeratedCollectorDriver.AbandonedByNotePredicateSql})
+                         THEN collection_time END) AS last_zero_row_streak_break_time
             FROM v_collection_log
             WHERE server_id = $1
             AND   collection_time >= $2
@@ -214,7 +220,9 @@ public sealed partial class ViewerDataService
             -- #5646: how many of the NEWEST runs in a row succeeded, counted to 3 and no further. Newest first on
             -- the full timestamp, then log_id DESC (unique), the Darling service read's own statement.
             -- APPENDED, read positionally by the one shared mapper.
-            COALESCE(recent.trailing_success_runs, 0) AS trailing_success_runs
+            COALESCE(recent.trailing_success_runs, 0) AS trailing_success_runs,
+            -- #6828: see the aggregate. APPENDED, read positionally by the one shared mapper.
+            h.last_zero_row_streak_break_time
         FROM health h
         -- #4955: the keyed lookups. Each reads ONE collector's rows through
         -- idx_collection_log_watermark (server_id, collector_name, collection_time DESC), at an instant the
@@ -500,6 +508,72 @@ public sealed partial class ViewerDataService
     }
 
     /// <summary>
+    /// #6384: the Sweep Pressure and Heaviest Collectors panels' data, the same trailing 7 days <c>get_collection_health</c> reads on the web.
+    /// It runs the web's own statement (<see cref="CollectionHealthStatements.ComposedSql"/>, which the service's reader points at too) and
+    /// feeds the average, p95 and max duration it returns (null when the window holds no collection log row), with each collector's cadence on this server (the schedule override, else the
+    /// shipped default, as <see cref="ApplyScheduledFrequencies"/> resolves it), to <see cref="SweepPressureReport"/>, the arithmetic the web's
+    /// tool uses. A failure to read the schedule overrides costs the panels nothing but the overrides (the shipped cadences are used).
+    /// </summary>
+    /// <param name="engineGated">#6912: the collectors this server's engine does not run (<see cref="FleetEngineGatedCollectors.For"/>). Their
+    /// pre-gate runs are left out of both panels, as <c>get_collection_health</c> computes its figures from the running rows only, so the
+    /// panel and the tool name the same peak collector for the same server. Null leaves every row in.</param>
+    public async Task<SweepPressureReport?> GetSweepPressureAsync(
+        int serverId, IReadOnlySet<string>? engineGated = null, CancellationToken cancellationToken = default)
+    {
+        var scheduleOverrides = await ReadScheduleOverridesForHealthAsync(cancellationToken);
+        var costs = new List<(CollectorHealthRow Row, double Avg, double P95, double Max)>();
+        await using (var command = _dataSource.CreateCommand(CollectionHealthStatements.ComposedSql))
+        {
+            command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+            command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+            command.Parameters.Add(new NpgsqlParameter<DateTime>
+            {
+                TypedValue = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-7), DateTimeKind.Unspecified),
+            });
+
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                /* Ordinals 0, 4, 5 and 6 of the statement: collector_name, avg_duration_ms, max_duration_ms, p95_duration_ms. */
+                costs.Add((
+                    new CollectorHealthRow { CollectorName = reader.GetString(0) },
+                    reader.IsDBNull(4) ? 0 : Convert.ToDouble(reader.GetValue(4), System.Globalization.CultureInfo.InvariantCulture),
+                    reader.IsDBNull(6) ? 0 : Convert.ToDouble(reader.GetValue(6), System.Globalization.CultureInfo.InvariantCulture),
+                    reader.IsDBNull(5) ? 0 : Convert.ToDouble(reader.GetValue(5), System.Globalization.CultureInfo.InvariantCulture)));
+            }
+        }
+
+        /* No collection log rows in the window: no report, as the web's get_collection_health answers "unavailable" for the same server. */
+        if (costs.Count == 0)
+        {
+            return null;
+        }
+
+        return BuildSweepPressure(costs, serverId, scheduleOverrides, engineGated);
+    }
+
+    /// <summary>
+    /// The pure half of <see cref="GetSweepPressureAsync"/>: stamps each collector's cadence, leaves the <paramref name="engineGated"/> collectors
+    /// out (#6912) and builds the report from the rest. Pure, so a test drives it without a store.
+    /// </summary>
+    internal static SweepPressureReport BuildSweepPressure(
+        List<(CollectorHealthRow Row, double Avg, double P95, double Max)> costs, int serverId,
+        IReadOnlyList<CollectorScheduleRow> scheduleOverrides, IReadOnlySet<string>? engineGated)
+    {
+        var running = engineGated is null || engineGated.Count == 0
+            ? costs
+            : costs.Where(c => !engineGated.Contains(c.Row.CollectorName)).ToList();
+
+        /* A name the catalog does not know is left unstamped (frequency 0), which the ranking and the roll-up both skip: the service's rule. */
+        ApplyScheduledFrequencies(
+            running.Select(c => c.Row).Where(r => CollectorScheduleDefaults.All.ContainsKey(r.CollectorName)), serverId, scheduleOverrides);
+
+        /* The statement's p95 is always the upper bound of a duration bucket (P95Bucketed), as the service's reader marks it. */
+        return SweepPressureReport.Build(running.Select(c =>
+            new SweepCollectorCost(c.Row.CollectorName, c.Avg, c.P95, P95Bucketed: true, c.Max, c.Row.FrequencyMinutes)));
+    }
+
+    /// <summary>
     /// #6254: the newest Query Store run's <c>read_source</c> on this server in the trailing 7 days. The newest run, not the newest run
     /// that had one, so a server whose Query Store replica setting was turned off stops showing a source as soon as its runs stop writing
     /// one. One keyed index walk that stops at the first row.
@@ -694,6 +768,13 @@ LIMIT 1";
            rows are stamped with the interval its collectors are scheduled at on THAT server, so the Overview cards
            and the status bar band them as the server's own Collection Health tab does. */
         var scheduleOverrides = await ReadScheduleOverridesForHealthAsync(CancellationToken.None);
+        /* #6828: the servers that report Always On off, read before the health statement's reader opens (one connection at a time). The
+           rows of a server in it stamp the Always On collectors as not collected, as get_collection_health lists them, so the card and the
+           status bar do not count them as healthy. */
+        var alwaysOnOffServers = await FleetAlwaysOnOff.ReadAsync(_dataSource, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, CancellationToken.None);
+        /* #6912: the collectors each server's engine does not run, read at the same point for the same reason. Their older logged runs
+           stay in the window, so the rows are stamped as not collected and the card and the status bar do not count them as failing. */
+        var engineGatedServers = await FleetEngineGatedCollectors.ReadAsync(_dataSource, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, CancellationToken.None);
         var now = DateTime.UtcNow;
         var windowStart = DateTime.SpecifyKind(now.AddDays(-7), DateTimeKind.Unspecified);
         var headEnd = CollectionHealthRollupSupport.CeilingHour(windowStart);
@@ -731,7 +812,10 @@ LIMIT 1";
                     byServer[serverId] = rows;
                 }
 
-                rows.Add(MapFleetByServerRow(reader));
+                var row = MapFleetByServerRow(reader);
+                row.ServerAlwaysOnOff = alwaysOnOffServers.Contains(serverId);
+                row.EngineGated = engineGatedServers.TryGetValue(serverId, out var gatedNames) && gatedNames.Contains(row.CollectorName);
+                rows.Add(row);
             }
         }
 
@@ -814,11 +898,13 @@ LIMIT 1";
            the Overview card would band a collector that lost half its databases HEALTHY beside its own tab's
            WARNING. */
         LatestRunNote = reader.IsDBNull(13) ? null : reader.GetString(13),
+        /* #6828: the aggregate already selects it (ordinal 12). Left unmapped, the card banded a collector that stopped storing rows HEALTHY. */
+        LastZeroRowStreakBreakTime = reader.IsDBNull(12) ? null : reader.GetDateTime(12),
     };
 
-    /// <summary>Maps one row of the 20-column per-server health projection (<see cref="CollectionHealthSql"/>, ordinals 0-19)
+    /// <summary>Maps one row of the 21-column per-server health projection (<see cref="CollectionHealthSql"/>, ordinals 0-20)
     /// to a <see cref="CollectorHealthRow"/>. The count is load-bearing: the projection is read POSITIONALLY
-    /// through this one mapper, so it must match it exactly (20 since #5646 appended trailing_success_runs at
+    /// through this one mapper, so it must match it exactly (21 since #6828 appended last_zero_row_streak_break_time at ordinal 20, 20 since #5646 appended trailing_success_runs at
     /// ordinal 19; #4748's latest_run_note sits at ordinal 18; #3819's last_non_skip_time and last_productive_time sit at ordinals 16-17,
     /// #3240's extension_missing_count at 15 and #2804's abandoned_count at 14).</summary>
     private static CollectorHealthRow MapHealthRow(NpgsqlDataReader reader) => new()
@@ -852,6 +938,8 @@ LIMIT 1";
         LatestRunNote = reader.IsDBNull(18) ? null : reader.GetString(18),
         /* Appended (#5646): the newest runs' success streak, the band's recovery input. */
         TrailingSuccessRuns = reader.IsDBNull(19) ? 0 : Convert.ToInt64(reader.GetValue(19)),
+        /* Appended (#6828): the quiet streak's break, so the grid bands a collector that stopped storing rows as the card does. */
+        LastZeroRowStreakBreakTime = reader.IsDBNull(20) ? null : reader.GetDateTime(20),
     };
 
     /// <summary>
@@ -1200,6 +1288,48 @@ public class CollectorHealthRow
     public bool RegressedFromProductive => CollectorHealthClassifier.RegressedFromProductive(
         LastRunTime, LastNonSkipTime, LastProductiveTime);
 
+    /// <summary>
+    /// #6828: the newest run that was NOT a zero-row SUCCESS (<c>last_zero_row_streak_break_time</c>), the instant the current quiet
+    /// streak began after. The input <see cref="TrailingZeroRowSuccessRuns"/> is estimated from, as the service's fleet card does.
+    /// </summary>
+    public DateTime? LastZeroRowStreakBreakTime { get; set; }
+
+    /// <summary>
+    /// #6828: how many runs, counting back from the newest, were SUCCESS with zero rows, as the service's fleet read estimates it
+    /// (<see cref="CollectorHealthClassifier.EstimateTrailingZeroRowSuccessRuns"/>) from the same aggregate and the cadence this row is
+    /// banded against. Computed where it is read, so it always follows the cadence <see cref="ViewerDataService.ApplyScheduledFrequencies"/> stamped.
+    /// </summary>
+    public long TrailingZeroRowSuccessRuns => CollectorHealthClassifier.EstimateTrailingZeroRowSuccessRuns(
+        LastRunTime, LastZeroRowStreakBreakTime, TotalRuns, FrequencyMinutes);
+
+    /// <summary>
+    /// #6828: whether this collector WAS producing rows and now records SUCCESS with zero rows every cycle (#3885). Left off this row
+    /// until now, so the Viewer banded HEALTHY a collector that <c>get_collection_health</c> banded WARNING. Event and on-load collectors are
+    /// excluded inside the shared predicate.
+    /// </summary>
+    public bool ProducedThenStopped => CollectorHealthClassifier.ProducedThenStopped(
+        CollectorName, TrailingZeroRowSuccessRuns, LastProductiveTime);
+
+    /// <summary>Whether the server this row was read for reports Always On as off. Stamped by the fleet read, false for a row built outside it.</summary>
+    internal bool ServerAlwaysOnOff { get; set; }
+
+    /// <summary>#6828: an Always On collector, HEALTHY, on a server with Always On off, which <c>get_collection_health</c> lists as not_collected.</summary>
+    internal bool NotCollected => EngineGated || CollectorHealthClassifier.IsNotCollectedWhenAlwaysOnOff(CollectorName, HealthStatus, ServerAlwaysOnOff);
+
+    /// <summary>#6912: this collector does not run on the server's engine, so whatever it logged before the gate existed reads as not collected. Stamped by the fleet read.</summary>
+    internal bool EngineGated { get; set; }
+
+    /// <summary>#6912: the engine's own sentence for a gated collector (<see cref="CollectorEngineCapability.NotCollectedMessage"/>, the one
+    /// <c>get_collection_health</c> lists beside <c>not_collected</c>), shown in the Note column. Null for a collector the engine runs.</summary>
+    internal string? EngineNotCollectedMessage { get; set; }
+
+    /// <summary>#6912: the word the Status column shows. A collector the server's engine does not run reads <c>not_collected</c>, as
+    /// <c>get_collection_health</c> lists it, whatever band the runs it logged before the gate existed left it. Every other row shows its band.</summary>
+    public string DisplayStatus => EngineGated ? EngineNotCollectedStatus : HealthStatus;
+
+    /// <summary>The status word <c>get_collection_health</c> uses for a collector the engine does not run.</summary>
+    internal const string EngineNotCollectedStatus = CollectorRuntimePrecondition.NotCollectedStatusWord;
+
     /// <summary>1s lock-timeout yields (#1805) — deliberate, benign, counted apart from errors.</summary>
     public long YieldCount { get; set; }
 
@@ -1284,7 +1414,7 @@ public class CollectorHealthRow
     /// rule the service's own schedule resolution is built on, so this band, the fleet roll-up's and
     /// get_collection_health's judge a collector against the same interval. A row nothing stamped keeps the
     /// shipped default.</para></summary>
-    private int FrequencyMinutes =>
+    internal int FrequencyMinutes =>
         EffectiveFrequencyMinutes
         ?? (CollectorScheduleDefaults.All.TryGetValue(CollectorName, out var schedule)
             ? CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(schedule.FrequencyMinutes)
@@ -1315,7 +1445,7 @@ public class CollectorHealthRow
         CollectorHealthClassifier.Classify(
             TotalRuns, SuccessCount, ErrorCount, PermissionDeniedCount, ExtensionMissingCount, AbandonedCount,
             HoursSinceLastSuccess, HoursSinceLastRun, FrequencyMinutes, LatestRunNote, TrailingSuccessRuns),
-        RegressedFromProductive);
+        RegressedFromProductive || ProducedThenStopped);
 
     public string AvgDurationFormatted => AvgDurationMs < 1000
         ? $"{AvgDurationMs:F0} ms"
@@ -1341,7 +1471,7 @@ public class CollectorHealthRow
     /// identically. Never feeds <see cref="HealthStatus"/>.
     /// </summary>
     public string NoteFormatted =>
-        CollectorHealthClassifier.FormatCollectionNote(LastNote, NoteCount, TotalRuns, CollectorName, TargetHasUserDatabases, RecoveredNote, ReadSource);
+        EngineGated && EngineNotCollectedMessage is not null ? EngineNotCollectedMessage : CollectorHealthClassifier.FormatCollectionNote(LastNote, NoteCount, TotalRuns, CollectorName, TargetHasUserDatabases, RecoveredNote, ReadSource);
 
     /// <summary>#6254: where the newest Query Store run read its rows from (for example <c>replica 12, primary 2</c>), shown in the Note column.
     /// Null for every collector but Query Store and for every server with the replica setting off. Informational only: it never feeds <see cref="HealthStatus"/>.</summary>

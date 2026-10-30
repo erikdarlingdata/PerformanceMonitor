@@ -122,7 +122,7 @@ public sealed class CustomAlertTagSubtreeLiveTests
         var ct = TestContext.Current.CancellationToken;
         await using var dataSource = await MigrateAndOpenAsync(connectionString, ct);
 
-        var store = new CustomAlertRuleStore(dataSource);
+        var store = new CustomAlertRuleStore(dataSource, StorageCommandDeadlines.McpReadSeconds);
         var prefix = "tsub_" + Guid.NewGuid().ToString("N") + "_";
 
         // Synthetic server ids (never real): the assertions compare exactly these sets.
@@ -188,7 +188,7 @@ public sealed class CustomAlertTagSubtreeLiveTests
         var ct = TestContext.Current.CancellationToken;
         await using var dataSource = await MigrateAndOpenAsync(connectionString, ct);
 
-        var store = new CustomAlertRuleStore(dataSource);
+        var store = new CustomAlertRuleStore(dataSource, StorageCommandDeadlines.McpReadSeconds);
         var prefix = "tsubcyc_" + Guid.NewGuid().ToString("N") + "_";
 
         const int SvrCycle = 980001, SvrSelf = 980002;

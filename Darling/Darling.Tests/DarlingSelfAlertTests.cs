@@ -307,6 +307,17 @@ public sealed class DarlingSelfAlertTests
         /// Purge Over Horizon read-failure count.</summary>
         public AlertReadFailureCounter? ReadFailures { get; set; }
 
+        /// <summary>#6873: the three database protection switches, read live. Default off, the shipped default.</summary>
+        public bool BackupOverdueEnabled { get; set; }
+        public bool LogBackupOverdueEnabled { get; set; }
+        public bool CheckDbOverdueEnabled { get; set; }
+        /// <summary>#6874: the Agent Alert Gaps switch, read live. Default off, the shipped default.</summary>
+        public bool AgentAlertSetupEnabled { get; set; }
+        /// <summary>#6875: the Identity Capacity switch, read live. Default off, the shipped default. The bars default to 70 and 90, and an override
+        /// resolver (wire, server key, database, global) replaces them for a scope.</summary>
+        public bool IdentityCapacityEnabled { get; set; }
+        public Func<string, string, string?, int, int>? ResolveThreshold { get; set; }
+
         public DateTime Now { get; set; } = new(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);
 
         /// <summary>#1681: captures what the evaluator writes to the service log, so the firing/recovery pair
@@ -328,7 +339,13 @@ public sealed class DarlingSelfAlertTests
             retentionHoldWarnRatio: WireRetentionHoldKnobs ? () => RetentionHoldWarnRatio : null,
             retentionHoldCriticalRatio: WireRetentionHoldKnobs ? () => RetentionHoldCriticalRatio : null,
             readFailures: ReadFailures,
-            storeName: StoreName);
+            storeName: StoreName,
+            agentAlertSetupEnabled: () => AgentAlertSetupEnabled,
+            backupOverdueEnabled: () => BackupOverdueEnabled,
+            logBackupOverdueEnabled: () => LogBackupOverdueEnabled,
+            checkDbOverdueEnabled: () => CheckDbOverdueEnabled,
+            identityCapacityEnabled: () => IdentityCapacityEnabled,
+            resolveThreshold: ResolveThreshold);
     }
 
     /* ---------------- #991 Availability Group fixtures ---------------- */
@@ -725,19 +742,20 @@ public sealed class DarlingSelfAlertTests
         var h = new Harness();
         var e = h.Build();
 
-        await e.ApplyCaptureDownAsync(ServerId, Name, new[] { "Blocking", "Deadlock" }, Ct);
+        await e.ApplyCaptureDownAsync(ServerId, Name, new[] { "Blocking", "Deadlock" }, Array.Empty<string>(), Ct);
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal("Capture Down", fired.MetricName);
         Assert.Equal("Blocking and Deadlock", fired.CurrentValue);
         Assert.Equal(AlertSeverityLevel.Critical, fired.Severity);
+        Assert.Contains("The Blocking and Deadlock Extended Events sessions are missing", fired.DetailText, StringComparison.Ordinal);
 
         /* Still down a minute later: a state alert (#5493) sends once per occurrence, no re-fire. */
         h.Now = h.Now.AddMinutes(1);
-        await e.ApplyCaptureDownAsync(ServerId, Name, new[] { "Blocking", "Deadlock" }, Ct);
+        await e.ApplyCaptureDownAsync(ServerId, Name, new[] { "Blocking", "Deadlock" }, Array.Empty<string>(), Ct);
         Assert.Single(h.Deliverer.Outcomes);
 
         /* Sessions back — one "Capture Restored" audit row. */
-        await e.ApplyCaptureDownAsync(ServerId, Name, Array.Empty<string>(), Ct);
+        await e.ApplyCaptureDownAsync(ServerId, Name, Array.Empty<string>(), Array.Empty<string>(), Ct);
         var restored = Assert.Single(h.History.Records);
         Assert.Equal("Capture Restored", restored.MetricName);
     }
@@ -750,8 +768,147 @@ public sealed class DarlingSelfAlertTests
         h.Settings.DeadlockEnabled = false;
         var e = h.Build();
 
-        await e.ApplyCaptureDownAsync(ServerId, Name, new[] { "Blocking" }, Ct);
+        await e.ApplyCaptureDownAsync(ServerId, Name, new[] { "Blocking" }, Array.Empty<string>(), Ct);
         Assert.Empty(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task CaptureDown_OneMissingSession_ReadsInTheSingular()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyCaptureDownAsync(ServerId, Name, new[] { "Blocking" }, Array.Empty<string>(), Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Contains("The Blocking Extended Events session is missing", fired.DetailText, StringComparison.Ordinal);
+        Assert.Equal("Blocking capture is not running \u2014 XE session missing", fired.ShortMessage);
+
+        /* Two sessions: the short message agrees the way the detail does (#6703's round-1 review). */
+        var h2 = new Harness();
+        await h2.Build().ApplyCaptureDownAsync(ServerId, Name, new[] { "Blocking", "Deadlock" }, Array.Empty<string>(), Ct);
+        var both = Assert.Single(h2.Deliverer.Outcomes);
+        Assert.Contains("Extended Events sessions are missing", both.DetailText, StringComparison.Ordinal);
+        Assert.EndsWith("capture is not running \u2014 XE sessions missing", both.ShortMessage, StringComparison.Ordinal);
+    }
+
+    /* ---------------- capture-down on a server whose engine does not run the collector (#6912) ---------------- */
+
+    private static readonly (int EngineEdition, string? EngineKind, PerformanceMonitor.Collectors.AwsRdsKind AwsRdsKind) PlainSqlServer =
+        (2, null, PerformanceMonitor.Collectors.AwsRdsKind.None);
+
+    private static readonly (int EngineEdition, string? EngineKind, PerformanceMonitor.Collectors.AwsRdsKind AwsRdsKind) RdsWebOrExpress =
+        (2, null, PerformanceMonitor.Collectors.AwsRdsKind.RdsWebOrExpress);
+
+    /* The pass the worker runs, with the store read replaced by what collection_log said and the registry read by the server's engine facts. */
+    private static async Task CaptureDownPassAsync(
+        DarlingSelfAlertEvaluator e, string[] missing,
+        (int EngineEdition, string? EngineKind, PerformanceMonitor.Collectors.AwsRdsKind AwsRdsKind) engine)
+    {
+        e.CaptureDownReadOverride = (_, _, _) => Task.FromResult<IReadOnlyList<string>>(missing);
+        e.CaptureDownEngineReadOverride = (_, _, _) => Task.FromResult(engine);
+        await e.EvaluateStoreAlertsAsync(null!, ServerId, Name, connected: true, Ct);
+    }
+
+    [Fact]
+    public async Task CaptureDown_ClientTimeoutsMissingOnRdsWebOrExpress_FiresNothing()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* The attention collector stopped on this edition, so its last SESSION_MISSING row stays the newest forever. */
+        await CaptureDownPassAsync(e, new[] { "Client timeouts" }, RdsWebOrExpress);
+
+        Assert.DoesNotContain(h.Deliverer.Outcomes, o => o.MetricName == "Capture Down");
+    }
+
+    [Fact]
+    public async Task CaptureDown_EngineFactsReadFails_MakesNoClaim_AndCaptureDownStillFires()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* #6912: a faulting registry read (a store statement_timeout is not retried) must not silence the alert for the pass.
+           No engine claim means nothing is dropped, so the pre-gate answer stands. */
+        e.CaptureDownReadOverride = (_, _, _) => Task.FromResult<IReadOnlyList<string>>(new[] { "Client timeouts" });
+        e.CaptureDownEngineReadOverride = (_, _, _) => throw new InvalidOperationException("the servers read faulted");
+        await e.EvaluateStoreAlertsAsync(null!, ServerId, Name, connected: true, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Capture Down");
+        Assert.Contains("Client timeouts", fired.DetailText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CaptureDown_ActiveAlertOnAServerWhoseEngineDoesNotRunTheCapture_ResolvesSayingSo()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* Fired before the service learned this server was an RDS Web or Express instance. */
+        await CaptureDownPassAsync(e, new[] { "Client timeouts" }, PlainSqlServer);
+        Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Capture Down");
+
+        await CaptureDownPassAsync(e, new[] { "Client timeouts" }, RdsWebOrExpress);
+
+        var cleared = Assert.Single(h.History.Records);
+        Assert.Equal("Capture Cleared", cleared.MetricName);
+        Assert.Contains("Client timeouts capture does not run on this server's engine", cleared.DetailText, StringComparison.Ordinal);
+        Assert.DoesNotContain("running again", cleared.DetailText, StringComparison.Ordinal);
+        Assert.True(PerformanceMonitor.Common.AlertMetricClassifier.IsResolution(cleared.MetricName));
+    }
+
+    [Fact]
+    public async Task CaptureDown_ClientTimeoutsMissingOnPlainSqlServer_StillFires_AndSaysNothingAboutBlockingOrDeadlocks()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await CaptureDownPassAsync(e, new[] { "Client timeouts" }, PlainSqlServer);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Capture Down");
+        Assert.Equal("Client timeouts", fired.CurrentValue);
+        Assert.Contains("client timeouts and cancels capture", fired.DetailText, StringComparison.Ordinal);
+        Assert.DoesNotContain("locking", fired.DetailText, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("deadlock", fired.DetailText, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("ALTER ANY EVENT SESSION", fired.DetailText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CaptureDown_BlockingAndDeadlockMissing_DetailNamesBothAlertKinds()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await CaptureDownPassAsync(e, new[] { "Blocking", "Deadlock" }, PlainSqlServer);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Capture Down");
+        Assert.Contains("blocking alerts can never fire", fired.DetailText, StringComparison.Ordinal);
+        Assert.Contains("deadlock alerts can never fire", fired.DetailText, StringComparison.Ordinal);
+        Assert.DoesNotContain("client timeouts", fired.DetailText, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task CaptureDown_RealRecovery_NamesTheCaptureThatCameBack_AndTheEngineIsNotReadForAnEmptyAnswer()
+    {
+        var h = new Harness();
+        var e = h.Build();
+        await CaptureDownPassAsync(e, new[] { "Client timeouts" }, PlainSqlServer);
+        Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Capture Down");
+
+        var engineReads = 0;
+        e.CaptureDownReadOverride = (_, _, _) => Task.FromResult<IReadOnlyList<string>>(Array.Empty<string>());
+        e.CaptureDownEngineReadOverride = (_, _, _) =>
+        {
+            engineReads++;
+            return Task.FromResult(PlainSqlServer);
+        };
+        await e.EvaluateStoreAlertsAsync(null!, ServerId, Name, connected: true, Ct);
+
+        var restored = Assert.Single(h.History.Records);
+        Assert.Equal("Capture Restored", restored.MetricName);
+        Assert.Contains("Client timeouts capture is running again", restored.DetailText, StringComparison.Ordinal);
+        Assert.DoesNotContain("Blocking/deadlock", restored.DetailText, StringComparison.Ordinal);
+        Assert.Equal(0, engineReads);
     }
 
     /* ---------------- agent-not-running edge (#1433 Phase 2) ---------------- */
@@ -1321,10 +1478,34 @@ public sealed class DarlingSelfAlertTests
         Assert.Equal("customalerts", fired.ServerKey);      // fleet sentinel key, not a real server_id
         Assert.Equal(DarlingSelfAlertEvaluator.StoreServerLabel, fired.ServerName);
         Assert.Equal("3", fired.CurrentValue);              // the count of unhealthy rules
+        Assert.StartsWith("3 custom alert rules need attention:", fired.ShortMessage, StringComparison.Ordinal);
         Assert.Contains("Rule 1", fired.DetailText);
         Assert.Contains("Rule 3", fired.DetailText);
         // The detail carries the rule id/name + reason, NEVER the compiled SQL.
         Assert.DoesNotContain("SELECT", fired.DetailText!, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task CustomRuleHealth_OneRule_ReadsInTheSingular()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyCustomRuleHealthAsync(HealthReport(broken: 1, neverFiring: 0), Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("1 custom alert rule needs attention: 1 no longer compiles, 0 armed but never fire", fired.ShortMessage);
+
+        /* Every clause agrees with its own count, not only the head (#6703's round-1 review). */
+        var h2 = new Harness();
+        await h2.Build().ApplyCustomRuleHealthAsync(HealthReport(broken: 1, neverFiring: 1), Ct);
+        Assert.Equal("2 custom alert rules need attention: 1 no longer compiles, 1 armed but never fires",
+            Assert.Single(h2.Deliverer.Outcomes).ShortMessage);
+
+        var h3 = new Harness();
+        await h3.Build().ApplyCustomRuleHealthAsync(HealthReport(broken: 0, neverFiring: 2), Ct);
+        Assert.Equal("2 custom alert rules need attention: 0 no longer compile, 2 armed but never fire",
+            Assert.Single(h3.Deliverer.Outcomes).ShortMessage);
     }
 
     [Fact]
@@ -1457,6 +1638,19 @@ public sealed class DarlingSelfAlertTests
         Assert.Equal(AlertSeverityLevel.Warning, fired.Severity);   // scoped rule: one signal hidden
         Assert.Contains("Rule rule-a", fired.DetailText);
         Assert.Contains("never expires", fired.DetailText);
+        Assert.StartsWith("1 mute rule has been suppressing", fired.ShortMessage, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task StaleMute_TwoRules_ReadInThePlural()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyStaleMuteRulesAsync(new[] { Mute(StaleDays + 1), Mute(StaleDays + 2, id: "rule-b") }, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.StartsWith("2 mute rules have been suppressing", fired.ShortMessage, StringComparison.Ordinal);
     }
 
     /* ---------------- managed store settings needing attention (#4215) ---------------- */
@@ -4542,7 +4736,7 @@ public sealed class DarlingSelfAlertTests
         Assert.Equal("Store Job Failing", fired.MetricName);
         Assert.Equal("jobfailing:7001", fired.ServerKey);
         Assert.Null(fired.Severity);  /* no override: the DECLARED INFO arm in AlertSeverity.ForMetric decides */
-        Assert.Contains("2 new failure(s), 14 total", fired.CurrentValue, StringComparison.Ordinal);
+        Assert.Contains("2 new failures, 14 total", fired.CurrentValue, StringComparison.Ordinal);
         Assert.Contains("refresh job 7001 on wait_stats_hourly", fired.ShortMessage, StringComparison.Ordinal);
 
         /* Pass 3 — the counter did NOT grow, and last_run_status is still 'Failed' (it says Failed until the
@@ -5344,13 +5538,13 @@ public sealed class DarlingSelfAlertTests
 
         var generation = e.GenerationOf(ServerId);
         e.Forget(ServerId);
-        await e.ApplyCaptureDownAsync(ServerId, Name, new[] { "Blocking", "Deadlock" }, Ct, sweepGeneration: generation);
+        await e.ApplyCaptureDownAsync(ServerId, Name, new[] { "Blocking", "Deadlock" }, Array.Empty<string>(), Ct, sweepGeneration: generation);
         Assert.Empty(h.Deliverer.Outcomes);
 
-        await e.ApplyCaptureDownAsync(ServerId, Name, Array.Empty<string>(), Ct);
+        await e.ApplyCaptureDownAsync(ServerId, Name, Array.Empty<string>(), Array.Empty<string>(), Ct);
         Assert.Empty(h.History.Records);
 
-        await e.ApplyCaptureDownAsync(ServerId, Name, new[] { "Blocking", "Deadlock" }, Ct);
+        await e.ApplyCaptureDownAsync(ServerId, Name, new[] { "Blocking", "Deadlock" }, Array.Empty<string>(), Ct);
         Assert.Equal("Capture Down", Assert.Single(h.Deliverer.Outcomes).MetricName);
     }
 
@@ -5387,11 +5581,11 @@ public sealed class DarlingSelfAlertTests
         foreach (var (serverId, sweepGeneration) in new (int, int?)[] { (ServerId, generation), (ServerId + 2, null) })
         {
             await e.ApplyCollectionStoppedAsync(serverId, Name, stopped: true, "no recent collection", Ct, sweepGeneration: sweepGeneration);
-            await e.ApplyCaptureDownAsync(serverId, Name, new[] { "Blocking" }, Ct, sweepGeneration: sweepGeneration);
+            await e.ApplyCaptureDownAsync(serverId, Name, new[] { "Blocking" }, Array.Empty<string>(), Ct, sweepGeneration: sweepGeneration);
             await e.ApplyAgentNotRunningAsync(serverId, Name, agentRunningFresh: false, agentEverSeenRunning: true, Ct, sweepGeneration: sweepGeneration);
 
             await e.ApplyCollectionStoppedAsync(serverId, Name, stopped: false, "", Ct, sweepGeneration: sweepGeneration);
-            await e.ApplyCaptureDownAsync(serverId, Name, Array.Empty<string>(), Ct, sweepGeneration: sweepGeneration);
+            await e.ApplyCaptureDownAsync(serverId, Name, Array.Empty<string>(), Array.Empty<string>(), Ct, sweepGeneration: sweepGeneration);
             await e.ApplyAgentNotRunningAsync(serverId, Name, agentRunningFresh: true, agentEverSeenRunning: true, Ct, sweepGeneration: sweepGeneration);
         }
 
@@ -5421,7 +5615,7 @@ public sealed class DarlingSelfAlertTests
             "await ApplyCollectionStoppedAsync(serverId, serverName, stopped, reason, cancellationToken, sweepGeneration: generation);",
             sweep, StringComparison.Ordinal);
         Assert.Contains(
-            "await ApplyCaptureDownAsync(serverId, serverName, missing, cancellationToken, sweepGeneration: generation);",
+            "await ApplyCaptureDownAsync(serverId, serverName, missing, notRunOnEngine, cancellationToken, sweepGeneration: generation);",
             sweep, StringComparison.Ordinal);
         Assert.Contains(
             "await ApplyAgentNotRunningAsync(serverId, serverName, freshRunning, everRan, cancellationToken, sweepGeneration: generation);",
@@ -6617,6 +6811,64 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
         Assert.Equal(DarlingSelfAlertEvaluator.RawPurgeOverHorizonClearedMetric, resolved.MetricName);
     }
 
+    [Fact]
+    public async Task ComposeHoursStuck_TwoHours_ReadInThePlural()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyComposeHoursStuckAsync(new[]
+        {
+            ComposeFailure(2, inBackoff: true),
+            ComposeFailure(3, inBackoff: true) with { Hour = new DateTime(2026, 10, 15, 9, 0, 0) },
+        }, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("2 hours", fired.CurrentValue);
+        Assert.Contains("2 hours of the Query Store compose rollup", fired.DetailText, StringComparison.Ordinal);
+        Assert.Contains("and are now retried once a day", fired.DetailText, StringComparison.Ordinal);
+        Assert.StartsWith("2 Query Store compose hours retried once a day", fired.ShortMessage, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ComposeHoursStuck_OneHourWithOneFailure_ReadsInTheSingular()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyComposeHoursStuckAsync(new[] { ComposeFailure(1, inBackoff: true) }, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("1 hour", fired.CurrentValue);
+        Assert.Contains("and is now retried once a day", fired.DetailText, StringComparison.Ordinal);
+        Assert.Contains("2026-10-07 15:00 UTC: 1 failure, last reason", fired.DetailText, StringComparison.Ordinal);
+        Assert.StartsWith("1 Query Store compose hour retried once a day", fired.ShortMessage, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task PolicyJobFailing_OneNewFailure_ReadsInTheSingular()
+    {
+        var h = new Harness();
+        var e = h.Build();
+        var rearm = new RearmRecorder();
+
+        StorePolicyJobHealth Pass(long failures) => new(
+            Array.Empty<StuckPolicyJob>(),
+            new[]
+            {
+                new PolicyJobRunReading(
+                    7001, TimescaleSupport.StorePolicyJobFamily.Refresh, "wait_stats_hourly", false, "Failed", failures),
+            });
+
+        await e.ApplyPolicyJobsStuckAsync(Pass(12), rearm.Delegate, Ct);
+        h.Now = h.Now.AddHours(1);
+        await e.ApplyPolicyJobsStuckAsync(Pass(13), rearm.Delegate, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Contains("1 new failure, 13 total", fired.CurrentValue, StringComparison.Ordinal);
+        Assert.Contains("failed 1 more time since the last sample", fired.ShortMessage, StringComparison.Ordinal);
+    }
+
     private static QueryStoreComposeStamp.HourFailure ComposeFailure(int failures, bool inBackoff) =>
         new(new DateTime(2026, 10, 7, 15, 0, 0), failures, "57014", "canceling statement due to statement timeout", 240,
             new DateTime(2026, 10, 15, 14, 5, 0), new DateTime(2026, 10, 15, 16, 5, 0), new DateTime(2026, 10, 16, 16, 5, 0), inBackoff);
@@ -6635,8 +6887,8 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
         await e.ApplyComposeHoursStuckAsync(new[] { ComposeFailure(2, inBackoff: true), ComposeFailure(1, inBackoff: false) with { Hour = new DateTime(2026, 10, 15, 9, 0, 0) } }, Ct);
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal(DarlingSelfAlertEvaluator.ComposeHoursStuckMetric, fired.MetricName);
-        Assert.Contains("1 hour(s) of the Query Store compose rollup", fired.DetailText, StringComparison.Ordinal);
-        Assert.Contains("2026-10-07 15:00 UTC: 2 failure(s), last reason 57014: canceling statement due to statement timeout", fired.DetailText, StringComparison.Ordinal);
+        Assert.Contains("1 hour of the Query Store compose rollup", fired.DetailText, StringComparison.Ordinal);
+        Assert.Contains("2026-10-07 15:00 UTC: 2 failures, last reason 57014: canceling statement due to statement timeout", fired.DetailText, StringComparison.Ordinal);
 
         await e.ApplyComposeHoursStuckAsync(Array.Empty<QueryStoreComposeStamp.HourFailure>(), Ct);
         var resolved = Assert.Single(h.History.Records);

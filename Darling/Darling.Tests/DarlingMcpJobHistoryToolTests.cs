@@ -60,7 +60,7 @@ public sealed class DarlingMcpJobHistoryToolSurfaceTests
             .ToArray();
 
         Assert.Equal(
-            new[] { "server_name", "hours_back", "job_name", "status", "category", "limit", "as_of" },
+            new[] { "server_name", "hours_back", "job_name", "status", "category", "limit", "as_of", "min_duration_seconds" },
             described.Select(p => p.Name).ToArray());
         Assert.All(described, p => Assert.True(p.HasDefaultValue, $"{p.Name} must be optional"));
     }
@@ -124,6 +124,26 @@ public sealed class DarlingMcpJobHistoryToolSurfaceTests
     }
 
     [Fact]
+    public void AManagedInstanceSnapshotReadsRunning_ButAnExpressShapedOneStillHasNoService()
+    {
+        var now = new DateTime(2026, 3, 11, 12, 0, 0, DateTimeKind.Utc);
+        var window = TimeSpan.FromMinutes(30);
+        var captured = now - TimeSpan.FromMinutes(1);
+        var next = now.AddHours(1);
+
+        /* #6886: the collector's query stores running with the platform-managed description for EngineEdition 8. */
+        var mi = DarlingJobReader.ResolveAgentState("mi", true, "Running (managed by Azure SQL Managed Instance)", next, captured, now, window);
+        Assert.True(mi.AgentRunning);
+        Assert.Equal("Running (managed by Azure SQL Managed Instance)", mi.AgentStatusDesc);
+        Assert.Equal(next, mi.NextRunUtc);
+
+        /* The Express or Agent-off container shape (false with NULL descriptions) is unchanged. */
+        var express = DarlingJobReader.ResolveAgentState("express", false, null, null, captured, now, window);
+        Assert.Null(express.AgentRunning);
+        Assert.Equal("no SQL Agent service found", express.AgentStatusDesc);
+    }
+
+    [Fact]
     public void AFreshRowWithNoAgentServiceIsNotStopped_ButAStoppedOneIs()
     {
         var now = new DateTime(2026, 3, 11, 12, 0, 0, DateTimeKind.Utc);
@@ -165,6 +185,29 @@ public sealed class DarlingMcpJobHistoryToolSurfaceTests
         Assert.Equal("invalid", DarlingMcpTestData.StatusOf(asOf));
         var limit = await DarlingMcpJobTools.GetJobHistory(null!, limit: 0);
         Assert.Equal("invalid", DarlingMcpTestData.StatusOf(limit));
+        var negative = await DarlingMcpJobTools.GetJobHistory(null!, min_duration_seconds: -1);
+        Assert.Equal("invalid", DarlingMcpTestData.StatusOf(negative));
+    }
+
+    /// <summary>
+    /// #6614: the web dispatch reads <c>min_duration_seconds</c> under a hand-typed key. An unparseable value is answered with
+    /// the refusal that names the parameter, before any store read, so this runs on the PR suite with a data source that points
+    /// nowhere. Revert proof: if the dispatch read a mistyped key (say <c>min_duration_second</c>), the value sent here would
+    /// never be seen, the read would go on to the unreachable store, and the answer would be an error envelope, not
+    /// <c>invalid</c>, so the status and message assertions fail. The live half (a value of 60 drops the short runs) is the
+    /// MCP-path test <c>MinDurationSeconds_KeepsTheLongRunOnTheFirstPage_BeforeTheLimit</c>, which needs DARLING_TEST_PG.
+    /// </summary>
+    [Fact]
+    public async Task ApiRead_RefusesAnUnparseableMinDurationSeconds_ByName_BeforeAnyStoreRead()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var unreachable = NpgsqlDataSource.Create("Host=127.0.0.1;Port=1;Database=none;Username=none;Timeout=1;Pooling=false");
+        var (status, body) = await DarlingMcpJobHistoryToolLiveTests.WebGetAsync(unreachable, "/api/read/get_job_history?min_duration_seconds=abc", ct);
+
+        Assert.Equal("invalid", DarlingMcpTestData.StatusOf(body));
+        using var doc = JsonDocument.Parse(body);
+        Assert.Contains("min_duration_seconds", doc.RootElement.GetProperty("message").GetString()!, StringComparison.Ordinal);
+        Assert.Equal(StatusCodes.Status400BadRequest, status);
     }
 }
 
@@ -258,7 +301,7 @@ public sealed class DarlingMcpJobHistoryToolLiveTests
         await DarlingMcpTestData.ExecAsync(c, ct, $"DELETE FROM servers WHERE server_id IN ({ids})");
     }
 
-    private static async Task<(int Status, string Body)> WebGetAsync(NpgsqlDataSource postgres, string pathAndQuery, CancellationToken ct)
+    internal static async Task<(int Status, string Body)> WebGetAsync(NpgsqlDataSource postgres, string pathAndQuery, CancellationToken ct)
     {
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
@@ -323,6 +366,43 @@ public sealed class DarlingMcpJobHistoryToolLiveTests
             Assert.Equal(JsonSerializer.Serialize(expected), JsonSerializer.Serialize(viewerRows));
             /* Alpha's local 08:00 is 13:00 UTC: the conversion survived the move. */
             Assert.Contains(viewerRows, r => r.ServerId == ServerA && r.RunDateTimeUtc == new DateTime(2026, 3, 10, 13, 0, 0));
+            ok = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(Cs!, ok, async (cleanup, cct) => await CleanupAsync(cleanup, cct));
+        }
+    }
+
+    /// <summary>#6614: min_duration_seconds applies before the limit, so one long run among many short ones is on the first page.</summary>
+    [Fact]
+    public async Task MinDurationSeconds_KeepsTheLongRunOnTheFirstPage_BeforeTheLimit()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(Cs), "Set DARLING_TEST_PG to run the live job-history tests.");
+        var ct = TestContext.Current.CancellationToken;
+        var (c, postgres) = await OpenAsync(ct);
+        await using var _ = postgres;
+        using var __ = c;
+        var ok = false;
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(c, ServerA, NameA, ct);
+            /* Ten short runs, all newer than the one hour-long run. */
+            await InsertAsync(c, ct, 20, ServerA, NameA, "Index Rebuild", "Maintenance", 0, 1, 3600, new DateTime(2026, 3, 10, 1, 0, 0), null);
+            for (var i = 0; i < 10; i++)
+                await InsertAsync(c, ct, 21 + i, ServerA, NameA, "Heartbeat", "Maintenance", 0, 1, 2, new DateTime(2026, 3, 10, 5, i, 0), null);
+
+            var unfiltered = await DarlingMcpJobTools.GetJobHistory(postgres, NameA, 24, limit: 3, as_of: AsOfText, cancellationToken: ct);
+            using (var doc = JsonDocument.Parse(unfiltered))
+                Assert.DoesNotContain(doc.RootElement.GetProperty("runs").EnumerateArray(), r => r.GetProperty("job_name").GetString() == "Index Rebuild");
+
+            var filtered = await DarlingMcpJobTools.GetJobHistory(postgres, NameA, 24, limit: 3, min_duration_seconds: 60, as_of: AsOfText, cancellationToken: ct);
+            using var filteredDoc = JsonDocument.Parse(filtered);
+            var runs = filteredDoc.RootElement.GetProperty("runs").EnumerateArray().ToList();
+            Assert.Single(runs);
+            Assert.Equal("Index Rebuild", runs[0].GetProperty("job_name").GetString());
+            Assert.Equal(3600, runs[0].GetProperty("duration_seconds").GetInt64());
+            Assert.False(filteredDoc.RootElement.GetProperty("truncated").GetBoolean());
             ok = true;
         }
         finally
@@ -438,6 +518,164 @@ public sealed class DarlingMcpJobHistoryToolLiveTests
             await DarlingMcpTestData.ExecAsync(c, ct, "UPDATE servers SET sql_engine_edition = 5 WHERE server_id = $1", ServerC);
             var body = await DarlingMcpJobTools.GetJobHistory(postgres, NameC, as_of: AsOfText, cancellationToken: ct);
             Assert.Equal("not_collected", DarlingMcpTestData.StatusOf(body));
+            ok = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(Cs!, ok, async (cleanup, cct) => await CleanupAsync(cleanup, cct));
+        }
+    }
+
+    /// <summary>#6860: a server registered with a display name that differs from its connection key is named by the display name in
+    /// every part of the answer, as every other tool names it (#6179): the envelope's <c>server</c>, the rows' <c>server</c> and the
+    /// not_collected sentence. The key must not appear, whether the caller named the server by its key or by its display name.</summary>
+    [Fact]
+    public async Task ADisplayNamedServer_IsAnsweredByItsDisplayName_NotItsConnectionKey()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(Cs), "Set DARLING_TEST_PG to run the live job-history tests.");
+        var ct = TestContext.Current.CancellationToken;
+        var (c, postgres) = await OpenAsync(ct);
+        await using var _ = postgres;
+        using var __ = c;
+        var ok = false;
+        try
+        {
+            await SeedAsync(c, ct);
+            const string displayA = "Payroll Agent Box";
+            const string displayC = "Reporting Azure Database";
+            await DarlingMcpTestData.ExecAsync(c, ct, "UPDATE servers SET display_name = $1 WHERE server_id = $2", displayA, ServerA);
+            await DarlingMcpTestData.ExecAsync(c, ct, "UPDATE servers SET display_name = $1, sql_engine_edition = 5 WHERE server_id = $2", displayC, ServerC);
+
+            foreach (var asked in new[] { NameA, displayA })
+            {
+                var body = await DarlingMcpJobTools.GetJobHistory(postgres, asked, as_of: AsOfText, cancellationToken: ct);
+                using var doc = JsonDocument.Parse(body);
+                Assert.Equal(displayA, doc.RootElement.GetProperty("server").GetString());
+                Assert.All(doc.RootElement.GetProperty("runs").EnumerateArray(), r => Assert.Equal(displayA, r.GetProperty("server").GetString()));
+                Assert.DoesNotContain(NameA, body, StringComparison.Ordinal);
+            }
+
+            foreach (var asked in new[] { NameC, displayC })
+            {
+                var body = await DarlingMcpJobTools.GetJobHistory(postgres, asked, as_of: AsOfText, cancellationToken: ct);
+                Assert.Equal("not_collected", DarlingMcpTestData.StatusOf(body));
+                Assert.Contains(displayC, body, StringComparison.Ordinal);
+                Assert.DoesNotContain(NameC, body, StringComparison.Ordinal);
+            }
+
+            ok = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(Cs!, ok, async (cleanup, cct) => await CleanupAsync(cleanup, cct));
+        }
+    }
+
+    /// <summary>#6860: the fleet form names each row by the one answer-name rule (#6179), not by the reader's own SQL label. A display name
+    /// one server holds answers by that name, and two servers that share a display name answer by their keys, which pick exactly one server
+    /// when passed back as <c>server_name</c>.</summary>
+    [Fact]
+    public async Task TheFleetForm_NamesEachRowByTheAnswerNameRule()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(Cs), "Set DARLING_TEST_PG to run the live job-history tests.");
+        var ct = TestContext.Current.CancellationToken;
+        var (c, postgres) = await OpenAsync(ct);
+        await using var _ = postgres;
+        using var __ = c;
+        var ok = false;
+        try
+        {
+            await SeedAsync(c, ct);
+            const string shared = "Payroll Agent Box";
+            await DarlingMcpTestData.ExecAsync(c, ct, "UPDATE servers SET display_name = $1 WHERE server_id = $2", shared, ServerA);
+
+            var held = await DarlingMcpJobTools.GetJobHistory(postgres, null, as_of: AsOfText, cancellationToken: ct);
+            using (var doc = JsonDocument.Parse(held))
+            {
+                var names = doc.RootElement.GetProperty("runs").EnumerateArray().Select(r => r.GetProperty("server").GetString()).Distinct().Order().ToArray();
+                Assert.Equal(new[] { NameB, shared }.Order().ToArray(), names);
+            }
+
+            await DarlingMcpTestData.ExecAsync(c, ct, "UPDATE servers SET display_name = $1 WHERE server_id = $2", shared, ServerB);
+            var clash = await DarlingMcpJobTools.GetJobHistory(postgres, null, as_of: AsOfText, cancellationToken: ct);
+            using (var doc = JsonDocument.Parse(clash))
+            {
+                var names = doc.RootElement.GetProperty("runs").EnumerateArray().Select(r => r.GetProperty("server").GetString()).Distinct().Order().ToArray();
+                Assert.Equal(new[] { NameA, NameB }.Order().ToArray(), names);
+            }
+
+            ok = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(Cs!, ok, async (cleanup, cct) => await CleanupAsync(cleanup, cct));
+        }
+    }
+
+    /// <summary>#6860: <c>agents_not_running[].server</c> follows the same naming rule as <c>runs[].server</c>. Two servers share a display
+    /// name and one Agent is stopped: the entry names that server by its key, as its runs do, and that name resolves back as <c>server_name</c>.</summary>
+    [Fact]
+    public async Task TheFleetForm_NamesAStoppedAgentByTheSameNameItsRunsUse_AndThatNameResolves()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(Cs), "Set DARLING_TEST_PG to run the live job-history tests.");
+        var ct = TestContext.Current.CancellationToken;
+        var (c, postgres) = await OpenAsync(ct);
+        await using var _ = postgres;
+        using var __ = c;
+        var ok = false;
+        try
+        {
+            await SeedAsync(c, ct);
+            const string shared = "Payroll Agent Box";
+            await DarlingMcpTestData.ExecAsync(c, ct, "UPDATE servers SET display_name = $1 WHERE server_id IN ($2, $3)", shared, ServerA, ServerB);
+            await SeedAgentAsync(c, ct, ServerA, NameA, false, "Stopped", TimeSpan.FromMinutes(2));
+            await SeedAgentAsync(c, ct, ServerB, NameB, true, "Running", TimeSpan.FromMinutes(1));
+
+            var fleet = await DarlingMcpJobTools.GetJobHistory(postgres, null, as_of: AsOfText, cancellationToken: ct);
+            using var doc = JsonDocument.Parse(fleet);
+            var runNames = doc.RootElement.GetProperty("runs").EnumerateArray().Select(r => r.GetProperty("server").GetString()).Distinct().Order().ToArray();
+            Assert.Equal(new[] { NameA, NameB }.Order().ToArray(), runNames);
+            var stopped = doc.RootElement.GetProperty("agents_not_running").EnumerateArray().Single();
+            var agentName = stopped.GetProperty("server").GetString();
+            Assert.Equal(NameA, agentName);
+            Assert.Contains(agentName, runNames);
+
+            var back = JsonDocument.Parse(await DarlingMcpJobTools.GetJobHistory(postgres, agentName, as_of: AsOfText, cancellationToken: ct)).RootElement;
+            Assert.Equal(NameA, back.GetProperty("server").GetString());
+            Assert.Equal(4, back.GetProperty("runs").GetArrayLength());
+            ok = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(Cs!, ok, async (cleanup, cct) => await CleanupAsync(cleanup, cct));
+        }
+    }
+
+    [Fact]
+    public async Task TheFleetForm_NamesADisabledServersRowsByItsKey_NeverByItsDisplayName()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(Cs), "Set DARLING_TEST_PG to run the live job-history tests.");
+        var ct = TestContext.Current.CancellationToken;
+        var (c, postgres) = await OpenAsync(ct);
+        await using var _ = postgres;
+        using var __ = c;
+        var ok = false;
+        try
+        {
+            await SeedAsync(c, ct);
+            /* #6860: an enabled and a disabled server carry one display name. The reader's label would show both under it. */
+            const string shared = "Orders Primary";
+            await DarlingMcpTestData.ExecAsync(c, ct, "UPDATE servers SET display_name = $1 WHERE server_id IN ($2, $3)", shared, ServerA, ServerB);
+            await DarlingMcpTestData.ExecAsync(c, ct, "UPDATE servers SET is_enabled = false WHERE server_id = $1", ServerB);
+
+            var body = await DarlingMcpJobTools.GetJobHistory(postgres, null, as_of: AsOfText, cancellationToken: ct);
+            using var doc = JsonDocument.Parse(body);
+            var runs = doc.RootElement.GetProperty("runs").EnumerateArray().ToArray();
+            var byName = runs.GroupBy(r => r.GetProperty("server").GetString()!).ToDictionary(g => g.Key, g => g.Select(r => r.GetProperty("job_name").GetString()!).Order().ToArray());
+
+            Assert.Equal(new[] { NameB, shared }.Order().ToArray(), byName.Keys.Order().ToArray());
+            Assert.Equal(new[] { "Index Rebuild", "Nightly ETL", "Nightly ETL", "Nightly ETL" }, byName[shared]);
+            Assert.Equal(new[] { "Log Backup", "Nightly ETL" }, byName[NameB]);
             ok = true;
         }
         finally
@@ -684,6 +922,47 @@ public sealed class DarlingMcpJobHistoryToolLiveTests
     }
 
     [Fact]
+    public async Task AManagedInstanceSnapshot_ReadsRunning_AndIsNotListedAsNotRunning()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(Cs), "Set DARLING_TEST_PG to run the live job-history tests.");
+        var ct = TestContext.Current.CancellationToken;
+        var (c, postgres) = await OpenAsync(ct);
+        await using var _ = postgres;
+        using var __ = c;
+        var ok = false;
+        try
+        {
+            await SeedAsync(c, ct);
+            await SetStaleMinutesAsync(c, ct, 30);
+            /* #6886: Bravo is a Managed Instance, whose snapshot the collector now stores as running with the platform description.
+               Alpha has the Express shape (false with NULL descriptions) and still has no service. */
+            await SeedAgentAsync(c, ct, ServerA, NameA, false, null, TimeSpan.FromMinutes(2));
+            await SeedAgentAsync(c, ct, ServerB, NameB, true, "Running (managed by Azure SQL Managed Instance)", TimeSpan.FromMinutes(2), AsOf.AddHours(1));
+
+            var named = JsonDocument.Parse(await DarlingMcpJobTools.GetJobHistory(postgres, NameB, as_of: AsOfText, cancellationToken: ct)).RootElement;
+            Assert.True(named.GetProperty("agent_running").GetBoolean());
+            Assert.Equal("Running (managed by Azure SQL Managed Instance)", named.GetProperty("agent_status_desc").GetString());
+            Assert.NotEqual(JsonValueKind.Null, named.GetProperty("next_run").ValueKind);
+
+            var express = JsonDocument.Parse(await DarlingMcpJobTools.GetJobHistory(postgres, NameA, as_of: AsOfText, cancellationToken: ct)).RootElement;
+            Assert.Equal(JsonValueKind.Null, express.GetProperty("agent_running").ValueKind);
+            Assert.Equal("no SQL Agent service found", express.GetProperty("agent_status_desc").GetString());
+
+            var fleet = JsonDocument.Parse(await DarlingMcpJobTools.GetJobHistory(postgres, as_of: AsOfText, cancellationToken: ct)).RootElement;
+            var listed = fleet.GetProperty("agents_not_running").EnumerateArray()
+                .Select(a => a.GetProperty("server").GetString()!)
+                .Where(n => n.StartsWith("jobhist-", StringComparison.Ordinal)).ToList();
+            Assert.Equal(new[] { NameA }, listed);
+            Assert.True(fleet.GetProperty("agents_running").GetInt32() >= 1);
+            ok = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(Cs!, ok, async (cleanup, cct) => await CleanupAsync(cleanup, cct));
+        }
+    }
+
+    [Fact]
     public async Task AServerWithNoAgentService_IsNotStopped_NamedOrInTheFleet()
     {
         Assert.SkipWhen(string.IsNullOrEmpty(Cs), "Set DARLING_TEST_PG to run the live job-history tests.");
@@ -914,7 +1193,7 @@ public sealed class DarlingMcpJobHistoryToolLiveTests
         try
         {
             await SeedAsync(c, ct);
-            var tool = await DarlingMcpJobTools.GetJobHistory(postgres, NameA, 24, "Nightly ETL", "Failed", null, 10, AsOfText, ct);
+            var tool = await DarlingMcpJobTools.GetJobHistory(postgres, NameA, 24, "Nightly ETL", "Failed", null, 10, AsOfText, cancellationToken: ct);
             var (status, body) = await WebGetAsync(postgres,
                 $"/api/read/get_job_history?server={NameA}&hours=24&job_name=Nightly%20ETL&status=Failed&limit=10&as_of={AsOfText}", ct);
 

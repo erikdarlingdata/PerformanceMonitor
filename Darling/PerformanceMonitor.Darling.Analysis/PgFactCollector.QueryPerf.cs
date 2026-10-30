@@ -62,6 +62,24 @@ AND   v.collection_time >= $2
 AND   v.collection_time <= $3
 AND   v.delta_execution_count > 0";
 
+    /// <summary>#6640: the queries behind QUERY_SPILLS, most spilled pages first. Same window, same filter and same
+    /// (database, query_hash) identity as the aggregate above, so the names are exactly the queries its spilling_query_count counts.
+    /// Run only when the aggregate found spills, and capped at the ranked-list cap.</summary>
+    internal static readonly string QuerySpillsRankedSql = @"
+SELECT
+    v.database_name,
+    v.query_hash,
+    SUM(v.delta_spills) AS spills
+FROM v_query_stats AS v
+WHERE v.server_id = $1
+AND   v.collection_time >= $2
+AND   v.collection_time <= $3
+AND   v.delta_execution_count > 0
+AND   v.delta_spills > 0
+GROUP BY v.database_name, v.query_hash
+ORDER BY spills DESC, v.database_name, v.query_hash
+LIMIT " + FactRanked.MaxObjects + ";";
+
     /// <summary>
     /// Collects query-level aggregate facts from query_stats.
     /// Focuses on spills (memory grant misestimates) and high-parallelism queries.
@@ -86,6 +104,35 @@ AND   v.delta_execution_count > 0";
             var totalExecutions = reader.IsDBNull(3) ? 0L : ToInt64(reader.GetValue(3));
             var totalCpuTimeUs = reader.IsDBNull(4) ? 0L : ToInt64(reader.GetValue(4));
 
+            /* #6640: name the spilling queries, most spilled pages first. A second small read on the same connection,
+               only when the aggregate found spills. The aggregate's figures above are unchanged. */
+            var spillRanked = new List<RankedObject>();
+            if (totalSpills > 0)
+            {
+                await reader.CloseAsync();
+                /* Its own try, as in Lite: a throw here loses the names and nothing else (record: false, the facts below are whole). */
+                try
+                {
+                    using var rankCmd = new NpgsqlCommand(QuerySpillsRankedSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
+                    rankCmd.Parameters.AddWithValue(context.ServerId);
+                    rankCmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
+                    rankCmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
+                    using var rankReader = await rankCmd.ExecuteReaderAsync(context.CancellationToken);
+                    while (await rankReader.ReadAsync(context.CancellationToken))
+                    {
+                        var db = rankReader.IsDBNull(0) ? null : rankReader.GetString(0);
+                        var hash = rankReader.IsDBNull(1) ? null : rankReader.GetString(1);
+                        var pages = rankReader.IsDBNull(2) ? 0.0 : Convert.ToDouble(rankReader.GetValue(2), System.Globalization.CultureInfo.InvariantCulture);
+                        spillRanked.Add(new RankedObject(FactRanked.QueryName(db, hash), string.IsNullOrEmpty(db) ? null : db, pages));
+                    }
+                }
+                catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
+                {
+                    spillRanked.Clear();
+                    ReportCollectionFailure(ex, context, record: false);
+                }
+            }
+
             if (totalSpills > 0)
             {
                 facts.Add(new Fact
@@ -94,6 +141,8 @@ AND   v.delta_execution_count > 0";
                     Key = "QUERY_SPILLS",
                     Value = totalSpills,
                     ServerId = context.ServerId,
+                    ObjectName = spillRanked.Count > 0 ? spillRanked[0].ObjectName : null,
+                    Ranked = spillRanked,
                     Metadata = new Dictionary<string, double>
                     {
                         ["total_spills"] = totalSpills,
@@ -199,7 +248,10 @@ SELECT
     CASE WHEN max_spills > 0 AND min_spills = 0 THEN 1 ELSE 0 END AS spill_divergence,
     creation_time AS creation_time_local,
     svr.offset_minutes,
-    svr.time_zone_id
+    svr.time_zone_id,
+    database_name,
+    query_hash,
+    query_plan_hash
 FROM latest, svr
 WHERE rn = 1
 AND   min_worker_time >= 10000
@@ -207,7 +259,7 @@ AND   max_worker_time >= 250000
 AND   execution_count >= 20
 AND   creation_time - make_interval(mins => svr.offset_minutes) <= $2 + interval '1 hour'
 AND   max_worker_time::DOUBLE PRECISION / NULLIF(min_worker_time, 0) >= 10
-ORDER BY worker_ratio DESC";
+ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
 
     /// <summary>
     /// Detects parameter-sensitive cached plans: a single query_plan_hash whose
@@ -235,6 +287,10 @@ ORDER BY worker_ratio DESC";
             var worstMaxWorker = 0L;
             var worstGrantRatio = 0.0;
             var worstSpillDivergence = 0;
+            /* #6640: the kept offenders, worst first, at most FactRanked.MaxObjects. The name is database/query_hash/
+               query_plan_hash: the plan hash is in the name because Figures holds numbers only, and one query with
+               two plans is two offenders. */
+            var ranked = new List<RankedObject>();
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             while (await reader.ReadAsync(context.CancellationToken))
@@ -256,6 +312,25 @@ ORDER BY worker_ratio DESC";
                     worstGrantRatio = reader.IsDBNull(3) ? 0.0 : Convert.ToDouble(reader.GetValue(3));
                     worstSpillDivergence = reader.IsDBNull(4) ? 0 : Convert.ToInt32(reader.GetValue(4));
                 }
+                if (ranked.Count < FactRanked.MaxObjects)
+                {
+                    /* Ordinals 8-10 are the last three columns of ParameterSensitivitySql's SELECT list (database_name, query_hash,
+                       query_plan_hash), re-read against it for #6641. FactsNameQueriesLiveTests runs them where DARLING_TEST_PG is set. */
+                    var db = reader.IsDBNull(8) ? null : reader.GetString(8);
+                    var hash = reader.IsDBNull(9) ? null : reader.GetString(9);
+                    var planHash = reader.IsDBNull(10) ? string.Empty : reader.GetString(10);
+                    ranked.Add(new RankedObject(
+                        FactRanked.QueryName(db, hash, planHash),
+                        string.IsNullOrEmpty(db) ? null : db,
+                        reader.IsDBNull(2) ? 0.0 : Convert.ToDouble(reader.GetValue(2)),
+                        new Dictionary<string, double>
+                        {
+                            ["min_worker_us"] = reader.IsDBNull(0) ? 0.0 : ToInt64(reader.GetValue(0)),
+                            ["max_worker_us"] = reader.IsDBNull(1) ? 0.0 : ToInt64(reader.GetValue(1)),
+                            ["grant_ratio"] = reader.IsDBNull(3) ? 0.0 : Convert.ToDouble(reader.GetValue(3)),
+                            ["spill_divergence"] = reader.IsDBNull(4) ? 0 : Convert.ToInt32(reader.GetValue(4)),
+                        }));
+                }
                 offenderCount++;
                 if (offenderCount >= ParameterSensitivityMaxOffenders)
                     break;
@@ -269,6 +344,8 @@ ORDER BY worker_ratio DESC";
                 Key = "PARAMETER_SENSITIVITY",
                 Value = worstRatio,
                 ServerId = context.ServerId,
+                ObjectName = ranked[0].ObjectName,
+                Ranked = ranked,
                 Metadata = new Dictionary<string, double>
                 {
                     ["offender_count"] = offenderCount,
@@ -721,6 +798,15 @@ candidates AS
     -- near-zero-cost queries whose ratios are all sampling jitter; magnitude ranking stays with
     -- regression_factor and the scorer.
     AND   latest_total_cpu_us >= 10000000
+    -- #6548: SQL Server own housekeeping statements (change tracking cleanup and the like) are not application code and
+    -- cannot be fixed by anyone monitoring. Left out BEFORE the LIMIT below, so they cannot use up its rows or lead the fact.
+    AND   NOT EXISTS (SELECT 1 FROM query_store_text AS x
+                      WHERE x.server_id = $1
+                        AND x.database_name = compared.database_name
+                        AND x.query_id = compared.query_id
+                        AND (lower(x.query_sql_text) ~ '" + PerformanceMonitor.Common.InternalStatements.LowerTextPattern + @"'
+                          -- #6665: or the monitor's own statement (its collector-side drop never fires on Darling)
+                          OR " + PerformanceMonitor.Darling.Storage.QueryStoreSelfStatement.SelfOfStoredText + @"))
     -- #5630: 100, not 20. The caller drops the queries whose two plans were compiled for different inputs
     -- (PlanInputComparison) and keeps the worst 20 of what is left, so the cut moved after that check.
     ORDER BY regression_factor DESC

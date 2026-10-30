@@ -108,6 +108,56 @@ WHERE rp.server_id = $1
 ORDER BY rp.submitted_at DESC
 LIMIT $4";
 
+    /* #6565, Darling's twin: the reports of other requests on the same server and family, reported in the last SameRootCauseHours hours,
+       whose analysis story has the same root fact (key and database) as this request's story. The story hash is a pure hash of the
+       story's path, so one chain gives one hash; what differs between two requests is the 30-minute join window, and a later request on
+       the same fault opens its own request. The root fact (for example the regressed query's hash and database) is what the reports
+       share. The root is the newest finding for this request's hash at or before the request's open time, so a later analysis run
+       cannot re-point the match when the brief composes at claim time. $1 server, $2 family, $3 this request, $4 limit,
+       $5 this request's story hash (null: no rows), $6 reported since. The key and database do not name a plan regression's query
+       (PLAN_REGRESSION is server-wide), so a row also carries this finding's and the candidate's newest remediation_action_json and
+       the reader compares their force targets (InvestigationRootFactMatch). $4 is therefore a candidate cap, not the count a brief names. */
+    internal const string SameRootCauseReportsSql = @"
+WITH root AS (
+    SELECT f.root_fact_key, f.database_name, f.remediation_action_json
+    FROM analysis_findings AS f
+    WHERE f.server_id = $1 AND f.story_path_hash = $5
+      AND f.analysis_time <= (SELECT r0.opened_at FROM investigation_requests AS r0 WHERE r0.request_id = $3)
+    ORDER BY f.analysis_time DESC
+    LIMIT 1
+)
+SELECT rp.request_id, rp.submitted_at, rp.agent_id, rp.verdict, rp.root_cause, rp.root_cause_found, rp.summary,
+       root.root_fact_key, root.remediation_action_json,
+       (SELECT f3.remediation_action_json FROM analysis_findings AS f3
+        WHERE f3.server_id = rq.server_id
+          AND f3.story_path_hash = rq.story_path_hash
+          AND f3.root_fact_key = root.root_fact_key
+          AND f3.database_name IS NOT DISTINCT FROM root.database_name
+        ORDER BY f3.analysis_time DESC
+        LIMIT 1) AS candidate_remediation_action_json
+FROM root
+CROSS JOIN investigation_requests AS rq
+JOIN investigation_reports AS rp ON rp.request_id = rq.request_id
+WHERE rq.server_id = $1
+  AND rq.family = $2
+  AND rq.request_id <> $3
+  AND rp.submitted_at > $6
+  AND EXISTS (
+        SELECT 1 FROM analysis_findings AS f2
+        WHERE f2.server_id = rq.server_id
+          AND f2.story_path_hash = rq.story_path_hash
+          AND f2.root_fact_key = root.root_fact_key
+          AND f2.database_name IS NOT DISTINCT FROM root.database_name)
+ORDER BY rp.submitted_at DESC
+LIMIT $4";
+
+    /// <summary>#6565: how many same-root-cause reports a brief names at most (the newest first).</summary>
+    public const int MaxSameRootCauseReports = 3;
+
+    /// <summary>#6565: how many candidate reports the SQL returns before the reader drops a plan regression on another query, so a
+    /// run of other-query regressions cannot crowd the real match out of <see cref="MaxSameRootCauseReports"/>.</summary>
+    public const int SameRootCauseCandidateCap = 50;
+
     /* The server's notes AND the fleet's (server_id NULL), the server's own first so fleet notes never crowd them out of
        the ten; a note has no tag scope. Only approved, unexpired notes. */
     internal const string NotesSql = @"
@@ -282,6 +332,42 @@ ORDER BY m.metric_name, f.day DESC";
                         reader.GetString(4),
                         reader.GetBoolean(5),
                         reader.IsDBNull(6) ? null : reader.GetString(6)));
+                }
+            }
+
+            /* #6565: a reported request with the same root fact under another story hash comes first, marked (Darling's twin). */
+            if (request.StoryPathHash is { } storyHash)
+            {
+                var sameRoot = new List<InvestigationEarlierReport>();
+                using (var command = Command(connection, SameRootCauseReportsSql, request.ServerId, request.Family, requestId,
+                    SameRootCauseCandidateCap, storyHash, Micros(now.AddHours(-InvestigationBriefComposer.SameRootCauseHours))))
+                using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
+                {
+                    while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                    {
+                        if (sameRoot.Count >= MaxSameRootCauseReports ||
+                            !InvestigationRootFactMatch.IsSameRootCause(
+                                reader.GetString(7),
+                                reader.IsDBNull(8) ? null : reader.GetString(8),
+                                reader.IsDBNull(9) ? null : reader.GetString(9)))
+                            continue;
+
+                        sameRoot.Add(new InvestigationEarlierReport(
+                            reader.GetGuid(0),
+                            Utc(reader, 1),
+                            reader.GetString(2),
+                            reader.GetString(3),
+                            reader.GetString(4),
+                            reader.GetBoolean(5),
+                            reader.IsDBNull(6) ? null : reader.GetString(6),
+                            SameRootCause: true));
+                    }
+                }
+
+                if (sameRoot.Count > 0)
+                {
+                    var ids = sameRoot.Select(r => r.RequestId).ToHashSet();
+                    earlier = sameRoot.Concat(earlier.Where(r => !ids.Contains(r.RequestId))).Take(Math.Max(MaxEarlierReports, sameRoot.Count)).ToList();
                 }
             }
 

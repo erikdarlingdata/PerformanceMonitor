@@ -11,12 +11,13 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitor.Darling.Storage;
 
 /// <summary>One server action a caller asks the gate about (#5632, step 5): the tool, the action (one of <see cref="ServerActionNames"/>),
 /// the validated <c>agent_action</c> and the server it would run on.</summary>
-public sealed record ServerActionCall(string Tool, string ServerAction, AgentAction Action, AgentActionTarget Target);
+public sealed record ServerActionCall(string Tool, string ServerAction, AgentAction Action, AgentActionTarget Target, string? TokenName = null);
 
 /// <summary>The caller's part of a server-action check (#5632, step 5): the live routes (as <see cref="AgentActionHooks.LoadLevels"/>) and
 /// the server's credential classification. The credential read is the caller's because the <c>remediation_encrypted_password</c> column is
@@ -24,7 +25,7 @@ public sealed record ServerActionCall(string Tool, string ServerAction, AgentAct
 /// <see cref="InvestigationRequestStore.ReadServerCredentialStateAsync"/>. It never resolves the secret.</summary>
 public sealed class ServerActionHooks
 {
-    public required Func<NpgsqlConnection, NpgsqlTransaction, CancellationToken, Task<Func<string, int, int?>>> LoadLevels { get; init; }
+    public required Func<NpgsqlConnection, NpgsqlTransaction, CancellationToken, Task<Func<string, int, AlertSeverityLevel?, int?>>> LoadLevels { get; init; }
 
     public required Func<int, CancellationToken, Task<ServerCredentialState>> ReadCredential { get; init; }
 }
@@ -79,7 +80,7 @@ public sealed partial class InvestigationRequestStore
     /// server's row for that action is present and enabled; no row is off), 4 <c>no_remediation_credential</c> or
     /// <c>credential_not_reference</c> (a login name and an <c>env:</c> or <c>file:</c> reference; a stored password is refused).
     /// <c>mcp.allowWrites</c> is not an input and no flag skips a check. A refusal is journaled <c>refused</c>, at most once per
-    /// request, tool, code and hour, as the Level 2 gate journals it. <b>Nothing calls this yet:</b> steps 7, 10 and 12 will.
+    /// request, verified token, tool, code and hour, as the Level 2 gate journals it. <b>Nothing calls this yet:</b> steps 7, 10 and 12 will.
     /// Null means every condition holds; the secret was not read or resolved.
     /// </summary>
     public async Task<AgentActionRefusal?> CheckServerActionAsync(ServerActionCall call, ServerActionHooks hooks,
@@ -98,7 +99,7 @@ public sealed partial class InvestigationRequestStore
         var refusal = await ServerActionChecksAsync(connection, transaction, request, call, hooks, now, cancellationToken);
         if (refusal is not null)
             await JournalRefusedAsync(connection, transaction, now, request is null ? null : action.RequestId,
-                request?.ServerId, actor, call.Tool, refusal.Reason, cancellationToken);
+                request?.ServerId, actor, call.TokenName, call.Tool, refusal.Reason, cancellationToken);
         await transaction.CommitAsync(cancellationToken);
         return refusal;
     }
@@ -108,7 +109,7 @@ public sealed partial class InvestigationRequestStore
     {
         if (!System.Linq.Enumerable.Contains(ServerActionNames.All, call.ServerAction, StringComparer.Ordinal))
             return new AgentActionRefusal(AgentActionCodes.UnknownServerAction,
-                "That is not a server action. The actions are force_plan, evict_plan and kill_session.");
+                "That is not a server action. The actions are force_plan, evict_plan, kill_session, recompile_module, create_plan_guide and drop_plan_guide.");
 
         /* 1: the service-wide switch, the one read the write-time re-check uses (without the lock, here). */
         if (await ActionsOffRefusalAsync(connection, transaction, lockRow: false, cancellationToken) is { } off)
@@ -131,7 +132,7 @@ public sealed partial class InvestigationRequestStore
     /// </summary>
     private async Task<AgentActionRefusal?> ServerActionConditionsRefusalAsync(NpgsqlConnection connection, NpgsqlTransaction transaction,
         AgentActionRequest? request, string serverAction, AgentAction action, AgentActionTarget target,
-        Func<NpgsqlConnection, NpgsqlTransaction, CancellationToken, Task<Func<string, int, int?>>> loadLevels, DateTime now, bool practice,
+        Func<NpgsqlConnection, NpgsqlTransaction, CancellationToken, Task<Func<string, int, AlertSeverityLevel?, int?>>> loadLevels, DateTime now, bool practice,
         CancellationToken cancellationToken)
     {
         if (ClaimOrPracticeRefusal(request, action, now, practice) is { } claimRefusal)
@@ -161,6 +162,9 @@ public sealed partial class InvestigationRequestStore
         AgentChangeKinds.PlanForce or AgentChangeKinds.PlanUnforce => ServerActionNames.ForcePlan,
         AgentChangeKinds.PlanEvict => ServerActionNames.EvictPlan,
         AgentChangeKinds.SessionKill => ServerActionNames.KillSession,
+        AgentChangeKinds.ModuleRecompile => ServerActionNames.RecompileModule,
+        AgentChangeKinds.PlanGuideCreate => ServerActionNames.CreatePlanGuide,
+        AgentChangeKinds.PlanGuideDrop => ServerActionNames.DropPlanGuide,
         _ => null,
     };
 

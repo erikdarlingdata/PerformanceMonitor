@@ -178,7 +178,30 @@ public sealed class RepeatDeliveryBudgetTests
             aggregateRepeats: true, incidents: Incidents("SRV-C"));
 
         Assert.True(firstNotice.ShouldSend);
-        Assert.Equal(new[] { "SRV-B (srvb01234567, 4 occurrence(s))" }, RosterEntries(firstNotice));
+        Assert.Equal(new[] { "SRV-B (srvb01234567, 4 occurrences)" }, RosterEntries(firstNotice));
+    }
+
+    /// <summary>#6703: a folded incident that carried one occurrence reads "1 occurrence", not "1 occurrences".</summary>
+    [Fact]
+    public void ARosterLine_ForAnIncidentSeenOnce_ReadsInTheSingular()
+    {
+        var budget = new RepeatDeliveryBudget();
+
+        var carrier = budget.Evaluate(
+            Metric, "SRV-A", Repeat(T0, Fingerprint("SRV-A")), Window, aggregateRepeats: true);
+        budget.Commit(carrier);
+
+        var folded = budget.Evaluate(
+            Metric, "SRV-B", Repeat(T0 + TimeSpan.FromMinutes(1), Fingerprint("SRV-B")), Window,
+            aggregateRepeats: true,
+            incidents: new[] { new AlertIncident(Fingerprint("SRV-B"), new[] { "SalesDb.dbo.Orders" }, 1) });
+        Assert.False(folded.ShouldSend);
+
+        var firstNotice = budget.Evaluate(
+            Metric, "SRV-C", FirstNotice(T0 + TimeSpan.FromMinutes(2), Fingerprint("SRV-C")), Window,
+            aggregateRepeats: true, incidents: Incidents("SRV-C"));
+
+        Assert.Equal(new[] { "SRV-B (srvb01234567, 1 occurrence)" }, RosterEntries(firstNotice));
     }
 
     /// <summary>
@@ -210,7 +233,7 @@ public sealed class RepeatDeliveryBudgetTests
         Assert.Equal(14, lines.Count);
         foreach (var server in Fleet.Skip(1))
         {
-            Assert.Contains($"{server} ({Fingerprint(server).Substring(0, 12)}, 4 occurrence(s))", lines);
+            Assert.Contains($"{server} ({Fingerprint(server).Substring(0, 12)}, 4 occurrences)", lines);
         }
 
         /* The permutation: every line is present, every fingerprint is present, and no line pairs a server
@@ -219,7 +242,7 @@ public sealed class RepeatDeliveryBudgetTests
         {
             var neighbour = Fleet[n == Fleet.Length - 1 ? 1 : n + 1];
             Assert.DoesNotContain(
-                $"{Fleet[n]} ({Fingerprint(neighbour).Substring(0, 12)}, 4 occurrence(s))", lines);
+                $"{Fleet[n]} ({Fingerprint(neighbour).Substring(0, 12)}, 4 occurrences)", lines);
         }
     }
 
@@ -292,7 +315,7 @@ public sealed class RepeatDeliveryBudgetTests
 
         var carrier = budget.Evaluate(
             Metric, "SRV-A", Repeat(T0 + Window, Fingerprint("SRV-A")), Window, true);
-        Assert.Equal(new[] { "SRV-B (srvb01234567, 4 occurrence(s))" }, RosterEntries(carrier));
+        Assert.Equal(new[] { "SRV-B (srvb01234567, 4 occurrences)" }, RosterEntries(carrier));
 
         /* Folded between the decision and the commit — the window the four channel posts occupy. */
         budget.Evaluate(
@@ -302,7 +325,7 @@ public sealed class RepeatDeliveryBudgetTests
 
         var next = budget.Evaluate(
             Metric, "SRV-A", Repeat(T0 + Window + Window, Fingerprint("SRV-A")), Window, true);
-        Assert.Equal(new[] { "SRV-C (srvc01234567, 4 occurrence(s))" }, RosterEntries(next));
+        Assert.Equal(new[] { "SRV-C (srvc01234567, 4 occurrences)" }, RosterEntries(next));
     }
 
     /// <summary>
@@ -414,7 +437,7 @@ public sealed class RepeatDeliveryBudgetTests
         var carrier = budget.Evaluate(
             Metric, "SRV-A", Repeat(T0 + Window, Fingerprint("SRV-A")), Window, true);
 
-        Assert.Equal(new[] { "SRV-B (srvb01234567, 7 occurrence(s))" }, RosterEntries(carrier));
+        Assert.Equal(new[] { "SRV-B (srvb01234567, 7 occurrences)" }, RosterEntries(carrier));
         Assert.Equal(1, carrier.RosterEntryCount);
     }
 

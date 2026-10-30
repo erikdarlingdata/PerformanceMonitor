@@ -84,6 +84,61 @@ public sealed class AnomalyDetectorTileBehaviourBatchSessionQueryMemoryTests : I
         TimeRangeEnd = windowStart.AddHours(4)
     };
 
+    /* ───────────────────────── Write latency: its own baseline (#6696) ───────────────────────── */
+
+    /// <summary>Hour h, row i of a seeded file-I/O hour: write latency in ms is 4 to 18 (median 11) with one 300 ms row.</summary>
+    private const string WriteMsSql = "CASE WHEN i = 14 THEN 300 ELSE 4 + (i * 7) % 15 END";
+
+    private async Task SeedFileIoAsync(int serverId, string time, string rangeOfDays, string writeMs)
+    {
+        // Reads sit near 1 ms (8 to 12 ms of stall over 10 reads); writes are 10 per row.
+        var sql = $@"
+INSERT INTO file_io_stats
+    (collection_id, collection_time, server_id, server_name, database_name, file_name, file_type, physical_name, size_mb,
+     delta_reads, delta_writes, delta_read_bytes, delta_write_bytes, delta_stall_read_ms, delta_stall_write_ms, sample_interval_seconds)
+SELECT -8100000 - (d * 100000 + h * 1000 + i), {time}, $2, 'TileServer', 'AppDb', 'AppDb_data', 'ROWS', 'D:\AppDb.mdf', 100,
+       10, 10, 81920, 81920, 8 + i % 5, ({writeMs}) * 10, 60
+FROM {rangeOfDays}
+CROSS JOIN range(0, 4) AS hh(h)
+CROSS JOIN range(0, 30) AS ii(i)";
+        await ExecuteSeedAsync(sql, WindowStartT, serverId);
+    }
+
+    /// <summary>
+    /// #6696: the write-latency gate scores against the WRITE history. Three weeks of history at hours 10-13, thirty
+    /// file rows an hour, reads near 1 ms and writes 4 to 18 ms with one 300 ms row an hour. Window A repeats that:
+    /// each hour's write mean (20.6 ms) is 1.7 robust sigma over the write median, so nothing fires. Scored against
+    /// the READ series (median 1 ms) that same mean read 7.8 sigma and fired, which is the defect. Window B runs every
+    /// write at 200 ms and fires, beside no read fact.
+    /// </summary>
+    [Fact]
+    public async Task WriteLatency_IsScoredAgainstWriteHistory_AWindowLikeItsHistoryStaysQuiet_FarAboveItFires()
+    {
+        const int serverId = -8301;
+        await SeedFileIoAsync(serverId, "$1 - to_days(d) + to_hours(h) + to_minutes(2 * i + 1)", "range(1, 22) AS dd(d)", WriteMsSql);
+        await SeedCanaryAsync(serverId, WindowStartT);
+
+        var writeBaseline = await _baselineProvider.GetBaselineAsync(serverId, MetricNames.IoWriteLatency, WindowStartT);
+        var readBaseline = await _baselineProvider.GetBaselineAsync(serverId, MetricNames.IoLatency, WindowStartT);
+        Assert.InRange(writeBaseline.Median, 8.0, 14.0);
+        Assert.InRange(readBaseline.Median, 0.5, 1.5);
+
+        await SeedFileIoAsync(serverId, "$1 + to_hours(h) + to_minutes(2 * i + 1)", "range(0, 1) AS dd(d)", WriteMsSql);
+        var quiet = await _detector.DetectAnomaliesAsync(FourHourContext(serverId, WindowStartT));
+        Assert.DoesNotContain(quiet, f => f.Key == "ANOMALY_WRITE_LATENCY");
+        Assert.DoesNotContain(quiet, f => f.Key == "ANOMALY_READ_LATENCY");
+
+        await ExecuteSeedAsync("DELETE FROM file_io_stats WHERE server_id = $1 AND collection_time >= $2", serverId, WindowStartT);
+        _baselineProvider.ClearCache();
+        await SeedFileIoAsync(serverId, "$1 + to_hours(h) + to_minutes(2 * i + 1)", "range(0, 1) AS dd(d)", "CASE WHEN i = 14 THEN 300 ELSE 200 END");
+
+        var sustained = await _detector.DetectAnomaliesAsync(FourHourContext(serverId, WindowStartT));
+        var write = Assert.Single(sustained, f => f.Key == "ANOMALY_WRITE_LATENCY");
+        Assert.Equal(300.0, write.Value);
+        Assert.InRange(write.Metadata["baseline_median"], 8.0, 14.0); // the write history, not the read series
+        Assert.DoesNotContain(sustained, f => f.Key == "ANOMALY_READ_LATENCY");
+    }
+
     /* ───────────────────────── Batch requests: scenarios 1, 3 and 4 ───────────────────────── */
 
     private const double BatchMu = 5000.0;    // requests/sec-equivalent delta per 10s collection

@@ -106,8 +106,11 @@ public sealed class ViewerGridTimeColumnSortMemberTests
         /* Columns whose row already had a UTC (or display-zone) DateTime and only lacked the SortMemberPath. */
         { "AlertsHistoryTab.xaml", "AlertsDataGrid", "TimeLocal", Name(typeof(ViewerAlertRow)), "AlertTime" },
         { "JobHistoryTab.xaml", "JobHistoryDataGrid", "RunTimeLocal", Name(typeof(ViewerJobHistoryRow)), "RunDateTimeUtc" },
-        { "JobHistoryTab.xaml", "JobHistoryDataGrid", "LastSuccessfulRunLocal", Name(typeof(ViewerJobHistoryRow)), "LastSuccessfulRunUtc" },
         { "MuteRulesWindow.xaml", "RulesGrid", "ExpiresDisplay", Name(typeof(MuteRule)), "ExpiresAtUtc" },
+        { "AlertRulesWindow.xaml", "RulesGrid", "ExpiryText", Name(typeof(AlertRuleRow)), "ExpiresAtUtc" },
+        { "FleetSweepsTab.xaml", "WatchItemsDataGrid", "FirstSeen", Name(typeof(FleetSweepWatchRow)), "FirstSeenUtc" },
+        { "FleetSweepsTab.xaml", "WatchItemsDataGrid", "LastSeen", Name(typeof(FleetSweepWatchRow)), "LastSeenUtc" },
+        { "FleetSweepsTab.xaml", "RunsDataGrid", "SweptAtLocal", Name(typeof(FleetSweepRunRow)), "SweptAtUtc" },
         { "ProcedureHistoryWindow.xaml", "HistoryDataGrid", "CollectionTimeLocal", Name(typeof(ViewerProcedureStatsHistoryRow)), "CollectionTime" },
         { "QueryStatsHistoryWindow.xaml", "HistoryDataGrid", "CollectionTimeLocal", Name(typeof(ViewerQueryStatsHistoryRow)), "CollectionTime" },
         { "QueryStoreHistoryWindow.xaml", "HistoryDataGrid", "CollectionTimeLocal", Name(typeof(ViewerQueryStoreHistoryRow)), "CollectionTime" },
@@ -225,6 +228,7 @@ public sealed class ViewerGridTimeColumnSortMemberTests
         [("ViewerServerTab.xaml", "PgLogEventsGrid", "TimesSeen")] = "a count of sightings",
         [("ViewerServerTab.xaml", "PgLockStatsGrid", "Captures")] = "a count of captures",
         [("ViewerServerTab.xaml", "PgReplicationStatsGrid", "Samples")] = "a count of samples",
+        [("IdentityCapacityTab.xaml", "ColumnsDataGrid", "RatePerDay")] = "identity values used per day, a rate and not a time",
         [("ViewerServerTab.xaml", "PgKernelStatsGrid", "CounterReset")] = "a yes/no flag that the counters were reset, not when",
         [("ViewerServerTab.xaml", "PgWaitSamplingGrid", "CounterReset")] = "a yes/no flag that the counters were reset, not when",
         [("ViewerServerTab.xaml", "PgAutovacuumGrid", "InsertsSinceVacuum")] = "a row count",
@@ -232,6 +236,7 @@ public sealed class ViewerGridTimeColumnSortMemberTests
         [("ViewerServerTab.xaml", "PgPlanCaptureGrid", "Observed")] = "the setting value the readiness check observed, not a time",
         [("ViewerServerTab.xaml", "PgIndexBloatGrid", "EstimatedReclaimableBytes")] = "a byte count",
         [("ViewerServerTab.xaml", "PgIndexBloatGrid", "SkippedReason")] = "the reason a measurement was skipped, text",
+        [("ViewerServerTab.xaml", "PgExtensionCensusGrid", "DatabasesCreated")] = "a count of databases the extension is created in",
         [("KnownPatternsWindow.xaml", "PatternsGrid", "CreatedBy")] = "the name of whoever created the entry, not when",
     };
 
@@ -391,7 +396,7 @@ public sealed class ViewerGridTimeColumnSortMemberTests
 
     /// <summary>The words that make a header or a bound property name read as a time. Tuned against every column in the viewer.</summary>
     private static readonly Regex TimeWords = new(
-        @"\b(?:time|date|when|seen|expires?|expiry|created|creation|modified|collected|captured|observed|started|start|ended|since|measured|estimated|reset|day|cached"
+        @"\b(?:time|date|when|seen|expires?|expiry|created|creation|modified|collected|captured|observed|started|start|ended|since|swept|measured|estimated|reset|day|cached"
         + @"|as of|(?:last|first) (?:run|success|scan|vacuum|autovacuum|analyze|autoanalyze|execution|refresh|access|cleanup end)|(?:executed|reverted|updated|last error) at)\b",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 

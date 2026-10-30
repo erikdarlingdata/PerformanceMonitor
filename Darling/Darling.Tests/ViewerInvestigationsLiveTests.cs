@@ -89,7 +89,11 @@ FROM config.investigation_notes WHERE note_id = {written}", ct));
                 (await viewer.GetInvestigationProfilesAsync(ct)).FirstOrDefault(p => p.ScopeServerId == server && p.ScopeTagId == tag)?.ModifiedAtUtc;
 
             await viewer.SaveInvestigationProfileAsync(null, null, "fleet: OLTP, business hours 08-18", "tester", null, ct);
+            /* #6400: a server profile needs the server in the registry (config_monitored_servers), not only in collect.servers. */
+            await ExecAsync(owner, "INSERT INTO config.config_monitored_servers (server_id, name, host) VALUES (7, 'srv-7', 'srv-7')", ct);
             await viewer.SaveInvestigationProfileAsync(7, null, "srv-7: reporting replica", "tester", null, ct);
+            /* #6400: a tag profile needs the tag to exist. */
+            await ExecAsync(owner, "INSERT INTO config.server_tags (id, name) OVERRIDING SYSTEM VALUE VALUES (3, 'dev')", ct);
             await viewer.SaveInvestigationProfileAsync(null, 3, "tag 3: dev servers", "tester", null, ct);
             var staleFleet = await ShownAsync(null, null);
 

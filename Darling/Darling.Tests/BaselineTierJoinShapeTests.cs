@@ -106,8 +106,8 @@ public sealed class BaselineTierJoinShapeTests
     }
 
     /// <summary>
-    /// The scaffold is shared, so the fix must reach every metric that uses it — nine at the time of
-    /// writing. If this count ever drops, a metric stopped routing through the robust path and its MAD
+    /// The scaffold is shared, so the fix must reach every metric that uses it — ten since #6696 added
+    /// IoWriteLatency (nine before it). If this count ever drops, a metric stopped routing through the robust path and its MAD
     /// silently became 0, which the reader cannot distinguish from a genuinely flat signal.
     /// </summary>
     [Fact]
@@ -117,6 +117,6 @@ public sealed class BaselineTierJoinShapeTests
             .Select(PgBaselineProvider.GetBaselineQuery)
             .Count(q => q is not null && q.Contains("tier_mads", StringComparison.Ordinal));
 
-        Assert.Equal(9, withMad);
+        Assert.Equal(10, withMad);
     }
 }

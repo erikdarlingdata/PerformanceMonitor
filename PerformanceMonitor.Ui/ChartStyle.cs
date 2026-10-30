@@ -99,6 +99,8 @@ namespace PerformanceMonitor.Ui
             chart.Plot.Axes.Bottom.TickLabelStyle.FontSize = 13;
             chart.Plot.Axes.Left.TickLabelStyle.FontSize = 13;
 
+            ApplyShortPlotFixes(chart);
+
             // Set the WPF control Background to match so no white flash appears before ScottPlot's render loop fires
             chart.Background = new SolidColorBrush(Color.FromRgb(c.FigureBackground.R, c.FigureBackground.G, c.FigureBackground.B));
 
@@ -125,6 +127,19 @@ namespace PerformanceMonitor.Ui
             chart.Plot.Grid.MajorLineColor = c.Grid;
             chart.Plot.Axes.Bottom.TickLabelStyle.ForeColor = c.Text;
             chart.Plot.Axes.Left.TickLabelStyle.ForeColor = c.Text;
+            ApplyShortPlotFixes(chart);
+        }
+
+        /// <summary>#6652: on a short plot keep at least two y ticks and fit the left-axis title to the plot height. A custom y tick generator a caller already set is left alone.</summary>
+        private static void ApplyShortPlotFixes(WpfPlot chart)
+        {
+            if (chart.Plot.Axes.Left.TickGenerator is ScottPlot.TickGenerators.NumericAutomatic)
+                chart.Plot.Axes.Left.TickGenerator = new MinimumTickGenerator();
+            ChartLayout.Attach(chart); // #6832: before the title, whose refit reads what this measured
+            ChartAxisTitle.Attach(chart);
+            // #6832: the panel is sized from the tick labels of one pass and drawn with those of the next, and on a short plot the
+            // second pass adds the axis' top tick ("398.17") that the first never measured, so that label ran into the title.
+            chart.Plot.Axes.Left.MinimumSize = (float)ChartAxisTitle.LeftPanelMinWidth;
         }
 
         private static void HandleChartFirstLoaded(object sender, RoutedEventArgs e)

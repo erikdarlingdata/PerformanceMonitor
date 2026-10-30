@@ -68,14 +68,21 @@ public sealed partial class ViewerDataService
     /// <c>collection_time</c>, which this event-time window alone gives the planner nothing to exclude a chunk
     /// on (#4229); the floor lets it skip every chunk older than the window, without being able to drop a row
     /// (an event is collected after it happens).
+    ///
+    /// <para><b>A parallel query waiting on itself is not blocking (#6645, #6705)</b>: both arms carry
+    /// <see cref="BlockingWaits.NotSelfWaitSql"/>, so the bars agree with the baseline band drawn over them
+    /// (<c>blocked_process_baseline</c> leaves self-waits out, #6690) and with <c>PgAnomalyDetector.BlockingWindowSql</c>.
+    /// The DMV arm is drawn when the FILTERED XE arm is empty, so a window whose only XE reports are self-waits falls back to
+    /// the DMV snapshots, as the anomaly detector does; <see cref="BlockedProcessReportsInWindowSql"/> takes the same predicate.</para>
     /// </summary>
-    public const string BlockingTrendSql = """
+    public const string BlockingTrendSql = $"""
         WITH bpr AS (
             SELECT DATE_TRUNC('minute', event_time) AS bucket, COUNT(*) AS incident_count, 'blocked-process-report' AS source
             FROM v_blocked_process_reports
             WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
             AND   collection_time >= $5
             AND   ($4::text[] IS NULL OR database_name = ANY($4))
+            AND   {PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql}
             GROUP BY DATE_TRUNC('minute', event_time)
         ),
         dmv AS (
@@ -84,6 +91,7 @@ public sealed partial class ViewerDataService
             WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
             AND   collection_time >= $5
             AND   ($4::text[] IS NULL OR database_name = ANY($4))
+            AND   {PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql}
             GROUP BY DATE_TRUNC('minute', event_time)
         )
         SELECT bucket, incident_count, source FROM bpr

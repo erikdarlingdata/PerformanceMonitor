@@ -161,11 +161,10 @@ VALUES ($1, $2, $3, 'TestSrv', $4, 'Server Memory Change', NULL, NULL, NULL, NUL
     [Fact]
     public void AJobStepAndANextRun_StoredAsTheWallClock_AreShownAsItIs_InTheRepeatedHour()
     {
-        var step = new JobHistoryRow { RunDateTime = At(2026, 11, 1, 1, 30), LastSuccessfulRun = At(2026, 11, 1, 1, 45) };
+        var step = new JobHistoryRow { RunDateTime = At(2026, 11, 1, 1, 30) };
         var agent = new AgentStatusRow { NextScheduledRun = At(2026, 11, 1, 1, 30) };
 
         Assert.Equal("2026-11-01 01:30:00", step.RunTimeLocal);
-        Assert.Equal("2026-11-01 01:45:00", step.LastSuccessfulRunLocal);
         Assert.Equal("2026-11-01 01:30:00", agent.NextScheduledRunLocal);
 
         Assert.Equal("2026-11-01 01:30:00 -05:00", TrueUtcRowText(At(2026, 11, 1, 6, 30)));

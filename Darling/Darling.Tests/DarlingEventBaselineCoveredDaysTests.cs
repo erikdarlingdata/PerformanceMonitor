@@ -225,7 +225,7 @@ public sealed class DarlingEventBaselineCoveredDaysTests
         foreach (var (metric, eventTable, aggregate, liteEvents) in new[]
         {
             ("Blocking", "blocked_process_reports", TimescaleSupport.BlockedProcessBaselineView,
-                "StoredEventCopies.BlockedProcessReports(\"server_id = $1 AND event_time >= $2 AND event_time < $3\") + \" AS ev\""),
+                "StoredEventCopies.BlockedProcessReports(\"server_id = $1 AND event_time >= $2 AND event_time < $3 AND \" + PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql) + \" AS ev\""),
             ("Deadlock", "deadlocks", TimescaleSupport.DeadlockBaselineView, "v_deadlocks"),
         })
         {
@@ -269,6 +269,18 @@ public sealed class DarlingEventBaselineCoveredDaysLiveTests
     private const long LogIdBase = -4731_000_000_000L;
 
     private static readonly DateTime AnalysisTime = new(2026, 3, 4, 14, 0, 0, DateTimeKind.Unspecified);
+
+    /// <summary>
+    /// #6706: the provider measures the raw tables' purge horizon from its clock. The seeded data is March 2026, so the clock is
+    /// set at the window's end (Mar 4 00:00 UTC): at the default 30-day retention the horizon is then the window start (Feb 2)
+    /// and every assertion below stands as it did before the clamp existed.
+    /// </summary>
+    private static readonly TimeProvider Clock = new FixedClock(new DateTimeOffset(2026, 3, 4, 0, 0, 0, TimeSpan.Zero));
+
+    private sealed class FixedClock(DateTimeOffset now) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => now;
+    }
 
     private static readonly DateTime[] Tuesdays =
     [
@@ -316,7 +328,7 @@ public sealed class DarlingEventBaselineCoveredDaysLiveTests
             await SeedEventAsync(connection, family, serverId, ElsewhereEvent, ct);
             await TimescaleSupport.EnsureBaselineFallbackViewsAsync(connection, null, ct);
 
-            var map = await new PgBaselineProvider(postgres).GetBucketMapAsync(serverId, metric, AnalysisTime, AnalysisTime.AddHours(1), ct);
+            var map = await new PgBaselineProvider(postgres, timeProvider: Clock).GetBucketMapAsync(serverId, metric, AnalysisTime, AnalysisTime.AddHours(1), ct);
 
             Assert.Equal(24 * 7, map.Buckets.Count);
             var tuesday = map.Buckets[(Hour, Tuesday)];
@@ -364,7 +376,7 @@ public sealed class DarlingEventBaselineCoveredDaysLiveTests
             await SeedQuietMonthAsync(connection, serverId, collector, ct);
             await TimescaleSupport.EnsureBaselineFallbackViewsAsync(connection, null, ct);
 
-            var map = await new PgBaselineProvider(postgres).GetBucketMapAsync(serverId, metric, AnalysisTime, AnalysisTime.AddHours(1), ct);
+            var map = await new PgBaselineProvider(postgres, timeProvider: Clock).GetBucketMapAsync(serverId, metric, AnalysisTime, AnalysisTime.AddHours(1), ct);
 
             Assert.Empty(map.Buckets);
 
@@ -412,7 +424,7 @@ public sealed class DarlingEventBaselineCoveredDaysLiveTests
 
             await TimescaleSupport.EnsureBaselineFallbackViewsAsync(connection, null, ct);
 
-            var map = await new PgBaselineProvider(postgres).GetBucketMapAsync(serverId, metric, AnalysisTime, AnalysisTime.AddHours(1), ct);
+            var map = await new PgBaselineProvider(postgres, timeProvider: Clock).GetBucketMapAsync(serverId, metric, AnalysisTime, AnalysisTime.AddHours(1), ct);
 
             var tuesday = map.Buckets[(Hour, Tuesday)];
             Assert.Equal(6.0 / 5.0, tuesday.Mean, 9);
@@ -463,7 +475,7 @@ public sealed class DarlingEventBaselineCoveredDaysLiveTests
             await SeedEventAsync(connection, family, serverId, ElsewhereEvent, ct);
             await TimescaleSupport.EnsureBaselineFallbackViewsAsync(connection, null, ct);
 
-            var map = await new PgBaselineProvider(postgres).GetBucketMapAsync(serverId, metric, AnalysisTime, AnalysisTime.AddHours(1), ct);
+            var map = await new PgBaselineProvider(postgres, timeProvider: Clock).GetBucketMapAsync(serverId, metric, AnalysisTime, AnalysisTime.AddHours(1), ct);
 
             var tuesday = map.Buckets[(Hour, Tuesday)];
             Assert.Equal(4L, tuesday.SampleCount);
@@ -507,7 +519,7 @@ public sealed class DarlingEventBaselineCoveredDaysLiveTests
             await SeedEventAsync(connection, family, serverId, ElsewhereEvent, ct);
             await TimescaleSupport.EnsureBaselineFallbackViewsAsync(connection, null, ct);
 
-            var provider = new PgBaselineProvider(postgres);
+            var provider = new PgBaselineProvider(postgres, timeProvider: Clock);
             var day = AnalysisTime.Date;
 
             var (morning, firstReads) = await CommandCapture.CountBaselineReadsAsync(
@@ -532,6 +544,73 @@ public sealed class DarlingEventBaselineCoveredDaysLiveTests
         finally
         {
             await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, (cleanup, cleanupCt) => TearDownAsync(cleanup, serverId, cleanupCt));
+        }
+    }
+
+    /// <summary>
+    /// #6706: on a plain-view store, raw events are purged at the collector's retention while <c>collection_log</c> is kept twice
+    /// as long. With retention 7 days and runs logged back 35 days, the days before the horizon (Feb 25 00:00 for a clock of
+    /// Mar 4 00:00) have logged runs and no events, and used to count as measured zeros. Events sit only on the last seven days
+    /// (three on Tuesday Mar 3 at 14:10, one on Sunday Mar 1 at 09:10). The Tuesday 14:00 bucket is now Mar 3 alone, so its mean
+    /// is the three events over one day, not over five. Then the same data under the default 30-day retention reads as it did
+    /// before: five Tuesdays, mean 3/5.
+    /// </summary>
+    [Theory]
+    [InlineData("blocking")]
+    [InlineData("deadlock")]
+    public async Task Live_RetentionBelowTheWindow_CountsOnlyTheDaysTheRawTableStillHolds(string family)
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live event-baseline coverage test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        var (metric, collector, serverId) = Family(family);
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await CleanupAsync(connection, serverId, ct);
+        await ExecAsync(connection, ct, "DELETE FROM config.config_collector_schedules WHERE server_id IS NULL AND collector_name = $1", collector);
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var bodySucceeded = false;
+        try
+        {
+            await SeedQuietMonthAsync(connection, serverId, collector, ct);
+            for (var i = 0; i < 3; i++)
+            {
+                await SeedEventAsync(connection, family, serverId, Tuesdays[4].AddMinutes(10 + i), ct);
+            }
+
+            await SeedEventAsync(connection, family, serverId, new DateTime(2026, 3, 1, 9, 10, 0, DateTimeKind.Unspecified), ct);
+            await TimescaleSupport.EnsureBaselineFallbackViewsAsync(connection, null, ct);
+
+            await ExecAsync(connection, ct,
+                "INSERT INTO config.config_collector_schedules (server_id, collector_name, retention_days) VALUES (NULL, $1, 7)", collector);
+
+            var short7 = (await new PgBaselineProvider(postgres, timeProvider: Clock).GetBucketMapAsync(serverId, metric, AnalysisTime, AnalysisTime.AddHours(1), ct))
+                .Buckets[(Hour, Tuesday)];
+            Assert.Equal(3.0, short7.Mean, 9);
+            Assert.Equal(1L, short7.SampleCount);
+            Assert.Equal(1L, short7.DistinctDays);
+
+            await ExecAsync(connection, ct, "DELETE FROM config.config_collector_schedules WHERE server_id IS NULL AND collector_name = $1", collector);
+
+            var thirty = (await new PgBaselineProvider(postgres, timeProvider: Clock).GetBucketMapAsync(serverId, metric, AnalysisTime, AnalysisTime.AddHours(1), ct))
+                .Buckets[(Hour, Tuesday)];
+            Assert.Equal(3.0 / 5.0, thirty.Mean, 9);
+            Assert.Equal(5L, thirty.SampleCount);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await ExecAsync(cleanup, cleanupCt, "DELETE FROM config.config_collector_schedules WHERE server_id IS NULL AND collector_name = $1", collector);
+                await TearDownAsync(cleanup, serverId, cleanupCt);
+            });
         }
     }
 

@@ -1,0 +1,69 @@
+<Window x:Class="PerformanceMonitor.Darling.Viewer.AlertRulesWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Manage Alert Rules"
+        Height="520" Width="980"
+        WindowStartupLocation="CenterOwner"
+        Icon="EDD.ico"
+        ResizeMode="CanResizeWithGrip"
+        Background="{DynamicResource BackgroundLightBrush}"
+        Foreground="{DynamicResource ForegroundBrush}">
+    <!-- The custom alert rule manager (#6390 S4), laid out like MuteRulesWindow and dark-styled via the shared ViewerDarkTheme dictionary.
+         Reads and writes go through CustomAlertRuleStore (via ViewerDataService), the same store the web dashboard and MCP tools use. -->
+    <Window.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="ViewerDarkTheme.xaml"/>
+            </ResourceDictionary.MergedDictionaries>
+        </ResourceDictionary>
+    </Window.Resources>
+
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0" Text="Custom Alert Rules" FontSize="18" FontWeight="Bold" HorizontalAlignment="Left" Margin="0,0,0,4"/>
+        <TextBlock Grid.Row="1" Text="Rules you write over the collected metrics. The service evaluates them on its next sweep after a save. A paused rule never evaluates; deleting a rule closes any incident it has open."
+                   Foreground="{DynamicResource ForegroundMutedBrush}" TextWrapping="Wrap" HorizontalAlignment="Left" Margin="0,0,0,12"/>
+
+        <Grid Grid.Row="2">
+            <DataGrid x:Name="RulesGrid"
+                      Style="{StaticResource DarkGrid}"
+                      CanUserDeleteRows="False"
+                      IsReadOnly="True"
+                      MouseDoubleClick="RulesGrid_MouseDoubleClick">
+                <DataGrid.Columns>
+                    <DataGridTextColumn Header="Name" Binding="{Binding Name}" Width="200"/>
+                    <DataGridTextColumn Header="Status" Binding="{Binding Status}" Width="70" SortMemberPath="Status"/>
+                    <DataGridTextColumn Header="Scope" Binding="{Binding ScopeText}" Width="*"/>
+                    <DataGridTextColumn Header="Expires (UTC)" Binding="{Binding ExpiryText}" SortMemberPath="ExpiresAtUtc" Width="140"/>
+                    <DataGridTextColumn Header="State" Binding="{Binding StateText}" Width="130"/>
+                    <DataGridTextColumn Header="Last fired (UTC)" Binding="{Binding LastFiredText}" Width="140"/>
+                    <DataGridTextColumn Header="Updated by" Binding="{Binding UpdatedBy}" Width="110"/>
+                </DataGrid.Columns>
+            </DataGrid>
+            <TextBlock x:Name="NoRulesMessage"
+                       Text="No custom alert rules yet. Add one, or start from a template."
+                       Foreground="{DynamicResource ForegroundMutedBrush}"
+                       HorizontalAlignment="Center" VerticalAlignment="Center"
+                       TextWrapping="Wrap" TextAlignment="Center" MaxWidth="420"
+                       Visibility="Collapsed"/>
+        </Grid>
+
+        <StackPanel x:Name="ActionButtonsPanel" Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Left" Margin="0,12,0,0">
+            <Button x:Name="NewButton" Content="_New..." Width="80" Height="28" Margin="0,0,8,0" Click="NewRule_Click"/>
+            <Button x:Name="TemplateButton" Content="New from _Template..." Width="150" Height="28" Margin="0,0,8,0" Click="NewFromTemplate_Click"/>
+            <Button x:Name="EditButton" Content="_Edit" Width="70" Height="28" Margin="0,0,8,0" Click="EditRule_Click"/>
+            <Button x:Name="PauseButton" Content="_Pause / Resume" Width="120" Height="28" Margin="0,0,8,0" Click="PauseResume_Click"/>
+            <Button x:Name="DeleteButton" Content="_Delete" Width="70" Height="28" Click="DeleteRule_Click"/>
+        </StackPanel>
+        <TextBlock x:Name="ReadOnlyBanner" Grid.Row="3" HorizontalAlignment="Left" VerticalAlignment="Center"
+                   Margin="0,12,0,0" Foreground="{DynamicResource WarningTextBrush}" TextWrapping="Wrap" MaxWidth="700" Visibility="Collapsed"/>
+        <Button Grid.Row="3" Content="_Close" Width="80" Height="28" Margin="0,12,0,0"
+                HorizontalAlignment="Right" Click="Close_Click" IsCancel="True"/>
+    </Grid>
+</Window>

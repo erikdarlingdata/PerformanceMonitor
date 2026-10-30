@@ -265,7 +265,7 @@ public sealed class DarlingAlertingTests
             {
                 var config = new DarlingConfig();
                 var settings = new DarlingAlertSettings(config);
-                var historyStore = new PgAlertHistoryStore(postgres);
+                var historyStore = new PgAlertHistoryStore(postgres, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds);
                 var webhooks = new WebhookAlertService(
                     settings, DarlingAlertDeliverer.Branding, NullLogger<WebhookAlertService>.Instance, historyStore);
                 var deliverer = new RecordingDeliverer(
@@ -330,7 +330,7 @@ WHERE server_id = $1 AND metric_name = $2", connection))
             }
 
             /* --- the history store's unfiltered cooldown seed sees the row --- */
-            var historyStore = new PgAlertHistoryStore(postgres);
+            var historyStore = new PgAlertHistoryStore(postgres, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds);
             Assert.NotNull(await historyStore.GetLastAlertTimeAsync(TestServerKey, "Deadlocks Detected"));
             Assert.Null(await historyStore.GetLastEmailSentUtcAsync(TestServerKey, "Deadlocks Detected"));
 
@@ -384,7 +384,7 @@ WHERE server_id = $1 AND metric_name = $2", connection))
         var bodySucceeded = false;
         try
         {
-            var historyStore = new PgAlertHistoryStore(postgres);
+            var historyStore = new PgAlertHistoryStore(postgres, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds);
             const string metricName = "Wraparound Risk";
 
             /* Real serializer, not hand-built JSON — the same path AlertOutcome.Context takes before
@@ -460,7 +460,7 @@ WHERE server_id = $1 AND metric_name = $2", connection))
         var bodySucceeded = false;
         try
         {
-            var historyStore = new PgAlertHistoryStore(postgres);
+            var historyStore = new PgAlertHistoryStore(postgres, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds);
             const string metricName = "Analysis: anomaly [3712abcd]";
 
             /* Only a digest row: the page seed sees nothing, the same answer as no history at all. */

@@ -9,6 +9,7 @@
 using System;
 using System.Linq;
 using System.Net;
+using System.Threading.Tasks;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Darling.Service;
@@ -514,7 +515,7 @@ public sealed class DarlingMcpHostTests
     /* ---- the constructor and the DI seam ---- */
 
     [Fact]
-    public void Di_HandsTheHostTheRegisteredMcpTlsCertificateState_TheOneTheWorkerReads()
+    public async Task Di_HandsTheHostTheRegisteredMcpTlsCertificateState_TheOneTheWorkerReads()
     {
         /* The self-alert worker takes the same registered McpTlsCertificateState singleton, so what the host publishes
            and clears is what the alert sweep reads. A host that kept its private default would publish into a state
@@ -524,7 +525,8 @@ public sealed class DarlingMcpHostTests
         /* The service's own registration (#5950), so the host is built from the container production builds. */
         DarlingProcessServices.Add(services, stoppedMarkerPath: null);
 
-        using var provider = services.BuildServiceProvider();
+        /* Async disposal: the front door's peer client (#6840) only implements IAsyncDisposable, as the host's own shutdown disposes it. */
+        await using var provider = services.BuildServiceProvider();
         var registered = provider.GetRequiredService<McpTlsCertificateState>();
         var host = provider.GetServices<Microsoft.Extensions.Hosting.IHostedService>().OfType<Host>().Single();
 
@@ -552,7 +554,8 @@ public sealed class DarlingMcpHostTests
     {
         var cidr = CidrAllowList.Parse(allowFrom);
         var expected = OldStartTemplate
-            .Replace("{Listen}", IPAddress.Parse(listen).ToString(), StringComparison.Ordinal)
+            // #6609: an IPv6 listen is a bracketed URL host; the IPv4 cases are the old text unchanged.
+            .Replace("{Listen}", listen == "::" ? "[::]" : IPAddress.Parse(listen).ToString(), StringComparison.Ordinal)
             .Replace("{Port}", "5152", StringComparison.Ordinal)
             .Replace("{Cidr}", cidr.ToString(), StringComparison.Ordinal)
             .Replace("{Origin}", StartOrigin, StringComparison.Ordinal);
@@ -584,7 +587,7 @@ public sealed class DarlingMcpHostTests
         var line = Host.DescribeNetworkStart(
             true, IPAddress.Parse(listen), 5152, CidrAllowList.Parse(allowFrom), StartOrigin);
 
-        Assert.StartsWith($"Starting MCP server on https://{IPAddress.Parse(listen)}:5152 (LAN-exposed to ", line, StringComparison.Ordinal);
+        Assert.StartsWith($"Starting MCP server on https://{(listen == "::" ? "[::]" : listen)}:5152 (LAN-exposed to ", line, StringComparison.Ordinal);
         Assert.Contains("; the one listener serves HTTPS to loopback too) \u2014 ", line, StringComparison.Ordinal);
         Assert.DoesNotContain("plain HTTP", line, StringComparison.Ordinal);
         Assert.Contains("listen/allowFrom/token/tls from darling.json", line, StringComparison.Ordinal);

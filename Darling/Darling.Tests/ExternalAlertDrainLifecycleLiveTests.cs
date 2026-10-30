@@ -487,7 +487,7 @@ public sealed class ExternalAlertDrainLifecycleLiveTests
             _seed = seed;
             ConnectionString = connectionString;
             Ct = ct;
-            History = new PgAlertHistoryStore(dataSource, NullLogger.Instance);
+            History = new PgAlertHistoryStore(dataSource, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds, NullLogger.Instance);
             Store = new ExternalAlertStore(dataSource, 30);
             Drain = new ExternalAlertDrain(
                 Store,
@@ -512,7 +512,7 @@ public sealed class ExternalAlertDrainLifecycleLiveTests
 
                     return delivery;
                 },
-                (_, _, _, _, _) => Task.FromResult(PagerDutyAnswer),
+                (_, _, _, _, _, _) => Task.FromResult(PagerDutyAnswer),
                 History,
                 context => IsMuted(context),
                 name => string.Equals(name, "SQL01", StringComparison.OrdinalIgnoreCase) ? new ExternalAlertServer(7, Sql01DisplayName) : null,

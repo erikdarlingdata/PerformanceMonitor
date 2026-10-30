@@ -109,9 +109,9 @@ public sealed class PlanForceNoWritePathTests
     {
         string darling = Path.Combine(RepoRoot(), "Darling");
         string agents = File.ReadAllText(Path.Combine(darling, "AGENTS.example.md"));
-        string section = MarkdownSection(File.ReadAllText(Path.Combine(darling, "README.md")), "Hand an alert to your own agent");
+        string section = MarkdownSection(File.ReadAllText(Path.Combine(RepoRoot(), "docs", "darling", "agents-and-alert-sources.md")), "Hand an alert to your own agent"); // #6416: moved from Darling/README.md
 
-        foreach (var (name, text) in new[] { ("Darling/AGENTS.example.md", agents), ("Darling/README.md \"Hand an alert to your own agent\"", section) })
+        foreach (var (name, text) in new[] { ("Darling/AGENTS.example.md", agents), ("docs/darling/agents-and-alert-sources.md \"Hand an alert to your own agent\"", section) })
         {
             foreach (var statement in WriteStatements)
             {
@@ -175,14 +175,21 @@ public sealed class PlanForceNoWritePathTests
 
         Assert.Equal(new[]
         {
+            /* #6394: a new webhook signing key is sealed for the destination's stored sealed generic URL, which the mcp role cannot read, so the tool reads that URL as the store owner. */
+            nameof(DarlingMcpAlertTools) + "." + nameof(DarlingMcpAlertTools.GenerateWebhookSigningKey),
+            nameof(DarlingMcpPlanForceTools) + "." + nameof(DarlingMcpPlanForceTools.CreatePlanGuide),
+            nameof(DarlingMcpPlanForceTools) + "." + nameof(DarlingMcpPlanForceTools.DropPlanGuide),
             nameof(DarlingMcpPlanForceTools) + "." + nameof(DarlingMcpPlanForceTools.EvictCachedPlan),
             nameof(DarlingMcpPlanForceTools) + "." + nameof(DarlingMcpPlanForceTools.ForceQueryStorePlan),
             nameof(DarlingMcpPlanForceTools) + "." + nameof(DarlingMcpPlanForceTools.KillSession),
+            nameof(DarlingMcpPlanForceTools) + "." + nameof(DarlingMcpPlanForceTools.RecompileModule),
             nameof(DarlingMcpPlanForceTools) + "." + nameof(DarlingMcpPlanForceTools.UnforceQueryStorePlan),
             /* #6230: the undo is the way back from a force, run by the same code the web route runs; its gate is the force tools (that server force_plan switch and remediation login). */
             nameof(DarlingMcpPlanUndoTools) + "." + nameof(DarlingMcpPlanUndoTools.UndoPlanChange),
         /* #6269: the server action switch tool writes config.config_server_actions, which only the store owner can write. */
         nameof(DarlingMcpServerActionTools) + "." + nameof(DarlingMcpServerActionTools.SetServerAction),
+        /* #6569: set_alert_threshold_override is a Level 2 agent action, so it takes the owner source and the service, not the mcp login, writes its action rows. */
+        nameof(DarlingMcpThresholdOverrideTools) + "." + nameof(DarlingMcpThresholdOverrideTools.SetAlertThresholdOverride),
         }, takers);
     }
 
@@ -260,7 +267,7 @@ public sealed class PlanForceNoWritePathTests
             })
             .Select(Path.GetFileName)
             .ToArray();
-        Assert.Equal(new[] { "DarlingMcpPlanForceTools.cs" }, naming);
+        Assert.Equal(new[] { "DarlingMcpPlanForceTools.cs", "DarlingMcpPlanForceTools.PlanGuide.cs", "DarlingMcpPlanForceTools.RecompileModule.cs" }, naming);
         Assert.DoesNotContain("PlanForceBot.cs", naming);
     }
 

@@ -20,7 +20,7 @@
  * discarded by a background refresh — the same guarantee the dashboard composer has.
  */
 
-import { el, mount } from "./util.js";
+import { el, mount, storeHash } from "./util.js";
 import { renderMarkdown } from "./markdown.js";
 import { cellRange, pinRangeLabel } from "./compose.js";
 import {
@@ -96,7 +96,7 @@ export async function renderNotebookEditor(main, id, templateKey) {
     }
     /* If the id is actually a DASHBOARD, hand off to the dashboard composer (no import cycle — a hash redirect). */
     if (!isNotebookDefinition(res.data.definition)) {
-      location.hash = "#/view/" + encodeURIComponent(id) + "/edit";
+      location.hash = storeHash("#/view/") + encodeURIComponent(id) + "/edit";
       return;
     }
     editingId = res.data.id;
@@ -235,7 +235,7 @@ function buildNotebookEditor(main, ctx) {
   const saveBtn = el("button", { class: "btn primary", type: "button", text: ctx.editingId != null ? "Save changes" : "Create notebook" });
   const cancelBtn = el("button", { class: "btn", type: "button", text: "Cancel" });
 
-  const backHash = ctx.editingId != null ? "#/notebook/" + encodeURIComponent(ctx.editingId) : "#/views";
+  const backHash = storeHash(ctx.editingId != null ? "#/notebook/" + encodeURIComponent(ctx.editingId) : "#/views");
   cancelBtn.addEventListener("click", () => {
     location.hash = backHash;
   });
@@ -316,7 +316,7 @@ function buildNotebookEditor(main, ctx) {
     }
 
     if (res.kind === "data" && res.data) {
-      location.hash = "#/notebook/" + encodeURIComponent(res.data.id);
+      location.hash = storeHash("#/notebook/") + encodeURIComponent(res.data.id);
       return;
     }
 
@@ -463,7 +463,7 @@ function pinnedWindowStrip(cell, ctx) {
 
 function notebookBackHead(id) {
   return el("div", { class: "page-head" }, [
-    el("a", { href: id != null && id !== "new" ? "#/notebook/" + encodeURIComponent(id) : "#/views", text: "← Back" }),
+    el("a", { href: storeHash(id != null && id !== "new" ? "#/notebook/" + encodeURIComponent(id) : "#/views"), text: "← Back" }),
     el("h2", { text: "Notebook composer" }),
   ]);
 }

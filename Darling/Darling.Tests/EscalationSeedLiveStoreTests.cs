@@ -77,7 +77,7 @@ VALUES ($1, $2, 'Srv', $3, 0, 0, $4, $5, $6, $7, $8)", connection);
         var bodySucceeded = false;
         try
         {
-            await body(new PgAlertHistoryStore(postgres), connection);
+            await body(new PgAlertHistoryStore(postgres, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds), connection);
             bodySucceeded = true;
         }
         finally

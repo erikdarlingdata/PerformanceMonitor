@@ -295,9 +295,9 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
 
                 if (value.HasValue)
                 {
-                    var indicator = GetBaselineIndicator(lane, value.Value);
+                    var indicator = GetBaselineIndicator(lane, value.Value, 0);
 
-                    // Tooltip: value + arrow + "30d avg" context
+                    // Tooltip: value, plus an arrow when the value is outside the lane's baseline band
                     _tooltipText.Inlines.Add(new Run($"\n{lane.Label}: {value.Value:N1} {lane.Unit}") { Foreground = DefaultBrush });
                     if (indicator != null)
                     {
@@ -311,14 +311,15 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
             }
             else if (lane.Series.Count > 1)
             {
-                foreach (var series in lane.Series)
+                for (int seriesIndex = 0; seriesIndex < lane.Series.Count; seriesIndex++)
                 {
+                    var series = lane.Series[seriesIndex];
                     double? value = FindNearestValue(series, xValue);
                     string unit = series.Unit ?? lane.Unit;
                     if (value.HasValue)
                     {
                         _tooltipText.Inlines.Add(new Run($"\n{series.Name}: {value.Value:N0} {unit}") { Foreground = DefaultBrush });
-                        var indicator = GetBaselineIndicator(lane, value.Value);
+                        var indicator = GetBaselineIndicator(lane, value.Value, seriesIndex);
                         if (indicator != null)
                             _tooltipText.Inlines.Add(new Run($" {indicator.Value.Symbol}") { Foreground = indicator.Value.Brush });
                     }
@@ -370,29 +371,40 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
 
     private record struct BaselineIndicator(string Symbol, SolidColorBrush Brush);
 
-    private static string? FormatBaselineContext(LaneInfo lane)
+    private static BaselineIndicator? GetBaselineIndicator(LaneInfo lane, double value, int seriesIndex)
     {
-        if (lane.BaselineUpper == null || lane.BaselineLower == null) return null;
-        var mean = (lane.BaselineUpper.Value + lane.BaselineLower.Value) / 2.0;
-        var formatted = mean >= 1000 ? $"{mean:N0}" : mean >= 10 ? $"{mean:N1}" : $"{mean:N2}";
-        return $"30d avg: ~{formatted}";
+        var symbol = BaselineArrowSymbol(lane.BaselineUpper, lane.BaselineLower, lane.MinAnomalyValue, lane.IsEventBased, seriesIndex, value);
+        return symbol switch
+        {
+            "▲" => new BaselineIndicator(symbol, RedBrush),
+            "▼" => new BaselineIndicator(symbol, GreenBrush),
+            _ => null
+        };
     }
 
-    private static BaselineIndicator? GetBaselineIndicator(LaneInfo lane, double value)
+    /// <summary>
+    /// The tooltip arrow for one series' value: "▲" above the lane's baseline, "▼" below it, or null. A lane has one
+    /// baseline and it belongs to the first series (the one registered by SetLaneData; the band, the dashed mean line
+    /// and the red dots all follow it), so a series added later (Total CPU next to SQL CPU, Deadlocks next to
+    /// blocking) never gets an arrow: judging it against another series' band showed a red ▲ with no red dot (#6787).
+    /// </summary>
+    internal static string? BaselineArrowSymbol(double? baselineUpper, double? baselineLower, double minAnomalyValue,
+        bool isEventBased, int seriesIndex, double value)
     {
-        if (lane.BaselineUpper == null || lane.BaselineLower == null) return null;
+        if (seriesIndex != 0) return null;
+        if (baselineUpper == null || baselineLower == null) return null;
         // For event-based metrics (blocking/deadlocks): value significantly above
         // the baseline mean is a spike, even if within the wide ± 2σ band.
         // Uses 3x mean as threshold — if you normally see ~5 events and now see 20, that's a spike.
-        var mean = (lane.BaselineUpper.Value + lane.BaselineLower.Value) / 2.0;
-        if (lane.IsEventBased && value >= 1.0 && (mean < 1.0 || value > mean * 3))
-            return new BaselineIndicator("▲", RedBrush);
+        var mean = (baselineUpper.Value + baselineLower.Value) / 2.0;
+        if (isEventBased && value >= 1.0 && (mean < 1.0 || value > mean * 3))
+            return "▲";
         // ▲ requires both: outside band AND above absolute minimum (prevents 1% CPU false alarms)
-        if (value > lane.BaselineUpper.Value && value >= lane.MinAnomalyValue)
-            return new BaselineIndicator("▲", RedBrush);
+        if (value > baselineUpper.Value && value >= minAnomalyValue)
+            return "▲";
         // ▼ always shown when below band (drops are always interesting — tuning feedback)
-        if (value < lane.BaselineLower.Value)
-            return new BaselineIndicator("▼", GreenBrush);
+        if (value < baselineLower.Value)
+            return "▼";
         return null;
     }
 

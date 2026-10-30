@@ -12,6 +12,9 @@ using System.Diagnostics;
 using System.Linq;
 using System.Reflection;
 using System.Text.Json;
+using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
 using static Darling.Tests.RepoFile;
 
@@ -27,7 +30,7 @@ public sealed class WebPlainTextTests
 {
     private static string[] Run(string[] inputs, out string notCollectedLine) => RunDoc(inputs, out notCollectedLine).Out;
 
-    private static (string[] Out, string[] Named, string[] Tools, string[] Labels, string[] Actions) RunDoc(string[] inputs, out string notCollectedLine)
+    private static (string[] Out, string[] Named, string[] Tools, string[] Labels, string[] Actions, string[] Counts) RunDoc(string[] inputs, out string notCollectedLine)
     {
         var psi = new ProcessStartInfo("node") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
         psi.ArgumentList.Add(PathTo("Darling", "Darling.Tests", "web-plain-text-harness.mjs"));
@@ -43,7 +46,7 @@ public sealed class WebPlainTextTests
         {
             Assert.Skip("Node is not installed, so the shipped page script cannot be run.");
             notCollectedLine = "";
-            return ([], [], [], [], []);
+            return ([], [], [], [], [], []);
         }
 
         using (proc)
@@ -60,8 +63,50 @@ public sealed class WebPlainTextTests
             using var doc = JsonDocument.Parse(output.Split('\n').First(l => l.StartsWith('{')));
             notCollectedLine = doc.RootElement.GetProperty("line").GetString()!;
             string[] Strs(string name) => doc.RootElement.GetProperty(name).EnumerateArray().Select(e => e.GetString()!).ToArray();
-            return (Strs("out"), Strs("named"), Strs("tools"), Strs("labels"), Strs("actions"));
+            return (Strs("out"), Strs("named"), Strs("tools"), Strs("labels"), Strs("actions"), Strs("counts"));
         }
+    }
+
+    /* #6764: the page and the two desktop apps say the same words for a collector that never ran or has gone dark. The page's copy
+       is runtimePreconditionText in plain-text.js, run here under Node on the real MCP answers; the desktop copy is
+       CollectorRuntimePrecondition.GatedOffReaderMessage. A word changed in either one fails this. */
+    [Fact]
+    public void ThePagesRuntimePreconditionText_IsTheDesktopReaderMessage_ForNeverRanAndGoneDark()
+    {
+        var serverLastCollected = DateTime.UtcNow.AddMinutes(-3);
+        var causes = CollectorRuntimePrecondition.RunningJobsPossibleCauses;
+        DateTime?[] collectorLastRuns = [null, serverLastCollected.AddDays(-20)];
+
+        foreach (var last in collectorLastRuns)
+        {
+            var mcp = CollectorRuntimePrecondition.GatedOffMessage("srv", "running_jobs", causes, last, serverLastCollected, null)!;
+            var reader = CollectorRuntimePrecondition.GatedOffReaderMessage("srv", "running_jobs", causes, last, serverLastCollected, null)!;
+
+            var page = Run([mcp], out _)[0];
+
+            Assert.Equal(reader, page);
+            Assert.DoesNotContain("runtime PRECONDITION", page, StringComparison.Ordinal);
+            Assert.EndsWith("Restart the service, or change this server's settings.", page, StringComparison.Ordinal);
+        }
+    }
+
+    /* #6869: a collector that cannot read its source (the DEGRADED status) says the same words on the page as in the two desktop apps. */
+    [Theory]
+    [InlineData(CollectorRuntimePrecondition.DegradedStatus)]
+    [InlineData(CollectorRuntimePrecondition.CaptureSessionMissingStatus)]
+    [InlineData(CollectorRuntimePrecondition.ExtensionMissingStatus)]
+    public void ThePagesRuntimePreconditionText_IsTheDesktopReaderMessage_ForACollectorOutcome(string status)
+    {
+        const string refused = "VIEW DATABASE PERFORMANCE STATE permission denied in database 'tempdb'.";
+        var ran = new DateTime(2026, 10, 25, 12, 0, 0, DateTimeKind.Utc);
+        var mcp = CollectorRuntimePrecondition.CollectionOutcomeMessage("srv", "tempdb_stats", status, refused, ran)!;
+        var reader = CollectorRuntimePrecondition.CollectionOutcomeReaderMessage("srv", "tempdb_stats", status, refused, ran)!;
+
+        var page = Run([mcp], out _)[0];
+
+        /* The page also turns the collector's key into its display name, which the desktop text does not. */
+        Assert.Equal(reader.Replace("tempdb_stats", "Tempdb Stats", StringComparison.Ordinal), page);
+        Assert.DoesNotContain("Act on that sentence", page, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -98,6 +143,91 @@ public sealed class WebPlainTextTests
         Assert.Equal("latest run: shred gated: 1, events read: 0, report xml empty: 0", o[0]);
     }
 
+    /* #6649: the left-out databases pointer, the baseline window sentence and the memory clerk note's four arms reached the page
+       with the MCP answer's field names in them. The baseline sentence and the clerk notes are read from the C# that owns them
+       (QueryStoreRegressionRules.BaselineWindowTail, DarlingMcpQueryStoreClutterTools.ClerkNote*), so a reword there breaks this
+       test instead of leaving a field name on the page (#3684). The left-out pointer is a generic suffix strip, so its one
+       sentence is typed here. */
+    [Fact]
+    public void FieldNamesInTheServicesOwnSentences_ReadAsThePagesWords()
+    {
+        var o = Run(
+        [
+            "No Query Store rows in the 24-hour window for a database this server still has. 29 database(s) the server no longer lists were left out of this read (see databases_left_out).",
+            QueryStoreRegressionRules.BaselineWindowTail,
+            DarlingMcpQueryStoreClutterTools.ClerkNoteInNewestCapture,
+            DarlingMcpQueryStoreClutterTools.ClerkNoteDroppedOut,
+            DarlingMcpQueryStoreClutterTools.ClerkNoteNoCapture,
+            DarlingMcpQueryStoreClutterTools.ClerkNoteNeverAppeared,
+        ], out _);
+        Assert.Equal("No Query Store rows in the 24-hour window for a database this server still has. 29 databases the server no longer lists were left out of this read.", o[0]);
+        Assert.Equal("Here the window starts before the baseline period, so the baseline holds only the part the store has.", o[1]);
+        Assert.Equal("The clerk is in the newest capture's top 25; Latest MB is its current footprint.", o[2]);
+        Assert.Contains("Latest MB is its last observed footprint", o[3]);
+        Assert.StartsWith("No memory clerk capture in the window: the collector wrote nothing", o[4]);
+        Assert.Contains("The memory clerks collector stores the top 25 clerks over 1 MB per capture", o[5]);
+        foreach (var line in o)
+        {
+            Assert.DoesNotContain("_left_out", line);
+            Assert.DoesNotContain("baseline_start", line);
+            Assert.DoesNotContain("effective_start", line);
+            Assert.DoesNotContain("_mb is", line);
+            Assert.DoesNotContain("memory_clerks", line);
+            Assert.DoesNotContain("(s)", line);
+        }
+    }
+
+    /* #6750: the empty-baseline sentence and the cut-recent-window sentences, read from the C# that owns them, reach the page without
+       the MCP answer's field names, as the baseline sentence above does. */
+    [Fact]
+    public void TheEmptyBaselineAndCutRecentWindowSentences_ReadAsThePagesWords()
+    {
+        var o = Run(
+        [
+            QueryStoreRegressionRules.EmptyBaselineTail,
+            QueryStoreRegressionRules.TailFor(new DateTime(2026, 1, 5), new DateTime(2026, 1, 1)),
+        ], out _);
+        Assert.Equal("Here the store starts at or after the end of the baseline period, so the baseline holds no hours: timeouts and errors are flagged on recent runs alone, and a cost flag can come only from a run before the baseline period ended that was collected later.", o[0]);
+        Assert.StartsWith(o[0], o[1], StringComparison.Ordinal);
+        Assert.Contains("The store also starts after the recent window began, so the recent window holds only the part the store has.", o[1], StringComparison.Ordinal);
+        Assert.EndsWith("Its per-hour rates divide by the hours it holds.", o[1], StringComparison.Ordinal);
+        foreach (var line in o)
+        {
+            Assert.DoesNotContain("baseline_end", line);
+            Assert.DoesNotContain("effective_start", line);
+            Assert.DoesNotContain("recent_window_start", line);
+        }
+    }
+
+    /* #6649: a count can be negative or have a fraction, and either ended the run of pairs, so the whole note stayed raw. */
+    [Fact]
+    public void ACountRunWithANegativeOrFractionalValue_StillReadsAsWords()
+    {
+        var o = Run(
+        [
+            "latest run: plans_rendered=0 plans_rendered_bytes=-12 plan_fetch_ms=0.5 deferred_hit=0",
+            "latest run: ring_buffer_truncated=1 ring_buffer_events_hidden=167 newest_visible_event_age_s=4300 statement_scrub_named=0",
+        ], out _);
+        Assert.Equal("latest run: plans rendered: 0, plans rendered bytes: -12, plan fetch ms: 0.5, deferred hit: 0", o[0]);
+        Assert.DoesNotContain("=", o[0]);
+        Assert.DoesNotContain("=0 ", o[1] + " ");
+        Assert.DoesNotContain("=", o[1]);
+    }
+
+    /* #6649: the collection log's Error cell holds a failed run's error and a successful run's note. The note's counts are said in
+       words; a real error message keeps everything else, a lone key=value pair and any tool-looking word included. */
+    [Fact]
+    public void TheCollectionLogMessage_SaysItsCountsInWords_AndLeavesAnErrorAlone()
+    {
+        var (_, _, _, _, _, counts) = RunDoc(
+        [
+            "ring_buffer_truncated=1 ring_buffer_events_hidden=167 newest_visible_event_age_s=4300",
+            "Connection failed (timeout=30): relation \"get_orders\" is not available; widen hours_back",
+        ], out _);
+        Assert.Equal("ring buffer truncated: 1, ring buffer events hidden: 167, newest visible event age s: 4300", counts[0]);
+        Assert.Equal("Connection failed (timeout=30): relation \"get_orders\" is not available; widen the time range", counts[1]);
+    }
+
     /* #5644 W8 (live check): the CPU and Memory pages have no bucket control, the Waits and Activity notes print raw field names, and a
        window count printed "24 hour(s)". */
     [Fact]
@@ -124,6 +254,57 @@ public sealed class WebPlainTextTests
         Assert.Equal("No blocking was recorded in the last 1 hour. 288 collector runs did execute; 1 collector run failed.", o[5]);
         /* a noun ending in a consonant plus y takes "ies", not a bare "s" */
         Assert.Equal("3 queries failed, 1 query retried, 2 policies skipped.", o[6]);
+    }
+
+    /* #6831: System Events says what was captured in words, with the count's own plural, for every event type the health parser reads. */
+    [Fact]
+    public void TheSystemHealthEventNames_AreSaidInWords_WithTheCountsPlural()
+    {
+        /* Every event type the parser names, read from its public constants, so a seventh type fails here until the page says it in words. */
+        var types = typeof(SystemHealthParser)
+            .GetFields(BindingFlags.Public | BindingFlags.Static)
+            .Where(f => f.IsLiteral && f.FieldType == typeof(string) && f.Name.EndsWith("Event", StringComparison.Ordinal))
+            .Select(f => (string)f.GetRawConstantValue()!)
+            .ToArray();
+        Assert.Equal(6, types.Length);
+        var inputs = types.SelectMany(t => new[]
+        {
+            $"1431 {t} event(s) were captured for SQL2025 in the last 24 hour(s) and none qualified.",
+            $"1 {t} event(s) were captured for SQL2025 in the last 1 hour(s) and none qualified.",
+            $"No {t} events were captured for SQL2025 in the last 24 hour(s).",
+        }).ToArray();
+        var o = Run(inputs, out _);
+        for (var i = 0; i < types.Length; i++)
+        {
+            var word = types[i] switch
+            {
+                SystemHealthParser.SchedulerMonitorEvent => "scheduler monitor",
+                SystemHealthParser.SpServerDiagnosticsEvent => "server diagnostics",
+                SystemHealthParser.MemoryBrokerEvent => "memory broker",
+                SystemHealthParser.MemoryNodeOomEvent => "memory node out-of-memory",
+                SystemHealthParser.ErrorReportedEvent => "error",
+                SystemHealthParser.WaitInfoEvent => "wait",
+                _ => throw new InvalidOperationException("an event type the page has no words for: " + types[i]),
+            };
+            Assert.StartsWith($"1431 {word} events were captured for SQL2025 in the last 24 hours", o[i * 3]);
+            Assert.StartsWith($"1 {word} event was captured", o[i * 3 + 1]);
+            Assert.StartsWith($"No {word} events were captured", o[i * 3 + 2]);
+        }
+        foreach (var line in o)
+        {
+            Assert.DoesNotContain("_", line);
+            Assert.DoesNotContain("event(s)", line);
+        }
+    }
+
+    /* #6831: the cut-window sentence with no instant to name (util.js puts the time in when the answer carries one). */
+    [Fact]
+    public void TheCutWindowSentence_WithNoInstantToName_DoesNotPointAtHints()
+    {
+        var o = Run([McpHelpers.CutWindowNothingMessage], out _);
+        Assert.DoesNotContain("effective_start", o[0]);
+        Assert.DoesNotContain("see hints", o[0]);
+        Assert.Contains("starts partway into the window, so", o[0]);
     }
 
     /* #5644 W8: the clauses that point an MCP caller at a parameter the page has no control for. */
@@ -224,7 +405,7 @@ public sealed class WebPlainTextTests
             "column \"last_error\" of relation \"x\" does not exist",
             "denied_since_last_success is true; move as_of or widen days_back",
         ];
-        var (_, named, _, _, _) = RunDoc(inputs, out _);
+        var (_, named, _, _, _, _) = RunDoc(inputs, out _);
         Assert.Equal("Could not find 'dbo.get_orders' (timeout=30); widen the time range or use get_collection_health", named[0]);
         /* Round-2 L1: a Last Error can quote a real relation or column, so field and table names are not rewritten here. */
         Assert.Equal("latest run: events_read=4 shred_gated=1 and last_error shows it", named[1]);
@@ -293,7 +474,7 @@ public sealed class WebPlainTextTests
     [Fact]
     public void ThePlainNamedPath_NeverLowerCasesOrDropsAnything()
     {
-        var (_, named, _, _, _) = RunDoc(["Last error: DID NOT connect; try analyze_server"], out _);
+        var (_, named, _, _, _, _) = RunDoc(["Last error: DID NOT connect; try analyze_server"], out _);
         Assert.Equal("Last error: DID NOT connect; try analyze_server", named[0]);
     }
 
@@ -301,7 +482,7 @@ public sealed class WebPlainTextTests
     public void TheToolNameList_IsExactlyTheRegisteredGetTools()
     {
         /* The get_ rule rewrites only these names, so the list must be the MCP tool registry's get_ tools, both ways. */
-        var (_, _, tools, _, actions) = RunDoc([], out _);
+        var (_, _, tools, _, actions, _) = RunDoc([], out _);
         if (tools.Length == 0)
         {
             return;
@@ -330,7 +511,7 @@ public sealed class WebPlainTextTests
     [Fact]
     public void TheMeasurementLabelList_CoversEveryLabelTheCollectorsWrite()
     {
-        var (_, _, tools, labels, _) = RunDoc([], out _);
+        var (_, _, tools, labels, _, _) = RunDoc([], out _);
         if (tools.Length == 0)
         {
             return;
@@ -358,7 +539,7 @@ public sealed class WebPlainTextTests
     {
         var o = Run(
         [
-            "example-pg-01 runs PostgreSQL. The pg_cpu_utilization collector does not run on that engine — its own AppliesTo gate excludes it — so this server does not collect the data, and never will. This is a permanent engine capability gap, not a collection outage.",
+            "example-pg-01 runs PostgreSQL. The pg_cpu_utilization collector does not run on this engine, so this server does not collect the data, and never will. This is a permanent engine capability gap, not a collection outage.",
             "No stored plan for this query. pg_stat_statements has none.",
         ], out var line);
         Assert.Equal(line, o[0]);
@@ -371,10 +552,87 @@ public sealed class WebPlainTextTests
     [Fact]
     public void TheEngineGateSentence_NamesAzureSqlDatabase_WhenThatIsTheEngine()
     {
-        var azure = PerformanceMonitor.Collectors.CollectorEngineCapability.NotCollectedMessage("example-azure-db", 5, null, "cpu_scheduler_stats")!;
+        var azure = PerformanceMonitor.Collectors.CollectorEngineCapability.NotCollectedMessage("example-azure-db", 5, null, "cpu_scheduler_stats", awsRdsKind: AwsRdsKind.None)!;
         var o = Run([azure], out var generic);
         Assert.Equal("Azure SQL Database does not have this data.", o[0]);
         Assert.NotEqual(generic, o[0]);
+    }
+
+    /// <summary>The Running Jobs panel showed the 1222-character "never run" answer written for an MCP client (it labels itself a runtime
+    /// PRECONDITION and says to retry). From the real builder's text: the page says which data is missing and keeps the possible causes
+    /// the server names, as written.</summary>
+    [Fact]
+    public void TheNeverRanAnswer_BecomesTwoShortSentences_KeepingThePossibleCauses()
+    {
+        var now = new DateTime(2026, 10, 25, 12, 0, 0, DateTimeKind.Utc);
+        var real = PerformanceMonitor.Collectors.CollectorRuntimePrecondition.GatedOffMessage(
+            "ui-sql", "running_jobs", PerformanceMonitor.Collectors.CollectorRuntimePrecondition.RunningJobsPossibleCauses,
+            null, now, now.AddDays(-3))!;
+        Assert.Contains("has never run against", real);
+        Assert.True(real.Length > 1000, "the builder's text is the long one");
+
+        var o = Run([real], out _);
+        Assert.Equal(
+            "The Running Jobs collector has never run for this server, so there is nothing to show. " +
+            PerformanceMonitor.Collectors.CollectorRuntimePrecondition.RunningJobsPossibleCauses +
+            " After you fix the cause, the service must reconnect to this server before collection starts again. " +
+            "Restart the service, or change this server's settings.", o[0]);
+        Assert.Contains("must reconnect to this server", o[0]);
+        Assert.DoesNotContain("PRECONDITION", o[0]);
+        Assert.DoesNotContain("Retrying", o[0]);
+    }
+
+    [Fact]
+    public void TheGoneDarkAnswer_BecomesOneShortLine_AndAPreconditionWithAStatementKeepsIt()
+    {
+        var now = new DateTime(2026, 10, 25, 12, 0, 0, DateTimeKind.Utc);
+        var dark = PerformanceMonitor.Collectors.CollectorRuntimePrecondition.GatedOffMessage(
+            "ui-sql", "running_jobs", PerformanceMonitor.Collectors.CollectorRuntimePrecondition.RunningJobsPossibleCauses,
+            now.AddDays(-5), now, now.AddDays(-9))!;
+        Assert.Contains("no longer being invoked", dark);
+
+        var session = PerformanceMonitor.Collectors.CollectorRuntimePrecondition.CollectionOutcomeMessage(
+            "ui-sql", "system_health", PerformanceMonitor.Collectors.CollectorRuntimePrecondition.CaptureSessionMissingStatus, null, now)!;
+        Assert.Contains("runtime PRECONDITION", session);
+
+        var o = Run([dark, session], out _);
+        Assert.StartsWith("The Running Jobs collector has not run for this server for over 24 hours, so there is nothing current to show. Possible cause:", o[0]);
+        Assert.EndsWith("After you fix the cause, the service must reconnect to this server before collection starts again. " +
+            "Restart the service, or change this server's settings.", o[0]);
+        Assert.DoesNotContain("PRECONDITION", o[0]);
+        Assert.Contains("ALTER ANY EVENT SESSION", o[1]);
+        Assert.DoesNotContain("PRECONDITION", o[1]);
+        Assert.DoesNotContain("nothing to restart", o[1]);
+    }
+
+    /// <summary>The three Query Store answers (error, read-only, off) end on the shared precondition sentence, which the page drops. What
+    /// each one names that the reader needs (the ALTER statement, the consistency check) stays, built from the real builder.</summary>
+    [Theory]
+    [InlineData("ERROR", "sys.sp_query_store_consistency_check")]
+    [InlineData("READ_ONLY", "OPERATION_MODE = READ_WRITE")]
+    [InlineData("OFF", "SET QUERY_STORE = ON")]
+    public void TheQueryStoreAnswers_KeepTheStatementTheyName_AndDropThePreconditionSentence(string state, string named)
+    {
+        var real = PerformanceMonitor.Collectors.CollectorRuntimePrecondition.QueryStoreDisabledMessage(
+            "ui-sql", new[] { new PerformanceMonitor.Collectors.CollectorRuntimePrecondition.QueryStoreDatabaseState("AppDb", state) },
+            new DateTime(2026, 10, 25, 12, 0, 0, DateTimeKind.Utc))!;
+        Assert.Contains("runtime PRECONDITION", real);
+        Assert.Contains("ALTER DATABASE", real);
+        Assert.Contains(named, real);
+
+        var o = Run([real], out _)[0];
+        Assert.Contains("ALTER DATABASE", o);
+        Assert.Contains(named, o);
+        Assert.DoesNotContain("PRECONDITION", o);
+        Assert.DoesNotContain("nothing to restart", o);
+    }
+
+    /// <summary>Text without the precondition closing sentence is not touched by that rule.</summary>
+    [Fact]
+    public void ATextWithoutThePreconditionMarks_IsUnchanged()
+    {
+        const string plain = "The running jobs table has no rows for this window. Try a wider range.";
+        Assert.Equal(plain, Run([plain], out _)[0]);
     }
 
     /// <summary>#6439: the tempdb File I/O Latency panel on an Azure SQL Database says the same short line as the other Azure panels, not "check

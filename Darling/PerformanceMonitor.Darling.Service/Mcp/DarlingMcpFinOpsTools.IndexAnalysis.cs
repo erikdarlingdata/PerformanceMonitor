@@ -239,7 +239,7 @@ public sealed partial class DarlingMcpFinOpsTools
         }
 
         var notes = new List<string>();
-        if (result.UptimeWarning) notes.Add(IndexAnalysisUptimeNote);
+        if (result.ShowUptimeCaveat) notes.Add(IndexAnalysisUptimeNote);
         if (result.DedupeOnlyApplied) notes.Add(IndexAnalysisDedupeNote);
         notes.AddRange(result.Notes);
 

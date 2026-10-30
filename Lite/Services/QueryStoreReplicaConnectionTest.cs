@@ -72,4 +72,16 @@ internal static class QueryStoreReplicaConnectionTest
             ? $"Primary: connected.\nQuery Store replica {replica.Host}: connected."
             : $"Primary: connected.\nQuery Store replica {replica.Host}: could not connect ({replica.Error}).\n"
                 + "Collection reads Query Store from the primary until the replica can be reached.";
+
+    /// <summary>
+    /// #6459: the sentence for a Query Store replica typed against an Azure SQL Database (EngineEdition 5), or null for any other
+    /// engine or an empty box. Azure SQL Database has no readable-replica Query Store read: collection never opens the replica
+    /// (<c>replicaConfigured</c> is false for it), so the setting is saved and has no effect, and the dialog says so.
+    /// </summary>
+    internal static string? IgnoredOnAzureSqlDatabaseNote(int engineEdition, string? replicaHost) =>
+        engineEdition == PerformanceMonitor.Collectors.CollectorEngineCapability.AzureSqlDatabaseEngineEdition
+        && !string.IsNullOrWhiteSpace(replicaHost)
+            ? $"Query Store replica {replicaHost.Trim()}: not used. Azure SQL Database has no readable-replica Query Store read, "
+                + "so this setting has no effect and collection reads Query Store from the database itself. Clear the replica box."
+            : null;
 }

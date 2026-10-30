@@ -151,7 +151,7 @@ public sealed class ValidateConfigOldFormatPasswordLiveTests
             var result = await RunVerbAsync(WriteConfig(root, viewerString), ct);
 
             Assert.Contains(DarlingCliCommands.OldFormatPasswordsNotCheckedText(1), result.Output, StringComparison.Ordinal);
-            Assert.Contains("Validating connectivity to 0 server(s)", result.Output, StringComparison.Ordinal);
+            Assert.Contains("No monitored servers are configured yet", result.Output, StringComparison.Ordinal);
             Assert.DoesNotContain("entered again", result.Output + result.Error, StringComparison.Ordinal);
             Assert.DoesNotContain("[FAIL] alpha", result.Output, StringComparison.Ordinal);
             ok = true;

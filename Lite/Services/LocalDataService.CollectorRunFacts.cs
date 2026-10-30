@@ -122,9 +122,11 @@ AND   collection_time <= $4";
     /// <paramref name="hoursBack"/> (with <paramref name="asOfUtc"/>) to also count the runs inside the window; leave it
     /// null for a read with no window question. A non-null <paramref name="asOfUtc"/> also bounds the newest-run read at the anchor
     /// (<see cref="CollectorLatestSuccessAtOrBeforeSql"/>), with or without a window. Only SUCCESS rows count. Asked only on an empty path, and a failed read
-    /// propagates to the tool's own catch rather than becoming a quiet "no runs".
+    /// propagates to the tool's own catch rather than becoming a quiet "no runs". <paramref name="window"/> (#6651) counts the runs inside
+    /// that UTC window instead of the last <paramref name="hoursBack"/> hours.
     /// </summary>
-    public async Task<CollectorRunFacts> GetCollectorRunFactsAsync(int serverId, string collectorName, int? hoursBack = null, DateTime? asOfUtc = null)
+    public async Task<CollectorRunFacts> GetCollectorRunFactsAsync(int serverId, string collectorName, int? hoursBack = null, DateTime? asOfUtc = null,
+        (DateTime StartUtc, DateTime EndUtc)? window = null)
     {
         using var connection = await OpenConnectionAsync();
 
@@ -156,9 +158,11 @@ AND   collection_time <= $4";
         }
 
         long? inWindow = null;
-        if (hoursBack is { } hours)
+        if (window is not null || hoursBack is not null)
         {
-            var (startTime, endTime) = GetTimeRange(hours, null, null, asOfUtc);
+            /* #6651: a grid's custom range or slicer window counts the runs inside that exact window (GetQueriesTabWindowUtc), not the
+               last N hours. */
+            var (startTime, endTime) = window is { } given ? (given.StartUtc, given.EndUtc) : GetTimeRange(hoursBack!.Value, null, null, asOfUtc);
             using var command = connection.CreateCommand();
             command.CommandText = CollectorRunsInWindowSql;
             command.Parameters.Add(new DuckDBParameter { Value = serverId });

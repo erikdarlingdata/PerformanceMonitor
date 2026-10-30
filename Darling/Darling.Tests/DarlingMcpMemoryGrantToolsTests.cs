@@ -154,7 +154,7 @@ public sealed class DarlingMcpMemoryGrantToolsSurfaceAndSqlTests
     [Fact]
     public void ResourceSemaphoreRow_IsUnknowable_OnlyForAStoredZeroInterval()
     {
-        static DarlingMemoryGrantReader.ResourceSemaphoreRow Row(int? interval) => new(
+        static ResourceSemaphoreRow Row(int? interval) => new(
             DateTime.UnixEpoch, 0, 2, 100, 200, 90, 80, 10, 8, 3, 1, 5, 2, 0, 0, interval);
 
         Assert.True(Row(0).IsUnknowable);

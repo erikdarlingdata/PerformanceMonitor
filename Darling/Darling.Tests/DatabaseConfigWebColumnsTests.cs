@@ -82,7 +82,7 @@ public sealed class DatabaseConfigWebColumnsTests
     public void TheScopedConfigTable_ReadsGetDatabaseScopedConfig_WithTheDesktopColumns()
     {
         var tab = Tab();
-        Assert.Contains("readTool(\"get_database_scoped_config\", { server })", tab, StringComparison.Ordinal);
+        Assert.Contains("readTool(\"get_database_scoped_config\", { server }, signal)", tab, StringComparison.Ordinal);
         Assert.Contains("scopedConfigPanel(server),", tab, StringComparison.Ordinal);
         var cols = Block(tab, "const SCOPED_CONFIG_COLUMNS = [");
         Assert.Equal(new[] { "Database", "Setting", "Value", "Value for Secondary", "Collected" }, Labels(cols));

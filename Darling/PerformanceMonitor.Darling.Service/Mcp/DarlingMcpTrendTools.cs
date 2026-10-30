@@ -178,7 +178,7 @@ public sealed class DarlingMcpTrendTools
     [McpServerTool(Name = "get_perfmon_trend"), Description("Gets one performance counter over time in buckets, ending at as_of. counter_kind says the unit: gauge - value is the bucket average, delta_value and sample_interval_seconds null (no delta for a level); rate - per-second is delta_value divided by sample_interval_seconds, never delta_value alone or when the interval is 0; other - delta_value is a non-rate change; null - classify by name (ends in /sec = rate). No points never returns empty: not_collected covers a gated engine, Page Life Expectancy, or an unknown counter name; unavailable: no counter at all collected in the window. <<GUIDE>> Gets one performance counter over time in time buckets. hours_back reaches 720 (30 days). Use get_perfmon_stats first to see available counter names. artifacts_set_aside counts an isolated single-sample Wait Statistics spike excluded from the sums before bucketing (notes explains it); it is not a missing-data count. counter_kind (from the stored cntr_type) says what a point's number is: 'gauge' — value is the bucket's average reading and peak_value its highest, delta_value and sample_interval_seconds are null because a level has no delta; 'rate' — the per-second figure is delta_value divided by sample_interval_seconds, never delta_value alone, and never where sample_interval_seconds is 0 (no delta was knowable), and each point carries it as per_second (null where the interval is 0); 'other' — delta_value is the change of an average/fraction numerator, not a rate and not a level; null — the rows predate the stored type or the instances mix types, so classify by name (a name ending in /sec is a rate)." + BaselineDiscontinuities.DescriptionSentence)]
     public static Task<string> GetPerfmonTrend(
         NpgsqlDataSource postgres,
-        [Description("The exact counter name, e.g. 'Batch Requests/sec'.")] string counter_name,
+        [Description("The exact counter name, e.g. 'Batch Requests/sec'. get_perfmon_stats lists the names.")] string counter_name,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
@@ -506,7 +506,7 @@ public sealed class DarlingMcpTrendTools
         }
     }
 
-    [McpServerTool(Name = "get_query_duration_trend"), Description("Gets a time-series of query elapsed_ms_per_second and executions_per_second across all queries, points ending at as_of. A collection whose interval was unknowable is excluded, not counted as 0: unrated_collections counts it, and a point left with nothing else carries null rates (unrated_points), never zero. No points: unavailable means query_stats was never collected here; empty means it was (the message says quiet window or rollup coverage gap). window_truncated is the store's retention floor, not a page cut: effective_start / effective_hours_back say where the answer begins. <<GUIDE>> Gets a time-series of average query duration over time. hours_back reaches 2160 (90 days), served from the hourly rollup past the raw tier's four days. Useful for spotting overall performance degradation or improvement trends across all queries. Points are time buckets (bucket, aggregate_note); rates are over each collection's STORED sample interval, and a collection whose interval was unknowable - a restart or counter reset, or the window's first collection when none was stored - is left out rather than counted as 0 (unrated_collections counts them; a point with nothing else carries null rates, unrated_points). The hourly rollup route divides by the bucket width and has no unrated point." + McpHelpers.WindowTruncatedDescription + BaselineDiscontinuities.DescriptionSentence)]
+    [McpServerTool(Name = "get_query_duration_trend"), Description("Gets elapsed_ms_per_second and executions_per_second across ALL queries, points ending at as_of. Not CPU. One query_hash: get_query_trend. A collection whose interval was unknowable is excluded, not counted as 0: unrated_collections counts it, and a point left with nothing else carries null rates (unrated_points), never zero. No points: unavailable means query_stats was never collected here; empty means it was (the message says quiet window or rollup coverage gap). window_truncated is the store's retention floor, not a page cut: effective_start says where the answer begins. <<GUIDE>> Gets a time-series of average query duration over time. hours_back reaches 2160 (90 days), served from the hourly rollup past the raw tier's four days. Useful for spotting overall performance degradation or improvement trends across all queries. Points are time buckets (bucket, aggregate_note); rates are over each collection's STORED sample interval, and a collection whose interval was unknowable - a restart or counter reset, or the window's first collection when none was stored - is left out rather than counted as 0 (unrated_collections counts them; a point with nothing else carries null rates, unrated_points). The hourly rollup route divides by the bucket width and has no unrated point." + McpHelpers.WindowTruncatedDescription + BaselineDiscontinuities.DescriptionSentence)]
     public static Task<string> GetQueryDurationTrend(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -589,7 +589,7 @@ public sealed class DarlingMcpTrendTools
                    is not a server nothing was ever stored for. */
                 return await EmptyRoutedTrendAsync(
                     DarlingTrendReader.HasAnyQueryStatAsync(postgres, resolved.ServerId, cancellationToken),
-                    postgres, resolved.ServerId, resolved.DisplayName, hours_back, startUtc, now, route, "query",
+                    postgres, resolved.ServerId, resolved.DisplayName, hours_back, startUtc, now, route, "query", "query_stats",
                     "Check that collection is running and that the server is enabled; get_top_queries_by_cpu will be equally empty until it does.",
                     new BucketChoice(bucketMinutes, bucket_minutes is not null, budget.AutoPoints), databases, cancellationToken);
             }
@@ -688,7 +688,7 @@ public sealed class DarlingMcpTrendTools
 
                 return WithProcedureEcho(await EmptyRoutedTrendAsync(
                     DarlingTrendReader.HasAnyProcedureStatAsync(postgres, resolved.ServerId, cancellationToken),
-                    postgres, resolved.ServerId, resolved.DisplayName, hours_back, startUtc, now, route, "stored-procedure",
+                    postgres, resolved.ServerId, resolved.DisplayName, hours_back, startUtc, now, route, "stored-procedure", "procedure_stats",
                     "Check that collection is running and that the server is enabled. A server that genuinely runs no stored procedures also lands here, and that is a real answer rather than a fault.",
                     new BucketChoice(bucketMinutes, bucket_minutes is not null, budget.AutoPoints), databases, cancellationToken), procedureName);
             }
@@ -1170,13 +1170,22 @@ public sealed class DarlingMcpTrendTools
     private static async Task<string> EmptyRoutedTrendAsync(
         Task<bool> rawProbe, NpgsqlDataSource postgres, int serverId, string serverName, int hours_back,
         DateTime startUtc, DateTime windowEndUtc, DarlingTrendReader.DurationTrendRoute route,
-        string what, string checkThis, BucketChoice bucket, DatabaseFilter databases, CancellationToken cancellationToken = default)
+        string what, string collectorName, string checkThis, BucketChoice bucket, DatabaseFilter databases, CancellationToken cancellationToken = default)
     {
         var disclosure = DescribeEmptyRoute(route, startUtc, windowEndUtc, bucket);
         var scoped = ScopedServer(serverName, databases);
 
         if (!await DarlingTrendReader.HasAnySampleOnRouteAsync(postgres, rawProbe, route, serverId, cancellationToken))
         {
+            /* #6453: no row EVER stored is a true negative, not "unavailable", when the collector's newest run completed
+               clean: it looked and the server had nothing to report, which collection health calls HEALTHY. */
+            var healthyEmpty = await DarlingRuntimePrecondition.HealthyEmptyMessageAsync(
+                postgres, serverId, serverName, collectorName, $"{what} samples", cancellationToken);
+            if (healthyEmpty != null)
+            {
+                return EmptyStatus("empty", healthyEmpty, disclosure, databases);
+            }
+
             return EmptyStatus("unavailable", NeverSampledMessage(serverName, what, checkThis), disclosure, databases);
         }
 

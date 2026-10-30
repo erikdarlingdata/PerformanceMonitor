@@ -114,7 +114,7 @@ public sealed class McpRouteDestinationAnswersLiveTests
     private static async Task<(object?[]? Row, string? SqlState)> CallAsync(
         NpgsqlDataSource mcp, int routeId, string[] columns, string teams, string slack, string generic, string key, string recipients, CancellationToken ct)
     {
-        await using var command = mcp.CreateCommand("SELECT * FROM config.set_notification_route_destinations($1, $2, $3, $4, $5, $6, $7)");
+        await using var command = mcp.CreateCommand("SELECT * FROM config.set_notification_route_destinations($1, NULL, $2, $3, $4, $5, $6, $7)");
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = routeId });
         command.Parameters.Add(new NpgsqlParameter<string[]> { TypedValue = columns });
         foreach (var text in new[] { teams, slack, generic, key, recipients })

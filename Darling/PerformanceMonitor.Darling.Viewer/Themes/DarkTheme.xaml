@@ -81,6 +81,9 @@
     <!-- Legible warning amber for content text/borders (block-chain longest-wait, flag banner).
          Tuned per theme so it clears >=4.5:1 as TEXT on content backgrounds; any control may adopt it. -->
     <SolidColorBrush x:Key="WarningTextBrush" Color="#FFB347"/>
+    <!-- #6773: info-colored TEXT (the wait drill-down banner). InfoBrush is the status fill and on Cool Breeze
+         measures 4.25:1 on the page, so this literal clears >=4.5:1 as text on every page surface of its theme. -->
+    <SolidColorBrush x:Key="InfoTextBrush" Color="#2eaef1"/>
     <!-- #4629/#4635: critical-tier text (plan viewer, status bar). A literal hex like WarningTextBrush
          above, so it stays out of the user-overridable palette. -->
     <SolidColorBrush x:Key="CriticalTextBrush" Color="#FF7043"/>

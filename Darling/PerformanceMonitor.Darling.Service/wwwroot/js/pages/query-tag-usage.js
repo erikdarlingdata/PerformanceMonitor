@@ -16,7 +16,8 @@
  * All server text reaches the DOM through el()/textContent.
  */
 
-import { el, mount, clear, readTool, readToolWithinKeptHistory, keptWindowStrip, loadingStrip, emptyStrip, noticeStrip, readErrorStrip, makeActivatable, fmtInt, fmtNum } from "../util.js";
+import { el, mount, clear, onPageLeave, readTool, readToolWithinKeptHistory, keptWindowStrip, loadingStrip, emptyStrip, noticeStrip, readErrorStrip, makeActivatable, fmtInt, fmtNum, retryOnceWhenBusy, busyRetryStrip, localTime, parseUtc } from "../util.js";
+
 import { pageRangePicker, windowOfSpec } from "../page-range.js";
 import { plainText } from "../plain-text.js";
 import { relativeSpec } from "../time-range.js";
@@ -61,6 +62,11 @@ let pageSeq = 0;
 let loadSeq = 0;
 let pageAbort = null;
 let loadAbort = null;
+/* #6793: leaving the page (route() calls beginPageScope) aborts its reads, so a slow read does not run on after the user went elsewhere. */
+onPageLeave(() => {
+  if (pageAbort) pageAbort.abort();
+  if (loadAbort) loadAbort.abort();
+});
 
 /** The label of a measure: its friendly name, or the key itself for one the page does not know. */
 export function measureLabel(key) {
@@ -127,6 +133,64 @@ function statusLine(block) {
   return el("div", { class: "muted", text: plainText(block.message) });
 }
 
+/** The section's source in words: the read names the relations it read, which the page has no use for (#6831). */
+export function sourceText(source) {
+  if (typeof source !== "string" || !source) return "";
+  const s = source.trim();
+  if (/^collect\.query_store_hash_daily \+ /.test(s)) return "daily and hourly Query Store tables, raw intervals for the edges";
+  if (/^collect\.query_store_hash_hourly \+ /.test(s)) return "hourly Query Store table, raw intervals for the edges";
+  if (s === "collect.query_store_interval_wide") return "Query Store intervals";
+  if (s.endsWith("_io_hourly (hourly rollup)")) return "hourly rollup";
+  if (s === "collect.query_stats" || s === "collect.procedure_stats") return "raw collections";
+  return plainText(s.replace(/collect\./g, "").replace(/_/g, " "));
+}
+
+/** The gap between two instants in whole minutes, or null when either is unreadable or the second is not later. */
+function minutesBetween(fromIso, toIso) {
+  const a = parseUtc(fromIso);
+  const b = parseUtc(toIso);
+  if (!a || !b || b <= a) return null;
+  return Math.round((b.getTime() - a.getTime()) / 60000);
+}
+
+/**
+ * #6831: what the hour buckets moved at a section's edges, said in the page's own clock and words. The read sends the same edges as a note
+ * for an MCP caller (raw UTC stamps) and as fields (served_start, window_end, start_dropped_from, materialized_to, end_hour_counted_whole,
+ * tier); this is built from the fields. Null when the section is not an hourly read or its edges did not move.
+ */
+export function edgesText(block) {
+  if (!block || !block.window_edges_note || !(typeof block.tier === "string" && block.tier.includes("hourly"))) return null;
+  const at = (v) => (typeof v === "string" && parseUtc(v) ? localTime(v) : null);
+  const start = at(block.served_start);
+  const end = at(block.window_end);
+  const lead = (block.tier.includes("daily") ? "Daily and hourly data" : "Hourly data") + (block.tier.endsWith("+tail") ? ", with the raw intervals for the edges," : "");
+  const sentences = [];
+  if (start) sentences.push(lead + " from " + start + (end ? " to " + end : "") + ".");
+  const gap = minutesBetween(block.start_dropped_from, block.served_start);
+  const gapFrom = at(block.start_dropped_from);
+  if (gap !== null && gap >= 60 && gapFrom && start) {
+    /* The first bucket came hours after the window start: that is a span with no data, not a partial first hour. */
+    sentences.push("The data from " + gapFrom + " to " + start + " is not included.");
+  } else if (gap !== null) {
+    sentences.push(gap < 1 ? "Less than a minute before the first full hour is not included." : "The " + gap + (gap === 1 ? " minute before the first full hour is" : " minutes before the first full hour are") + " not included.");
+  }
+  const built = at(block.materialized_to);
+  if (built) sentences.push("The hourly rollup is built only up to " + built + ", so nothing after that is included.");
+  else if (block.end_hour_counted_whole && end) sentences.push("The last hour is counted whole, so the data runs to " + end + ", past the end of the window.");
+  else if (!end && !block.materialized_to && block.tier === "hourly") sentences.push("How far the hourly rollup is built is not known, so its end is not checked.");
+  return sentences.length ? sentences.join(" ") : null;
+}
+
+/** #6865: why the section starts later than the window does, in the page's own clock. The same sentence as QueryTagRollupHashRoute.BacklogNote.
+    hours_left_out is the size of the gap (whole hours from the window's first hour to the start, among them the hours the interval table's floor cut), backlog_hours_waiting the backlog hours inside it. */
+export function backlogText(block) {
+  const n = block.backlog_hours_waiting;
+  const left = block.hours_left_out;
+  const start = typeof block.effective_start === "string" && parseUtc(block.effective_start) ? localTime(block.effective_start) : null;
+  return "The figures start " + (start ? "at " + start : "later") + ", which leaves out the first " + left + (left === 1 ? " hour" : " hours") + " of the window, because "
+    + n + (n === 1 ? " hour" : " hours") + " in that part " + (n === 1 ? "is" : "are") + " still being built into the hourly Query Store table. The full window answers once they are built.";
+}
+
 /** A section with no rows in the window says so in one line; the table of zeros under it is not drawn. */
 function isEmptyBlock(block) {
   return !!block && block.status === "empty";
@@ -134,12 +198,18 @@ function isEmptyBlock(block) {
 
 /** One section: its heading, then one table (a server) or one table per server with the fleet line (Fleet). */
 export function sectionCard(section, block, onTag, range = "this time range", servers = []) {
-  const parts = [el("h3", {}, [section.title, el("span", { class: "panel-sub", text: block && block.source ? " " + block.source : "" })])];
+  const parts = [el("h3", {}, [section.title, el("span", { class: "panel-sub", text: block && block.source ? " " + sourceText(block.source) : "" })])];
   if (!block) {
     parts.push(emptyStrip("The read sent no " + section.title + " section."));
     return el("div", { class: "panel", "data-section": section.name }, parts);
   }
   if (section.name === "deadlocks") parts.push(el("div", { class: "muted", text: DEADLOCK_NOTE }));
+  /* #6794: an hourly-rollup section says which edges the hour buckets moved (the note names the materialization ceiling). */
+  const edges = edgesText(block);
+  /* #6865: the fleet read leaves out the hours that wait for the hourly builder, so the section is the newest span that needs none of them. */
+  if (block.window_truncated === true && Number.isInteger(block.backlog_hours_waiting) && block.backlog_hours_waiting > 0 && Number.isInteger(block.hours_left_out) && block.hours_left_out > 0) parts.push(el("div", { class: "muted", text: backlogText(block) }));
+  if (edges) parts.push(el("div", { class: "muted", text: edges }));
+  else if (block.tier === "hourly" && block.window_end && parseUtc(block.window_end)) parts.push(el("div", { class: "muted", text: "Read from the hourly rollup up to " + localTime(block.window_end) + "." }));
   if (isEmptyBlock(block) && !Array.isArray(block.servers)) {
     parts.push(emptyStrip("None in " + range + "."));
     return el("div", { class: "panel", "data-section": section.name }, parts);
@@ -261,7 +331,15 @@ export function renderQueryTagUsage(main) {
     );
     mount(body, loadingStrip("Loading query tag usage…"));
     const w = currentWindow();
-    const res = await readToolWithinKeptHistory("get_resource_use_by_tag", readParams(w), signal);
+    /* #6800: the fleet read is a long read once its history says so, so it can be refused busy while other long reads hold every
+       slot. The page says so and asks once more after the Retry-After, instead of showing the refusal as a failure. */
+    const res = await retryOnceWhenBusy(
+      () => readToolWithinKeptHistory("get_resource_use_by_tag", readParams(w), signal),
+      (seconds) => {
+        if (ticket === loadSeq) mount(body, busyRetryStrip(seconds));
+      },
+      signal
+    );
     /* The server list the headings are named from may still be on its way: wait for it so the first paint is not the keys. */
     await serversReady;
     if (ticket !== loadSeq) return;

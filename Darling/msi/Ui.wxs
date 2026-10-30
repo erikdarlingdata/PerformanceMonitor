@@ -1,0 +1,150 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  #6480: the setup wizard. WixToolset.UI 5.0.2's stock dialogs in a dialog set of this package's own (WixUI_InstallDir's
+  set without the license page, plus two pages of ours), so each transition is written out here and nothing is
+  overridden by order.
+
+  First install / upgrade:   Welcome -> Install folder -> Options -> Ready -> progress -> Finish
+  Maintenance (run the MSI again):  Welcome -> Repair or Remove -> [Remove: Purge page] -> Ready -> progress -> Finish
+
+  There is no license page: the package carries no license text. Settings > Apps > Uninstall runs msiexec /x with the
+  reduced UI, which shows no dialogs, so the Purge page is reached only by running the package again; there,
+  PURGEDATA=1 on the command line is the way to purge.
+
+  Public properties the pages set (the same ones a silent install takes on the command line, Package.wxs):
+    INSTALLFOLDER          the Install folder page (WIXUI_INSTALLDIR names it)
+    ADDINSTALLER           Options page box, on by default: add the person running setup to the operator group
+    WEBDASHBOARD           Options page box, off by default
+    PURGEDATA              Purge page box, off by default
+    WIXUI_EXITDIALOGOPTIONALCHECKBOX   Finish page box (the stock dialog's own property), on by default: start the viewer
+
+  ADDINSTALLER is read here, by the Options page, and nowhere else: a silent install adds an operator only with an
+  explicit OPERATORACCOUNT=, as before. The Options page's Next button records the logon user in DARLING_UI_OPERATOR,
+  and Package.wxs passes it to the script only when ADDINSTALLER is still 1 and no OPERATORACCOUNT came in, so an
+  explicit OPERATORACCOUNT wins and unchecking the box after a Back leaves nothing stale behind.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+  <Fragment>
+    <UI Id="DarlingUI">
+      <TextStyle Id="WixUI_Font_Normal" FaceName="Tahoma" Size="8" />
+      <TextStyle Id="WixUI_Font_Bigger" FaceName="Tahoma" Size="12" />
+      <TextStyle Id="WixUI_Font_Title" FaceName="Tahoma" Size="9" Bold="yes" />
+
+      <Property Id="DefaultUIFont" Value="WixUI_Font_Normal" />
+      <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+      <Property Id="ARPNOMODIFY" Value="1" />
+
+      <!-- Defaults of the boxes. ADDINSTALLER is consumed only by the Options page's Next button, so a silent install
+           that never shows the page is not affected by it being 1. -->
+      <Property Id="ADDINSTALLER" Value="1" />
+      <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
+
+      <DialogRef Id="BrowseDlg" />
+      <DialogRef Id="DiskCostDlg" />
+      <DialogRef Id="ErrorDlg" />
+      <DialogRef Id="FatalError" />
+      <DialogRef Id="FilesInUse" />
+      <DialogRef Id="MsiRMFilesInUse" />
+      <DialogRef Id="PrepareDlg" />
+      <DialogRef Id="ProgressDlg" />
+      <DialogRef Id="ResumeDlg" />
+      <DialogRef Id="UserExit" />
+
+      <!-- The install folder is checked by the UI extension's own custom action, exactly as WixUI_InstallDir does for x64. -->
+      <Publish Dialog="BrowseDlg" Control="OK" Event="DoAction" Value="WixUIValidatePath_X64" Order="3" Condition="NOT WIXUI_DONTVALIDATEPATH" />
+      <Publish Dialog="BrowseDlg" Control="OK" Event="SpawnDialog" Value="InvalidDirDlg" Order="4" Condition="NOT WIXUI_DONTVALIDATEPATH AND WIXUI_INSTALLDIR_VALID&lt;&gt;&quot;1&quot;" />
+
+      <Publish Dialog="ExitDialog" Control="Finish" Event="EndDialog" Value="Return" Order="999" />
+
+      <!-- First install and upgrade. -->
+      <!-- An upgrade installs into the folder the first install recorded (Package.wxs resets INSTALLFOLDER from the marker),
+           so the page that asks for a folder is skipped: it would offer a choice that is ignored. -->
+      <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="InstallDirDlg" Order="2" Condition="NOT WIX_UPGRADE_DETECTED" />
+      <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="OptionsDlg" Order="3" Condition="WIX_UPGRADE_DETECTED" />
+
+      <Publish Dialog="InstallDirDlg" Control="Back" Event="NewDialog" Value="WelcomeDlg" />
+      <Publish Dialog="InstallDirDlg" Control="Next" Event="SetTargetPath" Value="[WIXUI_INSTALLDIR]" Order="1" />
+      <Publish Dialog="InstallDirDlg" Control="Next" Event="DoAction" Value="WixUIValidatePath_X64" Order="2" Condition="NOT WIXUI_DONTVALIDATEPATH" />
+      <Publish Dialog="InstallDirDlg" Control="Next" Event="SpawnDialog" Value="InvalidDirDlg" Order="3" Condition="NOT WIXUI_DONTVALIDATEPATH AND WIXUI_INSTALLDIR_VALID&lt;&gt;&quot;1&quot;" />
+      <Publish Dialog="InstallDirDlg" Control="Next" Event="NewDialog" Value="OptionsDlg" Order="4" Condition="WIXUI_DONTVALIDATEPATH OR WIXUI_INSTALLDIR_VALID=&quot;1&quot;" />
+      <Publish Dialog="InstallDirDlg" Control="ChangeFolder" Property="_BrowseProperty" Value="[WIXUI_INSTALLDIR]" Order="1" />
+      <Publish Dialog="InstallDirDlg" Control="ChangeFolder" Event="SpawnDialog" Value="BrowseDlg" Order="2" />
+
+      <Publish Dialog="OptionsDlg" Control="Back" Event="NewDialog" Value="InstallDirDlg" Order="1" Condition="NOT WIX_UPGRADE_DETECTED" />
+      <Publish Dialog="OptionsDlg" Control="Back" Event="NewDialog" Value="WelcomeDlg" Order="2" Condition="WIX_UPGRADE_DETECTED" />
+      <Publish Dialog="OptionsDlg" Control="Next" Property="DARLING_UI_OPERATOR" Value="[%USERDOMAIN]\[%USERNAME]" Order="1" />
+      <Publish Dialog="OptionsDlg" Control="Next" Event="NewDialog" Value="VerifyReadyDlg" Order="2" />
+
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="OptionsDlg" Order="1" Condition="NOT Installed" />
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="PurgeDlg" Order="2" Condition="Installed AND WixUI_InstallMode = &quot;Remove&quot;" />
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="MaintenanceTypeDlg" Order="3" Condition="Installed AND WixUI_InstallMode &lt;&gt; &quot;Remove&quot;" />
+
+      <!-- Maintenance. Remove goes through the Purge page. -->
+      <Publish Dialog="MaintenanceWelcomeDlg" Control="Next" Event="NewDialog" Value="MaintenanceTypeDlg" />
+
+      <Publish Dialog="MaintenanceTypeDlg" Control="RepairButton" Event="NewDialog" Value="VerifyReadyDlg" />
+      <Publish Dialog="MaintenanceTypeDlg" Control="RemoveButton" Event="NewDialog" Value="PurgeDlg" />
+      <Publish Dialog="MaintenanceTypeDlg" Control="Back" Event="NewDialog" Value="MaintenanceWelcomeDlg" />
+
+      <Publish Dialog="PurgeDlg" Control="Back" Event="NewDialog" Value="MaintenanceTypeDlg" />
+      <Publish Dialog="PurgeDlg" Control="Next" Event="NewDialog" Value="VerifyReadyDlg" />
+
+      <!-- Finish page: the box starts the viewer, and only after an install or upgrade. -->
+      <Publish Dialog="ExitDialog" Control="Finish" Property="WixShellExecTarget" Value="[INSTALLFOLDER]viewer\Darling Viewer (add server).lnk" Order="1" Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 AND NOT Installed" />
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="DarlingLaunchViewer" Order="2" Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 AND NOT Installed" />
+
+      <Dialog Id="OptionsDlg" Width="370" Height="270" Title="!(loc.InstallDirDlg_Title)">
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="!(loc.WixUINext)" />
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="!(loc.WixUIBack)" />
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="!(loc.WixUICancel)">
+          <Publish Event="SpawnDialog" Value="CancelDlg" />
+        </Control>
+
+        <Control Id="Description" Type="Text" X="25" Y="23" Width="320" Height="15" Transparent="yes" NoPrefix="yes" Text="Who can use the viewer, and the web dashboard." />
+        <Control Id="Title" Type="Text" X="15" Y="6" Width="200" Height="15" Transparent="yes" NoPrefix="yes" Text="{\WixUI_Font_Title}Setup options" />
+        <Control Id="BannerBitmap" Type="Bitmap" X="0" Y="0" Width="370" Height="44" TabSkip="no" Text="!(loc.InstallDirDlgBannerBitmap)" />
+        <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="370" Height="0" />
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0" />
+
+        <Control Id="AddInstaller" Type="CheckBox" X="20" Y="60" Width="330" Height="34" Property="ADDINSTALLER" CheckBoxValue="1"
+                 Text="Add me to the PerformanceMonitor Darling Operators group, so I can read the collected data in the viewer (recommended)." />
+        <Control Id="WebDashboard" Type="CheckBox" X="20" Y="110" Width="330" Height="72" Property="WEBDASHBOARD" CheckBoxValue="1"
+                 Text="Turn on the web dashboard. It listens on this machine only and asks for a web token that setup makes for you. To see the token, run &amp; &quot;[INSTALLFOLDER]PerformanceMonitor.Darling.Service.exe&quot; --print-web-token from an elevated PowerShell. It is off by default, and only a new darling.json gets this setting: an existing one is left as it is." />
+      </Dialog>
+
+      <Dialog Id="PurgeDlg" Width="370" Height="270" Title="!(loc.InstallDirDlg_Title)">
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="!(loc.WixUINext)" />
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="!(loc.WixUIBack)" />
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="!(loc.WixUICancel)">
+          <Publish Event="SpawnDialog" Value="CancelDlg" />
+        </Control>
+
+        <Control Id="Description" Type="Text" X="25" Y="23" Width="320" Height="15" Transparent="yes" NoPrefix="yes" Text="Keep or delete the collected data." />
+        <Control Id="Title" Type="Text" X="15" Y="6" Width="200" Height="15" Transparent="yes" NoPrefix="yes" Text="{\WixUI_Font_Title}Remove PerformanceMonitor Darling" />
+        <Control Id="BannerBitmap" Type="Bitmap" X="0" Y="0" Width="370" Height="44" TabSkip="no" Text="!(loc.InstallDirDlgBannerBitmap)" />
+        <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="370" Height="0" />
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0" />
+
+        <Control Id="PurgeNote" Type="Text" X="20" Y="60" Width="330" Height="40" NoPrefix="yes"
+                 Text="Setup removes the program, the service and the firewall rules. By default it keeps the collected data, so a later install picks up where this one left off. Setup never removes darling.json." />
+        <Control Id="PurgeData" Type="CheckBox" X="20" Y="115" Width="330" Height="34" Property="PURGEDATA" CheckBoxValue="1"
+                 Text="Also delete all the collected data. This cannot be undone." />
+      </Dialog>
+
+    </UI>
+
+    <!-- Finish page: the stock ExitDialog with its optional box. The box's text is set only for an install or an upgrade,
+         so a repair or a removal shows no launch box. -->
+    <SetProperty Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Sequence="ui" Before="CostInitialize" Condition="NOT Installed"
+                 Value="Start the viewer and add a server" />
+
+    <!-- The finish-page launch (#6480). WixUnelevatedShellExec is an immediate action run from the dialog, in the client
+         process, so the viewer starts as the person at the screen (and, when setup was elevated, through the shell, not
+         with setup's token), never as SYSTEM. It takes a file to open, not a command line, so the target (set by the Finish button just before this runs, from the folder the wizard chose) is a shortcut
+         to the viewer with the add-server switch (Package.wxs). Return="ignore": a viewer that does not start is not a failed
+         install. -->
+    <CustomAction Id="DarlingLaunchViewer" DllEntry="WixUnelevatedShellExec" BinaryRef="Wix4UtilCA_X64" Impersonate="yes" Return="ignore" />
+
+    <UIRef Id="WixUI_Common" />
+  </Fragment>
+</Wix>

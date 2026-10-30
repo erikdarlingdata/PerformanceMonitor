@@ -57,7 +57,7 @@ public sealed class DarlingMcpQueryTagTools
     private const string KindObject = "object";
 
     [McpServerTool(Name = "create_query_tag"), Description(
-        "Creates a query tag, at the root or under parent_id. A query tag labels queries (by query_hash or by object, see assign_query_tag) so resource use can be grouped by it; it is not a server tag. Names are trimmed, 1-100 characters, unique among siblings ignoring case (the same name under two different parents is fine); tags nest at most four levels. Needs mcp.allowWrites. The tag map takes effect on the collector's next map pass.")]
+        "Creates a query tag, at the root or under parent_id. A query tag labels queries (by query_hash or by object, see assign_query_tag) so resource use can be grouped by it; it is not a server tag. Names are trimmed, 1-100 characters, unique among siblings ignoring case (the same name under two different parents is fine); tags nest at most four levels. Needs mcp.allowWrites. The tag map takes effect on the collector's next map pass. The answer carries previous (null) and undo (the delete_query_tag call for the new id).")]
     public static Task<string> CreateQueryTag(
         NpgsqlDataSource postgres,
         [Description("The tag name (1-100 characters, trimmed, unique among siblings).")] string name,
@@ -67,7 +67,7 @@ public sealed class DarlingMcpQueryTagTools
         CreateQueryTagCore(new QueryTagStore(postgres, WriteCommandSeconds), name, parent_id, colour, cancellationToken);
 
     [McpServerTool(Name = "update_query_tag"), Description(
-        "PARTIAL edit of a query tag: send only name, colour or parent_id in changes_json; an explicit null clears colour or moves the tag to the root. A move carries the subtree, its assignments and its rules; it is refused with cycle if the new parent is the tag or one of its descendants, and with depth_limit past four levels. Needs mcp.allowWrites. The tag map takes effect on the collector's next map pass.")]
+        "PARTIAL edit of a query tag: send only name, colour or parent_id in changes_json; an explicit null clears colour or moves the tag to the root. A move carries the subtree, its assignments and its rules; it is refused with cycle if the new parent is the tag or one of its descendants, and with depth_limit past four levels. Needs mcp.allowWrites. The tag map takes effect on the collector's next map pass. The answer carries previous (the tag's name, colour and parent_id before) and undo (the update_query_tag call that puts the changed fields back).")]
     public static Task<string> UpdateQueryTag(
         NpgsqlDataSource postgres,
         [Description("The tag id (from list_query_tags).")] int tag_id,
@@ -76,7 +76,7 @@ public sealed class DarlingMcpQueryTagTools
         UpdateQueryTagCore(new QueryTagStore(postgres, WriteCommandSeconds), tag_id, changes_json, cancellationToken);
 
     [McpServerTool(Name = "delete_query_tag"), Description(
-        "Deletes a query tag AND its child tags, their hand assignments and their rules. Permanent. A tag that has children, assignments or rules answers confirm_required with the counts and deletes nothing; send it again with confirm=true to proceed. Collected data is untouched. Needs mcp.allowWrites. The tag map takes effect on the collector's next map pass.")]
+        "Deletes a query tag AND its child tags, their hand assignments and their rules. Permanent. A tag that has children, assignments or rules answers confirm_required with the counts and deletes nothing; send it again with confirm=true to proceed. Collected data is untouched. Needs mcp.allowWrites. The tag map takes effect on the collector's next map pass. The answer carries previous (the deleted tag); a tag that had no children, assignments or rules also carries undo (the create_query_tag call, which makes a new id), and any other delete carries an undo_note instead, because no single call restores the subtree.")]
     public static Task<string> DeleteQueryTag(
         NpgsqlDataSource postgres,
         [Description("The tag id (from list_query_tags).")] int tag_id,
@@ -85,7 +85,7 @@ public sealed class DarlingMcpQueryTagTools
         DeleteQueryTagCore(new QueryTagStore(postgres, WriteCommandSeconds), tag_id, confirm, cancellationToken);
 
     [McpServerTool(Name = "assign_query_tag"), Description(
-        "Hand-assigns a query tag to one key: kind 'hash' takes query_hash; kind 'object' takes database_name, schema_name AND object_name (all three). server_id limits the assignment to one monitored server; omit it for every server. One tag per key and server scope, with a hash and the object names compared ignoring case: a key that already has a hand tag in that scope moves to this tag, and the result says so (status moved). A hand assignment beats any rule. query_id is kept for display only and never matched on. Needs mcp.allowWrites. The tag map takes effect on the collector's next map pass.")]
+        "Hand-assigns a query tag to one key: kind 'hash' takes query_hash; kind 'object' takes database_name, schema_name AND object_name (all three). server_id limits the assignment to one monitored server; omit it for every server. One tag per key and server scope, with a hash and the object names compared ignoring case: a key that already has a hand tag in that scope moves to this tag, and the result says so (status moved). A hand assignment beats any rule. query_id is kept for display only and never matched on. Needs mcp.allowWrites. The tag map takes effect on the collector's next map pass. The answer carries previous (the tag the key held before in this scope, or null) and undo (unassign_query_tag for a new assignment, assign_query_tag with the earlier tag for a move).")]
     public static Task<string> AssignQueryTag(
         NpgsqlDataSource postgres,
         [Description("The tag id (from list_query_tags).")] int tag_id,
@@ -100,7 +100,7 @@ public sealed class DarlingMcpQueryTagTools
         AssignQueryTagCore(new QueryTagStore(postgres, WriteCommandSeconds), tag_id, kind, query_hash, database_name, schema_name, object_name, server_id, query_id, null, cancellationToken);
 
     [McpServerTool(Name = "unassign_query_tag"), Description(
-        "Removes the hand tag from one key in exactly one server scope: the same kind, key parts and server_id that assign_query_tag took (omit server_id for the every-server assignment; a server-limited assignment is a different row). A key with no hand tag in that scope is a no-op. Needs mcp.allowWrites. The tag map takes effect on the collector's next map pass.")]
+        "Removes the hand tag from one key in exactly one server scope: the same kind, key parts and server_id that assign_query_tag took (omit server_id for the every-server assignment; a server-limited assignment is a different row). A key with no hand tag in that scope is a no-op. Needs mcp.allowWrites. The tag map takes effect on the collector's next map pass. The answer carries previous (the tag that was removed) and undo (the assign_query_tag call that restores it).")]
     public static Task<string> UnassignQueryTag(
         NpgsqlDataSource postgres,
         [Description("The key kind: 'hash' or 'object'.")] string kind,
@@ -144,7 +144,14 @@ public sealed class DarlingMcpQueryTagTools
             var tag = after.Tags.FirstOrDefault(t => t.Id == ok.Tag.Id);
             return tag is null
                 ? ConcurrentlyGone(ok.Tag.Id)
-                : Serialize(new JsonObject { ["status"] = "created", ["tag"] = TagNode(after, tag), ["note"] = MapNote });
+                : Serialize(new JsonObject
+                {
+                    ["status"] = "created",
+                    ["tag"] = TagNode(after, tag),
+                    ["previous"] = null,
+                    ["undo"] = DarlingMcpUndoShape.Call("delete_query_tag", new JsonObject { ["tag_id"] = tag.Id }),
+                    ["note"] = MapNote,
+                });
         }
         catch (Exception ex)
         {
@@ -195,7 +202,13 @@ public sealed class DarlingMcpQueryTagTools
 
             if (changed.Count == 0)
             {
-                return Serialize(new JsonObject { ["status"] = "unchanged", ["tag"] = TagNode(before, stored) });
+                return Serialize(new JsonObject
+                {
+                    ["status"] = "unchanged",
+                    ["tag"] = TagNode(before, stored),
+                    ["previous"] = PreviousTagValues(stored),
+                    ["undo"] = UpdateUndo(tagId, stored, edit),
+                });
             }
 
             var written = await store.UpdateAsync(tagId, reduced, ct);
@@ -213,6 +226,8 @@ public sealed class DarlingMcpQueryTagTools
                     ["status"] = "updated",
                     ["updated_fields"] = new JsonArray(changed.Select(f => (JsonNode?)JsonValue.Create(f)).ToArray()),
                     ["tag"] = TagNode(after, tag),
+                    ["previous"] = PreviousTagValues(stored),
+                    ["undo"] = UpdateUndo(tagId, stored, reduced),
                     ["note"] = MapNote,
                 });
         }
@@ -228,6 +243,8 @@ public sealed class DarlingMcpQueryTagTools
     {
         try
         {
+            var snapshotBefore = await store.ReadSnapshotAsync(ct);
+            var storedTag = snapshotBefore.Tags.FirstOrDefault(t => t.Id == tagId);
             var written = await store.DeleteAsync(tagId, confirm, ct);
             if (written is QueryTagWriteResult.ConfirmRequired needed)
             {
@@ -251,7 +268,7 @@ public sealed class DarlingMcpQueryTagTools
             }
 
             var removed = ok.Removed ?? new QueryTagDeleteImpact(0, 0, 0);
-            return Serialize(new JsonObject
+            var deleted = new JsonObject
             {
                 ["status"] = "deleted",
                 ["tag_id"] = tagId,
@@ -260,7 +277,33 @@ public sealed class DarlingMcpQueryTagTools
                 ["removed_assignments"] = removed.Assignments,
                 ["removed_rules"] = removed.Rules,
                 ["note"] = MapNote,
-            });
+            };
+            if (storedTag is not null)
+            {
+                deleted["previous"] = TagNode(snapshotBefore, storedTag);
+                if (removed.ChildTags == 0 && removed.Assignments == 0 && removed.Rules == 0)
+                {
+                    var create = new JsonObject { ["name"] = storedTag.Name };
+                    if (storedTag.ParentId is int parent)
+                    {
+                        create["parent_id"] = parent;
+                    }
+
+                    if (storedTag.Colour is not null)
+                    {
+                        create["colour"] = storedTag.Colour;
+                    }
+
+                    deleted["undo"] = DarlingMcpUndoShape.Call("create_query_tag", create);
+                    deleted["undo_note"] = "The undo recreates the tag under a NEW id.";
+                }
+                else
+                {
+                    deleted["undo_note"] = "No single call undoes this: the delete also removed the child tags, hand assignments and rules listed above, and the previous tag is only the one you named. Recreate the tag with create_query_tag, then re-create what was under it.";
+                }
+            }
+
+            return Serialize(deleted);
         }
         catch (Exception ex)
         {
@@ -284,7 +327,7 @@ public sealed class DarlingMcpQueryTagTools
     {
         try
         {
-            var key = BuildKey(kind, queryHash, databaseName, schemaName, objectName, serverId, out var keyRefusal);
+            var key = BuildKey(kind, queryHash, databaseName, schemaName, objectName, serverId, out var keyRefusal, requireHashShape: true);
             if (keyRefusal is not null)
             {
                 return keyRefusal;
@@ -343,6 +386,23 @@ public sealed class DarlingMcpQueryTagTools
                     $"The key already had hand tag {previousId} in this server scope (one tag per key); it now has tag {tagId}.");
             }
 
+            node["previous"] = new JsonObject
+            {
+                ["tag_id"] = result.Outcome switch
+                {
+                    QueryTagAssignOutcome.Replaced => result.PreviousTagId,
+                    QueryTagAssignOutcome.Unchanged => tagId,
+                    _ => null,
+                },
+            };
+            node["undo"] = result.Outcome switch
+            {
+                QueryTagAssignOutcome.Added => DarlingMcpUndoShape.Call("unassign_query_tag", KeyArguments(new JsonObject(), key)),
+                QueryTagAssignOutcome.Replaced when result.PreviousTagId is int previousTag =>
+                    DarlingMcpUndoShape.Call("assign_query_tag", KeyArguments(new JsonObject { ["tag_id"] = previousTag }, key)),
+                _ => DarlingMcpUndoShape.Call("assign_query_tag", KeyArguments(new JsonObject { ["tag_id"] = tagId }, key)),
+            };
+
             if (result.Outcome != QueryTagAssignOutcome.Unchanged)
             {
                 node["note"] = MapNote;
@@ -382,6 +442,8 @@ public sealed class DarlingMcpQueryTagTools
                 return Serialize(new JsonObject
                 {
                     ["status"] = "unchanged",
+                    ["previous"] = null,
+                    ["undo"] = "None needed: nothing was removed.",
                     ["message"] = "That key has no hand tag in this server scope. Nothing was removed. A server-limited assignment and the every-server assignment are different rows; send server_id to address the first.",
                 });
             }
@@ -391,6 +453,8 @@ public sealed class DarlingMcpQueryTagTools
             {
                 ["status"] = "unassigned",
                 ["removed_assignment"] = AssignmentNode(removed, after, false),
+                ["previous"] = new JsonObject { ["tag_id"] = removed.TagId },
+                ["undo"] = DarlingMcpUndoShape.Call("assign_query_tag", AssignmentArguments(removed)),
                 ["note"] = MapNote,
             });
         }
@@ -473,7 +537,8 @@ public sealed class DarlingMcpQueryTagTools
 
     /// <summary>Validates and trims a key's arguments. Null key plus a ready envelope when the arguments cannot be used.</summary>
     private static QueryTagKey? BuildKey(
-        string? kind, string? queryHash, string? databaseName, string? schemaName, string? objectName, int? serverId, out string? refusal)
+        string? kind, string? queryHash, string? databaseName, string? schemaName, string? objectName, int? serverId, out string? refusal,
+        bool requireHashShape = false)
     {
         refusal = null;
         var cleanKind = kind?.Trim().ToLowerInvariant();
@@ -512,8 +577,16 @@ public sealed class DarlingMcpQueryTagTools
                 return null;
             }
 
-            /* The resolver matches a hash ignoring case, so the key stores one spelling of it (#6020). A hash that is not a
-               hash at all (all zeros, or neither hex nor decimal) is kept as typed. */
+            /* #6455: a NEW assignment must name something a query hash can be; unassign skips this so a key stored before the check
+               can still be removed. */
+            if (requireHashShape && !QueryHashIdentity.IsAssignableHash(hash))
+            {
+                refusal = Refusal("invalid", "bad_key", "query_hash must be hexadecimal: 0x followed by 1 to 16 hex digits (for example 0x1A2B3C4D5E6F7081), or the decimal number the long-query trace stores.");
+                return null;
+            }
+
+            /* The resolver matches a hash ignoring case, so the key stores one spelling of it (#6020). Unassign skips the shape
+               check above, so a key stored before it (all zeros, or neither hex nor decimal) is kept as typed and can be removed. */
             return new QueryTagKey(KindHash, serverId, QueryHashIdentity.CanonicalKey(hash) ?? hash, null, null, null);
         }
 
@@ -599,6 +672,69 @@ public sealed class DarlingMcpQueryTagTools
                 stack.Push(child);
             }
         }
+    }
+
+    /// <summary>What a tag held before an update (#6403): every field the update tool can change.</summary>
+    private static JsonObject PreviousTagValues(QueryTagRow stored) =>
+        new() { ["name"] = stored.Name, ["colour"] = stored.Colour, ["parent_id"] = stored.ParentId };
+
+    /// <summary>The update that puts back the fields <paramref name="applied"/> touched, as update_query_tag's own changes_json.</summary>
+    private static JsonObject UpdateUndo(int tagId, QueryTagRow stored, TagTreeEdit applied)
+    {
+        var changes = new JsonObject();
+        if (applied.HasName)
+        {
+            changes["name"] = stored.Name;
+        }
+
+        if (applied.HasColour)
+        {
+            changes["colour"] = stored.Colour;
+        }
+
+        if (applied.HasParent)
+        {
+            changes["parent_id"] = stored.ParentId;
+        }
+
+        return DarlingMcpUndoShape.Call("update_query_tag", new JsonObject { ["tag_id"] = tagId, ["changes_json"] = changes.ToJsonString() });
+    }
+
+    /// <summary>The key arguments assign_query_tag and unassign_query_tag both take.</summary>
+    private static JsonObject KeyArguments(JsonObject arguments, QueryTagKey key)
+    {
+        arguments["kind"] = key.Kind;
+        if (key.QueryHash is not null)
+        {
+            arguments["query_hash"] = key.QueryHash;
+        }
+
+        if (key.DatabaseName is not null)
+        {
+            arguments["database_name"] = key.DatabaseName;
+            arguments["schema_name"] = key.SchemaName;
+            arguments["object_name"] = key.ObjectName;
+        }
+
+        if (key.ServerId is int server)
+        {
+            arguments["server_id"] = server;
+        }
+
+        return arguments;
+    }
+
+    /// <summary>The assign call that recreates a removed hand assignment.</summary>
+    private static JsonObject AssignmentArguments(QueryTagAssignmentRow a)
+    {
+        var arguments = KeyArguments(
+            new JsonObject { ["tag_id"] = a.TagId }, new QueryTagKey(a.Kind, a.ServerId, a.QueryHash, a.DatabaseName, a.SchemaName, a.ObjectName));
+        if (a.QueryId is long queryId)
+        {
+            arguments["query_id"] = queryId;
+        }
+
+        return arguments;
     }
 
     private static JsonObject TagNode(QueryTagSnapshot snapshot, QueryTagRow tag)

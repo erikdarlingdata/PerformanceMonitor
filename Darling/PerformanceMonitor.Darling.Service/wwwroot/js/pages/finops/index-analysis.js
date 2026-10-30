@@ -156,7 +156,8 @@ export const tab = {
         const recs = (data.recommendations || []).map((r) => recommendationRow(r, captured));
         const rollups = (data.overall ? [rollupRow({ ...data.overall, database_name: "ALL DATABASES" })] : [])
           .concat((data.databases || []).map(rollupRow));
-        const lead = (data.uptime_warning ? 1 : 0) + (data.dedupe_only_applied ? 1 : 0);
+        /* #6653: the notes lead with the uptime caveat only when dedupe-only is not in effect (the tool leaves it out beside the dedupe notice). */
+        const lead = (data.uptime_warning && !data.dedupe_only_applied ? 1 : 0) + (data.dedupe_only_applied ? 1 : 0);
         const notes = data.notes || [];
         const parts = [noticeStrip(noticeText(data, recs.length, choice.db))];
         notes.slice(0, lead).forEach((t) => parts.push(noticeStrip(t)));

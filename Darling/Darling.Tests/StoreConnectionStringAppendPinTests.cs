@@ -18,7 +18,7 @@ namespace Darling.Tests;
 
 /// <summary>
 /// Round-1 security review on #4285 (the #4277 PR): <see cref="DarlingStoreConnection.PinSessionTimeZoneUtc"/>,
-/// <see cref="DarlingWorker.EnsureStoreSearchPath"/> and <see cref="ViewerDataService.ApplyConnectionTimeout"/>
+/// <see cref="DarlingStoreConnection.EnsureStoreSearchPath"/> and <see cref="ViewerDataService.ApplyConnectionTimeout"/>
 /// used to set their one keyword by rewriting the caller's connection string through a builder. A builder's
 /// writer emits an explicit empty value (<c>Password=''</c>) as a bare <c>Key=</c>, and its own reader treats a
 /// bare <c>Key=</c> as "not set" — silently dropping the keyword and letting Npgsql fall back to a <c>PG*</c>
@@ -58,7 +58,7 @@ public sealed class StoreConnectionStringAppendPinTests
     [MemberData(nameof(RiskyConnectionStrings))]
     public void EnsureStoreSearchPath_AppendsWithoutErasingAnyOtherKeyword(string label, string input)
     {
-        var output = DarlingWorker.EnsureStoreSearchPath(input);
+        var output = DarlingStoreConnection.EnsureStoreSearchPath(input);
 
         AssertAppendedAndEveryOtherKeywordSurvives(input, output, label);
         Assert.Equal(DarlingManagedPostgres.SearchPath, new NpgsqlConnectionStringBuilder(output).SearchPath);
@@ -117,14 +117,14 @@ public sealed class StoreConnectionStringAppendPinTests
     {
         const string input = "Host=store;Database=darling;SEARCHPATH=reporting,public";
 
-        var output = DarlingWorker.EnsureStoreSearchPath(input);
+        var output = DarlingStoreConnection.EnsureStoreSearchPath(input);
 
         Assert.Equal(input, output);
         Assert.Equal("reporting,public", new NpgsqlConnectionStringBuilder(output).SearchPath);
     }
 
     /// <summary>
-    /// <see cref="DarlingStoreConnection.PinSessionTimeZoneUtc"/> and <see cref="DarlingWorker.EnsureStoreSearchPath"/>
+    /// <see cref="DarlingStoreConnection.PinSessionTimeZoneUtc"/> and <see cref="DarlingStoreConnection.EnsureStoreSearchPath"/>
     /// both still parse the caller's string once, through <see cref="NpgsqlConnectionStringBuilder"/>, before
     /// deciding what to append — <c>PinSessionTimeZoneUtc</c> to keep today's malformed-string exception at
     /// this exact statement (round-1 review's Q2), <c>EnsureStoreSearchPath</c> as its unchanged presence
@@ -136,6 +136,24 @@ public sealed class StoreConnectionStringAppendPinTests
         const string malformed = "Host=store;sslmode=NotARealSslMode";
 
         Assert.Throws<ArgumentException>(() => DarlingStoreConnection.PinSessionTimeZoneUtc(malformed));
-        Assert.Throws<ArgumentException>(() => DarlingWorker.EnsureStoreSearchPath(malformed));
+        Assert.Throws<ArgumentException>(() => DarlingStoreConnection.EnsureStoreSearchPath(malformed));
+    }
+
+    /// <summary>
+    /// #6630 review: every surface appends the ONE Storage constant. The managed-runtime and Viewer names alias it, and the
+    /// SQL-side form is the same schemas in the same order with spaces; a surface that goes back to its own literal and drifts
+    /// fails here, instead of failing in the field with 42P01 on the one surface that kept the old list.
+    /// </summary>
+    [Fact]
+    public void EverySurfaceAppendsTheOneStorageSearchPath()
+    {
+        Assert.Equal(DarlingStoreConnection.StoreSearchPath, DarlingManagedPostgres.SearchPath);
+        Assert.Equal(DarlingStoreConnection.StoreSearchPath, ViewerSettings.ManagedSearchPath);
+        Assert.Equal(
+            DarlingStoreConnection.StoreSearchPath,
+            PgSchemaGenerator.SearchPath.Replace(" ", "", StringComparison.Ordinal));
+
+        var appended = new NpgsqlConnectionStringBuilder(DarlingStoreConnection.EnsureStoreSearchPath("Host=store;Database=darling"));
+        Assert.Equal(ViewerSettings.ManagedSearchPath, appended.SearchPath);
     }
 }

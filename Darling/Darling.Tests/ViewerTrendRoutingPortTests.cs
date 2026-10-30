@@ -320,13 +320,13 @@ public sealed class ViewerTrendRoutingPortTests
 
         var hourly = ViewerServerTab.DescribeTrendCoverage(new QueryTrendSeries(new List<QueryTrendPoint>(), RetentionTier.Hourly, start, false));
         Assert.Equal("Source: hourly rollup (one point per hour)", hourly);
-        Assert.DoesNotContain("data begins", hourly, StringComparison.Ordinal);
+        Assert.DoesNotContain("Data begins", hourly, StringComparison.Ordinal);
 
         var head = start.AddDays(3);
         var truncated = ViewerServerTab.DescribeTrendCoverage(new QueryTrendSeries(new List<QueryTrendPoint>(), RetentionTier.Hourly, head, true));
-        Assert.StartsWith("Source: hourly rollup (one point per hour) — data begins ", truncated, StringComparison.Ordinal);
+        Assert.StartsWith("Source: hourly rollup (one point per hour). Data begins ", truncated, StringComparison.Ordinal);
         Assert.Contains(ViewerTimeHelper.ForDisplay(head).ToString("yyyy-MM-dd HH:mm", System.Globalization.CultureInfo.InvariantCulture), truncated, StringComparison.Ordinal);
-        Assert.EndsWith("the store no longer holds the rest of this window at this tier", truncated, StringComparison.Ordinal);
+        Assert.EndsWith(" because the store no longer holds the rest of this window at this tier.", truncated, StringComparison.Ordinal);
 
         /* The word the chart leads with is the word the tool publishes. */
         foreach (var tier in new[] { RetentionTier.Raw, RetentionTier.Hourly })
@@ -358,24 +358,24 @@ public sealed class ViewerTrendRoutingPortTests
         var served = ViewerServerTab.DescribeQueryStoreTrendCoverage(new QueryStoreTrendSeries(new List<QueryTrendPoint>(), routed, start, null));
         var rawFromText = ViewerTimeHelper.ForDisplay(rawFrom).ToString("yyyy-MM-dd HH:mm", System.Globalization.CultureInfo.InvariantCulture);
         Assert.Equal($"Source: rollup+raw (one point per hour before {rawFromText}, one per Query Store interval from it)", served);
-        Assert.DoesNotContain("data begins", served, StringComparison.Ordinal);
+        Assert.DoesNotContain("Data begins", served, StringComparison.Ordinal);
 
         /* A late head on a route that reached the start: quiet, not truncated — no clause. */
         var quietHead = ViewerServerTab.DescribeQueryStoreTrendCoverage(new QueryStoreTrendSeries(new List<QueryTrendPoint>(), routed, start.AddDays(3), null));
-        Assert.DoesNotContain("data begins", quietHead, StringComparison.Ordinal);
+        Assert.DoesNotContain("Data begins", quietHead, StringComparison.Ordinal);
 
         /* The floor above the start: the head was not served, and the title says from where and why. */
         var head = start.AddDays(3);
         var unserved = ViewerServerTab.DescribeQueryStoreTrendCoverage(new QueryStoreTrendSeries(new List<QueryTrendPoint>(), routed, head, UnservedBeforeUtc: head));
-        Assert.StartsWith($"Source: rollup+raw (one point per hour before {rawFromText}, one per Query Store interval from it) — data begins ", unserved, StringComparison.Ordinal);
+        Assert.StartsWith($"Source: rollup+raw (one point per hour before {rawFromText}, one per Query Store interval from it). Data begins ", unserved, StringComparison.Ordinal);
         Assert.Contains(ViewerTimeHelper.ForDisplay(head).ToString("yyyy-MM-dd HH:mm", System.Globalization.CultureInfo.InvariantCulture), unserved, StringComparison.Ordinal);
-        Assert.EndsWith("; the corrected Query Store rollup has not materialized the rest of this window (--backfill-rollups reaches it)", unserved, StringComparison.Ordinal);
+        Assert.EndsWith(" because the corrected Query Store rollup has not materialized the rest of this window (--backfill-rollups reaches it).", unserved, StringComparison.Ordinal);
         Assert.DoesNotContain("no longer holds", unserved, StringComparison.Ordinal);
 
-        /* Same sentence shape as the siblings — "Source: {served} — data begins yyyy-MM-dd HH:mm; {why}" — because
+        /* Same sentence shape as the siblings — "Source: {served}. Data begins yyyy-MM-dd HH:mm because {why}." — because
            both go through one composer; the two slots differ, the frame does not. */
         var sibling = ViewerServerTab.DescribeTrendCoverage(new QueryTrendSeries(new List<QueryTrendPoint>(), RetentionTier.Hourly, head, true));
-        var frame = new System.Text.RegularExpressions.Regex(@"^Source: [^—]+ — data begins \d{4}-\d{2}-\d{2} \d{2}:\d{2}; [^;]+$");
+        var frame = new System.Text.RegularExpressions.Regex(@"^Source: [^—;]+\. Data begins \d{4}-\d{2}-\d{2} \d{2}:\d{2} because [^;—]+\.$");
         Assert.Matches(frame, sibling);
         Assert.Matches(frame, unserved);
         Assert.Matches(new System.Text.RegularExpressions.Regex(@"^Source: [^—;]+$"), served);

@@ -18,14 +18,15 @@ Thank you for your interest in contributing to the SQL Server Performance Monito
 
 This repository contains three editions of the SQL Server Performance Monitor:
 
-**Full Edition** — server-installed collectors with a separate dashboard:
+**Full Edition (deprecated)** — server-installed collectors with a separate dashboard. The Full Dashboard and the CLI installer are deprecated. No release since v3.3.0 includes them, and their last builds are in the [v3.2.0 release](https://github.com/erikdarlingdata/PerformanceMonitor/releases/tag/v3.2.0). They still build from this repository and are supported for existing users. New deployments use Lite or Darling.
 
 | Folder | Description |
 |--------|-------------|
 | `install/` | 50+ T-SQL scripts that create the PerformanceMonitor database |
-| `Installer/` | CLI installer for the Full Edition database and collectors |
-| `Installer.Core/` | Shared installation library (used by CLI installer and Dashboard) |
-| `Dashboard/` | WPF dashboard — connects to PerformanceMonitor database, can also install/upgrade via Add Server |
+| `upgrades/` | Version-specific upgrade scripts for that database |
+| `deprecated/Installer/` | CLI installer for the Full Edition database and collectors |
+| `deprecated/Installer.Core/` | Shared installation library (used by CLI installer and Dashboard) |
+| `deprecated/Dashboard/` | WPF dashboard — connects to PerformanceMonitor database, can also install/upgrade via Add Server |
 
 **Lite Edition** — standalone desktop app, nothing installed on the target server:
 
@@ -87,9 +88,9 @@ dotnet build Darling/PerformanceMonitor.Darling.Viewer/PerformanceMonitor.Darlin
 
 ### Running the Applications
 
-**Full Dashboard:**
-1. Install the database on a SQL Server instance using the installer
-2. Run `Dashboard/bin/Debug/net10.0-windows/Dashboard.exe`
+**Full Dashboard (deprecated):**
+1. Install the database on a SQL Server instance using the CLI installer in `deprecated/Installer/`
+2. Run `deprecated/Dashboard/bin/Debug/net10.0-windows/PerformanceMonitorDashboard.exe`
 3. Add your server connection and start monitoring
 
 **Lite Edition:**
@@ -106,34 +107,9 @@ dotnet build Darling/PerformanceMonitor.Darling.Viewer/PerformanceMonitor.Darlin
 
 ## Architecture Overview
 
-### Full Dashboard Architecture
+### Full Dashboard Architecture (deprecated)
 
-The Full Dashboard has a clean separation between data collection and display:
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    Monitored SQL Server                         │
-│  ┌─────────────────────────────────────────────────────────┐   │
-│  │  PerformanceMonitor Database                             │   │
-│  │  ├── collect.* tables (raw collected data)               │   │
-│  │  ├── dbo.collect_* procedures (29 collectors)            │   │
-│  │  ├── report.* views (reporting layer)                    │   │
-│  │  └── config.* tables (schedules, retention, logs)        │   │
-│  └─────────────────────────────────────────────────────────┘   │
-│                           ▲                                     │
-│                           │ SQL Agent Jobs (every 1 min)        │
-└───────────────────────────┼─────────────────────────────────────┘
-                            │
-                            │ SQL queries
-                            ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                    Dashboard Application                        │
-│  ├── Services/DatabaseService.cs (data access layer)           │
-│  ├── Models/*.cs (data transfer objects)                       │
-│  ├── ServerTab.xaml (main monitoring UI)                       │
-│  └── Mcp/*.cs (MCP server for LLM integration)                 │
-└─────────────────────────────────────────────────────────────────┘
-```
+The Full Edition is deprecated, so this guide does not describe its architecture in detail. It installs a `PerformanceMonitor` database on the monitored SQL Server. T-SQL collectors in that database run under SQL Agent, and the Full Dashboard in `deprecated/Dashboard/` reads the data. The scripts are in `install/`. See [`deprecated/Dashboard/README.md`](deprecated/Dashboard/README.md) for the details.
 
 **Key insight:** T-SQL collectors run independently from the C# Dashboard. You can modify collectors without touching C# code, and vice versa.
 
@@ -240,19 +216,19 @@ the extension is present, so the same store works on plain PostgreSQL.
 
 | Area | Complexity | Notes |
 |------|------------|-------|
-| **Full Dashboard T-SQL collectors** | Low | Clean, self-contained stored procedures |
-| **Full Dashboard reporting views** | Low | SQL views in `install/47_create_reporting_views.sql` |
-| **Dashboard UI improvements** | Medium | WPF/C# in `Dashboard/ServerTab.xaml*` |
+| **Full Edition T-SQL collectors (deprecated)** | Low | Clean, self-contained stored procedures |
+| **Full Edition reporting views (deprecated)** | Low | SQL views in `install/47_create_reporting_views.sql` |
+| **Full Dashboard UI improvements (deprecated)** | Medium | WPF/C# in `deprecated/Dashboard/ServerTab.xaml*` |
 | **Lite UI improvements** | Medium | WPF/C# in `Lite/Controls/ServerTab.xaml*` |
-| **Bug fixes (either edition)** | Varies | Always welcome |
+| **Bug fixes (any edition)** | Varies | Always welcome |
 | **Documentation** | Low | README, comments, troubleshooting guides |
-| **MCP tool improvements** | Medium | `Dashboard/Mcp/` or `Lite/Mcp/` |
+| **MCP tool improvements** | Medium | `Lite/Mcp/`, `Darling/PerformanceMonitor.Darling.Service/Mcp/` or `deprecated/Dashboard/Mcp/` |
 | **New Lite collectors** | **High** | See warning below |
 | **Darling schema migrations** | **High** | Four coordinated edits — see below |
 
-### Adding a New Full Dashboard Collector
+### Adding a New Full Edition Collector (deprecated)
 
-This is the cleanest contribution path. You need to:
+The Full Edition is deprecated but still supported for existing users. This is its cleanest contribution path. You need to:
 
 1. **Create the collection table** in `install/02_create_tables.sql`
 2. **Create the collector procedure** in a new file `install/XX_collect_your_collector.sql`
@@ -509,9 +485,9 @@ Use the troubleshooting scripts:
 - `install/99_installer_troubleshooting.sql` - Quick health check
 - `install/99_user_troubleshooting.sql` - Detailed diagnostics
 
-### Testing Dashboard Changes
+### Testing Full Dashboard Changes (deprecated)
 
-1. Build and run the Dashboard
+1. Build and run the Full Dashboard from `deprecated/Dashboard/`
 2. Connect to a test SQL Server with PerformanceMonitor installed
 3. Verify your changes appear correctly
 4. Test with different time ranges
@@ -526,7 +502,7 @@ Use the troubleshooting scripts:
 5. Test auto-refresh functionality
 6. If you added MCP tools, test with Claude Code:
    ```
-   claude mcp add --transport http --scope user sql-monitor http://localhost:5151/
+   claude mcp add --transport http --scope user sql-monitor http://localhost:5151/ --header "Authorization: Bearer <token>"
    ```
 
 ### Testing Darling Changes
@@ -556,9 +532,8 @@ It finds a read spelled three ways, and **only** these three:
 - a bare root name as an element of a collection projected one element to one whole path —
   `new[] { "Lite", "Lite.Tests" }.Select(d => Path.Combine(root, d))`.
 
-Anything else is invisible to it, and that is a decision rather than a gap — the census of shapes it
-cannot see, and the measurement behind refusing to widen it again, are in
-`TheCSharpMatchers_StillCannotSeeTheseSpellings`. The practical consequence is short: **spell the path
+Anything else is invisible to it, and that is a decision rather than a gap: widening the matcher again
+costs more than it finds. The practical consequence is short: **spell the path
 one of those three ways, at the site that reads it.** A root literal buried mid-`Path.Combine`, segments
 handed to a helper, or a segment array declared in another member all read fine and leave the guard
 unable to tell whether CI can run you. Nothing warns you — it is the silent direction by construction.

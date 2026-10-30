@@ -30,9 +30,23 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// </summary>
 public sealed class DarlingAgentActionSeat
 {
-    internal DarlingAgentActionSeat(DarlingMcpWritePolicy.Effective policy) => Policy = policy;
+    internal DarlingAgentActionSeat(DarlingMcpWritePolicy.Effective policy, StoreOwnerSource? owner = null,
+        IReadOnlySet<string>? namedAgentNames = null)
+    {
+        Policy = policy;
+        Owner = owner;
+        NamedAgentNames = namedAgentNames ?? new HashSet<string>();
+    }
+
+    /// <summary>The names of the named agent tokens this host serves (#6542), empty when it serves none: the legacy token's agent_action
+    /// may not act as one of them.</summary>
+    internal IReadOnlySet<string> NamedAgentNames { get; }
 
     internal DarlingMcpWritePolicy.Effective Policy { get; }
+
+    /// <summary>The service's own (store owner) data source, which the gate runs a change on (#6569): the journal keeps the agent action rows to the owner,
+    /// and the tools' own data source is the <c>mcp</c> login. Null (a test host) runs the change on the tool's data source.</summary>
+    internal StoreOwnerSource? Owner { get; }
 
     /// <summary>True when a call must go through the gate: the investigations arm, and not the writes arm.</summary>
     internal static bool IsGated(DarlingAgentActionSeat? seat) => seat is not null && !seat.Policy.Writes;
@@ -61,7 +75,7 @@ internal static class DarlingMcpAgentActions
     internal const string SelfMonitorMetric = "self_monitor_metric";
     internal const string RuleScope = "rule_scope";
 
-    /// <summary>The self alerts an agent may still mute: the five availability group metrics, Agent Not Running and the three report digests.</summary>
+    /// <summary>The self alerts an agent may still mute: the five availability group metrics, Agent Not Running, Agent Alert Gaps, the three database-protection overdue alerts (#6873), Identity Capacity (#6875) and the three report digests.</summary>
     private static readonly HashSet<string> UnprotectedConstantNames = new(StringComparer.Ordinal)
     {
         nameof(DarlingSelfAlertEvaluator.AgFailoverMetric),
@@ -70,6 +84,11 @@ internal static class DarlingMcpAgentActions
         nameof(DarlingSelfAlertEvaluator.AgSyncFellBehindMetric),
         nameof(DarlingSelfAlertEvaluator.AgDatabaseSuspendedMetric),
         nameof(DarlingSelfAlertEvaluator.AgentDownMetric),
+        nameof(DarlingSelfAlertEvaluator.BackupOverdueMetric),
+        nameof(DarlingSelfAlertEvaluator.LogBackupOverdueMetric),
+        nameof(DarlingSelfAlertEvaluator.CheckDbOverdueMetric),
+        nameof(DarlingSelfAlertEvaluator.AgentAlertSetupMetric),
+        nameof(DarlingSelfAlertEvaluator.IdentityCapacityMetric),
         nameof(DarlingSelfAlertEvaluator.CollectorCostDigestMetric),
         nameof(DarlingSelfAlertEvaluator.FleetSweepRollupMetric),
         nameof(DarlingSelfAlertEvaluator.AnalysisSinglesDigestMetric),
@@ -137,12 +156,12 @@ internal static class DarlingMcpAgentActions
         Func<NpgsqlConnection, NpgsqlTransaction, CancellationToken, Task<string?>> readBefore,
         Func<NpgsqlConnection, NpgsqlTransaction, CancellationToken, Task<string?>> write, CancellationToken ct)
     {
-        var store = new InvestigationRequestStore(postgres, ServiceCommandDeadlines.SerialLoopSeconds);
+        var store = new InvestigationRequestStore(postgres, ServiceCommandDeadlines.SerialLoopSeconds, agentActionSource: seat.Owner?.Read());
         try
         {
             var outcome = await DarlingAgentActionGate.RunAsync(seat.Policy, postgres, store,
                 logger ?? Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, tool, kind, agentAction, target,
-                kindRule, readBefore, write, ct);
+                kindRule, readBefore, write, ct, seat.NamedAgentNames);
             if (outcome.Refusal is { } refusal)
                 return DarlingAgentActionGate.RefusalAnswer(refusal);
             return outcome.AfterJson ?? Json("done", tool + " done.");
@@ -153,12 +172,13 @@ internal static class DarlingMcpAgentActions
         }
     }
 
-    /// <summary>A refusal the tool makes after the argument parses but before any live check, journaled once per request, tool, code and hour.</summary>
+    /// <summary>A refusal the tool makes after the argument parses but before any live check, journaled once per request, verified token (else one shared key), tool, code and hour.</summary>
     private static async Task<string> RefuseEarlyAsync(NpgsqlDataSource postgres, AgentAction action, string tool,
-        AgentActionRefusal refusal, CancellationToken ct)
+        AgentActionRefusal refusal, string? agentTokenName, IReadOnlySet<string>? namedAgentNames, CancellationToken ct)
     {
         var store = new InvestigationRequestStore(postgres, ServiceCommandDeadlines.SerialLoopSeconds);
-        await store.RecordAgentActionRefusalAsync(action.RequestId, action.AgentId, tool, refusal.Reason, ct);
+        /* #6542: a named agent token journals under its own name, never the agent_id it passed. */
+        await store.RecordAgentActionRefusalAsync(action.RequestId, DarlingAgentActionGate.JournalActor(agentTokenName, namedAgentNames, action.AgentId), tool, refusal.Reason, agentTokenName, ct);
         return DarlingAgentActionGate.RefusalAnswer(refusal);
     }
 
@@ -198,7 +218,7 @@ internal static class DarlingMcpAgentActions
             return DarlingMcpAlertTools.Outcome("invalid", StartsAtRefusal);
         var parsed = InvestigationToolCore.ParseAgentAction(agentAction, out var action);
         if (parsed is null && (server_id is null || string.IsNullOrWhiteSpace(metric_name)))
-            return await RefuseEarlyAsync(postgres, action!, tool, NeedsMetric, ct);
+            return await RefuseEarlyAsync(postgres, action!, tool, NeedsMetric, seat.Policy.AgentTokenName, seat.NamedAgentNames, ct);
 
         var target = await ServerTargetAsync(postgres, server_id ?? -1, null);
         return await RunAsync(seat, postgres, logger, tool, MuteRuleImage.Kind, agentAction, target,
@@ -364,7 +384,7 @@ internal static class DarlingMcpAgentActions
         if (definition is null && which == "after")
             return new AgentActionRefusal(AgentActionCodes.Invalid,
                 $"definition is not valid: {(parseError ?? "it does not parse").TrimEnd('.', ' ')}. Fix the definition field; it was not judged for scope.");
-        var storageName = await new CustomAlertRuleStore(connection, transaction).StorageServerNameAsync(requestServerId, ct);
+        var storageName = await new CustomAlertRuleStore(connection, transaction, McpCommandDeadlines.ReadSeconds).StorageServerNameAsync(requestServerId, ct);
 
         var inScope = definition is not null && storageName is not null
             && definition.ScopeMode == CustomAlertScopeMode.Servers
@@ -394,7 +414,7 @@ internal static class DarlingMcpAgentActions
                 var (expiry, expiryError) = DarlingMcpCustomAlertTools.ResolveCreateExpiry(expiresAtUtc);
                 if (expiryError is not null)
                     throw new AgentToolOutcomeException(DarlingMcpAlertTools.Outcome("invalid", expiryError));
-                var result = await new CustomAlertRuleStore(connection, transaction).CreateAsync(name, description, definition, enabled, "agent:" + action!.AgentId, expiry, token);
+                var result = await new CustomAlertRuleStore(connection, transaction, McpCommandDeadlines.ReadSeconds).CreateAsync(name, description, definition, enabled, "agent:" + action!.AgentId, expiry, token);
                 return CustomRuleAnswer(result);
             }, ct);
     }
@@ -407,7 +427,7 @@ internal static class DarlingMcpAgentActions
     internal static async Task StillInScopeAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, long ruleId,
         int requestServerId, CancellationToken ct)
     {
-        var stored = await new CustomAlertRuleStore(connection, transaction).LockDefinitionAsync(ruleId, ct);
+        var stored = await new CustomAlertRuleStore(connection, transaction, McpCommandDeadlines.ReadSeconds).LockDefinitionAsync(ruleId, ct);
 
         if (stored is null)
             throw new AgentToolOutcomeException(DarlingMcpAlertTools.Outcome("not_found", $"No custom alert rule with id {ruleId}."));
@@ -430,7 +450,7 @@ internal static class DarlingMcpAgentActions
     {
         const string tool = "update_custom_alert_rule";
         InvestigationToolCore.ParseAgentAction(agentAction, out var action);
-        var store = new CustomAlertRuleStore(postgres);
+        var store = new CustomAlertRuleStore(postgres, McpCommandDeadlines.ReadSeconds);
         var current = await store.GetAsync(rule_id, ct);
         var row = (current as CustomAlertRuleResult.Ok)?.Rule;
         if (row is null && InvestigationToolCore.ParseAgentAction(agentAction, out _) is null)
@@ -454,7 +474,7 @@ internal static class DarlingMcpAgentActions
                 var (expiry, expiryError) = DarlingMcpCustomAlertTools.ResolveUpdateExpiry(expiresAtUtc, row!.ExpiresAtUtc);
                 if (expiryError is not null)
                     throw new AgentToolOutcomeException(DarlingMcpAlertTools.Outcome("invalid", expiryError));
-                var result = await new CustomAlertRuleStore(connection, transaction).UpdateAsync(rule_id, name ?? row.Name,
+                var result = await new CustomAlertRuleStore(connection, transaction, McpCommandDeadlines.ReadSeconds).UpdateAsync(rule_id, name ?? row.Name,
                     DarlingMcpCustomAlertTools.ResolveOptionalText(description, row.Description), definition ?? row.DefinitionJson,
                     enabled ?? row.Enabled, version, "agent:" + action!.AgentId, expiry, token);
                 return CustomRuleAnswer(result);
@@ -465,7 +485,7 @@ internal static class DarlingMcpAgentActions
         string? agentAction, long rule_id, CancellationToken ct = default)
     {
         const string tool = "delete_custom_alert_rule";
-        var current = await new CustomAlertRuleStore(postgres).GetAsync(rule_id, ct);
+        var current = await new CustomAlertRuleStore(postgres, McpCommandDeadlines.ReadSeconds).GetAsync(rule_id, ct);
         var row = (current as CustomAlertRuleResult.Ok)?.Rule;
         if (row is null && InvestigationToolCore.ParseAgentAction(agentAction, out _) is null)
             return DarlingMcpAlertTools.Outcome("not_found", $"No custom alert rule with id {rule_id}.");
@@ -476,7 +496,7 @@ internal static class DarlingMcpAgentActions
             async (connection, transaction, token) =>
             {
                 await StillInScopeAsync(connection, transaction, rule_id, target.ServerId, token);
-                var result = await CustomAlertEvaluator.ResolveAndDeleteRuleAsync(postgres, new CustomAlertRuleStore(connection, transaction),
+                var result = await CustomAlertEvaluator.ResolveAndDeleteRuleAsync(postgres, new CustomAlertRuleStore(connection, transaction, McpCommandDeadlines.ReadSeconds),
                     rule_id, logger, token);
                 if (result is not CustomAlertRuleResult.Ok)
                     throw new AgentToolOutcomeException(DarlingMcpAlertTools.Outcome("not_found", $"No custom alert rule with id {rule_id}."));

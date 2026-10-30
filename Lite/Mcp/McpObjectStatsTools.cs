@@ -3,6 +3,7 @@ using System.Text.Json;
 using ModelContextProtocol.Server;
 using PerformanceMonitorLite.Services;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Collectors;
 
 namespace PerformanceMonitorLite.Mcp;
 
@@ -62,8 +63,9 @@ public sealed class McpObjectStatsTools
 
                 /* #5244: every answer shape says which database it was limited to (null for every database). */
                 return McpHelpers.WithDatabase(
-                           await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "index_object_stats"),
+                           await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "index_object_stats", awsRdsKind: AwsRdsKind.None),
                            McpDatabaseSelection.Describe(names))
+                    ?? await HealthyEmptyAsync(dataService, resolved.ServerId, resolved.DisplayName, "table size rows", McpDatabaseSelection.Describe(names))
                     ?? McpHelpers.StatusForDatabase("unavailable", "No object size data available. Index/object stats are collected daily.", McpDatabaseSelection.Describe(names));
             }
 
@@ -125,6 +127,18 @@ public sealed class McpObjectStatsTools
         {
             return McpHelpers.FormatError("get_table_index_sizes", ex);
         }
+    }
+
+    /// <summary>
+    /// #6453: the <c>empty</c> answer for an index_object_stats read with no stored snapshot when the collector's newest run
+    /// completed clean, or null so the caller keeps its <c>unavailable</c> text. Darling's twin.
+    /// </summary>
+    private static async Task<string?> HealthyEmptyAsync(
+        LocalDataService dataService, int serverId, string serverName, string what, string? databaseName)
+    {
+        var message = await McpRuntimePrecondition.HealthyEmptyMessageAsync(
+            dataService, serverId, serverName, "index_object_stats", what);
+        return message is null ? null : McpHelpers.StatusForDatabase("empty", message, databaseName);
     }
 
     /// <summary>
@@ -204,7 +218,8 @@ public sealed class McpObjectStatsTools
                     }
                 }
 
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "index_object_stats")
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "index_object_stats", awsRdsKind: AwsRdsKind.None)
+                    ?? await HealthyEmptyAsync(dataService, resolved.ServerId, resolved.DisplayName, "index usage rows", null)
                     ?? McpHelpers.Status("unavailable", "No index usage data available. Index/object stats are collected daily.");
             }
 
@@ -255,7 +270,7 @@ public sealed class McpObjectStatsTools
     }
 
     [ReadsLatestSnapshot(LatestSnapshotShape.Stamped)]
-    [McpServerTool(Name = "get_object_locking"), Description("Gets per-index locking and latch contention (row/page lock waits in ms, lock escalations, page-latch and page-IO-latch waits) from the latest daily snapshot, top contended objects first. Use to find tables/indexes driving blocking and contention. Counters are cumulative since the last instance restart. LATEST IS A TIME: this reads the newest index/object snapshot for the server, not a window, and captured_at is the instant it was collected - these are the databases and indexes that existed AT that stamp, and because object stats are collected DAILY the stamp can be most of a day old on a healthy server and older still on one whose collector has stalled.")]
+    [McpServerTool(Name = "get_object_locking"), Description("Gets per-index locking and latch contention (row/page lock waits in ms, lock escalations, page-latch and page-IO-latch waits) from the latest daily snapshot, top contended objects first. Use to find tables/indexes driving blocking and contention. Counters are cumulative since the last instance restart. LATEST IS A TIME: this reads the newest index/object snapshot for the server, not a window, and captured_at is the instant it was collected - these are the databases and indexes that existed AT that stamp, and because object stats are collected DAILY the stamp can be most of a day old on a healthy server and older still on one whose collector has stalled. It has no time window, so it cannot show locking during a past incident: use get_blocking_trend or get_blocking_stats for that.")]
     public static async Task<string> GetObjectLocking(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -303,7 +318,7 @@ public sealed class McpObjectStatsTools
                         optimizedLockingNote is null ? null : new { optimized_locking_note = optimizedLockingNote });
                 }
 
-                var notCollected = await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "index_object_stats");
+                var notCollected = await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "index_object_stats", awsRdsKind: AwsRdsKind.None);
                 if (notCollected is not null) return notCollected;
 
                 /* #5372 (r2 Low): a latest snapshot that holds index rows, none of them contended, is a TRUE negative:
@@ -317,6 +332,17 @@ public sealed class McpObjectStatsTools
                         + (database is null ? "" : $"{inScope} or in any other database")
                         + $" on {resolved.DisplayName} at the latest snapshot."
                         + (optimizedLockingNote is null ? "" : " " + optimizedLockingNote),
+                        optimizedLockingNote is null ? null : new { optimized_locking_note = optimizedLockingNote });
+                }
+
+                /* #6453: no snapshot stored, but the index_object_stats collector's newest run completed clean: it looked and
+                   the server had nothing to report, which collection health calls HEALTHY. Darling's twin. */
+                var healthyEmpty = await McpRuntimePrecondition.HealthyEmptyMessageAsync(
+                    dataService, resolved.ServerId, resolved.DisplayName, "index_object_stats", "locking or contention rows");
+                if (healthyEmpty != null)
+                {
+                    return McpHelpers.Status("empty",
+                        healthyEmpty + (optimizedLockingNote is null ? "" : " " + optimizedLockingNote),
                         optimizedLockingNote is null ? null : new { optimized_locking_note = optimizedLockingNote });
                 }
 

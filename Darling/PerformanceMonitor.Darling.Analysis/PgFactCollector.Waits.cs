@@ -686,32 +686,16 @@ LIMIT 5000";
 
             if (rows.Count == 0) return;
 
-            var reconstruction = BlockingChainReconstructor.Reconstruct(rows, maxDepth, maxPairs, stepBudget, scopeByMonitorLoop: false);
+            var reconstruction = BlockingChainReconstructor.Reconstruct(rows, maxDepth, maxPairs, stepBudget, scopeByMonitorLoop: true);
             if (reconstruction.Chains.Count == 0) return;
 
-            var worst = reconstruction.Chains[0];
-
-            facts.Add(new Fact
-            {
-                Source = "blocking",
-                Key = "BLOCKING_CHAIN",
-                Value = worst.Depth,
-                ServerId = context.ServerId,
-                Metadata = new Dictionary<string, double>
-                {
-                    ["worst_chain_depth"] = worst.Depth,
-                    ["worst_chain_victim_count"] = worst.VictimCount,
-                    ["worst_apex_spid"] = worst.ApexSpid,
-                    ["worst_apex_sleeping"] = worst.ApexSleeping ? 1 : 0,
-                    ["worst_chain_max_wait_ms"] = worst.MaxWaitMs,
-                    ["total_reconstructed_chains"] = reconstruction.Chains.Count,
-                    ["deepest_chain_overall"] = reconstruction.Chains.Max(c => c.Depth),
-                    ["max_victim_count_overall"] = reconstruction.Chains.Max(c => c.VictimCount),
-                    ["depth_capped"] = reconstruction.DepthCapped ? 1 : 0,
-                    ["traversal_truncated"] = reconstruction.TraversalTruncated ? 1 : 0,
-                    ["cycle_detected"] = reconstruction.CycleDetected ? 1 : 0
-                }
-            });
+            /* Built by the shared BlockingChainFactBuilder, so both products grade and describe the chain the
+               same way. The interval is this server's effective blocking-collector cadence (stamped beside the
+               latest-value bounds), else the shipped default: it decides whether the chain's newest sample is
+               recent enough to say it was still blocking when the window ended. */
+            var collectionInterval = context.BlockingCollectionIntervalMinutes
+                ?? CollectorScheduleDefaults.DefaultBlockingIntervalMinutes;
+            facts.Add(BlockingChainFactBuilder.Build(context, reconstruction, rows, collectionInterval));
         }
         catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
         {

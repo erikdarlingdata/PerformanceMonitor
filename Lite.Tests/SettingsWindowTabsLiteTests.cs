@@ -115,6 +115,42 @@ public sealed class SettingsWindowTabsLiteTests : IDisposable
         });
     }
 
+    /// <summary>#5736: the Settings save is the only writer of the marker that makes a saved off readable. Unchecking the alert and
+    /// applying must put the switch AND the marker in the saved root, and that root must load with the alert still off. Without
+    /// the marker, the loader ignores the switch and Lite could never turn the alert off.</summary>
+    [Fact]
+    public void UncheckingTheClientTimeoutsAlert_SavesTheSwitchBesideItsMarker_AndTheFileLoadsOff()
+    {
+        StaTestThread.Run(() =>
+        {
+            var before = App.AlertClientTimeoutsEnabled;
+            var dir = Path.Combine(Path.GetTempPath(), $"lite-ct-save-{Guid.NewGuid():N}");
+            Directory.CreateDirectory(dir);
+            try
+            {
+                var window = NewWindow();
+                window.AlertClientTimeoutsCheckBox.IsChecked = false;
+                var root = new JsonObject();
+                var errors = new SettingsValidationErrors();
+                window.ApplyAlertSettings(root, errors);
+
+                Assert.Equal(0, errors.Count);
+                Assert.False(root["alert_client_timeouts_enabled"]!.GetValue<bool>());
+                Assert.True(root["alert_client_timeouts_on_by_default_applied"]!.GetValue<bool>());
+
+                File.WriteAllText(Path.Combine(dir, "settings.json"), root.ToJsonString());
+                App.AlertClientTimeoutsEnabled = true;
+                App.LoadAlertSettings(dir, key => "stored:" + key, (key, url) => Assert.Fail($"LoadAlertSettings wrote credential '{key}'."));
+                Assert.False(App.AlertClientTimeoutsEnabled);
+            }
+            finally
+            {
+                App.AlertClientTimeoutsEnabled = before;
+                Directory.Delete(dir, true);
+            }
+        });
+    }
+
     /// <summary>#5881: the cooldown saved is the one in the box, not whatever the process-wide static holds at the
     /// root write. A second thread rewrites the static the whole time the window applies; the root must still carry the
     /// typed value on every pass.</summary>

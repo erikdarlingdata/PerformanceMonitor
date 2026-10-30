@@ -94,6 +94,36 @@ public sealed class ViewerBlockingMergeTests
             BlockingSpid = blocking,
         };
 
+    /// <summary>The report XML has no head-blocker session facts, so a DMV row dropped because a report row covers its pair and minute
+    /// hands them over; a report row with no covering DMV row, and a different pair, keep nulls.</summary>
+    [Fact]
+    public void DroppedDmvRow_HandsItsHeadEvidenceToTheCoveringReportRow_AndAReportRowWithNoDmvRowKeepsNulls()
+    {
+        var t = new DateTime(2026, 7, 1, 12, 0, 0);
+        var covered = Row(BlockedProcessAlertRow.XeReportSource, t, blocked: 51, blocking: 60);
+        var alone = Row(BlockedProcessAlertRow.XeReportSource, t.AddSeconds(5), blocked: 52, blocking: 61);
+        var dmv = Row(BlockedProcessAlertRow.DmvSnapshotSource, t.AddSeconds(20), blocked: 51, blocking: 60);
+        dmv.BlockingLoginTime = t.AddHours(-3);
+        dmv.BlockingLastRequestEndTime = t.AddMinutes(-9);
+        dmv.BlockingOpenTransactionCount = 2;
+        dmv.BlockingTranLogBytesUsed = 8192;
+        var otherPair = Row(BlockedProcessAlertRow.DmvSnapshotSource, t.AddSeconds(25), blocked: 53, blocking: 62);
+        otherPair.BlockingOpenTransactionCount = 7;
+        var items = new List<ViewerBlockedProcessRow> { covered, alone };
+
+        BlockedProcessReportMerge.AppendDmvFallbackRows(items, new List<ViewerBlockedProcessRow> { dmv, otherPair });
+
+        Assert.Equal(t.AddHours(-3), covered.BlockingLoginTime);
+        Assert.Equal(t.AddMinutes(-9), covered.BlockingLastRequestEndTime);
+        Assert.Equal(2, covered.BlockingOpenTransactionCount);
+        Assert.Equal(8192, covered.BlockingTranLogBytesUsed);
+        Assert.Null(alone.BlockingLoginTime);
+        Assert.Null(alone.BlockingLastRequestEndTime);
+        Assert.Null(alone.BlockingOpenTransactionCount);
+        Assert.Null(alone.BlockingTranLogBytesUsed);
+        Assert.Equal(7, Assert.Single(items, r => r.BlockedSpid == 53).BlockingOpenTransactionCount);
+    }
+
     [Fact]
     public void ViewerRow_DerivesFromTheSharedAlertRow()
     {

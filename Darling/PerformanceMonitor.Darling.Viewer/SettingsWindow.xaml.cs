@@ -45,6 +45,10 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// </summary>
 public partial class SettingsWindow : Window
 {
+    /// <summary>#6875: the Identity Capacity bars as loaded. The window shows only the switch, and a Save writes these back.</summary>
+    private int _identityCapacityWarningPercent = 70;
+    private int _identityCapacityCriticalPercent = 90;
+
     /// <summary>Branding the shared email/webhook renderers stamp on test messages (mirrors the service's).</summary>
     private static readonly AlertBranding s_branding = new("Performance Monitor Darling", null);
 
@@ -560,7 +564,7 @@ public partial class SettingsWindow : Window
         /* #2164 / #2170 collector memory knobs. Unlike the ports these are always in force (there is no
            "disabled" state to excuse a bad value), so a bad entry always blocks the save rather than
            silently keeping a last-known value. The service clamps on read as defense in depth. */
-        if (int.TryParse(QueryStoreTextBudgetMbTextBox.Text, out var parsedBudget) && parsedBudget is >= 4 and <= 256)
+        if (int.TryParse(QueryStoreTextBudgetMbTextBox.Text, out var parsedBudget) && ServiceFlagLimits.TextBudgetMbError(parsedBudget) is null)
         {
             textBudgetMb = parsedBudget;
         }
@@ -568,12 +572,12 @@ public partial class SettingsWindow : Window
         {
             SelectTabOf(QueryStoreTextBudgetMbTextBox);
             MessageBox.Show(
-                "Query Store text budget must be between 4 and 256 MB.",
+                ServiceFlagLimits.TextBudgetMbMessage,
                 "Validation", MessageBoxButton.OK, MessageBoxImage.Warning);
             return false;
         }
 
-        if (int.TryParse(MaxConcurrentSweepsTextBox.Text, out var parsedSweeps) && parsedSweeps is >= 1 and <= 16)
+        if (int.TryParse(MaxConcurrentSweepsTextBox.Text, out var parsedSweeps) && ServiceFlagLimits.ConcurrentSweepsError(parsedSweeps) is null)
         {
             maxSweeps = parsedSweeps;
         }
@@ -581,14 +585,14 @@ public partial class SettingsWindow : Window
         {
             SelectTabOf(MaxConcurrentSweepsTextBox);
             MessageBox.Show(
-                "Concurrent server sweeps must be between 1 and 16.",
+                ServiceFlagLimits.ConcurrentSweepsMessage,
                 "Validation", MessageBoxButton.OK, MessageBoxImage.Warning);
             return false;
         }
 
         /* #6211: plans per database-hour and metric whose text and plan the Query Store collector fetches. 0 means every new plan, so the floor
            is 0; the service clamps on read as defense in depth. */
-        if (int.TryParse(QueryStoreFetchTopNTextBox.Text, out var parsedTopN) && parsedTopN is >= 0 and <= 100000)
+        if (int.TryParse(QueryStoreFetchTopNTextBox.Text, out var parsedTopN) && ServiceFlagLimits.FetchTopNError(parsedTopN) is null)
         {
             fetchTopN = parsedTopN;
         }
@@ -596,7 +600,7 @@ public partial class SettingsWindow : Window
         {
             SelectTabOf(QueryStoreFetchTopNTextBox);
             MessageBox.Show(
-                "Query Store fetch top N must be between 0 and 100000 (0 fetches every new plan).",
+                ServiceFlagLimits.FetchTopNMessage,
                 "Validation", MessageBoxButton.OK, MessageBoxImage.Warning);
             return false;
         }
@@ -607,11 +611,13 @@ public partial class SettingsWindow : Window
     private void CopyMcpCommandButton_Click(object sender, RoutedEventArgs e)
     {
         var port = McpPortTextBox.Text;
-        var command = $"claude mcp add --transport http --scope user sql-monitor-darling http://localhost:{port}/";
+        /* The same text the service's --enable-mcp prints (#6474). The service needs the MCP token on loopback too
+           unless mcp.allowTokenlessLoopback is on, so the command carries the header with a placeholder; the token
+           itself never reaches the clipboard from here. */
+        var command = DarlingEndpointClientText.ClaudeMcpAddCommand(port);
         /* SetDataObject with copy=false avoids WPF's problematic Clipboard.Flush(). */
         McpStatusText.Text = ClipboardText.TrySetDataObject(command)
-            ? "Copied to clipboard! If the service has an MCP token, the client must also send "
-              + "--header \"Authorization: Bearer <token>\"; --print-mcp-token on the service host prints it."
+            ? "Copied to clipboard! Replace <token> with the MCP token: --print-mcp-token on the service host prints it. If the service's MCP network listener has a tls block, change http to https in the copied command."
             : "Couldn't copy: the clipboard is in use.";
     }
 
@@ -917,6 +923,10 @@ public partial class SettingsWindow : Window
            card agree about what the number looks like. */
         BandDeadlockWarnPerHourBox.Text = r.DeadlockWarnPerHour.ToString("0.0", CultureInfo.InvariantCulture);
         BandDeadlockCriticalPerHourBox.Text = r.DeadlockCriticalPerHour.ToString("0.0", CultureInfo.InvariantCulture);
+        BandBlockingWarnPerHourBox.Text = r.BlockingWarnPerHour.ToString("0.0", CultureInfo.InvariantCulture);
+        BandBlockingCriticalPerHourBox.Text = r.BlockingCriticalPerHour.ToString("0.0", CultureInfo.InvariantCulture);
+        BandBlockingWarnWaitSecondsBox.Text = r.BlockingWarnWaitSeconds.ToString("0.0", CultureInfo.InvariantCulture);
+        BandBlockingCriticalWaitSecondsBox.Text = r.BlockingCriticalWaitSeconds.ToString("0.0", CultureInfo.InvariantCulture);
         AlertPvsCheckBox.IsChecked = r.PvsEnabled;
         AlertPvsThresholdPercentBox.Text = r.PvsThresholdPercent.ToString(CultureInfo.InvariantCulture);
         AlertPvsFloorGbBox.Text = r.PvsFloorGb.ToString(CultureInfo.InvariantCulture);
@@ -929,6 +939,14 @@ public partial class SettingsWindow : Window
         AlertFailedJobCheckBox.IsChecked = r.FailedJobEnabled;
         AlertFailedJobLookbackBox.Text = r.FailedJobLookbackMinutes.ToString(CultureInfo.InvariantCulture);
         AlertDatabaseStateCheckBox.IsChecked = r.DatabaseStateEnabled;
+        AlertAgentAlertGapsCheckBox.IsChecked = r.AgentAlertGapsEnabled;
+        AlertBackupOverdueCheckBox.IsChecked = r.BackupOverdueEnabled;
+        AlertLogBackupOverdueCheckBox.IsChecked = r.LogBackupOverdueEnabled;
+        AlertCheckDbOverdueCheckBox.IsChecked = r.CheckDbOverdueEnabled;
+        AlertIdentityCapacityCheckBox.IsChecked = r.IdentityCapacityEnabled;
+        /* #6875: the two bars have no box here (update_alert_settings and the threshold overrides set them), so a Save carries the loaded values back unchanged. */
+        _identityCapacityWarningPercent = r.IdentityCapacityWarningPercent;
+        _identityCapacityCriticalPercent = r.IdentityCapacityCriticalPercent;
         AlertCooldownBox.Text = r.CooldownMinutes.ToString(CultureInfo.InvariantCulture);
         AnalysisEnabledCheckBox.IsChecked = r.AnalysisEnabled;
         AnalysisIntervalBox.Text = r.AnalysisIntervalMinutes.ToString(CultureInfo.InvariantCulture);
@@ -951,6 +969,23 @@ public partial class SettingsWindow : Window
         AlertDeliveryModeBox.SelectedIndex = r.DeliveryMode == "PerEvent" ? 1 : 0;
         AlertPerEventMaxBox.Text = r.PerEventMax.ToString(CultureInfo.InvariantCulture);
         UpdateAlertControlStates();
+    }
+
+    /// <summary>Parses one blocking band box (#6927): InvariantCulture, within the named bounds the classifier clamps to and the MCP writer
+    /// accepts. A bad value adds an error naming the box and the range, and leaves <paramref name="value"/> null.</summary>
+    private static void BlockingBandBox(
+        System.Windows.Controls.TextBox box, double min, double max, string label, SettingsValidationErrors errors, out double? value)
+    {
+        if (double.TryParse(box.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed) && parsed >= min && parsed <= max)
+        {
+            value = parsed;
+            return;
+        }
+
+        value = null;
+        errors.Add(
+            $"{label} must be a number between {min.ToString("0.0", CultureInfo.InvariantCulture)} and {max.ToString("0.0", CultureInfo.InvariantCulture)}.",
+            box);
     }
 
     /// <summary>Builds the store row from the alert + analysis controls, validating the numeric fields. Adds
@@ -998,6 +1033,13 @@ public partial class SettingsWindow : Window
             LongRunningJobEnabled = AlertLongRunningJobCheckBox.IsChecked == true,
             FailedJobEnabled = AlertFailedJobCheckBox.IsChecked == true,
             DatabaseStateEnabled = AlertDatabaseStateCheckBox.IsChecked == true,
+            AgentAlertGapsEnabled = AlertAgentAlertGapsCheckBox.IsChecked == true,
+            BackupOverdueEnabled = AlertBackupOverdueCheckBox.IsChecked == true,
+            LogBackupOverdueEnabled = AlertLogBackupOverdueCheckBox.IsChecked == true,
+            CheckDbOverdueEnabled = AlertCheckDbOverdueCheckBox.IsChecked == true,
+            IdentityCapacityEnabled = AlertIdentityCapacityCheckBox.IsChecked == true,
+            IdentityCapacityWarningPercent = _identityCapacityWarningPercent,
+            IdentityCapacityCriticalPercent = _identityCapacityCriticalPercent,
             AnalysisEnabled = AnalysisEnabledCheckBox.IsChecked == true,
             AnalysisNotificationsEnabled = AnalysisNotificationsCheckBox.IsChecked == true,
             /* #3712 (V137): the combo's Tag IS the stored value -- 'digest' / 'page', or empty for NULL ("the file
@@ -1141,6 +1183,37 @@ public partial class SettingsWindow : Window
             && dlCritical >= ServerHealthThresholds.DeadlockRatePerHourFloor
             && dlCritical <= ServerHealthThresholds.DeadlockRatePerHourCeiling)
             row.DeadlockCriticalPerHour = dlCritical;
+        /* #6927: the blocking band, validated against the SAME named bounds BlockingBandThresholds clamps to and the MCP writer accepts,
+           InvariantCulture on the parse. Unlike the deadlock pair, a pair with critical below warn is refused, the rule update_alert_settings
+           applies, so the window cannot save a pair the tool would refuse. */
+        BlockingBandBox(BandBlockingWarnPerHourBox, ServerHealthThresholds.BlockingRatePerHourFloor, ServerHealthThresholds.BlockingRatePerHourCeiling,
+            "Blocking warn per hour", errors, out var blWarnRate);
+        BlockingBandBox(BandBlockingCriticalPerHourBox, ServerHealthThresholds.BlockingRatePerHourFloor, ServerHealthThresholds.BlockingRatePerHourCeiling,
+            "Blocking critical per hour", errors, out var blCriticalRate);
+        BlockingBandBox(BandBlockingWarnWaitSecondsBox, ServerHealthThresholds.BlockingWaitSecondsFloor, ServerHealthThresholds.BlockingWaitSecondsCeiling,
+            "Blocking warn seconds", errors, out var blWarnWait);
+        BlockingBandBox(BandBlockingCriticalWaitSecondsBox, ServerHealthThresholds.BlockingWaitSecondsFloor, ServerHealthThresholds.BlockingWaitSecondsCeiling,
+            "Blocking critical seconds", errors, out var blCriticalWait);
+        if (blWarnRate.HasValue && blCriticalRate.HasValue)
+        {
+            if (blCriticalRate.Value < blWarnRate.Value)
+                errors.Add("Blocking critical per hour must not be lower than blocking warn per hour.", BandBlockingCriticalPerHourBox);
+            else
+            {
+                row.BlockingWarnPerHour = blWarnRate.Value;
+                row.BlockingCriticalPerHour = blCriticalRate.Value;
+            }
+        }
+        if (blWarnWait.HasValue && blCriticalWait.HasValue)
+        {
+            if (blCriticalWait.Value < blWarnWait.Value)
+                errors.Add("Blocking critical seconds must not be lower than blocking warn seconds.", BandBlockingCriticalWaitSecondsBox);
+            else
+            {
+                row.BlockingWarnWaitSeconds = blWarnWait.Value;
+                row.BlockingCriticalWaitSeconds = blCriticalWait.Value;
+            }
+        }
         if (int.TryParse(AlertPvsThresholdPercentBox.Text, out var pvsPct) && pvsPct is >= 0 and <= 100)
             row.PvsThresholdPercent = pvsPct;
         if (int.TryParse(AlertPvsFloorGbBox.Text, out var pvsFloor) && pvsFloor >= 0)
@@ -1271,6 +1344,14 @@ public partial class SettingsWindow : Window
             ServerHealthThresholds.DeadlockWarnPerHourDefault.ToString("0.0", CultureInfo.InvariantCulture);
         BandDeadlockCriticalPerHourBox.Text =
             ServerHealthThresholds.DeadlockCriticalPerHourDefault.ToString("0.0", CultureInfo.InvariantCulture);
+        BandBlockingWarnPerHourBox.Text =
+            ServerHealthThresholds.BlockingWarnPerHour.ToString("0.0", CultureInfo.InvariantCulture);
+        BandBlockingCriticalPerHourBox.Text =
+            ServerHealthThresholds.BlockingCriticalPerHour.ToString("0.0", CultureInfo.InvariantCulture);
+        BandBlockingWarnWaitSecondsBox.Text =
+            ServerHealthThresholds.BlockingWarnWaitSeconds.ToString("0.0", CultureInfo.InvariantCulture);
+        BandBlockingCriticalWaitSecondsBox.Text =
+            ServerHealthThresholds.BlockingCriticalWaitSeconds.ToString("0.0", CultureInfo.InvariantCulture);
         AnalysisNotifyCooldownBox.Text = "360";
         AlertPvsThresholdPercentBox.Text = "40";
         AlertPvsFloorGbBox.Text = "1";
@@ -1392,6 +1473,14 @@ public partial class SettingsWindow : Window
             parts.Add($"disk free < {AlertLowDiskThresholdPercentBox.Text}% or {AlertLowDiskThresholdGbBox.Text}GB");
         if (AlertPvsCheckBox.IsChecked == true)
             parts.Add($"PVS >= {AlertPvsThresholdPercentBox.Text}% of database");
+        if (AlertAgentAlertGapsCheckBox.IsChecked == true)
+            parts.Add("Agent alert setup gaps");
+        if (AlertBackupOverdueCheckBox.IsChecked == true)
+            parts.Add("full backup overdue");
+        if (AlertLogBackupOverdueCheckBox.IsChecked == true)
+            parts.Add("log backup overdue");
+        if (AlertCheckDbOverdueCheckBox.IsChecked == true)
+            parts.Add("CHECKDB overdue");
         if (AlertFileGrowthCheckBox.IsChecked == true)
             /* #3539 A8c: the rise is a RATE (MB per hour) averaged over the lookback, in the same unit phrase the
                row's label, the alert's threshold line and the MCP payload description use. It used to read
@@ -1399,6 +1488,8 @@ public partial class SettingsWindow : Window
             parts.Add($"file growth > {AlertFileGrowthRiseMbBox.Text} {AlertContextBuilders.FileGrowthRiseUnit} over {AlertFileGrowthLookbackMinutesBox.Text}m or volume > {AlertFileGrowthVolumePercentBox.Text}%");
         if (AlertLongRunningJobCheckBox.IsChecked == true)
             parts.Add($"jobs > {AlertLongRunningJobMultiplierBox.Text}x avg");
+        if (AlertIdentityCapacityCheckBox.IsChecked == true)
+            parts.Add("identity columns near the end of their type");
         if (AlertFailedJobCheckBox.IsChecked == true)
             parts.Add($"failed jobs (last {AlertFailedJobLookbackBox.Text}m)");
 
@@ -1485,6 +1576,10 @@ public partial class SettingsWindow : Window
         AlertLowDiskCheckBox.IsEnabled = enabled;
         AlertLowDiskThresholdPercentBox.IsEnabled = enabled;
         AlertPvsCheckBox.IsEnabled = enabled;
+        AlertAgentAlertGapsCheckBox.IsEnabled = enabled;
+        AlertBackupOverdueCheckBox.IsEnabled = enabled;
+        AlertLogBackupOverdueCheckBox.IsEnabled = enabled;
+        AlertCheckDbOverdueCheckBox.IsEnabled = enabled;
         AlertPvsThresholdPercentBox.IsEnabled = enabled;
         AlertPvsFloorGbBox.IsEnabled = enabled;
         AlertLowDiskThresholdGbBox.IsEnabled = enabled;
@@ -1509,6 +1604,7 @@ public partial class SettingsWindow : Window
         AlertLongRunningJobCheckBox.IsEnabled = enabled;
         AlertLongRunningJobMultiplierBox.IsEnabled = enabled;
         AlertFailedJobCheckBox.IsEnabled = enabled;
+        AlertIdentityCapacityCheckBox.IsEnabled = enabled;
         AlertFailedJobLookbackBox.IsEnabled = enabled;
         UpdateAlertPreviewText();
     }

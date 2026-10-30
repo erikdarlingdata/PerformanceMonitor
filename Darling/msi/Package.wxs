@@ -1,0 +1,164 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  #6480: the PerformanceMonitor Darling package. Per-machine, x64, major upgrades.
+
+  What Windows Installer owns here: the files, the service record (ServiceInstall / ServiceControl), the two all-users
+  shortcuts and the install marker. What it does not own is run by the package's own scripts, in the install folder:
+    FolderCheck  step 1a of install-darling.ps1 (who can write the install folder), run from the package's own command
+               line right before PreStart, so the script is not read from a folder that fails it (see DarlingFolderCheck).
+    PreStart  install-darling.ps1 -MsiPhase PreStart   after InstallServices, before the service starts: the tree
+               lock, darling.json (only when absent), the operator group, the store folder, the firewall rules.
+    PostStart  install-darling.ps1 -MsiPhase PostStart  after StartServices: the operator grant (and the firewall
+               re-apply on an upgrade).
+    Uninstall  uninstall-darling.ps1 -MsiUninstall      before StopServices, on a real uninstall only (a major
+               upgrade removes the old product too and must not run it): stops the service, removes the firewall
+               rules and the direct grants. The store goes only with PURGEDATA=1.
+  The scripts exit nonzero to fail a step, and a deferred custom action with Return="check" turns that into a rolled
+  back install. WixQuietExec puts the script's output in the MSI log.
+
+  darling.json is NOT a component: install-darling.ps1 writes it when it is absent, so an upgrade, a repair and an
+  uninstall never touch the operator's file.
+
+  Public properties (msiexec /i X.msi /qn OPERATORACCOUNT=CONTOSO\jdoe WEBDASHBOARD=1):
+    INSTALLFOLDER     default C:\Program Files\PerformanceMonitorDarling
+    OPERATORACCOUNT   DOMAIN\user added to the 'PerformanceMonitor Darling Operators' group (install-darling.ps1 -AddOperator)
+    WEBDASHBOARD      1 seeds web.enabled and a DPAPI-encrypted web.network.encryptedToken in the darling.json the script writes (ignored when darling.json exists)
+    PURGEDATA         1 deletes the store on uninstall (uninstall-darling.ps1 -PurgeData -ConfirmPurge)
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+  <!-- The UpgradeCode never changes: it is what lets 3.11.1 replace 3.11.0. -->
+  <Package Name="PerformanceMonitor Darling" Manufacturer="Darling Data, LLC" Version="$(ProductVersion)"
+           UpgradeCode="06d73487-589e-4aaa-9a47-0cc24d656a2a" Scope="perMachine">
+
+    <MajorUpgrade DowngradeErrorMessage="A newer PerformanceMonitor Darling is already installed. Uninstall it from Settings > Apps first if you mean to go back." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- The setup wizard (Ui.wxs). A silent install (/qn) never shows it and takes the same public properties. -->
+    <UIRef Id="DarlingUI" />
+
+    <!-- A script install (install-darling.ps1) is not taken over (#6480): it may have re-homed the service's logon
+         account, which this package's ServiceInstall would reset. The service key existing with no marker and no
+         upgrade in play is that case. Installed is true on repair and uninstall, which are this package's own. -->
+    <Property Id="DARLING_SERVICE_IMAGEPATH">
+      <RegistrySearch Id="DarlingServiceKey" Root="HKLM" Key="SYSTEM\CurrentControlSet\Services\PerformanceMonitor Darling" Name="ImagePath" Type="raw" Bitness="always64" />
+    </Property>
+    <Property Id="DARLING_INSTALLED_BY">
+      <RegistrySearch Id="DarlingMarker" Root="HKLM" Key="SOFTWARE\PerformanceMonitor Darling" Name="InstalledBy" Type="raw" Bitness="always64" />
+    </Property>
+    <Launch Condition="Installed OR NOT DARLING_SERVICE_IMAGEPATH OR DARLING_INSTALLED_BY OR WIX_UPGRADE_DETECTED"
+            Message="A script install (install-darling.ps1) is on this machine and this package will not take it over. Nothing was changed. Run uninstall-darling.ps1 in its folder (keeps darling.json and the store), then rerun this package; or stay on upgrade-darling.ps1." />
+
+    <!-- A folder chosen at install time is found again on upgrade and uninstall from the marker key below, so
+         [INSTALLFOLDER]uninstall-darling.ps1 is the script that was installed. -->
+    <Property Id="DARLING_PREVIOUS_FOLDER">
+      <RegistrySearch Id="DarlingInstallFolder" Root="HKLM" Key="SOFTWARE\PerformanceMonitor Darling" Name="InstallFolder" Type="raw" Bitness="always64" />
+    </Property>
+    <SetProperty Id="INSTALLFOLDER" Value="[DARLING_PREVIOUS_FOLDER]" After="AppSearch" Condition="DARLING_PREVIOUS_FOLDER AND (Installed OR WIX_UPGRADE_DETECTED)" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="PerformanceMonitorDarling">
+
+        <!-- darling.json is never in this tree: install-darling.ps1 writes it. -->
+        <Files Include="$(PayloadDir)\**">
+          <Exclude Files="$(PayloadDir)\viewer\**" />
+          <Exclude Files="$(PayloadDir)\PerformanceMonitor.Darling.Service.exe" />
+          <Exclude Files="$(PayloadDir)\darling.json" />
+        </Files>
+
+        <Component Id="DarlingService" Guid="*">
+          <File Id="DarlingServiceExe" Source="$(PayloadDir)\PerformanceMonitor.Darling.Service.exe" KeyPath="yes" />
+          <!-- Same record install-darling.ps1 makes with sc.exe create: own process, automatic start, the per-service
+               virtual account with no password. No recovery actions, dependencies or URL ACL are set by the script. -->
+          <ServiceInstall Id="DarlingServiceInstall" Name="PerformanceMonitor Darling" DisplayName="PerformanceMonitor Darling"
+                          Type="ownProcess" Start="auto" ErrorControl="normal" Vital="yes"
+                          Account="NT SERVICE\PerformanceMonitor Darling" />
+          <ServiceControl Id="DarlingServiceControl" Name="PerformanceMonitor Darling" Start="install" Stop="both" Remove="uninstall" Wait="yes" />
+        </Component>
+
+        <Component Id="DarlingMarker" Guid="*">
+          <!-- The marker (#6480 L1): the scripts refuse to run over it and read the 64-bit view. Removed on uninstall,
+               kept across a major upgrade (the new product writes it again). -->
+          <RegistryValue Root="HKLM" Key="SOFTWARE\PerformanceMonitor Darling" Name="InstalledBy" Type="string" Value="msi" KeyPath="yes" />
+          <RegistryValue Root="HKLM" Key="SOFTWARE\PerformanceMonitor Darling" Name="InstallFolder" Type="string" Value="[INSTALLFOLDER]" />
+          <!-- pg-runtime (and pg-runtime-prev) is extracted by the service from pg-runtime.zip, so it is not in the package's
+               file list and Windows Installer would leave it behind. It is regenerated from the zip. -->
+          <util:RemoveFolderEx On="uninstall" Property="DARLING_PGRUNTIME_DIR" />
+          <util:RemoveFolderEx On="uninstall" Property="DARLING_PGRUNTIME_PREV_DIR" />
+        </Component>
+
+        <Directory Id="ViewerDir" Name="viewer">
+          <Files Include="$(PayloadDir)\viewer\**">
+            <Exclude Files="$(PayloadDir)\viewer\PerformanceMonitor.Darling.Viewer.exe" />
+          </Files>
+          <Component Id="DarlingViewer" Guid="*">
+            <File Id="DarlingViewerExe" Source="$(PayloadDir)\viewer\PerformanceMonitor.Darling.Viewer.exe" KeyPath="yes">
+              <!-- The two all-users shortcuts install-darling.ps1 makes ('Darling Viewer.lnk' on the public Desktop and in the
+                   all-users Start Menu); a per-machine package's DesktopFolder and ProgramMenuFolder are the all-users ones.
+                   Inside the exe's own component so its keypath is the exe: a registry keypath in a component of their own
+                   trips ICE38, ICE43 and ICE57, which assume a per-user profile folder. -->
+              <Shortcut Id="DarlingDesktopLnk" Directory="DesktopFolder" Name="Darling Viewer" Description="PerformanceMonitor Darling Viewer" WorkingDirectory="ViewerDir" />
+              <Shortcut Id="DarlingStartMenuLnk" Directory="ProgramMenuFolder" Name="Darling Viewer" Description="PerformanceMonitor Darling Viewer" WorkingDirectory="ViewerDir" />
+              <!-- The finish page's launch box (Ui.wxs) opens this one: the shell-execute action takes a file, not a command line,
+                   and the viewer needs the add-server switch. It sits in the viewer folder, not on the Desktop or in the Start Menu. -->
+              <Shortcut Id="DarlingAddServerLnk" Directory="ViewerDir" Name="Darling Viewer (add server)" Description="PerformanceMonitor Darling Viewer, opening the add-server dialog" Arguments="--add-server" WorkingDirectory="ViewerDir" />
+            </File>
+          </Component>
+        </Directory>
+      </Directory>
+    </StandardDirectory>
+
+    <!-- WixRemoveFoldersEx runs before costing (sequence 799), when INSTALLFOLDER is not resolved yet, so the two folders
+         come from the install folder the marker recorded. Uninstall is the only time they matter, and the marker is there. -->
+    <SetProperty Id="DARLING_PGRUNTIME_DIR" Value="[DARLING_PREVIOUS_FOLDER]pg-runtime" After="AppSearch" Condition="DARLING_PREVIOUS_FOLDER" />
+    <SetProperty Id="DARLING_PGRUNTIME_PREV_DIR" Value="[DARLING_PREVIOUS_FOLDER]pg-runtime-prev" After="AppSearch" Condition="DARLING_PREVIOUS_FOLDER" />
+
+    <!-- The scripts' arguments. Each piece is its own property so the three command lines below stay readable; all of
+         them are set once costing is done and before the deferred actions read them. -->
+    <SetProperty Id="DARLING_ARG_UPGRADE" Value=" -MsiUpgrade" After="CostFinalize" Sequence="execute" Condition="WIX_UPGRADE_DETECTED" />
+    <SetProperty Id="DARLING_ARG_WEB" Value=" -WebDashboard" After="CostFinalize" Sequence="execute" Condition="WEBDASHBOARD = &quot;1&quot;" />
+    <SetProperty Id="DARLING_ARG_OPERATOR" Value=" -AddOperator &quot;[OPERATORACCOUNT]&quot;" After="CostFinalize" Sequence="execute" Condition="OPERATORACCOUNT" />
+    <!-- The wizard's "add me" box (Ui.wxs) put the person running setup in DARLING_UI_OPERATOR. An explicit OPERATORACCOUNT= wins. -->
+    <SetProperty Id="DARLING_ARG_OPERATOR_UI" Value=" -AddOperator &quot;[DARLING_UI_OPERATOR]&quot;" After="CostFinalize" Sequence="execute" Condition="ADDINSTALLER = &quot;1&quot; AND DARLING_UI_OPERATOR AND NOT OPERATORACCOUNT" />
+    <SetProperty Id="DARLING_ARG_PURGE" Value=" -PurgeData -ConfirmPurge" After="CostFinalize" Sequence="execute" Condition="PURGEDATA = &quot;1&quot;" />
+
+    <!-- A deferred WixQuietExec reads its command line from CustomActionData, which is the property of the same name
+         as the action. The command must begin with the quoted program. Windows PowerShell 5.1, the engine the scripts
+         are written for, from the 64-bit system folder. -->
+    <SetProperty Id="DarlingPreStart" Sequence="execute" Before="DarlingPreStart" Condition="NOT (REMOVE~=&quot;ALL&quot;) AND (NOT Installed OR WIX_UPGRADE_DETECTED OR MsiTrueAdminUser)"
+                 Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]install-darling.ps1&quot; -MsiPhase PreStart[DARLING_ARG_UPGRADE][DARLING_ARG_WEB][DARLING_ARG_OPERATOR][DARLING_ARG_OPERATOR_UI]" />
+    <SetProperty Id="DarlingPostStart" Sequence="execute" Before="DarlingPostStart" Condition="NOT (REMOVE~=&quot;ALL&quot;) AND (NOT Installed OR WIX_UPGRADE_DETECTED OR MsiTrueAdminUser)"
+                 Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]install-darling.ps1&quot; -MsiPhase PostStart[DARLING_ARG_UPGRADE][DARLING_ARG_WEB][DARLING_ARG_OPERATOR][DARLING_ARG_OPERATOR_UI]" />
+    <SetProperty Id="DarlingUninstall" Sequence="execute" Before="DarlingUninstall" Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE"
+                 Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]uninstall-darling.ps1&quot; -MsiUninstall[DARLING_ARG_PURGE]" />
+
+    <!-- The install folder check (#6480), right before DarlingPreStart runs install-darling.ps1 from INSTALLFOLDER as SYSTEM.
+         It is install-darling.ps1's step 1a, applied before that script runs, from code this package carries: no account
+         outside SYSTEM, Administrators and TrustedInstaller may own, or hold a write right on, anything in the folder (the
+         service's own account only in the folders it writes, as in 1a). A folder made under C:\ fails it, and the default
+         under Program Files passes. Its code is not read from INSTALLFOLDER: the build makes the encoded command below from
+         step 1a's functions in the packaged install-darling.ps1 (New-DarlingFolderCheck.ps1, darling-folder-check.ps1). It
+         exits 1 with a message that names the folder and the accounts, and the install rolls back before the script runs. -->
+    <!-- The encoded command (about 21,000 base64 characters) is a Property row, which has no length limit, rather than the
+         CustomAction row's Target, which ICE03 holds to 255. The name has lowercase letters, so it is private and cannot be
+         set from the command line. -->
+    <?include $(var.DarlingFolderCheckWxi)?>
+    <Property Id="DarlingFolderCheckEncoded" Value="$(var.DarlingFolderCheckCommand)" />
+    <SetProperty Id="DarlingFolderCheck" Sequence="execute" Before="DarlingFolderCheck" Condition="NOT (REMOVE~=&quot;ALL&quot;) AND (NOT Installed OR WIX_UPGRADE_DETECTED OR MsiTrueAdminUser)"
+                 Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand [DarlingFolderCheckEncoded]" />
+
+    <CustomAction Id="DarlingFolderCheck" DllEntry="WixQuietExec" BinaryRef="Wix4UtilCA_X64" Execute="deferred" Impersonate="no" Return="check" />
+    <CustomAction Id="DarlingPreStart" DllEntry="WixQuietExec" BinaryRef="Wix4UtilCA_X64" Execute="deferred" Impersonate="no" Return="check" />
+    <CustomAction Id="DarlingPostStart" DllEntry="WixQuietExec" BinaryRef="Wix4UtilCA_X64" Execute="deferred" Impersonate="no" Return="check" />
+    <CustomAction Id="DarlingUninstall" DllEntry="WixQuietExec" BinaryRef="Wix4UtilCA_X64" Execute="deferred" Impersonate="no" Return="check" />
+
+    <!-- The two script phases (and the folder check before them) run on a first install, on a major upgrade (the new
+         product is not Installed yet) and on a repair or change an administrator starts (MsiTrueAdminUser). A repair a
+         standard user starts still restores the files and the service record, and runs neither script. -->
+    <InstallExecuteSequence>
+      <Custom Action="DarlingFolderCheck" After="InstallServices" Condition="NOT (REMOVE~=&quot;ALL&quot;) AND (NOT Installed OR WIX_UPGRADE_DETECTED OR MsiTrueAdminUser)" />
+      <Custom Action="DarlingPreStart" After="DarlingFolderCheck" Condition="NOT (REMOVE~=&quot;ALL&quot;) AND (NOT Installed OR WIX_UPGRADE_DETECTED OR MsiTrueAdminUser)" />
+      <Custom Action="DarlingPostStart" After="StartServices" Condition="NOT (REMOVE~=&quot;ALL&quot;) AND (NOT Installed OR WIX_UPGRADE_DETECTED OR MsiTrueAdminUser)" />
+      <Custom Action="DarlingUninstall" Before="StopServices" Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+    </InstallExecuteSequence>
+  </Package>
+</Wix>

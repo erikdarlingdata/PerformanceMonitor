@@ -27,7 +27,7 @@ public sealed class McpPerfmonTools
             var rows = await dataService.GetLatestPerfmonStatsAsync(resolved.ServerId);
             if (rows.Count == 0)
             {
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "perfmon_stats")
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "perfmon_stats", awsRdsKind: AwsRdsKind.None)
                     ?? McpHelpers.Status("unavailable", "No perfmon stats available.");
             }
 
@@ -59,7 +59,7 @@ public sealed class McpPerfmonTools
     public static async Task<string> GetPerfmonTrend(
         LocalDataService dataService,
         ServerManager serverManager,
-        [Description("The exact counter name, e.g. 'Batch Requests/sec'.")] string counter_name,
+        [Description("The exact counter name, e.g. 'Batch Requests/sec'. get_perfmon_stats lists the names.")] string counter_name,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
@@ -86,7 +86,7 @@ public sealed class McpPerfmonTools
                    the miss path, so either order keeps the property that matters — but a permanently gated
                    engine takes this branch on every call, forever, and neither the probe nor the PLE branch
                    below could tell it anything. Asking first makes that case one query instead of two. */
-                var gated = await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "perfmon_stats");
+                var gated = await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "perfmon_stats", awsRdsKind: AwsRdsKind.None);
                 if (gated != null)
                 {
                     return gated;

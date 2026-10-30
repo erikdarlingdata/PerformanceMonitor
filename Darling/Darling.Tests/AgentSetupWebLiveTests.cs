@@ -73,6 +73,9 @@ public sealed class AgentSetupWebLiveTests
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
         await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+        /* #6400: the server a profile may name is one the operator defined (config_monitored_servers, what every picker lists), not one the worker
+           has observed (collect.servers, written on a first connection and never pruned), so the fixture's server is defined as well. */
+        await DarlingMcpTestData.ExecAsync(connection, ct, "INSERT INTO config.config_monitored_servers (server_id, name, host) VALUES ($1, $2, 'host-a')", ServerId, ServerName);
         return NpgsqlDataSource.Create(scratch.ConnectionString);
     }
 
@@ -84,7 +87,7 @@ public sealed class AgentSetupWebLiveTests
 
     private static async Task WithWebRoutesAsync(
         string managedRole, Func<NpgsqlDataSource, NpgsqlDataSource, Sender, CancellationToken, Task> body, IPasswordKeyRing? ring = null,
-        DarlingWebSeat? seat = null, bool signedIn = true, bool managedStore = false)
+        DarlingWebSeat? seat = null, bool signedIn = true, bool managedStore = false, AdminArmShape arm = AdminArmShape.None)
     {
         var baseConnectionString = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the agent setup web live tests.");
@@ -111,6 +114,10 @@ public sealed class AgentSetupWebLiveTests
                 Pooling = false,
             }.ConnectionString;
             await using var webLogin = NpgsqlDataSource.Create(asSeat);
+
+            /* #6600: the managed-shaped store. The web logs in as the read-only role above; the arm signs in as a second role that holds the admin
+               role's grants (the managed `admin` login), or, for Refused, as a login the store rejects, so a request that opens it fails. */
+            using var adminArm = await AdminArmLive.BuildAsync(owner, scratch, roleName, arm, ct);
 
             var builder = WebApplication.CreateBuilder(new WebApplicationOptions
             {
@@ -144,7 +151,7 @@ public sealed class AgentSetupWebLiveTests
                 await next(context);
             });
             DarlingWebEndpoints.MapAll(app, webLogin, new CollectorRuntimeState(), new CapturingTestLogger(), passwordKeys: ring,
-                postgresConfig: managedStore ? new PostgresConfig { Managed = true } : null);
+                postgresConfig: managedStore ? new PostgresConfig { Managed = true } : null, adminArm: adminArm);
             await app.StartAsync(ct);
             using var server = app.GetTestServer();
 
@@ -204,7 +211,7 @@ public sealed class AgentSetupWebLiveTests
             await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (connection, token) =>
             {
                 NpgsqlConnection.ClearAllPools();
-                await using var drop = new NpgsqlCommand($"DROP OWNED BY {roleName}; DROP ROLE IF EXISTS {roleName}", connection);
+                await using var drop = new NpgsqlCommand(AdminArmLive.DropRolesSql(roleName), connection);
                 await drop.ExecuteNonQueryAsync(token);
             });
         }
@@ -238,6 +245,17 @@ public sealed class AgentSetupWebLiveTests
             Assert.Equal("updated", (string)edited.Body!["status"]!);
             Assert.Equal("Analysis: Waits|ops@example.com|3|60|500|false", await ScalarAsync(owner,
                 $"SELECT metric_match || '|' || smtp_recipients || '|' || agent_level || '|' || agent_max_per_hour || '|' || agent_max_per_day || '|' || enabled::text FROM config_notification_routes WHERE route_id = {seeded}", ct));
+
+            /* #6928: the severity filter. A new route is Both, an edit sets it (any case), an edit that leaves it out keeps it. */
+            Assert.Equal("both", await ScalarAsync(owner, $"SELECT severities FROM config_notification_routes WHERE route_id = {seeded}", ct));
+            Assert.Equal(200, (await Send("PUT", $"/api/notification-routes/{seeded}", Json, "{\"severities\":\"Critical\"}")).Status);
+            Assert.Equal("critical", await ScalarAsync(owner, $"SELECT severities FROM config_notification_routes WHERE route_id = {seeded}", ct));
+            Assert.Equal(200, (await Send("PUT", $"/api/notification-routes/{seeded}", Json, "{\"enabled\":true}")).Status);
+            Assert.Equal("critical", await ScalarAsync(owner, $"SELECT severities FROM config_notification_routes WHERE route_id = {seeded}", ct));
+            var warningOnly = await Send("POST", "/api/notification-routes", Json, "{\"metric_match\":\"blocking\",\"agent_level\":1,\"severities\":\"warning\"}");
+            Assert.Equal(200, warningOnly.Status);
+            Assert.Equal("warning", await ScalarAsync(owner, $"SELECT severities FROM config_notification_routes WHERE route_id = {(int)warningOnly.Body!["route_id"]!}", ct));
+            Assert.Equal(200, (await Send("PUT", $"/api/notification-routes/{seeded}", Json, "{\"severities\":\"both\"}")).Status);
 
             /* Level 0 (Off) and Inherit are both settable. */
             Assert.Equal(200, (await Send("PUT", $"/api/notification-routes/{seeded}", Json, "{\"agent_level\":0}")).Status);
@@ -394,6 +412,8 @@ public sealed class AgentSetupWebLiveTests
             await Refused("POST", "/api/notification-routes", "{\"metric_match\":\"blocking\"}", "at least one destination or the agent channel");
             await Refused("POST", "/api/notification-routes", "{\"metric_match\":\"blocking\",\"agent_level\":1,\"fallback_route_id\":99999}", "Fallback route 99999 does not exist");
             await Refused("PUT", $"/api/notification-routes/{seeded}", $"{{\"fallback_route_id\":{seeded}}}", "its own fallback");
+            await Refused("POST", "/api/notification-routes", "{\"metric_match\":\"blocking\",\"agent_level\":1,\"severities\":\"major\"}", "severities is critical, warning or both");
+            await Refused("POST", "/api/notification-routes", "{\"metric_match\":\"blocking\",\"agent_level\":1,\"severities\":3}", "severities must be text");
             await Refused("POST", "/api/notification-routes", "{\"metric_match\":\"blocking\",\"agent_level\":\"one\"}", "agent_level must be a whole number");
             await Refused("POST", "/api/notification-routes", "{\"metric_match\":\"blocking\",\"agent_level\":1,\"agent_max_per_hour\":1.5}", "agent_max_per_hour must be a whole number");
 
@@ -467,10 +487,11 @@ public sealed class AgentSetupWebLiveTests
                 var answer = await Send(method, path, method == "DELETE" ? null : Json, json);
                 Assert.Equal(403, answer.Status);
                 var said = (string)answer.Body!["error"]!;
-                Assert.Equal(DarlingWebAgentSetup.RefusedMessage(managedStore), said);
+                Assert.Equal(DarlingWebAgentSetup.RefusedMessage(managedStore, adminWritesOff: managedStore), said);
+                Assert.Equal(managedStore, said.Contains("web.allowAdminWrites", StringComparison.Ordinal));
                 Assert.Contains("Viewer app", said, StringComparison.Ordinal);
                 Assert.Equal(!managedStore, said.Contains("webConnectionString", StringComparison.Ordinal));
-                Assert.Equal(!managedStore, said.Contains("admin", StringComparison.OrdinalIgnoreCase));
+                Assert.Equal(!managedStore, said.Contains("admin store login", StringComparison.OrdinalIgnoreCase));
             }
 
             Assert.Equal(managedStore, (bool)(await Send("GET", "/api/session", null)).Body!["managed_store"]!);
@@ -519,11 +540,73 @@ public sealed class AgentSetupWebLiveTests
             var tooLong = await Send("PUT", "/api/environment-profiles", Json, $"{{\"profile_text\":\"{new string('p', 4001)}\"}}");
             Assert.Equal(400, tooLong.Status);
             Assert.Equal("A profile must be 4,000 characters or fewer.", (string)tooLong.Body!["error"]!);
+            await ExecAsync(owner, "INSERT INTO config.server_tags (id, name) OVERRIDING SYSTEM VALUE VALUES (3, 'dev')", ct);
             Assert.Equal(200, (await Send("PUT", "/api/environment-profiles", Json, $"{{\"scope_tag_id\":3,\"profile_text\":\"{new string('p', 4000)}\"}}")).Status);
             Assert.Equal(400, (await Send("PUT", "/api/environment-profiles", Json, "{\"scope_server_id\":\"x\",\"profile_text\":\"x\"}")).Status);
             Assert.Equal(415, (await Send("PUT", "/api/environment-profiles", null, "{}")).Status);
             Assert.Equal("2", await ScalarAsync(owner, "SELECT count(*) FROM config.agent_environment_profiles", ct));
         });
+    }
+
+    /* #6600: the managed store's shape: the web reads as the viewer role and a signed-in admin's writes use the arm, a second small pool on the
+       admin login. The write succeeds, the journal names the person, and the access flags are true. */
+    [Fact]
+    public async Task OnTheManagedStore_ASignedInAdminSeat_WritesThroughTheArm_AndTheAccessFlagsAreTrue()
+    {
+        await WithWebRoutesAsync("viewer", async (owner, _, Send, ct) =>
+        {
+            var seeded = await SeedRouteAsync(owner, "performance", ct);
+
+            var access = await Send("GET", "/api/agent-setup/access", null);
+            Assert.True((bool)access.Body!["can_edit_routes"]!);
+            Assert.True((bool)access.Body["can_edit_profiles"]!);
+            Assert.True((bool)(await Send("GET", "/api/environment-profiles", null)).Body!["can_edit"]!);
+
+            Assert.Equal(200, (await Send("PUT", "/api/environment-profiles", Json, "{\"profile_text\":\"fleet: OLTP\"}")).Status);
+            Assert.Equal(200, (await Send("PUT", $"/api/notification-routes/{seeded}", Json, "{\"agent_level\":3}")).Status);
+            var created = await Send("POST", "/api/notification-routes", Json, "{\"metric_match\":\"blocking\",\"agent_level\":1}");
+            Assert.Equal(200, created.Status);
+            Assert.Equal(200, (await Send("DELETE", $"/api/notification-routes/{(int)created.Body!["route_id"]!}", null)).Status);
+
+            Assert.Equal("person:alice", await ScalarAsync(owner, "SELECT modified_by FROM config.agent_environment_profiles", ct));
+            Assert.Equal("1", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal WHERE event = 'route_agent_changed' AND actor = 'person:alice' AND route_id = " + seeded, ct));
+        }, DarlingPasswordKey.FromPrivateKey(PasswordPrivateKey.Generate()), seat: new DarlingWebSeat("alice", true), managedStore: true, arm: AdminArmShape.Admin);
+    }
+
+    /* #6600: a seat that is not a signed-in admin never opens the arm. Its login here is refused by the store, so a request that opened it would
+       fail; instead the reads answer as they do today (the viewer role: list only) and the host's write gate answers the write. */
+    [Fact]
+    public async Task OnTheManagedStore_AReadOnlySeat_NeverOpensTheArm_AndAnswersAsToday()
+    {
+        await WithWebRoutesAsync("viewer", async (owner, _, Send, ct) =>
+        {
+            var seeded = await SeedRouteAsync(owner, "performance", ct);
+
+            var access = await Send("GET", "/api/agent-setup/access", null);
+            Assert.Equal(200, access.Status);
+            Assert.False((bool)access.Body!["can_edit_routes"]!);
+            Assert.False((bool)access.Body["can_edit_profiles"]!);
+
+            Assert.Equal(403, (await Send("PUT", $"/api/notification-routes/{seeded}", Json, "{\"agent_level\":3}")).Status);
+            Assert.Equal("", await ScalarAsync(owner, $"SELECT agent_level FROM config_notification_routes WHERE route_id = {seeded}", ct));
+        }, DarlingPasswordKey.FromPrivateKey(PasswordPrivateKey.Generate()), seat: new DarlingWebSeat("viewer-person", false), managedStore: true, arm: AdminArmShape.Refused);
+    }
+
+    /* #6600: with the switch off (no arm on a managed store) the answers are today's: list-only flags, a 403 on every write that now names the
+       switch, and nothing written. */
+    [Fact]
+    public async Task OnTheManagedStore_WithTheSwitchOff_TheSignedInAdminStillListsOnly()
+    {
+        await WithWebRoutesAsync("viewer", async (owner, _, Send, ct) =>
+        {
+            var access = await Send("GET", "/api/agent-setup/access", null);
+            Assert.False((bool)access.Body!["can_edit_routes"]!);
+
+            var refused = await Send("POST", "/api/notification-routes", Json, "{\"metric_match\":\"blocking\",\"agent_level\":1}");
+            Assert.Equal(403, refused.Status);
+            Assert.Contains("web.allowAdminWrites", (string)refused.Body!["error"]!, StringComparison.Ordinal);
+            Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config_notification_routes", ct));
+        }, DarlingPasswordKey.FromPrivateKey(PasswordPrivateKey.Generate()), seat: new DarlingWebSeat("alice", true), managedStore: true);
     }
 
     /* The one person-name rule (#6265) reaches the web's profile and route writes: a signed-in name with a space and an apostrophe is a real
@@ -826,6 +909,116 @@ public sealed class AgentSetupWebLiveTests
             /* A version of the wrong shape is a 400, and the default date is not a pass. */
             Assert.Equal(400, (await Send("PUT", "/api/environment-profiles", Json, "{\"expected_modified_at\":17,\"profile_text\":\"x\"}")).Status);
             Assert.Equal(400, (await Send("PUT", "/api/environment-profiles", Json, "{\"expected_modified_at\":\"not a date\",\"profile_text\":\"x\"}")).Status);
+        }, seat: new DarlingWebSeat("alice", true));
+    }
+
+    /* #6400: a profile for tag 0 (or below), or for a tag that does not exist, is a 400 with one sentence and writes nothing. The store
+       matches a scope on coalesce(scope_tag_id, 0), so a tag-0 row was never read by any brief, made every later fleet save a conflict, and a
+       blank tag-0 save carrying the fleet row's version deleted the fleet profile. The Viewer's save is the same store method. */
+    [Fact]
+    public async Task EnvironmentProfiles_ATagThatIs0OrBelowOrNamesNoTag_Is400_AndWritesNothing_ViaTheWebAndTheStore()
+    {
+        await WithWebRoutesAsync("admin", async (owner, _, Send, ct) =>
+        {
+            const string Rows = "SELECT count(*) FROM config.agent_environment_profiles";
+            const string Journal = "SELECT count(*) FROM config.investigation_journal WHERE event IN ('profile_saved', 'profile_removed')";
+            var store = new InvestigationRequestStore(owner, 30);
+            var tag = await ScalarAsync(owner, "INSERT INTO config.server_tags (name) VALUES ('oltp-6400') RETURNING id", ct);
+            var unknown = (await ScalarAsync(owner, "SELECT coalesce(max(id), 0) + 1 FROM config.server_tags", ct))!;
+
+            /* No fleet profile yet: tag 0, a negative tag and an unknown tag are all refused, and the fleet can still be saved afterwards. */
+            foreach (var refused in new[] { "0", "-1", unknown })
+            {
+                var answer = await Send("PUT", "/api/environment-profiles", Json, $"{{\"scope_tag_id\":{refused},\"profile_text\":\"for no tag\"}}");
+                Assert.Equal(400, answer.Status);
+                Assert.Contains($"{refused}", (string)answer.Body!["error"]!, StringComparison.Ordinal);
+                await Assert.ThrowsAsync<ArgumentException>(() => store.SaveProfileAsync(null, int.Parse(refused, CultureInfo.InvariantCulture), "for no tag", "dave", null, ct));
+            }
+
+            Assert.Equal("0", await ScalarAsync(owner, Rows, ct));
+            Assert.Equal("0", await ScalarAsync(owner, Journal, ct));
+            Assert.Equal(200, (await Send("PUT", "/api/environment-profiles", Json, "{\"profile_text\":\"fleet: OLTP\"}")).Status);
+
+            /* A fleet profile is there: a blank tag-0 save that carries the fleet row's version (the page stamps it so) removes nothing. */
+            var fleetStamp = await ScalarAsync(owner, "SELECT modified_at::text FROM config.agent_environment_profiles", ct);
+            Assert.Equal(400, (await Send("PUT", "/api/environment-profiles", Json, "{\"scope_tag_id\":0,\"profile_text\":\"\"}")).Status);
+            Assert.Equal(400, (await Send("PUT", "/api/environment-profiles", Json, "{\"scope_tag_id\":0,\"profile_text\":\"for no tag\"}")).Status);
+            Assert.Equal("1|fleet: OLTP", await ScalarAsync(owner, "SELECT count(*) || '|' || max(profile_text) FROM config.agent_environment_profiles WHERE scope_server_id IS NULL AND scope_tag_id IS NULL", ct));
+            Assert.Equal(fleetStamp, await ScalarAsync(owner, "SELECT modified_at::text FROM config.agent_environment_profiles", ct));
+            Assert.Equal("1", await ScalarAsync(owner, Rows, ct));
+            Assert.Equal("1", await ScalarAsync(owner, Journal, ct));
+
+            /* An existing tag still saves; once its tag is deleted the orphan profile can still be removed by a blank save. */
+            Assert.Equal(200, (await Send("PUT", "/api/environment-profiles", Json, $"{{\"scope_tag_id\":{tag},\"profile_text\":\"tag: OLTP\"}}")).Status);
+            Assert.Equal("2", await ScalarAsync(owner, Rows, ct));
+            await ExecAsync(owner, $"DELETE FROM config.server_tags WHERE id = {tag}", ct);
+            Assert.Equal(400, (await Send("PUT", "/api/environment-profiles", Json, $"{{\"scope_tag_id\":{tag},\"profile_text\":\"tag: OLTP, edited\"}}")).Status);
+            Assert.Equal(200, (await Send("PUT", "/api/environment-profiles", Json, $"{{\"scope_tag_id\":{tag},\"profile_text\":\"\"}}")).Status);
+            Assert.Equal("1", await ScalarAsync(owner, Rows, ct));
+        }, seat: new DarlingWebSeat("alice", true));
+    }
+
+    /* #6400: the server side of the tag test above. The profile table has no foreign key to a server either, so a profile for server 0 (or
+       below), or for a server id that is not registered (no row in config.config_monitored_servers), is a 400 with one sentence and writes
+       nothing; a registered server still saves, and a blank save still removes the profile of a server that has gone. */
+    [Fact]
+    public async Task EnvironmentProfiles_AServerThatIs0OrBelowOrIsNotRegistered_Is400_AndWritesNothing_ViaTheWebAndTheStore()
+    {
+        await WithWebRoutesAsync("admin", async (owner, _, Send, ct) =>
+        {
+            const string Rows = "SELECT count(*) FROM config.agent_environment_profiles";
+            const string Journal = "SELECT count(*) FROM config.investigation_journal WHERE event IN ('profile_saved', 'profile_removed')";
+            var store = new InvestigationRequestStore(owner, 30);
+            var unregistered = ServerId + 1000;
+            var neverConnected = ServerId + 2000;
+
+            /* The registered/observed split (#6400): `unregistered` was observed (it has a collect.servers row, as a removed server keeps one) but
+               has no definition; `neverConnected` is defined and has never connected (no collect.servers row, as a server just added). */
+            await using (var observed = await owner.OpenConnectionAsync(ct))
+            {
+                await DarlingMcpTestData.RegisterServerAsync(observed, unregistered, "LcAgentSetupRemoved", ct);
+            }
+
+            await ExecAsync(owner, $"INSERT INTO config.config_monitored_servers (server_id, name, host) VALUES ({neverConnected}, 'LcAgentSetupNew', 'host-new')", ct);
+            Assert.Equal("0", await ScalarAsync(owner, $"SELECT count(*) FROM collect.servers WHERE server_id = {neverConnected}", ct));
+            Assert.Equal("0", await ScalarAsync(owner, $"SELECT count(*) FROM config.config_monitored_servers WHERE server_id = {unregistered}", ct));
+
+            Assert.Equal(200, (await Send("PUT", "/api/environment-profiles", Json, "{\"profile_text\":\"fleet: OLTP\"}")).Status);
+            var fleetStamp = await ScalarAsync(owner, "SELECT modified_at::text FROM config.agent_environment_profiles", ct);
+            Assert.Equal("1", await ScalarAsync(owner, Journal, ct));
+
+            /* Server 0, a negative server and an unregistered server are refused, with text and blank, and the fleet profile is not touched. */
+            foreach (var refused in new[] { 0, -1, unregistered })
+            {
+                var answer = await Send("PUT", "/api/environment-profiles", Json, $"{{\"scope_server_id\":{refused},\"profile_text\":\"for no server\"}}");
+                Assert.Equal(400, answer.Status);
+                var sentence = (string)answer.Body!["error"]!;
+                Assert.Contains($"{refused}", sentence, StringComparison.Ordinal);
+                Assert.DoesNotContain("Parameter", sentence, StringComparison.Ordinal);
+                await Assert.ThrowsAsync<ArgumentException>(() => store.SaveProfileAsync(refused, null, "for no server", "dave", null, ct));
+            }
+
+            Assert.Equal(400, (await Send("PUT", "/api/environment-profiles", Json, "{\"scope_server_id\":0,\"profile_text\":\"\"}")).Status);
+            Assert.Equal("1|fleet: OLTP", await ScalarAsync(owner, "SELECT count(*) || '|' || max(profile_text) FROM config.agent_environment_profiles WHERE scope_server_id IS NULL AND scope_tag_id IS NULL", ct));
+            Assert.Equal(fleetStamp, await ScalarAsync(owner, "SELECT modified_at::text FROM config.agent_environment_profiles", ct));
+            Assert.Equal("1", await ScalarAsync(owner, Rows, ct));
+            Assert.Equal("1", await ScalarAsync(owner, Journal, ct));
+
+            /* A registered server still saves; an orphan profile (its server gone) can still be removed by a blank save. */
+            Assert.Equal(200, (await Send("PUT", "/api/environment-profiles", Json, $"{{\"scope_server_id\":{ServerId},\"profile_text\":\"server: reporting\"}}")).Status);
+            Assert.Equal("2", await ScalarAsync(owner, Rows, ct));
+
+            /* A defined server that has never connected saves, through the web and through the store. */
+            Assert.Equal(200, (await Send("PUT", "/api/environment-profiles", Json, $"{{\"scope_server_id\":{neverConnected},\"profile_text\":\"server: just added\"}}")).Status);
+            Assert.Equal("3", await ScalarAsync(owner, Rows, ct));
+            await store.SaveProfileAsync(neverConnected, null, "server: just added, edited", "dave",
+                (await store.ListProfilesAsync(ct)).First(p => p.ScopeServerId == neverConnected).ModifiedAtUtc, ct);
+            Assert.Equal("server: just added, edited", await ScalarAsync(owner, $"SELECT profile_text FROM config.agent_environment_profiles WHERE scope_server_id = {neverConnected}", ct));
+
+            await ExecAsync(owner, $"INSERT INTO config.agent_environment_profiles (scope_server_id, profile_text, modified_by) VALUES ({unregistered}, 'orphan', 'test')", ct);
+            Assert.Equal(400, (await Send("PUT", "/api/environment-profiles", Json, $"{{\"scope_server_id\":{unregistered},\"profile_text\":\"orphan, edited\"}}")).Status);
+            Assert.Equal(200, (await Send("PUT", "/api/environment-profiles", Json, $"{{\"scope_server_id\":{unregistered},\"profile_text\":\"\"}}")).Status);
+            Assert.Equal("3", await ScalarAsync(owner, Rows, ct));
         }, seat: new DarlingWebSeat("alice", true));
     }
 

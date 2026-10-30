@@ -1,0 +1,258 @@
+name: Darling MSI
+
+# #6480: builds the Darling Windows Installer package from THIS commit's service and viewer publishes and runs it on
+# the two hosted Windows images, one leg per job:
+#   M1  a silent install ('msiexec /i ... /qn') leaves the machine as install-darling.ps1 does: the service Running,
+#       the store up, and the service record, the install root's, darling.json's and the store folder's security
+#       descriptors, the operator group, the firewall rules and the shortcuts equal to a snapshot taken after the
+#       script installed the same payload on the same runner (the script is the oracle)
+#   M2  the MSI over a script install of the older release is refused with 1603 and changes nothing
+#   M3  then that script's uninstall, then the MSI installs; darling.json is byte-identical and the store is kept
+#   M4  a major upgrade from one MSI to a newer one (built here with a higher version) keeps the service and darling.json,
+#       finds the install folder from the InstallFolder value and ignores an INSTALLFOLDER= given on the upgrade
+#   M5  an uninstall keeps the store and darling.json
+#   M6  an uninstall with PURGEDATA=1 removes the store
+#   M7  an install a script step refuses (a profile folder) fails in the custom action and rolls back clean
+#   M8  an install into a folder ordinary users can modify is stopped by the folder check before install-darling.ps1
+#       runs, and rolls back clean (M4 also repairs as an administrator, which runs the check and both phases)
+# M2+M3 and M4+M5+M6 share a job each, because each continues from the state the one before left.
+#
+# Only logs are uploaded, never the MSI: nothing here publishes anything. The release job does not build or sign the
+# package yet.
+#
+# Triggers: a pull request touching the package, the scripts it runs, or this check; a manual dispatch; and a call from
+# another workflow (`workflow_call`), which no workflow makes yet - the nightly does not run these legs. `pull_request`, never `pull_request_target`: the legs run the pull request's own
+# scripts and package, so they must run with the pull request's read-only token and no secrets.
+on:
+  pull_request:
+    paths:
+      - 'Darling/msi/**'
+      - 'Darling/tools/*.ps1'
+      - '.github/workflows/darling-msi.yml'
+      - '.github/scripts/darling-msi.ps1'
+      - '.github/scripts/assert-msi-signatures.ps1'
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: darling-msi-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  msi:
+    name: ${{ matrix.os }} / ${{ matrix.leg }}
+    runs-on: ${{ matrix.os }}
+    # Two publishes, the package build (compression of about 450 MB), the script install, the MSI install and a cold
+    # pg-runtime fetch (about 340 MB). The legs' own waits add up to well under this.
+    timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ github.token }}
+      # The release whose script install M2-M3 must not take over (the one darling-upgrade-shapes.yml uses as current).
+      DARLING_OLD_RELEASE: '3.10.0'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ windows-2022, windows-2025 ]
+        leg: [ M1, M2-M3, M4-M6, M7, M8 ]
+    steps:
+      # The commit under test, not a branch name that can move while the run is queued.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+
+      # The exact SDK version from global.json, not its feature band. Given a band, setup-dotnet resolves the newest
+      # patch through aka.ms links, and on 2026-10-25 those links sent every run to a download that failed with HTTP 409.
+      # With an exact version the install script downloads from the release feed and never asks aka.ms.
+      - name: Read the SDK version from global.json
+        id: globaljson_sdk
+        shell: pwsh
+        run: |
+          $version = (Get-Content -Raw (Join-Path $env:GITHUB_WORKSPACE 'global.json') | ConvertFrom-Json).sdk.version
+          if (-not $version) { throw 'global.json names no sdk.version' }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Setup .NET 10.0
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: ${{ steps.globaljson_sdk.outputs.version }}
+
+      # The same cache key build.yml uses, so a warm cache from there is reused.
+      - name: Cache Darling pg-runtime.zip
+        id: cache-pg-runtime
+        uses: actions/cache@v6
+        with:
+          path: Darling/artifacts/pg-runtime.zip
+          key: pg-runtime-${{ runner.os }}-${{ hashFiles('Darling/tools/fetch-pg-runtime.ps1') }}
+
+      - name: Build Darling pg-runtime.zip (cache miss only)
+        if: steps.cache-pg-runtime.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: ./Darling/tools/fetch-pg-runtime.ps1
+
+      # The release zip's layout (build.yml 'Stage Darling for signing' and 'Copy-Item pg-runtime.zip'): the service
+      # publish at the root, the viewer publish in viewer\, pg-runtime.zip beside the service exe. Both are
+      # self-contained, as in the release.
+      - name: Publish the payload
+        shell: pwsh
+        run: |
+          dotnet publish Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj -c Release -r win-x64 --self-contained -o publish/DarlingService
+          if ($LASTEXITCODE -ne 0) { throw "service publish failed ($LASTEXITCODE)" }
+          dotnet publish Darling/PerformanceMonitor.Darling.Viewer/PerformanceMonitor.Darling.Viewer.csproj -c Release -r win-x64 --self-contained -o publish/DarlingViewer
+          if ($LASTEXITCODE -ne 0) { throw "viewer publish failed ($LASTEXITCODE)" }
+          $payload = 'publish/DarlingMsiPayload'
+          New-Item -ItemType Directory -Force -Path "$payload/viewer" | Out-Null
+          Copy-Item 'publish/DarlingService/*' $payload -Recurse
+          Copy-Item 'publish/DarlingViewer/*' "$payload/viewer" -Recurse
+          Copy-Item 'Darling/artifacts/pg-runtime.zip' $payload
+
+      # WiX's ICE validation runs as part of the build, and any ICE error fails it.
+      - name: Build the MSI
+        shell: pwsh
+        run: |
+          dotnet build Darling/msi/PerformanceMonitor.Darling.Msi.wixproj -c Release -m:1 -p:UseSharedCompilation=false "-p:PayloadDir=${{ github.workspace }}\publish\DarlingMsiPayload"
+          if ($LASTEXITCODE -ne 0) { throw "MSI build failed ($LASTEXITCODE)" }
+          Get-ChildItem Darling/msi/bin/Release -Filter *.msi | ForEach-Object { "{0}  {1:N1} MB" -f $_.Name, ($_.Length / 1MB) }
+          # Out of the output folder, so the next build cannot be mistaken for it.
+          New-Item -ItemType Directory -Force -Path build/msi-current | Out-Null
+          Move-Item Darling/msi/bin/Release/*.msi build/msi-current
+
+      # #6480: proves the release job's MSI signature backstop (.github/scripts/assert-msi-signatures.ps1, the same
+      # script build.yml runs on releases\) on a runner, against the package built above. Cheap, so one leg runs it.
+      #   no .msi in the folder                                                      passes (the MSI ships only when
+      #                                                                              DARLING_MSI_SIGNING is 'true')
+      #   the unsigned package built above                                           FAILS
+      #   signed by a trusted certificate that is not SignPath Foundation's          FAILS on the signer, not the chain
+      #   signed by a trusted certificate whose subject names O=SignPath Foundation  passes
+      # The two certificates are throwaway self-signed ones, trusted in the runner's machine Root store for the length
+      # of the step and removed in the finally block. The runner is discarded afterwards either way.
+      - name: Prove the MSI signature backstop
+        if: matrix.leg == 'M1'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $backstop = '${{ github.workspace }}\.github\scripts\assert-msi-signatures.ps1'
+          $built = (Get-ChildItem '${{ github.workspace }}\build\msi-current' -Filter *.msi | Select-Object -First 1).FullName
+          $root = Join-Path ([IO.Path]::GetTempPath()) ('msi-backstop-' + [guid]::NewGuid().ToString('N'))
+          New-Item -ItemType Directory -Path $root | Out-Null
+
+          # Runs the backstop in its own process, as the release job does, and returns its exit code and text.
+          function Invoke-Backstop([string]$Dir) {
+            $text = & pwsh -NoProfile -File $backstop -ReleasesDir $Dir 2>&1 | ForEach-Object { "$_" }
+            $code = $LASTEXITCODE
+            $text | ForEach-Object { Write-Host "    $_" }
+            [pscustomobject]@{ Code = $code; Text = ($text -join "`n") }
+          }
+          function New-ReleasesDir([string]$Name) {
+            $dir = Join-Path $root $Name
+            New-Item -ItemType Directory -Path $dir | Out-Null
+            $dir
+          }
+          function New-TrustedSigner([string]$Subject) {
+            $rsa = [Security.Cryptography.RSA]::Create(2048)
+            $req = [Security.Cryptography.X509Certificates.CertificateRequest]::new($Subject, $rsa, [Security.Cryptography.HashAlgorithmName]::SHA256, [Security.Cryptography.RSASignaturePadding]::Pkcs1)
+            $eku = [Security.Cryptography.OidCollection]::new()
+            [void]$eku.Add([Security.Cryptography.Oid]::new('1.3.6.1.5.5.7.3.3'))
+            $req.CertificateExtensions.Add([Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension]::new($eku, $true))
+            $req.CertificateExtensions.Add([Security.Cryptography.X509Certificates.X509KeyUsageExtension]::new([Security.Cryptography.X509Certificates.X509KeyUsageFlags]::DigitalSignature, $true))
+            $req.CertificateExtensions.Add([Security.Cryptography.X509Certificates.X509BasicConstraintsExtension]::new($false, $false, 0, $true))
+            $made = $req.CreateSelfSigned([DateTimeOffset]::UtcNow.AddDays(-1), [DateTimeOffset]::UtcNow.AddDays(2))
+            # The key has to be persisted for Set-AuthenticodeSignature: round-trip through a pfx.
+            $pfx = $made.Export([Security.Cryptography.X509Certificates.X509ContentType]::Pfx, 'backstop')
+            $flags = [Security.Cryptography.X509Certificates.X509KeyStorageFlags]::PersistKeySet -bor [Security.Cryptography.X509Certificates.X509KeyStorageFlags]::Exportable
+            $signer = [Security.Cryptography.X509Certificates.X509Certificate2]::new($pfx, 'backstop', $flags)
+            $store = [Security.Cryptography.X509Certificates.X509Store]::new('Root', 'LocalMachine')
+            $store.Open('ReadWrite')
+            $store.Add([Security.Cryptography.X509Certificates.X509Certificate2]::new($made.Export([Security.Cryptography.X509Certificates.X509ContentType]::Cert)))
+            $store.Close()
+            $signer
+          }
+
+          $trusted = @()
+          $failures = @()
+          try {
+            Write-Host "Case 1: no .msi in the folder (a zip beside it is not looked at)"
+            $dir = New-ReleasesDir 'none'
+            Set-Content -LiteralPath (Join-Path $dir 'PerformanceMonitorDarling-1.0.0.zip') -Value 'x'
+            $r = Invoke-Backstop $dir
+            if ($r.Code -ne 0) { $failures += "case 1 expected exit 0, got $($r.Code)" }
+
+            Write-Host "Case 2: the unsigned package built above"
+            $dir = New-ReleasesDir 'unsigned'
+            Copy-Item $built $dir
+            $r = Invoke-Backstop $dir
+            if ($r.Code -ne 1) { $failures += "case 2 expected exit 1, got $($r.Code)" }
+            if ($r.Text -notmatch 'FAIL: the signature is not Valid') { $failures += "case 2 did not fail on the signature status" }
+
+            Write-Host "Case 3: signed by a trusted certificate that is not SignPath Foundation's"
+            $other = New-TrustedSigner 'CN=Some Other Publisher, O=Some Other Publisher'
+            $trusted += $other
+            $dir = New-ReleasesDir 'other'
+            Copy-Item $built $dir
+            $sig = Set-AuthenticodeSignature -FilePath (Join-Path $dir (Split-Path $built -Leaf)) -Certificate $other
+            Write-Host "    signing: $($sig.Status) $($sig.StatusMessage)"
+            $r = Invoke-Backstop $dir
+            if ($r.Code -ne 1) { $failures += "case 3 expected exit 1, got $($r.Code)" }
+            if ($r.Text -notmatch 'FAIL: not signed by the SignPath Foundation certificate') { $failures += "case 3 did not fail on the signer" }
+
+            Write-Host "Case 4: signed by a trusted certificate whose subject names O=SignPath Foundation"
+            $good = New-TrustedSigner 'CN=Backstop Fixture, O=SignPath Foundation, C=US'
+            $trusted += $good
+            $dir = New-ReleasesDir 'good'
+            Copy-Item $built $dir
+            $sig = Set-AuthenticodeSignature -FilePath (Join-Path $dir (Split-Path $built -Leaf)) -Certificate $good
+            Write-Host "    signing: $($sig.Status) $($sig.StatusMessage)"
+            $r = Invoke-Backstop $dir
+            if ($r.Code -ne 0) { $failures += "case 4 expected exit 0, got $($r.Code)" }
+          } finally {
+            $store = [Security.Cryptography.X509Certificates.X509Store]::new('Root', 'LocalMachine')
+            $store.Open('ReadWrite')
+            foreach ($c in $trusted) {
+              foreach ($m in @($store.Certificates | Where-Object { $_.Thumbprint -eq $c.Thumbprint })) { $store.Remove($m) }
+            }
+            $store.Close()
+            Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+          }
+          if ($failures) { $failures | ForEach-Object { Write-Host "::error::$_" }; exit 1 }
+          Write-Host "The backstop passed the empty folder and the SignPath-subject MSI and failed the unsigned and the wrong-signer MSI."
+          exit 0
+
+      # M4 upgrades from the package above to a newer one: the same payload with a higher version. --no-incremental,
+      # because a changed version alone does not make the incremental build redo the package.
+      - name: Build the newer MSI (M4-M6)
+        if: matrix.leg == 'M4-M6'
+        shell: pwsh
+        run: |
+          dotnet build Darling/msi/PerformanceMonitor.Darling.Msi.wixproj -c Release -m:1 --no-incremental -p:UseSharedCompilation=false -p:Version=98.0.0 "-p:PayloadDir=${{ github.workspace }}\publish\DarlingMsiPayload"
+          if ($LASTEXITCODE -ne 0) { throw "newer MSI build failed ($LASTEXITCODE)" }
+          New-Item -ItemType Directory -Force -Path build/msi-new | Out-Null
+          Move-Item Darling/msi/bin/Release/*.msi build/msi-new
+          Get-ChildItem build/msi-current, build/msi-new -Filter *.msi | ForEach-Object { "{0}  {1:N1} MB" -f $_.FullName, ($_.Length / 1MB) }
+
+      - name: Run the leg
+        shell: pwsh
+        timeout-minutes: 40
+        run: |
+          $msi = (Get-ChildItem '${{ github.workspace }}\build\msi-current' -Filter *.msi | Select-Object -First 1).FullName
+          $msiNew = Get-ChildItem '${{ github.workspace }}\build\msi-new' -Filter *.msi -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+          ./.github/scripts/darling-msi.ps1 -Leg '${{ matrix.leg }}' -Workspace '${{ github.workspace }}' -Payload '${{ github.workspace }}\publish\DarlingMsiPayload' -Msi $msi -MsiNew $msiNew -OldRelease '${{ env.DARLING_OLD_RELEASE }}'
+
+      - name: Service log tail
+        if: always()
+        shell: pwsh
+        run: |
+          Get-ChildItem 'C:\ProgramData\PerformanceMonitorDarling\logs' -ErrorAction SilentlyContinue | Select-Object -Last 2 | ForEach-Object { "log $($_.FullName)"; Get-Content $_.FullName -Tail 30 }
+
+      # Logs and snapshots only, never the MSI.
+      - name: Upload the logs
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: darling-msi-${{ matrix.os }}-${{ matrix.leg }}
+          path: |
+            C:\darling-msi-work\*.txt
+            C:\darling-msi-work\*.log
+          retention-days: 7
+          if-no-files-found: ignore

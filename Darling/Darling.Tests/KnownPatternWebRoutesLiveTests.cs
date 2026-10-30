@@ -38,6 +38,12 @@ namespace Darling.Tests;
 public sealed class KnownPatternWebRoutesLiveTests
 {
     private const int ServerId = 7_633_401;
+
+    /// <summary>Defined (<c>config_monitored_servers</c>, what the page's picker lists) with no <c>servers</c> row: added, not yet connected.</summary>
+    private const int DefinedOnlyServerId = 7_633_402;
+
+    /// <summary>Has a <c>servers</c> row and no definition: removed, its history kept.</summary>
+    private const int RegistryOnlyServerId = 7_633_403;
     private const string ServerName = "LcKnownPatternSrv";
     private const string RolePassword = "known-pattern-live-pw";
     private static readonly CapturingTestLogger Log = new();
@@ -57,6 +63,8 @@ public sealed class KnownPatternWebRoutesLiveTests
             await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
             /* The write functions refuse a server id the registry (config_monitored_servers) does not hold. */
             await DarlingMcpTestData.ExecAsync(connection, ct, $"INSERT INTO config.config_monitored_servers (server_id, name, host, is_enabled) VALUES ({ServerId}, 'kp-a', 'kp-a', TRUE) ON CONFLICT DO NOTHING");
+            await DarlingMcpTestData.ExecAsync(connection, ct, $"INSERT INTO config.config_monitored_servers (server_id, name, host, is_enabled) VALUES ({DefinedOnlyServerId}, 'kp-b', 'kp-b', TRUE) ON CONFLICT DO NOTHING");
+            await DarlingMcpTestData.RegisterServerAsync(connection, RegistryOnlyServerId, "kp-gone", ct);
             /* The three store functions are provisioning SQL, not a migration: create them as the store owner, before the viewer replay grants EXECUTE on them. */
             await DarlingMcpTestData.ExecAsync(connection, ct, "INSERT INTO config.config_service (id) VALUES (1) ON CONFLICT (id) DO NOTHING");
             await DarlingMcpTestData.ExecAsync(connection, ct, DarlingManagedRoles.BuildKnownPatternFunctionsSql("config"));
@@ -206,13 +214,31 @@ public sealed class KnownPatternWebRoutesLiveTests
             Assert.Equal(HttpStatusCode.BadRequest, added.Status);
             Assert.Equal("invalid", added.Body.GetProperty("status").GetString());
             Assert.Contains(expected, added.Body.GetProperty("error").GetString(), StringComparison.Ordinal);
+            Assert.DoesNotContain("(Parameter", added.Body.GetProperty("error").GetString(), StringComparison.Ordinal);
             Assert.Empty(await store.LoadAllAsync(ct));
 
             var seeded = await store.InsertAsync(new PerformanceMonitor.Common.KnownPatterns.KnownPatternInput(null, null, null, null, null, "Keep me.", null), "seed", ct);
             var edited = await SendAsync(client, HttpMethod.Put, $"/api/known-patterns/{seeded}", body);
             Assert.Equal(HttpStatusCode.BadRequest, edited.Status);
             Assert.Contains(expected, edited.Body.GetProperty("error").GetString(), StringComparison.Ordinal);
+            Assert.DoesNotContain("(Parameter", edited.Body.GetProperty("error").GetString(), StringComparison.Ordinal);
             Assert.Equal("Keep me.", Assert.Single(await store.LoadAllAsync(ct)).Note);
+        });
+    }
+
+    [Fact]
+    public async Task AServerTheEditorLists_IsAccepted_EvenBeforeItsFirstConnect_AndARemovedServerIsRefused()
+    {
+        await WithRoutesAsync(new DarlingWebSeat("alice@example.com", true), async (client, store, ct) =>
+        {
+            var added = await SendAsync(client, HttpMethod.Post, "/api/known-patterns", $"{{\"server_id\":{DefinedOnlyServerId},\"note\":\"Just added.\"}}");
+            Assert.True(added.Status == HttpStatusCode.Created, added.Body + " " + Log.Joined);
+            Assert.Equal(DefinedOnlyServerId, Assert.Single(await store.LoadAllAsync(ct)).ServerId);
+
+            var gone = await SendAsync(client, HttpMethod.Post, "/api/known-patterns", $"{{\"server_id\":{RegistryOnlyServerId},\"note\":\"Removed.\"}}");
+            Assert.Equal(HttpStatusCode.BadRequest, gone.Status);
+            Assert.Contains($"server_id {RegistryOnlyServerId} is not a registered server", gone.Body.GetProperty("error").GetString(), StringComparison.Ordinal);
+            Assert.Single(await store.LoadAllAsync(ct));
         });
     }
 

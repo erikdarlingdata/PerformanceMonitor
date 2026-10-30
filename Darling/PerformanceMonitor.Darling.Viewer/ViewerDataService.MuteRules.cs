@@ -13,6 +13,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using NpgsqlTypes;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -72,7 +73,7 @@ WHERE id = $1";
 
     public const string MuteRuleSetEnabledSql = "UPDATE config_mute_rules SET enabled = $2 WHERE id = $1";
 
-    public const string MuteRuleDeleteSql = "DELETE FROM config_mute_rules WHERE id = $1";
+    public const string MuteRuleDeleteSql = MuteRulePurge.DeleteByIdSql;
 
     /// <summary>The <see cref="MuteRule.Reason"/> stamped on a whole-server silence created from the sidebar's
     /// "Silence This Server" one-click, so it reads clearly in the Manage Mute Rules list.</summary>
@@ -362,13 +363,11 @@ WHERE id = $1";
     {
         var rules = await GetMuteRulesAsync(cancellationToken);
         var removed = 0;
-        foreach (var rule in rules)
+        /* #6399: the expiry test is the one the MCP purge_expired_mute_rules tool runs (MuteRulePurge.SelectExpired). */
+        foreach (var rule in MuteRulePurge.SelectExpired(rules, DateTime.UtcNow))
         {
-            if (rule.IsExpired)
-            {
-                await DeleteMuteRuleRawAsync(rule.Id, cancellationToken);
-                removed++;
-            }
+            await DeleteMuteRuleRawAsync(rule.Id, cancellationToken);
+            removed++;
         }
 
         if (removed > 0)

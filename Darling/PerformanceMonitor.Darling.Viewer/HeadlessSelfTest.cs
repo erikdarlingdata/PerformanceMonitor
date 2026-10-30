@@ -48,6 +48,31 @@ public static class HeadlessSelfTest
         => results.Any(r => r.Outcome == StoreConnectionSelfTest.LayerOutcome.Failed) ? 1 : 0;
 
     /// <summary>
+    /// The notes for the startup transforms the probe applied (#6630 review). Two transforms feed the string the probe tests, and
+    /// each is compared on its own: the connect-timeout one against the string it was given, the search-path one against the
+    /// string IT was given, so a note never names a change that did not happen (an explicit <c>Timeout</c> in a BYO string leaves
+    /// the timeout transform a no-op while the search path is still appended). Nothing is returned when neither changed anything.
+    /// </summary>
+    internal static IReadOnlyList<string> DescribeStartupTransforms(
+        string original, string withTimeout, string effective, int connectionTimeoutSeconds)
+    {
+        var notes = new List<string>();
+        if (!string.Equals(withTimeout, original, StringComparison.Ordinal))
+        {
+            notes.Add($"[note ] applied the Viewer's Connection timeout preference ({connectionTimeoutSeconds}s) — "
+                + "testing the same connection string startup uses, not the raw darling.json one");
+        }
+
+        if (!string.Equals(effective, withTimeout, StringComparison.Ordinal))
+        {
+            notes.Add($"[note ] added the store's Search Path ({DarlingStoreConnection.StoreSearchPath}) because the connection string names none — "
+                + "testing the same connection string startup uses, not the raw darling.json one");
+        }
+
+        return notes;
+    }
+
+    /// <summary>
     /// The whole headless run: resolve config exactly like startup (explicit path → DARLING_CONFIG →
     /// conventional locations), print the provenance block, load, print the non-secret connection summary,
     /// run the ladder, print the report. Every failure path returns 1 with the reason printed — never a
@@ -111,12 +136,12 @@ public static class HeadlessSelfTest
         try
         {
             var appSettings = new ViewerAppSettingsStore().Load();
-            effectiveConnectionString =
-                ViewerDataService.ApplyConnectionTimeout(settings.ConnectionString, appSettings.ConnectionTimeoutSeconds);
-            if (!string.Equals(effectiveConnectionString, settings.ConnectionString, StringComparison.Ordinal))
+            var withTimeout = ViewerDataService.ApplyConnectionTimeout(settings.ConnectionString, appSettings.ConnectionTimeoutSeconds);
+            effectiveConnectionString = DarlingStoreConnection.EnsureStoreSearchPath(withTimeout);
+            foreach (var note in DescribeStartupTransforms(
+                settings.ConnectionString, withTimeout, effectiveConnectionString, appSettings.ConnectionTimeoutSeconds))
             {
-                Print($"[note ] applied the Viewer's Connection timeout preference ({appSettings.ConnectionTimeoutSeconds}s) — "
-                    + "testing the same connection string startup uses, not the raw darling.json one");
+                Print(note);
             }
         }
         catch (Exception ex)

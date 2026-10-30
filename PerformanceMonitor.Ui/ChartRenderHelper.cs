@@ -34,6 +34,7 @@ public sealed class ChartRenderHelper
            and DateTimeTicksBottom() replaces the axis object entirely.
            Resetting the plot object avoids tick generator type mismatches. */
         chart.Reset();
+        ChartDisplayScale.Apply(chart); // #6678: Reset swaps in a plot at scale 1
         chart.Plot.Clear();
     }
 

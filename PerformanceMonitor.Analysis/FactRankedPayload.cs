@@ -71,6 +71,29 @@ public static partial class FactRanked
         return entries;
     }
 
+    /// <summary>The facts whose subject is a query and whose one-query case must still be named (#6640): a card of one spilling
+    /// query has no <c>ranked</c> array (it rides at two or more), and <c>get_analysis_facts</c> carries no <c>object_name</c>
+    /// for any fact. These two keys get it, so every other fact's payload keeps its bytes.</summary>
+    private static bool NamesItsSubjectInPayload(string key) =>
+        key is "QUERY_SPILLS" or "PARAMETER_SENSITIVITY";
+
+    /// <summary>
+    /// #6640: adds <c>object_name</c> to a <c>get_analysis_facts</c> entry for the facts <see cref="NamesItsSubjectInPayload"/>
+    /// lists, when the fact has one. Any other fact, or a fact with no name, gets its own payload reference back.
+    /// </summary>
+    public static object AttachSubject(object payload, Fact fact, JsonSerializerOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(payload);
+        ArgumentNullException.ThrowIfNull(fact);
+        if (!NamesItsSubjectInPayload(fact.Key) || string.IsNullOrEmpty(fact.ObjectName))
+            return payload;
+
+        var node = JsonSerializer.SerializeToNode(payload, options)?.AsObject()
+            ?? throw new InvalidOperationException("the fact payload did not serialize to a JSON object");
+        node["object_name"] = fact.ObjectName;
+        return node;
+    }
+
     /// <summary>
     /// Adds <c>ranked</c> to one card's payload object ONLY when the fact ranks two or more objects. With fewer
     /// the very same <paramref name="payload"/> reference comes back, so a card this does not concern is

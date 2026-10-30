@@ -192,7 +192,7 @@ namespace PerformanceMonitor.Common
                "Collection Falling Behind" (#4732) stores the share of due collector slots that were skipped, and the
                share that fires it (5): both are percentages, and the grid showed them as a bare 97.30 and 5.00. */
             "High CPU" or "tempdb Space" or "TempDB Space" or "Volume Free Space" or "Long-Running Job"
-                or "Collection Falling Behind" => $"{value:F1}%",
+                or "Collection Falling Behind" or "Identity Capacity" => $"{value:F1}%",
 
             /* Poison wait carries milliseconds — since #3539 A4 the wait ACCUMULATED over the ten-minute
                window on both engines (before that, SQL Server's average ms per wait; rows from then still
@@ -335,6 +335,11 @@ namespace PerformanceMonitor.Common
                        Both stored the 0 sentinel from the day they shipped and rendered it as "0.00". */
                     or "Capture Down"
                     or "Agent Not Running"
+                    /* #6873: state-only, like the two above. The current value is "3 overdue" against "older than 7 days"; the 0 sentinel is not a measurement. */
+                    or "Backup Overdue"
+                    or "Log Backup Overdue"
+                    or "CHECKDB Overdue"
+                    or "Agent Alert Gaps"
 
                     /* #1881, the metrics that stored a NONZERO number that was not a measurement:
 

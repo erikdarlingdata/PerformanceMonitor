@@ -16,6 +16,7 @@ using System.Text.Json;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Service.FrontDoor;
 using PerformanceMonitor.Darling.Storage;
 using System.Text.Json.Serialization;
 using PerformanceMonitor.Notifications;
@@ -338,15 +339,15 @@ public sealed class DarlingConfig
     /// The embedded MCP server (analysis slice AN4): the same analysis + data-read tool surface Lite
     /// and the Dashboard expose (the analysis class plus the plan-analysis and ~60 STORED data-read
     /// tools), over Streamable HTTP. Default OFF: a headless service should not open a port unless the
-    /// operator asks for it (both apps default their MCP servers off too). Loopback-only and tokenless
-    /// by default; an opt-in <see cref="McpConfig.Network"/> block exposes it on the LAN behind a
+    /// operator asks for it (both apps default their MCP servers off too). Loopback-only by default, and it
+    /// needs a token there too (<see cref="McpConfig.AllowTokenlessLoopback"/> is the opt-out); an opt-in <see cref="McpConfig.Network"/> block exposes it on the LAN behind a
     /// required bearer token + an in-app CIDR check (managed-mode only). Optional — omit the section entirely.
     /// </summary>
     [JsonPropertyName("mcp")]
     public McpConfig Mcp { get; set; } = new();
 
     /// <summary>
-    /// The embedded web dashboard (#1562): a second, independent Kestrel host serving a read-only,
+    /// The embedded web dashboard (#1562): a second, independent Kestrel host serving a
     /// browser-based view of the monitoring store over HTTP — a SEPARATE port + kill switch + exposure block
     /// from the MCP server (they gate different blast radii). Default OFF: a headless service should not open a
     /// port unless the operator asks. Loopback-only by default; an opt-in <see cref="WebConfig.Network"/> block
@@ -397,6 +398,26 @@ public sealed class DarlingConfig
     }
 
     private ReadsConfig _reads = new();
+
+    /// <summary>
+    /// The front door (#6840): one web address and one MCP endpoint that routes to several Darling stores, each of which keeps
+    /// its own monitoring database. File-only, like <see cref="Peers"/>, and absent or <c>"enabled": false</c> is today's
+    /// behavior. In front-door mode this process holds no store of its own and runs no collector. See <see cref="FrontDoorConfig"/>.
+    /// </summary>
+    [JsonPropertyName("frontDoor")]
+    public FrontDoorConfig FrontDoor
+    {
+        get => _frontDoor;
+
+        /* "frontDoor": null means off, the same as an absent block (the #5460 heartbeat rule). */
+        set => _frontDoor = value ?? new();
+    }
+
+    private FrontDoorConfig _frontDoor = new();
+
+    /// <summary>True when this process is a front door (#6840): <c>frontDoor.enabled</c>.</summary>
+    [JsonIgnore]
+    public bool IsFrontDoor => FrontDoor.Enabled;
 
     public static string ResolveConfigPath(string? explicitPath = null) =>
         ResolveConfigPath(explicitPath, Environment.GetEnvironmentVariable);
@@ -463,6 +484,9 @@ public sealed class DarlingConfig
             throw new InvalidDataException("Configuration file parsed to null.");
         }
 
+        /* #6468: a file with no "servers" key, or "servers": null, is the same as an empty list (a start with no servers yet). */
+        config.Servers ??= new List<MonitoredServer>();
+
         /* Capture every env:/file: reference AS WRITTEN, before the resolution below overwrites any slot
            with the secret it points at. */
         config.SecretReferencesAsWritten = DarlingOwnedSecrets.CollectReferences(config);
@@ -508,7 +532,12 @@ public sealed class DarlingConfig
     {
         var problems = new List<string>();
 
-        if (Postgres is null)
+        if (IsFrontDoor)
+        {
+            /* #6840: a front door has no store of its own, so no postgres section is required of it (and none is read).
+               The frontDoor block itself is checked below, with the peers block. */
+        }
+        else if (Postgres is null)
         {
             problems.Add("postgres section is required.");
         }
@@ -565,14 +594,13 @@ public sealed class DarlingConfig
         }
 
         problems.AddRange(PeersConfig.Validate(Peers));
+        problems.AddRange(FrontDoorConfig.Validate(FrontDoor));
         /* #5450: the heartbeat block, for the same reason (a broken one is reported even with no servers yet). */
         problems.AddRange(HeartbeatConfig.Validate(Heartbeat));
 
-        if (Servers is null || Servers.Count == 0)
-        {
-            problems.Add("servers must contain at least one entry.");
-            return problems;
-        }
+        /* #6468: no servers is a valid configuration. A first install starts with an empty list and the person adds the
+           first server in the Viewer or the web dashboard, so an empty list is not a problem to report here. */
+        Servers ??= new List<MonitoredServer>();
 
         for (int i = 0; i < Servers.Count; i++)
         {
@@ -841,10 +869,11 @@ public sealed class AlertsConfig
     public int RunnableQueueCriticalPerScheduler { get; set; } = RunnableQueueEvaluator.DefaultCriticalPerScheduler;
 
     /// <summary>The Client Timeouts alert (#5640) switch: client attentions (a client cancelled or timed out a query) per
-    /// minute, from the attention collector. OFF by default: the bars are a guess until checked against captured data.
-    /// Persisted as the store column <c>client_timeouts_enabled</c> (V179).</summary>
+    /// minute, from the attention collector. ON by default since #5736 (V216): the bars are relative to each server's own normal rate, and a
+    /// 7-day replay of them over a 42-server production store would have paged twice, both at Warning. Persisted as the store column
+    /// <c>client_timeouts_enabled</c> (V179, default moved to TRUE by V216).</summary>
     [JsonPropertyName("clientTimeoutsEnabled")]
-    public bool ClientTimeoutsEnabled { get; set; }
+    public bool ClientTimeoutsEnabled { get; set; } = true;
 
     /// <summary>Client Timeouts Warning FLOOR (#5640, #5736), attentions per minute over the covered span. Shipped 10. The bar is the higher of this and
     /// the Warning multiple times the server's own baseline. Read through
@@ -867,6 +896,37 @@ public sealed class AlertsConfig
     /// <c>client_timeouts_critical_multiple</c> (V211).</summary>
     [JsonPropertyName("clientTimeoutsCriticalMultiple")]
     public int ClientTimeoutsCriticalMultiple { get; set; } = AttentionBaselineMath.DefaultCriticalMultiple;
+
+    /// <summary>The "Identity Capacity" alert (#6875): fires when an identity column is at or past the warning bar (or the critical bar) of
+    /// its type's capacity. Ships OFF, like the other alerts that start firing on upgrade. Store column <c>identity_capacity_enabled</c> (V224).</summary>
+    [JsonPropertyName("identityCapacityEnabled")]
+    public bool IdentityCapacityEnabled { get; set; }
+
+    /// <summary>Percent used at which an identity column warns (default 70). Store column <c>identity_capacity_warning_percent</c> (V224). A per-server or
+    /// per-database threshold override (<c>identity_capacity.warning_percent</c>) replaces it.</summary>
+    [JsonPropertyName("identityCapacityWarningPercent")]
+    public int IdentityCapacityWarningPercent { get; set; } = 70;
+
+    /// <summary>Percent used at which an identity column is critical (default 90). Store column <c>identity_capacity_critical_percent</c> (V224).</summary>
+    [JsonPropertyName("identityCapacityCriticalPercent")]
+    public int IdentityCapacityCriticalPercent { get; set; } = 90;
+    /// <summary>The "Agent Alert Gaps" alert (#6874): fires when a server's SQL Server Agent alert setup has a gap (no alert for severities 19 to
+    /// 25 or errors 823 to 825, an alert that tells no operator, a disabled alert, a firing that told no one). Ships OFF, like the other alerts that
+    /// start firing on upgrade. Store column <c>agent_alert_gaps_enabled</c> (V222).</summary>
+    [JsonPropertyName("agentAlertGapsEnabled")]
+    public bool AgentAlertGapsEnabled { get; set; }
+    /// <summary>The "Backup Overdue", "Log Backup Overdue" and "CHECKDB Overdue" alerts (#6873): each fires when a database's last full backup (7 days),
+    /// last log backup (60 minutes) or last good CHECKDB (14 days) is older than its threshold, judged by <c>DatabaseProtectionBands</c>. All three ship
+    /// OFF, like the other alerts that start firing on upgrade. Store columns <c>backup_overdue_enabled</c>, <c>log_backup_overdue_enabled</c> and
+    /// <c>checkdb_overdue_enabled</c> (V223).</summary>
+    [JsonPropertyName("backupOverdueEnabled")]
+    public bool BackupOverdueEnabled { get; set; }
+
+    [JsonPropertyName("logBackupOverdueEnabled")]
+    public bool LogBackupOverdueEnabled { get; set; }
+
+    [JsonPropertyName("checkDbOverdueEnabled")]
+    public bool CheckDbOverdueEnabled { get; set; }
 
     [JsonPropertyName("longRunningQueryEnabled")]
     public bool LongRunningQueryEnabled { get; set; } = true;
@@ -1044,6 +1104,27 @@ public sealed class AlertsConfig
     /// which is what setting it there asks for.</summary>
     [JsonPropertyName("deadlockCriticalPerHour")]
     public double DeadlockCriticalPerHour { get; set; } = ServerHealthThresholds.DeadlockCriticalPerHourDefault;
+
+    /// <summary>#6927 (V228): the blocking health band's WARNING tier, blocked-process reports per hour over the window a card
+    /// counted them in. Seeded from <see cref="ServerHealthThresholds.BlockingWarnPerHour"/>, named rather than restated, so a store
+    /// that never sets it bands as every earlier build did. <c>BlockingBandThresholds</c> clamps it on read.</summary>
+    [JsonPropertyName("blockingWarnPerHour")]
+    public double BlockingWarnPerHour { get; set; } = ServerHealthThresholds.BlockingWarnPerHour;
+
+    /// <summary>#6927 (V228): the blocking health band's CRITICAL tier, reports per hour, seeded from
+    /// <see cref="ServerHealthThresholds.BlockingCriticalPerHour"/>.</summary>
+    [JsonPropertyName("blockingCriticalPerHour")]
+    public double BlockingCriticalPerHour { get; set; } = ServerHealthThresholds.BlockingCriticalPerHour;
+
+    /// <summary>#6927 (V228): the blocking band's WARNING bar on the longest single block, seconds, seeded from
+    /// <see cref="ServerHealthThresholds.BlockingWarnWaitSeconds"/>.</summary>
+    [JsonPropertyName("blockingWarnWaitSeconds")]
+    public double BlockingWarnWaitSeconds { get; set; } = ServerHealthThresholds.BlockingWarnWaitSeconds;
+
+    /// <summary>#6927 (V228): the blocking band's CRITICAL bar on the longest single block, seconds, seeded from
+    /// <see cref="ServerHealthThresholds.BlockingCriticalWaitSeconds"/>.</summary>
+    [JsonPropertyName("blockingCriticalWaitSeconds")]
+    public double BlockingCriticalWaitSeconds { get; set; } = ServerHealthThresholds.BlockingCriticalWaitSeconds;
 
     [JsonPropertyName("longRunningJobEnabled")]
     public bool LongRunningJobEnabled { get; set; } = true;
@@ -1385,8 +1466,8 @@ public sealed class SmtpConfig
 
 /// <summary>
 /// The embedded MCP server's config. Port 5152 keeps the product's local MCP family
-/// non-colliding on one machine (Dashboard 5150, Lite 5151, Darling 5152). Loopback-only and
-/// tokenless by default; the optional <see cref="Network"/> block opts into LAN exposure behind a
+/// non-colliding on one machine (Dashboard 5150, Lite 5151, Darling 5152). Loopback-only by default,
+/// with a bearer token required there too unless <see cref="AllowTokenlessLoopback"/> is on; the optional <see cref="Network"/> block opts into LAN exposure behind a
 /// required bearer token + an in-app CIDR check (darling-network-endpoints, managed-mode only).
 /// </summary>
 public sealed class McpConfig
@@ -1416,21 +1497,37 @@ public sealed class McpConfig
     public bool AllowWrites { get; set; }
 
     /// <summary>
-    /// Default OFF. Additionally offers <c>add_servers</c> and <c>remove_server</c>, which change the servers
-    /// this service connects to as its own account. Has no effect unless <see cref="AllowWrites"/> is on.
+    /// Default OFF. Additionally offers <c>add_servers</c>, <c>edit_server</c>, <c>remove_server</c> and
+    /// <c>set_server_action</c>. The first three change the servers this service connects to as its own
+    /// account; <c>set_server_action</c> turns one server's switch for an agent action (<c>force_plan</c>,
+    /// <c>evict_plan</c>, <c>kill_session</c>) on or off. Has no effect unless <see cref="AllowWrites"/> is on.
     /// </summary>
     [JsonPropertyName("allowServerAdmin")]
     public bool AllowServerAdmin { get; set; }
 
     /// <summary>
     /// Default OFF (#5632 Phase A, ruling R2). Offers <c>claim_investigation_request</c> and
-    /// <c>submit_investigation_report</c>, which write only investigation state. Served only when a bearer token
+    /// <c>submit_investigation_report</c>, which write investigation state, and the 13 Level 2 agent action tools. Every
+    /// action call needs an <c>agent_action</c> argument and a live claim, and the actions also need
+    /// <c>agent_actions_enabled</c> (default on). The 9 store actions need a Level 2 route; the 4 server actions (session
+    /// kill, plan force, unforce and evict) need a Level 3 request, the server's own action switch (default off) and a
+    /// remediation login reference. Served only when a bearer token
     /// resolves AND <see cref="AllowWrites"/> is off: one token cannot tell an agent from a person, so with both on the
     /// investigation tools stay off and the start logs one Critical line. File-only and restart-only, like
     /// <see cref="AllowWrites"/>. The two investigation reads are ordinary reads and need no setting.
     /// </summary>
     [JsonPropertyName("allowInvestigations")]
     public bool AllowInvestigations { get; set; }
+
+    /// <summary>
+    /// Default OFF. A loopback-only MCP server needs a bearer token like an exposed one: with no
+    /// <see cref="McpNetworkConfig.EncryptedToken"/> or <see cref="McpNetworkConfig.Token"/>, an enabled MCP server does not
+    /// start, and the log names the settings to add. On, a loopback-only server with no token serves local clients
+    /// without one, with the write and investigation tools off (they need the token), and every start logs one line
+    /// saying so. A configured token always gates, whatever this says. File-only and restart-only.
+    /// </summary>
+    [JsonPropertyName("allowTokenlessLoopback")]
+    public bool AllowTokenlessLoopback { get; set; }
 
     /// <summary>
     /// Default OFF. <c>add_servers</c> defaults to Windows authentication, where this service presents its own
@@ -1457,8 +1554,8 @@ public sealed class McpConfig
     public string DataDetail { get; set; } = McpDataDetailModes.DefaultValue;
 
     /// <summary>
-    /// Opt-in network exposure for the MCP server (darling-network-endpoints). Omit for the secure
-    /// default = loopback-only, tokenless HTTP (today's behavior). Managed-mode only; ignored in BYO
+    /// Opt-in network exposure for the MCP server (darling-network-endpoints). Omit <c>listen</c> for the
+    /// default = loopback-only HTTP; the block's token gates that listener too. Managed-mode only; ignored in BYO
     /// with a caller warning. Any missing precondition (token / valid allowFrom / managed, and a usable
     /// certificate when <c>tls</c> is set, #5288) keeps MCP loopback-only + LogCritical — enforced in the MCP
     /// host, NEVER in the all-fatal <see cref="DarlingConfig.Validate"/> (D-validate). See
@@ -1466,6 +1563,70 @@ public sealed class McpConfig
     /// </summary>
     [JsonPropertyName("network")]
     public McpNetworkConfig? Network { get; set; }
+
+    /// <summary>
+    /// Named bearer tokens, each with a role (#6542), so one service serves an operator and its investigation agents at once.
+    /// Null or empty keeps the legacy single token (<see cref="McpNetworkConfig.Token"/> or <see cref="McpNetworkConfig.EncryptedToken"/>)
+    /// exactly as before. With entries, the token on each request picks the tool set: <c>operator</c> gets the reads and the write
+    /// tools (never the claim or submit tools), <c>agent</c> gets the reads, the investigation tools and the Level 2 action tools
+    /// (never a tool in <c>DarlingMcpWritePolicy.NeverAgentTools</c>), and an agent's identity is the entry's name. A legacy token
+    /// set beside them keeps its role from <see cref="AllowWrites"/> and <see cref="AllowInvestigations"/>. File-only and restart-only.
+    /// </summary>
+    [JsonPropertyName("tokens")]
+    public List<McpTokenEntry>? Tokens { get; set; }
+
+    /// <summary>True when <see cref="Tokens"/> has an entry. An entry that cannot be served (no value, a bad name or role) still counts:
+    /// named tokens were asked for, so a start must not fall back to serving without credentials.</summary>
+    [JsonIgnore]
+    public bool HasNamedTokens => Tokens is { Count: > 0 } && Tokens.Any(t => t is not null);
+}
+
+/// <summary>
+/// One named MCP bearer token (#6542): a <see cref="Name"/> (1 to 64 of <c>A-Za-z0-9._:-</c>), the token itself
+/// (<see cref="EncryptedToken"/> or <see cref="Token"/>, the same rules as <c>mcp.network</c>'s), and a <see cref="Role"/>,
+/// <c>operator</c> or <c>agent</c>. The name is what logs and the journal record; the value is never logged.
+/// </summary>
+public sealed class McpTokenEntry
+{
+    /// <summary>The <c>operator</c> role.</summary>
+    public const string OperatorRole = "operator";
+
+    /// <summary>The <c>agent</c> role.</summary>
+    public const string AgentRole = "agent";
+
+    [JsonPropertyName("name")]
+    public string? Name { get; set; }
+
+    /// <summary>The DPAPI-encrypted token (Windows), as <c>--encrypt-password</c> writes it. Preferred over <see cref="Token"/>.</summary>
+    [JsonPropertyName("encryptedToken")]
+    public string? EncryptedToken { get; set; }
+
+    /// <summary>The plaintext token, or an <c>env:</c>/<c>file:</c> reference.</summary>
+    [JsonPropertyName("token")]
+    public string? Token { get; set; }
+
+    [JsonPropertyName("role")]
+    public string? Role { get; set; }
+
+    /// <summary>The token, preferring <see cref="EncryptedToken"/> over <see cref="Token"/>; null when neither is set. Throws when an
+    /// encrypted token cannot be read.</summary>
+    public string? ResolveToken()
+    {
+        /* #6542: the error names this entry's own setting, not mcp.network.token, so an operator fixes the right line. */
+        var setting = $"mcp.tokens[{Name}]";
+        if (!string.IsNullOrWhiteSpace(EncryptedToken))
+        {
+            if (!OperatingSystem.IsWindows())
+            {
+                throw new PlatformNotSupportedException(
+                    setting + ".encryptedToken requires Windows (DPAPI); use the plaintext \"token\" on other platforms.");
+            }
+
+            return DarlingSecrets.Unprotect(EncryptedToken);
+        }
+
+        return string.IsNullOrWhiteSpace(Token) ? null : DarlingSecretSource.Resolve(Token, setting + ".token");
+    }
 }
 
 /// <summary>
@@ -1524,7 +1685,7 @@ public sealed class PostgresNetworkConfig
 
 /// <summary>
 /// Opt-in NETWORK exposure for the embedded MCP server (darling-network-endpoints). Omit the whole
-/// <c>network</c> object for the secure default = today's loopback-only, tokenless HTTP. When present
+/// <c>listen</c> for the default = loopback-only HTTP, gated by this block's token. When present
 /// with a non-loopback <see cref="Listen"/> AND managed mode AND a token AND a valid
 /// <see cref="AllowFrom"/>, the MCP host binds the network interface behind a required bearer token +
 /// an in-app CIDR check (D3); any missing precondition keeps MCP loopback-only + LogCritical
@@ -1595,7 +1756,7 @@ public sealed class McpNetworkConfig
     /// In NETWORK mode the Host-header guard admits that one exact name, compared ignoring case, beside the
     /// names it always admits; it never admits a name the operator did not write here. In loopback-only mode,
     /// and in every mode that degrades to it (an unreadable token, a refused certificate), the guard does NOT
-    /// admit it: that surface is tokenless, and the name exists for the network listener's clients. With
+    /// admit it: the name exists for the network listener's clients, and a loopback-only listener has no use for it. With
     /// <see cref="Tls"/> set it is also the name the certificate should carry as a dNSName SAN, and the host
     /// warns (never refuses) when it does not. A value that is set but is not a bare DNS name is ignored with one
     /// Warning at start. A name written in Unicode is admitted as the ASCII (punycode) name a client sends in
@@ -1785,7 +1946,7 @@ public sealed class McpNetworkConfig
 /// required token → HMAC session cookie + an in-app CIDR check (darling-network-endpoints, managed-mode only).
 /// A SEPARATE surface from <see cref="McpConfig"/> — its own enable flag, port, token, and exposure block —
 /// because the two gate different blast radii (MCP's token guards analyze_server's live outbound SQL
-/// connections; the web dashboard is read-only over the store).
+/// connections; the web dashboard works on the collected store and changes only monitoring settings).
 /// </summary>
 public sealed class WebConfig
 {
@@ -1810,8 +1971,44 @@ public sealed class WebConfig
     public string PublicBaseUrl { get; set; } = "";
 
     /// <summary>
-    /// Opt-in network exposure for the web dashboard (darling-network-endpoints). Omit for the secure
-    /// default = loopback-only HTTP. Managed-mode only; ignored in BYO with a caller warning. Any missing
+    /// Default OFF. A loopback-only dashboard needs a token like an exposed one: with no
+    /// <see cref="WebNetworkConfig.EncryptedToken"/> or <see cref="WebNetworkConfig.Token"/>, an enabled dashboard does not
+    /// start, and the log names the settings to add. On, a loopback-only dashboard with no token serves local browsers
+    /// without one, for reads only (a change is refused with a message naming the token setting), and every start logs
+    /// one line saying so. A configured token always gates, whatever this says. File-only and restart-only.
+    /// </summary>
+    [JsonPropertyName("allowTokenlessLoopback")]
+    public bool AllowTokenlessLoopback { get; set; }
+
+    /// <summary>
+    /// Default OFF; a darling.json without the key keeps it off, so an upgrade from 3.11 keeps that release's web scope until the
+    /// operator turns it on. The files this product writes for a NEW install (the MSI's minimal darling.json and darling.sample.json) set
+    /// it to true explicitly (#6600). On the managed store the dashboard signs in as the read-only <c>viewer</c> role, so
+    /// its Admin writes were list-only. On, the dashboard opens a second, small connection pool that signs in as the managed <c>admin</c> role
+    /// (the Viewer's login) and uses it only for those writes and their access checks, and only for a person signed in as an admin; every read
+    /// stays on <c>viewer</c>. Off keeps the dashboard list-only on the managed store. A store you bring yourself is unchanged either way.
+    /// File-only and restart-only.
+    /// </summary>
+    [JsonPropertyName("allowAdminWrites")]
+    public bool AllowAdminWrites { get; set; }
+
+    /// <summary>
+    /// Default OFF; a darling.json without the key keeps it off. Adding or editing a server in the web dashboard defaults to Windows
+    /// authentication, where this service presents its own computer account to the host the form names. Off, the web add and edit refuse a
+    /// Windows-authentication server that also sets <c>trust_server_certificate</c> or an <c>encrypt_mode</c> other than Mandatory or
+    /// Strict, because the service could not confirm which server it reached. An edit is judged only when it changes the machine the entry
+    /// names or its sign-in and certificate settings (the host, the port, the auth type, <c>trust_server_certificate</c>,
+    /// <c>encrypt_mode</c> or the Query Store replica), on the server as it would be saved; <c>read_only_intent</c> and
+    /// <c>multi_subnet_failover</c> do not change the host the entry names, so they are not judged. On, the web accepts
+    /// them. SQL authentication and the Entra modes are not affected. The same rule as <see cref="McpConfig.AllowWindowsAuthOverUnverifiedTls"/>
+    /// for MCP; the <c>--add-server</c> command is the operator's own and is not gated. File-only and restart-only.
+    /// </summary>
+    [JsonPropertyName("allowWindowsAuthOverUnverifiedTls")]
+    public bool AllowWindowsAuthOverUnverifiedTls { get; set; }
+
+    /// <summary>
+    /// Opt-in network exposure for the web dashboard (darling-network-endpoints). Omit <c>listen</c> for the
+    /// default = loopback-only HTTP; the block's token gates that listener too. Managed-mode only; ignored in BYO with a caller warning. Any missing
     /// precondition (token / valid allowFrom / managed) keeps the dashboard loopback-only + LogCritical —
     /// enforced in the web host, NEVER in the all-fatal <see cref="DarlingConfig.Validate"/> (D-validate).
     /// See <see cref="WebNetworkConfig"/>.
@@ -2366,7 +2563,8 @@ public sealed class WebhooksConfig
     public string GenericHeaders { get; set; } = "";
 
     /// <summary>The JSON body, with <c>{{metric}}</c>/<c>{{server}}</c>/… placeholders; empty uses the shared default.
-    /// <c>{{investigation_json}}</c> (#5821) is the investigation request the alert opened or joined, empty when it opened none.</summary>
+    /// <c>{{investigation_json}}</c> (#5821) is the investigation request the alert opened or joined, empty when it opened none.
+    /// <c>{{status}}</c> (#6718) is <c>firing</c> on a fire and <c>resolved</c> on a resolution send.</summary>
     [JsonPropertyName("genericBodyTemplate")]
     public string GenericBodyTemplate { get; set; } = "";
 
@@ -2445,7 +2643,9 @@ public sealed class MonitoredServer
     /// TCP port, for PostgreSQL targets on a non-default port. <c>0</c> (the default) means "use the
     /// driver's default", which is 5432.
     /// <para>Unused for SQL Server, which carries a non-default port in the host itself as
-    /// <c>host,1433</c> — that convention is left alone rather than migrated.</para>
+    /// <c>host,1433</c> — that convention is left alone rather than migrated. A SQL Server entry with a non-zero
+    /// <c>port</c> still starts, but <c>--validate-config</c> and the service log warn that it is ignored (#6583), and
+    /// <c>add_servers</c> and <c>edit_server</c> refuse it.</para>
     /// </summary>
     [JsonPropertyName("port")]
     public int Port { get; set; }
@@ -2516,6 +2716,15 @@ public sealed class MonitoredServer
     [JsonPropertyName("alertDeliveryModeOverride")]
     [JsonConverter(typeof(JsonStringEnumConverter))]
     public AlertNotificationMode? AlertDeliveryModeOverride { get; set; }
+
+    /// <summary>
+    /// #6771: this server's own plan-capture setting, read from <c>config_monitored_servers.capture_plans</c>. Null means "use the
+    /// service-wide setting" (<see cref="DarlingConfig.CapturePlans"/>), true keeps plan XML for this server whatever the service-wide
+    /// setting says, false collects this server's statistics without plan XML. Store-only: darling.json has no per-server counterpart,
+    /// so it is not read from or written to the file.
+    /// </summary>
+    [JsonIgnore]
+    public bool? CapturePlans { get; set; }
 
     [JsonIgnore]
     public bool UsesSqlAuth => string.Equals(Auth, "sql", StringComparison.OrdinalIgnoreCase);
@@ -2965,6 +3174,11 @@ public sealed class PeersConfig
         return problems;
     }
 
+    /// <summary>The credential-shaped substring <paramref name="text"/> carries, or null. The front door's store names use the
+    /// same list, because a store name goes into a header and a page address.</summary>
+    internal static string? FindCredentialShapedToken(string text)
+        => CredentialShapedTokens.FirstOrDefault(t => text.Contains(t, StringComparison.OrdinalIgnoreCase));
+
     private static IEnumerable<string> PeerStrings(PeerStoreConfig peer)
     {
         yield return peer.Name ?? "";
@@ -3021,4 +3235,324 @@ public sealed class ReadsConfig
     /// <summary>How many long reads run at once (default 2). 0 turns the limit off.</summary>
     [JsonPropertyName("maxHeavyReads")]
     public int MaxHeavyReads { get; set; } = ReadAdmission.DefaultMaxHeavyReads;
+}
+
+/// <summary>
+/// The <c>frontDoor</c> block of darling.json (#6840): this process is a front door that holds no monitoring database of its
+/// own and forwards the MCP and web surfaces to the Darling stores listed in <see cref="Stores"/>.
+///
+/// <para><b>File-only, and its own block.</b> It is not part of <see cref="PeersConfig"/>: that text goes verbatim to every MCP
+/// client and its validator refuses secrets, while this block holds every peer's access token. No read surface returns it.
+/// Each token is an <c>*EncryptedToken</c> (DPAPI), a plain <c>*Token</c>, or an <c>env:</c>/<c>file:</c> reference, resolved the
+/// way <see cref="McpTokenEntry.ResolveToken"/> resolves its own. An edit takes effect on the next service restart.</para>
+/// </summary>
+public sealed class FrontDoorConfig
+{
+    /// <summary>Seconds between directory refreshes when <c>refreshSeconds</c> is omitted.</summary>
+    public const int DefaultRefreshSeconds = 300;
+
+    /// <summary>The shortest refresh a config may ask for.</summary>
+    public const int MinRefreshSeconds = 30;
+
+    /// <summary>The longest refresh a config may ask for.</summary>
+    public const int MaxRefreshSeconds = 3600;
+
+    /// <summary>Seconds a fan-out waits for one store when <c>peerTimeoutSeconds</c> is omitted.</summary>
+    public const int DefaultPeerTimeoutSeconds = 150;
+
+    /// <summary>The shortest peer timeout a config may ask for.</summary>
+    public const int MinPeerTimeoutSeconds = 30;
+
+    /// <summary>The longest peer timeout a config may ask for.</summary>
+    public const int MaxPeerTimeoutSeconds = 600;
+
+    /// <summary>Off unless set: an absent block, or <c>"enabled": false</c>, is today's single-store behavior.</summary>
+    [JsonPropertyName("enabled")]
+    public bool Enabled { get; set; }
+
+    /// <summary>Seconds between reads of each store's server list.</summary>
+    [JsonPropertyName("refreshSeconds")]
+    public int RefreshSeconds { get; set; } = DefaultRefreshSeconds;
+
+    /// <summary>Seconds one forwarded call to a store may take before the front door gives up on it.</summary>
+    [JsonPropertyName("peerTimeoutSeconds")]
+    public int PeerTimeoutSeconds { get; set; } = DefaultPeerTimeoutSeconds;
+
+    /// <summary>The directory refresh interval a caller uses: <see cref="RefreshSeconds"/> held between the limits. <c>Validate</c> does
+    /// not run in the processes that host the front door's directory and MCP router, so a 0 here would refresh without a pause and a
+    /// negative value would stop the host (#6840).</summary>
+    internal TimeSpan EffectiveRefreshInterval() =>
+        TimeSpan.FromSeconds(Math.Clamp(RefreshSeconds, MinRefreshSeconds, MaxRefreshSeconds));
+
+    /// <summary>The per-call deadline a caller uses: <see cref="PeerTimeoutSeconds"/> held between the limits, for the same reason.</summary>
+    internal TimeSpan EffectivePeerTimeout() =>
+        TimeSpan.FromSeconds(Math.Clamp(PeerTimeoutSeconds, MinPeerTimeoutSeconds, MaxPeerTimeoutSeconds));
+
+    /// <summary>The Darling stores this front door routes to.</summary>
+    [JsonPropertyName("stores")]
+    public List<FrontDoorStoreConfig> Stores { get; set; } = new();
+
+    /// <summary>The valid store entries as routing records, in file order. An entry that fails validation is left out, so a
+    /// caller that has not validated never sees a half-built store.</summary>
+    /* The same name twice (names compare ignoring case) is one store, the first entry: this host does not validate the file, Validate
+       refuses the duplicate, and a second entry would otherwise break the peer client's name table at start and make two rows share one
+       entry's health and server list. */
+    internal IReadOnlyList<FrontDoorStore> ToStores()
+        => (Stores ?? new()).Select(s => s?.ToStore()).Where(s => s is not null).Select(s => s!)
+            .GroupBy(s => s.Name, StringComparer.OrdinalIgnoreCase).Select(g => g.First()).ToList();
+
+    /// <summary>Notes for the log that are not refusals (D3): a plain-http address to a store that is not on this machine sends
+    /// that store's token in clear text. Guidance only, like the MCP listener without TLS. Names the store, never an address.</summary>
+    public IReadOnlyList<string> Warnings()
+    {
+        var warnings = new List<string>();
+        foreach (var store in Stores ?? new())
+        {
+            if (store is null || string.IsNullOrWhiteSpace(store.Name))
+            {
+                continue;
+            }
+
+            foreach (var (setting, url) in new[] { ("mcpUrl", store.McpUrl), ("webUrl", store.WebUrl) })
+            {
+                if (FrontDoorStoreConfig.TryParseUrl(url, out var uri) && uri.Scheme == Uri.UriSchemeHttp && !uri.IsLoopback)
+                {
+                    warnings.Add($"frontDoor.stores['{store.Name.Trim()}'].{setting} is plain http to a host that is not this machine, " +
+                        "so the store's access token crosses the network in clear text. Use https if the store serves it.");
+                }
+            }
+        }
+
+        return warnings;
+    }
+
+    /// <summary>
+    /// Validates a front-door block; returns human-readable problems (empty = valid). Nothing is checked when the block is off.
+    /// A problem never carries a URL's text or a token.
+    /// </summary>
+    public static IReadOnlyList<string> Validate(FrontDoorConfig? frontDoor)
+    {
+        var problems = new List<string>();
+        if (frontDoor is null || !frontDoor.Enabled)
+        {
+            return problems;
+        }
+
+        if (frontDoor.RefreshSeconds is < MinRefreshSeconds or > MaxRefreshSeconds)
+        {
+            problems.Add($"frontDoor.refreshSeconds must be between {MinRefreshSeconds} and {MaxRefreshSeconds} (got {frontDoor.RefreshSeconds}).");
+        }
+
+        if (frontDoor.PeerTimeoutSeconds is < MinPeerTimeoutSeconds or > MaxPeerTimeoutSeconds)
+        {
+            problems.Add($"frontDoor.peerTimeoutSeconds must be between {MinPeerTimeoutSeconds} and {MaxPeerTimeoutSeconds} (got {frontDoor.PeerTimeoutSeconds}).");
+        }
+
+        if (frontDoor.Stores is not { Count: > 0 })
+        {
+            problems.Add("frontDoor.stores needs at least one store when frontDoor.enabled is true.");
+            return problems;
+        }
+
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        for (var i = 0; i < frontDoor.Stores.Count; i++)
+        {
+            var store = frontDoor.Stores[i];
+            if (store is null)
+            {
+                problems.Add($"frontDoor.stores[{i}] is empty.");
+                continue;
+            }
+
+            /* The index names the entry, never the name: a name that fails the credential check can BE the offending text. */
+            var label = $"frontDoor.stores[{i}]";
+            var name = store.Name?.Trim() ?? "";
+            if (!FrontDoorStoreConfig.NamePattern.IsMatch(name))
+            {
+                problems.Add($"{label}: name is required, 1 to 64 characters of A-Z, a-z, 0-9, '.', '_' and '-'. It goes into a request header and a page address.");
+            }
+            else if (PeersConfig.FindCredentialShapedToken(name) is not null)
+            {
+                problems.Add($"{label}: name looks like it carries a credential. A store name is shown on every page and sent in a header, so name the store, not how to reach it.");
+            }
+            else if (!seen.Add(name))
+            {
+                problems.Add($"{label}: name is used by another store (names are compared ignoring case).");
+            }
+
+            if (string.IsNullOrWhiteSpace(store.McpUrl))
+            {
+                problems.Add($"{label}: mcpUrl is required.");
+            }
+            else if (FrontDoorStoreConfig.UrlProblem(store.McpUrl) is { } mcpProblem)
+            {
+                problems.Add($"{label}: mcpUrl {mcpProblem}");
+            }
+
+            if (!string.IsNullOrWhiteSpace(store.WebUrl) && FrontDoorStoreConfig.UrlProblem(store.WebUrl) is { } webProblem)
+            {
+                problems.Add($"{label}: webUrl {webProblem}");
+            }
+
+            if (string.IsNullOrWhiteSpace(store.McpEncryptedToken) && string.IsNullOrWhiteSpace(store.McpToken))
+            {
+                problems.Add($"{label}: an MCP token is required (mcpEncryptedToken, or mcpToken as text or an env:/file: reference).");
+            }
+
+            /* A store with a web address and no web token would answer 502 on every web request at run time. */
+            if (!string.IsNullOrWhiteSpace(store.WebUrl)
+                && string.IsNullOrWhiteSpace(store.WebEncryptedToken) && string.IsNullOrWhiteSpace(store.WebToken))
+            {
+                problems.Add($"{label}: a web token is required when webUrl is set (webEncryptedToken, or webToken as text or an env:/file: reference).");
+            }
+
+            if (!string.IsNullOrWhiteSpace(store.CertificateSha256) && FrontDoorStoreConfig.NormalizePin(store.CertificateSha256) is null)
+            {
+                problems.Add($"{label}: certificateSha256 must be the certificate's SHA-256 thumbprint, 64 hex characters (colons and spaces allowed).");
+            }
+        }
+
+        return problems;
+    }
+}
+
+/// <summary>One store a front door routes to: a name, the address of its MCP endpoint and (optionally) its web dashboard, the
+/// access tokens, and an optional certificate pin. See <see cref="FrontDoorConfig"/>.</summary>
+public sealed class FrontDoorStoreConfig
+{
+    internal static readonly System.Text.RegularExpressions.Regex NamePattern =
+        new("^[A-Za-z0-9._-]{1,64}$", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+    /// <summary>The store's name: 1 to 64 of <c>A-Za-z0-9._-</c>. It is the <c>X-Darling-Store</c> header value and the page address's store.</summary>
+    [JsonPropertyName("name")]
+    public string? Name { get; set; }
+
+    /// <summary>The store's MCP endpoint, an absolute http or https URL with no query. Required.</summary>
+    [JsonPropertyName("mcpUrl")]
+    public string? McpUrl { get; set; }
+
+    /// <summary>The store's operator-role MCP token, DPAPI-encrypted. Preferred over <see cref="McpToken"/>.</summary>
+    [JsonPropertyName("mcpEncryptedToken")]
+    public string? McpEncryptedToken { get; set; }
+
+    /// <summary>The store's operator-role MCP token as text, or an <c>env:</c>/<c>file:</c> reference.</summary>
+    [JsonPropertyName("mcpToken")]
+    public string? McpToken { get; set; }
+
+    /// <summary>The store's agent-role MCP token, DPAPI-encrypted. Preferred over <see cref="McpAgentToken"/>.</summary>
+    [JsonPropertyName("mcpEncryptedAgentToken")]
+    public string? McpEncryptedAgentToken { get; set; }
+
+    /// <summary>The store's agent-role MCP token as text, or an <c>env:</c>/<c>file:</c> reference.</summary>
+    [JsonPropertyName("mcpAgentToken")]
+    public string? McpAgentToken { get; set; }
+
+    /// <summary>The store's web dashboard, an absolute http or https URL with no query. Optional: a store without it has no web pages through the front door.</summary>
+    [JsonPropertyName("webUrl")]
+    public string? WebUrl { get; set; }
+
+    /// <summary>The token the front door signs in to the store's web dashboard with, DPAPI-encrypted. Preferred over <see cref="WebToken"/>.</summary>
+    [JsonPropertyName("webEncryptedToken")]
+    public string? WebEncryptedToken { get; set; }
+
+    /// <summary>The web sign-in token as text, or an <c>env:</c>/<c>file:</c> reference.</summary>
+    [JsonPropertyName("webToken")]
+    public string? WebToken { get; set; }
+
+    /// <summary>The SHA-256 of the store's certificate (64 hex characters). When set, only that certificate is accepted and the
+    /// chain is not consulted, which is how a store with a self-signed certificate is reached. Absent: the system's trust decides.</summary>
+    [JsonPropertyName("certificateSha256")]
+    public string? CertificateSha256 { get; set; }
+
+    internal static bool TryParseUrl(string? text, out Uri uri)
+    {
+        if (!string.IsNullOrWhiteSpace(text)
+            && Uri.TryCreate(text.Trim(), UriKind.Absolute, out var parsed)
+            && (parsed.Scheme == Uri.UriSchemeHttp || parsed.Scheme == Uri.UriSchemeHttps))
+        {
+            uri = parsed;
+            return true;
+        }
+
+        uri = null!;
+        return false;
+    }
+
+    /// <summary>What is wrong with a store address, as the tail of a sentence, or null when it is usable. Never echoes the address.</summary>
+    internal static string? UrlProblem(string text)
+    {
+        if (!TryParseUrl(text, out var uri))
+        {
+            return "must be an absolute http or https URL.";
+        }
+
+        if (uri.Query.Length > 0)
+        {
+            return "must not have a query string.";
+        }
+
+        if (uri.UserInfo.Length > 0)
+        {
+            return "must not carry a user name or password.";
+        }
+
+        return null;
+    }
+
+    /// <summary>A pin as 64 upper-case hex characters (colons and spaces dropped), or null when it is not one.</summary>
+    internal static string? NormalizePin(string? pin)
+    {
+        var hex = new string((pin ?? "").Where(c => c != ':' && !char.IsWhiteSpace(c)).ToArray());
+        return hex.Length == 64 && hex.All(Uri.IsHexDigit) ? hex.ToUpperInvariant() : null;
+    }
+
+    /// <summary>The routing record for this entry, or null when it is not usable (no valid name or MCP address, or a pin that is not 64 hex characters).</summary>
+    internal FrontDoorStore? ToStore()
+    {
+        var name = Name?.Trim() ?? "";
+        if (!NamePattern.IsMatch(name) || !TryParseUrl(McpUrl, out var mcp))
+        {
+            return null;
+        }
+
+        /* A pin that is set and is not a pin is not "no pin": dropping it would reach the store under the system's chain
+           trust, which is what the pin was written to exclude, and only the worker validates this file. */
+        var pin = NormalizePin(CertificateSha256);
+        if (!string.IsNullOrWhiteSpace(CertificateSha256) && pin is null)
+        {
+            return null;
+        }
+
+        var web = TryParseUrl(WebUrl, out var webUri) ? webUri : null;
+        return new FrontDoorStore(name, mcp, web, pin);
+    }
+
+    /// <summary>The MCP token for the role, preferring the encrypted form; null when none is set. Throws when an encrypted token
+    /// cannot be read or a reference cannot be resolved.</summary>
+    internal string? ResolveMcpToken(bool agentRole)
+        => agentRole
+            ? ResolveSecret(McpEncryptedAgentToken, McpAgentToken, "mcpEncryptedAgentToken", "mcpAgentToken")
+            : ResolveSecret(McpEncryptedToken, McpToken, "mcpEncryptedToken", "mcpToken");
+
+    /// <summary>The web sign-in token, preferring the encrypted form; null when none is set.</summary>
+    internal string? ResolveWebToken()
+        => ResolveSecret(WebEncryptedToken, WebToken, "webEncryptedToken", "webToken");
+
+    /* The same resolution as McpTokenEntry.ResolveToken, with this entry's own setting in each error. */
+    private string? ResolveSecret(string? encrypted, string? plain, string encryptedKey, string plainKey)
+    {
+        var setting = $"frontDoor.stores[{Name}]";
+        if (!string.IsNullOrWhiteSpace(encrypted))
+        {
+            if (!OperatingSystem.IsWindows())
+            {
+                throw new PlatformNotSupportedException(
+                    $"{setting}.{encryptedKey} requires Windows (DPAPI); use the plaintext \"{plainKey}\" on other platforms.");
+            }
+
+            return DarlingSecrets.Unprotect(encrypted);
+        }
+
+        return string.IsNullOrWhiteSpace(plain) ? null : DarlingSecretSource.Resolve(plain, $"{setting}.{plainKey}");
+    }
 }

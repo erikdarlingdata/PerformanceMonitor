@@ -104,14 +104,14 @@ public sealed class StatementScrubDerivedStoreTests
         Assert.Contains("DerivedStoreScrub.Text(finding.StoryText)", finding, StringComparison.Ordinal);
         Assert.Contains("DerivedStoreScrub.Json(DrillDownSerializer.Serialize(finding.DrillDown))", finding, StringComparison.Ordinal);
 
-        var alert = File.ReadAllText(RepoPath("Darling/PerformanceMonitor.Darling.Service/PgAlertHistoryStore.cs"));
+        var alert = File.ReadAllText(RepoPath("Darling/PerformanceMonitor.Darling.Storage/PgAlertHistoryStore.cs"));
         Assert.Contains("DerivedStoreScrub.Text(record.DetailText)", alert, StringComparison.Ordinal);
         Assert.Contains("DerivedStoreScrub.Json(record.ContextJson)", alert, StringComparison.Ordinal);
     }
 
     /// <summary>
     /// The managed-role <c>config.record_custom_alert_resolution</c> function (R10 verdict: it cannot hold a
-    /// statement). Its only caller is <c>CustomAlertEvaluator.WriteTeardownResolutionAsync</c>, which builds
+    /// statement). Its only caller is <c>CustomAlertTeardown.WriteTeardownResolutionAsync</c>, which builds
     /// <c>detail_text</c> from the server name, the operator-typed rule name (newline-stripped and capped) and one of
     /// three fixed reasons. Nothing there reads a collected row. If that message ever starts to carry collected text,
     /// this pin fails and the write has to go through <see cref="DerivedStoreScrub.Text"/>.
@@ -119,7 +119,7 @@ public sealed class StatementScrubDerivedStoreTests
     [Fact]
     public void TheCustomAlertResolutionRowCarriesNoCollectedText()
     {
-        var evaluator = File.ReadAllText(RepoPath("Darling/PerformanceMonitor.Darling.Service/CustomAlertEvaluator.cs"));
+        var evaluator = File.ReadAllText(RepoPath("Darling/PerformanceMonitor.Darling.Storage/CustomAlertTeardown.cs"));
         Assert.Contains("$\"{serverName}: {safeName} resolved because {reason}\"", evaluator, StringComparison.Ordinal);
         Assert.Contains("RecordCustomAlertResolutionAsync(serverId, serverName, title, message)", evaluator, StringComparison.Ordinal);
 
@@ -130,7 +130,7 @@ public sealed class StatementScrubDerivedStoreTests
             .Where(f => File.ReadAllText(f).Contains(".RecordCustomAlertResolutionAsync(", StringComparison.Ordinal))
             .Select(Path.GetFileName)
             .ToList();
-        Assert.Equal(new[] { "CustomAlertEvaluator.cs" }, callers);
+        Assert.Equal(new[] { "CustomAlertTeardown.cs" }, callers);
     }
 
     private static string RepoPath(string relative, [CallerFilePath] string thisFile = "") =>
@@ -269,7 +269,7 @@ public sealed class StatementScrubDerivedStoreLiveTests
     {
         await RunLiveAsync(async (postgres, connection) =>
         {
-            var store = new PgAlertHistoryStore(postgres);
+            var store = new PgAlertHistoryStore(postgres, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds);
             var contextJson = JsonSerializer.Serialize(new { dedup = "abc123", query_text = StatementScrubCanary.CanaryStatement });
             var plainContext = JsonSerializer.Serialize(new { dedup = "abc124", query_text = StatementScrubCanary.PlainStatement });
 

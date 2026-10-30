@@ -1,5 +1,7 @@
 # Platform Notes
 
+Audience: operators.
+
 Part of the [Performance Monitor documentation](../README.md#documentation).
 
 ### AWS RDS Parameter Group Configuration

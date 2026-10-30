@@ -15,6 +15,7 @@ using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
 
@@ -60,7 +61,7 @@ public sealed class DarlingMcpCustomViewTools
     {
         try
         {
-            var store = new CustomViewStore(postgres);
+            var store = new CustomViewStore(postgres, McpCommandDeadlines.ReadSeconds);
             var views = await store.ListAsync(allPersonal: true, folder: folder?.Trim());
             return DarlingWebEndpoints.BuildSummariesNode(views).ToJsonString(McpHelpers.JsonOptions);
         }
@@ -80,7 +81,7 @@ public sealed class DarlingMcpCustomViewTools
     {
         try
         {
-            var store = new CustomViewStore(postgres);
+            var store = new CustomViewStore(postgres, McpCommandDeadlines.ReadSeconds);
             var result = await store.GetAsync(view_id);
             return result is CustomViewResult.Ok ok
                 ? DarlingWebEndpoints.BuildFullViewNode(ok.View!).ToJsonString(McpHelpers.JsonOptions)
@@ -133,7 +134,7 @@ public sealed class DarlingMcpCustomViewTools
     [McpServerTool(Name = "create_custom_view"), Description(
         "Creates a new saved custom view. The definition is VALIDATED first (same as validate_custom_view); an " +
         "invalid definition returns {status:\"invalid\", ...} and saves nothing. On success returns the stored view " +
-        "(id, version 1, and the definition). A name collision returns {status:\"conflict\", ...}, and the message " +
+        "(id, version 1, and the definition) plus previous:null and undo (the delete_custom_view call for the new id). A name collision returns {status:\"conflict\", ...}, and the message " +
         "says which folder it collided in. Pass 'folder' to put the view in a shared folder; omit it for the top " +
         "level. A view made here is always shared, never personal: MCP has no person identity. The view is " +
         "stamped as MCP-authored.")]
@@ -152,12 +153,12 @@ public sealed class DarlingMcpCustomViewTools
                 return Outcome("invalid", validation.Error!);
             }
 
-            var store = new CustomViewStore(postgres);
+            var store = new CustomViewStore(postgres, McpCommandDeadlines.ReadSeconds);
             var result = await store.CreateAsync(
                 name, description, definition, updatedBy: DarlingWebEndpoints.McpEditorPrincipal, folder: folder, personal: false);
             return result switch
             {
-                CustomViewResult.Ok ok => DarlingWebEndpoints.BuildFullViewNode(ok.View!).ToJsonString(McpHelpers.JsonOptions),
+                CustomViewResult.Ok ok => CreateAnswer(ok.View!),
                 CustomViewResult.Conflict conflict => Outcome("conflict", conflict.Message),
                 CustomViewResult.Invalid invalid => Outcome("invalid", invalid.Message),
                 _ => Outcome("error", "Could not create the view."),
@@ -181,7 +182,7 @@ public sealed class DarlingMcpCustomViewTools
         "'folder' follows the same vocabulary as description: OMITTED keeps the view's current folder, an EMPTY string " +
         "moves it to the top level, any other text moves it to that folder. A PERSONAL view cannot be updated over MCP " +
         "(MCP has no person identity; only the owner can change it in the web dashboard): it returns " +
-        "{status:\"refused\", ...}. On success returns the stored view with its bumped version.")]
+        "{status:\"refused\", ...}. On success returns the stored view with its bumped version, plus previous (the values before) and undo (the update_custom_view call, at the new version, that restores them).")]
     public static async Task<string> UpdateCustomView(
         NpgsqlDataSource postgres,
         [Description("The id of the view to update (from list_custom_views).")] long view_id,
@@ -199,7 +200,7 @@ public sealed class DarlingMcpCustomViewTools
                 return Outcome("invalid", validation.Error!);
             }
 
-            var store = new CustomViewStore(postgres);
+            var store = new CustomViewStore(postgres, McpCommandDeadlines.ReadSeconds);
 
             /* #3541 A14: read the row first so an OMITTED description is carried forward rather than written as
                NULL. The store's UpdateAsync is a full replacement (right for the web editor, which always sends
@@ -226,7 +227,7 @@ public sealed class DarlingMcpCustomViewTools
                 folder: DarlingMcpCustomAlertTools.ResolveOptionalText(folder, currentOk.View.Folder), personal: false, actorKey: null);
             return result switch
             {
-                CustomViewResult.Ok ok => DarlingWebEndpoints.BuildFullViewNode(ok.View!).ToJsonString(McpHelpers.JsonOptions),
+                CustomViewResult.Ok ok => UpdateAnswer(currentOk.View, ok.View!),
                 CustomViewResult.NotFound => Outcome("not_found", $"No custom view with id {view_id}."),
                 CustomViewResult.Forbidden => Outcome("refused", PersonalViewRefusal),
                 CustomViewResult.Conflict conflict => Outcome("conflict", conflict.Message),
@@ -241,7 +242,7 @@ public sealed class DarlingMcpCustomViewTools
     }
 
     [McpServerTool(Name = "delete_custom_view"), Description(
-        "Deletes a saved custom view by id. Returns {status:\"deleted\", view_id:N} on success, or " +
+        "Deletes a saved custom view by id. Returns {status:\"deleted\", view_id:N, previous (the deleted view), undo (the create_custom_view call that recreates it under a new id), undo_note} on success, or " +
         "{status:\"not_found\", ...} when no view has that id. Unlike update_custom_view, this DOES delete a PERSONAL view, " +
         "whoever owns it: it is the operator's only way to clean up after a person who has left. Check personal and " +
         "created_by from list_custom_views first. This is permanent.")]
@@ -251,11 +252,17 @@ public sealed class DarlingMcpCustomViewTools
     {
         try
         {
-            var store = new CustomViewStore(postgres);
+            var store = new CustomViewStore(postgres, McpCommandDeadlines.ReadSeconds);
+            var before = await store.GetAsync(view_id);
+            if (before is not CustomViewResult.Ok beforeOk || beforeOk.View is null)
+            {
+                return Outcome("not_found", $"No custom view with id {view_id}.");
+            }
+
             var result = await store.DeleteAsync(view_id, actorKey: null, anyPersonal: true);
             return result switch
             {
-                CustomViewResult.Ok => JsonSerializer.Serialize(new { status = "deleted", view_id }, McpHelpers.JsonOptions),
+                CustomViewResult.Ok => DeleteAnswer(beforeOk.View),
                 _ => Outcome("not_found", $"No custom view with id {view_id}."),
             };
         }
@@ -263,6 +270,71 @@ public sealed class DarlingMcpCustomViewTools
         {
             return McpHelpers.FormatError("delete_custom_view", ex);
         }
+    }
+
+    /// <summary>The answer to a create (#6403): the stored view, no previous value, and the delete that undoes it.</summary>
+    private static string CreateAnswer(CustomView view)
+    {
+        var node = DarlingWebEndpoints.BuildFullViewNode(view);
+        node["previous"] = null;
+        node["undo"] = DarlingMcpUndoShape.Call("delete_custom_view", new JsonObject { ["view_id"] = view.Id });
+        return node.ToJsonString(McpHelpers.JsonOptions);
+    }
+
+    /// <summary>The answer to an update (#6403): the stored view, the values it had before, and the update that restores them at the new
+    /// version. An empty string restores a description or folder that was empty (the tool's own clear vocabulary).</summary>
+    private static string UpdateAnswer(CustomView before, CustomView after)
+    {
+        var node = DarlingWebEndpoints.BuildFullViewNode(after);
+        node["previous"] = new JsonObject
+        {
+            ["name"] = before.Name,
+            ["description"] = before.Description,
+            ["folder"] = before.Folder,
+            ["definition"] = JsonNode.Parse(before.DefinitionJson),
+            ["version"] = before.Version,
+        };
+        node["undo"] = DarlingMcpUndoShape.Call("update_custom_view", new JsonObject
+        {
+            ["view_id"] = after.Id,
+            ["name"] = before.Name,
+            ["definition"] = before.DefinitionJson,
+            ["version"] = after.Version,
+            ["description"] = before.Description ?? string.Empty,
+            ["folder"] = before.Folder ?? string.Empty,
+        });
+        return node.ToJsonString(McpHelpers.JsonOptions);
+    }
+
+    /// <summary>The answer to a delete (#6403): the deleted view as <c>previous</c> and the create that recreates it under a new id.
+    /// MCP creates only shared views, so a personal view comes back shared, and the note says so.</summary>
+    private static string DeleteAnswer(CustomView view)
+    {
+        var arguments = new JsonObject { ["name"] = view.Name, ["definition"] = view.DefinitionJson };
+        if (view.Description is not null)
+        {
+            arguments["description"] = view.Description;
+        }
+
+        if (view.Folder is not null)
+        {
+            arguments["folder"] = view.Folder;
+        }
+
+        var note = "The undo recreates the view under a NEW id.";
+        if (view.Personal)
+        {
+            note += " The view was personal; MCP can only create shared views, so the recreated view is shared.";
+        }
+
+        return new JsonObject
+        {
+            ["status"] = "deleted",
+            ["view_id"] = view.Id,
+            ["previous"] = DarlingWebEndpoints.BuildFullViewNode(view),
+            ["undo"] = DarlingMcpUndoShape.Call("create_custom_view", arguments),
+            ["undo_note"] = note,
+        }.ToJsonString(McpHelpers.JsonOptions);
     }
 
     [McpServerTool(Name = "run_custom_view_panel"), Description(

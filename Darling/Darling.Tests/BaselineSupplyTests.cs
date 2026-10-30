@@ -107,13 +107,13 @@ public class BaselineSupplyTests
         Assert.Contains("delta_wait_time_ms >= 0", TimescaleSupport.LegacyCreateWaitStatsBaselineSql, StringComparison.Ordinal);
         Assert.DoesNotContain("sample_interval_seconds", TimescaleSupport.LegacyCreateWaitStatsBaselineSql, StringComparison.Ordinal);
 
-        /* blocked_process_reports: neither family filters, so the shared aggregate carries no WHERE at all.
-           A WHERE appearing here later means one family narrowed the other's supply. */
+        /* blocked_process_reports: both families leave a parallel query's self-waits out of their current window
+           (#6663), so the shared aggregate carries the same predicate (#6690), or its baseline reads high. */
         var blocking = PgBaselineProvider.GetBaselineQuery(MetricNames.Blocking)!;
         var blockingPerMinute = PgBaselineProvider.GetBaselineQuery(MetricNames.BlockingPerMinute)!;
         Assert.Contains("FROM blocked_process_baseline", blocking, StringComparison.Ordinal);
         Assert.Contains("FROM blocked_process_baseline", blockingPerMinute, StringComparison.Ordinal);
-        Assert.DoesNotContain("WHERE", TimescaleSupport.CreateBlockedProcessBaselineSql, StringComparison.Ordinal);
+        Assert.Contains(PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql, TimescaleSupport.CreateBlockedProcessBaselineSql, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -128,7 +128,7 @@ public class BaselineSupplyTests
         var families = new[]
         {
             MetricNames.Cpu, MetricNames.BatchRequests, MetricNames.WaitStats, MetricNames.SessionCount,
-            MetricNames.QueryDuration, MetricNames.IoLatency, MetricNames.Blocking, MetricNames.Deadlock,
+            MetricNames.QueryDuration, MetricNames.IoLatency, MetricNames.IoWriteLatency, MetricNames.Blocking, MetricNames.Deadlock,
             MetricNames.Memory, MetricNames.WaitMsPerSec, MetricNames.BlockingPerMinute,
         };
 

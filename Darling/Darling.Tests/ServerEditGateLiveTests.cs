@@ -86,7 +86,7 @@ public sealed class ServerEditGateLiveTests
         return (ctx.Response.StatusCode, await new System.IO.StreamReader(ctx.Response.Body).ReadToEndAsync());
     }
 
-    /// <summary>The same real pipeline in loopback mode with no access token: no gate is registered, so no seat is stored for a request.</summary>
+    /// <summary>The same real pipeline in loopback mode with no access token (web.allowTokenlessLoopback): it serves reads only.</summary>
     private static async Task<TestServer> BuildTokenlessLoopbackServer()
     {
         var builder = WebApplication.CreateBuilder();
@@ -128,7 +128,7 @@ public sealed class ServerEditGateLiveTests
 
     [Theory]
     [MemberData(nameof(AgentSetupWrites))]
-    public async Task ATokenlessLoopbackDashboard_RefusesEveryAgentSetupWrite_WithTheSignInSentence_ByTheRealPipeline(string method, string path, string body)
+    public async Task ATokenlessLoopbackDashboard_RefusesEveryAgentSetupWrite_WithTheTokenSentence_ByTheRealPipeline(string method, string path, string body)
     {
         using var server = await BuildTokenlessLoopbackServer();
         var ctx = await server.SendAsync(c =>
@@ -142,7 +142,8 @@ public sealed class ServerEditGateLiveTests
         });
         var answer = await new System.IO.StreamReader(ctx.Response.Body).ReadToEndAsync();
         Assert.Equal(StatusCodes.Status403Forbidden, ctx.Response.StatusCode);
-        Assert.Contains("Sign in to the web as an admin", answer, StringComparison.Ordinal);
+        Assert.Contains("web.allowTokenlessLoopback", answer, StringComparison.Ordinal);
+        Assert.Contains("web.network.encryptedToken", answer, StringComparison.Ordinal);
     }
 
     private const string Edit = "{\"display_name\":\"x\",\"password\":\"Zq9-fake-secret-must-never-appear-7XK\"}";

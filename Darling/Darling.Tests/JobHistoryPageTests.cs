@@ -196,7 +196,7 @@ public sealed class JobHistoryPageTests
         Assert.Contains("AND   jh.run_datetime <= ${UntilParam(firstParam)} + make_interval(mins => so.offset_minutes)", reader);
         Assert.Contains("return ApplyWindow(rows, sinceUtc, limit, filter?.UntilUtc);", reader);
         var tool = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpJobTools.cs").ReplaceLineEndings("\n");
-        Assert.Contains("windowEnd);", tool);
+        Assert.Matches(@"windowEnd,\s*min_duration_seconds\);", tool);
         Assert.Contains("DarlingJobHistoryReader.GetAsync(", tool);
     }
 

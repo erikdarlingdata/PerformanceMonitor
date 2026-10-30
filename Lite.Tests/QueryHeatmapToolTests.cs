@@ -71,6 +71,22 @@ public sealed class QueryHeatmapToolTests : IClassFixture<SharedDuckDbFixture>, 
         try { Directory.Delete(_configDir, recursive: true); } catch (IOException) { /* temp dir */ }
     }
 
+    /// <summary>
+    /// An idle server: no query_stats row was ever stored, but the collector's newest run finished clean. That is a true negative,
+    /// the same answer Darling's twin gives, and not an "unavailable" that sends someone to fix collection that works.
+    /// </summary>
+    [Fact]
+    public async Task NothingEverStored_AfterACleanCollectorRun_IsEmptyNotUnavailable()
+    {
+        var service = new LocalDataService(_duckDb);
+        await SeedCollectionLogAsync("query_stats", "SUCCESS", DateTime.UtcNow.AddMinutes(-2));
+
+        var root = Root(await McpQueryTools.GetQueryHeatmap(service, _serverManager, ServerName, 24));
+
+        Assert.Equal("empty", root.GetProperty("status").GetString());
+        Assert.Contains("true negative", root.GetProperty("message").GetString(), StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task ThreeKindsOfNothing_AreThreeDifferentAnswers()
     {
@@ -317,6 +333,23 @@ public sealed class QueryHeatmapToolTests : IClassFixture<SharedDuckDbFixture>, 
             await _seedConn.OpenAsync();
         }
         return _seedConn;
+    }
+
+    private async Task SeedCollectionLogAsync(string collectorName, string status, DateTime collectionTime)
+    {
+        using var readLock = _duckDb.AcquireReadLock();
+        var connection = await SeedConnectionAsync();
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = @"
+INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, status)
+VALUES ($1, $2, $3, $4, $5, $6)";
+        cmd.Parameters.Add(new DuckDBParameter { Value = _nextId++ });
+        cmd.Parameters.Add(new DuckDBParameter { Value = _serverId });
+        cmd.Parameters.Add(new DuckDBParameter { Value = ServerName });
+        cmd.Parameters.Add(new DuckDBParameter { Value = collectorName });
+        cmd.Parameters.Add(new DuckDBParameter { Value = DateTime.SpecifyKind(collectionTime, DateTimeKind.Unspecified) });
+        cmd.Parameters.Add(new DuckDBParameter { Value = status });
+        await cmd.ExecuteNonQueryAsync();
     }
 
     private async Task SeedAsync(DateTime collectionTime, string queryHash, long deltaExec, long deltaElapsed)

@@ -192,18 +192,20 @@ public partial class CollectorScheduleEditorWindow : Window
         LoadScopeSchedule();
     }
 
-    private void LoadScopeSchedule()
+    internal void LoadScopeSchedule()
     {
         _scopeServerId = (ScopeCombo.SelectedItem as ComboBoxItem)?.Tag as int?;
         _resetToDefaults = false;   /* a Reset belongs to the scope it was made in, and a reload shows what is stored */
 
         var isServerScope = _scopeServerId is not null;
         UseDefaultCheckBox.Visibility = isServerScope ? Visibility.Visible : Visibility.Collapsed;
+        /* The purge reads one retention per collector for every server, so a server scope does not edit it. */
+        KeepColumn.IsReadOnly = isServerScope;
 
         if (isServerScope)
         {
             HeaderText.Text = $"Collector Schedules — {(ScopeCombo.SelectedItem as ComboBoxItem)?.Content}";
-            SubHeaderText.Text = "This server's custom schedule. Uncheck 'Use default schedule' to override the fleet-wide defaults for it.";
+            SubHeaderText.Text = "This server's custom schedule. Uncheck 'Use default schedule' to override the fleet-wide defaults for it. Keep (days) is fleet-wide: change it under All servers.";
             var hasOverride = CollectorScheduleOverlay.ServerHasOverride(_allOverrides, _runTimes, _scopeServerId!.Value);
 
             _suppressPresetChange = true;
@@ -319,7 +321,45 @@ public partial class CollectorScheduleEditorWindow : Window
     {
         ScheduleGrid.ItemsSource = null;
         ScheduleGrid.ItemsSource = _editing;
+        /* #6768: a new ItemsSource (a scope change, Reset, Copy from) comes with a fresh view that has no filter, so the filter is
+           applied again after every bind. */
+        ApplyFilter();
         RefreshRunAtDetail();
+    }
+
+    /// <summary>
+    /// #6768: shows only the rows that match the search box and "Disabled only" box. The filter is on the grid's view and never
+    /// removes a row from <c>_editing</c>, which is what Save, Reset to Defaults, Apply Default to All Servers, the presets and
+    /// Copy from all read and replace, so a hidden row is still saved, reset and copied. The matching rows are worked out here,
+    /// once, and the view keeps showing that set until the filter text, the box or the scope changes: a row ticked or unticked
+    /// under "Disabled only" stays in place instead of vanishing from under the mouse.
+    /// </summary>
+    private void ApplyFilter()
+    {
+        var text = FilterBox.Text;
+        var disabledOnly = DisabledOnlyCheckBox.IsChecked == true;
+        if (text.Trim().Length == 0 && !disabledOnly)
+        {
+            ScheduleGrid.Items.Filter = null;
+            NoMatchText.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        var shown = new HashSet<CollectorScheduleEditItem>(
+            _editing.Where(i => CollectorScheduleFilter.Matches(i.Name, i.Enabled, text, disabledOnly)));
+        ScheduleGrid.Items.Filter = row => row is CollectorScheduleEditItem item && shown.Contains(item);
+        NoMatchText.Visibility = shown.Count == 0 && _editing.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void Filter_Changed(object sender, RoutedEventArgs e) => ApplyFilter();
+
+    private void FilterBox_KeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+    {
+        if (e.Key == System.Windows.Input.Key.Escape && FilterBox.Text.Length > 0)
+        {
+            FilterBox.Clear();
+            e.Handled = true;   /* clears the text instead of closing the window; Escape in an empty box still cancels */
+        }
     }
 
     private void UpdateEditableState(bool editable)
@@ -459,6 +499,9 @@ public partial class CollectorScheduleEditorWindow : Window
 
         if (!usesDefault && !CollectorScheduleOverlay.ValidateSchedule(_editing, out var error))
         {
+            /* #6768: the refusal names a collector that the filter may be hiding, so show every row. */
+            FilterBox.Clear();
+            DisabledOnlyCheckBox.IsChecked = false;
             MessageBox.Show(error, "Collector Schedules", MessageBoxButton.OK, MessageBoxImage.Warning);
             return;
         }

@@ -360,7 +360,7 @@ public class PgDatabaseStatsCollectorDefinitionTests
     public void TheCapabilityMessageNamesWhatIsNotCollected()
     {
         var message = CollectorEngineCapability.NotCollectedMessage(
-            "sql-01", CollectorEngineCapability.UnknownEngineEdition, MonitoredEngineKind.SqlServer, "pg_database_stats");
+            "sql-01", CollectorEngineCapability.UnknownEngineEdition, MonitoredEngineKind.SqlServer, "pg_database_stats", awsRdsKind: AwsRdsKind.None);
 
         Assert.NotNull(message);
         Assert.Contains("pg_stat_database", message, StringComparison.Ordinal);

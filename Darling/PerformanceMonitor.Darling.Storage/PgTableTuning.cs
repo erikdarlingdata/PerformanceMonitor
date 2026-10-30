@@ -78,6 +78,11 @@ namespace PerformanceMonitor.Darling.Storage;
 /// failure, not just a drop's, so one blocked or invalid statement can never take the rest of the sweep down
 /// with it — proven live by seeding a block, forcing the failure, and asserting the statement after it still
 /// applies.</para>
+///
+/// <para>#6539: every <c>ALTER TABLE ... SET (...)</c> (the literal statements and the catalog-derived hourly sweep) is
+/// covered by the same doctrine through <see cref="GuardedAlter"/>: its own transaction under
+/// <see cref="AlterLockTimeoutSeconds"/>. A busy table (<c>55P03</c>) is rolled back, logged once at Information as
+/// skipped until the next pass, and the sweep goes on; the settings are idempotent, so a skipped pass costs nothing.</para>
 /// </summary>
 public static class PgTableTuning
 {
@@ -104,6 +109,14 @@ public static class PgTableTuning
     /// </summary>
     private const string CreateLockTimeoutSeconds = "5s";
 
+    /// <summary>
+    /// The same bound as <see cref="CreateLockTimeoutSeconds"/>, as the <c>CommandTimeout</c> (seconds) of the start-path
+    /// emptiness check. That check is a bare SELECT, so it takes ACCESS SHARE on the table and queues behind an ACCESS EXCLUSIVE
+    /// holder (drop_chunks, decompress_chunk, VACUUM FULL) the way a CREATE does; with <see cref="SetupTimeoutSeconds"/> it
+    /// would hold the start for 300 s. It gives up here instead and fails closed onto the one-build budget (#6460).
+    /// </summary>
+    private const int EmptinessCheckTimeoutSeconds = 5;
+
     private const string CreateIndexPrefix = "CREATE INDEX IF NOT EXISTS ";
 
     /// <summary>
@@ -111,7 +124,36 @@ public static class PgTableTuning
     /// Plain (not <c>CONCURRENTLY</c>: hypertables refuse it, and it cannot run inside a transaction block).
     /// </summary>
     private static string GuardedCreate(string statement) =>
-        "BEGIN; SET LOCAL lock_timeout = '" + CreateLockTimeoutSeconds + "'; " + statement + "; COMMIT;";
+        Guarded(CreateLockTimeoutSeconds, statement);
+
+    /// <summary>
+    /// #6539: the lock_timeout every <c>ALTER TABLE ... SET (...)</c> runs under, on the start path and in the hourly pass. The
+    /// statement takes SHARE UPDATE EXCLUSIVE, which an ACCESS EXCLUSIVE holder (drop_chunks, decompress_chunk, VACUUM FULL)
+    /// blocks, and unbounded it held a start for <see cref="SetupTimeoutSeconds"/> per statement. It gives up with
+    /// <c>55P03</c>; the settings are idempotent, so skipping one pass is harmless and the next pass applies them.
+    /// </summary>
+    private const string AlterLockTimeoutSeconds = "5s";
+
+    private const string AlterTablePrefix = "ALTER TABLE ";
+
+    /// <summary>Wraps an <c>ALTER TABLE ... SET</c> in its own transaction under <see cref="AlterLockTimeoutSeconds"/>.</summary>
+    private static string GuardedAlter(string statement) =>
+        Guarded(AlterLockTimeoutSeconds, statement);
+
+    /// <summary>
+    /// The one guarded shape every bounded-wait statement in this file uses: its own transaction, <c>SET LOCAL lock_timeout</c>
+    /// (reset by the transaction boundary either way), the statement, <c>COMMIT</c>. A lock-timeout failure leaves the
+    /// connection "in failed transaction"; <see cref="ApplyAsync"/> rolls back after every caught failure.
+    /// </summary>
+    private static string Guarded(string lockTimeout, string statement) =>
+        "BEGIN; SET LOCAL lock_timeout = '" + lockTimeout + "'; " + statement + "; COMMIT;";
+
+    /// <summary>The <c>schema.table</c> an <c>ALTER TABLE &lt;table&gt; SET (...)</c> statement tunes.</summary>
+    private static string AlteredTable(string statement)
+    {
+        var rest = statement.Substring(AlterTablePrefix.Length);
+        return rest.Substring(0, rest.IndexOf(' ', StringComparison.Ordinal));
+    }
 
     /// <summary>
     /// The indexes whose first build reads the heap of a large hypertable. A start builds at most one of them:
@@ -144,6 +186,27 @@ public static class PgTableTuning
         return end < 0 ? rest : rest.Substring(0, end);
     }
 
+    /// <summary>
+    /// True when <paramref name="table"/> (a <c>schema.table</c> taken from <see cref="Statements"/>, never from input) has no
+    /// row at all. A failed check, including one that gives up on a busy table after <see cref="EmptinessCheckTimeoutSeconds"/>,
+    /// answers false, so the index keeps the one-build budget; the command is cancelled on the server and the connection stays usable.
+    /// </summary>
+    private static async Task<bool> TableIsEmptyAsync(NpgsqlConnection connection, string table, ILogger? logger, CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var command = new NpgsqlCommand("SELECT NOT EXISTS (SELECT 1 FROM " + table + ")", connection) { CommandTimeout = EmptinessCheckTimeoutSeconds };
+            return await command.ExecuteScalarAsync(cancellationToken) is true;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogWarning(
+                "Could not tell whether {Table} is empty, so its index counts against the one-build budget this start: {Message}",
+                table, ex.Message);
+            return false;
+        }
+    }
+
     /// <summary>NULL when no such index exists in <c>collect</c>, otherwise whether it is valid.</summary>
     private const string IndexValidSql =
         "SELECT i.indisvalid FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
@@ -165,8 +228,7 @@ public static class PgTableTuning
     /// rest of the sweep down with it.</para>
     /// </summary>
     private static string GuardedDrop(string indexName) =>
-        "BEGIN; SET LOCAL lock_timeout = '" + DropLockTimeoutSeconds + "'; DROP INDEX IF EXISTS collect."
-        + indexName + "; COMMIT;";
+        Guarded(DropLockTimeoutSeconds, "DROP INDEX IF EXISTS collect." + indexName);
 
     /// <summary>
     /// The #3573 covering index's name, and the columns it carries in key-then-INCLUDE order. Exposed so the
@@ -527,7 +589,11 @@ public static class PgTableTuning
                         continue;
                     }
 
-                    var oneBuildPerStart = IsOneBuildPerStart(indexName);
+                    /* #6460: a table with no rows builds its index in no time and pauses nothing, so it does not use the
+                       one-build budget. Without this a brand-new store built one of the three large indexes at its first
+                       start and deferred the other two, and the first hourly pass then warned that they were missing. */
+                    var oneBuildPerStart = IsOneBuildPerStart(indexName)
+                        && !await TableIsEmptyAsync(connection, CreatedIndexTable(statement), logger, cancellationToken);
                     if (oneBuildPerStart && buildIssued)
                     {
                         logger?.LogInformation(
@@ -540,17 +606,32 @@ public static class PgTableTuning
                     buildStartedAt = Stopwatch.GetTimestamp();
                     sql = GuardedCreate(statement);
                 }
+                else if (statement.StartsWith(AlterTablePrefix, StringComparison.Ordinal))
+                {
+                    sql = GuardedAlter(statement);
+                }
 
                 using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = SetupTimeoutSeconds };
                 await command.ExecuteNonQueryAsync(cancellationToken);
                 applied++;
             }
             catch (PostgresException lockBusy) when (lockBusy.SqlState == PostgresErrorCodes.LockNotAvailable
-                && statement.StartsWith(CreateIndexPrefix, StringComparison.Ordinal))
+                && (statement.StartsWith(CreateIndexPrefix, StringComparison.Ordinal)
+                    || statement.StartsWith(AlterTablePrefix, StringComparison.Ordinal)))
             {
-                logger?.LogInformation(
-                    "Index {Index} not built this pass: the table was busy; the next pass tries again",
-                    CreatedIndexName(statement));
+                if (statement.StartsWith(AlterTablePrefix, StringComparison.Ordinal))
+                {
+                    logger?.LogInformation(
+                        "Tuning setting on {Table} not applied this pass: the table was busy; the next pass tries again",
+                        AlteredTable(statement));
+                }
+                else
+                {
+                    logger?.LogInformation(
+                        "Index {Index} not built this pass: the table was busy; the next pass tries again",
+                        CreatedIndexName(statement));
+                }
+
                 await RollbackBestEffortAsync(connection, logger, cancellationToken);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
@@ -709,18 +790,27 @@ WHERE COALESCE(array_to_string(c.reloptions, ','), '') NOT LIKE '%insert_scale_f
         foreach (var target in targets)
         {
             /* Identifier comes from the catalog already quoted by format('%I.%I') — never user input. */
-            var statement = $"ALTER TABLE {target} SET ({InsertTuningOptions})";
+            var statement = $"{AlterTablePrefix}{target} SET ({InsertTuningOptions})";
             try
             {
-                using var command = new NpgsqlCommand(statement, connection) { CommandTimeout = SetupTimeoutSeconds };
+                using var command = new NpgsqlCommand(GuardedAlter(statement), connection) { CommandTimeout = SetupTimeoutSeconds };
                 await command.ExecuteNonQueryAsync(cancellationToken);
                 applied++;
+            }
+            catch (PostgresException lockBusy) when (lockBusy.SqlState == PostgresErrorCodes.LockNotAvailable)
+            {
+                /* #6539: busy table (an ACCESS EXCLUSIVE holder): skip it; the setting is idempotent, so the next pass applies it. */
+                logger?.LogInformation(
+                    "Insert-autovacuum tuning not applied to {Table} this pass: the table was busy; the next pass tries again",
+                    target);
+                await RollbackBestEffortAsync(connection, logger, cancellationToken);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 logger?.LogWarning(
                     "Insert-autovacuum tuning failed for {Table} — the store keeps working without it: {Message}",
                     target, ex.Message);
+                await RollbackBestEffortAsync(connection, logger, cancellationToken);
             }
         }
 

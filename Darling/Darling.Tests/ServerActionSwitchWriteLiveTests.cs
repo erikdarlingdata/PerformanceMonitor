@@ -84,6 +84,27 @@ public sealed class ServerActionSwitchWriteLiveTests
     }
 
     [Fact]
+    public async Task ADryRunRefusedForWantOfTheClaim_ReadsTheSwitchWithoutOne_AndSaysOnOrOff()
+    {
+        await WithStoreAsync(async (owner, ct) =>
+        {
+            /* #6455: no claim, no agent_action. The plan tools read the switch for a refused dry run through ServerActionSwitches.ListAsync. */
+            var off = await DarlingMcpPlanForceTools.ReadSwitchStateAsync(owner, null, SqlServerId, "srv-1", "force_plan", ct);
+            Assert.Contains("is currently off", off, StringComparison.Ordinal);
+            /* The per-server switch answers server_action_off; actions_off is the service-wide switch. */
+            Assert.Contains($"refused as {AgentActionCodes.SwitchOff} ", off, StringComparison.Ordinal);
+            Assert.DoesNotContain(AgentActionCodes.ActionsOff, off, StringComparison.Ordinal);
+
+            await ServerActionSwitches.SetAsync(owner, SqlServerId, "force_plan", true, "person:alice", ServerActionSurfaces.Viewer, ct);
+            var on = await DarlingMcpPlanForceTools.ReadSwitchStateAsync(owner, null, SqlServerId, "srv-1", "force_plan", ct);
+            Assert.Contains("is currently on.", on, StringComparison.Ordinal);
+
+            /* An unknown server has no switch to describe, so the refusal goes out without the note. */
+            Assert.Null(await DarlingMcpPlanForceTools.ReadSwitchStateAsync(owner, null, 9999, "nowhere", "force_plan", ct));
+        });
+    }
+
+    [Fact]
     public async Task TheService_RefusesAnUnknownAction_AnActionTheEngineCannotRun_AndAnUnknownServer_WritingAndJournalingNothing()
     {
         await WithStoreAsync(async (owner, ct) =>
@@ -128,11 +149,17 @@ public sealed class ServerActionSwitchWriteLiveTests
                 new AgentActionTarget(SqlServerId, "alpha-sql-01", null, null));
             var hooks = new ServerActionHooks
             {
-                LoadLevels = (_, _, _) => Task.FromResult<Func<string, int, int?>>((_, _) => 3),
+                LoadLevels = (_, _, _) => Task.FromResult<Func<string, int, PerformanceMonitor.Notifications.AlertSeverityLevel?, int?>>((_, _, _) => 3),
                 ReadCredential = (serverId, token) => store.ReadServerCredentialStateAsync(owner, serverId, token),
             };
 
-            Assert.Equal(AgentActionCodes.SwitchOff, (await store.CheckServerActionAsync(call, hooks, ct))?.Reason);
+            var realRefusal = await store.CheckServerActionAsync(call, hooks, ct);
+            Assert.Equal(AgentActionCodes.SwitchOff, realRefusal?.Reason);
+
+            /* #6455: the code a dry run predicts is the code the real call gets for this server. */
+            var predicted = await DarlingMcpPlanForceTools.ReadSwitchStateAsync(owner, null, SqlServerId, "alpha-sql-01", ServerActionNames.ForcePlan, ct);
+            Assert.Contains($"refused as {realRefusal!.Reason} ", predicted, StringComparison.Ordinal);
+
             await ServerActionSwitches.SetAsync(owner, SqlServerId, "force_plan", true, "person:alice", ServerActionSurfaces.Viewer, ct);
             Assert.Null(await store.CheckServerActionAsync(call, hooks, ct));
             await ServerActionSwitches.SetAsync(owner, SqlServerId, "force_plan", false, "person:alice", ServerActionSurfaces.Viewer, ct);
@@ -207,6 +234,34 @@ public sealed class ServerActionSwitchWriteLiveTests
     }
 
     [Fact]
+    public async Task TheMcpTool_JournalsTheLegacyTokenAsLegacyToken_AndANamedTokenByItsName_NeverTheFingerprintTheLogCarries()
+    {
+        await WithStoreAsync(async (owner, ct) =>
+        {
+            try
+            {
+                ReadCaller.SetAmbientMcpCaller("claude-desktop 1.2.3");
+                ReadCaller.SetAmbientMcpToken(ReadCaller.OfMcpToken("a-legacy-bearer-token"));
+                Assert.Matches("^token [0-9a-f]{8}, client says: ", ReadCaller.WriteIdentity());
+                Assert.Equal("set", (string)JsonNode.Parse(await DarlingMcpServerActionTools.RunAsync(owner, owner, null, "alpha-sql-01", "evict_plan", true, DarlingMcpServerActionTools.ActorOf(), ct))!["status"]!);
+                var legacy = await ScalarAsync(owner, "SELECT actor FROM config.investigation_journal WHERE event = 'server_action_switched'", ct);
+                Assert.Equal("mcp:legacy token, client says: claude-desktop 1.2.3", legacy);
+                Assert.DoesNotMatch("[0-9a-f]{8}", legacy);
+
+                ReadCaller.SetAmbientMcpToken("named token ops");
+                Assert.Equal("set", (string)JsonNode.Parse(await DarlingMcpServerActionTools.RunAsync(owner, owner, null, "alpha-sql-01", "evict_plan", false, DarlingMcpServerActionTools.ActorOf(), ct))!["status"]!);
+                Assert.Equal("mcp:named token ops, client says: claude-desktop 1.2.3",
+                    await ScalarAsync(owner, "SELECT actor FROM config.investigation_journal WHERE event = 'server_action_switched' ORDER BY journal_id DESC LIMIT 1", ct));
+            }
+            finally
+            {
+                ReadCaller.SetAmbientMcpToken(null);
+                ReadCaller.SetAmbientMcpCaller(null);
+            }
+        });
+    }
+
+    [Fact]
     public void TheMcpTool_IsServedOnlyUnderAllowServerAdmin_AndNeverToAnInvestigationAgentEvenWhenItsToolSetNamesIt()
     {
         const string tool = "set_server_action";
@@ -275,6 +330,57 @@ public sealed class ServerActionSwitchWriteLiveTests
                 await ExecAsync(login, "INSERT INTO config.config_server_actions (server_id, action, enabled, set_by) VALUES (1, 'kill_session', true, 'x')", ct));
             Assert.Equal("42501", direct.SqlState);
         });
+    }
+
+    /* #6600: the managed store's shape. The web reads as the viewer role; a signed-in admin's access check goes through the arm, so the page can
+       decide, and the switch change is journaled by the person. */
+    [Fact]
+    public async Task OnTheManagedStore_ASignedInAdminSeat_ChangesASwitchThroughTheArm_AndCanDecideIsTrue()
+    {
+        await WithWebAsync("viewer", async (owner, _, Send, ct) =>
+        {
+            var list = await Send("GET", "/api/server-actions", null);
+            Assert.Equal(200, list.Status);
+            Assert.True((bool)list.Body!["can_decide"]!);
+            Assert.True((bool)list.Body["signed_in_admin"]!);
+
+            Assert.Equal(200, (await Send("PUT", "/api/servers/1/actions/force_plan", "application/json", "{\"enabled\":true}")).Status);
+            Assert.Equal("True", await ScalarAsync(owner, "SELECT enabled FROM config.config_server_actions WHERE server_id = 1 AND action = 'force_plan'", ct));
+            Assert.Equal("person:alice", await ScalarAsync(owner, "SELECT actor FROM config.investigation_journal WHERE event = 'server_action_switched'", ct));
+        }, seat: new DarlingWebSeat("alice", true), arm: AdminArmShape.Admin, managedStore: true);
+    }
+
+    /* #6600: an OIDC viewer seat never opens the arm (its login is refused here, so opening it would fail): it lists, cannot decide, and a
+       change answers with the sign-in sentence, as today. */
+    [Fact]
+    public async Task OnTheManagedStore_AViewerSeat_NeverOpensTheArm_AndAnswersAsToday()
+    {
+        await WithWebAsync("viewer", async (owner, _, Send, ct) =>
+        {
+            var list = await Send("GET", "/api/server-actions", null);
+            Assert.Equal(200, list.Status);
+            Assert.False((bool)list.Body!["can_decide"]!);
+            Assert.False((bool)list.Body["signed_in_admin"]!);
+
+            var refused = await Send("PUT", "/api/servers/1/actions/force_plan", "application/json", "{\"enabled\":true}");
+            Assert.Equal(403, refused.Status);
+            Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.config_server_actions", ct));
+        }, seat: new DarlingWebSeat("viewer-person", false), arm: AdminArmShape.Refused, managedStore: true);
+    }
+
+    /* #6600: with the switch off (no arm on a managed store) the signed-in admin lists only, and the 403 names the switch. */
+    [Fact]
+    public async Task OnTheManagedStore_WithTheSwitchOff_TheSignedInAdminStillListsOnly_NamingTheSwitch()
+    {
+        await WithWebAsync("viewer", async (owner, _, Send, ct) =>
+        {
+            Assert.False((bool)(await Send("GET", "/api/server-actions", null)).Body!["can_decide"]!);
+            var refused = await Send("PUT", "/api/servers/1/actions/force_plan", "application/json", "{\"enabled\":true}");
+            Assert.Equal(403, refused.Status);
+            Assert.Equal(DarlingWebEndpoints.ServerActionRefusedMessage(true, adminWritesOff: true), (string)refused.Body!["error"]!);
+            Assert.Contains("web.allowAdminWrites", (string)refused.Body["error"]!, StringComparison.Ordinal);
+            Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.config_server_actions", ct));
+        }, seat: new DarlingWebSeat("alice", true), managedStore: true);
     }
 
     [Fact]
@@ -489,6 +595,65 @@ public sealed class ServerActionSwitchWriteLiveTests
         });
     }
 
+    /* #6727: the registry says "sqlserver" for an Azure SQL target too; the probed edition in collect.servers is what the plan guide and eviction tools refuse on. */
+    [Fact]
+    public async Task AnAzureSqlTarget_RefusesTheSwitchesItsToolsAlwaysRefuse_OnAndListsThemInvalid_WhileOffAndTheOtherActionsStillWork()
+    {
+        await WithStoreAsync(async (owner, ct) =>
+        {
+            async Task<IReadOnlyDictionary<string, bool>> ValidAsync()
+            {
+                var rows = await ServerActionSwitches.ListAsync(owner, ct);
+                return rows.Single(r => r.ServerId == 1).Actions.ToDictionary(a => a.Action, a => a.Valid, StringComparer.Ordinal);
+            }
+
+            /* Edition 5, an Azure SQL Database: no eviction and no plan guides. */
+            await ExecAsync(owner, "UPDATE collect.servers SET sql_engine_edition = 5 WHERE server_id = 1", ct);
+            var evict = await ServerActionSwitches.SetAsync(owner, 1, ServerActionNames.EvictPlan, true, "person:alice", ServerActionSurfaces.Mcp, ct);
+            Assert.False(evict.Succeeded);
+            Assert.Equal("not_for_engine", evict.Code);
+            Assert.Contains("Azure SQL Database", evict.Message, StringComparison.Ordinal);
+            Assert.DoesNotContain("a SQL Server target", evict.Message, StringComparison.Ordinal);
+            Assert.Equal("not_for_engine", (await ServerActionSwitches.SetAsync(owner, 1, ServerActionNames.CreatePlanGuide, true, "person:alice", ServerActionSurfaces.Mcp, ct)).Code);
+            Assert.Equal("not_for_engine", (await ServerActionSwitches.SetAsync(owner, 1, ServerActionNames.DropPlanGuide, true, "person:alice", ServerActionSurfaces.Mcp, ct)).Code);
+            var valid = await ValidAsync();
+            Assert.False(valid[ServerActionNames.EvictPlan]);
+            Assert.False(valid[ServerActionNames.CreatePlanGuide]);
+            Assert.False(valid[ServerActionNames.DropPlanGuide]);
+            Assert.True(valid[ServerActionNames.ForcePlan]);
+            Assert.True(valid[ServerActionNames.KillSession]);
+            Assert.True(valid[ServerActionNames.RecompileModule]);
+            Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.config_server_actions WHERE server_id = 1", ct));
+            Assert.True((await ServerActionSwitches.SetAsync(owner, 1, ServerActionNames.KillSession, true, "person:alice", ServerActionSurfaces.Mcp, ct)).Succeeded);
+
+            /* Edition 8, a Managed Instance: no plan guides, but eviction runs. */
+            await ExecAsync(owner, "UPDATE collect.servers SET sql_engine_edition = 8 WHERE server_id = 1", ct);
+            var guide = await ServerActionSwitches.SetAsync(owner, 1, ServerActionNames.CreatePlanGuide, true, "person:alice", ServerActionSurfaces.Mcp, ct);
+            Assert.Equal("not_for_engine", guide.Code);
+            Assert.Contains("Azure SQL Managed Instance", guide.Message, StringComparison.Ordinal);
+            Assert.Equal("not_for_engine", (await ServerActionSwitches.SetAsync(owner, 1, ServerActionNames.DropPlanGuide, true, "person:alice", ServerActionSurfaces.Mcp, ct)).Code);
+            Assert.True((await ServerActionSwitches.SetAsync(owner, 1, ServerActionNames.EvictPlan, true, "person:alice", ServerActionSurfaces.Mcp, ct)).Succeeded);
+            valid = await ValidAsync();
+            Assert.True(valid[ServerActionNames.EvictPlan]);
+            Assert.False(valid[ServerActionNames.CreatePlanGuide]);
+            Assert.False(valid[ServerActionNames.DropPlanGuide]);
+
+            /* A switch left on before the edition was probed as Azure SQL Database can still be turned off. */
+            await ExecAsync(owner, "UPDATE collect.servers SET sql_engine_edition = 5 WHERE server_id = 1", ct);
+            var off = await ServerActionSwitches.SetAsync(owner, 1, ServerActionNames.EvictPlan, false, "person:alice", ServerActionSurfaces.Mcp, ct);
+            Assert.True(off.Succeeded);
+            Assert.Equal("set", off.Status);
+
+            /* No edition probed yet, and no collect.servers row at all: answers as an ordinary SQL Server, as before. */
+            await ExecAsync(owner, "UPDATE collect.servers SET sql_engine_edition = NULL WHERE server_id = 1", ct);
+            Assert.True((await ServerActionSwitches.SetAsync(owner, 1, ServerActionNames.CreatePlanGuide, true, "person:alice", ServerActionSurfaces.Mcp, ct)).Succeeded);
+            await ExecAsync(owner, "DELETE FROM collect.servers WHERE server_id = 1", ct);
+            Assert.True((await ServerActionSwitches.SetAsync(owner, 1, ServerActionNames.EvictPlan, true, "person:alice", ServerActionSurfaces.Mcp, ct)).Succeeded);
+            valid = await ValidAsync();
+            Assert.All(ServerActionNames.All, a => Assert.True(valid[a], a));
+        });
+    }
+
     [Theory]
     [InlineData("admin")]
     [InlineData("mcp")]
@@ -620,7 +785,8 @@ public sealed class ServerActionSwitchWriteLiveTests
         }
     }
 
-    private static async Task WithWebAsync(string managedRole, Func<NpgsqlDataSource, NpgsqlDataSource, Sender, CancellationToken, Task> body, bool signedIn = true, DarlingWebSeat? seat = null)
+    private static async Task WithWebAsync(string managedRole, Func<NpgsqlDataSource, NpgsqlDataSource, Sender, CancellationToken, Task> body, bool signedIn = true, DarlingWebSeat? seat = null,
+        AdminArmShape arm = AdminArmShape.None, bool managedStore = false)
     {
         var baseConnectionString = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the server action switch live tests.");
@@ -654,6 +820,7 @@ public sealed class ServerActionSwitchWriteLiveTests
                 Pooling = false,
             }.ConnectionString;
             await using var webLogin = NpgsqlDataSource.Create(asSeat);
+            using var adminArm = await AdminArmLive.BuildAsync(owner, scratch, roleName, arm, ct);
 
             var builder = WebApplication.CreateBuilder(new WebApplicationOptions
             {
@@ -676,7 +843,8 @@ public sealed class ServerActionSwitchWriteLiveTests
 
             var ownerSeam = new StoreOwnerSource();
             ownerSeam.Publish(owner);
-            DarlingWebEndpoints.MapAll(app, webLogin, new CollectorRuntimeState(), new CapturingTestLogger(), ownerSource: ownerSeam);
+            DarlingWebEndpoints.MapAll(app, webLogin, new CollectorRuntimeState(), new CapturingTestLogger(), ownerSource: ownerSeam,
+                postgresConfig: managedStore ? new PostgresConfig { Managed = true } : null, adminArm: adminArm);
             await app.StartAsync(ct);
             using var server = app.GetTestServer();
 
@@ -707,7 +875,7 @@ public sealed class ServerActionSwitchWriteLiveTests
             await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (connection, token) =>
             {
                 NpgsqlConnection.ClearAllPools();
-                await using var drop = new NpgsqlCommand($"DROP OWNED BY {roleName}; DROP ROLE IF EXISTS {roleName}", connection);
+                await using var drop = new NpgsqlCommand(AdminArmLive.DropRolesSql(roleName), connection);
                 await drop.ExecuteNonQueryAsync(token);
             });
         }

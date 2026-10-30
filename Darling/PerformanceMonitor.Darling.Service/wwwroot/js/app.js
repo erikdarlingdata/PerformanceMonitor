@@ -37,7 +37,8 @@
  * list) still refreshes.
  */
 
-import { el, mount, apiGet, apiGetFleet, readTool, localTime, hasInFlightReads, readErrorCount, isSessionExpired, onSessionExpired } from "./util.js";
+import { el, mount, apiGet, apiGetFleet, readTool, localTime, hasInFlightReads, beginPageScope, readErrorCount, isSessionExpired, onSessionExpired, frontDoor, currentStore, routeHash, splitStoreHash, storeHash, storeHeaders, loadingStrip } from "./util.js";
+import { initFrontDoor, refreshPicker, rememberStore, frontDoorStores, isKnownStore, locateServer, ambiguousStrip, locateFailureStrip } from "./store-picker.js";
 import { makeScrollReset } from "./scroll-reset.js";
 import { renderFleet } from "./pages/fleet.js";
 import { renderAg } from "./pages/ag.js";
@@ -65,7 +66,7 @@ import { renderQueryTagUsage } from "./pages/query-tag-usage.js";
 import { renderJobHistory } from "./pages/job-history.js";
 import { refreshAttention, clearViewGroups, onChange as onLocalChange } from "./viewer-local.js";
 import { initSidebarCollapse, initSeverityColorSettings } from "./viewer-local-ui.js";
-import { initSidebarSearch, paintServerList } from "./sidebar.js";
+import { initSidebarSearch, paintServerList, paintStoreServerLists } from "./sidebar.js";
 import { initNarrowNav } from "./narrow-nav.js";
 
 /* The shell (sidebar, view list, AG nav) refreshes every POLL_MS; the page re-renders on its own interval. */
@@ -84,7 +85,8 @@ const statusbar = document.getElementById("statusbar");
    from another site can open the dashboard with a live session behind it (#6286), so a page reached by an address
    may only read and draw; a change happens after a click on a button inside the page, never from the address. */
 function currentRoute() {
-  const h = location.hash || "#/fleet";
+  /* #6840: a front door's #/s/{store}/ prefix is not part of the route; the store it names is applied in route(). */
+  const h = routeHash() || "#/fleet";
   if (h.startsWith("#/server/")) return serverRoute(h.slice("#/server/".length));
   if (h === "#/finops" || h.startsWith("#/finops/")) return finopsRoute(h.slice("#/finops".length).replace(/^\//, ""));
   if (h === "#/ag" || h === "#/ag/") return { name: "ag" };
@@ -135,6 +137,80 @@ function currentRoute() {
   if (h === "#/query-tag-usage") return { name: "queryTagUsage" };
   if (h === "#/job-history" || h === "#/job-history/") return { name: "jobHistory" };
   return { name: "fleet" };
+}
+
+/* ─────────────────────────── front door: the store in the address (#6840) ─────────────────────────── */
+
+/* Server name -> the store /api/front-door/locate said holds it, kept for the page's life so an in-app link written without a
+   store does not ask again. */
+const locatedStore = new Map();
+
+/* The name a bare route points at when it is a server's page: #/server/{name}[/tab] and #/finops/{server}[/tab]. */
+function routeServerName(r) {
+  if (r.name === "server" && r.param) return r.param;
+  if (r.name === "finops" && r.param) return r.param;
+  return null;
+}
+
+/**
+ * Applies the store the address names, before the route draws. Returns true when route() must stop here (a reload, a lookup
+ * or a message is in charge of the page now) and false when the route can draw.
+ *   #/s/{store}/...  the store is made current: the one in force already draws; another one reloads the page (the shell's
+ *                    view list, alert counts and the rest belong to the store that was left); an unknown name says so.
+ *   a bare route     keeps the current store, and the address is rewritten to carry it so a link or bookmark made from it
+ *                    opens in the same store. A server's page asks the front door which store has the server (a person
+ *                    can paste a link with no store); a name more than one store has lets the person pick.
+ */
+function gateStore(opts) {
+  const split = splitStoreHash(location.hash || "");
+  if (split.store) {
+    if (split.store === currentStore()) return false;
+    if (isKnownStore(split.store)) {
+      rememberStore(split.store);
+      location.reload();
+      return true;
+    }
+    mount(main, el("div", { class: "strip error", role: "alert", text: "This front door has no store named " + split.store + "." }));
+    return true;
+  }
+
+  const r = currentRoute();
+  const name = routeServerName(r);
+  const bare = location.hash || "#/fleet";
+  if (!name) {
+    history.replaceState(null, "", storeHash(bare));
+    return false;
+  }
+  const known = locatedStore.get(name);
+  if (known) {
+    applyLocatedStore(known, bare, opts);
+    return true;
+  }
+  mount(main, loadingStrip("Finding " + name + "…"));
+  locateServer(name).then((answer) => {
+    if ((location.hash || "#/fleet") !== bare) return; /* the person went elsewhere while the front door answered */
+    if (answer.kind === "found") {
+      locatedStore.set(name, answer.store);
+      applyLocatedStore(answer.store, bare, opts);
+    } else if (answer.kind === "ambiguous") {
+      /* The store the page is working in wins when it is one of the candidates: that is a link from inside this store. */
+      if (answer.stores.includes(currentStore())) applyLocatedStore(currentStore(), bare, opts);
+      else mount(main, ambiguousStrip(answer, bare));
+    } else {
+      mount(main, locateFailureStrip(answer));
+    }
+  });
+  return true;
+}
+
+function applyLocatedStore(store, bare, opts) {
+  history.replaceState(null, "", storeHash(bare, store));
+  if (store === currentStore()) {
+    route(opts);
+    return;
+  }
+  rememberStore(store);
+  location.reload();
 }
 
 /* #/server/{name} and #/server/{name}/{tab} — the sub-tab id rides in the hash so a tab is deep-linkable and
@@ -190,13 +266,21 @@ function route(opts) {
      same way; short-circuiting is simpler than unwiring every listener that can reach route(). */
   if (isSessionExpired()) return;
 
+  /* #6793: going to another page (or a sub-tab, a deep link, the first paint) aborts the reads of the page being left
+     and starts a fresh read count, so a read left behind cannot hold the new page's poll, Refresh button, tab-return
+     refresh or render-time back-off. The poll and the Refresh button re-render the SAME page (`poll: true`): that page
+     aborts its own older load, as before, and the count carries on. */
+  if (!(opts && opts.poll === true)) beginPageScope();
+
+  if (frontDoor() && gateStore(opts)) return;
+
   const r = currentRoute();
   resetScrollOnRouteChange(r, !!(opts && opts.poll === true));
   markPageRenderStart(r.name, !!(opts && opts.poll === true));
   setActiveNav(r);
   if (r.name === "server") renderServer(main, r.param, r.tab, opts);
   else if (r.name === "finops") renderFinops(main, r.param, r.tab, opts);
-  else if (r.name === "ag") renderAg(main);
+  else if (r.name === "ag") renderAg(main, opts);
   else if (r.name === "sweeps") renderSweeps(main, opts);
   else if (r.name === "alerts") renderAlerts(main);
   else if (r.name === "investigations") renderInvestigations(main);
@@ -205,9 +289,9 @@ function route(opts) {
   else if (r.name === "admin") renderAdmin(main, r.tab);
   else if (r.name === "triage") renderTriage(main, r.query);
   else if (r.name === "views") renderViewList(main);
-  else if (r.name === "view") renderView(main, r.id);
+  else if (r.name === "view") renderView(main, r.id, opts);
   else if (r.name === "editor") renderEditor(main, r.id);
-  else if (r.name === "notebook") renderView(main, r.id); // renderView kind-detects -> notebook document
+  else if (r.name === "notebook") renderView(main, r.id, opts); // renderView kind-detects -> notebook document
   else if (r.name === "notebookEditor") renderNotebookEditor(main, r.id, r.template);
   else if (r.name === "muteRules") renderMuteRules(main, r.query);
   else if (r.name === "knownPatterns") renderKnownPatterns(main);
@@ -215,7 +299,7 @@ function route(opts) {
   else if (r.name === "manageQueryTags") renderManageQueryTags(main);
   else if (r.name === "queryTagUsage") renderQueryTagUsage(main);
   else if (r.name === "jobHistory") renderJobHistory(main);
-  else renderFleet(main);
+  else renderFleet(main, opts);
 }
 
 /* Whether a route targets a specific saved view/notebook (its renderer or composer) — the routes whose sidebar
@@ -262,7 +346,25 @@ function updateViewActive(r) {
 
 /* ─────────────────────────── sidebar ─────────────────────────── */
 
+/* Front door: one roll-up per store, read together. A store that fails shows its own message in the sidebar; the rest draw. */
+let lastStoreFleets = null;
+
+async function refreshStoreSidebar() {
+  const list = frontDoorStores();
+  const groups = await Promise.all(list.map(async (s) => ({ store: s, res: await apiGetFleet(s.name) })));
+  lastStoreFleets = groups;
+  const own = groups.find((g) => g.store.name === currentStore());
+  lastSidebarFleet = own && own.res.kind === "data" ? own.res : null;
+  if (lastSidebarFleet) refreshAttention(readTool).then(() => paintSidebar());
+  else updateStatusBar(null);
+  paintSidebar();
+}
+
 async function refreshSidebar() {
+  if (frontDoor()) {
+    await refreshStoreSidebar();
+    return;
+  }
   const res = await apiGetFleet();
   if (res.kind !== "data") {
     mount(serverList, el("div", { class: "muted", style: "padding:0.5rem 1.25rem", text: res.kind === "error" ? "Fleet unavailable" : "" }));
@@ -282,6 +384,12 @@ let lastSidebarFleet = null;
 function paintSidebar() {
   /* #6214: a signed-out page paints nothing: a late poll or a local change must not bring the old session's lists back. */
   if (isSessionExpired()) return;
+  if (frontDoor()) {
+    if (!lastStoreFleets) return;
+    paintStoreServerLists(serverList, lastStoreFleets, currentRoute().name === "server" ? currentRoute().param : null, currentStore());
+    updateStatusBar(lastSidebarFleet ? lastSidebarFleet.data : null);
+    return;
+  }
   const res = lastSidebarFleet;
   if (!res) return;
   const r = currentRoute();
@@ -376,7 +484,7 @@ function formatStoreSize(bytes) {
    reads the body whatever the status. Any failure is null (the item is hidden). */
 async function fetchCollectionState() {
   try {
-    const resp = await fetch("/api/ping", { headers: { Accept: "application/json" } });
+    const resp = await fetch("/api/ping", { headers: storeHeaders({ Accept: "application/json" }) });
     const body = await resp.json();
     return body && typeof body.status === "string" ? body.status : null;
   } catch {
@@ -425,15 +533,21 @@ function renderStatusBar() {
     return;
   }
   let healthy = 0;
+  let warning = 0;
   let failing = 0;
+  let notCollected = 0;
+  let noPermission = 0;
   for (const c of d.cards || []) {
     healthy += c.healthy_collector_count || 0;
+    warning += c.warning_collector_count || 0;
     failing += c.failed_collector_count || 0;
+    notCollected += c.not_collected_collector_count || 0;
+    noPermission += c.no_permission_collector_count || 0;
   }
   const servers = d.total_servers || 0;
   const items = [
     el("span", { class: "sb-item", text: servers + (servers === 1 ? " server" : " servers") }),
-    el("span", { class: "sb-item", text: healthy + " collectors healthy · " + failing + " failing" }),
+    el("span", { class: "sb-item", text: healthy + " collectors healthy · " + (warning > 0 ? warning + " warning · " : "") + failing + " failing" + (notCollected > 0 ? " · " + notCollected + " not collected" : "") + (noPermission > 0 ? " · " + noPermission + " no permission" : "") }),
   ];
   if (storeSizeBytes != null) {
     items.push(el("span", { class: "sb-item sb-store-size" + (storeSizeStale ? " muted" : ""), text: "Database: " + formatStoreSize(storeSizeBytes) + (storeSizeStale ? " (stale)" : "") }));
@@ -491,10 +605,12 @@ function updateStatusBar(d) {
    Triage cost guard (#4222d): #/triage is the alert-notebook deep link's landing page. Its cost item says the
    periodic poll must not re-render it every 60s — the same reason the composer routes are skipped, just for
    "don't waste a read against a page you opened to read once" rather than "don't discard an edit". hashchange
-   still routes there normally on first load / a fresh alert link. */
+   still routes there normally on first load / a fresh alert link.
+   Query Tag Usage (#6793): its figures are 24 hour totals and the fleet read can take minutes on a large store, so a 60 s
+   re-read adds almost nothing and costs a lot. The page's own server picker and range picker still re-read it. */
 function isNoPollRoute(routeName) {
   return routeName === "editor" || routeName === "notebookEditor" || routeName === "alertEditor"
-    || routeName === "triage";
+    || routeName === "triage" || routeName === "queryTagUsage";
 }
 
 /* Per-page schedule (#4666). pageNextRefreshAt is when the page may re-render next (Infinity = never);
@@ -570,7 +686,9 @@ function initPageRefreshControl() {
 function markPageRenderStart(routeName, isPoll) {
   syncPageRefreshControl(routeName);
   if (!isPoll && (routeName === "view" || routeName === "notebook")) clearViewRefresh();
-  if (isNoPollRoute(routeName)) {
+  /* Query Tag Usage is a no-poll page whose one read can run for minutes (#6793): its "Updated" time is written when that read
+     settles, like every polled page, not at render start. The editors and #/triage read once or not at all, so they stamp now. */
+  if (isNoPollRoute(routeName) && routeName !== "queryTagUsage") {
     pageRendering = false;
     pageNextRefreshAt = Infinity;
     notePageUpdated(Date.now());
@@ -608,6 +726,7 @@ function refreshShell() {
   shellLastRefreshAt = Date.now();
   /* The sidebar and the route() below both read /api/fleet in this same synchronous pass; apiGetFleet hands the
      second caller the first one's request, so a tick costs the store ONE fleet roll-up, not two (#3895). */
+  if (frontDoor()) refreshPicker();
   refreshSidebar();
   refreshViewList();
   refreshAgNav();
@@ -748,6 +867,18 @@ function initAutoRefreshToggle() {
   });
 }
 
+/* #6840: ask the session whether this is a front door before anything else reads, because every read after it names a store. */
+async function startFrontDoor() {
+  const session = await getSession();
+  if (!session || session.front_door !== true) return;
+  await initFrontDoor(document.getElementById("store-picker"), location.hash || "");
+  /* The menu's own links open in the store in use, so "open in a new tab" keeps it. */
+  for (const a of document.querySelectorAll("#sidebar .nav a")) {
+    const href = a.getAttribute("href");
+    if (href && href.startsWith("#/")) a.setAttribute("href", storeHash(href));
+  }
+}
+
 function start() {
   window.addEventListener("hashchange", route);
   document.addEventListener("visibilitychange", () => {
@@ -777,4 +908,4 @@ function start() {
   route();
 }
 
-start();
+startFrontDoor().catch(() => {}).then(start);

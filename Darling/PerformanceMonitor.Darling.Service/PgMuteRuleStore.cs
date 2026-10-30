@@ -12,6 +12,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using NpgsqlTypes;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitor.Darling.Service;
@@ -186,7 +187,7 @@ WHERE id = $1", scope.Connection, scope.Transaction) { CommandTimeout = DarlingA
     public async Task DeleteAsync(string ruleId)
     {
         await using var scope = await OpenAsync();
-        using var command = new NpgsqlCommand("DELETE FROM config_mute_rules WHERE id = $1", scope.Connection, scope.Transaction) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
+        using var command = new NpgsqlCommand(MuteRulePurge.DeleteByIdSql, scope.Connection, scope.Transaction) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(ruleId);
         await command.ExecuteNonQueryAsync();
     }
@@ -201,7 +202,7 @@ WHERE id = $1", scope.Connection, scope.Transaction) { CommandTimeout = DarlingA
         await using var scope = await OpenAsync();
         foreach (var id in expiredIds)
         {
-            using var command = new NpgsqlCommand("DELETE FROM config_mute_rules WHERE id = $1", scope.Connection, scope.Transaction) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
+            using var command = new NpgsqlCommand(MuteRulePurge.DeleteByIdSql, scope.Connection, scope.Transaction) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
             command.Parameters.AddWithValue(id);
             await command.ExecuteNonQueryAsync();
         }

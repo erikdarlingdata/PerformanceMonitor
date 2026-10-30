@@ -143,6 +143,19 @@ public sealed class DarlingMcpConfigTools
                 log_reuse_wait = r.LogReuseWaitDesc
             }).ToList();
 
+            /* A filter that matched nothing in a snapshot that does hold databases: say why, once. The shape and status stay as they were. */
+            if (result.Count == 0)
+            {
+                return JsonSerializer.Serialize(new
+                {
+                    server = resolved.DisplayName,
+                    captured_at = snapshot.CapturedAt!.Value.ToString("o"),
+                    database_count = result.Count,
+                    databases = result,
+                    note = McpHelpers.DatabaseConfigFilterMissNote
+                }, McpHelpers.JsonOptions);
+            }
+
             return JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,

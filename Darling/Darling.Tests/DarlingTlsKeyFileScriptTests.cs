@@ -69,18 +69,13 @@ public sealed class DarlingTlsKeyFileScriptTests
     }
 
     /// <summary>The verb runs after the last tree lock (the lock resets any extra write grant on a file it walks) and before
-    /// the service starts, in both scripts. A failure to run it is a warning, never a stop.</summary>
+    /// the service starts, in the upgrade script (the install script's order is not pinned as text: under -MsiPhase the
+    /// start is the package's, #6480). A failure to run it is a warning, never a stop, in both.</summary>
     [Fact]
     public void TheScripts_CallTheVerb_AfterTheLastTreeLock_AndBeforeTheServiceStarts_AndNeverFailOverIt()
     {
         var install = Script("install-darling.ps1");
         var upgrade = Script("upgrade-darling.ps1");
-
-        var installLock = install.LastIndexOf("\nInvoke-InstallTreeLock $serviceAccount\n", StringComparison.Ordinal);
-        var installCall = install.IndexOf("\n$tlsKeyWarning = Invoke-DarlingTlsKeyFileHardening $serviceExe $configPath\n", StringComparison.Ordinal);
-        var installStart = install.IndexOf("\nStart-Service -Name $serviceName\n", StringComparison.Ordinal);
-        Assert.True(installLock > 0 && installCall > installLock && installCall < installStart, $"install order: lock {installLock}, call {installCall}, start {installStart}");
-        Assert.Matches(@"\$tlsKeyWarning = Invoke-DarlingTlsKeyFileHardening \$serviceExe \$configPath\nif \(\$tlsKeyWarning\) \{ Write-Host ""WARNING: \$tlsKeyWarning"" -ForegroundColor Yellow \}\n", install);
 
         var upgradeLock = upgrade.LastIndexOf("\nInvoke-UpgradeTreeLock 'after the copy'\n", StringComparison.Ordinal);
         var upgradeCall = upgrade.IndexOf("\n$tlsKeyWarning = Get-UpgradeTlsKeyFileWarning (Join-Path $InstallRoot $serviceExeName) $configPath\n", StringComparison.Ordinal);
@@ -693,6 +688,74 @@ public sealed class DarlingTlsKeyFileScriptTests
         Assert.DoesNotContain("/reset 2>&1", upgrade, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #6920: the step that restricts a rollback backup folder read the folder's permissions back with a .NET Framework
+    /// only method, so under PowerShell 7 the upgrade stopped at "Method invocation failed ... GetAccessControl". It runs
+    /// to the end in both PowerShell 7 and Windows PowerShell 5.1: the folder and the file in it end limited to SYSTEM and
+    /// Administrators, and no problem is reported.
+    /// </summary>
+    [Theory]
+    [InlineData("pwsh")]
+    [InlineData("powershell.exe")]
+    public void TheBackupFolderStep_RunsToTheEnd_InPowerShell7AndWindowsPowerShell(string host)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            Assert.Skip("DACLs and Windows PowerShell are Windows'.");
+            return;
+        }
+
+        if (host == "pwsh" && !OnPath("pwsh.exe"))
+        {
+            Assert.Skip("PowerShell 7 (pwsh.exe) is not on PATH on this machine.");
+            return;
+        }
+
+        var script = Script("upgrade-darling.ps1");
+        var probe = new StringBuilder();
+        foreach (var name in new[] { "Get-DarlingFileNameCount", "Protect-DarlingRollbackBackupFolder" })
+        {
+            probe.AppendLine(ExtractFunction(script, name, "upgrade-darling.ps1"));
+        }
+
+        probe.AppendLine("""
+            $ErrorActionPreference = 'Stop'
+            $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+            $base = Join-Path $env:TEMP ('pm6920-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+            try {
+                $old = Join-Path $base '_rollback_old'
+                New-Item -ItemType Directory -Path $old -Force | Out-Null
+                Set-Content -LiteralPath (Join-Path $old 'web.pfx') -Value 'placeholder'
+                'edition=' + $PSVersionTable.PSEdition
+                $problem = Protect-DarlingRollbackBackupFolder $old -ResetChildren
+                'problem=' + $(if ($problem) { $problem } else { 'none' })
+                $access = [System.Security.AccessControl.AccessControlSections]::Access
+                $folder = New-Object System.Security.AccessControl.DirectorySecurity($old, $access)
+                'folderProtected=' + $folder.AreAccessRulesProtected
+                'folderSids=' + ((@($folder.Access | ForEach-Object { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value }) | Sort-Object -Unique) -join ',')
+                'fileSids=' + ((@((New-Object System.Security.AccessControl.FileSecurity((Join-Path $old 'web.pfx'), $access)).Access | ForEach-Object { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value }) | Sort-Object -Unique) -join ',')
+            }
+            finally {
+                $cleanup = Join-Path $base '_rollback_old'
+                if (Test-Path -LiteralPath $cleanup) { & icacls.exe $cleanup /grant ('*' + $me.Value + ':(OI)(CI)F') | Out-Null }
+                Remove-Item -LiteralPath $base -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            """);
+
+        var all = string.Join("\n", RunWindowsPowerShell(probe.ToString(), host));
+
+        Assert.Contains(host == "pwsh" ? "edition=Core" : "edition=Desktop", all, StringComparison.Ordinal);
+        Assert.Contains("problem=none", all, StringComparison.Ordinal);
+        Assert.Contains("folderProtected=True", all, StringComparison.Ordinal);
+        Assert.Contains("folderSids=S-1-5-18,S-1-5-32-544", all, StringComparison.Ordinal);
+        Assert.Contains("fileSids=S-1-5-18,S-1-5-32-544", all, StringComparison.Ordinal);
+    }
+
+    private static bool OnPath(string exe) =>
+        (Environment.GetEnvironmentVariable("PATH") ?? string.Empty)
+            .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries)
+            .Any(dir => File.Exists(Path.Combine(dir.Trim('"'), exe)));
+
     private static string ExtractFunction(string script, string name, string scriptName)
     {
         var start = script.IndexOf("function " + name + "(", StringComparison.Ordinal);
@@ -720,13 +783,13 @@ public sealed class DarlingTlsKeyFileScriptTests
         return string.Empty;
     }
 
-    private static List<string> RunWindowsPowerShell(string script)
+    private static List<string> RunWindowsPowerShell(string script, string host = "powershell.exe")
     {
         var path = Path.Combine(Path.GetTempPath(), $"darling-5700-{Guid.NewGuid():N}.ps1");
         File.WriteAllText(path, script);
         try
         {
-            using var process = Process.Start(WindowsPowerShellStartInfo.ForScript(path));
+            using var process = Process.Start(WindowsPowerShellStartInfo.Create(host, $"-NoProfile -ExecutionPolicy Bypass -File \"{path}\""));
             Assert.NotNull(process);
 
             var stdoutTask = process!.StandardOutput.ReadToEndAsync();

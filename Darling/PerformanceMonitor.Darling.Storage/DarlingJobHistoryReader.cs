@@ -48,9 +48,9 @@ public sealed record DarlingJobHistoryRow(
 /// instant: the SQL bounds the newest runs by it (widened by an hour, like the start) and the job stats exactly,
 /// and <see cref="DarlingJobHistoryReader.GetAsync"/> then cuts the runs exactly in C#.
 /// </summary>
-public sealed record JobHistoryFilter(string? JobName = null, int? RunStatus = null, string? Category = null, DateTime? UntilUtc = null)
+public sealed record JobHistoryFilter(string? JobName = null, int? RunStatus = null, string? Category = null, DateTime? UntilUtc = null, int? MinDurationSeconds = null)
 {
-    private int UntilParam(int firstParam) => firstParam + (JobName is null ? 0 : 1) + (RunStatus is null ? 0 : 1) + (Category is null ? 0 : 1);
+    private int UntilParam(int firstParam) => firstParam + (JobName is null ? 0 : 1) + (RunStatus is null ? 0 : 1) + (Category is null ? 0 : 1) + (MinDurationSeconds is null ? 0 : 1);
 
     /// <summary>The <c>AND</c> clauses for the set filters, numbering their parameters from <paramref name="firstParam"/>.</summary>
     public string Clauses(int firstParam)
@@ -70,6 +70,11 @@ public sealed record JobHistoryFilter(string? JobName = null, int? RunStatus = n
         if (Category is not null)
         {
             sql += $"\n        AND   lower(jh.category_name) = lower(${next++})";
+        }
+
+        if (MinDurationSeconds is not null)
+        {
+            sql += $"\n        AND   jh.run_duration_seconds >= ${next++}";
         }
 
         if (UntilUtc is not null)
@@ -103,6 +108,11 @@ public sealed record JobHistoryFilter(string? JobName = null, int? RunStatus = n
         if (Category is not null)
         {
             yield return new NpgsqlParameter<string> { TypedValue = Category };
+        }
+
+        if (MinDurationSeconds is not null)
+        {
+            yield return new NpgsqlParameter<int> { TypedValue = MinDurationSeconds.Value };
         }
 
         if (UntilUtc is not null)
@@ -326,6 +336,27 @@ ORDER BY jh.category_name";
     /// combined. <c>job_stats</c> LEFT JOINs onto <c>base</c> so a job with no successful step-0 row in the
     /// window still surfaces its other rows with a NULL avg/last-success, exactly as before.
     /// </para>
+    /// <para>
+    /// <b>The listed jobs are a seek key on V220's partial index (#6798).</b> <c>job_stats</c> still runs one aggregate per listed
+    /// server, but it hands that server's listed jobs in as one array, <c>jh.job_id = ANY (b.job_ids)</c>, so the job is an index
+    /// condition the planner seeks on. V220's <c>idx_job_history_job_success (server_id, job_id, run_datetime DESC) INCLUDE
+    /// (run_duration_seconds, collection_time) WHERE step_id = 0 AND run_status = 1</c> serves that seek index-only: it holds only the
+    /// successful job outcomes, and the INCLUDE columns cover the average and the <c>collection_time</c> floor, so a cold read of the
+    /// uncompressed chunks no longer visits the heap. Before, the aggregate read the server's whole run-time range through
+    /// <c>idx_job_history_server_run</c> and dropped the step rows, the failures and the other jobs after reading them from scattered
+    /// heap pages. The old <c>job_id IN (SELECT job_id FROM base WHERE ...)</c> asked the same question, but as a subquery the planner
+    /// ran it as a filter or a join, not as an index condition.
+    /// </para>
+    /// <para>
+    /// <b>Why one aggregate per server and not one per (server, job).</b> Past the compression boundary (7 days for
+    /// <c>job_history</c>) a compressed chunk keeps no rows in V220's index, and its batches are segmented by <c>server_id</c> only.
+    /// A per-job aggregate decompresses that server's batches on every compressed chunk once per job: on a 30-day read of a seeded
+    /// 40-server store it read 783,418 buffers and took 1.25 s, against 141,064 and 0.78 s for the old shape. One aggregate per
+    /// server decompresses each server's batches once, as before (145,573 buffers, 0.80 s). The GROUP BY keeps the old CTE's row set,
+    /// one row per (server, job) with at least one successful outcome in the window, so the one LEFT JOIN onto <c>base</c> fans out
+    /// no row and a job with no success lands on a NULL last success and a false long-running flag, as before. The values, the window
+    /// predicates, the end-instant clause and the LEFT JOIN are unchanged, so the rows are identical.
+    /// </para>
     /// </summary>
     public static string BuildJobHistorySql(bool scopedToServer, JobHistoryFilter? filter = null)
     {
@@ -414,7 +445,7 @@ job_stats AS (
         js.job_id,
         js.avg_success_duration,
         js.last_success_run_local
-    FROM (SELECT DISTINCT server_id FROM base) AS b
+    FROM (SELECT server_id, array_agg(DISTINCT job_id) AS job_ids FROM base GROUP BY server_id) AS b
     JOIN server_offsets AS so ON so.server_id = b.server_id
     CROSS JOIN LATERAL (
         SELECT
@@ -422,12 +453,12 @@ job_stats AS (
             AVG(jh.run_duration_seconds) AS avg_success_duration,
             MAX(jh.run_datetime) AS last_success_run_local
         FROM job_history AS jh
-        WHERE jh.server_id = so.server_id
+        WHERE jh.server_id = b.server_id
+        AND   jh.job_id = ANY (b.job_ids)
         AND   jh.step_id = 0
         AND   jh.run_status = 1
         AND   jh.collection_time >= {floorParam}
         AND   jh.run_datetime >= $1 + make_interval(mins => so.offset_minutes){statsUntilSql}
-        AND   jh.job_id IN (SELECT job_id FROM base WHERE base.server_id = so.server_id)
         GROUP BY jh.job_id
     ) AS js
 )

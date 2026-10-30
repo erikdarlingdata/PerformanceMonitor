@@ -50,24 +50,26 @@ public sealed class ViewerHourlyWindowEdgesTests
     public void HourlySql_BindsTheCeilingOnlyWhenOneIsKnown_OnBothGrids()
     {
         const string From = "collect.query_stats_io_hourly AS f";
-        foreach (var build in new Func<DateTime?, string>[]
+        /* The procedures grid binds the dropped-database exclusion at $6 (#6651), so its ceiling is the seventh parameter. */
+        foreach (var (build, slot) in new (Func<DateTime?, string>, int)[]
         {
-            ceiling => ViewerDataService.BuildTopQueriesHourlySql(From, withIo: true, ceiling: ceiling),
-            ceiling => ViewerDataService.BuildTopQueriesHourlySql(From, withIo: false, ceiling: ceiling),
-            ceiling => ViewerDataService.BuildTopProceduresHourlySql(From, withIo: true, ceiling: ceiling),
-            ceiling => ViewerDataService.BuildTopProceduresHourlySql(From, withIo: false, ceiling: ceiling),
+            (ceiling => ViewerDataService.BuildTopQueriesHourlySql(From, withIo: true, ceiling: ceiling), 6),
+            (ceiling => ViewerDataService.BuildTopQueriesHourlySql(From, withIo: false, ceiling: ceiling), 6),
+            (ceiling => ViewerDataService.BuildTopProceduresHourlySql(From, withIo: true, ceiling: ceiling), 7),
+            (ceiling => ViewerDataService.BuildTopProceduresHourlySql(From, withIo: false, ceiling: ceiling), 7),
         })
         {
+            var ceilingSlot = "bucket < $" + slot;
             var bounded = build(Aligned);
-            Assert.Contains("bucket < $6", bounded, StringComparison.Ordinal);
+            Assert.Contains(ceilingSlot, bounded, StringComparison.Ordinal);
             /* The ceiling rides beside the window end, ahead of the grouping. */
             Assert.True(
-                bounded.IndexOf("bucket < $3", StringComparison.Ordinal) < bounded.IndexOf("bucket < $6", StringComparison.Ordinal)
-                && bounded.IndexOf("bucket < $6", StringComparison.Ordinal) < bounded.IndexOf("GROUP BY", StringComparison.Ordinal));
+                bounded.IndexOf("bucket < $3", StringComparison.Ordinal) < bounded.IndexOf(ceilingSlot, StringComparison.Ordinal)
+                && bounded.IndexOf(ceilingSlot, StringComparison.Ordinal) < bounded.IndexOf("GROUP BY", StringComparison.Ordinal));
 
-            /* A null ceiling means no bound: today's text, with no sixth parameter. */
+            /* A null ceiling means no bound: today's text, with no ceiling parameter. */
             var open = build(null);
-            Assert.DoesNotContain("$6", open, StringComparison.Ordinal);
+            Assert.DoesNotContain(ceilingSlot, open, StringComparison.Ordinal);
             Assert.Contains("bucket < $3", open, StringComparison.Ordinal);
         }
     }

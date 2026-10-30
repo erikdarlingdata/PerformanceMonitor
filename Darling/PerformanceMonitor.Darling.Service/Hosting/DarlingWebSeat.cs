@@ -18,10 +18,11 @@ namespace PerformanceMonitor.Darling.Service.Hosting;
 /// attributes: an endpoint added tomorrow — by anyone, on any branch — is covered by the middleware's
 /// group-level write gate and inherits correct attribution without knowing this type exists.
 ///
-/// <para><b>Three seats.</b> The shared token (<see cref="Subject"/> null, edit — the pre-#2550 reach,
-/// unchanged); an OIDC admin (named, edit); an OIDC viewer (named, read-only). A loopback-only dashboard
-/// registers no auth middleware at all, so <see cref="FromContext"/>'s absent-item default IS the shared-token
-/// seat — the tokenless local operator keeps today's full reach.</para>
+/// <para><b>Seats.</b> The shared token (<see cref="Subject"/> null, edit — the pre-#2550 reach,
+/// unchanged); an OIDC admin (named, edit); an OIDC viewer (named, read-only); and <see cref="ReadsOnly"/>
+/// (<see cref="Subject"/> null, read-only), which the host stores for every request on a dashboard that
+/// <c>web.allowTokenlessLoopback</c> serves with no token, and for a shared-token session when the token is under
+/// the length floor.</para>
 ///
 /// <para><b>How the role survives the round-trip.</b> The session cookie's subject slot (#2583) carries an
 /// ENCODED seat — <c>o2:a:{ownerKey}:{subject}</c> / <c>o2:v:{ownerKey}:{subject}</c> (<c>o1:a:{subject}</c> /
@@ -34,12 +35,49 @@ namespace PerformanceMonitor.Darling.Service.Hosting;
 /// </summary>
 internal sealed record DarlingWebSeat(string? Subject, bool CanEdit, string? OwnerKey = null)
 {
-    /// <summary>The shared-token seat, and the default for a pipeline with no auth middleware (loopback-only
-    /// mode). Full edit reach — exactly what the token granted before per-user identity existed.</summary>
+    /// <summary>The shared-token seat: full edit reach, exactly what the token granted before per-user identity
+    /// existed.</summary>
     internal static readonly DarlingWebSeat SharedToken = new(null, true);
+
+    /// <summary>The seat of a dashboard that serves reads only: <c>web.allowTokenlessLoopback</c> with no token, or a
+    /// shared-token session whose token is under the length floor. Unnamed, so writes stamp nothing, and refused
+    /// every change by <see cref="IsRequestAllowed"/>.</summary>
+    internal static readonly DarlingWebSeat ReadsOnly = new(null, false);
 
     /// <summary>The <see cref="HttpContext.Items"/> key the auth middleware stores the resolved seat under.</summary>
     internal const string HttpContextItemKey = "darling.web.seat";
+
+    /// <summary>The request header a front door sends with every request it forwards for a person whose seat cannot edit (#6840). The
+    /// front door signs in to a store once, with the store's shared token, and shares that one session between its viewers and its
+    /// editors, so the store would otherwise answer a viewer as the shared-token seat (the Admin server form's login name, the
+    /// investigation export, the edit flags). See <see cref="ApplyFrontDoorRole"/>.</summary>
+    internal const string FrontDoorRoleHeader = "X-Darling-Front-Door-Role";
+
+    /// <summary>The response header a store sets when it applied <see cref="FrontDoorRoleHeader"/>. The front door refuses a viewer's
+    /// answer that lacks it, so a store on a build without this support never answers a viewer as the shared-token seat.</summary>
+    internal const string FrontDoorRoleAppliedHeader = "X-Darling-Front-Door-Role-Applied";
+
+    /// <summary>The one value <see cref="FrontDoorRoleHeader"/> carries.</summary>
+    internal const string FrontDoorViewerRole = "viewer";
+
+    /// <summary>
+    /// The seat a request runs as once <see cref="FrontDoorRoleHeader"/> is read (#6840), decided per request (a front door shares one
+    /// session between viewers and editors). With the header set to <see cref="FrontDoorViewerRole"/>, a seat that can edit becomes
+    /// <see cref="ReadsOnly"/> and the request is marked with <see cref="FrontDoorRoleAppliedHeader"/>. Every store handler then answers
+    /// exactly what it answers a reads-only caller, with no list of routes to keep. The header can only lower a seat: it names
+    /// nobody, a seat that cannot edit stays as it is, and any other value, or no header, changes nothing. Whoever sends it can
+    /// already use the session it rides on with that session's full reach.
+    /// </summary>
+    internal static DarlingWebSeat ApplyFrontDoorRole(HttpContext context, DarlingWebSeat seat)
+    {
+        if (!string.Equals(context.Request.Headers[FrontDoorRoleHeader].ToString(), FrontDoorViewerRole, StringComparison.Ordinal))
+        {
+            return seat;
+        }
+
+        context.Response.Headers[FrontDoorRoleAppliedHeader] = FrontDoorViewerRole;
+        return seat.CanEdit ? ReadsOnly : seat;
+    }
 
     /// <summary>Seat-encoding prefixes inside the session cookie's subject slot. Versioned (<c>o1</c>, <c>o2</c>) so a
     /// future shape can coexist with cookies already in browsers instead of signing everyone out. <c>o1</c> carries no
@@ -76,17 +114,18 @@ internal sealed record DarlingWebSeat(string? Subject, bool CanEdit, string? Own
     /// <c>web</c> constant the shared-token seat has always written.</summary>
     internal string EditorPrincipal => Subject ?? DarlingWebEndpoints.WebEditorPrincipal;
 
-    /// <summary>The request's resolved seat. Absent item = <see cref="SharedToken"/>: the only pipeline that
-    /// never stores one is loopback-only mode, where the local operator has today's full reach by design.</summary>
+    /// <summary>The request's resolved seat. Every pipeline the host builds stores one before routing (the auth gate,
+    /// or the reads-only gate of a tokenless dashboard); an absent item (routes mapped without the
+    /// host's pipeline, as some tests map them) reads as <see cref="ReadsOnly"/>, so a request nobody sat a seat for cannot write.</summary>
     internal static DarlingWebSeat FromContext(HttpContext context)
         => context.Items.TryGetValue(HttpContextItemKey, out var value) && value is DarlingWebSeat seat
             ? seat
-            : SharedToken;
+            : ReadsOnly;
 
     /// <summary>Whether this request is a signed-in session whose seat may edit (#6236): the auth middleware stored a seat (it does so
     /// only for a request that holds a valid session) and that seat is the shared token's or an OIDC admin's. A dashboard with no
     /// sign-in configured registers no middleware, so nothing is stored and this is false, unlike <see cref="FromContext"/>, whose
-    /// default is the shared-token seat.</summary>
+    /// default is the reads-only seat.</summary>
     internal static bool IsSignedInAdmin(HttpContext context)
         => context.Items.TryGetValue(HttpContextItemKey, out var value) && value is DarlingWebSeat { CanEdit: true };
 

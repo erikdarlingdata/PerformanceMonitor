@@ -3,6 +3,7 @@ using System.Text.Json;
 using ModelContextProtocol.Server;
 using PerformanceMonitorLite.Services;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Collectors;
 
 namespace PerformanceMonitorLite.Mcp;
 
@@ -23,7 +24,7 @@ public sealed class McpConfigTools
         {
             var rows = await dataService.GetLatestServerConfigAsync(resolved.ServerId);
             if (rows.Count == 0)
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "server_config")
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "server_config", awsRdsKind: AwsRdsKind.None)
                     ?? McpHelpers.Status(
                         "unavailable",
                         "No server configuration data available. The config collector may not have run yet.");
@@ -66,7 +67,7 @@ public sealed class McpConfigTools
         {
             var rows = await dataService.GetLatestDatabaseConfigAsync(resolved.ServerId);
             if (rows.Count == 0)
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "database_config")
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "database_config", awsRdsKind: AwsRdsKind.None)
                     ?? McpHelpers.Status(
                         "unavailable",
                         "No database configuration data available. The config collector may not have run yet.");
@@ -102,6 +103,19 @@ public sealed class McpConfigTools
                 log_reuse_wait = r.LogReuseWaitDesc
             }).ToList();
 
+            /* A filter that matched nothing in a snapshot that does hold databases: say why, once. The shape and status stay as they were. */
+            if (result.Count == 0)
+            {
+                return JsonSerializer.Serialize(new
+                {
+                    server = resolved.DisplayName,
+                    captured_at = capturedAt.ToString("o"),
+                    database_count = result.Count,
+                    databases = result,
+                    note = McpHelpers.DatabaseConfigFilterMissNote
+                }, McpHelpers.JsonOptions);
+            }
+
             return JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
@@ -131,7 +145,7 @@ public sealed class McpConfigTools
         {
             var rows = await dataService.GetLatestDatabaseScopedConfigAsync(resolved.ServerId);
             if (rows.Count == 0)
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "database_scoped_config")
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "database_scoped_config", awsRdsKind: AwsRdsKind.None)
                     ?? McpHelpers.Status(
                         "unavailable",
                         "No database-scoped configuration data available. The config collector may not have run yet.");
@@ -184,7 +198,7 @@ public sealed class McpConfigTools
         {
             var rows = await dataService.GetLatestQueryStoreHealthAsync(resolved.ServerId);
             if (rows.Count == 0)
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "query_store_health")
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "query_store_health", awsRdsKind: AwsRdsKind.None)
                     ?? McpHelpers.Status(
                         "unavailable",
                         "No Query Store health data available. The query_store_health collector runs hourly (SQL Server 2016+); a server with no rows either predates Query Store or has not completed a cycle yet.");
@@ -256,7 +270,7 @@ public sealed class McpConfigTools
         {
             var rows = await dataService.GetLatestTraceFlagsAsync(resolved.ServerId);
             if (rows.Count == 0)
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "trace_flags")
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "trace_flags", awsRdsKind: AwsRdsKind.None)
                     ?? EmptyTraceFlagsStatus(await dataService.GetCollectorRunFactsAsync(resolved.ServerId, "trace_flags"));
 
             return JsonSerializer.Serialize(new

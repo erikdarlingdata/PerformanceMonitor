@@ -38,6 +38,7 @@ public sealed class AgentLevel2ToolPolicyTests
         "create_mute_rule", "update_mute_rule", "delete_mute_rule", "set_mute_rule_enabled",
         "create_custom_alert_rule", "update_custom_alert_rule", "delete_custom_alert_rule", "set_alert_threshold_override", "merge_deadlock_signatures",
         "force_query_store_plan", "unforce_query_store_plan", "evict_cached_plan", "kill_session",
+        "recompile_module", "create_plan_guide", "drop_plan_guide",
     };
 
     private static readonly DarlingMcpWritePolicy.Effective AgentArm = new(false, false, Investigations: true);
@@ -51,7 +52,7 @@ public sealed class AgentLevel2ToolPolicyTests
     }
 
     [Fact]
-    public void TheInvestigationsArm_ServesExactlyTheThirteenActionTools_OfTheWrites()
+    public void TheInvestigationsArm_ServesExactlyTheActionTools_OfTheWrites()
     {
         var served = AgentServed().Select(t => t.ProtocolTool.Name).ToList();
         var writes = served.Where(DarlingMcpWritePolicy.IsWrite).OrderBy(n => n, StringComparer.Ordinal).ToList();
@@ -92,15 +93,15 @@ public sealed class AgentLevel2ToolPolicyTests
     }
 
     [Fact]
-    public void TheInstructionsCensus_UnderTheInvestigationsArm_CountsTheThirteenAsServed_AndStillSaysTheWritesAreOff()
+    public void TheInstructionsCensus_UnderTheInvestigationsArm_CountsTheActionToolsAsServed_AndStillSaysTheWritesAreOff()
     {
         var catalog = DarlingMcpWritePolicy.ToolNames(McpToolsListBudgetTests.BuildServedTools().Tools);
         var served = AgentServed().Select(t => t.ProtocolTool.Name).ToList();
         var writes = catalog.Count(n => DarlingMcpWritePolicy.IsWrite(n) && !DarlingMcpWritePolicy.IsServerAdmin(n));
         var admin = catalog.Count(DarlingMcpWritePolicy.IsServerAdmin);
         var text = DarlingMcpInstructions.Build(DarlingPeerDirectory.Snapshot.Empty, catalog, served);
-        Assert.Contains($"the write tools are off, so the {writes + admin - 13} that change monitoring configuration are not served", text, StringComparison.Ordinal);
-        Assert.Contains("the 13 mute, custom-rule, threshold override, signature merge, plan force, plan evict and session kill tools are served only to an agent with an `agent_action` (Level 2; the plan force, plan evict and session kill tools need Level 3 and the server's own switch)", text, StringComparison.Ordinal);
+        Assert.Contains($"the write tools are off, so the {writes + admin - ActionTools.Length} that change monitoring configuration are not served", text, StringComparison.Ordinal);
+        Assert.Contains($"the {ActionTools.Length} mute, custom-rule, threshold override, signature merge, plan force, plan evict, session kill, recompile and plan guide tools are served only to an agent with an `agent_action` (Level 2; the last five listed need Level 3 and the server's own switch)", text, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -127,13 +128,18 @@ public sealed class AgentLevel2ToolPolicyTests
         Assert.True(DarlingMcpAgentActions.IsProtectedMetric(metric));
 
     [Fact]
-    public void EverySelfAlertMetricConstant_IsProtected_ExceptTheNineAnAgentMayMute()
+    public void EverySelfAlertMetricConstant_IsProtected_ExceptTheThirteenAnAgentMayMute()
     {
         var unprotected = new[]
         {
             DarlingSelfAlertEvaluator.AgFailoverMetric, DarlingSelfAlertEvaluator.AgReplicaDisconnectedMetric,
             DarlingSelfAlertEvaluator.AgReplicaReconnectedMetric, DarlingSelfAlertEvaluator.AgSyncFellBehindMetric,
             DarlingSelfAlertEvaluator.AgDatabaseSuspendedMetric, DarlingSelfAlertEvaluator.AgentDownMetric,
+            /* #6873: the three database-protection overdue alerts are about a monitored server, like the AG ones. */
+            DarlingSelfAlertEvaluator.BackupOverdueMetric, DarlingSelfAlertEvaluator.LogBackupOverdueMetric,
+            DarlingSelfAlertEvaluator.CheckDbOverdueMetric,
+            DarlingSelfAlertEvaluator.AgentAlertSetupMetric,
+            DarlingSelfAlertEvaluator.IdentityCapacityMetric,
             DarlingSelfAlertEvaluator.CollectorCostDigestMetric, DarlingSelfAlertEvaluator.FleetSweepRollupMetric,
             DarlingSelfAlertEvaluator.AnalysisSinglesDigestMetric,
         };
@@ -372,6 +378,7 @@ VALUES ('{id}', {(enabled ? "TRUE" : "FALSE")}, now() AT TIME ZONE 'utc', {(serv
 
     [Theory]
     [InlineData("Agent Not Running")]
+    [InlineData("Identity Capacity")]
     [InlineData("Collector Cost Digest")]
     [InlineData("AG Failover")]
     public async Task AMuteOnAnUncoveredSelfAlert_IsAllowed(string metric)
@@ -529,7 +536,7 @@ VALUES ('{id}', {(enabled ? "TRUE" : "FALSE")}, now() AT TIME ZONE 'utc', {(serv
 
     private static async Task<long> SeedRuleAsync(Ctx c, string scope, bool enabled = true)
     {
-        var created = await new CustomAlertRuleStore(c.Source).CreateAsync("seed " + Guid.NewGuid().ToString("N"), null, Definition(scope), enabled, "person:erik");
+        var created = await new CustomAlertRuleStore(c.Source, StorageCommandDeadlines.McpReadSeconds).CreateAsync("seed " + Guid.NewGuid().ToString("N"), null, Definition(scope), enabled, "person:erik");
         return ((CustomAlertRuleResult.Ok)created).Rule!.Id;
     }
 

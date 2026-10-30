@@ -18,7 +18,11 @@ public static class MetricNames
     public const string WaitStats = "wait_stats";
     public const string SessionCount = "session_count";
     public const string QueryDuration = "query_duration";
+    /// <summary>Read latency (ms per read) — <c>delta_stall_read_ms / delta_reads</c> per file row. The ANOMALY_READ_LATENCY gate's baseline.</summary>
     public const string IoLatency = "io_latency";
+    /// <summary>Write latency (ms per write) — <c>delta_stall_write_ms / delta_writes</c> per file row. The ANOMALY_WRITE_LATENCY gate's
+    /// baseline, so a write window is judged against write history and not against the read series (#6696).</summary>
+    public const string IoWriteLatency = "io_write_latency";
     public const string Blocking = "blocking";
     public const string Deadlock = "deadlock";
     public const string Memory = "memory";

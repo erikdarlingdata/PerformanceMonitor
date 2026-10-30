@@ -14,6 +14,7 @@ using System.Text.Json.Nodes;
 using ModelContextProtocol.Server;
 using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
+using PerformanceMonitor.Darling.Storage;
 
 namespace Darling.Tests;
 
@@ -30,9 +31,9 @@ public sealed class MuteAnalysisFindingScopeTests
 {
     private const string Hash = "0123456789abcdef";
 
-    private static DarlingServerResolver.RegisteredServer Row(int id, string name, string? display = null) => new(id, name, display);
+    private static RegisteredServer Row(int id, string name, string? display = null) => new(id, name, display);
 
-    private static readonly DarlingServerResolver.RegisteredServer[] Fleet =
+    private static readonly RegisteredServer[] Fleet =
     {
         Row(1, "orders-primary", "Orders Primary"),
         Row(2, "orders-replica", "Orders Replica"),
@@ -83,7 +84,7 @@ public sealed class MuteAnalysisFindingScopeTests
 
     /// <summary>One machine registered four ways; the display name defaults to the machine name, so all four share it,
     /// and the plain registration's storage name IS that machine name.</summary>
-    private static DarlingServerResolver.RegisteredServer[] MachineWithSiblings() =>
+    private static RegisteredServer[] MachineWithSiblings() =>
         new[]
         {
             Row(20, "billing", "billing"),

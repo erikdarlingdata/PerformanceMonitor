@@ -308,7 +308,7 @@ public sealed class FinOpsRecommendationFiguresTests
         {
             Assert.Null(FinOpsRecommendationFigures.StorageTier(new[] { Io("a", 100, 500, 100, 0) }));
             var row = FinOpsRecommendationFigures.StorageTier(new[] { Io("a", 1000, 4999, 100, 0) })!;
-            Assert.Equal("1 database(s) with low IO latency — standard storage may suffice", row.Finding);
+            Assert.Equal("1 database with low IO latency, so standard storage may suffice", row.Finding);
             Assert.Contains("a (read 5.0ms, write 0.0ms)", row.Detail, StringComparison.Ordinal);
             Assert.Equal("Storage", row.Category);
             Assert.Equal("Low", row.Severity);
@@ -342,7 +342,7 @@ public sealed class FinOpsRecommendationFiguresTests
         {
             var rows = Enumerable.Range(1, 11).Select(i => Io($"d{i}", 100, 0, 100, 0)).ToList();
             var row = FinOpsRecommendationFigures.StorageTier(rows)!;
-            Assert.Equal("11 database(s) with low IO latency — standard storage may suffice", row.Finding);
+            Assert.Equal("11 databases with low IO latency, so standard storage may suffice", row.Finding);
             Assert.Contains("d10 (read 0.0ms, write 0.0ms) and 1 more. Premium", row.Detail, StringComparison.Ordinal);
             Assert.DoesNotContain("d11", row.Detail, StringComparison.Ordinal);
         });

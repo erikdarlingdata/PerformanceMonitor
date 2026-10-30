@@ -77,7 +77,7 @@ public interface IAlertEngineSettings
 
     /// <summary>
     /// The Client Timeouts alert (#5640): client attentions (a client cancelled or timed out a query) per minute, from the
-    /// attention collector's <c>attention_events</c>. OFF by default: the bars are a guess until checked against captured data.
+    /// attention collector's <c>attention_events</c>. ON by default since #5736 (V216 on Darling): the bars are relative to each server's own baseline.
     /// </summary>
     bool ClientTimeoutsEnabled { get; }
     bool LongRunningQueryEnabled { get; }

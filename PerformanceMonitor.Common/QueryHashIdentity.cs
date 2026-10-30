@@ -85,6 +85,42 @@ public static class QueryHashIdentity
             : known;
     }
 
+    /// <summary>
+    /// #6455: whether text can be the key of a NEW query-tag assignment: <c>0x</c> and 1 to 16 hex digits, or up to 20 decimal
+    /// digits that fit an unsigned 64-bit number (the shapes the DMV, Query Store and long-query trace collectors store), and not
+    /// the did-not-say hash (<see cref="IsUnknown"/>: zero in either spelling), which labels no query. Both products' assign tool
+    /// asks this one question, so a key is refused the same way on each.
+    /// </summary>
+    public static bool IsAssignableHash(string? hash)
+    {
+        var known = KnownHash(hash);
+        if (known is null)
+        {
+            return false;
+        }
+
+        if (known.Length > 2 && known[0] == '0' && (known[1] == 'x' || known[1] == 'X'))
+        {
+            var digits = known.AsSpan(2);
+            if (digits.Length > 16)
+            {
+                return false;
+            }
+
+            foreach (var c in digits)
+            {
+                if (!Uri.IsHexDigit(c))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        return ulong.TryParse(known, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out _);
+    }
+
     /// <summary>The trimmed hash, or NULL when <see cref="IsUnknown"/>.</summary>
     public static string? KnownHash(string? hash) => IsUnknown(hash) ? null : hash!.Trim();
 

@@ -187,8 +187,7 @@ DECLARE db_check CURSOR LOCAL FAST_FORWARD FOR
     AND   d.database_id < 32761
     AND   d.state_desc = N'ONLINE'
     AND   d.name <> N'PerformanceMonitor'
-    AND   HAS_DBACCESS(d.name) = 1 /*#1823's screen, which this collector never got: without it a least-privilege login probes every database it cannot enter and takes a 916 per database per cycle. Harmless while those failures were swallowed; with #1837 recording them they would be a permanent probe-failure note and a warning burst every cycle for a permission posture that is not changing. Its three siblings (database_scoped_config, index_object_stats, database_size_stats) already filter this way. On-prem only - from master on Azure SQL DB this returns 0 for every user database, and Azure does not use this enumeration.*/
-    /* Default screen (#1565): vendor/system-adjacent databases with no customer workload. First group =
+        /* Default screen (#1565): vendor/system-adjacent databases with no customer workload. First group =
        vendor-controlled names (cannot collide with real customer data): cloud-provider management dbs,
        SSRS catalogs, PolyBase/DW artifacts, plus the id>4 system four as a name-based belt for clarity.
        Second group = common DBA-convention tooling names, screened by operator decision; the inverse
@@ -196,7 +195,7 @@ DECLARE db_check CURSOR LOCAL FAST_FORWARD FOR
     AND   d.name NOT IN
           (
               N'master', N'model', N'msdb', N'tempdb',
-              N'rdsadmin', N'gcloud_cloudsqladmin',
+              " + DatabaseScopeFilter.VendorControlledDatabaseNames + @",
               N'ReportServer', N'ReportServerTempDB',
               N'DWConfiguration', N'DWDiagnostics', N'DWQueue',
               N'DBAUtil', N'DBAUtils', N'Utility'
@@ -216,7 +215,7 @@ FROM db_check
 INTO @db;
 
 WHILE @@FETCH_STATUS = 0
-BEGIN
+BEGIN" + NoDatabaseAccessNote.LoopGuardDbCheck + @"
     BEGIN TRY
         /* actual_state IN (1,2,4) = READ_ONLY / READ_WRITE / READ_CAPTURE_SECONDARY (#1546: > 0 also
            admitted 3 = ERROR). readonly_reason & 8 = 0 (#1558): bit 8 is the engine saying read-only
@@ -1788,7 +1787,10 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
                byte budget. This replaced the SQL-side NOT LIKE predicate, which was 75% of the read's
                elapsed time (full nvarchar(max) scan per row; the field A/B measured 4.3x without it).
                Reached on BOTH paths: on Azure our own per-database payload runs inside the very
-               database whose Query Store we are reading, so without this it would collect itself. */
+               database whose Query Store we are reading, so without this it would collect itself.
+               #6665: this tests row.QueryText, which is NULL on the separate-text-fetch path (FetchQueryTextSeparately nulls
+               query_sql_text, and Darling turns it on), so on that path the drop does not fire and the statement's stats rows are
+               stored. Darling hides it at READ time instead (QueryStoreSelfStatement); Lite keeps inline text and drops it here. */
             if (row.QueryText?.Contains(SelfQueryMarker, StringComparison.Ordinal) == true)
             {
                 continue;

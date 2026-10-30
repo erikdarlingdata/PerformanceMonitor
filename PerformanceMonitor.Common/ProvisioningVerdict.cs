@@ -78,6 +78,10 @@ public static class ProvisioningVerdict
     /// The one place the number lives. It is also where the Stolen Mem % figure starts to read amber.</summary>
     public const decimal HighStolenMemoryPercent = 60m;
 
+    /// <summary>A chosen value, not a measured one (#6646): the share of the memory basis the buffer pool must hold for a RIGHT_SIZED
+    /// sentence to call memory "well-utilized". It decides wording only, never the verdict.</summary>
+    public const double WellUtilizedBufferPoolPercent = 50.0;
+
     /// <summary>Too few CPU samples in the window to say (<see cref="MinSamples"/>).</summary>
     public const string NotEnoughData = "NOT_ENOUGH_DATA";
 

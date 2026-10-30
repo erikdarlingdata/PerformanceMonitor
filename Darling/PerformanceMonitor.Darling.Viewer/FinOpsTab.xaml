@@ -321,10 +321,10 @@
                             </Grid.ColumnDefinitions>
 
                             <GroupBox Grid.Column="0" Header="CPU" Margin="0,0,5,0" VerticalAlignment="Top" Foreground="{DynamicResource ForegroundBrush}">
-                                <StackPanel Margin="10">
+                                <StackPanel Margin="10" Grid.IsSharedSizeScope="True">
                                     <Grid Margin="0,0,0,8">
-                                        <Grid.ColumnDefinitions><ColumnDefinition Width="90"/><ColumnDefinition Width="*"/><ColumnDefinition Width="60"/></Grid.ColumnDefinitions>
-                                        <TextBlock Grid.Column="0" Text="Avg CPU" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"/>
+                                        <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" SharedSizeGroup="FinOpsCpuLabel"/><ColumnDefinition Width="*"/><ColumnDefinition Width="60"/></Grid.ColumnDefinitions>
+                                        <TextBlock Grid.Column="0" Text="{x:Static local:ViewerLabels.AvgSqlServerCpu}" Margin="0,0,8,0" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"/>
                                         <Grid Grid.Column="1" Margin="0,0,8,0">
                                             <Border Height="16" CornerRadius="3" Background="#1AFFFFFF"/>
                                             <Grid>
@@ -335,8 +335,8 @@
                                         <TextBlock x:Name="FinOpsAvgCpuText" Grid.Column="2" Text="-" Foreground="{DynamicResource ForegroundBrush}" HorizontalAlignment="Right" VerticalAlignment="Center"/>
                                     </Grid>
                                     <Grid Margin="0,0,0,8">
-                                        <Grid.ColumnDefinitions><ColumnDefinition Width="90"/><ColumnDefinition Width="*"/><ColumnDefinition Width="60"/></Grid.ColumnDefinitions>
-                                        <TextBlock Grid.Column="0" Text="P95 CPU" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"/>
+                                        <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" SharedSizeGroup="FinOpsCpuLabel"/><ColumnDefinition Width="*"/><ColumnDefinition Width="60"/></Grid.ColumnDefinitions>
+                                        <TextBlock Grid.Column="0" Text="{x:Static local:ViewerLabels.P95SqlServerCpu}" Margin="0,0,8,0" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"/>
                                         <Grid Grid.Column="1" Margin="0,0,8,0">
                                             <Border Height="16" CornerRadius="3" Background="#1AFFFFFF"/>
                                             <Grid>
@@ -347,8 +347,8 @@
                                         <TextBlock x:Name="FinOpsP95CpuText" Grid.Column="2" Text="-" Foreground="{DynamicResource ForegroundBrush}" HorizontalAlignment="Right" VerticalAlignment="Center"/>
                                     </Grid>
                                     <Grid Margin="0,0,0,8">
-                                        <Grid.ColumnDefinitions><ColumnDefinition Width="90"/><ColumnDefinition Width="*"/><ColumnDefinition Width="60"/></Grid.ColumnDefinitions>
-                                        <TextBlock Grid.Column="0" Text="Max CPU" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"/>
+                                        <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" SharedSizeGroup="FinOpsCpuLabel"/><ColumnDefinition Width="*"/><ColumnDefinition Width="60"/></Grid.ColumnDefinitions>
+                                        <TextBlock Grid.Column="0" Text="{x:Static local:ViewerLabels.MaxSqlServerCpu}" Margin="0,0,8,0" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"/>
                                         <Grid Grid.Column="1" Margin="0,0,8,0">
                                             <Border Height="16" CornerRadius="3" Background="#1AFFFFFF"/>
                                             <Grid>
@@ -428,9 +428,9 @@
                                             </Style>
                                         </DataGridTextColumn.ElementStyle>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Header="Avg CPU %" Binding="{Binding AvgCpuPct, StringFormat=N1}" Width="90" ElementStyle="{StaticResource NumericCell}"/>
-                                    <DataGridTextColumn Header="P95 CPU %" Binding="{Binding P95CpuPct, StringFormat=N1}" Width="90" ElementStyle="{StaticResource NumericCell}"/>
-                                    <DataGridTextColumn Header="Max CPU %" Binding="{Binding MaxCpuPct}" Width="90" ElementStyle="{StaticResource NumericCell}"/>
+                                    <DataGridTextColumn Header="{x:Static local:ViewerLabels.AvgSqlServerCpuPercent}" Binding="{Binding AvgCpuPct, StringFormat=N1}" Width="90" ElementStyle="{StaticResource NumericCell}"/>
+                                    <DataGridTextColumn Header="{x:Static local:ViewerLabels.P95SqlServerCpuPercent}" Binding="{Binding P95CpuPct, StringFormat=N1}" Width="90" ElementStyle="{StaticResource NumericCell}"/>
+                                    <DataGridTextColumn Header="{x:Static local:ViewerLabels.MaxSqlServerCpuPercent}" Binding="{Binding MaxCpuPct}" Width="90" ElementStyle="{StaticResource NumericCell}"/>
                                     <DataGridTextColumn Header="Mem Ratio" Binding="{Binding MemoryRatio, StringFormat=N2}" Width="90" ElementStyle="{StaticResource NumericCell}"/>
                                 </DataGrid.Columns>
                             </DataGrid>
@@ -669,7 +669,7 @@
                 <!-- Database Sizes Sub-Tab -->
                 <TabItem Header="Database Sizes">
                     <Grid>
-                        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+                        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="3*"/><RowDefinition Height="Auto"/><RowDefinition Height="2*"/></Grid.RowDefinitions>
                         <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="10,8" Height="36">
                             <TextBlock Text="{Binding ElementName=ServerSelector, Path=SelectedItem.DisplayName, StringFormat='Database Sizes ({0})', FallbackValue='Database Sizes'}" VerticalAlignment="Center" Margin="0,0,10,0" FontWeight="Bold" FontSize="14" Foreground="{DynamicResource ForegroundBrush}"/>
                             <Button Content="Refresh" Click="FinOpsRefreshDatabaseSizes_Click" Margin="12,0,0,0" Padding="10,4" MinWidth="70"/>
@@ -702,6 +702,30 @@
                                 </DataGrid.Columns>
                             </DataGrid>
                             <TextBlock x:Name="FinOpsNoDbSizesMessage" Style="{StaticResource EmptyHint}" Text="No database size data collected yet"/>
+                        </Grid>
+                        <!-- #6388 Table & Index Sizes, under the database files because the web shows the pair together: the largest
+                             tables at the newest daily index snapshot, indexes rolled up per table, with 7-day and 30-day growth.
+                             The same shared read as get_table_index_sizes. -->
+                        <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="10,0,10,4">
+                            <TextBlock Text="Table &amp; Index Sizes" VerticalAlignment="Center" FontWeight="Bold" FontSize="14" Foreground="{DynamicResource ForegroundBrush}"/>
+                            <TextBlock x:Name="FinOpsTableSizesNote" Margin="12,0,0,0" VerticalAlignment="Center" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                        </StackPanel>
+                        <Grid Grid.Row="3" Margin="10,0,10,10">
+                            <DataGrid x:Name="FinOpsTableSizesDataGrid" Style="{StaticResource DarkGrid}" RowStyle="{StaticResource FinOpsRowStyle}" HorizontalScrollBarVisibility="Auto">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" Width="160"/>
+                                    <DataGridTextColumn Header="Schema" Binding="{Binding SchemaName}" Width="100"/>
+                                    <DataGridTextColumn Header="Table" Binding="{Binding TableName}" Width="220"/>
+                                    <DataGridTextColumn Header="Reserved (MB)" Binding="{Binding CurrentReservedMb, StringFormat=N2, TargetNullValue='n/a'}" Width="120" ElementStyle="{StaticResource NumericCell}"/>
+                                    <DataGridTextColumn Header="Used (MB)" Binding="{Binding CurrentUsedMb, StringFormat=N2, TargetNullValue='n/a'}" Width="110" ElementStyle="{StaticResource NumericCell}"/>
+                                    <DataGridTextColumn Header="Rows" Binding="{Binding TotalRows, StringFormat=N0}" Width="110" ElementStyle="{StaticResource NumericCell}"/>
+                                    <DataGridTextColumn Header="Indexes" Binding="{Binding IndexCount}" Width="70" ElementStyle="{StaticResource NumericCell}"/>
+                                    <DataGridTextColumn Header="7d Growth (MB)" Binding="{Binding Growth7dMb, StringFormat=N2, TargetNullValue='n/a'}" Width="120" ElementStyle="{StaticResource NumericCell}"/>
+                                    <DataGridTextColumn Header="30d Growth (MB)" Binding="{Binding Growth30dMb, StringFormat=N2, TargetNullValue='n/a'}" Width="120" ElementStyle="{StaticResource NumericCell}"/>
+                                    <DataGridTextColumn Header="30d %" Binding="{Binding GrowthPct30d, StringFormat=N1, TargetNullValue='n/a'}" Width="80" ElementStyle="{StaticResource NumericCell}"/>
+                                </DataGrid.Columns>
+                            </DataGrid>
+                            <TextBlock x:Name="FinOpsNoTableSizesMessage" Style="{StaticResource EmptyHint}" Text="No object size rows recorded. Index and object stats are collected daily."/>
                         </Grid>
                     </Grid>
                 </TabItem>

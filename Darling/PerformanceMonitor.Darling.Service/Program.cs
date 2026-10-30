@@ -314,9 +314,15 @@ if (args.Length > 0 && DarlingCliCommands.IsDisableWebVerb(args[0]))
    Reads stdin rather than argv so a password never lands in the process list or shell history. */
 if (args.Length > 0 && DarlingCliCommands.IsAddServerVerb(args[0]))
 {
-    var addServerConfigPath = args.Length > 1 ? args[1] : null;
+    /* #6476: the rest of the line is the config path (as before) and/or the flags for one server; a password is never a flag. */
+    if (!DarlingCliCommands.TryParseAddServerArgs(args[1..], out var addServerConfigPath, out var addServerFlags, out var addServerArgError))
+    {
+        Console.Out.WriteLine(addServerArgError);
+        return 1;
+    }
+
     return await DarlingCliCommands.AddServerAsync(
-        addServerConfigPath, Console.In, Console.Out, Console.Error, CancellationToken.None);
+        addServerConfigPath, Console.In, Console.Out, Console.Error, CancellationToken.None, addServerFlags);
 }
 
 /* CLI verbs: --add-alert-source / --rotate-alert-source / --remove-alert-source <name> and --list-alert-sources, each with an
@@ -343,6 +349,13 @@ if (args.Length > 0 && DarlingCliCommands.IsRemoveAlertSourceVerb(args[0]))
 if (args.Length > 0 && DarlingCliCommands.IsListAlertSourcesVerb(args[0]))
 {
     return await DarlingCliCommands.ListAlertSourcesAsync(args[1..], Console.Out, Console.Error, CancellationToken.None);
+}
+
+/* CLI verb: --grant-script <server-name> | --host <host> [--finops] [--azure] (#6472) — print the T-SQL that creates the monitoring
+   login and grants what Darling needs. Connects to no SQL Server; prints no password. */
+if (args.Length > 0 && DarlingCliCommands.IsGrantScriptVerb(args[0]))
+{
+    return await DarlingCliCommands.GrantScriptAsync(args[1..], DarlingCliCommands.OpenGrantScriptOutput(), Console.Error, CancellationToken.None);
 }
 
 if (args.Length > 0 && DarlingCliCommands.IsExportInvestigationsVerb(args[0]))
@@ -435,23 +448,15 @@ if (args.Length > 0 && DarlingCliCommands.IsDropXeSessionsVerb(args[0]))
    Linux too, --dry-run included. Same posture as --drop-xe-sessions above. */
 if (args.Length > 0 && DarlingCliCommands.IsBackfillRollupsVerb(args[0]))
 {
-    var rest = args.AsSpan(1);
-    var dryRun = false;
-    string? backfillConfigPath = null;
-    foreach (var arg in rest)
+    var (backfillConfigPath, dryRun, backfillFreeBytes, backfillParseError) = DarlingCliCommands.ParseBackfillArgs(args.AsSpan(1));
+    if (backfillParseError is not null)
     {
-        if (string.Equals(arg, "--dry-run", StringComparison.OrdinalIgnoreCase))
-        {
-            dryRun = true;
-        }
-        else
-        {
-            backfillConfigPath = arg;
-        }
+        Console.Error.WriteLine(backfillParseError);
+        return 1;
     }
 
     return await DarlingCliCommands.BackfillRollupsAsync(
-        backfillConfigPath, dryRun, Console.Out, Console.Error, CancellationToken.None);
+        backfillConfigPath, dryRun, Console.Out, Console.Error, CancellationToken.None, backfillFreeBytes);
 }
 
 /* #1912 — repair the pre-#1907 Query Store split slices still in stored rows, then re-materialize what they
@@ -481,7 +486,7 @@ if (args.Length > 0 && DarlingCliCommands.IsCollapseLegacySlicesVerb(args[0]))
    the service runs. Same managed-credential-only platform check (inside the verb) and same --dry-run shape as the verbs above. */
 if (args.Length > 0 && DarlingCliCommands.IsRecompressPlanDimVerb(args[0]))
 {
-    var (recompressConfigPath, dryRun, vacuumMode, parseError) = DarlingCliCommands.ParseRecompressArgs(args.AsSpan(1));
+    var (recompressConfigPath, dryRun, vacuumMode, recompressFreeBytes, parseError) = DarlingCliCommands.ParseRecompressArgs(args.AsSpan(1));
     if (parseError is not null)
     {
         Console.Error.WriteLine(parseError);
@@ -489,7 +494,7 @@ if (args.Length > 0 && DarlingCliCommands.IsRecompressPlanDimVerb(args[0]))
     }
 
     return await DarlingCliCommands.RecompressPlanDimAsync(
-        recompressConfigPath, dryRun, vacuumMode, Console.Out, Console.Error, CancellationToken.None);
+        recompressConfigPath, dryRun, vacuumMode, Console.Out, Console.Error, CancellationToken.None, recompressFreeBytes);
 }
 
 var builder = Host.CreateApplicationBuilder(args);

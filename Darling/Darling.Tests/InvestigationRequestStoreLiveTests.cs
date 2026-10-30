@@ -89,7 +89,7 @@ FROM config.investigation_requests WHERE request_id = '{first.RequestId}'", ct))
     /// <summary>The join is bounded by the window even for a request still claimed (#5632 review round 1, M2): the
     /// constant <c>{server}:{metric}</c> key every alert of a metric carries joins nothing on its own. An alert 29 minutes
     /// after the request opened joins it; one 31 minutes after opens a new request, though the first is still claimed.
-    /// A reported request is final: a later alert inside its window opens a new one.</summary>
+    /// A reported request takes a quiet re-fire of the same metric and severity (#6778); a closed one is final.</summary>
     /// <summary>#5821: the generic webhook's read-back of the request an alert opened or joined, with its stored brief.</summary>
     [Fact]
     public async Task ReadRequest_ReturnsTheRequestAndItsBrief_AndNullForAnUnknownId()
@@ -158,7 +158,7 @@ FROM config.investigation_requests WHERE request_id = '{first.RequestId}'", ct))
     }
 
     [Fact]
-    public async Task AClaimedRequest_JoinsAt29Minutes_AndAnAlert31MinutesAfterThatOpensANewOne_AndAReportedOneIsFinal()
+    public async Task AClaimedRequest_JoinsAt29Minutes_AndAnAlert31MinutesAfterThatOpensANewOne_AndAReportedOneTakesAQuietReFire()
     {
         await RunAsync(async (store, connection, ct) =>
         {
@@ -179,14 +179,208 @@ FROM config.investigation_requests WHERE request_id = '{first.RequestId}'", ct))
             Assert.Equal("claimed", await ScalarAsync(connection,
                 $"SELECT state FROM config.investigation_requests WHERE request_id = '{first}'", ct));
 
-            /* Report the second; an alert two minutes later, inside its window, opens a third. */
+            /* Report the second; an alert two minutes later, inside its window, joins it quietly (#6778). */
             var second = opened.RequestId!.Value;
             var secondClaim = await store.ClaimAsync(second, "agent-a", ct);
             Assert.Equal(InvestigationSubmitOutcome.Reported, await store.SubmitAsync(Report(second, secondClaim.ClaimId!.Value), ct));
             _now = T0.AddMinutes(62);
             var third = await store.OpenOrJoinAsync(Alert(_now, keys: new[] { Fallback }), ct);
-            Assert.Equal(InvestigationOpenOutcome.Opened, third.Outcome);
-            Assert.NotEqual(second, third.RequestId);
+            Assert.Equal(InvestigationOpenOutcome.Joined, third.Outcome);
+            Assert.Equal(second, third.RequestId);
+            Assert.False(third.Evented);
+        });
+    }
+
+    /// <summary>Opens a request at <see cref="T0"/> and reports it (#6778).</summary>
+    private async Task<Guid> OpenReportedAsync(InvestigationRequestStore store, InvestigationAlert alert, CancellationToken ct)
+    {
+        var id = (await store.OpenOrJoinAsync(alert, ct)).RequestId!.Value;
+        var claim = await store.ClaimAsync(id, "agent-a", ct);
+        Assert.Equal(InvestigationSubmitOutcome.Reported, await store.SubmitAsync(Report(id, claim.ClaimId!.Value), ct));
+        return id;
+    }
+
+    [Fact]
+    public async Task AReportedRequest_TakesTheSameMetricAtTheSameSeverity_AsAQuietJoin()
+    {
+        await RunAsync(async (store, connection, ct) =>
+        {
+            var id = await OpenReportedAsync(store, Alert(T0) with { Severity = "warning" }, ct);
+            var routeBefore = await ScalarAsync(connection, "SELECT count(*) FROM config.investigation_requests", ct);
+
+            _now = T0.AddMinutes(5);
+            var again = await store.OpenOrJoinAsync(Alert(_now) with { Severity = "warning" }, ct);
+            Assert.Equal(InvestigationOpenOutcome.Joined, again.Outcome);
+            Assert.Equal(id, again.RequestId);
+            Assert.False(again.Evented);
+            Assert.Equal("2|reported", await ScalarAsync(connection,
+                $"SELECT alert_count || '|' || state FROM config.investigation_requests WHERE request_id = '{id}'", ct));
+            Assert.Equal("1", await ScalarAsync(connection,
+                $"SELECT count(*) FROM config.investigation_journal WHERE request_id = '{id}' AND event = 'joined_quiet'", ct));
+            Assert.Equal(routeBefore, await ScalarAsync(connection, "SELECT count(*) FROM config.investigation_requests", ct));
+
+            /* The window slides: 25 minutes after the join it joins again. */
+            _now = T0.AddMinutes(30);
+            Assert.Equal(id, (await store.OpenOrJoinAsync(Alert(_now) with { Severity = "warning" }, ct)).RequestId);
+        });
+    }
+
+    /* #6919: an unregistered external name arrives with server_id 0 and family other. */
+    private static InvestigationAlert ExternalAlert(DateTime at, string label, string source, string key = "cpu", int serverId = 0,
+        string family = "other") =>
+        new(1, serverId, label, family, "External:" + source + ":" + key, at, Array.Empty<string>(), null,
+            20, 100, LeaseMinutes: 15, ExpiryMinutes: 240);
+
+    /// <summary>#6919 case 1: two unregistered external alerts with one label and different sources, a minute apart, open two
+    /// requests. The old key (server_id and family) joined them.</summary>
+    [Fact]
+    public async Task UnregisteredExternalAlerts_OfDifferentSources_OpenTwoRequests()
+    {
+        await RunAsync(async (store, _, ct) =>
+        {
+            var first = await store.OpenOrJoinAsync(ExternalAlert(T0, "label-a", "source_one"), ct);
+            _now = T0.AddMinutes(1);
+            var second = await store.OpenOrJoinAsync(ExternalAlert(_now, "label-a", "source_two"), ct);
+            Assert.Equal(InvestigationOpenOutcome.Opened, first.Outcome);
+            Assert.Equal(InvestigationOpenOutcome.Opened, second.Outcome);
+            Assert.NotEqual(first.RequestId, second.RequestId);
+        });
+    }
+
+    /// <summary>#6919 case 2: one source with two labels opens two requests. The old key joined them.</summary>
+    [Fact]
+    public async Task UnregisteredExternalAlerts_OfOneSourceWithDifferentLabels_OpenTwoRequests()
+    {
+        await RunAsync(async (store, _, ct) =>
+        {
+            var first = await store.OpenOrJoinAsync(ExternalAlert(T0, "label-a", "source_one"), ct);
+            _now = T0.AddMinutes(1);
+            var second = await store.OpenOrJoinAsync(ExternalAlert(_now, "label-b", "source_one"), ct);
+            Assert.Equal(InvestigationOpenOutcome.Opened, second.Outcome);
+            Assert.NotEqual(first.RequestId, second.RequestId);
+        });
+    }
+
+    /// <summary>#6919 case 3: one source and one label inside the window still join one request, whatever the alert key, and a
+    /// request of another pair is not taken by them.</summary>
+    [Fact]
+    public async Task UnregisteredExternalAlerts_OfOneSourceAndLabel_JoinOneRequest()
+    {
+        await RunAsync(async (store, _, ct) =>
+        {
+            var first = await store.OpenOrJoinAsync(ExternalAlert(T0, "label-a", "source_one"), ct);
+            _now = T0.AddMinutes(1);
+            var other = await store.OpenOrJoinAsync(ExternalAlert(_now, "label-a", "source_two"), ct);
+            _now = T0.AddMinutes(2);
+            var same = await store.OpenOrJoinAsync(ExternalAlert(_now, "label-a", "source_one", key: "disk"), ct);
+            Assert.Equal(InvestigationOpenOutcome.Joined, same.Outcome);
+            Assert.Equal(first.RequestId, same.RequestId);
+            _now = T0.AddMinutes(3);
+            Assert.Equal(other.RequestId, (await store.OpenOrJoinAsync(ExternalAlert(_now, "label-a", "source_two", key: "disk"), ct)).RequestId);
+        });
+    }
+
+    /// <summary>#6919 case 4: a registered server (server_id above 0) keeps the old key, so alerts of different external sources
+    /// and metrics in one family join one request.</summary>
+    [Fact]
+    public async Task ARegisteredServer_StillJoinsAlertsOfDifferentSourcesAndMetrics_InOneFamily()
+    {
+        await RunAsync(async (store, _, ct) =>
+        {
+            var first = await store.OpenOrJoinAsync(ExternalAlert(T0, "srv-9", "source_one", serverId: 9, family: "resources"), ct);
+            _now = T0.AddMinutes(1);
+            var second = await store.OpenOrJoinAsync(ExternalAlert(_now, "srv-9", "source_two", key: "disk", serverId: 9, family: "resources"), ct);
+            Assert.Equal(InvestigationOpenOutcome.Joined, second.Outcome);
+            Assert.Equal(first.RequestId, second.RequestId);
+            _now = T0.AddMinutes(2);
+            var builtIn = await store.OpenOrJoinAsync(Alert(_now, family: "resources", serverId: 9), ct);
+            Assert.Equal(first.RequestId, builtIn.RequestId);
+        });
+    }
+    [Fact]
+    public async Task AReportedRequest_IsNotJoined_ByAHigherSeverity_ANewMetric_OrAnotherServer()
+    {
+        /* Each case has its own store: the new request a case opens would otherwise be the one the next alert finds. */
+        await RunAsync(async (store, connection, ct) =>
+        {
+            var id = await OpenReportedAsync(store, Alert(T0) with { Severity = "warning" }, ct);
+            _now = T0.AddMinutes(5);
+            var higher = await store.OpenOrJoinAsync(Alert(_now) with { Severity = "critical" }, ct);
+            Assert.Equal(InvestigationOpenOutcome.Opened, higher.Outcome);
+            Assert.NotEqual(id, higher.RequestId);
+        });
+
+        await RunAsync(async (store, connection, ct) =>
+        {
+            var id = await OpenReportedAsync(store, Alert(T0) with { Severity = "warning" }, ct);
+            _now = T0.AddMinutes(5);
+            var newMetric = await store.OpenOrJoinAsync(Alert(_now) with { MetricName = "Deadlocks", Severity = "warning" }, ct);
+            Assert.Equal(InvestigationOpenOutcome.Opened, newMetric.Outcome);
+            Assert.NotEqual(id, newMetric.RequestId);
+        });
+
+        await RunAsync(async (store, connection, ct) =>
+        {
+            var id = await OpenReportedAsync(store, Alert(T0) with { Severity = "warning" }, ct);
+            _now = T0.AddMinutes(5);
+            var otherServer = await store.OpenOrJoinAsync(Alert(_now, serverId: 8) with { Severity = "warning" }, ct);
+            Assert.Equal(InvestigationOpenOutcome.Opened, otherServer.Outcome);
+            Assert.NotEqual(id, otherServer.RequestId);
+            Assert.Equal("1", await ScalarAsync(connection,
+                $"SELECT alert_count FROM config.investigation_requests WHERE request_id = '{id}'", ct));
+        });
+    }
+
+    [Fact]
+    public async Task AReportedRequest_IsNotJoined_AfterItResolved_AfterTheWindow_AfterTheCap_OrWhenClosed()
+    {
+        await RunAsync(async (store, connection, ct) =>
+        {
+            /* A resolved journal row: the sweep's D7 event. */
+            var resolved = await OpenReportedAsync(store, Alert(T0), ct);
+            await ExecAsync(connection, $@"INSERT INTO config.investigation_journal (event_time, request_id, route_id, server_id, event, actor, once_key)
+SELECT now(), request_id, route_id, server_id, 'resolved', 'service', 'resolved:' || request_id::text FROM config.investigation_requests WHERE request_id = '{resolved}'", ct);
+            _now = T0.AddMinutes(5);
+            var afterResolve = await store.OpenOrJoinAsync(Alert(_now), ct);
+            Assert.Equal(InvestigationOpenOutcome.Opened, afterResolve.Outcome);
+            Assert.NotEqual(resolved, afterResolve.RequestId);
+        });
+
+        await RunAsync(async (store, connection, ct) =>
+        {
+            /* 31 minutes after the last alert. */
+            var id = await OpenReportedAsync(store, Alert(T0), ct);
+            _now = T0.AddMinutes(31);
+            var late = await store.OpenOrJoinAsync(Alert(_now), ct);
+            Assert.Equal(InvestigationOpenOutcome.Opened, late.Outcome);
+            Assert.NotEqual(id, late.RequestId);
+        });
+
+        await RunAsync(async (store, connection, ct) =>
+        {
+            /* Joins every 29 minutes slide the window to the 4-hour cap; the next alert is past it. */
+            var id = await OpenReportedAsync(store, Alert(T0), ct);
+            for (var minute = 29; minute <= 232; minute += 29)
+            {
+                _now = T0.AddMinutes(minute);
+                Assert.Equal(id, (await store.OpenOrJoinAsync(Alert(_now), ct)).RequestId);
+            }
+
+            _now = T0.AddMinutes(241);
+            var pastCap = await store.OpenOrJoinAsync(Alert(_now), ct);
+            Assert.Equal(InvestigationOpenOutcome.Opened, pastCap.Outcome);
+            Assert.NotEqual(id, pastCap.RequestId);
+        });
+
+        await RunAsync(async (store, connection, ct) =>
+        {
+            /* A closed request stays final. */
+            var id = await OpenReportedAsync(store, Alert(T0), ct);
+            await ExecAsync(connection, $"UPDATE config.investigation_requests SET state = 'closed', closed_at = now() WHERE request_id = '{id}'", ct);
+            _now = T0.AddMinutes(5);
+            var afterClose = await store.OpenOrJoinAsync(Alert(_now), ct);
+            Assert.Equal(InvestigationOpenOutcome.Opened, afterClose.Outcome);
+            Assert.NotEqual(id, afterClose.RequestId);
         });
     }
 
@@ -238,6 +432,46 @@ FROM config.investigation_requests WHERE request_id = '{id}'", ct));
             Assert.Equal("1", await ScalarAsync(connection,
                 "SELECT count(*) FROM config.investigation_journal WHERE event = 'refused'", ct));
             Assert.Equal(InvestigationClaimOutcome.NotFound, (await store.ClaimAsync(Guid.NewGuid(), "agent-x", ct)).Outcome);
+        });
+    }
+
+    /// <summary>#6576, #6586: with allowReclaim (a named token), an agent that lost its claim_id claims again under the same agent_id while its lease is live and gets the
+    /// live claim_id back with a renewed lease and an unchanged claim count; another agent_id is still refused; a lapsed lease
+    /// claims afresh as before.</summary>
+    [Fact]
+    public async Task AClaimByTheLeaseHolder_ReturnsTheLiveClaimId_AndRenews_AnotherAgentIsStillRefused()
+    {
+        await RunAsync(async (store, connection, ct) =>
+        {
+            var id = (await store.OpenOrJoinAsync(Alert(T0), ct)).RequestId!.Value;
+            var first = await store.ClaimAsync(id, "agent-a", ct);
+            Assert.Equal(InvestigationClaimOutcome.Claimed, first.Outcome);
+
+            _now = T0.AddMinutes(5);
+            /* Without allowReclaim (the legacy token) the same call is refused and the lease does not move. */
+            var plain = await store.ClaimAsync(id, "agent-a", ct);
+            Assert.Equal(InvestigationClaimOutcome.AlreadyClaimed, plain.Outcome);
+            Assert.Null(plain.ClaimId);
+            var again = await store.ClaimAsync(id, "agent-a", allowReclaim: true, ct);
+            Assert.Equal(InvestigationClaimOutcome.Reclaimed, again.Outcome);
+            Assert.Equal(first.ClaimId, again.ClaimId);
+            Assert.Equal(1, again.ClaimCount);
+            Assert.True(again.LeaseUntilUtc > first.LeaseUntilUtc);
+            Assert.Equal(first.LeaseUntilUtc!.Value.AddMinutes(5), again.LeaseUntilUtc);
+
+            /* A different agent_id never receives the claim_id. */
+            var other = await store.ClaimAsync(id, "agent-b", ct);
+            Assert.Equal(InvestigationClaimOutcome.AlreadyClaimed, other.Outcome);
+            Assert.Null(other.ClaimId);
+            Assert.Equal($"{first.ClaimId}|agent-a|1", await ScalarAsync(connection,
+                $"SELECT claim_id || '|' || claimed_by || '|' || claim_count FROM config.investigation_requests WHERE request_id = '{id}'", ct));
+
+            /* Past the renewed lease: the holder claims afresh, with a new claim_id, counted. */
+            _now = T0.AddMinutes(30);
+            var afresh = await store.ClaimAsync(id, "agent-a", ct);
+            Assert.Equal(InvestigationClaimOutcome.Claimed, afresh.Outcome);
+            Assert.NotEqual(first.ClaimId, afresh.ClaimId);
+            Assert.Equal(2, afresh.ClaimCount);
         });
     }
 
@@ -496,28 +730,37 @@ VALUES ($1, 1, $2, $3, 'real', $4, $5::jsonb, 7)", connection, tx);
     /// missing grant would pass them all and fail only in a deployment, with a 42501. The grants are TAKEN FROM
     /// <see cref="DarlingManagedRoles.BuildProvisioningSql"/>'s output with the role name swapped (the
     /// <c>ServerTagMcpRoleLiveTests</c> pattern: a per-run role name, since a role belongs to the whole cluster), so
-    /// removing one from the product's SQL fails this test. The same role may not set a note's state or link an alert.</summary>
+    /// removing one from the product's SQL fails this test. Since #6400 the same role also holds the person-only grants (close a request, decide a note, write a profile); the tool policy, not the role, keeps an agent from those tools. It still may not rewrite a note's text, delete a note, report or alert link, or update a column no grant names.</summary>
     [Fact]
     public async Task TheMcpRoleGrants_LetClaimBriefReleaseAndSubmit_AndNothingMore()
     {
         var roleName = "inv_mcp_" + Guid.NewGuid().ToString("N")[..8];
         var rolePassword = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(16));
-        var grants = PerformanceMonitor.Darling.Service.DarlingManagedRoles.BuildProvisioningSql(
-                ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp)
+        /* The comment lines go first: a statement that follows a comment would otherwise start with "--" and be dropped from the list below. */
+        var grants = Regex.Replace(PerformanceMonitor.Darling.Service.DarlingManagedRoles.BuildProvisioningSql(
+                ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp), @"--[^\r\n]*", "")
             .Split(';')
             .Select(statement => string.Join(' ', statement.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)))
             .Where(statement => statement.StartsWith("GRANT ", StringComparison.Ordinal)
                 && statement.EndsWith(" TO mcp", StringComparison.Ordinal)
-                && statement.Contains(" config.investigation_", StringComparison.Ordinal)
+                && (statement.Contains(" config.investigation_", StringComparison.Ordinal)
+                    || statement.Contains(" config.agent_environment_profiles", StringComparison.Ordinal))
                 /* The Level 2 read on the feedback table (V191, #5909) is pinned by AgentLevel2StoreGrantLiveTests. */
                 && !statement.Contains("investigation_feedback", StringComparison.Ordinal)
                 /* The read on the Phase C tables (V193, #5997) is pinned by PhaseCStoreGrantLiveTests. */
-                && !statement.Contains("investigation_evidence", StringComparison.Ordinal))
+                && !statement.Contains("investigation_evidence", StringComparison.Ordinal)
+                /* The signature merges are the Phase C tables' own write (#6400), pinned with them. */
+                && !statement.Contains("investigation_signature_merges", StringComparison.Ordinal))
             .Select(statement => statement[..^" TO mcp".Length] + " TO " + roleName)
             .ToList();
 
-        /* SELECT on the six, UPDATE on the claim and report columns, INSERT on reports, the journal and notes. */
-        Assert.Equal(5, grants.Count);
+        /* The agent grants (#5632): SELECT on the six tables; UPDATE of the claim and report columns of a request; INSERT on reports; INSERT of
+           the journal columns; INSERT of a note by the columns a proposal sets.
+           The person-only grants (#6400), which the person-only tools need because they run as mcp: UPDATE of the close columns of a request;
+           INSERT of a note's state, clock columns and decider; UPDATE of a note's state and decider; INSERT of a practice request's columns;
+           INSERT of the alert links a practice copies; INSERT, UPDATE of profile_text and its stamps, and DELETE on the environment profiles.
+           The database does not keep an agent from those tools: the tool policy (NeverAgentTools) does, because no MCP tool runs SQL a caller supplies. */
+        Assert.Equal(13, grants.Count);
 
         await RunAsync(async (store, connection, ct) =>
         {
@@ -550,14 +793,26 @@ VALUES ($1, 1, $2, $3, 'real', $4, $5::jsonb, 7)", connection, tx);
                 await using var direct = await source.OpenConnectionAsync(ct);
                 await ExecAsync(direct, $"INSERT INTO config.investigation_notes (server_id, note_text, author, source_request_id) VALUES (7, 'a proposal', 'agent:agent-a', '{id}')", ct);
                 Assert.Equal("pending", await ScalarAsync(connection, "SELECT state FROM config.investigation_notes", ct));
+
+                /* #6400: the person-only grants work as mcp, whatever the tool policy allows: a note inserted approved, a note decided, a request
+                   closed, a profile written, updated and deleted. */
+                await ExecAsync(direct, "INSERT INTO config.investigation_notes (note_text, author, state, decided_at, decided_by) VALUES ('written', 'person', 'approved', now(), 'person')", ct);
+                await ExecAsync(direct, "UPDATE config.investigation_notes SET state = 'rejected', decided_at = now(), decided_by = 'person' WHERE state = 'pending'", ct);
+                await ExecAsync(direct, "UPDATE config.investigation_requests SET closed_at = now(), closed_by = 'person', closed_reason = 'done'", ct);
+                await ExecAsync(direct, "INSERT INTO config.agent_environment_profiles (scope_server_id, profile_text, modified_at, modified_by) VALUES (7, 'profile', now(), 'person')", ct);
+                await ExecAsync(direct, "UPDATE config.agent_environment_profiles SET profile_text = 'x', modified_by = 'person'", ct);
+                await ExecAsync(direct, "DELETE FROM config.agent_environment_profiles", ct);
+
+                /* And nothing more: a column no grant above covers, the alert links' update and delete, and the reports' delete. */
                 foreach (var refused in new[]
                 {
-                    "INSERT INTO config.investigation_notes (note_text, author, state) VALUES ('self-approved', 'agent:agent-a', 'approved')",
-                    "UPDATE config.investigation_notes SET state = 'approved'",
-                    $"INSERT INTO config.investigation_request_alerts (request_id, alert_time, server_id, metric_name) VALUES ('{id}', now(), 7, 'Blocking')",
-                    "UPDATE config.investigation_requests SET closed_reason = 'mine'",
+                    "UPDATE config.investigation_requests SET server_id = 1",
+                    "UPDATE config.investigation_notes SET note_text = 'rewritten'",
+                    "DELETE FROM config.investigation_notes",
+                    "UPDATE config.investigation_request_alerts SET muted = true",
+                    "DELETE FROM config.investigation_request_alerts",
                     "DELETE FROM config.investigation_reports",
-                    "UPDATE config.agent_environment_profiles SET profile_text = 'x'",
+                    "UPDATE config.agent_environment_profiles SET scope_server_id = 1",
                 })
                 {
                     Assert.Equal("42501", (await Assert.ThrowsAsync<PostgresException>(() => ExecAsync(direct, refused, ct))).SqlState);

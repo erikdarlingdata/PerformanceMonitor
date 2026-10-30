@@ -99,7 +99,7 @@ FROM generate_series(1, $3) AS g");
         var ct = TestContext.Current.CancellationToken;
         await using var dataSource = await MigrateAndOpenAsync(connectionString, ct);
 
-        var store = new CustomAlertRuleStore(dataSource);
+        var store = new CustomAlertRuleStore(dataSource, StorageCommandDeadlines.McpReadSeconds);
         var prefix = "carcap_" + Guid.NewGuid().ToString("N") + "_";
         var bodySucceeded = false;
         try
@@ -164,7 +164,7 @@ FROM generate_series(1, $3) AS g");
         var ct = TestContext.Current.CancellationToken;
         await using var dataSource = await MigrateAndOpenAsync(connectionString, ct);
 
-        var store = new CustomAlertRuleStore(dataSource);
+        var store = new CustomAlertRuleStore(dataSource, StorageCommandDeadlines.McpReadSeconds);
         var prefix = "carceil_" + Guid.NewGuid().ToString("N") + "_";
         var bodySucceeded = false;
         try

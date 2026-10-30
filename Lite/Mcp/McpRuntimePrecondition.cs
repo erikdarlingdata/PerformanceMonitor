@@ -73,6 +73,36 @@ internal static class McpRuntimePrecondition
     }
 
     /// <summary>
+    /// #6453: the sentence for a read that found no stored rows while the collector serving it is HEALTHY (its newest run is
+    /// <c>SUCCESS</c> with no note), or null so the caller keeps its own <c>unavailable</c> text. The caller answers it with
+    /// <c>empty</c>. Darling's twin is <c>DarlingRuntimePrecondition.HealthyEmptyMessageAsync</c>; both build the sentence in
+    /// <see cref="CollectorRuntimePrecondition.HealthyEmptyMessage"/>. Call it AFTER <see cref="StatusAsync"/> and the engine gate.
+    /// </summary>
+    public static async Task<string?> HealthyEmptyMessageAsync(
+        LocalDataService dataService,
+        int serverId,
+        string serverName,
+        string collectorName,
+        string what)
+    {
+        string? status;
+        string? errorMessage;
+        DateTime? observedUtc;
+
+        try
+        {
+            (status, errorMessage, observedUtc) =
+                await dataService.GetLatestCollectorOutcomeAsync(serverId, collectorName);
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+
+        return CollectorRuntimePrecondition.HealthyEmptyMessage(serverName, collectorName, what, status, errorMessage, observedUtc);
+    }
+
+    /// <summary>
     /// The <c>precondition</c> envelope when the collector serving this read is not being invoked against
     /// this server while the server is collecting normally — i.e. its <c>AppliesTo</c> gate is off — or
     /// <c>null</c> otherwise. Darling's twin (#2559). A collector that has never run and is not due yet gets
@@ -162,11 +192,17 @@ internal static class McpRuntimePrecondition
     /// answer is an empty or unavailable status (#6074). Other statuses already say their own cause.
     /// </summary>
     public static async Task<string> WithQueryStoreNotWritingHintAsync(
-        string answer, LocalDataService dataService, int serverId, string? databaseName)
+        string answer, LocalDataService dataService, int serverId, string serverName, string? databaseName)
     {
         if (!McpHelpers.IsEmptyOrUnavailableStatus(answer))
         {
             return answer;
+        }
+
+        /* #6554: on a readable secondary READ_ONLY is the normal state, so say it is not collected instead of hinting at a fault. */
+        if (await QueryStoreReadableSecondaryStatusAsync(dataService, serverId, serverName) is { } notCollected)
+        {
+            return notCollected;
         }
 
         return McpHelpers.AppendToMessage(answer, await QueryStoreNotWritingHintAsync(dataService, serverId, databaseName));
@@ -199,5 +235,27 @@ internal static class McpRuntimePrecondition
 
         var message = CollectorRuntimePrecondition.QueryStoreDisabledMessage(serverName, states, observedUtc);
         return message is null ? null : McpHelpers.Status(CollectorRuntimePrecondition.StatusWord, message);
+    }
+
+    /// <summary>
+    /// #6554: the <c>not_collected</c> envelope for a Query Store read on a readable secondary, or <c>null</c> when the stored
+    /// evidence does not say the server is one or the read fails (this runs on a path that already found nothing).
+    /// </summary>
+    public static async Task<string?> QueryStoreReadableSecondaryStatusAsync(
+        LocalDataService dataService, int serverId, string serverName)
+    {
+        try
+        {
+            var (role, healthDatabases, healthSecondary) = await dataService.GetReadableSecondaryFactsAsync(serverId);
+            var message = CollectorRuntimePrecondition.QueryStoreReadableSecondaryMessage(
+                serverName, role, healthDatabases, healthSecondary, replicaConfigured: false,
+                "Lite collects Query Store only from a server that is not a readable secondary. " +
+                "Add the primary to Lite to read its Query Store.");
+            return message is null ? null : McpHelpers.Status(CollectorRuntimePrecondition.NotCollectedStatusWord, message);
+        }
+        catch (Exception)
+        {
+            return null;
+        }
     }
 }

@@ -142,9 +142,10 @@ END;";
     public const string TruncationSelectSql = @"SELECT
     " + TruncationColumnsSql + ";";
 
-    /* The labels the health reads parse back (PerformanceMonitor.Common.RingBufferTruncationNote holds the same three: Common
-       cannot reference this assembly, and the measurement gate reads label literals from the collector's own file).
-       RingBufferTruncationSignalTests renders a note from these and parses it with the Common reader, so the two agree. */
+    /* The labels the health reads parse back (PerformanceMonitor.Common.RingBufferTruncationNote holds the same three). These stay
+       string literals, not aliases of the Common constants: CollectorMeasurementSeamTests resolves each Measure( label to a
+       `const string NAME = "..."` in this file and cannot follow a reference to another type. RingBufferTruncationSignalTests
+       asserts each equals its Common constant, and renders a note from these and parses it with the Common reader. */
     internal const string TruncatedMeasurement = "ring_buffer_truncated";
     internal const string EventsHiddenMeasurement = "ring_buffer_events_hidden";
     internal const string NewestVisibleAgeMeasurement = "newest_visible_event_age_s";

@@ -19,6 +19,7 @@ using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -138,9 +139,11 @@ public sealed class McpToolLatencyFilter
 
             /* #5506 part 3: a heavy cacheable read is answered from the read cache, joins an identical read running now,
                or runs once and is stored. A hit skips admission. */
-            if (_admission is { } admission && admission.IsCached(ReadSurface.Mcp, toolName, windowBand))
+            /* #6800: a whole-fleet read of get_resource_use_by_tag (no server_name) over a window of 24 hours or more is cached for its own TTL. */
+            var fleetRead = IsFleetRead(request);
+            if (_admission is { } admission && admission.IsCached(ReadSurface.Mcp, toolName, windowBand, fleetRead))
             {
-                return await ServeCachedAsync(admission, next, request, toolName, windowBand, readScope.Scope, caller, cancellationToken);
+                return await ServeCachedAsync(admission, next, request, toolName, windowBand, fleetRead, readScope.Scope, caller, cancellationToken);
             }
 
             CallToolResult answer;
@@ -267,6 +270,42 @@ public sealed class McpToolLatencyFilter
         }
     }
 
+    /// <summary>#6800: <see cref="IsFleetRead(string, IDictionary{string, JsonElement}?, McpToolParameterTypes?)"/> for a request. Never
+    /// throws; a call whose window it cannot read is not a fleet read.</summary>
+    private bool IsFleetRead(ModelContextProtocol.Server.RequestContext<CallToolRequestParams> request)
+    {
+        try
+        {
+            var types = request.Services?.GetService(typeof(McpToolParameterTypes)) as McpToolParameterTypes;
+            return IsFleetRead(request.Params?.Name ?? string.Empty, request.Params?.Arguments, types);
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogDebug(ex, "Whether MCP tool {Tool} read the fleet was not read.", request.Params?.Name);
+            return false;
+        }
+    }
+
+    /// <summary>#6800: whether a call names no server (<c>server_name</c> absent, null or blank, on a route in
+    /// <see cref="ReadAdmission.FleetCachedRoutes"/>) over a window of 24 hours or more (<see cref="WindowHoursOf"/>, the sent
+    /// <c>hours_back</c> or the tool's declared default). A <c>server_name</c> of another kind is not a server name, so it is not read
+    /// as the fleet.</summary>
+    internal static bool IsFleetRead(string toolName, System.Collections.Generic.IDictionary<string, System.Text.Json.JsonElement>? arguments, McpToolParameterTypes? types)
+    {
+        var hours = WindowHoursOf(toolName, arguments, types);
+        if (arguments is null || !arguments.TryGetValue("server_name", out var value))
+        {
+            return ReadAdmission.IsFleetRead(toolName, null, hours);
+        }
+
+        return value.ValueKind switch
+        {
+            System.Text.Json.JsonValueKind.Null or System.Text.Json.JsonValueKind.Undefined => ReadAdmission.IsFleetRead(toolName, null, hours),
+            System.Text.Json.JsonValueKind.String => ReadAdmission.IsFleetRead(toolName, value.GetString(), hours),
+            _ => false,
+        };
+    }
+
     /// <summary>
     /// #5506 part 3: a heavy read through the read cache. A stored answer is returned at once and records
     /// <c>cache_hit</c>. Otherwise the caller joins the identical read running now, or starts it (D6): the caller that
@@ -275,15 +314,16 @@ public sealed class McpToolLatencyFilter
     /// once. Neither a hit nor a joined caller counts as a read in flight (round 2, L3).
     /// </summary>
     private async Task<CallToolResult> ServeCachedAsync(ReadAdmission admission, McpRequestHandler<CallToolRequestParams, CallToolResult> next,
-        RequestContext<CallToolRequestParams> request, string toolName, string windowBand, ReadScope scope, string caller,
+        RequestContext<CallToolRequestParams> request, string toolName, string windowBand, bool fleetRead, ReadScope scope, string caller,
         CancellationToken cancellationToken)
     {
         var stopwatch = Stopwatch.StartNew();
         var cache = admission.Cache;
         var gcf = (request.Services?.GetService(typeof(IGcfOutputFormat)) as IGcfOutputFormat)?.Enabled ?? GcfOutput.Enabled;
         var types = request.Services?.GetService(typeof(McpToolParameterTypes)) as McpToolParameterTypes;
-        var ttl = ReadResultCache.TtlOf(windowBand);
-        var key = ReadCacheKey.ForMcp(toolName, request.Params?.Arguments, types, gcf, cache.Generation, cache, ttl);
+        var ttl = ReadResultCache.TtlFor(toolName, windowBand, fleetRead);
+        var key = ReadCacheKey.ForMcp(toolName, request.Params?.Arguments, types, gcf, cache.Generation, cache, ttl,
+            heldFromStore: ReadAdmission.FleetTtlApplies(toolName, fleetRead));
         if (cache.TryGet(key, out var stored))
         {
             scope.Uncount();
@@ -520,10 +560,15 @@ public sealed class McpToolLatencyFilter
     /// one that leaves <c>hours_back</c> out. A tool whose window is fixed in code takes its <see cref="ReadWindowBand.FixedHours"/>
     /// band (#5814). Internal so a test can pin it against a really registered tool.</summary>
     internal static string WindowBandOf(string? toolName, System.Collections.Generic.IDictionary<string, System.Text.Json.JsonElement>? arguments, McpToolParameterTypes? types) =>
-        ReadWindowBand.OrFixed(ReadWindowBand.OfToolCall(arguments, key =>
+        ReadWindowBand.OrFixed(ReadWindowBand.Of(WindowHoursOf(toolName, arguments, types)), toolName);
+
+    /// <summary>The window in hours of a call to <paramref name="toolName"/>, the number <see cref="WindowBandOf(string?, IDictionary{string, JsonElement}?, McpToolParameterTypes?)"/> bands:
+    /// the argument the caller sent, else the default the tool method declares; null when there is none.</summary>
+    internal static double? WindowHoursOf(string? toolName, System.Collections.Generic.IDictionary<string, System.Text.Json.JsonElement>? arguments, McpToolParameterTypes? types) =>
+        ReadWindowBand.HoursOfToolCall(arguments, key =>
             types is not null && !string.IsNullOrEmpty(toolName) && types.TryGetDefault(toolName, key, out var value)
                 ? ReadWindowBand.DefaultText(value)
-                : null), toolName);
+                : null);
 
     /// <summary>The server-side identity of the call (#6231): the bearer token the HTTP request carried, as a short fingerprint
     /// (<see cref="ReadCaller.OfMcpToken"/>), never the token. The client's own name is not part of it. Never throws.</summary>
@@ -533,7 +578,9 @@ public sealed class McpToolLatencyFilter
         {
             if (request.Services?.GetService(typeof(IHttpContextAccessor)) is IHttpContextAccessor accessor)
             {
-                return ReadCaller.OfMcpToken(DarlingMcpHostService.ExtractBearerToken(accessor.HttpContext?.Request.Headers.Authorization.ToString()));
+                return ReadCaller.OfMcpIdentity(
+                    DarlingMcpTokenSet.CallerOf(accessor)?.Name,
+                    DarlingMcpHostService.ExtractBearerToken(accessor.HttpContext?.Request.Headers.Authorization.ToString()));
             }
         }
         catch (Exception ex)

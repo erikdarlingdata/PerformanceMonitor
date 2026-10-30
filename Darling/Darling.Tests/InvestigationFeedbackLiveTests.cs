@@ -257,14 +257,15 @@ public sealed class InvestigationFeedbackLiveTests
     /// source logging in as a role holding exactly what the managed <paramref name="managedRole"/> holds, on a scratch store with
     /// one reported request. The body gets the owner source, the reported request, and a sender for the routes.</summary>
     internal static Task WithWebRoutesAsync(
-        string managedRole, Func<NpgsqlDataSource, Guid, Func<string, string, string?, string?, Task<(int Status, JsonNode? Body)>>, CancellationToken, Task> body) =>
-        WithRawWebRoutesAsync(managedRole, null, McpDataDetail.Full, null, (owner, request, sendRaw, ct) => body(owner, request,
+        string managedRole, Func<NpgsqlDataSource, Guid, Func<string, string, string?, string?, Task<(int Status, JsonNode? Body)>>, CancellationToken, Task> body,
+        DarlingWebSeat? seat = null, AdminArmShape arm = AdminArmShape.None, bool managedStore = false) =>
+        WithRawWebRoutesAsync(managedRole, seat, McpDataDetail.Full, null, (owner, request, sendRaw, ct) => body(owner, request,
             async (method, path, contentType, payload) =>
             {
                 var (status, bytes) = await sendRaw(method, path, contentType, payload);
                 var text = Encoding.UTF8.GetString(bytes);
                 return (status, string.IsNullOrWhiteSpace(text) ? null : JsonNode.Parse(text));
-            }, ct));
+            }, ct), arm: arm, managedStore: managedStore);
 
     /// <summary>The same harness with the answer's raw bytes. <paramref name="seat"/> is what the sign-in middleware would have stored for the
     /// request (null: no sign-in is configured, so nothing is stored); <paramref name="dataDetail"/> is the level the dashboard started with;
@@ -273,7 +274,7 @@ public sealed class InvestigationFeedbackLiveTests
         string managedRole, DarlingWebSeat? seat, McpDataDetail dataDetail, Func<NpgsqlDataSource, Task>? configureStore,
         Func<NpgsqlDataSource, Guid, Func<string, string, string?, string?, Task<(int Status, byte[] Raw)>>, CancellationToken, Task> body,
         InvestigationExportGate? exportGate = null, ReadAdmission? readAdmission = null,
-        Action<Microsoft.AspNetCore.Http.HttpContext>? onRequest = null)
+        Action<Microsoft.AspNetCore.Http.HttpContext>? onRequest = null, AdminArmShape arm = AdminArmShape.None, bool managedStore = false)
     {
         var baseConnectionString = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the investigation feedback live tests.");
@@ -302,6 +303,7 @@ public sealed class InvestigationFeedbackLiveTests
                 Pooling = false,
             }.ConnectionString;
             await using var webLogin = NpgsqlDataSource.Create(asSeat);
+            using var adminArm = await AdminArmLive.BuildAsync(owner, scratch, roleName, arm, ct);
 
             var builder = WebApplication.CreateBuilder(new WebApplicationOptions
             {
@@ -325,7 +327,7 @@ public sealed class InvestigationFeedbackLiveTests
             ownerSource.Publish(owner);
             using var keys = new PseudonymKeySource(ownerSource);
             DarlingWebEndpoints.MapAll(app, webLogin, new CollectorRuntimeState(), new CapturingTestLogger(), dataDetail: dataDetail, pseudonymKeys: keys,
-                readAdmission: readAdmission, investigationExportGate: exportGate ?? new InvestigationExportGate(Path.Combine(Path.GetTempPath(), "darling-export-test-" + Guid.NewGuid().ToString("N"))));
+                readAdmission: readAdmission, postgresConfig: managedStore ? new PostgresConfig { Managed = true } : null, adminArm: adminArm, investigationExportGate: exportGate ?? new InvestigationExportGate(Path.Combine(Path.GetTempPath(), "darling-export-test-" + Guid.NewGuid().ToString("N"))));
             if (configureStore is not null)
             {
                 await configureStore(owner);
@@ -364,7 +366,7 @@ public sealed class InvestigationFeedbackLiveTests
             await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (connection, token) =>
             {
                 NpgsqlConnection.ClearAllPools();
-                await using var drop = new NpgsqlCommand($"DROP OWNED BY {roleName}; DROP ROLE IF EXISTS {roleName}", connection);
+                await using var drop = new NpgsqlCommand(AdminArmLive.DropRolesSql(roleName), connection);
                 await drop.ExecuteNonQueryAsync(token);
             });
         }
@@ -414,6 +416,54 @@ public sealed class InvestigationFeedbackLiveTests
             Assert.Equal(1, (int)family["with_feedback"]!);
             Assert.Equal(400, (await Send("GET", "/api/investigation-feedback?hours_back=0", null, null)).Status);
         });
+    }
+
+    /* #6600: the managed store's shape. The web reads as the viewer role; a signed-in admin's record and its capability probe go through the arm,
+       so the page may show its form, and the author is the person. */
+    [Fact]
+    public async Task OnTheManagedStore_ASignedInAdminSeat_RecordsThroughTheArm_AndCanRecordIsTrue()
+    {
+        await WithWebRoutesAsync("viewer", async (owner, request, Send, ct) =>
+        {
+            var list = await Send("GET", "/api/investigation-feedback", null, null);
+            Assert.Equal(200, list.Status);
+            Assert.True((bool)list.Body!["can_record"]!);
+
+            var recorded = await Send("PUT", "/api/investigation-feedback/" + request, "application/json", "{\"verdict\":\"wrong\",\"comment\":\"via the arm\"}");
+            Assert.Equal(200, recorded.Status);
+            Assert.Equal("alice", (string)recorded.Body!["author"]!);
+            Assert.Equal("wrong|via the arm|alice", await ScalarAsync(owner, "SELECT verdict || '|' || comment || '|' || author FROM config.investigation_feedback", ct));
+        }, new DarlingWebSeat("alice", true), AdminArmShape.Admin, managedStore: true);
+    }
+
+    /* #6600: an OIDC viewer seat never opens the arm (its login is refused here, so opening it would fail): the list says it cannot record and a
+       record answers 403 as today. */
+    [Fact]
+    public async Task OnTheManagedStore_AViewerSeat_NeverOpensTheArm_AndAnswersAsToday()
+    {
+        await WithWebRoutesAsync("viewer", async (owner, request, Send, ct) =>
+        {
+            Assert.False((bool)(await Send("GET", "/api/investigation-feedback", null, null)).Body!["can_record"]!);
+            var refused = await Send("PUT", "/api/investigation-feedback/" + request, "application/json", "{\"verdict\":\"wrong\"}");
+            Assert.Equal(403, refused.Status);
+            Assert.Equal(DarlingWebEndpoints.FeedbackRefusedMessage(true), (string)refused.Body!["error"]!);
+            Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_feedback", ct));
+        }, new DarlingWebSeat("viewer-person", false), AdminArmShape.Refused, managedStore: true);
+    }
+
+    /* #6600: with the switch off (no arm on a managed store) the signed-in admin gets today's 403, which now names the switch. */
+    [Fact]
+    public async Task OnTheManagedStore_WithTheSwitchOff_TheSignedInAdminGets403_NamingTheSwitch()
+    {
+        await WithWebRoutesAsync("viewer", async (owner, request, Send, ct) =>
+        {
+            Assert.False((bool)(await Send("GET", "/api/investigation-feedback", null, null)).Body!["can_record"]!);
+            var refused = await Send("PUT", "/api/investigation-feedback/" + request, "application/json", "{\"verdict\":\"wrong\"}");
+            Assert.Equal(403, refused.Status);
+            Assert.Equal(DarlingWebEndpoints.FeedbackRefusedMessage(true, adminWritesOff: true), (string)refused.Body!["error"]!);
+            Assert.Contains("web.allowAdminWrites", (string)refused.Body["error"]!, StringComparison.Ordinal);
+            Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_feedback", ct));
+        }, new DarlingWebSeat("alice", true), managedStore: true);
     }
 
     [Fact]

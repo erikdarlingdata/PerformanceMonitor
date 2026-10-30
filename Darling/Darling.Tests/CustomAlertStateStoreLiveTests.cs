@@ -58,8 +58,8 @@ public sealed class CustomAlertStateStoreLiveTests
         }.ConnectionString;
 
         await using var dataSource = NpgsqlDataSource.Create(dataSourceConnectionString);
-        var rules = new CustomAlertRuleStore(dataSource);
-        var state = new CustomAlertStateStore(dataSource);
+        var rules = new CustomAlertRuleStore(dataSource, StorageCommandDeadlines.McpReadSeconds);
+        var state = new CustomAlertStateStore(dataSource, StorageCommandDeadlines.McpReadSeconds);
 
         var ruleName = "car_live_" + Guid.NewGuid().ToString("N");
         const int serverId = 424242; // no FK to servers, so a synthetic id is fine

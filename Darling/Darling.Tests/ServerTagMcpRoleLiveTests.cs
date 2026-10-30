@@ -61,7 +61,8 @@ public sealed class ServerTagMcpRoleLiveTests
                 && line.EndsWith(" TO mcp;", StringComparison.Ordinal)
                 && (line.Contains("config.server_tags ", StringComparison.Ordinal)
                     || line.Contains("config.server_tag_map ", StringComparison.Ordinal)
-                    || line.Contains("config.config_service ", StringComparison.Ordinal)))
+                    || (line.Contains("config.config_service ", StringComparison.Ordinal)
+                        && line.Contains("(config_version, updated_at)", StringComparison.Ordinal))))
             .Select(line => line[..^" TO mcp;".Length] + " TO " + RoleName + ";")
             .ToList();
 
@@ -70,7 +71,7 @@ public sealed class ServerTagMcpRoleLiveTests
         {
             await ExecAsync(owner, $"GRANT USAGE ON SCHEMA config TO {RoleName}; GRANT SELECT ON ALL TABLES IN SCHEMA config TO {RoleName};", ct);
 
-            /* Exactly the two tag-table write grants plus the two-column config_service grant come out of the product's
+            /* Exactly the two tag-table write grants plus the two-column beacon config_service grant (not the #6393 service-flag grant, which is a different column list) come out of the product's
                SQL; a renamed or dropped line would otherwise leave this test granting nothing and still passing. The
                config_service grant is what the V181 reload-beacon triggers (trg_bump_server_tags / trg_bump_server_tag_map,
                #5750) need: config_bump_version() is SECURITY INVOKER and UPDATEs config_service.config_version as the

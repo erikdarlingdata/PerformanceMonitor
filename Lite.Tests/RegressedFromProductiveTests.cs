@@ -101,6 +101,42 @@ public sealed class RegressedFromProductiveTests
                 null, 0)); // 0: a count-only fixture, no run history
     }
 
+    /// <summary>
+    /// #6453: query_stats reads only statements that executed in the last ten minutes, so an idle target (an Azure SQL
+    /// Database serverless or Hyperscale database nobody queries) records SUCCESS with zero rows run after run. Through
+    /// the Lite row it reads HEALTHY five hours after the last busy cycle, and WARNING once the quiet passes the
+    /// 72 hour bar. memory_grant_stats, a dense collector, keeps the three-run rule.
+    /// </summary>
+    [Fact]
+    public void QueryStats_OnAnIdleTarget_ReadsHealthy_AndIsFlaggedPastTheBar()
+    {
+        CollectorHealthRow Zeros(string name, double hoursSinceProductive) => new()
+        {
+            CollectorName = name,
+            TotalRuns = 10_080,
+            SuccessCount = 10_080,
+            ErrorCount = 0,
+            LastSuccessTime = Now.AddMinutes(-1),
+            LastRunTime = Now.AddMinutes(-1),
+            RowsStored = RowsInPriorWindow,
+            CurrentStatus = "SUCCESS",
+            LastNonSkipTime = Now.AddMinutes(-1),
+            LastProductiveTime = Now.AddHours(-hoursSinceProductive),
+            TrailingZeroRowSuccessRuns = 28,
+        };
+
+        var idle = Zeros("query_stats", 5);
+        Assert.False(idle.ProducedThenStopped);
+        Assert.False(idle.AnyRegression);
+        Assert.Equal(CollectorHealthClassifier.Healthy, idle.HealthStatus);
+
+        var stopped = Zeros("query_stats", 73);
+        Assert.True(stopped.ProducedThenStopped);
+        Assert.Equal(CollectorHealthClassifier.Warning, stopped.HealthStatus);
+
+        Assert.True(Zeros("memory_grant_stats", 5).ProducedThenStopped);
+    }
+
     /// <summary>The second direction: the same status with nothing ever produced keeps the benign band.</summary>
     [Fact]
     public void ACollectorThatNeverProduced_KeepsTheBenignBand()

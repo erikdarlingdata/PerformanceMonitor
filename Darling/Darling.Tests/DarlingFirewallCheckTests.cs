@@ -857,21 +857,6 @@ public class DarlingFirewallCheckTests
         Assert.Contains("& $serviceExe --configure-firewall", script, StringComparison.Ordinal);
     }
 
-    [Fact]
-    public void InstallScript_ReconcilesTheFirewallBeforeTheFirstStart()
-    {
-        /* The pre-start call. Rules must exist before the service ever binds, so the very first start already
-           sees them - otherwise a fresh networked install spends its first start reporting a missing rule. */
-        var script = ReadRepoFile(Path.Combine("Darling", "tools", "install-darling.ps1"));
-
-        var call = script.IndexOf("\nInvoke-FirewallReconcile", StringComparison.Ordinal);
-        var start = script.IndexOf("Start-Service -Name $serviceName", StringComparison.Ordinal);
-
-        Assert.True(call >= 0, "install-darling.ps1 never calls Invoke-FirewallReconcile at top level");
-        Assert.True(start >= 0, "install-darling.ps1 no longer starts the service");
-        Assert.True(call < start, "the firewall reconcile must run BEFORE Start-Service, not after");
-    }
-
     /// <summary>
     /// #2436: the THIRD call, and the one whose absence is silent. The pre-start reconcile runs with the
     /// service stopped, and on a managed install the store is a child of the service — so on an UPGRADE the

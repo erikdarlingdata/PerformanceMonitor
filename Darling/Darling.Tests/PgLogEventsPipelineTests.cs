@@ -2205,13 +2205,70 @@ public sealed class PgLogEventsPipelineTests
 
         var run = DarlingCollectorRunner.WithForeignZoneLinesNote(
             new CollectorRunResult(rows.Count, 1, 1, context.Measurements));
-        Assert.Contains("(#4046)", run.Note, StringComparison.Ordinal);
+        Assert.Contains("#4046", run.Note, StringComparison.Ordinal);
         Assert.EndsWith("; foreign_zone_lines_skipped=1", run.Note, StringComparison.Ordinal);
 
         /* An ordinary run gets no note at all, as before. */
         var quiet = new CollectorRunResult(15, 1, 1, CollectorContext.NoMeasurements);
         Assert.Same(quiet, DarlingCollectorRunner.WithForeignZoneLinesNote(quiet));
         Assert.Null(quiet.Note);
+    }
+
+    /// <summary>
+    /// #6866: one read on a named-zone target makes exactly one trip to the server to prove its stamps, however many
+    /// lines or repeated stamps the slab holds, and the stored instants are the ones it proved. A UTC target, and a
+    /// named-zone slab with no line to prove, make none.
+    /// </summary>
+    [Fact]
+    public async Task OneReadOnANamedZoneTarget_AsksTheServerOnce_AndAUtcTargetOrAnEmptySlabNever()
+    {
+        var body = "2026-10-24 12:00:00.000 CEST [11] ERROR:  first\n"
+                   + "2026-10-24 12:00:00.000 CEST [12] ERROR:  same stamp\n"
+                   + "2026-10-24 13:30:00.500 CEST [13] ERROR:  later\n";
+        var calls = 0;
+        IReadOnlyCollection<PgLogZonePair>? asked = null;
+
+        CollectorContext Counting()
+        {
+            var context = TestContext();
+            context.PgLogZoneResolver = (_, pairs, _) =>
+            {
+                calls++;
+                asked = pairs;
+                return Task.FromResult<PgLogZoneMap?>(PgLogZoneMap.FromMatches(
+                [
+                    ("2026-10-24 12:00:00.000", "CEST", 1, new DateTime(2026, 10, 24, 10, 0, 0)),
+                    ("2026-10-24 13:30:00.500", "CEST", 1, new DateTime(2026, 10, 24, 11, 30, 0, 500)),
+                ]));
+            };
+            return context;
+        }
+
+        using (var reader = new FakeReader(new object?[][] { new object?[] { body, "Europe/Berlin" } }))
+        {
+            var rows = await PgLogEventsCollector.Instance.ReadAsync(reader, Counting(), CancellationToken.None);
+
+            Assert.Equal(3, rows.Count);
+            Assert.Equal(1, calls);
+            Assert.Equal(2, asked!.Count);
+            Assert.Equal(
+                new[] { new DateTime(2026, 10, 24, 10, 0, 0), new DateTime(2026, 10, 24, 10, 0, 0), new DateTime(2026, 10, 24, 11, 30, 0, 500) },
+                rows.Select(r => r.OccurredAtUtc).OrderBy(t => t).ToArray());
+        }
+
+        calls = 0;
+        using (var reader = new FakeReader(new object?[][] { new object?[] { "no log lines in this slab\n", "Europe/Berlin" } }))
+        {
+            await PgLogEventsCollector.Instance.ReadAsync(reader, Counting(), CancellationToken.None);
+            Assert.Equal(0, calls);
+        }
+
+        using (var reader = new FakeReader(new object?[][] { new object?[] { SelfHostedLog, "UTC" } }))
+        {
+            var rows = await PgLogEventsCollector.Instance.ReadAsync(reader, Counting(), CancellationToken.None);
+            Assert.Equal(15, rows.Count);
+            Assert.Equal(0, calls);
+        }
     }
 
     /// <summary>
@@ -2604,12 +2661,13 @@ public sealed class PgLogEventsRungTests
         Assert.Contains("return " + RungVersion.ToString(CultureInfo.InvariantCulture) + ";", viewer[thisArm..previousArm], StringComparison.Ordinal);
     }
 
-    /// <summary>The runbook carries the product's worker formula for the current hypertable count; the CI cluster workflows keep their own (smaller) floor, held by CiClusterWorkerSizingTests.</summary>
+    /// <summary>The managed RAM rule gives 128 / 139 on an 8 GB host at the current hypertable count, and the runbook and README carry the log-events rows; the CI cluster workflows keep their own (smaller) floor, held by CiClusterWorkerSizingTests.</summary>
     [Fact]
-    public void TheWorkflowsAndTheRunbook_CarryTheNewHypertableCount()
+    public void TheWorkerExample_AndTheLogEventsRows_Hold()
     {
-        /* The runbook and README state the MANAGED RAM rule (#5633 item 14) through an 8 GB example, not the CI
-           workflows' floor: 128 / 139 at 72 hypertables and 29 aggregates (74 / 85 at 4 GB, 177 / 188 at 12 GB). */
+        /* The runbook and README state the MANAGED RAM rule (#5633 item 14) through an 8 GB example whose inputs they
+           name, and tell the reader to count their own store, so no doc pins the live hypertable count (Erik 10-24:
+           no exact counts in descriptive text; a pin made every collector PR edit two docs). */
         var example = DarlingManagedPostgres.DeriveWorkerSettings(
             TimescaleSupport.HypertableCount, 8L * 1024 * 1024 * 1024);
         var workers = example.MaxBackgroundWorkers;
@@ -2618,14 +2676,9 @@ public sealed class PgLogEventsRungTests
         Assert.Equal(139, processes);
 
         var runbook = RepoFile.ReadRepoFile("docs", "postgres-first-target-runbook.md");
-        Assert.Contains($"for an 8 GB host the numbers are {workers} and {processes} for {TimescaleSupport.HypertableCount} hypertables", runbook, StringComparison.Ordinal);
-        Assert.Contains($"all {TimescaleSupport.HypertableTables.Count} of them, {CollectorCatalog.All.Count(c => c.TargetEngine == CollectorTargetEngine.PostgreSql)} PostgreSQL", runbook, StringComparison.Ordinal);
         Assert.Contains("| `get_pg_log_events` |", runbook, StringComparison.Ordinal);
         Assert.Contains("| `pg_log_events` | 5 min | 5 min |", runbook, StringComparison.Ordinal);
-
-        var readme = RepoFile.ReadRepoFile("Darling", "README.md");
-        Assert.Contains($"For an 8 GB host that is **{workers}** and **{processes}** for {TimescaleSupport.HypertableCount} hypertables", readme, StringComparison.Ordinal);
-        Assert.Contains("| **V129** — PostgreSQL log events |", readme, StringComparison.Ordinal);
+        /* #6416: the README's hand-kept migration table is gone; the ladder fixtures are the source of truth for the rungs. */
     }
 }
 

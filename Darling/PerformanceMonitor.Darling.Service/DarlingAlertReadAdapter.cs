@@ -576,16 +576,21 @@ LIMIT 200";
     /// <see cref="CurrentBlockingWaitResult"/>), its <c>wait_time_ms</c> summed and its distinct
     /// blocked SPIDs counted. $1 server_id, used twice.
     /// <para>
+    /// #6645: a row whose blocked and blocking spid are the same is a parallel query waiting on itself, not
+    /// blocking. The two aggregates leave those rows out with FILTER rather than the WHERE, so a newest snapshot
+    /// that holds only such rows still reads as a snapshot (its time and freshness) with nothing blocked.
+    /// </para>
+    /// <para>
     /// ONE statement, deliberately: Npgsql fails SILENTLY on multi-statement commands with positional
     /// parameters, so the freshness probe cannot be batched onto this — the snapshot time comes back as
     /// a column of this same aggregate instead, which is one round trip rather than two anyway.
     /// </para>
     /// </summary>
-    public const string CurrentBlockingWaitSql = @"
+    public const string CurrentBlockingWaitSql = $@"
 SELECT
     collection_time,
-    CAST(COALESCE(SUM(wait_time_ms), 0) AS bigint) AS total_wait_ms,
-    CAST(COUNT(DISTINCT blocked_spid) AS integer) AS blocked_sessions
+    CAST(COALESCE(SUM(wait_time_ms) FILTER (WHERE {BlockingWaits.NotSelfWaitSql}), 0) AS bigint) AS total_wait_ms,
+    CAST(COUNT(DISTINCT blocked_spid) FILTER (WHERE {BlockingWaits.NotSelfWaitSql}) AS integer) AS blocked_sessions
 FROM dmv_blocking_snapshots
 WHERE server_id = $1
 AND   collection_time = (
@@ -935,7 +940,10 @@ ORDER BY collection_time DESC
         var applications = await QueryAttentionAsync(connection, AttentionWindowSql.TopBy("attention_events", "client_app_name", bounded: true), serverId, topFloor, topCeiling,
             r => new AttentionTopItem(r.GetString(0), r.GetInt64(1)), cancellationToken);
 
-        return new AttentionWindow(runs, counts, groups, statements, databases, applications, topsFromLookback);
+        var hosts = await QueryAttentionAsync(connection, AttentionWindowSql.TopBy("attention_events", "client_hostname", bounded: true), serverId, topFloor, topCeiling,
+            r => new AttentionTopItem(r.GetString(0), r.GetInt64(1)), cancellationToken);
+
+        return new AttentionWindow(runs, counts, groups, statements, databases, applications, topsFromLookback, hosts);
     }
 
     /// <summary>The deadline of the Client Timeouts baseline read (#5736): a 7-day range of one server, run about once a day.</summary>

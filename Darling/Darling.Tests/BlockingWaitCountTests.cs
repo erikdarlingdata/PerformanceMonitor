@@ -89,6 +89,30 @@ public sealed class BlockingWaitCountTests
         Assert.Equal(new[] { 55900L, 45900L, 45900L, 30900L }.OrderBy(x => x), waits.Select(w => w.WaitTimeMs).OrderBy(x => x));
     }
 
+    /// <summary>
+    /// #6645: the threads of one parallel query write reports with blocked spid = blocking spid (different ecid).
+    /// That is the query waiting on itself, so it is no wait: the rule drops it and the alert rows follow.
+    /// </summary>
+    [Fact]
+    public void ParallelQuerySelfWaits_AreNotWaits()
+    {
+        var rows = OneWait(59, 59, T0, 6);
+        rows.AddRange(OneWait(59, 59, T0.AddMinutes(1), 3));
+        var real = OneWait(102, 100, T0.AddMinutes(2), 5);
+        rows.AddRange(real);
+
+        var wait = Assert.Single(Collapse(rows));
+        Assert.Equal(real.Max(r => r.WaitTimeMs), wait.WaitTimeMs);
+        Assert.Equal(100, wait.BlockingSpid);
+
+        var counted = AlertContextBuilders.BlockingWaitRows(rows, Array.Empty<string>());
+        Assert.Equal(100, Assert.Single(counted).BlockingSpid);
+        Assert.Empty(AlertContextBuilders.BlockingWaitRows(OneWait(59, 59, T0, 6), Array.Empty<string>()));
+
+        /* A report that named no session (the collector stores 0, never NULL) is still a blocking event. */
+        Assert.Single(AlertContextBuilders.BlockingWaitRows(OneWait(0, 0, T0, 1), Array.Empty<string>()));
+    }
+
     [Fact]
     public void ReportOrder_DoesNotChangeTheCount()
     {
@@ -214,6 +238,19 @@ public sealed class BlockingWaitCountTests
         Assert.Equal(102, wait.BlockedSpid);
     }
 
+    /// <summary>#6645 round 1: XE reports that are all a parallel query's self-waits are no XE reports, so the DMV
+    /// waits beside them are the source, as in the SQL read surfaces.</summary>
+    [Fact]
+    public void XeReportsThatAreAllSelfWaits_FallBackToTheDmvWaits()
+    {
+        var rows = OneWait(59, 59, T0, 6);
+        rows.AddRange(OneWait(202, 200, T0.AddMinutes(5), 3, source: BlockedProcessAlertRow.DmvSnapshotSource));
+
+        var wait = Assert.Single(AlertContextBuilders.BlockingWaitRows(rows, Array.Empty<string>()));
+        Assert.Equal(BlockedProcessAlertRow.DmvSnapshotSource, wait.Source);
+        Assert.Equal(200, wait.BlockingSpid);
+    }
+
     [Fact]
     public void NoXeReportsAtAll_CountsTheDmvWaits_OutsideTheExcludedDatabases()
     {
@@ -280,6 +317,10 @@ public sealed class BlockingWaitCountTests
         rows.AddRange(OneWait(102, 100, T0.AddMinutes(30), 6));
         rows.AddRange(OneWait(103, 100, T0, 4));
         rows.AddRange(OneWait(102, 101, T0.AddMinutes(1), 7));
+        /* #6645 round 1: a report that named no session is stored as (0, 0) and is a wait in the C# rule, so the SQL
+           must keep it; a parallel query's equal non-zero spids are dropped by both. */
+        rows.AddRange(OneWait(0, 0, T0.AddMinutes(40), 3));
+        rows.AddRange(OneWait(59, 59, T0.AddMinutes(50), 4));
 
         var sql = "WITH " + BlockingWaits.WaitsCteSql(
             BlockingWaits.SqlDialect.Postgres, "waits", ValuesSource(rows, 1), new[] { "server_id" })
@@ -293,8 +334,35 @@ public sealed class BlockingWaitCountTests
 
         var expected = Collapse(rows);
         Assert.Equal(expected.Count, Convert.ToInt32(reader.GetValue(0), CultureInfo.InvariantCulture));
-        Assert.Equal(6, expected.Count);
+        Assert.Equal(7, expected.Count);
         Assert.Equal(expected.Max(w => w.WaitTimeMs), Convert.ToInt64(reader.GetValue(1), CultureInfo.InvariantCulture));
+    }
+
+    [Fact]
+    public async Task PostgresSql_LeavesOutParallelQuerySelfWaits_AndCountsTheRealOne()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrWhiteSpace(connectionString), "Set DARLING_TEST_PG to run the live wait-count SQL test.");
+
+        var rows = new List<BlockedProcessAlertRow>();
+        rows.AddRange(OneWait(59, 59, T0, 6));
+        rows.AddRange(OneWait(59, 59, T0.AddMinutes(10), 4));
+        rows.AddRange(OneWait(102, 100, T0.AddMinutes(20), 5));
+
+        /* #6645: reportCount adds the per-wait report tally, which must count only the real wait's reports. */
+        var sql = "WITH " + BlockingWaits.WaitsCteSql(
+            BlockingWaits.SqlDialect.Postgres, "waits", ValuesSource(rows, 1), new[] { "server_id" }, reportCount: true)
+            + " SELECT COUNT(*), COUNT(DISTINCT blocking_spid), MAX(wait_reports) FROM waits";
+
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync();
+        await using var command = new NpgsqlCommand(sql, connection);
+        await using var reader = await command.ExecuteReaderAsync();
+        Assert.True(await reader.ReadAsync());
+
+        Assert.Equal(1, Convert.ToInt32(reader.GetValue(0), CultureInfo.InvariantCulture));
+        Assert.Equal(1, Convert.ToInt32(reader.GetValue(1), CultureInfo.InvariantCulture));
+        Assert.Equal(5, Convert.ToInt32(reader.GetValue(2), CultureInfo.InvariantCulture));
     }
 
     /* ── #5644 wave-1 review: sub-millisecond starts and NULL times, in C# and in the store's SQL ── */

@@ -407,6 +407,7 @@ public static partial class DarlingCliCommands
         || IsSetCollectorFrequencyVerb(arg)
         || IsSetCollectorRetentionVerb(arg)
         || IsDropXeSessionsVerb(arg)
+        || IsGrantScriptVerb(arg)
         || IsResetPasswordKeyVerb(arg)
         || IsSelfCheckPasswordKeyVerb(arg);
 
@@ -470,7 +471,7 @@ public static partial class DarlingCliCommands
         "  PerformanceMonitor.Darling.Service.exe                     Run the service (also how the Windows Service Control Manager starts it)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --version, -v       Print the product version and exit." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --help, -h          Print this help and exit." + Environment.NewLine +
-        "  PerformanceMonitor.Darling.Service.exe --test-connection   Validate darling.json and probe every configured server (the store's registry when it is reachable, otherwise the file's list)." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --test-connection   Validate darling.json and probe every configured server (the store's registry when it is reachable, otherwise the file's list). A Windows-authentication server is tested by the running service, as its own account; if the service is not running the test runs as you and says so." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --check-settings [--json]   Print the store host profile and a verdict per sizing-relevant setting; exits non-zero if any is stale-after-hardware-change." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --diagnostics-bundle <path> [--hours N] [--server <name>] [--log-dir <dir>] [--config <path>] [--alias-map <path>] [--include-log-text] [--force]   Write one aliased diagnostics file to attach to a bug report (run elevated on the store host; --diag-bundle is the short form)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --encrypt-password  Encrypt a SQL-auth password for darling.json (reads stdin)." + Environment.NewLine +
@@ -485,10 +486,10 @@ public static partial class DarlingCliCommands
         "  PerformanceMonitor.Darling.Service.exe --disable-mcp       Disable the MCP endpoint in the store and remove its firewall rule (run elevated)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --enable-web        Enable the web dashboard in the store and open its firewall (run elevated)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --disable-web       Disable the web dashboard in the store and remove its firewall rule (run elevated)." + Environment.NewLine +
-        "  PerformanceMonitor.Darling.Service.exe --backfill-rollups  Materialize the retention rollups back over existing history, after a disk preflight. Runs on Linux against a bring-your-own store; only a managed store needs Windows." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --backfill-rollups [--free-space <size>]  Materialize the retention rollups back over existing history, after a disk preflight. Runs on Linux against a bring-your-own store; only a managed store needs Windows. When the store is on another host, check the free space of its data volume there and pass it as --free-space, for example 41G." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --collapse-legacy-slices  Repair Query Store rows collected before the split-slice fix, then re-materialize the rollups they fed. Same platform rule as --backfill-rollups." + Environment.NewLine +
-        "  PerformanceMonitor.Darling.Service.exe --recompress-plan-dim  Convert the plan dimension's pre-V54 text rows to gzip in batches while the service runs, then VACUUM FULL to return the space to the volume (--no-vacuum-full to skip; --vacuum-full to compact an already-converted store)." + Environment.NewLine +
-        "  PerformanceMonitor.Darling.Service.exe --add-server, --add-servers   Register monitored server(s) from a JSON array on stdin (the add_servers shape); the running service picks them up without a restart." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --recompress-plan-dim [--free-space <size>]  Convert the plan dimension's pre-V54 text rows to gzip in batches while the service runs, then VACUUM FULL to return the space to the volume (--no-vacuum-full to skip; --vacuum-full to compact an already-converted store; --free-space gives the free space you checked on the store host when the store is on another host)." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --add-server, --add-servers   Register monitored server(s) from a JSON array on stdin (the add_servers shape) or one server from flags (--host, --name, --auth, --username, --engine, --database; a SQL login is asked for its password, hidden); the running service picks them up without a restart." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --add-alert-source <name> [--config <path>]      Make a source for external alerts: a login that can send alerts and do nothing else. Prints its connection string ONCE; Darling keeps no copy. <name> is 2-31 characters: a letter, then lower-case letters, digits or underscores." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --rotate-alert-source <name> [--config <path>]   Give a source a new password and print its connection string once. The old password stops working." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --remove-alert-source <name> [--config <path>]   Drop a source's login and remove it, along with any alerts of its that are still queued. Alerts it already sent stay in the history." + Environment.NewLine +
@@ -498,9 +499,11 @@ public static partial class DarlingCliCommands
         "  PerformanceMonitor.Darling.Service.exe --disable-collector <name> [--server <server>] [--config <path>]  Turn a collector OFF the same way. Frequency/retention overrides on the row are kept; only enabled changes." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --set-collector-run-at <collector> <HH:MM|none|default> [--server <server>] [--config <path>]   Set the time of day (the monitored server's own clock) a collector that runs once a day or less often starts; none stops a fixed time, default clears the row's time so the next level applies. Fleet-wide by default; --server scopes it to one server. Only the run time changes. The running service applies it within one sweep." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --set-collector-frequency <collector> <minutes|default> [--server <server>] [--config <path>]   Set how often a collector runs, in minutes (0 = once when the server loads, at most " + CollectorScheduleDefaults.MaxFrequencyMinutes + "); default clears the row's value so the next level applies. Fleet-wide by default; --server scopes it to one server. Only the frequency is written: the enabled flag, retention and database scope on the row are kept, and a new row stores no enabled flag of its own." + Environment.NewLine +
-        "  PerformanceMonitor.Darling.Service.exe --set-collector-retention <collector> <days|default> [--server <server>] [--config <path>]   Set how many days a collector's data is kept (1 to " + CollectorScheduleDefaults.MaxRetentionDays + "); default clears the row's value so the next level applies. Fleet-wide by default; --server scopes it to one server. Only the retention is written." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --set-collector-retention <collector> <days|default> [--server <server>] [--config <path>]   Set how many days a collector's data is kept (1 to " + CollectorScheduleDefaults.MaxRetentionDays + "); default clears the row's value so the next level applies. Retention is fleet-wide: --server is accepted only with default, to remove a value an older build stored. Only the retention is written." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --drop-xe-sessions <server-name> [--dry-run] [--config <path>]   Drop the Extended Events sessions Darling created on a server this service still monitors (" + DarlingXeSessionCleanup.SessionNamesPhrase() + ", and this install's own, whichever exist). Removing a server drops only this install's own sessions, so run this just before you remove the server to drop the shared ones too. It also lists the sessions of other installs and never drops them. --dry-run lists them and drops nothing." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --drop-xe-sessions --print-sql   Print guarded DROP statements for the shared sessions, and a query that lists every install's sessions with their DROP statements, in both scopes. It connects to nothing, so use it for a server that is no longer configured or that a removal could not reach." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --grant-script <server-name> [--finops] [--azure] [--config <path>]   Print the T-SQL that creates the monitoring login and grants what Darling needs on a monitored server (the SQL login the entry uses, or the service account for Windows authentication). Safe to run twice. Connects to no monitored server." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --grant-script --host <host> [--auth sql|integrated|windows|serviceprincipal|managedidentity] [--username <login>] [--finops] [--azure]   The same for a host not yet added." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --backfill-rollups --dry-run   Show the plan, the disk estimate and the time budget, and change nothing.";
 
     /// <summary>
@@ -558,20 +561,80 @@ public static partial class DarlingCliCommands
 
         await ReportAgentDispatchAsync(config, output, cancellationToken);
 
+        /* #6583: a warning, not an error, so a config that works today still starts: the port is ignored for a SQL Server target. */
+        foreach (var warning in SqlServerPortAdvice.Warnings(targets))
+        {
+            output.WriteLine("WARNING: " + warning);
+        }
+
         /* #6265: a warning, not an error, so a setup that started before still starts; the web refuses that token for sign-in. */
         if (DarlingAgentDispatchChecks.WebTokenFinding(config) is { } webTokenFinding)
         {
             output.WriteLine("WARNING: " + webTokenFinding);
         }
 
+        /* #6468: no servers yet is a valid start. Say so plainly rather than print "All servers reachable." over an empty list. */
+        if (targets.Count == 0)
+        {
+            output.WriteLine("No monitored servers are configured yet, so there is nothing to test. Add one in the Viewer (Add Server) or with --add-server.");
+            return 0;
+        }
+
         output.WriteLine($"Validating connectivity to {targets.Count} server(s)...");
 
+        /* #6476: a Windows-authentication server is tested BY THE RUNNING SERVICE when it can be asked, because this process runs as the
+           person at the console and the service runs as another account. The store is opened only when such a server is first tested. */
+        DarlingServiceConnectionTest.LazyStoreServiceConnectionTester? serviceTester = null;
+        if (OperatingSystem.IsWindows()
+            && TryBuildStoreConnectionString(config.Postgres, out var testerConnectionString, out _)
+            && !string.IsNullOrWhiteSpace(testerConnectionString))
+        {
+            serviceTester = new DarlingServiceConnectionTest.LazyStoreServiceConnectionTester(testerConnectionString);
+        }
+
+        bool allReachable;
+        try
+        {
+            allReachable = await ProbeTargetsAsync(
+                targets, output, serviceTester,
+                (server, token) => DarlingServerConnector.ProbeAsync(server, null, token, runsAsConsoleUser: true),
+                OperatingSystem.IsWindows(), DarlingServiceConnectionTest.ConsoleIdentity(), cancellationToken);
+        }
+        finally
+        {
+            if (serviceTester is not null)
+            {
+                await serviceTester.DisposeAsync();
+            }
+        }
+
+        output.WriteLine(allReachable
+            ? "All servers reachable."
+            : "One or more servers failed the connection pre-flight (see above).");
+        return allReachable ? 0 : 1;
+    }
+
+    /// <summary>
+    /// Probes each target and prints its PASS/FAIL line; true only when every one is reachable. A Windows-authentication target goes through
+    /// <see cref="DarlingServiceConnectionTest.TestAsync"/>, so the line says whose identity was tested (#6476). The seams are the service
+    /// tester and the in-process probe, so the loop runs under test without a SQL Server or a store.
+    /// </summary>
+    internal static async Task<bool> ProbeTargetsAsync(
+        IReadOnlyList<MonitoredServer> targets,
+        TextWriter output,
+        DarlingServiceConnectionTest.IServiceConnectionTester? serviceTester,
+        Func<MonitoredServer, CancellationToken, Task<ConnectionProbeResult>> probeAsConsole,
+        bool windowsHost,
+        string consoleIdentity,
+        CancellationToken cancellationToken)
+    {
         var allReachable = true;
         var nativeLoadFailureSaid = false;
         foreach (var server in targets)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var probe = await DarlingServerConnector.ProbeAsync(server, null, cancellationToken);
+            var (probe, notes) = await DarlingServiceConnectionTest.TestAsync(
+                server, serviceTester, probeAsConsole, consoleIdentity, windowsHost, cancellationToken);
             if (probe.SqlClientNativeLoadFailed)
             {
                 /* #6183: SqlClient's native library did not load, so no SQL Server connection can work from this
@@ -588,21 +651,24 @@ public static partial class DarlingCliCommands
             }
 
             output.WriteLine(FormatProbeLine(server.DisplayName, probe));
+            foreach (var note in notes)
+            {
+                output.WriteLine(note);
+            }
+
             if (!probe.Success)
             {
                 allReachable = false;
             }
         }
 
-        output.WriteLine(allReachable
-            ? "All servers reachable."
-            : "One or more servers failed the connection pre-flight (see above).");
-        return allReachable ? 0 : 1;
+        return allReachable;
     }
 
     /// <summary>
     /// The agent dispatch checks for <c>--validate-config</c> (#6263): investigations on with MCP off, with no usable token,
-    /// with writes also on, or with no agent route. Nothing is read or printed when <c>mcp.allowInvestigations</c> is off.
+    /// with writes also on, or with no agent route. Nothing is read or printed when <c>mcp.allowInvestigations</c> is off and
+    /// <c>mcp.tokens</c> is not set. With <c>mcp.tokens</c> set, its own findings print too (#6542).
     /// Each finding is a <c>WARNING:</c> or a <c>NOTE:</c> line on <paramref name="output"/>, the same shape as the other
     /// warnings in this verb. None of them changes the exit code: those configs ran before, so an upgrade must not start
     /// failing a validation. The MCP switch and the route count come from the store when it answers, else from the file.
@@ -610,7 +676,7 @@ public static partial class DarlingCliCommands
     internal static async Task ReportAgentDispatchAsync(
         DarlingConfig config, TextWriter output, CancellationToken cancellationToken)
     {
-        if (!config.Mcp.AllowInvestigations)
+        if (!config.Mcp.AllowInvestigations && !config.Mcp.HasNamedTokens)
         {
             return;
         }
@@ -634,6 +700,12 @@ public static partial class DarlingCliCommands
             output.WriteLine(
                 (finding.Severity == DarlingAgentDispatchChecks.AgentDispatchSeverity.Warning ? "WARNING: " : "NOTE: ")
                 + finding.Message);
+        }
+
+        /* #6542: the named tokens' own findings print whenever mcp.tokens is set, whether or not investigations are on. */
+        foreach (var finding in DarlingAgentDispatchChecks.NamedTokenFindings(config.Mcp, token, agentRoutes))
+        {
+            output.WriteLine("WARNING: " + finding);
         }
     }
 
@@ -782,12 +854,12 @@ public static partial class DarlingCliCommands
     /// lines later cannot throw on it. The build is repeated here rather than handed back because the connection
     /// census tests want the pin and the name on the very call that constructs each verb's connection.</para>
     ///
-    /// <para><paramref name="ensureStoreSearchPath"/> is for a verb that names store tables bare: it gives a
-    /// bring-your-own string the worker's collect/config search path (a managed string already carries it) BEFORE the
+    /// <para><paramref name="ensureStoreSearchPath"/> (on by default since #6630, because most verbs name store tables bare)
+    /// gives a bring-your-own string the worker's collect/config search path (a managed string already carries it) BEFORE the
     /// proof, so the string that is proved is the string that is used.</para>
     /// </summary>
     private static bool TryBuildStoreConnectionString(
-        PostgresConfig? postgres, out string? connectionString, out string? unusable, bool ensureStoreSearchPath = false)
+        PostgresConfig? postgres, out string? connectionString, out string? unusable, bool ensureStoreSearchPath = true)
     {
         connectionString = null;
         unusable = null;
@@ -819,7 +891,7 @@ public static partial class DarlingCliCommands
 
             if (ensureStoreSearchPath && !managedCredential)
             {
-                connectionString = DarlingWorker.EnsureStoreSearchPath(connectionString);
+                connectionString = DarlingStoreConnection.EnsureStoreSearchPath(connectionString);
             }
 
             using var proof = new NpgsqlConnection(
@@ -1202,6 +1274,10 @@ public static partial class DarlingCliCommands
             : CheckSettingsExitCode.Ok;
     }
 
+    /// <summary>#6472: <c>--grant-script</c>'s configuration load. It sits here with the other verbs' loads: this is a CLI process, so the
+    /// owned set <see cref="DarlingConfig.Load"/> publishes is that of the file the verb was pointed at.</summary>
+    internal static DarlingConfig LoadConfigForGrantScript(string? configPath) => DarlingConfig.Load(configPath);
+
     /// <summary>Formats one server's probe outcome as a PASS/FAIL line (pure — unit-testable).</summary>
     public static string FormatProbeLine(string serverName, ConnectionProbeResult probe)
     {
@@ -1213,12 +1289,18 @@ public static partial class DarlingCliCommands
         var passLine = $"  [PASS] {serverName}: {DarlingServerConnector.DescribeProbeFacts(probe)}";
         /* #6254: a server with a Query Store replica is tested on both connections, and each is named. A replica that could not be
            opened is a [WARN], not a [FAIL]: the primary answered, and collection reads Query Store from it. */
+        /* #6472: a missing base grant is a [WARN] line too: the connection worked. */
+        if (!string.IsNullOrEmpty(probe.MissingGrantsNote))
+        {
+            passLine += Environment.NewLine + $"  [WARN] {serverName}: {probe.MissingGrantsNote}";
+        }
+
         if (DarlingServerConnector.DescribeQueryStoreReplica(probe) is not { } replicaLine)
         {
             return passLine;
         }
 
-        var replicaPrefix = string.IsNullOrEmpty(probe.QueryStoreReplicaError) ? "         " : "  [WARN] ";
+        var replicaPrefix = string.IsNullOrEmpty(probe.QueryStoreReplicaError) && !probe.QueryStoreReplicaIgnoredOnAzureSqlDb ? "         " : "  [WARN] ";
         return passLine + Environment.NewLine + $"{replicaPrefix}{serverName}: Primary: connected. {replicaLine}";
     }
 
@@ -2840,7 +2922,7 @@ public static partial class DarlingCliCommands
 
     /// <summary>Best-effort Windows-service status line via Get-Service; never throws (falls back to a plain note).</summary>
     [SupportedOSPlatform("windows")]
-    private static async Task<string> DescribeServiceStateAsync(CancellationToken cancellationToken)
+    internal static async Task<string> DescribeServiceStateAsync(CancellationToken cancellationToken)
     {
         try
         {
@@ -3207,14 +3289,25 @@ public static partial class DarlingCliCommands
         _ => "the MCP resolver rejected these values.",
     };
 
-    /// <summary>Removes all three network blocks (symmetric with the reconcilers), validating parse + loopback-only before the timestamped write, then offers a restart. Shared by the managed Disable choice and the BYO cleanup.</summary>
+    /// <summary>
+    /// PURE: the darling.json text <see cref="DisableExposureAsync"/> writes, with the text after each step so the caller
+    /// can tell which sections changed. The <c>postgres.network</c> block goes whole. The <c>mcp.network</c> and
+    /// <c>web.network</c> blocks lose only their exposure keys (<see cref="DarlingNetworkConfigEditor.EndpointExposureKeys"/>)
+    /// and keep the token, which still gates the loopback listener.
+    /// </summary>
+    internal static (string AfterPostgres, string AfterMcp, string NewText) DisabledExposureText(string originalText)
+    {
+        var afterPostgres = DarlingNetworkConfigEditor.RemoveNetworkBlock(originalText, "postgres");
+        var afterMcp = DarlingNetworkConfigEditor.RemoveEndpointExposure(afterPostgres, "mcp");
+        return (afterPostgres, afterMcp, DarlingNetworkConfigEditor.RemoveEndpointExposure(afterMcp, "web"));
+    }
+
+    /// <summary>Removes the postgres network block and the mcp/web exposure keys (symmetric with the reconcilers), validating parse + loopback-only before the timestamped write, then offers a restart. Shared by the managed Disable choice and the BYO cleanup.</summary>
     [SupportedOSPlatform("windows")]
     private static async Task<int> DisableExposureAsync(
         string resolvedPath, string originalText, TextReader input, TextWriter output, TextWriter error, CancellationToken cancellationToken)
     {
-        var newText = DarlingNetworkConfigEditor.RemoveNetworkBlock(originalText, "postgres");
-        newText = DarlingNetworkConfigEditor.RemoveNetworkBlock(newText, "mcp");
-        newText = DarlingNetworkConfigEditor.RemoveNetworkBlock(newText, "web");
+        var (afterPostgres, afterMcp, newText) = DisabledExposureText(originalText);
 
         if (string.Equals(newText, originalText, StringComparison.Ordinal))
         {
@@ -3251,6 +3344,32 @@ public static partial class DarlingCliCommands
         }
 
         output.WriteLine("Network exposure removed. The service reconciles the endpoints OFF (pg_hba rule, firewall, ssl) on its next start.");
+
+        /* The mcp and web tokens stay (DisabledExposureText removes only the exposure keys), so each endpoint keeps
+           asking for its token on loopback. An endpoint whose block held no token gets a note naming what to add,
+           because an enabled endpoint needs one on loopback too unless its allowTokenlessLoopback is on. */
+        foreach (var (section, changed, hasToken, optOut) in new[]
+        {
+            ("mcp", !string.Equals(afterMcp, afterPostgres, StringComparison.Ordinal),
+                !string.IsNullOrWhiteSpace(reparsed.Mcp.Network?.EncryptedToken) || !string.IsNullOrWhiteSpace(reparsed.Mcp.Network?.Token),
+                reparsed.Mcp.AllowTokenlessLoopback),
+            ("web", !string.Equals(newText, afterMcp, StringComparison.Ordinal),
+                !string.IsNullOrWhiteSpace(reparsed.Web.Network?.EncryptedToken) || !string.IsNullOrWhiteSpace(reparsed.Web.Network?.Token),
+                reparsed.Web.AllowTokenlessLoopback),
+        })
+        {
+            if (changed && hasToken)
+            {
+                output.WriteLine($"Kept the {section} token: the loopback-only {section} endpoint still asks every client for it.");
+            }
+            else if (changed && !optOut)
+            {
+                output.WriteLine(
+                    $"NOTE: {section} has no token. If {section} is turned on, it needs one on loopback too: " +
+                    $"add \"{section}\": {{ \"network\": {{ \"encryptedToken\": \"...\" }} }} or set {section}.allowTokenlessLoopback " +
+                    "to true, or it will not start.");
+            }
+        }
         await OfferRestartAsync(input, output, error, cancellationToken);
         return 0;
     }
@@ -3445,10 +3564,7 @@ public static partial class DarlingCliCommands
             return "<a-LAN-IP-of-this-machine>";
         }
 
-        var text = listen.Trim();
-        return address.AddressFamily == AddressFamily.InterNetworkV6 && !text.StartsWith('[')
-            ? $"[{text}]"
-            : listen;
+        return DarlingListenUrl.FormatHost(listen);
     }
 
     /// <summary>
@@ -3676,6 +3792,92 @@ public static partial class DarlingCliCommands
         Handoff,
     }
 
+    /// <summary>
+    /// PURE: the line <c>--enable-mcp</c> / <c>--enable-web</c> prints when darling.json gives that endpoint no token and
+    /// its <c>allowTokenlessLoopback</c> is off, because the service then does not start it; null when a token is set, the
+    /// opt-out is on, or (MCP only) <c>mcp.tokens</c> names tokens, which the host honors without a legacy token (#6542).
+    /// Reads only whether a token value is present, never the token.
+    /// </summary>
+    internal static string? EnableTokenNote(bool mcp, DarlingConfig config)
+    {
+        var section = mcp ? "mcp" : "web";
+        var optOut = mcp ? config.Mcp.AllowTokenlessLoopback : config.Web.AllowTokenlessLoopback;
+        return HasEndpointToken(mcp, config) || (mcp && config.Mcp.HasNamedTokens) || optOut
+            ? null
+            : $"NOTE: darling.json gives {section} no token, so the service will not start it. Set {section}.network.encryptedToken " +
+              $"(from --encrypt-password) or {section}.network.token and restart the service, or set {section}.allowTokenlessLoopback " +
+              (mcp ? "to true to serve loopback with no token (the write tools stay off)." : "to true to serve loopback with no token, for reads only.");
+    }
+
+    /// <summary>Whether darling.json gives the endpoint a token value (presence only; the value is never read here).</summary>
+    private static bool HasEndpointToken(bool mcp, DarlingConfig config) => mcp
+        ? !string.IsNullOrWhiteSpace(config.Mcp.Network?.EncryptedToken) || !string.IsNullOrWhiteSpace(config.Mcp.Network?.Token)
+        : !string.IsNullOrWhiteSpace(config.Web.Network?.EncryptedToken) || !string.IsNullOrWhiteSpace(config.Web.Network?.Token);
+
+    /// <summary>
+    /// The scheme a loopback client uses to reach the endpoint. Plain <c>http</c>, except when the network listener is
+    /// TLS and its listen is a wildcard or loopback address: then there is ONE listener, HTTPS for loopback too (#5288
+    /// review F11), so the loopback address must be opened over <c>https</c>. Mirrors the host's own decision
+    /// (<see cref="DarlingListenerTls.DescribeLoopbackListener"/>); a certificate that fails to load is not known here.
+    /// </summary>
+    private static string LoopbackScheme(bool mcp, DarlingConfig config)
+    {
+        var managed = config.Postgres.Managed;
+        var exposed = mcp
+            ? DarlingMcpHostService.ResolveMcpBind(config.Mcp, managed).Mode == DarlingMcpHostService.McpBindMode.NetworkAndLoopback
+            : DarlingWebHostService.ResolveWebBind(config.Web, managed).Mode == DarlingHostBinding.BindMode.NetworkAndLoopback;
+        var listen = mcp ? config.Mcp.Network?.Listen : config.Web.Network?.Listen;
+        var tls = mcp ? config.Mcp.Network?.Tls : config.Web.Network?.Tls;
+        return exposed && tls is not null
+            && IPAddress.TryParse(listen?.Trim(), out var listenIp)
+            && !DarlingHostBinding.ShouldAddLoopbackListeners(listenIp)
+            ? "https"
+            : "http";
+    }
+
+    /// <summary>
+    /// What <c>--enable-mcp</c> / <c>--enable-web</c> print after "now on" (#6474): the web address to open, or the
+    /// <c>claude mcp add</c> command the Viewer's Settings copies (built by the same <see cref="DarlingEndpointClientText"/>
+    /// call, so they match except when the scheme is <c>https</c> on loopback: the <c>tls</c> block lives only in darling.json
+    /// on the service host, which the Viewer cannot see, so its copy stays <c>http</c> and its status line says to change it), and, when darling.json sets a token, the verb that shows it. The token value is never
+    /// printed: the command carries the <c>&lt;token&gt;</c> placeholder. <paramref name="port"/> is the port the endpoint
+    /// binds, as the store row the verb just wrote reports it. Prints nothing when the service will not start the
+    /// endpoint (no token and no <c>allowTokenlessLoopback</c>): <see cref="EnableTokenNote"/> has said so, and an address
+    /// that refuses the connection is no next step.
+    /// </summary>
+    internal static void WriteEnableNextSteps(bool mcp, DarlingConfig config, int port, TextWriter output)
+    {
+        var optOut = mcp ? config.Mcp.AllowTokenlessLoopback : config.Web.AllowTokenlessLoopback;
+        var hasToken = HasEndpointToken(mcp, config);
+        var namedTokens = mcp && config.Mcp.HasNamedTokens;
+        if (!hasToken && !namedTokens && !optOut)
+        {
+            return;
+        }
+
+        var portText = port.ToString(CultureInfo.InvariantCulture);
+        var scheme = LoopbackScheme(mcp, config);
+        output.WriteLine();
+        if (mcp)
+        {
+            output.WriteLine("To connect Claude Code, run:");
+            output.WriteLine("    " + DarlingEndpointClientText.ClaudeMcpAddCommand(portText, scheme));
+            output.WriteLine(hasToken
+                ? $"Replace {DarlingEndpointClientText.TokenPlaceholder} with the MCP token. Show it with: PerformanceMonitor.Darling.Service.exe --print-mcp-token (run elevated)."
+                : namedTokens
+                    ? $"Replace {DarlingEndpointClientText.TokenPlaceholder} with the token of one of the mcp.tokens entries in darling.json."
+                    : "darling.json sets no MCP token and mcp.allowTokenlessLoopback is on, so leave the --header part off the command.");
+        }
+        else
+        {
+            output.WriteLine("Open the web dashboard at: " + DarlingEndpointClientText.WebDashboardAddress(portText, scheme));
+            if (hasToken)
+            {
+                output.WriteLine("It asks for the web token. Show it with: PerformanceMonitor.Darling.Service.exe --print-web-token (run elevated).");
+            }
+        }
+    }
+
     /// <summary>PURE firewall-step decision for a toggle verb (unit-tested): a loopback-only endpoint needs no
     /// rule; an exposed endpoint runs the rule when elevated, otherwise hands the exact command off. Shared by
     /// enable and disable alike (disable just runs/hands-off the removal command instead of the open command).</summary>
@@ -3871,6 +4073,18 @@ public static partial class DarlingCliCommands
         output.WriteLine(
             "The running service applies this LIVE within one collection sweep (the write self-bumps the reload " +
             "beacon) — no restart needed.");
+
+        /* An enabled endpoint with no token and no allowTokenlessLoopback does not start (the host logs why at every
+           service start); say so here too, where the operator has just turned it on. */
+        if (enable && EnableTokenNote(endpoint == EndpointKind.Mcp, config) is { } tokenNote)
+        {
+            output.WriteLine(tokenNote);
+        }
+
+        if (enable)
+        {
+            WriteEnableNextSteps(endpoint == EndpointKind.Mcp, config, storePort, output);
+        }
 
         /* #2414: the SAME resolver the two host supervisors bind on, fed the row this verb just wrote. It carries
            the provenance as well as the value, so the firewall step can state on whose authority it picked a port
@@ -5907,15 +6121,17 @@ public static partial class DarlingCliCommands
     /// <c>--vacuum-full</c>, <c>--no-vacuum-full</c> in any order, at most one bare argument (the config
     /// path). Unknown flags are NOT config paths — refusing beats silently treating a typo as a file.
     /// </summary>
-    public static (string? ConfigPath, bool DryRun, RecompressVacuumMode Mode, string? Error) ParseRecompressArgs(
+    public static (string? ConfigPath, bool DryRun, RecompressVacuumMode Mode, long? FreeBytes, string? Error) ParseRecompressArgs(
         ReadOnlySpan<string> rest)
     {
         string? configPath = null;
         var dryRun = false;
         var mode = RecompressVacuumMode.Auto;
+        long? freeBytes = null;
 
-        foreach (var arg in rest)
+        for (var i = 0; i < rest.Length; i++)
         {
+            var arg = rest[i];
             if (string.Equals(arg, "--dry-run", StringComparison.OrdinalIgnoreCase))
             {
                 dryRun = true;
@@ -5928,9 +6144,16 @@ public static partial class DarlingCliCommands
             {
                 mode = RecompressVacuumMode.Skip;
             }
+            else if (string.Equals(arg, FreeSpaceOption, StringComparison.OrdinalIgnoreCase))
+            {
+                if (TakeFreeSpaceOption(rest, ref i, ref freeBytes) is { } freeSpaceError)
+                {
+                    return (null, false, RecompressVacuumMode.Auto, null, freeSpaceError);
+                }
+            }
             else if (arg.StartsWith("--", StringComparison.Ordinal))
             {
-                return (null, false, RecompressVacuumMode.Auto, $"unknown option '{arg}' for --recompress-plan-dim");
+                return (null, false, RecompressVacuumMode.Auto, null, $"unknown option '{arg}' for --recompress-plan-dim");
             }
             else
             {
@@ -5938,8 +6161,128 @@ public static partial class DarlingCliCommands
             }
         }
 
-        return (configPath, dryRun, mode, null);
+        // --free-space only feeds the closing VACUUM FULL's disk check, which --no-vacuum-full skips (#6791).
+        if (freeBytes is not null && mode == RecompressVacuumMode.Skip)
+        {
+            return (null, false, RecompressVacuumMode.Auto, null,
+                "--free-space has no effect with --no-vacuum-full: it only feeds the free-disk check before the closing VACUUM FULL, which --no-vacuum-full skips");
+        }
+
+        return (configPath, dryRun, mode, freeBytes, null);
     }
+
+    /// <summary>
+    /// Parses <c>--backfill-rollups</c>'s trailing arguments: <c>--dry-run</c>, <c>--free-space &lt;size&gt;</c> and at
+    /// most one bare argument (the config path), in any order. Unknown <c>--</c> options are refused: before
+    /// <c>--free-space</c> existed a typo here was read as the config path, and now it would swallow the size too.
+    /// </summary>
+    public static (string? ConfigPath, bool DryRun, long? FreeBytes, string? Error) ParseBackfillArgs(
+        ReadOnlySpan<string> rest)
+    {
+        string? configPath = null;
+        var dryRun = false;
+        long? freeBytes = null;
+
+        for (var i = 0; i < rest.Length; i++)
+        {
+            var arg = rest[i];
+            if (string.Equals(arg, "--dry-run", StringComparison.OrdinalIgnoreCase))
+            {
+                dryRun = true;
+            }
+            else if (string.Equals(arg, FreeSpaceOption, StringComparison.OrdinalIgnoreCase))
+            {
+                if (TakeFreeSpaceOption(rest, ref i, ref freeBytes) is { } freeSpaceError)
+                {
+                    return (null, false, null, freeSpaceError);
+                }
+            }
+            else if (arg.StartsWith("--", StringComparison.Ordinal))
+            {
+                return (null, false, null, $"unknown option '{arg}' for --backfill-rollups");
+            }
+            else
+            {
+                configPath = arg;
+            }
+        }
+
+        return (configPath, dryRun, freeBytes, null);
+    }
+
+    /// <summary>The option that hands a store verb the free space the operator checked on the store host (#6791).</summary>
+    private const string FreeSpaceOption = "--free-space";
+
+    /// <summary>
+    /// Reads the value after <c>--free-space</c> at <paramref name="index"/>, moving the index onto the value.
+    /// Returns the refusal text, or null when the size was taken.
+    /// </summary>
+    private static string? TakeFreeSpaceOption(ReadOnlySpan<string> rest, ref int index, ref long? freeBytes)
+    {
+        if (freeBytes is not null)
+        {
+            return "--free-space was given more than once. Pass it one time, with the free space of the store's data volume.";
+        }
+
+        if (index + 1 >= rest.Length || rest[index + 1].StartsWith("--", StringComparison.Ordinal))
+        {
+            return "--free-space needs a size after it, for example --free-space 41G.";
+        }
+
+        index++;
+        var (bytes, error) = ParseFreeSpaceSize(rest[index]);
+        if (error is not null)
+        {
+            return error;
+        }
+
+        freeBytes = bytes;
+        return null;
+    }
+
+    /// <summary>
+    /// Parses a <c>--free-space</c> size: a whole number of bytes, or a number followed by K, M, G or T, optionally
+    /// followed by B or iB, in any case. All units are 1024-based, the way <c>df -h</c> prints them, so the
+    /// <c>41G</c> that <c>df -h</c> shows is accepted as written. Zero and negative sizes are refused: a store with
+    /// no free space is a refusal the verb reaches by comparing, not a value to type in.
+    /// </summary>
+    public static (long? Bytes, string? Error) ParseFreeSpaceSize(string? text)
+    {
+        var unreadable = $"--free-space could not read '{text}' as a size. Use a number of bytes, or a number with K, M, G or T, for example 41G or 512M.";
+        var match = FreeSpaceSizePattern.Match(text ?? string.Empty);
+        if (!match.Success
+            || !double.TryParse(match.Groups["number"].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var number)
+            || double.IsNaN(number) || double.IsInfinity(number))
+        {
+            return (null, unreadable);
+        }
+
+        var scale = match.Groups["unit"].Value.ToUpperInvariant() switch
+        {
+            "K" => 1024d,
+            "M" => 1024d * 1024,
+            "G" => 1024d * 1024 * 1024,
+            "T" => 1024d * 1024 * 1024 * 1024,
+            _ => 1d,
+        };
+
+        var bytes = number * scale;
+        if (bytes < 1)
+        {
+            return (null, $"--free-space must be more than zero; '{text}' is not. Pass the free space you checked on the store's data volume, for example 41G.");
+        }
+
+        if (bytes >= long.MaxValue)
+        {
+            return (null, $"--free-space '{text}' is larger than any volume. Pass the free space you checked on the store's data volume, for example 41G.");
+        }
+
+        return ((long)bytes, null);
+    }
+
+    private static readonly System.Text.RegularExpressions.Regex FreeSpaceSizePattern = new(
+        @"^\s*(?<number>-?\d+(?:\.\d+)?)\s*(?:(?<unit>[KMGTkmgt])(?:[iI]?[bB])?|[bB])?\s*$",
+        System.Text.RegularExpressions.RegexOptions.CultureInvariant | System.Text.RegularExpressions.RegexOptions.NonBacktracking);
 
     /// <summary>
     /// #2171: whether the store's plan_xml_compression setting is 'none' — the mode where the live
@@ -5995,7 +6338,7 @@ public static partial class DarlingCliCommands
     /// </summary>
     public static async Task<int> RecompressPlanDimAsync(
         string? configPath, bool dryRun, RecompressVacuumMode vacuumMode, TextWriter output, TextWriter error,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, long? freeSpaceBytes = null)
     {
         ArgumentNullException.ThrowIfNull(output);
         ArgumentNullException.ThrowIfNull(error);
@@ -6099,8 +6442,8 @@ public static partial class DarlingCliCommands
             return 1;
         }
 
-        output.WriteLine($"  {survey.Pending:N0} text row(s) to convert; {survey.Converted:N0} already gzip; {survey.Total:N0} total.");
-        output.WriteLine($"  Relation size (table + TOAST + indexes): {survey.RelationBytes / (1024.0 * 1024 * 1024):N1} GB.");
+        output.WriteLine(Inv($"  {survey.Pending:N0} text row(s) to convert; {survey.Converted:N0} already gzip; {survey.Total:N0} total."));
+        output.WriteLine(Inv($"  Relation size (table + TOAST + indexes): {survey.RelationBytes / (1024.0 * 1024 * 1024):N1} GB."));
         output.WriteLine();
 
         if (!survey.HasWork)
@@ -6109,9 +6452,13 @@ public static partial class DarlingCliCommands
             output.WriteLine("  That is the expected end state: V54 writes gzip, and this verb (or GC attrition)");
             output.WriteLine("  has already converted whatever text rows existed.");
 
-            if (vacuumMode == RecompressVacuumMode.Force && !dryRun)
+            if (vacuumMode == RecompressVacuumMode.Force)
             {
-                return await CompactPlanDimAsync(connection, output, error, cancellationToken);
+                /* The dry run shows the same free-disk check the real compaction ends with (#6791): there is no
+                   conversion to project, so the estimate is the one the real run uses. */
+                return dryRun
+                    ? await PreviewCompactionAsync(connection, freeSpaceBytes, null, conversionWouldRun: false, output, error, cancellationToken)
+                    : await CompactPlanDimAsync(connection, freeSpaceBytes, output, error, cancellationToken);
             }
 
             output.WriteLine("  (Pass --vacuum-full to compact a previously-converted store whose file still");
@@ -6141,9 +6488,9 @@ public static partial class DarlingCliCommands
             var ratio = sample.GzipBytes == 0 ? 0 : (double)sample.TextBytes / sample.GzipBytes;
             var avgGzip = sample.GzipBytes / (double)sample.Rows;
             var projected = survey.Pending * avgGzip;
-            output.WriteLine($"  DRY RUN — sampled {sample.Rows:N0} pending row(s), compressed in memory, wrote nothing:");
-            output.WriteLine($"    measured ratio: {ratio:N1}x (raw text -> gzip), average {avgGzip / 1024.0:N1} KB per plan");
-            output.WriteLine($"    projected gzip content for all {survey.Pending:N0} pending rows: ~{projected / (1024.0 * 1024 * 1024):N1} GB");
+            output.WriteLine(Inv($"  DRY RUN — sampled {sample.Rows:N0} pending row(s), compressed in memory, wrote nothing:"));
+            output.WriteLine(Inv($"    measured ratio: {ratio:N1}x (raw text -> gzip), average {avgGzip / 1024.0:N1} KB per plan"));
+            output.WriteLine(Inv($"    projected gzip content for all {survey.Pending:N0} pending rows: ~{projected / (1024.0 * 1024 * 1024):N1} GB"));
             output.WriteLine();
             output.WriteLine("  The real run converts in 1,000-row batches (one transaction each) while the service");
             output.WriteLine("  runs; it is safe to interrupt and re-run. When the conversion CONVERGES it ends with");
@@ -6152,7 +6499,33 @@ public static partial class DarlingCliCommands
             output.WriteLine("  free disk. Size the lock window by your dimension: measured ~46 minutes on a 174 GB");
             output.WriteLine("  dimension (7.1M plans), during which collection freshness DEGRADES and recovers within");
             output.WriteLine("  minutes after. --no-vacuum-full skips it to schedule that window separately.");
-            return 0;
+
+            if (vacuumMode == RecompressVacuumMode.Skip)
+            {
+                return 0;
+            }
+
+            /* The real run would end with the compaction, so the dry run shows its free-disk check (#6791). The
+               estimate is what the compacted dimension will be AFTER conversion: heap + indexes + every row at the
+               sampled gzip size. The stored estimate cannot be used here: before any row is converted its gzip
+               term is 0 or far too small. */
+            long heapAndIndexes;
+            try
+            {
+                heapAndIndexes = await PlanDimRecompression.HeapAndIndexBytesAsync(connection, cancellationToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                error.WriteLine($"  Could not estimate the compacted size: {ex.Message}");
+                return 1;
+            }
+
+            output.WriteLine();
+            output.WriteLine(Inv($"  Closing VACUUM FULL, previewed (estimate = heap + indexes + {survey.Total:N0} rows x the sampled average gzip size):"));
+            return await PreviewCompactionAsync(
+                connection, freeSpaceBytes,
+                PlanDimRecompression.ProjectCompactedBytes(heapAndIndexes, survey.Total, avgGzip),
+                conversionWouldRun: true, output, error, cancellationToken);
         }
 
         var stopwatch = System.Diagnostics.Stopwatch.StartNew();
@@ -6177,9 +6550,9 @@ public static partial class DarlingCliCommands
                     var rate = running.Rows / Math.Max(stopwatch.Elapsed.TotalSeconds, 1);
                     var etaSeconds = rate <= 0 ? 0 : (pending - running.Rows) / rate;
                     output.WriteLine(
-                        $"  {running.Rows:N0} / {pending:N0} ({pct:N1}%) — " +
-                        $"{running.TextBytes / (1024.0 * 1024 * 1024):N1} GB text -> {running.GzipBytes / (1024.0 * 1024 * 1024):N1} GB gzip — " +
-                        $"~{TimeSpan.FromSeconds(etaSeconds):hh\\:mm\\:ss} remaining");
+                        Inv($"  {running.Rows:N0} / {pending:N0} ({pct:N1}%) — ") +
+                        Inv($"{running.TextBytes / (1024.0 * 1024 * 1024):N1} GB text -> {running.GzipBytes / (1024.0 * 1024 * 1024):N1} GB gzip — ") +
+                        Inv($"~{TimeSpan.FromSeconds(etaSeconds):hh\\:mm\\:ss} remaining"));
                 },
                 cancellationToken);
         }
@@ -6203,16 +6576,16 @@ public static partial class DarlingCliCommands
 
         var finalRatio = result.GzipBytes == 0 ? 0 : (double)result.TextBytes / result.GzipBytes;
         output.WriteLine();
-        output.WriteLine($"  DONE in {stopwatch.Elapsed:hh\\:mm\\:ss} — {result.Rows:N0} row(s) converted, " +
-            $"{result.TextBytes / (1024.0 * 1024 * 1024):N1} GB text -> {result.GzipBytes / (1024.0 * 1024 * 1024):N1} GB gzip ({finalRatio:N1}x).");
+        output.WriteLine(Inv($"  DONE in {stopwatch.Elapsed:hh\\:mm\\:ss} — {result.Rows:N0} row(s) converted, ") +
+            Inv($"{result.TextBytes / (1024.0 * 1024 * 1024):N1} GB text -> {result.GzipBytes / (1024.0 * 1024 * 1024):N1} GB gzip ({finalRatio:N1}x)."));
         if (after.Total > 0)
         {
-            output.WriteLine($"  Remaining text rows: {after.Pending:N0} (new sightings during the run convert on the next pass).");
+            output.WriteLine(Inv($"  Remaining text rows: {after.Pending:N0} (new sightings during the run convert on the next pass)."));
         }
 
         if (result.VerifyFailures > 0)
         {
-            error.WriteLine($"  [WARN] {result.VerifyFailures:N0} row(s) FAILED round-trip verification and kept their text unchanged.");
+            error.WriteLine(Inv($"  [WARN] {result.VerifyFailures:N0} row(s) FAILED round-trip verification and kept their text unchanged."));
             error.WriteLine("  Investigate before re-running; those rows are readable exactly as before.");
             error.WriteLine("  VACUUM FULL was skipped — compaction can wait until the conversion is clean.");
             return 1;
@@ -6227,13 +6600,132 @@ public static partial class DarlingCliCommands
 
         if (after.Total > 0 && after.Pending > 0)
         {
-            output.WriteLine($"  {after.Pending:N0} row(s) arrived mid-run and are still text — re-run to convert them;");
+            output.WriteLine(Inv($"  {after.Pending:N0} row(s) arrived mid-run and are still text — re-run to convert them;"));
             output.WriteLine("  compaction will run when the conversion converges.");
             return 0;
         }
 
-        return await CompactPlanDimAsync(connection, output, error, cancellationToken);
+        return await CompactPlanDimAsync(connection, freeSpaceBytes, output, error, cancellationToken);
     }
+
+    /// <summary>Formats an interpolated line with the invariant culture, so a size or count reads the same on a
+    /// comma-decimal machine as in the docs (#6791).</summary>
+    private static string Inv(FormattableString text) => text.ToString(CultureInfo.InvariantCulture);
+
+    /// <summary>
+    /// The dry run's version of the closing VACUUM FULL's free-disk check (#6791): resolves the free space exactly
+    /// as the real compaction does (the operator's <c>--free-space</c>, else measured), then runs the shared
+    /// <see cref="WritePlanDimVacuumPreflight"/>. <paramref name="projectedEstimate"/> is the post-conversion size
+    /// when rows are still pending; null means nothing is pending and the real run's own estimate applies.
+    /// Returns 0 when the compaction would fit, 1 when the real run would refuse it.
+    /// </summary>
+    private static async Task<int> PreviewCompactionAsync(
+        NpgsqlConnection connection, long? freeSpaceBytes, long? projectedEstimate, bool conversionWouldRun,
+        TextWriter output, TextWriter error, CancellationToken cancellationToken)
+    {
+        var estimated = projectedEstimate ?? 0;
+        if (projectedEstimate is null)
+        {
+            try
+            {
+                estimated = await PlanDimRecompression.EstimateCompactedBytesAsync(connection, cancellationToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                error.WriteLine($"  Could not estimate the compacted size: {ex.Message}");
+                return 1;
+            }
+        }
+
+        var (freeBytes, freeError) = await ResolveStoreFreeSpaceAsync(connection, freeSpaceBytes, cancellationToken);
+        return WritePlanDimVacuumPreflight(
+            estimated, freeBytes, freeError, freeSpaceBytes is not null, dryRun: true, conversionWouldRun, output, error)
+            ? 0
+            : 1;
+    }
+
+    /// <summary>
+    /// The free-disk check in front of the closing VACUUM FULL, shared by the real run and the dry run so they
+    /// cannot disagree (#6791). PURE over its inputs: the estimate, the resolved free space (a number, or the
+    /// refusal text from <c>ResolveStoreFreeSpaceAsync</c>) and whether that number came from <c>--free-space</c>.
+    /// Writes the provenance line when it did, and the estimate / required / free table on a shortfall (a dry run
+    /// also writes it when the compaction fits, since showing the comparison is its job). Returns true when the
+    /// compaction fits. The real run's wording is unchanged; a dry run says what the real run WOULD do.
+    /// </summary>
+    internal static bool WritePlanDimVacuumPreflight(
+        long estimated, long freeBytes, string? freeError, bool freeFromOption, bool dryRun, bool conversionWouldRun,
+        TextWriter output, TextWriter error)
+    {
+        var refusal = dryRun
+            ? "  DRY RUN — the real run would REFUSE to VACUUM FULL"
+            : "  REFUSING to VACUUM FULL";
+        var remedy = conversionWouldRun
+            ? "  The conversion itself would still run and commit; to compact afterwards, fix the above"
+            : "  Nothing would be converted; to compact, fix the above";
+
+        if (freeError is not null)
+        {
+            error.WriteLine($"{refusal}: {freeError}");
+            if (dryRun)
+            {
+                error.WriteLine($"{remedy} (or pass --free-space <size>), or pass --no-vacuum-full to skip the compaction.");
+            }
+            else
+            {
+                error.WriteLine("  The conversion is committed; re-run with --vacuum-full (after fixing the above, or");
+                error.WriteLine("  with --free-space <size>) to compact.");
+            }
+
+            return false;
+        }
+
+        if (freeFromOption)
+        {
+            output.WriteLine(Inv($"  Free space {GbText(freeBytes)} GB comes from --free-space; it was not measured."));
+        }
+
+        /* 1.2x headroom on a sampled estimate: the rewrite holds old + new copies simultaneously, and the
+           new copy is the estimate — the old one is already on disk and costs nothing extra. */
+        var required = (long)(estimated * 1.2);
+        var fits = freeBytes >= required;
+        if (!fits)
+        {
+            error.WriteLine($"{refusal}: not enough free disk for the compacted copy.");
+        }
+
+        if (!fits || dryRun)
+        {
+            var table = fits ? output : error;
+            table.WriteLine(Inv($"    estimated compacted size : {GbText(estimated)} GB"));
+            table.WriteLine(Inv($"    required (x1.2 headroom) : {GbText(required)} GB"));
+            table.WriteLine(Inv($"    free on the store volume : {GbText(freeBytes)} GB"));
+        }
+
+        if (fits)
+        {
+            if (dryRun)
+            {
+                output.WriteLine("  The compacted copy fits: the real run's VACUUM FULL would be allowed to start.");
+            }
+
+            return true;
+        }
+
+        if (dryRun)
+        {
+            error.WriteLine($"{remedy} (after freeing up disk, or pass --free-space <size>), or pass --no-vacuum-full to skip the compaction.");
+        }
+        else
+        {
+            error.WriteLine("  The conversion is committed and its space is reusable internally; free up disk and");
+            error.WriteLine("  re-run with --vacuum-full to compact.");
+        }
+
+        return false;
+    }
+
+    private static string GbText(long bytes) =>
+        (bytes / (1024.0 * 1024 * 1024)).ToString("N1", CultureInfo.InvariantCulture);
 
     /// <summary>
     /// The closing VACUUM FULL (#2076): rewrites the dimension to its live content so the conversion's
@@ -6244,7 +6736,8 @@ public static partial class DarlingCliCommands
     /// vacuum (the conversion itself is already committed either way).
     /// </summary>
     private static async Task<int> CompactPlanDimAsync(
-        NpgsqlConnection connection, TextWriter output, TextWriter error, CancellationToken cancellationToken)
+        NpgsqlConnection connection, long? freeSpaceBytes, TextWriter output, TextWriter error,
+        CancellationToken cancellationToken)
     {
         long estimated;
         try
@@ -6257,32 +6750,16 @@ public static partial class DarlingCliCommands
             return 1;
         }
 
-        var (freeBytes, freeError) = await ResolveStoreFreeSpaceAsync(connection, cancellationToken);
-        if (freeError is not null)
+        var (freeBytes, freeError) = await ResolveStoreFreeSpaceAsync(connection, freeSpaceBytes, cancellationToken);
+        if (!WritePlanDimVacuumPreflight(
+                estimated, freeBytes, freeError, freeSpaceBytes is not null, dryRun: false, conversionWouldRun: false, output, error))
         {
-            error.WriteLine($"  REFUSING to VACUUM FULL: {freeError}");
-            error.WriteLine("  The conversion is committed; re-run with --vacuum-full on the store host (or after");
-            error.WriteLine("  fixing the above) to compact.");
-            return 1;
-        }
-
-        /* 1.2x headroom on a sampled estimate: the rewrite holds old + new copies simultaneously, and the
-           new copy is the estimate — the old one is already on disk and costs nothing extra. */
-        var required = (long)(estimated * 1.2);
-        if (freeBytes < required)
-        {
-            error.WriteLine("  REFUSING to VACUUM FULL: not enough free disk for the compacted copy.");
-            error.WriteLine($"    estimated compacted size : {estimated / (1024.0 * 1024 * 1024):N1} GB");
-            error.WriteLine($"    required (x1.2 headroom) : {required / (1024.0 * 1024 * 1024):N1} GB");
-            error.WriteLine($"    free on the store volume : {freeBytes / (1024.0 * 1024 * 1024):N1} GB");
-            error.WriteLine("  The conversion is committed and its space is reusable internally; free up disk and");
-            error.WriteLine("  re-run with --vacuum-full to compact.");
             return 1;
         }
 
         var before = (await PlanDimRecompression.SurveyAsync(connection, cancellationToken)).RelationBytes;
         output.WriteLine();
-        output.WriteLine($"  Compacting (VACUUM FULL): rewriting ~{estimated / (1024.0 * 1024 * 1024):N1} GB of live content.");
+        output.WriteLine(Inv($"  Compacting (VACUUM FULL): rewriting ~{estimated / (1024.0 * 1024 * 1024):N1} GB of live content."));
         output.WriteLine("  This takes an EXCLUSIVE lock on the plan dimension — collections DEGRADE until it");
         output.WriteLine("  finishes and recover within minutes after (measured: ~46 minutes of lock on a 174 GB");
         output.WriteLine("  dimension; scale by yours). The service does not need to stop.");
@@ -6301,9 +6778,208 @@ public static partial class DarlingCliCommands
         }
 
         var after = (await PlanDimRecompression.SurveyAsync(connection, cancellationToken)).RelationBytes;
-        output.WriteLine($"  COMPACTED in {stopwatch.Elapsed:hh\\:mm\\:ss} — " +
-            $"{before / (1024.0 * 1024 * 1024):N1} GB -> {after / (1024.0 * 1024 * 1024):N1} GB on disk.");
+        output.WriteLine(Inv($"  COMPACTED in {stopwatch.Elapsed:hh\\:mm\\:ss} — ") +
+            Inv($"{before / (1024.0 * 1024 * 1024):N1} GB -> {after / (1024.0 * 1024 * 1024):N1} GB on disk."));
         return 0;
+    }
+
+    /// <summary>
+    /// The non-secret fields <c>--add-server</c> takes as flags (#6476) so one server needs no JSON file. There is deliberately NO password
+    /// flag: an argument is visible in the process list and in shell history, which is why the JSON path reads stdin. A login that has a
+    /// password is asked for it, hidden.
+    /// </summary>
+    public sealed record AddServerFlags(
+        string? Host = null, string? DisplayName = null, string? Auth = null, string? Username = null,
+        string? Engine = null, string? Database = null)
+    {
+        /// <summary>True when any flag was given, so the verb builds the one entry itself instead of reading JSON from stdin.</summary>
+        public bool Any => Host is not null || DisplayName is not null || Auth is not null || Username is not null
+            || Engine is not null || Database is not null;
+    }
+
+    /// <summary>The <c>--auth</c> word <c>--add-server</c> hands on: "integrated" (the word <c>--grant-script</c> takes) is Windows authentication,
+    /// so it becomes "windows". Any other word goes on as typed, for the shared server rules to judge.</summary>
+    internal static string AddServerAuthWord(string value) =>
+        value.Trim().Equals("integrated", StringComparison.OrdinalIgnoreCase) ? "windows" : value;
+
+    /// <summary>
+    /// Parses the arguments after <c>--add-server</c> (#6476): at most one bare argument, the config path (as before), or
+    /// <c>--config &lt;path&gt;</c>, and the flags <c>--host</c>, <c>--name</c>, <c>--auth</c>, <c>--username</c> (or <c>--login</c>),
+    /// <c>--engine</c> and <c>--database</c>, each as <c>--flag value</c> or <c>--flag=value</c>. A password flag is refused with the reason.
+    /// Anything else starting with '-' is refused rather than taken as a path. Pure so the grammar pins.
+    /// </summary>
+    public static bool TryParseAddServerArgs(string[] rest, out string? configPath, out AddServerFlags flags, out string? errorMessage)
+    {
+        configPath = null;
+        errorMessage = null;
+        string? host = null, displayName = null, auth = null, username = null, engine = null, database = null;
+
+        for (var i = 0; i < rest.Length; i++)
+        {
+            var arg = rest[i];
+            if (!arg.StartsWith('-'))
+            {
+                if (configPath is not null)
+                {
+                    errorMessage = $"Unexpected argument '{arg}': --add-server takes one config path.";
+                    break;
+                }
+
+                configPath = arg;
+                continue;
+            }
+
+            string name = arg;
+            string? value = null;
+            var equals = arg.IndexOf('=');
+            if (equals > 0)
+            {
+                name = arg[..equals];
+                value = arg[(equals + 1)..];
+            }
+
+            if (name.Equals("--password", StringComparison.OrdinalIgnoreCase) || name.Equals("--pwd", StringComparison.OrdinalIgnoreCase))
+            {
+                errorMessage = "There is no password flag: an argument shows in the process list and in shell history. "
+                    + "Leave it out and you are asked for the password with nothing echoed, or pipe a JSON array on stdin.";
+                break;
+            }
+
+            if (name.Equals("--config", StringComparison.OrdinalIgnoreCase) || name.Equals("--host", StringComparison.OrdinalIgnoreCase)
+                || name.Equals("--name", StringComparison.OrdinalIgnoreCase) || name.Equals("--auth", StringComparison.OrdinalIgnoreCase)
+                || name.Equals("--username", StringComparison.OrdinalIgnoreCase) || name.Equals("--login", StringComparison.OrdinalIgnoreCase)
+                || name.Equals("--engine", StringComparison.OrdinalIgnoreCase) || name.Equals("--database", StringComparison.OrdinalIgnoreCase))
+            {
+                if (value is null)
+                {
+                    if (i + 1 >= rest.Length || rest[i + 1].StartsWith('-'))
+                    {
+                        errorMessage = $"{name} needs a value: {name} <value>";
+                        break;
+                    }
+
+                    value = rest[++i];
+                }
+
+                switch (name.ToLowerInvariant())
+                {
+                    case "--config": configPath = value; break;
+                    case "--host": host = value; break;
+                    case "--name": displayName = value; break;
+                    case "--auth": auth = AddServerAuthWord(value); break;
+                    case "--username":
+                    case "--login": username = value; break;
+                    case "--engine": engine = value; break;
+                    default: database = value; break;
+                }
+
+                continue;
+            }
+
+            errorMessage = $"Unknown option '{name}'. --add-server takes --host, --name, --auth, --username (--login), --engine, --database and --config.";
+            break;
+        }
+
+        flags = new AddServerFlags(host, displayName, auth, username, engine, database);
+        return errorMessage is null;
+    }
+
+    /// <summary>
+    /// Builds the one-entry JSON array the add core reads from the flags (#6476), asking <paramref name="readPassword"/> for the password
+    /// of a login that has one (SQL authentication and service principal). Returns the JSON, or a ready-to-print problem. The password goes
+    /// into the returned text and nowhere else.
+    /// </summary>
+    internal static (string? Json, string? Problem) BuildAddServerJson(AddServerFlags flags, Func<string, string?> readPassword)
+    {
+        var entry = new System.Text.Json.Nodes.JsonObject { ["host"] = flags.Host!.Trim() };
+        if (!string.IsNullOrWhiteSpace(flags.DisplayName))
+        {
+            entry["display_name"] = flags.DisplayName.Trim();
+        }
+
+        if (!string.IsNullOrWhiteSpace(flags.Engine))
+        {
+            entry["engine"] = flags.Engine.Trim();
+        }
+
+        if (!string.IsNullOrWhiteSpace(flags.Database))
+        {
+            entry["database"] = flags.Database.Trim();
+        }
+
+        var auth = flags.Auth?.Trim();
+        if (!string.IsNullOrEmpty(auth))
+        {
+            entry["auth"] = auth;
+        }
+
+        if (!string.IsNullOrWhiteSpace(flags.Username))
+        {
+            entry["username"] = flags.Username.Trim();
+        }
+
+        var hasPassword = string.Equals(auth, "sql", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(auth, "serviceprincipal", StringComparison.OrdinalIgnoreCase);
+        if (hasPassword)
+        {
+            if (string.IsNullOrWhiteSpace(flags.Username))
+            {
+                return (null, $"--username is required with --auth {auth}.");
+            }
+
+            var password = readPassword($"Password for {flags.Username.Trim()}: ");
+            if (string.IsNullOrEmpty(password))
+            {
+                return (null, "No password was entered, so no server was added.");
+            }
+
+            entry["password"] = password;
+        }
+
+        return (new System.Text.Json.Nodes.JsonArray(entry).ToJsonString(), null);
+    }
+
+    /// <summary>
+    /// Reads a password without echoing it (#6476). At a keyboard it reads keys with the echo off and ends on Enter; when stdin is a pipe or
+    /// a file there is no screen to hide it from, so it reads one line from <paramref name="input"/>. The prompt goes to
+    /// <paramref name="output"/>, never the typed text.
+    /// </summary>
+    internal static string? ReadPasswordFromConsole(string prompt, TextReader input, TextWriter output)
+    {
+        if (Console.IsInputRedirected)
+        {
+            return input.ReadLine();
+        }
+
+        output.Write(prompt);
+        output.Flush();
+        var typed = new System.Text.StringBuilder();
+        while (true)
+        {
+            var key = Console.ReadKey(intercept: true);
+            if (key.Key == ConsoleKey.Enter)
+            {
+                break;
+            }
+
+            if (key.Key == ConsoleKey.Backspace)
+            {
+                if (typed.Length > 0)
+                {
+                    typed.Length--;
+                }
+
+                continue;
+            }
+
+            if (!char.IsControl(key.KeyChar))
+            {
+                typed.Append(key.KeyChar);
+            }
+        }
+
+        output.WriteLine();
+        return typed.ToString();
     }
 
     /// <summary>
@@ -6322,9 +6998,14 @@ public static partial class DarlingCliCommands
         "  PowerShell:  Get-Content servers.json | .\\PerformanceMonitor.Darling.Service.exe --add-server" + Environment.NewLine +
         "  cmd:         type servers.json | PerformanceMonitor.Darling.Service.exe --add-server" + Environment.NewLine +
         Environment.NewLine +
+        "For ONE server, no JSON is needed; give the non-secret fields as flags and a SQL login is asked for its password with nothing echoed:" + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --add-server --host sql01 --auth windows      (integrated means the same)" + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --add-server --host sql01 --auth sql --username darling_monitor [--name <display name>] [--database <db>] [--engine postgres]" + Environment.NewLine +
+        "There is no password flag. A Windows-authentication server is tested by the running service, as the account it runs under." + Environment.NewLine +
+        Environment.NewLine +
         "servers.json, SQL Server and PostgreSQL:" + Environment.NewLine +
         "  [" + Environment.NewLine +
-        "    {\"host\":\"sql01\",\"auth\":\"integrated\"}," + Environment.NewLine +
+        "    {\"host\":\"sql01\",\"auth\":\"Windows\"}," + Environment.NewLine +
         "    {\"host\":\"aurora.cluster-abc.us-east-1.rds.amazonaws.com\",\"engine\":\"postgres\"," + Environment.NewLine +
         "     \"auth\":\"SQL\",\"username\":\"darling_monitor\",\"password\":\"...\"}" + Environment.NewLine +
         "  ]";
@@ -6433,12 +7114,22 @@ public static partial class DarlingCliCommands
     /// Server 2012, which cannot run the Viewer at all — had no supported path.</para>
     /// </summary>
     public static async Task<int> AddServerAsync(
-        string? configPath, TextReader input, TextWriter output, TextWriter error, CancellationToken cancellationToken)
+        string? configPath, TextReader input, TextWriter output, TextWriter error, CancellationToken cancellationToken,
+        AddServerFlags? flags = null, Func<string, string?>? readPassword = null,
+        DarlingServiceConnectionTest.IServiceConnectionTester? serviceTester = null)
     {
-        var json = input is null ? null : await input.ReadToEndAsync(cancellationToken);
-        if (string.IsNullOrWhiteSpace(json))
+        /* #6476: flags name ONE server instead of a JSON array; stdin is then not read as JSON (a password it carries is read as a line). */
+        var fromFlags = flags is { Any: true };
+        var json = fromFlags || input is null ? null : await input.ReadToEndAsync(cancellationToken);
+        if (!fromFlags && string.IsNullOrWhiteSpace(json))
         {
             output.WriteLine(AddServerUsageText());
+            return 1;
+        }
+
+        if (fromFlags && string.IsNullOrWhiteSpace(flags!.Host))
+        {
+            error.WriteLine("--host is required when a server is given as flags: --add-server --host <host> [--name <name>] [--auth windows|integrated|sql|serviceprincipal|managedidentity] [--username <login>]");
             return 1;
         }
 
@@ -6492,6 +7183,42 @@ public static partial class DarlingCliCommands
         output.WriteLine("PerformanceMonitor Darling — register monitored server(s) (--add-server)");
         output.WriteLine();
 
+        if (fromFlags)
+        {
+            /* The password is asked for here, after the store is known usable, and only for a login that has one. It is read hidden and goes
+               into the request text and nowhere else: never to the output, the error stream or a log. */
+            var (built, problem) = BuildAddServerJson(flags!, readPassword ?? (label => ReadPasswordFromConsole(label, input ?? TextReader.Null, output)));
+            if (problem is not null)
+            {
+                error.WriteLine(problem);
+                return 1;
+            }
+
+            json = built;
+        }
+
+        /* #6476: this process runs as the person at the console. A Windows-authentication server is also tested by the running service,
+           as the account it runs under, when the service can be asked; otherwise the test says whose identity it used. */
+        var identityNotes = new List<(string Server, string[] Notes)>();
+        await using var lazyTester = serviceTester is null && OperatingSystem.IsWindows()
+            ? new DarlingServiceConnectionTest.LazyStoreServiceConnectionTester(connectionString)
+            : null;
+        var tester = serviceTester ?? lazyTester;
+        var windowsHost = OperatingSystem.IsWindows();
+        var consoleIdentity = DarlingServiceConnectionTest.ConsoleIdentity();
+
+        async Task<ConnectionProbeResult> ProbeAsync(MonitoredServer server, CancellationToken token)
+        {
+            var (probe, notes) = await DarlingServiceConnectionTest.TestAsync(
+                server, tester, DarlingMcpServerAdminTools.ProbeAsConsoleUserAsync, consoleIdentity, windowsHost, token);
+            if (notes.Length > 0)
+            {
+                identityNotes.Add((server.DisplayName, notes));
+            }
+
+            return probe;
+        }
+
         string resultJson;
         string? sealNotice = null;
         try
@@ -6504,7 +7231,7 @@ public static partial class DarlingCliCommands
                here may be an env:/file: reference, the way the configuration file's is
                (DarlingMcpServerAdminTools.AddServersFromHostCommandLineAsync). */
             var sealKey = await DarlingCliSealKey.ResolveAsync(config, DarlingConfig.ResolveConfigPath(configPath), dataSource, null, cancellationToken);
-            resultJson = await DarlingMcpServerAdminTools.AddServersFromHostCommandLineAsync(dataSource, json, sealKey.Ring);
+            resultJson = await DarlingMcpServerAdminTools.AddServersFromHostCommandLineAsync(dataSource, json!, sealKey.Ring, ProbeAsync);
             if (sealKey.Ring is DarlingCliSealKey.PublishedKeyRing { SealedCount: > 0 } && sealKey.Notice is not null)
             {
                 sealNotice = sealKey.Notice;
@@ -6520,6 +7247,16 @@ public static partial class DarlingCliCommands
         foreach (var line in lines)
         {
             output.WriteLine(line);
+        }
+
+        foreach (var (server, notes) in identityNotes)
+        {
+            output.WriteLine();
+            output.WriteLine($"  Connection test for {server}, which uses Windows authentication:");
+            foreach (var note in notes)
+            {
+                output.WriteLine(note);
+            }
         }
 
         if (sealNotice is not null)
@@ -7599,7 +8336,7 @@ ORDER BY rt.server_id NULLS FIRST, server_label, rt.server_id";
             return CollectorScope.Fleet;
         }
 
-        List<DarlingServerResolver.RegisteredServer> servers;
+        List<RegisteredServer> servers;
         try
         {
             servers = await DarlingServerResolver.LoadEnabledAsync(dataSource, CancellationToken.None);
@@ -7985,14 +8722,28 @@ ORDER BY rt.server_id NULLS FIRST, server_label, rt.server_id";
                 ? $"<minutes> is how often the collector runs: a whole number from 0 to {CollectorScheduleDefaults.MaxFrequencyMinutes} (one year), where 0 means once when the server loads."
                 : $"<days> is how many days the collector's data is kept: a whole number from 1 to {CollectorScheduleDefaults.MaxRetentionDays} (ten years).") + Environment.NewLine +
             "default clears the row's value, so the next level applies again (a server's row falls back to the fleet-wide value, the fleet-wide row to the code default)." + Environment.NewLine +
-            "Without --server the change is FLEET-WIDE (the schedule row with no server); --server <server> writes that server's own row" + Environment.NewLine +
-            "instead (its display name or storage name, as the Viewer and the MCP tools show it)." + Environment.NewLine +
+            (frequency
+                ? "Without --server the change is FLEET-WIDE (the schedule row with no server); --server <server> writes that server's own row" + Environment.NewLine +
+                  "instead (its display name or storage name, as the Viewer and the MCP tools show it)." + Environment.NewLine
+                : "Retention is FLEET-WIDE: the purge reads one value per collector for every server. --server <server> is accepted only with default," + Environment.NewLine +
+                  "to remove a retention an older build stored for that server (its display name or storage name); a number with --server is refused." + Environment.NewLine) +
             "Only this one value is written: the other columns on the row are kept, and a row the verb creates stores no enabled flag of its" + Environment.NewLine +
             "own, so it follows the fleet-wide row and the code default." + Environment.NewLine +
             Environment.NewLine +
             "Collectors:" + Environment.NewLine +
             KnownCollectorsText(_ => true);
     }
+
+    /// <summary>The refusal for a retention value set for ONE server. The purge reads only the fleet-wide retention (a per-server value
+    /// cannot apply to a table every server shares), so a per-server value would be stored and never used. Clearing one stays allowed,
+    /// so a value an older build stored can still be removed.</summary>
+    internal const string PerServerRetentionRefusalText =
+        "Collector retention is fleet-wide: one value per collector applies to every server, so a retention set for one server would change nothing. "
+        + "Set it without a server to change the fleet-wide retention (frequency and enabled can still be set per server). Nothing was changed.";
+
+    /// <summary>The refusal when retention is set (not cleared) with a server named, else null. Shared by the CLI verb and the MCP tool. Pure.</summary>
+    internal static string? PerServerRetentionRefusal(bool isRetention, bool clears, string? serverName) =>
+        isRetention && !clears && !string.IsNullOrWhiteSpace(serverName) ? PerServerRetentionRefusalText : null;
 
     /// <summary>
     /// Parses <c>--set-collector-frequency</c> / <c>--set-collector-retention</c>'s trailing arguments STRICTLY, as
@@ -8119,6 +8870,14 @@ ORDER BY rt.server_id NULLS FIRST, server_label, rt.server_id";
         {
             error.WriteLine(argError);
             output.WriteLine(CollectorColumnUsageText(column));
+            return CollectorToggleExitCode.UsageOrConfig;
+        }
+
+        var valueWord = valueText!.Trim();
+        var clearsValue = valueWord.Equals("default", StringComparison.OrdinalIgnoreCase) || valueWord.Equals("none", StringComparison.OrdinalIgnoreCase);
+        if (PerServerRetentionRefusal(column == CollectorScheduleColumn.RetentionDays, clearsValue, serverName) is { } perServerRefusal)
+        {
+            error.WriteLine(perServerRefusal);
             return CollectorToggleExitCode.UsageOrConfig;
         }
 
@@ -8588,7 +9347,8 @@ AND   cst.collector_name = ANY($2)", connection) { CommandTimeout = ServiceComma
     /// error, on a preflight refusal, or when any rollup finished short of raw.</para>
     /// </summary>
     public static async Task<int> BackfillRollupsAsync(
-        string? configPath, bool dryRun, TextWriter output, TextWriter error, CancellationToken cancellationToken)
+        string? configPath, bool dryRun, TextWriter output, TextWriter error, CancellationToken cancellationToken,
+        long? freeSpaceBytes = null)
     {
         DarlingConfig config;
         try
@@ -8764,7 +9524,7 @@ AND   cst.collector_name = ANY($2)", connection) { CommandTimeout = ServiceComma
                 "would have fit is recoverable, filling the volume is not.");
         }
 
-        var (freeBytes, freeError) = await ResolveStoreFreeSpaceAsync(connection, cancellationToken);
+        var (freeBytes, freeError) = await ResolveStoreFreeSpaceAsync(connection, freeSpaceBytes, cancellationToken);
         if (freeError is not null)
         {
             error.WriteLine();
@@ -8778,6 +9538,10 @@ AND   cst.collector_name = ANY($2)", connection) { CommandTimeout = ServiceComma
         output.WriteLine(string.Create(
             CultureInfo.InvariantCulture,
             $"Free space on the store volume: {RollupBackfillPlan.FormatBytes(freeBytes)}; required: {RollupBackfillPlan.FormatBytes(RollupBackfill.RequiredBytes(totalEstimate))}."));
+        if (freeSpaceBytes is not null)
+        {
+            output.WriteLine("The free space above came from --free-space; it was not measured.");
+        }
 
         if (!RollupBackfill.HasRoom(totalEstimate, freeBytes))
         {
@@ -8975,11 +9739,81 @@ AND   cst.collector_name = ANY($2)", connection) { CommandTimeout = ServiceComma
     /// would measure the WRONG volume: the login cannot read the setting, or the store is on another host so
     /// the path does not exist here.
     /// </summary>
-    private static async Task<(long FreeBytes, string? Error)> ResolveStoreFreeSpaceAsync(
-        NpgsqlConnection connection, CancellationToken cancellationToken)
+    private static Task<(long FreeBytes, string? Error)> ResolveStoreFreeSpaceAsync(
+        NpgsqlConnection connection, long? givenFreeBytes, CancellationToken cancellationToken)
+        => ResolveFreeSpaceAsync(
+            givenFreeBytes,
+            token => RollupBackfill.DataDirectoryAsync(connection, token),
+            readAvailableFreeBytes: null,
+            cancellationToken);
+
+    /// <summary>
+    /// The step that picks the free-space number (#6791). With <paramref name="givenFreeBytes"/> (the operator's
+    /// <c>--free-space</c>) the store is NOT asked for its data directory and the path is NOT looked for on this
+    /// machine, because the store is on another host and neither answer would be about its volume. Without it the
+    /// store is asked and the directory is measured here. The caller runs the same comparison on either number.
+    /// </summary>
+    internal static async Task<(long FreeBytes, string? Error)> ResolveFreeSpaceAsync(
+        long? givenFreeBytes,
+        Func<CancellationToken, Task<string?>> readDataDirectory,
+        Func<string, long>? readAvailableFreeBytes,
+        CancellationToken cancellationToken)
     {
-        var dataDirectory = await RollupBackfill.DataDirectoryAsync(connection, cancellationToken);
-        return ResolveDirectoryFreeSpace(dataDirectory);
+        if (givenFreeBytes is { } given)
+        {
+            return (given, null);
+        }
+
+        var dataDirectory = await readDataDirectory(cancellationToken);
+        return ResolveDirectoryFreeSpace(dataDirectory, readAvailableFreeBytes);
+    }
+
+    /// <summary>The sentence the two "cannot measure it here" refusals end on: the way out (#6791).</summary>
+    private const string FreeSpaceWayOut =
+        " Check the free space of the store's data volume on the store host (for example df -h <data_directory> there)" +
+        " and pass it with --free-space <size>, for example --free-space 41G.";
+
+    /// <summary>
+    /// The mount a path lives on: of <paramref name="mountRoots"/>, the one whose root is the longest path prefix
+    /// of <paramref name="fullPath"/> (#6791). A root matches only on a separator boundary, so /var/lib/pg does not
+    /// claim /var/lib/pgdata. Null when no root contains the path. PURE, so a test can give it a container's mount
+    /// table. Paths use '/' (the Linux and macOS case; Windows reads its volume another way).
+    /// </summary>
+    internal static string? ChooseMountRoot(IEnumerable<string> mountRoots, string fullPath)
+    {
+        string? best = null;
+        foreach (var root in mountRoots)
+        {
+            if (string.IsNullOrEmpty(root))
+            {
+                continue;
+            }
+
+            var bare = root.Length > 1 ? root.TrimEnd('/') : root;
+            var contains = bare == "/"
+                || string.Equals(fullPath, bare, StringComparison.Ordinal)
+                || fullPath.StartsWith(bare + "/", StringComparison.Ordinal);
+            if (contains && (best is null || bare.Length > best.TrimEnd('/').Length))
+            {
+                best = root;
+            }
+        }
+
+        return best;
+    }
+
+    /// <summary>
+    /// Free bytes on the volume holding <paramref name="directory"/> outside Windows: the mount with the longest
+    /// matching root, not the path root, which is always / on Linux and is the wrong volume whenever the data
+    /// directory has a mount of its own (#6791).
+    /// </summary>
+    private static long ReadMountAvailableFreeBytes(string directory)
+    {
+        var fullPath = Path.GetFullPath(directory);
+        var drives = DriveInfo.GetDrives();
+        var root = ChooseMountRoot(drives.Select(d => d.Name), fullPath);
+        var drive = root is null ? null : Array.Find(drives, d => d.Name == root);
+        return (drive ?? new DriveInfo(Path.GetPathRoot(fullPath)!)).AvailableFreeSpace;
     }
 
     /// <summary>
@@ -8995,12 +9829,12 @@ AND   cst.collector_name = ANY($2)", connection) { CommandTimeout = ServiceComma
     {
         if (string.IsNullOrWhiteSpace(dataDirectory))
         {
-            return (0, "could not read the store's data_directory, so the free space on the volume that will grow is unknown. The login needs superuser or pg_read_all_settings.");
+            return (0, "could not read the store's data_directory, so the free space on the volume that will grow is unknown. The login needs superuser or pg_read_all_settings." + FreeSpaceWayOut);
         }
 
         if (!Directory.Exists(dataDirectory))
         {
-            return (0, $"the store's data directory ({dataDirectory}) does not exist on this machine, so the store is on another host and this machine's free space is not the number that matters. Run --backfill-rollups ON the store host.");
+            return (0, $"the store's data directory ({dataDirectory}) does not exist on this machine, so the store is on another host and this machine's free space is not the number that matters. Run this verb ON the store host." + FreeSpaceWayOut);
         }
 
         try
@@ -9013,7 +9847,7 @@ AND   cst.collector_name = ANY($2)", connection) { CommandTimeout = ServiceComma
                 }
                 else
                 {
-                    readAvailableFreeBytes = directory => new DriveInfo(Path.GetPathRoot(Path.GetFullPath(directory))!).AvailableFreeSpace;
+                    readAvailableFreeBytes = ReadMountAvailableFreeBytes;
                 }
             }
 

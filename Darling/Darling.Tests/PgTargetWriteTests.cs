@@ -419,8 +419,8 @@ public sealed class PgTargetWriteTests
         anomaly.Metadata["baseline_ratio"] = 9.2 / 1.05;   /* peak over the robust centre (the median), as the detector stamps it */
 
         var leading = PgTargetAdvice.Compose(PgTargetFactKeys.AnomalyWalVolume, Lookup(anomaly, Pressure(0.1, 48)))!;
-        Assert.Equal("WAL volume spiked to 9.2 MB/s — 7σ above its baseline for this time of week", leading.Headline);
-        Assert.Contains("7σ above its 1.1 MB/s baseline median", leading.Investigation, StringComparison.Ordinal);
+        Assert.Equal("WAL volume spiked to 9.2 MB/s — 7 times its usual variation above its normal level for this time of week", leading.Headline);
+        Assert.Contains("7 times its usual variation above its 1.1 MB/s normal level", leading.Investigation, StringComparison.Ordinal);
         Assert.Contains("8.76× the 1.1 MB/s this server routinely writes", leading.Investigation, StringComparison.Ordinal);
         Assert.Contains("leading edge", leading.Investigation, StringComparison.Ordinal);
         Assert.Contains("pg_write_stats", leading.Investigation, StringComparison.Ordinal);
@@ -731,7 +731,7 @@ public sealed class PgTargetWriteTests
                 var advice = anomaly.GetProperty("advice");
                 var text = advice.GetProperty("headline").GetString() + advice.GetProperty("investigation").GetString();
                 Assert.Contains("WAL volume spiked to 12 MB/s", text, StringComparison.Ordinal);
-                Assert.Contains("σ above its", text, StringComparison.Ordinal);
+                Assert.Contains("times its usual variation above its", text, StringComparison.Ordinal);
                 Assert.Contains("Checkpoint pressure co-fired this window", text, StringComparison.Ordinal);
                 Assert.Contains("this server routinely writes", text, StringComparison.Ordinal);
                 Assert.All(anomaly.GetProperty("next_tools").EnumerateArray(), t => Assert.StartsWith("get_pg_", t.GetProperty("tool").GetString()!, StringComparison.Ordinal));

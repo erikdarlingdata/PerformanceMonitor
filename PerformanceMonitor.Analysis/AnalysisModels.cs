@@ -10,7 +10,9 @@ namespace PerformanceMonitor.Analysis;
 ///
 /// <para><b>The invariant.</b> Entry <c>[0]</c> IS the fact's own subject — <see cref="Fact.ObjectName"/> and
 /// <see cref="Fact.Value"/> — so a card has ONE truth about what it is about and the advice never has to
-/// decide between two spellings of the worst object. The order is the collector's rank (its read's ORDER BY),
+/// decide between two spellings of the worst object. <b>One exception, by name (#6640):</b> <c>QUERY_SPILLS</c>
+/// scores on the window's TOTAL spilled pages, so its <see cref="Fact.Value"/> is that total and entry <c>[0]</c>'s
+/// value is the worst query's own pages (never more than the total). Its subject is still entry <c>[0]</c> by name. The order is the collector's rank (its read's ORDER BY),
 /// never re-sorted here; <c>FactRankedTests</c> pins all of it over the collectors' planted fixtures.</para>
 ///
 /// <para><b>Why <see cref="Figures"/> is a dictionary and not fields.</b> Each family ranks on its own
@@ -42,6 +44,18 @@ public static partial class FactRanked
 {
     /// <summary>How many objects a fact may rank, entry [0] (the fact's own subject) included.</summary>
     public const int MaxObjects = 3;
+
+    /// <summary>
+    /// #6640: the name a query fact ranks a query by, <c>database/query_hash</c> or <c>database/query_hash/query_plan_hash</c>.
+    /// Both SKUs' collectors build it here, so a NULL column reads the same on both: a legible placeholder in place of an
+    /// empty part, because the string is printed into card prose and an empty part would show as <c>Sales/</c> or <c>/</c>.
+    /// The placeholders are display only: the aggregate's own identity (the COALESCE to an empty string in its SQL) is untouched.
+    /// </summary>
+    public static string QueryName(string? database, string? queryHash, string? queryPlanHash = null)
+    {
+        var name = (string.IsNullOrEmpty(database) ? "(no database)" : database) + "/" + (string.IsNullOrEmpty(queryHash) ? "(no hash)" : queryHash);
+        return queryPlanHash is null ? name : name + "/" + (queryPlanHash.Length == 0 ? "(no plan hash)" : queryPlanHash);
+    }
 }
 
 /// <summary>
@@ -70,7 +84,8 @@ public class Fact
     /// (<see cref="ObjectName"/> / <see cref="Value"/>) — see <see cref="RankedObject"/> for the invariant and
     /// the cap. Empty for the overwhelming majority of facts: a fact about a server, a setting or a single
     /// object ranks nothing, and an empty list is what byte-identity rests on (the payloads emit
-    /// <c>ranked</c> only at two or more entries, and no SQL Server collector sets this at all).
+    /// <c>ranked</c> only at two or more entries, and the only SQL Server collectors that set it are the two query
+    /// facts, <c>QUERY_SPILLS</c> and <c>PARAMETER_SENSITIVITY</c>, #6640).
     ///
     /// <para><b>Ephemeral by construction.</b> Only <see cref="AnalysisFinding"/> is persisted;
     /// <c>Fact</c> lives for one pass and <c>get_analysis_facts</c> re-runs the collect+score to answer.

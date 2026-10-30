@@ -75,6 +75,7 @@ public sealed class DarlingAnomalyBaselineTests
         MetricNames.SessionCount,
         MetricNames.QueryDuration,
         MetricNames.IoLatency,
+        MetricNames.IoWriteLatency,
         MetricNames.Blocking,
         MetricNames.Deadlock,
         MetricNames.Memory,
@@ -212,7 +213,7 @@ public sealed class DarlingAnomalyBaselineTests
         Assert.NotNull(typeof(PgBaselineProvider).GetMethod("ClearCache"));
         Assert.NotNull(typeof(PgBaselineProvider).GetProperty("CacheTtl"));
 
-        /* All eleven of Lite's metrics are served; an unknown metric is null (Lite's contract). */
+        /* All twelve of Lite's metrics are served; an unknown metric is null (Lite's contract). */
         foreach (var metric in AllMetricNames)
         {
             Assert.NotNull(PgBaselineProvider.GetBaselineQuery(metric));
@@ -680,9 +681,9 @@ public sealed class DarlingAnomalyBaselineTests
         Assert.Matches(@"AnomalyGate\.EvaluateTiles\(\s*readTiles,\s*\w*[Mm]ap,\s*ioThreshold,\s*(modifiedZThreshold|ModifiedZThresholdFor\(MetricNames\.IoLatency,\s*ioThreshold\)),\s*ReadLatencyFloorMs,\s*IoLatencyFallbackMs,\s*SigmaDisplayCap,\s*window\)", pg);
         Assert.Matches(@"AnomalyGate\.EvaluateTiles\(\s*readTiles,\s*\w*[Mm]ap,\s*ioThreshold,\s*(modifiedZThreshold|ModifiedZThresholdFor\(MetricNames\.IoLatency,\s*ioThreshold\)),\s*ReadLatencyFloorMs,\s*IoLatencyFallbackMs,\s*SigmaDisplayCap,\s*window\)", liteCode);
 
-        // I/O write: same tolerances.
-        Assert.Matches(@"AnomalyGate\.EvaluateTiles\(\s*writeTiles,\s*\w*[Mm]ap,\s*ioThreshold,\s*(modifiedZThreshold|ModifiedZThresholdFor\(MetricNames\.IoLatency,\s*ioThreshold\)),\s*WriteLatencyFloorMs,\s*IoLatencyFallbackMs,\s*SigmaDisplayCap,\s*window\)", pg);
-        Assert.Matches(@"AnomalyGate\.EvaluateTiles\(\s*writeTiles,\s*\w*[Mm]ap,\s*ioThreshold,\s*(modifiedZThreshold|ModifiedZThresholdFor\(MetricNames\.IoLatency,\s*ioThreshold\)),\s*WriteLatencyFloorMs,\s*IoLatencyFallbackMs,\s*SigmaDisplayCap,\s*window\)", liteCode);
+        // I/O write: same tolerances, but keyed on its own IoWriteLatency metric (#6696).
+        Assert.Matches(@"AnomalyGate\.EvaluateTiles\(\s*writeTiles,\s*\w*[Mm]ap,\s*writeThreshold,\s*(writeModifiedZThreshold|ModifiedZThresholdFor\(MetricNames\.IoWriteLatency,\s*writeThreshold\)),\s*WriteLatencyFloorMs,\s*IoLatencyFallbackMs,\s*SigmaDisplayCap,\s*window\)", pg);
+        Assert.Matches(@"AnomalyGate\.EvaluateTiles\(\s*writeTiles,\s*\w*[Mm]ap,\s*writeThreshold,\s*(writeModifiedZThreshold|ModifiedZThresholdFor\(MetricNames\.IoWriteLatency,\s*writeThreshold\)),\s*WriteLatencyFloorMs,\s*IoLatencyFallbackMs,\s*SigmaDisplayCap,\s*window\)", liteCode);
 
         // Batch requests: byte-identical.
         Assert.Matches(@"AnomalyGate\.EvaluateTiles\(\s*tiles,\s*map,\s*batchThreshold,\s*ModifiedZThresholdFor\(MetricNames\.BatchRequests,\s*batchThreshold\),\s*BatchRequestFloor,\s*BatchRequestFallback,\s*SigmaDisplayCap,\s*window\)", pg);
@@ -1390,6 +1391,7 @@ public sealed class DarlingAnomalyBaselineTests
 
         Assert.True(PgBaselineProvider.IsDailyCacheMetric(MetricNames.Cpu));
         Assert.True(PgBaselineProvider.IsDailyCacheMetric(MetricNames.IoLatency));
+        Assert.True(PgBaselineProvider.IsDailyCacheMetric(MetricNames.IoWriteLatency));
         Assert.True(PgBaselineProvider.IsDailyCacheMetric(MetricNames.Blocking));
         Assert.True(PgBaselineProvider.IsDailyCacheMetric(MetricNames.Deadlock));
         Assert.False(PgBaselineProvider.IsDailyCacheMetric(MetricNames.BatchRequests));
@@ -1678,6 +1680,127 @@ public sealed class DarlingAnomalyBaselineTests
             await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
             {
                 using (var command = new NpgsqlCommand($"DELETE FROM wait_stats WHERE server_id = {waitServerId};", cleanup))
+                {
+                    await command.ExecuteNonQueryAsync(cleanupCt);
+                }
+                await DropBaselineFallbackViewsAsync(cleanup, cleanupCt);
+            });
+        }
+    }
+
+    /// <summary>
+    /// #6696: the write-latency gate scores against the WRITE-latency baseline. History: four Mondays at 10:00, thirty
+    /// file rows each, two minutes apart. Reads sit near 1 ms. Writes run 4 to 18 ms (median 11, the way a busy data
+    /// file does) with one 300 ms row per hour. Window A looks like that history: the write peak is 300 ms, far over
+    /// the write median, but the window MEAN (20.6 ms) is 1.6 robust sigma, so the pair gate stays quiet. Scored
+    /// against the READ series (median 1 ms, floored sigma 2.5) the same window read 7.8 sigma on the mean and fired,
+    /// which is the defect. Window B runs every write at 200 ms and must fire, with no read fact beside it.
+    /// </summary>
+    [Fact]
+    public async Task EndToEnd_WriteLatencyGate_ScoresAgainstWriteHistory_NotTheReadSeries_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live write-latency gate test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        const int ioServerId = TestServerId + 6; // own id — this test cleans its own rows
+        const string ioServerName = "io-write-gate-e2e";
+        const string insertIo =
+            "INSERT INTO file_io_stats (collection_id, collection_time, server_id, server_name, delta_reads, delta_writes, delta_stall_read_ms, delta_stall_write_ms) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)";
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        await using (var cleanup = new NpgsqlCommand(
+            $"DELETE FROM file_io_stats WHERE server_id = {ioServerId}; " +
+            $"DELETE FROM wait_stats WHERE server_id = {ioServerId};", connection))
+        {
+            await cleanup.ExecuteNonQueryAsync(ct);
+        }
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var bodySucceeded = false;
+        try
+        {
+            var day = DateTime.UtcNow.Date.AddDays(-8);
+            while (day.DayOfWeek != DayOfWeek.Monday) day = day.AddDays(-1);
+            var lastHistoryMonday = DateTime.SpecifyKind(day.AddHours(10), DateTimeKind.Unspecified);
+            var analysisTime = lastHistoryMonday.AddDays(7);
+
+            // Write latency of row i in ms: 4..18 with one 300 ms row. Read stall: 0.8..1.2 ms over 10 reads.
+            static long WriteMs(int i) => i == 14 ? 300L : 4L + (i * 7) % 15;
+            static long ReadStall(int i) => 8L + i % 5;
+
+            var id = 700L;
+            foreach (var weeksBack in new[] { 3, 2, 1, 0 })
+            {
+                var monday = lastHistoryMonday.AddDays(-7 * weeksBack);
+                for (var i = 0; i < 30; i++)
+                    await InsertAsync(connection, insertIo, id++, monday.AddMinutes(2 * i + 1), ioServerId, ioServerName,
+                        10L, 10L, ReadStall(i), WriteMs(i) * 10);
+            }
+
+            await InsertAsync(connection,
+                "INSERT INTO wait_stats (collection_id, collection_time, server_id, server_name, wait_type, delta_waiting_tasks, delta_wait_time_ms) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                600L, lastHistoryMonday, ioServerId, ioServerName, TestWaitType, 1L, 100L);
+
+            await TimescaleSupport.EnsureBaselineFallbackViewsAsync(connection, null, ct);
+
+            var provider = new PgBaselineProvider(postgres);
+            var writeBaseline = await provider.GetBaselineAsync(ioServerId, MetricNames.IoWriteLatency, analysisTime);
+            var readBaseline = await provider.GetBaselineAsync(ioServerId, MetricNames.IoLatency, analysisTime);
+            Assert.Equal(120L, writeBaseline.SampleCount);
+            Assert.InRange(writeBaseline.Median, 8.0, 14.0);   // write series: median 11 ms
+            Assert.InRange(readBaseline.Median, 0.5, 1.5);     // read series: about 1 ms
+
+            var detector = new PgAnomalyDetector(postgres, provider);
+            var context = new AnalysisContext
+            {
+                ServerId = ioServerId,
+                ServerName = ioServerName,
+                TimeRangeStart = analysisTime,
+                TimeRangeEnd = analysisTime.AddMinutes(60),
+                ServerUtcOffset = TimeSpan.Zero
+            };
+
+            /* Window A: the same shape as the history. */
+            for (var i = 0; i < 30; i++)
+                await InsertAsync(connection, insertIo, id++, analysisTime.AddMinutes(2 * i + 1), ioServerId, ioServerName,
+                    10L, 10L, ReadStall(i), WriteMs(i) * 10);
+
+            var quiet = await detector.DetectAnomaliesAsync(context);
+            Assert.DoesNotContain(quiet, f => f.Key == "ANOMALY_WRITE_LATENCY");
+            Assert.DoesNotContain(quiet, f => f.Key == "ANOMALY_READ_LATENCY");
+
+            /* Window B: every write ran at 200 ms, the one hot row at 300. */
+            await using (var clearWindow = new NpgsqlCommand(
+                $"DELETE FROM file_io_stats WHERE server_id = {ioServerId} AND collection_time > $1;", connection))
+            {
+                clearWindow.Parameters.AddWithValue(analysisTime);
+                await clearWindow.ExecuteNonQueryAsync(ct);
+            }
+            for (var i = 0; i < 30; i++)
+                await InsertAsync(connection, insertIo, id++, analysisTime.AddMinutes(2 * i + 1), ioServerId, ioServerName,
+                    10L, 10L, ReadStall(i), (i == 14 ? 300L : 200L) * 10);
+
+            var sustained = await detector.DetectAnomaliesAsync(context);
+            var fact = Assert.Single(sustained, f => f.Key == "ANOMALY_WRITE_LATENCY");
+            Assert.Equal(300.0, fact.Value, 0.001);
+            Assert.Equal(300.0, fact.Metadata["current_latency_ms"], 0.001);
+            Assert.InRange(fact.Metadata["baseline_median"], 8.0, 14.0);   // judged against the write history
+            Assert.DoesNotContain(sustained, f => f.Key == "ANOMALY_READ_LATENCY");
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                using (var command = new NpgsqlCommand(
+                    $"DELETE FROM file_io_stats WHERE server_id = {ioServerId}; " +
+                    $"DELETE FROM wait_stats WHERE server_id = {ioServerId};", cleanup))
                 {
                     await command.ExecuteNonQueryAsync(cleanupCt);
                 }

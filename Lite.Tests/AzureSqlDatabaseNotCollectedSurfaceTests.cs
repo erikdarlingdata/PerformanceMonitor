@@ -63,6 +63,9 @@ public sealed class AzureSqlDatabaseNotCollectedSurfaceTests
     private const string JobsReason =
         "Fleet-wide Job History tab; an Azure SQL Database server has no SQL Server Agent, so it has no rows and no filter entry.";
 
+    private const string DarlingOnlyAgentAlertsReason =
+        "Darling-only collector (IsDarlingOnly): Lite never reads the SQL Agent alert definitions on any engine, so it has no surface that could say so.";
+
     private const string AvailabilityGroupsReason =
         "Fleet-wide Availability Groups tab, hidden until rows exist; its empty state already says these collectors do not run on Azure SQL Database.";
 
@@ -82,6 +85,7 @@ public sealed class AzureSqlDatabaseNotCollectedSurfaceTests
         ["default_trace_events"] = Entry.Shown(new Surface(SystemEventsFile, ServerTabXaml, "DefaultTraceNoDataMessage", Via: "DefaultTraceGapNote")),
         ["job_history"] = Entry.Because(JobsReason),
         ["agent_status"] = Entry.Because(JobsReason),
+        ["agent_alerts"] = Entry.Because(DarlingOnlyAgentAlertsReason),
         ["ag_replica_states"] = Entry.Because(AvailabilityGroupsReason),
         ["ag_database_replica_states"] = Entry.Because(AvailabilityGroupsReason),
     };
@@ -211,15 +215,15 @@ public sealed class AzureSqlDatabaseNotCollectedSurfaceTests
     [Fact]
     public void TheGapHelper_GivesTheNotCollectedSentenceOnAzureSqlDatabase_AndNothingOnPremises()
     {
-        var note = ServerTab.EngineGapNote(ServerName, isAzureSqlDatabase: true, "running_jobs");
+        var note = ServerTab.EngineGapNote(ServerName, isAzureSqlDatabase: true, "running_jobs", awsRdsKind: AwsRdsKind.None);
 
         Assert.NotNull(note);
-        Assert.Equal(CollectorEngineCapability.NotCollectedMessage(ServerName, AzureSqlDatabase, engineKind: null, "running_jobs"), note);
+        Assert.Equal(CollectorEngineCapability.NotCollectedMessage(ServerName, AzureSqlDatabase, engineKind: null, "running_jobs", awsRdsKind: AwsRdsKind.None), note);
         Assert.Contains(ServerName, note, StringComparison.Ordinal);
         Assert.Contains("Azure SQL Database", note, StringComparison.Ordinal);
         Assert.Contains("running_jobs", note, StringComparison.Ordinal);
 
-        Assert.Null(ServerTab.EngineGapNote(ServerName, isAzureSqlDatabase: false, "running_jobs"));
+        Assert.Null(ServerTab.EngineGapNote(ServerName, isAzureSqlDatabase: false, "running_jobs", awsRdsKind: AwsRdsKind.None));
     }
 
     /// <summary>Every collector on the map answers the same way, so a surface cannot say "not collected" on a server that does collect it.</summary>
@@ -228,8 +232,8 @@ public sealed class AzureSqlDatabaseNotCollectedSurfaceTests
     {
         foreach (var collector in Map.Keys)
         {
-            Assert.NotNull(ServerTab.EngineGapNote(ServerName, isAzureSqlDatabase: true, collector));
-            Assert.Null(ServerTab.EngineGapNote(ServerName, isAzureSqlDatabase: false, collector));
+            Assert.NotNull(ServerTab.EngineGapNote(ServerName, isAzureSqlDatabase: true, collector, awsRdsKind: AwsRdsKind.None));
+            Assert.Null(ServerTab.EngineGapNote(ServerName, isAzureSqlDatabase: false, collector, awsRdsKind: AwsRdsKind.None));
         }
     }
 
@@ -243,13 +247,13 @@ public sealed class AzureSqlDatabaseNotCollectedSurfaceTests
         foreach (var edition in new[] { 0, 1, 2, 3, 4, 5, 6, 8, 9, 11 })
         {
             var notCollected = !CollectorEngineCapability.IsCollectedOnEngineEdition("database_states", edition);
-            var note = ServerTab.EngineGapNote(ServerName, edition == AzureSqlDatabase, "database_states");
+            var note = ServerTab.EngineGapNote(ServerName, edition == AzureSqlDatabase, "database_states", awsRdsKind: AwsRdsKind.None);
 
             Assert.True(notCollected == (note is not null),
                 $"database_states on edition {edition}: AppliesTo says {(notCollected ? "not collected" : "collected")}, the note disagrees");
         }
 
-        var azure = ServerTab.EngineGapNote(ServerName, isAzureSqlDatabase: true, "database_states");
+        var azure = ServerTab.EngineGapNote(ServerName, isAzureSqlDatabase: true, "database_states", awsRdsKind: AwsRdsKind.None);
         Assert.NotNull(azure);
         Assert.Contains("Azure SQL Database", azure, StringComparison.Ordinal);
         Assert.Contains("database_states", azure, StringComparison.Ordinal);
@@ -275,13 +279,13 @@ public sealed class AzureSqlDatabaseNotCollectedSurfaceTests
     [Fact]
     public void TheMsdbWarning_IsHiddenOnAzureSqlDatabaseAndAwsRds_AndShownOnPremisesWithoutMsdbAccess()
     {
-        Assert.Equal(Visibility.Collapsed, ServerTab.RunningJobsMsdbWarningVisibility(hasMsdbAccess: false, isAzureSqlDatabase: true, isAwsRds: false));
-        Assert.Equal(Visibility.Collapsed, ServerTab.RunningJobsMsdbWarningVisibility(hasMsdbAccess: false, isAzureSqlDatabase: false, isAwsRds: true));
-        Assert.Equal(Visibility.Visible, ServerTab.RunningJobsMsdbWarningVisibility(hasMsdbAccess: false, isAzureSqlDatabase: false, isAwsRds: false));
+        Assert.Equal(Visibility.Collapsed, ServerTab.RunningJobsMsdbWarningVisibility(hasMsdbAccess: false, isAzureSqlDatabase: true, awsRdsKind: AwsRdsKind.None));
+        Assert.Equal(Visibility.Collapsed, ServerTab.RunningJobsMsdbWarningVisibility(hasMsdbAccess: false, isAzureSqlDatabase: false, awsRdsKind: AwsRdsKind.Rds));
+        Assert.Equal(Visibility.Visible, ServerTab.RunningJobsMsdbWarningVisibility(hasMsdbAccess: false, isAzureSqlDatabase: false, awsRdsKind: AwsRdsKind.None));
 
-        Assert.Equal(Visibility.Collapsed, ServerTab.RunningJobsMsdbWarningVisibility(hasMsdbAccess: true, isAzureSqlDatabase: true, isAwsRds: false));
-        Assert.Equal(Visibility.Collapsed, ServerTab.RunningJobsMsdbWarningVisibility(hasMsdbAccess: true, isAzureSqlDatabase: false, isAwsRds: true));
-        Assert.Equal(Visibility.Collapsed, ServerTab.RunningJobsMsdbWarningVisibility(hasMsdbAccess: true, isAzureSqlDatabase: false, isAwsRds: false));
+        Assert.Equal(Visibility.Collapsed, ServerTab.RunningJobsMsdbWarningVisibility(hasMsdbAccess: true, isAzureSqlDatabase: true, awsRdsKind: AwsRdsKind.None));
+        Assert.Equal(Visibility.Collapsed, ServerTab.RunningJobsMsdbWarningVisibility(hasMsdbAccess: true, isAzureSqlDatabase: false, awsRdsKind: AwsRdsKind.Rds));
+        Assert.Equal(Visibility.Collapsed, ServerTab.RunningJobsMsdbWarningVisibility(hasMsdbAccess: true, isAzureSqlDatabase: false, awsRdsKind: AwsRdsKind.None));
     }
 
     [Fact]
@@ -295,7 +299,7 @@ public sealed class AzureSqlDatabaseNotCollectedSurfaceTests
     [Fact]
     public void TheMsdbWarning_ComesFromTheHelper_WhenTheTabOpens_AndAgainOnceTheEditionIsKnown()
     {
-        const string call = "RunningJobsMsdbWarning.Visibility = RunningJobsMsdbWarningVisibility(_hasMsdbAccess, _isAzureSqlDatabase, _isAwsRds);";
+        const string call = "RunningJobsMsdbWarning.Visibility = RunningJobsMsdbWarningVisibility(_hasMsdbAccess, _isAzureSqlDatabase, _awsRdsKind);";
 
         Assert.Contains(call, CSharpSourceWalker.StripCommentsAndStrings(ParitySource.ReadFile("Lite/Controls/ServerTab.xaml.cs")), StringComparison.Ordinal);
         Assert.Contains(call, MethodBody(RefreshFile, "Task RefreshEngineEditionAsync("), StringComparison.Ordinal);

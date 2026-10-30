@@ -103,7 +103,7 @@ public sealed class AlertResolutionRestartLiveTests
             using var cpuBefore = new CapturingWebhookEndpoint();
             using var cpuAfter = new CapturingWebhookEndpoint();
             using var blocking = new CapturingWebhookEndpoint();
-            var history = new PgAlertHistoryStore(dataSource, NullLogger.Instance);
+            var history = new PgAlertHistoryStore(dataSource, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds, NullLogger.Instance);
 
             /* Before the restart: High CPU fires through route 1, Blocking through route 2. */
             var before = Build(Config(SlackRoute(1, "High CPU", cpuBefore.Url), SlackRoute(2, "Blocking Detected", blocking.Url)), history);

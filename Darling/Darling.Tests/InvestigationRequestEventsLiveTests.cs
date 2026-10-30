@@ -156,7 +156,7 @@ public sealed class InvestigationRequestEventsLiveTests
     {
         await RunAsync(async (store, connection, ct) =>
         {
-            var history = new PgAlertHistoryStore(_dataSource!, NullLogger.Instance);
+            var history = new PgAlertHistoryStore(_dataSource!, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds, NullLogger.Instance);
             var id = (await store.OpenOrJoinAsync(Alert(T0, "High CPU"), ct)).RequestId!.Value;
             _now = T0.AddMinutes(2);
             Assert.True((await store.OpenOrJoinAsync(Alert(_now, "Memory Pressure"), ct)).Evented);
@@ -186,6 +186,33 @@ public sealed class InvestigationRequestEventsLiveTests
     }
 
     /// <summary>
+    /// A follow-up opens now but copies its source's alert rows with their original times, so its last alert can be weeks
+    /// old. A clear logged after that alert still resolves it: the read's bound on the alert log is the oldest last alert,
+    /// not a fixed window from the clock. The rows are aged in place to the state a follow-up is in (opened now, alerts old).
+    /// </summary>
+    [Fact]
+    public async Task Resolved_CountsAClearOlderThanThreeDays_ForARequestWhoseAlertsAreOlder()
+    {
+        await RunAsync(async (store, connection, ct) =>
+        {
+            var history = new PgAlertHistoryStore(_dataSource!, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds, NullLogger.Instance);
+            var id = (await store.OpenOrJoinAsync(Alert(T0, "High CPU"), ct)).RequestId!.Value;
+            var alertAt = T0.AddDays(-10);
+            await using (var age = new NpgsqlCommand(
+                "UPDATE config.investigation_request_alerts SET alert_time = @t WHERE request_id = @id", connection))
+            {
+                age.Parameters.AddWithValue("t", alertAt);
+                age.Parameters.AddWithValue("id", id);
+                await age.ExecuteNonQueryAsync(ct);
+            }
+
+            await history.RecordAlertAsync(Clear("High CPU", "CPU Resolved", alertAt.AddDays(1)));
+            _now = T0.AddMinutes(1);
+            Assert.Equal(1, (await store.SweepAsync(ct)).Resolved);
+        });
+    }
+
+    /// <summary>
     /// D7: a clear that sends nothing still writes its row naming the metric it ends, so the request resolves: the route's
     /// SendResolutions off, a mute rule on the clear, a fire that went to the digest, and a fire the cooldown throttled (the
     /// last two leave no delivered fire, so the clear has nothing to answer). Each clear goes through the deliverer.
@@ -204,7 +231,7 @@ public sealed class InvestigationRequestEventsLiveTests
             config.Webhooks.SlackSendResolutions = true;
             config.NotificationRoutes = [new NotificationRoute(1, "High CPU", "", slack.Url, "", "", "", true) { SendResolutions = why != "off" }];
             var settings = new DarlingAlertSettings(config);
-            var history = new PgAlertHistoryStore(_dataSource!, NullLogger.Instance);
+            var history = new PgAlertHistoryStore(_dataSource!, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds, NullLogger.Instance);
             var webhooks = new WebhookAlertService(
                 settings, DarlingAlertDeliverer.Branding, NullLogger<WebhookAlertService>.Instance, history);
             var deliverer = new DarlingAlertDeliverer(settings, history, webhooks, NullLogger.Instance,
@@ -264,7 +291,7 @@ public sealed class InvestigationRequestEventsLiveTests
     {
         await RunAsync(async (store, connection, ct) =>
         {
-            var history = new PgAlertHistoryStore(_dataSource!, NullLogger.Instance);
+            var history = new PgAlertHistoryStore(_dataSource!, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds, NullLogger.Instance);
             var id = (await store.OpenOrJoinAsync(Alert(T0, "High CPU"), ct)).RequestId!.Value;
             await history.RecordAlertAsync(Clear("High CPU", "CPU Resolved", T0.AddMinutes(3)));
 
@@ -288,7 +315,7 @@ public sealed class InvestigationRequestEventsLiveTests
     {
         await RunAsync(async (store, connection, ct) =>
         {
-            var history = new PgAlertHistoryStore(_dataSource!, NullLogger.Instance);
+            var history = new PgAlertHistoryStore(_dataSource!, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds, NullLogger.Instance);
             var resolvedId = (await store.OpenOrJoinAsync(Alert(T0, "High CPU"), ct)).RequestId!.Value;
             var expiringId = (await store.OpenOrJoinAsync(Alert(T0, "Blocking Detected") with { Family = "blocking", ExpiryMinutes = 5 }, ct))
                 .RequestId!.Value;
@@ -318,7 +345,7 @@ public sealed class InvestigationRequestEventsLiveTests
     {
         await RunAsync(async (store, connection, ct) =>
         {
-            var history = new PgAlertHistoryStore(_dataSource!, NullLogger.Instance);
+            var history = new PgAlertHistoryStore(_dataSource!, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds, NullLogger.Instance);
             var id = (await store.OpenOrJoinAsync(Alert(T0, metric), ct)).RequestId!.Value;
             var record = Clear(metric, metric + " Resolved", T0.AddMinutes(3));
             record = record with
@@ -353,7 +380,7 @@ public sealed class InvestigationRequestEventsLiveTests
     {
         await RunAsync(async (store, connection, ct) =>
         {
-            var history = new PgAlertHistoryStore(_dataSource!, NullLogger.Instance);
+            var history = new PgAlertHistoryStore(_dataSource!, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds, NullLogger.Instance);
             await store.OpenOrJoinAsync(Alert(T0, "High CPU"), ct);
             await history.RecordAlertAsync(Clear("Other Metric", "Other Resolved", T0.AddMinutes(3)) with { ContextJson = context });
 
@@ -392,7 +419,7 @@ public sealed class InvestigationRequestEventsLiveTests
         await RunAsync(async (store, _, ct) =>
         {
             var signal = new InvestigationOpenSignal();
-            var history = new PgAlertHistoryStore(_dataSource!, NullLogger.Instance);
+            var history = new PgAlertHistoryStore(_dataSource!, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds, NullLogger.Instance);
             /* A route with a URL, so the pass makes a post, and a post that stays in flight until the test has looked: the waiter
                must already be awake by then, which holds only if the pass wakes it before the first POST (#6003 review). */
             var sends = new FakeSends();
@@ -541,7 +568,7 @@ public sealed class InvestigationRequestEventsLiveTests
             var sends = new FakeSends();
             _now = T0.AddMinutes(2);
             Assert.True((await store.OpenOrJoinAsync(Alert(_now, "Memory Pressure"), ct)).Evented);
-            var history = new PgAlertHistoryStore(_dataSource!, NullLogger.Instance);
+            var history = new PgAlertHistoryStore(_dataSource!, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds, NullLogger.Instance);
             await history.RecordAlertAsync(Clear("High CPU", "CPU Resolved", T0.AddMinutes(3)));
             await history.RecordAlertAsync(Clear("Memory Pressure", "Memory Pressure Resolved", T0.AddMinutes(3)));
             _now = T0.AddMinutes(4);
@@ -571,6 +598,13 @@ public sealed class InvestigationRequestEventsLiveTests
 
         /* Who changed a server action switch is the owner's alone (#6269): the managed trigger and the script's copy both refuse it from any other login. */
         forged.Add(JournalRow(id, ServerActionSwitches.JournalEvent));
+
+        /* The three rows of an agent action are the owner's alone (#6569): the Agent changes list offers Undo on action_called, so neither mcp nor admin
+           (the writer role here holds the column list both hold) may write one. */
+        foreach (var kind in AgentActionEvents.OwnerOnly)
+        {
+            forged.Add(JournalRow(id, kind));
+        }
 
         /* A practice request's opened row with a reason that is not the exact sentence. */
         forged.Add(JournalRow(practiceId, InvestigationEvents.Opened, reason: "because I said so"));
@@ -851,8 +885,8 @@ public sealed class InvestigationRequestEventsLiveTests
             var rule = new CustomAlertRule(6003, "events rule", definitionJson, null, true, 1, T0, T0, null);
             var deliverer = new RecordingDeliverer();
             var evaluator = new CustomAlertEvaluator(
-                new CustomAlertRuleStore(_dataSource!), new CustomAlertStateStore(_dataSource!), _dataSource!, deliverer,
-                isAlertMuted: _ => false, alertsEnabled: static () => true, new PgAlertHistoryStore(_dataSource!, NullLogger.Instance),
+                new CustomAlertRuleStore(_dataSource!, StorageCommandDeadlines.McpReadSeconds), new CustomAlertStateStore(_dataSource!, StorageCommandDeadlines.McpReadSeconds), _dataSource!, deliverer,
+                isAlertMuted: _ => false, alertsEnabled: static () => true, new PgAlertHistoryStore(_dataSource!, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds, NullLogger.Instance),
                 defaultIntervalSeconds: 0, cacheTtl: TimeSpan.Zero, NullLogger.Instance);
 
             var state = CustomAlertRuleState.Fresh(1);

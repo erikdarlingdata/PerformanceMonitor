@@ -62,6 +62,9 @@ public sealed class NotificationRouteDraft
     public bool? SendResolutions { get; set; }
     public int? FallbackRouteId { get; set; }
 
+    /// <summary>The severity filter (V229, #6928): <c>both</c>, <c>critical</c> or <c>warning</c>.</summary>
+    public string Severities { get; set; } = NotificationRouteKinds.SeveritiesBoth;
+
     /// <summary>When the route was last saved, as the writer's screen read it (the store's <c>modified_at</c>, UTC). On a <c>stored</c> draft
     /// handed to <see cref="NotificationRouteWriter.SaveAsync"/> it is the version the save expects: a route saved by anyone since is refused
     /// as a conflict instead of overwritten (#6274). Null or <c>default</c> skips the check.</summary>
@@ -93,8 +96,8 @@ public static class NotificationRouteWriter
     /// <summary>Inserts one route. <c>route_id</c> is <c>GENERATED ALWAYS AS IDENTITY</c>, so it is never in the column list.</summary>
     public const string InsertSql = @"
 INSERT INTO config_notification_routes
-    (metric_match, " + DestinationColumns + @", enabled, scope_server_id, scope_tag_id, " + AgentColumns + @", send_resolutions, fallback_route_id, modified_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, (now() AT TIME ZONE 'UTC'))
+    (metric_match, " + DestinationColumns + @", enabled, scope_server_id, scope_tag_id, " + AgentColumns + @", send_resolutions, fallback_route_id, severities, modified_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, (now() AT TIME ZONE 'UTC'))
 RETURNING route_id";
 
     public const string UpdateSql = @"
@@ -115,6 +118,7 @@ UPDATE config_notification_routes SET
     agent_expiry_minutes = $15,
     send_resolutions = $16,
     fallback_route_id = $17,
+    severities = $18,
     modified_at = (now() AT TIME ZONE 'UTC')
 WHERE route_id = $1";
 
@@ -215,7 +219,7 @@ WHERE route_id = $1";
     /// plaintext) and the address list. Only a writer with the service's login reads them.</summary>
     public const string SelectStoredSql =
         "SELECT route_id, metric_match, teams_url, slack_url, generic_url, pagerduty_routing_key, smtp_recipients, enabled, "
-        + "scope_server_id, scope_tag_id, " + AgentColumns + ", send_resolutions, fallback_route_id, modified_at "
+        + "scope_server_id, scope_tag_id, " + AgentColumns + ", send_resolutions, fallback_route_id, modified_at, severities "
         + "FROM config_notification_routes WHERE route_id = $1";
 
     /// <summary>The proxy of each webhook channel on the settings row (the row id 1 the Viewer reads).</summary>
@@ -272,6 +276,11 @@ WHERE route_id = $1";
             return "A route cannot be its own fallback route.";
         }
 
+        if (SeveritiesRefusal(row.Severities) is { } severities)
+        {
+            return severities;
+        }
+
         if (row.AgentLevel is { } level && level is not (NotificationRoute.AgentLevelOff or NotificationRoute.AgentLevelInvestigate or NotificationRoute.AgentLevelAct or NotificationRoute.AgentLevelServerAct))
         {
             return "The agent channel is Inherit, Off, Investigate, Act or Act on servers.";
@@ -323,8 +332,10 @@ WHERE route_id = $1";
     /// <paramref name="columns"/> names the ones to change. Returns, in the same order, whether a value was saved before for each column named (null for one not named; never a stored value, so a
     /// webhook value, sealed or not, never leaves the function). A database refusal propagates as a <see cref="PostgresException"/>.
     /// </summary>
+    /// <para>#6542 part 2: <paramref name="actor"/> is the operator-class MCP token's journal actor (<c>operator:</c> and its name), or null.
+    /// The function changes an agent route's destinations only for an operator actor.</para>
     public static async Task<bool?[]> SetRouteDestinationsAsync(
-        NpgsqlConnection connection, NpgsqlTransaction transaction, int routeId, IReadOnlyList<string> columns, IReadOnlyList<string> values,
+        NpgsqlConnection connection, NpgsqlTransaction transaction, int routeId, string? actor, IReadOnlyList<string> columns, IReadOnlyList<string> values,
         int timeoutSeconds, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(connection);
@@ -332,9 +343,12 @@ WHERE route_id = $1";
         ArgumentNullException.ThrowIfNull(columns);
         ArgumentNullException.ThrowIfNull(values);
         await using var command = new NpgsqlCommand(
-            "SELECT * FROM config.set_notification_route_destinations($1, $2, $3, $4, $5, $6, $7)", connection, transaction);
+            "SELECT * FROM config.set_notification_route_destinations($1, $2, $3, $4, $5, $6, $7, $8)", connection, transaction);
         command.CommandTimeout = timeoutSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = routeId });
+        command.Parameters.Add(actor is null
+            ? new NpgsqlParameter { Value = DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text }
+            : new NpgsqlParameter<string> { TypedValue = actor });
         command.Parameters.Add(new NpgsqlParameter<string[]> { TypedValue = columns.ToArray() });
         for (var i = 0; i < 5; i++)
         {
@@ -387,6 +401,13 @@ WHERE route_id = $1";
         return await command.ExecuteScalarAsync(cancellationToken) is null ? $"Fallback route {fallbackId} does not exist." : null;
     }
 
+    /// <summary>The sentence for a severity filter that is not <c>both</c>, <c>critical</c> or <c>warning</c> (case-insensitive), else null (#6928).</summary>
+    public static string? SeveritiesRefusal(string? severities) =>
+        severities?.Trim().ToLowerInvariant() is null or "" or NotificationRouteKinds.SeveritiesBoth
+            or NotificationRouteKinds.SeveritiesCritical or NotificationRouteKinds.SeveritiesWarning
+            ? null
+            : "severities is critical, warning or both.";
+
     /// <summary>Binds the agent columns, the resolution override and the fallback, in the order every insert and update takes them.</summary>
     public static void AddAgentColumns(NpgsqlCommand command, NotificationRouteDraft row)
     {
@@ -405,6 +426,8 @@ WHERE route_id = $1";
             : new NpgsqlParameter { Value = DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Boolean });
         /* #6036: the fallback route, bound last. NULL is none. */
         AddNullableInt(command, row.FallbackRouteId);
+        /* #6928 (V229): the severity filter, bound after the fallback. */
+        command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = NotificationRouteKinds.NormalizeSeverities(row.Severities) });
     }
 
     /// <summary>Binds an <c>integer</c> that may be SQL NULL.</summary>
@@ -449,6 +472,41 @@ WHERE route_id = $1";
         PasswordSeal.IsSealed(plaintext?.Trim())
             ? throw new NotificationRouteRefusedException($"The {label} must be the value itself, not saved text.", NotificationRouteRefusalKind.Value)
             : ResolveValue(plaintext, null, slot, PasswordBinding.WebhookRouteRow(routeId), proxy, proxy, label, seal, refusal);
+
+    /// <summary>
+    /// Seals a new webhook value for the SETTINGS row (#6392): the Teams, Slack or generic URL, the PagerDuty routing key
+    /// (<paramref name="slot"/> teams, slack, generic or pagerduty) or the generic headers (<c>generic_headers</c>, bound to
+    /// <paramref name="boundUrl"/>, the generic URL text as stored). The shape rule and the refusal words are the ones the route values use.
+    /// Throws <see cref="NotificationRouteRefusedException"/>.
+    /// </summary>
+    public static string SealNewSettingsValue(
+        string slot, string plaintext, string? proxy, string? boundUrl, string label, Func<string, PasswordBinding, string>? seal, string? refusal)
+    {
+        var text = plaintext?.Trim() ?? "";
+        if (PasswordSeal.IsSealed(text))
+        {
+            throw new NotificationRouteRefusedException($"The {label} must be the value itself, not saved text.", NotificationRouteRefusalKind.Value);
+        }
+
+        if (slot is "teams" or "slack" or "generic" && WebhookUrlShape.Refusal(text, label) is { } shapeRefusal)
+        {
+            throw new NotificationRouteRefusedException(shapeRefusal, NotificationRouteRefusalKind.Value);
+        }
+
+        if (seal is null)
+        {
+            throw new NotificationRouteRefusedException(refusal ?? NoKeyText, NotificationRouteRefusalKind.Value);
+        }
+
+        try
+        {
+            return seal(text, PasswordBinding.ForWebhook(slot, PasswordBinding.WebhookSettingsRow, proxy, boundUrl));
+        }
+        catch (NotificationRouteRefusedException ex)
+        {
+            throw new NotificationRouteRefusedException($"The {label}: {ex.Message}", NotificationRouteRefusalKind.Value);
+        }
+    }
 
     private static string ResolveValue(
         string? value, string? stored, string slot, string row, string? proxy, string? storedProxy, string label,
@@ -593,6 +651,7 @@ WHERE route_id = $1";
             SendResolutions = reader.IsDBNull(15) ? null : reader.GetBoolean(15),
             FallbackRouteId = reader.IsDBNull(16) ? null : reader.GetInt32(16),
             ModifiedAtUtc = reader.IsDBNull(17) ? null : DateTime.SpecifyKind(reader.GetDateTime(17), DateTimeKind.Utc),
+            Severities = reader.GetString(18),
         };
     }
 
@@ -687,7 +746,7 @@ WHERE route_id = $1";
         update.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = resolved.Enabled });                 // $8
         AddNullableInt(update, resolved.ScopeServerId);                                                      // $9
         AddNullableInt(update, resolved.ScopeTagId);                                                         // $10
-        AddAgentColumns(update, resolved);                                                                   // $11-$17
+        AddAgentColumns(update, resolved);                                                                   // $11-$18
         await update.ExecuteNonQueryAsync(cancellationToken);
         if (login is not null && AgentChange(before, resolved) is { } change)
         {
@@ -757,6 +816,12 @@ WHERE route_id = $1";
         Compare("metric_match", before?.MetricMatch.Trim(), after?.MetricMatch.Trim());
         Compare("scope_server_id", before?.ScopeServerId, after?.ScopeServerId);
         Compare("scope_tag_id", before?.ScopeTagId, after?.ScopeTagId);
+        /* #6928: the severity filter moves alerts between agent routes. A route with no agent setting is not in the agent lookup. */
+        if (before?.AgentLevel is not null || after?.AgentLevel is not null)
+        {
+            Compare("severities", NotificationRouteKinds.NormalizeSeverities(before?.Severities), NotificationRouteKinds.NormalizeSeverities(after?.Severities));
+        }
+
         Compare("agent_level", before?.AgentLevel, after?.AgentLevel);
         Compare("agent_max_per_hour", before?.AgentMaxPerHour, after?.AgentMaxPerHour);
         Compare("agent_max_per_day", before?.AgentMaxPerDay, after?.AgentMaxPerDay);
@@ -783,6 +848,7 @@ WHERE route_id = $1";
             ["agent_lease_minutes"] = row.AgentLeaseMinutes,
             ["agent_expiry_minutes"] = row.AgentExpiryMinutes,
             ["enabled"] = row.Enabled,
+            ["severities"] = NotificationRouteKinds.NormalizeSeverities(row.Severities),
         };
 
         var detail = new System.Text.Json.Nodes.JsonObject { ["before"] = Describe(before), ["after"] = Describe(after) };

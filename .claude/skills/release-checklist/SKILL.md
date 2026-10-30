@@ -237,6 +237,7 @@ Before cutting the release, verify the nightly build has been clean:
 - Do the version-bump + changelog commits on a branch off `dev` (e.g. `release/v{version}`) — NEVER commit directly to `dev` or `main` (branch protection)
 - Push the branch and merge it into `dev` first (open that PR with base `dev`)
 - Then open the release PR **from `dev` to `main`** — the head MUST be `dev`. `check-pr-branch.yml` rejects any PR to `main` whose head is not `dev`, so a `release/*` → `main` PR fails CI (the "all jobs failed" email)
+- Merge the `dev` to `main` release PR with **Create a merge commit**, never squash. A squash leaves `dev`'s commits out of `main`'s history, so the next release PR conflicts on every file `dev` changed. 3.10.0 was squashed, and the 3.11.0 release PR could merge only after `main` was merged into `dev` with a merge commit (#6485). An admin merge does not get past a conflict.
 - At release-PR merge time, dev must equal the sha the field validation ran against (or the delta must be explicitly accepted)
 
 ### 11. Tag and Release
@@ -258,6 +259,15 @@ gh release create v{version} --title "v{version}" --notes "See CHANGELOG.md for 
 The build workflow will then run, compile all artifacts, sign them (if SignPath is configured), and attach them to the release. Monitor at https://github.com/erikdarlingdata/PerformanceMonitor/actions
 
 SignPath blocks on **five** approval requests: **Lite** (zip), **Darling** (service + viewer apphost exes), **Lite (Velopack)**, **Darling Viewer (Velopack)**, and **the executables Velopack generates** — the Dashboard/Installer signing steps left with their artifacts. The fifth (#3288) comes after `vpk pack` and carries both products in one request: each `Setup.exe`, and the root launcher and `Update.exe` inside each `Portable.zip`. It uses the `SignTemplate` artifact configuration, whose `**/*.exe` and `**/*.dll` includes both need `min-matches="0"` because the batch contains no dll. Two executables per product stay unsigned by design and only inside the `.nupkg` — `lib/app/<App>_ExecutionStub.exe` and `lib/app/Squirrel.exe` — because `releases.<channel>.json` records that package's SHA256 and the delta patches against those bytes; the release guard allowlists exactly those, keyed on the container as well as the path. The `Darling` artifact-configuration slug on signpath.io signs the two apphost exes (`PerformanceMonitor.Darling.Service.exe` at the root and `viewer/PerformanceMonitor.Darling.Viewer.exe`) and leaves the `PerformanceMonitor.*` / third-party dlls and `pg-runtime.zip` alone; if it ever goes missing the single `Sign Darling` step fails the release. The Darling zip (`PerformanceMonitorDarling-{version}.zip` — service at root with `pg-runtime.zip` beside the exe, viewer in `viewer\`) joins the release assets; the pg-runtime build downloads ~340MB on a cold cache (cached across re-releases on the fetch script's content hash). Verify the Darling zip is attached and listed in `SHA256SUMS.txt`, alongside the Lite zip/Setup.exe and the Viewer Setup.exe.
+
+### 12. Publish the Darling docs to erikdarling.com (after the tag)
+
+The site pages describe the latest release, never dev. Run this once the tag exists and the release build has finished. `tools/docs-site/README.md` has the details.
+
+1. From a checkout that has the tag, run `python tools/docs-site/publish_darling_docs.py --ref v{version} --credentials <the WordPress credentials file named in your local notes> --status publish`. It creates or updates the `darling-docs` page and its children from `docs/darling/` at the tag. Re-running is safe: it finds each page by slug and parent.
+2. Open two of the new pages (the parent `darling-docs` and one child such as `install`). Check that the first line names `v{version}`, that the links go to sibling pages and not to `.md` files, and that a table and a code block look right.
+3. Add the Darling documentation link to the Feature Docs strip on the landing page (page 13037, slug `free-sql-server-performance-monitoring`; never change that slug). Read the page with `context=edit` first and change only the strip.
+4. Submit the new URLs to IndexNow: `POST /wp-json/rankmath/v1/in/submitUrls` with `{"urls": "<the page URLs, one per line>"}`.
 
 ## Notes
 

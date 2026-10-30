@@ -146,8 +146,8 @@ GRANT EXECUTE ON FUNCTION config.record_custom_alert_resolution(integer, text, t
         var ct = TestContext.Current.CancellationToken;
         await using var owner = await MigrateAndOpenAsync(connectionString, ct);
 
-        var rules = new CustomAlertRuleStore(owner);
-        var state = new CustomAlertStateStore(owner);
+        var rules = new CustomAlertRuleStore(owner, StorageCommandDeadlines.McpReadSeconds);
+        var state = new CustomAlertStateStore(owner, StorageCommandDeadlines.McpReadSeconds);
         var ruleName = "car_grant_del_" + Guid.NewGuid().ToString("N");
         const int serverId = 991334;
         var bodySucceeded = false;
@@ -210,8 +210,8 @@ GRANT EXECUTE ON FUNCTION config.record_custom_alert_resolution(integer, text, t
         var ct = TestContext.Current.CancellationToken;
         await using var owner = await MigrateAndOpenAsync(connectionString, ct);
 
-        var rules = new CustomAlertRuleStore(owner);
-        var state = new CustomAlertStateStore(owner);
+        var rules = new CustomAlertRuleStore(owner, StorageCommandDeadlines.McpReadSeconds);
+        var state = new CustomAlertStateStore(owner, StorageCommandDeadlines.McpReadSeconds);
         var ruleName = "car_grant_rec_" + Guid.NewGuid().ToString("N");
         const int serverId = 991335;
         var bodySucceeded = false;
@@ -239,7 +239,7 @@ GRANT EXECUTE ON FUNCTION config.record_custom_alert_resolution(integer, text, t
             var evaluator = new CustomAlertEvaluator(
                 rules, state, owner /* viewer: unused by reconcile */, new NoopDeliverer(),
                 isAlertMuted: null, alertsEnabled: static () => true,
-                new PgAlertHistoryStore(lowPriv), defaultIntervalSeconds: 60,
+                new PgAlertHistoryStore(lowPriv, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds), defaultIntervalSeconds: 60,
                 cacheTtl: TimeSpan.Zero, NullLogger.Instance);
 
             await evaluator.ReconcileStateAsync(monitored, ct);

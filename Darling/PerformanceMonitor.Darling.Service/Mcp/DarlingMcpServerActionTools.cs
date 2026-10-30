@@ -26,7 +26,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 
 /// <summary>
 /// The server action switch tools (#6269): <c>set_server_action</c> turns one server's switch for one agent server action
-/// (<c>force_plan</c>, <c>evict_plan</c>, <c>kill_session</c>) on or off, and <c>get_server_actions</c> reads every server's switches.
+/// (<c>force_plan</c>, <c>evict_plan</c>, <c>kill_session</c>, <c>recompile_module</c>, <c>create_plan_guide</c>, <c>drop_plan_guide</c>) on or off, and <c>get_server_actions</c> reads every server's switches.
 ///
 /// <para><b>Served only under <c>mcp.allowServerAdmin</c></b> (with <c>mcp.allowWrites</c> and a token), like <c>edit_server</c>, and listed in
 /// <see cref="DarlingMcpWritePolicy.NeverAgentTools"/>, so an agent that investigates an alert can never turn on its own server actions.
@@ -40,13 +40,13 @@ public sealed class DarlingMcpServerActionTools
     internal const string SetToolName = "set_server_action";
 
     /// <summary>The journal actor of an MCP switch change: <c>mcp:</c> plus the caller the request filter worked out. Never <c>agent:</c> and never <c>person:</c>.</summary>
-    internal static string ActorOf() => "mcp:" + ReadCaller.WriteIdentity();
+    internal static string ActorOf() => "mcp:" + ReadCaller.StoreIdentity();
 
     [McpServerTool(Name = "set_server_action"), Description(
-        "Turns ONE server's switch for ONE agent server action on or off: force_plan and evict_plan (SQL Server only) and kill_session (SQL Server and PostgreSQL). All switches start off; an agent can act on a server only while its switch for that action is on (and the other conditions hold: Level 3, the service's agent actions on, a remediation login given as an env: or file: reference). Served only with mcp.allowServerAdmin, and never offered to an agent that investigates an alert. The change is journaled with who made it, from MCP, and the state before and after. Reversed by calling it again with the other value. The answer gives the state before and after and the call that puts it back.")]
+        "Turns ONE server's switch for ONE agent server action on or off: force_plan, evict_plan, recompile_module, create_plan_guide and drop_plan_guide (SQL Server only) and kill_session (SQL Server and PostgreSQL). All switches start off; an agent can act on a server only while its switch for that action is on (and the other conditions hold: Level 3, the service's agent actions on, a remediation login given as an env: or file: reference). Served only with mcp.allowServerAdmin, and never offered to an agent that investigates an alert. The change is journaled with who made it, from MCP, and the state before and after. Reversed by calling it again with the other value. The answer gives the state before and after and the call that puts it back.")]
     public static Task<string> SetServerAction(
         [Description("The server's full name, exactly as list_servers shows it (a disabled server too). A part of a name is refused and the near matches are listed.")] string server_name,
-        [Description("force_plan, evict_plan or kill_session.")] string action,
+        [Description("force_plan, evict_plan, kill_session, recompile_module, create_plan_guide or drop_plan_guide.")] string action,
         [Description("True to turn the switch on, false to turn it off.")] bool enabled,
         NpgsqlDataSource postgres,
         StoreOwnerSource? ownerSource = null,
@@ -112,7 +112,7 @@ public sealed class DarlingMcpServerActionTools
     }
 
     [McpServerTool(Name = "get_server_actions"), Description(
-        "Lists every monitored server's switch for each agent server action (force_plan, evict_plan, kill_session): on or off (a server with no row is off), who last set it and when, and whether the server's engine can run the action at all (valid false: the switch cannot be turned on). A read. set_server_action changes a switch where mcp.allowServerAdmin is on.")]
+        "Lists every monitored server's switch for each agent server action (force_plan, evict_plan, kill_session, recompile_module, create_plan_guide, drop_plan_guide): on or off (a server with no row is off), who last set it and when, and whether the server's engine can run the action at all (valid false: the switch cannot be turned on). A read. set_server_action changes a switch where mcp.allowServerAdmin is on.")]
     public static async Task<string> GetServerActions(NpgsqlDataSource postgres, CancellationToken cancellationToken = default)
     {
         try

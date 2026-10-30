@@ -179,8 +179,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $11 + $12, $13, 1, $14, $1
     /// <summary>The case's alert rows, copied without the dedup key. $1 new request, $2 case.</summary>
     internal const string CopyAlertsSql = @"
 INSERT INTO config.investigation_request_alerts
-    (request_id, alert_time, server_id, metric_name, dedup_key, current_value, threshold_value, muted, detail_text, context_json)
-SELECT $1, alert_time, server_id, metric_name, NULL, current_value, threshold_value, muted, detail_text, context_json
+    (request_id, alert_time, server_id, metric_name, dedup_key, current_value, threshold_value, muted, detail_text, context_json, severity)
+SELECT $1, alert_time, server_id, metric_name, NULL, current_value, threshold_value, muted, detail_text, context_json, severity
 FROM config.investigation_request_alerts
 WHERE request_id = $2";
 

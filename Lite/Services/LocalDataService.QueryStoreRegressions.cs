@@ -86,8 +86,8 @@ public sealed class QueryStoreRunGroup
  * (timeouts, cancels) and Exception (errors). Counting only Regular runs hides what a timeout or an error does (one 30 s timeout
  * among 1,000 fast runs barely moves an average), and blending them into one average would hide it the same way. Cost is the
  * Regular runs' CPU and duration per execution, WEIGHTED by execution count (the summed cost over the summed executions, not an
- * average of interval averages), for both sides. A query is flagged for COST (Regular CPU up more than CostGatePercent), for
- * TIMEOUTS or ERRORS (that group's per-hour rate in the recent window at least FailureRateMultiple times the baseline's, or any at
+ * average of interval averages), for both sides. A query is flagged for COST (Regular CPU up more than CostGatePercent,
+ * with at least CostMinAddedCpuMs of added CPU over the window, #6781), for TIMEOUTS or ERRORS (that group's per-hour rate in the recent window at least FailureRateMultiple times the baseline's, or any at
  * all where the baseline had none, with at least FailureMinRecentRuns such runs in the recent window), or for several. The
  * thresholds are QueryStoreRegressionRules', shared with Darling. Logical reads are not read at all.
  *
@@ -116,21 +116,43 @@ public partial class LocalDataService
     /// and take at most <c>maxRows / FailureShareDivisor</c> slots (more only when the cost rows leave room).
     /// </summary>
     public async Task<List<QueryStoreRegressionRow>> GetQueryStoreRegressionsAsync(
-        int serverId, int hoursBack = 24, int maxRows = 50, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null)
+        int serverId, int hoursBack = 24, int maxRows = 50, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null,
+        IReadOnlyList<string>? excludedDatabases = null, DateTime? dataStartUtc = null)
     {
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
+        var baselineStartTime = startTime.AddDays(-BaselineLookbackDays);
+
+        /* #6750: where the server's Query Store data starts, the instant the tool's window notice reports as effective_start
+           (McpQueryTools.EffectiveWindowStart over GetQueryWindowFloorAsync). The tool already probes it for that notice, so it
+           passes the answer in (dataStartUtc) and the read makes no second probe. A caller that passes none gets the same probe
+           here: one MIN over the rows from the baseline's start, and one more only when that row sits after the start. It is
+           read before this read's own connection opens, as the probe opens one of its own. It only DIVIDES: the row filters
+           below keep the baseline's start. */
+        var dataStart = dataStartUtc
+            ?? Mcp.McpQueryTools.EffectiveWindowStart(
+                await GetQueryWindowFloorAsync(QueryWindowRelation.QueryStoreStats, serverId, baselineStartTime, endTime), baselineStartTime);
+
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
-        var baselineStartTime = startTime.AddDays(-BaselineLookbackDays);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
         var baselineParamIndex = 4 + dbValues.Count;
         var limitIndex = baselineParamIndex + 1;
+        /* #6654: the databases the server dropped, left out of the candidates before the rank and the cap (the exclusion binds after the limit). */
+        var excludeClause = BuildDbExcludeClause(excludedDatabases, "f.database_name", limitIndex + 1, out var excludeValues);
 
-        /* The per-hour rates divide by each window's own length: the baseline is [baseline start, window start), the recent
-           window [window start, window end]. Both are numbers computed here, written as invariant literals. */
-        var baseHours = (startTime - baselineStartTime).TotalHours.ToString("R", CultureInfo.InvariantCulture);
-        var recentHours = (endTime - startTime).TotalHours.ToString("R", CultureInfo.InvariantCulture);
+        /* The per-hour rates divide by the hours each side HOLDS (#6750), not the hours its window names: the baseline is
+           [baseline start, window start) and the store holds it from the data start, the recent window [window start, window end]
+           and the store holds it from the later of the two. Both are numbers computed here, written as invariant literals. A side
+           that holds no hour divides by NULL, so its per-hour rate is NULL as Darling's NULLIF gives (a zero literal would depend
+           on the engine's division by zero). When the store holds the whole baseline the two equal the old whole windows.
+           Darling's gates count a baseline that holds no hours as empty, because there a baseline row can have runs while it holds
+           none (its rows are filtered on last_execution_time). Here they need no such arm: the baseline rows are filtered on
+           collection_time < $2, and the data start is at or before the first row's collection_time (GetQueryWindowFloorAsync), so
+           a baseline with any row holds a positive number of hours (#6750). */
+        static string Hours(TimeSpan held) => held > TimeSpan.Zero ? held.TotalHours.ToString("R", CultureInfo.InvariantCulture) : "CAST(NULL AS DOUBLE)";
+        var baseHours = Hours(startTime - (dataStart > baselineStartTime ? dataStart : baselineStartTime));
+        var recentHours = Hours(endTime - (dataStart > startTime ? dataStart : startTime));
         var limit = "CAST($" + limitIndex + " AS INTEGER)";
 
         command.CommandText = @"
@@ -279,7 +301,7 @@ flagged AS (
         j.*,
         (j.recent_dur_ms - j.base_dur_ms) * 100.0 / NULLIF(j.base_dur_ms, 0) AS duration_regression_percent,
         (j.recent_cpu_ms - j.base_cpu_ms) * 100.0 / NULLIF(j.base_cpu_ms, 0) AS cpu_regression_percent,
-        COALESCE((j.recent_cpu_ms - j.base_cpu_ms) * 100.0 / NULLIF(j.base_cpu_ms, 0) > " + QueryStoreRegressionRules.CostGatePercent + @", false) AS is_cost,
+        " + QueryStoreRegressionRules.CostTestSql("j") + @" AS is_cost,
         COALESCE(j.recent_aborted_execs >= " + QueryStoreRegressionRules.FailureMinRecentRuns + @"
             AND (j.base_aborted_execs = 0
                  OR (j.recent_aborted_execs / " + recentHours + @") >= " + QueryStoreRegressionRules.FailureRateMultiple + @" * (j.base_aborted_execs / " + baseHours + @")), false) AS is_timeouts,
@@ -312,7 +334,7 @@ qualified AS (
                  ELSE 2 END) AS failure_rank,
         (f.recent_dur_ms - f.base_dur_ms) * f.recent_execs AS additional_duration_ms
     FROM flagged AS f
-    WHERE f.is_cost OR f.is_timeouts OR f.is_errors
+    WHERE (f.is_cost OR f.is_timeouts OR f.is_errors)" + excludeClause + @"
 ),
 ranked AS (
     SELECT
@@ -403,6 +425,8 @@ LIMIT " + limit;
             command.Parameters.Add(new DuckDBParameter { Value = db });
         command.Parameters.Add(new DuckDBParameter { Value = baselineStartTime });
         command.Parameters.Add(new DuckDBParameter { Value = maxRows });
+        foreach (var excluded in excludeValues)
+            command.Parameters.Add(new DuckDBParameter { Value = excluded });
 
         var rows = new List<QueryStoreRegressionRow>();
         var textKeys = new List<(long? Id, DateTime? Time)>();
@@ -531,5 +555,41 @@ SELECT
         if (!await reader.ReadAsync())
             return (false, false);
         return (reader.GetBoolean(0), reader.GetBoolean(1));
+    }
+
+    /// <summary>#6877: where the server's stored Query Store rows start, for a window that ends before them (the window-floor probe
+    /// answers null when a window holds no row). Null when the server has none.</summary>
+    public async Task<DateTime?> GetOldestQueryStoreRowAsync(int serverId)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT min(collection_time) FROM v_query_store_stats WHERE server_id = $1";
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        return await command.ExecuteScalarAsync() is DateTime first ? first : null;
+    }
+
+    /// <summary>
+    /// #6877: whether the collection log holds a productive run (SUCCESS, rows collected) of one collector at or before
+    /// <paramref name="cutoffUtc"/>: the collector was storing rows then, so a window whose rows are gone lost them to retention rather
+    /// than never having had any. Twin of Darling's <c>RetentionCause</c> check, without its servers-table fallback (Lite has one
+    /// horizon for the log and the data, so a window the data has lost is a window the log has lost).
+    /// </summary>
+    public async Task<bool> CollectorStoredRowsAtOrBeforeAsync(int serverId, string collectorName, DateTime cutoffUtc)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+        command.CommandText = @"
+SELECT 1
+FROM v_collection_log
+WHERE server_id = $1
+AND   collector_name = $2
+AND   status = 'SUCCESS'
+AND   rows_collected > 0
+AND   collection_time <= $3
+LIMIT 1";
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = collectorName });
+        command.Parameters.Add(new DuckDBParameter { Value = cutoffUtc });
+        return await command.ExecuteScalarAsync() is not null and not DBNull;
     }
 }

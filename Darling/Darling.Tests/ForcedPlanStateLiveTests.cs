@@ -52,12 +52,12 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)";
     }
 
     /// <summary>One Query Store interval of one plan: it ran <paramref name="executions"/> times and last ran at <paramref name="lastRun"/>.</summary>
-    private static Task RanAsync(NpgsqlConnection c, CancellationToken ct, string db, long query, long plan, DateTime lastRun, long executions) =>
+    private static Task RanAsync(NpgsqlConnection c, CancellationToken ct, string db, long query, long plan, DateTime lastRun, long executions, bool forcedWhenSampled = false) =>
         Exec(c, ct, @"INSERT INTO query_store_stats
 (collection_id, collection_time, server_id, server_name, database_name, query_id, plan_id, execution_type_desc, runtime_stats_interval_id,
  interval_start_time_utc, first_execution_time, last_execution_time, execution_count, avg_cpu_time_us, avg_duration_us, avg_rowcount, is_forced_plan, force_failure_count)
-VALUES ($1,$2,$3,$4,$5,$6,$7,'Regular',$8,$9,$9,$10,$11,5000,7000,1,FALSE,0)",
-            CollectionIdGenerator.Next(), lastRun.AddMinutes(1), ServerId, ServerName, db, query, plan, plan * 1000 + lastRun.Minute, lastRun.AddMinutes(-30), lastRun, executions);
+VALUES ($1,$2,$3,$4,$5,$6,$7,'Regular',$8,$9,$9,$10,$11,5000,7000,1,$12,0)",
+            CollectionIdGenerator.Next(), lastRun.AddMinutes(1), ServerId, ServerName, db, query, plan, plan * 1000 + lastRun.Minute, lastRun.AddMinutes(-30), lastRun, executions, forcedWhenSampled);
 
     private sealed record Rig(NpgsqlDataSource Postgres, NpgsqlConnection Connection);
 
@@ -79,7 +79,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,'Regular',$8,$9,$9,$10,$11,5000,7000,1,FALSE,0)",
     private static async Task<Dictionary<(string Db, long Plan), ForcedPlanFact>> ReadAsync(
         Rig rig, CancellationToken ct, DatabaseFilter? databases = null, IReadOnlyDictionary<(string, long), DateTime>? forcedAt = null)
     {
-        var read = await DarlingForcedPlanStateReader.ReadAsync(rig.Postgres, ServerId, databases ?? DatabaseFilter.All, null, T0.AddHours(-1), AsOf, forcedAt, 30, ct);
+        var read = await DarlingForcedPlanStateReader.ReadAsync(rig.Postgres, ServerId, databases ?? DatabaseFilter.All, null, T0.AddHours(-1), AsOf, forcedAt, 30, cancellationToken: ct);
         return read.Plans.ToDictionary(p => (p.DatabaseName, p.PlanId));
     }
 
@@ -109,11 +109,88 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,'Regular',$8,$9,$9,$10,$11,5000,7000,1,FALSE,0)",
         /* #6221: plan 32 is a LATER plan of the query, so it is another plan by its stored XML (an ordinary plan: no UsePlan). */
         await StoredPlanSeed.AddAsync(c, ct, ServerId, db, 32, StoredPlanSeed.Plain);
         await RanAsync(c, ct, db, 4, 41, T0.AddMinutes(20), 3);
-        await RanAsync(c, ct, db, 5, 51, T0.AddMinutes(10), 3);
+        await RanAsync(c, ct, db, 5, 51, T0.AddMinutes(10), 3, forcedWhenSampled: true);
 
         /* OlderDb's newest capture is at T0+30m, 60 minutes before StateDb's. Plan 61 is in it, so it is still forced; plan 62 was only in the first. */
         await CaptureAsync(c, ct, "OlderDb", T0, (61, 6, 0, null), (62, 7, 0, null));
         await CaptureAsync(c, ct, "OlderDb", T0.AddMinutes(30), (61, 6, 0, null));
+    }
+
+    /// <summary>The read's row cap cuts the last rows of its order: a failing force first-kept, then the rest of each database's newest capture, then removed
+    /// ones. Before, the order was database and plan id, so a standing failing force in a later database could be cut with nothing said.</summary>
+    [Fact]
+    public async Task WhenTheReadHitsItsCap_FailingForcesAreKept_AndTheReadSaysItWasCapped()
+    {
+        await WithStoreAsync(async (rig, ct) =>
+        {
+            await SeedStatesAsync(rig.Connection, ct);
+
+            var capped = await DarlingForcedPlanStateReader.ReadAsync(rig.Postgres, ServerId, DatabaseFilter.All, null, T0.AddHours(-1), AsOf, 3, null, 30, null, ct);
+            Assert.True(capped.ReadCapped);
+            Assert.Equal(3, capped.Plans.Count);
+            var kept = capped.Plans.Select(p => (p.DatabaseName, p.PlanId)).ToHashSet();
+            Assert.Contains(("StateDb", 41L), kept);
+            Assert.DoesNotContain(("StateDb", 51L), kept);
+            Assert.DoesNotContain(("OlderDb", 62L), kept);
+
+            var whole = await DarlingForcedPlanStateReader.ReadAsync(rig.Postgres, ServerId, DatabaseFilter.All, null, T0.AddHours(-1), AsOf, 7, null, 30, null, ct);
+            Assert.False(whole.ReadCapped);
+            Assert.Equal(7, whole.Plans.Count);
+
+            /* captures[].forced_plan_count counts the whole capture, so a cut read does not under-report a database (as hint_count does). */
+            var wholeCounts = whole.Captures.ToDictionary(c => c.DatabaseName, c => c.ForcedPlanCount);
+            Assert.Equal(wholeCounts, capped.Captures.ToDictionary(c => c.DatabaseName, c => c.ForcedPlanCount));
+            Assert.True(capped.Captures.Sum(c => c.ForcedPlanCount) > capped.Plans.Count(p => p.State != ForcedPlanState.Removed));
+            return 0;
+        });
+    }
+
+    /// <summary>
+    /// #6833: the forced-plan list over the field shape (many forces captured every cycle). The order is failing forces first, then the other
+    /// forces of the newest capture, then the removed ones, each by plan id, the first seen of a force is the start of its current run of
+    /// captures, and a cap cuts the last rows of that order and says so.
+    /// </summary>
+    [Fact]
+    public async Task TheListOverManyForcesCapturedEveryCycle_KeepsItsOrderFirstSeenAndCap()
+    {
+        await WithStoreAsync(async (rig, ct) =>
+        {
+            const string db = "FieldDb";
+            const int captures = 24, forces = 40;
+            for (var c = 0; c < captures; c++)
+            {
+                var forced = new List<(long Plan, long Query, long Failures, string? Reason)>();
+                for (long plan = 1; plan <= forces; plan++)
+                {
+                    if (plan is >= 10 and <= 12 && c is >= 5 and <= 8) continue; /* absent for four captures: first seen is capture 9 */
+                    if (plan == 39 && c >= 12) continue; /* in the first twelve captures only: REMOVED */
+                    var failing = plan is 7 or 30;
+                    forced.Add((plan, plan + 100, failing ? 2 : 0, failing ? "GENERAL_FAILURE" : null));
+                }
+
+                await CaptureAsync(rig.Connection, ct, db, T0.AddMinutes(5 * c), forced.ToArray());
+            }
+
+            var read = await DarlingForcedPlanStateReader.ReadAsync(rig.Postgres, ServerId, DatabaseFilter.All, null, T0.AddHours(-1), AsOf, 50, null, 30, null, ct);
+            Assert.False(read.ReadCapped);
+            var expected = new List<long> { 7, 30 };
+            expected.AddRange(Enumerable.Range(1, forces).Select(p => (long)p).Where(p => p is not (7 or 30 or 39)));
+            expected.Add(39);
+            Assert.Equal(expected, read.Plans.Select(p => p.PlanId).ToList());
+            var facts = read.Plans.ToDictionary(p => p.PlanId);
+            Assert.Equal(T0, facts[1].FirstSeen);
+            Assert.Equal(T0.AddMinutes(5 * 9), facts[10].FirstSeen);
+            Assert.Equal(T0.AddMinutes(5 * 9), facts[12].FirstSeen);
+            Assert.Equal(T0.AddMinutes(5 * (captures - 1)), facts[1].LastSeen);
+            Assert.Equal(ForcedPlanState.Failing, facts[7].State);
+            Assert.Equal(ForcedPlanState.Removed, facts[39].State);
+
+            /* A cap of 5 keeps the two failing forces and the first three others, and reads one row past it to know it cut. */
+            var capped = await DarlingForcedPlanStateReader.ReadAsync(rig.Postgres, ServerId, DatabaseFilter.All, null, T0.AddHours(-1), AsOf, 5, null, 30, null, ct);
+            Assert.True(capped.ReadCapped);
+            Assert.Equal(new long[] { 7, 30, 1, 2, 3 }, capped.Plans.Select(p => p.PlanId).ToArray());
+            return 0;
+        });
     }
 
     [Fact]
@@ -206,7 +283,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,'Regular',$8,$9,$9,$10,$11,5000,7000,1,FALSE,0)",
             /* No capture at all in the window. */
             using (var none = JsonDocument.Parse(await DarlingMcpForcedPlanTools.GetForcedPlans(rig.Postgres, ServerName, 24, asOf, DatabaseFilter.All, ct)))
             {
-                Assert.Equal("empty", none.RootElement.GetProperty("status").GetString());
+                Assert.Equal("unavailable", none.RootElement.GetProperty("status").GetString());
                 Assert.Contains("No forced-plan capture", none.RootElement.GetProperty("message").GetString());
             }
 
@@ -234,7 +311,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,'Regular',$8,$9,$9,$10,$11,5000,7000,1,FALSE,0)",
     }
 
     [Fact]
-    public async Task TheHistoryTool_ListsAForcedPlanWithNoExecutionsInTheWindow_AndNotARemovedOne()
+    public async Task TheHistoryTool_ListsAForcedPlanWithNoExecutionsInTheWindow_AndARemovedOneWithItsState()
     {
         await WithStoreAsync(async (rig, ct) =>
         {
@@ -260,11 +337,21 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,'Regular',$8,$9,$9,$10,$11,5000,7000,1,FALSE,0)",
                 Assert.Equal(JsonValueKind.Null, byPlan[32].GetProperty("forced_state").ValueKind);
             }
 
-            /* Query 5: its force was removed, so plan 51 is no longer listed as forced. */
+            /* Query 5 (#6598): plan 51 was forced when sampled and its force was removed. It says so: forced, state REMOVED, and the force is listed. */
             using (var removed = JsonDocument.Parse(await DarlingMcpQueryStoreHistoryTools.GetQueryStoreQueryHistory(rig.Postgres, "StateDb", 5, ServerName, 24, asOf, ct)))
             {
-                Assert.Empty(removed.RootElement.GetProperty("forced_plans").EnumerateArray());
-                Assert.Equal(JsonValueKind.Null, Assert.Single(removed.RootElement.GetProperty("plans").EnumerateArray()).GetProperty("forced_state").ValueKind);
+                var plan = Assert.Single(removed.RootElement.GetProperty("plans").EnumerateArray());
+                Assert.True(plan.GetProperty("is_forced_plan").GetBoolean());
+                Assert.Equal("REMOVED", plan.GetProperty("forced_state").GetString());
+                var force = Assert.Single(removed.RootElement.GetProperty("forced_plans").EnumerateArray());
+                Assert.Equal(51, force.GetProperty("plan_id").GetInt64());
+                Assert.Equal("REMOVED", force.GetProperty("state").GetString());
+                Assert.Equal("ok", removed.RootElement.GetProperty("forced_plans_status").GetString());
+                /* The plan ran 3 times, and the force's own runs were not read, so the force does not say it ran zero times. */
+                Assert.Equal(3, plan.GetProperty("execution_count").GetInt64());
+                Assert.False(force.GetProperty("runs_read").GetBoolean());
+                Assert.Equal(JsonValueKind.Null, force.GetProperty("forced_plan").ValueKind);
+                Assert.Equal(JsonValueKind.Null, force.GetProperty("other_plans_total").ValueKind);
             }
 
             return 0;

@@ -1939,6 +1939,14 @@ LIMIT 1";
            hour or at the next reconnect. Written on the pool thread only (INV-2), like the long-query fault. */
         public string? AttentionXePermissionFault { get; set; }
 
+        /* #6893: what the last ensure left for the deadlock and blocked-process runs. A session whose create was refused for permission
+           records PERMISSIONS, one that failed for any other reason records SESSION_MISSING, and neither read happens: the join to the
+           session views returns no rows for an absent session, which a run records as a SUCCESS with zero rows, so collection health
+           read HEALTHY and the Capture Down self-alert could not fire. Replaced by every ensure (at connect, then hourly), so the
+           first one that succeeds clears it. On Azure SQL Database the fault is set only when the create failed in every database; a
+           failure in some leaves a partial note on the run instead. Written on the pool thread only (INV-2). */
+        public DarlingXeSessions.CaptureEnsureOutcome CaptureEnsure { get; set; } = new();
+
         /* #5640 (L5): whether the last ensure ran with the attention collector enabled. An ensure that skipped the client-timeout
            session because the collector was off leaves this false, so turning the collector on makes the next sweep ensure it at
            once and not after the hour. Reset on every (re)connect. */
@@ -1990,8 +1998,10 @@ LIMIT 1";
         /* Stamped before the ensure, so a server that refuses it is asked once an hour and not on every sweep. */
         server.XeSessionsEnsuredAtUtc = utcNow;
         server.AttentionXeEnsuredWhileEnabled = attentionEnabled;
-        var attentionFault = await DarlingXeSessions.EnsureAllAsync(server.Runtime, runner, logger, cancellationToken, attentionEnabled);
+        var captureOutcome = new DarlingXeSessions.CaptureEnsureOutcome();
+        var attentionFault = await DarlingXeSessions.EnsureAllAsync(server.Runtime, runner, logger, cancellationToken, attentionEnabled, captureOutcome);
         server.AttentionXePermissionFault = attentionFault?.Message;
+        server.CaptureEnsure = captureOutcome;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -2083,6 +2093,7 @@ LIMIT 1";
                 var next = StartupFailureTriage.NextAction(attempt, configRetryBudget.Elapsed, ex);
                 if (!configSustainedRetryCriticalLogged)
                 {
+                    // install-darling.ps1 waits for this text (#6470): reword both together.
                     _logger.LogCritical(
                         ex,
                         "Cannot load configuration within the {Budget}s retry budget ({Message}); this is " +
@@ -2108,6 +2119,7 @@ LIMIT 1";
             }
             catch (Exception ex)
             {
+                // install-darling.ps1 waits for this text (#6470): reword both together.
                 _logger.LogCritical(ex, "Cannot load configuration: {Message}", ex.Message);
                 _collectorState.PublishStopped(CollectorRuntimeState.StartupStep.Configuration);
                 return;
@@ -2125,6 +2137,7 @@ LIMIT 1";
         {
             foreach (var problem in problems)
             {
+                // install-darling.ps1 waits for this text (#6470): reword both together.
                 _logger.LogCritical("Configuration problem: {Problem}", problem);
             }
 
@@ -2136,6 +2149,34 @@ LIMIT 1";
                the per-problem critical log lines just above. */
             _collectorState.PublishConfigurationProblems(config);
             return;
+        }
+
+        /* #6840: a front door has no store of its own, so nothing below applies: no store connection, no migration, no collector,
+           no alerting, no retention and no heartbeat. The MCP and web hosts and the directory service are separate hosted
+           services and keep running; this worker has nothing left to do. Validate runs first (it does not ask a front door for
+           a postgres section) so a broken frontDoor block is reported the same way any other broken block is. */
+        if (config.IsFrontDoor)
+        {
+            foreach (var warning in config.FrontDoor.Warnings())
+            {
+                _logger.LogWarning("{Warning}", warning);
+            }
+
+            _logger.LogInformation(
+                "Front door mode: routing to {StoreCount} store(s). This process holds no store and runs no collectors, alerting, retention or heartbeat.",
+                config.FrontDoor.Stores.Count);
+
+            /* The worker task stays pending until shutdown instead of completing: this is a deliberate rest, not a stand-down
+               after a failure, so it publishes no collector verdict (the ping body keeps its start-up answer). Shutdown
+               cancels the wait, and that is the one silent exit. */
+            try
+            {
+                await Task.Delay(Timeout.Infinite, stoppingToken);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
         }
 
         /* #2339: publish the declared peer stores as soon as a VALIDATED config is in hand, so the web
@@ -2167,6 +2208,12 @@ LIMIT 1";
 
         /* #6262: a remediation secret that is a DPAPI blob works for operator remediation but is refused by agent server actions. */
         foreach (var warning in DarlingSecrets.RemediationSecretWarnings(config.Servers))
+        {
+            _logger.LogWarning("{Warning}", warning);
+        }
+
+        /* #6583: a SQL Server entry's port is ignored (the connection uses the host as written); the store registry's entries are named when it is read. */
+        foreach (var warning in SqlServerPortAdvice.Warnings(config.Servers))
         {
             _logger.LogWarning("{Warning}", warning);
         }
@@ -2207,6 +2254,7 @@ LIMIT 1";
         {
             if (!OperatingSystem.IsWindows())
             {
+                // install-darling.ps1 waits for this text (#6470): reword both together.
                 _logger.LogCritical(
                     "postgres.managed = true requires Windows (the bundled runtime and the DPAPI-protected credential); " +
                     "set postgres.managed = false and point postgres.connectionString at your own PostgreSQL instead.");
@@ -2280,6 +2328,7 @@ LIMIT 1";
                     var next = StartupFailureTriage.NextAction(attempt, bootstrapRetryBudget.Elapsed, ex);
                     if (!bootstrapSustainedRetryCriticalLogged)
                     {
+                        // install-darling.ps1 waits for this text (#6470): reword both together.
                         _logger.LogCritical(
                             ex,
                             "Managed Postgres bootstrap has not succeeded within the {Budget}s retry budget " +
@@ -2305,6 +2354,7 @@ LIMIT 1";
                 }
                 catch (Exception ex)
                 {
+                    // install-darling.ps1 waits for this text (#6470): reword both together.
                     _logger.LogCritical(ex, "Managed Postgres bootstrap failed: {Message}", ex.Message);
                     _collectorState.PublishStopped(CollectorRuntimeState.StartupStep.ManagedStore);
                     return;
@@ -2800,7 +2850,7 @@ LIMIT 1";
         await using var postgres = NpgsqlDataSource.Create(
             DarlingStoreConnection.PinSessionTimeZoneUtc(
                 DarlingStoreConnection.WithApplicationName(
-                    EnsureStoreSearchPath(storeConnectionString), DarlingManagedPostgres.ServiceApplicationName)));
+                    DarlingStoreConnection.EnsureStoreSearchPath(storeConnectionString), DarlingManagedPostgres.ServiceApplicationName)));
         _postgres = postgres;
         _ownerSource?.Publish(postgres);
         /* #2936: a failure here is triaged rather than uniformly terminal. A store that is unreachable for
@@ -2897,6 +2947,7 @@ LIMIT 1";
                 var next = StartupFailureTriage.NextAction(attempt, storeRetryBudget.Elapsed, ex);
                 if (!storeSustainedRetryCriticalLogged)
                 {
+                    // install-darling.ps1 waits for this text (#6470): reword both together.
                     _logger.LogCritical(
                         ex,
                         "Cannot reach or migrate the Postgres store within the {Budget}s retry budget " +
@@ -2921,7 +2972,7 @@ LIMIT 1";
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                _logger.LogCritical(ex, "Cannot reach or migrate the Postgres store: {Message}", ex.Message);
+                _logger.LogCritical(ex, "Cannot reach or migrate the Postgres store: {Message}", ex.Message); // install-darling.ps1 waits for this text (#6470): reword both together.
                 /* #2953: AFTER the critical line, deliberately. The log line is the diagnosis of record and
                    predates this seam; publishing first would put a new call between the failure and the one
                    message an operator greps for. */
@@ -2980,6 +3031,11 @@ LIMIT 1";
            step, which runs before the collectors and every hour. */
         var queryStoreIndexes = QueryStoreIntervalPartitions.RunDelayedAsync(
             postgres, _logger, QueryStoreBackgroundIndexes.StartDelay, QueryStoreBackgroundIndexes.All, stoppingToken);
+
+        /* #6750 part 3: the keys of the monitor's own Query Store statements stored before V219, one scan of the text table, in the
+           background QueryStoreBackgroundIndexes.StartDelay after start. Until it has run the regressions read keeps the text probe
+           (QueryStoreSelfKeys explains the gate). Once per start, a no-op once the state row exists, and it never throws. */
+        var queryStoreSelfKeys = QueryStoreSelfKeys.RunDelayedAsync(postgres, _logger, QueryStoreBackgroundIndexes.StartDelay, stoppingToken);
 
         /* #4957: one rollup-coverage probe in the background RollupCoverageWarmup.ServiceStartDelay after start, so
            the first MCP or web call finds each rollup's floor already measured and does not wait ~10 s on the
@@ -3313,6 +3369,10 @@ LIMIT 1";
            Never throws; a key that cannot be used is a refusing ring with the reason logged and recorded in the store. */
         _passwordKeyRuntime = await DarlingPasswordKeyRuntime.StartForServiceAsync(
             config, DarlingConfig.ResolveConfigPath(), postgres, _logger, stoppingToken);
+        /* #6715: the seed above copies the webhook values from darling.json as plain text, because the ring it would seal them with
+           needs the seeded store and loads only now. Seal those (and any an older build left) here, before the first view reads the
+           row, so this host's reload baseline already includes the write's config_version bump. Never stops the start. */
+        await configProvider.SealPlainWebhookSettingsAsync(_passwordKeyRuntime.Ring, stoppingToken);
         /* #5456: a pin step that could not run is tried again on every sweep, and until it does the re-enter line says to wait.
            Set before the first view so that view's line already knows; the pins it takes bump config_version, which every
            host's reload beacon picks up. */
@@ -3352,6 +3412,14 @@ LIMIT 1";
            else the darling.json servers, which is what this run will actually collect from either way. The
            MCP host's plan-fetch resolver reads this instead of re-reading the store as the mcp role. */
         _registryState.Publish(initialServers);
+        /* #6468: an install that has no servers yet is a normal first start, so say so once, at Information, and name the ways to add
+           one. The service keeps running: it picks up the first server the Viewer or the web dashboard registers, with no restart. */
+        if (initialServers.Count == 0)
+        {
+            _logger.LogInformation(
+                "No monitored servers are configured yet. Add one in the Viewer (Add Server) or with " +
+                "PerformanceMonitor.Darling.Service.exe --add-server; the service starts collecting from it without a restart.");
+        }
         /* #5812 (L1): the PLAN_REGRESSION candidate cache evicts the entries of servers outside this set on its next store. */
         PerformanceMonitor.Darling.Analysis.PgFactCollector.PlanRegressionCandidateCache.Shared.RetainServers(initialServers.Select(s => s.ServerId));
 
@@ -3436,7 +3504,7 @@ LIMIT 1";
            service is hoisted too so a reload can re-LoadAsync() it (closes F16 — the engine holds
            its IsAlertMuted delegate, so refreshing the same instance's cache mutes the next sweep). */
         var alertSettings = new DarlingAlertSettings(config, _logger);
-        var historyStore = new PgAlertHistoryStore(postgres, _logger);
+        var historyStore = new PgAlertHistoryStore(postgres, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds, _logger);
         var webhookAlertService = new WebhookAlertService(
             alertSettings, DarlingAlertDeliverer.Branding,
             _loggerFactory.CreateLogger<WebhookAlertService>(), historyStore);
@@ -3453,7 +3521,7 @@ LIMIT 1";
             InvestigationDispatcher.WithLockTimeout(
                 DarlingStoreConnection.PinSessionTimeZoneUtc(
                     DarlingStoreConnection.WithApplicationName(
-                        EnsureStoreSearchPath(storeConnectionString), DarlingManagedPostgres.ServiceApplicationName))));
+                        DarlingStoreConnection.EnsureStoreSearchPath(storeConnectionString), DarlingManagedPostgres.ServiceApplicationName))));
         var investigationStore = new InvestigationRequestStore(
             investigationPostgres, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds);
         /* #5821: the generic webhook's {{investigation_json}} masks the stored brief at the level the MCP tools serve; an
@@ -3539,8 +3607,8 @@ LIMIT 1";
         if (customAlertViewerSource is not null)
         {
             _customAlertEvaluator = new CustomAlertEvaluator(
-                new CustomAlertRuleStore(postgres),
-                new CustomAlertStateStore(postgres),
+                new CustomAlertRuleStore(postgres, McpCommandDeadlines.ReadSeconds),
+                new CustomAlertStateStore(postgres, McpCommandDeadlines.ReadSeconds),
                 customAlertViewerSource,
                 deliverer,
                 muteRuleService.IsAlertMuted,
@@ -3575,6 +3643,17 @@ LIMIT 1";
                through the same by-reference alertSettings seam, so a store edit takes effect on the next sweep
                without a restart (and the clamps live on the settings properties, not here). */
             notifyAgHealth: () => alertSettings.NotifyAgHealth,
+            /* #6875: the Identity Capacity switch and bars, read live, and the per-server and per-database override resolution. Off until an operator turns it on. */
+            identityCapacityEnabled: () => alertSettings.IdentityCapacityEnabled,
+            identityCapacityWarningPercent: () => alertSettings.IdentityCapacityWarningPercent,
+            identityCapacityCriticalPercent: () => alertSettings.IdentityCapacityCriticalPercent,
+            resolveThreshold: (wire, serverKey, database, global) => _thresholdOverrides.ResolveWire(wire, serverKey, database, global),
+            /* #6874: the Agent Alert Gaps switch, read live. Off until an operator turns it on. */
+            agentAlertSetupEnabled: () => alertSettings.AgentAlertGapsEnabled,
+            /* #6873: the three database protection switches, read live. Off until an operator turns each on. */
+            backupOverdueEnabled: () => alertSettings.BackupOverdueEnabled,
+            logBackupOverdueEnabled: () => alertSettings.LogBackupOverdueEnabled,
+            checkDbOverdueEnabled: () => alertSettings.CheckDbOverdueEnabled,
             agLagAlertSeconds: () => alertSettings.AgLagAlertSeconds,
             agRedoQueueAlertKb: () => alertSettings.AgRedoQueueAlertKb,
             agDisconnectRefireMinutes: () => alertSettings.AgDisconnectRefireMinutes,
@@ -3684,7 +3763,7 @@ LIMIT 1";
             externalAlertStore,
             alertsEnabled: () => alertSettings.AlertsEnabled,
             (outcome, token) => deliverer.DeliverAndReportAsync(outcome, token),
-            (metric, serverName, serverKey, detail, token) => deliverer.TryResolvePagerDutyAsync(metric, serverName, serverKey, detail, token),
+            (metric, serverName, serverKey, detail, severity, token) => deliverer.TryResolvePagerDutyAsync(metric, serverName, serverKey, detail, severity, token),
             historyStore,
             muteRuleService.IsAlertMuted,
             name =>
@@ -3737,7 +3816,7 @@ LIMIT 1";
            PostgreSQL store there are no hourly rollups for a backdated row to fall out of, so the refresh
            term does not apply and that deployment mode keeps the full raw-tier depth. Passed as a provider
            rather than a value so it cannot capture a stale reading. */
-        var queryStoreBackfill = new QueryStoreBackfill(postgres, runner, deltas, _logger, () => config.CapturePlans,
+        var queryStoreBackfill = new QueryStoreBackfill(postgres, runner, deltas, _logger,
             () => StoreConfigProvider.ClampTextBudgetMb(config.QueryStoreTextBudgetMb),
             () => _timescaleAvailable,
             /* #5483: the server's effective database_states cadence, resolved live like the alert adapter's, so the
@@ -3789,6 +3868,7 @@ LIMIT 1";
            once, here. No daily run can be going yet, so nothing has to give a permit back. */
         ApplyDailyRunCap(StorePoolMaxSize(postgres), initialSweepWidth);
 
+        // install-darling.ps1 waits for this text (#6470): reword both together.
         _logger.LogInformation("PerformanceMonitor Darling collection loop started");
         /* #2953: the one publish that clears the failure phases. Set HERE — the last statement before the
            sweep loop's first iteration — and not re-published per cycle: this seam answers "did collection
@@ -3807,6 +3887,14 @@ LIMIT 1";
            was built: the store retries and migrations before this point can take minutes. */
         _collectionPressure.MarkCollectionStarted();
 
+        /* A stop that lands where a pass awaits the store (the config beacon, the password key check, a version stamp)
+           raises OperationCanceledException from the pass itself. It must end the loop and fall to the drain below, as the
+           two delay arms do: leaving by the exception disposes the store sources while the command, external alert,
+           investigation, backfill and heartbeat loops are still running, and a pass of theirs in flight then fails on a
+           disposed source and logs a false warning. The try's braces sit at the loop's own indent and the pass is not
+           re-indented under them, so the lines that tests and other branches read by column stay where they were. */
+        try
+        {
         while (!stoppingToken.IsCancellationRequested)
         {
             /* #4732: tells the skipped-slot count when this loop was not running. First thing in the pass and on the
@@ -4435,6 +4523,11 @@ LIMIT 1";
                 break;
             }
         }
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            /* Expected on shutdown. */
+        }
 
         /* Shutdown drain for the fire-and-track bodies (#1553): the launch loop does NOT await the per-server
            bodies, so on cancellation some may still be running (or queued on the gate). Collect the live ones
@@ -4689,6 +4782,9 @@ LIMIT 1";
 
         /* And the Query Store read index ensures (#4605, #4952, #5507), which absorb their own failures. */
         await queryStoreIndexes;
+
+        /* And the self-statement key backfill (#6750), which absorbs its own failures. */
+        await queryStoreSelfKeys;
 
         /* And the rollup-coverage warm (#4957), which also absorbs its own failures. */
         await rollupCoverageWarm;
@@ -5082,6 +5178,15 @@ LIMIT 1";
            dropped its session, and a create now would outlive the server. */
         if (server.Runtime is null || server.Retired)
         {
+            return;
+        }
+
+        /* #6893: Amazon RDS Web and Express refuse every session create, and write each refusal into the instance's own error log. The
+           collector does not apply there, so neither the create nor the drop is sent, on any sweep. */
+        if (!CollectorTargetInfo.XeSessionSupported(server.Runtime.Target))
+        {
+            server.LongQueryTraceFault = null;
+            server.LongQueryTracePartialNote = null;
             return;
         }
 
@@ -5965,7 +6070,7 @@ LIMIT 1";
     /// five on-load collectors' once-a-day recapture, the catalog's 1440-minute collectors, and any collector an
     /// operator slows to a day or more.
     /// </summary>
-    internal const int DailyCollectorIntervalMinutes = 1440;
+    internal const int DailyCollectorIntervalMinutes = SweepPressureReport.DailyCollectorIntervalMinutes;
 
     /// <summary>
     /// #4938: the most detached daily runs that may be going at once across the whole fleet. Each holds a connection
@@ -6228,7 +6333,7 @@ LIMIT 1";
     /// interval, where an on-load collector's 0 has already become its daily recapture.
     /// </summary>
     internal static bool IsDailyInterval(int effectiveIntervalMinutes) =>
-        effectiveIntervalMinutes >= DailyCollectorIntervalMinutes;
+        SweepPressureReport.IsDailyInterval(effectiveIntervalMinutes);
 
     /// <summary>
     /// #4938, #4999: whether a finished run's cost goes into the sweep body's peer high-water mark (#2864). Not
@@ -6419,6 +6524,21 @@ LIMIT 1";
     internal static string? AttentionPermissionFaultFor(string collectorName, ServerLoopState server) =>
         IsAttentionCollector(collectorName) ? server.AttentionXePermissionFault : null;
 
+    /// <summary>
+    /// #6893: the ensure failure the deadlock or blocked-process run records instead of reading a session that does not exist, or null for
+    /// any other collector and when the last ensure left the session in place.
+    /// </summary>
+    internal static DarlingXeSessions.XeEnsureFailure? CaptureEnsureFaultFor(string collectorName, ServerLoopState server) =>
+        string.Equals(collectorName, DeadlocksCollector.Instance.Name, StringComparison.OrdinalIgnoreCase) ? server.CaptureEnsure.Deadlock
+        : string.Equals(collectorName, BlockedProcessReportCollector.Instance.Name, StringComparison.OrdinalIgnoreCase) ? server.CaptureEnsure.BlockedProcess
+        : null;
+
+    /// <summary>#6893: the partial note (Azure SQL Database, the create failed in some databases) merged onto a successful deadlock or blocked-process run, or null.</summary>
+    internal static string? CaptureEnsurePartialNoteFor(string collectorName, ServerLoopState server) =>
+        string.Equals(collectorName, DeadlocksCollector.Instance.Name, StringComparison.OrdinalIgnoreCase) ? server.CaptureEnsure.DeadlockPartialNote
+        : string.Equals(collectorName, BlockedProcessReportCollector.Instance.Name, StringComparison.OrdinalIgnoreCase) ? server.CaptureEnsure.BlockedProcessPartialNote
+        : null;
+
     internal static bool IsAttentionCollector(string collectorName) =>
         string.Equals(collectorName, AttentionCollector.Instance.Name, StringComparison.OrdinalIgnoreCase);
 
@@ -6456,7 +6576,7 @@ LIMIT 1";
     /// the gate acquisition tests it once, and this is not that call.
     /// </summary>
     internal static bool IsDetachedByName(string name) =>
-        IsQueryStoreCollector(name) || IsPlanCorrectionCollector(name) || IsPgWaitSamplingCollector(name);
+        SweepPressureReport.IsDetachedByName(name);
 
     /// <summary>
     /// #4999: THE test for whether a collector's scheduled run leaves its server's sequential pass: the three
@@ -6467,7 +6587,7 @@ LIMIT 1";
     /// run is not part of the body, and a long run of it is not an overrun of the body.
     /// </summary>
     internal static bool RunsDetached(string name, int effectiveIntervalMinutes) =>
-        IsDetachedByName(name) || IsDailyInterval(effectiveIntervalMinutes);
+        SweepPressureReport.RunsDetached(name, effectiveIntervalMinutes);
 
     /// <summary>
     /// #4999: the (server, collector) slot an INLINE run of a daily collector takes: the at-connect run of an on-load
@@ -7150,6 +7270,18 @@ LIMIT 1";
                ServerDefinitionEquals) drops the runtime to reconnect through the startup path. */
             var connectionChanged = !ServerDefinitionEquals(state.Config, desiredServer);
             state.Config = desiredServer;
+            /* #6771: the plan-capture setting is not a connection field, so an edit must reach the next cycle without a reconnect.
+               The collectors read the runtime (set at connect, init-only Config), so the new value goes onto the live runtime too. */
+            if (state.Runtime is { } liveRuntime)
+            {
+                liveRuntime.CapturePlans = desiredServer.CapturePlans;
+            }
+
+            if (state.LastKnownRuntime is { } lastRuntime)
+            {
+                lastRuntime.CapturePlans = desiredServer.CapturePlans;
+            }
+
             if (connectionChanged)
             {
                 _logger.LogInformation(
@@ -7817,47 +7949,16 @@ LIMIT 1";
     }
 
     /// <summary>
-    /// Ensures the store connection string carries the collect/config search path (the V8 schema
-    /// split) so every pooled physical connection resolves the shared SQL's bare table names to the
-    /// <c>collect</c>/<c>config</c> schemas from its FIRST use. Managed mode already sets it
-    /// (<see cref="DarlingManagedPostgres.SearchPath"/>) — that string is returned unchanged, no
-    /// double-set. A bring-your-own connection string usually omits it and would otherwise rely on
-    /// the database-default <c>search_path</c> that
-    /// <see cref="PgMigrations.MigrateAsync(NpgsqlConnection, ILogger, CancellationToken)"/>
-    /// best-effort sets via <c>ALTER DATABASE ... SET search_path</c>.
-    ///
-    /// <para>That database default only governs the startup search_path of connections established
-    /// AFTER the ALTER commits, but the Npgsql pool's physical connections opened around it (for the
-    /// migration itself, the hypertable conversion, and the first collection sweep) keep their
-    /// pre-ALTER session search_path for their entire lifetime. On a FRESH BYO store that means the
-    /// whole first run fails — hypertable conversion, delta seeding, and every collector write hit
-    /// <c>42P01: relation "wait_stats" does not exist</c> — and collection only starts working after
-    /// a service restart hands out a fresh pool. Carrying the search path on the connection string
-    /// itself is deterministic and pool-timing-independent; any login may <c>SET</c> its own
-    /// search_path, so this is safe for least-privilege BYO logins too.</para>
+    /// The store data source the MCP and web hosts open (#6630): the operator's string (a configured
+    /// <c>postgres.mcpConnectionString</c>/<c>webConnectionString</c> or the owner fallback never runs through the managed
+    /// builder) with the collect/config search path set-if-absent, then the application name, then the UTC session pin,
+    /// in the order the worker builds its own. Without the path a login that does not own the database, on a database
+    /// with no default path, fails every unqualified read with 42P01.
     /// </summary>
-    internal static string EnsureStoreSearchPath(string connectionString)
-    {
-        var builder = new NpgsqlConnectionStringBuilder(connectionString);
-        if (string.IsNullOrWhiteSpace(builder.SearchPath))
-        {
-            /* Append, don't rewrite through the builder: round-1 review on #4285's PR found the builder's
-               writer erases a caller keyword set to an explicit empty value (Password='', ...), because it
-               emits that as a bare Key=, which its own reader treats as "not set". Appending keeps every
-               other keyword byte for byte. The constant below holds no ';', '=' or quote character, so it
-               never needs quoting — a plain "Search Path=<value>" is unambiguous.
-               DarlingManagedPostgres is annotated [SupportedOSPlatform("windows")] for its DPAPI /
-               bundled-cluster surface, but SearchPath is a platform-neutral compile-time constant
-               with no runtime dependency, and BYO mode runs on any OS — so the CA1416 cross-platform
-               reachability flag is spurious for this const reference. Suppressed narrowly rather than
-               forking the constant, keeping managed and BYO byte-identical (a test pins them equal). */
-#pragma warning disable CA1416
-            return connectionString + ";Search Path=" + DarlingManagedPostgres.SearchPath;
-#pragma warning restore CA1416
-        }
-
-        return connectionString;
-    }
+    internal static NpgsqlDataSource CreateHostStoreDataSource(string storeConnectionString, string applicationName) =>
+        NpgsqlDataSource.Create(
+            DarlingStoreConnection.PinSessionTimeZoneUtc(
+                DarlingStoreConnection.WithApplicationName(DarlingStoreConnection.EnsureStoreSearchPath(storeConnectionString), applicationName)));
 
     /// <summary>
     /// Assembles the Phase-5 shared alert engine over Darling's third-party implementations:
@@ -8872,7 +8973,7 @@ LIMIT 1";
                         NumericThresholdValue: threshold,
                         Muted: muted,
                         Severity: AlertEngine.GradeDeadlockFire(count, rateTiers),
-                        ShortMessage: $"{count} deadlock(s) in the last hour"),
+                        ShortMessage: $"{count} {(count == 1 ? "deadlock" : "deadlocks")} in the last hour"),
                     cancellationToken);
                 readClock.Restart();
 
@@ -9051,7 +9152,7 @@ LIMIT 1";
                         NumericThresholdValue: threshold,
                         Muted: muted,
                         Severity: PgBlockingFireSeverity,
-                        ShortMessage: $"{count} blocking session(s)"),
+                        ShortMessage: $"{count} blocking {(count == 1 ? "session" : "sessions")}"),
                     cancellationToken);
                 readClock.Restart();
 
@@ -9264,7 +9365,7 @@ LIMIT 1";
                         key,
                         snapshot.ServerName,
                         metricName,
-                        $"{rows.Count} query(s), longest {elapsedMinutes}m",
+                        $"{rows.Count} {(rows.Count == 1 ? "query" : "queries")}, longest {elapsedMinutes}m",
                         $"{thresholdMinutes}m",
                         Context: AlertSampleAge.Stamp(
                             new AlertContext
@@ -9683,7 +9784,7 @@ LIMIT 1";
                    without this, a multi-line statement breaks the one-line-per-incident rendering and an
                    unbounded one can bloat the stored context past what Slack/Teams will accept. */
                 string.IsNullOrWhiteSpace(row.VictimStatement)
-                    ? $"victim pid {row.VictimPid}, {row.ParticipantCount} participant(s)"
+                    ? $"victim pid {row.VictimPid}, {row.ParticipantCount} {(row.ParticipantCount == 1 ? "participant" : "participants")}"
                     : AlertContextBuilders.TruncateText(row.VictimStatement!),
             });
 
@@ -9776,7 +9877,7 @@ LIMIT 1";
                 : row.RootBackendId.ToString(CultureInfo.InvariantCulture),
             new[]
             {
-                $"root pid {row.RootPid} blocking {row.TotalVictims} session(s)"
+                $"root pid {row.RootPid} blocking {row.TotalVictims} {(row.TotalVictims == 1 ? "session" : "sessions")}"
                     + (row.Databases.Length > 0 ? $" in [{string.Join(", ", row.Databases)}]" : string.Empty)
                     /* AlertContextBuilders.TruncateText — same reasoning as BuildPgDeadlockIncident's
                        VictimStatement: root queries are commonly multi-line and otherwise unbounded. */
@@ -14002,6 +14103,11 @@ AND   j.hypertable_name = '{relation}'", connection))
             }
 
             var runtime = attempt.Value.Runtime!;
+
+            /* #6771: the plan-capture setting is not part of ServerDefinitionEquals (an edit must not reconnect), so the
+               attempt's runtime can carry the value from before an edit that landed while this body waited for the permit,
+               and ReconcileServers had no runtime to re-stamp. The held definition is the current one: copy from it. */
+            runtime.CapturePlans = server.Config.CapturePlans;
             server.Runtime = runtime;
             server.LastKnownRuntime = runtime;
             server.WatchingSinceUtc = DateTime.UtcNow;
@@ -14133,8 +14239,10 @@ AND   j.hypertable_name = '{relation}'", connection))
             if (runtime.Target.Engine == CollectorTargetEngine.SqlServer)
             {
                 var attentionEnabled = StoreConfigProvider.ResolveSchedule("attention", server.Config.ServerId, _scheduleOverrides).Enabled;
-                var attentionFault = await DarlingXeSessions.EnsureAllAsync(runtime, runner, _logger, cancellationToken, attentionEnabled);
+                var captureOutcome = new DarlingXeSessions.CaptureEnsureOutcome();
+                var attentionFault = await DarlingXeSessions.EnsureAllAsync(runtime, runner, _logger, cancellationToken, attentionEnabled, captureOutcome);
                 server.AttentionXePermissionFault = attentionFault?.Message;
+                server.CaptureEnsure = captureOutcome;
                 server.AttentionXeEnsuredWhileEnabled = attentionEnabled;
                 server.XeSessionsEnsuredAtUtc = DateTime.UtcNow;
             }
@@ -16537,6 +16645,19 @@ LIMIT 1";
                 throw new DarlingXeSessionDeniedException(attentionFault);
             }
 
+            /* #6893: the deadlock and blocked-process sessions, the same two outcomes as the two above. The ensure that could not create the
+               session left its failure on the server: PERMISSIONS for a denied create, SESSION_MISSING for anything else. Without this
+               the read joined an absent session and returned zero rows, and the run recorded SUCCESS. */
+            if (CaptureEnsureFaultFor(collectorName, server) is { } captureFault)
+            {
+                if (captureFault.IsPermission)
+                {
+                    throw new DarlingXeSessionDeniedException(captureFault.Message);
+                }
+
+                throw new DarlingXeSessionMissingException(captureFault.Message);
+            }
+
             var result = await run(runner, runtime, cancellationToken);
 
             /* #4964: a run of this collector succeeded, so its run of missing-session failures is over: the next failure
@@ -16553,6 +16674,12 @@ LIMIT 1";
             if (IsLongQueryCompletionsCollector(collectorName) && server.LongQueryTracePartialNote is { } partialNote)
             {
                 result = result with { HostNote = EnumeratedCollectorDriver.MergeNotes(result.HostNote, partialNote) };
+            }
+
+            /* #6893: the same partial case for the deadlock and blocked-process sessions on Azure SQL Database. */
+            if (CaptureEnsurePartialNoteFor(collectorName, server) is { } captureNote)
+            {
+                result = result with { HostNote = EnumeratedCollectorDriver.MergeNotes(result.HostNote, captureNote) };
             }
 
             /* #4004 review, round 3: the first pg_log_events run after a start that replaced a discarded log-hash key
@@ -17420,6 +17547,10 @@ LIMIT 1";
         ["ag_database_replica_states"] = (r, s, ct) => r.RunAsync(AgDatabaseReplicaStatesCollector.Instance, s, ct),
         ["plan_correction"] = (r, s, ct) => r.RunAsync(PlanCorrectionCollector.Instance, s, ct),
         ["query_store_forced_plans"] = (r, s, ct) => r.RunAsync(QueryStoreForcedPlansCollector.Instance, s, ct),
+        ["query_store_hints"] = (r, s, ct) => r.RunAsync(QueryStoreHintsCollector.Instance, s, ct),
+        ["identity_capacity"] = (r, s, ct) => r.RunAsync(IdentityCapacityCollector.Instance, s, ct),
+        ["agent_alerts"] = (r, s, ct) => r.RunAsync(AgentAlertsCollector.Instance, s, ct),
+        ["database_protection"] = (r, s, ct) => r.RunAsync(DatabaseProtectionCollector.Instance, s, ct),
         ["pvs_stats"] = (r, s, ct) => r.RunAsync(PvsStatsCollector.Instance, s, ct),
         /* PostgreSQL. Dispatch is by name and engine-agnostic; the engine gate upstream in
            RunDueCollectorsAsync means this lambda is only ever reached for a Postgres target. */

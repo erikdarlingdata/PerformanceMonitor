@@ -166,8 +166,8 @@ public sealed class DarlingConfigTests
 
         Assert.Contains(ValidConfig(c => c.Postgres.ConnectionString = "").Validate(),
             p => p.Contains("postgres.connectionString", StringComparison.Ordinal));
-        Assert.Contains(ValidConfig(c => c.Servers.Clear()).Validate(),
-            p => p.Contains("at least one", StringComparison.Ordinal));
+        /* #6468: an empty server list is a valid start (the first server is added after install), not a problem. */
+        Assert.Empty(ValidConfig(c => c.Servers.Clear()).Validate());
         Assert.Contains(ValidConfig(c => c.Servers[0].Host = "").Validate(),
             p => p.Contains("host is required", StringComparison.Ordinal));
         Assert.Contains(ValidConfig(c => c.Servers[0].Auth = "kerberos").Validate(),

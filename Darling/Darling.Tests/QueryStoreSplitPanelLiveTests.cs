@@ -140,7 +140,7 @@ VALUES (1, (now() AT TIME ZONE 'UTC') - interval '30 hours', now() AT TIME ZONE 
         foreach (var panel in s_panels)
         {
             var (start, end, plan, rollups, coverage) = await PrepareAsync(source, panel, ct);
-            var resolution = await DarlingWebEndpoints.ResolveQueryStoreWideEligibleAsync(source, null, start, end, null, ct, plan);
+            var resolution = await ComposePanelRunner.ResolveQueryStoreWideEligibleAsync(source, null, start, end, null, ct, plan);
             Assert.True(resolution.Eligible, "servers 1 to 3 pass, so the panel must read the interval table for them: " + panel);
             Assert.Equal(new[] { 4 }, resolution.RawServerIds);
 
@@ -188,7 +188,7 @@ VALUES (1, (now() AT TIME ZONE 'UTC') - interval '30 hours', now() AT TIME ZONE 
 
         async Task<(string Sql, IReadOnlyList<int>? Raw, bool Eligible)> RunAsync(params string[] scope)
         {
-            var resolution = await DarlingWebEndpoints.ResolveQueryStoreWideEligibleAsync(source, scope, start, end, null, ct, plan);
+            var resolution = await ComposePanelRunner.ResolveQueryStoreWideEligibleAsync(source, scope, start, end, null, ct, plan);
             var context = new ComposeRunContext(scope, start, end, ComposeRunContext.NoVariables, rollups, end, coverage, resolution.Eligible, resolution.WideStart,
                 QueryStoreGroupMembers: resolution.GroupMembers, QueryStoreStampThrough: resolution.StampThrough, QueryStoreRawServerIds: resolution.RawServerIds);
             var (compiled, error) = ComposeCompiler.Compile(plan, context);
@@ -278,7 +278,7 @@ FROM collect.query_store_stats AS r WHERE r.server_id = 1", ct);
             async Task<(List<string> Split, List<string> AllRaw, string Sql)> RunBothAsync(string panel)
             {
                 var (start, end, plan, rollups, coverage) = await PrepareAsync(source, panel, ct);
-                var resolution = await DarlingWebEndpoints.ResolveQueryStoreWideEligibleAsync(source, null, start, end, null, ct, plan);
+                var resolution = await ComposePanelRunner.ResolveQueryStoreWideEligibleAsync(source, null, start, end, null, ct, plan);
                 Assert.True(resolution.Eligible, "servers 1 to 3 pass, so the panel must read the wide route: " + panel);
                 Assert.Equal(new[] { 4 }, resolution.RawServerIds);
                 Assert.Equal(hourNow.AddHours(-2), resolution.StampThrough);
@@ -328,7 +328,7 @@ FROM collect.query_store_stats AS r WHERE r.server_id = 1", ct);
             "INSERT INTO collect.collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected) "
             + $"VALUES ({6_115_000_000L + logId}, {serverId}, 'srv{serverId}', 'query_store', (now() AT TIME ZONE 'UTC') - interval '{ago}', 20, 'SUCCESS', {rows})", ct);
 
-    private static async Task<DarlingWebEndpoints.ComposeRunOutcome> RunPanelAsync(NpgsqlDataSource source, CancellationToken ct) =>
+    private static async Task<ComposeRunOutcome> RunPanelAsync(NpgsqlDataSource source, CancellationToken ct) =>
         await DarlingWebEndpoints.RunComposedPanelAsync(source, new JsonObject { ["panel"] = JsonNode.Parse(s_panels[0]), ["hours"] = 24 }, ct);
 
     /// <summary>#6115: the raw half of the read guard (<see cref="QueryStoreWideReadGuard.Estimate.RawRows"/>). Server 4 is read raw; its collection
@@ -351,7 +351,7 @@ FROM collect.query_store_stats AS r WHERE r.server_id = 1", ct);
         /* Under the limit: a thousand rows collected an hour ago. */
         await LogRowsAsync(connection, 1, 4, "1 hour", 1_000, ct);
         var end = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
-        var under = await QueryStoreWideReadGuard.EstimateSplitAsync(source, null, end, null, new[] { 4 }, end.AddHours(-24), ct);
+        var under = await QueryStoreWideReadGuard.EstimateSplitAsync(source, null, end, null, new[] { 4 }, end.AddHours(-24), StorageCommandDeadlines.McpReadSeconds, ct);
         Assert.InRange(under!.Value.RawRows, 900L, 1_000L);
         Assert.Equal(1, under.Value.RawServers);
         /* The wide half leaves the raw server out: its log rows are not counted a second time as a wide day. */
@@ -401,7 +401,7 @@ FROM collect.query_store_stats AS r WHERE r.server_id = 1", ct);
 
         /* Server 1 has no built day and collected only before the window: it adds 0 (it is the newest day of a server that stopped). */
         await LogRowsAsync(connection, 1, 1, "10 days", 1_000_000, ct);
-        var before = await QueryStoreWideReadGuard.EstimateAsync(source, null, null, ct, null, start, end);
+        var before = await QueryStoreWideReadGuard.EstimateAsync(source, null, null, StorageCommandDeadlines.McpReadSeconds, ct, null, start, end);
         Assert.Equal(new QueryStoreWideReadGuard.Estimate(0, 0), before);
         Assert.Equal(0L, before!.Value.RowsOver(start, end));
 
@@ -409,7 +409,7 @@ FROM collect.query_store_stats AS r WHERE r.server_id = 1", ct);
         await LogRowsAsync(connection, 2, 2, "2 days", 3_000, ct);
         await LogRowsAsync(connection, 3, 2, "5 days", 2_000, ct);
         await LogRowsAsync(connection, 4, 2, "9 days", 1_000, ct);
-        var inside = await QueryStoreWideReadGuard.EstimateAsync(source, null, null, ct, null, start, end);
+        var inside = await QueryStoreWideReadGuard.EstimateAsync(source, null, null, StorageCommandDeadlines.McpReadSeconds, ct, null, start, end);
         Assert.Equal(1, inside!.Value.Servers);
         Assert.InRange(inside.Value.RowsOver(start, end), 5_000L, 5_010L);
 
@@ -423,7 +423,7 @@ FROM collect.query_store_stats AS r WHERE r.server_id = 1", ct);
             + "(3, DATE '2026-01-01', 2, now() AT TIME ZONE 'UTC', 300), (4, DATE '2026-01-01', 2, now() AT TIME ZONE 'UTC', 400)", ct);
         await LogRowsAsync(connection, 5, 5, "20 days", 9_000_000, ct);
         await LogRowsAsync(connection, 6, 5, "21 days", 9_000_000, ct);
-        var mature = await QueryStoreWideReadGuard.EstimateAsync(source, null, null, ct, null, start, end);
+        var mature = await QueryStoreWideReadGuard.EstimateAsync(source, null, null, StorageCommandDeadlines.McpReadSeconds, ct, null, start, end);
         Assert.Equal(new QueryStoreWideReadGuard.Estimate(1_000, 4), mature);
     }
 
@@ -449,12 +449,12 @@ FROM collect.query_store_stats AS r WHERE r.server_id = 1", ct);
         /* Server 4 is read raw: its log rows belong to the raw half and never to the wide estimate. */
         await LogRowsAsync(connection, 4, 4, "1 hour", 4_000_000, ct);
 
-        var fleet = await QueryStoreWideReadGuard.EstimateAsync(source, null, null, ct);
+        var fleet = await QueryStoreWideReadGuard.EstimateAsync(source, null, null, StorageCommandDeadlines.McpReadSeconds, ct);
         Assert.Equal(new QueryStoreWideReadGuard.Estimate(13_000_000, 2), fleet);
-        var withoutRaw = await QueryStoreWideReadGuard.EstimateAsync(source, null, null, ct, new[] { 4 });
+        var withoutRaw = await QueryStoreWideReadGuard.EstimateAsync(source, null, null, StorageCommandDeadlines.McpReadSeconds, ct, new[] { 4 });
         Assert.Equal(new QueryStoreWideReadGuard.Estimate(9_000_000, 1), withoutRaw);
         /* A server with neither a built day nor a log row still adds nothing: the guard fails open. */
-        Assert.Equal(new QueryStoreWideReadGuard.Estimate(0, 0), await QueryStoreWideReadGuard.EstimateAsync(source, new[] { "srv2" }, null, ct));
+        Assert.Equal(new QueryStoreWideReadGuard.Estimate(0, 0), await QueryStoreWideReadGuard.EstimateAsync(source, new[] { "srv2" }, null, StorageCommandDeadlines.McpReadSeconds, ct));
 
         var refused = await RunPanelAsync(source, ct);
         Assert.True(refused.Payload is null, "nine million collected rows for one wide server must refuse the panel; it ran");
@@ -466,7 +466,7 @@ FROM collect.query_store_stats AS r WHERE r.server_id = 1", ct);
         await ExecAsync(connection,
             "INSERT INTO collect.query_store_top_daily_built (server_id, day, pass, built_at, source_rows) "
             + "VALUES (1, DATE '2026-01-01', 2, now() AT TIME ZONE 'UTC', 1000)", ct);
-        Assert.Equal(new QueryStoreWideReadGuard.Estimate(1_000, 1), await QueryStoreWideReadGuard.EstimateAsync(source, null, null, ct, new[] { 4 }));
+        Assert.Equal(new QueryStoreWideReadGuard.Estimate(1_000, 1), await QueryStoreWideReadGuard.EstimateAsync(source, null, null, StorageCommandDeadlines.McpReadSeconds, ct, new[] { 4 }));
         var ran = await RunPanelAsync(source, ct);
         Assert.True(ran.Payload is not null, "with a small built day the panel must run: " + ran.Error);
     }

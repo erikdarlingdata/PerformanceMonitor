@@ -18,6 +18,7 @@ const context = vm.createContext({
   console, URLSearchParams, window: windowStub,
   fetch: async () => ({ status: nextResponse.status, text: async () => nextResponse.text }),
   reportSessionExpired: () => { expiredCalls++; },
+  storeHeaders: (h) => h, /* util.js: adds X-Darling-Store behind a front door (#6840); a store is not behind one */
 });
 vm.runInContext(source + "\nglobalThis.__p = { TEXT_FIELDS, formToCreateBody, buildPatch, isEmptyCreate, interpretWrite, EMPTY_CREATE_WARNING, send, closeForm, parsePrefill, openForm: (f) => { form = { errors: {}, ...f }; }, setLast: (v) => { lastPrefillQuery = v; }, getLast: () => lastPrefillQuery };", context);
 const ctx2 = vm.createContext({});

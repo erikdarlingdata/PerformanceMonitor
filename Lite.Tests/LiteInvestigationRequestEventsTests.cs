@@ -115,6 +115,19 @@ VALUES ('{at:yyyy-MM-dd HH:mm:ss.ffffff}', {serverId}, 'srv-{serverId}', '{firin
         Assert.Equal("critical", Scalar("SELECT max_severity FROM investigation_requests"));
     }
 
+    /* A follow-up opens now but copies its source's alert rows with their original times, so its last alert can be weeks old.
+       A clear logged after that alert still resolves it: the read's bound is the oldest last alert, not a fixed window. */
+    [Fact]
+    public async Task ARequestWhoseAlertsAreOlderThanThreeDays_IsResolvedByAClearAfterThem()
+    {
+        await _store.OpenOrJoinAsync(Alert(T0, "Blocking", "warning"), Ct);
+        var alertAt = T0.AddDays(-10);
+        Exec($"UPDATE investigation_request_alerts SET alert_time = '{alertAt:yyyy-MM-dd HH:mm:ss.ffffff}'");
+        Resolution(alertAt.AddDays(1), "Blocking");
+        _now = T0.AddMinutes(1);
+        Assert.Equal(1, (await _store.SweepAsync(Ct)).Resolved);
+    }
+
     [Fact]
     public async Task ARequestIsResolved_OnlyWhenEveryLinkedMetricHasAResolutionRowAfterItsLastAlert_OnItsOwnServer()
     {

@@ -130,6 +130,28 @@ try {
       out.openAfterNavigation = !ctl().popover.hidden;
       out.expandedAfterNavigation = ctl().button.getAttribute("aria-expanded");
     },
+    /* The tab strip the page draws for a server with more tabs than fit in one row: the strip carries the class app.css wraps
+       onto a second row (.subtabs), and every tab is a link in it. */
+    async tabBar() {
+      const ids = Array.from({ length: 14 }, (_, i) => "t" + String(i).padStart(2, "0"));
+      const tabs = ids.map((id) => `{ id: '${id}', label: 'Tab ${id}', build() { return el('div', { class: 'stub-panel' }); } }`);
+      fs.writeFileSync(
+        path.join(scratch, "pages", "server-tabs.js"),
+        'import { el } from "../util.js";\n' +
+          `const TABS = [${tabs.join(", ")}];\n` +
+          "export const SERVER_TABS = TABS;\nexport const POSTGRES_TABS = TABS;\n" +
+          "export function serverTabsFor() { return TABS; }\n" +
+          "export function isPostgresTarget() { return false; }\n" +
+          "export function findServerTab(id, tabs) { const r = tabs || TABS; return r.find((t) => t.id === id) || r[0]; }\n" +
+          "export function tabNote() { return null; }\n"
+      );
+      const { page } = await open();
+      const strips = page.every((n) => n.tag === "nav" && n.attrs["aria-label"] === "Server sections");
+      out.stripCount = strips.length;
+      out.stripClass = strips.length ? strips[0].className : null;
+      out.tabs = strips.length ? strips[0].every((n) => n.tag === "a").map((a) => a.textContent) : [];
+      out.tabsWithTheTabClass = strips.length ? strips[0].byClass("subtab").length : 0;
+    },
     /* A PostgreSQL card gets no control, and no filter is active. */
     async postgres() {
       card = { ...card, is_postgres: true, engine_description: "PostgreSQL" };

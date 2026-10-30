@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
+using PerformanceMonitor.Darling.Storage;
 
 namespace Darling.Tests;
 
@@ -24,15 +25,15 @@ public sealed class DarlingServerResolverSameHostTests
 {
     private const string Host = "shared-host";
 
-    private static DarlingServerResolver.RegisteredServer Db(string database, string? displayName = null)
+    private static RegisteredServer Db(string database, string? displayName = null)
     {
         var storageName = Host + ":" + database;
-        return new DarlingServerResolver.RegisteredServer(
+        return new RegisteredServer(
             ServerIdHelper.GetDeterministicHashCode(storageName), storageName, displayName ?? storageName);
     }
 
     private static ((int ServerId, string ServerName) resolved, string? error) Resolve(
-        IReadOnlyList<DarlingServerResolver.RegisteredServer> servers, string? name) =>
+        IReadOnlyList<RegisteredServer> servers, string? name) =>
         DarlingServerResolver.ResolveOrError(servers, name, DarlingPeerDirectory.Snapshot.Empty);
 
     [Fact]
@@ -88,7 +89,7 @@ public sealed class DarlingServerResolverSameHostTests
     {
         var orders = Db("a", "orders");
         var billing = Db("b", "billing");
-        var elsewhere = new DarlingServerResolver.RegisteredServer(
+        var elsewhere = new RegisteredServer(
             ServerIdHelper.GetDeterministicHashCode("another-host"), "another-host", "another-host");
         var servers = new[] { orders, billing, elsewhere };
 
@@ -107,7 +108,7 @@ public sealed class DarlingServerResolverSameHostTests
     {
         /* The plain registration's storage name IS the host, and its per-database siblings take the host as their
            display name, so the host matches all three. Its own storage name is the one exact key that is unique. */
-        var plain = new DarlingServerResolver.RegisteredServer(ServerIdHelper.GetDeterministicHashCode(Host), Host, Host);
+        var plain = new RegisteredServer(ServerIdHelper.GetDeterministicHashCode(Host), Host, Host);
         var servers = new[] { Db("a", Host), plain, Db("b", Host) };
 
         var (resolved, error) = Resolve(servers, Host);
@@ -132,8 +133,8 @@ public sealed class DarlingServerResolverSameHostTests
     [Fact]
     public void AReadToolGivenThePlainServersName_InAnotherCase_AnswersForThePlainServer_NotItsReadOnlyTwin()
     {
-        var plain = new DarlingServerResolver.RegisteredServer(ServerIdHelper.GetDeterministicHashCode(Host), Host, Host);
-        var readOnlyTwin = new DarlingServerResolver.RegisteredServer(
+        var plain = new RegisteredServer(ServerIdHelper.GetDeterministicHashCode(Host), Host, Host);
+        var readOnlyTwin = new RegisteredServer(
             ServerIdHelper.GetDeterministicHashCode(Host + ":RO"), Host + ":RO", Host);
 
         var (resolved, error) = Resolve(new[] { readOnlyTwin, plain }, Host.ToUpperInvariant());
@@ -146,9 +147,9 @@ public sealed class DarlingServerResolverSameHostTests
     [Fact]
     public void AReadToolGivenAPrefixTwoDifferentHostsShare_IsRefusedWithBothListed()
     {
-        var east = new DarlingServerResolver.RegisteredServer(
+        var east = new RegisteredServer(
             ServerIdHelper.GetDeterministicHashCode("orders-east"), "orders-east", "orders-east");
-        var west = new DarlingServerResolver.RegisteredServer(
+        var west = new RegisteredServer(
             ServerIdHelper.GetDeterministicHashCode("orders-west"), "orders-west", "orders-west");
 
         var (resolved, error) = Resolve(new[] { east, west }, "orders");

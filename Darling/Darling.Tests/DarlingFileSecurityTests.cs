@@ -707,7 +707,9 @@ public sealed class DarlingFileSecurityTests
     /// .NET call persists only the sections it sees modified, so a C# test would go green against the exact
     /// code that broke the field boxes. What is checkable here is the shape: one descriptor built for the DACL,
     /// the owner applied onto a re-read of what was written, and the verification LAST so the state it judges
-    /// is the state the installer leaves behind.</para>
+    /// is the state the installer leaves behind. The one other descriptor, in Write-DarlingMinimalConfig, is
+    /// passed only to the create call (applied when darling.json is created, before step 4b), so nothing is
+    /// applied over the hardened DACL.</para>
     /// </summary>
     [Fact]
     public void InstallScript_SetsTheOwnerOnTheCurrentDescriptor_SoTheHardenedDaclSurvives()
@@ -724,14 +726,23 @@ public sealed class DarlingFileSecurityTests
             "the owner must be set on the file's CURRENT ACL ($owner = Get-Acl ...), not on a fresh " +
             "FileSecurity — Set-Acl writes the whole descriptor, so a bare one wipes the hardened DACL (#1957).");
 
-        /* Exactly ONE FileSecurity is constructed in the whole script: the hardened DACL. A second one is how
-           this defect looked, and the assertion above alone would stay green with a bare-descriptor Set-Acl
-           left behind after the re-read. */
-        var constructions = script.Split("New-Object System.Security.AccessControl.FileSecurity", StringSplitOptions.None).Length - 1;
+        /* Exactly ONE FileSecurity is constructed outside Write-DarlingMinimalConfig: the hardened DACL. A second
+           one is how this defect looked, and the assertion above alone would stay green with a bare-descriptor
+           Set-Acl left behind after the re-read. Write-DarlingMinimalConfig builds its own descriptor, but only to
+           hand to the create call, so the file is born with it; it runs before step 4b and applies nothing over
+           the hardened DACL. */
+        var minimalConfig = DarlingInstallerConfigStepTests.ExtractFunction(script, "Write-DarlingMinimalConfig");
+        var outsideMinimalConfig = script.Replace(minimalConfig, string.Empty, StringComparison.Ordinal);
+        var constructions = outsideMinimalConfig.Split("New-Object System.Security.AccessControl.FileSecurity", StringSplitOptions.None).Length - 1;
         Assert.True(constructions == 1,
-            $"expected exactly 1 FileSecurity construction (the hardened DACL), found {constructions}. A second " +
+            $"expected exactly 1 FileSecurity construction outside Write-DarlingMinimalConfig (the hardened DACL), found {constructions}. A second " +
             "bare descriptor applied over the first is #1957: it resets DACL protection and lets the folder's " +
             "inherited BUILTIN\\Users read come straight back.");
+
+        /* The create-time descriptor must only ever be passed to a create call, never applied to an existing file. */
+        Assert.Contains("New-Object System.Security.AccessControl.FileSecurity", minimalConfig, StringComparison.Ordinal);
+        Assert.DoesNotContain("Set-Acl", minimalConfig, StringComparison.Ordinal);
+        Assert.DoesNotContain("SetAccessControl", minimalConfig, StringComparison.Ordinal);
 
         /* And the verification must judge the FINAL state — after both the DACL and the owner. */
         var verify = script.IndexOf("$after = Get-Acl -LiteralPath $secretFile", StringComparison.Ordinal);

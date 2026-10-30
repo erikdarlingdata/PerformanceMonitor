@@ -521,7 +521,7 @@ LIMIT 1";
         bool RunnableQueueEnabled,
         int RunnableQueueWarningPerScheduler,
         int RunnableQueueCriticalPerScheduler,
-        /* #5640 (V179): the Client Timeouts alert's switch (OFF by default) and its two bars (client attentions per minute over the
+        /* #5640 (V179): the Client Timeouts alert's switch (ON by default since V216) and its two bars (client attentions per minute over the
            attention collector's last runs), NOT NULL in the store. APPENDED, same reason. Carried as stored: the payload reports the
            bars through AttentionEvaluator.ClampBars, the way the engine reads them. */
         bool ClientTimeoutsEnabled,
@@ -532,7 +532,22 @@ LIMIT 1";
         IReadOnlyList<string> ExcludedVolumes,
         /* #5736 (V211): the relative Client Timeouts bars' two multiples (integer NOT NULL, defaults 3 and 10). APPENDED, same reason. */
         int ClientTimeoutsWarningMultiple,
-        int ClientTimeoutsCriticalMultiple);
+        int ClientTimeoutsCriticalMultiple,
+        /* #6874 (V222): the Agent Alert Gaps switch (boolean NOT NULL, default off). APPENDED, same reason. */
+        bool AgentAlertGapsEnabled,
+        /* #6873 (V223): the three database protection alert switches (boolean NOT NULL, default off). APPENDED, same reason. */
+        bool BackupOverdueEnabled,
+        bool LogBackupOverdueEnabled,
+        bool CheckDbOverdueEnabled,
+        /* #6875 (V224): the Identity Capacity switch (boolean NOT NULL, default off) and its warning and critical bars (integer NOT NULL, 70 and 90). APPENDED, same reason. */
+        bool IdentityCapacityEnabled,
+        int IdentityCapacityWarningPercent,
+        int IdentityCapacityCriticalPercent,
+        /* #6927 (V228): the four blocking band tiers (double precision NOT NULL, 5, 20 reports per hour and 10, 60 seconds). */
+        double BlockingWarnPerHour,
+        double BlockingCriticalPerHour,
+        double BlockingWarnWaitSeconds,
+        double BlockingCriticalWaitSeconds);
 
     /// <summary>The single global alert-settings row (id=1) — the viewer's <c>AlertSettingsSelectSql</c>. The
     /// columns are read in the SAME order the service reads them (<c>StoreConfigProvider</c>), and
@@ -570,7 +585,10 @@ SELECT enabled, cpu_enabled, cpu_threshold_percent, cpu_mode, blocking_enabled, 
        runnable_queue_enabled, runnable_queue_warning_per_scheduler, runnable_queue_critical_per_scheduler,
        client_timeouts_enabled, client_timeouts_warning_per_minute, client_timeouts_critical_per_minute,
        excluded_volumes,
-       client_timeouts_warning_multiple, client_timeouts_critical_multiple
+       client_timeouts_warning_multiple, client_timeouts_critical_multiple,
+       agent_alert_gaps_enabled, backup_overdue_enabled, log_backup_overdue_enabled, checkdb_overdue_enabled,
+       identity_capacity_enabled, identity_capacity_warning_percent, identity_capacity_critical_percent,
+       blocking_warn_per_hour, blocking_critical_per_hour, blocking_warn_wait_seconds, blocking_critical_wait_seconds
 FROM config_alert_settings
 WHERE id = 1";
 
@@ -637,7 +655,13 @@ WHERE id = 1";
             /* #6098 (V200): the excluded mount points at 76. */
             reader.IsDBNull(76) ? Array.Empty<string>() : reader.GetFieldValue<string[]>(76),
             /* #5736 (V211): the multiples at 77-78. */
-            reader.GetInt32(77), reader.GetInt32(78));
+            reader.GetInt32(77), reader.GetInt32(78),
+            /* #6874 (V222): the Agent Alert Gaps switch at 79. #6873 (V223): the three database protection switches at 80-82. */
+            reader.GetBoolean(79), reader.GetBoolean(80), reader.GetBoolean(81), reader.GetBoolean(82),
+            /* #6875 (V224): the Identity Capacity switch and bars at 83-85. */
+            reader.GetBoolean(83), reader.GetInt32(84), reader.GetInt32(85),
+            /* #6927 (V228): the four blocking band tiers at 86-89. */
+            reader.GetDouble(86), reader.GetDouble(87), reader.GetDouble(88), reader.GetDouble(89));
     }
 
     /* ─────────────────────── delivery cooldown (a SECOND config table) ─────────────────────── */
@@ -722,6 +746,26 @@ WHERE id = 1";
         await using var transaction = await connection.BeginTransactionAsync(
             System.Data.IsolationLevel.RepeatableRead, cancellationToken);
 
+        var settings = await ReadAlertSettingsAsync(connection, transaction, cancellationToken);
+        var delivery = await ReadDeliveryAsync(connection, transaction, cancellationToken);
+
+        return new AlertConfigurationRead(settings, delivery);
+    }
+
+    /// <summary>
+    /// The same two-table read over a transaction the CALLER owns (#6403): update_alert_settings reads what its sent fields hold
+    /// inside its own write transaction, after it has locked the rows it is about to update, so the <c>previous</c> it reports is
+    /// exactly what the write replaced. The single-table reads stay private; this and the entry point above are the only ways in.
+    ///
+    /// <para>This is NOT one snapshot: the caller's transaction is plain READ COMMITTED, so the two reads can see different commits
+    /// (the entry point above reads both under one REPEATABLE READ snapshot). That is correct here only because the caller locks
+    /// (FOR UPDATE) the tables its write targets and projects only fields drawn from what it updates, so a value that could be read
+    /// stale is never one that reaches <c>previous</c>. If a caller ever reports a field from a table it did not lock, this stops
+    /// being true.</para>
+    /// </summary>
+    public static async Task<AlertConfigurationRead> GetAlertConfigurationAsync(
+        NpgsqlConnection connection, NpgsqlTransaction transaction, CancellationToken cancellationToken = default)
+    {
         var settings = await ReadAlertSettingsAsync(connection, transaction, cancellationToken);
         var delivery = await ReadDeliveryAsync(connection, transaction, cancellationToken);
 

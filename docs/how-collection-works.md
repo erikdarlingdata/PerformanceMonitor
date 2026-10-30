@@ -1,5 +1,7 @@
 # How Collection Works
 
+Audience: contributors.
+
 A tour of the collection pipeline for people who know SQL but don't know this codebase. Read this, then read two or three collector definitions, and you'll understand 80% of what Performance Monitor is doing on your servers.
 
 There is **one collection brain and two storage engines**. Every collector — the exact T-SQL sent to a monitored server, the result-row mapping, the delta rules, the default cadence, the retention horizon — is defined once in the shared `PerformanceMonitor.Collectors` library. **Lite** writes those rows to DuckDB; **Darling** writes the same rows to PostgreSQL. A collector change lands once and both editions get it.
@@ -47,7 +49,7 @@ Optional behaviours a definition can opt into, all with sensible defaults on the
 | `EmitsProbeFailures` | The definition returns a trailing `(item, error)` result set so per-item failures get summarized instead of lost |
 | `YieldsOnLockTimeout` | Treat a lock timeout as "come back later," not an error (only `query_snapshots`) |
 | `StateKeys` | Persist a cursor the SQL can't derive — e.g. `default_trace_events` remembering its last trace file |
-| `CommandTimeoutSecondsOverride` | Raise the 60-second default (only `index_object_stats`, at 300s) |
+| `CommandTimeoutSecondsOverride` | Raise the command timeout above its default (60 seconds in Darling, 30 in Lite). Seven definitions do: `index_object_stats` (300 s), `query_store` (500 s), `query_store_forced_plans` (120 s), `query_store_hints` (120 s), `database_protection` (120 s), `pg_buffer_usage` (120 s) and `pg_wait_sampling` (120 s) |
 | `PerItemTextByteBudget` | Stop a text-heavy drain mid-read and defer the backlog rather than ballooning memory |
 
 ### The three registration tables
@@ -56,9 +58,9 @@ There is **no DI container for collectors**. A new definition is wired up by add
 
 | Concern | File | Shape |
 | --- | --- | --- |
-| Schema catalog — drives DDL generation | [`CollectorCatalog.cs`](../PerformanceMonitor.Collectors/CollectorCatalog.cs) | `IReadOnlyList<ICollectorSchemaInfo> All` — 48 `XCollector.Instance` entries (41 SQL Server + 7 PostgreSQL) |
-| Cadence, retention, default-enabled | [`CollectorScheduleDefaults.cs`](../PerformanceMonitor.Collectors/CollectorScheduleDefaults.cs) | `record Entry(int FrequencyMinutes, int RetentionDays, bool DefaultEnabled = true)` — 48 entries |
-| Runtime dispatch (Darling) | [`DarlingWorker.cs`](../Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs) | `s_dispatch` — 48 typed lambdas |
+| Schema catalog — drives DDL generation | [`CollectorCatalog.cs`](../PerformanceMonitor.Collectors/CollectorCatalog.cs) | `IReadOnlyList<ICollectorSchemaInfo> All` — one `XCollector.Instance` entry per collector (more than 40 SQL Server and more than 25 PostgreSQL) |
+| Cadence, retention, default-enabled | [`CollectorScheduleDefaults.cs`](../PerformanceMonitor.Collectors/CollectorScheduleDefaults.cs) | `record Entry(int FrequencyMinutes, int RetentionDays, bool DefaultEnabled = true)` — more than 70 entries |
+| Runtime dispatch (Darling) | [`DarlingWorker.cs`](../Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs) | `s_dispatch` — more than 70 typed lambdas |
 
 The catalog is deliberately **engine-mixed**: the schema generator walks it to create tables and one
 store can hold both engines' data, so splitting it per engine would fragment DDL generation. What keeps
@@ -124,9 +126,9 @@ server_name     text      NOT NULL
 
 — followed by nullable payload columns. Fact tables have **no primary key** (a hypertable's unique constraint must include the partition column, and COPY ingest doesn't want one) and are indexed `(server_id, <time column>)`. Timestamps are naive UTC `timestamp`, never `timestamptz`.
 
-`server_id` is not a sequence. It is a deterministic FNV-1a hash of `host[:database][:RO]`, computed client-side by `ServerIdHelper`, so both editions derive the same id for the same server and collected rows join desired-state config without a lookup. `server_id = 0` is a reserved fleet sentinel used for run-records that aren't about one server.
+`server_id` is not a sequence. It is a deterministic FNV-1a hash of `host[:database][:pg][:port][:RO]`, computed client-side by `ServerIdHelper`. The `:pg` part is added for a PostgreSQL server only, and the `:port` part only when the entry gives a port. The `:RO` part is added for read-only intent, and always comes last. Both editions derive the same id for the same server, so collected rows join desired-state config without a lookup. `server_id = 0` is a reserved fleet sentinel used for run-records that aren't about one server.
 
-**TimescaleDB is optional and auto-adopted.** If the extension is present, the service converts collector tables to hypertables with 1-day chunks, compression after 1 day segmented by `server_id`, and continuous aggregates for hourly/daily rollups and baselines. Without it, the store runs in plain PostgreSQL mode, fully supported. There is no configuration flag either way. Compressed chunks stay queryable — compression *is* the archival tier.
+**TimescaleDB is optional and auto-adopted.** If the extension is present, the service converts collector tables to hypertables that start with 1-day chunks. The service can narrow the heaviest raw tables to 12 or 6 hours (`RawChunkIntervalPlanner`). It adds compression after 1 day segmented by `server_id`, and continuous aggregates for hourly/daily rollups and baselines. Without it, the store runs in plain PostgreSQL mode, fully supported. There is no configuration flag either way. Compressed chunks stay queryable — compression *is* the archival tier.
 
 ### Schedules and overrides
 
@@ -183,7 +185,7 @@ private Task<int> CollectCpuUtilizationAsync(ServerConnection server, Cancellati
 
 The SQL is not in those files — it is in the shared definition. That is the cross-SKU parity contract: engine quirks and dedup rules live in one place so Lite and Darling cannot disagree about what a collector means.
 
-Storage is a local DuckDB file plus a Parquet archive. DuckDB is single-writer, so collectors for a given server run **sequentially**; multi-server parallelism still works, each server running its own serialized chain. Schedules come from [`Lite/config/collection_schedule.json`](../Lite/config/collection_schedule.json) rather than a table, and retention runs inline at the end of each cycle.
+Storage is a local DuckDB file plus a Parquet archive. DuckDB is single-writer, so collectors for a given server run **sequentially**; multi-server parallelism still works, each server running its own serialized chain. The default schedules are `ScheduleManager.GetDefaultSchedules`, with 43 entries (one per Lite collector). A test checks them against the shared defaults. A per-user `collection_schedule.json` in Lite's config folder keeps changes. The repo file [`Lite/config/collection_schedule.json`](../Lite/config/collection_schedule.json) is an old seed that lists only 25 of them. Schedules are not in a table, and retention runs inline at the end of each cycle.
 
 ---
 

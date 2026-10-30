@@ -227,6 +227,15 @@
                     <ComboBoxItem Content="Per-event — one notification per incident"/>
                 </ComboBox>
             </StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
+                <TextBlock Text="Capture plans:" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center" Width="110"/>
+                <ComboBox x:Name="CapturePlansBox" Width="240" SelectedIndex="0"
+                          ToolTip="Whether the service fetches execution-plan XML for THIS server. 'Use the service setting' follows Settings, Collection, Capture execution plans (all servers). On or Off overrides it for just this server: Off collects query and procedure statistics without plan XML, On keeps plans even when the service setting is off.">
+                    <ComboBoxItem Content="Use the service setting" Tag="service"/>
+                    <ComboBoxItem Content="On" Tag="on"/>
+                    <ComboBoxItem Content="Off" Tag="off"/>
+                </ComboBox>
+            </StackPanel>
         </StackPanel>
 
             </Grid>
@@ -242,9 +251,22 @@
                 <Button x:Name="TestConnectionButton" Content="_Test Connection" Width="130" Height="30"
                         Click="TestConnectionButton_Click" DockPanel.Dock="Left"
                         ToolTip="Asks the Darling service to connect to this server and report the version/edition, before saving."/>
-                <Button Content="_Cancel" Width="80" Height="30" Click="CancelButton_Click" DockPanel.Dock="Right" IsCancel="True"/>
-                <Button x:Name="SaveButton" Content="_Save" Width="80" Height="30" Click="SaveButton_Click" Style="{StaticResource AccentButton}" DockPanel.Dock="Right" Margin="0,0,8,0"/>
+                <!-- #6472: the login and grant script for this server, on the clipboard, so the SQL Server admin can run it before the first test. -->
+                <Button x:Name="CopyGrantScriptButton" Content="Copy _grant script" Width="130" Height="30" Margin="8,0,0,0"
+                        Click="CopyGrantScriptButton_Click" DockPanel.Dock="Left"
+                        ToolTip="Copies the T-SQL that creates the monitoring login and grants what Darling needs on this server. Safe to run twice."/>
+                <CheckBox x:Name="GrantScriptFinOpsCheck" Content="FinOps" VerticalAlignment="Center" Margin="8,0,0,0" DockPanel.Dock="Left"
+                          Foreground="{DynamicResource ForegroundBrush}"
+                          ToolTip="Also grant what the FinOps Index Analysis tab needs in each user database."/>
             </DockPanel>
+            <!-- #6823: Save and Cancel sit on their own row. They shared the DockPanel above with the three tool
+                 controls, whose widths add up to more than the 450 px dialog, and a DockPanel clips its last
+                 children first, so Save was the control pushed out of view. On a row of their own nothing the
+                 tool row grows to can reach them. -->
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,8,0,0">
+                <Button x:Name="SaveButton" Content="_Save" Width="80" Height="30" Click="SaveButton_Click" Style="{StaticResource AccentButton}" Margin="0,0,8,0"/>
+                <Button Content="_Cancel" Width="80" Height="30" Click="CancelButton_Click" IsCancel="True"/>
+            </StackPanel>
         </StackPanel>
     </Grid>
 </Window>

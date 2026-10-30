@@ -37,7 +37,12 @@ internal static class ComposeStampLiveSupport
 
     internal static string At(DateTime value) => value.ToString("yyyy-MM-dd HH:mm:ss.ffffff", CultureInfo.InvariantCulture);
 
-    internal static DateTime ThisHour() => new(DateTime.UtcNow.Year, DateTime.UtcNow.Month, DateTime.UtcNow.Day, DateTime.UtcNow.Hour, 0, 0, DateTimeKind.Unspecified);
+    /* One clock read: four separate DateTime.UtcNow reads can stitch a day from before midnight to an hour from after it (#6769). */
+    internal static DateTime ThisHour()
+    {
+        var now = DateTime.UtcNow;
+        return new DateTime(now.Year, now.Month, now.Day, now.Hour, 0, 0, DateTimeKind.Unspecified);
+    }
 
     internal static async Task ExecAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
     {
@@ -57,10 +62,11 @@ internal static class ComposeStampLiveSupport
         return Convert.ToString(await command.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture) ?? string.Empty;
     }
 
-    internal static async Task EnrollAsync(NpgsqlConnection connection, int serverId, CancellationToken ct) =>
+    /// <summary>Enrolls a server with a coverage claim written from <paramref name="hourNow"/>, the same hour the seed and the builder's clock use, so an arrange step that crosses the top of the hour cannot start the claim an hour before the seed (#6769).</summary>
+    internal static async Task EnrollAsync(NpgsqlConnection connection, int serverId, DateTime hourNow, CancellationToken ct) =>
         await ExecAsync(connection,
             $"INSERT INTO collect.servers (server_id, server_name, is_enabled) VALUES ({serverId}, 'srv{serverId}', TRUE) ON CONFLICT (server_id) DO NOTHING;"
-            + $"INSERT INTO collect.query_store_interval_wide_coverage (server_id, filled_since, applied_through) VALUES ({serverId}, date_trunc('hour', now() AT TIME ZONE 'UTC') - interval '30 hours', now() AT TIME ZONE 'UTC')", ct);
+            + $"INSERT INTO collect.query_store_interval_wide_coverage (server_id, filled_since, applied_through) VALUES ({serverId}, TIMESTAMP '{At(hourNow.AddHours(-30))}', TIMESTAMP '{At(ClockWithin(hourNow))}')", ct);
 
     internal static Task SeedAsync(NpgsqlConnection connection, DateTime hourNow, CancellationToken ct) => ExecAsync(connection, $@"
 INSERT INTO collect.query_store_interval_wide
@@ -166,13 +172,24 @@ FROM collect.query_store_interval_wide WHERE module_name = 'modT' GROUP BY colle
         Assert.True(await CountAsync(connection, $"SELECT count(*) FROM ({Ties}) AS g", ct) > 0, "no rounding-tie groups");
     }
 
+    /// <summary>
+    /// One builder tick. With <paramref name="nowUtc"/> (the arrange step's <see cref="ClockWithin"/>) the tick plans, and records a
+    /// failure, on that store clock instead of the real one: the plan's due hours read the STORE's clock (<c>PlanSql</c>'s $3), so a test
+    /// that crosses the top of the hour between its arrange step and this call must not make one more hour due (#6769). Without it the
+    /// tick runs as the service does.
+    /// </summary>
+    internal static Task<QueryStoreComposeStamp.TickResult> TickAtAsync(NpgsqlDataSource source, DateTime? nowUtc, CancellationToken ct) =>
+        nowUtc is { } at
+            ? QueryStoreComposeStamp.RunTickAsync(source, at, RetentionDays, NullLogger.Instance, () => TimeSpan.Zero, ct, new QueryStoreComposeStamp.TickOptions(StoreNow: at))
+            : QueryStoreComposeStamp.RunTickAsync(source, DateTime.UtcNow, RetentionDays, NullLogger.Instance, ct);
+
     /// <summary>Builds every hour that is due, tick by tick, and returns how many hours were built.</summary>
-    internal static async Task<int> BuildAllAsync(NpgsqlDataSource source, CancellationToken ct)
+    internal static async Task<int> BuildAllAsync(NpgsqlDataSource source, CancellationToken ct, DateTime? nowUtc = null)
     {
         var total = 0;
         for (var guard = 0; guard < 20; guard++)
         {
-            var result = await QueryStoreComposeStamp.RunTickAsync(source, DateTime.UtcNow, RetentionDays, NullLogger.Instance, ct);
+            var result = await TickAtAsync(source, nowUtc, ct);
             Assert.Equal(0, result.Failed);
             if (result.Built == 0)
             {
@@ -193,25 +210,28 @@ INSERT INTO {table}
 VALUES (TIMESTAMP '{At(collectionTime)}', {serverId}, 'dbX', 99, 99, 'Regular', TIMESTAMP '{At(collectionTime.AddMinutes(-3))}', TIMESTAMP '{At(collectionTime)}',
         'modX', 'hashX', 7, 1000, 500, 2000, 900, {interval})", ct);
 
-    /// <summary>A migrated scratch store with the three servers enrolled, the 30-hour seed, and every due hour built (28).</summary>
+    /// <summary>The 'now' a builder tick is given: half past <paramref name="hourNow"/>, taken from the same clock read as the seed's hour so a run that crosses an hour boundary mid-test cannot move the builder's cut-off past the seeded data.</summary>
+    internal static DateTime ClockWithin(DateTime hourNow) => hourNow.AddMinutes(30);
+
+    /// <summary>A migrated scratch store with the three servers enrolled, the 30-hour seed, and every due hour built (28). <paramref name="at"/>: the seed's hour (a whole hour), default this hour.</summary>
     internal static async Task<(ScratchPostgres Scratch, NpgsqlConnection Connection, NpgsqlDataSource Source, DateTime HourNow)> ArrangeAsync(
-        CancellationToken ct, int servers = 3, bool build = true)
+        CancellationToken ct, int servers = 3, bool build = true, DateTime? at = null)
     {
         var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
         var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
+        var hourNow = at ?? ThisHour();
         for (var s = 1; s <= servers; s++)
         {
-            await EnrollAsync(connection, s, ct);
+            await EnrollAsync(connection, s, hourNow, ct);
         }
 
-        var hourNow = ThisHour();
         await SeedAsync(connection, hourNow, ct);
         var source = NpgsqlDataSource.Create(scratch.ConnectionString);
         if (build)
         {
-            Assert.Equal(28, await BuildAllAsync(source, ct));
+            Assert.Equal(28, await BuildAllAsync(source, ct, ClockWithin(hourNow)));
         }
 
         return (scratch, connection, source, hourNow);
@@ -219,7 +239,7 @@ VALUES (TIMESTAMP '{At(collectionTime)}', {serverId}, 'dbX', 99, 99, 'Regular', 
 
     /// <summary>The runner's StampThrough lookup on a connection, for the servers 1 to <paramref name="servers"/>.</summary>
     internal static Task<DateTime?> StampThroughAsync(NpgsqlConnection connection, DateTime wideStart, DateTime end, CancellationToken ct, int servers = 3) =>
-        PerformanceMonitor.Darling.Service.DarlingWebEndpoints.ResolveQueryStoreStampThroughAsync(
+        PerformanceMonitor.Darling.Storage.ComposePanelRunner.ResolveQueryStoreStampThroughAsync(
             connection, System.Linq.Enumerable.ToArray(System.Linq.Enumerable.Range(1, servers)), wideStart, end, QueryStoreComposeStamp.RungVersion, ct);
 
     internal static async Task CleanupAsync(ScratchPostgres scratch, NpgsqlConnection connection, NpgsqlDataSource source, bool bodySucceeded)

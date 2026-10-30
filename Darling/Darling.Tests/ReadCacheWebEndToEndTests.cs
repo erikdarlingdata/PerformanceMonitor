@@ -28,6 +28,7 @@ using Npgsql;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
+using PerformanceMonitor.Darling.Storage;
 
 namespace Darling.Tests;
 
@@ -56,7 +57,7 @@ public sealed class ReadCacheWebEndToEndTests
 
     /// <summary>The production web pipeline over an unreachable store, plus a test-only write route (any 2xx non-GET
     /// <c>/api/*</c> answer moves the cache's write generation) and an optional middleware ahead of everything.</summary>
-    private static async Task<(WebApplication App, NpgsqlDataSource Postgres)> BuildServer(ReadAdmission admission, ReadLatencyAccumulator readLatency,
+    internal static async Task<(WebApplication App, NpgsqlDataSource Postgres)> BuildServer(ReadAdmission admission, ReadLatencyAccumulator readLatency,
         Func<RequestDelegate, RequestDelegate>? first = null, Task? heldWriteEnd = null)
     {
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
@@ -70,6 +71,18 @@ public sealed class ReadCacheWebEndToEndTests
         builder.Services.AddSingleton(postgres);
         DarlingWebHostService.ConfigureResponseCompression(builder.Services);
         var app = builder.Build();
+
+        /* The writes below need an editing seat: a loopback dashboard with no token serves reads only. Every request comes
+           from loopback holding a shared-token session cookie signed with the key the pipeline is given. */
+        var signingKey = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
+        var sessionCookie = DarlingWebHostService.SessionCookieName + "="
+            + DarlingWebHostService.BuildSessionCookieValue(signingKey, DateTimeOffset.UtcNow.AddHours(1), null);
+        app.Use(next => context =>
+        {
+            context.Connection.RemoteIpAddress ??= IPAddress.Loopback;
+            context.Request.Headers.Cookie = sessionCookie;
+            return next(context);
+        });
         if (first is not null)
         {
             app.Use(first);
@@ -79,7 +92,8 @@ public sealed class ReadCacheWebEndToEndTests
             new NullLogger<DarlingWebHostService>(), new WebRuntimeState(), new CollectorRuntimeState(), new WebTlsCertificateState(),
             baselineCache: null, readLatency: readLatency, readAdmission: admission);
         host.ConfigurePipeline(app, postgres, networkMode: false, networkListenIp: null,
-            allowedCidr: IPNetwork.Parse("127.0.0.1/32"), accessToken: "unused-in-loopback-mode", oidcClient: null);
+            allowedCidr: IPNetwork.Parse("127.0.0.1/32"), accessToken: "read-cache-end-to-end-token-0123456789", oidcClient: null,
+            requireTokenWhenLoopbackOnly: true, sessionSigningKeyForTests: signingKey);
         app.MapPost("/api/__test/write", () => Results.Text("{}", "application/json"));
 
         /* Round 2, L2: a write whose 2xx and body leave at once, while its handler stays until heldWriteEnd ends. */
@@ -389,7 +403,7 @@ public sealed class ReadCacheWebEndToEndTests
         var cache = admission.Cache;
         var ttl = ReadResultCache.TtlOf(band);
         await using var postgres = NpgsqlDataSource.Create("Host=127.0.0.1;Port=1;Database=none;Username=none;Timeout=1");
-        var timedOut = DarlingWebEndpoints.ComposeRunOutcome.AuthorQueryError("canceling statement due to statement timeout", "57014");
+        var timedOut = ComposeRunOutcome.AuthorQueryError("canceling statement due to statement timeout", "57014");
         var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var lead = cache.Join(ReadCacheKey.ForCompose(ReadSurface.Mcp, route, body.ToJsonString(), cache.Generation, cache, ttl), ttl,
             async _ =>
@@ -400,7 +414,7 @@ public sealed class ReadCacheWebEndToEndTests
             _ => null);
         Assert.True(lead.IsLead);
 
-        Task<DarlingWebEndpoints.ComposeRunOutcome>[] joined;
+        Task<ComposeRunOutcome>[] joined;
         try
         {
             joined =

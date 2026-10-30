@@ -21,7 +21,7 @@
  * fleet-wide: the picker stays visible on that tab and its build ignores the choice.
  */
 
-import { el, mount, readTool, loadingStrip, errorStrip, emptyStrip } from "../util.js";
+import { storeHash, el, mount, readTool, onPageLeave, loadingStrip, errorStrip, emptyStrip } from "../util.js";
 import { setPanelSignal } from "../panels.js";
 import { orderServers } from "../server-order.js";
 import { isPostgresRow } from "./finops/gate.js";
@@ -59,6 +59,12 @@ const TAB_KEY = "finops.tab";
 
 let renderGeneration = 0;
 let panelAbort = null;
+/* #6793: leaving the page (route() calls beginPageScope) aborts its panel reads and clears the shared panel signal, which would
+   otherwise stay aborted for the next page that renders panels (panels.js keeps it as module state). */
+onPageLeave(() => {
+  if (panelAbort) panelAbort.abort();
+  setPanelSignal();
+});
 /* The last list_servers rows, so a hashchange paints in the same tick and only the poll re-reads them. */
 let lastRows = null;
 
@@ -83,7 +89,7 @@ function findTab(id) {
 }
 
 function hashFor(server, tabId) {
-  return "#/finops/" + encodeURIComponent(server) + "/" + tabId;
+  return storeHash("#/finops/" + encodeURIComponent(server) + "/" + tabId);
 }
 
 /** The server rows list_servers returned, whichever envelope shape carried them. */
@@ -114,7 +120,7 @@ export function pinFinopsHash(server, tabId) {
 function tabBar(server, active) {
   return el(
     "nav",
-    { class: "subtabs finops-tabs", "aria-label": "FinOps sections" },
+    { class: "subtabs", "aria-label": "FinOps sections" },
     FINOPS_TABS.map((t) =>
       el("a", {
         class: "subtab" + (t.id === active.id ? " active" : ""),
@@ -218,6 +224,8 @@ export function renderFinops(main, server, tabId, opts) {
       controller.abort();
       if (body) mount(body, emptyStrip("No servers are registered yet."));
     };
+    /* A read the page left (#6793) or a signed-out session says nothing about the registry: keep the cache and the painted page. */
+    if (res.kind === "aborted" || res.kind === "auth") return;
     if (res.kind === "error") return show(errorStrip(res.message));
     const rows = res.kind === "data" ? orderServers(serverRows(res.data)) : [];
     if (rows.length === 0) return showEmpty();

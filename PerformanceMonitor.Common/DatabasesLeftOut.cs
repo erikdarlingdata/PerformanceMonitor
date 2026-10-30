@@ -63,4 +63,29 @@ public static class DatabasesLeftOut
         return "These databases were left out of this read because the server's newest database snapshot no longer lists them "
             + "(dropped or detached since an earlier snapshot did)" + more + ". Name one in database_name to read its history.";
     }
+
+    /// <summary>
+    /// #6651: the banner text for a Top Procedures read that left databases out, or null when it left none. With rows, the names and
+    /// the shared <see cref="Note"/>. With none, the shared empty-page sentence
+    /// (<see cref="CollectorRunFacts.ProcedureStatsEmpty"/>, so the wording matches the web page and the MCP tool) followed by the names. The
+    /// shared sentence points at the MCP key <c>databases_left_out</c>; a person reading this window has the names in the same banner, so
+    /// that pointer is dropped. Shared by the Darling Viewer and Lite (#6667), so the two cannot drift.
+    /// </summary>
+    public static string? ProcedureBanner(IReadOnlyList<string>? leftOut, int rowCount, CollectorRunFacts? facts, int hoursBack)
+    {
+        if (leftOut is null || leftOut.Count == 0)
+        {
+            return null;
+        }
+
+        var named = Named(leftOut)!;
+        var names = "Left out: " + string.Join(", ", named) + (leftOut.Count > named.Count ? string.Format(CultureInfo.InvariantCulture, " and {0} more", leftOut.Count - named.Count) : "") + ".";
+        if (rowCount == 0 && facts is not null)
+        {
+            var (_, message) = facts.ProcedureStatsEmpty(hoursBack, leftOut.Count);
+            return message.Replace(" (see databases_left_out)", "", StringComparison.Ordinal) + " " + names;
+        }
+
+        return Note(leftOut) + " " + names;
+    }
 }

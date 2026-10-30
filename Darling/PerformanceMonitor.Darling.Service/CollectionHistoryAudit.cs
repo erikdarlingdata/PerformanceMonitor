@@ -423,7 +423,7 @@ HAVING COUNT(p.one) > 0";
     {
         var text = new StringBuilder();
         text.Append(CultureInfo.InvariantCulture,
-            $"Retained history for {auditDayUtc:yyyy-MM-dd} (UTC) fell below half of the usual pace for that hour in {findings.Count} source(s), ")
+            $"Retained history for {auditDayUtc:yyyy-MM-dd} (UTC) fell below half of the usual pace for that hour in {findings.Count} {(findings.Count == 1 ? "source" : "sources")}, ")
             .Append("where usual is the median of the 7 days before and only servers enabled now are counted. ");
 
         var groups = new List<(bool JudgesPasses, bool Incomplete, List<Rollup> Sources, IReadOnlyList<FlaggedRange> Ranges)>();

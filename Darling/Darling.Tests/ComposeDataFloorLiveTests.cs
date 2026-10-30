@@ -318,17 +318,17 @@ public sealed class ComposeDataFloorLiveTests
 
     private static string Minute(DateTime utc) => utc.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture);
 
-    private static string? NoticeOf(DarlingWebEndpoints.ComposeRunOutcome outcome)
+    private static string? NoticeOf(ComposeRunOutcome outcome)
     {
         Assert.True(outcome.Error is null, $"compose run failed: {outcome.Error}");
         return outcome.Payload!["notice"]?.GetValue<string>();
     }
 
-    private static Task<DarlingWebEndpoints.ComposeRunOutcome> RunAsync(
+    private static Task<ComposeRunOutcome> RunAsync(
         NpgsqlDataSource dataSource, string? server, int hours, CancellationToken ct, bool includeDataStartFields = false) =>
         RunAsync(dataSource, WaitDurationPanel, server, hours, ct, includeDataStartFields);
 
-    private static Task<DarlingWebEndpoints.ComposeRunOutcome> RunAsync(
+    private static Task<ComposeRunOutcome> RunAsync(
         NpgsqlDataSource dataSource, string panel, string? server, int hours, CancellationToken ct, bool includeDataStartFields = false)
     {
         var body = new JsonObject
@@ -345,7 +345,7 @@ public sealed class ComposeDataFloorLiveTests
     }
 
     /* A pinned Custom Views cell's run: the absolute window pair, as ISO-8601 UTC text, in place of the relative hours. */
-    private static Task<DarlingWebEndpoints.ComposeRunOutcome> RunInWindowAsync(
+    private static Task<ComposeRunOutcome> RunInWindowAsync(
         NpgsqlDataSource dataSource, string server, DateTime windowStartUtc, DateTime windowEndUtc, CancellationToken ct)
     {
         var body = new JsonObject

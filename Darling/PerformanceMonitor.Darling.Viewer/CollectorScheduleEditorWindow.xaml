@@ -27,6 +27,7 @@
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
@@ -76,7 +77,22 @@
         <TextBlock Grid.Row="3" x:Name="StatusText" FontSize="11" FontStyle="Italic"
                    Foreground="{StaticResource DimTextBrush}" Margin="0,0,0,6" TextWrapping="Wrap"/>
 
-        <DataGrid Grid.Row="4" x:Name="ScheduleGrid" Style="{StaticResource DarkGrid}"
+        <!-- #6768: narrow the grid by collector name and by enabled state. The filter is on the grid's view only, so Save, Reset to
+             Defaults, Apply Default to All Servers, the presets and Copy from still act on every row, shown or not. -->
+        <StackPanel Grid.Row="4" Orientation="Horizontal" Margin="0,0,0,6">
+            <Label Content="_Find:" Target="{Binding ElementName=FilterBox}" Padding="0" VerticalAlignment="Center" Margin="0,0,8,0"
+                   Foreground="{DynamicResource ForegroundBrush}"/>
+            <TextBox x:Name="FilterBox" Width="220" VerticalAlignment="Center"
+                     TextChanged="Filter_Changed" KeyDown="FilterBox_KeyDown"
+                     ToolTip="Show only collectors whose name contains this text. Press Escape to clear it."/>
+            <CheckBox x:Name="DisabledOnlyCheckBox" Content="_Disabled only" VerticalAlignment="Center" Margin="16,0,0,0"
+                      Checked="Filter_Changed" Unchecked="Filter_Changed"
+                      ToolTip="Show only collectors that are turned off"/>
+            <TextBlock x:Name="NoMatchText" Text="No collectors match the filter." Visibility="Collapsed" VerticalAlignment="Center"
+                       Margin="16,0,0,0" FontSize="11" FontStyle="Italic" Foreground="{StaticResource DimTextBrush}"/>
+        </StackPanel>
+
+        <DataGrid Grid.Row="5" x:Name="ScheduleGrid" Style="{StaticResource DarkGrid}"
                   AutoGenerateColumns="False" CanUserAddRows="False" CanUserDeleteRows="False"
                   HeadersVisibility="Column" HorizontalScrollBarVisibility="Auto"
                   SelectionChanged="ScheduleGrid_SelectionChanged" CellEditEnding="ScheduleGrid_CellEditEnding">
@@ -89,7 +105,8 @@
                      time on this server, which stops a fleet-wide time). The line under the grid says what the selected
                      row's time means in server time and UTC. -->
                 <DataGridTextColumn Header="Run at" Binding="{Binding RunAtText}" Width="90"/>
-                <DataGridTextColumn Header="Keep (days)" Binding="{Binding RetentionDays}" Width="90"/>
+                <!-- Retention is fleet-wide: the purge reads one value per collector for every server, so a server scope shows it read-only. -->
+                <DataGridTextColumn x:Name="KeepColumn" Header="Keep (days)" Binding="{Binding RetentionDays}" Width="90"/>
                 <!-- The #3477 per-collector database scope: comma-separated names (the excluded-databases
                      entry format), blank = every database. Only the per-database fan-out collectors read
                      it; excluded databases still win. -->
@@ -101,15 +118,15 @@
         <!-- What the selected row's Run at time means (#4938): the server-clock and UTC times, the spread across a fleet,
              the next run on a server row. Filled in code from CollectorScheduleRunAtText, which is built on the shared
              run-time rules, so what is shown is what the service does. -->
-        <TextBlock Grid.Row="5" x:Name="RunAtDetailText" Margin="0,8,0,0" MinHeight="34" FontSize="12" TextWrapping="Wrap"
+        <TextBlock Grid.Row="6" x:Name="RunAtDetailText" Margin="0,8,0,0" MinHeight="34" FontSize="12" TextWrapping="Wrap"
                    Foreground="{DynamicResource ForegroundBrush}"/>
 
         <!-- The delta cadence cap sentence is appended in code from the shared gap-policy constants, so the
              shown numbers can't drift from what ValidateSchedule enforces (#3532). -->
-        <TextBlock Grid.Row="6" x:Name="FooterHintText" Margin="0,8,0,0" FontSize="11" Foreground="{StaticResource DimTextBrush}" TextWrapping="Wrap"
+        <TextBlock Grid.Row="7" x:Name="FooterHintText" Margin="0,8,0,0" FontSize="11" Foreground="{StaticResource DimTextBrush}" TextWrapping="Wrap"
                    Text="Every (min): 0 collects once on server load. Keep (days) must be at least 1. Run at: a 24-hour time such as 02:00 on the monitored server's own clock, for a collector that runs once a day or less often. Use default takes the fleet-wide time, and on a server None stops a fleet-wide time. Databases: comma-separated allow-list for per-database collectors — blank collects every database, and a server's excluded databases always stay excluded. Changes apply on the service's next reload."/>
 
-        <DockPanel Grid.Row="7" Margin="0,12,0,0" LastChildFill="False">
+        <DockPanel Grid.Row="8" Margin="0,12,0,0" LastChildFill="False">
             <!-- Fleet-scale bulk reset: clears every server's per-server override in one write so they all fall
                  back to the fleet-wide default (the shortcut over reverting servers one at a time). Confirmed +
                  applied immediately, separate from the per-scope Save. -->

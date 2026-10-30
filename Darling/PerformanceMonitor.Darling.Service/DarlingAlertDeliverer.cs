@@ -14,6 +14,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Notifications;
 
@@ -111,8 +112,8 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
     /// </summary>
     public Task<AlertChannelOutcome> TryResolvePagerDutyAsync(
         string firingMetric, string serverName, string serverKey, string? detailText,
-        CancellationToken cancellationToken = default) =>
-        _webhooks.TrySendPagerDutyResolveAsync(firingMetric, serverName, serverKey, detailText, cancellationToken);
+        IReadOnlyCollection<AlertSeverityLevel?> firedSeverities, CancellationToken cancellationToken = default) =>
+        _webhooks.TrySendPagerDutyResolveAsync(firingMetric, serverName, serverKey, detailText, firedSeverities, cancellationToken);
 
     public Task DeliverAsync(AlertOutcome outcome, CancellationToken cancellationToken = default) =>
         DeliverAndReportAsync(outcome, cancellationToken);
@@ -293,7 +294,9 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
         if (result.Route is { } route)
         {
             context ??= new AlertContext();
-            context.Route = route.ToDto(result.ChannelOutcomes);
+            /* #6718: the generic post's rendered {{dedup_key}} rides its destination, so a resolution after a restart closes
+               the key the receiver opened. The row's incidents are unfiltered (#3313) and cannot give that key back. */
+            context.Route = route.ToDto(result.ChannelOutcomes, result.GenericDedupKey, result.PagerDutyDedupKey);
         }
 
         /* Always log the alert, regardless of channel status (EmailAlertService.cs:82-94). */
@@ -335,9 +338,28 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
         /// against, read the way the viewer reads a row (<see cref="AlertMuteContext.PopulateFromDetailText"/>).</summary>
         public string? DetailText { get; set; }
 
-        public Dictionary<string, (string Destination, int? RouteId)> Channels { get; } = new(StringComparer.Ordinal);
+        /// <summary>Every destination each channel was fired to during the episode, each once (#6928). A severity filter can send a
+        /// Warning fire and the Critical fire after it to different routes, and the clear owes each of them its close.</summary>
+        public Dictionary<string, List<(string Destination, int? RouteId)>> Channels { get; } = new(StringComparer.Ordinal);
+
+        public void AddDestination(string channel, string destination, int? routeId)
+        {
+            if (!Channels.TryGetValue(channel, out var list))
+            {
+                Channels[channel] = list = new List<(string Destination, int? RouteId)>();
+            }
+
+            if (!list.Contains((destination, routeId)))
+            {
+                list.Add((destination, routeId));
+            }
+        }
 
         public HashSet<string> PagerDutyDedupKeys { get; } = new(StringComparer.Ordinal);
+
+        /// <summary>The <c>{{dedup_key}}</c> the generic webhook's fires rendered (#6718), which its resolution renders again so
+        /// the receiver closes what the fire opened. Not the PagerDuty keys: the generic token ignores the auto-resolve flag.</summary>
+        public HashSet<string> GenericDedupKeys { get; } = new(StringComparer.Ordinal);
 
         /// <summary>Channels a fire read back from history reached through a route that is gone or disabled now: no
         /// destination to send to, and the row's outcome says so.</summary>
@@ -382,7 +404,12 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
 
         var now = _utcNow();
         var serverId = string.IsNullOrEmpty(outcome.ServerKey) ? outcome.ServerName : outcome.ServerKey;
-        var dedupKey = WebhookAlertService.DerivePagerDutyDedupKeyForSend(serverId, outcome.MetricName, context, _settings);
+        /* The key the PagerDuty trigger carried, from the filtered context, so the resolve closes the incident it opened and
+           the triage link names it. Derived from this unfiltered context only when PagerDuty was not sent, for the link. */
+        var dedupKey = result.PagerDutyDedupKey
+            ?? WebhookAlertService.DerivePagerDutyDedupKeyForSend(serverId, outcome.MetricName, context, _settings);
+        /* #6718: the key the generic post rendered, from the filtered context, not one derived again from this unfiltered one. */
+        var genericDedupKey = result.GenericDedupKey;
         lock (_deliveredFires)
         {
             var key = (outcome.ServerKey, outcome.MetricName);
@@ -399,10 +426,14 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
             fire.DetailText = detailText;
             foreach (var (channel, where, routeId) in delivered)
             {
-                fire.Channels[channel] = (where, routeId);
+                fire.AddDestination(channel, where, routeId);
                 if (channel == NotificationRouter.PagerDutyChannel)
                 {
                     fire.PagerDutyDedupKeys.Add(dedupKey);
+                }
+                else if (channel == NotificationRouter.GenericChannel && genericDedupKey is not null)
+                {
+                    fire.GenericDedupKeys.Add(genericDedupKey);
                 }
             }
         }
@@ -537,33 +568,38 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
         var routeGone = new List<string>();
         foreach (var channel in s_channelOrder)
         {
-            if (!fire.Channels.TryGetValue(channel, out var reached))
+            if (!fire.Channels.TryGetValue(channel, out var reachedList))
             {
                 continue;
             }
 
-            /* The route that carried the fire, as it is now. Deleted or disabled since the fire: the same answer as the
-               history path below (#5855 review), so the clear goes nowhere on that channel and the row says why. */
-            var route = RouteNow(reached.RouteId, routes, out var gone);
-            if (gone)
+            /* #6928: a severity filter can fire one channel to different destinations during an episode, so each is closed. */
+            foreach (var reached in reachedList)
             {
-                if (!fire.RouteGoneChannels.Contains(channel))
+                /* The route that carried the fire, as it is now. Deleted or disabled since the fire: the same answer as the
+                   history path below (#5855 review), so the clear goes nowhere on that destination and the row says why. */
+                var route = RouteNow(reached.RouteId, routes, out var gone);
+                if (gone)
                 {
-                    fire.RouteGoneChannels.Add(channel);
+                    if (!fire.RouteGoneChannels.Contains(channel))
+                    {
+                        fire.RouteGoneChannels.Add(channel);
+                    }
+
+                    continue;
                 }
 
-                continue;
-            }
+                if (channel == NotificationRouter.PagerDutyChannel
+                    && (!options.ClosePagerDuty || fire.PagerDutyDedupKeys.Count == 0))
+                {
+                    continue;
+                }
 
-            if (channel == NotificationRouter.PagerDutyChannel
-                && (!options.ClosePagerDuty || fire.PagerDutyDedupKeys.Count == 0))
-            {
-                continue;
-            }
-
-            if (NotificationRouteResolutions.SendsResolutions(route, channel, flags))
-            {
-                targets.Add((channel, reached.Destination));
+                if (NotificationRouteResolutions.SendsResolutions(route, channel, flags)
+                    && !targets.Contains((channel, reached.Destination)))
+                {
+                    targets.Add((channel, reached.Destination));
+                }
             }
         }
 
@@ -627,12 +663,28 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
                         destination, dedupKey, resolution.MetricName, resolution.ServerName, serverId, detail, cancellationToken);
                 }
             }
+            else if (channel == NotificationRouter.GenericChannel && fire.GenericDedupKeys.Count > 0)
+            {
+                /* #6718: one resolution post per key the fire's posts rendered, as the PagerDuty close does per incident. Usually one. */
+                error = null;
+                foreach (var dedupKey in fire.GenericDedupKeys)
+                {
+                    error ??= await _webhooks.TrySendResolutionAsync(
+                        channel, destination, facts, serverId, dedupKey, cancellationToken);
+                }
+            }
             else
             {
-                error = await _webhooks.TrySendResolutionAsync(channel, destination, facts, serverId, cancellationToken);
+                /* Teams and Slack carry no key. A generic fire with no recorded key lands here and the send reports it. */
+                error = await _webhooks.TrySendResolutionAsync(channel, destination, facts, serverId, genericDedupKey: null, cancellationToken);
             }
 
-            outcomes[channel] = error is null ? AlertChannelOutcome.Delivered : AlertChannelOutcome.Failed;
+            /* A channel with several destinations is Failed when any of them failed. */
+            if (error is not null || !outcomes.ContainsKey(channel))
+            {
+                outcomes[channel] = error is null ? AlertChannelOutcome.Delivered : AlertChannelOutcome.Failed;
+            }
+
             if (error is not null && channel != NotificationRouter.EmailChannel)
             {
                 webhookError ??= $"{channel}: {error}";
@@ -719,7 +771,7 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
         };
         string? firstDedupKey = null;
 
-        /* Newest first: a channel takes the destination its newest delivered fire used, as the memory path does. */
+        /* Every delivered fire of the episode adds its destination, as the memory path does (#6928). */
         foreach (var row in history.Rows)
         {
             if (AlertContextSerializer.TryReadRoute(row.ContextJson) is not { } route)
@@ -728,25 +780,43 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
             }
 
             AlertContextSerializer.TryDeserialize(row.ContextJson, out var context);
-            var dedupKey = WebhookAlertService.DerivePagerDutyDedupKeyForSend(serverId, resolution.MetricName, context, _settings);
+            /* The key the PagerDuty trigger carried, stored on its destination as sent. A row written before that was stored,
+               or one that did not send PagerDuty, carries none, and the key is derived from the row's incidents, which
+               matches the trigger whenever the #3313 filter dropped none of them. The triage link takes the same key. */
+            var dedupKey = route.Destinations.FirstOrDefault(d => d.Channel == NotificationRouter.PagerDutyChannel)?.SentKey
+                ?? WebhookAlertService.DerivePagerDutyDedupKeyForSend(serverId, resolution.MetricName, context, _settings);
             firstDedupKey = dedupKey;
             foreach (var destination in route.Destinations)
             {
-                if (destination.Outcome != AlertRouteOutcomes.Delivered
-                    || fire.Channels.ContainsKey(destination.Channel) || fire.RouteGoneChannels.Contains(destination.Channel))
+                /* #6718: the key the generic post rendered, stored on its destination as sent. A row written before that was
+                   stored carries none, and the key is derived from the row's incidents, which matches the post whenever the
+                   #3313 filter dropped none of them. */
+                var genericDedupKey = destination.SentKey
+                    ?? WebhookAlertService.DeriveGenericDedupKey(resolution.ServerKey, resolution.ServerName, resolution.MetricName, context);
+                /* #6928: every delivered fire's destination counts, not only the newest, because a severity filter can send the
+                   Warning fire and the Critical fire of one episode to different routes, and each owes its close. */
+                if (destination.Outcome != AlertRouteOutcomes.Delivered)
                 {
-                    if (destination.Outcome == AlertRouteOutcomes.Delivered && destination.Channel == NotificationRouter.PagerDutyChannel)
-                    {
-                        fire.PagerDutyDedupKeys.Add(dedupKey);
-                    }
-
                     continue;
+                }
+
+                if (destination.Channel == NotificationRouter.PagerDutyChannel)
+                {
+                    fire.PagerDutyDedupKeys.Add(dedupKey);
+                }
+                else if (destination.Channel == NotificationRouter.GenericChannel)
+                {
+                    fire.GenericDedupKeys.Add(genericDedupKey);
                 }
 
                 var where = CurrentDestination(destination.Channel, destination.RouteId, routes, out var gone);
                 if (gone)
                 {
-                    fire.RouteGoneChannels.Add(destination.Channel);
+                    if (!fire.RouteGoneChannels.Contains(destination.Channel))
+                    {
+                        fire.RouteGoneChannels.Add(destination.Channel);
+                    }
+
                     continue;
                 }
 
@@ -755,11 +825,7 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
                     continue;
                 }
 
-                fire.Channels[destination.Channel] = (where, destination.RouteId);
-                if (destination.Channel == NotificationRouter.PagerDutyChannel)
-                {
-                    fire.PagerDutyDedupKeys.Add(dedupKey);
-                }
+                fire.AddDestination(destination.Channel, where, destination.RouteId);
             }
         }
 

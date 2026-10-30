@@ -150,6 +150,9 @@ public partial class App : Application
         /* F17: tabs and column headers made of panels get an accessible name equal to their visible text. */
         PerformanceMonitor.Ui.AccessibleNames.Register();
 
+        /* #6678: chart text is drawn at the window's DPI scale, not at 100% of device pixels. */
+        PerformanceMonitor.Ui.ChartDisplayScale.Register();
+
         base.OnStartup(e);
 
         // Right-click selects the DataGrid row under the cursor app-wide, so context-menu actions

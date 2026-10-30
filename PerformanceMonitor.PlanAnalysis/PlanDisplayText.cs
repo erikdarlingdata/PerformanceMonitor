@@ -76,11 +76,13 @@ public static class PlanDisplayText
 
     /// <summary>
     /// The runtime summary card's title, matching erikdarlingdata/PerformanceStudio@40ade29 (E7):
-    /// "Predicted Runtime" when the statement has no <see cref="PlanStatement.QueryTimeStats"/>
-    /// (an estimated-plan-only statement), "Runtime Summary" otherwise.
+    /// "Plan properties" when the statement has no <see cref="PlanStatement.QueryTimeStats"/>
+    /// (an estimated-plan-only statement), "Runtime Summary" otherwise. #6653: PerformanceStudio@40ade29
+    /// titled the estimated card "Predicted Runtime", but it holds compile facts (compile time, memory, cached size),
+    /// not a predicted runtime, so the title is "Plan properties" here.
     /// </summary>
     public static string RuntimeSummaryTitle(PlanStatement statement) =>
-        statement.QueryTimeStats == null ? "Predicted Runtime" : "Runtime Summary";
+        statement.QueryTimeStats == null ? "Plan properties" : "Runtime Summary";
 
     /// <summary>
     /// Walks a plan's node tree looking for any warning whose type ends in " Spill" (Sort Spill,

@@ -14,6 +14,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Service.Mcp;
 
 namespace PerformanceMonitor.Darling.Service;
@@ -68,18 +69,18 @@ SELECT server_id, server_name, display_name
 FROM servers
 ORDER BY server_name";
 
-    private static async Task<(List<DarlingServerResolver.RegisteredServer> Servers, string? Fault)> LoadAllOrFaultAsync(
+    private static async Task<(List<RegisteredServer> Servers, string? Fault)> LoadAllOrFaultAsync(
         NpgsqlDataSource postgres, CancellationToken cancellationToken)
     {
         try
         {
-            var servers = new List<DarlingServerResolver.RegisteredServer>();
+            var servers = new List<RegisteredServer>();
             await using var command = postgres.CreateCommand(LoadAllServersSql);
             command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
-                servers.Add(new DarlingServerResolver.RegisteredServer(
+                servers.Add(new RegisteredServer(
                     reader.GetInt32(0), reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetString(2)));
             }
 
@@ -95,7 +96,7 @@ ORDER BY server_name";
     /// <summary>The pure half of <see cref="ResolveNamesAsync"/>: the scope with each name placed in <paramref name="servers"/>, or the
     /// resolver's refusal for a name that is ambiguous.</summary>
     internal static (List<string> Scope, string? Refusal) ResolveNames(
-        IReadOnlyList<string> scope, IReadOnlyList<DarlingServerResolver.RegisteredServer> servers)
+        IReadOnlyList<string> scope, IReadOnlyList<RegisteredServer> servers)
     {
         var resolvedNames = new List<string>(scope.Count);
         foreach (var rawName in scope)

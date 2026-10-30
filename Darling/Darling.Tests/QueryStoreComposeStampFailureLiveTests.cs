@@ -65,9 +65,12 @@ EXECUTE FUNCTION collect.fail_5867();", ct);
     private static Task ADayPassesAsync(NpgsqlConnection connection, CancellationToken ct) =>
         ExecAsync(connection, "UPDATE collect.query_store_compose_stamp_failures SET retry_at = retry_at - interval '1 day', last_failed_at = last_failed_at - interval '1 day'", ct);
 
-    private static Task<QueryStoreComposeStamp.TickResult> TickAsync(NpgsqlDataSource source, ILogger logger, CancellationToken ct) =>
-        QueryStoreComposeStamp.RunTickAsync(source, DateTime.UtcNow, RetentionDays, logger, () => TimeSpan.Zero, ct,
-            new QueryStoreComposeStamp.TickOptions(new QueryStoreComposeStamp.DeferralWatch(() => DateTime.UtcNow)));
+    /* The tick plans and records failures on the arrange step's store clock (ClockWithin(hourNow)), not the real one: the plan's due hours
+       and a failure's retry_at both read the store clock, so a test that crosses the top of the hour must not make one more hour due (#6769).
+       The DeferralWatch measures elapsed time and stays on the real clock. */
+    private static Task<QueryStoreComposeStamp.TickResult> TickAsync(NpgsqlDataSource source, ILogger logger, DateTime hourNow, CancellationToken ct) =>
+        QueryStoreComposeStamp.RunTickAsync(source, ClockWithin(hourNow), RetentionDays, logger, () => TimeSpan.Zero, ct,
+            new QueryStoreComposeStamp.TickOptions(new QueryStoreComposeStamp.DeferralWatch(() => DateTime.UtcNow), ClockWithin(hourNow)));
 
     [Fact]
     public async Task ABuildThatFailsForAnotherReason_IsRetriedEachTickThreeTimes_ThenOnceADay_IsReadable_AndASuccessClearsIt()
@@ -86,7 +89,7 @@ EXECUTE FUNCTION collect.fail_5867();", ct);
             var logger = new CapturingTestLogger();
 
             /* Tick 1: the normal hour builds as before and leaves no record; the failing hour is recorded once and retried next tick. */
-            var first = await TickAsync(source, logger, ct);
+            var first = await TickAsync(source, logger, hourNow, ct);
             Assert.Equal(1, first.Failed);
             Assert.Equal(1, first.BuiltMissing);
             Assert.Equal(0, first.BackedOff);
@@ -101,12 +104,12 @@ EXECUTE FUNCTION collect.fail_5867();", ct);
             Assert.Contains(logger.Lines, l => l.StartsWith("Warning:", StringComparison.Ordinal) && l.Contains("is retried next tick:", StringComparison.Ordinal));
 
             /* Not a timeout, so the retry runs under the normal timeout. */
-            var planned = Assert.Single(await QueryStoreComposeStamp.PlanBuildsAsync(connection, DateTime.UtcNow, RetentionDays, ct));
+            var planned = Assert.Single((await QueryStoreComposeStamp.PlanAsync(connection, ClockWithin(hourNow), RetentionDays, ct, ClockWithin(hourNow))).Builds);
             Assert.Equal(new QueryStoreComposeStamp.Build(failing, false, 1, false), planned);
 
             /* Ticks 2 and 3: the third failure in a row moves the hour to its daily attempt. */
-            Assert.Equal(1, (await TickAsync(source, logger, ct)).Failed);
-            var third = await TickAsync(source, logger, ct);
+            Assert.Equal(1, (await TickAsync(source, logger, hourNow, ct)).Failed);
+            var third = await TickAsync(source, logger, hourNow, ct);
             Assert.Equal(1, third.Failed);
             Assert.Equal(1, third.BackedOff);
             record = Assert.Single(await QueryStoreComposeStamp.ReadFailuresAsync(connection, ct));
@@ -118,8 +121,8 @@ EXECUTE FUNCTION collect.fail_5867();", ct);
 
             /* Tick 4, the next hour: the hour in backoff is not planned, not built, and logs nothing. */
             var warnings = logger.CountAtLevel(LogLevel.Warning);
-            Assert.Empty(await QueryStoreComposeStamp.PlanBuildsAsync(connection, DateTime.UtcNow, RetentionDays, ct));
-            var fourth = await TickAsync(source, logger, ct);
+            Assert.Empty((await QueryStoreComposeStamp.PlanAsync(connection, ClockWithin(hourNow), RetentionDays, ct, ClockWithin(hourNow))).Builds);
+            var fourth = await TickAsync(source, logger, hourNow, ct);
             Assert.Equal(0, fourth.Failed);
             Assert.Equal(0, fourth.Built);
             Assert.Equal(warnings, logger.CountAtLevel(LogLevel.Warning));
@@ -127,16 +130,16 @@ EXECUTE FUNCTION collect.fail_5867();", ct);
 
             /* A day later it is tried once, fails once more, and goes back to waiting a day. */
             await ADayPassesAsync(connection, ct);
-            var daily = await TickAsync(source, logger, ct);
+            var daily = await TickAsync(source, logger, hourNow, ct);
             Assert.Equal(1, daily.Failed);
             Assert.Equal(1, daily.BackedOff);
             Assert.Equal(QueryStoreComposeStamp.FailuresBeforeBackoff + 1, Assert.Single(await QueryStoreComposeStamp.ReadFailuresAsync(connection, ct)).Failures);
-            Assert.Equal(0, (await TickAsync(source, logger, ct)).Failed);
+            Assert.Equal(0, (await TickAsync(source, logger, hourNow, ct)).Failed);
 
             /* The cause goes away: the next daily attempt builds the hour and clears its record. */
             await DropFailureAsync(connection, ct);
             await ADayPassesAsync(connection, ct);
-            var healed = await TickAsync(source, logger, ct);
+            var healed = await TickAsync(source, logger, hourNow, ct);
             Assert.Equal(0, healed.Failed);
             Assert.Equal(1, healed.BuiltMissing);
             Assert.Equal(1, await HoursBuiltAsync(connection, failing, ct));
@@ -163,17 +166,17 @@ EXECUTE FUNCTION collect.fail_5867();", ct);
             await UnbuildAsync(connection, failing, ct);
             var logger = new CapturingTestLogger();
 
-            var first = await TickAsync(source, logger, ct);
+            var first = await TickAsync(source, logger, hourNow, ct);
             Assert.Equal(1, first.Failed);
             var record = Assert.Single(await QueryStoreComposeStamp.ReadFailuresAsync(connection, ct));
             Assert.Equal(QueryStoreComposeStamp.StatementTimeoutSqlState, record.LastSqlState);
             Assert.False(record.InBackoff);
             Assert.Contains(logger.Lines, l => l.Contains($"is retried next tick under a {QueryStoreComposeStamp.ExtendedBuildStatementTimeoutSeconds} s statement timeout", StringComparison.Ordinal));
             Assert.Equal(new QueryStoreComposeStamp.Build(failing, false, 1, true),
-                Assert.Single(await QueryStoreComposeStamp.PlanBuildsAsync(connection, DateTime.UtcNow, RetentionDays, ct)));
+                Assert.Single((await QueryStoreComposeStamp.PlanAsync(connection, ClockWithin(hourNow), RetentionDays, ct, ClockWithin(hourNow))).Builds));
 
             /* The next tick runs the build under the extended timeout, where the planted check passes: built, and the record is gone. */
-            var second = await TickAsync(source, logger, ct);
+            var second = await TickAsync(source, logger, hourNow, ct);
             Assert.Equal(0, second.Failed);
             Assert.Equal(1, second.BuiltMissing);
             Assert.Equal(1, await HoursBuiltAsync(connection, failing, ct));
@@ -199,8 +202,8 @@ EXECUTE FUNCTION collect.fail_5867();", ct);
             await PlantFailureAsync(connection, failing, "query_canceled", onlyUnderTheNormalTimeout: false, ct);
             await UnbuildAsync(connection, failing, ct);
 
-            Assert.Equal(0, (await TickAsync(source, NullLogger.Instance, ct)).BackedOff);
-            var second = await TickAsync(source, NullLogger.Instance, ct);
+            Assert.Equal(0, (await TickAsync(source, NullLogger.Instance, hourNow, ct)).BackedOff);
+            var second = await TickAsync(source, NullLogger.Instance, hourNow, ct);
             Assert.Equal(1, second.Failed);
             Assert.Equal(1, second.BackedOff);
             var record = Assert.Single(await QueryStoreComposeStamp.ReadFailuresAsync(connection, ct));
@@ -208,7 +211,7 @@ EXECUTE FUNCTION collect.fail_5867();", ct);
             Assert.Equal(QueryStoreComposeStamp.ExtendedBuildStatementTimeoutSeconds, record.LastTimeoutSeconds);
             Assert.True(record.InBackoff);
 
-            var third = await TickAsync(source, NullLogger.Instance, ct);
+            var third = await TickAsync(source, NullLogger.Instance, hourNow, ct);
             Assert.Equal(0, third.Failed);
             Assert.Equal(0, third.Built);
             Assert.Equal(0, await HoursBuiltAsync(connection, failing, ct));

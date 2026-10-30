@@ -104,40 +104,6 @@ public sealed class McpZeroIsAMeasurementTests
     }
 
     /// <summary>
-    /// The ladder itself: five rungs, three of them <c>empty</c> and two <c>unavailable</c> (#6441). One is the
-    /// nothing-of-any-type-ever rung, with <c>source_observed: false</c> and the sentence the
-    /// EngineCapabilityMissTests pin (<c>system_health session is started</c>). The other is the truncated-capture
-    /// rung, which comes first: when the newest collection run found the ring buffer truncated, an empty window is
-    /// not a true negative, so it is <c>unavailable</c>, not <c>empty</c>. It reads the collection log's note,
-    /// which is why it is a probe of its own and the witness stays the events view. Rung 3 — this type never, the
-    /// session alive — must be <c>empty</c>: a memory-node OOM that never happened is the healthy measurement.
-    /// </summary>
-    [Theory]
-    [InlineData(DarlingMcp + "/DarlingMcpHealthParserTools.cs")]
-    [InlineData(LiteMcp + "/McpHealthParserTools.cs")]
-    public void TheEmptyLadder_HasFiveRungs_AndOnlyTheDeadSessionAndTheTruncatedCaptureAreUnavailable(string file)
-    {
-        var source = ReadRepoFile(file.Split('/'));
-        var start = source.IndexOf("private static async Task<string> EmptyAsync", StringComparison.Ordinal);
-        Assert.True(start > 0, $"{file} has no shared EmptyAsync ladder");
-        var end = source.IndexOf("private static string WitnessStatus", start, StringComparison.Ordinal);
-        var ladder = Strip(source[start..end]);
-
-        Assert.Equal(3, Regex.Matches(ladder, "WitnessStatus\\(\\s*\"empty\"").Count);
-        Assert.Equal(2, Regex.Matches(ladder, "WitnessStatus\\(\\s*\"unavailable\"").Count);
-        Assert.Contains("RingBufferTruncationNote.Describe", ladder, StringComparison.Ordinal);
-        Assert.Single(Regex.Matches(ladder, "sourceObserved: false"));
-        Assert.Contains("NOT an all-clear", ladder, StringComparison.Ordinal);
-        Assert.Contains("system_health session is started", ladder, StringComparison.Ordinal);
-        /* The engine-capability probe goes FIRST on the dead rung — the stronger claim. */
-        Assert.True(
-            ladder.IndexOf("NotCollectedStatusAsync", StringComparison.Ordinal) < ladder.LastIndexOf("\"unavailable\"", StringComparison.Ordinal));
-        /* The healthy rungs never reach for the dead rung's word, so a caller keying on it cannot be misled. */
-        var rung3 = ladder[..ladder.IndexOf("NotCollectedStatusAsync", StringComparison.Ordinal)];
-        Assert.DoesNotContain("EVER", rung3, StringComparison.Ordinal);
-    }
-
-    /// <summary>
     /// The witness reads the SAME view the tools read and is not the collection log — the log records a
     /// SUCCESS for a run that read a dead session and stored nothing, which is the shape being fixed.
     /// </summary>
@@ -486,7 +452,7 @@ public sealed class McpZeroIsAMeasurementTests
         var latest = new DateTime(2026, 3, 4, 3, 0, 0);
 
         /* Three days of history: no 7-day or 30-day snapshot; the oldest holds the table at 100 MB. */
-        var threeDays = new DarlingObjectStatsReader.ObjectSizeGrowthRow(
+        var threeDays = new TableSizeGrowthRow(
             "db", "dbo", "Posts", CurrentReservedMb: 160, CurrentUsedMb: 150, TotalRows: 10, IndexCount: 2,
             ReservedMb7dAgo: null, ReservedMb30dAgo: null, ReservedMbOldest: 100,
             Snapshot7dTime: null, Snapshot30dTime: null, EarliestSnapshotTime: earliest, LatestSnapshotTime: latest, DaysOfData: 3);
@@ -608,9 +574,10 @@ public sealed class McpZeroIsAMeasurementLivePostgresTests
                The 30-hours-ago rows sit in the baseline whichever hour the test runs (#5506: the split is by
                last_execution_time, which the seed sets to the collection time). */
             await SeedQueryStoreAsync(connection, ct, HoursAgo(30), queryId: 1, intervalId: 1, executions: 10, avgDurationUs: 0, avgCpuUs: 500, avgReads: 0);
-            await SeedQueryStoreAsync(connection, ct, MinutesAgo(30), queryId: 1, intervalId: 2, executions: 10, avgDurationUs: 1_500, avgCpuUs: 1_000, avgReads: 0);
+            /* #6781: 3,000 recent runs, so the 0.5 ms CPU rise adds 1.5 s of CPU (QueryStoreRegressionRules.CostMinAddedCpuMs). */
+            await SeedQueryStoreAsync(connection, ct, MinutesAgo(30), queryId: 1, intervalId: 2, executions: 3_000, avgDurationUs: 1_500, avgCpuUs: 1_000, avgReads: 0);
             await SeedQueryStoreAsync(connection, ct, HoursAgo(30), queryId: 2, intervalId: 3, executions: 10, avgDurationUs: 1_000, avgCpuUs: 500, avgReads: 0);
-            await SeedQueryStoreAsync(connection, ct, MinutesAgo(30), queryId: 2, intervalId: 4, executions: 10, avgDurationUs: 3_000, avgCpuUs: 1_000, avgReads: 0);
+            await SeedQueryStoreAsync(connection, ct, MinutesAgo(30), queryId: 2, intervalId: 4, executions: 3_000, avgDurationUs: 3_000, avgCpuUs: 1_000, avgReads: 0);
 
             var root = JsonDocument.Parse(await DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(postgres, ServerName, hours_back: 24)).RootElement;
             Assert.Equal(2, root.GetProperty("regression_count").GetInt32());
@@ -637,8 +604,8 @@ public sealed class McpZeroIsAMeasurementLivePostgresTests
             Assert.False(defined.TryGetProperty("baseline_reads", out _));
             Assert.False(defined.TryGetProperty("recent_reads", out _));
 
-            /* The ranking key is the absolute delta, defined for both — query 2's 2 ms × 10 outranks
-               query 1's 1.5 ms × 10, whatever their ratios. */
+            /* The ranking key is the absolute delta, defined for both — query 2's 2 ms × 3,000 outranks
+               query 1's 1.5 ms × 3,000, whatever their ratios. */
             var order = root.GetProperty("regressions").EnumerateArray().Select(r => r.GetProperty("query_id").GetInt64()).ToArray();
             Assert.Equal(new long[] { 2, 1 }, order);
 

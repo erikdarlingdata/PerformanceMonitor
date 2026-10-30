@@ -47,7 +47,7 @@ public sealed class DarlingMcpCollectionStateTools
 {
     private const string TakesEffect = "The running service re-reads this on its next config poll; no restart is needed.";
 
-    private sealed record ServerRow(int ServerId, string Name, string StorageName, string Engine, bool Enabled, IReadOnlyList<string> Excluded);
+    private sealed record ServerRow(int ServerId, string Name, string StorageName, string Engine, bool Enabled, IReadOnlyList<string> Excluded, decimal MonthlyCostUsd);
 
     [McpServerTool(Name = "pause_collection"), Description(
         "Pauses ALL collection, alerting, analysis and purge in the service: queues the same pause command the Viewer's Pause button queues, which the service runs and which sets its paused flag. Data already collected stays, and nothing is deleted. A pass already running finishes; no new pass starts until resume_collection. Served only with mcp.allowWrites. The answer gives the command id, the previous state, the exact call that undoes it and the read that shows the result (get_command_result, then get_collection_state).")]
@@ -166,7 +166,7 @@ public sealed class DarlingMcpCollectionStateTools
     }
 
     [McpServerTool(Name = "get_collection_state"), Description(
-        "Shows whether collection is paused, the store's config version, and every monitored server's enabled flag and excluded databases (disabled servers included). Read it before and after pause_collection, resume_collection, disable_server, enable_server, set_server_excluded_databases or reload_config. A server with enabled false is skipped by collection.")]
+        "Shows whether collection is paused, the store's config version, and every monitored server's enabled flag, excluded databases and monthly cost in USD (0 means none is set; disabled servers included). get_server_settings shows the rest of the fields edit_server changes. Read it before and after pause_collection, resume_collection, disable_server, enable_server, set_server_excluded_databases or reload_config. A server with enabled false is skipped by collection.")]
     public static async Task<string> GetCollectionState(NpgsqlDataSource postgres, CancellationToken cancellationToken = default)
     {
         try
@@ -190,6 +190,44 @@ public sealed class DarlingMcpCollectionStateTools
         }
     }
 
+    /// <summary>
+    /// #6402: the read of the fields <c>edit_server</c> changes. It is the web edit route's own read
+    /// (<see cref="DarlingMcpServerAdminTools.PostgresServerEditStore.ReadRowAsync"/>) and the same value shape the
+    /// <c>edit_server</c> conflict answer carries (<see cref="DarlingMcpServerAdminTools.CurrentValuesOf"/>), so a read and an edit
+    /// never disagree about a field. Names the server the way <c>edit_server</c> does. Never returns a password or an AWS external ID.
+    /// </summary>
+    [McpServerTool(Name = "get_server_settings"), Description(
+        "Shows the settings edit_server changes, for ONE monitored server, with their current values: display name, host, port, database, read-only intent, auth, username, encrypt mode, trust certificate, multi-subnet failover, Query Store replica, monthly cost in USD (0 = none set), AWS role, and modified_at. A read; no password is ever returned."
+        + "<<GUIDE>>"
+        + "Read it before edit_server, and pass modified_at back as expected_modified_at so the edit fails instead of overwriting a change made since. A disabled server is found too. aws_external_id_set says whether an AWS external ID is stored (the ID itself is never returned). Whether a password is stored cannot be read here: that column is write-only for this role. server_name is the name list_servers shows, the storage name, or a part of either that matches ONE server; several matches are never picked from, the answer lists them. A server defined only in darling.json has no stored definition and is not found. The answer is {status:\"ok\", settings:{...}}, the same fields edit_server's conflict answer calls current.")]
+    public static async Task<string> GetServerSettings(
+        NpgsqlDataSource postgres,
+        [Description("Server name (the name list_servers shows), or a unique part of it.")] string server_name,
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var (server, error) = await ResolveAsync(postgres, "get_server_settings", server_name, cancellationToken);
+            if (error is not null || server is null)
+            {
+                return error ?? Refuse("get_server_settings", "not_found", $"No monitored server is named '{server_name}'.");
+            }
+
+            var row = await new DarlingMcpServerAdminTools.PostgresServerEditStore(postgres).ReadRowAsync(server.ServerId, cancellationToken);
+            if (row is null)
+            {
+                return Refuse("get_server_settings", "not_found", $"'{server.Name}' was defined when this call resolved it but its definition was gone by the time it was read.");
+            }
+
+            return System.Text.Json.JsonSerializer.Serialize(
+                new { status = "ok", settings = DarlingMcpServerAdminTools.CurrentValuesOf(row) }, McpHelpers.JsonOptions);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return McpHelpers.FormatError("get_server_settings", ex);
+        }
+    }
+
     private static JsonNode ServerJson(ServerRow s) => new JsonObject
     {
         ["server_id"] = s.ServerId,
@@ -198,6 +236,8 @@ public sealed class DarlingMcpCollectionStateTools
         ["engine"] = s.Engine,
         ["enabled"] = s.Enabled,
         ["excluded_databases"] = Strings(s.Excluded),
+        /* #6402: 0 means no cost is set (the unset value every FinOps read treats as "no cost"). */
+        ["monthly_cost_usd"] = s.MonthlyCostUsd,
     };
 
     private static JsonArray Strings(IEnumerable<string> values) =>
@@ -368,7 +408,7 @@ public sealed class DarlingMcpCollectionStateTools
         var servers = await ReadServersAsync(postgres, cancellationToken);
         var typed = serverName.Trim();
         var target = DarlingMcpServerAdminTools.ResolveForRemoval(
-            servers.Select(s => new DarlingServerResolver.RegisteredServer(s.ServerId, s.StorageName, s.Name)).ToList(), typed,
+            servers.Select(s => new RegisteredServer(s.ServerId, s.StorageName, s.Name)).ToList(), typed,
             nameClash: NameClash.Refuse);
         if (target.Candidates.Count == 1)
         {
@@ -390,7 +430,7 @@ public sealed class DarlingMcpCollectionStateTools
     {
         var rows = new List<ServerRow>();
         await using var command = postgres.CreateCommand(
-            "SELECT server_id, name, host, database, COALESCE(read_only_intent, false), engine, port, is_enabled, excluded_databases "
+            "SELECT server_id, name, host, database, COALESCE(read_only_intent, false), engine, port, is_enabled, excluded_databases, COALESCE(monthly_cost_usd, 0) "
             + "FROM config.config_monitored_servers ORDER BY name, server_id");
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -402,7 +442,8 @@ public sealed class DarlingMcpCollectionStateTools
                 ServerIdHelper.BuildStorageName(
                     reader.GetString(2), reader.IsDBNull(3) ? null : reader.GetString(3), reader.GetBoolean(4), engine, reader.IsDBNull(6) ? 0 : reader.GetInt32(6)),
                 engine ?? "sqlserver", reader.GetBoolean(7),
-                reader.IsDBNull(8) ? Array.Empty<string>() : reader.GetFieldValue<string[]>(8)));
+                reader.IsDBNull(8) ? Array.Empty<string>() : reader.GetFieldValue<string[]>(8),
+                reader.GetDecimal(9)));
         }
 
         return rows;

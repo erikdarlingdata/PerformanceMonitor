@@ -306,6 +306,18 @@ WHERE command_id = $1
             : null;
 
     /// <summary>
+    /// #6472: what a <c>test_connect</c> result says about base grants the connecting login lacks, each with the statement that adds
+    /// it, or null when none is missing (or the service is older than this field). A warning: the connection worked.
+    /// </summary>
+    public static string? ProbeMissingGrantsNote(JsonElement probeResult) =>
+        probeResult.ValueKind == JsonValueKind.Object
+        && probeResult.TryGetProperty("missingGrantsNote", out var note)
+        && note.ValueKind == JsonValueKind.String
+        && !string.IsNullOrWhiteSpace(note.GetString())
+            ? note.GetString()
+            : null;
+
+    /// <summary>
     /// The engine-aware version label for a <c>test_connect</c> result payload (#3145) — the ONE reader of
     /// the probe's version facts, shared by both Add-server dialogs, which each formatted this themselves.
     /// Lives beside <see cref="BuildTestConnectArgs"/> because the two are halves of the same contract: that

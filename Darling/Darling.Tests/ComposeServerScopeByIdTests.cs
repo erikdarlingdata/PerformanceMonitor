@@ -226,8 +226,10 @@ public sealed class ComposeServerScopeByIdTests
     [Fact]
     public void BothRunners_LookUpUnregisteredNames_BeforeTheyCompile_AndHandThemOn()
     {
-        var web = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs");
-        var lookup = web.IndexOf("await ComposeServerScope.FindUnregisteredAsync(postgres, serverScope, cancellationToken", StringComparison.Ordinal);
+        /* #6390 S2c: the run core moved to Storage and reaches the lookup through the host the service builds. */
+        var web = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "Compose", "ComposePanelRunner.cs");
+        var endpoints = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs");
+        var lookup = web.IndexOf("await host.FindUnregistered(postgres, serverScope, cancellationToken", StringComparison.Ordinal);
         var snapshot = web.IndexOf("await BeginHourlyEdgesSnapshotAsync(postgres, hourlyEdgesCandidate", StringComparison.Ordinal);
         /* #5582: the ReadsStampRollup gate earlier in the runner builds a throwaway context only to ask whether the plan reads the
            rollup. That one is never compiled, so the pin anchors on the assignment of the context the runner compiles. */
@@ -239,7 +241,8 @@ public sealed class ComposeServerScopeByIdTests
         Assert.Contains("ComposeCompiler.Compile(plan!, runContext)", web[context..], StringComparison.Ordinal);
         Assert.Contains("cancellationToken, unregisteredServers);", web[snapshot..context], StringComparison.Ordinal);
         Assert.Contains("UnregisteredServers: unregisteredServers", web[context..(context + 700)], StringComparison.Ordinal);
-        Assert.Single(Regex.Matches(web, @"ComposeServerScope\.FindUnregisteredAsync\("));
+        Assert.Single(Regex.Matches(web, @"host\.FindUnregistered\("));
+        Assert.Single(Regex.Matches(endpoints, @"ComposeServerScope\.FindUnregisteredAsync,"));
 
         var alerts = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "CustomAlertEvaluator.cs");
         Assert.Equal(2, Regex.Matches(alerts, @"ComposeServerScope\.FindUnregisteredAsync\(").Count);

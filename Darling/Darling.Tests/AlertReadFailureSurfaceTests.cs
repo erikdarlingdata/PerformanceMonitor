@@ -928,7 +928,9 @@ public sealed class AlertReadFailureSurfaceTests
            catch - the delivery self-alert's report is a parameter, with the count read counted in DarlingWorker. 20th exempt since
            #5867: EvaluateComposeHoursStuckAsync's wrapper catch - the compose rollup self-alert's failure record is a parameter,
            with the read exempt in DarlingWorker (it holds the alert on a failed read). */
-        (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 13, 20),
+        /* 21st exempt since #6912: the capture-down engine facts catch, whose read goes through the retry adapter that already records the failure. */
+        /* 16th counted since #6875: the identity-capacity self-alert read in the per-server sweep, counted as "identity-capacity self-alert". */
+        (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 16, 21),
     };
 
     /// <summary>
@@ -1042,8 +1044,11 @@ public sealed class AlertReadFailureSurfaceTests
     /// the card's request items go missing and the fire does not. And a FORTY-FIRST since #5640: the Client Timeouts window read ("client timeouts"), counted because a swallowed read neither fires nor clears the alert. And a FORTY-SECOND since #5654: the external-alert delivery self-alert's count of undelivered rows, counted because a
     /// swallowed read leaves the standing alert unjudged (the worker holds it rather than resolving it). And a FORTY-THIRD since #5715 part B: the escalation-tier seed read ("escalation tier seed"), counted because a swallowed read leaves a Warning delivered before a restart unknown to the engine, so the Critical that follows waits out the cooldown instead of escalating; it seeds nothing, never blocks a fire, and is retried on the next sweep.</para>
     /// And a FORTY-FOURTH since #5916: the threshold-override reload ("threshold-override reload"), counted because a swallowed read keeps the overrides already in force, so a nonzero count says a changed override has not yet taken effect.
+    /// And a FORTY-FIFTH since #6874: the Agent Alert Gaps read ("agent-alert-setup self-alert"), counted because a swallowed read leaves the standing alert unjudged and a nonzero count says the setup check is not running.
+    /// And a FORTY-SIXTH since #6873: the database-protection read ("database-protection self-alert"), counted because a swallowed read leaves the Backup Overdue, Log Backup Overdue and CHECKDB Overdue alerts unjudged.
+    /// And a FORTY-SEVENTH since #6875: the Identity Capacity window read ("identity-capacity self-alert"), counted because a swallowed read neither fires nor clears the alert, so a population of them would leave a nearly exhausted identity column unreported for as long as the store stayed unreadable.
     /// </summary>
-    private const int CountedSites = 44;
+    private const int CountedSites = 47;
 
     /// <summary>
     /// Log-message fragments that identify a catch block DELIBERATELY not counted, each paired with the
@@ -1097,6 +1102,7 @@ public sealed class AlertReadFailureSurfaceTests
         ["Collection log hourly rollup failed"] = "a maintenance write (#5810): the pass upserts the hourly rollup and no alert is judged on its result; a failed pass is redone by the next, and get_collection_health reads the hours after the newest rolled hour from the raw log",
         ["The threshold override for"] = "an in-memory override lookup (#5910), not a read: the global value applies and the check's own read is counted as before",
         ["Read-latency flush failed"] ="the read-latency histogram flush writes instrumentation; losing an hour's rows can't hide an alert condition",
+        ["Capture-down engine facts read failed"] = "#6912: the read goes through ReadWithOneRetryAsync, whose adapter already records the failure, so counting again here would double it; the catch only keeps the unknown edition from silencing Capture Down for the pass",
     };
 
     /// <summary>
@@ -1291,8 +1297,9 @@ public sealed class AlertReadFailureSurfaceTests
            self-alert's wrapper catch, handed its failure record as a parameter. 41st since #5867: the worker's read of that
            record, which holds the standing alert on a failure. 42nd since #5910: the engine's threshold-override
            fallback, an in-memory lookup and not a read. 43rd since #6005: the deadlock rollup's catch, a write after the deadlock read, which counts its own
-           failure. */
-        Assert.Equal(43, totalExempt);
+           failure. 44th since #6912: the capture-down engine facts catch, whose read goes through the retry adapter that
+           already records the failure. */
+        Assert.Equal(44, totalExempt);
 
         /* Every exemption in the table is actually used. An exemption for a message that no longer exists
            is a hole this pin would otherwise keep open indefinitely — the shape that lets a real new catch

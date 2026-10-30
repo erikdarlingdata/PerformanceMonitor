@@ -143,9 +143,7 @@ internal static class DarlingFleetSweepEndpoints
         ILogger? logger,
         CancellationToken cancellationToken)
     {
-        return items.Any(item => item.ServerId != FleetSweepStore.FleetScopeServerId)
-            ? await FleetSweepStore.GetSweepServerNamesAsync(postgres, logger, cancellationToken)
-            : new Dictionary<int, string>();
+        return await FleetSweepStore.GetWatchItemNamesAsync(postgres, items, logger, cancellationToken);
     }
 
     /// <summary>

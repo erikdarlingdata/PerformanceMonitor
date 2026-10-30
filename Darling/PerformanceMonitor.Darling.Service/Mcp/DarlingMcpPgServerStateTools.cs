@@ -700,12 +700,13 @@ public sealed class DarlingMcpPgServerStateTools
                 /* Empty on the default view can mean two things: no snapshot, or a snapshot in which nothing
                    is set and nothing is pending. SnapshotNonDefaultCount cannot tell them apart (it rides on
                    rows that did not come back), so the capability read decides as it always has. */
+                var configMinutes = await DarlingCollectorCadence.MinutesAsync(postgres, "pg_server_config", resolved.ServerId, 60, cancellationToken);
                 return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, DateTime.UtcNow, await DarlingEngineCapability.NotCollectedStatusAsync(
                     postgres, resolved.ServerId, resolved.DisplayName, "pg_server_config", cancellationToken)
                     ?? McpHelpers.Status(
                         "empty",
                         $"No configuration snapshot has been collected for {resolved.DisplayName} yet. "
-                        + "This collector runs hourly, so a server registered in the last hour has not "
+                        + $"This collector runs {CollectorCadenceText.Every(configMinutes)}, so a server registered in the last {CollectorCadenceText.Span(configMinutes)} has not "
                         + "reached its first collection."), cancellationToken);
             }
 
@@ -909,6 +910,7 @@ public sealed class DarlingMcpPgServerStateTools
             var windowStart = windowEnd.AddHours(-hours_back);
             var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
                 postgres, "get_pg_server_config_changes", resolved.ServerName, windowStart, windowEnd, emptyAnswer: false, logger, cancellationToken);
+            var changesMinutes = await DarlingCollectorCadence.MinutesAsync(postgres, "pg_server_config", resolved.ServerId, 60, cancellationToken);
 
             /* #3937: the rows are typed `object` so one list can carry two shapes. A server-wide row is the SAME
                anonymous shape it always was, and System.Text.Json serializes an object-typed element by its
@@ -931,7 +933,7 @@ public sealed class DarlingMcpPgServerStateTools
                 change_count = rows.Count,
                 truncated,
                 note = "changed_at is the time of the snapshot that FIRST reported the new value, so the "
-                     + "change happened at some point in the hour before it - this collector runs hourly. "
+                     + $"change happened at some point in the {CollectorCadenceText.Span(changesMinutes)} before it - this collector runs {CollectorCadenceText.Every(changesMinutes)}. "
                      + "A setting appearing for the first time is not reported here.",
                 changes = rows.Select(r => r.DatabaseName is null && r.RoleName is null
                     ? (object)new

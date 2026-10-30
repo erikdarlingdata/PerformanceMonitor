@@ -297,18 +297,29 @@ public class FactScorer
     }
 
     /// <summary>
-    /// Scores a BLOCKING_CHAIN fact by structural magnitude — the worse of chain depth
-    /// and transitive victim count. Max, not average, so one severe dimension scores high
-    /// without being diluted by the other.
+    /// Scores a BLOCKING_CHAIN fact: the worst of its structural magnitude (chain depth and transitive victim
+    /// count) and its duration (the longest any session in it waited). Max, not average, so one severe
+    /// dimension scores high without being diluted by the others. Duration is here because a head holding
+    /// locks in an open transaction for thirteen minutes blocks two sessions, not twenty-five; graded on
+    /// structure alone that chain read as a small one.
     /// </summary>
-    private static double ScoreBlockingChain(Fact fact)
-    {
-        var depth = fact.Metadata.GetValueOrDefault("worst_chain_depth");
-        var victims = fact.Metadata.GetValueOrDefault("worst_chain_victim_count");
-        return Math.Max(
-            ApplyThresholdFormula(depth, 3, 8),
-            ApplyThresholdFormula(victims, 5, 25));
-    }
+    private static double ScoreBlockingChain(Fact fact) =>
+        ScoreBlockingChainShape(
+            fact.Metadata.GetValueOrDefault("worst_chain_depth"),
+            fact.Metadata.GetValueOrDefault("worst_chain_victim_count"),
+            fact.Metadata.GetValueOrDefault("worst_chain_max_wait_ms"));
+
+    /// <summary>The BLOCKING_CHAIN grade for one chain's depth, victim count and longest wait (milliseconds).
+    /// The wait bars (30 s concerning, 300 s critical) are the pair <see cref="PgTargetScorer.BlockingWaitWarningMs"/>
+    /// and <see cref="PgTargetScorer.BlockingWaitCriticalMs"/>: one definition of "a long blocked wait".
+    /// <see cref="ReconstructedChain.Grade"/> is this per chain; the collectors pick the worst chain by it and the
+    /// drill-downs list chains by it, so the fact and its drill-down name the same chain.</summary>
+    internal static double ScoreBlockingChainShape(double depth, double victims, double maxWaitMs) =>
+        Math.Max(
+            Math.Max(
+                ApplyThresholdFormula(depth, 3, 8),
+                ApplyThresholdFormula(victims, 5, 25)),
+            ApplyThresholdFormula(maxWaitMs, PgTargetScorer.BlockingWaitWarningMs, PgTargetScorer.BlockingWaitCriticalMs));
 
     /// <summary>
     /// Scores CPU utilization. Value is average SQL CPU %.

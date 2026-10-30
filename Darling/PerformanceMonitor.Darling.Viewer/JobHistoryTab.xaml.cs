@@ -223,8 +223,9 @@ public partial class JobHistoryTab : UserControl
         }
         catch (Exception ex)
         {
-            StatusChanged?.Invoke($"failed to load job history: {ex.Message}");
             if (_loads.Superseded(nameof(LoadJobsAsync), gen)) return;
+
+            StatusChanged?.Invoke($"failed to load job history: {ex.Message}");
 
             LoadingMessage.Visibility = Visibility.Collapsed;
         }

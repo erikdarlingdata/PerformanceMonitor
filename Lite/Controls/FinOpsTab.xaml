@@ -259,15 +259,15 @@
                     <!-- CPU Metrics -->
                     <GroupBox Grid.Column="0" Header="CPU" Margin="0,0,5,0" VerticalAlignment="Top"
                               Foreground="{DynamicResource ForegroundBrush}">
-                        <StackPanel Margin="10">
+                        <StackPanel Margin="10" Grid.IsSharedSizeScope="True">
                             <!-- Avg CPU -->
                             <Grid Margin="0,0,0,8">
                                 <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="90"/>
+                                    <ColumnDefinition Width="Auto" SharedSizeGroup="FinOpsCpuLabel"/>
                                     <ColumnDefinition Width="*"/>
                                     <ColumnDefinition Width="60"/>
                                 </Grid.ColumnDefinitions>
-                                <TextBlock Grid.Column="0" Text="Avg CPU" FontWeight="SemiBold"
+                                <TextBlock Grid.Column="0" Text="Avg SQL Server CPU" Margin="0,0,8,0" FontWeight="SemiBold"
                                            Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"/>
                                 <Grid Grid.Column="1" Margin="0,0,8,0">
                                     <Border Height="16" CornerRadius="3" Background="#1AFFFFFF"/>
@@ -287,11 +287,11 @@
                             <!-- P95 CPU -->
                             <Grid Margin="0,0,0,8">
                                 <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="90"/>
+                                    <ColumnDefinition Width="Auto" SharedSizeGroup="FinOpsCpuLabel"/>
                                     <ColumnDefinition Width="*"/>
                                     <ColumnDefinition Width="60"/>
                                 </Grid.ColumnDefinitions>
-                                <TextBlock Grid.Column="0" Text="P95 CPU" FontWeight="SemiBold"
+                                <TextBlock Grid.Column="0" Text="P95 SQL Server CPU" Margin="0,0,8,0" FontWeight="SemiBold"
                                            Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"/>
                                 <Grid Grid.Column="1" Margin="0,0,8,0">
                                     <Border Height="16" CornerRadius="3" Background="#1AFFFFFF"/>
@@ -311,11 +311,11 @@
                             <!-- Max CPU -->
                             <Grid Margin="0,0,0,8">
                                 <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="90"/>
+                                    <ColumnDefinition Width="Auto" SharedSizeGroup="FinOpsCpuLabel"/>
                                     <ColumnDefinition Width="*"/>
                                     <ColumnDefinition Width="60"/>
                                 </Grid.ColumnDefinitions>
-                                <TextBlock Grid.Column="0" Text="Max CPU" FontWeight="SemiBold"
+                                <TextBlock Grid.Column="0" Text="Max SQL Server CPU" Margin="0,0,8,0" FontWeight="SemiBold"
                                            Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"/>
                                 <Grid Grid.Column="1" Margin="0,0,8,0">
                                     <Border Height="16" CornerRadius="3" Background="#1AFFFFFF"/>
@@ -490,13 +490,13 @@
                                     </Style>
                                 </DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Header="Avg CPU %" Binding="{Binding AvgCpuPct, StringFormat='{}{0:N1}'}" Width="95">
+                            <DataGridTextColumn Header="Avg SQL Server CPU %" Binding="{Binding AvgCpuPct, StringFormat='{}{0:N1}'}" Width="95">
                                 <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Header="P95 CPU %" Binding="{Binding P95CpuPct, StringFormat='{}{0:N1}'}" Width="95">
+                            <DataGridTextColumn Header="P95 SQL Server CPU %" Binding="{Binding P95CpuPct, StringFormat='{}{0:N1}'}" Width="95">
                                 <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Header="Max CPU %" Binding="{Binding MaxCpuPct}" Width="100">
+                            <DataGridTextColumn Header="Max SQL Server CPU %" Binding="{Binding MaxCpuPct}" Width="100">
                                 <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
                             <DataGridTextColumn Header="Mem Ratio" Binding="{Binding MemoryRatio, StringFormat='{}{0:N2}'}" Width="95">

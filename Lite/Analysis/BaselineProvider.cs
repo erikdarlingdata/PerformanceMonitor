@@ -102,6 +102,7 @@ public class BaselineProvider
         [MetricNames.SessionCount] = "session_stats",
         [MetricNames.QueryDuration] = "query_stats",
         [MetricNames.IoLatency] = "file_io_stats",
+        [MetricNames.IoWriteLatency] = "file_io_stats",
         [MetricNames.Blocking] = "blocked_process_report",
         [MetricNames.BlockingPerMinute] = "blocked_process_report",
         [MetricNames.Deadlock] = "deadlocks",
@@ -227,14 +228,14 @@ public class BaselineProvider
     internal static DateTime RoundedDay(DateTime analysisTime)
         => new(analysisTime.Year, analysisTime.Month, analysisTime.Day, 0, 0, 0);
 
-    /// <summary>#4248, widened by #4731: the four arms that read a RAW table at full grain over the 30-day window —
-    /// the <c>clean</c> CTE of Cpu and IoLatency (<c>v_cpu_utilization_stats</c>, <c>v_file_io_stats</c>) and the
+    /// <summary>#4248, widened by #4731: the five arms that read a RAW table at full grain over the 30-day window —
+    /// the <c>clean</c> CTE of Cpu, IoLatency and IoWriteLatency (<c>v_cpu_utilization_stats</c>, <c>v_file_io_stats</c> twice, #6696) and the
     /// <c>logged</c> CTE of Blocking and Deadlock (<see cref="EventBaselineSql"/>, over <c>v_collection_log</c>) —
     /// rather than an already-aggregated one. Darling's PgBaselineProvider.IsDailyCacheMetric, twinned, so the two
     /// products flag the same anomalies off the same cache grain. See that method's remarks for why these four and
     /// not the other seven RobustTierScaffold arms.</summary>
     internal static bool IsDailyCacheMetric(string metricName)
-        => metricName is MetricNames.Cpu or MetricNames.IoLatency or MetricNames.Blocking or MetricNames.Deadlock;
+        => metricName is MetricNames.Cpu or MetricNames.IoLatency or MetricNames.IoWriteLatency or MetricNames.Blocking or MetricNames.Deadlock;
 
     /// <summary>The cache key's time AND the compute's window end (#3941, restated for #4248): the day for a
     /// raw-table arm (<see cref="IsDailyCacheMetric"/>), the hour for every other one — the one seam both read so
@@ -584,7 +585,7 @@ GROUP BY hh, dw";
     }
 
     /// <summary>
-    /// The eleven per-metric baseline queries. Internal (was private) since #3653 Q6 so Lite.Tests can pin every
+    /// The twelve per-metric baseline queries. Internal (was private) since #3653 Q6 so Lite.Tests can pin every
     /// arm to the local-clock key and run the real text over a DuckDB fixture; null for a metric with no baseline.
     /// </summary>
     internal static string? GetBaselineQuery(string metricName)
@@ -711,10 +712,23 @@ WITH clean AS (
     AND   (delta_reads > 0 OR delta_writes > 0)
 )," + RobustTierScaffold,
 
+            /* #6696: the write-latency twin of the arm above (Darling's PgBaselineProvider has the long note), for the
+               ANOMALY_WRITE_LATENCY gate, which used to be scored against the read series. WHERE delta_writes > 0
+               keeps v non-null, so sample_count counts write-bearing file rows. */
+            MetricNames.IoWriteLatency => @"
+WITH clean AS (
+    SELECT collection_time, delta_stall_write_ms * 1.0 / NULLIF(delta_writes, 0) AS v
+    FROM v_file_io_stats
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+    AND   delta_writes > 0
+)," + RobustTierScaffold,
+
+            // #6645: the baseline counts the same reports the current window does (BlockingWaits.NotSelfWaitSql), so the 3x ratio
+            // compares like with like. The Darling twin's stored aggregate leaves them out too (#6705).
             // Event-based — mean = events per covered hour for this bucket, sample_count = covered days.
             // No restart exclusion needed (event counts, not cumulative). See EventBaselineSql (#4731).
             MetricNames.Blocking => OnEventTime(EventBaselineSql("blocked_process_report", "v_collection_log",
-                StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time < $3") + " AS ev", "COUNT(*)"), "event_time"),
+                StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time < $3 AND " + PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql) + " AS ev", "COUNT(*)"), "event_time"),
 
             // Event-based — same approach as blocking
             MetricNames.Deadlock => OnEventTime(EventBaselineSql("deadlocks", "v_collection_log",
@@ -773,7 +787,7 @@ clean AS (
 WITH per_minute AS (
     SELECT DATE_TRUNC('minute', event_time) AS minute_bucket,
            COUNT(*)::DOUBLE PRECISION AS event_count
-    FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time < $3") + @" AS ev
+    FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time < $3 AND " + PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql) + @" AS ev
     GROUP BY minute_bucket
 ),
 clean AS (

@@ -158,6 +158,46 @@ WHERE rn = 1";
     private static readonly string QueryStoreByEndSql =
         QueryStoreSqlTemplate.Replace("{placement}", IntervalEndSql + " > $4 AND " + IntervalEndSql + " <= $5", StringComparison.Ordinal);
 
+    /* #6555: the same read as QueryStoreSqlTemplate, one row per plan (plan_id, executions, total elapsed microseconds). A query that ran several plans at
+       once (parameter sensitivity, automatic plan correction churn) has an average that moves with the plan mix, so a duration that looks regressed is
+       compared again at the before-window's mix (AdjustAfterToMix). Read only for a query whose whole-query average moved. */
+    private const string QueryStorePlansSqlTemplate = @"
+WITH len AS (
+    SELECT max(interval_length_minutes) AS minutes
+    FROM v_query_store_health
+    WHERE server_id = $1 AND database_name = $2 AND interval_length_minutes > 0
+      AND capture_time >= $4 - interval '2 days' AND capture_time <= $5 + interval '1 day'
+)
+SELECT coalesce(plan_id::text, ''), sum(execution_count)::bigint, coalesce(sum(execution_count::double precision * avg_duration_us::double precision), 0)::double precision
+FROM (
+    SELECT plan_id, execution_count, avg_duration_us,
+           ROW_NUMBER() OVER (PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
+                              ORDER BY collection_time DESC, execution_count DESC) AS rn
+    FROM query_store_stats
+    WHERE server_id = $1 AND database_name = $2 AND query_id = $3
+      AND {placement}
+      AND collection_time >= $4 - interval '1 day' AND collection_time <= $5 + interval '1 day'
+) AS x
+WHERE rn = 1
+GROUP BY coalesce(plan_id::text, '')
+HAVING sum(execution_count) > 0";
+
+    private static readonly string QueryStorePlansByStartSql =
+        QueryStorePlansSqlTemplate.Replace("{placement}", "interval_start_time_utc >= $4 AND interval_start_time_utc < $5", StringComparison.Ordinal);
+
+    private static readonly string QueryStorePlansByEndSql =
+        QueryStorePlansSqlTemplate.Replace("{placement}", IntervalEndSql + " > $4 AND " + IntervalEndSql + " <= $5", StringComparison.Ordinal);
+
+    /* #6555: one query hash's plans in a window (the plan cache's query_plan_hash), the per-plan counterpart of QuerySql. $5 is the same database
+       list QuerySql takes (NULL for none), so the plans describe the population the measured averages do. */
+    private const string QueryPlansSql = @"
+SELECT coalesce(query_plan_hash, ''), sum(delta_execution_count)::bigint, coalesce(sum(delta_elapsed_time), 0)::double precision
+FROM v_query_stats
+WHERE server_id = $1 AND collection_time > $2 AND collection_time <= $3 AND query_hash::text = $4
+  AND ($5::text[] IS NULL OR database_name = ANY($5))
+GROUP BY coalesce(query_plan_hash, '')
+HAVING sum(delta_execution_count) > 0";
+
     private readonly NpgsqlDataSource _dataSource;
     private readonly int _commandTimeoutSeconds;
 
@@ -187,6 +227,129 @@ WHERE rn = 1";
 
     /// <summary>The duration test: the after-window's average is at least <see cref="DurationFactor"/> times the baseline's.</summary>
     public static bool DurationMoved(double baselineAvgUs, double afterAvgUs) => baselineAvgUs > 0 && afterAvgUs >= baselineAvgUs * DurationFactor;
+
+    /// <summary>#6581: a change that names one Query Store query (a forced or unforced plan, a Query Store hint set, changed or cleared). A watch of only these measures those queries.</summary>
+    internal static bool IsQueryScopedKind(string kind) => kind is "plan_force" or "query_store_hint";
+
+    /// <summary>One plan's runtime in a window (#6555): executions and total elapsed microseconds.</summary>
+    internal readonly record struct PlanRuntime(long Executions, double ElapsedUs);
+
+    /// <summary>
+    /// #6555: the after-window's average duration, in microseconds, at the plan mix of <paramref name="reference"/> (a before or week-earlier window), so a shift
+    /// in which plan ran more does not read as a change in how fast the query runs. A plan present in both windows keeps its after-window average but takes its
+    /// share of the shared executions from the reference window; the shares of the shared plans are scaled to the share of the after-window's executions
+    /// that ran on shared plans. A plan that ran only after (a plan change, the thing a watch is about) keeps its own contribution, and a plan that ran only
+    /// before is ignored. With no shared plan, or one plan in each window, the result is the plain after-window average.
+    /// </summary>
+    internal static double AdjustAfterToMix(IReadOnlyDictionary<string, PlanRuntime> reference, IReadOnlyDictionary<string, PlanRuntime> after)
+    {
+        double afterExecutions = 0, afterElapsed = 0;
+        foreach (var plan in after.Values)
+        {
+            afterExecutions += plan.Executions;
+            afterElapsed += plan.ElapsedUs;
+        }
+
+        if (afterExecutions <= 0)
+        {
+            return 0;
+        }
+
+        var plain = afterElapsed / afterExecutions;
+        if (reference.Count <= 1 && after.Count <= 1)
+        {
+            return plain;
+        }
+
+        double sharedReferenceExecutions = 0, sharedAfterExecutions = 0, sharedAfterElapsed = 0;
+        foreach (var (plan, runtime) in after)
+        {
+            if (reference.TryGetValue(plan, out var reference1) && reference1.Executions > 0 && runtime.Executions > 0)
+            {
+                sharedReferenceExecutions += reference1.Executions;
+                sharedAfterExecutions += runtime.Executions;
+                sharedAfterElapsed += runtime.ElapsedUs;
+            }
+        }
+
+        if (sharedReferenceExecutions <= 0)
+        {
+            return plain;
+        }
+
+        var sharedShare = sharedAfterExecutions / afterExecutions;
+        double adjustedShared = 0;
+        foreach (var (plan, runtime) in after)
+        {
+            if (reference.TryGetValue(plan, out var reference2) && reference2.Executions > 0 && runtime.Executions > 0)
+            {
+                adjustedShared += sharedShare * (reference2.Executions / sharedReferenceExecutions) * (runtime.ElapsedUs / runtime.Executions);
+            }
+        }
+
+        return adjustedShared + ((afterElapsed - sharedAfterElapsed) / afterExecutions);
+    }
+
+    /// <summary>
+    /// #6555: whether any plan the query ran in both windows got slower on its own: it ran at least <see cref="MinExecutions"/> times in each window and its
+    /// own average passes <see cref="DurationMoved"/>. The mix adjustment answers "did the average move once the mix is held", which a plan that was a minority
+    /// before and now carries most of the executions can slip under (its slowdown is weighted by the share it used to have), so this is the second question.
+    /// </summary>
+    internal static bool AnySharedPlanMoved(IReadOnlyDictionary<string, PlanRuntime> reference, IReadOnlyDictionary<string, PlanRuntime> after)
+    {
+        foreach (var (plan, runtime) in after)
+        {
+            if (reference.TryGetValue(plan, out var before) && before.Executions >= MinExecutions && runtime.Executions >= MinExecutions
+                && DurationMoved(before.ElapsedUs / before.Executions, runtime.ElapsedUs / runtime.Executions))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>The busiest plans of the after-window with their share of the executions and their average, before then after, so a note says which plan moved.</summary>
+    internal static string PlanBreakdown(IReadOnlyDictionary<string, PlanRuntime> before, IReadOnlyDictionary<string, PlanRuntime> after)
+    {
+        double beforeTotal = before.Values.Sum(p => p.Executions), afterTotal = after.Values.Sum(p => p.Executions);
+        var parts = new List<string>();
+        foreach (var (plan, runtime) in after.OrderByDescending(p => p.Value.Executions).ThenBy(p => p.Key, StringComparer.Ordinal).Take(3))
+        {
+            var afterText = string.Create(CultureInfo.InvariantCulture, $"{runtime.Executions * 100 / afterTotal:0}% at {runtime.ElapsedUs / runtime.Executions / 1000:0.##} ms");
+            var beforeText = before.TryGetValue(plan, out var was) && was.Executions > 0 && beforeTotal > 0
+                ? string.Create(CultureInfo.InvariantCulture, $"{was.Executions * 100 / beforeTotal:0}% at {was.ElapsedUs / was.Executions / 1000:0.##} ms")
+                : "not run";
+            parts.Add($"plan {plan}: {beforeText} before, {afterText} after");
+        }
+
+        return string.Join("; ", parts);
+    }
+
+    /// <summary>
+    /// #6555: decides one query's duration measure, given the plan-level reads of the three windows. The whole-query averages are the first test; for a
+    /// query that ran more than one plan the after average is then compared again at the before-window's plan mix (and at the week-earlier window's), and a
+    /// plan that got slower on its own keeps the measure moved whatever the mix did (<see cref="AnySharedPlanMoved"/>), so a shift in the mix alone is not a
+    /// regression. <paramref name="note"/> says what the plans were; it is set whenever more than one plan ran in a window.
+    /// </summary>
+    internal static bool QueryDurationMoved(
+        double beforeAvgUs, double afterAvgUs, double? weekAvgUs,
+        IReadOnlyDictionary<string, PlanRuntime> beforePlans, IReadOnlyDictionary<string, PlanRuntime> afterPlans, IReadOnlyDictionary<string, PlanRuntime> weekPlans,
+        out string? note)
+    {
+        note = null;
+        var adjusted = AdjustAfterToMix(beforePlans, afterPlans);
+        var adjustedWeek = weekAvgUs is null ? (double?)null : AdjustAfterToMix(weekPlans, afterPlans);
+        var movedBefore = DurationMoved(beforeAvgUs, adjusted) || AnySharedPlanMoved(beforePlans, afterPlans);
+        var movedWeek = weekAvgUs is null || DurationMoved(weekAvgUs.Value, adjustedWeek!.Value) || AnySharedPlanMoved(weekPlans, afterPlans);
+        if (Math.Max(beforePlans.Count, afterPlans.Count) > 1)
+        {
+            note = string.Create(CultureInfo.InvariantCulture,
+                $"{beforePlans.Count} plan(s) before, {afterPlans.Count} after; the average moves with the plan mix, so it is compared at the before-window's mix: {adjusted / 1000:0.##} ms there against {afterAvgUs / 1000:0.##} ms as measured; {PlanBreakdown(beforePlans, afterPlans)}");
+        }
+
+        return movedBefore && movedWeek;
+    }
 
     /// <summary>One window's rate from a statement that returns (rate, seconds covered, rows read).</summary>
     private async Task<RateSample> ReadRateAsync(
@@ -328,15 +491,15 @@ WHERE rn = 1";
         hadData |= AddRateMeasure("avg_cpu_percent", "%", cpuAfter, afterSeconds, cpuBefore, beforeSeconds, cpuWeek, afterSeconds,
             CpuMoved, window => $"the cpu_utilization_stats collector stored no samples for this target in the {window} window", measures, notMeasured, notes);
 
-        /* Query duration. A watch of plan changes alone measures THAT query (Query Store's own runtime intervals, the source the duration
+        /* Query duration. A watch of plan or Query Store hint changes alone measures THAT query (Query Store's own runtime intervals, the source the duration
            trend reads, keyed by database and query_id); where Query Store has no usable intervals for it, the top 20 by total duration
            of the changed databases are measured instead and the result says so. Any other mix reads the top 20 server-wide.
            The before-window holds only intervals that ENDED at or before the change and the after-window only intervals that STARTED at or
            after it (QueryStoreByEndSql, QueryStoreByStartSql): at Query Store's default 60-minute interval an interval that straddles the change
            holds executions from both sides, and counting it as "before" compared the regressed plan with itself. */
-        var planDatabases = watch.Changes.Where(c => c.Kind == "plan_force" && c.DatabaseName is not null)
+        var planDatabases = watch.Changes.Where(c => IsQueryScopedKind(c.Kind) && c.DatabaseName is not null)
             .Select(c => c.DatabaseName!).Distinct(StringComparer.Ordinal).ToArray();
-        var onlyPlan = watch.Changes.Count > 0 && watch.Changes.All(c => c.Kind == "plan_force");
+        var onlyPlan = watch.Changes.Count > 0 && watch.Changes.All(c => IsQueryScopedKind(c.Kind));
         var scope = onlyPlan && planDatabases.Length > 0 ? planDatabases : null;
         var needTopQueries = true;
         if (onlyPlan)
@@ -377,8 +540,23 @@ WHERE rn = 1";
                     double? queryWeekAvg = queryWeek.Executions >= MinExecutions ? queryWeek.ElapsedUs / queryWeek.Executions : null;
                     if (DurationMoved(queryBeforeAvg, queryAfterAvg) && (queryWeekAvg is null || DurationMoved(queryWeekAvg.Value, queryAfterAvg)))
                     {
-                        measures.Add(new ChangeWatchMeasure(measureName, "ms", queryBeforeAvg / 1000, queryAfterAvg / 1000,
-                            queryWeekAvg / 1000, true, $"Query Store query {queryId} in {database}; {queryBefore.Executions} -> {queryAfter.Executions} executions"));
+                        /* #6555: a query that ran several plans is compared per plan (at the before-window's mix), not by the average over all of them. */
+                        var beforePlans = await ReadQueryStorePlansAsync(connection, watch.ServerId, database, queryId, beforeStart, afterStart, true, cancellationToken);
+                        var afterPlans = await ReadQueryStorePlansAsync(connection, watch.ServerId, database, queryId, afterStart, afterEnd, false, cancellationToken);
+                        var weekPlans = queryWeekAvg is null
+                            ? new Dictionary<string, PlanRuntime>(StringComparer.Ordinal)
+                            : await ReadQueryStorePlansAsync(connection, watch.ServerId, database, queryId, weekStart, weekEnd, false, cancellationToken);
+                        var moved = QueryDurationMoved(queryBeforeAvg, queryAfterAvg, queryWeekAvg, beforePlans, afterPlans, weekPlans, out var mixNote);
+                        var where = $"read from Query Store: query_id {queryId} in database {database}; {queryBefore.Executions} -> {queryAfter.Executions} executions";
+                        if (moved)
+                        {
+                            measures.Add(new ChangeWatchMeasure(measureName, "ms", queryBeforeAvg / 1000, queryAfterAvg / 1000,
+                                queryWeekAvg / 1000, true, mixNote is null ? where : where + "; " + mixNote));
+                        }
+                        else
+                        {
+                            notes.Add($"{measureName}: the average duration moved from {Num(queryBeforeAvg / 1000)} ms to {Num(queryAfterAvg / 1000)} ms, but only with the plan mix, so it is not a regression ({where}{(mixNote is null ? "" : "; " + mixNote)})");
+                        }
                     }
                 }
             }
@@ -394,8 +572,8 @@ WHERE rn = 1";
         else if (afterQueries.Count > 0)
         {
             var hashes = afterQueries.Keys.ToArray();
-            var beforeQueries = await ReadQueriesAsync(connection, watch.ServerId, beforeStart, afterStart, hashes, null, hashes.Length, cancellationToken);
-            var weekQueries = await ReadQueriesAsync(connection, watch.ServerId, weekStart, weekEnd, hashes, null, hashes.Length, cancellationToken);
+            var beforeQueries = await ReadQueriesAsync(connection, watch.ServerId, beforeStart, afterStart, hashes, scope, hashes.Length, cancellationToken);
+            var weekQueries = await ReadQueriesAsync(connection, watch.ServerId, weekStart, weekEnd, hashes, scope, hashes.Length, cancellationToken);
             var missingBefore = 0;
             var belowFloor = 0;
             foreach (var (hash, after) in afterQueries)
@@ -418,8 +596,23 @@ WHERE rn = 1";
                 double? weekAvg = weekQueries.TryGetValue(hash, out var week) && week.Executions >= MinExecutions ? week.ElapsedUs / week.Executions : null;
                 if (DurationMoved(beforeAvg, afterAvg) && (weekAvg is null || DurationMoved(weekAvg.Value, afterAvg)))
                 {
-                    measures.Add(new ChangeWatchMeasure("query_avg_duration_ms:" + hash, "ms", beforeAvg / 1000, afterAvg / 1000,
-                        weekAvg / 1000, true, $"database {after.Database}; {before.Executions} -> {after.Executions} executions"));
+                    /* #6555: a query hash that ran several plans is compared per plan (at the before-window's mix), not by the average over all of them. */
+                    var beforePlans = await ReadQueryPlansAsync(connection, watch.ServerId, hash, beforeStart, afterStart, scope, cancellationToken);
+                    var afterPlans = await ReadQueryPlansAsync(connection, watch.ServerId, hash, afterStart, afterEnd, scope, cancellationToken);
+                    var weekPlans = weekAvg is null
+                        ? new Dictionary<string, PlanRuntime>(StringComparer.Ordinal)
+                        : await ReadQueryPlansAsync(connection, watch.ServerId, hash, weekStart, weekEnd, scope, cancellationToken);
+                    var moved = QueryDurationMoved(beforeAvg, afterAvg, weekAvg, beforePlans, afterPlans, weekPlans, out var mixNote);
+                    var where = $"read from the plan cache (query_stats), query_hash {hash} in database {after.Database ?? "(unknown)"}; {before.Executions} -> {after.Executions} executions";
+                    if (moved)
+                    {
+                        measures.Add(new ChangeWatchMeasure("query_avg_duration_ms:" + hash, "ms", beforeAvg / 1000, afterAvg / 1000,
+                            weekAvg / 1000, true, mixNote is null ? where : where + "; " + mixNote));
+                    }
+                    else
+                    {
+                        notes.Add($"query_avg_duration_ms:{hash}: the average duration moved from {Num(beforeAvg / 1000)} ms to {Num(afterAvg / 1000)} ms, but only with the plan mix, so it is not a regression ({where}{(mixNote is null ? "" : "; " + mixNote)})");
+                    }
                 }
             }
 
@@ -466,6 +659,41 @@ WHERE rn = 1";
         return (reader.GetInt64(0), reader.GetDouble(1), reader.GetInt64(2));
     }
 
+    /// <summary>#6555: <see cref="ReadQueryStoreAsync"/> split by plan: the executions and total elapsed microseconds of each plan_id the query ran in the window.</summary>
+    private async Task<Dictionary<string, PlanRuntime>> ReadQueryStorePlansAsync(
+        NpgsqlConnection connection, int serverId, string database, long queryId, DateTime start, DateTime end, bool byEnd, CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(byEnd ? QueryStorePlansByEndSql : QueryStorePlansByStartSql, connection) { CommandTimeout = _commandTimeoutSeconds };
+        command.Parameters.Add(new NpgsqlParameter { Value = serverId });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = database });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = queryId });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = Naive(start) });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = Naive(end) });
+        return await ReadPlansAsync(command, cancellationToken);
+    }
+
+    /// <summary>#6555: the plans (query_plan_hash) one query hash ran in the window, from the plan cache's statistics.</summary>
+    private async Task<Dictionary<string, PlanRuntime>> ReadQueryPlansAsync(
+        NpgsqlConnection connection, int serverId, string queryHash, DateTime start, DateTime end, string[]? databases, CancellationToken cancellationToken)
+    {
+        await using var command = Command(connection, QueryPlansSql, serverId, start, end);
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = queryHash });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = (object?)databases ?? DBNull.Value });
+        return await ReadPlansAsync(command, cancellationToken);
+    }
+
+    private static async Task<Dictionary<string, PlanRuntime>> ReadPlansAsync(NpgsqlCommand command, CancellationToken cancellationToken)
+    {
+        var plans = new Dictionary<string, PlanRuntime>(StringComparer.Ordinal);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            plans[reader.GetString(0)] = new PlanRuntime(reader.GetInt64(1), reader.GetDouble(2));
+        }
+
+        return plans;
+    }
+
     private static string Num(double? value) => value is { } v ? v.ToString("0.##", CultureInfo.InvariantCulture) : "n/a";
 
     /// <summary>The text the request's alert row carries: the changes, the window and every measure that moved with its three numbers. Held under the brief's 1,000-character field cap.</summary>
@@ -484,10 +712,19 @@ WHERE rn = 1";
             text.Append('+').Append(watch.Changes.Count - 5).Append(" more; ");
         }
 
-        foreach (var m in measures.Where(m => m.Moved).Take(5))
+        var moved = measures.Where(m => m.Moved).Take(5).ToList();
+        foreach (var m in moved)
         {
             text.Append(m.Name).Append(" before ").Append(Num(m.Before)).Append(" after ").Append(Num(m.After))
                 .Append(" week earlier ").Append(Num(m.WeekEarlier)).Append(' ').Append(m.Unit).Append("; ");
+        }
+
+        /* #6551: a query measure's note names the database and the read (plan cache or Query Store) it came from, so an agent can call the
+           matching trend read for the right database without guessing it from another change line. The notes come after every measure line:
+           the cut below drops the end of the text, and a note must never push a moved measure out of it. */
+        foreach (var m in moved.Where(m => !string.IsNullOrEmpty(m.Note)))
+        {
+            text.Append(m.Name).Append(": ").Append(m.Note).Append("; ");
         }
 
         var result = text.ToString().TrimEnd(' ', ';');

@@ -28,6 +28,14 @@ public sealed class InvestigationFamilyTests
     }
 
     [Fact]
+    public void ChangeWatch_IsQueryPerformance_NotOther()
+    {
+        /* #6551: the change-watch request's metric is not an alert in the census; it used to fall to `other`, next to custom and external alerts. */
+        Assert.Equal(InvestigationFamily.QueryPerformance, InvestigationFamily.Of(PerformanceMonitor.Common.InvestigationTriggerKinds.ChangeWatchMetric));
+        Assert.True(InvestigationFamily.StartsInvestigation(PerformanceMonitor.Common.InvestigationTriggerKinds.ChangeWatchMetric));
+    }
+
+    [Fact]
     public void EveryPerformanceMetricHasADeliberateFamily()
     {
         /* A new performance alert must be given a family here, not fall to `other` unseen. */
@@ -80,6 +88,14 @@ public sealed class InvestigationFamilyTests
     [InlineData("Analysis: blocking [1a2b3c4d]", "blocking")]
     [InlineData("Analysis: CPU_PRESSURE [1a2b3c4d]", "resources")]
     [InlineData("Analysis: replication_risk [1a2b3c4d]", "availability")]
+    [InlineData("Analysis: anomaly [0123abcd]", "resources")]
+    [InlineData("Analysis: cpu [0123abcd]", "resources")]
+    [InlineData("Analysis: memory [0123abcd]", "resources")]
+    [InlineData("Analysis: io [0123abcd]", "resources")]
+    [InlineData("Analysis: disk [0123abcd]", "resources")]
+    [InlineData("Analysis: jobs [0123abcd]", "jobs")]
+    [InlineData("Analysis: config [0123abcd]", "other")]
+    [InlineData("Analysis: waits [0123abcd]", "other")]
     [InlineData("Analysis: config_issue [1a2b3c4d]", "other")]
     [InlineData("Analysis: something_new [1a2b3c4d]", "other")]
     public void TheDraftTableAndTheRulingHold(string metric, string family)

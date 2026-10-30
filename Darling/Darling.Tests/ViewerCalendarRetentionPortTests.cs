@@ -373,6 +373,72 @@ public sealed class ViewerCalendarRetentionLivePostgresTests
         }
     }
 
+    /// <summary>
+    /// #6815: the viewer's own range cache honours the retention floor it is given. A day the calendar read as
+    /// past-horizon (a run record plus one surviving signal) is purged afterwards (the signal rows go, the run
+    /// record stays). Inside the sub-horizon bound the cached block still serves the old verdict. Once a fake clock
+    /// passes it, the day must read <c>Purged</c>. Without the <c>trustFromUtc</c> argument on the viewer's cache
+    /// call, the block would hold every closed day until the next UTC day plus the grace and this read would still
+    /// say <c>PastHorizon</c>. The twin of the service-side <c>GetDailySummaryRangeAsync_PurgedPastHorizonDay_...</c>.
+    /// </summary>
+    [Fact]
+    public async Task Calendar_PurgedPastHorizonDay_ShowsOnceTheSubHorizonBoundPasses_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live #6815 viewer range cache test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteTestRowsAsync(connection, ct);
+
+        await using var viewer = new ViewerDataService(connectionString!);
+        var bodySucceeded = false;
+        try
+        {
+            /* LiveClock's anchor is yesterday 22:00, so its next day is today. The fake clock sits at noon of that
+               day, far from midnight, so the block never crosses a UTC day boundary while the test runs. */
+            var today = LiveClock.AnchoredEnd().Date.AddDays(1);
+            var noon = today.AddHours(12);
+            var fakeNow = noon;
+            viewer.UseRangeCacheClockForTests(() => fakeNow);
+
+            /* The horizon is the store's own, so ask it rather than assume 30 days. */
+            var horizon = await viewer.ReadRetentionHorizonAsync(ct);
+            var oldDay = horizon.Date.AddDays(-5);
+            var fromDate = oldDay.AddDays(-2);
+            var toDate = today.AddDays(1);
+
+            await InsertCollectionLogAsync(connection, oldDay.AddHours(10), ct);
+            await InsertDeadlockAsync(connection, oldDay.AddHours(10), ct);
+
+            var first = await viewer.GetDailySummaryRangeAsync(ServerId, fromDate, toDate, ct);
+            Assert.Equal(DailySummaryDataState.PastHorizon, first.Single(r => r.SummaryDate.Date == oldDay).DataState);
+
+            /* The purge removes the signal rows and leaves the run record. */
+            using (var purge = new NpgsqlCommand($"DELETE FROM deadlocks WHERE server_id = {ServerId};", connection))
+            {
+                await purge.ExecuteNonQueryAsync(ct);
+            }
+
+            fakeNow = noon.AddMinutes(30);
+            var inside = await viewer.GetDailySummaryRangeAsync(ServerId, fromDate, toDate, ct);
+            Assert.Equal(DailySummaryDataState.PastHorizon, inside.Single(r => r.SummaryDate.Date == oldDay).DataState);
+
+            fakeNow = noon + DailySummaryRangeCache<DarlingHealthReader.DailySummaryReadRow>.SubHorizonTtl + TimeSpan.FromMinutes(1);
+            var after = await viewer.GetDailySummaryRangeAsync(ServerId, fromDate, toDate, ct);
+            Assert.Equal(DailySummaryDataState.Purged, after.Single(r => r.SummaryDate.Date == oldDay).DataState);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, DeleteTestRowsAsync);
+        }
+    }
+
     private static async Task InsertCollectionLogAsync(NpgsqlConnection connection, DateTime collectionTimeUtc, System.Threading.CancellationToken ct)
     {
         using var command = new NpgsqlCommand(@"

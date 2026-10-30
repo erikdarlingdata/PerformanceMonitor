@@ -92,7 +92,7 @@ VALUES ($1, 1, $2, $3, 0, 0, false, 'none', NULL, false, NULL, NULL)");
         var ct = TestContext.Current.CancellationToken;
         await using var dataSource = await MigrateAndOpenAsync(connectionString, ct);
 
-        var store = new CustomAlertRuleStore(dataSource);
+        var store = new CustomAlertRuleStore(dataSource, StorageCommandDeadlines.McpReadSeconds);
         var prefix = "carlf_" + Guid.NewGuid().ToString("N") + "_";
         var bodySucceeded = false;
         try

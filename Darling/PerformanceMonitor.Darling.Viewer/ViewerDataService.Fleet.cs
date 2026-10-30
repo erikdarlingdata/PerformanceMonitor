@@ -53,6 +53,48 @@ namespace PerformanceMonitor.Darling.Viewer;
 public sealed partial class ViewerDataService
 {
     /// <summary>
+    /// The gaps in one server's SQL Server Agent alert setup (#6874) for its Overview card. It reads the newest capture inside
+    /// <see cref="DarlingAgentAlertReader.FreshCaptureWindow"/> through the same reader and <see cref="AgentAlertStatus.Evaluate"/> as
+    /// the Agent Alerts tab and the web fleet card, so a lagging feed shows no gaps and makes no claim (Collection Stopped owns it).
+    /// </summary>
+    public async Task<IReadOnlyList<AgentAlertGap>> GetAgentAlertGapsAsync(int serverId, DateTime nowUtc, CancellationToken cancellationToken = default)
+    {
+        var read = await DarlingAgentAlertReader.ReadAsync(
+            _dataSource, serverId, nowUtc - DarlingAgentAlertReader.FreshCaptureWindow, nowUtc,
+            ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+        return read.HasCapture ? AgentAlertStatus.Evaluate(read.Alerts).Gaps : Array.Empty<AgentAlertGap>();
+    }
+
+    /// <summary>
+    /// The overdue full backups, log backups and CHECKDBs of one server for the fleet card's chip (#6873): the value ("3 overdue") and the
+    /// facts in words, both null when nothing is overdue. The judgment is <see cref="DatabaseProtectionBands.OverdueFacts"/>, the one the
+    /// alerts, the web card and <c>get_database_protection</c> use, over the newest capture inside <see cref="DatabaseProtectionBands.CaptureFreshness"/>.
+    /// A store older than V223 has no table: that is no chip, not an error on the card.
+    /// </summary>
+    internal async Task<(string? Value, string? Detail)> GetDatabaseProtectionChipAsync(
+        int serverId, DateTime nowUtc, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var read = await DarlingDatabaseProtectionReader.ReadAsync(
+                _dataSource, serverId, nowUtc - DatabaseProtectionBands.CaptureFreshness, nowUtc, cancellationToken: cancellationToken);
+            if (read.NewestCapture is null)
+            {
+                return (null, null);
+            }
+
+            var overdue = DatabaseProtectionBands.OverdueFacts(read.Databases, DateTime.SpecifyKind(read.NewestCapture.Value, DateTimeKind.Utc));
+            return overdue.Count == 0
+                ? (null, null)
+                : (DatabaseProtectionBands.ChipValue(overdue), DatabaseProtectionBands.ChipDetail(overdue));
+        }
+        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable)
+        {
+            return (null, null);
+        }
+    }
+
+    /// <summary>
     /// The cross-server fleet totals over a window — the read only Darling's central store can serve.
     /// <c>total_blocking_events</c> respects the Overview card's XE-preferred / DMV-fallback rule PER
     /// server before summing: each source is counted per <c>server_id</c> (a GROUP BY), a FULL OUTER JOIN

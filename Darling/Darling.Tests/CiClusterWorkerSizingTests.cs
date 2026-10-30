@@ -49,11 +49,10 @@ namespace Darling.Tests;
 public sealed class CiClusterWorkerSizingTests
 {
     /// <summary>
-    /// The workflows that stand up a throwaway cluster. All of them, not just <c>build.yml</c>: the PR leg, the
-    /// nightly leg and the UI-smoke legs (#5701, and the WPF smoke's viewer walk, #5745) are separate copies of the same steps, and a fix applied to one of
+    /// The workflows that stand up a throwaway cluster. All of them, not just the nightly: the nightly leg and the UI-smoke legs (#5701, and the WPF smoke's viewer walk, #5745) are separate copies of the same steps, and a fix applied to one of
     /// them is the ordinary way these drift apart.
     /// </summary>
-    public static TheoryData<string> ClusterWorkflows() => new() { "build.yml", "nightly.yml", "darling-ui-smoke.yml", "wpf-smoke.yml" };
+    public static TheoryData<string> ClusterWorkflows() => new() { "nightly.yml", "darling-ui-smoke.yml", "wpf-smoke.yml" };
 
     /// <summary>
     /// <c>Add-Content -Path "$dataDir\postgresql.conf" -Value "setting = value"</c> — how both workflows append
@@ -98,27 +97,13 @@ public sealed class CiClusterWorkerSizingTests
     }
 
     /// <summary>
-    /// The two workflows must configure the cluster IDENTICALLY. They are hand-maintained copies of one step,
-    /// and the nightly is the one nobody looks at on a pull request — so a setting added to <c>build.yml</c>
-    /// alone would leave the nightly quietly testing a different cluster than the PR leg that gated the merge.
-    /// </summary>
-    [Fact]
-    public void BothClusterWorkflows_ConfigureTheSameCluster()
-    {
-        var build = ParseConfAppends(ReadWorkflow("build.yml"));
-        var nightly = ParseConfAppends(ReadWorkflow("nightly.yml"));
-
-        Assert.Equal(build, nightly);
-    }
-
-    /// <summary>
     /// The parser must actually be reading the file. Mutating the appended value has to be REPORTED — if this
     /// passes, the regex above matched nothing and every assertion in this class was vacuous.
     /// </summary>
     [Fact]
     public void ParsedSettings_Comparison_FailsOnAnInjectedDrift()
     {
-        var real = ReadWorkflow("build.yml");
+        var real = ReadWorkflow("nightly.yml");
         var parsed = ParseConfAppends(real);
         Assert.NotEmpty(parsed);
         Assert.Equal(ExpectedWorkerProcesses.ToString(CultureInfo.InvariantCulture), parsed["max_worker_processes"]);

@@ -56,7 +56,7 @@ public sealed class McpQueryTagTools
     // ------------------------------------------------------------------ tag tools
 
     [McpServerTool(Name = "create_query_tag"), Description(
-        "Creates a query tag, at the root or under parent_id. A query tag labels queries (by query_hash or by object, see assign_query_tag) so resource use can be grouped by it; it is not a server tag. Names are trimmed, 1-100 characters, unique among siblings ignoring case (the same name under two different parents is fine); tags nest at most four levels. Needs mcp_allow_writes. The tag map takes effect on its next pass.")]
+        "Creates a query tag, at the root or under parent_id. A query tag labels queries (by query_hash or by object, see assign_query_tag) so resource use can be grouped by it; it is not a server tag. Names are trimmed, 1-100 characters, unique among siblings ignoring case (the same name under two different parents is fine); tags nest at most four levels. Needs mcp_allow_writes. The tag map takes effect on its next pass. The answer carries previous (null) and undo (the delete_query_tag call for the new id).")]
     public static Task<string> CreateQueryTag(
         LocalDataService dataService,
         [Description("The tag name (1-100 characters, trimmed, unique among siblings).")] string name,
@@ -65,7 +65,7 @@ public sealed class McpQueryTagTools
         CreateQueryTagCore(dataService, name, parent_id, colour);
 
     [McpServerTool(Name = "update_query_tag"), Description(
-        "PARTIAL edit of a query tag: send only name, colour or parent_id in changes_json; an explicit null clears colour or moves the tag to the root. A move carries the subtree, its assignments and its rules; it is refused with cycle if the new parent is the tag or one of its descendants, and with depth_limit past four levels. Needs mcp_allow_writes. The tag map takes effect on its next pass.")]
+        "PARTIAL edit of a query tag: send only name, colour or parent_id in changes_json; an explicit null clears colour or moves the tag to the root. A move carries the subtree, its assignments and its rules; it is refused with cycle if the new parent is the tag or one of its descendants, and with depth_limit past four levels. Needs mcp_allow_writes. The tag map takes effect on its next pass. The answer carries previous (the name, colour and parent_id before) and undo (the update_query_tag call that puts the changed fields back).")]
     public static Task<string> UpdateQueryTag(
         LocalDataService dataService,
         [Description("The tag id (from list_query_tags).")] int tag_id,
@@ -73,7 +73,7 @@ public sealed class McpQueryTagTools
         UpdateQueryTagCore(dataService, tag_id, changes_json);
 
     [McpServerTool(Name = "delete_query_tag"), Description(
-        "Deletes a query tag AND its child tags, their hand assignments and their rules. Permanent. A tag that has children, assignments or rules answers confirm_required with the counts and deletes nothing; send it again with confirm=true to proceed. Collected data is untouched. Needs mcp_allow_writes. The tag map takes effect on its next pass.")]
+        "Deletes a query tag AND its child tags, their hand assignments and their rules. Permanent. A tag that has children, assignments or rules answers confirm_required with the counts and deletes nothing; send it again with confirm=true to proceed. Collected data is untouched. Needs mcp_allow_writes. The tag map takes effect on its next pass. The answer carries previous (the deleted tag); a tag that had no children, assignments or rules also carries undo (the create_query_tag call, which makes a new id), and any other delete carries an undo_note instead, because no single call restores the subtree.")]
     public static Task<string> DeleteQueryTag(
         LocalDataService dataService,
         [Description("The tag id (from list_query_tags).")] int tag_id,
@@ -81,7 +81,7 @@ public sealed class McpQueryTagTools
         DeleteQueryTagCore(dataService, tag_id, confirm);
 
     [McpServerTool(Name = "assign_query_tag"), Description(
-        "Hand-assigns a query tag to one key: kind 'hash' takes query_hash; kind 'object' takes database_name, schema_name AND object_name (all three). server_id limits the assignment to one monitored server; omit it for every server. One tag per key and server scope: a key that already has a hand tag in that scope moves to this tag, and the result says so (status moved). A hand assignment beats any rule. query_id is kept for display only and never matched on. Needs mcp_allow_writes. The tag map takes effect on its next pass.")]
+        "Hand-assigns a query tag to one key: kind 'hash' takes query_hash; kind 'object' takes database_name, schema_name AND object_name (all three). server_id limits the assignment to one monitored server; omit it for every server. One tag per key and server scope: a key that already has a hand tag in that scope moves to this tag, and the result says so (status moved). A hand assignment beats any rule. query_id is kept for display only and never matched on. Needs mcp_allow_writes. The tag map takes effect on its next pass. The answer carries previous (the tag the key held before in this scope, or null) and undo (unassign_query_tag for a new assignment, assign_query_tag with the earlier tag for a move).")]
     public static Task<string> AssignQueryTag(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -96,7 +96,7 @@ public sealed class McpQueryTagTools
         AssignQueryTagCore(dataService, serverManager.GetKnownServerIds(), tag_id, kind, query_hash, database_name, schema_name, object_name, server_id, query_id);
 
     [McpServerTool(Name = "unassign_query_tag"), Description(
-        "Removes the hand tag from one key in exactly one server scope: the same kind, key parts and server_id that assign_query_tag took (omit server_id for the every-server assignment; a server-limited assignment is a different row). A key with no hand tag in that scope is a no-op. Needs mcp_allow_writes. The tag map takes effect on its next pass.")]
+        "Removes the hand tag from one key in exactly one server scope: the same kind, key parts and server_id that assign_query_tag took (omit server_id for the every-server assignment; a server-limited assignment is a different row). A key with no hand tag in that scope is a no-op. Needs mcp_allow_writes. The tag map takes effect on its next pass. The answer carries previous (the tag that was removed) and undo (the assign_query_tag call that restores it).")]
     public static Task<string> UnassignQueryTag(
         LocalDataService dataService,
         [Description("The key kind: 'hash' or 'object'.")] string kind,
@@ -121,7 +121,7 @@ public sealed class McpQueryTagTools
         "(an object is matched as database.schema.name, so start with *. to ignore the database), text matches anywhere in the first 4,000 characters of the query text. " +
         "text_tag reads a /* tag:NAME */ or -- tag:NAME comment in the query text and uses NAME as the tag: it takes no tag_id and its pattern is unused; every other field needs a tag_id " +
         "(from the query tag tools) and a pattern of 1-400 characters. Rules apply by priority (lower first), then id; the first match wins, but a hand assignment beats any rule. " +
-        "server_id limits the rule to one server (omit it for every server). Test a rule first with test_query_tag_rule. Needs mcp_allow_writes.")]
+        "server_id limits the rule to one server (omit it for every server). Test a rule first with test_query_tag_rule. Needs mcp_allow_writes. The answer carries previous (null) and undo (the delete_query_tag_rule call for the new id).")]
     public static Task<string> CreateQueryTagRule(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -136,7 +136,7 @@ public sealed class McpQueryTagTools
     [McpServerTool(Name = "update_query_tag_rule"), Description(
         "PARTIAL edit of a query tag rule: send only the fields to change in changes_json, from pattern, priority, enabled, tag_id and server_id. An explicit null for server_id " +
         "makes the rule apply to every server. The rule's field cannot change (delete it and create another). The edit is validated like a new rule. " +
-        "Setting enabled to false keeps the rule in list_query_tag_rules with enabled false. The change reaches the tag map on its next pass. Needs mcp_allow_writes.")]
+        "Setting enabled to false keeps the rule in list_query_tag_rules with enabled false. The change reaches the tag map on its next pass. Needs mcp_allow_writes. The answer carries previous (the pattern, priority, enabled, tag_id and server_id before) and undo (the update_query_tag_rule call that puts the changed fields back).")]
     public static Task<string> UpdateQueryTagRule(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -146,7 +146,7 @@ public sealed class McpQueryTagTools
 
     [McpServerTool(Name = "delete_query_tag_rule"), Description(
         "Deletes a query tag rule. Permanent; queries it tagged lose that tag at the next map pass (unless another rule or a hand assignment holds them). " +
-        "To keep the rule but stop it applying, set enabled to false with update_query_tag_rule. Needs mcp_allow_writes.")]
+        "To keep the rule but stop it applying, set enabled to false with update_query_tag_rule. Needs mcp_allow_writes. The answer carries previous (the deleted rule) and undo (the create_query_tag_rule call, which makes a new id).")]
     public static Task<string> DeleteQueryTagRule(
         LocalDataService dataService,
         [Description("The rule id (from list_query_tag_rules).")] int rule_id) =>
@@ -190,7 +190,14 @@ public sealed class McpQueryTagTools
             var tag = snapshot.Tags.FirstOrDefault(t => t.Id == id);
             return tag is null
                 ? ConcurrentlyGone(id)
-                : Serialize(new JsonObject { ["status"] = "created", ["tag"] = TagNode(snapshot, tag), ["note"] = MapNote });
+                : Serialize(new JsonObject
+                {
+                    ["status"] = "created",
+                    ["tag"] = TagNode(snapshot, tag),
+                    ["previous"] = null,
+                    ["undo"] = UndoCall("delete_query_tag", new JsonObject { ["tag_id"] = tag.Id }),
+                    ["note"] = MapNote,
+                });
         });
 
     internal static Task<string> UpdateQueryTagCore(LocalDataService data, int tagId, string? changesJson) =>
@@ -233,7 +240,13 @@ public sealed class McpQueryTagTools
 
             if (changed.Count == 0)
             {
-                return Serialize(new JsonObject { ["status"] = "unchanged", ["tag"] = TagNode(before, stored) });
+                return Serialize(new JsonObject
+                {
+                    ["status"] = "unchanged",
+                    ["tag"] = TagNode(before, stored),
+                    ["previous"] = PreviousTagValues(stored),
+                    ["undo"] = TagUpdateUndo(tagId, stored, edit),
+                });
             }
 
             await data.UpdateQueryTagAsync(tagId, reduced);
@@ -246,6 +259,8 @@ public sealed class McpQueryTagTools
                     ["status"] = "updated",
                     ["updated_fields"] = new JsonArray(changed.Select(f => (JsonNode?)JsonValue.Create(f)).ToArray()),
                     ["tag"] = TagNode(after, tag),
+                    ["previous"] = PreviousTagValues(stored),
+                    ["undo"] = TagUpdateUndo(tagId, stored, reduced),
                     ["note"] = MapNote,
                 });
         });
@@ -283,7 +298,7 @@ public sealed class McpQueryTagTools
             }
 
             await data.DeleteQueryTagAsync(tagId);
-            return Serialize(new JsonObject
+            var deleted = new JsonObject
             {
                 ["status"] = "deleted",
                 ["tag_id"] = tagId,
@@ -292,7 +307,34 @@ public sealed class McpQueryTagTools
                 ["removed_assignments"] = assignments,
                 ["removed_rules"] = rules,
                 ["note"] = MapNote,
-            });
+            };
+            var storedTag = snapshot.Tags.FirstOrDefault(t => t.Id == tagId);
+            if (storedTag is not null)
+            {
+                deleted["previous"] = TagNode(snapshot, storedTag);
+                if (children == 0 && assignments == 0 && rules == 0)
+                {
+                    var create = new JsonObject { ["name"] = storedTag.Name };
+                    if (storedTag.ParentId is int parent)
+                    {
+                        create["parent_id"] = parent;
+                    }
+
+                    if (storedTag.Colour is not null)
+                    {
+                        create["colour"] = storedTag.Colour;
+                    }
+
+                    deleted["undo"] = UndoCall("create_query_tag", create);
+                    deleted["undo_note"] = "The undo recreates the tag under a NEW id.";
+                }
+                else
+                {
+                    deleted["undo_note"] = "No single call undoes this: the delete also removed the child tags, hand assignments and rules listed above, and the previous tag is only the one you named. Recreate the tag with create_query_tag, then re-create what was under it.";
+                }
+            }
+
+            return Serialize(deleted);
         });
 
     internal static Task<string> AssignQueryTagCore(
@@ -300,7 +342,7 @@ public sealed class McpQueryTagTools
         string? databaseName, string? schemaName, string? objectName, int? serverId, long? queryId) =>
         GuardAsync("assign_query_tag", async () =>
         {
-            var key = BuildKey(kind, queryHash, databaseName, schemaName, objectName, serverId, out var keyRefusal);
+            var key = BuildKey(kind, queryHash, databaseName, schemaName, objectName, serverId, out var keyRefusal, requireHashShape: true);
             if (keyRefusal is not null)
             {
                 return keyRefusal;
@@ -330,6 +372,8 @@ public sealed class McpQueryTagTools
                         ["status"] = "unchanged",
                         ["assignment"] = AssignmentNode(existing, before, false),
                         ["tag"] = TagNode(before, before.Tags.First(t => t.Id == tagId)),
+                        ["previous"] = new JsonObject { ["tag_id"] = tagId },
+                        ["undo"] = UndoCall("assign_query_tag", KeyArguments(new JsonObject { ["tag_id"] = tagId }, key!)),
                     });
                 }
 
@@ -365,6 +409,10 @@ public sealed class McpQueryTagTools
                     $"The key already had hand tag {previousId} in this server scope (one tag per key); it now has tag {tagId}.");
             }
 
+            node["previous"] = new JsonObject { ["tag_id"] = previousTagId };
+            node["undo"] = previousTagId is int earlierTag
+                ? UndoCall("assign_query_tag", KeyArguments(new JsonObject { ["tag_id"] = earlierTag }, key!))
+                : UndoCall("unassign_query_tag", KeyArguments(new JsonObject(), key!));
             node["note"] = MapNote;
             return Serialize(node);
         });
@@ -386,6 +434,8 @@ public sealed class McpQueryTagTools
                 return Serialize(new JsonObject
                 {
                     ["status"] = "unchanged",
+                    ["previous"] = null,
+                    ["undo"] = "None needed: nothing was removed.",
                     ["message"] = "That key has no hand tag in this server scope. Nothing was removed. A server-limited assignment and the every-server assignment are different rows; send server_id to address the first.",
                 });
             }
@@ -395,6 +445,8 @@ public sealed class McpQueryTagTools
             {
                 ["status"] = "unassigned",
                 ["removed_assignment"] = AssignmentNode(existing, snapshot, false),
+                ["previous"] = new JsonObject { ["tag_id"] = existing.TagId },
+                ["undo"] = UndoCall("assign_query_tag", AssignmentArguments(existing)),
                 ["note"] = MapNote,
             });
         });
@@ -487,6 +539,8 @@ public sealed class McpQueryTagTools
                 {
                     ["status"] = "created",
                     ["rule"] = RuleNode(row, tags),
+                    ["previous"] = null,
+                    ["undo"] = UndoCall("delete_query_tag_rule", new JsonObject { ["rule_id"] = row.Id }),
                     ["rules_version"] = state.RulesVersion,
                     ["map_refresh"] = RuleMapNote,
                 });
@@ -531,7 +585,13 @@ public sealed class McpQueryTagTools
 
             if (pattern == current.Pattern && priority == current.Priority && enabled == current.Enabled && tagId == current.TagId && serverId == current.ServerId)
             {
-                return Serialize(new JsonObject { ["status"] = "unchanged", ["rule"] = RuleNode(current, tags) });
+                return Serialize(new JsonObject
+                {
+                    ["status"] = "unchanged",
+                    ["rule"] = RuleNode(current, tags),
+                    ["previous"] = PreviousRuleValues(current),
+                    ["undo"] = RuleUpdateUndo(current, changes),
+                });
             }
 
             // A tag or server this edit does not touch is not re-checked: a rule must stay pausable after its tag was removed elsewhere.
@@ -553,6 +613,8 @@ public sealed class McpQueryTagTools
                 {
                     ["status"] = "updated",
                     ["rule"] = RuleNode(row, tags),
+                    ["previous"] = PreviousRuleValues(current),
+                    ["undo"] = RuleUpdateUndo(current, changes),
                     ["rules_version"] = state.RulesVersion,
                     ["map_refresh"] = RuleMapNote,
                 });
@@ -561,7 +623,8 @@ public sealed class McpQueryTagTools
     internal static Task<string> DeleteRuleCore(LocalDataService data, int ruleId) =>
         GuardAsync("delete_query_tag_rule", async () =>
         {
-            if (!(await data.GetQueryTagRulesAsync()).Any(r => r.Id == ruleId))
+            var before = (await data.GetQueryTagRulesAsync()).FirstOrDefault(r => r.Id == ruleId);
+            if (before is null)
             {
                 return NotFoundRule(ruleId);
             }
@@ -572,6 +635,9 @@ public sealed class McpQueryTagTools
             {
                 ["status"] = "deleted",
                 ["rule_id"] = ruleId,
+                ["previous"] = RuleNode(before, await data.GetQueryTagsAsync()),
+                ["undo"] = UndoCall("create_query_tag_rule", RuleCreateArguments(before)),
+                ["undo_note"] = "The undo recreates the rule under a NEW id.",
                 ["rules_version"] = state.RulesVersion,
                 ["map_refresh"] = RuleMapNote,
             });
@@ -747,7 +813,8 @@ public sealed class McpQueryTagTools
             key.Hash, new PerformanceMonitor.Common.QueryTags.QueryTagObject(key.Database, key.Schema, key.Name));
 
     private static QueryTagKey? BuildKey(
-        string? kind, string? queryHash, string? databaseName, string? schemaName, string? objectName, int? serverId, out string? refusal)
+        string? kind, string? queryHash, string? databaseName, string? schemaName, string? objectName, int? serverId, out string? refusal,
+        bool requireHashShape = false)
     {
         refusal = null;
         var cleanKind = kind?.Trim().ToLowerInvariant();
@@ -785,8 +852,16 @@ public sealed class McpQueryTagTools
                 return null;
             }
 
-            /* The resolver matches a hash ignoring case, so the key stores one spelling of it. A value that is not a hash
-               at all is kept as typed. */
+            /* #6455: a NEW assignment must name something a query hash can be, the same refusal the Darling twin gives; unassign
+               skips this so a key stored before the check can still be removed. */
+            if (requireHashShape && !QueryHashIdentity.IsAssignableHash(hash))
+            {
+                refusal = Refusal("invalid", "bad_key", "query_hash must be hexadecimal: 0x followed by 1 to 16 hex digits (for example 0x1A2B3C4D5E6F7081), or the decimal number the long-query trace stores.");
+                return null;
+            }
+
+            /* The resolver matches a hash ignoring case, so the key stores one spelling of it. Unassign skips the shape check
+               above, so a key stored before it is kept as typed and can be removed. */
             return new QueryTagKey(KindHash, serverId, QueryHashIdentity.CanonicalKey(hash) ?? hash, null, null, null);
         }
 
@@ -1158,6 +1233,130 @@ public sealed class McpQueryTagTools
             ["depth"] = TagTreeRules.Depth(Nodes(snapshot.Tags), tag.Id),
             ["path"] = string.Join(" / ", names),
         };
+    }
+
+    /// <summary>The one shape of an undo call (#6403): <c>{tool, arguments}</c>, the same as Darling's write tools.</summary>
+    private static JsonObject UndoCall(string tool, JsonObject arguments) => new() { ["tool"] = tool, ["arguments"] = arguments };
+
+    private static JsonObject PreviousTagValues(QueryTagRow stored) =>
+        new() { ["name"] = stored.Name, ["colour"] = stored.Colour, ["parent_id"] = stored.ParentId };
+
+    /// <summary>The update that puts back the fields <paramref name="applied"/> touched, as update_query_tag's own changes_json.</summary>
+    private static JsonObject TagUpdateUndo(int tagId, QueryTagRow stored, TagTreeEdit applied)
+    {
+        var changes = new JsonObject();
+        if (applied.HasName)
+        {
+            changes["name"] = stored.Name;
+        }
+
+        if (applied.HasColour)
+        {
+            changes["colour"] = stored.Colour;
+        }
+
+        if (applied.HasParent)
+        {
+            changes["parent_id"] = stored.ParentId;
+        }
+
+        return UndoCall("update_query_tag", new JsonObject { ["tag_id"] = tagId, ["changes_json"] = changes.ToJsonString() });
+    }
+
+    private static JsonObject KeyArguments(JsonObject arguments, QueryTagKey key)
+    {
+        arguments["kind"] = key.Kind;
+        if (key.Hash is not null)
+        {
+            arguments["query_hash"] = key.Hash;
+        }
+
+        if (key.Database is not null)
+        {
+            arguments["database_name"] = key.Database;
+            arguments["schema_name"] = key.Schema;
+            arguments["object_name"] = key.Name;
+        }
+
+        if (key.ServerId is int server)
+        {
+            arguments["server_id"] = server;
+        }
+
+        return arguments;
+    }
+
+    private static JsonObject AssignmentArguments(QueryTagAssignmentRow a)
+    {
+        var arguments = KeyArguments(
+            new JsonObject { ["tag_id"] = a.TagId }, new QueryTagKey(a.Kind, a.ServerId, a.QueryHash, a.DatabaseName, a.SchemaName, a.ObjectName));
+        if (a.QueryId is long queryId)
+        {
+            arguments["query_id"] = queryId;
+        }
+
+        return arguments;
+    }
+
+    private static JsonObject PreviousRuleValues(QueryTagRuleRow row) => new()
+    {
+        ["pattern"] = row.MatchField == "text_tag" ? null : row.Pattern,
+        ["priority"] = row.Priority,
+        ["enabled"] = row.Enabled,
+        ["tag_id"] = row.TagId,
+        ["server_id"] = row.ServerId,
+    };
+
+    /// <summary>The update that puts back the fields <paramref name="applied"/> named, as update_query_tag_rule's own changes_json.</summary>
+    private static JsonObject RuleUpdateUndo(QueryTagRuleRow row, RuleChanges applied)
+    {
+        var changes = new JsonObject();
+        if (applied.HasPattern)
+        {
+            changes["pattern"] = row.Pattern;
+        }
+
+        if (applied.HasPriority)
+        {
+            changes["priority"] = row.Priority;
+        }
+
+        if (applied.HasEnabled)
+        {
+            changes["enabled"] = row.Enabled;
+        }
+
+        if (applied.HasTagId)
+        {
+            changes["tag_id"] = row.TagId;
+        }
+
+        if (applied.HasServerId)
+        {
+            changes["server_id"] = row.ServerId;
+        }
+
+        return UndoCall("update_query_tag_rule", new JsonObject { ["rule_id"] = row.Id, ["changes_json"] = changes.ToJsonString() });
+    }
+
+    /// <summary>The create that recreates a deleted rule; a text_tag rule takes no pattern and no tag.</summary>
+    private static JsonObject RuleCreateArguments(QueryTagRuleRow row)
+    {
+        var arguments = new JsonObject { ["field"] = row.MatchField };
+        if (row.MatchField != "text_tag")
+        {
+            arguments["pattern"] = row.Pattern;
+            arguments["tag_id"] = row.TagId;
+        }
+
+        arguments["priority"] = row.Priority;
+        arguments["enabled"] = row.Enabled;
+        if (row.ServerId is int server)
+        {
+            arguments["server_id"] = server;
+        }
+
+        return arguments;
     }
 
     private static JsonObject AssignmentNode(QueryTagAssignmentRow a, Snapshot snapshot, bool withPrecedence)

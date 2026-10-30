@@ -21,7 +21,9 @@
  * server names render inert.
  */
 
+import { notePanelKey } from "./refresh-in-place.js";
 import {
+  storeHash,
   el,
   mount,
   loadingStrip,
@@ -31,6 +33,7 @@ import {
   noticeStrip,
   keptWindowStrip,
   windowFloorStrip,
+  leftOutStrip,
   readTool,
   readWithinKeptHistory,
   apiGet,
@@ -52,7 +55,7 @@ import {
   localizeAlertDetail,
 } from "./util.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS } from "./charts.js";
-import { plainText, plainTextNamed } from "./plain-text.js";
+import { plainText, plainTextNamed, plainTextCounts } from "./plain-text.js";
 import { toTsv, toCsv, isListValue, csvFileName, copyText, downloadCsv } from "./grid-tools.js";
 import {
   VALUE_LIST_MAX_LEN,
@@ -140,6 +143,8 @@ export function renderPanel(desc, onSettled) {
     desc.control || null,
     body,
   ]);
+  /* #6933: the key a poll matches this panel by, so it keeps the panel on screen while the same read runs again. */
+  notePanelKey(panel, JSON.stringify([desc.read || desc.path || null, desc.params || null]));
   loadPanel(desc, body, signal, onSettled);
   return panel;
 }
@@ -204,7 +209,7 @@ async function loadPanelBody(desc, body, signal) {
        window's start (the server adds the note to that envelope only, never to an unavailable or not_collected one), so a
        new server's empty week does not read as a quiet one. windowFloorStrip is null for a chart and for an envelope
        without the note. */
-    mount(body, [kept, windowFloorStrip(res.data, desc), emptyStrip(emptyHeadline(desc, res))]);
+    mount(body, [kept, windowFloorStrip(res.data, desc), leftOutStrip(res.data, desc), emptyStrip(emptyHeadline(desc, res))]);
     return;
   }
 
@@ -1317,9 +1322,11 @@ function cell(row, c) {
           ? "—"
           : c.plain === "named"
             ? plainTextNamed(String(raw))
-            : c.plain
-              ? plainText(String(raw))
-              : String(raw);
+            : c.plain === "counts"
+              ? plainTextCounts(String(raw))
+              : c.plain
+                ? plainText(String(raw))
+                : String(raw);
   /* #5644 W20: a column marked `localizeText` (a message or note: collection-health notes, collector errors) shows any ISO
      instant in its sentence in local time, like the grids beside it. Opt-in: query text, statement text, details and
      identifiers are data, and a literal such as '2026-01-01T00:00:00' inside them must show as written. */
@@ -1477,8 +1484,8 @@ function vizBandlist(data, desc) {
 /* ─────────────────────────── shared helpers ─────────────────────────── */
 
 /** Set the hash route to a server's detail page. */
-export function navigateServer(serverName) {
-  location.hash = "#/server/" + encodeURIComponent(serverName);
+export function navigateServer(serverName, store) {
+  location.hash = storeHash("#/server/" + encodeURIComponent(serverName), store);
 }
 
 /** Collector rows worst first (Failing, then Warning, then the rest, then Healthy, then not applicable), each group in

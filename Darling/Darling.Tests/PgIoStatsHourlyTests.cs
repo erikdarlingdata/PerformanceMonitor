@@ -467,7 +467,7 @@ AND   NOT (c.bt = 'startup' AND t < '{Ts(Late)}')";
             var waiting = false;
             for (var attempt = 0; attempt < 600 && !waiting; attempt++)
             {
-                waiting = (await RowsAsync(connection, "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND wait_event = 'advisory'"))[0] != "0";
+                waiting = (await RowsAsync(connection, "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND wait_event = 'advisory'"))[0] != "0";
                 if (!waiting)
                 {
                     await Task.Delay(50, ct);

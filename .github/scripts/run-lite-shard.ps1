@@ -90,14 +90,15 @@ else {
 
         $PSNativeCommandUseErrorActionPreference = $false
         $downloaded = $false
-        foreach ($attempt in 1..5) {
+        # #6497: three tries (45 s of sleeps), not five (150 s).
+        foreach ($attempt in 1..3) {
             # Start every try from an empty folder: gh will not overwrite a file that a partial try left.
             Remove-Item -Recurse -Force -Path $timingDir -ErrorAction SilentlyContinue
             New-Item -ItemType Directory -Force -Path $timingDir | Out-Null
             gh run download $TimingRun --pattern 'lite-tests-timing-*' --dir $timingDir
             if ($LASTEXITCODE -eq 0) { $downloaded = $true; break }
-            Write-Host "timing download attempt $attempt of 5 failed with exit code $LASTEXITCODE"
-            if ($attempt -lt 5) { Start-Sleep -Seconds (15 * $attempt) }
+            Write-Host "timing download attempt $attempt of 3 failed with exit code $LASTEXITCODE"
+            if ($attempt -lt 3) { Start-Sleep -Seconds (15 * $attempt) }
         }
         if (-not $downloaded) { throw "could not download the Lite timings of run $TimingRun that the gate pinned - failing this shard rather than cutting alone, because the other shards may have cut by duration" }
         # The gate pinned the exact artifact set. A leg that got fewer (one expired or was deleted since,

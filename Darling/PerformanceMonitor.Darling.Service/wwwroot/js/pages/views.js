@@ -25,9 +25,10 @@
  * descriptions) reaches the DOM through el()/textContent (R4 — never innerHTML).
  */
 
-import { el, mount, apiGetFleet, loadingStrip, errorStrip, emptyStrip, noticeStrip, relTime, localTime, localizeIsoText, localizeAlertDetail, fmtNum } from "../util.js";
+import { el, mount, apiGetFleet, loadingStrip, errorStrip, emptyStrip, noticeStrip, relTime, localTime, localizeIsoText, localizeAlertDetail, fmtNum, storeHash } from "../util.js";
 import { rollingHoursPicker } from "../page-range.js";
 import { renderPanel, setPanelSignal, VIZ } from "../panels.js";
+import { holdsPage, refreshGridInPlace, showAround, showPage, showRefreshError } from "../refresh-in-place.js";
 import { orderServers } from "../server-order.js";
 import { renderComposedPanelCard } from "../compose.js";
 import { renderMarkdown } from "../markdown.js";
@@ -162,8 +163,8 @@ function firstRunHero(canEdit, servers) {
         "investigation. Both save for every seat and re-scope live by server and time range. No SQL to write.",
     }),
     el("div", { class: "hero-ctas" }, [
-      el("a", { class: "btn primary hero-cta", href: "#/view/new", text: "New view" }),
-      el("a", { class: "btn hero-cta", href: "#/notebook/new", text: "New notebook" }),
+      el("a", { class: "btn primary hero-cta", href: storeHash("#/view/new"), text: "New view" }),
+      el("a", { class: "btn hero-cta", href: storeHash("#/notebook/new"), text: "New notebook" }),
       templateMenu(servers),
     ]),
     starterRow(servers),
@@ -213,8 +214,8 @@ function listHead(canEdit, servers) {
     el("h2", { text: "Custom Views" }),
     el("div", { class: "spacer" }),
     canEdit ? templateMenu(servers) : null,
-    canEdit ? el("a", { class: "btn", href: "#/notebook/new", text: "New notebook" }) : null,
-    canEdit ? el("a", { class: "btn primary", href: "#/view/new", text: "New view" }) : null,
+    canEdit ? el("a", { class: "btn", href: storeHash("#/notebook/new"), text: "New notebook" }) : null,
+    canEdit ? el("a", { class: "btn primary", href: storeHash("#/view/new"), text: "New view" }) : null,
   ]);
 }
 
@@ -252,7 +253,7 @@ function templateMenu(servers) {
   list.push(el("div", { class: "template-group-label", text: "Notebooks" }));
   for (const t of NOTEBOOK_TEMPLATES) {
     list.push(
-      el("a", { class: "template-item", href: "#/notebook/new/" + encodeURIComponent(t.key), title: t.description }, [
+      el("a", { class: "template-item", href: storeHash("#/notebook/new/") + encodeURIComponent(t.key), title: t.description }, [
         el("span", { class: "template-label", text: t.label }),
         el("span", { class: "template-desc", text: t.description }),
       ])
@@ -289,7 +290,7 @@ async function createFromTemplate(template, server, status) {
   mount(status, loadingStrip("Creating “" + template.label + "”…"));
   const res = await api.createView(template.make(server));
   if (res.kind === "data" && res.data && res.data.id != null) {
-    location.hash = "#/view/" + encodeURIComponent(res.data.id);
+    location.hash = storeHash("#/view/") + encodeURIComponent(res.data.id);
     return;
   }
   const message =
@@ -321,7 +322,7 @@ function viewCard(v) {
   const chips = el("div", { class: "vc-chips" });
   /* The list summary carries a concrete `kind` (backend #56), so the link + "Notebook" badge are set SYNCHRONOUSLY
      here — no wait on the per-card definition fetch (which only fills in the count chips). */
-  const href = (isNotebook ? "#/notebook/" : "#/view/") + encodeURIComponent(v.id);
+  const href = storeHash((isNotebook ? "#/notebook/" : "#/view/") + encodeURIComponent(v.id));
   const card = el("a", { class: "view-card card", href }, [
     el("div", { class: "vc-name" }, [
       el("span", { class: "vc-name-text", text: v.name }),
@@ -421,7 +422,7 @@ function importPanel() {
     const result = await api.createView({ name, description: parsed.description || null, definition: def });
     importBtn.disabled = false;
     if (result.kind === "data" && result.data) {
-      const route = isNotebookDefinition(def) ? "#/notebook/" : "#/view/";
+      const route = storeHash(isNotebookDefinition(def) ? "#/notebook/" : "#/view/");
       location.hash = route + encodeURIComponent(result.data.id);
       return;
     }
@@ -544,9 +545,19 @@ function rememberScope(id, state) {
   viewScopeMemory.set(String(id), { server: state.server, hours: state.hours, values: { ...state.values }, picked: !!state.picked });
 }
 
-export async function renderView(main, id) {
+/* #6933: the grid swaps of the last poll, stopped when a newer render starts. */
+let cancelViewRefresh = null;
+
+export async function renderView(main, id, opts) {
   const ourHash = location.hash;
-  mount(main, loadingStrip("Loading view…"));
+  const pageKey = "view:" + id;
+  if (cancelViewRefresh) {
+    cancelViewRefresh();
+    cancelViewRefresh = null;
+  }
+  /* A poll reads again with the view still on screen, and swaps each panel's new body in when its own read returns. */
+  const hold = holdsPage(main, pageKey, opts && opts.poll === true);
+  if (!hold) mount(main, loadingStrip("Loading view…"));
 
   const [session, catalog, res, fleetRes] = await Promise.all([
     api.getSession(),
@@ -560,7 +571,9 @@ export async function renderView(main, id) {
   if (location.hash !== ourHash) return;
 
   if (res.kind === "error") {
-    mount(main, [el("div", { class: "page-head" }, [backToViews(), el("h2", { text: "View" })]), errorStrip(res.message)]);
+    if (!showRefreshError(main, pageKey, res.message)) {
+      mount(main, [el("div", { class: "page-head" }, [backToViews(), el("h2", { text: "View" })]), errorStrip(res.message)]);
+    }
     return;
   }
 
@@ -589,12 +602,12 @@ export async function renderView(main, id) {
     el("div", { class: "spacer" }),
     viewRefreshControl(view, def, false, canEdit),
     exportButton(view),
-    canEdit ? el("a", { class: "btn small", href: "#/view/" + encodeURIComponent(id) + "/edit", text: "Edit" }) : null,
+    canEdit ? el("a", { class: "btn small", href: storeHash("#/view/") + encodeURIComponent(id) + "/edit", text: "Edit" }) : null,
     canEdit ? deleteButton(id, status) : session.can_edit ? lockedDeleteButton(access) : null,
   ]);
 
   if (!panels.length) {
-    mount(main, [head, status, emptyStrip("This view has no panels yet.")]);
+    showPage(main, pageKey, [head, status, emptyStrip("This view has no panels yet.")]);
     return;
   }
 
@@ -619,18 +632,37 @@ export async function renderView(main, id) {
     };
   }
 
-  const gridBox = el("div", { class: "panel-grid" });
-  function renderGrid() {
+  /* On a poll the grid already on screen stays and is refreshed in place (refreshGridInPlace), so the scope controls built below
+     keep drawing into it. */
+  const liveGrid = hold ? Array.from(main.children).find((n) => n.className === "panel-grid") : null;
+  const gridBox = liveGrid || el("div", { class: "panel-grid" });
+  function buildGrid() {
     if (scopeNote) scopeNote.textContent = panelServerNote(state, panelServer);
-    mount(gridBox, panels.map((p, i) => panelOrError(panelUnderScope(p, state, panelServer), readSet, sourceSet, currentScope(), undefined, i)));
+    return panels.map((p, i) => panelOrError(panelUnderScope(p, state, panelServer), readSet, sourceSet, currentScope(), undefined, i));
+  }
+  function renderGrid() {
+    mount(gridBox, buildGrid());
   }
 
   /* The chrome is only meaningful when a composed panel can re-scope; a pure v1 read view skips it. */
-  const onChange = () => { rememberScope(id, state); renderGrid(); };
+  /* #6933: a scope change draws new-scope panels, so an in-place refresh still outstanding is for the old scope and must not land over them. */
+  const onChange = () => {
+    if (cancelViewRefresh) {
+      cancelViewRefresh();
+      cancelViewRefresh = null;
+    }
+    rememberScope(id, state);
+    renderGrid();
+  };
   const controls = hasComposed ? buildViewControls(fleet, variables, state, defaultHours, onChange) : null;
 
-  mount(main, [head, status, controls, scopeNote, gridBox]);
-  renderGrid();
+  if (liveGrid) {
+    showAround(main, pageKey, liveGrid, [head, status, controls, scopeNote].filter(Boolean));
+    cancelViewRefresh = refreshGridInPlace(liveGrid, buildGrid());
+  } else {
+    showPage(main, pageKey, [head, status, controls, scopeNote, gridBox]);
+    renderGrid();
+  }
   /* Clear any stale AbortSignal left by the previous page (e.g. server.js's per-render panelAbort) so it
      cannot bleed into SUBSEQUENT view renders — the onChange scope re-render and any poll-triggered
      renderView call. View panels carry no per-render abort controller, so undefined (unabortable) is the
@@ -709,7 +741,7 @@ export async function renderNotebookDoc(main, opts) {
         el("div", { class: "spacer" }),
         viewRefreshControl(opts.view, def, true, canEdit),
         exportButton(opts.view),
-        canEdit ? el("a", { class: "btn small", href: "#/notebook/" + encodeURIComponent(opts.view.id) + "/edit", text: "Edit" }) : null,
+        canEdit ? el("a", { class: "btn small", href: storeHash("#/notebook/") + encodeURIComponent(opts.view.id) + "/edit", text: "Edit" }) : null,
         canEdit ? deleteButton(opts.view.id, status) : opts.session.can_edit ? lockedDeleteButton(access) : null,
       ]);
 
@@ -934,7 +966,7 @@ function saveAsNotebookButton(definition, provenance, status) {
     const name = "Alert notebook " + new Date().toISOString();
     const res = await api.createView({ name, description: provenance || null, definition });
     if (res.kind === "data" && res.data && res.data.id != null) {
-      location.hash = "#/notebook/" + encodeURIComponent(res.data.id);
+      location.hash = storeHash("#/notebook/") + encodeURIComponent(res.data.id);
       return;
     }
     btn.disabled = false;
@@ -973,7 +1005,7 @@ function renderCell(cell, readSet, sourceSet, scope, onSettled) {
 }
 
 function backToViews() {
-  return el("a", { href: "#/views", text: "← Views" });
+  return el("a", { href: storeHash("#/views"), text: "← Views" });
 }
 
 /* Fleet server options for the scope picker (value = stored server_name, label = display name). */
@@ -1183,7 +1215,7 @@ function deleteButton(id, status) {
     mount(status, el("div", { class: "strip loading", text: "Deleting…" }));
     const res = await api.deleteView(id);
     if (res.kind === "data") {
-      location.hash = "#/views";
+      location.hash = storeHash("#/views");
       return;
     }
     btn.disabled = false;

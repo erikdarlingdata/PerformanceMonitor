@@ -11,6 +11,7 @@ using System.Threading;
 using Npgsql;
 using PerformanceMonitor.Darling.Service;
 using Xunit;
+using PerformanceMonitor.Darling.Storage;
 
 namespace Darling.Tests;
 
@@ -28,7 +29,7 @@ public sealed class PostgresOpenTimeoutTests
 
     private static string Answer(Exception inner)
     {
-        var outcome = DarlingWebEndpoints.FromRunException(new DarlingWebEndpoints.ComposeStoreOpenException(inner));
+        var outcome = ComposePanelRunner.FromRunException(new ComposePanelRunner.ComposeStoreOpenException(inner));
         Assert.True(outcome.IsServerError);
         Assert.Null(outcome.AuthorSqlState);
         return outcome.Error!;
@@ -182,7 +183,7 @@ public sealed class PostgresOpenTimeoutTests
     public void AnOpenThatFailedAfterTheTimeout_AnswersInTime_AndOneThatDidNotKeepsCouldNotOpen()
     {
         var inner = AbortedRead();
-        var late = DarlingWebEndpoints.FromRunException(new DarlingWebEndpoints.ComposeStoreOpenException(inner) { FailedAfterTimeout = true });
+        var late = ComposePanelRunner.FromRunException(new ComposePanelRunner.ComposeStoreOpenException(inner) { FailedAfterTimeout = true });
         Assert.Equal(InTime + inner.Message, late.Error);
         Assert.Equal(NotOpened + inner.Message, Answer(inner));
     }

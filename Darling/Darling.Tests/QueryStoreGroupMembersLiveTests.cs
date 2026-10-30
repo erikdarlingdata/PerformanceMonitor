@@ -62,7 +62,7 @@ public sealed class QueryStoreGroupMembersLiveTests
         var databaseName = QueryStoreRankedHarness.Parse(Panel("database_name"));
 
         /* Never analyzed: no statistics row, so the count is unknown (the compiler then takes two scans). */
-        Assert.Null(await QueryStoreGroupMembers.ResolveAsync(connection, moduleName, 3, ct));
+        Assert.Null(await QueryStoreGroupMembers.ResolveAsync(connection, moduleName, 3, StorageCommandDeadlines.McpReadSeconds, ct));
 
         /* 6,000 rows: 50 modules, and a database name that is different on every row. */
         await ExecAsync(connection,
@@ -72,13 +72,13 @@ public sealed class QueryStoreGroupMembersLiveTests
         await ExecAsync(connection, "ANALYZE collect.query_store_interval_wide", ct);
 
         /* A positive n_distinct is the count itself, times the safety factor of 4. */
-        Assert.Equal(200L, await QueryStoreGroupMembers.ResolveAsync(connection, moduleName, 3, ct));
+        Assert.Equal(200L, await QueryStoreGroupMembers.ResolveAsync(connection, moduleName, 3, StorageCommandDeadlines.McpReadSeconds, ct));
 
         /* A negative n_distinct (-1: every row distinct) is a fraction of reltuples, so it is the row count, times the safety factor. */
         var reltuples = Convert.ToInt64(await ScalarAsync(connection,
             "SELECT reltuples::bigint FROM pg_class WHERE oid = 'collect.query_store_interval_wide'::regclass", ct), System.Globalization.CultureInfo.InvariantCulture);
         Assert.Equal(6000L, reltuples);
-        Assert.Equal(24000L, await QueryStoreGroupMembers.ResolveAsync(connection, databaseName, 3, ct));
+        Assert.Equal(24000L, await QueryStoreGroupMembers.ResolveAsync(connection, databaseName, 3, StorageCommandDeadlines.McpReadSeconds, ct));
 
         /* The partitioned parent has its statistics inherited, and no non-inherited row: the lookup must ask for the inherited ones. */
         Assert.Equal(1L, Convert.ToInt64(await ScalarAsync(connection,
@@ -90,28 +90,28 @@ public sealed class QueryStoreGroupMembersLiveTests
 
         /* server is the servers in scope, exactly (no factor); the product of several dimensions is the product of the counts, the n_distinct one times 4. */
         var serverOnly = QueryStoreRankedHarness.Parse(Panel("server"));
-        Assert.Equal(43L, await QueryStoreGroupMembers.ResolveAsync(connection, serverOnly, 43, ct));
+        Assert.Equal(43L, await QueryStoreGroupMembers.ResolveAsync(connection, serverOnly, 43, StorageCommandDeadlines.McpReadSeconds, ct));
         var both = QueryStoreRankedHarness.Parse(
             "{\"source\":\"query_store_stats\",\"measure\":\"qs_executions\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"topN\":10,"
             + "\"groupBy\":[\"server\",\"module_name\"],\"viz\":\"line\"}");
-        Assert.Equal(600L, await QueryStoreGroupMembers.ResolveAsync(connection, both, 3, ct));
+        Assert.Equal(600L, await QueryStoreGroupMembers.ResolveAsync(connection, both, 3, StorageCommandDeadlines.McpReadSeconds, ct));
 
         /* query_hash has no bound this lookup can give: unknown. A panel that is not a RankedTimeSeries asks for nothing. */
-        Assert.Null(await QueryStoreGroupMembers.ResolveAsync(connection, QueryStoreRankedHarness.Parse(Panel("query_hash")), 3, ct));
+        Assert.Null(await QueryStoreGroupMembers.ResolveAsync(connection, QueryStoreRankedHarness.Parse(Panel("query_hash")), 3, StorageCommandDeadlines.McpReadSeconds, ct));
         Assert.Null(await QueryStoreGroupMembers.ResolveAsync(connection, QueryStoreRankedHarness.Parse(
-            "{\"source\":\"query_store_stats\",\"ratio\":\"qs_total_cpu_us\",\"topN\":10,\"groupBy\":[\"module_name\"],\"viz\":\"table\"}"), 3, ct));
+            "{\"source\":\"query_store_stats\",\"ratio\":\"qs_total_cpu_us\",\"topN\":10,\"groupBy\":[\"module_name\"],\"viz\":\"table\"}"), 3, StorageCommandDeadlines.McpReadSeconds, ct));
 
         /* A plain table (the wide table before V171): the same lookup, on the non-inherited statistics. */
         await ExecAsync(connection, "CREATE TABLE collect.qsgm_plain (module_name text, database_name text)", ct);
         await ExecAsync(connection,
             "INSERT INTO collect.qsgm_plain SELECT 'm' || (g % 20), 'db' || g FROM generate_series(1, 3000) AS g", ct);
         await ExecAsync(connection, "ANALYZE collect.qsgm_plain", ct);
-        Assert.Equal(20d, await QueryStoreGroupMembers.NDistinctMembersAsync(connection, "module_name", ct, "qsgm_plain"));
-        Assert.Equal(3000d, await QueryStoreGroupMembers.NDistinctMembersAsync(connection, "database_name", ct, "qsgm_plain"));
+        Assert.Equal(20d, await QueryStoreGroupMembers.NDistinctMembersAsync(connection, "module_name", StorageCommandDeadlines.McpReadSeconds, ct, "qsgm_plain"));
+        Assert.Equal(3000d, await QueryStoreGroupMembers.NDistinctMembersAsync(connection, "database_name", StorageCommandDeadlines.McpReadSeconds, ct, "qsgm_plain"));
 
         /* A column or table with no statistics row is unknown, not zero. */
-        Assert.Null(await QueryStoreGroupMembers.NDistinctMembersAsync(connection, "no_such_column", ct, "qsgm_plain"));
-        Assert.Null(await QueryStoreGroupMembers.NDistinctMembersAsync(connection, "module_name", ct, "no_such_table"));
+        Assert.Null(await QueryStoreGroupMembers.NDistinctMembersAsync(connection, "no_such_column", StorageCommandDeadlines.McpReadSeconds, ct, "qsgm_plain"));
+        Assert.Null(await QueryStoreGroupMembers.NDistinctMembersAsync(connection, "module_name", StorageCommandDeadlines.McpReadSeconds, ct, "no_such_table"));
     }
 
     [Fact]
@@ -128,7 +128,7 @@ public sealed class QueryStoreGroupMembersLiveTests
         await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
 
         /* An empty store is not wide-eligible, whatever the plan: nothing to count, and the default tuple says so. */
-        var none = await DarlingWebEndpoints.ResolveQueryStoreWideEligibleAsync(
+        var none = await ComposePanelRunner.ResolveQueryStoreWideEligibleAsync(
             postgres, null, DateTime.UtcNow.AddDays(-2), DateTime.UtcNow, null, ct, QueryStoreRankedHarness.Parse(Panel("module_name")));
         Assert.False(none.Eligible);
         Assert.Null(none.GroupMembers);

@@ -275,7 +275,7 @@ public partial class ServerTab : UserControl
         _engineEdition = await ResolveEngineEditionAsync(_engineEdition, () => Task.Run(() => _dataService.GetSqlEngineEditionAsync(_serverId)));
 
         /* The constructor decided the msdb warning from the connection check's edition, which was unknown. */
-        RunningJobsMsdbWarning.Visibility = RunningJobsMsdbWarningVisibility(_hasMsdbAccess, _isAzureSqlDatabase, _isAwsRds);
+        RunningJobsMsdbWarning.Visibility = RunningJobsMsdbWarningVisibility(_hasMsdbAccess, _isAzureSqlDatabase, _awsRdsKind);
     }
 
     private async System.Threading.Tasks.Task RefreshVisibleTabAsync(int hoursBack, DateTime? fromDate, DateTime? toDate, bool subTabOnly = false, CancellationToken ct = default)
@@ -440,7 +440,7 @@ public partial class ServerTab : UserControl
                         }
                         break;
                     case 3: // Top Procedures by Duration
-                        var procStats = await Task.Run(() => QueryTagGrid.ReadAsync(_dataService, _serverId, _queryTagChoice, tags => _dataService.GetTopProceduresByCpuAsync(_serverId, hoursBack, 50, fromDate, toDate, ServerClock, SelectedDatabaseFilter, tags: tags)));
+                        var (procStats, procLeftOut) = await ReadTopProceduresAsync(hoursBack, fromDate, toDate);
                         _procStatsFilterMgr!.UpdateData(procStats);
                         SetDefaultSortIfNone(ProcedureStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
                         _ = LoadProcStatsSlicerAsync();
@@ -450,6 +450,7 @@ public partial class ServerTab : UserControl
                             var (windowStart, windowEnd) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate);
                             await RefreshProcStatsComparisonAsync(windowStart, windowEnd);
                             await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.ProcedureStats, ProcStatsWindowTruncatedBanner, windowStart, windowEnd);
+                            await UpdateProcStatsLeftOutBannerAsync(procStats.Count, procLeftOut, windowStart, windowEnd);
                         }
                         break;
                     case 4: // Query Store by Duration
@@ -488,7 +489,7 @@ public partial class ServerTab : UserControl
             /* Full refresh: load all sub-tabs */
             var snapshotsTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.Snapshots", () => Task.Run(() => _dataService.GetLatestQuerySnapshotsAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter)));
             var queryStatsTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.QueryStats", () => Task.Run(() => QueryTagGrid.ReadAsync(_dataService, _serverId, _queryTagChoice, tags => _dataService.GetTopQueriesByCpuAsync(_serverId, hoursBack, 50, fromDate, toDate, ServerClock, SelectedDatabaseFilter, tags: tags))));
-            var procStatsTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.ProcStats", () => Task.Run(() => QueryTagGrid.ReadAsync(_dataService, _serverId, _queryTagChoice, tags => _dataService.GetTopProceduresByCpuAsync(_serverId, hoursBack, 50, fromDate, toDate, ServerClock, SelectedDatabaseFilter, tags: tags))));
+            var procStatsTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.ProcStats", () => ReadTopProceduresAsync(hoursBack, fromDate, toDate));
             var queryStoreTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.QueryStore", () => Task.Run(() => QueryTagGrid.ReadAsync(_dataService, _serverId, _queryTagChoice, tags => _dataService.GetQueryStoreTopQueriesAsync(_serverId, hoursBack, 50, fromDate, toDate, SelectedDatabaseFilter, tags: tags))));
             var planCorrectionTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.PlanCorrections", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetPlanCorrectionsAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter))));
             var queryDurationTrendTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.QueryDurationTrends", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetQueryDurationTrendAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter))));
@@ -529,7 +530,7 @@ public partial class ServerTab : UserControl
                 await RefreshQueryStatsComparisonAsync(windowStart, windowEnd);
                 await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.QueryStats, QueryStatsWindowTruncatedBanner, windowStart, windowEnd);
             }
-            _procStatsFilterMgr!.UpdateData(procStatsTask.Result);
+            _procStatsFilterMgr!.UpdateData(procStatsTask.Result.Rows);
             SetDefaultSortIfNone(ProcedureStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
             _ = LoadProcStatsSlicerAsync();
             {
@@ -538,6 +539,7 @@ public partial class ServerTab : UserControl
                 var (windowStart2, windowEnd2) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate);
                 await RefreshProcStatsComparisonAsync(windowStart2, windowEnd2);
                 await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.ProcedureStats, ProcStatsWindowTruncatedBanner, windowStart2, windowEnd2);
+                await UpdateProcStatsLeftOutBannerAsync(procStatsTask.Result.Rows.Count, procStatsTask.Result.LeftOut, windowStart2, windowEnd2);
             }
             _queryStoreFilterMgr!.UpdateData(queryStoreTask.Result);
             SetDefaultSortIfNone(QueryStoreGrid, "TotalDurationMs", ListSortDirection.Descending);
@@ -927,6 +929,9 @@ public partial class ServerTab : UserControl
             UpdateTempDbChart(tempDbTask.Result, hoursBack, fromDate, toDate);
             UpdateTempDbSizeChart(tempDbTask.Result, hoursBack, fromDate, toDate);
             UpdateTempDbFileIoChart(tempDbFileIoTask.Result, hoursBack, fromDate, toDate);
+            await ShowTempDbOutcomeAsync(tempDbTask.Result.Count);
+            (TempDbFileIoNoDataMessage.Text, TempDbFileIoNoDataMessage.Visibility) =
+                TempDbFileIoGapState(_server.DisplayName, _isAzureSqlDatabase, tempDbFileIoTask.Result.Count);
         }
         catch (Exception ex)
         {
@@ -1110,7 +1115,9 @@ public partial class ServerTab : UserControl
             _blockingSlicerData = data;
             _blockingSlicerMetric = "Events";
             var (slicerStart, slicerEnd) = PerformanceMonitor.Ui.TimeWindows.ChartAxis(hoursBack, fromDate, toDate, DateTime.UtcNow);
-            if (data.Count > 0)
+            if (data.Count == 0)
+                BlockingSlicer.ShowEmpty("No blocked process reports in the selected time window.");
+            else
                 BlockingSlicer.LoadData(data, "Blocking Events", slicerStart, slicerEnd);
         }
         catch (Exception ex)
@@ -1132,7 +1139,9 @@ public partial class ServerTab : UserControl
             var data = await Task.Run(() => _dataService.GetDeadlockSlicerDataAsync(_serverId, hoursBack, fromDate, toDate));
             _deadlockSlicerData = data;
             var (slicerStart, slicerEnd) = PerformanceMonitor.Ui.TimeWindows.ChartAxis(hoursBack, fromDate, toDate, DateTime.UtcNow);
-            if (data.Count > 0)
+            if (data.Count == 0)
+                DeadlockSlicer.ShowEmpty("No deadlocks in the selected time window.");
+            else
                 DeadlockSlicer.LoadData(data, "Deadlocks", slicerStart, slicerEnd);
         }
         catch (Exception ex)
@@ -1269,6 +1278,7 @@ public partial class ServerTab : UserControl
                and the stamped one also holds when the display mode flips or another tab is selected first. */
             var tabClock = _serverClock;
             foreach (var row in collectionHealthTask.Result) row.Clock = tabClock;
+            ApplyEngineGate(collectionHealthTask.Result, _server.DisplayName, _engineEdition, _awsRdsKind);
             foreach (var row in collectionLogTask.Result) row.Clock = tabClock;
 
             SkippedCyclesSummary.Text = (await skippedCyclesTask)?.SummaryLine(tabClock) ?? "Skipped cycles in 24 h: could not be read";

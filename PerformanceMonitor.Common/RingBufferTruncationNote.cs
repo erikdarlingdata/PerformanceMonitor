@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 
 namespace PerformanceMonitor.Common;
@@ -105,18 +106,99 @@ public static class RingBufferTruncationNote
     }
 
     /// <summary>
-    /// The health-parser reads' answer (Lite and Darling, one string) when a category came back empty and the newest
-    /// system_health collection run says the ring buffer was truncated. Without it those reads called the window
+    /// The health-parser reads' answer (Lite and Darling, one string) when a category came back empty and the
+    /// system_health collection runs of the read's window say the ring buffer was truncated. Without it those reads called the window
     /// "genuinely quiet" or "the healthy answer" while the newest events sat on the server unread (#6441).
+    /// <para>#6650: when the read did count events of the type (<paramref name="eventsRead"/> above 0) the first clause
+    /// says so, with the filter that left none (<paramref name="noneQualifiedBecause"/>), instead of "No ... events were
+    /// found" over a count of hundreds. At 0 it keeps that wording.</para>
+    /// <para>#6827: <paramref name="stretch"/> is the truncated runs that read the read's window (the runs inside it and the
+    /// first one after its end). The sentence names how many runs were truncated and when, rather than the collector's
+    /// newest run today. Both reads only get here with a stretch in hand, so it is required.</para>
     /// </summary>
-    public static string HealthParserMessage(string eventType, string serverName, int hoursBack, string truncation) =>
-        string.Format(
+    public static string HealthParserMessage(
+        string eventType, string serverName, int hoursBack, string truncation, TruncatedStretch stretch,
+        int eventsRead = 0, string? noneQualifiedBecause = null)
+    {
+        var first = eventsRead > 0
+            ? string.Format(
+                CultureInfo.InvariantCulture,
+                "{0} {1} event(s) were read for {2} in the last {3} hour(s), and {4}",
+                eventsRead,
+                eventType,
+                serverName,
+                hoursBack,
+                noneQualifiedBecause ?? "none qualified")
+            : string.Format(
+                CultureInfo.InvariantCulture,
+                "No {0} events were found for {1} in the last {2} hour(s)",
+                eventType,
+                serverName,
+                hoursBack);
+
+        /* #6827: a read over a window answers for the runs that read it, not for the collector's newest run today. */
+        var who = stretch.Count == 1
+            ? string.Format(CultureInfo.InvariantCulture, "the system_health collection run at {0}, which read events of this window,", FormatStamp(stretch.First))
+            : string.Format(
+                CultureInfo.InvariantCulture,
+                "{0} system_health collection runs that read events of this window (the first at {1}, the last at {2})",
+                stretch.Count, FormatStamp(stretch.First), FormatStamp(stretch.Last));
+
+        return first + string.Format(
             CultureInfo.InvariantCulture,
-            "No {0} events were found for {1} in the last {2} hour(s), and this is NOT an all-clear: the newest system_health collection run reported that {3}. Events of this type may exist on the server and not be stored here. Restarting the system_health session empties its ring buffer, and collection resumes until the buffer fills again.",
-            eventType,
-            serverName,
-            hoursBack,
+            ", and this is NOT an all-clear: {0} reported that {1}. Events of this type may exist on the server and not be stored here. Restarting the system_health session empties its ring buffer, and collection resumes until the buffer fills again.",
+            who,
             truncation);
+    }
+
+    /// <summary>
+    /// #6827: the truncated system_health runs that read a read's window (inside it, or the first after its end): how many, when the first and the last
+    /// ran (naive UTC, the frame collection_time is stored in), and the note of the newest of them (the hidden-event
+    /// count and age <see cref="Describe"/> turns into a sentence).
+    /// </summary>
+    public readonly record struct TruncatedStretch(int Count, DateTime First, DateTime Last, string NewestNote)
+    {
+        /// <summary>
+        /// The stretch of the runs <paramref name="runs"/> (collection_time naive UTC, the run's note) whose note
+        /// <see cref="TryParse"/> calls truncated, or null when none does. The readers' SQL only pre-filters on the
+        /// label, so this is where a run is decided: a row that matches the SQL but does not parse (a suffixed label,
+        /// a value of 1x, a later <c>ring_buffer_truncated=0</c>) is not counted, and it does not hide the runs that
+        /// do parse. The newest note is the newest PARSING run's, a tie on time going to the greater note so the two
+        /// products name the same one.
+        /// </summary>
+        public static TruncatedStretch? FromRuns(IEnumerable<(DateTime CollectionTime, string? Note)> runs)
+        {
+            ArgumentNullException.ThrowIfNull(runs);
+            var count = 0;
+            var first = DateTime.MaxValue;
+            var last = DateTime.MinValue;
+            string? newest = null;
+            foreach (var (time, note) in runs)
+            {
+                if (!TryParse(note, out _, out _))
+                {
+                    continue;
+                }
+
+                count++;
+                if (time < first)
+                {
+                    first = time;
+                }
+
+                if (time > last || (time == last && string.CompareOrdinal(note, newest) > 0))
+                {
+                    last = time;
+                    newest = note;
+                }
+            }
+
+            return count == 0 ? null : new TruncatedStretch(count, first, last, newest!);
+        }
+    }
+
+    private static string FormatStamp(DateTime utc) =>
+        utc.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture) + " UTC";
 
     /// <summary>An age in seconds as <c>5 h 23 min</c>, <c>20 min</c> or <c>45 s</c>.</summary>
     public static string FormatAge(long seconds)

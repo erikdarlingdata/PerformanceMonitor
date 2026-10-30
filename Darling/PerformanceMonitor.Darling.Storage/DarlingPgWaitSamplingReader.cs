@@ -36,7 +36,10 @@ public static class DarlingPgWaitSamplingReader
 {
     /// <param name="EventType">Wait class. <c>CPU</c> means the backend was NOT waiting.</param>
     /// <param name="QueryId">Joins <c>pg_statement_stats.queryid</c>. Zero is a wait belonging to no
-    /// statement — a background process — kept so attributed and unattributed waits stay distinguishable.</param>
+    /// statement — a background process — kept so attributed and unattributed waits stay distinguishable.
+    /// NULL (#6836) is a different statement: the target does not report a query id (the service sampler on
+    /// PostgreSQL 10 to 13, whose pg_stat_activity has no query_id). It is "not reported", never zero, and it
+    /// joins to no statement.</param>
     /// <param name="SampleCount">Samples observed IN THE WINDOW, already differenced.</param>
     /// <param name="EstimatedWaitMs"><c>SampleCount × profile_period_ms</c>. An estimate from a sampling
     /// profiler, not a measured duration.
@@ -56,7 +59,7 @@ public static class DarlingPgWaitSamplingReader
     public sealed record PgWaitSamplingRow(
         string? EventType,
         string? Event,
-        long QueryId,
+        long? QueryId,
         long SampleCount,
         long EstimatedWaitMs,
         int BackendCount,
@@ -126,7 +129,7 @@ public static class DarlingPgWaitSamplingReader
         LEFT JOIN oldest AS o
           ON  o.event_type IS NOT DISTINCT FROM n.event_type
           AND o.event      IS NOT DISTINCT FROM n.event
-          AND o.query_id   = n.query_id
+          AND o.query_id   IS NOT DISTINCT FROM n.query_id
         ORDER BY 4 DESC, n.event_type, n.event
         LIMIT $4
         """;
@@ -213,7 +216,7 @@ public static class DarlingPgWaitSamplingReader
             rows.Add(new PgWaitSamplingRow(
                 EventType: reader.IsDBNull(0) ? null : reader.GetString(0),
                 Event: reader.IsDBNull(1) ? null : reader.GetString(1),
-                QueryId: reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
+                QueryId: reader.IsDBNull(2) ? null : reader.GetInt64(2),
                 SampleCount: samples,
                 EstimatedWaitMs: samples * periodMs,
                 BackendCount: reader.IsDBNull(5) ? 0 : reader.GetInt32(5),

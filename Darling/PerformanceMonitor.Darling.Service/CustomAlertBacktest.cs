@@ -14,6 +14,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service;
 

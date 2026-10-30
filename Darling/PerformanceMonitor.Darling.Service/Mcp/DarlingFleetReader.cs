@@ -355,7 +355,10 @@ AND   {SqlServerCollectedTargetSql}";
        band's count tiers (5 / 20 per hour) were measured in blocked-process REPORTS per server-hour, so the band
        reads those; the tile, the alert value and the MCP counts stay waits. Each source is read once (the
        *_reports CTE, shared by the report count and the waits chain), so the window and the floor are still
-       applied once per source. */
+       applied once per source.
+
+       #6705: both reads leave a parallel query waiting on itself out (BlockingWaits.NotSelfWaitSql), so the report count
+       the band reads agrees with the waits count, which WaitsCteSql already filters. */
     public static readonly string FleetBlockingSql = @"
 WITH xe_reports AS (
     SELECT server_id, blocked_spid, blocking_spid, event_time, wait_time_ms
@@ -363,6 +366,7 @@ WITH xe_reports AS (
     WHERE event_time >= $1
     AND   event_time <= $2
     AND   collection_time >= $3
+    AND   " + BlockingWaits.NotSelfWaitSql + @"
 ),
 dmv_reports AS (
     SELECT server_id, blocked_spid, blocking_spid, event_time, wait_time_ms
@@ -370,6 +374,7 @@ dmv_reports AS (
     WHERE event_time >= $1
     AND   event_time <= $2
     AND   collection_time >= $3
+    AND   " + BlockingWaits.NotSelfWaitSql + @"
 )," + BlockingWaits.WaitsCteSql(
         BlockingWaits.SqlDialect.Postgres, "xe_waits",
         "SELECT * FROM xe_reports", new[] { "server_id" }) + "," + BlockingWaits.WaitsCteSql(
@@ -917,12 +922,17 @@ GROUP BY server_id, collector_name";
             (scanNow, scanToken) => ReadFailingCollectorCountsAsync(postgres, scanNow, scanToken),
             cancellationToken);
         var tags = await ReadTagsAsync(postgres, cancellationToken);
+        var agentAlertGaps = await ReadAgentAlertGapsAsync(postgres, now, cancellationToken);
+        var databaseProtection = await ReadDatabaseProtectionOverdueAsync(postgres, now, cancellationToken);
         var tagForest = await ReadTagForestAsync(postgres, cancellationToken);
         /* #3368: the deadlock band's tiers, read ONCE per roll-up rather than per card. A store reload can
            hot-swap the settings row mid-read, and re-reading per server would let one roll-up band some
            servers on the old pair and the rest on the new one — a mixed reading no configuration ever held,
            and the band counts and the worst-first ranking would be derived from it. */
         var deadlockTiers = await ReadDeadlockRateThresholdsAsync(postgres, cancellationToken);
+        /* #6927 (V228): the blocking band's tiers, read once per roll-up for the same reason. */
+        var blockingTiers = await BlockingBandStore.ReadAsync(postgres, McpCommandDeadlines.ReadSeconds, cancellationToken);
+        var identityCapacity = await ReadIdentityCapacityAsync(postgres, now, cancellationToken);
 
         var cards = new List<FleetServerCard>(servers.Count);
         foreach (var server in servers)
@@ -952,10 +962,14 @@ GROUP BY server_id, collector_name";
             lastCollection.TryGetValue(server.ServerId, out var collected);
             failingCollectors.TryGetValue(server.ServerId, out var collectors);
             tags.TryGetValue(server.ServerId, out var serverTags);
+            agentAlertGaps.TryGetValue(server.ServerId, out var serverAgentAlertGaps);
+            identityCapacity.TryGetValue(server.ServerId, out var serverIdentityCapacity);
+
+            databaseProtection.TryGetValue(server.ServerId, out var serverDatabaseProtection);
 
             cards.Add(BuildCard(
                 server, c, pg, m, mp, t, b, deadlock, pgDeadlock, collected.LastCollection, collectors, serverTags, now,
-                windowEndUtc - windowStartUtc, deadlockTiers, collected.RegisteredAt, collected.OlderCollection));
+                windowEndUtc - windowStartUtc, deadlockTiers, collected.RegisteredAt, collected.OlderCollection, serverAgentAlertGaps, serverDatabaseProtection, serverIdentityCapacity, blockingTiers));
         }
 
         return BuildRollup(cards, now, windowStartUtc, windowEndUtc, worstCount, tagForest, collectionHealthAgeSeconds,
@@ -985,6 +999,82 @@ GROUP BY server_id, collector_name";
     /// null <paramref name="lastCollection"/> apart: registered before the window is Offline, registered
     /// inside it is awaiting its first collection. Trailing and defaulted to null, which keeps the shared
     /// ladder's reading, so a caller that only exercises the metric rows need not invent a registration.</param>
+    /// <summary>The window a server's identity capacity scans count in (#6875): seven days, the one the tool and the alert read, so a database the pass
+    /// budget has not reached again keeps its last scan.</summary>
+    internal static readonly TimeSpan IdentityCapacityWindow = TimeSpan.FromHours(168);
+
+    /// <summary>
+    /// Each database's newest scan in the window, and its columns at the warning bar or past it, one statement for the fleet (#6875). Shaped like the
+    /// other per-server reads in this file: <c>servers</c> drives a lateral that range-scans the marker index (<c>idx_identity_capacity_markers</c>,
+    /// <c>server_id, database_name, collection_time</c>, markers only) on the server_id prefix and keeps each database's newest marker, then the
+    /// column rows at that same instant are read through <c>idx_identity_capacity_time</c> (<c>server_id, collection_time</c>). A time-only predicate
+    /// over the whole table is never used, so a fleet load does not walk the 90-day table. Like <see cref="FleetCpuSql"/> and its siblings it
+    /// skips a disabled server and a PostgreSQL target, which never write this table, so they get no probe (the filter sits after the lateral, the
+    /// form the siblings use, and the planner applies it to <c>servers</c> before the lateral runs). A skip row (<c>skip_reason</c> set) is not a
+    /// scan marker. $1 is the window start, $2 the percent of the warning bar.
+    ///
+    /// <para><b>Measured (EXPLAIN (ANALYZE, BUFFERS), PostgreSQL 18.6 scratch store, 60 registered servers of which 41 enabled SQL Server targets wrote rows,
+    /// 265,680 rows over 90 days, six databases each).</b> Without the filter the lateral ran 60 times (19 probes for servers that never write this
+    /// table), with it 41. The window predicate on the column rows (<c>c.collection_time &gt;= $1</c>, implied by the join to the marker but not visible to
+    /// the planner) matters more: without it the planner hashed every column row of a server over all 90 days (a bitmap scan of
+    /// <c>idx_identity_capacity_time</c>, 2,160 rows and about 3,200 buffers per server) and the statement took 111 to 115 ms and 138,700 buffers. With it
+    /// the plan is a nested loop of a seq scan of <c>servers</c> (41 rows after the filter), the marker index bitmap scan with a unique sort per server,
+    /// and one index scan of <c>idx_identity_capacity_time</c> per kept marker (246 loops): 9 to 11.5 ms and 10,800 buffers, the same 246 rows.</para>
+    /// </summary>
+    internal const string FleetIdentityCapacitySql = $@"
+SELECT c.server_id, c.percent_used
+FROM servers AS s
+CROSS JOIN LATERAL
+(
+    SELECT DISTINCT ON (x.database_name) x.database_name, x.collection_time
+    FROM collect.identity_capacity AS x
+    WHERE x.server_id = s.server_id
+    AND   x.column_name IS NULL
+    AND   x.skip_reason IS NULL
+    AND   x.collection_time >= $1
+    ORDER BY x.database_name, x.collection_time DESC
+) AS n
+JOIN collect.identity_capacity AS c
+  ON c.server_id = s.server_id AND c.collection_time = n.collection_time AND c.database_name = n.database_name
+  AND c.collection_time >= $1
+WHERE s.is_enabled
+AND   {SqlServerCollectedTargetSql}
+AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
+
+    /// <summary>The worst band and the count of columns at warning or critical per server, for the servers that have any (#6875). The band is
+    /// <see cref="IdentityCapacityMath.Band(double)"/>.</summary>
+    internal static async Task<Dictionary<int, FleetIdentityCapacity>> ReadIdentityCapacityAsync(
+        NpgsqlDataSource postgres, DateTime nowUtc, CancellationToken cancellationToken)
+    {
+        var counts = new Dictionary<int, (int Columns, bool Critical)>();
+        await using var command = postgres.CreateCommand(FleetIdentityCapacitySql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(nowUtc - IdentityCapacityWindow, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(IdentityCapacityMath.WarningPercent);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            if (reader.IsDBNull(1))
+            {
+                continue;
+            }
+
+            var band = IdentityCapacityMath.Band(reader.GetDouble(1));
+            if (band == IdentityCapacityMath.BandOk)
+            {
+                continue;
+            }
+
+            var serverId = reader.GetInt32(0);
+            counts.TryGetValue(serverId, out var seen);
+            counts[serverId] = (seen.Columns + 1, seen.Critical || band == IdentityCapacityMath.BandCritical);
+        }
+
+        return counts.ToDictionary(
+            c => c.Key,
+            c => new FleetIdentityCapacity(c.Value.Critical ? IdentityCapacityMath.BandCritical : IdentityCapacityMath.BandWarning, c.Value.Columns));
+    }
+
     internal static FleetServerCard BuildCard(
         FleetServerRow server,
         CpuRow cpu,
@@ -1002,7 +1092,11 @@ GROUP BY server_id, collector_name";
         TimeSpan deadlockWindow,
         DeadlockRateThresholds deadlockTiers,
         DateTime? registeredAt = null,
-        DateTime? olderCollection = null)
+        DateTime? olderCollection = null,
+        IReadOnlyList<FleetAgentAlertGap>? agentAlertGaps = null,
+        IReadOnlyList<FleetDatabaseProtectionOverdue>? databaseProtectionOverdue = null,
+        FleetIdentityCapacity? identityCapacity = null,
+        BlockingBandThresholds? blockingTiers = null)
     {
 
         /* Lite's XE-preferred / DMV-fallback, per server: XE when it has any row this window, else the DMV
@@ -1097,6 +1191,8 @@ GROUP BY server_id, collector_name";
                arm, one metric over. */
             DeadlockWindow = deadlockWindow,
             DeadlockRateThresholds = deadlockTiers,
+            /* #6927: the blocking tiers travel with the count and the window, for the reason the deadlock ones do. */
+            BlockingBandThresholds = blockingTiers,
             TotalThreads = threads.TotalThreads,
             AvailableThreads = availableThreads,
             ThreadsWaitingForCpu = threads.RunnableTasks,
@@ -1177,7 +1273,7 @@ GROUP BY server_id, collector_name";
                 ? ServerHealthClassifier.BlockingRatePerHour(blockingForBand.Value, deadlockWindow)
                 : null,
             BlockingWindow = deadlockWindow,
-            BlockingSeverity = ServerHealthClassifier.BlockingSeverity(blockingForBand, maxBlockedSeconds, deadlockWindow),
+            BlockingSeverity = ServerHealthClassifier.BlockingSeverity(blockingForBand, maxBlockedSeconds, deadlockWindow, blockingTiers),
             DeadlockCount = deadlockCount,
             DeadlockLastSeen = deadlockLastSeen,
             DeadlockMeasured = deadlockMeasured,
@@ -1190,6 +1286,9 @@ GROUP BY server_id, collector_name";
                 : null,
             DeadlockWindow = deadlockWindow,
             DeadlockRateThresholds = deadlockTiers,
+            BlockingBandThresholds = blockingTiers,
+            /* #6875: set only when a column is at the warning bar or past it. The Band below is not read from it. */
+            IdentityCapacity = identityCapacity,
             DeadlockSeverity = ServerHealthClassifier.DeadlockSeverity(
                 deadlocksForBand, deadlockWindow, deadlockTiers),
             DeadlockCollectorBand = deadlockCollectorBand,
@@ -1199,7 +1298,14 @@ GROUP BY server_id, collector_name";
             ThreadsWaitingForCpu = threads.RunnableTasks,
             RequestsWaitingForThreads = threads.WorkQueue,
             ThreadsSeverity = ServerHealthClassifier.ThreadsSeverity(threads.TotalThreads, availableThreads, threads.RunnableTasks, threads.WorkQueue),
+            /* #6874: set only when the Agent alert setup has a gap. The Band below is not read from it. */
+            AgentAlertGaps = agentAlertGaps is { Count: > 0 } ? agentAlertGaps : null,
+            /* #6873: set only when something is overdue. The Band below is not read from it. */
+            DatabaseProtectionOverdue = databaseProtectionOverdue is { Count: > 0 } ? databaseProtectionOverdue : null,
             HealthyCollectorCount = collectors.Healthy,
+            WarningCollectorCount = collectors.Warning,
+            NotCollectedCollectorCount = collectors.NotCollected,
+            NoPermissionCollectorCount = collectors.NoPermission,
             FailedCollectorCount = collectors.Failing,
             RegressedCollectorCount = collectors.Regressed,
             CollectorCount = collectors.Total,
@@ -1233,6 +1339,11 @@ GROUP BY server_id, collector_name";
         var failures = 0;
         long totalBlocking = 0;
         long totalDeadlocks = 0;
+        /* #6927: each totals tile takes the worst band among the cards for that signal, the classification the cards already show.
+           A fleet total is not a per-server rate: ten servers at 3 an hour each would otherwise band the sum of 30 against the
+           per-server tiers and turn Critical with no card even Warning. */
+        var blockingTileSeverity = HealthSeverity.Healthy;
+        var deadlockTileSeverity = HealthSeverity.Healthy;
         var deadlockSourcesRead = 0;
         var deadlockPostgresTargets = 0;
         var deadlockCollectorsSilent = 0;
@@ -1276,6 +1387,8 @@ GROUP BY server_id, collector_name";
 
             totalBlocking += card.BlockingCount;
             totalDeadlocks += card.DeadlockCount;
+            if (card.BlockingSeverity > blockingTileSeverity) blockingTileSeverity = card.BlockingSeverity;
+            if (card.DeadlockSeverity > deadlockTileSeverity) deadlockTileSeverity = card.DeadlockSeverity;
         }
 
         var problems = cards
@@ -1311,6 +1424,8 @@ GROUP BY server_id, collector_name";
             ServersWithCollectionFailures = failures,
             TotalBlockingEvents = totalBlocking,
             TotalDeadlocks = totalDeadlocks,
+            TotalBlockingSeverity = blockingTileSeverity,
+            TotalDeadlockSeverity = deadlockTileSeverity,
             DeadlockCoverage = new FleetDeadlockCoverage
             {
                 ServersRead = deadlockSourcesRead,
@@ -1581,6 +1696,142 @@ GROUP BY server_id, collector_name";
         }
 
         return forest;
+    }
+
+    /// <summary>The newest Agent alert capture per server in the last two hours (the collector runs every 15 minutes), one statement for the
+    /// fleet (#6874): the latest capture's rows. Shaped like the other per-server reads in this file: <c>servers</c> drives a lateral that
+    /// seeks <c>idx_agent_alerts_time</c> (<c>server_id, collection_time</c>) once per server for the newest capture time, then the capture's
+    /// rows are read by the same index, so a fleet load never walks the 30-day table. A server whose newest capture is the all-NULL marker
+    /// row has no alert_id, which is "collected, none defined". Like <see cref="FleetCpuSql"/>, it skips disabled servers and the
+    /// PostgreSQL and Aurora targets (<see cref="SqlServerCollectedTargetSql"/>): they never write this table, so a lateral probe for
+    /// them would be spent on every fleet read for nothing. $1 is the window start.</summary>
+    internal const string FleetAgentAlertsSql = $@"
+SELECT a.server_id, a.alert_id, a.alert_name, a.enabled, a.message_id, a.severity, a.has_notification, a.operator_count
+FROM servers AS s
+CROSS JOIN LATERAL
+(
+    SELECT MAX(x.collection_time) AS collection_time
+    FROM collect.agent_alerts AS x
+    WHERE x.server_id = s.server_id
+    AND   x.collection_time >= $1
+) AS n
+JOIN collect.agent_alerts AS a ON a.server_id = s.server_id AND a.collection_time = n.collection_time
+WHERE s.is_enabled
+AND   {SqlServerCollectedTargetSql}";
+
+    /// <summary>The Agent alert setup's gaps per server, for the servers that have any (#6874). The status itself is
+    /// <see cref="AgentAlertStatus.Evaluate"/>; this only batches the read.</summary>
+    internal static async Task<Dictionary<int, IReadOnlyList<FleetAgentAlertGap>>> ReadAgentAlertGapsAsync(
+        NpgsqlDataSource postgres, DateTime nowUtc, CancellationToken cancellationToken)
+    {
+        var facts = new Dictionary<int, List<AgentAlertFact>>();
+        await using var command = postgres.CreateCommand(FleetAgentAlertsSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(nowUtc - AgentAlertCaptureFreshness, DateTimeKind.Unspecified));
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+        {
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var serverId = reader.GetInt32(0);
+                if (!facts.TryGetValue(serverId, out var list))
+                {
+                    facts[serverId] = list = new List<AgentAlertFact>();
+                }
+
+                if (reader.IsDBNull(1))
+                {
+                    continue; // the marker row: a capture with no alert
+                }
+
+                int? OptInt(int i) => reader.IsDBNull(i) ? null : reader.GetInt32(i);
+                list.Add(new AgentAlertFact(
+                    reader.GetInt32(1), reader.IsDBNull(2) ? null : reader.GetString(2), reader.IsDBNull(3) ? null : reader.GetBoolean(3),
+                    null, OptInt(4), OptInt(5), null, null, null, null, null, null, null, null, OptInt(6), OptInt(7), null, null));
+            }
+        }
+
+        var map = new Dictionary<int, IReadOnlyList<FleetAgentAlertGap>>();
+        foreach (var (serverId, list) in facts)
+        {
+            var status = AgentAlertStatus.Evaluate(list);
+            if (status.Gaps.Count > 0)
+            {
+                map[serverId] = status.Gaps.Select(g => new FleetAgentAlertGap(g.Code, g.Message)).ToList();
+            }
+        }
+
+        return map;
+    }
+
+    /// <summary>How old the newest Agent alert capture may be and still count (#6874): eight passes of the 15-minute collector.</summary>
+    internal static readonly TimeSpan AgentAlertCaptureFreshness = DarlingAgentAlertReader.FreshCaptureWindow;
+
+    /// <summary>The newest database protection capture per server inside <see cref="DatabaseProtectionBands.CaptureFreshness"/>, one statement for the
+    /// fleet (#6873). Shaped like the other per-server reads in this file: <c>servers</c> drives a lateral that seeks
+    /// <c>idx_database_protection_time</c> (<c>server_id, collection_time</c>) once per server for the newest capture time, then the capture's
+    /// rows are read by the same index. The table is a plain table with <c>server_id</c> leading its index, so a predicate on <c>collection_time</c>
+    /// alone has no range seek on it and, on a runtime without index skip scan, walks every retained row on each fleet roll-up. Measured on
+    /// PostgreSQL 18 over 3.24M rows (50 servers, 30 databases, hourly for 90 days): 50 index-only seeks for the newest times plus 50 seeks for the
+    /// capture rows, about 1.0 to 1.4 ms and 1,516 buffer hits. The time-only shape was 1.9 to 2.7 ms there, and only that fast because PostgreSQL 18
+    /// skips ahead through the leading column. The <c>WHERE</c> after the lateral is the one the other per-server laterals carry
+    /// (<see cref="SqlServerCollectedTargetSql"/>, #3895): it skips PostgreSQL and Aurora targets, which never write this SQL Server-only table,
+    /// and disabled servers, so neither pays a lateral probe on each fleet read. $1 is the window start.</summary>
+    internal const string FleetDatabaseProtectionSql = $@"
+SELECT d.server_id, d.collection_time, d.database_name, d.state_desc, d.recovery_model_desc, d.create_date, d.replica_role, d.platform,
+       d.last_good_checkdb_time, d.checkdb_state, d.last_full_backup_time, d.full_backup_state, d.last_log_backup_time, d.log_backup_state
+FROM servers AS s
+CROSS JOIN LATERAL
+(
+    SELECT MAX(x.collection_time) AS collection_time
+    FROM collect.database_protection AS x
+    WHERE x.server_id = s.server_id
+    AND   x.collection_time >= $1
+) AS n
+JOIN collect.database_protection AS d ON d.server_id = s.server_id AND d.collection_time = n.collection_time
+WHERE s.is_enabled
+AND   {SqlServerCollectedTargetSql}";
+
+    /// <summary>The overdue facts per server, for the servers that have any (#6873). The judgment is
+    /// <see cref="DatabaseProtectionBands.OverdueFacts"/>, the one the alerts, the tool and the Viewer use; this only batches the read.
+    /// A platform-managed server has none, by that judgment.</summary>
+    internal static async Task<Dictionary<int, IReadOnlyList<FleetDatabaseProtectionOverdue>>> ReadDatabaseProtectionOverdueAsync(
+        NpgsqlDataSource postgres, DateTime nowUtc, CancellationToken cancellationToken)
+    {
+        var captures = new Dictionary<int, (DateTime At, List<DatabaseProtectionFact> Facts)>();
+        await using var command = postgres.CreateCommand(FleetDatabaseProtectionSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp,
+            DateTime.SpecifyKind(nowUtc - DatabaseProtectionBands.CaptureFreshness, DateTimeKind.Unspecified));
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+        {
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var serverId = reader.GetInt32(0);
+                if (!captures.TryGetValue(serverId, out var capture))
+                {
+                    captures[serverId] = capture = (DateTime.SpecifyKind(reader.GetDateTime(1), DateTimeKind.Utc), new List<DatabaseProtectionFact>());
+                }
+
+                string? Text(int i) => reader.IsDBNull(i) ? null : reader.GetString(i);
+                DateTime? Time(int i) => reader.IsDBNull(i) ? null : reader.GetDateTime(i);
+                capture.Facts.Add(new DatabaseProtectionFact(
+                    Text(2) ?? string.Empty, Text(3), Text(4), Time(5), Text(6), Text(7),
+                    Time(8), Text(9), Time(10), Text(11), Time(12), Text(13)));
+            }
+        }
+
+        var map = new Dictionary<int, IReadOnlyList<FleetDatabaseProtectionOverdue>>();
+        foreach (var (serverId, (at, facts)) in captures)
+        {
+            var overdue = DatabaseProtectionBands.OverdueFacts(facts, at);
+            if (overdue.Count > 0)
+            {
+                map[serverId] = overdue.Select(o => new FleetDatabaseProtectionOverdue(
+                    o.Kind, o.Database, o.State, o.Age is { } age ? (long)age.TotalSeconds : null, o.Label + ": " + o.Text)).ToList();
+            }
+        }
+
+        return map;
     }
 
     private static async Task<Dictionary<int, CpuRow>> ReadCpuAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
@@ -1990,6 +2241,12 @@ GROUP BY server_id, collector_name";
            shipped cadence, as the per-server read does. */
         var scheduleOverrides = await DarlingDataReader.ReadScheduleOverridesAsync(postgres, null, cancellationToken);
         var overridesByServer = new Dictionary<int, IReadOnlyList<ScheduleOverride>>();
+        /* #6828: the servers that report Always On off, read once here for the same one-connection reason. get_collection_health lists
+           a HEALTHY Always On collector there as not_collected, so the tally counts it there too and not as healthy. */
+        var alwaysOnOffServers = await FleetAlwaysOnOff.ReadAsync(postgres, McpCommandDeadlines.ReadSeconds, cancellationToken);
+        /* #6912: the collectors each server's engine does not run. Their older logged runs stay in the window, so they count as not
+           collected here, as get_collection_health lists them. */
+        var engineGatedServers = await FleetEngineGatedCollectors.ReadAsync(postgres, McpCommandDeadlines.ReadSeconds, cancellationToken);
         /* #3893 arm 2, #4477: the composed read (hourly aggregate + raw head slice + any hole hours read raw
            alongside it) when the guard passes, else the raw scan. Same fourteen ordinals either way, so
            everything below is shared. */
@@ -2034,39 +2291,63 @@ GROUP BY server_id, collector_name";
         foreach (var (serverId, health) in rows)
         {
             counts.TryGetValue(serverId, out var existing);
-            var status = health.HealthStatus;
-            counts[serverId] = new CollectorCounts(
-                existing.Healthy + (status == "HEALTHY" ? 1 : 0),
-                existing.Failing + (status == "FAILING" ? 1 : 0),
-                /* #3539 A8d: every banded row, whatever its band — the share's denominator. */
-                existing.Total + 1,
-                /* #3819: counted off the PREDICATE rather than off the band, and the two are not the same
-                   population. The band floor only moves a row that would have read HEALTHY; a collector
-                   whose success clock has already run out reads FAILING and is regressed as well. Keyed
-                   on the band, this count would go quiet exactly when the regression got worse.
-
-                   #3885: the SAME count, now over both regression classes -- stopped SKIPPING and stopped
-                   PRODUCING -- through the row's one AnyRegression member. One number, because an install
-                   countersign reads it as "collectors that stopped doing what they used to do" and a second
-                   parallel count would have to be learned, added, and never confused with the first. The
-                   two predicates are disjoint by construction (one needs the newest run to be a skip, the
-                   other needs it to be a success), so nothing is double-counted. */
-                existing.Regressed + (health.AnyRegression ? 1 : 0),
-                /* #3017: the ONE collector per engine whose band the deadlock total's coverage turns on,
-                   kept alongside the Healthy/Failing tallies because it comes out of the same aggregate —
-                   no extra round trip, which is what keeps this reader's fan-out bounded. Named from the
-                   collector rather than as a literal so a rename cannot leave this silently matching
-                   nothing and reporting every server uncovered. Both engines' bands are kept on every
-                   server because this aggregate does not know the engine; BuildCard picks. */
-                string.Equals(health.CollectorName, DeadlocksCollector.Instance.Name, StringComparison.Ordinal)
-                    ? status
-                    : existing.DeadlockBand,
-                string.Equals(health.CollectorName, PgDatabaseStatsCollector.Instance.Name, StringComparison.Ordinal)
-                    ? status
-                    : existing.PgDeadlockBand);
+            var engineGated = engineGatedServers.TryGetValue(serverId, out var gatedNames) && gatedNames.Contains(health.CollectorName);
+            counts[serverId] = AddCollector(existing, health, alwaysOnOffServers.Contains(serverId), engineGated);
         }
 
         return counts;
+    }
+
+    /// <summary>
+    /// One collector row added to a server's running counts: the band tally, the regression count and the two deadlock-source bands. The
+    /// pure step of <see cref="ReadFailingCollectorCountsAsync"/>, so a test drives it without a store.
+    /// </summary>
+    /// <param name="existing">The server's counts so far (<c>default</c> for its first row).</param>
+    /// <param name="health">The collector's 7-day aggregate.</param>
+    /// <param name="alwaysOnOff">The server reports Always On off (#6828).</param>
+    /// <param name="engineGated">#6912: the collector does not run on the server's engine.</param>
+    internal static CollectorCounts AddCollector(CollectorCounts existing, CollectorHealth health, bool alwaysOnOff, bool engineGated)
+    {
+        var status = health.HealthStatus;
+        /* #6828: one tally for every count surface (CollectorHealthClassifier.BandTally). A WARNING collector is not healthy, and a
+           HEALTHY Always On collector on a server with Always On off is not collected. */
+        var tally = new CollectorHealthClassifier.BandTally(existing.Healthy, existing.Warning, existing.Failing, existing.NotCollected, existing.NoPermission, existing.Total)
+            .Add(health.CollectorName, status, alwaysOnOff, engineGated);
+        return new CollectorCounts(
+            tally.Healthy,
+            tally.Failing,
+            /* #3539 A8d: every banded row, whatever its band — the share's denominator. */
+            tally.Total,
+            /* #3819: counted off the PREDICATE rather than off the band, and the two are not the same
+               population. The band floor only moves a row that would have read HEALTHY; a collector
+               whose success clock has already run out reads FAILING and is regressed as well. Keyed
+               on the band, this count would go quiet exactly when the regression got worse.
+
+               #3885: the SAME count, now over both regression classes -- stopped SKIPPING and stopped
+               PRODUCING -- through the row's one AnyRegression member. One number, because an install
+               countersign reads it as "collectors that stopped doing what they used to do" and a second
+               parallel count would have to be learned, added, and never confused with the first. The
+               two predicates are disjoint by construction (one needs the newest run to be a skip, the
+               other needs it to be a success), so nothing is double-counted. */
+            existing.Regressed + (health.AnyRegression && !engineGated ? 1 : 0),
+            /* #3017: the ONE collector per engine whose band the deadlock total's coverage turns on,
+               kept alongside the Healthy/Failing tallies because it comes out of the same aggregate —
+               no extra round trip, which is what keeps this reader's fan-out bounded. Named from the
+               collector rather than as a literal so a rename cannot leave this silently matching
+               nothing and reporting every server uncovered. Both engines' bands are kept on every
+               server because this aggregate does not know the engine; BuildCard picks. */
+            /* #6912: a deadlocks collector the engine does not run left its old rows in the window, and their stale band would read as a deadlock
+               capture the card could trust. Gated, it reads as a target with no deadlock capture: no band, the same null a server with no
+               row in the window has, which the card classifies as a silent collector rather than a read one. */
+            string.Equals(health.CollectorName, DeadlocksCollector.Instance.Name, StringComparison.Ordinal)
+                ? (engineGated ? null : status)
+                : existing.DeadlockBand,
+            string.Equals(health.CollectorName, PgDatabaseStatsCollector.Instance.Name, StringComparison.Ordinal)
+                ? status
+                : existing.PgDeadlockBand,
+            tally.Warning,
+            tally.NotCollected,
+            tally.NoPermission);
     }
 
     /// <summary>
@@ -2238,7 +2519,7 @@ GROUP BY server_id, collector_name";
     /// old), so the band floor moves it to WARNING; by the second day the success clock has run out and
     /// the same collector reads FAILING while still being regressed. Counting off the band would make
     /// this go quiet precisely as the regression got worse.</para></param>
-    internal readonly record struct CollectorCounts(int Healthy, int Failing, int Total, int Regressed, string? DeadlockBand = null, string? PgDeadlockBand = null);
+    internal readonly record struct CollectorCounts(int Healthy, int Failing, int Total, int Regressed, string? DeadlockBand = null, string? PgDeadlockBand = null, int Warning = 0, int NotCollected = 0, int NoPermission = 0);
 
     /// <summary>One completed 7-day collection-health scan (#3735): the per-server counts
     /// <see cref="ReadFailingCollectorCountsAsync"/> produced and the <c>nowUtc</c> the scan was started with —
@@ -2425,13 +2706,32 @@ GROUP BY server_id, collector_name";
     }
 }
 
+/// <summary>One gap in a server's SQL Server Agent alert setup, as the fleet card carries it (#6874): the stable <see cref="Code"/> and the sentence.</summary>
+public sealed record FleetAgentAlertGap(
+    [property: JsonPropertyName("code")] string Code,
+    [property: JsonPropertyName("message")] string Message);
+
 /// <summary>
 /// One pre-banded Overview card in the fleet roll-up — every band already computed by the shared
 /// <see cref="ServerHealthClassifier"/>, every instant a naive-UTC value the browser localizes. Serialized with
 /// snake_case field names for both <c>/api/fleet</c> and the <c>get_fleet_overview</c> MCP tool.
 /// </summary>
+/// <summary>One overdue CHECKDB, full backup or log backup on a server's fleet card (#6873): the stable <see cref="Kind"/> (full_backup, log_backup,
+/// checkdb), the database, its banded <see cref="State"/>, the age in seconds at the capture (null when nothing is recorded) and the <see cref="Text"/> to show.</summary>
+public sealed record FleetDatabaseProtectionOverdue(
+    [property: JsonPropertyName("kind")] string Kind,
+    [property: JsonPropertyName("database")] string Database,
+    [property: JsonPropertyName("state")] string State,
+    [property: JsonPropertyName("age_seconds")] long? AgeSeconds,
+    [property: JsonPropertyName("text")] string Text);
+
 public sealed class FleetServerCard
 {
+    /// <summary>The identity columns at the warning bar or past it (#6875), from each database's newest scan in the last seven days: the worst band
+    /// (<see cref="IdentityCapacityMath.Band(double)"/>, the one the tool and the alert use) and how many columns are at warning or critical. Null when
+    /// no column is, and on every server that never scans. A chip on the card and nothing more: no band reads it.</summary>
+    [JsonPropertyName("identity_capacity")] public FleetIdentityCapacity? IdentityCapacity { get; init; }
+
     [JsonPropertyName("server_id")] public int ServerId { get; init; }
     [JsonPropertyName("display_name")] public string DisplayName { get; init; } = "";
     [JsonPropertyName("server_name")] public string ServerName { get; init; } = "";
@@ -2667,6 +2967,11 @@ public sealed class FleetServerCard
     [JsonIgnore]
     public DeadlockRateThresholds DeadlockRateThresholds { get; init; }
 
+    /// <summary>The blocking tiers this card banded on (#6927), or null for today's constants. Carried, not serialized, for
+    /// <see cref="ToHealthMetrics"/>, so the worst-first score re-bands on the card's own tiers.</summary>
+    [JsonIgnore]
+    public BlockingBandThresholds? BlockingBandThresholds { get; init; }
+
     /// <summary>This server's deadlock-source collector band over the trailing seven days of collection
     /// health (#3017) — the fact that explains a <see cref="DeadlockCount"/> of zero. The collector is
     /// <c>deadlocks</c> on SQL Server and <c>pg_database_stats</c> on PostgreSQL (#3539). Null when that
@@ -2695,6 +3000,19 @@ public sealed class FleetServerCard
     [JsonPropertyName("threads_severity")] public HealthSeverity ThreadsSeverity { get; init; }
 
     [JsonPropertyName("healthy_collector_count")] public int HealthyCollectorCount { get; init; }
+
+    /// <summary>#6828: collectors banded WARNING, so a footer or header that shows only healthy and failing does not leave them out or count them
+    /// as healthy. <c>get_collection_health</c> lists the same collectors with status WARNING.</summary>
+    [JsonPropertyName("warning_collector_count")] public int WarningCollectorCount { get; init; }
+
+    /// <summary>#6828: Always On collectors on a server with Always On off, which <c>get_collection_health</c> lists as <c>not_collected</c> and
+    /// the card does not count as healthy.</summary>
+    [JsonPropertyName("not_collected_collector_count")] public int NotCollectedCollectorCount { get; init; }
+
+    /// <summary>#6932: collectors the monitored server refused (NO_PERMISSIONS) or lacks an extension for (EXTENSION_MISSING), the two bands
+    /// a person fixes at the monitored server. Healthy + warning + failed + not collected + this = <c>collector_count</c>. It does not move
+    /// <c>collector_severity</c>, so an optional collector refused after an upgrade shows here without turning the card yellow.</summary>
+    [JsonPropertyName("no_permission_collector_count")] public int NoPermissionCollectorCount { get; init; }
     [JsonPropertyName("failed_collector_count")] public int FailedCollectorCount { get; init; }
 
     /// <summary>
@@ -2724,6 +3042,18 @@ public sealed class FleetServerCard
     /// neither. Zero with nothing failing bands <c>collector_severity</c> Unknown, not Healthy (#3539
     /// A6): no collector has been banded for this server, so there is no collection to call clean.</summary>
     [JsonPropertyName("collector_count")] public int CollectorCount { get; init; }
+
+    /// <summary>The gaps in this server's SQL Server Agent alert setup (#6874), from the newest <c>agent_alerts</c> capture in the last
+    /// two hours through <see cref="AgentAlertStatus.Evaluate"/> (the words come from there, so the page, the Viewer and the tool agree).
+    /// Null when the setup has no gap, when no capture is that fresh, and on every server that never captures (Azure SQL Database, Azure SQL
+    /// Managed Instance, Amazon RDS, PostgreSQL). A chip on the card and nothing more: no band reads it. A firing that told no operator is not
+    /// here, because it needs two captures; <c>get_agent_alerts</c> reports that one.</summary>
+    [JsonPropertyName("agent_alert_gaps")] public IReadOnlyList<FleetAgentAlertGap>? AgentAlertGaps { get; init; }
+    /// <summary>The overdue full backups, log backups and CHECKDBs on this server (#6873), from the newest <c>database_protection</c> capture in the
+    /// last three hours through <see cref="DatabaseProtectionBands.OverdueFacts"/> (the one judgment, so the page, the Viewer, the alerts and
+    /// <c>get_database_protection</c> agree). Null when nothing is overdue, when no capture is that fresh, and on a platform-managed server (Azure SQL Database,
+    /// Managed Instance, Amazon RDS), where the age is shown and never judged. A chip on the card and nothing more: no band reads it.</summary>
+    [JsonPropertyName("database_protection_overdue")] public IReadOnlyList<FleetDatabaseProtectionOverdue>? DatabaseProtectionOverdue { get; init; }
     [JsonPropertyName("collector_severity")] public HealthSeverity CollectorSeverity { get; init; }
 
     /// <summary>The worst per-metric band, or Unknown when NOT ONE metric on the card was measured (#3539
@@ -2777,6 +3107,7 @@ public sealed class FleetServerCard
            dot used the store's. */
         DeadlockWindow = DeadlockWindow,
         DeadlockRateThresholds = DeadlockRateThresholds,
+        BlockingBandThresholds = BlockingBandThresholds,
         TotalThreads = TotalThreads,
         AvailableThreads = AvailableThreads,
         ThreadsWaitingForCpu = ThreadsWaitingForCpu,
@@ -2786,6 +3117,11 @@ public sealed class FleetServerCard
         CollectorCount = CollectorCount,
     };
 }
+
+/// <summary>The identity columns at a bar on one server, as the fleet card carries them (#6875).</summary>
+public sealed record FleetIdentityCapacity(
+    [property: JsonPropertyName("worst_band")] string WorstBand,
+    [property: JsonPropertyName("columns_at_bar")] int ColumnsAtBar);
 
 /// <summary>One tag on a fleet card — read-only, for the web pills (#2020). Serialized snake_case like the card.
 /// <c>colour</c> is the stored <c>#RRGGBB</c> or null (null renders as a neutral pill, matching the desktop
@@ -2836,6 +3172,13 @@ public sealed class FleetOverviewResult
     [JsonPropertyName("servers_with_collection_failures")] public int ServersWithCollectionFailures { get; init; }
     [JsonPropertyName("total_blocking_events")] public long TotalBlockingEvents { get; init; }
     [JsonPropertyName("total_deadlocks")] public long TotalDeadlocks { get; init; }
+
+    /// <summary>The Blocking totals tile's band (#6927): the fleet's blocked-process reports per hour and longest block against the
+    /// store's blocking tiers, through the same classifier the cards use. Unknown when no card has a blocking source.</summary>
+    [JsonPropertyName("total_blocking_severity")] public HealthSeverity TotalBlockingSeverity { get; init; }
+
+    /// <summary>The Deadlocks totals tile's band (#6927): the fleet's deadlocks per hour against the store's deadlock tiers.</summary>
+    [JsonPropertyName("total_deadlock_severity")] public HealthSeverity TotalDeadlockSeverity { get; init; }
 
     /// <summary>How much of the fleet <see cref="TotalDeadlocks"/> actually read a deadlock source for, with
     /// the causes named (#3017). Never null — a total with no denominator beside it is the defect.</summary>

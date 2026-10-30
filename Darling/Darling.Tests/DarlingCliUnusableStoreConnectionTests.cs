@@ -349,10 +349,12 @@ public sealed class DarlingCliUnusableStoreConnectionTests
            two collector toggles (one shared body). That is eight call sites. The ninth is --drop-xe-sessions reading
            this install's id, the long-query schedule rows and the instance names (#4961), after it has resolved the
            server through the first one's shared body. The tenth is --diagnostics-bundle (#5097). The eleventh is
-           --validate-config's agent dispatch read of the MCP switch and the agent route count (#6263). A twelfth call
-           site adds a twelfth here, and growing this count is the point. */
+           --validate-config's agent dispatch read of the MCP switch and the agent route count (#6263). The twelfth is
+           --test-connection's best-effort open of the store so the running service can test a Windows-authentication server (#6476): it
+           ignores the failure and probes from this process instead. A thirteenth call site adds a thirteenth here, and growing this count
+           is the point. */
         var calls = Regex.Matches(code, @"(?<!bool\s)TryBuildStoreConnectionString\(").Count;
-        Assert.Equal(11, calls);
+        Assert.Equal(12, calls);
 
         /* The stored credential is read bare in exactly two places: inside that method, and in the firewall verb's
            best-effort read (TryReadEndpointTogglesAsync), which turns a failure into a reason it prints rather than

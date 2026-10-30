@@ -4,6 +4,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.PlanAnalysis;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Mcp;
@@ -184,7 +185,7 @@ LIMIT 5000";
             connection.CreateCommand, rows, context.ServerId, context.TimeRangeStart, context.TimeRangeEnd,
             context.CancellationToken, includeText: false);
 
-        /* #5361: the merge appends only the DMV edges no blocked-process-report edge already holds, after the report
+        /* #5361: the merge appends every DMV row after the report
            rows, so every row past the report count is DMV-sourced: the source of each level's text read below. */
         var dmvKeys = rows.Skip(bprRowCount).Select(r => r.Key).ToHashSet();
 
@@ -195,9 +196,11 @@ LIMIT 5000";
         if (rows.Count == 0) return;
 
         var reconstruction = BlockingChainReconstructor.Reconstruct(
-            rows, maxDepth: 50, maxPairs: 5000, stepBudget: 100_000, scopeByMonitorLoop: false);
+            rows, maxDepth: 50, maxPairs: 5000, stepBudget: 100_000, scopeByMonitorLoop: true);
 
-        var shownChains = reconstruction.Chains.Take(3).ToList();
+        var shownChains = BlockingChainFactBuilder.DrillDownChains(
+            reconstruction, 3,
+            context.BlockingCollectionIntervalMinutes ?? CollectorScheduleDefaults.DefaultBlockingIntervalMinutes);
 
         /* #5361: whole statement text for the levels that print, by event key, one read per source. A level whose row
            is gone by now reads as empty text. The text is judged and cut below, as before. */
@@ -219,7 +222,7 @@ LIMIT 5000";
                 apex_spid = chain.ApexSpid,
                 apex_sleeping = chain.ApexSleeping,
                 depth = chain.Depth,
-                // Distinct sessions blocked under this apex over the window — cumulative, not peak-concurrent.
+                // Distinct sessions blocked under this apex in its worst single scan (#6931).
                 victim_count = chain.VictimCount,
                 max_wait_ms = chain.MaxWaitMs,
                 levels = chain.Levels.Select(l => new

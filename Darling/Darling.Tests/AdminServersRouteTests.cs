@@ -250,7 +250,7 @@ public sealed class AdminServersRouteTests
     public void TheRoute_IsMappedByMapAll_BesideTheTagRoutes_AndOnlyAsAGet()
     {
         var source = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs").ReplaceLineEndings("\n");
-        Assert.Contains("MapServerTags(app, postgres, logger);\n        MapServerActions(app, postgres, new AgentChangeUndo(postgres, McpCommandDeadlines.ReadSeconds), logger, ownerSource, managedStore);\n        MapAdminServers(app, postgres);", source);
+        Assert.Contains("MapServerTags(app, postgres, logger);\n        MapServerActions(app, postgres, new AgentChangeUndo(postgres, McpCommandDeadlines.ReadSeconds), logger, ownerSource, managedStore, adminArm);\n        MapAdminServers(app, postgres);", source);
         Assert.Contains("app.MapGet(DarlingAdminServersReader.Route,", source);
         Assert.DoesNotContain("MapPost(DarlingAdminServersReader.Route", source);
         Assert.Equal("/api/admin/servers", DarlingAdminServersReader.Route);

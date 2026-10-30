@@ -117,16 +117,17 @@ public sealed class CollectorEngineCapabilityTests
 
     /// <summary>
     /// The box editions and Managed Instance have NO permanent gaps: every gate in the library that names
-    /// Azure names Azure SQL DATABASE specifically. Stated as a derived zero rather than as prose, so the day
-    /// a gate starts excluding Managed Instance this says so instead of a message quietly never appearing.
+    /// Azure names Azure SQL DATABASE specifically, with one exception: agent_alerts (#6874) also excludes Managed
+    /// Instance, which refuses SQL Server Agent alerts. Stated as a derived list rather than as prose, so the day
+    /// another gate starts excluding Managed Instance this says so instead of a message quietly never appearing.
     /// </summary>
     [Fact]
-    public void BoxEditionsAndManagedInstance_HaveNoPermanentGaps()
+    public void BoxEditionsHaveNoPermanentGaps_AndManagedInstanceHasOnlyTheAgentAlertsGap()
     {
         Assert.Empty(GapsOn(Enterprise));
         Assert.Empty(GapsOn(2));
         Assert.Empty(GapsOn(4));
-        Assert.Empty(GapsOn(AzureMi));
+        Assert.Equal(new[] { "agent_alerts" }, GapsOn(AzureMi).ToArray());
     }
 
     /// <summary>A non-vacuity floor: the sweep must actually be finding gaps on Azure SQL DB, or every
@@ -148,7 +149,7 @@ public sealed class CollectorEngineCapabilityTests
     public void UnknownEngineEdition_MakesNoClaim()
     {
         Assert.True(CollectorEngineCapability.IsCollectedOnEngineEdition("system_health_events", CollectorEngineCapability.UnknownEngineEdition));
-        Assert.Null(CollectorEngineCapability.NotCollectedMessage("srv", 0, engineKind: null, "system_health_events"));
+        Assert.Null(CollectorEngineCapability.NotCollectedMessage("srv", 0, engineKind: null, "system_health_events", awsRdsKind: AwsRdsKind.None));
     }
 
     /// <summary>
@@ -170,7 +171,7 @@ public sealed class CollectorEngineCapabilityTests
     public void AnUnknownCollectorName_MakesNoClaim()
     {
         Assert.True(CollectorEngineCapability.IsCollectedOnEngineEdition("no_such_collector", AzureSqlDb));
-        Assert.Null(CollectorEngineCapability.NotCollectedMessage("srv", AzureSqlDb, engineKind: null, "no_such_collector"));
+        Assert.Null(CollectorEngineCapability.NotCollectedMessage("srv", AzureSqlDb, engineKind: null, "no_such_collector", awsRdsKind: AwsRdsKind.None));
     }
 
     /// <summary>
@@ -180,7 +181,7 @@ public sealed class CollectorEngineCapabilityTests
     [Fact]
     public void TheMessage_NamesTheEngineAndRefusesToSendAnyoneLooking()
     {
-        var message = CollectorEngineCapability.NotCollectedMessage("azure-db-01", AzureSqlDb, MonitoredEngineKind.SqlServer, "system_health_events");
+        var message = CollectorEngineCapability.NotCollectedMessage("azure-db-01", AzureSqlDb, MonitoredEngineKind.SqlServer, "system_health_events", awsRdsKind: AwsRdsKind.None);
         Assert.NotNull(message);
         Assert.Contains("azure-db-01", message, StringComparison.Ordinal);
         Assert.Contains("Azure SQL Database", message, StringComparison.Ordinal);
@@ -191,6 +192,15 @@ public sealed class CollectorEngineCapabilityTests
 
         /* The words the OLD message used are the ones that sent an Azure operator hunting. */
         Assert.DoesNotContain("check that collection is running", message, StringComparison.OrdinalIgnoreCase);
+
+        /* #6457 review: the closing clause repeats the capture path instead of saying "it", so the sentence
+           agrees in number for a plural path ("the sys.configurations instance settings") too. */
+        var plural = CollectorEngineCapability.NotCollectedMessage("azure-db-01", AzureSqlDb, MonitoredEngineKind.SqlServer, "server_config", awsRdsKind: AwsRdsKind.None);
+        Assert.NotNull(plural);
+        Assert.Contains(
+            "which does not have the sys.configurations instance settings that this server can read, so this server does not collect the sys.configurations instance settings, and never will. ",
+            plural, StringComparison.Ordinal);
+        Assert.DoesNotContain("does not collect it", plural, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -356,9 +366,10 @@ public sealed class EngineCapabilityReadWiringTests
        which this file's own `consts` lookup cannot resolve — it only sees `private const string X = "..."`
        declared in the SAME file) from backtracking past the dot and mis-capturing the trailing token word itself
        as the collector name; it falls back to not matching that call at all, its behavior before #4203 added the
-       token argument, rather than asserting a wrong name. */
+       token argument, rather than asserting a wrong name. Lite calls end with an explicit `awsRdsKind: AwsRdsKind.None` or take the server manager (#6894), which the
+       optional group before the token allows. */
     private static readonly Regex WiringCall = new(
-        @"NotCollectedStatusAsync\([^)]*?,\s*(?:""([a-z_0-9]+)""|(?!cancellationToken\b|ct\b|CancellationToken\.None\b)([A-Za-z_][A-Za-z0-9_]*))(?:\s*,\s*(?:cancellationToken|ct|CancellationToken\.None))?\s*\)",
+        @"NotCollectedStatusAsync\([^)]*?,\s*(?:""([a-z_0-9]+)""|(?!cancellationToken\b|ct\b|CancellationToken\.None\b)([A-Za-z_][A-Za-z0-9_]*))(?:\s*,\s*awsRdsKind:\s*AwsRdsKind\.None)?(?:\s*,\s*(?:cancellationToken|ct|CancellationToken\.None))?\s*\)",
         RegexOptions.Compiled);
 
     private static readonly Regex CollectorConst = new(
@@ -563,7 +574,7 @@ public sealed class EngineCapabilityReadWiringTests
         };
 
         return kinds.Any(kind => editions.Any(edition =>
-            CollectorEngineCapability.NotCollectedMessage("probe", edition, kind, collectorName) is not null));
+            CollectorEngineCapability.NotCollectedMessage("probe", edition, kind, collectorName, awsRdsKind: AwsRdsKind.None) is not null));
     }
 
     /// <summary>get_finops lives in DarlingMcpFinOpsTools.cs and its views ask their questions through helpers in the

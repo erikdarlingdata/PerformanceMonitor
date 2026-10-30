@@ -71,7 +71,7 @@ public sealed class SettingsImportTests : IDisposable
         var current = NewInstall("current");
         foreach (var name in ConfigFileNames)
         {
-            File.WriteAllText(Path.Combine(old.Config, name), "old " + name);
+            File.WriteAllText(Path.Combine(old.Config, name), ContentOf(name));
         }
 
         File.WriteAllText(Path.Combine(old.Root, "alert_state.json"), "old alert state");
@@ -85,7 +85,7 @@ public sealed class SettingsImportTests : IDisposable
         Assert.Equal(ConfigFileNames.Length + 1, copied);
         foreach (var name in ConfigFileNames)
         {
-            Assert.Equal("old " + name, File.ReadAllText(Path.Combine(current.Config, name)));
+            Assert.Equal(ContentOf(name), File.ReadAllText(Path.Combine(current.Config, name)));
         }
 
         Assert.Equal("old alert state", File.ReadAllText(Path.Combine(current.Root, "alert_state.json")));
@@ -95,13 +95,16 @@ public sealed class SettingsImportTests : IDisposable
             "the previous install's id file was copied into the config folder");
     }
 
+    /// <summary>settings.json has to be a JSON object to be copied (an unreadable one is skipped); the other files are copied as they are.</summary>
+    private static string ContentOf(string name) => name == "settings.json" ? "{ \"old\": \"settings.json\" }" : "old " + name;
+
     /// <summary>The import has always kept what this install already has; moving the list must not change that.</summary>
     [Fact]
     public void CopyMissing_KeepsAFileThisInstallAlreadyHas_AndDoesNotCountIt()
     {
         var old = NewInstall("old");
         var current = NewInstall("current");
-        File.WriteAllText(Path.Combine(old.Config, "settings.json"), "old settings");
+        File.WriteAllText(Path.Combine(old.Config, "settings.json"), ContentOf("settings.json"));
         File.WriteAllText(Path.Combine(old.Config, "ignored_wait_types.json"), "old waits");
         File.WriteAllText(Path.Combine(current.Config, "settings.json"), "current settings");
         File.WriteAllText(Path.Combine(old.Root, "alert_state.json"), "old alert state");

@@ -117,7 +117,7 @@ public sealed class McpMissMessageParityPinTests
 
         /* get_mute_rules */
         "No mute rules are configured for this store, so no alert is being suppressed anywhere — a quiet alert history is genuine rather than muted.",
-        "is disabled or expired, so nothing is being suppressed. Pass enabled_only=false to list them — this is a lapsed mute, not an absent one.",
+        "disabled or expired, so nothing is being suppressed. Pass enabled_only=false to list them — this is a lapsed mute, not an absent one.",
 
         /* compare_analysis */
         "in EITHER window, so there is nothing to compare — this is NOT a report that nothing changed.",

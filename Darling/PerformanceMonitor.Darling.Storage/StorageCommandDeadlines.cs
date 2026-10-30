@@ -59,4 +59,10 @@ public static class StorageCommandDeadlines
     /// latency data before raising it.</para>
     /// </summary>
     public const int McpReadSeconds = 30;
+
+    /// <summary>The client deadline of the composed web/MCP read path, 75 s: above the managed store's 60 s server-side ceiling on
+    /// purpose, so the server's own 57014 is the cancel that fires. The derivation and its pins live with the service's
+    /// <c>McpCommandDeadlines.ReadSeconds</c>, which now takes this value; it lives here so the composed-panel run, moved to Storage,
+    /// bounds its reads with the same number in every host.</summary>
+    public const int ComposedReadSeconds = 75;
 }

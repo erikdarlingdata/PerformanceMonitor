@@ -35,7 +35,7 @@ namespace PerformanceMonitor.Darling.Storage;
 /// own read wrong.</para>
 ///
 /// <para>Overwrites a caller-supplied <c>Timezone</c> rather than leaving it — unlike
-/// <c>DarlingWorker.EnsureStoreSearchPath</c>'s set-if-absent for <c>SearchPath</c>, and unlike the viewer's
+/// <see cref="EnsureStoreSearchPath"/>'s set-if-absent for <c>SearchPath</c>, and unlike the viewer's
 /// connect <c>Timeout</c>, where an operator's explicit value wins. The store's columns are naive UTC
 /// regardless of what a caller's connection string says, so there is no reading of "the caller meant it";
 /// a store connection string that names another zone is always a mistake this pin corrects.</para>
@@ -62,6 +62,44 @@ public static class DarlingStoreConnection
         _ = new NpgsqlConnectionStringBuilder(connectionString);
 
         return connectionString + ";Timezone=UTC";
+    }
+
+    /// <summary>
+    /// The store's search path (schemas in resolution order) in connection-string form, the ONE constant every surface appends
+    /// (#6630): the worker, the CLI, both hosts, the Viewer and the managed-runtime connection strings
+    /// (<c>DarlingManagedPostgres.SearchPath</c> and <c>ViewerSettings.ManagedSearchPath</c> alias it). It holds no <c>;</c>,
+    /// <c>=</c> or quote character, so a plain <c>Search Path=&lt;value&gt;</c> is unambiguous. The SQL-side
+    /// <see cref="PgSchemaGenerator.SearchPath"/> is the same schemas in the same order, spelled with spaces for the
+    /// <c>SET</c> statements; a test pins the two equal modulo the spaces.
+    /// </summary>
+    public const string StoreSearchPath = "collect,config,public";
+
+    /// <summary>
+    /// Ensures the store connection string carries the collect/config search path (the V8 schema split) so every pooled physical
+    /// connection resolves the shared SQL's bare table names to the <c>collect</c>/<c>config</c> schemas from its FIRST use.
+    /// Set-if-ABSENT, like <see cref="WithApplicationName"/>: a string that names a <c>Search Path</c> (every managed string does)
+    /// is returned unchanged, so an operator's own path wins. A bring-your-own connection string usually omits it and would
+    /// otherwise rely on the database-default <c>search_path</c> that <c>PgMigrations.MigrateAsync</c> best-effort sets with
+    /// <c>ALTER DATABASE ... SET search_path</c>.
+    ///
+    /// <para>That database default only governs the startup search_path of connections established AFTER the ALTER commits, and
+    /// a login that does not own the database never gets it set. The pool's physical connections opened around it keep their
+    /// pre-ALTER session search_path for their lifetime. On a FRESH BYO store that means the whole first run fails with
+    /// <c>42P01: relation "wait_stats" does not exist</c>, and the Viewer's and the MCP/web hosts' bare-name reads fail the
+    /// same way (#6630). Carrying the path on the connection string is deterministic and pool-timing-independent; any login may
+    /// <c>SET</c> its own search_path, so this is safe for least-privilege BYO logins too.</para>
+    ///
+    /// <para>APPENDS, never rewrites through a builder: the builder's writer erases a caller keyword set to an explicit empty
+    /// value (<c>Password=''</c>, ...), because it emits that as a bare <c>Key=</c> that its own reader treats as "not set"
+    /// (round-1 review on #4285's PR). Appending keeps every other keyword byte for byte; the builder here only validates the
+    /// string and reads the existing path.</para>
+    /// </summary>
+    public static string EnsureStoreSearchPath(string connectionString)
+    {
+        var builder = new NpgsqlConnectionStringBuilder(connectionString);
+        return string.IsNullOrWhiteSpace(builder.SearchPath)
+            ? connectionString + ";Search Path=" + StoreSearchPath
+            : connectionString;
     }
 
     /// <summary>The setting an MCP write transaction carries (#6281), and the value it carries. The store's guard on the tag writes

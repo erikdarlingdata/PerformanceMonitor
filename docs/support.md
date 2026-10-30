@@ -1,5 +1,7 @@
 # Support & Sponsorship
 
+Audience: operators.
+
 Part of the [Performance Monitor documentation](../README.md#documentation).
 
 Performance Monitor is free and open source under the MIT License. Every user gets the same tool, with the same collectors and the same MCP server, and no features are withheld. The tools that it replaces charge thousands of dollars per server per year. A support subscription costs $500 a year and covers all of your SQL Server instances.

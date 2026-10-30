@@ -1,0 +1,562 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using PerformanceMonitor.Darling.Storage;
+
+namespace PerformanceMonitor.Darling.Storage;
+
+/// <summary>Which physical relation a composed panel reads: the raw collector table, or one of its
+/// continuous-aggregate rollups.</summary>
+public enum ComposeSourceTier
+{
+    /// <summary>The raw per-sweep collector table (<c>collect.&lt;table&gt;</c>).</summary>
+    Raw,
+
+    /// <summary>The hourly continuous aggregate (<c>collect.&lt;table&gt;_hourly</c>).</summary>
+    Hourly,
+
+    /// <summary>The daily continuous aggregate (<c>collect.&lt;table&gt;_daily</c>).</summary>
+    Daily,
+
+    /// <summary>A SUM/MAX/MIN panel whose whole middle hours come from the interval-honest hourly successor, with
+    /// the restart rows of those hours and both partial-hour edges read from raw. It is taken only when a
+    /// count-guard verdict proves the successor holds exactly what raw holds for those hours. It is not a
+    /// rollup read on its own (<see cref="ComposeRoute.IsCagg"/> is false): everything but the FROM item
+    /// compiles as raw.</summary>
+    HourlyRawEdges,
+}
+
+/// <summary>
+/// The routing decision for one panel: which tier to read and the relation/time-column that implies. The raw tier
+/// carries no relation (the compiler keeps its existing <c>SourceTable</c> + prefix-time-column path); a CAGG tier
+/// names the rollup view, whose time column is always the <c>bucket</c> the CAGG produced.
+///
+/// <para><paramref name="StitchBoundaryUtc"/> is the instant a stitched <paramref name="CaggFromClause"/> splits at
+/// (<see cref="RollupCoverage.StitchFloor"/>): the superseded rollup is read below it and its successor from it up. It
+/// is null when the clause names one relation. It is carried as a value, set where the router builds the clause, so
+/// the data-start probe reads the successor over the same range the panel does.</para>
+/// </summary>
+public sealed record ComposeRoute(ComposeSourceTier Tier, string? CaggRelation, string? CaggFromClause = null, DateTime? StitchBoundaryUtc = null,
+    DateTime? EdgeStartUtc = null, DateTime? EdgeEndUtc = null)
+{
+    /// <summary>The raw route — the compiler's unchanged behaviour.</summary>
+    public static readonly ComposeRoute Raw = new(ComposeSourceTier.Raw, null);
+
+    /// <summary>True for a route that reads a rollup alone (<c>Hourly</c>, <c>Daily</c>). <see cref="ComposeSourceTier.HourlyRawEdges"/>
+    /// reads raw outside its middle hours, so it is not a CAGG route.</summary>
+    public bool IsCagg => Tier is ComposeSourceTier.Hourly or ComposeSourceTier.Daily;
+
+    /// <summary>Every CAGG's time dimension is the <c>time_bucket(...) AS bucket</c> column.</summary>
+    public const string CaggTimeColumn = "bucket";
+
+    /// <summary>The compiler's fact-table alias every CAGG <see cref="CaggFromClause"/> is built with (#3653
+    /// A6): <c>f</c>, matching <c>ComposeCompiler.FactAlias</c>.</summary>
+    public const string FactAlias = "f";
+
+    /// <summary>The rollup-side alias of the whole-hour middle inside the hourly-raw-edges FROM item.</summary>
+    public const string HybridMidAlias = "mid";
+}
+
+/// <summary>The column map the hourly-raw-edges FROM item projects. Group columns and delta columns are named
+/// the same in raw and in the interval-honest hourly successors (<c>collect.query_stats_interval_hourly</c>,
+/// <c>collect.procedure_stats_interval_hourly</c>), so one SELECT list serves every arm.</summary>
+internal static class ComposeHybridColumns
+{
+    /// <summary>The successor's group columns, per raw table.</summary>
+    public static readonly IReadOnlyDictionary<string, string[]> GroupColumns = new Dictionary<string, string[]>(StringComparer.Ordinal)
+    {
+        ["query_stats"] = new[] { "server_id", "server_name", "database_name", "query_hash", "sql_handle" },
+        ["procedure_stats"] = new[] { "server_id", "server_name", "database_name", "schema_name", "object_name" },
+    };
+
+    /// <summary>Raw delta column to the successor's base name; the successor holds <c>&lt;base&gt;_sum</c>,
+    /// <c>&lt;base&gt;_max</c> and <c>&lt;base&gt;_min</c> for each.</summary>
+    public static readonly IReadOnlyDictionary<string, string> Measures = new Dictionary<string, string>(StringComparer.Ordinal)
+    {
+        ["delta_worker_time"] = "worker_time",
+        ["delta_elapsed_time"] = "elapsed_time",
+        ["delta_execution_count"] = "execution_count",
+    };
+}
+
+/// <summary>A window the hourly-raw-edges route could serve: the source, its interval-honest hourly successor,
+/// and the whole-hour middle <c>[HourStartUtc, HourEndUtc)</c> the successor would answer.</summary>
+public sealed record ComposeHourlyEdgesCandidate(string SourceTable, string SuccessorView, DateTime HourStartUtc, DateTime HourEndUtc);
+
+/// <summary>A count guard's proof for one candidate: the successor's per-(server, hour) row counts matched raw's
+/// over <c>[HourStartUtc, HourEndUtc)</c>. The route is taken only when the verdict matches the candidate.
+/// <c>Servers</c> is the server scope the guard proved: a proof for one scope says nothing about another, so the
+/// compiler also requires it to equal the run's scope (see <see cref="ComposeSourceRouter.NormalizeServerScope"/>).
+/// Null means the whole fleet.</summary>
+public sealed record ComposeHourlyEdgesVerdict(string SourceTable, DateTime HourStartUtc, DateTime HourEndUtc, IReadOnlyList<string>? Servers);
+
+/// <summary>One raw table's continuous-aggregate coverage: its hourly (and optional daily) rollup view names and
+/// the dimensions those rollups are grouped by — the set a panel's group-by/filter dimensions must be a subset of
+/// to route (the universal <c>server</c> dimension always qualifies, since server_id/server_name lead every CAGG's
+/// GROUP BY).
+///
+/// <para><b><c>LegacyHourlyView</c>/<c>LegacyDailyView</c> are the SUPERSEDED pair, and only query_store_stats has
+/// one (#1849).</b> Its original rollups materialized <c>sum(execution_count)</c> from un-deduped raw rows, so they
+/// bake in the cumulative-snapshot double-count — measured at up to 496x for a single Query Store interval. The
+/// corrected rollups above replace them, but the old pair CANNOT be dropped and rebuilt: a continuous aggregate's
+/// columns cannot be ALTERed, and with retention active a rebuild would re-materialize from 4 days of raw and
+/// permanently destroy the retained hourly and indefinite daily history (#1759/#1793). So the corrected pair starts
+/// empty and deepens from deploy, the old pair keeps everything it already holds, and reads prefer the corrected
+/// one wherever it reaches. <b>Past that boundary a window is still served INFLATED numbers</b> — a visible step
+/// where the two meet, unavoidable while the old history is the only history, and shrinking every day as the
+/// corrected rollups deepen and the old rows age out.</para>
+///
+/// <para><b><c>DayGrainDailyView</c> is a BETTER daily, not a deeper one (#1869), and only query_store_stats
+/// has one.</b> <c>DailyView</c> dedups each Query Store interval within a collection HOUR, so an interval
+/// straddling an hour boundary is counted once per hour it was collected in — measured at 1.97x. The
+/// day-grain daily dedups across the whole DAY and counts it once. It is a NEW aggregate that starts empty,
+/// so it wins only where it has actually materialized the window; older windows keep falling to
+/// <c>DailyView</c>, and older ones still to <c>LegacyDailyView</c>. Three dailies, best-first, each step the
+/// same comparative rule.</para></summary>
+public sealed record ComposeCaggInfo(
+    string RawTable,
+    string HourlyView,
+    string? DailyView,
+    IReadOnlySet<string> Dimensions,
+    string? LegacyHourlyView = null,
+    string? LegacyDailyView = null,
+    string? DayGrainDailyView = null)
+{
+    public bool Covers(string dimensionName) =>
+        string.Equals(dimensionName, MeasureCatalog.ServerDimensionName, StringComparison.Ordinal)
+        || Dimensions.Contains(dimensionName);
+
+    /// <summary>Is there a superseded pair to fall back to for windows the primary pair has not materialized?</summary>
+    public bool HasLegacyPair => LegacyHourlyView is not null;
+}
+
+/// <summary>
+/// The catalog of which raw tables have CAGGs, keyed by raw table name — the composer-dimension shape after the
+/// CAGG reshape (query_store_stats regrouped to module_name/query_hash; procedure_stats carrying schema_name).
+/// Dimensions here are the CAGGs' GROUP BY columns (minus the universal server prefix); a panel routes only when
+/// its dimensions are covered (see <see cref="ComposeCaggInfo.Covers"/>). query_stats' <c>object_name</c> is
+/// covered via the module_map join (the CAGG carries sql_handle; the compiler joins collect.module_map for it) —
+/// it stays a ViaModuleJoin dimension so the RAW path still uses the live #1568 procedure_stats CTE.
+/// All three rolled tables (query_stats / procedure_stats / query_store_stats) now carry both an hourly and a
+/// daily CAGG, so every one tiers raw → hourly → daily.
+/// </summary>
+public static class ComposeCaggCatalog
+{
+    private static readonly Dictionary<string, ComposeCaggInfo> s_byTable = new(StringComparer.Ordinal)
+    {
+        /* object_name is coverable via the module_map join (the query_stats CAGG carries sql_handle) — the
+           compiler joins collect.module_map for it on a CAGG route. It stays a ViaModuleJoin dimension, so the raw
+           path still uses the live #1568 procedure_stats CTE. statement (#2737) rides the same join plus the
+           CAGG's own query_hash fallback column, so it is coverable for exactly the same reason. */
+        ["query_stats"] = new(
+            "query_stats", "query_stats_hourly", "query_stats_daily",
+            new HashSet<string>(StringComparer.Ordinal) { "database_name", "query_hash", "object_name", "statement" }),
+
+        ["procedure_stats"] = new(
+            "procedure_stats", "procedure_stats_hourly", "procedure_stats_daily",
+            new HashSet<string>(StringComparer.Ordinal) { "database_name", "schema_name", "object_name" }),
+
+        /* The CORRECTED pair is primary (#1849); the original inflated pair is the documented fallback for
+           windows the corrected rollups have not materialized. Same dimensions and the same column NAMES on
+           both, so ComposeCaggValueMapper and the compiled SQL are identical either way — only which relation
+           is named changes. */
+        ["query_store_stats"] = new(
+            "query_store_stats", "query_store_stats_corrected_hourly", "query_store_stats_corrected_daily",
+            new HashSet<string>(StringComparer.Ordinal) { "database_name", "module_name", "query_hash" },
+            LegacyHourlyView: "query_store_stats_hourly",
+            LegacyDailyView: "query_store_stats_daily",
+            DayGrainDailyView: "query_store_stats_daygrain_daily"),
+    };
+
+    /// <summary>The CAGG coverage for <paramref name="rawTable"/>, or null if it has no continuous aggregate.</summary>
+    public static ComposeCaggInfo? For(string rawTable) =>
+        s_byTable.TryGetValue(rawTable, out var info) ? info : null;
+}
+
+/// <summary>
+/// Chooses the physical source tier for a composed panel by the AGE of the window's oldest point, never by the
+/// display grain (an explicit bucket, or the Ranked/Scalar modes that resolve no grain at all, would otherwise
+/// route wrong). Retention drops chunks by ACTUAL now, so the oldest point's age is measured from a caller-supplied
+/// <c>nowUtc</c> (deterministic for tests), not from the window's end — a purely historical window ("30 to 25 days
+/// ago") must reach the tier that still retains it or the query returns empty rows.
+///
+/// <para>Route thresholds sit a margin BELOW each retention horizon (raw kept 4d → route ≤3d; hourly kept 90d →
+/// route ≤89d), so a drop lagging the boundary (1-day chunk granularity + the CAGG refresh interval) can never leave
+/// the chosen tier missing the oldest chunk. The margin is pinned as a test invariant against the retention
+/// constants. A whole window routes to the single tier its OLDEST point needs — uniform coarsening, no cross-tier
+/// union (a future optimization); real-time aggregation on the CAGG stitches the still-filling recent edge.</para>
+/// </summary>
+public static class ComposeSourceRouter
+{
+    /// <summary>Raw is chosen only for windows whose oldest point is within this age — a day inside the 4-day raw
+    /// retention, so raw never routes to an about-to-drop chunk. Aliases the shared definition (#1661); the
+    /// viewer's built-in tabs route off the same value.</summary>
+    public static readonly TimeSpan RawRouteMaxAge = RetentionTierRouter.RawMaxAge;
+
+    /// <summary>The sources the hourly-raw-edges route is enabled for. Only <c>query_stats</c> has been measured
+    /// against its raw read, so <c>procedure_stats</c> (mapped in <see cref="ComposeHybridColumns"/>) stays out.</summary>
+    internal static readonly IReadOnlySet<string> HourlyRawEdgesEnabledSources =
+        new HashSet<string>(StringComparer.Ordinal) { "query_stats" };
+
+    private static readonly TimeSpan HourlyRawEdgesMinWindow = TimeSpan.FromHours(12);
+    private static readonly TimeSpan HourlyRawEdgesEndSlack = TimeSpan.FromMinutes(1);
+
+    /// <summary>The hourly CAGG is chosen up to this age — a day inside the 90-day (#1937) hourly retention; older windows
+    /// fall to the daily CAGG (or stay on the hourly, capped, when no daily CAGG exists yet). Aliases the shared
+    /// definition (#1661).</summary>
+    public static readonly TimeSpan HourlyRouteMaxAge = RetentionTierRouter.HourlyMaxAge;
+
+    /// <summary>
+    /// The tier for <paramref name="plan"/> given the window's oldest point (<paramref name="windowStartUtc"/>)
+    /// relative to <paramref name="nowUtc"/>, gated by which rollups the store actually HAS
+    /// (<paramref name="rollups"/>, #1665 — the composer's arm of the #1664 availability guard: the CAGGs are
+    /// runtime TimescaleDB setup, so a plain-PostgreSQL store has none and routing there by age alone compiled
+    /// SQL against missing relations). Falls through to <see cref="ComposeRoute.Raw"/> — the compiler's
+    /// unchanged path — whenever the table has no CAGG, a grouped/filtered dimension is outside the CAGG's coverage
+    /// (object_name IS covered on query_stats, via the module_map join), the window is recent enough that raw
+    /// still holds it, or the age-resolved tier's view is absent (per-table degrade: daily missing → hourly,
+    /// hourly missing → raw — the same shared ladder the viewer's built-in tabs use).
+    ///
+    /// <para><paramref name="coverage"/> adds the #1759 gate: a rollup that EXISTS may still not have
+    /// materialized the window (created <c>WITH NO DATA</c> over pre-existing history), and the router drops
+    /// to a tier measured to reach further back rather than serving an empty result off a rollup while raw
+    /// still holds the rows. Pass <see cref="RollupCoverage.Unknown"/> to keep the pure age + availability
+    /// decision.</para>
+    /// </summary>
+    public static ComposeRoute Resolve(
+        PanelPlan plan, DateTime nowUtc, DateTime windowStartUtc, RollupAvailability rollups, RollupCoverage coverage)
+    {
+        ArgumentNullException.ThrowIfNull(plan);
+        ArgumentNullException.ThrowIfNull(coverage);
+
+        var cagg = ComposeCaggCatalog.For(plan.Measure.SourceTable);
+        if (cagg is null)
+        {
+            return ComposeRoute.Raw;
+        }
+
+        /* No blanket module-join gate: object_name (the only ViaModuleJoin dimension) is now coverable on the
+           query_stats CAGG via the module_map join (the CAGG carries sql_handle), and is in that CAGG's coverage
+           set below. The dimension-coverage loop is the sole gate — a dimension no CAGG can serve (directly or via
+           the map) still falls to raw. */
+
+        /* Every grouped/filtered dimension must be served by the CAGG (a GROUP BY column, or object_name via the
+           module_map join), else the rollup can't reproduce it. */
+        foreach (var dimension in plan.GroupBy)
+        {
+            if (!cagg.Covers(dimension.Name))
+            {
+                return ComposeRoute.Raw;
+            }
+        }
+
+        foreach (var filter in plan.Filters)
+        {
+            if (!cagg.Covers(filter.Dimension.Name))
+            {
+                return ComposeRoute.Raw;
+            }
+        }
+
+        /* The age decision AND the availability degrade are shared with the viewer's built-in tabs
+           (#1661/#1664) — one ladder in RetentionTierRouter, so the two readers can never drift into
+           disagreeing about which tier still retains (or exists for) a window. The coverage gates above stay
+           composer-specific; the flags are per-TABLE (#1665), because a failure-isolated ensure sweep can
+           build one table's pair and not another's. A catalog entry with no daily view feeds
+           dailyAvailable=false through the same ladder — identical to the old null-DailyView fallback. */
+        var primary = PreferDayGrainDaily(
+            cagg,
+            ResolveFamily(cagg.HourlyView, cagg.DailyView, nowUtc, windowStartUtc, rollups, coverage),
+            windowStartUtc, rollups, coverage);
+
+        if (!cagg.HasLegacyPair)
+        {
+            return primary.Route;
+        }
+
+        /* ── the corrected/legacy boundary (#1849) ────────────────────────────────────────────────────────
+           The corrected Query Store rollups are NEW objects that start empty and deepen from deploy, beside
+           an old pair that already holds up to the full hourly horizon (90d) and unbounded daily of INFLATED history.
+           The rule is: use the corrected pair wherever it has actually materialized the window, and only
+           reach for the superseded pair where it measurably reaches further back.
+
+           WHAT THIS MEANS FOR A READER, stated because it is a real product behaviour and not a detail: a
+           window inside the corrected coverage reads deduped numbers; a window past it reads the old
+           inflated ones, and there is a VISIBLE STEP where the two meet. That step is not new — it exists
+           today between raw (deduped since #1853) and the CAGGs, and this change moves it strictly outward
+           and shrinks it every day. It disappears once the corrected rollups are backfilled past the old
+           pair's floor, which --backfill-rollups does.
+
+           The comparison is the same COMPARATIVE primitive the coverage ladder uses, never an absolute one:
+           the legacy pair wins only when its floor is measurably deeper, so on a healthy store — where the
+           corrected pair covers everything asked for — this never fires and never silently prefers the
+           inflated numbers. */
+        /* AVAILABILITY IS NOT COVERAGE, and deciding them in one step is wrong. A store whose service predates
+           #1849 has NO corrected rollups, so there is nothing to compare floors against — every floor is null
+           and the comparative rule below (correctly) refuses to move on no evidence, which would strand every
+           Query Store window on raw and throw away the legacy pair that was serving them yesterday. Existence
+           is therefore settled FIRST, and settling it restores exactly the pre-#1849 routing. */
+        var correctedExists = rollups.Has(cagg.HourlyView)
+            || (cagg.DailyView is not null && rollups.Has(cagg.DailyView));
+
+        if (!correctedExists)
+        {
+            return ResolveFamily(cagg.LegacyHourlyView!, cagg.LegacyDailyView, nowUtc, windowStartUtc, rollups, coverage).Route;
+        }
+
+        if (primary.Route.IsCagg && TierCoverage.Covers(primary.FloorUtc, windowStartUtc))
+        {
+            return primary.Route;
+        }
+
+        var legacy = ResolveFamily(cagg.LegacyHourlyView!, cagg.LegacyDailyView, nowUtc, windowStartUtc, rollups, coverage);
+
+        return legacy.Route.IsCagg && TierCoverage.ReachesFurtherBack(legacy.FloorUtc, primary.FloorUtc)
+            ? legacy.Route
+            : primary.Route;
+    }
+
+    /// <summary>
+    /// #1869: at the DAILY tier only, swap in the day-grain daily where it can answer the window.
+    ///
+    /// <para><b>Why the daily tier only.</b> The hour-straddle residual this removes is IRREDUCIBLE at the
+    /// hourly grain — an interval genuinely collected across two hours has to appear in both — so there is no
+    /// better hourly to prefer, and an hourly-age window is left exactly as #1849 routed it. What made the
+    /// daily worth a fourth near-raw-cardinality aggregate is that the daily tier is kept INDEFINITELY: its
+    /// numbers are the ones that persist and get compared year over year.</para>
+    ///
+    /// <para><b>The candidate has to prove itself, which is the reverse of the corrected/legacy step in
+    /// <see cref="Resolve"/> and deliberately so.</b> There the incumbent was the inflated pair and the
+    /// newcomer was simply better;
+    /// here both relations are corrected and the newcomer is merely MORE correct, while being younger and
+    /// therefore shallower. So it wins where it covers the window, or where it measurably reaches further
+    /// back, and otherwise the corrected daily keeps the window — trading a bounded ~2x over-count for
+    /// coverage the newer view does not have, the same trade the legacy step makes one notch further down.
+    /// With no coverage measured at all (a failed probe) nothing moves: <see cref="TierCoverage"/>'s rule is
+    /// that null is no evidence, and no evidence never wins.</para>
+    /// </summary>
+    private static (ComposeRoute Route, DateTime? FloorUtc) PreferDayGrainDaily(
+        ComposeCaggInfo cagg, (ComposeRoute Route, DateTime? FloorUtc) resolved,
+        DateTime windowStartUtc, RollupAvailability rollups, RollupCoverage coverage)
+    {
+        if (cagg.DayGrainDailyView is null
+            || resolved.Route.Tier != ComposeSourceTier.Daily
+            || !rollups.Has(cagg.DayGrainDailyView))
+        {
+            return resolved;
+        }
+
+        /* The day-grain daily has no successor to stitch to, so its FROM clause is the one relation. It is set here,
+           like every other rollup route's, because the data-start probe reads the relations a panel read off that
+           clause; compiled, it is the same text the compiler built from the name alone (" AS f" appended). */
+        var dayGrain = (Route: new ComposeRoute(
+                            ComposeSourceTier.Daily,
+                            cagg.DayGrainDailyView,
+                            $"{PgSchemaGenerator.CollectSchema}.{cagg.DayGrainDailyView} AS {ComposeRoute.FactAlias}"),
+                        FloorUtc: coverage.FloorOf(cagg.DayGrainDailyView));
+
+        if (TierCoverage.Covers(dayGrain.FloorUtc, windowStartUtc))
+        {
+            return dayGrain;
+        }
+
+        return TierCoverage.ReachesFurtherBack(dayGrain.FloorUtc, resolved.FloorUtc) ? dayGrain : resolved;
+    }
+
+    /// <summary>
+    /// One rollup family's route AND the materialized floor the chosen tier actually reaches — the pair the
+    /// corrected/legacy comparison above needs. A raw outcome carries a null floor, which
+    /// <see cref="TierCoverage.ReachesFurtherBack"/> reads as "no evidence", so an absent or empty family can
+    /// never beat one holding something.
+    /// </summary>
+    private static (ComposeRoute Route, DateTime? FloorUtc) ResolveFamily(
+        string hourlyView, string? dailyView, DateTime nowUtc, DateTime windowStartUtc,
+        RollupAvailability rollups, RollupCoverage coverage)
+    {
+        /* coverage.For(...) is called INLINE in the Resolve argument list, and again below for the floors,
+           rather than hoisted into a local used twice. That is deliberate: RollupCoverageRoutingTests scans
+           the source for RetentionTierRouter.Resolve call sites and requires each to look coverage up in its
+           own argument list — a guard against the #1759 shape where a caller routes on no evidence. A local
+           satisfies the compiler and defeats the scan, so the duplicate lookup (two dictionary probes) buys
+           a guard that stays honest. Do not "simplify" it back. */
+        var tier = RetentionTierRouter.Resolve(
+            nowUtc, windowStartUtc,
+            hourlyAvailable: rollups.Has(hourlyView),
+            dailyAvailable: dailyView is not null && rollups.Has(dailyView),
+            coverage: coverage.For(hourlyView, dailyView));
+
+        var tierCoverage = coverage.For(hourlyView, dailyView);
+
+        /* #3653 (Q12): the tier is decided over the LEGACY hourly's floor above — it is the deeper of the pair on
+           any upgraded store — and only then is the hourly RELATION chosen: the interval-honest successor
+           (query_stats_interval_hourly / procedure_stats_interval_hourly) where it exists and reaches as far back
+           into the window as the legacy does, the legacy otherwise. Same dimensions, same column names on both,
+           so the compiled SQL and ComposeCaggValueMapper are identical either way — the #1849 arrangement, one
+           relation name swapped. The Query Store family has no successor here and comes back unchanged. The
+           daily tier's RELATION is chosen the same way as the hourly's, below (#3653 A6): CaggRelation is still
+           the by-name answer for probes/logs/registry lookups, and CaggFromClause may stitch the legacy daily to
+           its own interval-honest successor daily at F_d — the tier CHOICE itself stays on the legacy pair
+           (coverage.For above), only the RELATION within the chosen tier can be a stitch. */
+        return tier switch
+        {
+            RetentionTier.Raw => (ComposeRoute.Raw, null),
+            /* #3653 A6: CaggRelation stays the by-NAME answer (probes/logs/registry lookups); CaggFromClause is
+               the FROM-clause item the compiler actually splices in, which may stitch the legacy hourly to its
+               interval-honest successor. With no successor this is byte-identical to
+               "collect.<hourlyView> AS f" — the same text the old CaggRelation-only path produced once the
+               compiler appended " AS f" itself. The route also carries the stitch boundary as a value
+               (RollupCoverage.StitchFloor, the F the clause splits at, null when the clause names one relation),
+               so the data-start probe reads the successor from that boundary up, as the panel does. */
+            RetentionTier.Hourly => (new ComposeRoute(
+                ComposeSourceTier.Hourly,
+                coverage.HourlyRelationNameFor(hourlyView, windowStartUtc),
+                coverage.StitchedRelationSql(hourlyView, ComposeRoute.FactAlias, windowStartUtc, RollupCoverage.StitchTier.Hourly),
+                coverage.StitchFloor(hourlyView, RollupCoverage.StitchTier.Hourly, windowStartUtc)),
+                tierCoverage.HourlyFloorUtc),
+            /* #3653 A6: same shape as the hourly arm above, but StitchTier.Daily — the successor daily's own
+               floor and its successor hourly's ceiling-of-day decide F_d (RollupCoverage.StitchedRelationSql).
+               With no successor daily this is byte-identical to "collect.<dailyView> AS f", same as today. */
+            _ => (new ComposeRoute(
+                ComposeSourceTier.Daily,
+                dailyView!,
+                coverage.StitchedRelationSql(dailyView!, ComposeRoute.FactAlias, windowStartUtc, RollupCoverage.StitchTier.Daily),
+                coverage.StitchFloor(dailyView!, RollupCoverage.StitchTier.Daily, windowStartUtc)),
+                tierCoverage.DailyFloorUtc),
+        };
+    }
+
+    /// <summary>
+    /// The hourly-raw-edges candidate for a panel whose window ends now, or null. Null unless every gate holds:
+    /// <see cref="Resolve"/> chose raw; the source is enabled; every measure is a cumulative delta column the
+    /// successor holds; the aggregate is Sum, Max or Min (an overlay must match source and aggregate); the mode is
+    /// Ranked or Scalar, or a time series bucketed by hour or day; every grouped or filtered dimension is a
+    /// successor column or a module-join dimension whose fallback column the successor holds; the successor
+    /// exists, reaches back to the first whole hour, and has a measured ceiling; the whole-hour middle is at
+    /// least an hour; the window ends within a minute of now; and it spans at least 12 hours.
+    ///
+    /// <para>The <c>statement</c> dimension qualifies: its group expression is
+    /// <c>COALESCE(m.object_name, f.query_hash)</c> (the module join plus the <c>query_hash</c> fallback), and
+    /// both are available to every arm.</para>
+    /// </summary>
+    public static ComposeHourlyEdgesCandidate? HourlyRawEdgesCandidate(
+        PanelPlan plan, DateTime nowUtc, DateTime windowStartUtc, DateTime windowEndUtc,
+        RollupAvailability rollups, RollupCoverage coverage)
+    {
+        ArgumentNullException.ThrowIfNull(plan);
+        ArgumentNullException.ThrowIfNull(coverage);
+
+        if (Resolve(plan, nowUtc, windowStartUtc, rollups, coverage).Tier != ComposeSourceTier.Raw)
+        {
+            return null;
+        }
+
+        var source = plan.Measure.SourceTable;
+        if (!HourlyRawEdgesEnabledSources.Contains(source) || !ComposeHybridColumns.GroupColumns.TryGetValue(source, out var groupColumns))
+        {
+            return null;
+        }
+
+        if (!IsHourlyEdgesMeasure(plan.Measure) || plan.Aggregate is not (ComposeAggregate.Sum or ComposeAggregate.Max or ComposeAggregate.Min))
+        {
+            return null;
+        }
+
+        if (plan.Overlay is ComposeOverlay overlay
+            && (overlay.Measure.SourceTable != source || overlay.Aggregate != plan.Aggregate || !IsHourlyEdgesMeasure(overlay.Measure)))
+        {
+            return null;
+        }
+
+        if (plan.Mode is not (PanelMode.Ranked or PanelMode.Scalar))
+        {
+            var bucket = MeasureCatalog.ResolveBucket(plan.TimeBucket, (windowEndUtc - windowStartUtc).TotalSeconds);
+            if (bucket is not (ComposeTimeBucket.Hour or ComposeTimeBucket.Day))
+            {
+                return null;
+            }
+        }
+
+        foreach (var dimension in plan.GroupBy.Concat(plan.Filters.Select(f => f.Dimension)))
+        {
+            var readsMapped = dimension.ViaModuleJoin
+                ? dimension.FallbackColumn is null || Array.IndexOf(groupColumns, dimension.FallbackColumn) >= 0
+                : Array.IndexOf(groupColumns, dimension.Column) >= 0;
+            if (!readsMapped)
+            {
+                return null;
+            }
+        }
+
+        var cagg = ComposeCaggCatalog.For(source);
+        if (cagg is null)
+        {
+            return null;
+        }
+
+        var successor = TimescaleSupport.SuccessorOf(cagg.HourlyView);
+        if (successor is null || !rollups.Has(successor))
+        {
+            return null;
+        }
+
+        var hStart = CeilHour(windowStartUtc);
+        if (coverage.FloorOf(successor) is not DateTime floor || floor > hStart)
+        {
+            return null;
+        }
+
+        if (coverage.CeilingOf(successor) is not DateTime ceiling)
+        {
+            return null;
+        }
+
+        var hEnd = Min(FloorHour(windowEndUtc), FloorHour(ceiling));
+        if (hEnd - hStart < TimeSpan.FromHours(1))
+        {
+            return null;
+        }
+
+        if (nowUtc - windowEndUtc > HourlyRawEdgesEndSlack)
+        {
+            return null;
+        }
+
+        if (windowEndUtc - windowStartUtc < HourlyRawEdgesMinWindow)
+        {
+            return null;
+        }
+
+        return new ComposeHourlyEdgesCandidate(source, successor, hStart, hEnd);
+    }
+
+    /// <summary>The one reading of a server scope for the hourly-raw-edges proof: null or empty is the whole fleet
+    /// (null), anything else is the list as given. The runner binds the count guard's <c>$3</c> from this in a later
+    /// change, and the compiler matches a verdict's scope against the run's scope with it now, so an empty array can
+    /// never be proven as "no servers" and then read as the fleet.</summary>
+    public static IReadOnlyList<string>? NormalizeServerScope(IReadOnlyList<string>? servers)
+    {
+        return servers is { Count: > 0 } ? servers : null;
+    }
+
+    private static bool IsHourlyEdgesMeasure(ComposeMeasure measure) =>
+        measure.Kind != MeasureKind.Ratio
+        && measure.Archetype == MeasureArchetype.Cumulative
+        && measure.AggregationColumn is string column
+        && ComposeHybridColumns.Measures.ContainsKey(column);
+
+    private static DateTime CeilHour(DateTime value) =>
+        value == FloorHour(value) ? value : FloorHour(value).AddHours(1);
+
+    private static DateTime FloorHour(DateTime value) =>
+        new(value.Year, value.Month, value.Day, value.Hour, 0, 0, value.Kind);
+
+    private static DateTime Min(DateTime a, DateTime b) => a < b ? a : b;
+}

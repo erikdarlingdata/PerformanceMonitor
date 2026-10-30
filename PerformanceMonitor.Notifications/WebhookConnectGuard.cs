@@ -21,8 +21,8 @@ namespace PerformanceMonitor.Notifications;
 /// The connect step of a webhook post (#6231): it refuses a link-local address (169.254.0.0/16 and fe80::/10) and the cloud
 /// instance addresses fd00:ec2::254, 168.63.129.16 and 100.100.100.200 wherever the address came from, a URL's own host, a DNS
 /// answer or a redirect, because the connection is what is checked, not the text of the URL. Loopback and private addresses stay
-/// allowed: operators run internal receivers. The check applies to direct connections; when a proxy carries the request, the
-/// proxy decides what it can reach.
+/// allowed: operators run internal receivers. The check applies to the connection a post makes: the target's for a direct post, and the proxy's when a
+/// proxy carries the request (#6392). What the proxy then reaches is its own decision.
 /// </summary>
 public static class WebhookConnectGuard
 {

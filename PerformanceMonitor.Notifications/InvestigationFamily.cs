@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Notifications;
 
@@ -75,8 +76,14 @@ public static class InvestigationFamily
         ["Version Store (PVS)"] = Resources,
         ["Volume Free Space"] = Resources,
         ["Database File Growth"] = Resources,
+        /* #6875: an identity column that runs out of values stops every insert into its table, a resource running out like a full volume. */
+        ["Identity Capacity"] = Resources,
 
         ["Database State"] = Availability,
+        /* Not in the draft: a missing backup or CHECKDB is a restorability gap, which sits beside Database State. */
+        ["Backup Overdue"] = Availability,
+        ["Log Backup Overdue"] = Availability,
+        ["CHECKDB Overdue"] = Availability,
         ["AG Failover"] = Availability,
         ["AG Replica Disconnected"] = Availability,
         ["AG Sync Fell Behind"] = Availability,
@@ -123,6 +130,18 @@ public static class InvestigationFamily
         ["tempdb_pressure"] = Resources,
         ["bloat_growth"] = Resources,
         ["object_growth"] = Resources,
+        /* An anomaly is a spike against the server's own baseline in CPU, waits, I/O or latency, so resources is the
+           closest family. One caused by blocking or a query story is still reported by the agent that gets it. */
+        ["anomaly"] = Resources,
+        /* A story's category is its root fact's source (InferenceEngine: rootFact.Source), so these SQL Server fact sources are
+           the categories a live run emits. The edge categories above (cpu_pressure and the rest) only match a story whose
+           category happens to equal one. config, database_config, coverage, bad_actor, tempdb and waits stay other. */
+        ["cpu"] = Resources,
+        ["memory"] = Resources,
+        ["io"] = Resources,
+        ["disk"] = Resources,
+
+        ["jobs"] = Jobs,
 
         ["ag_health"] = Availability,
         ["replication_risk"] = Availability,
@@ -148,6 +167,16 @@ public static class InvestigationFamily
         if (string.Equals(metricName, AlertFamily.InvestigationUnansweredMetric, StringComparison.Ordinal))
         {
             return null;
+        }
+
+        /* #6551: a change watch's request (metric "Change Watch", opened by the change-watch pass and not by an alert) is a question about
+           what a recorded change did to plans and query measures, so it is query performance. A forced-plan change is the common case; a
+           configuration change is read through the same query measures. Without this it fell to `other`, next to custom and external
+           alerts, and an operator that routes families to agents sent it to the agent that works those. The name is not in the notification
+           census (it is not an alert), so it is mapped here and not in PerformanceMetricFamilies. */
+        if (string.Equals(metricName, InvestigationTriggerKinds.ChangeWatchMetric, StringComparison.Ordinal))
+        {
+            return QueryPerformance;
         }
 
         if (PerformanceMetricFamilies.TryGetValue(metricName, out var named))

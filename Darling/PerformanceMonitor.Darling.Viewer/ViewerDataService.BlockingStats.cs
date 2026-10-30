@@ -50,8 +50,10 @@ public sealed partial class ViewerDataService
     /// drop a row (an event is collected after it happens). $5 is the database filter (#5244), the same
     /// <c>text[]</c> (NULL for all) the count trend binds, on BOTH arms so the severity reconciles with it.
     /// The last column names the arm that answered, the tag Darling's MCP answers carry.
+    /// Both arms leave out a parallel query waiting on itself (<see cref="BlockingWaits.NotSelfWaitSql"/>, #6645, #6705), as the
+    /// count trend does, so the two reconcile and the severity is the blocking's, not the query's own.
     /// </summary>
-    public const string BlockingDurationStatsSql = """
+    public const string BlockingDurationStatsSql = $"""
         WITH bpr AS (
             SELECT
                 DATE_TRUNC('minute', event_time) AS bucket,
@@ -64,6 +66,7 @@ public sealed partial class ViewerDataService
             WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
             AND   collection_time >= $4
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
+            AND   {PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql}
             GROUP BY DATE_TRUNC('minute', event_time)
         ),
         dmv AS (
@@ -78,6 +81,7 @@ public sealed partial class ViewerDataService
             WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
             AND   collection_time >= $4
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
+            AND   {PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql}
             GROUP BY DATE_TRUNC('minute', event_time)
         )
         SELECT bucket, event_count, total_duration_ms, max_duration_ms, avg_duration_ms, source FROM bpr

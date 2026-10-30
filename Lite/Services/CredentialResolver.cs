@@ -26,11 +26,26 @@ public sealed class CredentialResolver
 {
     private readonly CredentialService _credentialService;
     private readonly IProfileLookup? _profileLookup;
+    private readonly ServerHostBindings? _hostBindings;
 
-    public CredentialResolver(CredentialService credentialService, IProfileLookup? profileLookup)
+    /// <param name="hostBindings">This user's confirmed hosts. When set, every connection string is refused for a server
+    /// whose host (or Query Store replica) is not the one this user confirmed. <see cref="ServerManager.CredentialResolver"/>
+    /// always passes its own; null only where a test builds a resolver by hand.</param>
+    public CredentialResolver(CredentialService credentialService, IProfileLookup? profileLookup, ServerHostBindings? hostBindings = null)
     {
         _credentialService = credentialService;
         _profileLookup = profileLookup;
+        _hostBindings = hostBindings;
+    }
+
+    /// <summary>
+    /// Throws <see cref="ServerHostNotConfirmedException"/> when this user has not confirmed the host the server names now,
+    /// before any saved password, secret or sign-in is read for it.
+    /// </summary>
+    public void RequireConfirmedHost(ServerConnection server)
+    {
+        if (_hostBindings?.Check(server) is { } change)
+            throw new ServerHostNotConfirmedException(change.Describe(server));
     }
 
     /// <summary>
@@ -43,13 +58,28 @@ public sealed class CredentialResolver
     /// "credential profile '{id}' not found" if the server references a missing profile.
     /// </summary>
     public string GetConnectionString(ServerConnection server)
-        => ServerConnection.ResolveConnectionString(server, _credentialService, _profileLookup);
+    {
+        RequireConfirmedHost(server);
+        return ServerConnection.ResolveConnectionString(server, _credentialService, _profileLookup);
+    }
+
+    /// <summary>
+    /// The Query Store replica's connection string (#6254), or null when the server has no replica set.
+    /// </summary>
+    public string? GetQueryStoreReplicaConnectionString(ServerConnection server)
+    {
+        RequireConfirmedHost(server);
+        return ServerConnection.ResolveQueryStoreReplicaConnectionString(server, _credentialService, _profileLookup);
+    }
 
     /// <summary>
     /// Resolves a connection string targeting the server's UtilityDatabase when set.
     /// </summary>
     public string GetUtilityConnectionString(ServerConnection server)
-        => ServerConnection.ResolveUtilityConnectionString(server, _credentialService, _profileLookup);
+    {
+        RequireConfirmedHost(server);
+        return ServerConnection.ResolveUtilityConnectionString(server, _credentialService, _profileLookup);
+    }
 
     /// <summary>
     /// Resolves a connection string targeting a NAMED database rather than the server's configured default
@@ -57,7 +87,10 @@ public sealed class CredentialResolver
     /// a database has to be run from inside it — the Utility DB indirection cannot apply there.
     /// </summary>
     public string GetConnectionStringForDatabase(ServerConnection server, string databaseName)
-        => ServerConnection.ResolveConnectionStringForDatabase(server, databaseName, _credentialService, _profileLookup);
+    {
+        RequireConfirmedHost(server);
+        return ServerConnection.ResolveConnectionStringForDatabase(server, databaseName, _credentialService, _profileLookup);
+    }
 
     /// <summary>
     /// Profile-aware stored-credential check (N-1).

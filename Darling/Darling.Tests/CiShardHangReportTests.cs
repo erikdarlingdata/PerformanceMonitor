@@ -37,20 +37,6 @@ public sealed class CiShardHangReportTests
     [Theory]
     [InlineData("Run Darling PG tests")]
     [InlineData("Run Lite tests (shard)")]
-    public void ShardStep_HasAStepTimeout_UnderTheJobTimeout(string stepName)
-    {
-        var step = ReadStep(stepName);
-
-        var timeout = Regex.Match(step, @"(?m)^        timeout-minutes:\s*(?<n>\d+)\s*$");
-        Assert.True(timeout.Success,
-            $"'{stepName}' has no step-level timeout-minutes. The job's own timeout cancels the job and leaves the upload steps pending (#5587).");
-        var minutes = int.Parse(timeout.Groups["n"].Value);
-        Assert.InRange(minutes, 10, MaxStepTimeoutMinutes);
-    }
-
-    [Theory]
-    [InlineData("Run Darling PG tests")]
-    [InlineData("Run Lite tests (shard)")]
     public void ShardStep_AsksTheRunnerToNameALongRunningTest_AndKeepsTheRunnerOutput(string stepName)
     {
         // #5616: the chunk loop lives in the shard script both workflows call, so the runner's flags are read from it.
@@ -64,36 +50,8 @@ public sealed class CiShardHangReportTests
         Assert.Matches(@"New-Item\s+-ItemType\s+Directory\s+-Force\s+-Path\s+TestResults", step);
     }
 
-    [Fact]
-    public void DarlingUploads_RunWhateverTheTestStepDid()
-    {
-        var timings = ReadStep("Upload Darling test timings");
-        Assert.Matches(@"(?m)^        if:\s*always\(\)", timings);
-
-        var runner = ReadStep("Upload Darling runner output");
-        Assert.Matches(@"(?m)^        if:\s*always\(\)", runner);
-        Assert.Contains("TestResults/darling-runner-*.log", runner, StringComparison.Ordinal);
-        Assert.Contains("darling-runner-log-${{ matrix.shard }}", runner, StringComparison.Ordinal);
-        Assert.Matches(@"(?m)^        timeout-minutes:\s*\d+", runner);
-
-        var failure = ReadStep("Upload PG log and test results on failure");
-        Assert.Matches(@"(?m)^        if:\s*\(failure\(\) \|\| cancelled\(\)\)", failure);
-    }
-
-    [Fact]
-    public void LiteUploads_RunWhateverTheTestStepDid()
-    {
-        var timings = ReadStep("Upload Lite test timings");
-        Assert.Matches(@"(?m)^        if:\s*always\(\)", timings);
-
-        var runner = ReadStep("Upload Lite runner output");
-        Assert.Matches(@"(?m)^        if:\s*always\(\)", runner);
-        Assert.Contains("TestResults/lite-runner-*.log", runner, StringComparison.Ordinal);
-        Assert.Contains("lite-runner-log-${{ matrix.shard }}", runner, StringComparison.Ordinal);
-    }
-
     /// <summary>
-    /// #5587, #5616, nightly.yml: the nightly's shard steps call the same scripts as build.yml's, so the hang report
+    /// #5587, #5616, nightly.yml: the nightly's shard steps call the shard scripts, so the hang report
     /// (<c>-longRunning</c> and the teed runner log) is the script's, and the step must pass the script's shard
     /// arguments and no event: the nightly runs every class, so it must not pass <c>-EventName</c>.
     /// </summary>
@@ -121,10 +79,10 @@ public sealed class CiShardHangReportTests
     }
 
     /// <summary>
-    /// #5587, #5616, nightly.yml: step timeouts from numbers. Lite: build.yml's four legs ran the step for 5.6 to 19.9
+    /// #5587, #5616, nightly.yml: step timeouts from numbers. Lite: the four PR legs (build.yml, since removed) ran the step for 5.6 to 19.9
     /// minutes over the last 7 successful dev pushes; the nightly's hash cut is less even, so the step gets twice that
-    /// (40) in a job of 50, and 19.9 is 50% of it, under the 70% bar. Darling: build.yml's six legs ran 5.5 to 10.9
-    /// minutes, the step gets build.yml's 22 in a job of 40, and 10.9 is 50% of it.
+    /// (40) in a job of 50, and 19.9 is 50% of it, under the 70% bar. Darling: the six PR legs ran 5.5 to 10.9
+    /// minutes, the step gets 22 in a job of 40, and 10.9 is 50% of it.
     /// </summary>
     [Fact]
     public void NightlyStepTimeouts_FollowTheMeasuredNumbers()
@@ -166,16 +124,6 @@ public sealed class CiShardHangReportTests
         Assert.DoesNotContain("-runner-", ReadStep("Upload Lite test timings", "nightly.yml"), StringComparison.Ordinal);
     }
 
-    [Fact]
-    public void RunnerLogs_AreTheirOwnArtifacts_NotPartOfTheTimingArtifacts()
-    {
-        // The shadow check and the Lite shard packer read every file of the *-tests-timing-* artifacts.
-        foreach (var name in new[] { "Upload Darling test timings", "Upload Lite test timings" })
-        {
-            Assert.DoesNotContain("-runner-", ReadStep(name), StringComparison.Ordinal);
-        }
-    }
-
     /// <summary>
     /// #5587: the shard-3 classes were read for a wait with no end. The one found is the cancelled refresh in
     /// <c>RollupBackfillLiveTests</c>: it waited on a task whose only way out was a cancel to a backend that was blocked
@@ -208,7 +156,7 @@ public sealed class CiShardHangReportTests
         return File.ReadAllText(path).Replace("\r\n", "\n");
     }
 
-    private static string ReadStep(string stepName, string workflow = "build.yml")
+    private static string ReadStep(string stepName, string workflow = "nightly.yml")
     {
         var path = Path.Combine(AppContext.BaseDirectory, "Fixtures", workflow);
         Assert.True(File.Exists(path), $"{workflow} was not copied beside the test binary (Darling.Tests.csproj links it into Fixtures\\).");

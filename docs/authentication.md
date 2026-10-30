@@ -1,23 +1,29 @@
 # Authentication
 
+Audience: operators.
+
 Part of the [Performance Monitor documentation](../README.md#documentation).
 
-`PerformanceMonitor.Common.AuthenticationTypes` supports seven authentication types, defined once there and named the same way in every edition. **Not every edition connects with all seven**, so the table says which does what: Lite offers all of them, while the Darling service builds Windows-integrated or SQL-login connections only and acquires no tokens at all, so its viewer rejects every Azure mode at the credential step.
+`PerformanceMonitor.Common.AuthenticationTypes` supports seven authentication types, defined once there and named the same way in every edition. **Not every edition connects with all seven**, so the table says which does what: Lite offers all of them. The Darling service and its Viewer connect with four: Windows, SQL Server, Service Principal and Managed Identity (`auth` set to `integrated`, `sql`, `serviceprincipal` or `managedidentity` in `darling.json`). The service runs headless, so it refuses the other three, which need a person at the machine or their own sign-in on it.
 
 | Type | Editions | Interactive? | Credential stored? | Where |
 |---|---|---|---|---|
 | Windows | Lite, Darling | No | None | — |
-| SQL Server | Lite, Darling | No | Password | Windows Credential Manager |
+| SQL Server | Lite, Darling | No | Password | Lite: Windows Credential Manager. Darling: see below |
 | Entra ID (MFA) | Lite | Yes, once per session | None | — |
-| Service Principal | Lite | No | Client secret | Windows Credential Manager |
-| Managed Identity | Lite | No | None | — |
+| Service Principal | Lite, Darling | No | Client secret | Lite: Windows Credential Manager. Darling: see below |
+| Managed Identity | Lite, Darling | No | None | — |
 | Existing Azure Sign-In | Lite | No | None | — (established outside the app, e.g. `az login`) |
 | Device Code | Lite | Yes, once per session | None | — (entered in a browser, on any device) |
 
+**Where Darling keeps a SQL password or a client secret.** A server in `darling.json` holds it in one of three forms. `encryptedPassword` is a LocalMachine DPAPI blob that `--encrypt-password` produces. `password` holds an `env:NAME` or `file:PATH` reference, or the value itself. A server added in the Darling Viewer keeps its password or secret in the store, sealed to the service's RSA-3072 password key. Only the service can read it, and only for that server's connection settings.
+
 **Managed Identity and Service Principal** are non-interactive Azure AD (Entra ID) authentication modes, added for fleet onboarding of Azure SQL Database / Managed Instance without a per-server interactive MFA prompt (see [#1038](https://github.com/erikdarlingdata/PerformanceMonitor/issues/1038)). Both map directly to `Microsoft.Data.SqlClient`'s native `SqlAuthenticationMethod` (`ActiveDirectoryServicePrincipal` / `ActiveDirectoryManagedIdentity`) — PerformanceMonitor never acquires, caches, or stores a token itself; the official Microsoft driver handles that internally.
 
-- **Managed Identity** requires the machine running the app/service to itself be an Azure resource (VM, App Service, etc.) with a system- or user-assigned managed identity. That identity is then provisioned as a user directly on each target database (see [Permissions](permissions.md#permissions) below). Nothing is stored locally.
-- **Service Principal** uses an Entra app registration's client id + secret. The client id is non-secret and stored in config; the secret is stored only in Windows Credential Manager, same as a SQL auth password.
+- **Managed Identity** requires the machine running the app/service to itself be an Azure resource (VM, App Service, etc.) with a system- or user-assigned managed identity. That identity is then provisioned as a user directly on each target database (see the [Azure SQL Database section of Permissions](permissions.md#azure-sql-database-lite--darling)). Nothing is stored locally.
+- **Service Principal** uses an Entra app registration's client id + secret. The client id is non-secret and stored in config. In Lite the secret is stored only in Windows Credential Manager, same as a SQL auth password. Darling keeps it the way it keeps a SQL password (above).
+
+In `darling.json`, a Service Principal server sets `"auth": "serviceprincipal"`, the application (client) id in `username`, and the client secret in `encryptedPassword`. That is the same pair of fields as a SQL login. A Managed Identity server sets `"auth": "managedidentity"`. A system-assigned identity needs no other field. A user-assigned identity puts its client id in `username`. The Darling Viewer writes the same values, and the other server fields are in [Configure darling.json](darling/install.md#configure-darlingjson).
 
 ### Existing Azure Sign-In (Lite only, `ActiveDirectoryDefault`)
 
@@ -29,7 +35,7 @@ It signs in as **whichever Azure identity is already established on the machine*
 - **The order is the driver's, not yours.** There is no seam to narrow the list: the driver constructs the credential chain itself and this app cannot pass options into it. On a machine with several Azure identities set up, this connects as whichever comes first, which is not necessarily the one you signed into Windows with. When a specific identity matters, use **Service Principal**, which names it.
 - **The log says which one won.** Lite records the credential type `DefaultAzureCredential` actually selected — `AzureCliCredential`, `EnvironmentCredential`, `ManagedIdentityCredential` and so on — so "whichever comes first" is answerable after the fact rather than only a caveat. Expect exactly one such line per run of the app: `Azure.Identity` reports the selection once per credential instance and the driver caches that instance for the process, so later connections have nothing new to report and say so at `Debug`. The type name is the only thing recorded; no tenant id, account or scope.
 
-Darling does not offer this mode: the Darling service's connect path builds Windows-integrated or SQL-login connections only and acquires no tokens at all, so its viewer rejects every Azure mode at the credential step.
+Darling does not offer this mode. The Darling service connects with Windows, SQL Server, Service Principal and Managed Identity only, so its Viewer refuses this mode when you save a server. To connect to Azure SQL as a named Azure identity from Darling, use Service Principal or Managed Identity.
 
 **Not yet confirmed against a live Entra tenant.** The mechanism above is read off the pinned `Microsoft.Data.SqlClient` 7.0.2 and `Azure.Identity` 1.18.0 sources, and the behaviour is pinned by tests; nobody here has a tenant to run it against. Treat it as worth trying rather than as known to work, and please report what happens.
 
@@ -51,7 +57,7 @@ Two things worth knowing before you pick it:
 - **Every code window names the server its code is for.** That name comes from the token acquisition that produced the code, not from whichever sign-in happened to be in progress, so a window cannot name one server beside another's code. Background reads raise named prompts too; what a background prompt cannot do is hand a waiting dialog back when you close it, because nothing is waiting behind it.
 - **Only one device-code sign-in can be in flight at a time**, and a second is refused with a message rather than queued. Two sign-ins to the same server describe identically, and there is one slot for the sign-in a window's Cancel belongs to, so the first one's code could be displayed on the second one's window. Finish or close the one on screen and try again.
 
-Darling does not offer this mode, for two reasons rather than one: the Darling service's connect path builds Windows-integrated or SQL-login connections only and acquires no tokens at all, and the service is a headless collector with nobody in front of it to read a code.
+Darling does not offer this mode. The service is a headless collector with nobody to read a code, so its Viewer refuses this mode when you save a server. Darling connects with Windows, SQL Server, Service Principal and Managed Identity only.
 
 **Not yet confirmed against a live Entra tenant.** The mechanism above is read off the pinned `Microsoft.Data.SqlClient` 7.0.2 and `Microsoft.Identity.Client` 4.84.2 sources, and the behaviour is pinned by tests; nobody here has a tenant to run it against. Treat it as worth trying rather than as known to work, and please report what happens.
 

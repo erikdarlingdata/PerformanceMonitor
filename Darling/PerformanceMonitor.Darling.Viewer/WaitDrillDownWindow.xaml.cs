@@ -204,7 +204,7 @@ public partial class WaitDrillDownWindow : Window
         });
     }
 
-    private void SetWarningBanner(WaitClassification classification)
+    internal void SetWarningBanner(WaitClassification classification)
     {
         if (classification.Category == WaitCategory.Uncapturable)
         {
@@ -228,9 +228,10 @@ public partial class WaitDrillDownWindow : Window
     private void ShowInfoBanner()
     {
         WarningBanner.Visibility = Visibility.Visible;
-        WarningBanner.Background = new SolidColorBrush(Color.FromArgb(0x3D, 0x00, 0x33, 0x66));
-        WarningBanner.BorderBrush = new SolidColorBrush(Color.FromArgb(0x66, 0x00, 0x55, 0x99));
-        WarningText.Foreground = new SolidColorBrush(Color.FromRgb(0x66, 0xBB, 0xFF));
+        // #6773: theme brushes by reference (not new SolidColorBrush), so the light themes get a readable
+        // blue and a theme switch while the window is open still applies.
+        WarningBanner.SetResourceReference(Border.BorderBrushProperty, "InfoBrush");
+        WarningText.SetResourceReference(TextBlock.ForegroundProperty, "InfoTextBrush");
     }
 
     private static SnapshotInfo ToSnapshotInfo(ViewerQuerySnapshotRow row) => new()

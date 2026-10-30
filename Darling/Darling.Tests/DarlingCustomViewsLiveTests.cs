@@ -97,7 +97,7 @@ public sealed class DarlingCustomViewsLiveTests
         }.ConnectionString;
 
         await using var dataSource = NpgsqlDataSource.Create(dataSourceConnectionString);
-        var store = new CustomViewStore(dataSource);
+        var store = new CustomViewStore(dataSource, StorageCommandDeadlines.McpReadSeconds);
 
         var name1 = "cv_live_" + Guid.NewGuid().ToString("N");
         var name2 = "cv_live_" + Guid.NewGuid().ToString("N");
@@ -204,7 +204,7 @@ public sealed class DarlingCustomViewsLiveTests
         }.ConnectionString;
 
         await using var dataSource = NpgsqlDataSource.Create(dataSourceConnectionString);
-        var store = new CustomViewStore(dataSource);
+        var store = new CustomViewStore(dataSource, StorageCommandDeadlines.McpReadSeconds);
 
         var name = "cv_live_notebook_" + Guid.NewGuid().ToString("N");
         var bodySucceeded = false;

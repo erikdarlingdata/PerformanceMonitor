@@ -45,6 +45,7 @@ public sealed class WebRouteStatementCensusTests
         "DarlingServerDatabasesEndpoint.cs",
         "DarlingTriageEndpoint.cs",
         "DarlingWebEndpoints.cs",
+        "FrontDoor/DarlingFrontDoorWebProxy.cs",
         "Mcp/DarlingMcpHostService.cs",
     };
 
@@ -52,6 +53,7 @@ public sealed class WebRouteStatementCensusTests
     private static readonly Dictionary<string, string> Named = new(StringComparer.Ordinal)
     {
         ["\"/api/ping\""] = "liveness, no data",
+        ["\"/api/{**rest}\""] = "the front door's one catch-all (#6840), which exists only on a front door and maps no dashboard route. It answers four routes itself, none with statement text: /api/ping (liveness), /api/session (the seat's capabilities plus front_door and can_own), /api/front-door (store names, health and server counts) and /api/front-door/locate (a store name, a server name, or an ambiguity message). Every other /api path is sent to one store's dashboard, whose own routes ran the sweep before answering, and the proxy copies that answer through unchanged",
         ["\"/api/webhook-signing\""] = "signing key presence and dates from the worker's in-process snapshot, no store read (#5998)",
         ["\"/api/session\""] = "the seat's capabilities",
         ["\"/api/agent-setup/access\""] = "two booleans from the store login's privilege checks, no text (#6264)",
@@ -72,6 +74,13 @@ public sealed class WebRouteStatementCensusTests
         ["\"/api/admin/servers/{id:int}\""] = "server registry",
         ["\"/api/collectors/run\""] = "queues one command through a store function; no statement read (#5941)",
         ["\"/api/collectors/run/{commandId:long}\""] = "one command row by id (#5941)",
+        ["\"/api/active-queries/live/available\""] = "one catalog lookup of the queue function and its privilege (#6386)",
+        ["\"/api/active-queries/live\""] = "queues one command through a store function; no statement read (#6386)",
+        ["\"/api/analyze-now/available\""] = "one catalog lookup of the queue function and its privilege (#6389)",
+        ["\"/api/analyze-now\""] = "queues one command through a store function; no statement read (#6389)",
+        ["\"/api/analyze-now/{commandId:long}\""] = "one command row by id (#6389)",
+        ["\"/api/analysis/ask-ai-prompt\""] = "one server-clock row by server id (#6389)",
+        ["\"/api/active-queries/live/{commandId:long}\""] = "one command row by id (#6386)",
         ["DarlingAdminServersReader.Route"] = "server registry",
         ["\"/api/alert-history/dismiss\""] = "a dismissal receipt",
         ["\"/api/known-patterns\""] = "writes one known-pattern entry; the answer is a status word and the id, or the refusal reason, never collected text (#6334)",
@@ -91,8 +100,8 @@ public sealed class WebRouteStatementCensusTests
     {
         (new Regex(@"^UnsupportedMediaTypeResult\s*\(\s*\)$", RegexOptions.Compiled), "a fixed 415 sentence"),
         (new Regex(@"^ErrorResult\s*\(", RegexOptions.Compiled), "the route's own request-validation message"),
-        (new Regex(@"^AgentChangeRefusedResult\s*\(\s*managedStore\s*\)$", RegexOptions.Compiled), "#5917: a fixed 403 sentence (the store refused an undo or the switch for privilege)"),
-        (new Regex(@"^NoteDecisionRefusedResult\s*\(\s*managedStore\s*\)$", RegexOptions.Compiled), "#5903: a fixed 403 sentence (the store refused a note decision for privilege)"),
+        (new Regex(@"^AgentChangeRefusedResult\s*\(\s*managedStore\s*(?:,\s*adminWritesOff\s*)?\)$", RegexOptions.Compiled), "#5917: a fixed 403 sentence (the store refused an undo or the switch for privilege)"),
+        (new Regex(@"^NoteDecisionRefusedResult\s*\(\s*managedStore\s*(?:,\s*adminWritesOff\s*)?\)$", RegexOptions.Compiled), "#5903: a fixed 403 sentence (the store refused a note decision for privilege)"),
         (new Regex(@"^SignInRequiredResult\s*\(\s*\)$", RegexOptions.Compiled), "#6265: a fixed 403 sentence (a person-made investigation change needs a signed-in admin)"),
         (new Regex(@"^PersonActorRefusedResult\s*\(\s*\)$", RegexOptions.Compiled), "#6265: a fixed 400 sentence (the signed-in name cannot be recorded; it never carries the name)"),
         (new Regex(@"^(?:Alert)?NotFoundResult\s*\(\s*\)$", RegexOptions.Compiled), "a fixed 404 sentence"),

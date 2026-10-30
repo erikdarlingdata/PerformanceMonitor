@@ -62,7 +62,7 @@ public sealed class McpLongQueryTools
             {
                 /* #5244 round 2 (L2): not_collected and precondition echo database_name like every other shape. */
                 var unmet = McpHelpers.WithDatabase(
-                    await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "long_query_completions"), database)
+                    await McpEngineCapability.NotCollectedStatusAsync(dataService, serverManager, resolved.ServerId, resolved.DisplayName, "long_query_completions"), database)
                     /* #2546: this collector is opt-in, so the fall-through below already sends the reader to
                        the schedule, which is the wrong place when the collector IS enabled and its session
                        is missing. The precondition answer names that state instead of quietly blaming a knob

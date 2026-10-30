@@ -625,6 +625,16 @@ public partial class RemoteCollectorService
                 continue;
             }
 
+            /* A server whose host this user has not confirmed is not connected to at all: its status and the Edit dialog
+               say why. Every connection string is refused for it anyway; skipping here keeps the cycle from logging one
+               refusal per collector. */
+            if (_serverManager.HostChange(server) != null)
+            {
+                skippedOffline++;
+                AppLogger.Debug("Scheduler", $"Skipping server '{server.DisplayName}': its host is not confirmed");
+                continue;
+            }
+
             NoteServerOnline(server);
             onlineServers.Add(server);
         }
@@ -806,6 +816,7 @@ public partial class RemoteCollectorService
                 IsAzureSqlDb = engineEdition == 5,
                 IsAzureManagedInstance = engineEdition == 8,
                 IsAwsRds = serverStatus.IsAwsRds,
+                IsAwsRdsWebOrExpress = serverStatus.IsAwsRdsWebOrExpress,
                 SqlMajorVersion = serverStatus.SqlMajorVersion,
                 HasMsdbAccess = serverStatus.HasMsdbAccess,
             };
@@ -1020,7 +1031,17 @@ public partial class RemoteCollectorService
                     ex.Number, _serverManager.GetConnectionStatus(server.Id).SqlEngineEdition == 5, ex.Message);
             /* #4964: a long-query trace failure that an earlier run already logged is logged again at Debug (LogRunError and
                LogRunWarning); every other run's lines are at the levels below. The classification does not depend on it. */
-            LogRunError(telemetry, $"  [{server.DisplayName}] {collectorName} SQL Error #{ex.Number}: {ex.Message}");
+            /* #6859: classify first, so a denial the arm below records as PERMISSIONS writes only its Warning line. The
+               Error line used to be written before the classification, and a login refused one collector logged
+               an Error and a Warning on each run the backoff (#6186) still let through, about one pair an hour at its steady
+               state, for a posture the customer chose (#1823), where Darling logs one Warning. A run that stays ERROR (transient, 207, unclassified) keeps its Error line. */
+            var permissionDenied = !RetryHelper.IsTransient(ex)
+                && ex.Number != 207
+                && SqlServerPermissionErrors.IsPermissionDenied(ex.Number);
+            if (!permissionDenied)
+            {
+                LogRunError(telemetry, $"  [{server.DisplayName}] {collectorName} SQL Error #{ex.Number}: {ex.Message}");
+            }
 
             if (RetryHelper.IsTransient(ex))
             {
@@ -1030,7 +1051,7 @@ public partial class RemoteCollectorService
             {
                 LogRunWarning(telemetry, $"Collector '{collectorName}' column not found for server '{server.DisplayName}' (possible version incompatibility): {ex.Message}");
             }
-            else if (SqlServerPermissionErrors.IsPermissionDenied(ex.Number))
+            else if (permissionDenied)
             {
                 /* 8189 is sys.traces' own denial (ALTER TRACE missing) — a legitimate least-privilege
                    choice (#1823), so default_trace_events degrades as PERMISSIONS like every other
@@ -1039,7 +1060,8 @@ public partial class RemoteCollectorService
                    transcription — it IS Darling's classifier, and 262 (the tempdb denial behind the
                    collector's old Azure SQL DB gate) reaches both SKUs at once. */
                 status = "PERMISSIONS";
-                LogRunWarning(telemetry, $"Collector '{collectorName}' permission denied for server '{server.DisplayName}': {ex.Message}");
+                /* #6859: errorMessage carries the error number and the Azure hint, as Darling's line does, because this Warning is now the only log line for a denied run. */
+                LogRunWarning(telemetry, $"Collector '{collectorName}' permission denied for server '{server.DisplayName}': {errorMessage}");
             }
             else
             {
@@ -1697,7 +1719,7 @@ public partial class RemoteCollectorService
 
             /* #6254: the Query Store replica connection is this same open with the replica host and read-only intent. */
             var connectionString = replica
-                ? ServerConnection.ResolveQueryStoreReplicaConnectionString(server, _serverManager.CredentialResolver.CredentialService, _serverManager.ProfileLookup)
+                ? _serverManager.CredentialResolver.GetQueryStoreReplicaConnectionString(server)
                     ?? throw new InvalidOperationException("No Query Store replica is set for this server.")
                 : _serverManager.CredentialResolver.GetConnectionString(server);
 

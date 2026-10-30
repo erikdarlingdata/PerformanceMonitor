@@ -49,6 +49,14 @@ public sealed class AgentActionPolicyTests
     [InlineData("mute_analysis_finding")]
     [InlineData("unmute_analysis_finding")]
     [InlineData("undo_plan_change")]
+    [InlineData("set_database_state_expected")]
+    [InlineData("write_investigation_note")]
+    [InlineData("approve_investigation_note")]
+    [InlineData("reject_investigation_note")]
+    [InlineData("close_investigation_request")]
+    [InlineData("start_practice_request")]
+    [InlineData("save_environment_profile")]
+    [InlineData("record_investigation_feedback")]
     [InlineData("delete_notification_route")]
     [InlineData("set_notification_route_enabled")]
     [InlineData("set_notification_route_fallback")]
@@ -210,7 +218,7 @@ public sealed class AgentActionGateLiveTests
 
     private AgentActionHooks Hooks(int? resolved = 2, AgentActionRefusal? kind = null) => new()
     {
-        LoadLevels = (_, _, _) => Task.FromResult<Func<string, int, int?>>((_, _) => resolved),
+        LoadLevels = (_, _, _) => Task.FromResult<Func<string, int, PerformanceMonitor.Notifications.AlertSeverityLevel?, int?>>((_, _, _) => resolved),
         KindRule = kind is null ? null : (_, _, _, _) => Task.FromResult<AgentActionRefusal?>(kind),
         ReadBefore = (_, _, _) => Task.FromResult<string?>("{\"reason\":\"old\"}"),
         Write = (_, _, _) => { _writes++; return Task.FromResult<string?>("{\"reason\":\"new\"}"); },
@@ -289,8 +297,8 @@ public sealed class AgentActionGateLiveTests
 
             /* The next hour journals the refusal again, once. */
             _now = T0.AddMinutes(61);
-            await store.RecordAgentActionRefusalAsync(request, "agent-a", "create_mute_rule", AgentActionCodes.Invalid, ct);
-            await store.RecordAgentActionRefusalAsync(request, "agent-a", "create_mute_rule", AgentActionCodes.Invalid, ct);
+            await store.RecordAgentActionRefusalAsync(request, "agent-a", "create_mute_rule", AgentActionCodes.Invalid, null, ct);
+            await store.RecordAgentActionRefusalAsync(request, "agent-a", "create_mute_rule", AgentActionCodes.Invalid, null, ct);
             Assert.Equal("1", await ScalarAsync(connection,
                 $"SELECT count(*) FROM config.investigation_journal WHERE event = 'refused' AND reason = '{AgentActionCodes.Invalid}'", ct));
         });
@@ -355,7 +363,7 @@ public sealed class AgentActionGateLiveTests
                 LoadLevels = (_, _, _) =>
                 {
                     var level = ++calls == 1 ? 2 : 1;
-                    return Task.FromResult<Func<string, int, int?>>((_, _) => level);
+                    return Task.FromResult<Func<string, int, PerformanceMonitor.Notifications.AlertSeverityLevel?, int?>>((_, _, _) => level);
                 },
                 ReadBefore = (_, _, _) => Task.FromResult<string?>(null),
                 Write = (_, _, _) => { _writes++; return Task.FromResult<string?>(null); },
@@ -379,7 +387,7 @@ public sealed class AgentActionGateLiveTests
             await ExecAsync(connection, "UPDATE config.config_service SET agent_actions_enabled = true", ct);
             var hooks = new AgentActionHooks
             {
-                LoadLevels = (_, _, _) => Task.FromResult<Func<string, int, int?>>((_, _) => 2),
+                LoadLevels = (_, _, _) => Task.FromResult<Func<string, int, PerformanceMonitor.Notifications.AlertSeverityLevel?, int?>>((_, _, _) => 2),
                 /* Runs in the gate's transaction after the switch check passed and before action_called commits: a person turns the switch
                    off now, so only the write's re-check can see it. */
                 ReadBefore = async (_, _, token) =>
@@ -478,7 +486,7 @@ public sealed class AgentActionGateLiveTests
                 LoadLevels = (_, _, _) =>
                 {
                     loads++;
-                    return Task.FromResult<Func<string, int, int?>>((metric, _) => { seen.Add(metric); return 2; });
+                    return Task.FromResult<Func<string, int, PerformanceMonitor.Notifications.AlertSeverityLevel?, int?>>((metric, _, _) => { seen.Add(metric); return 2; });
                 },
                 ReadBefore = (_, _, _) => Task.FromResult<string?>(null),
                 Write = (_, _, _) => { _writes++; return Task.FromResult<string?>(null); },
@@ -545,7 +553,7 @@ CREATE TRIGGER test_fail_every_done BEFORE INSERT ON config.investigation_journa
     private AgentActionHooks WriteHooks(ServerChangeSignal? signal, bool mark, Func<CancellationToken, Task>? then = null) => new()
     {
         ServerChange = signal,
-        LoadLevels = (_, _, _) => Task.FromResult<Func<string, int, int?>>((_, _) => 2),
+        LoadLevels = (_, _, _) => Task.FromResult<Func<string, int, PerformanceMonitor.Notifications.AlertSeverityLevel?, int?>>((_, _, _) => 2),
         ReadBefore = (_, _, _) => Task.FromResult<string?>("{\"state\":\"old\"}"),
         Write = async (_, _, token) =>
         {

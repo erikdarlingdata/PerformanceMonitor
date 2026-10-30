@@ -14,6 +14,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Darling.Service;
 using Xunit;
+using PerformanceMonitor.Darling.Storage;
 
 namespace Darling.Tests;
 
@@ -62,7 +63,7 @@ public sealed class ComposeQueryStoreStampGuardLiveTests
             /* The runner's own resolution: eligible, with the rollup answering up to the first unbuilt hour. */
             var end = DateTime.UtcNow;
             var start = end.AddHours(-24);
-            var resolution = await DarlingWebEndpoints.ResolveQueryStoreWideEligibleAsync(source, null, start, end, null, ct);
+            var resolution = await ComposePanelRunner.ResolveQueryStoreWideEligibleAsync(source, null, start, end, null, ct);
             Assert.True(resolution.Eligible, "the seeded store must route the panel to the wide table, or this test proves nothing");
             Assert.Equal(hourNow.AddHours(-2), resolution.StampThrough);
 
@@ -72,7 +73,7 @@ public sealed class ComposeQueryStoreStampGuardLiveTests
 
             /* Before the first build: no hour in the ledger, StampThrough is null, the same panel is refused. */
             await ComposeStampLiveSupport.ExecAsync(connection, "DELETE FROM collect.query_store_compose_stamp_hours", ct);
-            var unbuilt = await DarlingWebEndpoints.ResolveQueryStoreWideEligibleAsync(source, null, start, end, null, ct);
+            var unbuilt = await ComposePanelRunner.ResolveQueryStoreWideEligibleAsync(source, null, start, end, null, ct);
             Assert.True(unbuilt.Eligible);
             Assert.Null(unbuilt.StampThrough);
 

@@ -758,6 +758,8 @@ FROM compared
 CROSS JOIN svr
 WHERE regression_factor >= 2
 AND   latest_total_cpu_us >= 10000000
+-- #6548: SQL Server own housekeeping statements are not application code; left out before the LIMIT, as the PLAN_REGRESSION fact does.
+AND   NOT regexp_matches(lower(COALESCE(query_text, '')), '" + PerformanceMonitor.Common.InternalStatements.LowerTextPattern + @"')
 ORDER BY regression_factor DESC
 LIMIT 5";
 

@@ -116,6 +116,48 @@ public sealed class DiagnosticsBundleSecretTests
         Assert.False(DiagnosticsBundle.BuildConfigShape(new DarlingConfig { QueryStatsDeferredPlanFetch = false })["query_stats_deferred_plan_fetch"]!.GetValue<bool>());
     }
 
+    /// <summary>A loopback-only install keeps its token in the network block, so the block alone does not make the listener
+    /// reachable from the network: the bundle reports the bind the host resolves, not whether the block is there.</summary>
+    [Fact]
+    public void ConfigShape_LoopbackOnlyWithATokenInTheNetworkBlock_ReportsNotExposed()
+    {
+        var config = new DarlingConfig
+        {
+            Postgres = new PostgresConfig { Managed = true },
+            Mcp = new McpConfig { Enabled = true, Network = new McpNetworkConfig { Token = "placeholder-token-value-1234" } },
+            Web = new WebConfig { Enabled = true, Network = new WebNetworkConfig { Token = "placeholder-token-value-1234" } },
+        };
+
+        var shape = DiagnosticsBundle.BuildConfigShape(config);
+
+        Assert.False(shape["mcp_network_exposed"]!.GetValue<bool>());
+        Assert.False(shape["web_network_exposed"]!.GetValue<bool>());
+    }
+
+    [Fact]
+    public void ConfigShape_ARealNetworkListen_ReportsExposed()
+    {
+        var config = new DarlingConfig
+        {
+            Postgres = new PostgresConfig { Managed = true },
+            Mcp = new McpConfig
+            {
+                Enabled = true,
+                Network = new McpNetworkConfig { Listen = "192.168.1.205", AllowFrom = "192.168.1.0/24", Token = "placeholder-token-value-1234" },
+            },
+            Web = new WebConfig
+            {
+                Enabled = true,
+                Network = new WebNetworkConfig { Listen = "192.168.1.205", AllowFrom = "192.168.1.0/24", Token = "placeholder-token-value-1234" },
+            },
+        };
+
+        var shape = DiagnosticsBundle.BuildConfigShape(config);
+
+        Assert.True(shape["mcp_network_exposed"]!.GetValue<bool>());
+        Assert.True(shape["web_network_exposed"]!.GetValue<bool>());
+    }
+
     [Fact]
     public void ConfigShape_CarriesNoStringFromTheConfig()
     {

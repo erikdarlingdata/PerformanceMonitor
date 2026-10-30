@@ -19,7 +19,7 @@ public static class ServerConnectionRule
     /// web and MCP edit, the viewer and the store's own trigger and edit function (<c>provision-roles.sql</c>,
     /// <c>DarlingManagedRoles</c>, which keep the text literal) all answer with exactly this text.</summary>
     public const string PasswordNeededOnMoveText =
-        "Changing how this server is reached needs its password again: it is stored encrypted and this surface cannot read it back.";
+        "Changing the host, port or any other connection setting of this server needs its password sent with the change, because a saved password is only ever sent to the server it was saved for. Send the password together with the new settings.";
 
     /// <summary>The sentence a refused password gives when it is a reference (env: or file:). The same text in the store's
     /// trigger and edit function.</summary>

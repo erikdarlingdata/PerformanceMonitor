@@ -424,7 +424,11 @@ public class AlertContextBuildersTests
         Assert.Equal(AlertContextBuilders.ActiveMaintenanceMaxLines + 2, detail.Split('\n').Length);
         Assert.Equal(AlertContextBuilders.ActiveMaintenanceMaxLines,
             System.Text.RegularExpressions.Regex.Matches(detail, "Active maintenance: BACKUP DATABASE").Count);
-        Assert.EndsWith("Active maintenance: 2 more maintenance session(s) not shown", detail, StringComparison.Ordinal);
+        Assert.EndsWith("Active maintenance: 2 more maintenance sessions not shown", detail, StringComparison.Ordinal);
+        /* #6703: one session past the cap reads in the singular. */
+        var oneOver = AlertContextBuilders.BuildActiveMaintenanceDetail(
+            sessions.GetRange(0, AlertContextBuilders.ActiveMaintenanceMaxLines + 1));
+        Assert.EndsWith("Active maintenance: 1 more maintenance session not shown", oneOver, StringComparison.Ordinal);
         /* The leader (longest elapsed) is named first — the likeliest pin leads the reader's eye. */
         Assert.Contains("10m 0s elapsed", detail.Split('\n')[1], StringComparison.Ordinal);
     }

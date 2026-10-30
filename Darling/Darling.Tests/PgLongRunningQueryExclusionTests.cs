@@ -328,7 +328,7 @@ public class PgLongRunningQueryExclusionTests
     [Fact]
     public void TheReadme_SaysThePostgresTwinConsultsTheKnob()
     {
-        var readme = RepoFile.ReadRepoFile("Darling", "README.md");
+        var readme = RepoFile.ReadRepoFile("docs", "darling", "alerts-and-notifications.md"); // #6416: moved from Darling/README.md
 
         Assert.DoesNotContain("The PostgreSQL twin does not consult the knob", readme, StringComparison.Ordinal);
         Assert.Contains("The PostgreSQL twin consults the same knob through the same shared predicate builder (#3743)", readme, StringComparison.Ordinal);

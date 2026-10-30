@@ -540,6 +540,8 @@ public sealed class NotificationRoutingTests
             /* #5493: fired through the constants (DecideStateAlert / FireAsync with CaptureDownMetric and
                AgentDownMetric), so the FireAsync literal scan below cannot see them. */
             DarlingSelfAlertEvaluator.CaptureDownMetric, DarlingSelfAlertEvaluator.AgentDownMetric,
+            /* #6874: the Agent Alert Gaps state alert, fired through DecideStateAlert with the constant. */
+            DarlingSelfAlertEvaluator.AgentAlertSetupMetric,
             /* #3816: the policy-job self-heal's two new per-family names and its total_failures arm. Listed
                here rather than found by the FireAsync literal scan below because all three fire through a
                band record's field (band.Metric) rather than a quoted string at the call site — the scan
@@ -558,6 +560,12 @@ public sealed class NotificationRoutingTests
             RunnableQueueEvaluator.MetricName,
             /* #5640: the Client Timeouts alert fires from AlertEngine.CheckAttentionAsync through AttentionEvaluator.MetricName. */
             AttentionEvaluator.MetricName,
+            /* #6873: the three database-protection overdue alerts fire from ApplyOverdueMetricAsync through its metric
+               parameter (FireAsync(key, serverName, metric, ...)), a variable the FireAsync literal scan below cannot see. */
+            DarlingSelfAlertEvaluator.BackupOverdueMetric, DarlingSelfAlertEvaluator.LogBackupOverdueMetric,
+            DarlingSelfAlertEvaluator.CheckDbOverdueMetric,
+            /* #6875: the Identity Capacity alert fires through DarlingSelfAlertEvaluator.IdentityCapacityMetric, a constant the FireAsync literal scan cannot see. */
+            DarlingSelfAlertEvaluator.IdentityCapacityMetric,
         };
 
         /* The literals: the third argument of every `new AlertOutcome(` in the shared engine and the worker

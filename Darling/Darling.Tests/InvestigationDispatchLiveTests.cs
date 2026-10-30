@@ -242,7 +242,7 @@ FROM config.investigation_requests AS r", ct));
         config.NotificationRoutes = new[] { AgentRoute(1, AlertFamily.Performance), AgentRoute(2, AlertFamily.Reports) };
         configure?.Invoke(config, storeString);
         var settings = new DarlingAlertSettings(config);
-        var history = new PgAlertHistoryStore(historySource);
+        var history = new PgAlertHistoryStore(historySource, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds);
         var webhooks = new WebhookAlertService(settings, DarlingAlertDeliverer.Branding, NullLogger<WebhookAlertService>.Instance, history);
         var dispatcher = new InvestigationDispatcher(store, settings, NullLogger.Instance);
 

@@ -3,6 +3,7 @@ using System.Text.Json;
 using ModelContextProtocol.Server;
 using PerformanceMonitorLite.Services;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Collectors;
 
 namespace PerformanceMonitorLite.Mcp;
 
@@ -57,7 +58,7 @@ public sealed class McpConfigHistoryTools
 
             var rows = await dataService.GetServerConfigChangesAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             if (rows.Count == 0)
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "server_config")
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "server_config", awsRdsKind: AwsRdsKind.None)
                     ?? McpHelpers.Status("empty",
                         $"No server configuration changes detected in the last {hours_back}h. Config is captured on connect, so at least two snapshots are needed to detect a change.",
                         (await WindowNoticeAsync(dataService, QueryWindowRelation.ServerConfig, resolved.ServerId, hours_back, windowEnd, "server_config", emptyAnswer: true)).AsHints());
@@ -118,7 +119,7 @@ public sealed class McpConfigHistoryTools
             var rows = await dataService.GetDatabaseConfigChangesAsync(
                 resolved.ServerId, hours_back, databaseNames: database is null ? null : new[] { database }, asOfUtc: windowEnd);
             if (rows.Count == 0)
-                return McpHelpers.WithDatabase(await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "database_config"), database)
+                return McpHelpers.WithDatabase(await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "database_config", awsRdsKind: AwsRdsKind.None), database)
                     ?? McpHelpers.StatusForDatabase("empty",
                         $"No database configuration changes detected in the last {hours_back}h{McpDatabaseSelection.ForChosen(database is null ? null : new[] { database })}. Config is captured on connect, so at least two snapshots are needed to detect a change.",
                         database,
@@ -183,7 +184,7 @@ public sealed class McpConfigHistoryTools
 
             var rows = await dataService.GetTraceFlagChangesAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             if (rows.Count == 0)
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "trace_flags")
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "trace_flags", awsRdsKind: AwsRdsKind.None)
                     ?? McpHelpers.Status("empty",
                         NoTraceFlagChangesMessage(await dataService.GetCollectorRunFactsAsync(resolved.ServerId, "trace_flags", asOfUtc: windowEnd), hours_back),
                         (await WindowNoticeAsync(dataService, QueryWindowRelation.TraceFlags, resolved.ServerId, hours_back, windowEnd, "trace_flags", emptyAnswer: true)).AsHints());

@@ -114,6 +114,47 @@ public sealed class QueryStoreReplicaConnectionTestTests : IDisposable
         Assert.Empty(opened);
     }
 
+    /* ---------------- #6459: a replica set on an Azure SQL Database is said to be unused, at save time ---------------- */
+
+    [Fact]
+    public void AReplicaOnAnAzureSqlDatabase_IsReportedAsIgnored_AndNoOtherTargetIs()
+    {
+        Assert.Equal(Replica, DarlingServerConnector.IgnoredQueryStoreReplica(Server("  " + Replica + " "), true));
+        Assert.Null(DarlingServerConnector.IgnoredQueryStoreReplica(Server(null), true));
+        Assert.Null(DarlingServerConnector.IgnoredQueryStoreReplica(Server("   "), true));
+        Assert.Null(DarlingServerConnector.IgnoredQueryStoreReplica(Server(Replica), false));
+
+        var postgres = Server(Replica);
+        postgres.Engine = "postgres";
+        Assert.Null(DarlingServerConnector.IgnoredQueryStoreReplica(postgres, true));
+    }
+
+    private static ConnectionProbeResult AzureProbe(string? replica) =>
+        new(true, 12, 5, "Azure SQL Database", true, false, false, false, null,
+            QueryStoreReplica: replica, QueryStoreReplicaIgnoredOnAzureSqlDb: replica is not null);
+
+    [Fact]
+    public void TheReplicaNote_OnAnAzureSqlDatabase_SaysTheSettingHasNoEffect_OnEverySurface()
+    {
+        var probe = AzureProbe(Replica);
+
+        var note = DarlingServerConnector.DescribeQueryStoreReplica(probe);
+        Assert.NotNull(note);
+        Assert.Contains(Replica, note, StringComparison.Ordinal);
+        Assert.Contains("Azure SQL Database has no readable-replica Query Store read", note, StringComparison.Ordinal);
+        Assert.Contains("no effect", note, StringComparison.Ordinal);
+        Assert.DoesNotContain("connected", note, StringComparison.Ordinal);
+
+        /* The MCP reply (edit_server's query_store_replica_test, add_servers' detail) carries it too, with no driver text to redact. */
+        Assert.Equal(note, Core.QueryStoreReplicaReply(Server(Replica), probe, null, false));
+
+        /* The --test-connection line is a [WARN], and a server with no replica set says nothing. */
+        var line = DarlingCliCommands.FormatProbeLine("azure", probe);
+        Assert.Contains("  [WARN] azure: Primary: connected. Query Store replica " + Replica + ": not used.", line, StringComparison.Ordinal);
+        Assert.DoesNotContain("replica", DarlingCliCommands.FormatProbeLine("azure", AzureProbe(null)), StringComparison.OrdinalIgnoreCase);
+        Assert.Null(DarlingServerConnector.DescribeQueryStoreReplica(AzureProbe(null)));
+    }
+
     [Fact]
     public async Task ACancelledProbe_Propagates_NotReportedAsAReplicaError()
     {
@@ -191,7 +232,7 @@ public sealed class QueryStoreReplicaConnectionTestTests : IDisposable
 
     private static string AddBody() => JsonSerializer.Serialize(new[]
     {
-        new { host = "sql-test-01", port = 1444, auth = "SQL", username = "monitor", password = Password },
+        new { host = "sql-test-01,1444", auth = "SQL", username = "monitor", password = Password },
     });
 
     private static JsonNode AddedResult(string answer) => JsonNode.Parse(answer)!["results"]![0]!;

@@ -124,6 +124,27 @@ public static class InvestigationReportFields
     public static string BasesText { get; } = string.Join(" or ", Bases);
 
     /// <summary>
+    /// Parses the <c>family_of</c> argument: null or blank is none, and a UUID gives <paramref name="familyOf"/>. Anything else
+    /// gives one sentence (without the field name). Whether the id names a request on the store is the caller's check, after
+    /// this one. Darling and Lite both call this, so the refusal is one sentence in one place.
+    /// </summary>
+    public static string? ValidateFamilyOf(string? familyOfText, out Guid? familyOf)
+    {
+        familyOf = null;
+        if (string.IsNullOrWhiteSpace(familyOfText))
+            return null;
+        if (Guid.TryParse(familyOfText, out var parsed))
+        {
+            familyOf = parsed;
+            return null;
+        }
+
+        /* An agent that passes the short form of a request id (its first 8 hex digits) is told the full one is needed,
+           rather than only that the value is not an id. */
+        return "not a request id. Give the full request_id, a UUID, not a short form such as its first 8 characters.";
+    }
+
+    /// <summary>
     /// Parses the <c>queries_run</c> argument: null, blank, <c>[]</c> or <c>null</c> is none. A JSON array of strings gives
     /// <paramref name="queriesRunJson"/> normalized; anything else gives one sentence (without the field name). The caps
     /// are <see cref="CapProblems"/>'s, never a clamp.

@@ -44,7 +44,7 @@ public sealed class AttentionPlainTableTests
         /* Every opt-out is a table that is NOT in the hypertable grid. The list is exact, so the exception cannot spread
            silently: a second entry reddens here, and its author has to argue the grid decision again. */
         var optedOut = CollectorCatalog.All.Where(c => c.StaysPlainTable).Select(c => c.TargetTable).ToArray();
-        Assert.Equal(new[] { "attention_events", "query_store_forced_plans" }, optedOut);
+        Assert.Equal(new[] { "attention_events", "query_store_forced_plans", "query_store_hints", "database_protection", "agent_alerts", "identity_capacity" }, optedOut);
 
         Assert.DoesNotContain(TimescaleSupport.HypertableTables, t => t.StaysPlainTable);
         Assert.DoesNotContain(TimescaleSupport.HypertableTables, t => t.TargetTable == "attention_events");
@@ -131,8 +131,8 @@ public sealed class AttentionPlainTableTests
                 "SELECT data_type || ':' || is_nullable || ':' || coalesce(column_default, '') FROM information_schema.columns "
                 + "WHERE table_schema = 'config' AND table_name = '{0}' AND column_name = '{1}'";
 
-            /* The alert settings: off, 10 and 60 per minute. */
-            Assert.Equal("boolean:NO:false", await ScalarAsync(connection, string.Format(ColumnSql, "config_alert_settings", "client_timeouts_enabled"), ct));
+            /* The alert settings: on (V216 moved the default from V179's off), 10 and 60 per minute. */
+            Assert.Equal("boolean:NO:true", await ScalarAsync(connection, string.Format(ColumnSql, "config_alert_settings", "client_timeouts_enabled"), ct));
             Assert.Equal("integer:NO:10", await ScalarAsync(connection, string.Format(ColumnSql, "config_alert_settings", "client_timeouts_warning_per_minute"), ct));
             Assert.Equal("integer:NO:60", await ScalarAsync(connection, string.Format(ColumnSql, "config_alert_settings", "client_timeouts_critical_per_minute"), ct));
 
@@ -149,7 +149,7 @@ public sealed class AttentionPlainTableTests
             await ExecAsync(connection, Rung.Sql, ct);
             await ExecAsync(connection, Rung.Sql, ct);
             Assert.Equal("text:YES:", await ScalarAsync(connection, string.Format(ColumnSql, "config_mute_rules", "client_app_pattern"), ct));
-            Assert.Equal("boolean:NO:false", await ScalarAsync(connection, string.Format(ColumnSql, "config_alert_settings", "client_timeouts_enabled"), ct));
+            Assert.Equal("boolean:NO:true", await ScalarAsync(connection, string.Format(ColumnSql, "config_alert_settings", "client_timeouts_enabled"), ct));
 
             /* An upgrade: the rung's columns and table taken away (a store one rung behind), then the rung's text brings them back. */
             await ExecAsync(connection, "DROP TABLE collect.attention_events", ct);

@@ -28,6 +28,7 @@ using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
+using PerformanceMonitor.Darling.Storage;
 
 namespace Darling.Tests;
 
@@ -186,10 +187,21 @@ public sealed class McpToolLatencyRecordingTests
         return SendJsonRpcAsync(server, path, requestBody);
     }
 
+    /// <summary>The real clock, except that "now" is one fixed instant. The read cache keys an answer by the TTL bucket of now
+    /// (60 s for the 7-day band), so two identical calls a few milliseconds apart landed in different buckets, and ran two
+    /// reads, whenever a test started within milliseconds of a bucket boundary (a CI run failed at 23:39:00 UTC). A fixed
+    /// "now" keeps both calls in one bucket; timers and elapsed time stay real.</summary>
+    private sealed class FixedNowTimeProvider : TimeProvider
+    {
+        private readonly DateTimeOffset _now = new(2026, 1, 1, 0, 0, 30, TimeSpan.Zero);
+
+        public override DateTimeOffset GetUtcNow() => _now;
+    }
+
     /// <summary>#5506 part 3: an admission, cache on, that classifies <c>latency_probe_json</c> as heavy in every band.</summary>
     private static ReadAdmission CachingAdmission()
     {
-        var admission = new ReadAdmission(TimeProvider.System, ReadAdmission.DefaultWaitCap, null, 2);
+        var admission = new ReadAdmission(new FixedNowTimeProvider(), ReadAdmission.DefaultWaitCap, null, 2);
         var table = new System.Collections.Generic.Dictionary<(ReadSurface, string, string), long>();
         foreach (var band in new[] { ReadWindowBand.None, ReadWindowBand.OneHour, ReadWindowBand.OneDay, ReadWindowBand.SevenDays, ReadWindowBand.Longer })
         {

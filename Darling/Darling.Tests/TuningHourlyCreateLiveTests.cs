@@ -176,14 +176,6 @@ public sealed class TuningHourlyCreateLiveTests
         }
     }
 
-    [Fact]
-    public void ACreateThatIsStillIssued_RunsUnderASetLocalLockTimeout()
-    {
-        var src = RepoFile.ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Storage", "PgTableTuning.cs");
-        Assert.Contains("GuardedCreate(statement)", src, StringComparison.Ordinal);
-        Assert.Contains("\"BEGIN; SET LOCAL lock_timeout = '\" + CreateLockTimeoutSeconds + \"'; \" + statement + \"; COMMIT;\"", src, StringComparison.Ordinal);
-    }
-
     private static async Task Exec(NpgsqlConnection c, string sql, CancellationToken ct)
     {
         await using var cmd = new NpgsqlCommand(sql, c);

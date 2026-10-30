@@ -162,13 +162,11 @@ public partial class ViewerServerTab
         return (startUtc, endUtc);
     }
 
-    private static readonly TimeSpan ScheduleOverridesMaxAge = TimeSpan.FromMinutes(5);
-
-    private IReadOnlyList<CollectorScheduleRow>? _scheduleOverrides;
+    /// <summary>The collector schedule rows this tab resolves cadences from: the picker's "collected every N minutes" note and the
+    /// panel notes that say how often a collector runs share one read every five minutes.</summary>
+    private ViewerScheduleOverridesCache _scheduleOverrides = null!;
 
     private string? _noteCollector;
-
-    private DateTime _scheduleOverridesReadUtc;
 
     /// <summary>Redraws the picker's resolved text from the clock, the zone and the notes. Run when the display zone moved
     /// and on every refresh, so a range that slides with now shows the window it is reading.</summary>
@@ -228,26 +226,7 @@ public partial class ViewerServerTab
                 RecordDataStart(null);
             }
 
-            IReadOnlyList<CollectorScheduleRow>? overrides = null;
-            if (collector is not null)
-            {
-                try
-                {
-                    /* The schedule table is small but the refresh runs every 30 seconds to 5 minutes per tab, so the rows are
-                       read at most every five minutes. */
-                    if (_scheduleOverrides is null || DateTime.UtcNow - _scheduleOverridesReadUtc > ScheduleOverridesMaxAge)
-                    {
-                        _scheduleOverrides = await _dataService.GetCollectorSchedulesAsync();
-                        _scheduleOverridesReadUtc = DateTime.UtcNow;
-                    }
-
-                    overrides = _scheduleOverrides;
-                }
-                catch (Exception ex)
-                {
-                    ViewerLogger.Warn("ViewerServerTab", $"time range note: could not read the collector schedule, using the shipped cadence | {ex.GetType().Name}: {ex.Message}");
-                }
-            }
+            var overrides = collector is not null ? await _scheduleOverrides.GetAsync() : null;
 
             RangePicker.SampleInterval = ViewerTimeRangeWindow.SampleIntervalFor(collector, _server.ServerId, overrides);
         }

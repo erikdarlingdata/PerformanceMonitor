@@ -258,7 +258,7 @@ public class ProcedureStatsPlanCadenceTests
         var runner = Runner(interval: 4);
 
         var captured = Enumerable.Range(0, 40)
-            .Count(_ => runner.ShouldCapturePlanXmlFor("procedure_stats", serverId: 8));
+            .Count(_ => runner.ShouldCapturePlanXmlFor("procedure_stats", serverId: 8, serverCapturePlans: null));
 
         Assert.Equal(10, captured);
     }
@@ -272,7 +272,7 @@ public class ProcedureStatsPlanCadenceTests
 
         foreach (var collector in new[] { "query_stats", "query_store", "deadlocks", "blocked_process_report" })
         {
-            var captured = Enumerable.Range(0, 40).Count(_ => runner.ShouldCapturePlanXmlFor(collector, serverId: 8));
+            var captured = Enumerable.Range(0, 40).Count(_ => runner.ShouldCapturePlanXmlFor(collector, serverId: 8, serverCapturePlans: null));
             Assert.Equal(40, captured);
         }
     }
@@ -286,7 +286,7 @@ public class ProcedureStatsPlanCadenceTests
 
         Assert.All(
             Enumerable.Range(0, 40),
-            _ => Assert.False(runner.ShouldCapturePlanXmlFor("procedure_stats", serverId: 8)));
+            _ => Assert.False(runner.ShouldCapturePlanXmlFor("procedure_stats", serverId: 8, serverCapturePlans: null)));
     }
 
     [Fact]
@@ -298,8 +298,8 @@ public class ProcedureStatsPlanCadenceTests
         var a = Runner(interval: 4);
         var b = Runner(interval: 4);
 
-        var forServer4 = Enumerable.Range(0, 4).Select(_ => a.ShouldCapturePlanXmlFor("procedure_stats", 4)).ToArray();
-        var forServer5 = Enumerable.Range(0, 4).Select(_ => b.ShouldCapturePlanXmlFor("procedure_stats", 5)).ToArray();
+        var forServer4 = Enumerable.Range(0, 4).Select(_ => a.ShouldCapturePlanXmlFor("procedure_stats", 4, serverCapturePlans: null)).ToArray();
+        var forServer5 = Enumerable.Range(0, 4).Select(_ => b.ShouldCapturePlanXmlFor("procedure_stats", 5, serverCapturePlans: null)).ToArray();
 
         Assert.Single(forServer4, true);
         Assert.Single(forServer5, true);

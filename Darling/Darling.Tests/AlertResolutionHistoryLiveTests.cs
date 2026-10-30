@@ -67,7 +67,7 @@ public sealed class AlertResolutionHistoryLiveTests
             config.Webhooks.SlackUrl = slack.Url;
             config.Webhooks.SlackSendResolutions = true;
             var settings = new DarlingAlertSettings(config);
-            var history = new PgAlertHistoryStore(dataSource, NullLogger.Instance);
+            var history = new PgAlertHistoryStore(dataSource, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds, NullLogger.Instance);
             var webhooks = new WebhookAlertService(
                 settings, DarlingAlertDeliverer.Branding, NullLogger<WebhookAlertService>.Instance, history);
             var mute = false;

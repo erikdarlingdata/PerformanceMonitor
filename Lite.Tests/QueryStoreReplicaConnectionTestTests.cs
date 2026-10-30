@@ -73,6 +73,23 @@ public sealed class QueryStoreReplicaConnectionTestTests
         Assert.Empty(opened);
     }
 
+    /// <summary>#6459: a replica typed against an Azure SQL Database is said to have no effect; any other engine, or an empty box, says nothing.</summary>
+    [Fact]
+    public void AReplicaOnAnAzureSqlDatabase_IsSaidToHaveNoEffect_AndNothingElseIs()
+    {
+        var note = QueryStoreReplicaConnectionTest.IgnoredOnAzureSqlDatabaseNote(5, "  replica-01 ");
+        Assert.NotNull(note);
+        Assert.Contains("replica-01", note, StringComparison.Ordinal);
+        Assert.Contains("Azure SQL Database has no readable-replica Query Store read", note, StringComparison.Ordinal);
+        Assert.Contains("no effect", note, StringComparison.Ordinal);
+
+        Assert.Null(QueryStoreReplicaConnectionTest.IgnoredOnAzureSqlDatabaseNote(5, "  "));
+        Assert.Null(QueryStoreReplicaConnectionTest.IgnoredOnAzureSqlDatabaseNote(5, null));
+        Assert.Null(QueryStoreReplicaConnectionTest.IgnoredOnAzureSqlDatabaseNote(3, "replica-01"));
+        Assert.Null(QueryStoreReplicaConnectionTest.IgnoredOnAzureSqlDatabaseNote(8, "replica-01"));
+        Assert.Null(QueryStoreReplicaConnectionTest.IgnoredOnAzureSqlDatabaseNote(0, "replica-01"));
+    }
+
     [Fact]
     public async Task AnUnreachableHost_ThroughTheRealSqlConnection_IsAnErrorNotAnException()
     {

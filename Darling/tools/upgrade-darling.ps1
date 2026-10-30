@@ -31,9 +31,12 @@ What it does, in order:
      guard fired, what it caught was an operator's own psql.exe sitting in the install directory from a
      diagnostic query.
   5. Stops the service and waits for it to actually be Stopped.
-  6. Copies the install root's FILES (not its subdirectories) to _rollback_manual_<stamp>. A re-run inside
-     -BackupWindowMinutes reuses the existing backup instead of taking a second one, because a second one
-     would be a copy of the half-extracted tree written over your only good copy.
+  6. Copies the install root's FILES (not its subdirectories) to _rollback_manual_<stamp>. A re-run of an
+     INTERRUPTED upgrade inside -BackupWindowMinutes reuses the existing backup instead of taking a second one,
+     because a second one would be a copy of the half-extracted tree written over your only good copy. An
+     upgrade that FINISHED (darling-install-manifest.txt is newer than the backup) always gets a new backup,
+     so two complete upgrades inside the window do not leave the newest backup two builds back. A missing or
+     unreadable manifest counts as not finished.
   7. Prunes the rollback backups past -KeepRollbacks, each in its own handler.
   8. Lays the new build over the install root, retrying once on the transient file lock that has bitten this
      step before.
@@ -74,7 +77,9 @@ back a bad deploy; the fourth can only roll back to a version nobody wants.
 
 .PARAMETER BackupWindowMinutes
 A backup newer than this is reused rather than replaced, so a re-run after an interrupted upgrade does not
-overwrite the good pre-upgrade copy with a copy of the half-upgraded tree.
+overwrite the good pre-upgrade copy with a copy of the half-upgraded tree. It is reused only when that upgrade
+did not finish: if darling-install-manifest.txt was written after the backup, the last upgrade completed and
+this one takes a new backup. A missing or unreadable manifest keeps the backup in use.
 
 .PARAMETER PruneOnly
 Prune the rollback backups and exit. Nothing is stopped, nothing is copied, and the service keeps running.
@@ -1022,12 +1027,14 @@ function Protect-DarlingRollbackBackupFolder([string]$path, [switch]$ResetChildr
             $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($sid, 'FullControl', $inherit, 'None', 'Allow')))
         }
         Set-Acl -LiteralPath $path -AclObject $acl -ErrorAction Stop
-        $after = (New-Object System.IO.DirectoryInfo($path)).GetAccessControl([System.Security.AccessControl.AccessControlSections]::Access)
+        # DirectoryInfo.GetAccessControl is .NET Framework only, so PowerShell 7 stopped here (#6920). The DirectorySecurity and FileSecurity constructors read the
+        # same DACL by name in both hosts, and (unlike Get-Acl) without opening the file, which a caller the new DACL does not name could not do.
+        $after = New-Object System.Security.AccessControl.DirectorySecurity($path, [System.Security.AccessControl.AccessControlSections]::Access)
         if ((-not $after.AreAccessRulesProtected) -or (& $notOnlyAdmins $after).Count -gt 0) {
             return "The rollback backup '$path' still grants access to accounts other than SYSTEM and Administrators after its permissions were set. Run from an elevated prompt: $fix"
         }
         foreach ($file in $reset) {
-            if ((& $notOnlyAdmins ((New-Object System.IO.FileInfo($file.FullName)).GetAccessControl([System.Security.AccessControl.AccessControlSections]::Access))).Count -gt 0) { $left += $file.Name }
+            if ((& $notOnlyAdmins (New-Object System.Security.AccessControl.FileSecurity($file.FullName, [System.Security.AccessControl.AccessControlSections]::Access))).Count -gt 0) { $left += $file.Name }
         }
         if ($left.Count -gt 0) {
             return "In the rollback backup '$path', $($left -join ', ') could not be limited to SYSTEM and Administrators (a link, a file with more than one name, or a permission that would not change). Restrict each by hand, or delete the backup."
@@ -2118,6 +2125,47 @@ function Test-DarlingRollbackBackupIsRecent($backups, [int]$withinMinutes, [date
     return ($elapsed -ge 0) -and ($elapsed -lt $withinMinutes)
 }
 
+# When the install manifest was last written (UTC), or $null when it is missing or cannot be read. The manifest is written
+# only after a successful copy (step 8), so its time is the time the last upgrade FINISHED. A failure to read it is never
+# fatal: $null sends the caller down the reuse side, the safe one.
+function Get-DarlingInstallManifestWriteUtc([string]$manifestPath) {
+    try {
+        if ([string]::IsNullOrWhiteSpace($manifestPath)) { return $null }
+        $item = Get-Item -LiteralPath $manifestPath -Force -ErrorAction Stop
+        if ($item.PSIsContainer) { return $null }
+        return [datetime]$item.LastWriteTimeUtc
+    }
+    catch {
+        return $null
+    }
+}
+
+# True when the upgrade that took the newest backup FINISHED: the install manifest was written after that backup (#6821).
+#
+# Test-DarlingRollbackBackupIsRecent alone looks only at the backup's age, so two complete upgrades inside one window
+# reused the first one's backup, and the newest backup then held root files from two builds back. The manifest is written
+# only after the copy succeeds and every copy failure stops before it, so a manifest newer than the backup means the last
+# upgrade is not an interrupted one and this run needs a backup of its own.
+#
+# A missing or unreadable manifest ($null) and one not later than the backup both answer $false, which keeps the reuse: an
+# interrupted first upgrade has no manifest, and a spare backup costs 120 MB while a lost good copy costs the rollback.
+function Test-DarlingLastUpgradeFinishedAfterBackup($backups, $manifestWriteUtc) {
+    $ordered = @($backups | Where-Object { $null -ne $_ })
+    if ($ordered.Count -eq 0) { return $false }
+    if ($null -eq $manifestWriteUtc) { return $false }
+    return ([datetime]$manifestWriteUtc) -gt $ordered[0].LastWriteTimeUtc
+}
+
+# What step 6 does about the backup, as one word so the decision runs under test and the caller only acts on it:
+#   'reuse'    a recent backup and the upgrade that took it did not finish (a re-run of an interrupted upgrade)
+#   'finished' a recent backup, but the install manifest is newer, so that upgrade completed: take a new backup
+#   'new'      no backup, or none inside the window: take a new backup
+function Get-DarlingRollbackBackupDecision($backups, [int]$withinMinutes, [datetime]$nowUtc, [string]$manifestPath) {
+    if (-not (Test-DarlingRollbackBackupIsRecent $backups $withinMinutes $nowUtc)) { return 'new' }
+    if (Test-DarlingLastUpgradeFinishedAfterBackup $backups (Get-DarlingInstallManifestWriteUtc $manifestPath)) { return 'finished' }
+    return 'reuse'
+}
+
 # ============================ the install tree ============================
 
 # True when two paths name the same directory: both go through Get-DarlingCanonicalPath (#5673), so a folder typed as a
@@ -2258,6 +2306,35 @@ function Get-DarlingInstallRootFromService([string]$name) {
 
     try { return [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($imagePath)) }
     catch { return $null }
+}
+
+# #6597: a service a released install-darling.ps1 registered carries its image path bare, which is how the MSI never
+# registered it, and the upgrade never touched the registration. When the registered path is exactly this install's
+# service exe and has no quotes, register it again in quotes. A quoted path, a path with arguments after it and a path
+# to some other folder are left alone. Call it with the service stopped. Returns $true when it re-registered.
+# sc.exe strips a plain pair of quotes as it parses its command line, so the value goes in as "\"path\"" (the outer
+# pair is stripped, the \" pair is kept). PowerShell 5.1 and 7.x turn a quoted native argument into a command line
+# differently, so the command line is handed over verbatim as ONE string through Start-Process (same as install-darling.ps1).
+function Set-DarlingServiceQuotedPath([string]$name, [string]$exePath) {
+    try {
+        $service = Get-CimInstance -ClassName Win32_Service -Filter "Name='$name'" -ErrorAction Stop
+    }
+    catch {
+        return $false
+    }
+    if (-not $service -or [string]::IsNullOrWhiteSpace($service.PathName)) { return $false }
+
+    $registered = $service.PathName.Trim()
+    if ($registered.StartsWith('"')) { return $false }
+
+    try { $sameExe = [string]::Equals([IO.Path]::GetFullPath($registered), [IO.Path]::GetFullPath($exePath), [StringComparison]::OrdinalIgnoreCase) }
+    catch { return $false }
+    if (-not $sameExe) { return $false }
+
+    $argLine = "config `"$name`" binPath= `"\`"$exePath\`"`""
+    $p = Start-Process -FilePath "$env:SystemRoot\System32\sc.exe" -ArgumentList $argLine -Wait -PassThru -NoNewWindow
+    if ($p.ExitCode -ne 0) { Fail "sc config failed ($($p.ExitCode)) while registering the service path in quotes. The new build IS in place and the service is STOPPED: fix the cause and re-run this script." }
+    return $true
 }
 
 # Every process whose executable lives under $root, so the copy can refuse instead of failing half-way.
@@ -2974,6 +3051,37 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
     Fail "Run this from an ELEVATED PowerShell. Stopping the service, writing to the install directory, and starting it again all need it."
 }
 
+# The MSI package (#6480) writes HKLM\SOFTWARE\PerformanceMonitor Darling, value InstalledBy = msi, and removes it at uninstall. A
+# machine that holds it belongs to Windows Installer: a script install over it would leave two owners for one service. Returns the
+# refusal text, or $null when the marker is absent. The registry read is a parameter so a test can stand in for the machine; the
+# default reads the 64-bit view, so a 32-bit PowerShell is not sent to WOW6432Node and does not miss the marker. Kept byte-identical
+# in install-darling.ps1, upgrade-darling.ps1 and uninstall-darling.ps1.
+function Get-DarlingMsiInstallRefusal([string]$ScriptName, [scriptblock]$ReadMarker = $null) {
+    if (-not $ReadMarker) {
+        $ReadMarker = {
+            $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry64)
+            try {
+                $key = $base.OpenSubKey('SOFTWARE\PerformanceMonitor Darling')
+                if ($key) { try { $key.GetValue('InstalledBy') } finally { $key.Dispose() } }
+            }
+            finally { $base.Dispose() }
+        }
+    }
+    if ("$(& $ReadMarker)" -ne 'msi') { return $null }
+    return @"
+PerformanceMonitor Darling on this machine was installed by the MSI package, so $ScriptName will not change it: two installers
+would then own one service.
+  To update it: run the newer MSI. Windows Installer replaces the files in place and keeps darling.json and the store.
+  To remove it: Settings > Apps > Installed apps > PerformanceMonitor Darling > Uninstall. That keeps the store unless you tick
+  the box to remove it.
+  To go back to script installs: uninstall the MSI as above, extract the zip into a fresh folder, and run install-darling.ps1 there.
+Nothing was installed or changed.
+"@
+}
+
+$msiRefusal = Get-DarlingMsiInstallRefusal 'upgrade-darling.ps1'
+if ($msiRefusal) { Fail $msiRefusal }
+
 if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
     $InstallRoot = Get-DarlingInstallRootFromService $serviceName
     if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
@@ -3458,10 +3566,17 @@ Invoke-UpgradeTreeLock 'before the backup and the copy'
 $backups = Get-DarlingRollbackBackups $InstallRoot
 $nowUtc = [datetime]::UtcNow
 
-if (Test-DarlingRollbackBackupIsRecent $backups $BackupWindowMinutes $nowUtc) {
-    Note ("Reusing the rollback backup {0}, taken {1:N0} minute(s) ago - this looks like a re-run of an interrupted upgrade, and a second backup now would copy a half-upgraded tree over the good one." -f $backups[0].Name, ($nowUtc - $backups[0].LastWriteTimeUtc).TotalMinutes)
+# A recent backup is reused only when the upgrade that took it did not finish (#6821): a manifest written after it means
+# that upgrade completed, and reusing its backup would leave the newest backup holding files from two builds back.
+$backupDecision = Get-DarlingRollbackBackupDecision $backups $BackupWindowMinutes $nowUtc $manifestPath
+
+if ($backupDecision -eq 'reuse') {
+    Note ("Reusing the rollback backup {0}, taken {1:N0} minute(s) ago - this looks like a re-run of an interrupted upgrade (no upgrade has finished since it was taken), and a second backup now would copy a half-upgraded tree over the good one." -f $backups[0].Name, ($nowUtc - $backups[0].LastWriteTimeUtc).TotalMinutes)
 }
 else {
+    if ($backupDecision -eq 'finished') {
+        Note ("The rollback backup {0} is inside the {1}-minute window, but the upgrade that took it finished (the install manifest is newer), so this is a new upgrade and it takes its own backup." -f $backups[0].Name, $BackupWindowMinutes)
+    }
     $backupPath = Join-Path $InstallRoot (New-DarlingRollbackBackupName $nowUtc)
     Note "Backing up the install root's files to $backupPath ..."
     try {
@@ -3796,6 +3911,11 @@ else {
     }
 }
 
+# #6597: the registered path keeps its quotes, as the MSI registers it. The service is stopped here and the new build is in place.
+if (Set-DarlingServiceQuotedPath $serviceName (Join-Path $InstallRoot $serviceExeName)) {
+    Good "Service path re-registered in quotes."
+}
+
 Note "Starting '$serviceName'..."
 Start-Service -Name $serviceName
 try { (Get-Service -Name $serviceName).WaitForStatus('Running', [TimeSpan]::FromMinutes(2)) }
@@ -3804,12 +3924,11 @@ catch { Fail "'$serviceName' did not reach Running within two minutes. The new b
 Good "Service is Running."
 Note ""
 Note "The install is NOT verified yet. 'Running' means the process started, not that it collects."
-Note "In 10-15 minutes, against the store, confirm all of:"
-Note "  1. MAX(version) FROM darling_schema_version equals this build's expected schema rung."
-Note "  2. COUNT(DISTINCT server_id) FROM collect.collection_log over the last 15 minutes equals the fleet size plus the '(fleet)' maintenance row - the fleet-wide passes (the retention purge and the oversized-plan backlog sweep) both log under server_id = 0, and both run their first pass at startup, so the row is there within this window."
-Note "  3. COUNT(DISTINCT collector_name) over the same window is in the mid-30s, not single digits."
-Note "  4. Any non-SUCCESS rows since the restart are READ, not just counted - YIELDED is the lock-timeout guard working; anything else is a finding."
-Note "  5. If this build added a collector or a migration, one targeted probe that ITS table moved."
+Note "About 10-15 minutes after the start, check these:"
+Note "  1. Open the Viewer. Every monitored server shows Online, and the status bar shows 'Collection: Active'."
+Note "  2. On each server card, Collectors shows OK and 'Failing: 0'. The status bar shows 'Collectors: N OK'. The web page has a Collection Health tab for each server."
+Note "  3. The service log (%ProgramData%\PerformanceMonitorDarling\logs) has a line 'Postgres store ready (schema v<N>, ...)' from this start. N is the store version this build expects. If the line is missing, the store did not finish its update: read the log lines near the start."
+Note "  If you connect to the store, you can also run SELECT MAX(version) FROM darling_schema_version. It returns the same N."
 
 }
 finally {

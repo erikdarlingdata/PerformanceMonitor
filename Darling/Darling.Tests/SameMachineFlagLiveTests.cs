@@ -95,7 +95,8 @@ INSERT INTO config.config_monitored_servers (server_id, name, host, auth, is_ena
 VALUES (1, 'flag-a', 'flag-a-host', 'integrated', TRUE, 'sqlserver'),
        (2, 'flag-b', 'flag-b-host', 'integrated', TRUE, 'sqlserver'),
        (3, 'flag-c', 'flag-c-host', 'integrated', FALSE, 'sqlserver'),
-       (4, 'flag-d', 'flag-d-host', 'integrated', TRUE, 'sqlserver')", ct);
+       (4, 'flag-d', 'flag-d-host', 'integrated', TRUE, 'sqlserver'),
+       (5, 'flag-e', 'flag-e-host', 'integrated', TRUE, 'sqlserver')", ct);
 
             /* MCP list_servers: each is in the other's list; the disabled one is in nobody's list (and has no row of its own). */
             var mcp = await McpFlagsAsync(owner, ct);

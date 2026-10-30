@@ -86,6 +86,15 @@ public static class QueryStoreComposeStamp
     /// <summary>The wall-clock budget of one tick: no new build starts once this has passed.</summary>
     public static readonly TimeSpan MaxTickDuration = TimeSpan.FromMinutes(10);
 
+    /// <summary>The most backlog hours (see <see cref="Build.Backlog"/>) one tick builds on top of its <see cref="MaxBuildsPerTick"/> (#6865).</summary>
+    public const int MaxExtraBacklogBuilds = 24;
+
+    /// <summary>The wall-clock budget of a tick's extra backlog builds (#6865): no extra build starts once they have run this long. It is a fraction of
+    /// <see cref="MaxTickDuration"/> (the normal six builds take about 21 s of it). At that speed (about 3.5 s a build) the budget would allow about 50
+    /// hours, so <see cref="MaxExtraBacklogBuilds"/> (24, which makes 6 + 24 = 30 hours a tick) is what ends the extras, and the budget binds only when a
+    /// build takes more than about 7.5 s (3 minutes over 24 builds).</summary>
+    public static readonly TimeSpan ExtraBacklogBudget = TimeSpan.FromMinutes(3);
+
     /// <summary>The server-side <c>statement_timeout</c> each build's transaction runs under.</summary>
     public const int BuildStatementTimeoutSeconds = 60;
 
@@ -121,7 +130,7 @@ public static class QueryStoreComposeStamp
     /// <summary>PostgreSQL's SQLSTATE for a statement cancelled by <c>statement_timeout</c> (<c>query_canceled</c>).</summary>
     public const string StatementTimeoutSqlState = "57014";
 
-    private static string StatementTimeoutSql(int seconds) =>
+    internal static string StatementTimeoutSql(int seconds) =>
         "SET LOCAL statement_timeout = '" + seconds.ToString(System.Globalization.CultureInfo.InvariantCulture) + "s'";
 
     /// <summary>The alias the compiler gives the fact relation in a partial's text (<c>ComposeCompiler.FactAlias</c>). The
@@ -337,6 +346,126 @@ CREATE TABLE IF NOT EXISTS collect.query_store_compose_stamp_failures
 );
 """;
 
+    /// <summary>
+    /// V221 (#6800): the narrow hourly source of the fleet tag roll-up, <c>collect.query_store_hash_hourly</c>, and the ledger column
+    /// that says whether its pair of an hour is valid, <c>hash_built_seq</c>. One block, so a later table of the same family (the daily
+    /// one) extends this text while the rung is un-landed and a landed rung is never edited. Idempotent, catalog-only: the table is
+    /// created empty, the index is built over it, and the new column is nullable with no default, so no row is rewritten and nothing is
+    /// scanned. The rung writes no GRANT (the <c>collect</c> schema's blanket SELECT covers a new table).
+    /// </summary>
+    public const string HashHourlyCreateSql = """
+/* V221 (#6800): one row per (hour, server, query_hash) of the wide Query Store table with exactly the sums the fleet tag roll-up reads,
+   built by the same hourly pass as the stamp rollup, in the same transaction. Plain table on every store kind. Naive UTC.
+   hour is the hour start the builder was given. mem_max is the MAX of max_query_max_used_memory, the others are exact sums
+   (the source columns are bigint, so adding hours gives the same total). query_hash NULL is its own group. */
+CREATE TABLE IF NOT EXISTS collect.query_store_hash_hourly
+(
+    hour timestamp NOT NULL,
+    wide_rows bigint NOT NULL,
+    mem_max bigint,
+    server_id integer NOT NULL,
+    query_hash text,
+    ec_sum numeric,
+    cpu_wsum numeric,
+    dur_wsum numeric,
+    reads_wsum numeric,
+    writes_wsum numeric
+);
+
+/* No unique index, as the stamp table: the grain is held by the builder's GROUP BY and its one-transaction DELETE and INSERT. */
+CREATE INDEX IF NOT EXISTS ix_query_store_hash_hourly_hour_server
+ON collect.query_store_hash_hourly (hour, server_id);
+
+/* The ledger's second sequence: the late_seq this table's pair was built against. NULL on an hour built before V221 and on an hour a
+   build that does not know this table rebuilt (it writes built_seq only), so both read as stale for this table. */
+ALTER TABLE collect.query_store_compose_stamp_built
+    ADD COLUMN IF NOT EXISTS hash_built_seq bigint;
+
+/* The day table (#6800, the page's 7 and 30 day windows): the same partial columns as the hourly table, one row per (UTC day, server,
+   query_hash), the sum of the day's 24 hourly rows (MAX for mem_max, exact numeric sums). day is the UTC day start, naive UTC. Built by
+   QueryStoreHashDaily in one transaction with its ledger rows. */
+CREATE TABLE IF NOT EXISTS collect.query_store_hash_daily
+(
+    day timestamp NOT NULL,
+    wide_rows bigint NOT NULL,
+    mem_max bigint,
+    server_id integer NOT NULL,
+    query_hash text,
+    ec_sum numeric,
+    cpu_wsum numeric,
+    dur_wsum numeric,
+    reads_wsum numeric,
+    writes_wsum numeric
+);
+
+CREATE INDEX IF NOT EXISTS ix_query_store_hash_daily_day_server
+ON collect.query_store_hash_daily (day, server_id);
+
+/* The day table's ledger: per (day, server), the fingerprint of the server's pairs of the day at the build: how many pairs the server had
+   in the day's 24 hours and the sum of their hash_built_seq. A day's rows of a server may be read only while the server's pairs of the day
+   all have hash_built_seq = late_seq and still have this count and this sum. hash_built_seq only grows and a late write adds a pair
+   (count) or raises late_seq, which a rebuild copies into hash_built_seq (sum), so any change to the hourly rows the day summed moves the
+   fingerprint. A server with no pair in the day has no row here, which reads as (0, 0). */
+CREATE TABLE IF NOT EXISTS collect.query_store_hash_daily_built
+(
+    day timestamp NOT NULL,
+    server_id integer NOT NULL,
+    pair_count integer NOT NULL,
+    seq_sum bigint NOT NULL,
+    built_at timestamp NOT NULL,
+    CONSTRAINT pk_query_store_hash_daily_built PRIMARY KEY (day, server_id)
+);
+
+/* The day build's failure record, the shape of collect.query_store_compose_stamp_failures keyed by day. Kept apart from that table so a
+   day cannot clear or delay the build of the hour that starts it. */
+CREATE TABLE IF NOT EXISTS collect.query_store_hash_daily_failures
+(
+    day timestamp NOT NULL,
+    failures integer NOT NULL,
+    last_sqlstate text,
+    last_reason text NOT NULL,
+    last_timeout_seconds integer NOT NULL,
+    first_failed_at timestamp NOT NULL,
+    last_failed_at timestamp NOT NULL,
+    retry_at timestamp NOT NULL,
+    CONSTRAINT pk_query_store_hash_daily_failures PRIMARY KEY (day)
+);
+""";
+
+    /// <summary>Clears the hour's rows of the hash-hourly table before they are rebuilt: $1 the hour. Served by the (hour, server_id) index.</summary>
+    public const string DeleteHashHourSql = @"
+DELETE FROM collect.query_store_hash_hourly
+WHERE hour = $1;";
+
+    /// <summary>
+    /// Fills the hash-hourly table for one hour from the wide table: $1 the hour. The same rows as <see cref="BuildHourInsertSql"/>
+    /// (its bounds, the <c>first_execution_time</c> floor included), grouped by <c>server_id, query_hash</c>. The measure expressions are
+    /// the ones the tag roll-up's Query Store statement (<c>QueryTagRollupSql.QueryStoreSql</c>) sums, without the COALESCE and the cast,
+    /// which the read applies after adding the hours.
+    /// </summary>
+    public static readonly string BuildHashHourInsertSql = $@"
+INSERT INTO collect.query_store_hash_hourly (hour, wide_rows, mem_max, server_id, query_hash, ec_sum, cpu_wsum, dur_wsum, reads_wsum, writes_wsum)
+SELECT $1, count(*), MAX({FactAlias}.max_query_max_used_memory), {FactAlias}.server_id, {FactAlias}.query_hash,
+       SUM({FactAlias}.execution_count),
+       SUM({FactAlias}.avg_cpu_time_us * {FactAlias}.execution_count),
+       SUM({FactAlias}.avg_duration_us * {FactAlias}.execution_count),
+       SUM({FactAlias}.avg_logical_io_reads * {FactAlias}.execution_count),
+       SUM({FactAlias}.avg_logical_io_writes * {FactAlias}.execution_count)
+FROM collect.query_store_interval_wide AS {FactAlias}
+WHERE {FactAlias}.collection_time >= $1
+  AND {FactAlias}.collection_time < $1 + interval '1 hour'
+  AND {FactAlias}.first_execution_time >= $1 - {QueryStoreIntervalWide.PurgeEdgeMarginSql}
+GROUP BY {FactAlias}.server_id, {FactAlias}.query_hash;";
+
+    /// <summary>
+    /// Removes every hash-hourly row below the floor: $1 the floor, served by the (hour, server_id) index. By the floor and not by
+    /// the hours <see cref="GcHoursSql"/> returned in one call, as <see cref="GcBuiltSql"/> and the day cleanup do: a build before
+    /// V221 (a documented rollback) retires hours without touching this table, and those rows must still go after a roll forward.
+    /// </summary>
+    public const string GcHashHourlySql = @"
+DELETE FROM collect.query_store_hash_hourly
+WHERE hour < $1;";
+
     private static string InsertColumns() =>
         "collection_time, " + string.Join(", ", PartialColumnMap.Select(c => c.Column)) + ", " + string.Join(", ", DimensionColumns);
 
@@ -371,6 +500,45 @@ CREATE TABLE IF NOT EXISTS collect.query_store_compose_stamp_failures
       )
       AND a.datname = current_database()
       AND a.pid <> pg_backend_pid()";
+
+    /// <summary>
+    /// The writer cutoff (#5582 review round 2) the planner (<see cref="PlanSql"/>) uses, which runs as the store owner and sees every session:
+    /// a one-row <c>SELECT</c> of <c>since</c>, the start of the oldest open writer of the wide table. No writer is <c>infinity</c>, and a
+    /// writer whose <c>xact_start</c> reads NULL is <c>-infinity</c> (it counts as open from before every hour, see <see cref="OpenWriterSql"/>).
+    /// Used as a CTE named <c>cutoff</c>, with <see cref="BlockedByWriterTail"/>. The fleet rollup read uses <see cref="ReaderWriterCutoffSql"/> (#6945).
+    /// </summary>
+    internal const string WriterCutoffSql = @"SELECT coalesce(min(coalesce(w.xact_start AT TIME ZONE 'UTC', '-infinity'::timestamp)), 'infinity'::timestamp) AS since
+    FROM (" + WideWriterRowsSql + @"
+    ) AS w";
+
+    /// <summary>
+    /// The writer cutoff for a READER that cannot see every session (#6945): the fleet rollup read (<c>QueryTagRollupHashRoute.LedgerSql</c>),
+    /// which runs as the <c>mcp</c> or <c>viewer</c> role. Like <see cref="WriterCutoffSql"/> it is a one-row <c>SELECT</c> of <c>since</c>, but a
+    /// writer whose <c>xact_start</c> reads NULL counts for nothing. PostgreSQL shows another role's <c>xact_start</c> only to a superuser or a
+    /// member of <c>pg_read_all_stats</c>, and the service writes the wide table as the store owner, so for these two roles EVERY open writer reads
+    /// NULL: under <see cref="WriterCutoffSql"/> the cutoff is <c>-infinity</c>, every built hour is blocked, and the backlog cut (#6865) never
+    /// applies whenever a collector transaction happens to be open at the read. A writer the role can see still counts, as before.
+    /// <para>Why that is safe on the read: <c>blocked</c> has one consumer, the backlog filter in <c>QueryTagRollupHashRoute.TryPlanAsync</c>. It
+    /// only keeps an hour out of the backlog, which decides where the answer starts. It never decides which rows an hour contributes: that is
+    /// the ledger's validity facts and the data statement, which share the read's one REPEATABLE READ snapshot, and an hour left out of the
+    /// answer is named in its note. The planner builds an hour only once the store's clock is <see cref="BuildLag"/> (3 hours) past it, so
+    /// a built hour H is over by at least 3 hours, and a writer defers it only when <c>xact_start &lt; H + 2 h</c>, which takes a transaction
+    /// open for over an hour. The collector's transactions last seconds, so the one case this ignores is an unreadable writer open for over an
+    /// hour, which holds the cut back until it closes. The code has no bound on a writer's whole transaction to size a guess by
+    /// (<c>ServiceCommandDeadlines.CollectionSweepSeconds</c> bounds one command and nothing encloses the transaction), so the read does not
+    /// guess one.</para>
+    /// </summary>
+    internal const string ReaderWriterCutoffSql = @"SELECT coalesce(min(w.xact_start AT TIME ZONE 'UTC'), 'infinity'::timestamp) AS since
+    FROM (" + WideWriterRowsSql + @"
+    ) AS w";
+
+    /// <summary>
+    /// What follows an hour expression to say "an open writer would defer this hour" against the <c>cutoff</c> CTE
+    /// (<see cref="WriterCutoffSql"/>): the row trigger skips a row within one hour of the writer's clock, so a row of hour H can land
+    /// unmarked only while the store's clock is before H + 2 h (<see cref="OpenWriterSql"/>). The planner and the fleet rollup read both
+    /// use it, so an hour the builder will not build because of a writer is the same hour the read does not wait for.
+    /// </summary>
+    internal const string BlockedByWriterTail = " + interval '2 hours' > cutoff.since";
 
     /// <summary>
     /// The margin guard (#5582 review round 1, narrowed in round 2): the oldest open WRITER OF THE WIDE TABLE (<see cref="WideWriterRowsSql"/>)
@@ -468,11 +636,13 @@ WHERE collection_time >= $1
     /// Records the hour's validity rows: $1 the hour, $2 built_at, $3 the servers read in step 1, $4 their <c>late_seq</c>.
     /// Every server of step 1 and every server in the new rollup rows gets a row. <c>built_seq</c> is the value read in step
     /// 1, 0 for a server that had no row, and <c>late_seq</c> is not touched: a row a writer created or bumped after step 1
-    /// therefore stays stale.
+    /// therefore stays stale. <c>hash_built_seq</c> (V221, #6800) is written with the same value as <c>built_seq</c>: the hash-hourly rows
+    /// were built in the same pass from the same rows. A build that sets <c>built_seq</c> only (a service host that predates V221) leaves
+    /// <c>hash_built_seq</c> behind, so the pair reads as stale for the hash-hourly table and <see cref="PlanSql"/> rebuilds it.
     /// </summary>
     public const string UpsertBuiltSql = @"
-INSERT INTO collect.query_store_compose_stamp_built AS b (server_id, hour, late_seq, built_seq, built_at, source_rows, stamp_rows)
-SELECT x.server_id, $1, 0, COALESCE(l.late_seq, 0), $2, COALESCE(r.source_rows, 0), COALESCE(r.stamp_rows, 0)
+INSERT INTO collect.query_store_compose_stamp_built AS b (server_id, hour, late_seq, built_seq, hash_built_seq, built_at, source_rows, stamp_rows)
+SELECT x.server_id, $1, 0, COALESCE(l.late_seq, 0), COALESCE(l.late_seq, 0), $2, COALESCE(r.source_rows, 0), COALESCE(r.stamp_rows, 0)
 FROM
 (
     SELECT u.server_id FROM unnest($3::integer[]) AS u (server_id)
@@ -493,6 +663,7 @@ LEFT JOIN
 ) AS r ON r.server_id = x.server_id
 ON CONFLICT (server_id, hour) DO UPDATE
 SET built_seq = EXCLUDED.built_seq,
+    hash_built_seq = EXCLUDED.hash_built_seq,
     built_at = EXCLUDED.built_at,
     source_rows = EXCLUDED.source_rows,
     stamp_rows = EXCLUDED.stamp_rows;";
@@ -505,8 +676,10 @@ ON CONFLICT (hour) DO UPDATE SET built_at = EXCLUDED.built_at;";
 
     /// <summary>
     /// The hours to build, as (hour, stale): $1 the floor (<see cref="FloorHour"/>), $2 the cap PER KIND, so at most that many
-    /// stale hours and at most that many never-built hours; <see cref="ChooseBuilds"/> splits one tick's builds between the two.
-    /// First the stale hours (an hour the builder has done that has a pair with <c>built_seq IS DISTINCT FROM late_seq</c>),
+    /// stale hours and at most that many never-built hours (backlog hours: see the sixth column); <see cref="ChooseBuilds"/> splits one tick's builds between the two.
+    /// First the stale hours (an hour the builder has done that has a pair with <c>built_seq IS DISTINCT FROM late_seq</c>, or with
+    /// <c>hash_built_seq IS DISTINCT FROM late_seq</c> for the hash-hourly table: NULL on every hour built before V221, so those plan as
+    /// stale, newest first, and the backfill is the ordinary tick),
     /// newest first; then the hours the builder has never done that are at least <see cref="BuildLag"/> old, newest first. Neither goes
     /// below the floor or below the hour of the earliest wide-table coverage claim (<c>filled_since</c>) of an enabled
     /// server, since the rollup cannot speak for earlier hours. A pair of an hour that is not in the hours table is not
@@ -518,6 +691,12 @@ ON CONFLICT (hour) DO UPDATE SET built_at = EXCLUDED.built_at;";
     ///
     /// <para>$3 is NULL in the service. A test passes a store clock of its own (<see cref="TickOptions.StoreNow"/>), because a writer
     /// blocks a plannable hour only once it has been open for over an hour, and a test cannot wait that long.</para>
+    ///
+    /// <para>The sixth column, <c>backlog</c> (#6865), is true for a stale hour whose pairs are stale only for the hash-hourly table (<c>built_seq</c>
+    /// equals <c>late_seq</c> but <c>hash_built_seq</c> is NULL or different): the hours every store has after V221, and the hours a service host that
+    /// predates V221 built. No writer touched them, so the rollup itself is right and only the hash table waits. A stale hour with any pair whose
+    /// <c>built_seq</c> differs from <c>late_seq</c> is a late-write hour, not backlog. $5 is <see cref="MaxExtraBacklogBuilds"/>: backlog hours are
+    /// capped at $2 plus $5, the others at $2, so the tick can build its extra backlog hours (<see cref="ChooseExtraBacklog"/>).</para>
     ///
     /// <para>The third column, <c>blocked</c>, is true for an hour an open writer of the wide table would defer (<see cref="OpenWriterSql"/>:
     /// the oldest writer started before the hour plus two hours; a writer with no readable start blocks every hour). The cap is per kind AND
@@ -545,42 +724,42 @@ clock AS
 ),
 cutoff AS
 (
-    SELECT coalesce(min(coalesce(w.xact_start AT TIME ZONE 'UTC', '-infinity'::timestamp)), 'infinity'::timestamp) AS since
-    FROM (" + WideWriterRowsSql + @"
-    ) AS w
+    " + WriterCutoffSql + @"
 ),
 stale AS
 (
-    SELECT DISTINCT b.hour, true AS stale, (b.hour + interval '2 hours' > cutoff.since) AS blocked
+    SELECT b.hour, true AS stale, (b.hour" + BlockedByWriterTail + @") AS blocked,
+           NOT bool_or(b.built_seq IS DISTINCT FROM b.late_seq) AS backlog
     FROM collect.query_store_compose_stamp_built AS b
     JOIN collect.query_store_compose_stamp_hours AS h ON h.hour = b.hour
     CROSS JOIN bounds
     CROSS JOIN cutoff
-    WHERE b.built_seq IS DISTINCT FROM b.late_seq
+    WHERE (b.built_seq IS DISTINCT FROM b.late_seq OR b.hash_built_seq IS DISTINCT FROM b.late_seq)
       AND b.hour >= bounds.floor_hour
+    GROUP BY b.hour, cutoff.since
 ),
 missing AS
 (
-    SELECT g AS hour, false AS stale, (g + interval '2 hours' > cutoff.since) AS blocked
+    SELECT g AS hour, false AS stale, (g" + BlockedByWriterTail + @") AS blocked, false AS backlog
     FROM bounds
     CROSS JOIN cutoff
     CROSS JOIN clock
     CROSS JOIN LATERAL generate_series(bounds.floor_hour, date_trunc('hour', clock.at - interval '3 hours'), interval '1 hour') AS g
     WHERE NOT EXISTS (SELECT 1 FROM collect.query_store_compose_stamp_hours AS h WHERE h.hour = g)
 )
-SELECT p.hour, p.stale, p.blocked, p.failures, p.extended
+SELECT p.hour, p.stale, p.blocked, p.failures, p.extended, p.backlog
 FROM
 (
-    SELECT u.hour, u.stale, u.blocked, coalesce(f.failures, 0) AS failures,
+    SELECT u.hour, u.stale, u.blocked, u.backlog, coalesce(f.failures, 0) AS failures,
            coalesce(f.last_sqlstate = $4::text, false) AS extended,
-           row_number() OVER (PARTITION BY u.stale, u.blocked ORDER BY u.hour DESC) AS rn
+           row_number() OVER (PARTITION BY u.stale, u.blocked, u.backlog ORDER BY u.hour DESC) AS rn
     FROM (SELECT * FROM stale UNION ALL SELECT * FROM missing) AS u
     LEFT JOIN collect.query_store_compose_stamp_failures AS f ON f.hour = u.hour
     CROSS JOIN clock
     WHERE f.hour IS NULL
        OR f.retry_at <= clock.at
 ) AS p
-WHERE p.rn <= $2
+WHERE p.rn <= CASE WHEN p.backlog THEN $2::integer + $5::integer ELSE $2::integer END
 ORDER BY p.stale DESC, p.blocked, p.hour DESC;";
 
     /// <summary>
@@ -652,8 +831,9 @@ WHERE hour < $1;";
 
     /// <summary>One planned build: <paramref name="Failures"/> is the hour's consecutive failed builds (#5867, 0 for none), and
     /// <paramref name="Extended"/> is true when the last one was a statement timeout, so this attempt runs under
-    /// <see cref="ExtendedBuildStatementTimeoutSeconds"/>.</summary>
-    public readonly record struct Build(DateTime Hour, bool Stale, int Failures = 0, bool Extended = false);
+    /// <see cref="ExtendedBuildStatementTimeoutSeconds"/>. <paramref name="Backlog"/> (#6865) is a stale hour that is stale only for the
+    /// hash-hourly table (see <see cref="PlanSql"/>); it is also <paramref name="Stale"/>.</summary>
+    public readonly record struct Build(DateTime Hour, bool Stale, int Failures = 0, bool Extended = false, bool Backlog = false);
 
     /// <summary>One hour's failure record (<see cref="ReadFailuresSql"/>, #5867). Times are naive UTC on the store's clock.</summary>
     public readonly record struct HourFailure(
@@ -664,9 +844,9 @@ WHERE hour < $1;";
     public readonly record struct FailureOutcome(int Failures, DateTime NextAttemptAt, bool BackedOff);
 
     /// <summary>What one tick did.</summary>
-    public readonly record struct TickResult(int BuiltStale, int BuiltMissing, int Failed, long HoursRemoved, int Deferred = 0, int DeferredForWriters = 0, int HeldBack = 0, int BackedOff = 0)
+    public readonly record struct TickResult(int BuiltStale, int BuiltMissing, int Failed, long HoursRemoved, int Deferred = 0, int DeferredForWriters = 0, int HeldBack = 0, int BackedOff = 0, int DaysBuilt = 0, int DaysFailed = 0, int BuiltBacklog = 0)
     {
-        public int Built => BuiltStale + BuiltMissing;
+        public int Built => BuiltStale + BuiltMissing + BuiltBacklog;
     }
 
     private static DateTime Unspecified(DateTime value) => DateTime.SpecifyKind(value, DateTimeKind.Unspecified);
@@ -704,17 +884,39 @@ WHERE hour < $1;";
     {
         ArgumentNullException.ThrowIfNull(candidates);
 
-        var stale = candidates.Where(b => b.Stale).OrderByDescending(b => b.Hour).ToList();
+        /* #6865: a backlog hour (stale only for the hash-hourly table) is not a late write, so it does not take the never-built half. It fills
+           whatever the late-write stale hours and the never-built hours leave. */
+        var stale = candidates.Where(b => b.Stale && !b.Backlog).OrderByDescending(b => b.Hour).ToList();
         var missing = candidates.Where(b => !b.Stale).OrderByDescending(b => b.Hour).ToList();
+        var backlog = candidates.Where(b => b.Stale && b.Backlog).OrderByDescending(b => b.Hour).ToList();
         var staleCap = missing.Count > 0 ? max / 2 : max;
         var chosen = stale.Take(staleCap).ToList();
         chosen.AddRange(missing.Take(Math.Max(0, max - chosen.Count)));
+        chosen.AddRange(backlog.Take(Math.Max(0, max - chosen.Count)));
         /* OrderBy is stable: the order above holds within each group. */
         return chosen.OrderBy(b => b.Failures > 0).ToList();
     }
 
+    /// <summary>
+    /// The backlog hours a tick builds after its normal builds (#6865): the backlog hours of <paramref name="candidates"/> that
+    /// <paramref name="chosen"/> does not hold, newest first, at most <paramref name="maxExtra"/>. An hour that has failed before is left
+    /// to the normal selection and its back-off, so an extra build never retries a failure. Pure: the tick adds the wall-clock budget.
+    /// </summary>
+    public static IReadOnlyList<Build> ChooseExtraBacklog(IReadOnlyList<Build> candidates, IReadOnlyList<Build> chosen, int maxExtra)
+    {
+        ArgumentNullException.ThrowIfNull(candidates);
+        ArgumentNullException.ThrowIfNull(chosen);
+
+        var taken = chosen.Select(b => b.Hour).ToHashSet();
+        return candidates
+            .Where(b => b.Stale && b.Backlog && b.Failures == 0 && !taken.Contains(b.Hour))
+            .OrderByDescending(b => b.Hour)
+            .Take(Math.Max(0, maxExtra))
+            .ToList();
+    }
+
     /// <summary>One plan: the hours to build, and how many hours the plan held back because an open writer of the wide table would defer them.</summary>
-    public readonly record struct Plan(IReadOnlyList<Build> Builds, int HeldBack);
+    public readonly record struct Plan(IReadOnlyList<Build> Builds, int HeldBack, IReadOnlyList<Build>? ExtraBacklog = null);
 
     /// <summary>The hours to build at <paramref name="nowUtc"/>: <see cref="ChooseBuilds"/> over <see cref="PlanSql"/>, at most <see cref="MaxBuildsPerTick"/>.</summary>
     public static async Task<IReadOnlyList<Build>> PlanBuildsAsync(
@@ -735,6 +937,7 @@ WHERE hour < $1;";
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = MaxBuildsPerTick });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = storeNow is { } at ? Unspecified(at) : DBNull.Value });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = StatementTimeoutSqlState });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = MaxExtraBacklogBuilds });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -744,10 +947,11 @@ WHERE hour < $1;";
                 continue;
             }
 
-            builds.Add(new Build(reader.GetDateTime(0), reader.GetBoolean(1), reader.GetInt32(3), reader.GetBoolean(4)));
+            builds.Add(new Build(reader.GetDateTime(0), reader.GetBoolean(1), reader.GetInt32(3), reader.GetBoolean(4), reader.GetBoolean(5)));
         }
 
-        return new Plan(ChooseBuilds(builds, MaxBuildsPerTick), heldBack);
+        var normal = ChooseBuilds(builds, MaxBuildsPerTick);
+        return new Plan(normal, heldBack, ChooseExtraBacklog(builds, normal, MaxExtraBacklogBuilds));
     }
 
     /// <summary>What a caller can set on <see cref="RunTickAsync(NpgsqlDataSource, DateTime, int, ILogger, Func{TimeSpan}, CancellationToken, TickOptions?)"/>:
@@ -837,7 +1041,8 @@ WHERE hour < $1;";
     }
 
     /// <summary>
-    /// Removes the hours below <see cref="FloorHour"/> from all three tables in ONE transaction and returns how many hours
+    /// Removes the hours below <see cref="FloorHour"/> from all three tables, the failure records and (V221, #6800) the hash-hourly
+    /// table, and the days wholly below it from the day tables (<see cref="QueryStoreHashDaily.GcAsync"/>), in ONE transaction and returns how many hours
     /// went. Step one deletes the hours and the validity rows (small tables) and returns the hours; step two removes each
     /// returned hour's rollup rows by the index. A rollup row is always written in the same transaction as its hour's row,
     /// so no rollup row is left without one.
@@ -878,6 +1083,17 @@ WHERE hour < $1;";
             rollup.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = hour });
             await rollup.ExecuteNonQueryAsync(cancellationToken);
         }
+
+        /* V221 (#6800): the hash-hourly rows below the floor, by the (hour, server_id) index, in the same transaction. By the floor and not
+           by `expired`: a pre-V221 build retires hours without deleting their rows here, and `expired` never names those hours again. */
+        await using (var hashHourly = new NpgsqlCommand(GcHashHourlySql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
+        {
+            hashHourly.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = floor });
+            await hashHourly.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        /* V221 (#6800): the day table's rows, ledger rows and failure records of every day whose whole day is below the floor, in the same transaction. */
+        await QueryStoreHashDaily.GcAsync(connection, transaction, floor, cancellationToken);
 
         await transaction.CommitAsync(cancellationToken);
         return expired.Count;
@@ -958,6 +1174,20 @@ WHERE hour < $1;";
         {
             insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = hourValue });
             await insert.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        /* V221 (#6800): the hash-hourly rows of the same hour, in this transaction, so the table and the stamp rows come from the same
+           pass. The ledger's hash_built_seq below is the same value as built_seq. */
+        await using (var deleteHash = NewCommand(DeleteHashHourSql))
+        {
+            deleteHash.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = hourValue });
+            await deleteHash.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await using (var insertHash = NewCommand(BuildHashHourInsertSql))
+        {
+            insertHash.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = hourValue });
+            await insertHash.ExecuteNonQueryAsync(cancellationToken);
         }
 
         long sourceRows;
@@ -1095,7 +1325,7 @@ WHERE hour < $1;";
         ArgumentNullException.ThrowIfNull(logger);
         ArgumentNullException.ThrowIfNull(elapsed);
 
-        int builtStale = 0, builtMissing = 0, failed = 0, started = 0, deferredForWriters = 0, backedOff = 0;
+        int builtStale = 0, builtMissing = 0, builtBacklog = 0, failed = 0, started = 0, deferredForWriters = 0, backedOff = 0;
         var watch = options?.Watch ?? DeferralWatch.Shared;
 
         await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
@@ -1103,11 +1333,27 @@ WHERE hour < $1;";
         var planned = await PlanAsync(connection, nowUtc, retentionDays, cancellationToken, options?.StoreNow);
         var plan = planned.Builds;
 
-        foreach (var item in plan)
+        /* #6865: after the normal builds the tick keeps building backlog hours, newest first, while the extra builds stay inside
+           ExtraBacklogBudget and the tick inside MaxTickDuration. Each one is built, failed and backed off like any other hour. */
+        var extra = planned.ExtraBacklog ?? Array.Empty<Build>();
+        TimeSpan? extraStart = null;
+        var startedExtra = 0;
+        foreach (var (item, isExtra) in plan.Select(build => (build, false)).Concat(extra.Select(build => (build, true))))
         {
             if (elapsed() >= MaxTickDuration)
             {
                 break;
+            }
+
+            if (isExtra)
+            {
+                extraStart ??= elapsed();
+                if (elapsed() - extraStart.Value >= ExtraBacklogBudget)
+                {
+                    break;
+                }
+
+                startedExtra++;
             }
 
             started++;
@@ -1116,11 +1362,21 @@ WHERE hour < $1;";
             {
                 if (await BuildHourAsync(connection, item.Hour, nowUtc, cancellationToken, statementTimeoutSeconds: timeoutSeconds) is null)
                 {
-                    deferredForWriters++;
+                    /* Only a plan hour is "deferred" by a writer: an extra the writer held is opportunistic and is the next tick's backlog, so it is in
+                       neither Deferred nor the writer warning's count (it would report hours the plan never held, #6865). */
+                    if (!isExtra)
+                    {
+                        deferredForWriters++;
+                    }
+
                     continue;
                 }
 
-                if (item.Stale)
+                if (item.Backlog)
+                {
+                    builtBacklog++;
+                }
+                else if (item.Stale)
                 {
                     builtStale++;
                 }
@@ -1151,6 +1407,9 @@ WHERE hour < $1;";
                 }
             }
         }
+
+        /* V221 (#6800): the days whose 24 hours are built and valid, after the hours of this tick, newest first, at most QueryStoreHashDaily.MaxBuildsPerTick. */
+        var days = await QueryStoreHashDaily.RunTickAsync(connection, nowUtc, logger, elapsed, options?.StoreNow, cancellationToken);
 
         /* An open writer of the wide table held hours back: at plan time (the hours it would defer never took a build slot) or at build
            time (it started between the plan and the build). Name it, once per tick, however many hours; the next tick retries. */
@@ -1184,10 +1443,11 @@ WHERE hour < $1;";
             watch.ShouldWarn(false, null);
         }
 
-        var deferred = plan.Count - started + deferredForWriters;
-        var result = new TickResult(builtStale, builtMissing, failed, removed, deferred, deferredForWriters, planned.HeldBack, backedOff);
-        logger.LogInformation("Query Store compose rollup: built {Built} hour(s) (stale {Stale}, missing {Missing}), failed {Failed}, deferred {Deferred}, removed {Removed} hour(s), {ElapsedMs} ms",
-            result.Built, builtStale, builtMissing, failed, deferred, removed, (long)elapsed().TotalMilliseconds);
+        /* The extra builds are opportunistic: the ones the budget did not reach are not "deferred", they are the next tick's backlog. */
+        var deferred = plan.Count - (started - startedExtra) + deferredForWriters;
+        var result = new TickResult(builtStale, builtMissing, failed, removed, deferred, deferredForWriters, planned.HeldBack, backedOff, days.Built, days.Failed, builtBacklog);
+        logger.LogInformation("Query Store compose rollup: built {Built} hour(s) (stale {Stale}, missing {Missing}, backlog {Backlog}), failed {Failed}, deferred {Deferred}, removed {Removed} hour(s), built {DaysBuilt} day(s), failed {DaysFailed} day(s), {ElapsedMs} ms",
+            result.Built, builtStale, builtMissing, builtBacklog, failed, deferred, removed, days.Built, days.Failed, (long)elapsed().TotalMilliseconds);
         return result;
     }
 }

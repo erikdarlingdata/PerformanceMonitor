@@ -62,7 +62,16 @@ internal static class TestWait
     /// Holds the calling thread for <paramref name="duration"/> because the elapsed time is the test's input (a
     /// fake slow call, a lock held open), not because anything is being waited for.
     /// </summary>
-    internal static void Elapse(TimeSpan duration) => Pause(duration);
+    internal static void Elapse(TimeSpan duration)
+    {
+        /* A timed wait on Windows can return up to one timer tick early, so a single Pause can hold for less than it was
+           asked to (#6704's CI: 60 ms asked, 47 ms measured by Stopwatch). Pause again for whatever is left. */
+        var started = TimeProvider.System.GetTimestamp();
+        for (var left = duration; left > TimeSpan.Zero; left = duration - TimeProvider.System.GetElapsedTime(started))
+        {
+            Pause(left);
+        }
+    }
 
     /// <summary>The polling loop, with the pause and the clock passed in so the unit tests need no real time.</summary>
     internal static bool WaitCore(Func<bool> condition, TimeSpan timeout, TimeSpan poll, Action<TimeSpan> pause, Func<TimeSpan> elapsed)

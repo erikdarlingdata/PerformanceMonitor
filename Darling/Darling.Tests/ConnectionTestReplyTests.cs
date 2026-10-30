@@ -58,7 +58,8 @@ public sealed class ConnectionTestReplyTests : IDisposable
         new ConnectionProbeResult(false, 0, 0, null, false, false, false, false, DriverText + " password=" + Password));
 
     private static string AddBody() =>
-        JsonSerializer.Serialize(new[] { new { host = "sql-test-01", port = 1444, auth = "SQL", username = "monitor", password = Password } });
+        /* #6583: a SQL Server port rides in the host; a separate port is refused. */
+        JsonSerializer.Serialize(new[] { new { host = "sql-test-01,1444", auth = "SQL", username = "monitor", password = Password } });
 
     private sealed class EmptyDefinitions : Core.IServerDefinitions
     {
@@ -299,7 +300,7 @@ public sealed class ConnectionTestReplyTests : IDisposable
     public void TheWebRoutesPassTheServiceLogger_ToBothCores()
     {
         var text = RepoFile.ReadRepoFile("Darling/PerformanceMonitor.Darling.Service/DarlingWebEndpoints.cs");
-        Assert.Contains("DarlingMcpServerAdminTools.AddServers(postgres, body, logger)", text, StringComparison.Ordinal);
-        Assert.Contains("CancellationToken.None, probeLogger: logger)", text, StringComparison.Ordinal);
+        Assert.Contains("DarlingMcpServerAdminTools.AddServers(postgres, body, logger, windowsAuthScreen)", text, StringComparison.Ordinal);
+        Assert.Contains("CancellationToken.None, probeLogger: logger, webScreen: windowsAuthScreen)", text, StringComparison.Ordinal);
     }
 }

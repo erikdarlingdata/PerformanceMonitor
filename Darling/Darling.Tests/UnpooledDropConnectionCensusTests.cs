@@ -59,6 +59,7 @@ public sealed class UnpooledDropConnectionCensusTests
     internal static readonly IReadOnlyDictionary<string, string> Exceptions = new Dictionary<string, string>(StringComparer.Ordinal)
     {
         ["DarlingCollectorRunnerTests.cs"] = "T-SQL against SQL Server (DROP DATABASE [name]); SQL Server has no backend pool shared with a TimescaleDB job.",
+        ["MonitoringGrantScriptLiveSqlTests.cs"] = "T-SQL against the local test SQL Server (SINGLE_USER, then DROP DATABASE [name]); SQL Server has no backend pool shared with a TimescaleDB job.",
         ["ProcedureStatsDeferredPlanFetchLiveTests.cs"] = "T-SQL against SQL Server (SINGLE_USER, then DROP DATABASE [name]).",
         ["QueryStatsDeferredPlanFetchLiveTests.cs"] = "T-SQL against SQL Server (SINGLE_USER, then DROP DATABASE [name]).",
         ["RemediationLiveSqlTests.cs"] = "T-SQL against the local test SQL Server (SINGLE_USER, then DROP DATABASE [name]); SQL Server has no backend pool shared with a TimescaleDB job.",

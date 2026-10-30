@@ -93,6 +93,45 @@ public sealed class McpMuteReportsWhatItMatchedTests : IClassFixture<SharedDuckD
 
     /// <summary>The normal case: the hash came from real findings on the named server. Two planted occurrences
     /// → <c>matched_now: 2</c>, <c>status: "muted"</c>, and the registry row exists under the server's id.</summary>
+    /// <summary>
+    /// #6403: the mute answers with previous null and an undo that unmutes the same scope; the unmute answers with the rows it
+    /// removed and an undo that mutes the scope again with the reason the row carried. Each undo is run through the real tool and
+    /// the registry is checked.
+    /// </summary>
+    [Fact]
+    public async Task TheMuteAndTheUnmute_AnswerWithAnUndoThatPutsTheRegistryBack()
+    {
+        using var muted = JsonDocument.Parse(await McpAnalysisTools.MuteAnalysisFinding(CreateTestService(), _serverManager, PlantedHash, "TestServer", "planted"));
+        Assert.Equal(JsonValueKind.Null, muted.RootElement.GetProperty("previous").ValueKind);
+        var unmuteCall = muted.RootElement.GetProperty("undo");
+        Assert.Equal("unmute_analysis_finding", unmuteCall.GetProperty("tool").GetString());
+        Assert.Equal(1, await CountMuteRowsAsync(PlantedHash, _serverId));
+
+        var unmuteArguments = unmuteCall.GetProperty("arguments");
+        using var unmuted = JsonDocument.Parse(await McpAnalysisTools.UnmuteAnalysisFinding(
+            CreateTestService(), _serverManager, unmuteArguments.GetProperty("story_path_hash").GetString()!, unmuteArguments.GetProperty("server_name").GetString()));
+        Assert.Equal("unmuted", unmuted.RootElement.GetProperty("status").GetString());
+        Assert.Equal(0, await CountMuteRowsAsync(PlantedHash, _serverId));
+        var previous = unmuted.RootElement.GetProperty("previous").EnumerateArray().Single();
+        Assert.Equal("planted", previous.GetProperty("reason").GetString());
+
+        var muteCall = unmuted.RootElement.GetProperty("undo");
+        Assert.Equal("mute_analysis_finding", muteCall.GetProperty("tool").GetString());
+        var muteArguments = muteCall.GetProperty("arguments");
+        using var again = JsonDocument.Parse(await McpAnalysisTools.MuteAnalysisFinding(
+            CreateTestService(), _serverManager, muteArguments.GetProperty("story_path_hash").GetString()!,
+            muteArguments.GetProperty("server_name").GetString(), muteArguments.GetProperty("reason").GetString()));
+        Assert.True(again.RootElement.GetProperty("registered").GetBoolean());
+        Assert.Equal(1, await CountMuteRowsAsync(PlantedHash, _serverId));
+
+        /* A repeat of a mute that is already in force wrote nothing, so there is nothing to undo; an unmute of a scope with no mute removed nothing. */
+        using var repeat = JsonDocument.Parse(await McpAnalysisTools.MuteAnalysisFinding(CreateTestService(), _serverManager, PlantedHash, "TestServer"));
+        Assert.StartsWith("None needed", repeat.RootElement.GetProperty("undo").GetString(), StringComparison.Ordinal);
+        using var nothing = JsonDocument.Parse(await McpAnalysisTools.UnmuteAnalysisFinding(CreateTestService(), _serverManager, NeverSeenHash, "TestServer"));
+        Assert.Equal("not_muted", nothing.RootElement.GetProperty("status").GetString());
+        Assert.StartsWith("None needed", nothing.RootElement.GetProperty("undo").GetString(), StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task AHashWithStoredFindings_IsMuted_AndSaysHowManyItMatched()
     {

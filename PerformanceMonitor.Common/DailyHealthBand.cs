@@ -211,6 +211,13 @@ namespace PerformanceMonitor.Common
         /// </summary>
         public DeadlockRateThresholds DeadlockRates { get; init; } = DeadlockRateThresholds.Default;
 
+        /// <summary>
+        /// The blocking band's tiers the day bands with (#6927) — the SAME store-backed values the Overview
+        /// card's blocking dot reads, so a day cell and the card cannot disagree about what a blocking rate or
+        /// a peak block means. Defaults to today's constants; Lite has no such knobs and bands on them.
+        /// </summary>
+        public BlockingBandThresholds BlockingBands { get; init; } = BlockingBandThresholds.Default;
+
         /// <summary>The high-CPU sample count at or above which <paramref name="window"/> is Critical: the
         /// greater of <see cref="HighCpuCriticalSamplesMinimum"/> and
         /// <see cref="HighCpuCriticalSamplesPerHour"/> × the window's hours. An undeclared window
@@ -275,7 +282,7 @@ namespace PerformanceMonitor.Common
                undeclared span) is the fallback this classifier wants: a non-zero count reads Warning, a zero
                count (Unknown) stays out of the blocking trigger. */
             var blockingSeverity = ServerHealthClassifier.BlockingSeverity(
-                signals.BlockingReports ?? signals.BlockingEvents, signals.PeakBlockWaitMs / 1000.0, signals.Window);
+                signals.BlockingReports ?? signals.BlockingEvents, signals.PeakBlockWaitMs / 1000.0, signals.Window, t.BlockingBands);
 
             var cpuSeverity = HighCpuSeverity(signals.HighCpuEvents, signals.Window, t);
             var collectionSeverity = CollectionErrorSeverity(signals.CollectionErrors, signals.CollectionRuns);

@@ -393,8 +393,69 @@ FROM investigation_requests AS r"));
         await sweep.RunAsync(stop.Token);
     }
 
-    private static FindingAlert Finding(string metric, FindingRoute route = FindingRoute.Page, string serverId = "43", string? hash = null) =>
-        new(metric, "srv", "0.9", "0.5", serverId, new AlertContext(), 0.9, 0.5, "finding detail", false, route, hash);
+    /// <summary>#6596, through the shared core and Lite's email service over a throwaway DuckDB: a finding page whose story is
+    /// recurring at this hour opens no request, on a single page and on a held page a summary names. Its history row is still
+    /// written, and the skip is journaled as <c>recurring_skipped</c> with no request id, once per route, server, metric and
+    /// hour. The same page without the label opens a request as before.</summary>
+    [Fact]
+    public async Task ARecurringAtThisHourFindingPage_OpensNoRequest_ButItsRowIsWritten_AndTheSkipIsJournaled()
+    {
+        using var duck = new ThrowawayDuckDb();
+        var email = duck.EmailService(new RouteSettings(AgentRoute(5, AlertFamily.Performance)));
+
+        Assert.NotNull(await email.SendFindingAlertAsync(Finding("Analysis: anomaly [aaaa1111]", hash: "aaaa1111bbbb", recurring: true)));
+        await email.SendFindingAlertAsync(Finding("Analysis: anomaly [aaaa1111]", hash: "aaaa1111bbbb", recurring: true));
+        await email.SendFindingSummaryAsync(new[] { Finding("Analysis: anomaly [cccc3333]", hash: "cccc3333dddd", recurring: true) });
+
+        Assert.Equal("0", duck.Scalar("SELECT count(*) FROM investigation_requests"));
+        Assert.Equal("3", duck.Scalar("SELECT count(*) FROM config_alert_log"));
+        Assert.Equal("2|0|5|43", duck.Scalar(
+            "SELECT concat_ws('|', count(*), count(request_id), max(route_id), max(server_id)) FROM investigation_journal WHERE event = 'recurring_skipped'"));
+        Assert.Equal("Analysis: anomaly [aaaa1111]|Analysis: anomaly [cccc3333]", duck.Scalar(
+            "SELECT string_agg(reason, '|' ORDER BY reason) FROM investigation_journal WHERE event = 'recurring_skipped'"));
+        Assert.Contains("aaaa1111bbbb", duck.Scalar(
+            "SELECT detail FROM investigation_journal WHERE event = 'recurring_skipped' AND reason = 'Analysis: anomaly [aaaa1111]'"));
+
+        await email.SendFindingAlertAsync(Finding("Analysis: anomaly [eeee5555]", hash: "eeee5555ffff"));
+        Assert.Equal("1", duck.Scalar("SELECT count(*) FROM investigation_requests"));
+    }
+
+    /// <summary>#6596 at the shared core: the label holds back only the store's open-or-join and calls the skip journal with
+    /// the alert it would have opened; without the label the store is asked and the journal is not called.</summary>
+    [Fact]
+    public async Task TheCore_HoldsBackARecurringAlertsRequest_AndJournalsTheSkip_AndAsksTheStoreWithoutTheLabel()
+    {
+        var settings = new RouteSettings(AgentRoute(5, AlertFamily.Performance));
+        var asked = new List<InvestigationAlert>();
+        var skipped = new List<InvestigationAlert>();
+        var core = new InvestigationDispatchCore(
+            (alert, _) =>
+            {
+                asked.Add(alert);
+                return Task.FromResult(new InvestigationOpenResult(InvestigationOpenOutcome.Opened, Guid.NewGuid()));
+            },
+            settings, NullLogger.Instance,
+            recurringSkipped: (alert, _) =>
+            {
+                skipped.Add(alert);
+                return Task.CompletedTask;
+            });
+        var at = new DateTime(2026, 10, 23, 1, 5, 0, DateTimeKind.Utc);
+
+        Assert.Null(await core.OpenOrJoinAsync("42", "srv", "Analysis: anomaly [aaaa1111]", false, at, null, "aaaa1111bbbb", null, Ct,
+            recurringAtThisHour: true));
+        Assert.Empty(asked);
+        var skip = Assert.Single(skipped);
+        Assert.Equal((5, 42, "aaaa1111bbbb", at), (skip.RouteId, skip.ServerId, skip.StoryPathHash, skip.AlertTimeUtc));
+
+        Assert.NotNull(await core.OpenOrJoinAsync("42", "srv", "Analysis: anomaly [aaaa1111]", false, at, null, "aaaa1111bbbb", null, Ct));
+        Assert.Single(asked);
+        Assert.Single(skipped);
+    }
+
+    private static FindingAlert Finding(string metric, FindingRoute route = FindingRoute.Page, string serverId = "43", string? hash = null,
+        bool recurring = false) =>
+        new(metric, "srv", "0.9", "0.5", serverId, new AlertContext(), 0.9, 0.5, "finding detail", false, route, hash, recurring);
 
     /// <summary>A throwaway DuckDB with the real alert history store and the real investigation store, on a clock the test
     /// can move forward.</summary>
@@ -420,7 +481,8 @@ FROM investigation_requests AS r"));
         {
             var history = new DuckDbAlertHistoryStore(_db);
             var webhooks = new WebhookAlertService(settings, EmailAlertService.Branding, NullLogger<WebhookAlertService>.Instance, history);
-            var core = new InvestigationDispatchCore(Store.OpenOrJoinAsync, settings, NullLogger.Instance);
+            var core = new InvestigationDispatchCore(Store.OpenOrJoinAsync, settings, NullLogger.Instance,
+                recurringSkipped: Store.RecordRecurringSkipAsync);
             return new EmailAlertService(settings, history, webhooks, NullLogger<EmailAlertService>.Instance, core,
                 (requestId, token) => Store.ReadRequestAsync(requestId, token));
         }

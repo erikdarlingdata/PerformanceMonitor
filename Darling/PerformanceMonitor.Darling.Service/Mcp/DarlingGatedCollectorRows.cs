@@ -13,6 +13,8 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -39,16 +41,15 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 internal static class DarlingGatedCollectorRows
 {
     /// <summary>The status word on a gated row: the same word the <c>not_collected</c> envelope uses.</summary>
-    internal const string NotCollectedStatus = "not_collected";
+    internal const string NotCollectedStatus = CollectorRuntimePrecondition.NotCollectedStatusWord;
 
-    /// <summary>The two Always On collectors. On a SQL Server without Always On they run and log HEALTHY with zero rows.</summary>
-    private static readonly string[] AlwaysOnCollectors = { "ag_database_replica_states", "ag_replica_states" };
 
     /// <summary>The sentence on a not-applicable Always On row.</summary>
     internal const string AlwaysOnOffMessage = "Always On availability groups are not enabled on this server, so there is nothing for this collector to read.";
 
+    /// <summary>The two Always On collectors, named once in the shared classifier (#6828) so the count surfaces and this list cannot disagree.</summary>
     internal static bool IsAlwaysOnCollector(string collectorName) =>
-        Array.IndexOf(AlwaysOnCollectors, collectorName) >= 0;
+        CollectorHealthClassifier.IsAlwaysOnCollector(collectorName);
 
     /// <summary>
     /// True for a logged row that a server without Always On shows as "not applicable" (round-1 L5): an Always On
@@ -57,7 +58,7 @@ internal static class DarlingGatedCollectorRows
     /// and all, instead of vanishing behind the not-applicable sentence.
     /// </summary>
     internal static bool IsNotApplicableWhenAlwaysOnOff(CollectorHealth row) =>
-        IsAlwaysOnCollector(row.CollectorName) && string.Equals(row.HealthStatus, "HEALTHY", StringComparison.Ordinal);
+        CollectorHealthClassifier.IsNotCollectedWhenAlwaysOnOff(row.CollectorName, row.HealthStatus, alwaysOnOff: true);
 
     /// <summary>
     /// The logged rows a server without Always On still lists: everything except the HEALTHY Always On collectors
@@ -80,6 +81,56 @@ internal static class DarlingGatedCollectorRows
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return false;
+        }
+    }
+
+    /// <summary>
+    /// #6912: one server's engine facts and the collectors they gate off. A gated collector writes no new row, so what it logged
+    /// before the gate existed (an Amazon RDS Web or Express target's SESSION_MISSING runs for <c>attention</c>, after #6893) keeps its
+    /// FAILING band for the whole seven-day window. Such a collector reads <c>not_collected</c> whatever it logged, and is left out of
+    /// the sweep arithmetic and the counts. The gate is <see cref="CollectorEngineCapability.NotCollectedMessage"/>, the one the reads use.
+    /// </summary>
+    internal sealed record EngineGate(string ServerName, int EngineEdition, string? EngineKind, AwsRdsKind AwsRdsKind, IReadOnlySet<string> Names)
+    {
+        /// <summary>True when <paramref name="collectorName"/> does not run on this server's engine.</summary>
+        internal bool IsGated(string collectorName) => Names.Contains(collectorName);
+
+        /// <summary>The logged rows that still count: everything this engine runs.</summary>
+        internal List<CollectorHealth> RowsThatRun(IEnumerable<CollectorHealth> loggedRows) =>
+            loggedRows.Where(r => !IsGated(r.CollectorName)).ToList();
+
+        /// <summary>One <c>not_collected</c> row per gated collector that <paramref name="loggedRows"/> lists, with the engine's own sentence.</summary>
+        internal IReadOnlyList<object> NotCollectedRows(IEnumerable<CollectorHealth> loggedRows) =>
+            loggedRows
+                .Select(r => r.CollectorName)
+                .Where(IsGated)
+                .Distinct(StringComparer.Ordinal)
+                .OrderBy(n => n, StringComparer.Ordinal)
+                .Select(n => (object)new
+                {
+                    collector = n,
+                    status = NotCollectedStatus,
+                    message = CollectorEngineCapability.NotCollectedMessage(ServerName, EngineEdition, EngineKind, n, AwsRdsKind),
+                })
+                .ToList();
+    }
+
+    /// <summary>
+    /// The server's <see cref="EngineGate"/>, or null when it gates nothing or the registry read fails (the log-driven rows then stand,
+    /// as they do for <see cref="AppendAsync"/>).
+    /// </summary>
+    internal static async Task<EngineGate?> ReadEngineGateAsync(
+        NpgsqlDataSource postgres, int serverId, string serverName, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var (edition, kind, rds) = await DarlingEngineCapability.ReadServerEngineAsync(postgres, serverId, cancellationToken);
+            var names = FleetEngineGatedCollectors.For(edition, kind, rds);
+            return names.Count == 0 ? null : new EngineGate(serverName, edition, kind, rds, names);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return null;
         }
     }
 
@@ -111,9 +162,10 @@ internal static class DarlingGatedCollectorRows
     {
         int engineEdition;
         string? engineKind;
+        AwsRdsKind awsRdsKind;
         try
         {
-            (engineEdition, engineKind) = await DarlingEngineCapability.ReadServerEngineAsync(postgres, serverId, cancellationToken);
+            (engineEdition, engineKind, awsRdsKind) = await DarlingEngineCapability.ReadServerEngineAsync(postgres, serverId, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -124,7 +176,9 @@ internal static class DarlingGatedCollectorRows
             CollectorCatalog.All,
             engineKind,
             loggedRows.Select(r => r.CollectorName).ToHashSet(StringComparer.Ordinal),
-            name => CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind, name));
+            /* The RDS kind is inert here while Rows admits PostgreSQL definitions only (the kind axis returns before the RDS axis
+               is reached). It is passed so the answer stays right if that filter ever widens. */
+            name => CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind, name, awsRdsKind));
     }
 
     /// <summary>

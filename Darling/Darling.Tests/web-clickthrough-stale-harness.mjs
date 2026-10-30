@@ -63,6 +63,10 @@ class FakeNode {
 }
 
 globalThis.Node = FakeNode;
+/* The in-place refresh (#6933) watches a staged panel for its loading strip to go. These scenarios do not read what lands, so the observer never fires. */
+globalThis.MutationObserver = class { observe() {} disconnect() {} };
+/* renderAg and renderFleet stop when the route changed under them, so they read location.hash. */
+if (typeof globalThis.location === "undefined") globalThis.location = { hash: "#/ag" };
 globalThis.document = {
   activeElement: null,
   createElement: (tag) => new FakeNode(tag),
@@ -114,7 +118,10 @@ const all = (node, pred, found = []) => {
   return found;
 };
 const settle = async () => { for (let i = 0; i < 60; i++) await new Promise((r) => setTimeout(r, 2)); };
-const chips = (node) => all(node, (n) => String(n.className).startsWith("metric-chip")).map((c) => ({ cls: c.className, text: c.textContent }));
+const chips = (node) => all(node, (n) => String(n.className).startsWith("metric-chip")).map((c) => {
+  const detail = (c.children || []).find((d) => d.className === "detail");
+  return { cls: c.className, text: c.textContent, detail: detail ? detail.textContent : null, detailTitle: detail ? detail.getAttribute("title") : null };
+});
 
 const iso = (msAgo) => new Date(Date.now() - msAgo).toISOString().slice(0, 19);
 const card = (over) => ({
@@ -129,6 +136,25 @@ const scenarios = {
   cards: async () => ({
     offline: chips(modules.fleet.metricBands(card({ is_online: false }))),
     online: chips(modules.fleet.metricBands(card({ last_collection: iso(1000) }))),
+  }),
+  /* #6901: a chip's detail is clamped to one line with an ellipsis, so the full sentence has to be on the detail's title. */
+  longDetail: async () => ({
+    chips: chips(modules.fleet.metricBands(card({
+      last_collection: iso(1000),
+      agent_alert_gaps: [{ message: "No alert is set for severity 19 through 25 errors." }, { message: "No alert is set for error 823, 824 or 825 (corruption)." }],
+    }))),
+  }),
+  /* #6828: a server whose collectors are 39 HEALTHY, 3 WARNING and 2 not collected: the Collectors chip shows the warning count and does not call them healthy. */
+  collectorsWarning: async () => ({
+    chips: chips(modules.fleet.metricBands(card({
+      last_collection: iso(1000), collector_count: 44, healthy_collector_count: 39, warning_collector_count: 3, not_collected_collector_count: 2,
+    }))),
+  }),
+  /* #6828: the same server with nothing uncollected shows no "not collected" count. */
+  collectorsNoneNotCollected: async () => ({
+    chips: chips(modules.fleet.metricBands(card({
+      last_collection: iso(1000), collector_count: 44, healthy_collector_count: 41, warning_collector_count: 3, not_collected_collector_count: 0,
+    }))),
   }),
   /* #6178: a server with no thread reading. On an Azure SQL Database (engine_edition 5) the Threads chip says why; on a box it stays a bare n/a. */
   azureThreads: async () => {

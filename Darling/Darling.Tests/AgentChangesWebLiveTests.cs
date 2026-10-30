@@ -111,6 +111,9 @@ public sealed class AgentChangesWebLiveTests
             Assert.Equal("unknown", (string)planRow["result"]!);
 
             var planCall = await ScalarAsync(owner, "SELECT journal_id FROM config.investigation_journal WHERE detail->>'kind' = 'plan_force'", ct);
+            /* A refusal is journaled once per call, code and HOUR, keyed on the stamp the store took (its own clock, which the web route
+               cannot be given), so two refusals journal one row inside an hour and two rows across an hour boundary. The journal's own
+               stamps own both ends of that: one row per distinct UTC hour, and one or two rows, wherever the hour happened to fall. */
             foreach (var payload in new[] { "{}", "{\"confirm\":true}" })
             {
                 var refused = await Send("PUT", "/api/agent-changes/" + planCall + "/undo", "application/json", payload);
@@ -119,7 +122,8 @@ public sealed class AgentChangesWebLiveTests
                 Assert.Contains("config_server_actions", (string)refused.Body["error"]!, StringComparison.Ordinal);
             }
 
-            Assert.Equal("1", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal WHERE event = 'refused' AND actor LIKE 'person:%' AND reason = 'server_action_off'", ct));
+            var refusals = await ScalarAsync(owner, "SELECT count(*) || ':' || count(DISTINCT date_trunc('hour', event_time AT TIME ZONE 'UTC')) FROM config.investigation_journal WHERE event = 'refused' AND actor LIKE 'person:%' AND reason = 'server_action_off'", ct);
+            Assert.True(refusals is "1:1" or "2:2", $"two refusals journal one row per distinct UTC hour, so 1 or 2 rows (rows:hours), got {refusals}");
             Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal WHERE event = 'action_undone'", ct));
             Assert.Equal(400, (await Send("PUT", "/api/agent-changes/" + planCall + "/undo", "application/json", "[1]")).Status);
             Assert.Equal(415, (await Send("PUT", "/api/agent-changes/" + planCall + "/undo", "text/plain", "{}")).Status);
@@ -133,6 +137,13 @@ public sealed class AgentChangesWebLiveTests
         {
             var list = await Send("GET", "/api/agent-changes", null);
             Assert.True((bool)list.Body!["can_decide"]!);
+
+            /* No service row yet (#6401): the switch is refused with 409 and the row is not created. */
+            var notSetUp = await Send("PUT", "/api/agent-changes/switch", "application/json", "{\"enabled\":false}");
+            Assert.Equal(409, notSetUp.Status);
+            Assert.Equal("store_not_set_up", (string)notSetUp.Body!["code"]!);
+            Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.config_service", ct));
+            await ExecAsync(owner, "INSERT INTO config.config_service (id) VALUES (1)", ct);
 
             var called = await CalledIdAsync(owner, "m-web", ct);
             var undone = await Send("PUT", "/api/agent-changes/" + called + "/undo", "application/json");
@@ -189,6 +200,7 @@ public sealed class AgentChangesWebLiveTests
     {
         await WithWebRoutesAsync("admin", async (owner, Send, ct) =>
         {
+            await ExecAsync(owner, "INSERT INTO config.config_service (id) VALUES (1)", ct);
             var called = await CalledIdAsync(owner, "m-web", ct);
             var undone = await Send("PUT", "/api/agent-changes/" + called + "/undo", "application/json");
             Assert.Equal(200, undone.Status);
@@ -204,6 +216,73 @@ public sealed class AgentChangesWebLiveTests
         }, () => "John Smith");
     }
 
+    /* #6600: the managed store's shape. The web reads as the viewer role; a signed-in admin's access check, undo and switch go through the arm and
+       record the person. A plan undo that the server's switch refuses is still journaled (a viewer-role insert would fail). */
+    [Fact]
+    public async Task OnTheManagedStore_ASignedInAdminSeat_UndoesAndSwitchesThroughTheArm_AndCanDecideIsTrue()
+    {
+        await WithWebRoutesAsync("viewer", async (owner, Send, ct) =>
+        {
+            var list = await Send("GET", "/api/agent-changes", null);
+            Assert.Equal(200, list.Status);
+            Assert.True((bool)list.Body!["can_decide"]!);
+
+            var planCall = await ScalarAsync(owner, "SELECT journal_id FROM config.investigation_journal WHERE detail->>'kind' = 'plan_force'", ct);
+            var planUndo = await Send("PUT", "/api/agent-changes/" + planCall + "/undo", "application/json", "{\"confirm\":true}");
+            Assert.Equal(409, planUndo.Status);
+            Assert.Equal("server_action_off", (string)planUndo.Body!["code"]!);
+            Assert.Equal("1", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal WHERE event = 'refused' AND actor = 'person:alice'", ct));
+
+            var called = await CalledIdAsync(owner, "m-web", ct);
+            var undone = await Send("PUT", "/api/agent-changes/" + called + "/undo", "application/json");
+            Assert.Equal(200, undone.Status);
+            Assert.Equal("person:alice", (string)undone.Body!["undone_by"]!);
+            Assert.Equal("person:alice", await ScalarAsync(owner,
+                $"SELECT actor FROM config.investigation_journal WHERE event = 'action_undone' AND detail->>'called_id' = '{called}'", ct));
+
+            /* #6401: the switch updates the service row and never creates it, so the store needs its row first. */
+            await ExecAsync(owner, "INSERT INTO config.config_service (id) VALUES (1)", ct);
+            Assert.Equal(200, (await Send("PUT", "/api/agent-changes/switch", "application/json", "{\"enabled\":false}")).Status);
+            Assert.Equal("person:alice", await ScalarAsync(owner, "SELECT updated_by FROM config.config_service", ct));
+            Assert.Equal("person:alice", await ScalarAsync(owner, "SELECT actor FROM config.investigation_journal WHERE event = 'agent_actions_switched'", ct));
+        }, () => "alice", arm: AdminArmShape.Admin, managedStore: true);
+    }
+
+    /* #6600: an OIDC viewer seat never opens the arm (its login is refused here, so opening it would fail): the list says it cannot decide and the
+       writes answer with the sign-in sentence, as they do today. */
+    [Fact]
+    public async Task OnTheManagedStore_AViewerSeat_NeverOpensTheArm_AndAnswersAsToday()
+    {
+        await WithWebRoutesAsync("viewer", async (owner, Send, ct) =>
+        {
+            var list = await Send("GET", "/api/agent-changes", null);
+            Assert.Equal(200, list.Status);
+            Assert.False((bool)list.Body!["can_decide"]!);
+
+            var undone = await Send("PUT", "/api/agent-changes/" + await CalledIdAsync(owner, "m-web", ct) + "/undo", "application/json");
+            Assert.Equal(403, undone.Status);
+            Assert.Equal(SignInSentence, (string)undone.Body!["error"]!);
+            Assert.Equal(403, (await Send("PUT", "/api/agent-changes/switch", "application/json", "{\"enabled\":false}")).Status);
+            Assert.Equal("agent says", await ScalarAsync(owner, "SELECT reason FROM config.config_mute_rules WHERE id = 'm-web'", ct));
+            Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal WHERE actor LIKE 'person:%'", ct));
+        }, () => "viewer-person", arm: AdminArmShape.Refused, managedStore: true, seatCanEdit: false);
+    }
+
+    /* #6600: with the switch off (no arm on a managed store) the list-only answers are today's, and the 403 names the switch. */
+    [Fact]
+    public async Task OnTheManagedStore_WithTheSwitchOff_TheSignedInAdminStillListsOnly_NamingTheSwitch()
+    {
+        await WithWebRoutesAsync("viewer", async (owner, Send, ct) =>
+        {
+            Assert.False((bool)(await Send("GET", "/api/agent-changes", null)).Body!["can_decide"]!);
+            var off = await Send("PUT", "/api/agent-changes/switch", "application/json", "{\"enabled\":false}");
+            Assert.Equal(403, off.Status);
+            Assert.Equal(DarlingWebEndpoints.AgentChangeRefusedMessage(true, adminWritesOff: true), (string)off.Body!["error"]!);
+            Assert.Contains("web.allowAdminWrites", (string)off.Body["error"]!, StringComparison.Ordinal);
+            Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.config_service WHERE NOT agent_actions_enabled", ct));
+        }, () => "alice", managedStore: true);
+    }
+
     private delegate Task<(int Status, JsonNode? Body)> Sender(string method, string path, string? contentType, string? payload = null);
 
     private static async Task<string?> CalledIdAsync(NpgsqlDataSource owner, string target, CancellationToken ct) =>
@@ -215,7 +294,8 @@ public sealed class AgentChangesWebLiveTests
     /// <param name="signedInAs">The signed-in admin's name read on every request (default a real email), or null for a dashboard with
     /// no sign-in configured (no seat is stored, as the host does when no web token is set).</param>
     private static async Task WithWebRoutesAsync(
-        string managedRole, Func<NpgsqlDataSource, Sender, CancellationToken, Task> body, Func<string?>? signedInAs = null)
+        string managedRole, Func<NpgsqlDataSource, Sender, CancellationToken, Task> body, Func<string?>? signedInAs = null,
+        AdminArmShape arm = AdminArmShape.None, bool managedStore = false, bool seatCanEdit = true)
     {
         signedInAs ??= () => "erik@example.com";
         var baseConnectionString = ConnectionString;
@@ -263,6 +343,7 @@ VALUES ('{Guid.NewGuid()}', 7, 'action_called', 'agent:a', '{{""tool"":""force_q
                 Pooling = false,
             }.ConnectionString;
             await using var webLogin = NpgsqlDataSource.Create(asSeat);
+            using var adminArm = await AdminArmLive.BuildAsync(owner, scratch, roleName, arm, ct);
 
             var builder = WebApplication.CreateBuilder(new WebApplicationOptions
             {
@@ -277,14 +358,15 @@ VALUES ('{Guid.NewGuid()}', 7, 'action_called', 'agent:a', '{{""tool"":""force_q
             {
                 if (signedInAs() is { } name)
                 {
-                    http.Items[PerformanceMonitor.Darling.Service.Hosting.DarlingWebSeat.HttpContextItemKey] = new PerformanceMonitor.Darling.Service.Hosting.DarlingWebSeat(name, true);
+                    http.Items[PerformanceMonitor.Darling.Service.Hosting.DarlingWebSeat.HttpContextItemKey] = new PerformanceMonitor.Darling.Service.Hosting.DarlingWebSeat(name, seatCanEdit);
                 }
 
                 await next(http);
             });
             var ownerSeam = new PerformanceMonitor.Darling.Service.Mcp.StoreOwnerSource();
             ownerSeam.Publish(owner);
-            DarlingWebEndpoints.MapAll(app, webLogin, new CollectorRuntimeState(), new CapturingTestLogger(), ownerSource: ownerSeam);
+            DarlingWebEndpoints.MapAll(app, webLogin, new CollectorRuntimeState(), new CapturingTestLogger(), ownerSource: ownerSeam,
+                postgresConfig: managedStore ? new PostgresConfig { Managed = true } : null, adminArm: adminArm);
             await app.StartAsync(ct);
             using var server = app.GetTestServer();
 
@@ -315,7 +397,7 @@ VALUES ('{Guid.NewGuid()}', 7, 'action_called', 'agent:a', '{{""tool"":""force_q
             await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (connection, token) =>
             {
                 NpgsqlConnection.ClearAllPools();
-                await using var drop = new NpgsqlCommand($"DROP OWNED BY {roleName}; DROP ROLE IF EXISTS {roleName}", connection);
+                await using var drop = new NpgsqlCommand(AdminArmLive.DropRolesSql(roleName), connection);
                 await drop.ExecuteNonQueryAsync(token);
             });
         }

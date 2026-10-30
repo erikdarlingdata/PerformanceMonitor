@@ -1604,7 +1604,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8)", CollectionIdGenerator.Next(), now, ServerId, 
             await DarlingMcpTestData.ExecAsync(connection, ct, $"UPDATE config_alert_log SET dismissed = TRUE WHERE server_id = {ServerId}");
             var allDismissed = await DarlingMcpAlertTools.GetAlertHistory(postgres, ServerName, 24, 50);
             Assert.Equal("empty", DarlingMcpTestData.StatusOf(allDismissed));
-            Assert.Contains("5 dismissed alert(s) were excluded", allDismissed, StringComparison.Ordinal);
+            Assert.Contains("5 dismissed alerts were excluded", allDismissed, StringComparison.Ordinal);
 
             bodySucceeded = true;
         }

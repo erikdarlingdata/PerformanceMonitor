@@ -13,6 +13,7 @@ using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Notifications;
 using Xunit;
+using PerformanceMonitor.Darling.Storage;
 
 namespace Darling.Tests;
 
@@ -263,7 +264,7 @@ public sealed class DarlingIncidentFingerprintTests
     public void FingerprintNamePrefersTheDisplayNameTheAlertPathHashes(
         string storageName, string? displayName, string expected)
     {
-        var server = new DarlingServerResolver.RegisteredServer(42, storageName, displayName);
+        var server = new RegisteredServer(42, storageName, displayName);
 
         Assert.Equal(expected, DarlingServerResolver.FingerprintNameOf(server, DarlingServerResolver.SharedNamesOf(new[] { server })));
     }
@@ -278,12 +279,12 @@ public sealed class DarlingIncidentFingerprintTests
     {
         var rows = new[]
         {
-            new DarlingServerResolver.RegisteredServer(42, "host1:SalesDB", "host1"),
-            new DarlingServerResolver.RegisteredServer(43, "host1:Other", "host1"),
-            new DarlingServerResolver.RegisteredServer(44, "hostA", "Prod"),
-            new DarlingServerResolver.RegisteredServer(45, "hostB", "Prod"),
-            new DarlingServerResolver.RegisteredServer(46, "host9", "host9"),
-            new DarlingServerResolver.RegisteredServer(47, "host8", null),
+            new RegisteredServer(42, "host1:SalesDB", "host1"),
+            new RegisteredServer(43, "host1:Other", "host1"),
+            new RegisteredServer(44, "hostA", "Prod"),
+            new RegisteredServer(45, "hostB", "Prod"),
+            new RegisteredServer(46, "host9", "host9"),
+            new RegisteredServer(47, "host8", null),
         };
         var shared = DarlingServerResolver.SharedNamesOf(rows);
 
@@ -300,9 +301,9 @@ public sealed class DarlingIncidentFingerprintTests
     {
         var rows = new[]
         {
-            new DarlingServerResolver.RegisteredServer(42, "host1:SalesDB", "host1"),
-            new DarlingServerResolver.RegisteredServer(43, "host1:Sales", "host1"),
-            new DarlingServerResolver.RegisteredServer(44, "host2", "Sales Primary"),
+            new RegisteredServer(42, "host1:SalesDB", "host1"),
+            new RegisteredServer(43, "host1:Sales", "host1"),
+            new RegisteredServer(44, "host2", "Sales Primary"),
         };
         var shared = DarlingServerResolver.SharedNamesOf(rows);
         foreach (var row in rows)
@@ -321,9 +322,9 @@ public sealed class DarlingIncidentFingerprintTests
     {
         var rows = new[]
         {
-            new DarlingServerResolver.RegisteredServer(42, "host1:SalesDB", "host1"),
-            new DarlingServerResolver.RegisteredServer(43, "host1:Other", "host1"),
-            new DarlingServerResolver.RegisteredServer(44, "host2", "Unique"),
+            new RegisteredServer(42, "host1:SalesDB", "host1"),
+            new RegisteredServer(43, "host1:Other", "host1"),
+            new RegisteredServer(44, "host2", "Unique"),
         };
         var (shared, _) = DarlingServerResolver.ResolveWithFingerprintName(rows, "host1:SalesDB");
         Assert.Equal("host1#42", shared.FingerprintName);
@@ -350,7 +351,7 @@ public sealed class DarlingIncidentFingerprintTests
            The servers table holds only 42. */
         var registry = PerformanceMonitor.Notifications.AlertFingerprint.SharedDisplayNames(new[] { "host1", "host1" });
         var engineName = PerformanceMonitor.Notifications.AlertFingerprint.ServerIdentity("host1", 42, registry.Contains("host1"));
-        var connectedOnly = new[] { new DarlingServerResolver.RegisteredServer(42, "host1:SalesDB", "host1") };
+        var connectedOnly = new[] { new RegisteredServer(42, "host1:SalesDB", "host1") };
 
         var (resolved, _) = DarlingServerResolver.ResolveWithFingerprintName(connectedOnly, "host1:SalesDB");
 

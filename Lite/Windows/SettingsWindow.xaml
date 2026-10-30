@@ -239,11 +239,11 @@
                                 </WrapPanel>
                                 <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
                                     <!-- #5640: the Client Timeouts alert grades client timeouts and cancels (the sqlserver.attention event: a client cancelled a query
-                                         or its timeout expired) per minute over the covered span of the attention collector's last runs (about 3 minutes). OFF by default:
+                                         or its timeout expired) per minute over the covered span of the attention collector's last runs (about 3 minutes). ON by default since #5736:
                                          the bars are relative to each server's own normal rate (#5736). The two bars are the floors; the two multiples scale the server's baseline. All whole numbers; Critical never below Warning. -->
                                     <CheckBox x:Name="AlertClientTimeoutsCheckBox" Content="Client timeouts and cancels per minute — Warning at" VerticalAlignment="Center"
                                               Foreground="{DynamicResource ForegroundBrush}"
-                                              ToolTip="The Client Timeouts alert counts client timeouts and cancels per minute (the sqlserver.attention event: a client cancelled a query or its timeout expired) over the attention collector's last runs (about 3 minutes). The two bars are floors: the Warning bar is the higher of the first floor and the Warning multiple times the server's own baseline (the p99.9 of its 3-minute average rate over the last 7 days), and the Critical bar the same with the second floor and the Critical multiple. A server with under a day of capture uses the floors. A Warning that worsens to Critical is delivered at once. Off by default."/>
+                                              ToolTip="The Client Timeouts alert counts client timeouts and cancels per minute (the sqlserver.attention event: a client cancelled a query or its timeout expired) over the attention collector's last runs (about 3 minutes). The two bars are floors: the Warning bar is the higher of the first floor and the Warning multiple times the server's own baseline (the p99.9 of its 3-minute average rate over the last 7 days), and the Critical bar the same with the second floor and the Critical multiple. A server with under a day of capture uses the floors. A Warning that worsens to Critical is delivered at once. On by default."/>
                                     <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AlertClientTimeoutsCheckBox}" x:Name="AlertClientTimeoutsWarningBox" Width="45" Text="10" Margin="6,0,0,0" VerticalAlignment="Center"
                                              ToolTip="Warning floor: client timeouts and cancels (attentions) per minute over the covered span. At least 1. Default 10. The bar is the higher of this floor and the Warning multiple times the server's own baseline."/>
                                     <TextBlock Text="Critical at" VerticalAlignment="Center" Margin="6,0,0,0"
@@ -642,7 +642,7 @@
                                 </StackPanel>
                                 <TextBlock Margin="20,8,0,0" TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}">
                                     <Run Text="Placeholders (each is JSON-escaped when substituted): "/>
-                                    <Run FontFamily="Consolas" Text="{}{{metric}} {{server}} {{value}} {{threshold}} {{severity}} {{context}} {{detail}} {{timestamp}}"/>
+                                    <Run FontFamily="Consolas" Text="{}{{metric}} {{server}} {{value}} {{threshold}} {{severity}} {{context}} {{detail}} {{timestamp}} {{status}}"/>
                                 </TextBlock>
                                 <TextBlock Margin="20,4,0,0" TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}">
                                     <Run Text="Automation placeholders — the first two substitute RAW JSON values (use them unquoted, e.g. &quot;context&quot;: {{context_json}}): "/>
@@ -866,8 +866,23 @@
                                             Click="AutoPortButton_Click"/>
                                 </WrapPanel>
                                 <TextBlock x:Name="McpStatusText" FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,6,0,0"/>
+                                <WrapPanel x:Name="McpTokenPanel" Orientation="Horizontal" Margin="0,6,0,0">
+                                    <TextBlock Text="Token:" VerticalAlignment="Center" Margin="0,0,6,0"
+                                               Foreground="{DynamicResource ForegroundBrush}"/>
+                                    <TextBox AutomationProperties.Name="MCP token" x:Name="McpTokenTextBox" Width="320" IsReadOnly="True"
+                                             VerticalAlignment="Center">
+                                        <TextBox.CommandBindings>
+                                            <CommandBinding Command="ApplicationCommands.Copy" Executed="McpTokenTextBox_Copy"/>
+                                        </TextBox.CommandBindings>
+                                    </TextBox>
+                                    <Button x:Name="CopyMcpTokenButton" Content="Copy _Token" Margin="6,0,0,0" Padding="8,2"
+                                            VerticalAlignment="Center" Click="CopyMcpTokenButton_Click"/>
+                                    <Button x:Name="NewMcpTokenButton" Content="New token" Margin="6,0,0,0" Padding="8,2"
+                                            VerticalAlignment="Center" Click="NewMcpTokenButton_Click"
+                                            ToolTip="Make a new token. The old one stops working at once, and your MCP client needs the new config."/>
+                                </WrapPanel>
                                 <WrapPanel Orientation="Horizontal" Margin="0,6,0,0">
-                                    <Button x:Name="CopyMcpCommandButton" Content="Cop_y Setup Command" Click="CopyMcpCommandButton_Click"/>
+                                    <Button x:Name="CopyMcpCommandButton" Content="Cop_y MCP config" Click="CopyMcpCommandButton_Click"/>
                                     <TextBlock TextWrapping="Wrap" Text="Works with Claude Code. Other LLMs may apply, but why would you?"
                                                FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
                                                VerticalAlignment="Center" Margin="8,0,0,0"/>

@@ -131,12 +131,12 @@ public sealed class SharedBaselineCacheTests
     /// <c>DarlingProcessServices.Add</c>, the registration Program.cs runs.
     /// </summary>
     [Fact]
-    public void TheContainer_HandsTheOneBaselineCacheToTheWorkerAndBothHosts()
+    public async Task TheContainer_HandsTheOneBaselineCacheToTheWorkerAndBothHosts()
     {
         var services = new ServiceCollection();
         services.AddLogging();
         DarlingProcessServices.Add(services, stoppedMarkerPath: null);
-        using var provider = services.BuildServiceProvider();
+        await using var provider = services.BuildServiceProvider();
 
         var shared = provider.GetRequiredService<BaselineCache>();
         var hosted = provider.GetServices<IHostedService>().ToList();

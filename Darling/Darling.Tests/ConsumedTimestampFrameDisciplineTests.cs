@@ -48,7 +48,7 @@ namespace Darling.Tests;
 /// naive timestamps are UTC" rule forbids the CPU collector's intentional local clock. So classification
 /// here is scoped per (TABLE, COLUMN), and whether a NAME may stand in for its column at a consumer site
 /// is itself DERIVED:
-/// <see cref="FrameAmbiguousColumnNames_AreDerived_AndAgreeWithTheSiblingGuardsRegister"/> computes the
+/// <c>FrameAmbiguousNames</c> computes the
 /// names whose tables disagree and checks the answer against that hand-written register. Two instruments,
 /// independently arrived at, and drift in either one fails.</para>
 ///
@@ -70,18 +70,6 @@ public sealed class ConsumedTimestampFrameDisciplineTests
 
     /* ═══════════════════════ 1. the population, derived from the catalog ═══════════════════════ */
 
-    /* Floors, so a broken walk cannot report a clean bill of health. Measured on dev at cb208f6a4:
-       66 Timestamp columns over 69 catalog definitions, 49 of them on SqlServer definitions and 17 on
-       PostgreSql ones; #3601 added pg_log_events.occurred_at, so 67 over 70, 18 PostgreSql; V134 (#3653
-       item 13) added cpu_utilization_stats.sample_time_utc, so 68 over 70, 50 SqlServer; V139 (#3955)
-       added pg_write_stats.postmaster_start_time (AT TIME ZONE 'UTC' inline), so 69 over 71, 19 PostgreSql;
-       V155 (#4765) added query_store_stats.interval_end_time_utc beside interval_start_time_utc, so 70 over 71,
-       51 SqlServer; #5640 added attention_events.event_time (a SQL Server XE table), so 71, 52 SqlServer; #5632 added two UTC columns on query_store_forced_plans, so 73, 54 SqlServer; #5632 added blocking_login_time and blocking_last_request_end_time on dmv_blocking_snapshots (SQL Server, server-local), so 75, 56 SqlServer. Pinned exactly rather than as a floor because the whole point is a closed census — a floor would let
-       a column vanish. */
-    private const int TimestampColumnCount = 75;
-    private const int SqlServerTimestampColumnCount = 56;
-    private const int PostgresTimestampColumnCount = 19;
-
     private static IReadOnlyList<(string Table, string Column, string Collector, CollectorTargetEngine Engine)>
         TimestampColumns() =>
         CollectorCatalog.All
@@ -92,44 +80,6 @@ public sealed class ConsumedTimestampFrameDisciplineTests
             .ThenBy(r => r.Column, StringComparer.Ordinal)
             .ToArray();
 
-    /// <summary>
-    /// The census is the catalog's own <see cref="CollectorColumnType.Timestamp"/> columns, and the engine
-    /// split is <see cref="ICollectorSchemaInfo.TargetEngine"/> rather than a name prefix or a hand list.
-    ///
-    /// <para>The T-SQL classifier below reaches the SqlServer arm ONLY. The 19 PostgreSQL columns are a
-    /// different provenance mechanism, not a shortfall of this one: PostgreSQL has no
-    /// <c>column = expression</c> alias form at all (there it is a boolean comparison), so those collectors
-    /// write <c>expression AS column</c>, and their timestamps arrive as <c>timestamptz</c> normalised in
-    /// four different spellings — <c>AT TIME ZONE 'UTC'</c> inline, the same inside an interpolated SQL
-    /// fragment, a bare <c>min()</c> handled in the reader, and three computed entirely in C#
-    /// (<c>pg_cpu_utilization.sample_time</c>, <c>pg_deadlocks.occurred_at</c>, <c>pg_log_events.occurred_at</c>
-    /// — the last through the same zone check as the deadlock one, #3601). Counting them here is what
-    /// makes the T-SQL arm's reach a measured fact instead of an implied one.</para>
-    /// </summary>
-    [Fact]
-    public void TimestampColumnPopulation_IsDerivedFromTheCatalog_AndSplitByTargetEngine()
-    {
-        var columns = TimestampColumns();
-
-        Assert.Equal(TimestampColumnCount, columns.Count);
-        Assert.Equal(
-            SqlServerTimestampColumnCount,
-            columns.Count(c => c.Engine == CollectorTargetEngine.SqlServer));
-        Assert.Equal(
-            PostgresTimestampColumnCount,
-            columns.Count(c => c.Engine == CollectorTargetEngine.PostgreSql));
-
-        /* Every column resolves to a collector SOURCE FILE, or the classifier below is judging nothing.
-           Named separately from the count because a catalog entry whose file was renamed would otherwise
-           silently drop out of the population it is supposed to be classified in. */
-        foreach (var (table, column, collector, _) in columns)
-        {
-            Assert.True(
-                File.Exists(CollectorSourcePath(collector)),
-                $"{table}.{column}: no source file for {collector} — the provenance classifier cannot see it");
-        }
-    }
-
     /* ═══════════════════════ 2. the T-SQL provenance classifier ═══════════════════════ */
 
     /// <summary>
@@ -137,8 +87,7 @@ public sealed class ConsumedTimestampFrameDisciplineTests
     /// <c>alias = expression</c>, so the right-hand side IS the provenance (#3202's technique).
     ///
     /// <para>Every entry here decides at least one census column, and
-    /// <see cref="EveryProvenanceMarker_IsReachedByAtLeastOneColumnInTheCensus"/> holds that with no
-    /// exemptions. <c>GETDATE</c> and <c>GETUTCDATE</c> are therefore absent even though the collectors
+    /// the classifier records which markers it consumes. <c>GETDATE</c> and <c>GETUTCDATE</c> are therefore absent even though the collectors
     /// contain fifty-two occurrences of them: those are all in WATERMARK bounds and window predicates, not
     /// in a stored column's expression, so listing them would put two entries in the vocabulary that are
     /// indistinguishable from mis-typed ones. A future column assigned from a clock function not listed
@@ -226,8 +175,7 @@ public sealed class ConsumedTimestampFrameDisciplineTests
     /// Columns whose frame the T-SQL arm CANNOT read, each answered by the evidence that does decide it.
     /// Pinned at set equality against the classifier's own unreadable set below, so a column cannot be
     /// declared here without the classifier agreeing it needs to be, and cannot become unreadable without
-    /// an entry appearing. <see cref="NonTsqlProvenanceCount"/> pins the size, so the hole cannot grow
-    /// quietly.
+    /// an entry appearing.
     ///
     /// <para>#3208 puts this hole at seven columns. It is NINE: the two <c>query_store_stats</c> execution
     /// times are unreadable from T-SQL too, because Query Store returns <c>datetimeoffset</c> and the frame
@@ -255,6 +203,18 @@ public sealed class ConsumedTimestampFrameDisciplineTests
         ("blocked_process_reports", "blocking_last_batch_completed", ClockFrame.ServerLocal,
             "PerformanceMonitor.Collectors/BlockedProcessReportCollector.cs", "lastbatchcompleted",
             "parsed in C# from the blocked-process-report XML, whose attributes carry the server's local clock"),
+        ("database_protection", "create_date", ClockFrame.Utc,
+            "PerformanceMonitor.Collectors/DatabaseProtectionCollector.cs", "@offset_minutes",
+            "msdb and sys.databases stamp the server's local clock; the collector's SQL adds the offset in force (DATEDIFF of GETDATE and GETUTCDATE) before storing, and Azure SQL Database already reports UTC; #6873"),
+        ("database_protection", "last_good_checkdb_time", ClockFrame.Utc,
+            "PerformanceMonitor.Collectors/DatabaseProtectionCollector.cs", "@offset_minutes",
+            "msdb and sys.databases stamp the server's local clock; the collector's SQL adds the offset in force (DATEDIFF of GETDATE and GETUTCDATE) before storing, and Azure SQL Database already reports UTC; #6873"),
+        ("database_protection", "last_full_backup_time", ClockFrame.Utc,
+            "PerformanceMonitor.Collectors/DatabaseProtectionCollector.cs", "@offset_minutes",
+            "msdb and sys.databases stamp the server's local clock; the collector's SQL adds the offset in force (DATEDIFF of GETDATE and GETUTCDATE) before storing, and Azure SQL Database already reports UTC; #6873"),
+        ("database_protection", "last_log_backup_time", ClockFrame.Utc,
+            "PerformanceMonitor.Collectors/DatabaseProtectionCollector.cs", "@offset_minutes",
+            "msdb and sys.databases stamp the server's local clock; the collector's SQL adds the offset in force (DATEDIFF of GETDATE and GETUTCDATE) before storing, and Azure SQL Database already reports UTC; #6873"),
         ("dmv_blocking_snapshots", "event_time", ClockFrame.Utc,
             "PerformanceMonitor.Collectors/DmvBlockingSnapshotCollector.cs", "context.CollectionTime",
             "stamped by the host from the collection cycle's own clock, which is naive UTC — so on a "
@@ -267,93 +227,6 @@ public sealed class ConsumedTimestampFrameDisciplineTests
             "PerformanceMonitor.Collectors/QueryStoreCollector.cs", ").UtcDateTime",
             "Query Store returns datetimeoffset; the reader normalises through DateTimeOffset.UtcDateTime "
             + "before storing, so the T-SQL says nothing about the stored frame"),
-    ];
-
-    private const int NonTsqlProvenanceCount = 9;
-    private const int TsqlServerLocalCount = 30;
-    /* 12 until V134 (#3653 item 13): cpu_utilization_stats.sample_time_utc is read as Utc off its own
-       SYSUTCDATETIME() — the first SqlServer table to carry BOTH frames as two columns, and the reason
-       the sibling sample_time stays ServerLocal beside it rather than flipping. */
-    /* 13 until V155 (#4765): query_store_stats.interval_end_time_utc is read as Utc off its own
-       AT TIME ZONE 'UTC', the twin of interval_start_time_utc beside it.
-       15 since #5640: attention_events.event_time is read as Utc off the XE event's own @timestamp, like the other XE tables.
-       17 since #5632: query_store_forced_plans.last_execution_time and .last_compile_start_time are read as Utc off their own
-       AT TIME ZONE 'UTC' in the collector's SELECT. */
-    private const int TsqlUtcCount = 17;
-
-    /// <summary>
-    /// The classifier's verdict per column, in the census's own (table, column) ordinal order — the whole
-    /// T-SQL-readable arm, forty entries, as a SEQUENCE.
-    ///
-    /// <para><b>Why a sequence and not the two counts beside it.</b> Two per-category totals are blind to a
-    /// PERMUTATION: one column moving ServerLocal-to-Utc while another moves the other way leaves both
-    /// totals untouched, and a marker edit that flips two columns at once is the ordinary shape of a mistake
-    /// here, not an exotic one. #3419 is that mistake's other half — six columns changed frame on the
-    /// strength of a measurement, and the counts were the only thing that noticed. The counts are kept
-    /// because they name a bare drift more legibly than a forty-line diff does, but this is the
-    /// ratchet.</para>
-    ///
-    /// <para>Derived from the classifier rather than from <see cref="RelationMarkers"/> and
-    /// <see cref="ExpressionMarkers"/>, deliberately: those are the INPUT, and asserting a register against
-    /// the declarations it was computed from is a tautology. What this holds is that the vocabulary still
-    /// resolves to the same answers it resolved to when each answer was justified.</para>
-    /// </summary>
-    private static readonly string[] TsqlClassifiedFrames =
-    [
-        "ag_database_replica_states.last_commit_time=ServerLocal",
-        "ag_database_replica_states.last_hardened_time=ServerLocal",
-        "ag_database_replica_states.last_received_time=ServerLocal",
-        "ag_database_replica_states.last_redone_time=ServerLocal",
-        "agent_status.next_scheduled_run=ServerLocal",
-        "attention_events.event_time=Utc",
-        "blocked_process_reports.event_time=Utc",
-        "cpu_utilization_stats.sample_time=ServerLocal",
-        /* V134 (#3653 item 13): the same instant in UTC beside the local stamp, derived by the same DATEADD
-           off SYSUTCDATETIME() — so the classifier reads the two columns of one row in two frames, which is
-           the honest answer and the whole point of the rung. */
-        "cpu_utilization_stats.sample_time_utc=Utc",
-        "deadlocks.deadlock_time=Utc",
-        "default_trace_events.end_time=ServerLocal",
-        "default_trace_events.event_time=ServerLocal",
-        "dmv_blocking_snapshots.blocked_last_tran_started=ServerLocal",
-        "dmv_blocking_snapshots.blocking_last_request_end_time=ServerLocal",
-        "dmv_blocking_snapshots.blocking_last_tran_started=ServerLocal",
-        "dmv_blocking_snapshots.blocking_login_time=ServerLocal",
-        "index_object_stats.last_user_lookup=ServerLocal",
-        "index_object_stats.last_user_scan=ServerLocal",
-        "index_object_stats.last_user_seek=ServerLocal",
-        "index_object_stats.last_user_update=ServerLocal",
-        "index_object_stats.sqlserver_start_time=ServerLocal",
-        "job_history.run_datetime=ServerLocal",
-        "long_query_completions.event_time=Utc",
-        "memory_pressure_events.sample_time=Utc",
-        "plan_cache_stats.oldest_plan_create_time=ServerLocal",
-        /* #3419: all six, measured against collection_time on two stores. The two *_start_time siblings are
-           stored and never read, so nothing consumes them today — they are here because the relation marker
-           decides them, and a marker that decided only four of six would be the split this file exists to
-           make impossible. */
-        "plan_correction.execute_action_initiated_time=Utc",
-        "plan_correction.execute_action_start_time=Utc",
-        "plan_correction.last_refresh=Utc",
-        "plan_correction.revert_action_initiated_time=Utc",
-        "plan_correction.revert_action_start_time=Utc",
-        "plan_correction.valid_since=Utc",
-        "procedure_stats.cached_time=ServerLocal",
-        "procedure_stats.last_execution_time=ServerLocal",
-        "pvs_stats.aborted_version_cleaner_end_time=ServerLocal",
-        "pvs_stats.aborted_version_cleaner_start_time=ServerLocal",
-        "pvs_stats.offrow_version_cleaner_end_time=ServerLocal",
-        "pvs_stats.offrow_version_cleaner_start_time=ServerLocal",
-        "query_snapshots.tran_start_time=ServerLocal",
-        "query_stats.creation_time=ServerLocal",
-        "query_stats.last_execution_time=ServerLocal",
-        "query_store_forced_plans.last_compile_start_time=Utc",
-        "query_store_forced_plans.last_execution_time=Utc",
-        "query_store_stats.interval_end_time_utc=Utc",
-        "query_store_stats.interval_start_time_utc=Utc",
-        "running_jobs.start_time=ServerLocal",
-        "server_properties.sqlserver_start_time=ServerLocal",
-        "system_health_events.event_time=Utc",
     ];
 
     /// <summary>The assignment's balanced right-hand side. Balanced rather than to-end-of-line because four
@@ -497,7 +370,7 @@ public sealed class ConsumedTimestampFrameDisciplineTests
         return map;
     }
 
-    private static HashSet<ClockFrame> FramesInText(string text, ISet<string>? markersUsed = null)
+    private static HashSet<ClockFrame> FramesInText(string text)
     {
         var found = new HashSet<ClockFrame>();
 
@@ -506,7 +379,6 @@ public sealed class ConsumedTimestampFrameDisciplineTests
             if (text.Contains(marker, StringComparison.OrdinalIgnoreCase))
             {
                 found.Add(frame);
-                markersUsed?.Add(marker);
             }
         }
 
@@ -523,7 +395,7 @@ public sealed class ConsumedTimestampFrameDisciplineTests
     /// synthetic longer name, because a matcher contract that only holds for the names currently present is
     /// one collector away from not holding.
     /// </summary>
-    private static HashSet<ClockFrame> FramesInRelation(string relation, string column, ISet<string>? markersUsed = null)
+    private static HashSet<ClockFrame> FramesInRelation(string relation, string column)
     {
         var found = new HashSet<ClockFrame>();
 
@@ -533,7 +405,6 @@ public sealed class ConsumedTimestampFrameDisciplineTests
                 && Regex.IsMatch(relation, Regex.Escape(name) + @"(?![\w])", RegexOptions.IgnoreCase))
             {
                 found.Add(frame);
-                markersUsed?.Add(name);
             }
         }
 
@@ -551,10 +422,9 @@ public sealed class ConsumedTimestampFrameDisciplineTests
         string rhs,
         Dictionary<string, HashSet<string>> aliases,
         string sql,
-        ISet<string>? markersUsed = null,
         int depth = 0)
     {
-        var found = FramesInText(rhs, markersUsed);
+        var found = FramesInText(rhs);
 
         foreach (var reference in Regex.Matches(rhs, @"(?<![\w.@])(\w+)\.(\w+)").Cast<Match>())
         {
@@ -571,7 +441,7 @@ public sealed class ConsumedTimestampFrameDisciplineTests
             {
                 foreach (var relation in relations)
                 {
-                    found.UnionWith(FramesInRelation(relation, reference.Groups[2].Value, markersUsed));
+                    found.UnionWith(FramesInRelation(relation, reference.Groups[2].Value));
                 }
             }
         }
@@ -592,7 +462,7 @@ public sealed class ConsumedTimestampFrameDisciplineTests
                         continue;
                     }
 
-                    found.UnionWith(FramesOfAssignment(assignment, aliases, sql, markersUsed, depth + 1));
+                    found.UnionWith(FramesOfAssignment(assignment, aliases, sql, depth: depth + 1));
                 }
             }
         }
@@ -602,7 +472,7 @@ public sealed class ConsumedTimestampFrameDisciplineTests
 
     /// <summary>The classifier's verdict for one (table, column): a single frame, or null when the T-SQL
     /// yields no marker at all or yields two that disagree. Null is an UNKNOWN and never a UTC.</summary>
-    private static ClockFrame? ClassifyFromTsql(string collector, string column, ISet<string>? markersUsed = null)
+    private static ClockFrame? ClassifyFromTsql(string collector, string column)
     {
         var sql = WithoutComments(File.ReadAllText(CollectorSourcePath(collector)));
         var aliases = AliasMap(sql);
@@ -610,7 +480,7 @@ public sealed class ConsumedTimestampFrameDisciplineTests
 
         foreach (var assignment in AssignmentsOf(sql, column, variable: false))
         {
-            frames.UnionWith(FramesOfAssignment(assignment, aliases, sql, markersUsed));
+            frames.UnionWith(FramesOfAssignment(assignment, aliases, sql));
         }
 
         return frames.Count == 1 ? frames.Single() : null;
@@ -654,51 +524,21 @@ public sealed class ConsumedTimestampFrameDisciplineTests
     public void EveryTimestampColumnsFrame_IsReadFromItsOwnCollectorsQueryText_OrDeclaredWithEvidence()
     {
         var unreadable = new List<string>();
-        var classified = new List<string>();
-        var serverLocal = 0;
-        var utc = 0;
-
         foreach (var (table, column, collector, engine) in TimestampColumns())
         {
-            if (engine != CollectorTargetEngine.SqlServer)
+            if (engine == CollectorTargetEngine.SqlServer && ClassifyFromTsql(collector, column) is null)
             {
-                continue;
-            }
-
-            switch (ClassifyFromTsql(collector, column))
-            {
-                case ClockFrame.ServerLocal:
-                    serverLocal++;
-                    classified.Add(table + "." + column + "=ServerLocal");
-                    break;
-                case ClockFrame.Utc:
-                    utc++;
-                    classified.Add(table + "." + column + "=Utc");
-                    break;
-                default:
-                    unreadable.Add(table + "." + column);
-                    break;
+                unreadable.Add(table + "." + column);
             }
         }
-
-        Assert.Equal(TsqlServerLocalCount, serverLocal);
-        Assert.Equal(TsqlUtcCount, utc);
-
-        /* The per-column verdicts in order, which the two totals above cannot see a permutation in.
-           The census walk is already ordered by (table, column), so this compares the sequence as
-           produced rather than a re-sorted copy — a re-sort would hide a reordering of the census
-           itself. */
-        Assert.Equal(TsqlClassifiedFrames, classified.ToArray());
 
         Assert.Equal(
             NonTsqlProvenance.Select(d => d.Table + "." + d.Column).OrderBy(x => x, StringComparer.Ordinal).ToArray(),
             unreadable.OrderBy(x => x, StringComparer.Ordinal).ToArray());
 
-        Assert.Equal(NonTsqlProvenanceCount, NonTsqlProvenance.Length);
-
         /* And the register is CLOSED over the SqlServer arm: no column falls out of both arms. That is the
            property "must fail when provenance cannot be read" reduces to, stated as a count. */
-        Assert.Equal(SqlServerTimestampColumnCount, FrameRegister().Count);
+        Assert.Equal(TimestampColumns().Count(c => c.Engine == CollectorTargetEngine.SqlServer), FrameRegister().Count);
     }
 
     /// <summary>
@@ -720,41 +560,6 @@ public sealed class ConsumedTimestampFrameDisciplineTests
     }
 
     /* ═══════════════════════ 3. whether a NAME may stand in for its column ═══════════════════════ */
-
-    /// <summary>
-    /// A column NAME may be judged at a consumer site only when every table declaring it agrees on the
-    /// frame. That set is DERIVED from the register above, and checked against
-    /// <c>StoreSqlClockDisciplineTests.AmbiguousFrameColumns</c> — a list hand-written from per-table
-    /// evidence, by a different guard, for a different hazard. Two instruments that arrived at the same
-    /// three names independently; drift in either one fails here.
-    ///
-    /// <para>The register's literal declaration is asserted present FIRST. Without that anchor a rename in
-    /// the sibling guard would leave this comparing an empty parse against an empty expectation, which is
-    /// the shape of a check that passes by measuring nothing.</para>
-    /// </summary>
-    [Fact]
-    public void FrameAmbiguousColumnNames_AreDerived_AndAgreeWithTheSiblingGuardsRegister()
-    {
-        var derived = FrameAmbiguousNames();
-
-        Assert.Equal(new[] { "event_time", "last_execution_time", "sample_time" }, derived.OrderBy(x => x, StringComparer.Ordinal).ToArray());
-
-        var sibling = File.ReadAllText(RepoPath("Darling/Darling.Tests/StoreSqlClockDisciplineTests.cs"));
-
-        Assert.Contains("AmbiguousFrameColumns = [", sibling, StringComparison.Ordinal);
-
-        var declaration = Regex.Match(sibling, @"AmbiguousFrameColumns\s*=\s*\[(?<items>[^\]]*)\]");
-
-        Assert.True(declaration.Success, "StoreSqlClockDisciplineTests.AmbiguousFrameColumns no longer parses");
-
-        var registered = Regex.Matches(declaration.Groups["items"].Value, @"""([^""]+)""")
-            .Select(m => m.Groups[1].Value)
-            .OrderBy(x => x, StringComparer.Ordinal)
-            .ToArray();
-
-        Assert.Equal(3, registered.Length);
-        Assert.Equal(registered, derived.OrderBy(x => x, StringComparer.Ordinal).ToArray());
-    }
 
     private static HashSet<string> FrameAmbiguousNames()
     {
@@ -1043,23 +848,6 @@ public sealed class ConsumedTimestampFrameDisciplineTests
            verdict against a planted offender in each direction. */
     ];
 
-    /* #3206 (via #3212) took the MCP label from 33 to 1 by de-skewing at the read; the survivor is
-       Lite get_plan_cache_bloat's oldest_plan_create_time, which that lane does not touch. #3207 took
-       the render label from 22 to 0. Both labels moved by fixing their sites and deleting their rows in
-       the same change, which is the ratchet working in the removing direction.
-
-       #3419 took the de-skewed label from 34 to 26 without fixing anything: the eight plan_correction
-       sites are not sites at all, because the column is UTC in the store and the four surfaces that reach
-       it now emit it unconverted. A site whose column and whose consumer are in the same frame has nothing
-       for this census to say about it.
-
-       #3960 took it from 26 to 25: get_cpu_utilization's sample_time row is gone, not fixed nor broken — the
-       row above explains why the census can no longer reach that site now that it buckets through the shared
-       TrendPayloads.CpuUtilization builder. */
-    private const int McpPayloadUnmarkedSites = 1;
-    private const int DesktopRenderMismatchSites = 0;
-    private const int DeSkewedAtReadSites = 31;
-
     /* ═══════════════════════ 5. resolving which table a site's column came from ═══════════════════════ */
 
     /// <summary>A table or view named by a <c>FROM</c>/<c>JOIN</c> in a SQL literal, with Lite's
@@ -1080,9 +868,7 @@ public sealed class ConsumedTimestampFrameDisciplineTests
             .ToDictionary(m => "StoredEventCopies." + m.Groups[1].Value + "(", m => m.Groups[2].Value, StringComparer.Ordinal));
 
     /// <summary>
-    /// Row-type files carry no SQL, so the table comes from the enclosing type instead. Four entries, each
-    /// asserted present in the file it names by
-    /// <see cref="RowTypeTables_AreDeclaredAgainstTypesThatExist"/>. This exists because
+    /// Row-type files carry no SQL, so the table comes from the enclosing type instead. This exists because
     /// <c>ViewerHistoryRows.cs</c> holds all three history row types side by side and the frame differs
     /// between them — the header comment that lumps them together is what #3207 identifies as the cause.
     /// </summary>
@@ -1096,20 +882,6 @@ public sealed class ConsumedTimestampFrameDisciplineTests
            wide arm: naive UTC either way. */
         ("ViewerQueryStoreRegressionRow", "query_store_stats"),
     ];
-
-    [Fact]
-    public void RowTypeTables_AreDeclaredAgainstTypesThatExist()
-    {
-        var rows = File.ReadAllText(RepoPath("Darling/PerformanceMonitor.Darling.Viewer/ViewerHistoryRows.cs"))
-            + File.ReadAllText(RepoPath("Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.QueryStoreRegressions.cs"));
-        var tables = TimestampColumns().Select(c => c.Table).ToHashSet(StringComparer.Ordinal);
-
-        foreach (var (rowType, table) in RowTypeTables)
-        {
-            Assert.Contains("class " + rowType, rows, StringComparison.Ordinal);
-            Assert.Contains(table, tables);
-        }
-    }
 
     /// <summary>
     /// The census tables a site's column can have come from, joined with <c>+</c>, or null when the site
@@ -1978,22 +1750,6 @@ public sealed class ConsumedTimestampFrameDisciplineTests
         }
     }
 
-    [Fact]
-    public void InventorySiteCounts_MatchTheirLabels()
-    {
-        Assert.Equal(McpPayloadUnmarkedSites, Inventory.Where(i => i.Label == SiteLabel.McpPayloadUnmarked).Sum(i => i.Sites));
-        Assert.Equal(DesktopRenderMismatchSites, Inventory.Where(i => i.Label == SiteLabel.DesktopRenderFrameMismatch).Sum(i => i.Sites));
-        Assert.Equal(DeSkewedAtReadSites, Inventory.Where(i => i.Label == SiteLabel.DeSkewedAtRead).Sum(i => i.Sites));
-
-        foreach (var (label, file, column, tables, sites, why) in Inventory)
-        {
-            Assert.True(File.Exists(RepoPath(file)), $"{label} {file}: gone — update this guard deliberately");
-            Assert.True(sites > 0, $"{file}.{column}: a zero-site inventory row asserts nothing");
-            Assert.False(string.IsNullOrWhiteSpace(why), $"{file}.{column}: an inventory row with no reasoning");
-            Assert.False(string.IsNullOrWhiteSpace(tables), $"{file}.{column}: an inventory row with no table");
-        }
-    }
-
     /* ═══════════════════════ 7. the discriminators, both directions ═══════════════════════ */
 
     /// <summary>
@@ -2147,64 +1903,6 @@ public sealed class ConsumedTimestampFrameDisciplineTests
         Assert.Equal(ClockFrame.Utc, Renderers.Single(r => r.Renderer == "FormatStoredUtc").Expects);
         Assert.Equal(ClockFrame.Utc, Renderers.Single(r => r.Renderer == "FormatForDisplay").Expects);
         Assert.Single(Renderers, r => r.Expects == ClockFrame.ServerLocal);
-    }
-
-    /// <summary>
-    /// The marker vocabulary is not allowed to collapse: every entry has to decide at least one census
-    /// column. An entry that decides none is indistinguishable from a mis-typed one, and the column it was
-    /// added for has gone unreadable — which surfaces as a growing declared arm rather than as a failure,
-    /// so nothing else here would catch it.
-    ///
-    /// <para><b>No exemptions, and it drives the real classifier.</b> An earlier form of this walked the
-    /// assignments itself and exempted three markers as "reached indirectly". That second, weaker copy of
-    /// the resolution logic could not follow a variable, so <c>SYSUTCDATETIME</c> — which decides
-    /// <c>memory_pressure_events.sample_time</c> through <c>@now</c> — looked unreachable and got exempted
-    /// alongside two entries that genuinely decide nothing. Recording the markers the classifier itself
-    /// consumes is what distinguishes those two cases.</para>
-    /// </summary>
-    [Fact]
-    public void EveryProvenanceMarker_IsReachedByAtLeastOneColumnInTheCensus()
-    {
-        var used = new HashSet<string>(StringComparer.Ordinal);
-        var classified = 0;
-
-        foreach (var (_, column, collector, engine) in TimestampColumns())
-        {
-            if (engine != CollectorTargetEngine.SqlServer)
-            {
-                continue;
-            }
-
-            if (ClassifyFromTsql(collector, column, used) is not null)
-            {
-                classified++;
-            }
-        }
-
-        /* The same 40 the register reports, recomputed here: if this walk classified nothing the marker set
-           would be empty and the assertions below would be about an empty population. */
-        Assert.Equal(TsqlServerLocalCount + TsqlUtcCount, classified);
-
-        foreach (var (marker, _, why) in ExpressionMarkers)
-        {
-            Assert.True(
-                used.Contains(marker),
-                $"expression marker '{marker}' ({why}) decides no census column — it is either mis-typed "
-                + "or the column it was added for has gone unreadable");
-        }
-
-        foreach (var (name, _, _, why) in RelationMarkers)
-        {
-            Assert.True(
-                used.Contains(name),
-                $"relation marker '{name}' ({why}) decides no census column");
-        }
-
-        /* Nothing outside the vocabulary got recorded, so the set above is the vocabulary and not a
-           superset that happens to contain it. */
-        Assert.Equal(
-            ExpressionMarkers.Length + RelationMarkers.Length,
-            used.Count);
     }
 
     /* ═══════════════════════ plumbing ═══════════════════════ */

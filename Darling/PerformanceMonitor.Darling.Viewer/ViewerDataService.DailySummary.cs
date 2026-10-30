@@ -53,7 +53,12 @@ public sealed partial class ViewerDataService
     /// — the WPF viewer keeps its own instance, distinct from the service's shared one). Benignly racy like
     /// <see cref="GetRollupAvailabilityAsync"/>'s cache: concurrent tab loads may miss together and compute the
     /// range twice, which is correct, just not maximally cache-efficient.</summary>
-    private readonly DailySummaryRangeCache<RawDailySummaryDay> _dailySummaryRangeCache = new();
+    private DailySummaryRangeCache<RawDailySummaryDay> _dailySummaryRangeCache = new();
+
+    /// <summary>#6815: test-only. Replaces <see cref="_dailySummaryRangeCache"/> with an empty one that reads
+    /// <paramref name="clock"/>, so a live test can move time past the sub-horizon bound without a sleep. The twin of
+    /// <c>DarlingHealthReader.UseRangeCacheClockForTests</c>. Production never calls it and keeps the wall clock.</summary>
+    internal void UseRangeCacheClockForTests(Func<DateTime> clock) => _dailySummaryRangeCache = new(clock);
 
     /// <summary>#4232: one day's worth of <see cref="DailySummarySql"/>'s raw output columns, from BEFORE any
     /// banding or retention judgment — the unit <see cref="_dailySummaryRangeCache"/> actually caches. A record
@@ -119,6 +124,7 @@ public sealed partial class ViewerDataService
         var banding = new DailyHealthThresholds
         {
             DeadlockRates = await GetDeadlockRateThresholdsAsync(cancellationToken),
+            BlockingBands = await GetBlockingBandThresholdsAsync(cancellationToken),
         };
 
         /* #3653: the horizon, read once per range like the banding tiers above — a schedule save mid-read must
@@ -180,7 +186,7 @@ public sealed partial class ViewerDataService
 
         /* #4232: the closed-day cache. The viewer's calendar reads are always live ("as of now"), so every
            call is cache-eligible. ToDailySummaryRow re-reads the live banding/horizon on every row, cached or
-           fresh, every call — never from whatever a cached block happened to compute them as up to an hour ago
+           fresh, every call — never from whatever a cached block happened to compute them as when it was built
            (ruling item 7: no column the statement itself returns spans more than one day, but this post-read
            judgment does move between refreshes). */
         Task<List<RawDailySummaryDay>> ReadRawAsync(string sql, IReadOnlyList<string>? scope) => _dailySummaryRangeCache.GetRangeAsync(
@@ -193,7 +199,8 @@ public sealed partial class ViewerDataService
             day: raw => raw.Day,
             runRange: (start, end, ct) => RunRangeAsync(sql, scope, start, end, ct),
             scopeKey: DailySummaryAzureMasterScope.CacheScopeKey(scope),
-            cancellationToken: cancellationToken);
+            cancellationToken: cancellationToken,
+            trustFromUtc: DailySummaryRangeCache.TrustFloorFor(horizon)); // #6809: the horizon day and older are re-read within the hour, never held for a day
 
         /* #4925: an Azure SQL Database master with separately monitored databases counts only its own blocking and
            deadlocks, as get_daily_health does. An empty list (every other target) is today's read, unchanged. A

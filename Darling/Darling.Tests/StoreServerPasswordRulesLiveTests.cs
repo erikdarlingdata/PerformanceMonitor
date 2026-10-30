@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -31,7 +32,7 @@ namespace Darling.Tests;
 public sealed class StoreServerPasswordRulesLiveTests
 {
     private const string ReferenceSentence = "Enter the password itself. References (env: or file:) can only be set in the configuration file.";
-    private const string MoveSentence = "Changing how this server is reached needs its password again: it is stored encrypted and this surface cannot read it back.";
+    private const string MoveSentence = "Changing the host, port or any other connection setting of this server needs its password sent with the change, because a saved password is only ever sent to the server it was saved for. Send the password together with the new settings.";
     private const string RemediationSentence = "This server has a remediation or hypothetical-index login stored. Change how it is reached on the service host, in the configuration file or with --add-server.";
     private const string ReferenceState = "PW001";
     private const string MoveState = "PW002";
@@ -643,6 +644,100 @@ public sealed class StoreServerPasswordRulesLiveTests
         {
             await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
                 await ExecAsync(cleanup, $"DROP OWNED BY {login}; DROP ROLE IF EXISTS {login}", cleanupCt));
+        }
+    }
+
+    /// <summary>
+    /// #6569: a self-managed store upgraded by replacing the binaries keeps the journal's owner-row function from before the three rows of an
+    /// agent action (action_called, action_done, action_failed) were the owner's alone, so the mcp and admin logins could still write them. The
+    /// service's start replaces the function under the same lock as the password rules: an mcp-grant login's insert of action_called is accepted
+    /// before and refused after, a second start changes nothing, and a login that is not the function's owner gets one warning that names the script.
+    /// </summary>
+    [Fact]
+    public async Task AStoreHoldingTheOlderJournalFunction_GetsTheOwnerOnlyEventListFromTheServicesStart_AndALoginThatMayNotReplaceItGetsOneWarning()
+    {
+        var connectionString = RequireLivePostgres();
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct);
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var writer = "journal_writer_" + suffix;
+        var restrictedLogin = "journal_probe_" + suffix;
+        const string functionText = "SELECT prosrc FROM pg_proc WHERE oid = 'config.investigation_journal_owner_rows()'::regprocedure";
+        const string functionVersion = "SELECT xmin::text FROM pg_proc WHERE oid = 'config.investigation_journal_owner_rows()'::regprocedure";
+        const string actionCalled = "INSERT INTO config.investigation_journal (event, actor, reason) VALUES ('action_called', 'agent:probe', 'probe')";
+
+        var bodySucceeded = false;
+        try
+        {
+            await using var owner = new NpgsqlConnection(scratch.ConnectionString);
+            await owner.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(owner, ct);
+
+            /* The older function: the same text with the three rows of an agent action out of the owner-only list. */
+            var current = DarlingManagedRoles.BuildJournalEventRulesSql("config");
+            var olderList = string.Join(", ", DarlingManagedRoles.JournalOwnerEventList.Split(", ")
+                .Where(item => !AgentActionEvents.OwnerOnly.Contains(item.Trim('\''))));
+            Assert.NotEqual(DarlingManagedRoles.JournalOwnerEventList, olderList);
+            var older = current.Replace(DarlingManagedRoles.JournalOwnerEventList, olderList, StringComparison.Ordinal);
+            Assert.NotEqual(current, older);
+            await ExecAsync(owner, older, ct);
+
+            await ExecAsync(owner,
+                $"CREATE ROLE {writer} LOGIN PASSWORD 'journal-writer-1'; GRANT USAGE ON SCHEMA config TO {writer}; "
+                + $"GRANT SELECT, INSERT ({DarlingManagedRoles.JournalWriterColumns}) ON config.investigation_journal TO {writer};", ct);
+            await ExecAsync(owner, $"CREATE ROLE {restrictedLogin} LOGIN PASSWORD 'rules-probe-1'; GRANT USAGE ON SCHEMA config TO {restrictedLogin}", ct);
+            await using var asWriter = new NpgsqlConnection(
+                new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { Username = writer, Password = "journal-writer-1" }.ConnectionString);
+            await asWriter.OpenAsync(ct);
+
+            /* The store really is in the state the start must fix: the older function lets the login write the owner's row. */
+            await ExecAsync(asWriter, actionCalled, ct);
+            Assert.Equal("1", await TextAsync(owner, "SELECT count(*) FROM config.investigation_journal WHERE event = 'action_called'", ct));
+
+            var restricted = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { Username = restrictedLogin, Password = "rules-probe-1" }.ConnectionString;
+            var oldText = await TextAsync(owner, functionText, ct);
+            var warned = new CapturingTestLogger();
+            await using (var restrictedSource = NpgsqlDataSource.Create(restricted))
+            {
+                Assert.False(await DarlingManagedRoles.EnsureServerPasswordRulesAsync(restrictedSource, warned, ct), warned.Joined);
+            }
+
+            Assert.Equal(1, warned.CountAtLevel(Microsoft.Extensions.Logging.LogLevel.Warning));
+            Assert.Contains("provision-roles.sql", warned.Joined, StringComparison.Ordinal);
+            Assert.Equal(oldText, await TextAsync(owner, functionText, ct));
+
+            var log = new CapturingTestLogger();
+            string version;
+            await using (var ownerSource = NpgsqlDataSource.Create(scratch.ConnectionString))
+            {
+                Assert.True(await DarlingManagedRoles.EnsureServerPasswordRulesAsync(ownerSource, log, ct), log.Joined);
+                Assert.Equal(0, log.CountAtLevel(Microsoft.Extensions.Logging.LogLevel.Warning));
+                Assert.Contains(string.Join(", ", AgentActionEvents.OwnerOnly.Select(e => "'" + e + "'")), await TextAsync(owner, functionText, ct), StringComparison.Ordinal);
+                version = (await TextAsync(owner, functionVersion, ct))!;
+
+                /* A second start changes nothing: the function is not rewritten. */
+                Assert.True(await DarlingManagedRoles.EnsureServerPasswordRulesAsync(ownerSource, log, ct), log.Joined);
+                Assert.Equal(version, await TextAsync(owner, functionVersion, ct));
+            }
+
+            var refused = await Assert.ThrowsAsync<PostgresException>(() => ExecAsync(asWriter, actionCalled, ct));
+            Assert.Equal("42501", refused.SqlState);
+            Assert.Equal("1", await TextAsync(owner, "SELECT count(*) FROM config.investigation_journal WHERE event = 'action_called'", ct));
+
+            /* Rules already in place, made by a role the login is not, are left alone and warn nothing. */
+            var inPlace = new CapturingTestLogger();
+            await using (var restrictedSource = NpgsqlDataSource.Create(restricted))
+            {
+                Assert.True(await DarlingManagedRoles.EnsureServerPasswordRulesAsync(restrictedSource, inPlace, ct), inPlace.Joined);
+            }
+
+            Assert.Equal(0, inPlace.CountAtLevel(Microsoft.Extensions.Logging.LogLevel.Warning));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+                await ExecAsync(cleanup, $"DROP OWNED BY {writer}, {restrictedLogin}; DROP ROLE IF EXISTS {writer}; DROP ROLE IF EXISTS {restrictedLogin}", cleanupCt));
         }
     }
 

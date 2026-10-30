@@ -20,6 +20,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Service.Hosting;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 
@@ -76,7 +77,7 @@ internal static class DiagnosticsBundle
     {
         "DarlingConfig.Postgres", "DarlingConfig.Servers", "DarlingConfig.Analyzer", "DarlingConfig.CapturePlans",
         "DarlingConfig.Mcp", "DarlingConfig.Web", "DarlingConfig.Reads", "ReadsConfig.MaxHeavyReads", "DarlingConfig.QueryStatsDeferredPlanFetch", "DarlingConfig.ProcedureStatsDeferredPlanFetch", "PostgresConfig.Managed", "PostgresConfig.ConnectionString",
-        "PostgresConfig.Network", "McpConfig.Enabled", "McpConfig.Network", "McpConfig.AllowWrites", "McpConfig.AllowServerAdmin", "McpConfig.AllowInvestigations", "McpConfig.AllowWindowsAuthOverUnverifiedTls", "McpConfig.DataDetail", "WebConfig.Enabled", "WebConfig.Network",
+        "PostgresConfig.Network", "McpConfig.Enabled", "McpConfig.Network", "McpConfig.AllowWrites", "McpConfig.AllowServerAdmin", "McpConfig.AllowInvestigations", "McpConfig.AllowWindowsAuthOverUnverifiedTls", "McpConfig.DataDetail", "McpConfig.AllowTokenlessLoopback", "WebConfig.Enabled", "WebConfig.Network", "WebConfig.AllowTokenlessLoopback", "WebConfig.AllowAdminWrites", "WebConfig.AllowWindowsAuthOverUnverifiedTls",
         "MonitoredServer.Engine", "MonitoredServer.AlertDeliveryModeOverride",
     };
 
@@ -101,12 +102,16 @@ internal static class DiagnosticsBundle
         "DarlingConfig.ForcePlanBot",
         "DarlingConfig.Peers",
         "DarlingConfig.Heartbeat",
+        /* #6840: the front door's block holds every store's address and access token. */
+        "DarlingConfig.FrontDoor",
         "PostgresConfig.WebConnectionString",
         "PostgresConfig.McpConnectionString",
         "PostgresConfig.Port",
         "PostgresConfig.DataDirectory",
         "PostgresConfig.ConnectAs",
         "McpConfig.Port",
+        /* #6542: named MCP tokens hold token names and secrets; the bundle shows only whether the legacy network block exists. */
+        "McpConfig.Tokens",
         "WebConfig.Port",
         "WebConfig.PublicBaseUrl",
         "MonitoredServer.Name",
@@ -140,6 +145,16 @@ internal static class DiagnosticsBundle
         "MonitoredServer.AwsExternalId",
     };
 
+    /* A loopback-only install keeps its token in the network block too, so the block being present does not mean the
+       listener is reachable from the network. Exposed is the bind the host actually resolves: network and loopback. */
+    private static bool McpNetworkExposed(DarlingConfig config)
+        => config.Mcp is not null
+            && DarlingMcpHostService.ResolveMcpBind(config.Mcp, config.Postgres?.Managed ?? false).Mode == DarlingMcpHostService.McpBindMode.NetworkAndLoopback;
+
+    private static bool WebNetworkExposed(DarlingConfig config)
+        => config.Web is not null
+            && DarlingWebHostService.ResolveWebBind(config.Web, config.Postgres?.Managed ?? false).Mode == DarlingHostBinding.BindMode.NetworkAndLoopback;
+
     internal static JsonObject BuildConfigShape(DarlingConfig config)
     {
         var byEngine = new JsonObject();
@@ -164,15 +179,19 @@ internal static class DiagnosticsBundle
             ["server_count"] = config.Servers.Count,
             ["servers_by_engine"] = byEngine,
             ["mcp_enabled"] = config.Mcp?.Enabled ?? false,
-            ["mcp_network_exposed"] = config.Mcp?.Network is not null,
+            ["mcp_network_exposed"] = McpNetworkExposed(config),
             ["mcp_allow_writes"] = config.Mcp?.AllowWrites ?? false,
             ["mcp_allow_server_admin"] = config.Mcp?.AllowServerAdmin ?? false,
             ["mcp_allow_investigations"] = config.Mcp?.AllowInvestigations ?? false,
             ["mcp_allow_windows_auth_over_unverified_tls"] = config.Mcp?.AllowWindowsAuthOverUnverifiedTls ?? false,
+            ["mcp_allow_tokenless_loopback"] = config.Mcp?.AllowTokenlessLoopback ?? false,
             // The PARSED level word, never the raw text; an unknown value runs as metadataOnly, so it reports that.
             ["mcp_data_detail"] = McpDataDetailModes.Word(McpDataDetailModes.Resolve(config.Mcp?.DataDetail)),
             ["web_enabled"] = config.Web?.Enabled ?? false,
-            ["web_network_exposed"] = config.Web?.Network is not null,
+            ["web_network_exposed"] = WebNetworkExposed(config),
+            ["web_allow_tokenless_loopback"] = config.Web?.AllowTokenlessLoopback ?? false,
+            ["web_allow_admin_writes"] = config.Web?.AllowAdminWrites ?? false,
+            ["web_allow_windows_auth_over_unverified_tls"] = config.Web?.AllowWindowsAuthOverUnverifiedTls ?? false,
             ["analyzer_present"] = config.Analyzer is not null,
             /* #5506 part 3: the read-admission limit, a plain number; a busy answer is only readable beside it (0 means the limit is off). */
             ["reads_max_heavy_reads"] = config.Reads?.MaxHeavyReads,

@@ -34,7 +34,7 @@ internal static class DarlingAlwaysOnXeSessions
     /// sentence when a create or start failed, and leaves the choice as it was: one broken database or session never blocks
     /// the rest.
     /// </summary>
-    internal static async Task<DarlingXeSessions.AttentionEnsureFault?> EnsureAsync(
+    internal static async Task<DarlingXeSessions.XeEnsureFailure?> EnsureAsync(
         IAlwaysOnXeDatabase database,
         DarlingCollectorRunner runner,
         ServerRuntime server,
@@ -89,6 +89,10 @@ internal static class DarlingAlwaysOnXeSessions
             var first = runner.AlwaysOnChoices.MarkReadOnlyRefusal(ServerKey(server), databaseName, kind);
             logger?.Log(first ? LogLevel.Warning : LogLevel.Debug, "[{Server}] [{Database}] {Message}",
                 server.Config.DisplayName, databaseName, AlwaysOnXeSessions.ReadOnlyDatabaseMessage(kind));
+
+            /* #4961: the database counts as ensured, for every capture. No grant can fix a read-only database, so carrying the refusal
+               to the run (#6893) would record SESSION_MISSING every sweep and fire Capture Down for good on a registration whose
+               databases are all geo-secondaries. The one message above is the whole report. */
             return null;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -96,8 +100,12 @@ internal static class DarlingAlwaysOnXeSessions
             logger?.LogWarning("[{Server}] [{Database}] Failed to ensure {Capture} XE session: {Message}",
                 server.Config.DisplayName, databaseName, captureName, AlwaysOnXeSessions.DescribeFailure(ex));
 
-            /* #5640 (H2): the client-timeout session's permission denial, for the run to record as PERMISSIONS. */
-            return kind == AlwaysOnXeSessionKind.Attention ? DarlingXeSessions.AttentionFaultFor(ex) : null;
+            /* #5640 (H2): the client-timeout session's permission denial, for the run to record as PERMISSIONS. Any other failure of
+               that session leaves it absent and its read records SESSION_MISSING. #6893: the deadlock and blocked-process sessions
+               carry every failure, classified the same way. */
+            return kind == AlwaysOnXeSessionKind.Attention
+                ? DarlingXeSessions.AttentionFaultFor(ex) is { } attentionFault ? new DarlingXeSessions.XeEnsureFailure(attentionFault.Message, IsPermission: true) : null
+                : DarlingXeSessions.CaptureFaultFor(ex, captureName);
         }
     }
 

@@ -43,21 +43,38 @@ public sealed partial class ViewerDataService
        projections carry them, so a read-only seat sees which routes send alerts to agents. */
     private const string NotificationRouteAgentColumns = NotificationRouteWriter.AgentColumns;
 
-    /// <summary>The full row, for an <c>admin</c> seat, with the two scope columns (V181, #5750). Ordered by
-    /// <c>route_id</c>; the window re-sorts the grid newest first. The resolver's order is the scope tier, then the
-    /// metric level, then the route id, so the id order is no longer the order routes are consulted in.</summary>
+    /* The columns both projections share, so the V229 variants below differ only by the one appended column. */
+    private const string NotificationRoutesAdminColumns =
+        "route_id, metric_match, " + NotificationRouteDestinationColumns + ", enabled, modified_at, configured_channels, scope_server_id, scope_tag_id, "
+        + NotificationRouteAgentColumns + ", send_resolutions, fallback_route_id";
+
+    private const string NotificationRoutesNoSecretColumns =
+        "route_id, metric_match, smtp_recipients, enabled, modified_at, configured_channels, scope_server_id, scope_tag_id, "
+        + NotificationRouteAgentColumns + ", send_resolutions, fallback_route_id";
+
+    /// <summary>The store version that added <c>config_notification_routes.severities</c> (V229, #6928). A store below it has no column, so
+    /// the list reads the statements without it and every route shows as Both.</summary>
+    internal const int RouteSeveritiesStoreSchemaVersion = 229;
+
+    /// <summary>The full row, for an <c>admin</c> seat, with the two scope columns (V181, #5750), for a store below V229 (no
+    /// <c>severities</c> column). Ordered by <c>route_id</c>; the window re-sorts the grid newest first. The resolver's order is the
+    /// scope tier, then the metric level, then the route id, so the id order is no longer the order routes are consulted in.</summary>
     public const string NotificationRoutesSelectSql =
-        "SELECT route_id, metric_match, " + NotificationRouteDestinationColumns + ", enabled, modified_at, configured_channels, scope_server_id, scope_tag_id, "
-        + NotificationRouteAgentColumns + ", send_resolutions, fallback_route_id "
-        + "FROM config_notification_routes ORDER BY route_id";
+        "SELECT " + NotificationRoutesAdminColumns + " FROM config_notification_routes ORDER BY route_id";
 
     /// <summary>The secret-free projection a read-only <c>viewer</c> seat reads: the four webhook-class
     /// destinations are omitted (they 42501 for that role), <c>smtp_recipients</c> stays (an address list is
     /// not a secret, on the parent either), and <c>configured_channels</c> carries presence.</summary>
     public const string NotificationRoutesSelectNoSecretSql =
-        "SELECT route_id, metric_match, smtp_recipients, enabled, modified_at, configured_channels, scope_server_id, scope_tag_id, "
-        + NotificationRouteAgentColumns + ", send_resolutions, fallback_route_id "
-        + "FROM config_notification_routes ORDER BY route_id";
+        "SELECT " + NotificationRoutesNoSecretColumns + " FROM config_notification_routes ORDER BY route_id";
+
+    /// <summary>The full row with the severity filter as the last column (V229, #6928), for a store that has it.</summary>
+    public const string NotificationRoutesSelectWithSeveritiesSql =
+        "SELECT " + NotificationRoutesAdminColumns + ", severities FROM config_notification_routes ORDER BY route_id";
+
+    /// <summary>The secret-free projection with the severity filter as the last column (V229, #6928). The column is not a secret.</summary>
+    public const string NotificationRoutesSelectNoSecretWithSeveritiesSql =
+        "SELECT " + NotificationRoutesNoSecretColumns + ", severities FROM config_notification_routes ORDER BY route_id";
 
     /// <summary>Inserts one route (#6231: the one copy is <see cref="NotificationRouteWriter.InsertSql"/>, which the MCP tools share).</summary>
     public const string NotificationRouteInsertSql = NotificationRouteWriter.InsertSql;
@@ -75,12 +92,18 @@ public sealed partial class ViewerDataService
     public async Task<IReadOnlyList<NotificationRouteRow>> GetNotificationRoutesAsync(CancellationToken cancellationToken = default)
     {
         var rows = new List<NotificationRouteRow>();
-        await using var command = _dataSource.CreateCommand(IsReadOnly ? NotificationRoutesSelectNoSecretSql : NotificationRoutesSelectSql);
+        /* V229 (#6928): a store below it has no severities column, so the list reads the older statements and every route shows as Both. */
+        var version = _cachedStoreSchemaVersion ??= await GetStoreSchemaVersionAsync(cancellationToken);
+        var hasSeverities = version is int known && known >= RouteSeveritiesStoreSchemaVersion;
+        var sql = IsReadOnly
+            ? (hasSeverities ? NotificationRoutesSelectNoSecretWithSeveritiesSql : NotificationRoutesSelectNoSecretSql)
+            : (hasSeverities ? NotificationRoutesSelectWithSeveritiesSql : NotificationRoutesSelectSql);
+        await using var command = _dataSource.CreateCommand(sql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            rows.Add(IsReadOnly ? ReadRouteRowNoSecret(reader) : ReadRouteRow(reader));
+            rows.Add(IsReadOnly ? ReadRouteRowNoSecret(reader, hasSeverities) : ReadRouteRow(reader, hasSeverities));
         }
 
         foreach (var row in rows.Where(r => r.FallbackRouteId.HasValue))
@@ -301,7 +324,7 @@ public sealed partial class ViewerDataService
         }
     }
 
-    private static NotificationRouteRow ReadRouteRow(NpgsqlDataReader reader) => new()
+    private static NotificationRouteRow ReadRouteRow(NpgsqlDataReader reader, bool hasSeverities) => new()
     {
         RouteId = reader.GetInt32(0),
         MetricMatch = reader.GetString(1),
@@ -322,11 +345,12 @@ public sealed partial class ViewerDataService
         AgentExpiryMinutes = reader.GetInt32(16),
         SendResolutions = reader.IsDBNull(17) ? null : reader.GetBoolean(17),
         FallbackRouteId = reader.IsDBNull(18) ? null : reader.GetInt32(18),
+        Severities = hasSeverities ? NotificationRouteKinds.NormalizeSeverities(reader.GetString(19)) : NotificationRouteKinds.SeveritiesBoth,
     };
 
     /// <summary>The secret-free reader: the four carved destinations stay empty (the seat cannot author them
     /// anyway) and every later column shifts ordinal, the <c>ReadNotificationRowNoSecret</c> idiom.</summary>
-    private static NotificationRouteRow ReadRouteRowNoSecret(NpgsqlDataReader reader) => new()
+    private static NotificationRouteRow ReadRouteRowNoSecret(NpgsqlDataReader reader, bool hasSeverities) => new()
     {
         RouteId = reader.GetInt32(0),
         MetricMatch = reader.GetString(1),
@@ -347,6 +371,7 @@ public sealed partial class ViewerDataService
         AgentExpiryMinutes = reader.GetInt32(12),
         SendResolutions = reader.IsDBNull(13) ? null : reader.GetBoolean(13),
         FallbackRouteId = reader.IsDBNull(14) ? null : reader.GetInt32(14),
+        Severities = hasSeverities ? NotificationRouteKinds.NormalizeSeverities(reader.GetString(15)) : NotificationRouteKinds.SeveritiesBoth,
     };
 }
 
@@ -395,6 +420,18 @@ public sealed class NotificationRouteRow
     /// <summary>Whether this route's destinations get an alert's resolution (#5825): null uses each channel's setting,
     /// true always sends it, false never does.</summary>
     public bool? SendResolutions { get; set; }
+
+    /// <summary>The severity filter (V229, #6928): <see cref="NotificationRouteKinds.SeveritiesBoth"/>, <see cref="NotificationRouteKinds.SeveritiesCritical"/>
+    /// or <see cref="NotificationRouteKinds.SeveritiesWarning"/>. A route the filter excludes an alert from is skipped and matching goes on.</summary>
+    public string Severities { get; set; } = NotificationRouteKinds.SeveritiesBoth;
+
+    /// <summary>The Severity column: Both, Critical only or Warning only (#6928).</summary>
+    public string SeveritiesDisplay => NotificationRouteKinds.NormalizeSeverities(Severities) switch
+    {
+        NotificationRouteKinds.SeveritiesCritical => "Critical only",
+        NotificationRouteKinds.SeveritiesWarning => "Warning only",
+        _ => "Both",
+    };
 
     /// <summary>The route an expired investigation request goes to first (#6036, D8 of #5632 Phase C), or null for none.
     /// Never the route itself; the delete clears it when that route is deleted.</summary>
@@ -458,13 +495,14 @@ public sealed class NotificationRouteRow
     };
 
     /// <summary>
-    /// When the route was last saved, in the viewer's display mode (#4766). <see cref="ModifiedAtUtc"/> is the store's
-    /// <c>modified_at</c>, written as <c>now() AT TIME ZONE 'UTC'</c>, so it is one UTC instant, and it reads as the
-    /// other grids' times do: Server, Local or UTC per the mode, with the UTC offset added in the repeated autumn
-    /// hour (<see cref="ViewerTimeHelper.FormatForDisplay(DateTime, string)"/>). This used to be the machine's local
-    /// time in every mode. Empty for a route that has not been stored yet.
+    /// When the route was last saved (#4766, #6457). <see cref="ModifiedAtUtc"/> is the store's <c>modified_at</c>,
+    /// written as <c>now() AT TIME ZONE 'UTC'</c>, so it is one UTC instant. A route belongs to the whole fleet and no
+    /// one server, so "Server" display mode has no clock to apply: it used to apply the active server's offset and
+    /// showed a route saved at 10:07 UTC as 03:07. It reads as every fleet-wide window does
+    /// (<see cref="ViewerTimeHelper.FormatFleetWide(DateTime, string)"/>): this machine's time in Local mode, UTC in
+    /// the others, always followed by the zone's name. Empty for a route that has not been stored yet.
     /// </summary>
-    public string ModifiedDisplay => ModifiedAtUtc == default ? "" : ViewerTimeHelper.FormatForDisplay(ModifiedAtUtc, "yyyy-MM-dd HH:mm:ss");
+    public string ModifiedDisplay => ModifiedAtUtc == default ? "" : ViewerTimeHelper.FormatFleetWide(ModifiedAtUtc, "yyyy-MM-dd HH:mm:ss");
 
     /// <summary>The row as the shared writer states it (#6231).</summary>
     public NotificationRouteDraft ToDraft() => new()
@@ -486,6 +524,7 @@ public sealed class NotificationRouteRow
         AgentExpiryMinutes = AgentExpiryMinutes,
         SendResolutions = SendResolutions,
         FallbackRouteId = FallbackRouteId,
+        Severities = Severities,
         ModifiedAtUtc = ModifiedAtUtc == default ? null : ModifiedAtUtc,
     };
 
@@ -511,6 +550,7 @@ public sealed class NotificationRouteRow
         SendResolutions = SendResolutions,
         FallbackRouteId = FallbackRouteId,
         FallbackRouteName = FallbackRouteName,
+        Severities = Severities,
         ScopeDisplay = ScopeDisplay,
         StatusDisplay = StatusDisplay,
     };

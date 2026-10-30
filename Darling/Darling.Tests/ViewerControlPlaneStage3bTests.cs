@@ -264,9 +264,9 @@ public sealed class ViewerCollectorSchedulesSqlTests
     [Fact]
     public void DeleteScopeSql_KeyOnTheScope()
     {
-        Assert.Contains("DELETE FROM config_collector_schedules WHERE server_id IS NULL",
+        Assert.Contains("DELETE FROM config.config_collector_schedules WHERE server_id IS NULL",
             ViewerDataService.CollectorScheduleDeleteFleetScopeSql, StringComparison.Ordinal);
-        Assert.Contains("DELETE FROM config_collector_schedules WHERE server_id = $1",
+        Assert.Contains("DELETE FROM config.config_collector_schedules WHERE server_id = $1",
             ViewerDataService.CollectorScheduleDeleteServerScopeSql, StringComparison.Ordinal);
     }
 
@@ -424,6 +424,33 @@ public sealed class ViewerCollectorScheduleLogicTests
 
         Assert.Equal(CollectorScheduleDefaults.All.Count, rows.Count);
         Assert.All(rows, r => Assert.Equal(7, r.ServerId));
+    }
+
+    /// <summary>Retention is a fleet setting and the Keep (days) cell is read-only at a server scope, so a server Save must not
+    /// store today's fleet retention on every per-server row. The rows carry NULL, and a reload of them still shows the fleet value.</summary>
+    [Fact]
+    public void ServerOverrideRows_CarryNoRetention_AndAReloadShowsTheFleetValue()
+    {
+        var fleetRows = new List<CollectorScheduleRow> { new(null, "wait_stats", null, 45, null) };
+
+        var edited = CollectorScheduleOverlay.BuildEffectiveSchedule(fleetRows, 7);
+        Assert.Equal(45, edited.Single(s => s.Name == "wait_stats").RetentionDays);
+        edited.Single(s => s.Name == "wait_stats").FrequencyMinutes = 3;
+
+        var serverRows = CollectorScheduleOverlay.ToServerOverrideRows(edited, serverId: 7);
+        Assert.All(serverRows, r => Assert.Null(r.RetentionDays));
+        Assert.Equal(3, serverRows.Single(r => r.CollectorName == "wait_stats").FrequencyMinutes);
+
+        var reloaded = CollectorScheduleOverlay.BuildEffectiveSchedule(fleetRows.Concat(serverRows).ToList(), 7);
+        var reloadedItem = reloaded.Single(s => s.Name == "wait_stats");
+        Assert.Equal(45, reloadedItem.RetentionDays);
+        Assert.Equal(3, reloadedItem.FrequencyMinutes);
+
+        /* The service reads the same rows: a NULL per-server retention falls through to the fleet value. */
+        var overrides = fleetRows.Concat(serverRows)
+            .Select(r => new ScheduleOverride(r.ServerId, r.CollectorName, r.FrequencyMinutes, r.RetentionDays, r.Enabled, r.Databases))
+            .ToList();
+        Assert.Equal(45, StoreConfigProvider.ResolveSchedule("wait_stats", 7, overrides).RetentionDays);
     }
 
     [Fact]

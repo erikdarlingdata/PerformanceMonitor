@@ -370,6 +370,9 @@ public class PostgresTargetConfigTests
             /* V213 (#6254): the readable replica Query Store is read from. Settable from darling.json and read back by the
                registry read, like the connection fields above. */
             ("QueryStoreReplica", "query_store_replica"),
+            /* #6771: the per-server plan-capture choice (NULL = follow the service setting), read back by the registry read and
+               written by the Viewer's Add/Edit Server dialog. */
+            ("CapturePlans", "capture_plans"),
         };
 
         /* Password is the deliberate exception: a plaintext dev password is never persisted, and is

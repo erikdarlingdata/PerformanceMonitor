@@ -278,14 +278,14 @@ public sealed class ViewerConfigDiagnosticsTests
             Directory.CreateDirectory(viewerDirectory);
 
             /* Nothing anywhere: report the viewer's own directory, and say it is not there. */
-            var nothing = ViewerSettings.ResolveConfigLocation(baseDirectory: viewerDirectory);
+            var nothing = ViewerSettings.ResolveConfigLocation(baseDirectory: viewerDirectory, installedServiceFolder: () => null);
             Assert.Equal(ViewerConfigSource.BesideViewer, nothing.Source);
             Assert.False(nothing.Exists);
 
             /* The shipped-zip layout: viewer\ under the service root, darling.json beside the SERVICE. */
             var atServiceRoot = Path.Combine(root.FullName, "darling.json");
             File.WriteAllText(atServiceRoot, "{}");
-            var fromServiceRoot = ViewerSettings.ResolveConfigLocation(baseDirectory: viewerDirectory);
+            var fromServiceRoot = ViewerSettings.ResolveConfigLocation(baseDirectory: viewerDirectory, installedServiceFolder: () => null);
             Assert.Equal(ViewerConfigSource.ServiceRoot, fromServiceRoot.Source);
             Assert.Equal(atServiceRoot, fromServiceRoot.Path);
             Assert.True(fromServiceRoot.Exists);
@@ -293,7 +293,7 @@ public sealed class ViewerConfigDiagnosticsTests
             /* Beside the viewer still wins when both exist. */
             var besideViewer = Path.Combine(viewerDirectory, "darling.json");
             File.WriteAllText(besideViewer, "{}");
-            var fromBesideViewer = ViewerSettings.ResolveConfigLocation(baseDirectory: viewerDirectory);
+            var fromBesideViewer = ViewerSettings.ResolveConfigLocation(baseDirectory: viewerDirectory, installedServiceFolder: () => null);
             Assert.Equal(ViewerConfigSource.BesideViewer, fromBesideViewer.Source);
             Assert.Equal(besideViewer, fromBesideViewer.Path);
             Assert.True(fromBesideViewer.Exists);
@@ -322,18 +322,18 @@ public sealed class ViewerConfigDiagnosticsTests
             Directory.CreateDirectory(viewerDirectory);
 
             Assert.Equal(
-                ViewerSettings.ResolveConfigPath(baseDirectory: viewerDirectory),
-                ViewerSettings.ResolveConfigLocation(baseDirectory: viewerDirectory).Path);
+                ViewerSettings.ResolveConfigPath(baseDirectory: viewerDirectory, installedServiceFolder: () => null),
+                ViewerSettings.ResolveConfigLocation(baseDirectory: viewerDirectory, installedServiceFolder: () => null).Path);
 
             File.WriteAllText(Path.Combine(root.FullName, "darling.json"), "{}");
             Assert.Equal(
-                ViewerSettings.ResolveConfigPath(baseDirectory: viewerDirectory),
-                ViewerSettings.ResolveConfigLocation(baseDirectory: viewerDirectory).Path);
+                ViewerSettings.ResolveConfigPath(baseDirectory: viewerDirectory, installedServiceFolder: () => null),
+                ViewerSettings.ResolveConfigLocation(baseDirectory: viewerDirectory, installedServiceFolder: () => null).Path);
 
             Environment.SetEnvironmentVariable("DARLING_CONFIG", @"C:\from\env\darling.json");
             Assert.Equal(
-                ViewerSettings.ResolveConfigPath(baseDirectory: viewerDirectory),
-                ViewerSettings.ResolveConfigLocation(baseDirectory: viewerDirectory).Path);
+                ViewerSettings.ResolveConfigPath(baseDirectory: viewerDirectory, installedServiceFolder: () => null),
+                ViewerSettings.ResolveConfigLocation(baseDirectory: viewerDirectory, installedServiceFolder: () => null).Path);
         }
         finally
         {

@@ -48,8 +48,8 @@ public sealed class DarlingDailySummaryRangeTests
 
     /// <summary>#4232: the "nothing ever collected" preamble below needs its OWN server — reading it through
     /// <see cref="ServerId"/> would populate <c>DarlingHealthReader.RangeCache</c>'s closed-day block for that
-    /// exact range from an EMPTY store, and the seeded read moments later (same range, same cache key, same
-    /// hour) would then see that stale empty block instead of the rows just seeded. That staleness is the
+    /// exact range from an EMPTY store, and the seeded read moments later (same range, same cache key, within
+    /// the same cached block) would then see that stale empty block instead of the rows just seeded. That staleness is the
     /// closed-day cache working as designed against a store that already had data — not a substitute for a
     /// server nobody has ever collected from.</summary>
     private const int NeverCollectedServerId = -949579;
@@ -269,6 +269,72 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
         }
         finally
         {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>
+    /// #6809: the service's call site must pass <c>trustFromUtc</c>. A day before the retention horizon is read,
+    /// its signal rows are then purged (the collection log row stays, so the day is still on the spine), and the
+    /// same cache is read again. Inside the sub-horizon bound the block still serves the old rows. Once a fake
+    /// clock passes it, the day must come back <c>purged</c>. Without the argument the block would hold the day
+    /// until the next UTC day plus the grace and this read would still say <c>past_horizon</c>.
+    /// </summary>
+    [Fact]
+    public async Task GetDailySummaryRangeAsync_PurgedPastHorizonDay_ShowsOnceTheSubHorizonBoundPasses()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live daily-summary range cache test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        await using var dataSource = NpgsqlDataSource.Create(cs!);
+        var bodySucceeded = false;
+
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+
+            var today = DateTime.UtcNow.Date;
+            var noon = today.AddHours(12); // the fake clock stays inside today's block, far from midnight
+            var fakeNow = noon;
+            DarlingHealthReader.UseRangeCacheClockForTests(() => fakeNow);
+
+            /* The horizon is the store's own, so ask it rather than assume 30 days. */
+            var probe = await DarlingHealthReader.GetDailySummaryRangeAsync(dataSource, ServerId, today.AddDays(-1), today.AddDays(1), cancellationToken: ct);
+            var oldDay = probe.RetentionHorizon.Date.AddDays(-5);
+            var fromDate = oldDay.AddDays(-2);
+            var toDate = today.AddDays(1);
+            DarlingHealthReader.UseRangeCacheClockForTests(() => fakeNow);
+
+            await PlantWaitAsync(connection, oldDay.AddHours(10), 1000, ct);
+            await SeedRunAsync(connection, ct, oldDay.AddHours(10), "wait_stats", "SUCCESS");
+
+            var first = await DarlingHealthReader.GetDailySummaryRangeAsync(dataSource, ServerId, fromDate, toDate, cancellationToken: ct);
+            Assert.Equal(DailySummaryDataState.PastHorizon, first.Rows.Single(r => r.SummaryDate.Date == oldDay).DataState);
+
+            /* The purge removes the signal rows and leaves the run record. */
+            await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM wait_stats WHERE server_id = $1", ServerId);
+
+            fakeNow = noon.AddMinutes(30);
+            var inside = await DarlingHealthReader.GetDailySummaryRangeAsync(dataSource, ServerId, fromDate, toDate, cancellationToken: ct);
+            Assert.Equal(DailySummaryDataState.PastHorizon, inside.Rows.Single(r => r.SummaryDate.Date == oldDay).DataState);
+
+            fakeNow = noon + DailySummaryRangeCache<DarlingHealthReader.DailySummaryReadRow>.SubHorizonTtl + TimeSpan.FromMinutes(1);
+            var after = await DarlingHealthReader.GetDailySummaryRangeAsync(dataSource, ServerId, fromDate, toDate, cancellationToken: ct);
+            Assert.Equal(DailySummaryDataState.Purged, after.Rows.Single(r => r.SummaryDate.Date == oldDay).DataState);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            DarlingHealthReader.ResetRangeCacheForTests();
             await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
                 await DeleteRowsAsync(cleanup, cleanupCt));
         }

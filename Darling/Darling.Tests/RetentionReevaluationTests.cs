@@ -452,7 +452,7 @@ public sealed class RetentionReevaluationTests
         Assert.Contains("'Retention re-evaluation: 0 policies held, N armed this pass, K unchanged'", verb, StringComparison.Ordinal);
         Assert.Contains("To arm immediately instead, restart the", verb, StringComparison.Ordinal);
 
-        var readme = RepoFile.ReadRepoFile("Darling", "README.md");
+        var readme = RepoFile.ReadRepoFile("docs", "darling", "admin.md"); // #6416: the cadence table moved from Darling/README.md
         /* The cadence row names this pass and gives the cadence. Anchored on the two halves separately since
            #3817 joined the row as its fourth tenant and put its own name between them — the property is that
            the row names the re-evaluation and states the cadence, not that the two are adjacent, and a pin

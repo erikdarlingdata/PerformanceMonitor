@@ -149,8 +149,10 @@ public sealed class FactRankedTests
                property that is always absent, which is a lie about why it is absent. */
             Assert.Equal(1, CountOf(analyze, "FactRanked.Attach("));
             Assert.Contains("f.RootFactRanked,", analyze, StringComparison.Ordinal);
-            Assert.Equal(1, CountOf(facts, "FactRanked.Attach(new"));
-            Assert.Contains("}, f.Ranked, McpHelpers.JsonOptions))", facts, StringComparison.Ordinal);
+            /* #6640: the card is wrapped by AttachSubject first (object_name, only for the facts that name their query),
+               and Attach wraps THAT, so `ranked` stays the last property. */
+            Assert.Equal(1, CountOf(facts, "FactRanked.Attach(FactRanked.AttachSubject(new"));
+            Assert.Contains("}, f, McpHelpers.JsonOptions), f.Ranked, McpHelpers.JsonOptions))", facts, StringComparison.Ordinal);
 
             /* Never as a property, anywhere in the file: that is a serialized null on every card. */
             Assert.DoesNotContain("ranked =", CSharpSourceWalker.StripCommentsAndStrings(source), StringComparison.Ordinal);

@@ -25,17 +25,19 @@ export const FILTERED = new Set([
   "get_blocked_process_xml",
   // Duration trends, Query Store clutter, long queries and plan corrections (#5244 PR4).
   "get_query_duration_trend", "get_procedure_duration_trend", "get_query_store_duration_trend",
-  "get_query_store_clutter", "get_long_query_completions", "get_plan_corrections", "get_forced_plans",
+  "get_query_store_clutter", "get_long_query_completions", "get_plan_corrections", "get_forced_plans", "get_query_store_hints",
   // Configuration, Query Store health, configuration changes, severe errors and the default trace (#5244 PR6).
   "get_database_config", "get_database_scoped_config", "get_query_store_health", "get_database_config_changes",
   "get_health_parser_severe_errors", "get_default_trace_events",
   // File I/O, sizes and the persistent version store (#5244 PR5). get_file_io_stats and get_file_io_trend chart one file
   // per line for exactly one chosen database and one line per database otherwise.
   "get_file_io_trend", "get_file_io_stats", "get_database_sizes", "get_table_index_sizes", "get_pvs_stats",
+  // Identity column capacity (#6875): the Configuration tab's panel lists the chosen databases' columns and scan state.
+  "get_identity_capacity",
 ]);
 
 /** Database-scoped reads that cannot take the filter yet, so they show every database and say so (the "All databases"
- *  chip). 35 database-scoped reads in all: this list shrank as FILTERED grew, and what is left is the three
+ *  chip). 37 database-scoped reads in all: this list shrank as FILTERED grew, and what is left is the three
  *  deadlock reads, which stay unfiltered on purpose (as on the desktop): a deadlock spans several databases, and they are
  *  inside each deadlock graph. The groups follow the page that moves each read into FILTERED. */
 export const UNFILTERED = new Set([
@@ -56,8 +58,8 @@ export const IDENTITY = new Set([
 /** Every other SQL Server read a module of the server page names: the data has no database, so the filter does not apply.
  *  That includes the fleet, FinOps, alert and self-monitoring reads the page's shared modules name. */
 export const SERVER_WIDE = new Set([
-  "audit_config", "get_alert_history", "get_analysis_findings", "get_block_chain", "get_collection_health", "get_collection_log",
-  "get_cpu_scheduler_pressure", "get_cpu_utilization", "get_daily_summary", "get_daily_summary_range", "get_finops", "get_fleet_overview", "get_investigation_reports",
+  "audit_config", "get_agent_alerts", "get_alert_history", "get_analysis_findings", "get_block_chain", "get_collection_health", "get_collection_log",
+  "get_cpu_scheduler_pressure", "get_cpu_utilization", "get_database_protection", "get_daily_summary", "get_daily_summary_range", "get_finops", "get_fleet_overview", "get_investigation_reports",
   "get_health_parser_cpu_tasks", "get_health_parser_io_issues", "get_health_parser_memory_broker",
   "get_health_parser_memory_conditions", "get_health_parser_memory_node_oom", "get_health_parser_scheduler_issues",
   "get_health_parser_significant_waits", "get_health_parser_system_health", "get_job_history", "get_latch_stats",

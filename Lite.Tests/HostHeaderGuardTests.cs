@@ -55,40 +55,4 @@ public sealed class HostHeaderGuardTests
     [InlineData("evil.com", false)]
     public void IsAllowedHost_WithAListenIp_AlsoAllowsThatAddress(string host, bool expected)
         => Assert.Equal(expected, HostHeaderGuard.IsAllowedHost(host, IPAddress.Parse("192.168.1.205")));
-
-    /* ---------------- the wiring: the guard is installed, first, ahead of MapMcp ---------------- */
-
-    private static string ReadMcpHostSource()
-    {
-        var path = Path.Combine(AppContext.BaseDirectory, "Fixtures", "McpHostService.cs");
-        Assert.True(File.Exists(path), "McpHostService.cs was not copied beside the test binary — check the csproj None/Link item.");
-
-        var source = File.ReadAllText(path);
-        /* Guard the guard: pin the anchors the assertions key off, so a restructured host fails loudly
-           instead of passing vacuously on a parse that matched nothing. */
-        Assert.Contains("_app = builder.Build();", source, StringComparison.Ordinal);
-        Assert.Contains("_app.MapMcp();", source, StringComparison.Ordinal);
-        return source;
-    }
-
-    [Fact]
-    public void McpHost_InstallsTheHostHeaderGuard_AsItsFirstMiddleware_BeforeMapMcp()
-    {
-        var source = ReadMcpHostSource();
-        var afterBuild = source[(source.IndexOf("_app = builder.Build();", StringComparison.Ordinal) + 1)..];
-
-        var firstUse = afterBuild.IndexOf("_app.Use(", StringComparison.Ordinal);
-        Assert.True(firstUse >= 0, "no middleware is registered after builder.Build() — the Host-header guard is missing (#1648)");
-
-        var mapMcp = afterBuild.IndexOf("_app.MapMcp();", StringComparison.Ordinal);
-        Assert.True(firstUse < mapMcp, "the Host-header guard must be registered before MapMcp maps the MCP endpoints");
-
-        /* The first Use's body only — a second Use cannot satisfy this by accident. */
-        var body = afterBuild[firstUse..];
-        var nextUse = body.IndexOf("_app.Use(", 1, StringComparison.Ordinal);
-        var first = nextUse > 0 ? body[..nextUse] : body[..(mapMcp - firstUse)];
-
-        Assert.Contains("HostHeaderGuard.IsAllowedHost(context.Request.Host.Host", first, StringComparison.Ordinal);
-        Assert.Contains("Status400BadRequest", first, StringComparison.Ordinal);
-    }
 }

@@ -13,6 +13,7 @@ using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Notifications;
 using Xunit;
+using PerformanceMonitor.Darling.Storage;
 
 namespace Darling.Tests;
 
@@ -142,11 +143,11 @@ public class AlertFingerprintServerIdentityTests
         var c = Server("Prod", "host3");
         var rows = new[]
         {
-            new DarlingServerResolver.RegisteredServer(7, "host1:dbA", a.DisplayName),
-            new DarlingServerResolver.RegisteredServer(8, "host1:dbB", "host1"),
-            new DarlingServerResolver.RegisteredServer(9, "host2", b.DisplayName),
-            new DarlingServerResolver.RegisteredServer(10, "host3", c.DisplayName),
-            new DarlingServerResolver.RegisteredServer(11, "host4", "host4"),
+            new RegisteredServer(7, "host1:dbA", a.DisplayName),
+            new RegisteredServer(8, "host1:dbB", "host1"),
+            new RegisteredServer(9, "host2", b.DisplayName),
+            new RegisteredServer(10, "host3", c.DisplayName),
+            new RegisteredServer(11, "host4", "host4"),
         };
         var shared = DarlingServerResolver.SharedNamesOf(rows);
         var population = new[] { a, Server("", "host1", "dbB"), b, c, Server("host4", "host4") };

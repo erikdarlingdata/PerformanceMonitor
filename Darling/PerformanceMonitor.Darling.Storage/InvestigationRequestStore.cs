@@ -27,7 +27,7 @@ namespace PerformanceMonitor.Darling.Storage;
 /// test can move the clock.
 ///
 /// <para><b>Open or join is one transaction.</b> It takes a transaction-scoped advisory lock on the server and family, so two
-/// alerts of one incident cannot both open a request; joins an open or claimed request of that server and family only while
+/// alerts of one incident cannot both open a request; joins an open or claimed request, or a reported request that takes a quiet re-fire (#6778), of that server and family only while
 /// the alert fires within 30 minutes of the request's latest alert and no later than 4 hours after its first (#5632: the
 /// window slides, see <see cref="InvestigationRules.GroupingWindow"/> and <see cref="InvestigationRules.GroupingWindowCap"/>); and otherwise takes
 /// <c>pg_advisory_xact_lock(5632, route_id)</c> over the count of the route's requests and the INSERT (ruling R6), so two
@@ -49,8 +49,31 @@ public sealed partial class InvestigationRequestStore : IInvestigationRequestSto
     public const int RouteLockKey = 5632;
 
 
+    /* #6919: an unregistered external name arrives with server_id 0, so server_id and family alone would join every such alert. For
+       server_id 0 the lock text also carries the label ($3) and the external source ($4), the same two values FindJoinSql adds to the
+       join key. A registered server keeps the text it always had. */
     internal const string GroupLockSql =
-        "SELECT pg_advisory_xact_lock(hashtextextended('investigation:' || $1::text || ':' || $2, 5632))";
+        "SELECT pg_advisory_xact_lock(hashtextextended('investigation:' || $1::text || ':' || $2"
+        + " || CASE WHEN $1::int = 0 THEN ':' || $3 || ':' || $4 ELSE '' END, 5632))";
+
+    /* #6919: the source of an External:<source>:<key> metric. A source name matches [a-z][a-z0-9_]{1,30}
+       (ck_external_alert_source_name), so it holds no colon and the second colon-separated part is the whole source. Any other metric
+       at server_id 0 has no source and reads as empty, so those alerts keep grouping by label and family alone. */
+    internal static string ExternalSourceSql(string metric) =>
+        $"CASE WHEN {metric} LIKE 'External:%' THEN split_part({metric}, ':', 2) ELSE '' END";
+
+    /// <summary>The source part of an <c>External:&lt;source&gt;:&lt;key&gt;</c> metric name, or empty for any other metric (#6919).</summary>
+    internal static string ExternalSourceOf(string metricName)
+    {
+        const string prefix = "External:";
+        if (!metricName.StartsWith(prefix, StringComparison.Ordinal))
+        {
+            return string.Empty;
+        }
+
+        var colon = metricName.IndexOf(':', prefix.Length);
+        return colon < 0 ? metricName[prefix.Length..] : metricName[prefix.Length..colon];
+    }
 
     internal const string RouteLockSql = "SELECT pg_advisory_xact_lock($1, $2)";
 
@@ -74,11 +97,15 @@ SELECT r.request_id,
 FROM config.investigation_requests AS r
 WHERE r.server_id = $1
   AND r.family = $2
+  AND ($1 <> 0 OR r.server_name = $7 AND " + ExternalSourceSql("r.first_metric") + @" = $8)
   AND r.practice_of IS NULL
   AND r.force_check_of IS NULL
   AND r.trigger_kind = 'alert'
-  AND r.state IN ('open', 'claimed')
-  AND r.expires_at > $3
+  AND (r.state IN ('open', 'claimed') AND r.expires_at > $3
+       OR r.state = 'reported'
+          AND EXISTS (SELECT 1 FROM config.investigation_request_alerts AS a2 WHERE a2.request_id = r.request_id AND a2.metric_name = $5)
+          AND (CASE WHEN $6 = 'critical' THEN 1 ELSE 0 END) <= (CASE WHEN r.max_severity = 'critical' THEN 1 ELSE 0 END)
+          AND NOT EXISTS (SELECT 1 FROM config.investigation_journal AS j WHERE j.request_id = r.request_id AND j.event = 'resolved'))
   AND r.opened_at >= $3 - " + GroupingWindowCapSql + @"
   AND $4 <= r.window_until
 ORDER BY r.opened_at DESC
@@ -122,8 +149,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $9 + " + GroupingWindowSql + @",
 
     internal const string AlertRowsSql = @"
 INSERT INTO config.investigation_request_alerts
-    (request_id, alert_time, server_id, metric_name, dedup_key, current_value, threshold_value, muted, detail_text, context_json)
-SELECT $1, $2, $3, $4, k, $6, $7, $8, $9, $10
+    (request_id, alert_time, server_id, metric_name, dedup_key, current_value, threshold_value, muted, detail_text, context_json, severity)
+SELECT $1, $2, $3, $4, k, $6, $7, $8, $9, $10, $11
 FROM unnest($5::text[]) AS k";
 
     internal const string JournalSql = @"
@@ -150,6 +177,18 @@ WHERE request_id = $1
   AND claim_count < 3
   AND expires_at > $4
 RETURNING lease_until, claim_count, server_id";
+
+    /* #6576: the agent that already holds the live lease claims again (it lost its claim_id): the live claim_id comes back and the
+       lease renews the way RenewSql renews it. No new claim, so claim_count does not move. $1 request, $2 agent, $3 now. */
+    internal const string ReclaimSql = @"
+UPDATE config.investigation_requests
+SET lease_until = least($3 + make_interval(mins => lease_minutes), expires_at)
+WHERE request_id = $1
+  AND claimed_by = $2
+  AND state = 'claimed'
+  AND lease_until >= $3
+  AND expires_at > $3
+RETURNING claim_id, lease_until, claim_count";
 
     internal const string ClaimWhySql = @"
 SELECT state, lease_until, claim_count, expires_at, server_id
@@ -255,8 +294,8 @@ RETURNING route_id, server_id";
     /* #6008: the source's alert rows, without the dedup key, so the brief's alerts section reads what the source's read. $1 new, $2 source. */
     internal const string CopyFollowUpAlertsSql = @"
 INSERT INTO config.investigation_request_alerts
-    (request_id, alert_time, server_id, metric_name, dedup_key, current_value, threshold_value, muted, detail_text, context_json)
-SELECT $1, alert_time, server_id, metric_name, NULL, current_value, threshold_value, muted, detail_text, context_json
+    (request_id, alert_time, server_id, metric_name, dedup_key, current_value, threshold_value, muted, detail_text, context_json, severity)
+SELECT $1, alert_time, server_id, metric_name, NULL, current_value, threshold_value, muted, detail_text, context_json, severity
 FROM config.investigation_request_alerts
 WHERE request_id = $2";
 
@@ -295,13 +334,22 @@ WHERE request_id = $1 AND claim_id = $2 AND state = 'claimed'";
         $"COALESCE({registry}.display_name, {registry}.server_name, {requests}.server_name) AS registry_display_name, "
         + $"{registry}.server_name AS registry_instance_name";
 
+    /* #6551: a change-watch request's alert detail (the text its first alert row carries), NULL for every other request. A
+       change-watch request has no row in the alert history, so this is what lets the list and the wait answer triage it before a
+       claim. <paramref name="requests"/> is the alias of config.investigation_requests. */
+    internal static string ChangeWatchDetailSelect(string requests) =>
+        $"CASE WHEN {requests}.trigger_kind = '{InvestigationTriggerKinds.ChangeWatch}' THEN "
+        + $"(SELECT a.detail_text FROM config.investigation_request_alerts AS a WHERE a.request_id = {requests}.request_id "
+        + "ORDER BY a.alert_time, a.dedup_key LIMIT 1) END AS change_watch_detail";
+
     /* #5822, #6003: the long-poll's catch-up read. Every request event (InvestigationEvents.Kinds, $4) journaled after $1 on the
        routes in $2 (all routes when NULL), oldest first, whatever the request's state now: it answers what happened, and the
        claim decides what is still claimable. An open is its request's "opened" row. */
     internal static readonly string OpenedSinceSql = $@"
 SELECT r.request_id, r.route_id, r.server_name, r.family, r.opened_at,
        {RegistryNamesSelect("r", "sv")},
-       j.event_id, j.event, j.event_time, j.detail::text, r.practice_of
+       j.event_id, j.event, j.event_time, j.detail::text, r.practice_of,
+       {ChangeWatchDetailSelect("r")}
 FROM config.investigation_journal AS j
 JOIN config.investigation_requests AS r ON r.request_id = j.request_id
 LEFT JOIN collect.servers AS sv ON sv.server_id = r.server_id
@@ -347,20 +395,29 @@ LIMIT $2";
        non-ASCII character, so no one encoding of a metric name is the stored one. The candidate rows come back and C# parses
        each context_json (System.Text.Json reads every escaping); one a text column holds but jsonb refuses (a NUL
        escape) is no problem there. The prefilter is the member's key, which no encoder escapes. A metric with no candidate
-       comes back once with a NULL context, so a request with an uncleared metric is seen as unresolved. */
+       comes back once with a NULL context, so a request with an uncleared metric is seen as unresolved.
+       The bound on h.alert_time is the oldest last alert among the candidates. The plan still scans the log; the bound saves
+       the per-row work (the Resolves test and the join) on every older row, about 44 ms a pass on a store with 30,000 alert
+       rows (warm, and the pass runs once a minute). A live follow-up can pull the oldest last alert back by up to 30 days, so
+       the saving is smaller while one is open. It drops no candidate: every resolution row a candidate can use is after that
+       candidate's last alert, so after the oldest one. The bound is NOT the clock minus a fixed window:
+       a follow-up opens now but copies its source's alert rows with their original times, so its last alert can be weeks old
+       (follow_up_at may be 30 days out), and a fixed window would hide a clear older than it and lose the resolved event. */
     internal const string ResolveCandidatesSql = @"
+WITH m AS (SELECT a.request_id, a.server_id, a.metric_name, max(a.alert_time) AS last_alert
+           FROM config.investigation_request_alerts AS a
+           WHERE a.request_id IN (SELECT r.request_id
+                                  FROM config.investigation_requests AS r
+                                  WHERE r.state IN ('open', 'claimed', 'reported')
+                                    AND r.practice_of IS NULL
+                                    AND r.opened_at > $1 - interval '2 days')
+           GROUP BY a.request_id, a.server_id, a.metric_name)
 SELECT m.request_id, m.metric_name, h.context_json
-FROM (SELECT a.request_id, a.server_id, a.metric_name, max(a.alert_time) AS last_alert
-      FROM config.investigation_request_alerts AS a
-      WHERE a.request_id IN (SELECT r.request_id
-                             FROM config.investigation_requests AS r
-                             WHERE r.state IN ('open', 'claimed', 'reported')
-                               AND r.practice_of IS NULL
-                               AND r.opened_at > $1 - interval '2 days')
-      GROUP BY a.request_id, a.server_id, a.metric_name) AS m
+FROM m
 LEFT JOIN config.config_alert_log AS h
        ON h.server_id = m.server_id
       AND h.alert_time > m.last_alert
+      AND h.alert_time > (SELECT min(last_alert) FROM m)
       AND strpos(h.context_json, 'Resolves') > 0";
 
     /* Journals resolved once per request (once key resolved:<request_id>). The state is checked again: the candidates were
@@ -377,7 +434,7 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
     internal static readonly string ListSql = $@"
 SELECT request_id, route_id, server_id, server_name, family, first_metric, first_alert_at, last_alert_at, alert_count,
        effective_state, opened_at, expires_at, claimed_by, lease_until, claim_count, reported_at, practice_of,
-       registry_display_name, registry_instance_name
+       registry_display_name, registry_instance_name, change_watch_detail
 FROM (
     SELECT r.*,
            CASE
@@ -387,7 +444,8 @@ FROM (
                WHEN r.state = 'claimed' AND r.lease_until < $1 THEN 'open'
                ELSE r.state
            END AS effective_state,
-           {RegistryNamesSelect("r", "sv")}
+           {RegistryNamesSelect("r", "sv")},
+           {ChangeWatchDetailSelect("r")}
     FROM config.investigation_requests AS r
     LEFT JOIN collect.servers AS sv ON sv.server_id = r.server_id
     WHERE ($3::integer IS NULL OR r.server_id = $3)
@@ -565,17 +623,27 @@ FROM expired AS e
 ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
 
     private readonly NpgsqlDataSource _dataSource;
+    private readonly NpgsqlDataSource? _agentActionSource;
     private readonly int _commandTimeoutSeconds;
     private readonly Func<DateTime> _utcNow;
+
+    /// <summary>The data source <see cref="RunAgentActionAsync"/> runs on: the store owner's, when the caller gave one. The journal rows an agent
+    /// action writes (<see cref="AgentActionEvents"/>) are the owner's alone, so the whole change, its checks and its rows, runs on that login.</summary>
+    private NpgsqlDataSource AgentActionSource => _agentActionSource ?? _dataSource;
 
     /// <summary>
     /// <paramref name="dataSource"/> must connect as a role that may write the investigation tables: the store owner for
     /// open, join and the sweep; the owner or the <c>mcp</c> role for claim and submit. <paramref name="commandTimeoutSeconds"/>
     /// is applied to every command. <paramref name="utcNow"/> is the clock (tests move it); it defaults to the wall clock.
+    /// <paramref name="agentActionSource"/> is the store owner's data source for <see cref="RunAgentActionAsync"/>: the service's MCP tools
+    /// pass it, because their own <paramref name="dataSource"/> is the <c>mcp</c> login, which the journal's trigger keeps from writing the
+    /// agent action rows (#6569). Null runs the change on <paramref name="dataSource"/>.
     /// </summary>
-    public InvestigationRequestStore(NpgsqlDataSource dataSource, int commandTimeoutSeconds, Func<DateTime>? utcNow = null)
+    public InvestigationRequestStore(NpgsqlDataSource dataSource, int commandTimeoutSeconds, Func<DateTime>? utcNow = null,
+        NpgsqlDataSource? agentActionSource = null)
     {
         _dataSource = dataSource ?? throw new ArgumentNullException(nameof(dataSource));
+        _agentActionSource = agentActionSource;
         _commandTimeoutSeconds = commandTimeoutSeconds;
         _utcNow = utcNow ?? (() => DateTime.UtcNow);
     }
@@ -583,7 +651,7 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
     private DateTime Now() => DateTime.SpecifyKind(_utcNow(), DateTimeKind.Utc);
 
     /// <summary>
-    /// Opens a request for <paramref name="alert"/>, joins it to an open or claimed request of the same server and family,
+    /// Opens a request for <paramref name="alert"/>, joins it to an open or claimed request (or a reported one, #6778) of the same server and family,
     /// or refuses at the route's limit, in one transaction. See the class remarks for the locks.
     /// </summary>
     /// <remarks>
@@ -592,9 +660,15 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
     /// the send path's key falls back to the constant <c>{server}:{metric}</c> for an alert with no incidents, so a key arm
     /// would join every later alert of that metric for the request's whole life, after its brief was composed. The keys are
     /// recorded as the request's alert rows only.</para>
-    /// <para><b>A reported or closed request is final.</b> A later alert of the same server and family opens a NEW request,
-    /// even inside the same grouping window, and that request counts against the route's hourly and daily limits. This is
-    /// intended: the agent's report answered the alerts it was briefed on, and a condition that fires again is a new question.</para>
+    /// <para><b>A closed request is final. A reported request takes a quiet re-fire (#6778).</b> An alert joins a reported
+    /// request only when its metric is already on the request, its severity is not above the request's <c>max_severity</c>, the
+    /// request has no <c>resolved</c> journal row (#6003, D7), and the alert is inside the grouping window and the 4-hour cap.
+    /// Such a join brings no new metric and no higher severity, so <see cref="InvestigationEvents.JoinIsEvent"/> is false and it
+    /// is journaled <c>joined_quiet</c> (<see cref="InvestigationEvents.QuietJoin"/>), which no reader delivers. The state and the report do not change, and a join never counts
+    /// against a limit. Anything else opens a NEW request, as before. The claim deadline (<c>expires_at</c>) applies to open and
+    /// claimed requests only, because a reported request is past its claim and the 4-hour cap bounds it. The send path's
+    /// cooldown cannot decide this: the request is opened or joined before the throttle runs, because the generic webhook's
+    /// <c>{{investigation_json}}</c> needs it (#5821), so the store cannot know whether the page will be throttled.</para>
     /// </remarks>
     public async Task<InvestigationOpenResult> OpenOrJoinAsync(InvestigationAlert alert, CancellationToken cancellationToken = default)
     {
@@ -606,7 +680,8 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
-        await ExecAsync(connection, transaction, GroupLockSql, cancellationToken, P(alert.ServerId), P(alert.Family));
+        await ExecAsync(connection, transaction, GroupLockSql, cancellationToken,
+            P(alert.ServerId), P(alert.Family), P(alert.ServerName), P(ExternalSourceOf(alert.MetricName)));
 
         var severity = AlertSeverityWord(alert.Severity);
         Guid? joinId = null;
@@ -616,7 +691,8 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
         if (string.Equals(alert.TriggerKind, InvestigationTriggerKinds.Alert, StringComparison.Ordinal))
         {
             await using var find = Command(connection, transaction, FindJoinSql,
-                P(alert.ServerId), P(alert.Family), P(now), P(alertTime), P(alert.MetricName));
+                P(alert.ServerId), P(alert.Family), P(now), P(alertTime), P(alert.MetricName), P(severity),
+                P(alert.ServerName), P(ExternalSourceOf(alert.MetricName)));
             await using var found = await find.ExecuteReaderAsync(cancellationToken);
             if (await found.ReadAsync(cancellationToken))
             {
@@ -695,7 +771,13 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
     /// refused first. The <c>claimed</c> row's reason is null (#5632 review round 2, L4): the claim id is a lease identity,
     /// so it lives only in that row's <c>once_key</c>, which no reader returns.
     /// </summary>
-    public async Task<InvestigationClaimResult> ClaimAsync(Guid requestId, string agentId, CancellationToken cancellationToken = default)
+    public Task<InvestigationClaimResult> ClaimAsync(Guid requestId, string agentId, CancellationToken cancellationToken = default) =>
+        ClaimAsync(requestId, agentId, allowReclaim: false, cancellationToken);
+
+    /// <summary>The claim, with <paramref name="allowReclaim"/> (#6576, #6586 review): true only when <paramref name="agentId"/> is bound to the caller's named agent token (#6542),
+    /// so the same agent id holding the live lease gets its claim id back. An agent id on the legacy token is free text, and claimed_by is
+    /// published by list_investigation_requests, so there the same call answers already_claimed.</summary>
+    public async Task<InvestigationClaimResult> ClaimAsync(Guid requestId, string agentId, bool allowReclaim, CancellationToken cancellationToken = default)
     {
         if (!InvestigationRules.IsValidAgentId(agentId))
         {
@@ -709,6 +791,25 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
 
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+        /* #6576: before the journal cap, like a renewal: it writes no journal row. The same agent id that holds the live lease gets
+           its claim id back; any other agent id falls through to the claim below and is refused as before. */
+        if (allowReclaim)
+        {
+            await using (var reclaim = Command(connection, transaction, ReclaimSql, P(requestId), P(agentId), P(now)))
+            await using (var reader = await reclaim.ExecuteReaderAsync(cancellationToken))
+            {
+                if (await reader.ReadAsync(cancellationToken) && !reader.IsDBNull(0))
+                {
+                    var heldClaim = reader.GetGuid(0);
+                    var heldLease = DateTime.SpecifyKind(reader.GetFieldValue<DateTime>(1), DateTimeKind.Utc);
+                    var heldCount = reader.GetInt32(2);
+                    await reader.DisposeAsync();
+                    await transaction.CommitAsync(cancellationToken);
+                    return new InvestigationClaimResult(InvestigationClaimOutcome.Reclaimed, heldClaim, heldLease, heldCount, null);
+                }
+            }
+        }
 
         if (await JournalCappedAsync(connection, transaction, now, requestId, actor, "claim", cancellationToken))
         {
@@ -985,6 +1086,23 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
     }
 
     /// <summary>
+    /// #6596: journals an alert on an agent route that opened no request because its story is recurring at this hour
+    /// (<see cref="InvestigationEvents.RecurringSkipped"/>). The row has no request id; it names the route, the server, the metric
+    /// (as the reason) and the story path hash, once per route, server, metric and alert hour.
+    /// </summary>
+    public async Task RecordRecurringSkipAsync(InvestigationAlert alert, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(alert);
+        var alertTime = DateTime.SpecifyKind(alert.AlertTimeUtc, DateTimeKind.Utc);
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        await JournalAsync(connection, transaction, Now(), null, alert.RouteId, alert.ServerId, InvestigationEvents.RecurringSkipped,
+            "service", alert.MetricName, InvestigationEvents.RecurringSkippedDetail(alert.StoryPathHash, alertTime),
+            InvestigationEvents.RecurringSkippedOnceKey(alert.RouteId, alert.ServerId, alert.MetricName, alertTime), cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+    }
+
+    /// <summary>
     /// Journals a refusal the tool layer decided (an invalid report, an action proposal at Level 1, an unsupported format)
     /// once per request, operation and reason (#5632 review ruling). An unknown request id is journaled once per hour per
     /// reason, as the store's own refusals are. An agent id <see cref="InvestigationRules.IsValidAgentId"/> refuses is journaled as
@@ -1221,7 +1339,8 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
                 reader.IsDBNull(15) ? null : reader.GetFieldValue<DateTime>(15),
                 reader.IsDBNull(16) ? null : reader.GetGuid(16),
                 reader.GetString(17),
-                reader.IsDBNull(18) ? null : reader.GetString(18)));
+                reader.IsDBNull(18) ? null : reader.GetString(18),
+                reader.IsDBNull(19) ? null : reader.GetString(19)));
         }
 
         return rows;
@@ -1264,6 +1383,7 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
                 /* #6003 review: only the members the event's kind lists leave the store. */
                 DetailJson = InvestigationEvents.PublicDetail(reader.GetString(8), reader.IsDBNull(10) ? null : reader.GetString(10),
                     reader.IsDBNull(11) ? null : reader.GetGuid(11)),
+                DetailText = reader.IsDBNull(12) ? null : reader.GetString(12),
             });
         }
 
@@ -1562,7 +1682,9 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
             new NpgsqlParameter<double?> { TypedValue = facts?.ThresholdValue, NpgsqlDbType = NpgsqlDbType.Double },
             new NpgsqlParameter<bool?> { TypedValue = facts?.Muted, NpgsqlDbType = NpgsqlDbType.Boolean },
             new NpgsqlParameter<string?> { TypedValue = DerivedStoreScrub.Text(facts?.DetailText), NpgsqlDbType = NpgsqlDbType.Text },
-            new NpgsqlParameter<string?> { TypedValue = DerivedStoreScrub.Json(facts?.ContextJson), NpgsqlDbType = NpgsqlDbType.Text });
+            new NpgsqlParameter<string?> { TypedValue = DerivedStoreScrub.Json(facts?.ContextJson), NpgsqlDbType = NpgsqlDbType.Text },
+            /* #6928: the tier this alert arrived at, so the agent-action gate resolves its route at that tier. */
+            new NpgsqlParameter<string?> { TypedValue = AlertSeverityWord(alert.Severity), NpgsqlDbType = NpgsqlDbType.Text });
     }
 
     /// <summary>

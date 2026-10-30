@@ -1,5 +1,7 @@
 # Agent dispatch (Darling)
 
+Audience: operators.
+
 Agent dispatch hands an alert to an agent that you run yourself. Darling ships no agent. It opens a request when an alert fires, gives the agent a brief, and records the agent's report. At the higher levels the agent can also change settings, and Darling records every change so that a person can undo it.
 
 Lite can hand an alert to an agent too, but only to read and report. See "Lite" at the end of this page.
@@ -45,7 +47,50 @@ Run `PerformanceMonitor.Darling.Service.exe --validate-config`. With `mcp.allowI
 - `mcp.allowWrites` is also on. Turn `mcp.allowWrites` off to serve the investigation tools.
 - No enabled route has an agent level above Off. This one prints as a `NOTE:`. No request opens until you add a route.
 
+With `mcp.tokens` set, it also prints its findings about named tokens, whether or not `mcp.allowInvestigations` is on. See "Named tokens" below.
+
 The service log says the same at start-up. None of these changes the exit code of `--validate-config`, and none stops the service from starting. The first three keep the investigation tools from working. The route note does not stop anything.
+
+## Named tokens: an operator and agents on one service
+
+One bearer token cannot tell a person from an agent. So with `mcp.allowWrites` and `mcp.allowInvestigations` you serve the write tools or the investigation tools, never both. Named tokens remove that limit. Each token has a name and a role, and the token on a request decides which tools that request sees.
+
+Set them in `darling.json`:
+
+```json
+"mcp": {
+  "enabled": true,
+  "tokens": [
+    { "name": "ops-lead",   "encryptedToken": "...", "role": "operator" },
+    { "name": "triage-bot", "encryptedToken": "...", "role": "agent" }
+  ]
+}
+```
+
+| Field | Rule |
+|---|---|
+| `name` | 1 to 64 characters from `A-Za-z0-9._:-`. Each name is used once. |
+| `encryptedToken` or `token` | The same rules as the `mcp.network` token. At least 16 characters, and at least 6 of them different. Each value is used once. |
+| `role` | `operator` or `agent`. |
+
+What each role sees:
+
+| Role | Sees | Never sees |
+|---|---|---|
+| `operator` | The reads and the write tools. The four server admin tools (`add_servers`, `edit_server`, `remove_server` and `set_server_action`) only when `mcp.allowWrites` and `mcp.allowServerAdmin` are both on. | `claim_investigation_request` and `submit_investigation_report`. |
+| `agent` | The reads, the two investigation tools, and the Level 2 action tools through the `agent_action` gate. | Every tool in the never-agent list: the route tools, alert settings, Custom Views, tags, collector and server controls. |
+
+`tools/list` shows only that set. A call to a tool outside it fails as an unknown tool. An unknown token gets 401, and so does a request with no token, loopback included.
+
+An agent's name is its identity. `agent_id` must equal the name of the agent token. A different `agent_id` is refused as `agent_id_not_token`, and the refusal is journaled under the token's name. The log names a named token by its name. It never logs a token value. The legacy token still shows as a short fingerprint.
+
+The old single token (`mcp.network.token` or `mcp.network.encryptedToken`) works as before. Its role still comes from `mcp.allowWrites` and `mcp.allowInvestigations`. With no `mcp.tokens`, nothing changes. You can set both, but give the legacy token a name and a role in `mcp.tokens` and remove it from `mcp.network` instead.
+
+A named token that cannot be served is left out, and the start logs one Critical line that names the token and never its value. This covers a bad name or role, an unreadable value, a value that is too short, and a name or value shared with another token. If you set `mcp.tokens` and none can be served, and no legacy token is set, the MCP server does not start. `--validate-config` prints the same problems as `WARNING:` lines whenever `mcp.tokens` is set. It also warns when an enabled route has an agent level and no agent token can be served.
+
+Darling reads `mcp.tokens` once, at start.
+
+Route agent fields over MCP (the agent level and its limits on `create_notification_route` and `update_notification_route`, for the operator role only) come in a later change. Until then you set agent routes in the Viewer.
 
 ## Create an agent route
 
@@ -80,6 +125,16 @@ Past the hourly or daily limit, no request opens, and the journal says `limit_re
 
 You can also pick a **Fallback route**. A request that nobody claims goes to that route's channels.
 
+### Change Watch requests
+
+A Change Watch request opens when a watch window saw the measures move after a recorded change (a plan forced or unforced, a setting changed). It is not an alert: the metric on the request is `Change Watch`, and its investigation family is `query_performance`.
+
+A Change Watch request is routed like an alert. Without a route of its own it matches the route for the `performance` alert family, or a route for every metric, and it spends that route's hourly and daily limits next to real alerts. A burst of forced-plan changes can use most of an hourly limit and leave a CPU alert with no request. To keep the two apart, add a route whose metric is exactly `Change Watch` and give it its own agent, level and limits. A route that names the metric exactly wins over a route for the family or for every metric.
+
+The request has no alert row in `get_alert_history`. The changes the watch named, and the query measures that moved, are in the request's brief after a claim, and in `detail_text` on its row in `list_investigation_requests` and `wait_for_investigation_requests`, so an agent can triage the request before it claims. Each query measure names its database and the read it came from (the plan cache or Query Store).
+
+When a server is a readable secondary of an availability group, the plan changes its Query Store shows are the primary's, replicated. Darling does not open a request for them on the secondary: the primary's own watch reports the change once. A forced plan the plan-force ledger recorded on the secondary itself still counts.
+
 ## How an agent gets and works a request
 
 The agent calls these tools in order:
@@ -87,7 +142,7 @@ The agent calls these tools in order:
 1. `wait_for_investigation_requests` waits up to 25 seconds for a request to open on the routes you name. It answers each new request's id, route, server, family and time, with a cursor. Call it again with the cursor. `list_investigation_requests` lists the open requests instead.
 2. `claim_investigation_request` takes one request. The first claim wins. The answer holds a `claim_id` and the brief. To keep a request past its lease, claim it again with the same `claim_id`.
 3. The agent calls the read tools that the brief names. The brief has a budget of minutes and tool calls.
-4. `get_investigation_evidence` reads the evidence sections that Darling froze for the request. A section that is still collecting says `pending`. The call never waits.
+4. `get_investigation_evidence` reads the evidence sections that Darling froze for the request. A section that is still collecting says `pending`. The call never waits. A request that a Client Timeouts alert opened also gets a `client_timeouts` section. It lists the top client applications, client hosts, databases and statements of the alert window, and the brief names `get_client_timeouts` first in `next_calls`.
 5. `submit_investigation_report` ends the work.
 
 ### The brief
@@ -104,7 +159,7 @@ A report has these fields:
 - `evidence`: a JSON array of at least one entry, at most 50. Each entry has `tool`, `arguments`, `key_numbers` and `basis`. `basis` is `verified` when the agent checked the claim against data. It is `inferred` when the agent reasoned to it.
 - `summary`, at most 4,000 characters.
 - `proposed_note` (optional), at most 2,000 characters. See "Agent notes".
-- `family_of` (optional): the `request_id` of the first report in this alert family.
+- `family_of` (optional): the `request_id` of an earlier request on this store. It need not have a report yet.
 - `links` (optional): at most 10 ticket, pull request, bug report, commit or release links. A link must use https. Darling stores the link and never calls Jira or git.
 - `queries_run` (optional): the statements the agent ran.
 - `follow_up_at` (optional): a time for Darling to open a new request for this case. It must be an ISO 8601 time after now and at most 30 days ahead. A route can hold at most 20 pending follow-ups. The new request names the first one, and its brief carries the first report.
@@ -148,6 +203,9 @@ At Level 3, an agent can also change the monitored server. These tools exist:
 - `force_query_store_plan` and `unforce_query_store_plan` (SQL Server).
 - `evict_cached_plan` (SQL Server, not Azure SQL Database).
 - `kill_session` (SQL Server, Azure SQL Database and PostgreSQL).
+- `recompile_module` (SQL Server and Azure SQL Database): runs `sys.sp_recompile` on one procedure, function or trigger, so its next run compiles a new plan. The agent names the database and the two-part `schema.name`; Darling resolves the name in that database first and refuses a name that does not resolve or that is a table, a view or another kind of object. The name goes to the server as a parameter. There is no undo.
+- `create_plan_guide` (SQL Server only; an Azure SQL Database or Managed Instance target is refused as `engine_not_supported`, because Microsoft documents `sp_control_plan_guide`, which the drop of an invalid guide and the undo use, for SQL Server alone): runs `sys.sp_create_plan_guide` to attach an `OPTION (...)` clause (`OPTIMIZE FOR`, `RECOMPILE`, `MAXDOP`, `USE PLAN`) to one statement without a change to the application. The agent names the database, the guide name, the statement, the type (`OBJECT`, `SQL` or `TEMPLATE`) and the hints, in any form `sys.sp_create_plan_guide` takes: an `OPTION (...)` clause, an XML showplan (text that starts with `<`), or none (empty: the guide applies no hints and removes the statement's own `OPTION` hints). A `TEMPLATE` guide takes no module or batch and needs `params`; `sys.sp_get_query_template` returns the statement and params for a query, and SQL Server checks which hints a type takes. Darling matches before it creates (an `OBJECT` guide's module must resolve and hold the statement exactly; a `SQL` guide reports how many cached batches compiled in its database equal its text, and zero is allowed; a `TEMPLATE` guide reports no count), refuses a name already in use, validates the new guide with `sys.fn_validate_plan_guide` in the same batch, and drops a guide that fails validation again. Every value goes to the server as a parameter. The change is journaled with the whole definition and a person can undo it from Agent changes: the undo drops the guide by name, and only while it still holds the statement and hints it was created with. 
+- `drop_plan_guide` (SQL Server only, refused on an Azure SQL target as `engine_not_supported`): drops one plan guide by name with `sys.sp_control_plan_guide N'DROP'`. One batch in the request's database reads the guide from `sys.plan_guides` (query text, scope, the module's two-part name for an `OBJECT` guide, scope batch, parameters, hints, `is_disabled`), refuses a guide that is not there (`guide_not_found`), checks the grant for its type, and drops it. Every guide form is dropped (`OBJECT`, `SQL` and `TEMPLATE`, with `OPTION`, XML showplan or NULL hints), and the journal keeps NULL hints as NULL. It is a dry run by default and the dry run shows the statement and the definition that would be journaled. The change is journaled with that whole definition, and a person can undo it from Agent changes: the undo re-creates the guide from the journal through the create path (the name must be free, an `OBJECT` guide's module must still hold the statement, the new guide is validated and dropped again if it is invalid), whatever form the guide had and disables it again if it was disabled. If a guide with that name exists by then, the undo is refused as `guide_exists` and changes nothing. The undo is gated by that server's `drop_plan_guide` switch and remediation login.
 
 Each tool runs as a dry run unless the agent passes `dry_run` as `false`. A dry run returns the exact statement and writes nothing. A dry run still signs in with the remediation login.
 
@@ -197,8 +255,11 @@ Grants for the remediation login:
 
 | Action | Grant |
 |---|---|
-| Force or unforce a plan (SQL Server) | `ALTER` on each database where it forces a plan. |
+| Force or unforce a plan (SQL Server) | `ALTER` on each database where it forces a plan. `ALTER` on a database also lets the login create users, change roles and schemas, and add database DDL triggers, so grant it only on databases where that is acceptable. |
 | Evict a plan (SQL Server) | `ALTER SERVER STATE`. Without it, an eviction is refused as `evict_permission_denied`. |
+| Drop a plan guide (SQL Server) | As Microsoft documents `sp_control_plan_guide`: an `OBJECT` guide on a procedure or function needs `ALTER` on that object only, which also lets the login change its code; an `OBJECT` guide on a DML trigger needs `ALTER` on the trigger's table (`ALTER` cannot be granted on a trigger), which also lets the login alter or truncate that table; a `SQL` guide needs `ALTER` on the database, which also lets the login create users, change roles and schemas, and add database DDL triggers, so grant it only on databases where that is acceptable. Without the one that applies, the drop is refused as `guide_permission_denied` (a login without `ALTER` on the database does not see a `SQL` guide in `sys.plan_guides`, so for it a guide it cannot find is refused the same way, with the permission sentence, not as `guide_not_found`). A person's undo re-creates the guide and needs the grant `sp_create_plan_guide` documents, which is the same split (`ALTER` on the procedure or function, or on the trigger's table, for an `OBJECT` guide; `ALTER` on the database for a `SQL` guide). A refusal for a trigger names its table. |
+| Create a plan guide (SQL Server) | As Microsoft documents `sp_create_plan_guide`: an `OBJECT` guide on a procedure or function needs `ALTER` on it, which also lets the login change its code; an `OBJECT` guide on a DML trigger needs `ALTER` on the trigger's table (`ALTER` cannot be granted on a trigger), which also lets the login alter or truncate that table; a `SQL` guide needs `ALTER` on the database, which also lets the login create users, change roles and schemas, and add database DDL triggers, so grant it only on databases where that is acceptable. Without the one that applies, the create is refused as `guide_permission_denied`. A refusal for a trigger names its table. A person's undo follows the same split (`sp_control_plan_guide`). |
+| Recompile a module (SQL Server, Azure SQL Database) | A procedure or function needs `ALTER` on the module. A DML trigger needs `ALTER` on its table, and that grant also allows changing and emptying that table (`ALTER TABLE`, `TRUNCATE`), so grant it only where that is acceptable. Without the grant, a recompile is refused as `recompile_permission_denied`. |
 | Kill a session (SQL Server) | `ALTER ANY CONNECTION`. This grant lets the login kill any session on that server. Grant it only where you want an agent to kill. |
 | Kill a session (Azure SQL Database) | A user in each database, with `VIEW DATABASE STATE` and `KILL DATABASE CONNECTION`. |
 | Kill a session (PostgreSQL) | `pg_signal_backend` and `pg_read_all_stats`. |
@@ -215,11 +276,11 @@ A person turns a switch on or off from any of three places. Each change is journ
 - **The web dashboard.** Open the Admin page and use the **Server actions** tab. You must be signed in to the dashboard as an admin. A dashboard with no sign-in configured, or a viewer account, lists the switches and answers 403 to a change.
 - **MCP.** The `set_server_action` tool, served only with `mcp.allowServerAdmin`. Name one server by its exact name. A disabled server works too. A part of a name is refused and the near matches are listed.
 
-A switch cannot be turned on for an action the server's engine cannot run, but it can always be turned off. No `darling.json` key sets a switch.
+A switch cannot be turned on for an action the server's engine cannot run, but it can always be turned off. An Azure SQL Database target cannot take `evict_plan`, `create_plan_guide` or `drop_plan_guide`, and an Azure SQL Managed Instance target cannot take `create_plan_guide` or `drop_plan_guide`. The edition is the one Darling collected for the server. Until Darling collects it, the switch can be turned on and the tool still refuses the call. No `darling.json` key sets a switch.
 
 As a fallback, the store owner can write the table directly.
 
-The actions are `force_plan` (it covers force and unforce), `evict_plan` and `kill_session`. To write the table directly, connect as the store owner and run this statement for each action and server:
+The actions are `force_plan` (it covers force and unforce), `evict_plan`, `kill_session`, `recompile_module`, `create_plan_guide` and `drop_plan_guide`. To write the table directly, connect as the store owner and run this statement for each action and server:
 
 ```sql
 INSERT INTO config.config_server_actions (server_id, action, enabled, set_by)
@@ -238,9 +299,9 @@ Darling journals every request. Each change shows as `action_called` (with the o
 
 The Viewer's Investigations window and the web Admin page each have an **Agent changes** tab. Each row is one agent call, with the time, server, kind, tool, agent, reason and result. A call that has neither a "done" nor a "failed" result shows **result unknown**. It has no Undo button.
 
-To undo a change, select **Undo** on its row. Undo restores what the setting was before the agent's change. It works only when nobody changed the setting after the agent. If someone did, Undo says **changed since** and leaves the setting alone. Undo works for 365 days after the change.
+To undo a change, select **Undo** on its row. Undo restores what the setting was before the agent's change. It works only when nobody changed the setting after the agent. If someone did, Undo says **changed since** and leaves the setting alone. Undo works for 365 days after the change. Over MCP (`mcp.allowWrites` and a token), `undo_agent_change` does the same for a change that is not a plan force or unforce. It takes the change's `called_id` from `get_agent_changes`.
 
-To stop all agent changes at once, use **Turn off agent changes** in the Viewer or the web. The gate then refuses every change as `actions_off`. Nothing already made is undone. No MCP tool turns the switch back on.
+To stop all agent changes at once, use **Turn off agent changes** in the Viewer or the web. The gate then refuses every change as `actions_off`. Nothing already made is undone. Over MCP, `set_agent_actions_enabled` can turn the switch off but never back on. A person turns it on in the Viewer or the web.
 
 The web can undo and switch only under the store's admin login. On a managed or compose store, the web signs in as the viewer role, so use the Viewer app there.
 

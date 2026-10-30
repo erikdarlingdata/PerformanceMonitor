@@ -70,11 +70,11 @@ public sealed class JobHistoryCollectorDefinitionTests
         Assert.Contains("(jh.run_time / 10000) * 3600", text, StringComparison.Ordinal);
         Assert.Contains("(jh.run_duration / 10000) * 3600", text, StringComparison.Ordinal);
         Assert.Contains("CONVERT(varchar(36), jh.job_id)", text, StringComparison.Ordinal);
-        /* run_status decode covers every documented outcome. */
-        Assert.Contains("N'Failed'", text, StringComparison.Ordinal);
-        Assert.Contains("N'Succeeded'", text, StringComparison.Ordinal);
-        Assert.Contains("N'Retry'", text, StringComparison.Ordinal);
-        Assert.Contains("N'Canceled'", text, StringComparison.Ordinal);
+        /* run_status decode covers every documented outcome (inside the sp_executesql literal since #6889, so the quotes are doubled). */
+        Assert.Contains("N''Failed''", text, StringComparison.Ordinal);
+        Assert.Contains("N''Succeeded''", text, StringComparison.Ordinal);
+        Assert.Contains("N''Retry''", text, StringComparison.Ordinal);
+        Assert.Contains("N''Canceled''", text, StringComparison.Ordinal);
         Assert.Contains("SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED", text, StringComparison.Ordinal);
         Assert.Contains("OPTION(RECOMPILE)", text, StringComparison.Ordinal);
     }

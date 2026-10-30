@@ -36,15 +36,17 @@ internal static class DarlingWebThresholdOverrides
 {
     /// <summary>The 403 sentence a refused write answers: the web host runs on whatever login <c>postgres.webConnectionString</c>
     /// names, and writing an override is an <c>admin</c> role write.</summary>
-    internal static string RefusedMessage(bool managedStore) =>
+    internal static string RefusedMessage(bool managedStore, bool adminWritesOff = false) =>
         DarlingWebStoreWrites.Refused("change threshold overrides", managedStore, "Change them in the Viewer app",
             " If this login already is the admin role, the store has not had "
-            + "Darling/tools/provision-roles.sql re-run since the upgrade that added threshold overrides: run it once as a superuser (it is idempotent).");
+            + "Darling/tools/provision-roles.sql re-run since the upgrade that added threshold overrides: run it once as a superuser (it is idempotent).",
+            adminWritesOff);
 
-    /// <summary>The list body: <c>{overrides: [{server_id, server_name, database, key, value, global_value, set_by, request_id,
-    /// updated_at}], keys: [{key, min, max, database_scope}], servers: [{server_id, server_name}], can_edit, note}</c>.
+    /// <summary>The list body: <c>{overrides: [{server_id, server_name, tag_id, tag_name, orphaned, database, key, value, global_value, set_by,
+    /// request_id, updated_at}], keys: [{key, min, max, database_scope}], servers: [{server_id, server_name}], tags: [{tag_id, tag_name}],
+    /// can_edit, note}</c>. A tag override (#6926) has a tag_id, a null server_id and server_name, and orphaned true when its tag was deleted.
     /// <c>can_edit</c> is whether the store login holds the write grant, so a page can say list-only before anyone tries.</summary>
-    internal static async Task<JsonObject> ListBodyAsync(NpgsqlDataSource postgres, CancellationToken ct)
+    internal static async Task<JsonObject> ListBodyAsync(NpgsqlDataSource postgres, CancellationToken ct, NpgsqlDataSource? accessSource = null)
     {
         var overrides = new JsonArray();
         string? note = null;
@@ -55,8 +57,11 @@ internal static class DarlingWebThresholdOverrides
             {
                 overrides.Add(new JsonObject
                 {
-                    ["server_id"] = r.ServerId,
-                    ["server_name"] = r.ServerName,
+                    ["server_id"] = r.IsTag ? null : r.ServerId,
+                    ["server_name"] = r.IsTag ? null : r.ServerName,
+                    ["tag_id"] = r.TagId,
+                    ["tag_name"] = r.IsTag && !r.Orphaned ? r.ServerName : null,
+                    ["orphaned"] = r.Orphaned,
                     ["database"] = r.Database,
                     ["key"] = r.Key,
                     ["value"] = r.Value,
@@ -94,12 +99,22 @@ internal static class DarlingWebThresholdOverrides
                 servers.Add(new JsonObject { ["server_id"] = reader.GetInt32(0), ["server_name"] = reader.GetString(1) });
         }
 
+        var tags = new JsonArray();
+        await using (var command = postgres.CreateCommand("SELECT id, name FROM config.server_tags ORDER BY name, id"))
+        {
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            await using var reader = await command.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+                tags.Add(new JsonObject { ["tag_id"] = reader.GetInt32(0), ["tag_name"] = reader.GetString(1) });
+        }
+
         return new JsonObject
         {
             ["overrides"] = overrides,
             ["keys"] = keys,
             ["servers"] = servers,
-            ["can_edit"] = await DarlingMcpThresholdOverrideTools.HoldsGrantAsync(postgres, ct),
+            ["tags"] = tags,
+            ["can_edit"] = await DarlingMcpThresholdOverrideTools.HoldsGrantAsync(accessSource ?? postgres, ct),
             ["note"] = note,
         };
     }
@@ -110,11 +125,12 @@ internal static class DarlingWebThresholdOverrides
     /// are this route's 403. <c>refused</c> is a key, value, database or <c>set_by</c> the tool will not write: 400.
     /// </summary>
     internal static async Task<(int Status, JsonNode Body)> ChangeAsync(
-        NpgsqlDataSource postgres, ILogger logger, JsonObject body, string editor, CancellationToken ct, bool managedStore = false)
+        NpgsqlDataSource postgres, ILogger logger, JsonObject body, string editor, CancellationToken ct, bool managedStore = false, bool adminWritesOff = false)
     {
         var server = body["server_name"]?.GetValueKind() == JsonValueKind.String ? body["server_name"]!.GetValue<string>() : null;
         var key = body["key"]?.GetValueKind() == JsonValueKind.String ? body["key"]!.GetValue<string>() : null;
         var database = body["database_name"]?.GetValueKind() == JsonValueKind.String ? body["database_name"]!.GetValue<string>() : null;
+        var tag = body["tag"]?.GetValueKind() == JsonValueKind.String ? body["tag"]!.GetValue<string>() : null;
         var clear = body["clear"]?.GetValueKind() == JsonValueKind.True;
 
         int? value = null;
@@ -125,13 +141,13 @@ internal static class DarlingWebThresholdOverrides
             value = parsed;
         }
 
-        if (string.IsNullOrWhiteSpace(server))
-            return (400, new JsonObject { ["error"] = "server_name is required." });
+        if (string.IsNullOrWhiteSpace(server) && string.IsNullOrWhiteSpace(tag))
+            return (400, new JsonObject { ["error"] = "server_name or tag is required." });
 
         var json = await DarlingMcpThresholdOverrideTools.SetAsync(
             postgres, new DarlingMcpWritePolicy.Effective(true, false),
             new InvestigationRequestStore(postgres, McpCommandDeadlines.ReadSeconds), logger,
-            server, key ?? string.Empty, value, database, clear, ThresholdOverrideStore.SetByFor(editor), null, ct);
+            server, key ?? string.Empty, value, database, clear, ThresholdOverrideStore.SetByFor(editor), null, ct, tag: tag);
 
         var answer = JsonNode.Parse(json)!.AsObject();
         var status = answer["status"]?.GetValue<string>();
@@ -141,7 +157,7 @@ internal static class DarlingWebThresholdOverrides
             case "cleared":
                 return (200, answer);
             case "precondition":
-                return (403, new JsonObject { ["error"] = RefusedMessage(managedStore) });
+                return (403, new JsonObject { ["error"] = RefusedMessage(managedStore, adminWritesOff) });
             case "refused":
             case "invalid":
                 return (400, new JsonObject

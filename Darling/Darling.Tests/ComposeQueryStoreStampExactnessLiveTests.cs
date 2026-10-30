@@ -14,6 +14,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
 namespace Darling.Tests;
@@ -89,7 +90,7 @@ public sealed class ComposeQueryStoreStampExactnessLiveTests
                them, and the seed's own exact products would let it pass. */
             await ComposeStampLiveSupport.SeedPrecisionRowsAsync(connection, hourNow, ComposeStampLiveSupport.PrecisionSpot.Built, ct);
             await ComposeStampLiveSupport.SeedPrecisionRowsAsync(connection, hourNow, ComposeStampLiveSupport.PrecisionSpot.Tail, ct);
-            Assert.Equal(28, await ComposeStampLiveSupport.BuildAllAsync(source, ct));
+            Assert.Equal(28, await ComposeStampLiveSupport.BuildAllAsync(source, ct, ComposeStampLiveSupport.ClockWithin(hourNow)));
             await ComposeStampLiveSupport.AssertPrecisionRowsHaveTeethAsync(connection, ct);
 
             /* Window A: starts at hourNow - 28 h + 17 min (mid-hour, inside the built run), ends at hourNow - 40 min. The built hours stop at

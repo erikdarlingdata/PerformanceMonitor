@@ -214,6 +214,15 @@ public static class CollectorRuntimePrecondition
         "collector: it runs and reports a permission error instead, and a grant takes effect on its next run.";
 
     /// <summary>
+    /// What could stop the agent_alerts collector from running, as <c>get_agent_alerts</c> words it (#6874). The engine edition is
+    /// answered before this is asked (Azure SQL Database and Managed Instance are <c>not_collected</c>), so AWS RDS is the one
+    /// remaining candidate: it reports an ordinary edition, so the registry cannot tell it from a plain SQL Server.
+    /// </summary>
+    public const string AgentAlertsPossibleCauses =
+        "Possible cause: this is an AWS RDS instance, where this collector does not run. A login without msdb access " +
+        "does not stop this collector: it runs and reports a permission error instead, and a grant takes effect on its next run.";
+
+    /// <summary>
     /// The closing sentence every precondition message ends on. One copy, for the same reason
     /// <c>CollectorEngineCapability.PermanentGapEpilogue</c> is one copy: the messages have to agree about
     /// what a precondition IS, and a second wording would eventually disagree about whether it is worth
@@ -270,7 +279,26 @@ public static class CollectorRuntimePrecondition
         string collectorName,
         string? status,
         string? errorMessage,
-        DateTime? observedUtc)
+        DateTime? observedUtc) =>
+        BuildCollectionOutcome(serverName, collectorName, status, errorMessage, observedUtc, forReader: false);
+
+    /// <summary>
+    /// The sentence the DEGRADED answer closes on for an MCP client (#6869): it tells a caller what to do with the stored sentence, which a
+    /// person reading a panel or the web page has no use for. <see cref="CollectionOutcomeReaderMessage"/> leaves it out, and so does
+    /// <c>runtimePreconditionText</c> in plain-text.js.
+    /// </summary>
+    public const string DegradedClientSentence =
+        "Act on that sentence — it is what the monitored server itself answered, and it distinguishes the states this " +
+        "one status carries: a grant the login was refused, a source object that does not exist " +
+        "on this target, and a feature the platform does not implement or has switched off.";
+
+    private static string? BuildCollectionOutcome(
+        string serverName,
+        string collectorName,
+        string? status,
+        string? errorMessage,
+        DateTime? observedUtc,
+        bool forReader)
     {
         if (string.IsNullOrWhiteSpace(status))
         {
@@ -296,7 +324,7 @@ public static class CollectorRuntimePrecondition
         {
             return $"The {collectorName} collector is running against {serverName} but the PostgreSQL " +
                    $"extension it reads is not installed there: its last run{observed} was recorded as a " +
-                   $"named non-fatal skip, so {CapturePathOf(collectorName)} is not being stored.{said} " +
+                   $"named non-fatal skip, so nothing from {CapturePathOf(collectorName)} is being stored.{said} " +
                    "The stored sentence names the extension and the database to create it in — installing " +
                    "it is the remedy, and no grant will change this. An optional extension left " +
                    "uninstalled is also a legitimate resting state; the skip simply keeps that choice " +
@@ -308,14 +336,35 @@ public static class CollectorRuntimePrecondition
         {
             return $"The {collectorName} collector is running against {serverName} but cannot read its " +
                    $"source: its last run{observed} was recorded as a non-fatal skip rather than a failure, " +
-                   $"so {CapturePathOf(collectorName)} is not being stored.{said} Act on that sentence — it " +
-                   "is what the monitored server itself answered, and it distinguishes the states this " +
-                   "one status carries: a grant the login was refused, a source object that does not exist " +
-                   "on this target, and a feature the platform does not implement or has switched off. " +
+                   $"so nothing from {CapturePathOf(collectorName)} is being stored.{said} " +
+                   MsdbGrantSentence(collectorName) +
+                   (forReader ? "" : DegradedClientSentence + " ") +
                    PreconditionEpilogue;
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// <see cref="CollectionOutcomeMessage"/> as a person reading a desktop panel or the web page should see it (#6861, the rule
+    /// #6764 set for <see cref="GatedOffReaderMessage"/>): the same classification, so the panel and the MCP tool decide from the
+    /// same facts, without the closing paragraph that labels itself a runtime PRECONDITION and says the read re-derives on every
+    /// call, and without the DEGRADED answer's <see cref="DegradedClientSentence"/> (#6869), which only an MCP client can use. The web page cuts
+    /// the MCP answer the same way (<c>runtimePreconditionText</c> in plain-text.js). Null where <see cref="CollectionOutcomeMessage"/> is null.
+    /// <see cref="CollectionOutcomeMessage"/> itself is unchanged: it is the MCP answer.
+    /// </summary>
+    public static string? CollectionOutcomeReaderMessage(
+        string serverName,
+        string collectorName,
+        string? status,
+        string? errorMessage,
+        DateTime? observedUtc)
+    {
+        var message = BuildCollectionOutcome(serverName, collectorName, status, errorMessage, observedUtc, forReader: true);
+
+        return message is not null && message.EndsWith(PreconditionEpilogue, StringComparison.Ordinal)
+            ? message[..^PreconditionEpilogue.Length].TrimEnd()
+            : message;
     }
 
     /// <summary>
@@ -373,15 +422,19 @@ public static class CollectorRuntimePrecondition
     /// <param name="serverFirstCollectedUtc">The server's oldest run by ANY collector in the same store, or null
     /// when it has none. Null makes no first-run grace claim, so the never-ran arm speaks as before. It has no default,
     /// so a caller cannot drop the grace by leaving it out.</param>
+    /// <param name="serviceStartedUtc">#6932: when the collecting service process started, or null where the caller does not know it. A
+    /// collector added by an upgrade has no run of its own and the server's first collection is long past, so without this the first
+    /// slot after the restart reads as "switched off". See <see cref="IsInsideFirstRunGrace"/>.</param>
     public static string? GatedOffMessage(
         string serverName,
         string collectorName,
         string gateCandidates,
         DateTime? collectorLastRunUtc,
         DateTime? serverLastCollectedUtc,
-        DateTime? serverFirstCollectedUtc)
+        DateTime? serverFirstCollectedUtc,
+        DateTime? serviceStartedUtc = null)
     {
-        switch (ClassifyGatedOff(collectorName, collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc))
+        switch (ClassifyGatedOff(collectorName, collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc, serviceStartedUtc))
         {
             case GatedOffCase.GoneDark:
                 /* Both instants, because this is a claim about NOW assembled from two stored measurements and the
@@ -397,7 +450,7 @@ public static class CollectorRuntimePrecondition
                        ConnectScopedEpilogue;
 
             case GatedOffCase.NotYetDue:
-                return NotYetRunMessage(serverName, collectorName, serverLastCollectedUtc, serverFirstCollectedUtc);
+                return NotYetRunMessage(serverName, collectorName, serverLastCollectedUtc, serverFirstCollectedUtc, serviceStartedUtc);
 
             case GatedOffCase.NeverRan:
                 return $"The {collectorName} collector has never run against {serverName}, while the server itself " +
@@ -410,6 +463,97 @@ public static class CollectorRuntimePrecondition
             default:
                 return null;
         }
+    }
+
+    /// <summary>
+    /// <see cref="GatedOffMessage"/> as a person reading a desktop panel or the web page should see it (#6764): the same
+    /// classification, so the panel and the MCP tool decide from the same facts, but worded for the reader. The MCP answer is
+    /// about 1200 characters and ends in a closing sentence that labels itself a runtime PRECONDITION and says to retry the read,
+    /// which only an MCP client can use. The two "not being invoked" arms (never ran, gone dark) become one line saying which
+    /// data is missing, then <paramref name="gateCandidates"/> as written, then the two reconnect sentences that
+    /// <see cref="ConnectScopedEpilogue"/> carries in the MCP answer. The gone-dark line drops the two observed instants,
+    /// deliberately, the same as the web page. The first-run sentence is already short and is returned as
+    /// <see cref="GatedOffMessage"/> gives it. The words match the web page's (<c>runtimePreconditionText</c> in plain-text.js,
+    /// PR #6760), so all three human surfaces read the same. Null where <see cref="GatedOffMessage"/> is null.
+    /// <see cref="GatedOffMessage"/> itself is unchanged: it is the MCP answer.
+    /// </summary>
+    public static string? GatedOffReaderMessage(
+        string serverName,
+        string collectorName,
+        string gateCandidates,
+        DateTime? collectorLastRunUtc,
+        DateTime? serverLastCollectedUtc,
+        DateTime? serverFirstCollectedUtc,
+        DateTime? serviceStartedUtc = null)
+    {
+        var causes = gateCandidates.Trim();
+        var tail = (causes.Length == 0 ? "" : " " + causes) + ReconnectStep;
+        switch (ClassifyGatedOff(collectorName, collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc, serviceStartedUtc))
+        {
+            case GatedOffCase.GoneDark:
+                return $"The {CollectorWords(collectorName)} collector has not run for this server for over " +
+                       $"{GoneDarkHours.ToString("0", CultureInfo.InvariantCulture)} hours, so there is nothing current to show." +
+                       tail;
+
+            case GatedOffCase.NeverRan:
+                return $"The {CollectorWords(collectorName)} collector has never run for this server, so there is nothing to show." +
+                       tail;
+
+            default:
+                return GatedOffMessage(
+                    serverName, collectorName, gateCandidates, collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc, serviceStartedUtc);
+        }
+    }
+
+    /// <summary>What <see cref="ConnectScopedEpilogue"/> tells a reader to do, in the words the web page uses.</summary>
+    private const string ReconnectStep =
+        " After you fix the cause, the service must reconnect to this server before collection starts again. " +
+        "Restart the service, or change this server's settings.";
+
+    /// <summary>A collector's name the way a panel says it: <c>running_jobs</c> is "Running Jobs".</summary>
+    private static string CollectorWords(string collectorName) =>
+        string.Join(
+            " ",
+            collectorName.Split('_').Select(w => w.Length == 0 ? w : char.ToUpperInvariant(w[0]) + w[1..]));
+
+    /// <summary>
+    /// #6453: the sentence for a read that found no stored rows while the collector serving it is HEALTHY, or null when it is
+    /// not. Healthy here is the newest <c>collection_log</c> run being <c>SUCCESS</c> with no note, or a note that is only measurement counts
+    /// (<see cref="CollectorMeasurementNote.IsMeasurementsOnly"/>, #6903: every query_stats run on SQL Server writes
+    /// <c>plans_rendered=0 plans_rendered_bytes=0 plan_fetch_ms=31</c>, a fact about the run and never a reason for zero rows). Counts-only notes are benign except the ring-buffer truncation counts, which mean the read was blind, so those do not qualify: the monitored server
+    /// answered and had nothing for the collector, which <c>get_collection_health</c> reports as "every run completed and its
+    /// source returned no rows". The caller answers it with <c>empty</c>, a true negative; a read that said <c>unavailable</c>
+    /// beside that health verdict sent the reader in a circle. Null for no run, a fault, a denial, a missing session, or a
+    /// run whose note may explain the zero, so the caller keeps its own text. Shared by Lite and Darling so the two cannot
+    /// drift.
+    /// </summary>
+    /// <param name="serverName">The server as the caller named it.</param>
+    /// <param name="collectorName">The collector serving the read.</param>
+    /// <param name="what">What the read found none of, as a plural noun phrase.</param>
+    /// <param name="status">The <c>collection_log</c> status of that collector's most recent run.</param>
+    /// <param name="errorMessage">That run's stored note, if any.</param>
+    /// <param name="observedUtc">When that run happened.</param>
+    public static string? HealthyEmptyMessage(
+        string serverName,
+        string collectorName,
+        string what,
+        string? status,
+        string? errorMessage,
+        DateTime? observedUtc)
+    {
+        if (observedUtc is not DateTime at
+            || !string.Equals(status, "SUCCESS", StringComparison.OrdinalIgnoreCase)
+            || (!string.IsNullOrWhiteSpace(errorMessage) && !CollectorMeasurementNote.IsMeasurementsOnly(errorMessage)))
+        {
+            return null;
+        }
+
+        return string.Format(
+            CultureInfo.InvariantCulture,
+            "No {0} are stored for {1}, and that is a true negative rather than missing data: the {2} collector's newest run "
+            + "({3:yyyy-MM-dd HH:mm:ss} UTC) completed without a fault and its source returned no rows. "
+            + "get_collection_health shows the run history.",
+            what, serverName, collectorName, at);
     }
 
     /// <summary>
@@ -427,8 +571,9 @@ public static class CollectorRuntimePrecondition
         string collectorName,
         DateTime? collectorLastRunUtc,
         DateTime? serverLastCollectedUtc,
-        DateTime? serverFirstCollectedUtc) =>
-        ClassifyGatedOff(collectorName, collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc)
+        DateTime? serverFirstCollectedUtc,
+        DateTime? serviceStartedUtc = null) =>
+        ClassifyGatedOff(collectorName, collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc, serviceStartedUtc)
             == GatedOffCase.NotYetDue
             ? NotYetDueStatusWord
             : StatusWord;
@@ -443,14 +588,44 @@ public static class CollectorRuntimePrecondition
     /// collecting early stays inside the grace. False when either instant is null, for a collector with no default schedule,
     /// and for one that is off by default, so a caller that read nothing makes no grace claim.
     /// </summary>
-    public static bool IsInsideFirstRunGrace(string collectorName, DateTime? serverLastCollectedUtc, DateTime? serverFirstCollectedUtc)
+    public static bool IsInsideFirstRunGrace(
+        string collectorName, DateTime? serverLastCollectedUtc, DateTime? serverFirstCollectedUtc, DateTime? serviceStartedUtc = null)
     {
-        return serverLastCollectedUtc is { } lastCollected
-               && serverFirstCollectedUtc is { } firstCollected
-               && CollectorScheduleDefaults.All.TryGetValue(collectorName, out var schedule)
-               && schedule.DefaultEnabled
-               && schedule.FrequencyMinutes >= 0
-               && lastCollected < firstCollected.AddMinutes(schedule.FrequencyMinutes + FirstRunSlackMinutes);
+        return InsideGrace(collectorName, serverLastCollectedUtc, serverFirstCollectedUtc, serviceStartedUtc, out _);
+    }
+
+    /// <summary>
+    /// The grace test, and which instant it counted from. <paramref name="fromServiceStart"/> is true when only the collecting
+    /// service's start (#6932) puts the collector inside the grace: a collector an upgrade adds has no run, and the server's first
+    /// collection was long ago, so the grace measured from it is spent while the first slot after the restart is not yet due. A
+    /// collector that runs when monitoring starts (cadence 0) has no slot to wait for, so the service start never applies to it.
+    /// </summary>
+    private static bool InsideGrace(
+        string collectorName,
+        DateTime? serverLastCollectedUtc,
+        DateTime? serverFirstCollectedUtc,
+        DateTime? serviceStartedUtc,
+        out bool fromServiceStart)
+    {
+        fromServiceStart = false;
+        if (serverLastCollectedUtc is not { } lastCollected
+            || !CollectorScheduleDefaults.All.TryGetValue(collectorName, out var schedule)
+            || !schedule.DefaultEnabled
+            || schedule.FrequencyMinutes < 0)
+        {
+            return false;
+        }
+
+        if (serverFirstCollectedUtc is { } firstCollected
+            && lastCollected < firstCollected.AddMinutes(schedule.FrequencyMinutes + FirstRunSlackMinutes))
+        {
+            return true;
+        }
+
+        fromServiceStart = schedule.FrequencyMinutes > 0
+                           && serviceStartedUtc is { } started
+                           && lastCollected < started.AddMinutes(schedule.FrequencyMinutes + FirstRunSlackMinutes);
+        return fromServiceStart;
     }
 
     /// <summary>
@@ -461,11 +636,26 @@ public static class CollectorRuntimePrecondition
     /// a user may have changed the schedule. The times are UTC, marked with a "Z".
     /// </summary>
     public static string? NotYetRunMessage(
-        string serverName, string collectorName, DateTime? serverLastCollectedUtc, DateTime? serverFirstCollectedUtc)
+        string serverName,
+        string collectorName,
+        DateTime? serverLastCollectedUtc,
+        DateTime? serverFirstCollectedUtc,
+        DateTime? serviceStartedUtc = null)
     {
-        if (!IsInsideFirstRunGrace(collectorName, serverLastCollectedUtc, serverFirstCollectedUtc))
+        if (!InsideGrace(collectorName, serverLastCollectedUtc, serverFirstCollectedUtc, serviceStartedUtc, out var fromServiceStart))
         {
             return null;
+        }
+
+        /* #6932: inside the grace the collecting service's start gives, and not the one the server's first collection gives, the
+           collector's first slot is one cadence after the service started. Say when it is due rather than when the server first
+           collected, which is long ago and has nothing to do with this collector. */
+        if (fromServiceStart && serviceStartedUtc is { } started)
+        {
+            var interval = CollectorScheduleDefaults.All[collectorName].FrequencyMinutes;
+            return $"The {collectorName} collector has not had its first run against {serverName} yet. The collecting service " +
+                   $"started at {UtcText(started)}, and by default this collector runs {CadenceText(interval)}, so its first run " +
+                   $"is due at about {UtcText(started.AddMinutes(interval))}.";
         }
 
         var everyMinutes = CollectorScheduleDefaults.All[collectorName].FrequencyMinutes;
@@ -523,7 +713,8 @@ public static class CollectorRuntimePrecondition
         string collectorName,
         DateTime? collectorLastRunUtc,
         DateTime? serverLastCollectedUtc,
-        DateTime? serverFirstCollectedUtc)
+        DateTime? serverFirstCollectedUtc,
+        DateTime? serviceStartedUtc)
     {
         if (serverLastCollectedUtc is not { } lastCollected)
         {
@@ -541,7 +732,7 @@ public static class CollectorRuntimePrecondition
                 : GatedOffCase.GoneDark;
         }
 
-        return IsInsideFirstRunGrace(collectorName, serverLastCollectedUtc, serverFirstCollectedUtc)
+        return IsInsideFirstRunGrace(collectorName, serverLastCollectedUtc, serverFirstCollectedUtc, serviceStartedUtc)
             ? GatedOffCase.NotYetDue
             : GatedOffCase.NeverRan;
     }
@@ -699,6 +890,66 @@ public static class CollectorRuntimePrecondition
                PreconditionEpilogue;
     }
 
+    /// <summary>The engine's readable-secondary bit in <c>readonly_reason</c> (the same bit the collectors gate on, #1558).</summary>
+    public const int ReadableSecondaryReadonlyBit = 8;
+
+    /// <summary>The <c>status</c> word of <see cref="QueryStoreReadableSecondaryMessage"/>: the data is not collected here, and the reason is not a fault to repair.</summary>
+    public const string NotCollectedStatusWord = "not_collected";
+
+    /// <summary>
+    /// #6554: the one-line reason a Query Store read on a readable secondary is empty, or <c>null</c> when the evidence does not
+    /// say the server is one. The collectors skip every database whose <c>readonly_reason</c> has bit 8 (Query Store, its
+    /// forced-plan and plan-correction fan-outs, and since #6252 its health row), so a registered secondary has no Query Store
+    /// rows to read, and the older answers ("empty", "Query Store is READ_ONLY") sent the reader to look for a fault in what is a
+    /// secondary's normal state. The server is a secondary when every database in its newest health capture that Query Store is read
+    /// for carries the bit (an RDS read replica reads <c>Standalone</c> in the role, and captures from before #6252 still carry the bit).
+    /// A capture with any such database not flagged secondary says the server still collects Query Store for it, so the answer is null
+    /// whatever the role says (an instance whose role reads <c>Secondary</c> can host databases outside any availability group).
+    /// The databases counted are the ones the collector reads Query Store for: the on-prem health capture always holds tempdb (its
+    /// database list is <c>database_id &gt; 4 OR database_id = 2</c>) with Query Store OFF, and a database whose Query Store is OFF has
+    /// nothing to read, so neither counts. Only when no such database is left does the collected <c>ag_replica_role</c> decide: <c>Secondary</c> is a secondary. Null when <paramref name="replicaConfigured"/> is true: then the Query Store
+    /// is read from a replica and an empty read has some other cause.
+    /// </summary>
+    /// <param name="healthDatabases">Databases in the newest <c>query_store_health</c> capture, leaving out tempdb and any database whose Query Store is OFF.</param>
+    /// <param name="healthSecondaryDatabases">Of those, how many carry <see cref="ReadableSecondaryReadonlyBit"/>.</param>
+    /// <param name="settingClause">Why the product does not read it, and the setting that changes that (product specific).</param>
+    public static string? QueryStoreReadableSecondaryMessage(
+        string serverName,
+        string? agReplicaRole,
+        int healthDatabases,
+        int healthSecondaryDatabases,
+        bool replicaConfigured,
+        string settingClause)
+    {
+        if (replicaConfigured)
+        {
+            return null;
+        }
+
+        // The newest health capture decides when it has rows: the collectors skip a secondary's databases, so a database
+        // in the capture that is not flagged secondary is one Query Store is still read for (an instance whose role reads
+        // Secondary can host databases outside any availability group), and an empty read there is not "nothing can be read".
+        // The role decides only when the capture has no database Query Store is read for (tempdb and OFF databases do not count).
+        bool secondary;
+        if (healthDatabases > 0)
+        {
+            secondary = healthSecondaryDatabases == healthDatabases;
+        }
+        else
+        {
+            secondary = string.Equals(agReplicaRole?.Trim(), "Secondary", StringComparison.OrdinalIgnoreCase);
+        }
+
+        if (!secondary)
+        {
+            return null;
+        }
+
+        return $"Query Store is not collected for {serverName}: it is a readable secondary, and {settingClause} " +
+               "READ_ONLY is a secondary's normal state, not a fault, and its Query Store is the primary's, replicated. " +
+               "An empty read here means nothing was collected, not that nothing ran.";
+    }
+
     /// <summary>
     /// The sentence a Query Store read that found nothing appends when the newest <c>query_store_health</c> row of a
     /// database in scope is not READ_WRITE (#6074), or <c>null</c> when every database in scope is collecting (or no row
@@ -792,6 +1043,51 @@ public static class CollectorRuntimePrecondition
     /// be the drift <see cref="CollectorEngineCapability.CapturePathByCollector"/>'s own doc-comment warns
     /// about, doubled.
     /// </summary>
+    /// <summary>
+    /// #6932: the msdb objects a collector reads through a grant of its own, by collector (the grant is <c>SELECT</c> unless the entry
+    /// says otherwise). The monitoring login does not get these from an ordinary install, and a refusal on one of them is the
+    /// <c>PERMISSIONS</c> run the degraded message above answers, which used to name the refusal and not the fix. The objects are the
+    /// ones <c>MonitoringGrantScript</c> grants in msdb, spelled the same way, and a test holds each pair against that script so the
+    /// message cannot name a grant the script does not give.
+    /// </summary>
+    public static readonly IReadOnlyDictionary<string, IReadOnlyList<(string Permission, string Object)>> MsdbGrantsByCollector =
+        new Dictionary<string, IReadOnlyList<(string Permission, string Object)>>(StringComparer.Ordinal)
+        {
+            ["agent_alerts"] = [("SELECT", "dbo.sysalerts"), ("SELECT", "dbo.sysnotifications")],
+            ["database_protection"] = [("SELECT", "dbo.backupset")],
+            ["job_history"] = [("SELECT", "dbo.sysjobs"), ("SELECT", "dbo.sysjobhistory"), ("SELECT", "dbo.syscategories")],
+            ["running_jobs"] = [("SELECT", "dbo.sysjobs"), ("SELECT", "dbo.sysjobactivity"), ("SELECT", "dbo.sysjobhistory"), ("SELECT", "dbo.syssessions")],
+            ["agent_status"] = [("SELECT", "dbo.sysjobs"), ("SELECT", "dbo.sysjobschedules"), ("EXECUTE", "dbo.agent_datetime")],
+        };
+
+    /// <summary>
+    /// The sentence that names the grant a refused msdb collector needs (#6932), or empty for a collector that reads nothing in msdb
+    /// through a grant. It says what to run, where, and that the next run uses it. The collector's own stored sentence stays the
+    /// authority on which object was refused: this lists every object the collector reads, because a login missing one is often
+    /// missing the others.
+    /// </summary>
+    internal static string MsdbGrantSentence(string collectorName)
+    {
+        if (!MsdbGrantsByCollector.TryGetValue(collectorName, out var grants))
+        {
+            return string.Empty;
+        }
+
+        var parts = new List<string>();
+        foreach (var byPermission in grants.GroupBy(g => g.Permission, StringComparer.Ordinal))
+        {
+            parts.Add(byPermission.Key + " on " + JoinWithAnd(byPermission.Select(g => "msdb." + g.Object).ToList()));
+        }
+
+        return "If that is a permission denial, grant " + JoinWithAnd(parts) +
+               " to the monitoring login. The next run uses it. ";
+    }
+
+    private static string JoinWithAnd(List<string> items) =>
+        items.Count <= 2
+            ? string.Join(" and ", items)
+            : string.Join(", ", items.Take(items.Count - 1)) + " and " + items[^1];
+
     private static string CapturePathOf(string collectorName) =>
         CollectorEngineCapability.CapturePathByCollector.TryGetValue(collectorName, out var described)
             ? described

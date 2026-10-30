@@ -1,10 +1,10 @@
 # Clearing a "Retention Held" alert (Darling)
 
+Audience: operators.
+
 The `Retention Held` self-alert (#2813) means a retention policy has been **paused on purpose** and the
 tier it governs has grown past its configured horizon. Warning fires at 2.0x that horizon by default,
 Critical at 4.0x; both are settable — see [Adjusting the thresholds](#adjusting-the-thresholds).
-
-Reported from the field in #3296, where the command sequence below came from the reporter.
 
 ## What the alert is telling you
 
@@ -57,9 +57,28 @@ dotnet PerformanceMonitor.Darling.Service.dll --backfill-rollups --dry-run
 dotnet PerformanceMonitor.Darling.Service.dll --backfill-rollups
 ```
 
-Run it on the host that holds the store's data directory: the free-space check reads that directory and refuses
-when it does not exist on the machine you run the verb on. A managed store on a non-Windows host is refused with a
-message that says so.
+Before it materializes anything, the verb checks that the store's data volume has room. There are two ways to give
+it that number.
+
+- **On the store host.** Run the verb on the host that holds the store's data directory. It reads the directory
+  from the store and measures the volume the directory is on. The login needs superuser or `pg_read_all_settings`
+  to read the directory.
+- **From anywhere, with `--free-space`.** Use this when the store is in another container, a managed service or on
+  another host. Check the free space of its data volume there, then pass it. On the store host,
+  `df -h <data_directory>` shows it. The verb skips the directory lookup and runs the same room check on your
+  number. Its output says the number came from you and was not measured:
+
+  ```bash
+  dotnet PerformanceMonitor.Darling.Service.dll --backfill-rollups --free-space 41G --dry-run
+  dotnet PerformanceMonitor.Darling.Service.dll --backfill-rollups --free-space 41G
+  ```
+
+  The size is a whole number of bytes, or a number with K, M, G or T (optionally followed by B or iB). Units are
+  1024-based, as `df -h` prints them. `--recompress-plan-dim` takes the same option for its closing VACUUM FULL, and
+  its `--dry-run` shows that free-space check too, so you can see before the conversion whether the compaction would
+  be refused. Do not pass it with `--no-vacuum-full`, which skips the check.
+
+A managed store on a non-Windows host is refused with a message that says so.
 
 ## Why step 3 is a wait and not a restart
 

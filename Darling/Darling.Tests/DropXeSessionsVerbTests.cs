@@ -20,6 +20,7 @@ using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
+using PerformanceMonitor.Darling.Storage;
 
 namespace Darling.Tests;
 
@@ -1230,9 +1231,9 @@ public sealed class DropXeSessionsVerbTests
     public void RemoveServer_NamesTheVerb_ForAServerThatHadConnected()
     {
         var connected = DarlingMcpServerAdminTools.RemovedAnswer(
-            new DarlingMcpServerAdminTools.ServerDefinition(new DarlingServerResolver.RegisteredServer(1, "sql01", "sql01"), true, "plain"), "exact");
+            new DarlingMcpServerAdminTools.ServerDefinition(new RegisteredServer(1, "sql01", "sql01"), true, "plain"), "exact");
         var never = DarlingMcpServerAdminTools.RemovedAnswer(
-            new DarlingMcpServerAdminTools.ServerDefinition(new DarlingServerResolver.RegisteredServer(2, "sql02", "sql02"), false, "plain"), "exact");
+            new DarlingMcpServerAdminTools.ServerDefinition(new RegisteredServer(2, "sql02", "sql02"), false, "plain"), "exact");
 
         using var connectedDoc = JsonDocument.Parse(connected);
         using var neverDoc = JsonDocument.Parse(never);
@@ -1263,17 +1264,18 @@ public sealed class DropXeSessionsVerbTests
     [Fact]
     public void TheReadmeNamesEverySessionTheVerbDrops_InItsSectionAndInTheRemoveServerBullet()
     {
-        var readme = RepoFile.ReadRepoFile("Darling", "README.md").Replace("\r\n", "\n", StringComparison.Ordinal);
+        var readme = RepoFile.ReadRepoFile("docs", "darling", "collector-settings.md").Replace("\r\n", "\n", StringComparison.Ordinal); // #6416: moved from Darling/README.md
 
-        var start = readme.IndexOf("### Drop the Extended Events sessions a removed server left behind", StringComparison.Ordinal);
+        var start = readme.IndexOf("## Drop the Extended Events sessions a removed server left behind", StringComparison.Ordinal);
         Assert.True(start >= 0, "the README no longer has the --drop-xe-sessions section (#4732)");
         var end = readme.IndexOf("\n---", start, StringComparison.Ordinal);
-        Assert.True(end > start, "the --drop-xe-sessions section no longer ends at a horizontal rule");
+        if (end < 0) end = readme.Length; // #6416: the section is the last one on its page
         var section = readme[start..end];
 
-        var bulletAt = readme.IndexOf("`remove_server` (which drops this install's own Extended Events sessions on the server", StringComparison.Ordinal);
+        var mcpPage = RepoFile.ReadRepoFile("docs", "darling", "configuration-mcp.md").Replace("\r\n", "\n", StringComparison.Ordinal); // #6416: the remove_server bullet moved here
+        var bulletAt = mcpPage.IndexOf("`remove_server` (which drops this install's own Extended Events sessions on the server", StringComparison.Ordinal);
         Assert.True(bulletAt >= 0, "the remove_server bullet no longer says what it leaves on the server (#4732)");
-        var bullet = readme[bulletAt..Math.Min(readme.Length, bulletAt + 500)];
+        var bullet = mcpPage[bulletAt..Math.Min(mcpPage.Length, bulletAt + 500)];
 
         foreach (var name in DarlingXeSessionCleanup.SessionNames)
         {
@@ -1285,12 +1287,12 @@ public sealed class DropXeSessionsVerbTests
     [Fact]
     public void TheReadmeSaysWhenToRunTheNamedForm_WhatItStops_WhatToRunAfterTheRemoval_AndWhichGrantDropsASession()
     {
-        var readme = RepoFile.ReadRepoFile("Darling", "README.md").Replace("\r\n", "\n", StringComparison.Ordinal);
+        var readme = RepoFile.ReadRepoFile("docs", "darling", "collector-settings.md").Replace("\r\n", "\n", StringComparison.Ordinal); // #6416: moved from Darling/README.md
 
-        var start = readme.IndexOf("### Drop the Extended Events sessions a removed server left behind", StringComparison.Ordinal);
+        var start = readme.IndexOf("## Drop the Extended Events sessions a removed server left behind", StringComparison.Ordinal);
         Assert.True(start >= 0, "the README no longer has the --drop-xe-sessions section (#4732)");
         var end = readme.IndexOf("\n---", start, StringComparison.Ordinal);
-        Assert.True(end > start, "the --drop-xe-sessions section no longer ends at a horizontal rule");
+        if (end < 0) end = readme.Length; // #6416: the section is the last one on its page
         var section = readme[start..end];
 
         // When to run the named form, and what it stops on a server the service still monitors.
@@ -1314,9 +1316,10 @@ public sealed class DropXeSessionsVerbTests
         Assert.DoesNotContain("monitored server: the Extended Events sessions", section, StringComparison.Ordinal);
 
         // The other places that point at the verb say the same: after the removal it is --print-sql.
-        var bulletAt = readme.IndexOf("`remove_server` (which drops this install's own Extended Events sessions on the server", StringComparison.Ordinal);
+        var mcpPage = RepoFile.ReadRepoFile("docs", "darling", "configuration-mcp.md").Replace("\r\n", "\n", StringComparison.Ordinal); // #6416: the remove_server bullet moved here
+        var bulletAt = mcpPage.IndexOf("`remove_server` (which drops this install's own Extended Events sessions on the server", StringComparison.Ordinal);
         Assert.True(bulletAt >= 0, "the remove_server bullet no longer says what it leaves on the server (#4732)");
-        var bullet = readme[bulletAt..Math.Min(readme.Length, bulletAt + 1000)];
+        var bullet = mcpPage[bulletAt..Math.Min(mcpPage.Length, bulletAt + 1000)];
         Assert.Contains("`--drop-xe-sessions --print-sql`", bullet, StringComparison.Ordinal);
         Assert.Contains("works only before the removal", bullet, StringComparison.Ordinal);
 
@@ -1327,11 +1330,6 @@ public sealed class DropXeSessionsVerbTests
         var collector = readme[collectorAt..Math.Min(readme.Length, collectorAt + 500)];
         Assert.Contains("If that attempt failed or ran out of time", collector, StringComparison.Ordinal);
         Assert.Contains("`--drop-xe-sessions --print-sql`", collector, StringComparison.Ordinal);
-
-        // The list of verbs that survive an unusable store connection names this one.
-        var listAt = readme.IndexOf("Every other verb that opens the store (", StringComparison.Ordinal);
-        Assert.True(listAt >= 0, "the README no longer lists the verbs that open the store");
-        Assert.Contains("`--drop-xe-sessions <server-name>`", readme[listAt..Math.Min(readme.Length, listAt + 400)], StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1341,11 +1339,11 @@ public sealed class DropXeSessionsVerbTests
         Assert.Contains("An excluded database that cannot be opened is reported as a note and does not change the exit code", usage, StringComparison.Ordinal);
         Assert.Contains("a monitored database that cannot be opened exits 2", usage, StringComparison.Ordinal);
 
-        var readme = RepoFile.ReadRepoFile("Darling", "README.md").Replace("\r\n", "\n", StringComparison.Ordinal);
-        var start = readme.IndexOf("### Drop the Extended Events sessions a removed server left behind", StringComparison.Ordinal);
+        var readme = RepoFile.ReadRepoFile("docs", "darling", "collector-settings.md").Replace("\r\n", "\n", StringComparison.Ordinal); // #6416: moved from Darling/README.md
+        var start = readme.IndexOf("## Drop the Extended Events sessions a removed server left behind", StringComparison.Ordinal);
         Assert.True(start >= 0, "the README no longer has the --drop-xe-sessions section (#4732)");
         var end = readme.IndexOf("\n---", start, StringComparison.Ordinal);
-        Assert.True(end > start, "the --drop-xe-sessions section no longer ends at a horizontal rule");
+        if (end < 0) end = readme.Length; // #6416: the section is the last one on its page
         var section = readme[start..end];
 
         Assert.Contains("is reported in a note on stderr and does not change the exit code", section, StringComparison.Ordinal);

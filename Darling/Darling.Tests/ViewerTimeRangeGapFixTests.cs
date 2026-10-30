@@ -177,7 +177,7 @@ public sealed class ViewerTimeRangeGapFixTests
         /* A new banner site changes these counts: it must go through UpdateTruncationBanner (the event surfaces through
            ShowEventDataStartAsync, which ends in it), which feeds the note below. Raise the count with the site. */
         Assert.Equal(35, updateSites);
-        Assert.Equal(29, eventSites);
+        Assert.Equal(30, eventSites);
 
         var update = ViewerTypedRangeTests.StripComments(ViewerTypedRangeTests.MemberText(ViewerFile("ViewerServerTab.Queries.cs"), "UpdateTruncationBanner"));
         Assert.Matches(@"\{\s*ViewerDataStartNote\.Feed\(banner, floor\);", update);

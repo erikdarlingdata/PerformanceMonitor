@@ -69,12 +69,35 @@ internal static class ReadCaller
             ? "no token"
             : "token " + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(bearerToken)))[..8].ToLowerInvariant();
 
+    /// <summary>The server-side identity of a call (#6542): <c>named token NAME</c> when a named token was presented, else the fingerprint
+    /// of the legacy token (<see cref="OfMcpToken"/>). A name is a label the operator chose, never a secret.</summary>
+    internal static string OfMcpIdentity(string? namedTokenName, string? bearerToken) =>
+        string.IsNullOrEmpty(namedTokenName) ? OfMcpToken(bearerToken) : "named token " + namedTokenName;
+
     /// <summary>
     /// The text a write log line carries for who made the call: the token identity the service worked out, then the name the client
     /// gave itself, labelled as the client's own claim (any client can send any name).
     /// </summary>
     internal static string WriteIdentity() =>
         (AmbientMcpToken ?? "token unknown") + ", client says: " + (AmbientMcpCaller ?? Unknown);
+
+    /// <summary>The token part of the identity a store row records for an MCP write: <c>named token NAME</c> when a named token was
+    /// used, <c>legacy token</c> for the endpoint's one legacy token (the fingerprint <see cref="WriteIdentity"/> logs is left out of
+    /// store rows, which read-only logins and agent briefs can read), <c>no token</c> when the request carried none.</summary>
+    internal static string StoreTokenIdentity()
+    {
+        var token = AmbientMcpToken;
+        if (string.IsNullOrEmpty(token))
+            return "token unknown";
+        if (token.StartsWith("named token ", StringComparison.Ordinal) || token == "no token")
+            return token;
+        return "legacy token";
+    }
+
+    /// <summary>The identity an MCP write records in a store row: <see cref="StoreTokenIdentity"/>, then the name the client gave
+    /// itself, labelled as the client's own claim the way <see cref="WriteIdentity"/> labels it. Log lines keep <see cref="WriteIdentity"/>.</summary>
+    internal static string StoreIdentity() =>
+        StoreTokenIdentity() + ", client says: " + (AmbientMcpCaller ?? Unknown);
 
     /// <summary>The MCP caller set by the tool filter for the call in progress, or null outside one.</summary>
     internal static string? AmbientMcpCaller => s_ambientMcpCaller.Value;

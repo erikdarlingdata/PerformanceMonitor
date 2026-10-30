@@ -44,7 +44,7 @@ internal static class LiteInvestigationBriefTools
     /// <summary>The only tools a brief may name in <c>next_calls</c>: the analysis recommendation table and the family calls.</summary>
     internal static IReadOnlyCollection<string> NameableTools { get; } =
         new HashSet<string>(
-            ToolRecommendations.AllToolNames.Concat(SqlServerFamilyCalls.Values.SelectMany(calls => calls)),
+            ToolRecommendations.AllToolNames.Concat(SqlServerFamilyCalls.Values.SelectMany(calls => calls)).Append("get_client_timeouts"),
             StringComparer.Ordinal);
 
     /// <summary>The tables as the composer takes them.</summary>

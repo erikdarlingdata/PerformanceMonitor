@@ -21,7 +21,7 @@ namespace PerformanceMonitor.Alerting;
 /// <param name="ServerKey">The engine's stable identity for the server (see <see cref="IAlertStateStore"/>).</param>
 /// <param name="ServerName">Display name rendered in notifications.</param>
 /// <param name="MetricName">The alert metric name (e.g. "High CPU", "Deadlocks Detected") — the key mute rules, severity, and history filtering match on.</param>
-/// <param name="CurrentValue">Human-readable current value (e.g. "3 deadlock(s) in the last hour").</param>
+/// <param name="CurrentValue">Human-readable current value (e.g. "3 deadlocks in the last hour", or "1 deadlock in the last hour").</param>
 /// <param name="ThresholdValue">Human-readable threshold it breached (e.g. "1", "80%").</param>
 /// <param name="Context">Structured detail context (built by <see cref="AlertContextBuilders"/>), or null when no detail was resolvable.</param>
 /// <param name="DetailText">

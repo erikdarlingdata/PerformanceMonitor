@@ -1,5 +1,7 @@
 # Signed webhooks (Darling)
 
+Audience: operators.
+
 Darling can sign each post that it sends to a generic webhook. A receiver checks the signature to know that the post came from Darling and that nobody changed it on the way. The signature follows the [Standard Webhooks](https://www.standardwebhooks.com/) format, so most languages already have a library that checks it.
 
 Signing applies to the generic webhook only. Teams, Slack and PagerDuty posts are not signed, because those services have their own authentication.

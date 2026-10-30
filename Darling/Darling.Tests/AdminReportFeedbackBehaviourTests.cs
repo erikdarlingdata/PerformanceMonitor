@@ -77,6 +77,18 @@ public sealed class AdminReportFeedbackBehaviourTests
     }
 
     [Fact]
+    public void OnTheManagedStoreWithTheSwitchOff_TheListOnlyNote_NamesTheSwitch_InTheWordsOfThe403()
+    {
+        var page = AdminServerEditBehaviourTests.Run("feedback:nostoreoff");
+
+        Assert.Equal(0, page.GetProperty("formsBefore").GetInt32());
+        var note = Assert.Single(Strings(page.GetProperty("strips")), t => t.Contains("this page is list-only", System.StringComparison.Ordinal));
+        const string SwitchSentence = " To let a signed-in admin make it here, set web.allowAdminWrites to true in darling.json and restart the service.";
+        Assert.Equal("This dashboard lists only on this store, so this page is list-only. To record feedback, use the Viewer app." + SwitchSentence, note);
+        Assert.EndsWith(SwitchSentence, PerformanceMonitor.Darling.Service.DarlingWebEndpoints.FeedbackRefusedMessage(true, adminWritesOff: true), System.StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void AStoreLoginThatCanRecord_ShowsTheForm_AndNotTheListOnlySentence()
     {
         var page = AdminServerEditBehaviourTests.Run("feedback:recorded");

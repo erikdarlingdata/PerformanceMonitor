@@ -112,13 +112,7 @@ SELECT (
     /// index cannot serve a second key, so the sort would cover the server's whole newest chunk (1,158 buffers
     /// against 5). $1 server_id, $2 collector.</para>
     /// </summary>
-    public const string LatestCollectorOutcomeSql = @"
-SELECT status, error_message, collection_time
-FROM collection_log
-WHERE server_id = $1
-AND   collector_name = $2
-ORDER BY collection_time DESC, log_id DESC
-LIMIT 1";
+    public const string LatestCollectorOutcomeSql = CollectorOutcomeStatements.LatestCollectorOutcomeSql;
 
     /// <summary>
     /// The latest per-database Query Store configuration snapshot, optionally narrowed to the one database a
@@ -171,6 +165,41 @@ ORDER BY database_name";
     }
 
     /// <summary>
+    /// #6453: the sentence for a read that found no stored rows while the collector serving it is HEALTHY: its newest
+    /// <c>collection_log</c> run is <c>SUCCESS</c> with no note, so the monitored server answered and had nothing for it. Null
+    /// when there is no run, the newest run is anything else (a fault, a denial, a missing session, a note that explains the
+    /// zero), or the log read fails; the caller then keeps its own <c>unavailable</c> text. The caller answers it with
+    /// <c>empty</c>: <c>get_collection_health</c> calls the same collector HEALTHY ("every run completed and its source returned
+    /// no rows"), and a read that said <c>unavailable</c> beside it sent the reader in a circle.
+    /// <para>Call this AFTER <see cref="StatusAsync"/> and the engine gate, never before: a recorded precondition or a
+    /// wrong-engine target is a stronger answer than a clean run.</para>
+    /// </summary>
+    public static async Task<string?> HealthyEmptyMessageAsync(
+        NpgsqlDataSource postgres,
+        int serverId,
+        string serverName,
+        string collectorName,
+        string what,
+        CancellationToken cancellationToken = default)
+    {
+        string? status;
+        string? errorMessage;
+        DateTime? observedUtc;
+
+        try
+        {
+            (status, errorMessage, observedUtc) =
+                await ReadLatestOutcomeAsync(postgres, serverId, collectorName, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return null;
+        }
+
+        return CollectorRuntimePrecondition.HealthyEmptyMessage(serverName, collectorName, what, status, errorMessage, observedUtc);
+    }
+
+    /// <summary>
     /// The <c>precondition</c> envelope when the collector serving this read is not being invoked against
     /// this server while the server is collecting normally — i.e. its <c>AppliesTo</c> gate is off — or
     /// <c>null</c> otherwise. A collector that has never run and is not due yet gets the <c>unavailable</c>
@@ -194,11 +223,15 @@ ORDER BY database_name";
         DateTime? collectorLastRunUtc;
         DateTime? serverLastCollectedUtc;
         DateTime? serverFirstCollectedUtc;
+        DateTime? serviceStartedUtc;
 
         try
         {
             (collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc) =
                 await ReadCollectorLastRunAsync(postgres, serverId, collectorName, cancellationToken);
+            serviceStartedUtc = collectorLastRunUtc is null
+                ? await ReadServiceStartedAsync(postgres, cancellationToken)
+                : null;
         }
         catch (Exception)
         {
@@ -208,10 +241,10 @@ ORDER BY database_name";
         }
 
         var message = CollectorRuntimePrecondition.GatedOffMessage(
-            serverName, collectorName, gateCandidates, collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc);
+            serverName, collectorName, gateCandidates, collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc, serviceStartedUtc);
 
         return message is null ? null : McpHelpers.Status(
-            CollectorRuntimePrecondition.GatedOffStatusWord(collectorName, collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc),
+            CollectorRuntimePrecondition.GatedOffStatusWord(collectorName, collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc, serviceStartedUtc),
             message);
     }
 
@@ -257,6 +290,70 @@ ORDER BY database_name";
 
         var message = CollectorRuntimePrecondition.QueryStoreDisabledMessage(serverName, states, observedUtc);
         return message is null ? null : McpHelpers.Status(CollectorRuntimePrecondition.StatusWord, message);
+    }
+
+    /// <summary>
+    /// #6554: the three facts <see cref="CollectorRuntimePrecondition.QueryStoreReadableSecondaryMessage"/> judges, in one round trip:
+    /// the newest collected <c>ag_replica_role</c>, whether the server names a <c>query_store_replica</c>, and how many databases
+    /// in the newest <c>query_store_health</c> capture carry the readable-secondary bit (of how many, leaving out tempdb and databases whose
+    /// Query Store is OFF: the on-prem capture always holds tempdb, and neither has Query Store rows to read). $1 server_id.
+    /// </summary>
+    public const string ReadableSecondaryFactsSql = @"
+SELECT
+    (SELECT sp.ag_replica_role FROM server_properties AS sp WHERE sp.server_id = $1 ORDER BY sp.collection_time DESC LIMIT 1),
+    (SELECT COALESCE(NULLIF(btrim(c.query_store_replica), ''), NULL) FROM config.config_monitored_servers AS c WHERE c.server_id = $1),
+    (SELECT COUNT(*) FROM v_query_store_health AS h
+      WHERE h.server_id = $1 AND h.capture_time = (SELECT MAX(h2.capture_time) FROM v_query_store_health AS h2 WHERE h2.server_id = $1)
+        AND h.database_name <> 'tempdb' AND UPPER(COALESCE(h.actual_state, '')) <> 'OFF'),
+    (SELECT COUNT(*) FROM v_query_store_health AS h
+      WHERE h.server_id = $1 AND (h.readonly_reason & 8) <> 0
+        AND h.capture_time = (SELECT MAX(h2.capture_time) FROM v_query_store_health AS h2 WHERE h2.server_id = $1)
+        AND h.database_name <> 'tempdb' AND UPPER(COALESCE(h.actual_state, '')) <> 'OFF')";
+
+    /// <summary>
+    /// #6554: the <c>not_collected</c> envelope for a Query Store read on a server that is a readable secondary with
+    /// <c>query_store_replica</c> off, or <c>null</c> (the caller keeps its own answer) when the evidence does not say so or the
+    /// read fails: this runs on a path that already found nothing.
+    /// </summary>
+    public static async Task<string?> QueryStoreReadableSecondaryStatusAsync(
+        NpgsqlDataSource postgres, int serverId, string serverName, CancellationToken cancellationToken = default)
+    {
+        var message = await QueryStoreReadableSecondaryMessageAsync(postgres, serverId, serverName, cancellationToken);
+        return message is null ? null : McpHelpers.Status(CollectorRuntimePrecondition.NotCollectedStatusWord, message);
+    }
+
+    /// <summary>
+    /// #6554: the one-line reason a Query Store read on this server is empty because it is a readable secondary with
+    /// <c>query_store_replica</c> off, or <c>null</c> when it is not or the read fails. The one source of the wording: the
+    /// Query Store reads' <c>not_collected</c> answer and a Change Watch request's brief both use it.
+    /// </summary>
+    public static async Task<string?> QueryStoreReadableSecondaryMessageAsync(
+        NpgsqlDataSource postgres, int serverId, string serverName, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            await using var command = postgres.CreateCommand(ReadableSecondaryFactsSql);
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            DarlingMcpReadParameters.AddInt(command, serverId);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                return null;
+            }
+
+            return CollectorRuntimePrecondition.QueryStoreReadableSecondaryMessage(
+                serverName,
+                reader.IsDBNull(0) ? null : reader.GetString(0),
+                (int)reader.GetInt64(2),
+                (int)reader.GetInt64(3),
+                replicaConfigured: !reader.IsDBNull(1),
+                "Darling collects Query Store from a registered server only when that server is not a readable secondary, and query_store_replica is off for it. " +
+                "Register the primary, or set query_store_replica on the primary to read Query Store from a readable secondary (edit_server).");
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return null;
+        }
     }
 
     /// <summary>
@@ -307,11 +404,17 @@ ORDER BY database_name";
     /// answer is an empty or unavailable status (#6074). Other statuses (a precondition, a not-collected answer, an error) already say their own cause.
     /// </summary>
     public static async Task<string> WithQueryStoreNotWritingHintAsync(
-        string answer, NpgsqlDataSource postgres, int serverId, DatabaseFilter databases, CancellationToken cancellationToken = default)
+        string answer, NpgsqlDataSource postgres, int serverId, string serverName, DatabaseFilter databases, CancellationToken cancellationToken = default)
     {
         if (!McpHelpers.IsEmptyOrUnavailableStatus(answer))
         {
             return answer;
+        }
+
+        /* #6554: on a readable secondary READ_ONLY is the normal state, so say it is not collected instead of hinting at a fault. */
+        if (await QueryStoreReadableSecondaryStatusAsync(postgres, serverId, serverName, cancellationToken) is { } notCollected)
+        {
+            return notCollected;
         }
 
         return McpHelpers.AppendToMessage(answer, await QueryStoreNotWritingHintAsync(postgres, serverId, databases, cancellationToken));
@@ -338,6 +441,20 @@ ORDER BY database_name";
             reader.IsDBNull(0) ? null : reader.GetString(0),
             reader.IsDBNull(1) ? null : reader.GetString(1),
             reader.IsDBNull(2) ? null : DateTime.SpecifyKind(reader.GetDateTime(2), DateTimeKind.Utc));
+    }
+
+    /// <summary>
+    /// #6932: when the newest collecting service process started, from the version row each service host writes at startup
+    /// (<c>config.service_version</c>), or null when no host has recorded one. Read only for a collector with no run at all, which is
+    /// the one case that needs it: a collector an upgrade adds waits one cadence after this instant for its first slot, and the
+    /// server's first collection (long ago) cannot say so.
+    /// </summary>
+    private static async Task<DateTime?> ReadServiceStartedAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
+    {
+        await using var command = postgres.CreateCommand("SELECT MAX(process_started_at) FROM config.service_version");
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        var value = await command.ExecuteScalarAsync(cancellationToken);
+        return value is DateTime started ? DateTime.SpecifyKind(started, DateTimeKind.Utc) : null;
     }
 
     private static async Task<(DateTime? CollectorLastRunUtc, DateTime? ServerLastCollectedUtc, DateTime? ServerFirstCollectedUtc)>

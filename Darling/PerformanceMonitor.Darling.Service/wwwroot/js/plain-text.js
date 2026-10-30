@@ -20,18 +20,18 @@
     get_ word that is no tool (a procedure dbo.get_orders, a server get_prod), and it must reach the page as written.
     WebPlainTextTests checks this list against the MCP tool registry both ways, so it cannot drift. */
 export const MCP_TOOL_NAMES = [
-  "get_active_queries", "get_active_query_plan_xml", "get_ag_health", "get_alert_history", "get_alert_settings",
+  "get_active_queries", "get_active_query_plan_xml", "get_ag_health", "get_agent_alerts", "get_alert_history", "get_alert_settings",
   "get_analysis_facts", "get_analysis_findings", "get_blocked_process_xml", "get_blocking", "get_blocking_plan_xml",
   "get_blocking_stats", "get_blocking_trend", "get_change_watches", "get_known_patterns", "get_client_timeouts", "get_collection_health", "get_collection_log", "get_collection_state", "get_collector_cost", "get_collector_schedules",
   "get_collector_stall_probes", "get_agent_changes", "get_command_result", "get_compiles_after_evict", "get_cpu_by_database", "get_cpu_scheduler_pressure", "get_cpu_utilization", "get_current_waits_trend",
   "get_custom_alert_rule", "get_custom_view", "get_daily_summary", "get_daily_summary_range", "get_database_config",
-  "get_database_config_changes", "get_database_scoped_config", "get_database_sizes", "get_deadlock_detail",
+  "get_database_config_changes", "get_database_protection", "get_database_scoped_config", "get_database_state_expectations", "get_database_sizes", "get_deadlock_detail",
   "get_deadlock_plan_xml", "get_deadlock_trend", "get_deadlocks", "get_default_trace_events", "get_file_io_stats",
-  "get_file_io_trend", "get_finops", "get_finops_inventory", "get_finops_recommendations", "get_fleet_overview", "get_forced_plans",
+  "get_file_io_trend", "get_finops", "get_finops_inventory", "get_finops_recommendations", "get_fleet_overview", "get_forced_plans", "get_query_store_hints",
   "get_health_parser_cpu_tasks", "get_health_parser_io_issues", "get_health_parser_memory_broker",
   "get_health_parser_memory_conditions", "get_health_parser_memory_node_oom", "get_health_parser_scheduler_issues",
   "get_health_parser_severe_errors", "get_health_parser_significant_waits", "get_health_parser_system_health",
-  "get_index_usage", "get_investigation_evidence", "get_investigation_reports", "get_job_history", "get_latch_stats", "get_load_by_caller", "get_lock_wait_trend", "get_long_query_completions",
+  "get_identity_capacity", "get_index_usage", "get_investigation_evidence", "get_investigation_reports", "get_job_history", "get_latch_stats", "get_load_by_caller", "get_lock_wait_trend", "get_long_query_completions",
   "get_memory_clerks", "get_memory_grants", "get_memory_pressure_events", "get_memory_stats", "get_memory_trend",
   "get_mute_rules", "get_notification_routes", "get_object_locking", "get_oversized_plan_backlog",
   "get_perfmon_stats", "get_perfmon_trend", "get_pg_autovacuum_health", "get_pg_blocking", "get_pg_buffer_usage",
@@ -47,7 +47,7 @@ export const MCP_TOOL_NAMES = [
   "get_query_heatmap", "get_query_pileups", "get_query_repro_script", "get_query_store_aborts", "get_query_store_clutter", "get_query_store_duration_trend",
   "get_query_store_health", "get_query_store_plan_xml", "get_query_store_query_history",
   "get_query_store_regressions", "get_query_store_top", "get_query_trend", "get_read_latency",
-  "get_resource_semaphore", "get_resource_use_by_tag", "get_running_jobs", "get_server_actions", "get_server_config", "get_server_config_changes",
+  "get_resource_semaphore", "get_resource_use_by_tag", "get_running_jobs", "get_server_actions", "get_server_config", "get_server_config_changes", "get_server_settings",
   "get_server_properties", "get_server_summary", "get_server_trend", "get_session_stats", "get_slow_reads",
   "get_spinlock_stats", "get_store_host", "get_store_log", "get_store_metrics", "get_store_query_history",
   "get_store_query_stats", "get_sweep_reports", "get_table_index_sizes", "get_tempdb_trend", "get_tool_guide",
@@ -61,21 +61,22 @@ const TOOL_NAME_SET = new Set(MCP_TOOL_NAMES);
     this list against the registry, like the get_ list above. */
 export const MCP_ACTION_TOOL_NAMES = [
   "add_servers", "analyze_now", "analyze_plan_xml", "analyze_procedure_plan", "analyze_query_plan", "analyze_query_store_plan",
-  "analyze_server", "assign_query_tag", "assign_server_tag", "audit_config", "backtest_custom_alert_rule", "claim_investigation_request",
-  "clear_quiet_window", "compare_analysis", "create_custom_alert_rule", "create_custom_view", "create_mute_rule",
+  "analyze_server", "approve_investigation_note", "assign_query_tag", "assign_server_tag", "audit_config", "backtest_custom_alert_rule", "claim_investigation_request",
+  "clear_quiet_window", "close_investigation_request", "compare_analysis", "create_custom_alert_rule", "create_custom_view", "create_known_pattern", "create_mute_rule",
   "create_notification_route", "create_query_tag", "create_query_tag_rule", "create_server_tag", "delete_custom_alert_rule",
-  "delete_custom_view", "delete_mute_rule", "delete_notification_route", "delete_query_tag", "delete_query_tag_rule",
+  "delete_custom_view", "delete_known_pattern", "delete_mute_rule", "delete_notification_route", "delete_query_tag", "delete_query_tag_rule",
   "delete_server_tag", "describe_custom_view_catalog", "disable_collector", "disable_server", "dismiss_alert_history", "edit_server",
-  "enable_collector", "enable_server", "evict_cached_plan", "find_database", "force_query_store_plan", "kill_session",
+  "enable_collector", "enable_server", "evict_cached_plan", "find_database", "force_query_store_plan", "generate_webhook_signing_key", "kill_session",
   "list_custom_alert_rules", "list_custom_alert_templates", "list_custom_views", "list_investigation_requests", "list_query_tag_rules",
-  "list_query_tags", "list_servers", "merge_deadlock_signatures", "mute_analysis_finding", "pause_collection", "purge_now",
-  "reload_config", "remove_server", "restore_alert_history", "resume_collection", "run_collectors_now", "run_custom_view_panel",
-  "set_alert_threshold_override", "set_collector_frequency", "set_collector_retention", "set_collector_run_at", "set_mute_rule_enabled",
+  "list_query_tags", "list_servers", "merge_deadlock_signatures", "mute_analysis_finding", "pause_collection", "purge_expired_mute_rules", "purge_now",
+  "create_plan_guide", "drop_plan_guide", "recompile_module",
+  "record_investigation_feedback", "reject_investigation_note", "reload_config", "remove_server", "remove_webhook_signing_key", "reset_collector_schedules", "restore_alert_history", "resume_collection", "run_collectors_now", "run_custom_view_panel",
+  "save_environment_profile", "set_agent_actions_enabled", "set_alert_threshold_override", "set_collector_databases", "set_collector_frequency", "set_collector_retention", "set_collector_run_at", "set_database_state_expected", "set_mute_rule_enabled",
   "set_notification_route_enabled", "set_notification_route_fallback", "set_quiet_window", "set_server_action", "set_server_excluded_databases",
-  "submit_investigation_report", "test_connection", "test_custom_alert_rule", "test_query_tag_rule", "unassign_query_tag",
-  "unassign_server_tag", "undo_plan_change", "unforce_query_store_plan", "unmute_analysis_finding", "update_alert_settings", "update_custom_alert_rule",
-  "update_custom_view", "update_mute_rule", "update_notification_route", "update_query_tag", "update_query_tag_rule",
-  "update_server_tag", "validate_custom_alert_rule", "validate_custom_view", "wait_for_investigation_requests",
+  "submit_investigation_report", "test_connection", "test_custom_alert_rule", "test_query_tag_rule", "start_practice_request", "unassign_query_tag",
+  "unassign_server_tag", "undo_agent_change", "undo_plan_change", "unforce_query_store_plan", "unmute_analysis_finding", "update_alert_settings", "update_custom_alert_rule",
+  "update_custom_view", "update_known_pattern", "update_mute_rule", "update_notification_channels", "update_notification_route", "update_query_tag", "update_query_tag_rule",
+  "update_server_tag", "update_service_flags", "validate_custom_alert_rule", "validate_custom_view", "wait_for_investigation_requests", "write_investigation_note",
 ];
 const ACTION_TOOL_SET = new Set(MCP_ACTION_TOOL_NAMES);
 
@@ -89,6 +90,7 @@ const PAGE_FOR_TOOLS = [
   ["the Wait Stats tab", ["get_wait_stats", "get_wait_trend", "get_waiting_tasks", "get_latch_stats", "get_spinlock_stats"]],
   ["the File I/O tab", ["get_file_io_trend", "get_tempdb_trend"]],
   ["the CPU tab", ["get_cpu_utilization"]],
+  ["the Query Store Health panel", ["get_query_store_health"]],
   ["the Memory tab", ["get_memory_grants", "get_memory_trend", "get_resource_semaphore"]],
   ["the System Events tab", ["get_default_trace_events"]],
   ["the Replication tab", ["get_pg_replication_slots", "get_pg_replication_stats"]],
@@ -104,7 +106,8 @@ const PAGE_FOR_TOOL = new Map(PAGE_FOR_TOOLS.flatMap(([page, tools]) => tools.ma
 /** The label=value measurement labels the collectors write (the CollectorMeasurement labels). A lone label=value pair is
     rewritten only when its label is one of these; WebPlainTextTests checks the list against the collectors' source. */
 export const MEASUREMENT_LABELS = [
-  "csv_records_discarded", "events_read", "events_stored", "foreign_zone_lines_skipped", "forged_captures_skipped",
+  "csv_records_discarded", "event_file_buffer_cut", "event_file_error", "event_file_events", "event_file_fallback", "event_file_wildcard",
+  "events_read", "events_stored", "foreign_zone_lines_skipped", "forged_captures_skipped",
   "identity_epoch_changes", "job_history_identity_regressions", "job_history_identity_store_watermark",
   "job_history_identity_target_row", "json_records_discarded", "log_bytes_skipped", "log_files_skipped_by_rotation",
   "log_matches_limited", "log_resume_file_missing", "log_resume_file_recycled", "newest_visible_event_age_s",
@@ -157,6 +160,20 @@ const FIELD_WORDS = [
 /* The rewrites that name one known internal token each (a hints pointer, a window parameter, a denial flag). They are the
    parameter names the service's own sentences write, never a field or table name: those can be real object names in a
    store error (pg_wraparound_stats, last_error), so they stay out of this list and are rewritten only by plainText. */
+/* #6831: what each system_health event type the health parser reads is called on the page. */
+const SYSTEM_HEALTH_EVENT_WORDS = {
+  sp_server_diagnostics_component_result: "server diagnostics",
+  scheduler_monitor_system_health_ring_buffer_recorded: "scheduler monitor",
+  memory_broker_ring_buffer_recorded: "memory broker",
+  memory_node_oom_ring_buffer_recorded: "memory node out-of-memory",
+  error_reported: "error",
+  wait_info: "wait",
+};
+/* The two rules in namedTokenText match exactly the names the table above holds, so a name is added in one place. */
+const SYSTEM_HEALTH_EVENT_NAMES = Object.keys(SYSTEM_HEALTH_EVENT_WORDS).join("|");
+const SYSTEM_HEALTH_EVENT_COUNTED = new RegExp("(?<![\\w.])(\\d[\\d,]*) (" + SYSTEM_HEALTH_EVENT_NAMES + ") event\\(s\\)( were)?", "g");
+const SYSTEM_HEALTH_EVENT_BARE = new RegExp("\\b(" + SYSTEM_HEALTH_EVENT_NAMES + ")\\b", "g");
+
 function namedTokenText(text) {
   let t = text;
 
@@ -187,6 +204,35 @@ function namedTokenText(text) {
 export function plainTextNamed(text) {
   if (typeof text !== "string" || text === "") return text;
   return namedTokenText(text);
+}
+
+/**
+ * A collector's measurement counts put into words (shred_gated=1 events_read=0 -> "shred gated: 1, events read: 0"), and the
+ * underscore form of the same counts. Only these two rules apply to text that may echo a real error message (a collection
+ * log's Error cell holds a failed run's error and a successful run's note in the same column).
+ */
+function measurementCountsText(text) {
+  let t = text;
+
+  /* A collector's measurement counts: shred_gated=1 events_read=0 report_xml_empty=0. A run of two or more pairs, or a
+     lone pair whose label a collector really writes; any other lone pair, such as timeout=30 in a driver message, stays. */
+  t = t.replace(/(?<![\w.-])[a-z][a-z0-9]*(?:_[a-z0-9]+)*=-?\d+(?:\.\d+)?(?: [a-z][a-z0-9]*(?:_[a-z0-9]+)*=-?\d+(?:\.\d+)?)*(?![\w=])/g, (run) =>
+    run.includes(" ") || LABEL_SET.has(run.slice(0, run.indexOf("="))) ? pairsToText(run) : run,
+  );
+
+  /* The same counts written with an underscore for the "=": a run of two or more name_digits words. A lone word such as
+     pg_stat_statements_1 is left alone, so a real object name followed by a number is not rewritten. */
+  t = t.replace(/(?<![\w.])[a-z][a-z0-9]*(?:_[a-z][a-z0-9]*)*_\d+(?: [a-z][a-z0-9]*(?:_[a-z][a-z0-9]*)*_\d+)+(?![\w])/g, underscoreCountsToText);
+  return t;
+}
+
+/**
+ * `text` with the named internal tokens and the measurement counts put into words, nothing else (#6649). For a collection
+ * log's message cell: a successful run leaves its counts there, and a failed run leaves a real error message.
+ */
+export function plainTextCounts(text) {
+  if (typeof text !== "string" || text === "") return text;
+  return measurementCountsText(namedTokenText(text));
 }
 
 /** Whether a word is a tool the service registers, get_ or otherwise. */
@@ -287,6 +333,7 @@ export function plainText(text) {
   if (typeof text !== "string" || text === "") return text;
   if (text.includes(ENGINE_GATE_MARK)) return AZURE_SQL_DATABASE_MARK.test(text) ? AZURE_SQL_DATABASE_NOT_COLLECTED_LINE : NOT_COLLECTED_LINE;
   let t = text;
+  if (text.includes(RUNTIME_PRECONDITION_MARK)) t = runtimePreconditionText(text);
   t = namedTokenText(t);
 
   /* The health sentence's collector and field names, said as the page's own words (#5492). Not in the named path: a Last
@@ -294,15 +341,7 @@ export function plainText(text) {
   t = t.replace(/\bpg_wraparound_stats\b/g, "the freeze-headroom collector");
   for (const [re, words] of FIELD_WORDS) t = t.replace(re, words);
 
-  /* A collector's measurement counts: shred_gated=1 events_read=0 report_xml_empty=0. A run of two or more pairs, or a
-     lone pair whose label a collector really writes; any other lone pair, such as timeout=30 in a driver message, stays. */
-  t = t.replace(/(?<![\w.-])[a-z][a-z0-9]*(?:_[a-z0-9]+)*=\d+(?: [a-z][a-z0-9]*(?:_[a-z0-9]+)*=\d+)*(?![\w=])/g, (run) =>
-    run.includes(" ") || LABEL_SET.has(run.slice(0, run.indexOf("="))) ? pairsToText(run) : run,
-  );
-
-  /* The same counts written with an underscore for the "=": a run of two or more name_digits words. A lone word such as
-     pg_stat_statements_1 is left alone, so a real object name followed by a number is not rewritten. */
-  t = t.replace(/(?<![\w.])[a-z][a-z0-9]*(?:_[a-z][a-z0-9]*)*_\d+(?: [a-z][a-z0-9]*(?:_[a-z][a-z0-9]*)*_\d+)+(?![\w])/g, underscoreCountsToText);
+  t = measurementCountsText(t);
 
   /* The index-bloat "answered only" read says it in the read's own parameter name. The page shows the sentence under the
      answered-ranking panel, so it says why that ranking is empty, in words, and points at the table above that lists each
@@ -331,6 +370,15 @@ export function plainText(text) {
     /\btop_application_name, top_application_connections, top_host_name and top_host_connections are\b/g,
     "the top application, its connection count, the top host and its connection count are",
   );
+  /* #6831: the system_health event names ("1431 scheduler_monitor_system_health_ring_buffer_recorded event(s) were captured") in words, with
+     the count's own plural. The same words say the name inside "No ... events were captured". */
+  t = t.replace(
+    SYSTEM_HEALTH_EVENT_COUNTED,
+    (m, n, type, were) => n + " " + SYSTEM_HEALTH_EVENT_WORDS[type] + (n === "1" ? " event" + (were ? " was" : "") : " events" + (were || "")),
+  );
+  t = t.replace(SYSTEM_HEALTH_EVENT_BARE, (m, type) => SYSTEM_HEALTH_EVENT_WORDS[type]);
+  /* #6831: the empty cut-window sentence's pointer at hints.effective_start, when the page has no instant to put there (util.js names it when it has one). */
+  t = t.replace(/\bstarts at effective_start \(see hints\)/g, "starts partway into the window");
   /* "24 hour(s)", "288 collector run(s)": the count is known, so the word agrees with it ("1 hour", "24 hours", "2 queries"). */
   t = t.replace(/(?<![\w.])(\d[\d,]*) ((?:[a-z]+ )?[a-z]+)\(s\)/g, (m, n, word) => n + " " + (n === "1" ? word : /[^aeiou]y$/.test(word) ? word.slice(0, -1) + "ies" : word + "s"));
 
@@ -349,6 +397,27 @@ export function plainText(text) {
   t = t.replace(/\bcollector_name '/g, "collector '");
   t = t.replace(/\bmin_duration_ms (?=\d)/g, "minimum duration (ms) ");
   t = t.replace(/\bblocking_only\b/g, "blocking queries only");
+  /* #6649: field names inside the service's own sentences. The left-out databases' names live in the MCP answer's
+     `databases_left_out` list, which the page never shows, so the pointer goes and the count before it stays. */
+  t = t.replace(/ \(see databases_left_out\)/g, "");
+  t = t.replace(
+    /Here the window starts at baseline_start, so the baseline holds only the part from effective_start to baseline_end\./g,
+    "Here the window starts before the baseline period, so the baseline holds only the part the store has.",
+  );
+  /* #6750: the empty-baseline sentence and the cut-recent-window sentences that follow it. */
+  t = t.replace(
+    /Here effective_start is at or after baseline_end, so the baseline holds no hours: timeouts and errors are flagged on recent runs alone, and a cost flag can come only from an interval that ran before baseline_end and was collected after it\./g,
+    "Here the store starts at or after the end of the baseline period, so the baseline holds no hours: timeouts and errors are flagged on recent runs alone, and a cost flag can come only from a run before the baseline period ended that was collected later.",
+  );
+  t = t.replace(
+    /effective_start is also after baseline_end, so the recent window holds only the part from effective_start\./g,
+    "The store also starts after the recent window began, so the recent window holds only the part the store has.",
+  );
+  /* The memory clerk note has four arms (memory_clerk.note): two name latest_memory_mb, the Queries tab's "Latest MB" column,
+     and two name the collector's own relation, memory_clerks. */
+  t = t.replace(/\blatest_memory_mb\b/g, "Latest MB");
+  t = t.replace(/\bmemory_clerks capture\b/g, "memory clerk capture");
+  t = t.replace(/\bmemory_clerks stores\b/g, "The memory clerks collector stores");
   /* The system-health "events were captured, none qualified" closing. */
   t = t.replace(/so this is the healthy answer for this read rather than missing data/g, "so this is a normal result, not missing data");
 
@@ -359,6 +428,44 @@ export function plainText(text) {
   t = lowerEmphasisWords(t);
 
   return t;
+}
+
+/** The words every runtime-precondition answer opens its closing sentence with (CollectorRuntimePrecondition.cs: the
+    PreconditionEpilogue and ConnectScopedEpilogue constants). */
+const RUNTIME_PRECONDITION_MARK = "This is a runtime PRECONDITION";
+
+/** How CollectorRuntimePrecondition.GatedOffMessage opens its "never ran" answer. */
+const NEVER_RAN_OPENING = /^The ([a-z][a-z0-9]*(?:_[a-z0-9]+)*) collector has never run against .+?, while the server itself is collecting normally/s;
+
+/** How CollectorRuntimePrecondition.GatedOffMessage opens its "no longer invoked" answer, with the number of hours it names. */
+const GONE_DARK_OPENING = /^The ([a-z][a-z0-9]*(?:_[a-z0-9]+)*) collector is no longer being invoked against .+? by more than (\d+) hours/s;
+
+/** What GatedOffMessage puts between its fixed sentences and the closing sentence: the text its caller passes for what could switch the collector off. */
+const SWITCHED_OFF_CAUSES = /(?:never|no longer) permitted to look\.\s*(.*?)\s*This is a runtime PRECONDITION/s;
+
+/** What the two "the collector is not being invoked" answers say in their closing sentence that a reader can act on: the fact
+    that gates them is read once when the service connects (ConnectScopedEpilogue), so fixing a cause is not enough by itself. */
+const RECONNECT_STEP = " After you fix the cause, the service must reconnect to this server before collection starts again. Restart the service, or change this server's settings.";
+
+/** The sentence the DEGRADED answer (a collector that cannot read its source) closes on for an MCP client (#6869): it says what to do with the
+    stored sentence, which a reader of the page cannot use. CollectorRuntimePrecondition.DegradedClientSentence, with the space before it. */
+const DEGRADED_CLIENT_SENTENCE = " Act on that sentence — it is what the monitored server itself answered, and it distinguishes the states this one status carries: a grant the login was refused, a source object that does not exist on this target, and a feature the platform does not implement or has switched off.";
+
+/**
+ * A runtime-precondition answer (CollectorRuntimePrecondition.cs) the way the page shows it. The server's text is written for
+ * an MCP client: it labels itself a runtime PRECONDITION and says to retry, which a reader of the page cannot use. Without
+ * that closing sentence the rest is kept as written, because it names the statement, grant or step that satisfies it.
+ * The two "the collector is not being invoked" answers (never ran, gone dark) are longer than the page needs: each becomes a
+ * line saying which data is missing, followed by the possible causes the server names, as written, and the reconnect step the server's closing sentence carries.
+ */
+function runtimePreconditionText(text) {
+  const causes = SWITCHED_OFF_CAUSES.exec(text);
+  const tail = (causes && causes[1] ? " " + causes[1] : "") + RECONNECT_STEP;
+  const never = NEVER_RAN_OPENING.exec(text);
+  if (never) return "The " + toolWords(never[1]) + " collector has never run for this server, so there is nothing to show." + tail;
+  const dark = GONE_DARK_OPENING.exec(text);
+  if (dark) return "The " + toolWords(dark[1]) + " collector has not run for this server for over " + dark[2] + " hours, so there is nothing current to show." + tail;
+  return text.slice(0, text.indexOf(RUNTIME_PRECONDITION_MARK)).replace(DEGRADED_CLIENT_SENTENCE, "").trimEnd();
 }
 
 /** The one short line the page shows where the server says a collector can never run on this kind of server. The

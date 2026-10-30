@@ -36,6 +36,11 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// </summary>
 public partial class ViewerServerTab
 {
+    /// <summary>#6878: the Blocking Trends chart's left-axis title. It is drawn rotated along a plot only about 80 px long at 1366x768, so it stays short enough that
+    /// <see cref="PerformanceMonitor.Ui.ChartAxisTitle.Fit"/> keeps all of it. The answering collector (blocked-process-report or DMV snapshot) is named in the legend entry instead,
+    /// where there is a whole line of width for it.</summary>
+    internal const string BlockingTrendAxisTitle = "Blocking events";
+
     private ChartHoverHelper? _lockWaitTrendHover;
     private ChartHoverHelper? _blockingTrendHover;
     private ChartHoverHelper? _deadlockTrendHover;
@@ -338,6 +343,59 @@ public partial class ViewerServerTab
         }
     }
 
+    /// <summary>#6390 S6: the inner tab an alert's Triage link opens (<see cref="AlertChainLink.TabFor"/>), or -1 for none.</summary>
+    internal static int InnerTabIndexFor(AlertServerTab tab) => tab switch
+    {
+        AlertServerTab.Overview => OverviewInnerTabIndex,
+        AlertServerTab.WaitStats => WaitStatsInnerTabIndex,
+        AlertServerTab.Queries => QueriesInnerTabIndex,
+        AlertServerTab.Cpu => CpuInnerTabIndex,
+        AlertServerTab.Memory => MemoryInnerTabIndex,
+        AlertServerTab.FileIo => FileIoInnerTabIndex,
+        AlertServerTab.TempDb => TempDbInnerTabIndex,
+        AlertServerTab.Blocking => BlockingInnerTabIndex,
+        AlertServerTab.RunningJobs => RunningJobsInnerTabIndex,
+        AlertServerTab.Configuration => ConfigurationInnerTabIndex,
+        AlertServerTab.SystemEvents => SystemEventsInnerTabIndex,
+        AlertServerTab.CollectionHealth => HealthInnerTabIndex,
+        AlertServerTab.PgOverview => PgOverviewInnerTabIndex,
+        AlertServerTab.PgActivity => PgActivityInnerTabIndex,
+        AlertServerTab.PgVacuum => PgVacuumInnerTabIndex,
+        AlertServerTab.PgWaits => PgWaitsInnerTabIndex,
+        AlertServerTab.PgReplication => PgReplicationInnerTabIndex,
+        _ => -1
+    };
+
+    /// <summary>
+    /// #6390 S6, the viewer's Triage link: show the tab an alert's metric belongs on over a window around the alert's time. The same
+    /// steps <see cref="DeepLinkToIncidentAsync"/> takes: hold the window on the toolbar, switch the inner tab under
+    /// <see cref="_suppressDrillDownAutoRefresh"/>, then load the tab that is showing over the window the toolbar holds.
+    /// </summary>
+    internal async Task DeepLinkToTabAsync(AlertServerTab tab, DateTime fromUtc, DateTime toUtc)
+    {
+        var index = InnerTabIndexFor(tab);
+        if (index < 0)
+        {
+            return;
+        }
+
+        SetToolbarWindowUtc(fromUtc, toUtc);
+        _suppressDrillDownAutoRefresh = true;
+        try
+        {
+            InnerTabs.SelectedIndex = index;
+        }
+        finally
+        {
+            _suppressDrillDownAutoRefresh = false;
+        }
+
+        await RefreshServerClockAsync();
+        ApplyServerClockToHelper();
+        RefreshRangePicker();
+        await RefreshActiveInnerTabAsync();
+    }
+
     // ── Blocking / Deadlock slicers (W1e) ──
 
     private string _blockingSlicerMetric = "Events";
@@ -506,7 +564,7 @@ public partial class ViewerServerTab
             LockWaitTrendChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
             LockWaitTrendChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
             ReapplyAxisColors(LockWaitTrendChart);
-            LockWaitTrendChart.Plot.YLabel("Lock Wait Time (ms/sec)");
+            LockWaitTrendChart.Plot.YLabel("Lock wait ms/s");
             SetChartYLimitsWithLegendPadding(LockWaitTrendChart, 0, 1);
             ShowChartLegend(LockWaitTrendChart);
             LockWaitTrendChart.Refresh();
@@ -534,7 +592,7 @@ public partial class ViewerServerTab
         LockWaitTrendChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         LockWaitTrendChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
         ReapplyAxisColors(LockWaitTrendChart);
-        LockWaitTrendChart.Plot.YLabel("Lock Wait Time (ms/sec)");
+        LockWaitTrendChart.Plot.YLabel("Lock wait ms/s");
         SetChartYLimitsWithLegendPadding(LockWaitTrendChart, 0, globalMax > 0 ? globalMax : 1);
         ShowChartLegend(LockWaitTrendChart);
         LockWaitTrendChart.Refresh();
@@ -550,7 +608,7 @@ public partial class ViewerServerTab
         var rangeEnd = winEndUtc;
 
         _blockingTrendHover?.Clear();
-        EmptyState.Show(BlockingTrendChart, data.Count == 0, "No blocking in the selected time window.", clearOfBaseline: true);
+        EmptyState.Show(BlockingTrendChart, data.Count == 0, "No lock wait lasted long enough to count as an incident. Shorter lock waits show only in the lock wait chart above.", clearOfBaseline: true);
         if (data.Count == 0)
         {
             /* No blocking events — show a flat line at zero so the chart looks active */
@@ -563,7 +621,7 @@ public partial class ViewerServerTab
             BlockingTrendChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
             BlockingTrendChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
             ReapplyAxisColors(BlockingTrendChart);
-            BlockingTrendChart.Plot.YLabel("Blocking Incidents");
+            BlockingTrendChart.Plot.YLabel(BlockingTrendAxisTitle);
             SetChartYLimitsWithLegendPadding(BlockingTrendChart, 0, 1);
             ShowChartLegend(BlockingTrendChart);
             BlockingTrendChart.Refresh();
@@ -597,7 +655,7 @@ public partial class ViewerServerTab
         expandedCounts.Add(0);
 
         var plot = BlockingTrendChart.Plot.Add.Scatter(expandedTimes.ToArray(), expandedCounts.ToArray()); /* synthetic spike baseline (±0.0001d offsets), NOT a cadence series - gap-breaking would lock onto the artificial deltas (#1944 review) */
-        plot.LegendText = "Blocking Incidents";
+        plot.LegendText = PerformanceMonitor.Ui.BlockingSourceLabel.For("Blocking Incidents", data.Select(d => d.Source));
         plot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("Blocking"));
         plot.MarkerSize = 0; /* No markers, just lines */
         _blockingTrendHover?.Add(plot, "Blocking Incidents");
@@ -605,7 +663,7 @@ public partial class ViewerServerTab
         BlockingTrendChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         BlockingTrendChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
         ReapplyAxisColors(BlockingTrendChart);
-        BlockingTrendChart.Plot.YLabel(PerformanceMonitor.Ui.BlockingSourceLabel.For("Blocking Incidents", data.Select(d => d.Source)));
+        BlockingTrendChart.Plot.YLabel(BlockingTrendAxisTitle);
         SetChartYLimitsWithLegendPadding(BlockingTrendChart, 0, data.Max(d => d.Count));
         ShowChartLegend(BlockingTrendChart);
         BlockingTrendChart.Refresh();

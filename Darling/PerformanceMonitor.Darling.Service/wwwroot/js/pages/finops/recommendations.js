@@ -21,8 +21,10 @@ const COLUMNS = [
   { key: "category", label: "Category" },
   { key: "severity", label: "Severity", sevKey: "severity_sev" },
   { key: "confidence", label: "Confidence" },
-  { key: "finding", label: "Finding", wrap: true },
-  { key: "detail", label: "Detail", wrap: true },
+  /* The two prose columns keep a readable width (rec-text, app.css): at phone width the grid scrolls sideways inside its own box instead of
+     squeezing the Detail text into a one-word-wide column that made a row about 280 px tall. */
+  { key: "finding", label: "Finding", wrap: true, cellClass: () => "rec-text" },
+  { key: "detail", label: "Detail", wrap: true, cellClass: () => "rec-text" },
   { key: "est_savings_usd_month", label: "Est. Savings ($/mo)", format: "int", nullKey: "est_savings_note" },
 ];
 

@@ -165,7 +165,7 @@ public sealed partial class DarlingMcpServerAdminTools
         "Changes ONLY the fields named in changes_json, a JSON object. Keys: display_name, host, port (PostgreSQL), " +
         "database, read_only_intent, auth (\"Windows\", \"SQL\", \"ServicePrincipal\", \"ManagedIdentity\"), username, " +
         "password, encrypt_mode, trust_server_certificate, multi_subnet_failover, query_store_replica, monthly_cost_usd, " +
-        "aws_role_arn, aws_external_id, expected_modified_at. The values mean what they mean in add_servers (query_store_replica: empty or null removes it). Naming engine, is_enabled, " +
+        "aws_role_arn, aws_external_id, expected_modified_at. The values mean what they mean in add_servers (query_store_replica: empty or null removes it; monthly_cost_usd: null clears it, stored as 0, the unset value). Naming engine, is_enabled, " +
         "excluded_databases or any other key is status \"invalid\". The server keeps its id: tags, history and " +
         "settings stay attached, even when the address changes; the old address then cannot be added as a new " +
         "server under the same spelling. PASSWORD: omit it, or leave it blank, to keep the stored one; a typed one replaces it and is the password itself (a value starting with env: or file: is refused, references are set in the configuration file). The stored secret cannot be " +
@@ -183,9 +183,9 @@ public sealed partial class DarlingMcpServerAdminTools
         "\"collides\": the new address belongs to another monitored server, or the connection lands in a database " +
         "another one covers. \"connection_failed\": the probe could not connect, nothing was saved. \"unchanged\": " +
         "the request equals the stored values, nothing was written. updated returns {status, server, display_name, " +
-        "server_id, changed:[field names], reconnects, tested, query_store_replica_test, modified_at, note}; reconnects says whether the " +
+        "server_id, changed:[field names], reconnects, tested, query_store_replica_test, modified_at, note, previous, undo, undo_note}; previous holds the changed fields as they were and undo is the edit_server call that sets them back (guarded by the new modified_at); the password and AWS external ID cannot be read back, so undo never carries them and undo_note says what to add (undo is null when nothing else changed); reconnects says whether the " +
         "service drops and re-opens its connection to the server; query_store_replica_test is the replica's own connection result when the " +
-        "server has one and the edit was tested (a replica that does not open is a note, the edit is still saved). server_name is resolved as remove_server resolves it.")]
+        "server has one and the edit was tested (a replica that does not open is a note, the edit is still saved; on an Azure SQL Database it says the setting has no effect, because that engine has no readable-replica Query Store read). server_name is resolved as remove_server resolves it.")]
     public static Task<string> EditServer(
         NpgsqlDataSource postgres,
         [Description("The monitored server to edit: its display name or storage name / address. A partial name is accepted only when it matches exactly one definition.")] string server_name,
@@ -311,7 +311,7 @@ LIMIT 1";
     /// </summary>
     internal static async Task<string> EditServerByIdAsync(
         NpgsqlDataSource postgres, int serverId, string changesJson, ILogger? logger, CancellationToken cancellationToken,
-        ILogger? probeLogger = null)
+        ILogger? probeLogger = null, DarlingUnverifiedWindowsAuthScreen? webScreen = null)
     {
         string?[] submittedSecrets = [];
         try
@@ -324,7 +324,7 @@ LIMIT 1";
 
             submittedSecrets = [changes!.Password, changes.AwsExternalId];
             return await EditServerCoreAsync(
-                new PostgresServerEditStore(postgres), serverId, changes, DefaultProbeAsync, DarlingPasswordKey.Current, logger, cancellationToken, probeLogger);
+                new PostgresServerEditStore(postgres), serverId, changes, DefaultProbeAsync, DarlingPasswordKey.Current, logger, cancellationToken, probeLogger, webScreen: webScreen);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -337,12 +337,12 @@ LIMIT 1";
     /// An unparseable body is <c>invalid</c> without a store read.</summary>
     internal static async Task<string> EditServerCoreAsync(
         IServerEditStore store, int serverId, string changesJson, ServerProbe probe, IPasswordKeyRing ring, ILogger? logger, CancellationToken cancellationToken,
-        ILogger? probeLogger = null, DarlingMcpAddServersPolicy? policy = null)
+        ILogger? probeLogger = null, DarlingMcpAddServersPolicy? policy = null, DarlingUnverifiedWindowsAuthScreen? webScreen = null)
     {
         var (changes, error) = ParseEditChanges(changesJson);
         return error != null
             ? Outcome(EditStatus.Invalid, error)
-            : await EditServerCoreAsync(store, serverId, changes!, probe, ring, logger, cancellationToken, probeLogger, policy);
+            : await EditServerCoreAsync(store, serverId, changes!, probe, ring, logger, cancellationToken, probeLogger, policy, webScreen: webScreen);
     }
 
     /// <summary>
@@ -353,7 +353,8 @@ LIMIT 1";
         IServerEditStore store, int serverId, ServerEditChanges changes, ServerProbe probe, IPasswordKeyRing ring, ILogger? logger, CancellationToken cancellationToken,
         ILogger? probeLogger = null, DarlingMcpAddServersPolicy? policy = null,
         Func<int, CancellationToken, Task<int?>>? agentRouteCovering = null,
-        Func<CancellationToken, Task<List<RegisteredTarget>>>? loadTargets = null)
+        Func<CancellationToken, Task<List<RegisteredTarget>>>? loadTargets = null,
+        DarlingUnverifiedWindowsAuthScreen? webScreen = null)
     {
         var row = await store.ReadRowAsync(serverId, cancellationToken);
         if (row is null)
@@ -384,6 +385,19 @@ LIMIT 1";
                 modified_at = ModifiedAtToken(row.ModifiedAt),
                 message = "The request equals the stored values; nothing was written.",
             }, McpHelpers.JsonOptions);
+        }
+
+        /* The web route's one rule (web.allowWindowsAuthOverUnverifiedTls), on the server as it would be saved. It runs only when the edit
+           changes the machine the entry names or its sign-in and certificate settings: the host, the port, the auth type,
+           trust_server_certificate, encrypt_mode or the Query Store replica (the replica is reached with the primary's Windows sign-in
+           and certificate settings). read_only_intent and multi_subnet_failover are not in the list: read-only routing goes to a replica
+           the availability group's own routing list picks, and multi-subnet failover keeps the same host name.
+           An edit of anything else (display name, thresholds, tags, enabled) is never refused, even on a server that already has the
+           combination. It runs before any further store read or probe. */
+        if (webScreen is not null && (plan.ReplicaChanged || plan.ChangedFields.Exists(f => f is "host" or "port" or "auth" or "trust_server_certificate" or "encrypt_mode"))
+            && webScreen.Refusal(plan.ProbeConfig) is { } webRefusal)
+        {
+            return Outcome(EditStatus.Invalid, RedactEditSecret(webRefusal.Replace("Not added:", "Not saved:", StringComparison.Ordinal), plan.PlaintextSecret, plan.PlaintextExternalId));
         }
 
         /* #6281: over MCP, where a registration connects is not changed while a route with an agent setting applies to the
@@ -538,6 +552,7 @@ LIMIT 1";
 
         logger?.LogInformation("Server edited through edit_server: id {ServerId}, fields {Fields}", serverId, string.Join(",", plan.ChangedFields));
 
+        var (previous, undo, undoNote) = EditUndoOf(row, plan, ModifiedAtToken(write.ModifiedAt));
         return JsonSerializer.Serialize(new
         {
             status = EditStatus.Updated,
@@ -552,7 +567,96 @@ LIMIT 1";
             query_store_replica_test = replicaTest,
             modified_at = ModifiedAtToken(write.ModifiedAt),
             note = plan.AddressChanged ? EditNoteSweep + " " + EditNoteAddress : EditNoteSweep,
+            previous,
+            undo,
+            undo_note = undoNote,
         }, McpHelpers.JsonOptions);
+    }
+
+    /// <summary>
+    /// What an applied edit hands back (#6403): <c>previous</c> is the fields it changed as they were, and <c>undo</c> is the edit_server call
+    /// that sets them back, guarded by the new <c>modified_at</c> so a later change is not overwritten. The stored password and AWS external ID
+    /// cannot be read, so neither is ever in <c>previous</c> or the undo, and the note says what the caller must add. An edit that changed nothing
+    /// else (a password-only edit) has nothing a call can restore: <c>undo</c> is null and the note says why.
+    /// </summary>
+    private static (JsonObject Previous, JsonObject? Undo, string? Note) EditUndoOf(ServerEditRow row, ServerEditPlan plan, string newModifiedAt)
+    {
+        var previous = new JsonObject();
+        foreach (var field in plan.ChangedFields)
+        {
+            switch (field)
+            {
+                case "display_name": previous[field] = row.Name; break;
+                case "host": previous[field] = row.Host; break;
+                case "port": previous[field] = row.Port; break;
+                case "database": previous[field] = row.Database; break;
+                case "read_only_intent": previous[field] = row.ReadOnlyIntent; break;
+                case "auth": previous[field] = AuthWord(row.Auth); break;
+                case "username": previous[field] = row.Username; break;
+                case "encrypt_mode": previous[field] = row.EncryptMode; break;
+                case "trust_server_certificate": previous[field] = row.TrustServerCertificate; break;
+                case "multi_subnet_failover": previous[field] = row.MultiSubnetFailover; break;
+                case "query_store_replica": previous[field] = row.QueryStoreReplica; break;
+                case "monthly_cost_usd": previous[field] = row.MonthlyCostUsd; break;
+                case "aws_role_arn": previous[field] = row.AwsRoleArn; break;
+            }
+        }
+
+        var secretChanged = plan.ChangedFields.Contains("password") || plan.ChangedFields.Contains("aws_external_id");
+        /* A put-back of how the row connects needs the password again when the row ends up on SQL or service-principal authentication. */
+        var undoAuth = plan.ChangedFields.Contains("auth") ? row.Auth : plan.ProbeConfig.Auth;
+        var needsPasswordAgain = IsSecretAuth(undoAuth)
+            && (plan.ConnectionChanged || plan.ChangedFields.Contains("auth"));
+        var needsExternalIdAgain = plan.ChangedFields.Contains("aws_role_arn");
+
+        string? note = null;
+        if (secretChanged || needsPasswordAgain || needsExternalIdAgain)
+        {
+            note = "The stored password and AWS external ID cannot be read back, so the undo does not restore them" +
+                   (needsPasswordAgain || needsExternalIdAgain
+                       ? "; add password (and aws_external_id, for an AWS role) to its changes_json, which that put-back needs."
+                       : ".");
+        }
+
+        /* A row saved before #6583 (a non-zero port on SQL Server) or #6352 (a named-pipe or admin-style host) holds a value the edit
+           rules now refuse. Putting it back is refused the same way, with nothing written, so the note says so instead of leaving
+           the undo to read as a call that works. */
+        var sqlServerRow = PerformanceMonitor.Collectors.MonitoredEngineKind.ParseConfiguredEngine(row.Engine) != PerformanceMonitor.Collectors.CollectorTargetEngine.PostgreSql;
+        var refusedValues = new List<string>();
+        if (sqlServerRow && plan.ChangedFields.Contains("port") && row.Port > 0)
+        {
+            refusedValues.Add("port " + row.Port.ToString(System.Globalization.CultureInfo.InvariantCulture) + " (a SQL Server port is no longer accepted)");
+        }
+
+        if (sqlServerRow && plan.ChangedFields.Contains("host") && ServerHostSetting.Refusal(row.Host) is not null)
+        {
+            refusedValues.Add("host " + row.Host + " (no longer an accepted host)");
+        }
+
+        if (refusedValues.Count > 0)
+        {
+            note = (note is null ? string.Empty : note + " ")
+                + "The undo will be refused with nothing written, because the previous " + string.Join(" and ", refusedValues)
+                + " would no longer pass the add rules; edit the other fields by hand.";
+        }
+
+        if (previous.Count == 0)
+        {
+            return (previous, null, note);
+        }
+
+        var changes = new JsonObject();
+        foreach (var (name, value) in previous.ToList())
+        {
+            changes[name] = value?.DeepClone();
+        }
+
+        changes["expected_modified_at"] = newModifiedAt;
+        return (previous, DarlingMcpUndoShape.Call("edit_server", new JsonObject
+        {
+            ["server_name"] = plan.NewStorageKey,
+            ["changes_json"] = changes.ToJsonString(),
+        }), note);
     }
 
     /// <summary>The answer for an edit whose connected database another definition already covers: the add refusal's text
@@ -839,9 +943,12 @@ LIMIT 1";
                     changes.EncryptMode = encryptMode;
                     break;
                 case "monthly_cost_usd":
-                    if (!TryEditDecimal(node, out var cost) || cost < 0)
+                    // #6454: null clears the cost. The stored column is NOT NULL and 0 is the unset value every FinOps read
+                    // treats as "no cost", so a clear is stored as 0.
+                    var cost = 0m;
+                    if (node is not null && (!TryEditDecimal(node, out cost) || cost < 0))
                     {
-                        return (null, "monthly_cost_usd must be a number, zero or more.");
+                        return (null, "monthly_cost_usd must be a number, zero or more; null clears it.");
                     }
 
                     changes.MonthlyCostUsd = cost;
@@ -1025,9 +1132,10 @@ LIMIT 1";
                           "(integrated/Kerberos auth is not supported for PostgreSQL targets).");
         }
 
-        if (!isPostgres && c.Port is not null)
+        /* #6583: a non-zero port is refused for a SQL Server row. Zero is allowed so an edit can clear a port saved before this rule. */
+        if (!isPostgres && c.Port is > 0)
         {
-            return (null, "A SQL Server port goes in host, as host,port.");
+            return (null, SqlServerPortAdvice.Refusal);
         }
 
         /* #6254: a Query Store replica is a SQL Server setting; the check is on a replica the request names. */

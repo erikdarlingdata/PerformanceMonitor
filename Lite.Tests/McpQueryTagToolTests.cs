@@ -82,6 +82,39 @@ public sealed class McpQueryTagToolTests : IClassFixture<SharedDuckDbFixture>
         Assert.Empty(await _data.GetQueryTagsAsync());
     }
 
+    /* #6455: Lite's assign_query_tag refuses exactly what the Darling twin refuses (the shared QueryHashIdentity.IsAssignableHash),
+       so a key that is not a hash never lands in the map; the refusal comes before any write. */
+    [Theory]
+    [InlineData("0xG6G6G6G6G6G6G6G6")]
+    [InlineData("0x")]
+    [InlineData("hello")]
+    [InlineData("0x1A2B3C4D5E6F70811")]
+    [InlineData("12.5")]
+    [InlineData("-5")]
+    [InlineData("99999999999999999999999")]
+    [InlineData("0")]
+    [InlineData("0x0000000000000000")]
+    public async Task AssignQueryTag_RefusesAHashThatIsNotHexadecimal_AndStoresNothing(string hash)
+    {
+        var created = Parse(await McpQueryTagTools.CreateQueryTagCore(_data, "Reports", null, null));
+        var tagId = created.GetProperty("tag").GetProperty("tag_id").GetInt32();
+
+        var answer = Parse(await McpQueryTagTools.AssignQueryTagCore(_data, [], tagId, "hash", hash, null, null, null, null, null));
+
+        Assert.Equal("invalid", answer.GetProperty("status").GetString());
+        Assert.Contains("hexadecimal", answer.GetProperty("message").GetString(), StringComparison.Ordinal);
+        var list = Parse(await McpQueryTagTools.ListQueryTagsCore(_data, []));
+        Assert.Equal(0, list.GetProperty("tags").EnumerateArray().Single().GetProperty("assignment_count").GetInt32());
+    }
+
+    [Fact]
+    public async Task UnassignQueryTag_DoesNotApplyTheHashShapeRefusal_SoAnOlderKeyCanStillBeRemoved()
+    {
+        var answer = Parse(await McpQueryTagTools.UnassignQueryTagCore(_data, "hash", "hello", null, null, null, null));
+
+        Assert.DoesNotContain("hexadecimal", answer.GetProperty("message").GetString() ?? "", StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task AssignByHash_ThenListShowsIt_AndTheWriteSaysTheMapIsNotRebuilt()
     {

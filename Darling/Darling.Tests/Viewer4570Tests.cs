@@ -29,7 +29,7 @@ public sealed class Viewer4570Tests
     {
         var stmt = Statement();
         Assert.Null(stmt.QueryTimeStats);
-        Assert.Equal("Predicted Runtime", PlanDisplayText.RuntimeSummaryTitle(stmt));
+        Assert.Equal("Plan properties", PlanDisplayText.RuntimeSummaryTitle(stmt));
     }
 
     [Fact]

@@ -96,7 +96,7 @@ public sealed class MuteRuleReloadBeaconTests
         {
             "INSERT INTO config_mute_rules",
             "UPDATE config_mute_rules SET",
-            "DELETE FROM config_mute_rules",
+            /* DELETE: the store now runs MuteRulePurge.DeleteByIdSql (#6399), asserted below with the viewer's. */
         };
 
         foreach (var statement in mutations)
@@ -108,6 +108,7 @@ public sealed class MuteRuleReloadBeaconTests
         Assert.Contains("UPDATE config_mute_rules SET", ViewerDataService.MuteRuleUpdateSql, StringComparison.Ordinal);
         Assert.Contains("UPDATE config_mute_rules SET", ViewerDataService.MuteRuleSetEnabledSql, StringComparison.Ordinal);
         Assert.Contains("DELETE FROM config_mute_rules", ViewerDataService.MuteRuleDeleteSql, StringComparison.Ordinal);
+        Assert.Contains("DELETE FROM config_mute_rules", PerformanceMonitor.Darling.Storage.MuteRulePurge.DeleteByIdSql, StringComparison.Ordinal);
     }
 
     [Fact]

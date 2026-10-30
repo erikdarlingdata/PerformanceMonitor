@@ -37,8 +37,13 @@ public sealed partial class ViewerDataService
     /// $1 server_id, $2 window start, $3 window end (naive UTC), $4 database filter. The XE arm windows and
     /// buckets on the report's own <c>event_time</c>; the DMV arm stays on <c>collection_time</c>, which IS its
     /// event time. $5 is the <see cref="EventWindowFloor"/> for $2 (XE arm only; no upper bound).
+    ///
+    /// <para><b>A parallel query waiting on itself is not blocking (#6645, #6705)</b>: both arms carry
+    /// <see cref="PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql"/>, as Lite's slicer does, so the bars agree with
+    /// <see cref="BlockingTrendSql"/> and the baseline band. The DMV arm is drawn when the FILTERED XE arm has no buckets, so a
+    /// window whose only XE reports are self-waits falls back to the DMV snapshots.</para>
     /// </summary>
-    public const string BlockingSlicerSql = """
+    public const string BlockingSlicerSql = $"""
         WITH bpr AS (
             SELECT
                 date_trunc('hour', event_time) AS bucket,
@@ -51,6 +56,7 @@ public sealed partial class ViewerDataService
             WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
             AND   collection_time >= $5
             AND   ($4::text[] IS NULL OR database_name = ANY($4))
+            AND   {PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql}
             GROUP BY date_trunc('hour', event_time)
         ),
         dmv AS (
@@ -64,6 +70,7 @@ public sealed partial class ViewerDataService
             FROM v_dmv_blocking_snapshots
             WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
             AND   ($4::text[] IS NULL OR database_name = ANY($4))
+            AND   {PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql}
             GROUP BY date_trunc('hour', collection_time)
         )
         SELECT bucket, event_count, total_wait_sec, distinct_blockers, distinct_blocked, distinct_databases FROM bpr

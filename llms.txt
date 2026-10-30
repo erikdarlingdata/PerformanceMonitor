@@ -1,10 +1,10 @@
 # SQL Server Performance Monitor
 
-> Free, open-source SQL Server performance monitoring tool by Erik Darling (Darling Data, LLC). 44 SQL Server collectors, real-time alerts, graphical execution plan viewer, and a built-in MCP server for AI-powered analysis (113 tools in Lite, 245 in Darling). Two current editions: Lite (standalone desktop app with DuckDB storage) and Darling (headless 24/7 service with a central PostgreSQL/TimescaleDB store). The older Full/Dashboard edition is deprecated. Replaces expensive commercial tools like SolarWinds SQL Sentry (formerly SentryOne) and SolarWinds DPA. MIT licensed.
+> Free, open-source SQL Server performance monitoring tool by Erik Darling (Darling Data, LLC). More than 40 SQL Server collectors, real-time alerts, graphical execution plan viewer, and a built-in MCP server for AI-powered analysis (more than 100 tools in Lite, more than 200 in Darling). Two current editions: Lite (standalone desktop app with DuckDB storage) and Darling (headless 24/7 service with a central PostgreSQL/TimescaleDB store). The older Full/Dashboard edition is deprecated. Replaces expensive commercial tools like SolarWinds SQL Sentry (formerly SentryOne) and SolarWinds DPA. MIT licensed.
 
 - Supports SQL Server 2016-2025, Azure SQL Managed Instance, AWS RDS for SQL Server, and Azure SQL Database (Lite and Darling)
 - Darling's service runs on Windows or Linux, and its viewers are a Windows desktop app and a web dashboard
-- Darling also monitors PostgreSQL (self-hosted, AWS RDS, and Aurora) with 29 PostgreSQL collectors
+- Darling also monitors PostgreSQL (self-hosted, AWS RDS, and Aurora) with more than 25 PostgreSQL collectors
 - The attention collector records queries a client cancelled or timed out (the client application, host, database and statement), from a dedicated Extended Events session; the Client Timeouts alert and mute-by-client-application read it
 - Monitors wait stats, query performance, blocking chains, deadlocks, memory grants, file I/O, tempdb, CPU, perfmon counters, and more
 - Real-time alerts via system tray notifications (Lite), styled HTML emails, Microsoft Teams, Slack, PagerDuty, and generic webhooks

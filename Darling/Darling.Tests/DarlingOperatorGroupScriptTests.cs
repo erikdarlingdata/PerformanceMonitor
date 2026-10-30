@@ -68,7 +68,15 @@ public sealed class DarlingOperatorGroupScriptTests
         Assert.True(lookup >= 0, $"{scriptName}: the group lookup is gone");
         Assert.True(create > lookup, $"{scriptName}: the group must be looked up before it is created");
 
-        Assert.Single(Regex.Matches(script, @"&\s+net\.exe\s+localgroup", RegexOptions.IgnoreCase));
+        /* The upgrade script never adds a member. The installer adds one only in Add-DarlingOperatorToGroup (#6478), which
+           step 7 calls after an answer of yes or -AddOperator; the group creation above is its other net.exe call. */
+        var isInstaller = scriptName == "install-darling.ps1";
+        Assert.Equal(isInstaller ? 2 : 1, Regex.Matches(script, @"&\s+net\.exe\s+localgroup", RegexOptions.IgnoreCase).Count);
+        if (isInstaller)
+        {
+            Assert.Contains("& net.exe localgroup $groupName $account /add", ExtractFunction(script, "Add-DarlingOperatorToGroup", scriptName), StringComparison.Ordinal);
+        }
+
         Assert.DoesNotContain("Add-LocalGroupMember", script, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("Add-ADGroupMember", script, StringComparison.OrdinalIgnoreCase);
     }
@@ -132,10 +140,14 @@ public sealed class DarlingOperatorGroupScriptTests
     {
         var script = Script(scriptName);
 
-        Assert.Contains("Local group '$operatorGroupName' is in place. This script never adds members to it.", script, StringComparison.Ordinal);
-        Assert.Contains("Add each person who runs the Viewer or the CLI without elevation to the local group '$operatorGroupName'", script, StringComparison.Ordinal);
-        Assert.Contains("Members can read darling.json and the store's admin and viewer credentials, which decrypt every stored password", script, StringComparison.Ordinal);
-        Assert.Contains("A person added to the group has to sign out and back in before the membership takes effect.", script, StringComparison.Ordinal);
+        /* The installer says it in Write-DarlingOperatorGuidance, after the question (#6478); its behaviour is proved by the
+           operator-step tests below. The upgrade script asks nothing and still says it inline. */
+        var text = scriptName == "install-darling.ps1" ? ExtractFunction(script, "Write-DarlingOperatorGuidance", scriptName) : script;
+        var groupVariable = scriptName == "install-darling.ps1" ? "$groupName" : "$operatorGroupName";
+        Assert.Contains(scriptName == "install-darling.ps1" ? "No one was added to it." : "This script never adds members to it.", text, StringComparison.Ordinal);
+        Assert.Contains("Add each person who runs the Viewer or the CLI without elevation to the local group '" + groupVariable + "'", text, StringComparison.Ordinal);
+        Assert.Contains("Members can read darling.json and the store's admin and viewer credentials, which decrypt every stored password", text, StringComparison.Ordinal);
+        Assert.Contains("A person added to the group has to sign out and back in before the membership takes effect.", text, StringComparison.Ordinal);
     }
 
     /// <summary>A group the upgrade cannot make must not leave the monitoring host stopped: the files stay
@@ -228,6 +240,325 @@ public sealed class DarlingOperatorGroupScriptTests
         Assert.Equal(new[] { expectedSid }, lines);
     }
 
+    private const string OperatorStepGroup = "Test Operators";
+
+    /// <summary>Runs the installer's step 7 (<c>Invoke-DarlingOperatorStep</c>) under Windows PowerShell with the machine
+    /// stood in for: the answer, the signed-in account, the host, and the two calls that change the machine (the group
+    /// add and the direct grant) are stubs that only write to a log, so nothing on this machine is created or changed.
+    /// Returns the log: every line the step printed, the prompt it asked, each stub call, and the result.</summary>
+    private static List<string> RunOperatorStep(string call, string signedInUser = "'CONTOSO\\alice'", string answer = "''", string hostIsInteractive = "$true")
+    {
+        const string scriptName = "install-darling.ps1";
+        var script = Script(scriptName);
+        var probe = string.Join(
+            "\n",
+            "$script:log = New-Object System.Collections.ArrayList",
+            "$script:answer = " + answer,
+            "function Write-Host { param($Object, $ForegroundColor) [void]$script:log.Add([string]$Object) }",
+            "function Test-DarlingInteractiveHost { " + hostIsInteractive + " }",
+            "function Get-DarlingInteractiveUser { " + signedInUser + " }",
+            "function Resolve-DarlingOperatorAccount([string]$account) { if ($account -eq 'CONTOSO\\alice') { New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-32-546' } else { New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-32-545' } }",
+            "function Read-Host { param($Prompt) [void]$script:log.Add('PROMPT ' + $Prompt); $script:answer }",
+            "function Add-DarlingOperatorToGroup([string]$groupName, [string]$account) { [void]$script:log.Add('ADD ' + $groupName + '|' + $account) }",
+            "function Grant-DarlingOperatorDirect($sid, [string]$configPath, [string]$storeFolder) { [void]$script:log.Add('GRANT ' + $sid.Value + '|' + $configPath + '|' + $storeFolder); @() }",
+            ExtractFunction(script, "Write-DarlingOperatorGuidance", scriptName),
+            ExtractFunction(script, "Invoke-DarlingOperatorStep", scriptName),
+            "$result = " + call,
+            "[void]$script:log.Add('RESULT ' + $result)",
+            "$script:log");
+        return RunWindowsPowerShell(probe);
+    }
+
+    private static string GuestsAccount() =>
+        new SecurityIdentifier(WellKnownSidType.BuiltinGuestsSid, null).Translate(typeof(NTAccount)).Value;
+
+    /// <summary>Nothing answered (Enter) is No: the prompt names the account and the group, the group is not touched, the
+    /// closing text still says who to add and that a person signs out and back in, and the step reports that no one was
+    /// added. It also says why the Viewer needs the group (what members get, and that the Viewer uses the admin role).</summary>
+    [Fact]
+    public void TheOperatorQuestionDefaultsToNo_AndAddsNoOne()
+    {
+        var log = RunOperatorStep($"Invoke-DarlingOperatorStep '{OperatorStepGroup}' '' $false 'C:\\x\\darling.json' 'C:\\s'");
+
+        Assert.Contains($"PROMPT Add CONTOSO\\alice to '{OperatorStepGroup}'? [y/N]", log);
+        Assert.DoesNotContain(log, line => line.StartsWith("ADD ", StringComparison.Ordinal) || line.StartsWith("GRANT ", StringComparison.Ordinal));
+        Assert.Contains(log, line => line.Contains("Members can read darling.json and the store's admin and viewer credentials", StringComparison.Ordinal)
+            && line.Contains("Viewer connects with the store's admin role", StringComparison.Ordinal));
+        Assert.Contains(log, line => line.Contains("A person added to the group has to sign out and back in", StringComparison.Ordinal));
+        Assert.Contains($"Add each person who runs the Viewer or the CLI without elevation to the local group '{OperatorStepGroup}' (Computer Management > Local Users and Groups, or net localgroup \"{OperatorStepGroup}\" DOMAIN\\user /add).", log);
+        Assert.Equal("RESULT False", log[^1]);
+    }
+
+    /// <summary>Anything that is not a yes is a no, including a word that only starts like a no.</summary>
+    [Theory]
+    [InlineData("'n'")]
+    [InlineData("'no'")]
+    [InlineData("' '")]
+    [InlineData("'maybe'")]
+    public void AnythingButYesIsNo(string answer)
+    {
+        var log = RunOperatorStep($"Invoke-DarlingOperatorStep '{OperatorStepGroup}' '' $false 'C:\\x\\darling.json' 'C:\\s'", answer: answer);
+
+        Assert.DoesNotContain(log, line => line.StartsWith("ADD ", StringComparison.Ordinal));
+        Assert.Equal("RESULT False", log[^1]);
+    }
+
+    /// <summary>A yes adds the account to the group and gives it the direct grant, both for the account that was named in the
+    /// prompt, and prints the one line that says it also has a direct grant and how to remove it.</summary>
+    [Theory]
+    [InlineData("'y'")]
+    [InlineData("'Yes'")]
+    public void AYesAddsTheAccountToTheGroup_AndGrantsItDirectly(string answer)
+    {
+        var log = RunOperatorStep($"Invoke-DarlingOperatorStep '{OperatorStepGroup}' '' $false 'C:\\x\\darling.json' 'C:\\s'", answer: answer);
+
+        var guests = GuestsAccount();
+        Assert.Contains($"ADD {OperatorStepGroup}|{guests}", log);
+        Assert.Contains("GRANT S-1-5-32-546|C:\\x\\darling.json|C:\\s", log);
+        Assert.Contains(log, line => line.Contains("also has a direct grant", StringComparison.Ordinal)
+            && line.Contains("uninstall-darling.ps1 removes it", StringComparison.Ordinal)
+            && line.Contains("/remove *S-1-5-32-546", StringComparison.Ordinal));
+        Assert.Equal("RESULT True", log[^1]);
+    }
+
+    /// <summary>The person signed in to the session and the account the script runs as are not always the same one (someone
+    /// elevated with another administrator account). The prompt names the signed-in person, and says so when they differ.</summary>
+    [Fact]
+    public void WhenTheSignedInAccountIsNotTheAccountTheScriptRunsAs_ThePromptSaysSo_AndStillDefaultsToNo()
+    {
+        var runAs = WindowsIdentity.GetCurrent().Name;
+        var log = RunOperatorStep($"Invoke-DarlingOperatorStep '{OperatorStepGroup}' '' $false 'C:\\x\\darling.json' 'C:\\s'");
+
+        Assert.Contains(log, line => line.StartsWith("You are signed in as CONTOSO\\alice, but this script runs as " + runAs, StringComparison.Ordinal)
+            && line.Contains("separate decision", StringComparison.Ordinal));
+        Assert.Contains($"PROMPT Add CONTOSO\\alice to '{OperatorStepGroup}'? [y/N]", log);
+        Assert.DoesNotContain(log, line => line.StartsWith("ADD ", StringComparison.Ordinal));
+        Assert.Equal("RESULT False", log[^1]);
+    }
+
+    /// <summary>When no desktop shell is found for the session the prompt names the account the script runs as, and has no
+    /// "different account" sentence to say.</summary>
+    [Fact]
+    public void WhenTheSignedInAccountIsTheAccountTheScriptRunsAs_ThePromptHasNoDifferentAccountWording()
+    {
+        var runAs = WindowsIdentity.GetCurrent().Name;
+        var log = RunOperatorStep($"Invoke-DarlingOperatorStep '{OperatorStepGroup}' '' $false 'C:\\x\\darling.json' 'C:\\s'", signedInUser: "$null");
+
+        Assert.Contains($"PROMPT Add {runAs} to '{OperatorStepGroup}'? [y/N]", log);
+        Assert.DoesNotContain(log, line => line.StartsWith("You are signed in as", StringComparison.Ordinal));
+    }
+
+    /// <summary>-NoOperatorPrompt never asks and never adds, and prints the existing closing text.</summary>
+    [Fact]
+    public void NoOperatorPromptNeverAsks()
+    {
+        var log = RunOperatorStep($"Invoke-DarlingOperatorStep '{OperatorStepGroup}' '' $true 'C:\\x\\darling.json' 'C:\\s'", answer: "'y'");
+
+        Assert.DoesNotContain(log, line => line.StartsWith("PROMPT ", StringComparison.Ordinal) || line.StartsWith("ADD ", StringComparison.Ordinal) || line.StartsWith("GRANT ", StringComparison.Ordinal));
+        Assert.Contains(log, line => line.Contains("A person added to the group has to sign out and back in", StringComparison.Ordinal));
+        Assert.Equal("RESULT False", log[^1]);
+    }
+
+    /// <summary>-AddOperator adds the named account without asking, and gives it the direct grant.</summary>
+    [Fact]
+    public void AddOperatorAddsTheNamedAccountWithoutAsking()
+    {
+        var log = RunOperatorStep($"Invoke-DarlingOperatorStep '{OperatorStepGroup}' 'CONTOSO\\alice' $false 'C:\\x\\darling.json' 'C:\\s'", answer: "'n'");
+
+        Assert.DoesNotContain(log, line => line.StartsWith("PROMPT ", StringComparison.Ordinal));
+        Assert.Contains($"ADD {OperatorStepGroup}|{GuestsAccount()}", log);
+        Assert.Contains("GRANT S-1-5-32-546|C:\\x\\darling.json|C:\\s", log);
+        Assert.Equal("RESULT True", log[^1]);
+    }
+
+    /// <summary>A host nobody can answer on is never waited on: the answer is No, the group is not touched and the closing
+    /// text prints.</summary>
+    [Fact]
+    public void AHostThatCannotTakeAnAnswerIsTreatedAsNo()
+    {
+        var log = RunOperatorStep($"Invoke-DarlingOperatorStep '{OperatorStepGroup}' '' $false 'C:\\x\\darling.json' 'C:\\s'", answer: "'y'", hostIsInteractive: "$false");
+
+        Assert.DoesNotContain(log, line => line.StartsWith("PROMPT ", StringComparison.Ordinal) || line.StartsWith("ADD ", StringComparison.Ordinal) || line.StartsWith("GRANT ", StringComparison.Ordinal));
+        Assert.Contains(log, line => line.Contains("the answer is No", StringComparison.Ordinal));
+        Assert.Contains(log, line => line.Contains("A person added to the group has to sign out and back in", StringComparison.Ordinal));
+        Assert.Equal("RESULT False", log[^1]);
+    }
+
+    /// <summary>The real host check, under a console started with -NonInteractive, says no.</summary>
+    [Fact]
+    public void TheHostCheckSaysNoUnderNonInteractive()
+    {
+        const string scriptName = "install-darling.ps1";
+        var lines = RunWindowsPowerShell(ExtractFunction(Script(scriptName), "Test-DarlingRemoteSession", scriptName) + "\n" + ExtractFunction(Script(scriptName), "Test-DarlingInteractiveHost", scriptName) + "\nTest-DarlingInteractiveHost", nonInteractive: true);
+
+        Assert.Equal(new[] { "False" }, lines);
+    }
+
+    /// <summary>A PowerShell remoting session can report UserInteractive as true with no console behind it, so the prompt
+    /// would hang. The remoting check says yes for the remote host name and for a set $PSSenderInfo (either alone is enough),
+    /// and no for an ordinary console. The real host check is then run with the sender info set, so it answers No whatever
+    /// the console around it looks like.</summary>
+    [Fact]
+    public void ARemotingSessionIsTreatedAsAHostThatCannotAnswer()
+    {
+        const string scriptName = "install-darling.ps1";
+        var probe = string.Join(
+            "\n",
+            ExtractFunction(Script(scriptName), "Test-DarlingRemoteSession", scriptName),
+            "'host=' + (Test-DarlingRemoteSession 'ServerRemoteHost' $null)",
+            "'sender=' + (Test-DarlingRemoteSession 'ConsoleHost' ([pscustomobject]@{ ConnectedUser = 'CONTOSO\\alice' }))",
+            "'console=' + (Test-DarlingRemoteSession 'ConsoleHost' $null)",
+            "$PSSenderInfo = [pscustomobject]@{ ConnectedUser = 'CONTOSO\\alice' }",
+            ExtractFunction(Script(scriptName), "Test-DarlingInteractiveHost", scriptName),
+            "'interactive=' + (Test-DarlingInteractiveHost)");
+
+        var lines = RunWindowsPowerShell(probe);
+
+        Assert.Equal(new[] { "host=True", "sender=True", "console=False", "interactive=False" }, lines);
+    }
+
+    /// <summary>The real account check: a person's own account resolves to its SID, and the names that would put every user
+    /// inside the boundary (Everyone, BUILTIN\Users, Authenticated Users) and a name that resolves to nothing are refused.</summary>
+    [Fact]
+    public void OnlyAUserOrGroupAccountIsAcceptedAsAnOperator()
+    {
+        const string scriptName = "install-darling.ps1";
+        var probe = string.Join(
+            "\n",
+            ExtractFunction(Script(scriptName), "Resolve-DarlingOperatorAccount", scriptName),
+            "foreach ($name in @('Everyone', 'BUILTIN\\Users', 'NT AUTHORITY\\Authenticated Users', 'no-such-account-6478')) { try { $null = Resolve-DarlingOperatorAccount $name; \"$name=accepted\" } catch { \"$name=refused\" } }",
+            "[System.Security.Principal.WindowsIdentity]::GetCurrent().Name | ForEach-Object { 'me=' + (Resolve-DarlingOperatorAccount $_).Value }");
+
+        var lines = RunWindowsPowerShell(probe);
+
+        Assert.Equal(
+            new[]
+            {
+                "Everyone=refused",
+                "BUILTIN\\Users=refused",
+                "NT AUTHORITY\\Authenticated Users=refused",
+                "no-such-account-6478=refused",
+                "me=" + WindowsIdentity.GetCurrent().User!.Value,
+            },
+            lines);
+    }
+
+    /// <summary>The direct grant lands on exactly the paths the group gets, with the group's rights: read on darling.json,
+    /// traverse only on the store folder, read on the admin and viewer credential files, and nothing else (the mcp and
+    /// superuser credentials are not the operators'). A store that is not managed has darling.json alone.</summary>
+    [Fact]
+    public void TheDirectGrantTargetsAreTheGroupsOwn()
+    {
+        const string scriptName = "install-darling.ps1";
+        var probe = string.Join(
+            "\n",
+            ExtractFunction(Script(scriptName), "Get-DarlingOperatorGrantTargets", scriptName),
+            "Get-DarlingOperatorGrantTargets 'C:\\i\\darling.json' 'C:\\s' | ForEach-Object { $_.Path + '|' + $_.Rights }",
+            "'--'",
+            "Get-DarlingOperatorGrantTargets 'C:\\i\\darling.json' $null | ForEach-Object { $_.Path + '|' + $_.Rights }");
+
+        var lines = RunWindowsPowerShell(probe);
+
+        Assert.Equal(
+            new[]
+            {
+                "C:\\i\\darling.json|(R)",
+                "C:\\s|(S,X)",
+                "C:\\s\\" + PerformanceMonitor.Darling.Service.DarlingManagedPostgres.AdminCredentialFileName + "|(R)",
+                "C:\\s\\" + PerformanceMonitor.Darling.Service.DarlingManagedPostgres.ViewerCredentialFileName + "|(R)",
+                "--",
+                "C:\\i\\darling.json|(R)",
+            },
+            lines);
+    }
+
+    /// <summary>Uninstall leaves darling.json, the store folder and its credential files in place, and no service is left to
+    /// rewrite their permissions, so a direct grant the installer gave (#6478) would stay. The uninstall function removes
+    /// every direct Allow entry on those four paths except SYSTEM, Administrators, a service account and the operator group,
+    /// and leaves inherited entries and denies alone. Run with stand-ins for the ACL read and for icacls, so no permission on
+    /// this machine is changed.</summary>
+    [Fact]
+    public void UninstallRemovesTheDirectGrantFromEveryPathItLands()
+    {
+        const string scriptName = "uninstall-darling.ps1";
+        var folder = Directory.CreateTempSubdirectory("darling-uninstall-6478-").FullName;
+        try
+        {
+            var store = Path.Combine(folder, "store");
+            Directory.CreateDirectory(store);
+            var config = Path.Combine(folder, "darling.json");
+            File.WriteAllText(config, "{}");
+            var admin = Path.Combine(store, "pg-admin-credential.dpapi");
+            var viewer = Path.Combine(store, "pg-viewer-credential.dpapi");
+            File.WriteAllText(admin, "x");
+            File.WriteAllText(viewer, "x");
+
+            /* Performance Log Users stands in for the operator group (a group that exists on every machine, found under the
+               BUILTIN domain in place of the machine name), so its entry must be kept. */
+            var probe = string.Join(
+                "\n",
+                "$env:COMPUTERNAME = 'BUILTIN'",
+                "$script:log = New-Object System.Collections.ArrayList",
+                "function Write-Host { param($Object, $ForegroundColor) [void]$script:log.Add([string]$Object) }",
+                "function New-Rule($sidText, [bool]$inherited, $type = 'Allow') { [pscustomobject]@{ IdentityReference = (New-Object System.Security.Principal.SecurityIdentifier $sidText); IsInherited = $inherited; AccessControlType = $type } }",
+                "function Get-Acl { param($LiteralPath) [pscustomobject]@{ Access = @((New-Rule 'S-1-5-18' $false), (New-Rule 'S-1-5-32-544' $false), (New-Rule 'S-1-5-80-1-2-3-4-5' $false), (New-Rule 'S-1-5-32-559' $false), (New-Rule 'S-1-5-32-546' $false), (New-Rule 'S-1-5-32-545' $true), (New-Rule 'S-1-5-32-547' $false 'Deny')) } }",
+                "function icacls.exe { [void]$script:log.Add('ICACLS ' + ($args -join ' ')); $global:LASTEXITCODE = 0 }",
+                ExtractFunction(Script(scriptName), "Remove-DarlingDirectOperatorGrants", scriptName),
+                $"Remove-DarlingDirectOperatorGrants '{config}' '{store}' 'Performance Log Users'",
+                "$script:log");
+
+            var lines = RunWindowsPowerShell(probe);
+
+            Assert.Equal(
+                new[] { config, store, admin, viewer }.Select(path => $"ICACLS {path} /remove:g *S-1-5-32-546").ToArray(),
+                lines.Where(line => line.StartsWith("ICACLS ", StringComparison.Ordinal)).ToArray());
+        }
+        finally
+        {
+            Directory.Delete(folder, recursive: true);
+        }
+    }
+
+    /// <summary>When the operator group's own SID cannot be resolved, the function cannot tell the group's entries from a
+    /// direct grant, so it removes nothing from any of the four paths and says so by naming the group. The group lookup is made
+    /// to throw by naming a group that does not exist; the stand-in ACL still carries entries (one of them the group's own).</summary>
+    [Fact]
+    public void UninstallRemovesNothingWhenTheOperatorGroupCannotBeResolved()
+    {
+        const string scriptName = "uninstall-darling.ps1";
+        var folder = Directory.CreateTempSubdirectory("darling-uninstall-6478-").FullName;
+        try
+        {
+            var store = Path.Combine(folder, "store");
+            Directory.CreateDirectory(store);
+            var config = Path.Combine(folder, "darling.json");
+            File.WriteAllText(config, "{}");
+            File.WriteAllText(Path.Combine(store, "pg-admin-credential.dpapi"), "x");
+            File.WriteAllText(Path.Combine(store, "pg-viewer-credential.dpapi"), "x");
+
+            var probe = string.Join(
+                "\n",
+                "$env:COMPUTERNAME = 'BUILTIN'",
+                "$script:log = New-Object System.Collections.ArrayList",
+                "function Write-Host { param($Object, $ForegroundColor) [void]$script:log.Add([string]$Object) }",
+                "function New-Rule($sidText, [bool]$inherited, $type = 'Allow') { [pscustomobject]@{ IdentityReference = (New-Object System.Security.Principal.SecurityIdentifier $sidText); IsInherited = $inherited; AccessControlType = $type } }",
+                "function Get-Acl { param($LiteralPath) [pscustomobject]@{ Access = @((New-Rule 'S-1-5-18' $false), (New-Rule 'S-1-5-32-544' $false), (New-Rule 'S-1-5-32-559' $false), (New-Rule 'S-1-5-32-546' $false)) } }",
+                "function icacls.exe { [void]$script:log.Add('ICACLS ' + ($args -join ' ')); $global:LASTEXITCODE = 0 }",
+                ExtractFunction(Script(scriptName), "Remove-DarlingDirectOperatorGrants", scriptName),
+                $"Remove-DarlingDirectOperatorGrants '{config}' '{store}' 'No Such Operator Group 6478'",
+                "$script:log");
+
+            var lines = RunWindowsPowerShell(probe);
+
+            Assert.DoesNotContain(lines, line => line.StartsWith("ICACLS ", StringComparison.Ordinal));
+            Assert.Contains(lines, line => line.Contains("No Such Operator Group 6478", StringComparison.Ordinal) && line.Contains("left in place", StringComparison.Ordinal));
+        }
+        finally
+        {
+            Directory.Delete(folder, recursive: true);
+        }
+    }
+
     /// <summary>Returns the full <c>function NAME(...) { ... }</c> definition text from the script, signature
     /// included, so the extracted copy takes its parameters the way the shipped one does.</summary>
     private static string ExtractFunction(string script, string name, string scriptName)
@@ -261,13 +592,16 @@ public sealed class DarlingOperatorGroupScriptTests
 
     /// <summary>Runs <paramref name="script"/> under Windows PowerShell 5.1 and returns its non-empty output
     /// lines. Written to a temp file, not passed with -Command, because the script is whole function bodies.</summary>
-    private static List<string> RunWindowsPowerShell(string script)
+    private static List<string> RunWindowsPowerShell(string script, bool nonInteractive = false)
     {
         var path = Path.Combine(Path.GetTempPath(), $"darling-opgroup-{Guid.NewGuid():N}.ps1");
         File.WriteAllText(path, script);
         try
         {
-            using var process = Process.Start(WindowsPowerShellStartInfo.ForScript(path));
+            var startInfo = nonInteractive
+                ? WindowsPowerShellStartInfo.Create("powershell.exe", $"-NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{path}\"")
+                : WindowsPowerShellStartInfo.ForScript(path);
+            using var process = Process.Start(startInfo);
             Assert.NotNull(process);
 
             /* Both streams are drained concurrently: reading one to the end before the other deadlocks when the

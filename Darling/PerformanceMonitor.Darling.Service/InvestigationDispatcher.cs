@@ -103,7 +103,7 @@ public sealed class InvestigationDispatcher
         McpDataDetail dataDetail = McpDataDetail.MetadataOnly, InvestigationOpenSignal? openSignal = null,
         Func<string, string, CancellationToken, Task<bool>>? agentGate = null, IPseudonymKeySource? keys = null)
         : this((store ?? throw new ArgumentNullException(nameof(store))).OpenOrJoinAsync, settings, logger,
-            store.ReadRequestAsync, dataDetail, openSignal, agentGate, keys)
+            store.ReadRequestAsync, dataDetail, openSignal, agentGate, keys, store.RecordRecurringSkipAsync)
     {
     }
 
@@ -116,10 +116,12 @@ public sealed class InvestigationDispatcher
         McpDataDetail dataDetail = McpDataDetail.MetadataOnly,
         InvestigationOpenSignal? openSignal = null,
         Func<string, string, CancellationToken, Task<bool>>? agentGate = null,
-        IPseudonymKeySource? keys = null)
+        IPseudonymKeySource? keys = null,
+        Func<InvestigationAlert, CancellationToken, Task>? recurringSkipped = null)
     {
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
-        _core = new InvestigationDispatchCore(openOrJoin, settings, logger, openSignal is null ? null : openSignal.Opened, agentGate, keys);
+        _core = new InvestigationDispatchCore(openOrJoin, settings, logger, openSignal is null ? null : openSignal.Opened, agentGate, keys,
+            recurringSkipped);
         _readRequest = readRequest;
         _dataDetail = dataDetail;
     }
@@ -146,8 +148,9 @@ public sealed class InvestigationDispatcher
     /// </summary>
     /// <returns>What the store did, or null when nothing was asked of it (muted, no family, no agent route) or it failed.</returns>
     public Task<InvestigationOpenOutcome?> DispatchAsync(
-        AlertHistoryRecord record, AlertContext? context, string? storyPathHash = null, CancellationToken cancellationToken = default) =>
-        _core.DispatchAsync(record, context, storyPathHash, cancellationToken);
+        AlertHistoryRecord record, AlertContext? context, string? storyPathHash = null, bool recurringAtThisHour = false,
+        CancellationToken cancellationToken = default) =>
+        _core.DispatchAsync(record, context, storyPathHash, recurringAtThisHour, cancellationToken);
 
     /// <summary>The shared core, for the change watch's pass (#6234).</summary>
     internal InvestigationDispatchCore Core => _core;
@@ -173,10 +176,11 @@ public sealed class InvestigationDispatcher
     /// </summary>
     public Task<string?> OpenForWebhookAsync(
         string serverId, string serverName, string metricName, bool muted, DateTime alertTimeUtc, AlertContext? context,
-        string? storyPathHash = null, InvestigationAlertFacts? facts = null, CancellationToken cancellationToken = default)
+        string? storyPathHash = null, InvestigationAlertFacts? facts = null, bool recurringAtThisHour = false,
+        CancellationToken cancellationToken = default)
     {
         return _core.OpenForWebhookAsync(
             serverId, serverName, metricName, muted, alertTimeUtc, context, storyPathHash, facts,
-            _readRequest, _dataDetail, cancellationToken);
+            _readRequest, _dataDetail, recurringAtThisHour, cancellationToken);
     }
 }

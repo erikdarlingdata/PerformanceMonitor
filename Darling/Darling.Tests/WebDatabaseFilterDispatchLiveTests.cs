@@ -142,8 +142,9 @@ public sealed class WebDatabaseFilterDispatchLiveTests
                     CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(now.AddHours(-2)), serverId, ServerName, db, "usp_" + tag, "0xSQLH" + tag, weight);
 
                 /* Query Store: a baseline capture 40 hours back and a recent capture 30 minutes back that ran 4x slower, so the
-                   same two rows feed get_query_store_top (the recent one, in the 3-hour window) and get_query_store_regressions. */
-                foreach (var (at, executions, avgUs, intervalId) in new[] { (now.AddHours(-40), 100L, 1000L, 2L), (now.AddMinutes(-30), 200L, 4000L, 1L) })
+                   same two rows feed get_query_store_top (the recent one, in the 3-hour window) and get_query_store_regressions.
+                   #6781: 400 recent runs at +3 ms add 1.2 s of CPU, over the regressions 1 s floor. */
+                foreach (var (at, executions, avgUs, intervalId) in new[] { (now.AddHours(-40), 100L, 1000L, 2L), (now.AddMinutes(-30), 400L, 4000L, 1L) })
                 {
                     await DarlingMcpTestData.ExecAsync(connection, ct,
                         @"INSERT INTO query_store_stats

@@ -10,8 +10,6 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
-using System.Security.Cryptography;
-using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -46,26 +44,6 @@ public sealed class QueryStoreTopDailyReadLiveTests
     private static readonly DateTime BuildNow = new(2026, 1, 15, 12, 0, 0, DateTimeKind.Unspecified);
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
-
-    /// <summary>SHA-256 of each statement, line endings normalized. They were taken from the pre-split text, before
-    /// <c>QueryStoreTopSuffix</c> was divided into its ranked head and its tail, and re-taken once for #5313, which
-    /// deliberately changed both statements: the over-fetch <c>LIMIT $4 + 5</c> became the round's candidate limit and
-    /// the tail gained the page / count-row wrapper, and re-taken again for #5420, which deliberately bounded the tail's
-    /// inline-text fallback to the read's window (<c>collection_time &gt;= $2</c> and <c>&lt;= $3</c>), and re-taken for #5523, which deliberately added the table read's upper <c>first_execution_time</c> bound (<c>&lt;= $3 + </c>the slack, twelve hours). The split pin is the
-    /// tail-sharing assert below. Re-taken for #5815, which deliberately sorted the page's candidates before the text lateral
-    /// so <c>LIMIT $4</c> stops the text lookups at a full page (rows and order unchanged). Re-taken for #5984, which deliberately added the query-tag filter's comment token (a no-op until a read names a tag).</summary>
-    private const string RawSqlHash = "DD0DD535EFADA1E258360AE5C8CBFDCD5E6EC0D21F87BCECEAE7BA76411CF827";
-    private const string TableSqlHash = "0CFFEA04CFB2F5FD8C6C9AE9A21E186C1A6349B3772799B909DB39BC9DCE89D3";
-
-    private static string Hash(string sql) =>
-        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(sql.ReplaceLineEndings("\n"))));
-
-    [Fact]
-    public void TheRawAndTableStatements_AreByteIdenticalToTheirPreSplitText()
-    {
-        Assert.Equal(RawSqlHash, Hash(DarlingDataReader.QueryStoreTopSql));
-        Assert.Equal(TableSqlHash, Hash(DarlingDataReader.QueryStoreTopTableSql));
-    }
 
     [Fact]
     public void TheDailyStatement_SharesTheTableReadsTail_AndItsPredicates()

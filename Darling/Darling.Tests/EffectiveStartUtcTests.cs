@@ -178,7 +178,7 @@ public sealed class EffectiveStartUtcTests
     /// (<c>McpQueryTools.WindowNoticeAsync</c> -> <c>WindowNotice</c>, which prints through
     /// <see cref="McpHelpers.FormatEffectiveStart(DateTime)"/>), never from a bare <c>ToString("o")</c> of the store's naive floor.
     /// Each data answer writes the key once, from <c>notice.EffectiveStart</c>. The <c>empty</c> answers are built in one place,
-    /// the empty ladder's three <c>empty</c> rungs, which each pass the same notice under hints; the <c>unavailable</c> rung passes none.
+    /// the empty ladder's four <c>empty</c> rungs (#6453 added the fourth: nothing of any type ever, but the newest run read the session through its event_file), which each pass the same notice under hints; the <c>unavailable</c> rung passes none.
     /// The event-time form is not used: the probe reads <c>event_time</c>, the column the reads window on.
     /// </summary>
     [Fact]
@@ -193,8 +193,8 @@ public sealed class EffectiveStartUtcTests
 
         Assert.Equal(9, writes.Count);
         Assert.All(writes, line => Assert.Equal("effective_start = notice.EffectiveStart,", line));
-        /* #4966: two rungs read their notice first (to choose quiet or cut wording); the third passes it straight. */
-        Assert.Equal(3, Regex.Matches(source, @"emptyAnswer: true\)\)\.AsHints\(\)|hints: notice\.AsHints\(\)").Count);
+        /* #4966: two rungs read their notice first (to choose quiet or cut wording); the other two (#6453 added the second) pass it straight. */
+        Assert.Equal(4, Regex.Matches(source, @"emptyAnswer: true\)\)\.AsHints\(\)|hints: notice\.AsHints\(\)").Count);
         /* A call, not the doc comment that explains why there is none. */
         Assert.DoesNotContain("EventWindowNoticeAsync(", source, StringComparison.Ordinal);
     }

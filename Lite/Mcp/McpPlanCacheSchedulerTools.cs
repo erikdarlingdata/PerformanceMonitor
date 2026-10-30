@@ -3,6 +3,7 @@ using System.Text.Json;
 using ModelContextProtocol.Server;
 using PerformanceMonitorLite.Services;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Collectors;
 
 namespace PerformanceMonitorLite.Mcp;
 
@@ -39,7 +40,7 @@ public sealed class McpPlanCacheSchedulerTools
             /* The summary's stamp is null exactly when the window held no snapshot, which is the same state
                the (0 plans, no groups) test below names — one branch, so a stamped payload always has rows. */
             if (summary.CollectionTime is not DateTime capturedAt || (summary.TotalPlans == 0 && cacheTypes.Count == 0))
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "plan_cache_stats")
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "plan_cache_stats", awsRdsKind: AwsRdsKind.None)
                     ?? McpHelpers.Status("unavailable", "No plan cache statistics available in the requested time range.");
 
             var bloat = LocalDataService.ClassifyPlanCacheBloat(summary.TotalPlans, summary.SingleUsePlans);
@@ -110,7 +111,7 @@ public sealed class McpPlanCacheSchedulerTools
 
             var item = await dataService.GetCpuSchedulerSnapshotAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             if (item == null)
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "cpu_scheduler_stats")
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "cpu_scheduler_stats", awsRdsKind: AwsRdsKind.None)
                     ?? McpHelpers.Status("unavailable", "No CPU scheduler snapshot in the requested time range. The scheduler collector may not have run yet, or its newest snapshot is older than hours_back.");
 
             var workerUtilizationPercent = item.MaxWorkersCount > 0

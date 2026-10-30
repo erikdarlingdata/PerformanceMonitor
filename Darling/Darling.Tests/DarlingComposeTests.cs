@@ -1863,8 +1863,8 @@ public sealed class DarlingComposeTests
     public void QueryStoreHistoryNote_NamesTheStartAndTheReason()
     {
         var start = new DateTime(2026, 8, 3, 12, 0, 0, DateTimeKind.Utc);
-        var filled = DarlingWebEndpoints.QueryStoreHistoryNote(start, QueryStoreIntervalWide.WideStartBound.FilledSince);
-        var purge = DarlingWebEndpoints.QueryStoreHistoryNote(start, QueryStoreIntervalWide.WideStartBound.TablePurgeEdge);
+        var filled = ComposePanelRunner.QueryStoreHistoryNote(start, QueryStoreIntervalWide.WideStartBound.FilledSince);
+        var purge = ComposePanelRunner.QueryStoreHistoryNote(start, QueryStoreIntervalWide.WideStartBound.TablePurgeEdge);
         Assert.Contains(start.ToString("o"), filled, StringComparison.Ordinal);
         Assert.Contains("began keeping complete history", filled, StringComparison.Ordinal);
         Assert.Contains("keeps 10 days", purge, StringComparison.Ordinal);
@@ -1874,7 +1874,7 @@ public sealed class DarlingComposeTests
     public void QueryStoreHistoryNote_NamesTheSettingServer()
     {
         var start = new DateTime(2026, 8, 3, 12, 0, 0, DateTimeKind.Utc);
-        var named = DarlingWebEndpoints.QueryStoreHistoryNote(start, QueryStoreIntervalWide.WideStartBound.FilledSince, "alpha");
+        var named = ComposePanelRunner.QueryStoreHistoryNote(start, QueryStoreIntervalWide.WideStartBound.FilledSince, "alpha");
         Assert.Contains("complete history for alpha at ", named, StringComparison.Ordinal);
         Assert.DoesNotContain("these servers", named, StringComparison.Ordinal);
     }

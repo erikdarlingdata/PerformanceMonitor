@@ -16,8 +16,8 @@ using System.Text.Json.Serialization;
 namespace PerformanceMonitor.Darling.Service;
 
 /// <summary>
-/// #5307: finds the keys under <c>web.network</c> and <c>mcp.network</c> (including their <c>tls</c> blocks and
-/// <c>web.network.oidc</c>) that no config class declares, so the worker can name each one at start. A mistyped
+/// #5307: finds the keys directly under <c>web</c> and under <c>web.network</c> and <c>mcp.network</c> (including their
+/// <c>tls</c> blocks and <c>web.network.oidc</c>) that no config class declares, so the worker can name each one at start. A mistyped
 /// key such as <c>ssl</c> for <c>tls</c> is otherwise dropped at load and the block behaves as if the setting had
 /// never been written.
 ///
@@ -40,7 +40,13 @@ internal static class DarlingUnknownKeys
         foreach (var root in doc.RootElement.ValueKind == JsonValueKind.Object ? doc.RootElement.EnumerateObject() : default)
         {
             var sectionType = root.Name.ToLowerInvariant() switch { "web" => typeof(WebConfig), "mcp" => typeof(McpConfig), _ => null };
-            if (sectionType is not null && TryGetIgnoreCase(root.Value, "network", out var network))
+            if (sectionType == typeof(WebConfig))
+            {
+                // The web section is walked whole (its direct keys and, through them, web.network), so a misspelled
+                // "allowAdminWrite" is named at start rather than silently leaving the default (#6600).
+                Walk(root.Value, typeof(WebConfig), "web", found);
+            }
+            else if (sectionType is not null && TryGetIgnoreCase(root.Value, "network", out var network))
             {
                 var networkType = sectionType.GetProperty("Network")!.PropertyType;
                 Walk(network, Nullable.GetUnderlyingType(networkType) ?? networkType, sectionType == typeof(WebConfig) ? "web.network" : "mcp.network", found);

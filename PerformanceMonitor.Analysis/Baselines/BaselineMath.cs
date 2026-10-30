@@ -232,7 +232,7 @@ public static class BaselineMath
         MetricNames.Cpu => 5.0,        // CPU utilization %
         MetricNames.PgCpu => 5.0,      // percent of the capacity ceiling — same unit as Cpu, same floor (#3691, see the summary)
         MetricNames.Memory => 4.0,     // memory pressure %
-        MetricNames.IoLatency => 2.5,  // I/O latency ms
+        MetricNames.IoLatency or MetricNames.IoWriteLatency => 2.5,  // I/O latency ms (read and write share the unit, so the floor)
         _ => 0.0,                       // batch/query-duration/sessions/waits/blocking/deadlock — server-relative (PG tps/sessions/deadlock/wait too)
     };
 

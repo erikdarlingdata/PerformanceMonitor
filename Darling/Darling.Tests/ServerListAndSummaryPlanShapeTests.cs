@@ -86,6 +86,10 @@ public sealed class ServerListAndSummaryPlanShapeTests
             await ExecAsync(connection, ct,
                 "INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_engine_edition, sql_major_version, engine_kind, created_date, modified_date) VALUES ($1, $2, $2, TRUE, 3, 16, 'sqlserver', $3, $3)",
                 CollectingServerId, "server3976-a", now.AddDays(-9));
+            /* #6454: list_servers lists a registered server only while its definition exists. */
+            await ExecAsync(connection, ct,
+                "INSERT INTO config.config_monitored_servers (server_id, name, host, is_enabled) VALUES ($1, $2, $2, TRUE) ON CONFLICT (server_id) DO NOTHING",
+                CollectingServerId, "server3976-a");
 
             /* A week of daily history at production-like density (a real store's collectors write hundreds of
                rows a day per server), so the planner's cost model has the same incentive it has in the field
@@ -237,7 +241,7 @@ public sealed class ServerListAndSummaryPlanShapeTests
     {
         var ids = string.Join(", ", Array.ConvertAll(s_serverIds, id => id.ToString(CultureInfo.InvariantCulture)));
         using var cleanup = new NpgsqlCommand(
-            $"DELETE FROM collection_log WHERE server_id IN ({ids}); DELETE FROM servers WHERE server_id IN ({ids});", connection);
+            $"DELETE FROM collection_log WHERE server_id IN ({ids}); DELETE FROM servers WHERE server_id IN ({ids}); DELETE FROM config.config_monitored_servers WHERE server_id IN ({ids});", connection);
         await cleanup.ExecuteNonQueryAsync(ct);
     }
 

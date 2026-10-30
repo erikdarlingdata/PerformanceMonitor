@@ -118,8 +118,6 @@ public sealed class StoredServerClockRowTextTests
 
         Assert.Equal("2026-11-01 01:30:00", firstPass.RunTimeLocal);
         Assert.Equal("2026-11-01 01:30:00", secondPass.RunTimeLocal);
-        Assert.Equal("2026-11-01 01:45:00", firstPass.LastSuccessfulRunLocal);
-        Assert.Equal("2026-11-01 01:45:00", secondPass.LastSuccessfulRunLocal);
 
         /* A real instant in the same test keeps the offset: the two passes of 01:30 are 05:30Z and 06:30Z. */
         Assert.Equal("2026-11-01 01:30:00 -04:00", TrueUtcRowText(Naive(2026, 11, 1, 5, 30)));
@@ -138,8 +136,6 @@ public sealed class StoredServerClockRowTextTests
         Assert.Equal("2026-11-01 00:59:00", beforeTheHour.RunTimeLocal);
         Assert.Equal("2026-11-01 02:00:00", afterTheHour.RunTimeLocal);
         Assert.Equal("2026-07-06 12:00:00", summer.RunTimeLocal);
-        Assert.Equal("2026-07-06 11:00:00", summer.LastSuccessfulRunLocal);
-        Assert.Equal("Never", beforeTheHour.LastSuccessfulRunLocal);
         Assert.Equal("", new ViewerJobHistoryRow().RunTimeLocal);
     }
 

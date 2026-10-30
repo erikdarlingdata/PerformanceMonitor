@@ -229,11 +229,28 @@ public static class ServerHardwareScope
 
     /// <summary>
     /// The FinOps utilization verdict sentence for a server whose provisioning is RIGHT_SIZED. Off an Azure SQL Database it is
-    /// the long-standing sentence, byte for byte. On one it says the same, with the share named against the database's memory
-    /// limit instead of physical RAM.
+    /// the long-standing sentence, byte for byte, when the average CPU is at or above <see cref="ProvisioningVerdict.IdleAvgCpuPercent"/>
+    /// and the buffer pool holds at least <see cref="ProvisioningVerdict.WellUtilizedBufferPoolPercent"/> of the memory basis.
+    /// On an Azure SQL Database it says the same, with the share named against the database's memory limit instead of physical RAM,
+    /// and "database" where the server would be named.
+    /// <para>#6646: RIGHT_SIZED is also the answer for a server whose average is below that bar, so the CPU clause names the test
+    /// that decided: one sample at or above <see cref="ProvisioningVerdict.IdleMaxCpuPercent"/> is real peak demand, so the server is
+    /// not rated over-provisioned; otherwise the measured grant utilization held it back. "Well-utilized" is said only when the buffer
+    /// pool holds at least <see cref="ProvisioningVerdict.WellUtilizedBufferPoolPercent"/> of the basis.</para>
     /// </summary>
-    public static string RightSizedExplanation(decimal avgCpuPct, decimal p95CpuPct, double bufferPoolPct, bool azureSqlDatabase) =>
-        string.Create(CultureInfo.CurrentCulture, $"CPU is moderately loaded (avg {avgCpuPct:N1}%, p95 {p95CpuPct:N1}%) and memory is well-utilized (buffer pool uses {bufferPoolPct:N0}% of {MemoryBasis(azureSqlDatabase)}). No action needed.");
+    public static string RightSizedExplanation(decimal avgCpuPct, decimal p95CpuPct, int maxCpuPct, decimal grantUtilizationPct, double bufferPoolPct, bool azureSqlDatabase)
+    {
+        var target = azureSqlDatabase ? "database" : "server";
+        var cpu = avgCpuPct >= ProvisioningVerdict.IdleAvgCpuPercent
+            ? string.Create(CultureInfo.CurrentCulture, $"CPU is moderately loaded (avg {avgCpuPct:N1}%, p95 {p95CpuPct:N1}%)")
+            : maxCpuPct >= ProvisioningVerdict.IdleMaxCpuPercent
+                ? string.Create(CultureInfo.CurrentCulture, $"CPU averaged {avgCpuPct:N1}% (p95 {p95CpuPct:N1}%), but one sample reached {maxCpuPct:N0}%, so this {target} is not rated over-provisioned")
+                : string.Create(CultureInfo.CurrentCulture, $"CPU is lightly loaded (avg {avgCpuPct:N1}%, p95 {p95CpuPct:N1}%), but its memory grants peaked at {grantUtilizationPct:N0}% of their target (threshold: {ProvisioningVerdict.IdleGrantUtilizationPercent:N0}%), so this {target} is not rated over-provisioned");
+        var memory = bufferPoolPct >= ProvisioningVerdict.WellUtilizedBufferPoolPercent
+            ? string.Create(CultureInfo.CurrentCulture, $"memory is well-utilized (buffer pool uses {bufferPoolPct:N0}% of {MemoryBasis(azureSqlDatabase)})")
+            : string.Create(CultureInfo.CurrentCulture, $"the buffer pool uses {bufferPoolPct:N0}% of {MemoryBasis(azureSqlDatabase)}");
+        return cpu + " and " + memory + ". No action needed.";
+    }
 
     /// <summary>
     /// The FinOps utilization verdict sentence for a server whose provisioning is OVER_PROVISIONED. Same rule as
@@ -241,7 +258,7 @@ public static class ServerHardwareScope
     /// against the database's memory limit, about "this database".
     /// </summary>
     public static string OverProvisionedExplanation(decimal avgCpuPct, int maxCpuPct, double bufferPoolPct, bool azureSqlDatabase) =>
-        string.Create(CultureInfo.CurrentCulture, $"CPU is lightly loaded (avg {avgCpuPct:N1}%, max {maxCpuPct}%) and buffer pool uses only {bufferPoolPct:N0}% of {MemoryBasis(azureSqlDatabase)}. This {(azureSqlDatabase ? "database" : "server")} may have more resources than it needs.");
+        string.Create(CultureInfo.CurrentCulture, $"CPU is lightly loaded (avg {avgCpuPct:N1}%, max {maxCpuPct}%) and the buffer pool uses {bufferPoolPct:N0}% of {MemoryBasis(azureSqlDatabase)}. This {(azureSqlDatabase ? "database" : "server")} may have more resources than it needs.");
 
     /// <summary>
     /// The physical memory (<c>server_properties.physical_memory_mb</c>) a calculation may treat as the server's OWN. Off an

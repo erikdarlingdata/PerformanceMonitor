@@ -120,9 +120,12 @@ public sealed class AlertSettingsControlWiringTests
            #3653 (A5, Q5) added the Long-Running Query opt-out knob's two lists in the same shape, and the
            source pin in Darling.Tests.LongRunningQueryExclusionsTests holds their root["..."] keys.
            AlertCooldownMinutes (#5881) reaches the document from a local the same method sets the static from, so no
-           thread can change what is written; SettingsWindowTabsLiteTests checks the value in the root. */
+           thread can change what is written; SettingsWindowTabsLiteTests checks the value in the root.
+           AlertClientTimeoutsEnabled (#5736) reaches the document through App.WriteClientTimeoutsSwitch, which writes it beside
+           its on-by-default marker. ClientTimeoutsOnByDefaultSettingsTests checks both keys in a real root and loads
+           them back. */
         var unpersisted = assigned.Except(persisted)
-            .Except(new[] { "AlertExcludedDatabases", "AlertExcludedVolumes", "AlertLongRunningQueryExcludedProgramNamePrefixes", "AlertLongRunningQueryExcludedLogins", "AlertCooldownMinutes" })
+            .Except(new[] { "AlertClientTimeoutsEnabled", "AlertExcludedDatabases", "AlertExcludedVolumes", "AlertLongRunningQueryExcludedProgramNamePrefixes", "AlertLongRunningQueryExcludedLogins", "AlertCooldownMinutes" })
             .OrderBy(n => n, StringComparer.Ordinal)
             .ToList();
 

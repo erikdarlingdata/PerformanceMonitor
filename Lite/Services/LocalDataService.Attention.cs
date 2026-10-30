@@ -52,7 +52,10 @@ public partial class LocalDataService
         var applications = await QueryAttentionAsync(connection, AttentionWindowSql.TopBy("v_attention_events", "client_app_name", bounded: true), serverId, topFloor, topCeiling,
             r => new AttentionTopItem(r.GetString(0), r.GetInt64(1)));
 
-        return new AttentionWindow(runs, counts, groups, statements, databases, applications, topsFromLookback);
+        var hosts = await QueryAttentionAsync(connection, AttentionWindowSql.TopBy("v_attention_events", "client_hostname", bounded: true), serverId, topFloor, topCeiling,
+            r => new AttentionTopItem(r.GetString(0), r.GetInt64(1)));
+
+        return new AttentionWindow(runs, counts, groups, statements, databases, applications, topsFromLookback, hosts);
     }
 
     /// <summary>
@@ -99,6 +102,8 @@ public partial class LocalDataService
             r => new AttentionTopItem(r.GetString(0), r.GetInt64(1)));
         var applications = await QueryAttentionAsync(connection, AttentionWindowSql.TopBy("v_attention_events", "client_app_name", bounded: true), serverId, spanFloor, spanCeiling,
             r => new AttentionTopItem(r.GetString(0), r.GetInt64(1)));
+        var hosts = await QueryAttentionAsync(connection, AttentionWindowSql.TopBy("v_attention_events", "client_hostname", bounded: true), serverId, spanFloor, spanCeiling,
+            r => new AttentionTopItem(r.GetString(0), r.GetInt64(1)));
         var samples = await QueryAttentionAsync(connection, AttentionWindowSql.Samples("v_attention_events", sampleLimit + 1), serverId, spanFloor, spanCeiling,
             r => new ClientTimeoutSample(
                 r.IsDBNull(0) ? null : r.GetDateTime(0),
@@ -111,7 +116,7 @@ public partial class LocalDataService
                 r.IsDBNull(7) ? null : r.GetString(7),
                 r.IsDBNull(8) ? null : r.GetString(8)));
 
-        return (new AttentionWindow(runs, counts, groups, statements, databases, applications), samples);
+        return (new AttentionWindow(runs, counts, groups, statements, databases, applications, TopHosts: hosts), samples);
     }
 
     /// <summary>

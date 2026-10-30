@@ -132,7 +132,8 @@ export function buildStrips(reads) {
   };
 
   const waits = {
-    key: "waits", title: "Waits", unit: "ms/sec",
+    /* From 0 like the other four strips: an axis zoomed to 292-500 made a small swing in wait time look like a spike. */
+    key: "waits", title: "Waits", unit: "ms/sec", min: 0,
     series: [{ label: "Wait time", color: "#ffb74d", points: toTimed(rowsOf(reads.waits, "trend"), "time", (r) => r.wait_time_ms_per_second) }],
     note: note(reads.waits, "No wait samples in this window."),
   };
@@ -473,6 +474,8 @@ export function fillOverviewStrips(body, server, ctx) {
       /* The Viewer's four baselines at the window start, from the one web-only read; a failure costs the bands, never the lines. */
       readTool("get_overview_baselines", { server, window_start: baselineStart }, ctx && ctx.signal).catch((e) => ({ kind: "error", message: String((e && e.message) || e) })),
     ]);
+    /* #6793: the batch was cancelled (a redraw, or the user left the page). Nothing is drawn into a body nobody is looking at. */
+    if (baselineRes.kind === "aborted" || results.some((r) => r.kind === "aborted")) return;
     const reads = {};
     READS.forEach(([key], i) => { reads[key] = results[i]; });
     const strips = buildStrips(reads);

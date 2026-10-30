@@ -63,6 +63,7 @@ public sealed class StoreConfigProvider
     /// </summary>
     private int _viewReadFailureStreak;
     private (int Count, bool Waiting) _lastReenterLogged = (-1, false);
+    private string? _lastPortWarningsLogged;
 
     /// <summary>
     /// Says whether the one-time pin step is open and has not been able to run (#5456). Set by the worker right after the
@@ -1428,11 +1429,14 @@ INSERT INTO config_alert_settings (
     runnable_queue_enabled, runnable_queue_warning_per_scheduler, runnable_queue_critical_per_scheduler,
     client_timeouts_enabled, client_timeouts_warning_per_minute, client_timeouts_critical_per_minute,
     excluded_volumes,
-    client_timeouts_warning_multiple, client_timeouts_critical_multiple)
+    client_timeouts_warning_multiple, client_timeouts_critical_multiple,
+    agent_alert_gaps_enabled, backup_overdue_enabled, log_backup_overdue_enabled, checkdb_overdue_enabled,
+    identity_capacity_enabled, identity_capacity_warning_percent, identity_capacity_critical_percent,
+    blocking_warn_per_hour, blocking_critical_per_hour, blocking_warn_wait_seconds, blocking_critical_wait_seconds)
 VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21,
         $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42,
         $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63,
-        $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79)
+        $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81, $82, $83, $84, $85, $86, $87, $88, $89, $90)
 ON CONFLICT (id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
         command.Parameters.AddWithValue(a.Enabled);
         command.Parameters.AddWithValue(a.CpuEnabled);
@@ -1552,6 +1556,21 @@ ON CONFLICT (id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadl
         /* #5736, bound last in the same order the V211 columns were appended. Seeded RAW like every sibling: the clamp lives on DarlingAlertSettings. */
         command.Parameters.AddWithValue(a.ClientTimeoutsWarningMultiple);
         command.Parameters.AddWithValue(a.ClientTimeoutsCriticalMultiple);
+        /* #6874, bound last in the order the V222 column was appended. The switch seeds FALSE: the alert ships off. */
+        command.Parameters.AddWithValue(a.AgentAlertGapsEnabled);
+        /* #6873, bound last in the order the V223 columns were appended. The three switches seed FALSE: the alerts ship off. */
+        command.Parameters.AddWithValue(a.BackupOverdueEnabled);
+        command.Parameters.AddWithValue(a.LogBackupOverdueEnabled);
+        command.Parameters.AddWithValue(a.CheckDbOverdueEnabled);
+        /* #6875, bound last in the order the V224 columns were appended. The switch seeds FALSE: the alert ships off. The bars are seeded RAW, the clamp lives on DarlingAlertSettings. */
+        command.Parameters.AddWithValue(a.IdentityCapacityEnabled);
+        command.Parameters.AddWithValue(a.IdentityCapacityWarningPercent);
+        command.Parameters.AddWithValue(a.IdentityCapacityCriticalPercent);
+        /* #6927, bound last in the order the V228 columns were appended. Seeded RAW like every sibling: the clamp lives on BlockingBandThresholds. */
+        command.Parameters.AddWithValue(a.BlockingWarnPerHour);
+        command.Parameters.AddWithValue(a.BlockingCriticalPerHour);
+        command.Parameters.AddWithValue(a.BlockingWarnWaitSeconds);
+        command.Parameters.AddWithValue(a.BlockingCriticalWaitSeconds);
         await command.ExecuteNonQueryAsync(ct);
     }
 
@@ -1562,8 +1581,11 @@ ON CONFLICT (id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadl
         using var command = new NpgsqlCommand(@"
 INSERT INTO config_notification (
     id, smtp_host, smtp_port, smtp_use_ssl, smtp_username, smtp_encrypted_password, smtp_from_address,
-    smtp_recipients, email_cooldown_minutes, teams_url, teams_proxy, slack_url, slack_proxy, modified_at)
-VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+    smtp_recipients, email_cooldown_minutes, teams_url, teams_proxy, slack_url, slack_proxy, modified_at,
+    generic_url, generic_headers, generic_body_template, generic_proxy,
+    pagerduty_routing_key, pagerduty_use_eu_region, pagerduty_proxy, pagerduty_auto_resolve,
+    slack_send_resolutions, teams_send_resolutions, generic_send_resolutions, email_send_resolutions)
+VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
 ON CONFLICT (id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
         command.Parameters.AddWithValue(s.Host);
         command.Parameters.AddWithValue(s.Port);
@@ -1578,7 +1600,222 @@ ON CONFLICT (id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadl
         command.Parameters.AddWithValue(w.SlackUrl);
         command.Parameters.AddWithValue(w.SlackProxy);
         command.Parameters.AddWithValue(now);
+        /* #6715: every other column ReadNotificationAsync reads that darling.json can set. The row is read back whole and the store
+           wins, so a column this INSERT left out kept its empty default and the file's value was dead. Raw like the Teams and Slack
+           values above: a value that is not sealed is read as stored (DarlingWebhookSecrets.OpenValue). The signing keys are not here:
+           WebhooksConfig.GenericSigning is JsonIgnore, so the file cannot carry one. */
+        command.Parameters.AddWithValue(w.GenericUrl);
+        command.Parameters.AddWithValue(w.GenericHeaders);
+        command.Parameters.AddWithValue(w.GenericBodyTemplate);
+        command.Parameters.AddWithValue(w.GenericProxy);
+        command.Parameters.AddWithValue(w.PagerDutyRoutingKey);
+        command.Parameters.AddWithValue(w.PagerDutyUseEuRegion);
+        command.Parameters.AddWithValue(w.PagerDutyProxy);
+        command.Parameters.AddWithValue(w.PagerDutyAutoResolve);
+        command.Parameters.AddWithValue(w.SlackSendResolutions);
+        command.Parameters.AddWithValue(w.TeamsSendResolutions);
+        command.Parameters.AddWithValue(w.GenericSendResolutions);
+        command.Parameters.AddWithValue(s.SendResolutions);
         await command.ExecuteNonQueryAsync(ct);
+    }
+
+    /* ---------------- seal the plain text webhook values on the settings row (#6715) ---------------- */
+
+    /// <summary>
+    /// #6715: seals each webhook value on the notification settings row (<c>config_notification</c> id 1) that is still stored as
+    /// plain text: the Teams, Slack and generic URLs, the generic headers and the PagerDuty routing key. The first start's seed
+    /// copies them from darling.json before the password key is loaded, and an older build can have left one too. The reader
+    /// passes a plain value through (<see cref="DarlingWebhookSecrets"/>), so they work, but until now they stayed plain text until
+    /// the next save. The worker runs this on every start, right after the key ring loads and before the first config view.
+    /// <para>Each value is sealed the way <c>update_notification_channels</c> seals it
+    /// (<see cref="NotificationRouteWriter.SealNewSettingsValue"/>, for the channel's proxy; the headers for the generic URL text as it
+    /// will be stored), and written with a compare-and-set: a column changes only while it and what its seal is bound to (its proxy,
+    /// for the headers the generic URL too) still hold what was read. A Viewer, web or MCP save that lands in between wins (the MCP
+    /// and web hosts can take a write before this runs, #5240). The UPDATE fires the row's statement trigger, which bumps
+    /// <c>config_version</c> like every other write; it runs only when there is a value to seal.</para>
+    /// <para>A ring that cannot seal, or a value a save would refuse, leaves the value as it is with one warning that names the
+    /// columns, never a value, and the next start tries again. The generic URL stays plain text while a signing key is saved for
+    /// it (the key is sealed for the URL's stored text), and the headers are sealed only with a sealed (or empty) generic URL.
+    /// Never throws except for cancellation. <paramref name="afterRead"/> is the tests' seam between the read and the write.</para>
+    /// </summary>
+    public async Task SealPlainWebhookSettingsAsync(
+        IPasswordKeyRing ring, CancellationToken cancellationToken, Func<CancellationToken, Task>? afterRead = null)
+    {
+        ArgumentNullException.ThrowIfNull(ring);
+        try
+        {
+            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            var v = new string?[9];
+            bool signingSaved;
+            await using (var select = new NpgsqlCommand(
+                "SELECT teams_url, teams_proxy, slack_url, slack_proxy, generic_url, generic_headers, generic_proxy, "
+                + "pagerduty_routing_key, pagerduty_proxy, COALESCE(signing_key, '') <> '' OR COALESCE(previous_signing_key, '') <> '' "
+                + "FROM config_notification WHERE id = 1",
+                connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds })
+            await using (var reader = await select.ExecuteReaderAsync(cancellationToken))
+            {
+                if (!await reader.ReadAsync(cancellationToken))
+                {
+                    return;
+                }
+
+                for (var i = 0; i < v.Length; i++)
+                {
+                    v[i] = reader.IsDBNull(i) ? null : reader.GetString(i);
+                }
+
+                signingSaved = reader.GetBoolean(9);
+            }
+
+            static bool IsPlain(string? value) => !string.IsNullOrWhiteSpace(value) && !PasswordSeal.IsSealed(value);
+            var plain = new (int Index, string Column)[] { (0, "teams_url"), (2, "slack_url"), (4, "generic_url"), (5, "generic_headers"), (7, "pagerduty_routing_key") }
+                .Where(c => IsPlain(v[c.Index])).Select(c => c.Column).ToList();
+            if (plain.Count == 0)
+            {
+                return;
+            }
+
+            if (!ring.Status.CanSeal)
+            {
+                _logger?.LogWarning(
+                    "The notification settings hold {Columns} as plain text, and the password key cannot seal them at this start ({Reason}). They stay as they are; the next start tries again.",
+                    string.Join(", ", plain), (ring.Status.Reason ?? DarlingPasswordKey.NotReadyReason).TrimEnd('.'));
+                return;
+            }
+
+            var (seal, refusal) = Mcp.DarlingMcpAlertTools.RouteSealer(ring);
+            var parameters = new List<NpgsqlParameter>();
+            var writes = new List<(string Column, string Sealed, string Condition)>();
+            var refused = new List<string>();
+            var kept = new List<string>();
+
+            string P(string? value)
+            {
+                parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)value ?? DBNull.Value });
+                return "$" + parameters.Count.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            }
+
+            string? Seal(string column, string slot, string value, string? proxy, string? boundUrl, string label)
+            {
+                try
+                {
+                    return NotificationRouteWriter.SealNewSettingsValue(slot, value, proxy, boundUrl, label, seal, refusal);
+                }
+                catch (NotificationRouteRefusedException)
+                {
+                    refused.Add(column);
+                    return null;
+                }
+            }
+
+            void SealUrlOrKey(string column, string proxyColumn, string slot, string? value, string? proxy, string label)
+            {
+                if (IsPlain(value) && Seal(column, slot, value!, proxy, null, label) is { } sealedText)
+                {
+                    writes.Add((column, sealedText, $"{column} = {P(value)} AND {proxyColumn} IS NOT DISTINCT FROM {P(proxy)}"));
+                }
+            }
+
+            SealUrlOrKey("teams_url", "teams_proxy", "teams", v[0], v[1], "Teams webhook URL");
+            SealUrlOrKey("slack_url", "slack_proxy", "slack", v[2], v[3], "Slack webhook URL");
+
+            /* The generic URL first, then the headers bound to its text as it will be stored, the order update_notification_channels
+               uses. The headers' condition carries the URL's, so the two land together or not at all. */
+            var (genericUrl, genericHeaders, genericProxy) = (v[4], v[5], v[6]);
+            var urlAfter = genericUrl;
+            string? urlCondition = null;
+            if (IsPlain(genericUrl))
+            {
+                if (signingSaved)
+                {
+                    kept.Add("generic_url");
+                }
+                else if (Seal("generic_url", "generic", genericUrl!, genericProxy, null, "generic webhook URL") is { } sealedUrl)
+                {
+                    urlCondition = $"generic_url = {P(genericUrl)} AND generic_proxy IS NOT DISTINCT FROM {P(genericProxy)} "
+                        + "AND COALESCE(signing_key, '') = '' AND COALESCE(previous_signing_key, '') = ''";
+                    writes.Add(("generic_url", sealedUrl, urlCondition));
+                    urlAfter = sealedUrl;
+                }
+            }
+
+            if (IsPlain(genericHeaders))
+            {
+                if (IsPlain(urlAfter))
+                {
+                    kept.Add("generic_headers");
+                }
+                else if (Seal("generic_headers", "generic_headers", genericHeaders!, genericProxy, urlAfter, "generic webhook headers") is { } sealedHeaders)
+                {
+                    urlCondition ??= $"generic_url IS NOT DISTINCT FROM {P(genericUrl)} AND generic_proxy IS NOT DISTINCT FROM {P(genericProxy)}";
+                    writes.Add(("generic_headers", sealedHeaders, $"generic_headers = {P(genericHeaders)} AND {urlCondition}"));
+                }
+            }
+
+            SealUrlOrKey("pagerduty_routing_key", "pagerduty_proxy", "pagerduty", v[7], v[8], "PagerDuty routing key");
+
+            if (refused.Count > 0)
+            {
+                _logger?.LogWarning(
+                    "The notification settings hold {Columns} as plain text that a save would refuse, so it stays as it is. Enter it again in Settings to seal it.",
+                    string.Join(", ", refused));
+            }
+
+            if (kept.Count > 0)
+            {
+                _logger?.LogWarning(
+                    "The notification settings keep {Columns} as plain text: the generic webhook URL stays plain text while a signing key is saved for its text or a save would refuse it, and the headers are sealed only with a sealed URL.",
+                    string.Join(", ", kept));
+            }
+
+            if (writes.Count == 0)
+            {
+                return;
+            }
+
+            var set = string.Join(", ", writes.Select(w => $"{w.Column} = CASE WHEN {w.Condition} THEN {P(w.Sealed)} ELSE {w.Column} END"));
+            var sql = $"UPDATE config_notification SET {set} WHERE id = 1 AND ({string.Join(" OR ", writes.Select(w => "(" + w.Condition + ")"))}) "
+                + $"RETURNING {string.Join(", ", writes.Select(w => w.Column))}";
+
+            if (afterRead is not null)
+            {
+                await afterRead(cancellationToken);
+            }
+
+            var landed = new List<string>();
+            await using (var update = new NpgsqlCommand(sql, connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds })
+            {
+                update.Parameters.AddRange(parameters.ToArray());
+                await using var reader = await update.ExecuteReaderAsync(cancellationToken);
+                if (await reader.ReadAsync(cancellationToken))
+                {
+                    for (var i = 0; i < writes.Count; i++)
+                    {
+                        if (!reader.IsDBNull(i) && string.Equals(reader.GetString(i), writes[i].Sealed, StringComparison.Ordinal))
+                        {
+                            landed.Add(writes[i].Column);
+                        }
+                    }
+                }
+            }
+
+            if (landed.Count > 0)
+            {
+                _logger?.LogInformation("Sealed {Columns} on the notification settings, which were stored as plain text.", string.Join(", ", landed));
+            }
+
+            var changed = writes.Select(w => w.Column).Except(landed, StringComparer.Ordinal).ToList();
+            if (changed.Count > 0)
+            {
+                _logger?.LogInformation("{Columns} on the notification settings changed while this start was sealing them; the newer save is kept.", string.Join(", ", changed));
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger?.LogWarning(
+                "Could not seal the plain text webhook values on the notification settings at this start; the next start tries again: {Message}",
+                ex.Message);
+        }
     }
 
     private static async Task SeedMonitoredServersAsync(NpgsqlConnection connection, DarlingConfig config, DateTime now, CancellationToken ct)
@@ -1771,6 +2008,19 @@ ON CONFLICT (server_id) DO NOTHING", connection, transaction) { CommandTimeout =
 
             var servers = await ReadMonitoredServersAsync(connection, bootstrap, cancellationToken, pins);
 
+            /* #6583: a SQL Server registry row that holds a port, which is ignored. Once per change in the warnings, not once per reload. */
+            var portWarnings = SqlServerPortAdvice.Warnings(servers);
+            var portWarningKey = string.Join('\n', portWarnings);
+            if (portWarningKey != _lastPortWarningsLogged)
+            {
+                foreach (var warning in portWarnings)
+                {
+                    _logger?.LogWarning("{Warning}", warning);
+                }
+
+                _lastPortWarningsLogged = portWarningKey;
+            }
+
             /* Once per change, not once per reload: the count is the same on every reload until someone enters a password.
                #5456: while the one-time pin step is waiting to run, the same count is a different message (do not enter
                them again yet), so the line is repeated once when that changes. */
@@ -1852,10 +2102,10 @@ ON CONFLICT (server_id) DO NOTHING", connection, transaction) { CommandTimeout =
 
     /// <summary>The V59 collector-memory knob clamps (#2164/#2170) — a bad stored value degrades to a sane
     /// one rather than failing the config load, matching the alert knobs' posture.</summary>
-    internal const int MinTextBudgetMb = 4;
-    internal const int MaxTextBudgetMb = 256;
-    internal const int MinConcurrentSweeps = 1;
-    internal const int MaxConcurrentSweepsLimit = 16;
+    internal const int MinTextBudgetMb = PerformanceMonitor.Darling.Storage.ServiceFlagLimits.TextBudgetMbMin;
+    internal const int MaxTextBudgetMb = PerformanceMonitor.Darling.Storage.ServiceFlagLimits.TextBudgetMbMax;
+    internal const int MinConcurrentSweeps = PerformanceMonitor.Darling.Storage.ServiceFlagLimits.ConcurrentSweepsMin;
+    internal const int MaxConcurrentSweepsLimit = PerformanceMonitor.Darling.Storage.ServiceFlagLimits.ConcurrentSweepsMax;
 
     internal static int ClampTextBudgetMb(int value) => Math.Clamp(value, MinTextBudgetMb, MaxTextBudgetMb);
 
@@ -1958,7 +2208,10 @@ SELECT enabled, cpu_enabled, cpu_threshold_percent, cpu_mode, blocking_enabled, 
        runnable_queue_enabled, runnable_queue_warning_per_scheduler, runnable_queue_critical_per_scheduler,
        client_timeouts_enabled, client_timeouts_warning_per_minute, client_timeouts_critical_per_minute,
        excluded_volumes,
-       client_timeouts_warning_multiple, client_timeouts_critical_multiple
+       client_timeouts_warning_multiple, client_timeouts_critical_multiple,
+       agent_alert_gaps_enabled, backup_overdue_enabled, log_backup_overdue_enabled, checkdb_overdue_enabled,
+       identity_capacity_enabled, identity_capacity_warning_percent, identity_capacity_critical_percent,
+       blocking_warn_per_hour, blocking_critical_per_hour, blocking_warn_wait_seconds, blocking_critical_wait_seconds
 FROM config_alert_settings WHERE id = 1", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
         using var reader = await command.ExecuteReaderAsync(ct);
         if (!await reader.ReadAsync(ct))
@@ -2119,6 +2372,21 @@ FROM config_alert_settings WHERE id = 1", connection) { CommandTimeout = Service
             /* #5736 (V211): the relative Client Timeouts bars' multiples, appended at 77-78 (same reachability rule as every appended knob). */
             ClientTimeoutsWarningMultiple = reader.GetInt32(77),
             ClientTimeoutsCriticalMultiple = reader.GetInt32(78),
+            /* #6874 (V222): the Agent Alert Gaps switch at 79 (same reachability rule as every appended knob). */
+            AgentAlertGapsEnabled = reader.GetBoolean(79),
+            /* #6873 (V223): the three database protection alert switches at 80-82 (same reachability rule as every appended knob). */
+            BackupOverdueEnabled = reader.GetBoolean(80),
+            LogBackupOverdueEnabled = reader.GetBoolean(81),
+            CheckDbOverdueEnabled = reader.GetBoolean(82),
+            /* #6875 (V224): the Identity Capacity switch and its two bars at 83-85 (same reachability rule as every appended knob). */
+            IdentityCapacityEnabled = reader.GetBoolean(83),
+            IdentityCapacityWarningPercent = reader.GetInt32(84),
+            IdentityCapacityCriticalPercent = reader.GetInt32(85),
+            /* #6927 (V228): the four blocking band tiers at 86-89 (same reachability rule as every appended knob). */
+            BlockingWarnPerHour = reader.GetDouble(86),
+            BlockingCriticalPerHour = reader.GetDouble(87),
+            BlockingWarnWaitSeconds = reader.GetDouble(88),
+            BlockingCriticalWaitSeconds = reader.GetDouble(89),
         };
         var analysis = new AnalysisConfig
         {
@@ -2231,7 +2499,7 @@ SELECT name, host, database, auth, username, encrypted_password, encrypt_mode, t
        read_only_intent, multi_subnet_failover, excluded_databases, monthly_cost_usd, alert_delivery_mode_override,
        engine, port, server_id, plan_force_bot_enabled, remediation_username, remediation_encrypted_password,
        aws_role_arn, aws_external_id, hypothetical_index_username, hypothetical_index_encrypted_password,
-       query_store_replica
+       query_store_replica, capture_plans
 FROM config_monitored_servers WHERE is_enabled = TRUE
 ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
         using var reader = await command.ExecuteReaderAsync(ct);
@@ -2410,6 +2678,9 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
             HypotheticalIndexEncryptedPassword = reader.IsDBNull(22) ? null : reader.GetString(22),
             /* V213 (#6254): the Query Store replica. Nullable with no default: NULL is the shipped state and reads from the server itself. */
             QueryStoreReplica = reader.IsDBNull(23) ? null : reader.GetString(23),
+            /* #6771: the per-server plan-capture setting. Nullable with no default: NULL is every server nobody has set, and it means
+               the service-wide setting. Read through IsDBNull, never GetBoolean alone, so NULL does not become false. */
+            CapturePlans = reader.IsDBNull(24) ? null : reader.GetBoolean(24),
         };
 
         /* #5366: the identity a sealed password is bound to is the row's own text, read through the one raw-row mapping
@@ -2519,7 +2790,7 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
     public const string NotificationRoutesSelectSql =
         "SELECT route_id, metric_match, teams_url, slack_url, generic_url, pagerduty_routing_key, smtp_recipients, enabled, scope_server_id, scope_tag_id, "
         + "agent_level, agent_max_per_hour, agent_max_per_day, agent_lease_minutes, agent_expiry_minutes, send_resolutions, "
-        + NotificationRouteSigningColumns + ", fallback_route_id "
+        + NotificationRouteSigningColumns + ", fallback_route_id, severities "
         + "FROM config_notification_routes ORDER BY route_id";
 
     /// <summary>A route's signing key columns (V193, #5998), last in both the service's and the viewer's route SELECT.</summary>
@@ -2642,6 +2913,8 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
                         clockAhead),
                     /* V193 (#6003, D8): where an unclaimed, expired investigation request goes instead. */
                     FallbackRouteId = reader.IsDBNull(19) ? null : reader.GetInt32(19),
+                    /* V229 (#6928): the severity filter; a word this build does not know reads as both. */
+                    Severities = NotificationRouteKinds.NormalizeSeverities(reader.GetString(20)),
                 });
             }
         }

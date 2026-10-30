@@ -67,10 +67,10 @@
         </StackPanel>
 
         <!-- Warning banner (hidden by default) -->
-        <Border x:Name="WarningBanner" Grid.Row="1" Background="#3D332200"
-                BorderBrush="#665C3300" BorderThickness="1" CornerRadius="3"
+        <Border x:Name="WarningBanner" Grid.Row="1" Background="Transparent"
+                BorderBrush="{DynamicResource WarningBrush}" BorderThickness="1" CornerRadius="3"
                 Padding="8,4" Margin="0,0,0,6" Visibility="Collapsed">
-            <TextBlock x:Name="WarningText" FontSize="11" Foreground="#FFCC66" TextWrapping="Wrap"/>
+            <TextBlock x:Name="WarningText" FontSize="11" Foreground="{DynamicResource WarningTextBrush}" TextWrapping="Wrap"/>
         </Border>
 
         <!-- Data Grid -->

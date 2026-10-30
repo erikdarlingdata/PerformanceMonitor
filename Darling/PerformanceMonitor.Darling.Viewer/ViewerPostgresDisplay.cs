@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -830,7 +831,7 @@ internal static class PgDisplay
         /* Aurora-only too: core PostgreSQL has no per-statement peak-memory figure at all, so this is
            not-applicable rather than a zero-byte grant. */
         PeakMemory = row.MaxPeakMemBytes is { } peak ? Bytes(peak) : NotApplicableText,
-        WalWritten = Bytes(row.WalBytes),
+        WalWritten = row.WalBytes is { } wal ? Bytes(wal) : NotApplicableText,
         /* Null is "no text captured for this queryid yet" — text refreshes hourly, and a major-version
            upgrade re-keys every queryid — which is a different statement from an empty query. */
         QueryText = row.QueryText ?? "(statement text not captured yet)",
@@ -844,7 +845,7 @@ internal static class PgDisplay
         TempReadSort = Raw(row.TempBlocksRead),
         TempWrittenSort = Raw(row.TempBlocksWritten),
         PeakMemorySort = row.MaxPeakMemBytes is { } peakSort ? Raw(peakSort) : null,
-        WalWrittenSort = Raw(row.WalBytes),
+        WalWrittenSort = row.WalBytes is { } walSort ? Raw(walSort) : null,
     };
 
     internal sealed class DatabaseRow
@@ -1569,7 +1570,8 @@ internal static class PgDisplay
     {
         public string? EventType { get; init; }
         public string? Event { get; init; }
-        public long QueryId { get; init; }
+        /// <summary>Null is a target that does not report a query id (#6836): the grid shows the not-applicable dash, never 0.</summary>
+        public long? QueryId { get; init; }
         public long SampleCount { get; init; }
         public long EstimatedWaitMs { get; init; }
         public int BackendCount { get; init; }
@@ -1598,6 +1600,42 @@ internal static class PgDisplay
         CaptureTime = Timestamp(row.CaptureTime),
         CaptureTimeUtc = row.CaptureTime,
     };
+
+    /// <summary>How many wait rows are attributed to a statement. A null query id is a target that does not report
+    /// one (#6836) and 0 is work belonging to no statement, so neither counts: a lifted <c>null != 0</c> is true
+    /// and would call every row of a PostgreSQL 13 target attributed (#6849).</summary>
+    internal static int WaitSamplingAttributedCount(IReadOnlyList<DarlingPgWaitSamplingReader.PgWaitSamplingRow> rows)
+    {
+        ArgumentNullException.ThrowIfNull(rows);
+
+        return rows.Count(r => r.QueryId is not null and not 0);
+    }
+
+    /// <summary>The note over the Wait Sampling grid. The service tier appends
+    /// <see cref="PgWaitInstrument.ServiceSampledCaveat"/>, the one copy the MCP read and the empty-state message
+    /// also use, so the three surfaces cannot drift on what the caveat is (#6849). <paramref name="cadence"/> is the
+    /// collector's cadence phrase.</summary>
+    internal static string WaitSamplingSummary(IReadOnlyList<DarlingPgWaitSamplingReader.PgWaitSamplingRow> rows, bool serviceTier,
+        bool instrumentKnown, string cadence, bool reset)
+    {
+        ArgumentNullException.ThrowIfNull(rows);
+
+        return $"{rows.Count:N0} wait event(s), {WaitSamplingAttributedCount(rows):N0} attributed to a query. "
+            + (serviceTier
+                ? $"Instrument: SERVICE SAMPLER, the service polling pg_stat_activity {cadence}. "
+                  + PgWaitInstrument.ServiceSampledCaveat + " "
+                : instrumentKnown
+                    ? "Instrument: pg_wait_sampling extension (10 ms in-engine profiler). "
+                    : string.Empty)
+            + "Est. Wait is samples multiplied by the profile period, an estimate from a sampling "
+            + "profiler and not a measured duration, so treat it as a ranking rather than a stopwatch. "
+            + "A Query ID of 0 is a background process rather than an unknown query, and CPU/Running "
+            + "is the backend on processor rather than waiting."
+            + (reset
+                ? " One or more counters RESET inside this window (a restart, or "
+                  + "pg_wait_sampling_reset_profile), so those rows cover only the time since the reset."
+                : string.Empty);
+    }
 
     /// <summary>One standby of the Replication grid: the reader's columns, with Connected Since as text.</summary>
     internal sealed class ReplicationStatRow
@@ -1813,6 +1851,82 @@ internal static class PgDisplay
         ShortDescription = row.ShortDescription,
         CollectionTime = SnapshotTime(row.CollectionTimeUtc),
         CollectionTimeUtc = row.CollectionTimeUtc,
+    };
+
+    /// <summary>One change of the Configuration Changes grid (#6387): a parameter's old value beside its new one, at the
+    /// snapshot that saw it. A server-wide change names no scope; a per-database or per-role override names the one it
+    /// applies to, and says whether it was set, reset or changed.</summary>
+    internal sealed class ConfigChangeRow
+    {
+        public string ChangedAt { get; init; } = "";
+        /// <summary>The UTC instant <see cref="ChangedAt"/> is formatted from. The column sorts by it, not by that text.</summary>
+        public DateTime ChangedAtUtc { get; init; }
+        public string Name { get; init; } = "";
+        public string? OldValue { get; init; }
+        public string? NewValue { get; init; }
+        public string? Unit { get; init; }
+        public string Scope { get; init; } = "";
+        public string Kind { get; init; } = "";
+        public string? Context { get; init; }
+        public string? Source { get; init; }
+        public string? ShortDescription { get; init; }
+    }
+
+    internal static ConfigChangeRow ConfigChange(DarlingPgServerConfigReader.PgConfigChangeRow row) => new()
+    {
+        ChangedAt = SnapshotTime(row.ChangedAtUtc),
+        ChangedAtUtc = row.ChangedAtUtc,
+        Name = row.Name,
+        OldValue = row.OldValue,
+        NewValue = row.NewValue,
+        Unit = row.Unit,
+        Scope = ConfigChangeScope(row),
+        Kind = row.ChangeKind,
+        Context = row.Context,
+        Source = row.Source,
+        ShortDescription = row.ShortDescription,
+    };
+
+    /// <summary>"Server" for a server-wide change; otherwise the database and/or role an override is scoped to.</summary>
+    internal static string ConfigChangeScope(DarlingPgServerConfigReader.PgConfigChangeRow row)
+    {
+        var parts = new List<string>();
+        if (!string.IsNullOrEmpty(row.DatabaseName)) parts.Add("database " + row.DatabaseName);
+        if (!string.IsNullOrEmpty(row.RoleName)) parts.Add("role " + row.RoleName);
+        return parts.Count == 0 ? "Server" : string.Join(", ", parts);
+    }
+
+    /// <summary>One logging setting of the Logging Settings Audit grid (#6387): the verdict on the lines it writes, what it
+    /// unlocks, and the remedy worded for this server's hosting. A row whose file and running value disagree carries the
+    /// restart note in its own column, so its remedy is not acted on blind.</summary>
+    internal sealed class LoggingAuditRow
+    {
+        public string Setting { get; init; } = "";
+        public string Verdict { get; init; } = "";
+        public string? Value { get; init; }
+        public string? Unit { get; init; }
+        public string? Source { get; init; }
+        public string? ChangeNeeds { get; init; }
+        public string Unlocks { get; init; } = "";
+        public string Recommended { get; init; } = "";
+        public string CostNote { get; init; } = "";
+        public string Remedy { get; init; } = "";
+        public string PendingRestart { get; init; } = "";
+    }
+
+    internal static LoggingAuditRow LoggingAudit(DarlingPgLoggingAudit.Facet f) => new()
+    {
+        Setting = f.Setting,
+        Verdict = f.Verdict,
+        Value = f.Value,
+        Unit = f.Unit,
+        Source = f.Source,
+        ChangeNeeds = f.ChangeNeeds,
+        Unlocks = f.Unlocks,
+        Recommended = f.Recommended,
+        CostNote = f.CostNote,
+        Remedy = f.Remedy,
+        PendingRestart = f.PendingRestart ? (f.RestartNote ?? "yes") : string.Empty,
     };
 
     /// <summary>One relation of the Buffer Usage grid. All rows are one collection, so the time is the same on each.</summary>

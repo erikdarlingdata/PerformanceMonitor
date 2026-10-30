@@ -2286,6 +2286,295 @@ CREATE TRIGGER trg_bump_known_patterns
     FOR EACH STATEMENT EXECUTE FUNCTION config.config_bump_version();";
 
     /// <summary>
+    /// V215: six indexes on the investigation ("agent") tables. A restored store copy loaded with one synthetic year of requests at a
+    /// production store's measured rate (73,000 requests) timed every hot read of these tables. Most stayed under 1 ms. These did not, and
+    /// each index below took its read to well under 10 ms: the follow-up module read (<c>ProcedureStatsModuleDates.WatchedSql</c>, about
+    /// 60,000 calls a day) 127 ms to 5.5 ms with the first two, the due follow-ups read 35 ms to 0.7 ms with the third and second,
+    /// <c>PendingFollowUpsSql</c> 25 ms to 5 ms with the second, the MCP request list and the reports 30-day read 25-53 ms to under
+    /// 0.3 ms with the fourth, the brief's earlier-report and prior-links lookups and the live-practice hider 12-24 ms to under 0.25 ms
+    /// with the fifth, and the retention delete of requests (the <c>fk_investigation_reports_family</c> check scanned every report per
+    /// deleted request) 310 ms for 8 rows to 0.5 ms with the sixth.
+    ///
+    /// <para>Each partial predicate is implied by the WHERE clause of the read it serves, so the planner can use it: an equality on
+    /// <c>follow_up_of</c>, <c>practice_of</c> or <c>family_of</c> implies NOT NULL, and the follow-up reads state
+    /// <c>state = 'reported'</c> and the NOT NULL columns themselves. Plain <c>CREATE INDEX IF NOT EXISTS</c>, not CONCURRENTLY: the tables
+    /// hold hundreds of rows on a production store today, so each build is instant and takes no noticeable lock. The shipped V184 text
+    /// (<c>InvestigationTables.CreateSql</c>) is not edited, and a fresh store runs every rung, so it gets these too. Additive: an older build
+    /// never reads the indexes, and no GRANT is needed for an index.</para>
+    /// </summary>
+    private const string V215Sql = @"
+CREATE INDEX IF NOT EXISTS ix_investigation_requests_reported_condition
+    ON config.investigation_requests (server_id) WHERE state = 'reported' AND follow_up_condition IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ix_investigation_requests_follow_up_of
+    ON config.investigation_requests (follow_up_of) WHERE follow_up_of IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ix_investigation_requests_follow_up_at
+    ON config.investigation_requests (follow_up_at) WHERE state = 'reported' AND follow_up_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ix_investigation_requests_opened_at
+    ON config.investigation_requests (opened_at);
+CREATE INDEX IF NOT EXISTS ix_investigation_requests_practice_of
+    ON config.investigation_requests (practice_of) WHERE practice_of IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ix_investigation_reports_family_of
+    ON config.investigation_reports (family_of) WHERE family_of IS NOT NULL;";
+
+    /// <summary>
+    /// V216 (#5736): the Client Timeouts alert ships ON. V179 added <c>config.config_alert_settings.client_timeouts_enabled</c> with
+    /// <c>DEFAULT FALSE</c> so the alert was off until its bars could be checked against captured data. #5736 made the bars relative to each
+    /// server's own baseline, and a 7-day replay of the new bars over one production store of 42 SQL Servers would have paged twice, both at
+    /// Warning, with 40 of the 42 servers never crossing a bar. Two statements. The column default becomes TRUE, so a store that has no row yet
+    /// (or a new one) starts with the alert on. And the one row a store has is moved from FALSE to TRUE.
+    ///
+    /// <para><b>Why moving the row is right.</b> Nothing RECORDED "off" as a choice distinct from the default until now. Both Settings windows and <c>update_alert_settings</c> have offered the checkbox since #5640, but the column stores a boolean with no provenance. A stored FALSE is the
+    /// old default, written by V179 or by a Settings save that sent the whole row back, and a store cannot tell it from an operator's choice. The
+    /// rung says so rather than guessing: an operator who turned the alert off on purpose switches it off again, once. The repo has no
+    /// settings-change journal to write to, so the reason is stated here, in the Darling README's V216 rollback note, in docs/alerts.md
+    /// for both editions, and in this change's CHANGELOG entry, which joins the release notes at the release cut.</para>
+    ///
+    /// <para><b>Cost.</b> <c>config_alert_settings</c> is the one-row singleton (<c>id = 1</c>), so the UPDATE touches at most one row and the
+    /// SET DEFAULT is catalog-only. Neither is given a <c>lock_timeout</c>, the shape V147 and V211 used on the same kind of table: the only thing
+    /// the ALTER can wait on is a transaction holding this one-row table, which is a millisecond read, and the applier's command timeout is the
+    /// backstop. The UPDATE fires V17's statement trigger, which bumps <c>config_version</c>, so a running service reloads the setting at once.
+    /// Re-running changes nothing: the column default is already TRUE and no row is FALSE. Written as literals because a migration's text is frozen
+    /// at the version it ships in. An older build reads the same boolean column and is unaffected.</para>
+    /// </summary>
+    private const string V216Sql = @"
+ALTER TABLE config.config_alert_settings ALTER COLUMN client_timeouts_enabled SET DEFAULT TRUE;
+UPDATE config.config_alert_settings SET client_timeouts_enabled = TRUE WHERE client_timeouts_enabled = FALSE;";
+
+    /// <summary>
+    /// V217 (#6581) - <c>collect.query_store_hints</c>: the Query Store hints in place, read from <c>sys.query_store_query_hints</c> by
+    /// <c>QueryStoreHintsCollector</c> (SQL Server 2022 and later) every five minutes, one row per hint plus ONE all-NULL marker row
+    /// (<c>query_hint_id</c> NULL) per captured database per pass, so a hint that left a captured database reads as CLEARED, not as not
+    /// captured. The forced-plans table's model: a PLAIN table on every store (<c>StaysPlainTable</c>), 30-day time-sliced DELETE. Columns
+    /// and the (server_id, collection_time) index are exactly <c>PgSchemaGenerator</c>'s output, so a fresh store (V1's catalog walk) and an
+    /// upgraded one agree. The marker index is the forced-plans one (<c>idx_query_store_forced_plans_markers</c>): it finds a database's
+    /// previous complete capture by one seek. New table, no data moves, no grant (the <c>collect</c> schema carries blanket SELECT).
+    /// Every statement is idempotent.
+    /// </summary>
+    private const string V217Sql = @"
+CREATE TABLE IF NOT EXISTS collect.query_store_hints (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    database_name text,
+    query_hint_id bigint,
+    query_id bigint,
+    query_hint_text text,
+    last_query_hint_failure_reason text,
+    query_hint_failure_count bigint,
+    source_desc text
+);
+
+CREATE INDEX IF NOT EXISTS idx_query_store_hints_time ON collect.query_store_hints(server_id, collection_time);
+
+CREATE INDEX IF NOT EXISTS idx_query_store_hints_markers
+    ON collect.query_store_hints (server_id, database_name, collection_time) WHERE query_hint_id IS NULL;";
+
+    /// <summary>
+    /// V222 (#6874) - <c>collect.agent_alerts</c>: the SQL Server Agent alert definitions and their counters, read from
+    /// <c>msdb.dbo.sysalerts</c> (with the operator count from <c>msdb.dbo.sysnotifications</c>) by <c>AgentAlertsCollector</c> every 15
+    /// minutes. One row per alert per pass, so the change in <c>occurrence_count</c> between two passes says which alert fired in a window.
+    /// An instance with no alerts writes ONE marker row whose <c>alert_id</c> is NULL, so "collected, none defined" differs from "never
+    /// collected". A PLAIN table on every store (<c>StaysPlainTable</c>, tens of rows per pass), 30-day time-sliced DELETE. Columns and the
+    /// (server_id, collection_time) index are exactly <c>PgSchemaGenerator</c>'s output, so a fresh store (V1's catalog walk) and an upgraded
+    /// one agree. New table, no data moves, no grant (the <c>collect</c> schema carries blanket SELECT). Every statement is idempotent. An
+    /// older build never reads the table and is unaffected.
+    /// The same rung adds <c>config.config_alert_settings.agent_alert_gaps_enabled</c> (<c>boolean NOT NULL DEFAULT FALSE</c>, catalog-only): the "Agent Alert Gaps"
+    /// alert ships OFF. An older build never reads the column.
+    /// </summary>
+    private const string V222Sql = @"
+CREATE TABLE IF NOT EXISTS collect.agent_alerts (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    alert_id integer,
+    alert_name text,
+    enabled boolean,
+    event_source text,
+    message_id integer,
+    severity integer,
+    database_name text,
+    event_description_keyword text,
+    performance_condition text,
+    delay_between_responses integer,
+    last_occurrence timestamp,
+    last_response timestamp,
+    occurrence_count integer,
+    count_reset timestamp,
+    has_notification integer,
+    operator_count integer,
+    response_job_id text
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_alerts_time ON collect.agent_alerts(server_id, collection_time);
+
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS agent_alert_gaps_enabled boolean NOT NULL DEFAULT FALSE;";
+
+    /// <summary>
+    /// V218 (#6569): <c>ck_config_server_actions_action</c> also allows <c>recompile_module</c> (the switch of the Level 3 action that
+    /// runs <c>sys.sp_recompile</c> on a procedure, function or trigger), <c>create_plan_guide</c> and <c>drop_plan_guide</c> (the plan guide actions). The CHECK is replaced in place under its own name, only when
+    /// the stored definition does not already name the newest action (V196's guard shape), so a second run replaces nothing. It inserts no row:
+    /// the action starts off on every server. An older build never writes the new word and never reads it as anything else.
+    /// </summary>
+    private const string V218Sql = @"
+DO $do$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_constraint
+               WHERE conname = 'ck_config_server_actions_action'
+                 AND conrelid = 'config.config_server_actions'::regclass
+                 AND pg_get_constraintdef(oid) !~ 'drop_plan_guide') THEN
+        ALTER TABLE config.config_server_actions DROP CONSTRAINT ck_config_server_actions_action;
+        ALTER TABLE config.config_server_actions
+            ADD CONSTRAINT ck_config_server_actions_action CHECK (action IN ('force_plan', 'evict_plan', 'kill_session', 'recompile_module', 'create_plan_guide', 'drop_plan_guide'));
+    END IF;
+END $do$;";
+
+    /// <summary>
+    /// V219 (#6750 part 3): <c>collect.query_store_self_keys</c>, the keys of the monitor's own Query Store statements, and
+    /// <c>collect.query_store_self_keys_state</c>, the one-row record that their backfill has run (<see cref="QueryStoreSelfKeys"/>),
+    /// plus two row triggers on <c>collect.query_store_text</c> that keep the key table current for every writer of text, an older
+    /// build's included (<see cref="QueryStoreSelfKeys.TriggerSql"/>). The keys of text stored earlier are backfilled in the background
+    /// after start, because that is one scan of the TOAST-heavy text table and could pass the migration silence limit inside the startup
+    /// transaction. Both tables are new and empty, and <c>CREATE TRIGGER</c> reads no row, so the rung moves no data. The lock timeout
+    /// is <see cref="MigrationCommandTimeoutSeconds"/> less 20 s, as V173's, because <c>CREATE TRIGGER</c> needs a SHARE ROW EXCLUSIVE
+    /// lock on the text table, which an older instance sharing the store can be writing. Plain tables, no GRANT (the <c>collect</c>
+    /// schema's blanket SELECT and its default privileges cover a table a migration introduces, as V168 notes). Every statement is
+    /// idempotent. <b>No Lite twin:</b> Lite keeps the text inline and the collector drops the monitor's own row there.
+    /// </summary>
+    private static readonly string V219Sql =
+        "SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + "s';\n" + QueryStoreSelfKeys.CreateSql + "\n" + QueryStoreSelfKeys.TriggerSql;
+
+    /// <summary>
+    /// V220 (#6798): <c>idx_job_history_job_success</c> on <c>collect.job_history (server_id, job_id, run_datetime DESC) INCLUDE
+    /// (run_duration_seconds, collection_time) WHERE step_id = 0 AND run_status = 1</c>, for the Job History read's per-job statistics
+    /// (<see cref="DarlingJobHistoryReader.BuildJobHistorySql"/>'s <c>job_stats</c>). That part averages each listed job's successful
+    /// outcomes and finds its last one. Through V150's <c>idx_job_history_server_run</c> it read the server's whole run-time range and
+    /// dropped the step rows and the other jobs after fetching them from scattered heap pages: on a 210-server copy of a production
+    /// store, 13.2 s of a 16.3 s cold read. This partial index holds only the successful outcomes (about 23% of the rows on one
+    /// production store), and its INCLUDE columns cover the aggregate and the <c>collection_time</c> floor, so the read seeks the listed
+    /// jobs and never visits the heap. A compressed chunk keeps no rows in this index (past 7 days for <c>job_history</c>), so the read
+    /// takes those chunks through the compressed batches' <c>server_id</c> segment-by index, once per listed server, as it did before.
+    ///
+    /// <para><b>Cost, measured on PostgreSQL 17 with TimescaleDB 2.31</b> (42 servers, 9.8M rows in 101 twelve-hour chunks, 98 of them
+    /// compressed, the step and status mix of one production store): the build took 0.18 s, because a compressed chunk's index is an
+    /// empty shell and only the three uncompressed chunks hold rows. The index is 20 MB on those chunks against V150's 69 MB. A 93,000-row
+    /// insert into the newest chunk went from 0.24 s to 0.28 s (median of three), one more btree that only the 23% of rows that are
+    /// successful outcomes enter. Compressing a chunk drops its rows from the index, so the size stays bounded by the uncompressed
+    /// window. Plain <c>CREATE INDEX IF NOT EXISTS</c>, V150's shape: <c>MigrateAsync</c> runs the rung in one transaction, where
+    /// <c>timescaledb.transaction_per_chunk</c> cannot run. The build holds a SHARE lock on the uncompressed chunks, which blocks the
+    /// collector's inserts for the build's length, so the lock timeout is <see cref="MigrationCommandTimeoutSeconds"/> less 20 s, as
+    /// V173's. A fresh store runs every rung, so it gets the index too. Additive: an older build never reads it, and no GRANT is needed
+    /// for an index.</para>
+    /// </summary>
+    private static readonly string V220Sql =
+        "SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + @"s';
+CREATE INDEX IF NOT EXISTS idx_job_history_job_success
+    ON collect.job_history (server_id, job_id, run_datetime DESC)
+    INCLUDE (run_duration_seconds, collection_time)
+    WHERE step_id = 0 AND run_status = 1;";
+
+    /// <summary>
+    /// V221 (#6800): <c>collect.query_store_hash_hourly</c>, the narrow hourly source of the fleet tag roll-up, its <c>(hour, server_id)</c>
+    /// index, and <c>hash_built_seq</c> on <c>collect.query_store_compose_stamp_built</c>. The text, the column map and the reasoning are on
+    /// <see cref="QueryStoreComposeStamp.HashHourlyCreateSql"/>. The service's hourly tick (V173's builder) fills the table in the stamp's
+    /// transaction and the planner rebuilds every hour whose <c>hash_built_seq</c> differs from <c>late_seq</c>, which is every hour built
+    /// before this rung (NULL), so the backfill is the ordinary tick, newest first, six hours a tick. The same text also creates the day
+    /// table <c>collect.query_store_hash_daily</c> (#6800, the 7 and 30 day windows), its <c>(day, server_id)</c> index, its ledger
+    /// <c>query_store_hash_daily_built</c> and its failure record; <see cref="QueryStoreHashDaily"/> builds the days after the hours of a
+    /// tick. <b>The rung scans nothing</b>: four new empty tables, two indexes on them, and a nullable column with no default on the small ledger. The column needs an ACCESS EXCLUSIVE lock
+    /// on that ledger, which the wide table's late-row triggers take row locks on, so the lock timeout is
+    /// <see cref="MigrationCommandTimeoutSeconds"/> less 20 s, as V173's. Additive: an older build never reads the table, and a build
+    /// that rebuilds a stamp hour without writing it leaves the pair stale for the table, which this build then rebuilds.
+    /// </summary>
+    private static readonly string V221Sql =
+        "SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + "s';\n" + QueryStoreComposeStamp.HashHourlyCreateSql;
+
+    /// <summary>
+    /// V223 (#6873) - <c>collect.database_protection</c>: per database, the last good CHECKDB and the last full and log backup, read by
+    /// <c>DatabaseProtectionCollector</c> every 60 minutes (Darling only). One row per database per pass: the raw times (UTC), the
+    /// recovery model, the database state and replica role, a per-row platform label (native, platform_managed, native_only) and a state
+    /// word for each of the three facts (never, unknown, none_in_window, not_expected, unavailable), so a reader can tell "no backup in 60
+    /// days" from "the platform owns this". The overdue judgment is the reader's. A PLAIN table on every store (<c>StaysPlainTable</c>),
+    /// 90-day time-sliced DELETE. Columns and the (server_id, collection_time) index are exactly <c>PgSchemaGenerator</c>'s output, so a
+    /// fresh store (V1's catalog walk) and an upgraded one agree. New table, no data moves, no grant (the <c>collect</c> schema carries
+    /// blanket SELECT). Every statement is idempotent.
+    /// The same rung adds three <c>config.config_alert_settings</c> columns (<c>boolean NOT NULL DEFAULT FALSE</c>, catalog-only):
+    /// <c>backup_overdue_enabled</c>, <c>log_backup_overdue_enabled</c> and <c>checkdb_overdue_enabled</c>. The three overdue alerts ship OFF.
+    /// An older build never reads the columns.
+    /// </summary>
+    private const string V223Sql = @"
+CREATE TABLE IF NOT EXISTS collect.database_protection (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    database_name text,
+    state_desc text,
+    recovery_model_desc text,
+    create_date timestamp,
+    replica_role text,
+    platform text,
+    last_good_checkdb_time timestamp,
+    checkdb_state text,
+    last_full_backup_time timestamp,
+    full_backup_state text,
+    last_log_backup_time timestamp,
+    log_backup_state text
+);
+
+CREATE INDEX IF NOT EXISTS idx_database_protection_time ON collect.database_protection(server_id, collection_time);
+
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS backup_overdue_enabled boolean NOT NULL DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS log_backup_overdue_enabled boolean NOT NULL DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS checkdb_overdue_enabled boolean NOT NULL DEFAULT FALSE;";
+
+    /// <summary>
+    /// V224 (#6875) - <c>collect.identity_capacity</c>: how full the identity columns are, read from <c>sys.identity_columns</c> by
+    /// <c>IdentityCapacityCollector</c> every six hours, per database: the top 20 columns above 10 percent used (value, seed, increment,
+    /// type, precision and the percent) plus ONE all-NULL marker row (<c>column_name</c> NULL) per scanned database, so a database with no
+    /// high column reads as scanned and clean, and one that was not scanned has no marker. A PLAIN table on every store
+    /// (<c>StaysPlainTable</c>), 90-day time-sliced DELETE, at most 21 rows per database per pass. Columns and the (server_id,
+    /// collection_time) index are exactly <c>PgSchemaGenerator</c>'s output, so a fresh store (V1's catalog walk) and an upgraded one
+    /// agree. The marker index finds a database's newest scan by one seek. New table, no data moves, no grant (the <c>collect</c> schema
+    /// carries blanket SELECT). Every statement is idempotent.
+    /// The same rung adds three <c>config.config_alert_settings</c> columns for the "Identity Capacity" alert (catalog-only): <c>identity_capacity_enabled</c>
+    /// (<c>boolean NOT NULL DEFAULT FALSE</c>, the alert ships OFF) and the warning and critical bars <c>identity_capacity_warning_percent</c> (70) and
+    /// <c>identity_capacity_critical_percent</c> (90), the global values a per-server or per-database threshold override replaces. An older build never
+    /// reads the columns.
+    /// </summary>
+    private const string V224Sql = @"
+CREATE TABLE IF NOT EXISTS collect.identity_capacity (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    database_name text,
+    schema_name text,
+    table_name text,
+    column_name text,
+    data_type text,
+    type_precision integer,
+    last_value numeric(38,0),
+    seed_value numeric(38,0),
+    increment_value numeric(38,0),
+    percent_used double precision,
+    skip_reason text
+);
+
+CREATE INDEX IF NOT EXISTS idx_identity_capacity_time ON collect.identity_capacity(server_id, collection_time);
+
+CREATE INDEX IF NOT EXISTS idx_identity_capacity_markers
+    ON collect.identity_capacity (server_id, database_name, collection_time) WHERE column_name IS NULL;
+
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS identity_capacity_enabled boolean NOT NULL DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS identity_capacity_warning_percent integer NOT NULL DEFAULT 70,
+    ADD COLUMN IF NOT EXISTS identity_capacity_critical_percent integer NOT NULL DEFAULT 90;";
+
+    /// <summary>
     /// V196 (#5632, step 5): Level 3 and the per-server action switches. <b>Nothing here turns an action on.</b>
     ///
     /// <para><b>Levels.</b> <c>ck_config_notification_routes_agent</c> now allows <c>agent_level</c> NULL and 0 to 3, and
@@ -2674,7 +2963,136 @@ $rung$;";
         new Migration(212, "server-machine-identity", V212Sql),
         new Migration(213, "query-store-replica", V213Sql),
         new Migration(214, "known-patterns", V214Sql),
+        new Migration(215, "agent-table-indexes", V215Sql),
+        new Migration(216, "client-timeouts-on-by-default", V216Sql),
+        new Migration(217, "query-store-hints", V217Sql),
+        new Migration(218, "server-action-recompile-module", V218Sql),
+        new Migration(219, "query-store-self-keys", V219Sql),
+        new Migration(220, "job-history-success-index", V220Sql),
+        new Migration(221, "query-store-hash-hourly", V221Sql),
+        new Migration(222, "agent-alerts", V222Sql),
+        new Migration(223, "database-protection", V223Sql),
+        new Migration(224, "identity-capacity", V224Sql),
+        new Migration(225, "server-aws-rds", V225Sql),
+        new Migration(226, "server-aws-rds-web-or-express", V226Sql),
+        new Migration(227, "threshold-override-tag-scope", V227Sql),
+        new Migration(228, "blocking-band-tiers", V228Sql),
+        new Migration(229, "notification-route-severities", V229Sql),
     };
+
+    /// <summary>
+    /// V227 (#6926): a threshold override can be held for a server tag. <c>config.config_threshold_overrides</c> gains the nullable
+    /// <c>scope_tag_id</c> (a <c>config.server_tags</c> id), <c>server_id</c> becomes nullable, and a CHECK says exactly one of the two is set,
+    /// so a stored row (server set, tag NULL) keeps its meaning and stays valid. A tag row holds no database (CHECK), because a tag value is
+    /// the server-level value for every server under the tag. A second unique index keeps one value per tag and key, since the V191 index is
+    /// on <c>server_id</c> and NULLs never collide.
+    ///
+    /// <para><b>No foreign key on the tag, deliberately</b>, as V181 did for a route: an override whose tag was deleted stays as written and
+    /// shows as orphaned, and the service resolves it to nothing. A cascade would delete the person's setting, and SET NULL would break the
+    /// exactly-one CHECK. The table's reload trigger (V191) and the tag tables' (V181) already bump the config version, so the service
+    /// re-reads when a tag moves. No GRANT: the table-level grants of V191 (admin and mcp write, viewer read) cover the new column. Every
+    /// statement is idempotent. <b>No Lite twin:</b> Lite has no overrides.</para>
+    /// </summary>
+    private const string V227Sql = @"
+ALTER TABLE config.config_threshold_overrides
+    ADD COLUMN IF NOT EXISTS scope_tag_id integer;
+
+ALTER TABLE config.config_threshold_overrides
+    ALTER COLUMN server_id DROP NOT NULL;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                   WHERE conname = 'ck_config_threshold_overrides_one_scope'
+                     AND conrelid = 'config.config_threshold_overrides'::regclass) THEN
+        ALTER TABLE config.config_threshold_overrides
+            ADD CONSTRAINT ck_config_threshold_overrides_one_scope
+            CHECK ((server_id IS NOT NULL) <> (scope_tag_id IS NOT NULL));
+    END IF;
+
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                   WHERE conname = 'ck_config_threshold_overrides_tag_no_database'
+                     AND conrelid = 'config.config_threshold_overrides'::regclass) THEN
+        ALTER TABLE config.config_threshold_overrides
+            ADD CONSTRAINT ck_config_threshold_overrides_tag_no_database
+            CHECK (scope_tag_id IS NULL OR database_name IS NULL);
+    END IF;
+END $$;
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_config_threshold_overrides_tag
+    ON config.config_threshold_overrides (scope_tag_id, threshold_key)
+    WHERE scope_tag_id IS NOT NULL;";
+
+    /// <summary>
+    /// V225 (#6894): <c>collect.servers.is_aws_rds</c>, whether the target is an Amazon RDS for SQL Server instance (the connect query's
+    /// <c>DB_ID('rdsadmin') IS NOT NULL</c>), written on every connect. The collectors that RDS gates off (running jobs, Agent status, Agent alerts)
+    /// never run there, so nothing in the store could tell the read side why they have no data, and an RDS target was answered as if a setup
+    /// step on the server could fix it. NULL means no connect has stamped it yet (and a PostgreSQL target, where it is not a SQL Server fact),
+    /// which makes no claim. No backfill: a registration fills its own on its next connect. No view refresh: <c>collect.servers</c> is a
+    /// registry, not a hypertable.
+    /// </summary>
+    private const string V225Sql = @"
+ALTER TABLE collect.servers
+    ADD COLUMN IF NOT EXISTS is_aws_rds boolean;";
+
+    /// <summary>
+    /// V226 (#6893): <c>collect.servers.is_aws_rds_web_or_express</c>, whether that Amazon RDS for SQL Server instance is on the Web or Express
+    /// edition (the connect query's <c>SERVERPROPERTY('Edition')</c> together with the RDS flag), written on every connect. RDS refuses every
+    /// Extended Events session create on those editions, so the deadlock, blocked-process, client-timeout and long-query captures never run
+    /// there, and <c>SERVERPROPERTY('EngineEdition')</c> is 2 for both Web and Standard, so <c>sql_engine_edition</c> cannot say it. The read
+    /// side needs this column to answer those reads with the edition limit instead of a setup step that cannot help. NULL means no connect has
+    /// stamped it yet (and a PostgreSQL target), which makes no claim. No backfill: a registration fills its own on its next connect. No view
+    /// refresh: <c>collect.servers</c> is a registry, not a hypertable.
+    /// </summary>
+    private const string V226Sql = @"
+ALTER TABLE collect.servers
+    ADD COLUMN IF NOT EXISTS is_aws_rds_web_or_express boolean;";
+
+    /// <summary>
+    /// V228 (#6927): the blocking health band's four tiers on the alert settings row, beside the V120 deadlock ones. They carry the
+    /// figures <c>ServerHealthThresholds.BlockingWarnPerHour</c>, <c>BlockingCriticalPerHour</c>, <c>BlockingWarnWaitSeconds</c> and
+    /// <c>BlockingCriticalWaitSeconds</c> have always been, so a store that never sets them bands exactly as before. They are literals here
+    /// because SQL text cannot name a C# constant. No CHECK ordering the two tiers of a pair, for the reason V120 gives: the writers refuse
+    /// a pair with critical below warn, and a hand-edited row reads as written. Idempotent: every column is added with IF NOT EXISTS, so a
+    /// store that already has them is left as it is. Table-level grants already cover new columns on this table, so no GRANT is added.
+    /// </summary>
+    private const string V228Sql = @"
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS blocking_warn_per_hour double precision NOT NULL DEFAULT 5.0;
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS blocking_critical_per_hour double precision NOT NULL DEFAULT 20.0;
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS blocking_warn_wait_seconds double precision NOT NULL DEFAULT 10.0;
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS blocking_critical_wait_seconds double precision NOT NULL DEFAULT 60.0;";
+    /// V229 (#6928): <c>config.config_notification_routes.severities</c>, the severity filter of a notification route: <c>both</c> (the
+    /// default, Warning and Critical alerts alike, which is what every route did before), <c>critical</c> or <c>warning</c>. NOT NULL with
+    /// the default, so every stored route reads <c>both</c> and keeps its effect, and a CHECK holds the three words. An alert that is not
+    /// Critical counts as Warning. A route whose filter excludes an alert does not match it, and matching goes on to the next route.
+    /// Idempotent: the column and the constraint are each added only when absent. No backfill and no view refresh: a registry table.
+    /// Also <c>config.external_alert_state.fired_severities</c>, every severity an external alert sent during its open episode
+    /// (comma separated), so its clear closes the incident of each tier's route. Null on an episode already open, which reads as
+    /// the newest severity alone. And <c>config.investigation_request_alerts.severity</c>, the tier (<c>critical</c> or <c>warning</c>) each
+    /// alert row of an agent request arrived at, so the agent-action gate re-resolves each alert's route at the tier dispatch used. Null on
+    /// a row written before, which resolves with no tier.
+    /// </summary>
+    private const string V229Sql = @"
+ALTER TABLE config.config_notification_routes
+    ADD COLUMN IF NOT EXISTS severities text NOT NULL DEFAULT 'both';
+ALTER TABLE config.external_alert_state
+    ADD COLUMN IF NOT EXISTS fired_severities text;
+ALTER TABLE config.investigation_request_alerts
+    ADD COLUMN IF NOT EXISTS severity text;
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_config_notification_routes_severities'
+                   AND conrelid = 'config.config_notification_routes'::regclass) THEN
+        ALTER TABLE config.config_notification_routes
+            ADD CONSTRAINT ck_config_notification_routes_severities
+            CHECK (severities IN ('both', 'critical', 'warning'));
+    END IF;
+END
+$$;";
 
     /// <summary>
     /// V189 (#5867): <c>collect.query_store_compose_stamp_failures</c>, the failure record of the Query Store compose builder: one row

@@ -6,6 +6,13 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using Npgsql;
+
 namespace PerformanceMonitor.Darling.Storage;
 
 /// <summary>The two <c>config.config_collector_schedules</c> columns a single-column write can set or clear.</summary>
@@ -106,4 +113,125 @@ ON CONFLICT (server_id, collector_name) WHERE server_id IS NOT NULL DO UPDATE SE
     /// </summary>
     public const string InheritServerEnabled =
         "UPDATE config.config_collector_schedules SET enabled = NULL WHERE server_id = $1 AND lower(collector_name) = lower($2)";
+
+    /// <summary>
+    /// #6396: sets the V125 <c>databases</c> allow-list on the fleet-wide row, creating the row when there is none (a NEW row stores
+    /// <c>enabled</c> as NULL, "inherit", like <see cref="SetFleetColumn"/>). Every other column of an existing row is kept. The name is
+    /// matched ignoring case. $1 collector_name, $2 the names (text[]).
+    /// </summary>
+    public const string SetFleetDatabases =
+        "WITH changed AS (UPDATE config.config_collector_schedules SET databases = $2::text[] " +
+        "WHERE server_id IS NULL AND lower(collector_name) = lower($1::text) RETURNING 1) " +
+        "INSERT INTO config.config_collector_schedules (server_id, collector_name, databases, enabled) " +
+        "SELECT NULL, $1::text, $2::text[], NULL WHERE NOT EXISTS (SELECT 1 FROM changed) " +
+        "ON CONFLICT (collector_name) WHERE server_id IS NULL DO UPDATE SET databases = EXCLUDED.databases";
+
+    /// <summary>#6396: sets the <c>databases</c> allow-list on one server's row, creating the row when there is none. An EMPTY array is
+    /// the explicit "no scope" that stops the fall-through to the fleet row. $1 server_id, $2 collector_name, $3 the names (text[]).</summary>
+    public const string SetServerDatabases =
+        "WITH changed AS (UPDATE config.config_collector_schedules SET databases = $3::text[] " +
+        "WHERE server_id = $1::int AND lower(collector_name) = lower($2::text) RETURNING 1) " +
+        "INSERT INTO config.config_collector_schedules (server_id, collector_name, databases, enabled) " +
+        "SELECT $1::int, $2::text, $3::text[], NULL WHERE NOT EXISTS (SELECT 1 FROM changed) " +
+        "ON CONFLICT (server_id, collector_name) WHERE server_id IS NOT NULL DO UPDATE SET databases = EXCLUDED.databases";
+
+    /// <summary>#6396: clears the fleet-wide row's <c>databases</c> to NULL (no scope at this level). A row that is not there is left
+    /// alone. $1 collector_name.</summary>
+    public const string ClearFleetDatabases =
+        "UPDATE config.config_collector_schedules SET databases = NULL WHERE server_id IS NULL AND lower(collector_name) = lower($1)";
+
+    /// <summary>#6396: clears one server's row's <c>databases</c> to NULL (the fleet row's scope applies again). $1 server_id,
+    /// $2 collector_name.</summary>
+    public const string ClearServerDatabases =
+        "UPDATE config.config_collector_schedules SET databases = NULL WHERE server_id = $1 AND lower(collector_name) = lower($2)";
+
+    /// <summary>Deletes every fleet-wide override row (revert the fleet scope to code defaults). Schema-qualified: the MCP host's data
+    /// source (#6396) is not guaranteed a <c>config</c> search_path, as the Viewer's connection is.</summary>
+    public const string DeleteFleetScope = "DELETE FROM config.config_collector_schedules WHERE server_id IS NULL";
+
+    /// <summary>Deletes every override row for one server (the "use default schedule" revert). $1 server_id.</summary>
+    public const string DeleteServerScope = "DELETE FROM config.config_collector_schedules WHERE server_id = $1";
+
+    /// <summary>Deletes EVERY fleet-wide run time, whatever the collector: the run-time half of a fleet-scope schedule Reset.</summary>
+    public const string RunTimeDeleteFleetScope = "DELETE FROM config.config_collector_run_times WHERE server_id IS NULL";
+
+    /// <summary>Deletes EVERY run time of one server, whatever the collector: the run-time half of a server-scope schedule Reset. $1 server_id.</summary>
+    public const string RunTimeDeleteServerScope = "DELETE FROM config.config_collector_run_times WHERE server_id = $1";
+
+    /// <summary>Whether the run-time table (V160) exists, looked up in the catalog so the answer does not depend on the role's privileges.</summary>
+    public const string RunTimeTableExists = "SELECT to_regclass('config.config_collector_run_times') IS NOT NULL";
+
+    /// <summary>
+    /// #6396: the Viewer's "Reset to Defaults" (fleet scope) and "Use default schedule" (one server) as one transaction: the scope's
+    /// schedule rows go, then the scope's run times (a reset means the shipped defaults, which have no fixed time), and no other scope is
+    /// touched. A store below V160 has no run-time table, which is no run times to remove. Returns the rows removed from each table.
+    /// </summary>
+    public static async Task<(int ScheduleRows, int RunTimes)> ResetScopeAsync(
+        NpgsqlDataSource postgres, int? serverId, int commandTimeoutSeconds, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(postgres);
+        await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+        int schedules;
+        await using (var delete = new NpgsqlCommand(serverId is null ? DeleteFleetScope : DeleteServerScope, connection, transaction)
+        {
+            CommandTimeout = commandTimeoutSeconds,
+        })
+        {
+            if (serverId is int sid)
+            {
+                delete.Parameters.AddWithValue(sid);
+            }
+
+            schedules = await delete.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        var runTimes = 0;
+        await using (var exists = new NpgsqlCommand(RunTimeTableExists, connection, transaction) { CommandTimeout = commandTimeoutSeconds })
+        {
+            if (await exists.ExecuteScalarAsync(cancellationToken) is true)
+            {
+                await using var delete = new NpgsqlCommand(serverId is null ? RunTimeDeleteFleetScope : RunTimeDeleteServerScope, connection, transaction)
+                {
+                    CommandTimeout = commandTimeoutSeconds,
+                };
+                if (serverId is int sid)
+                {
+                    delete.Parameters.AddWithValue(sid);
+                }
+
+                runTimes = await delete.ExecuteNonQueryAsync(cancellationToken);
+            }
+        }
+
+        await transaction.CommitAsync(cancellationToken);
+        return (schedules, runTimes);
+    }
+
+    /// <summary>
+    /// #6454: the statements both server-removal paths (the MCP <c>remove_server</c> tool and the Viewer's Remove) run in the removal's own
+    /// transaction to clear a removed server's collector overrides and run times. One server's rows by id ($1 server_id), never the fleet-wide
+    /// ones (server_id NULL). Left behind, a set override would come back when the server is re-added (the id is a hash of the name).
+    /// </summary>
+    public static readonly string[] ClearForServerSqls =
+    {
+        "DELETE FROM config.config_collector_schedules WHERE server_id = $1",
+        "DELETE FROM config.config_collector_run_times WHERE server_id = $1",
+    };
+}
+
+/// <summary>
+/// The per-collector database scope text (the schedule editor's Databases column), parsed one way for the Viewer and the MCP tool
+/// (#6396). The same entry discipline as the Settings window's excluded-databases box: split on comma, trim, drop blanks.
+/// </summary>
+public static class CollectorDatabaseScope
+{
+    /// <summary>The names in <paramref name="text"/>: comma-separated, trimmed, blanks dropped. Null or blank is an empty list.</summary>
+    public static List<string> Parse(string? text) =>
+        (text ?? "")
+            .Split(',')
+            .Select(s => s.Trim())
+            .Where(s => s.Length > 0)
+            .ToList();
 }

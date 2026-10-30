@@ -33,7 +33,7 @@ export const AGENT_LEVEL_CHOICES = [
 
 export const AGENT_LIMIT_DEFAULTS = { perHour: "20", perDay: "100", lease: "15", expiry: "240" };
 
-export const routesListOnly = (managed) => listOnlyNote(managed, "routes are listed only", "To add, edit or delete a route");
+export const routesListOnly = (managed, adminWritesOff) => listOnlyNote(managed, "routes are listed only", "To add, edit or delete a route", adminWritesOff);
 export const ROUTES_EDITING_NOTE =
   "Add, edit and delete a route's agent channel, match, scope and destinations here. A webhook URL or key is sealed when saved and never " +
   "shown again: a box left blank keeps the saved one, and Remove deletes it. Email recipients are shown and edited as plain text.";
@@ -58,7 +58,7 @@ export function entriesFromRoute(r) {
   if (!r) {
     return {
       id: null, match: "", scope: "", enabled: true, level: "", perHour: AGENT_LIMIT_DEFAULTS.perHour, perDay: AGENT_LIMIT_DEFAULTS.perDay,
-      lease: AGENT_LIMIT_DEFAULTS.lease, expiry: AGENT_LIMIT_DEFAULTS.expiry, resolutions: "", fallback: "",
+      lease: AGENT_LIMIT_DEFAULTS.lease, expiry: AGENT_LIMIT_DEFAULTS.expiry, resolutions: "", fallback: "", severities: "both",
       saved: [], hooks: {}, removes: {}, recipients: "", recipientsWas: "", modifiedAt: null,
     };
   }
@@ -76,6 +76,8 @@ export function entriesFromRoute(r) {
     expiry: String(r.agent_expiry_minutes ?? AGENT_LIMIT_DEFAULTS.expiry),
     resolutions: r.send_resolutions === true ? "true" : r.send_resolutions === false ? "false" : "",
     fallback: r.fallback_route_id != null ? String(r.fallback_route_id) : "",
+    /* #6928: a route read without the field, or with a word this page does not know, edits as Both. */
+    severities: r.severities === "critical" || r.severities === "warning" ? r.severities : "both",
     saved: Array.isArray(r.configured_channels) ? r.configured_channels : [],
     hooks: {},
     removes: {},
@@ -104,6 +106,8 @@ export function destinationPayload(entries) {
 /** The request body for the entries. The service applies the rules (the same ones as the Viewer); this only turns the boxes into
     values, and says which box is not a number. */
 export function routePayload(entries) {
+  /* A blank match is refused by the service with this sentence (a 400); said here it costs no request. */
+  if (String(entries.match).trim() === "") return { error: "Choose a family or enter an exact metric name." };
   const whole = (label, text) => {
     const t = String(text).trim();
     return /^\d+$/.test(t) ? { value: Number(t) } : { error: label + " must be a whole number." };
@@ -136,6 +140,7 @@ export function routePayload(entries) {
       agent_expiry_minutes: nums[3],
       send_resolutions: entries.resolutions === "" ? null : entries.resolutions === "true",
       fallback_route_id: fallback,
+      severities: entries.severities === "critical" || entries.severities === "warning" ? entries.severities : "both",
       ...(entries.id != null ? { expected_modified_at: entries.modifiedAt } : {}),
     },
   };
@@ -204,6 +209,7 @@ function routeForm(options) {
   const controls = {
     match: text("match", entries.match, { placeholder: "family, 'Analysis: <category>', exact metric or *" }),
     scope: select("scope", scopeChoices, entries.scope),
+    severities: select("severities", [{ value: "both", label: "Both (Warning and Critical)" }, { value: "critical", label: "Critical only" }, { value: "warning", label: "Warning only" }], entries.severities || "both"),
     level: select("level", AGENT_LEVEL_CHOICES, entries.level),
     perHour: text("perHour", entries.perHour, { inputmode: "numeric" }),
     perDay: text("perDay", entries.perDay, { inputmode: "numeric" }),
@@ -237,7 +243,8 @@ function routeForm(options) {
   const recipients = text("recipients", entries.recipients, { placeholder: "name@example.com, other@example.com" });
   const read = () => {
     const e = {
-      id: entries.id, enabled: enabled.checked, saved: entries.saved, recipientsWas: entries.recipientsWas, hooks: {}, removes: {},
+      /* #6936: modifiedAt rides along, or an edit goes out without expected_modified_at and the service refuses it with a 400. */
+      id: entries.id, modifiedAt: entries.modifiedAt, enabled: enabled.checked, saved: entries.saved, recipientsWas: entries.recipientsWas, hooks: {}, removes: {},
     };
     for (const k of Object.keys(controls)) e[k] = controls[k].value;
     for (const d of WEBHOOK_DESTINATIONS) {
@@ -254,7 +261,7 @@ function routeForm(options) {
     onClick: () => sendRoute("save", read(), options.repaint),
   });
   const parts = [
-    field("Match:", controls.match), field("Applies to:", controls.scope), field("Agent:", controls.level),
+    field("Match:", controls.match), field("Applies to:", controls.scope), field("Severity:", controls.severities), field("Agent:", controls.level),
     field("Requests per hour:", controls.perHour), field("Requests per day:", controls.perDay),
     field("Lease minutes:", controls.lease), field("Expiry minutes:", controls.expiry),
     field("Send resolutions:", controls.resolutions), field("Fallback route:", controls.fallback),
@@ -281,9 +288,9 @@ export function routeEditorNodes(options) {
 
 /** The nodes for a seat that lists only. */
 /* #6274: a seat that is not a signed-in admin lists only, and the service says why in its own sentence (sign in as an admin, or use the Viewer). */
-export function routeListOnlyNodes(message, managed) {
+export function routeListOnlyNodes(message, managed, adminWritesOff) {
   const status = statusNode(routeStatus);
-  return (status ? [status] : []).concat([noticeStrip(message || routesListOnly(managed))]);
+  return (status ? [status] : []).concat([noticeStrip(message || routesListOnly(managed, adminWritesOff))]);
 }
 
 /** The Routes grid's extra columns: Agent use for everyone, Change (Edit and Delete) for an editing seat. */
@@ -311,15 +318,16 @@ export function routeColumns(base, options) {
 /** Whether the seat may edit: the session says it can make changes AND the store login holds the grants. */
 export async function readAgentSetupAccess(session) {
   const managed = !!session && session.managed_store === true;
-  if (!session || session.can_edit !== true) return { routes: false, profiles: false, managed };
+  const adminWritesOff = !!session && session.admin_writes_off === true;
+  if (!session || session.can_edit !== true) return { routes: false, profiles: false, managed, adminWritesOff };
   const res = await apiGet("/api/agent-setup/access");
   const d = res && res.kind === "data" ? res.data : null;
-  return { routes: !!d && d.can_edit_routes === true, profiles: !!d && d.can_edit_profiles === true, managed, message: d && typeof d.sign_in_message === "string" ? d.sign_in_message : null };
+  return { routes: !!d && d.can_edit_routes === true, profiles: !!d && d.can_edit_profiles === true, managed, adminWritesOff, message: d && typeof d.sign_in_message === "string" ? d.sign_in_message : null };
 }
 
 /* ───────────────────────────── Environment Profiles ───────────────────────────── */
 
-export const profilesListOnly = (managed) => listOnlyNote(managed, "profiles are listed only", "To change one");
+export const profilesListOnly = (managed, adminWritesOff) => listOnlyNote(managed, "profiles are listed only", "To change one", adminWritesOff);
 export const PROFILES_NOTE =
   "An environment profile is free text every agent brief carries for its scope: the fleet, one server or one tag. Write the server's role, " +
   "business hours, owners, read limits and patterns known to be noisy. Saving blank text removes the scope's profile. Every change is journaled.";
@@ -377,7 +385,7 @@ export async function buildProfiles(body, generation, ctx) {
   const nodes = [];
   const status = statusNode(profileStatus);
   if (status) nodes.push(status);
-  nodes.push(noticeStrip(canEdit ? PROFILES_NOTE : (typeof d.sign_in_message === "string" && d.sign_in_message) || profilesListOnly(session.managed_store === true)));
+  nodes.push(noticeStrip(canEdit ? PROFILES_NOTE : (typeof d.sign_in_message === "string" && d.sign_in_message) || profilesListOnly(session.managed_store === true, session.admin_writes_off === true)));
   if (canEdit) nodes.push(profileForm(profiles, fleet, d.max_length || 4000, ctx));
   const rows = profiles.map((p) => ({ ...p, scope: profileScopeText(p, fleet.servers, fleet.tags) }));
   nodes.push(rows.length

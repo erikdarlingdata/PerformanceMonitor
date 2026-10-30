@@ -37,6 +37,8 @@ public sealed partial class DarlingMcpAlertTools
     /// <summary>The destination values a call carries: null (or blank) leaves a field alone, <c>-</c> clears it.</summary>
     internal sealed record RouteDestinationRequest(string? Teams, string? Slack, string? Generic, string? PagerDuty, string? Recipients)
     {
+        internal static readonly RouteDestinationRequest None = new(null, null, null, null, null);
+
         public bool Any =>
             !string.IsNullOrWhiteSpace(Teams) || !string.IsNullOrWhiteSpace(Slack) || !string.IsNullOrWhiteSpace(Generic)
             || !string.IsNullOrWhiteSpace(PagerDuty) || !string.IsNullOrWhiteSpace(Recipients);
@@ -72,7 +74,7 @@ public sealed partial class DarlingMcpAlertTools
     /// </summary>
     internal static async Task<RouteDestinationChange> ApplyRouteDestinationsAsync(
         NpgsqlConnection connection, NpgsqlTransaction transaction, int routeId, RouteDestinationRequest request, WebhookProxies proxies,
-        IPasswordKeyRing ring, CancellationToken cancellationToken)
+        IPasswordKeyRing ring, CancellationToken cancellationToken, string? operatorActor = null)
     {
         ArgumentNullException.ThrowIfNull(connection);
         ArgumentNullException.ThrowIfNull(transaction);
@@ -128,7 +130,7 @@ public sealed partial class DarlingMcpAlertTools
         }
 
         var previousSaved = await NotificationRouteWriter.SetRouteDestinationsAsync(
-            connection, transaction, routeId, columns, values.Select(v => v ?? "").ToArray(), McpCommandDeadlines.ReadSeconds, cancellationToken);
+            connection, transaction, routeId, operatorActor, columns, values.Select(v => v ?? "").ToArray(), McpCommandDeadlines.ReadSeconds, cancellationToken);
 
         var now = new Dictionary<string, string>();
         var previous = new Dictionary<string, string>();

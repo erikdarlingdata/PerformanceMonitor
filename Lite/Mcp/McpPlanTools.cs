@@ -10,6 +10,7 @@ using PerformanceMonitor.Common;
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
 
 using PerformanceMonitorLite;
+using PerformanceMonitor.Collectors;
 namespace PerformanceMonitorLite.Mcp;
 
 [McpServerToolType]
@@ -128,7 +129,7 @@ public sealed class McpPlanTools
             /* Lite never fills query_stats.query_plan_xml, so a miss here is not "evicted from the plan cache":
                it is "Lite does not keep plans". The engine-capability answer still comes first. */
             if (string.IsNullOrEmpty(xml))
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "query_stats")
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "query_stats", awsRdsKind: AwsRdsKind.None)
                     ?? PlansNotKept();
 
             // #4530: one store read per call so rule 38 can see the server's edition/MAXDOP.
@@ -167,7 +168,7 @@ public sealed class McpPlanTools
             /* GetCachedProcedurePlanAsync reads the same query_stats.query_plan_xml (matched on plan_handle), which
                Lite never fills, so this miss is "Lite does not keep plans" too. The engine answer stays first. */
             if (string.IsNullOrEmpty(xml))
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "procedure_stats")
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "procedure_stats", awsRdsKind: AwsRdsKind.None)
                     ?? PlansNotKept();
 
             // #4530: one store read per call so rule 38 can see the server's edition/MAXDOP.
@@ -219,7 +220,7 @@ public sealed class McpPlanTools
             var xml = await ReadQueryStorePlanAsync(connectionString, database_name, plan_id);
 
             if (string.IsNullOrEmpty(xml))
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "query_store")
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "query_store", awsRdsKind: AwsRdsKind.None)
                     ?? McpHelpers.Status(
                         "unavailable",
                         $"No plan found for plan_id {plan_id} in database '{database_name}'. Query Store may not be enabled or the plan may have been purged.");
@@ -287,7 +288,7 @@ public sealed class McpPlanTools
         {
             var xml = await ReadQueryStatsPlanAsync(dataService, resolved.ServerId, query_hash, PlanXmlOutputChars);
             if (string.IsNullOrEmpty(xml))
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "query_stats")
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "query_stats", awsRdsKind: AwsRdsKind.None)
                     ?? PlansNotKept();
 
             return McpHelpers.Truncate(xml, PlanXmlOutputChars) ?? "No plan XML available.";

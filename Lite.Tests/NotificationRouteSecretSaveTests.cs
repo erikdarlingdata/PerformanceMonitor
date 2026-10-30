@@ -163,34 +163,9 @@ public sealed class NotificationRouteSecretSaveTests : IDisposable
         Assert.Equal(0, _secrets.Count);
     }
 
-    [Fact]
-    public async Task ADeleteWhoseCredentialWillNotGo_StillDeletesTheRow()
-    {
-        var id = await _store.InsertAsync(Route("High CPU", server: 7101, teams: OldTeams));
-        _secrets.DeleteGate = _ => false;
-
-        Assert.True(await _store.DeleteAsync(id));
-
-        Assert.Empty(await _store.ListAsync());
-    }
-
-    [Fact]
-    public async Task AReusedRouteId_DoesNotInheritACredentialLeftByAFailedDelete()
-    {
-        var id = await _store.InsertAsync(Route("High CPU", server: 7101, teams: OldTeams, slack: OldSlack));
-        _secrets.DeleteGate = _ => false;
-        await _store.DeleteAsync(id);
-        Assert.True(_secrets.Has(id, "Slack"), "precondition: the failed delete left the credential");
-        _secrets.DeleteGate = _ => true;
-
-        var reused = await _store.InsertAsync(Route("Blocking", server: 7102, teams: "https://teams.fresh-secret.test/h"));
-
-        /* The leftover is under another generation than anything the new row points at, so it is never read (#5775). */
-        Assert.Equal(id, reused);
-        Assert.False(await FlagAsync(reused, "slack_set"));
-        Assert.Equal("", (await _store.GetAsync(reused))!.SlackUrl);
-        Assert.Equal("https://teams.fresh-secret.test/h", (await _store.GetAsync(reused))!.TeamsUrl);
-    }
+    /* ADeleteWhoseCredentialWillNotGo_StillDeletesTheRow and AReusedRouteId_DoesNotInheritACredentialLeftByAFailedDelete live in
+       NotificationRouteSecretGenerationTests: a delete that fails logs the "could not be removed" warning into the shared buffer,
+       and that class (app-logger-statics) counts those warnings while this one (app-alert-statics) runs beside it. */
 
     [Fact]
     public async Task ANamedOffChannelWithNoSavedFlag_IsNotInvented()

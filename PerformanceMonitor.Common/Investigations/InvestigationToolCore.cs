@@ -31,6 +31,15 @@ internal static class InvestigationToolCore
     internal static readonly string[] Families =
         ["blocking", "query_performance", "resources", "availability", "jobs", "self_monitor", "other"];
 
+    /// <summary>
+    /// #6462: the parameters <c>submit_investigation_report</c> requires, in the tool's own order, written once. The brief's
+    /// <c>report_contract.required</c> and the tool contract table in the tests both read it, and the tests that reflect the contract
+    /// against both products' real tool methods therefore check the brief too. A tool method that gains or loses a required parameter
+    /// fails them until this list follows.
+    /// </summary>
+    internal static readonly string[] SubmitReportRequired =
+        ["request_id", "claim_id", "report_format", "verdict", "root_cause", "evidence", "summary"];
+
     /// <summary>The verdicts a report may give (V184's check constraint).</summary>
     internal static readonly string[] Verdicts = ["real", "false_positive", "needs_person"];
 
@@ -532,6 +541,10 @@ internal static class InvestigationToolCore
             payload["display_name"] = displayName;
         if (r.InstanceName is { } instanceName)
             payload["instance_name"] = instanceName;
+        /* #6551: a change-watch request has no alert row in get_alert_history, so its detail (what changed, on which database, which
+           measure moved) rides the answer under the key an alert's brief row uses; the mcp.dataDetail filter masks detail_text by key. */
+        if (r.DetailText is { } detailText)
+            payload["detail_text"] = detailText;
         return payload;
     }
 
@@ -558,6 +571,7 @@ internal static class InvestigationToolCore
     internal static string ClaimStatus(InvestigationClaimOutcome outcome) => outcome switch
     {
         InvestigationClaimOutcome.Claimed => "claimed",
+        InvestigationClaimOutcome.Reclaimed => "renewed",
         InvestigationClaimOutcome.AlreadyClaimed => "already_claimed",
         InvestigationClaimOutcome.NotOpen => "not_open",
         InvestigationClaimOutcome.NotFound => "not_found",

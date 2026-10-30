@@ -55,6 +55,7 @@ public sealed class ExternalAlertDeliverySelfAlertTests
         Assert.Equal("externalalerts", fired.ServerKey);
         Assert.Equal(DarlingSelfAlertEvaluator.StoreServerLabel, fired.ServerName);
         Assert.Equal("7", fired.CurrentValue);
+        Assert.Contains("7 external alerts were not delivered in the last hour", fired.ShortMessage);
         Assert.Contains("2 expired, 4 interrupted, 1 failed", fired.ShortMessage);
         Assert.Contains("- Source backup_svc: 2 expired, 1 failed", fired.DetailText);
         Assert.Contains("- Source etl: 4 interrupted", fired.DetailText);
@@ -118,7 +119,25 @@ public sealed class ExternalAlertDeliverySelfAlertTests
         Assert.Equal("25", fired.CurrentValue);
         Assert.Contains("- Source src19:", fired.DetailText);
         Assert.DoesNotContain("- Source src20:", fired.DetailText);
-        Assert.Contains("+ 5 more source(s).", fired.DetailText);
+        Assert.Contains("+ 5 more sources.", fired.DetailText);
+    }
+
+    [Fact]
+    public async Task Undelivered_TheWordsAgreeWithTheCounts_ForOneAlertAndForOneUnlistedSource()
+    {
+        /* #6700: "1 external alert was not delivered", not "1 external alert(s) were"; the 21st source is "1 more source.". */
+        var one = new DarlingSelfAlertTests.Harness();
+        await one.Build().ApplyExternalAlertsAsync(Report(("etl", "failed", 1)), Ct);
+        var single = Assert.Single(one.Deliverer.Outcomes);
+        Assert.StartsWith("1 external alert was not delivered in the last hour", single.ShortMessage);
+        Assert.DoesNotContain("(s)", single.DetailText);
+
+        var h = new DarlingSelfAlertTests.Harness();
+        var rows = Enumerable.Range(0, 21).Select(i => ("src" + i.ToString("D2", CultureInfo.InvariantCulture), "expired", 1)).ToArray();
+        await h.Build().ApplyExternalAlertsAsync(Report(rows), Ct);
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Contains("+ 1 more source.", fired.DetailText);
+        Assert.DoesNotContain("(s)", fired.DetailText);
     }
 
     [Fact]

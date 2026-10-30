@@ -12,15 +12,10 @@ name: Darling upgrade shapes
 #       the folder's own write entry, and prints the move steps
 # U1, U2 and U3 run both install-darling.ps1 and upgrade-darling.ps1 as separate legs; U4 runs install-darling.ps1.
 #
-# Triggers: a pull request touching the scripts (or this check), the nightly (as a reusable workflow), and a
-# manual dispatch. `pull_request`, never `pull_request_target`: the legs run the pull request's own scripts,
-# so they must run with the pull request's read-only token and no secrets.
+# Triggers: the nightly (as a reusable workflow) and a manual dispatch. It no longer runs on pull requests (#6656):
+# the pull request workflow (pr.yml) is the one per-PR CI system, so these legs are a nightly and on-demand check.
+# Never add `pull_request_target`: the legs run the checked-out scripts, which must not get a write token or secrets.
 on:
-  pull_request:
-    paths:
-      - 'Darling/tools/*.ps1'
-      - '.github/workflows/darling-upgrade-shapes.yml'
-      - '.github/scripts/darling-upgrade-shapes.ps1'
   workflow_call:
   workflow_dispatch:
 
@@ -29,7 +24,7 @@ permissions:
 
 # The released builds the legs install first. Change them here and nowhere else.
 env:
-  DARLING_CURRENT_RELEASE: '3.10.0'
+  DARLING_CURRENT_RELEASE: '3.11.0'
   DARLING_OLD_RELEASE: '3.7.1'
 
 concurrency:
@@ -57,10 +52,21 @@ jobs:
         with:
           ref: ${{ github.sha }}
 
+      # The exact SDK version from global.json, not its feature band. Given a band, setup-dotnet resolves the newest
+      # patch through aka.ms links, and on 2026-10-25 those links sent every run to a download that failed with HTTP 409.
+      # With an exact version the install script downloads from the release feed and never asks aka.ms.
+      - name: Read the SDK version from global.json
+        id: globaljson_sdk
+        shell: pwsh
+        run: |
+          $version = (Get-Content -Raw (Join-Path $env:GITHUB_WORKSPACE 'global.json') | ConvertFrom-Json).sdk.version
+          if (-not $version) { throw 'global.json names no sdk.version' }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
       - name: Setup .NET 10.0
         uses: actions/setup-dotnet@v6
         with:
-          dotnet-version: '10.0.x'
+          dotnet-version: ${{ steps.globaljson_sdk.outputs.version }}
 
       - name: Run the leg
         shell: pwsh

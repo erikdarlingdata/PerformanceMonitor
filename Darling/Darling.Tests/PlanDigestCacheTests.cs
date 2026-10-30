@@ -190,9 +190,9 @@ public sealed class PlanDigestCacheTests
             .SetValue(runner, (Func<string?>)(() => "off"));
 
         var target = new CollectorTargetInfo { IsAzureSqlDb = azure };
-        Assert.Equal(expected, runner.ShouldDeferPlanFetchFor("query_stats", capture, target));
-        Assert.False(runner.ShouldDeferPlanFetchFor("procedure_stats", capture, target));
-        Assert.False(runner.ShouldDeferPlanFetchFor("query_store", capture, target));
+        Assert.Equal(expected, runner.ShouldDeferPlanFetchFor("query_stats", capture, target, serverCapturePlans: null));
+        Assert.False(runner.ShouldDeferPlanFetchFor("procedure_stats", capture, target, serverCapturePlans: null));
+        Assert.False(runner.ShouldDeferPlanFetchFor("query_store", capture, target, serverCapturePlans: null));
     }
 
     [Fact]

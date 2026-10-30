@@ -90,7 +90,7 @@ public sealed class DeadlockRollupLiveTests
             new NotificationRoute(1, AlertFamily.Performance, "", "", "", "", "", Enabled: true) { AgentLevel = NotificationRoute.AgentLevelInvestigate },
         };
         var settings = new DarlingAlertSettings(config);
-        var history = new PgAlertHistoryStore(historySource);
+        var history = new PgAlertHistoryStore(historySource, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds);
         var webhooks = new WebhookAlertService(settings, DarlingAlertDeliverer.Branding, NullLogger<WebhookAlertService>.Instance, history);
         var dispatcher = new InvestigationDispatcher(store, settings, NullLogger.Instance, agentGate: rollup.AllowsAgentRequestAsync);
         var deliverer = new DarlingAlertDeliverer(settings, history, webhooks, NullLogger.Instance, investigationDispatcher: dispatcher);

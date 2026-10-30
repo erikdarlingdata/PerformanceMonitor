@@ -1265,7 +1265,7 @@ public sealed class DarlingConfigureNetworkTests
     public void Readme_NamesTheAddressSpellingRule_OnTheStoreRangeAndOnTheList()
     {
         const string Clause = "with each IPv4 address written as four plain decimal numbers (no leading zeros) and no IPv6 zone index";
-        var readme = RepoFile.ReadRepoFile("Darling", "README.md");
+        var readme = RepoFile.ReadRepoFile("docs", "darling", "network-endpoints.md"); // #6416: moved from Darling/README.md
 
         Assert.Contains("**`allowFrom`**: one range in CIDR form, " + Clause + ". The store takes ONE range and never a list", readme, StringComparison.Ordinal);
         Assert.Contains("Each entry must be in CIDR form (use `/32` for one address), " + Clause + ", and must match the address family of `listen`.", readme, StringComparison.Ordinal);
@@ -2440,7 +2440,7 @@ public sealed class DarlingCollectorToggleVerbTests
     [Fact]
     public void Readme_DocumentsBothVerbs_TheDefaultScope_AndTheXeSessionConsequence()
     {
-        var readme = RepoFile.ReadRepoFile("Darling", "README.md");
+        var readme = RepoFile.ReadRepoFile("docs", "darling", "collector-settings.md"); // #6416: moved from Darling/README.md
         Assert.Contains("--enable-collector long_query_completions", readme, StringComparison.Ordinal);
         Assert.Contains("--disable-collector long_query_completions", readme, StringComparison.Ordinal);
         Assert.Contains("--enable-collector long_query_completions --server", readme, StringComparison.Ordinal);

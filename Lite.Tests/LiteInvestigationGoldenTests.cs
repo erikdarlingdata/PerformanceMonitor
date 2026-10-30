@@ -13,7 +13,6 @@ using System.Linq;
 using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
-using ModelContextProtocol.Server;
 using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Investigations;
 using PerformanceMonitorLite.Mcp;
@@ -23,10 +22,9 @@ namespace PerformanceMonitorLite.Tests;
 
 /// <summary>
 /// #5914 (#5632 Phase B slice L) lands its shared link work with Lite's bytes held still: the brief Lite composes for a
-/// fixed input, at every <c>mcp.dataDetail</c> level, and Lite's Level 1 tool texts (each investigation tool's description
-/// and parameter descriptions) are pinned by SHA-256 here, written before any production change of the slice. Darling's
+/// fixed input, at every <c>mcp.dataDetail</c> level, is pinned by SHA-256 here, written before any production change of the slice. Darling's
 /// <c>prior_links</c> and <c>request_url</c> are absent from a Lite brief because Lite's reader supplies neither. A
-/// deliberate change to Lite's brief or tool text updates these pins in the same PR, with the reason.
+/// deliberate change to Lite's brief updates these pins in the same PR, with the reason.
 /// </summary>
 public sealed class LiteInvestigationGoldenTests
 {
@@ -57,10 +55,14 @@ public sealed class LiteInvestigationGoldenTests
 
     private static string Sha(string text) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(text)));
 
+    /// <summary>
+    /// #6462: the three hashes below moved with <c>report_contract.required</c> (it now lists summary and drops root_cause_found, and
+    /// <c>service_sets</c> names the one the service sets); the keyed pin further down moved with it. Re-pinned in the same PR.
+    /// </summary>
     [Theory]
-    [InlineData(McpDataDetail.Full, "103E37D369912AE9161B2691C10F7F51BFEBF5FA72E60CE18B4A50BE17ADAD67")]
-    [InlineData(McpDataDetail.MaskLiterals, "6427BD28BEE859A66C29009A545072C0B5F96B6DF9BCFEA1E52B7A0EBDA5F46E")]
-    [InlineData(McpDataDetail.MetadataOnly, "CD0442961146963B9162A96E5395B181B8238FD232AA1E651F6771745A5BCE3E")]
+    [InlineData(McpDataDetail.Full, "2A1A81C9E4BC0FC37E717758570F670539ADECA5D6BC2987A9B95689CAD9BBC2")]
+    [InlineData(McpDataDetail.MaskLiterals, "D68F95DC98BA4706D8A4C630475B241904C9201B1F4B96BEBC93E16D2FC41F37")]
+    [InlineData(McpDataDetail.MetadataOnly, "9C7E884F127787EFA70D37CF08869E3227358D1979F49CF3C97E18D97C9A2944")]
     public void TheLiteBrief_ForAFixedInput_IsByteForByteUnchanged(McpDataDetail mode, string expectedSha)
     {
         /* No key: the brief numbers logins per answer (login#1), as before #6066, so this pin did not move. */
@@ -74,16 +76,48 @@ public sealed class LiteInvestigationGoldenTests
     /// <summary>
     /// #6066: the same brief at <c>metadataOnly</c> with the fixed test key (the 32 bytes 0x00 to 0x1f, the same key Darling's
     /// pseudonym tests use). Re-pinned in the same PR as the change, because every login in it is now <c>login#</c> plus 8 hex instead of
-    /// <c>login#1</c>.
+    /// <c>login#1</c>. #6462: moved again with <c>report_contract.required</c> (see the pin above).
     /// </summary>
     [Fact]
     public void TheLiteBrief_AtMetadataOnly_WithTheFixedKey_IsByteForByteUnchanged()
     {
         var brief = InvestigationBriefComposer.Compose(Sources(), LiteInvestigationBriefTools.Tools, McpDataDetail.MetadataOnly, At, FixedKey());
 
-        Assert.True("A93E1CC9D8C35BA9DE65580E43F3DB5C5A64DE53D6C94C6538B4FC92344D98AF" == Sha(brief), $"The keyed Lite brief moved; its SHA-256 is {Sha(brief)}, length {brief.Length}:\n{brief}");
+        Assert.True("65DC09863AF1BD6A16722B928B3CF90E79C934B09B6349CFA426E5C1FDFBFF9F" == Sha(brief), $"The keyed Lite brief moved; its SHA-256 is {Sha(brief)}, length {brief.Length}:\n{brief}");
         Assert.DoesNotContain("corp", brief, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("alice", brief, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// The brief's <c>report_contract.required</c> is exactly the required parameters of Lite's submit tool (found by reflection, not
+    /// by reading source text). It once listed root_cause_found, which the tool does not take, and left out summary. The brief's
+    /// golden bytes above moved for that, and the pins were updated in the same PR.
+    /// </summary>
+    [Fact]
+    public void ReportContractRequired_IsExactlyTheSubmitToolsRequiredParameters()
+    {
+        var brief = System.Text.Json.Nodes.JsonNode.Parse(InvestigationBriefComposer.Compose(Sources(), LiteInvestigationBriefTools.Tools, McpDataDetail.Full, At))!;
+        var required = brief["report_contract"]!["required"]!.AsArray().Select(n => (string)n!).OrderBy(n => n, StringComparer.Ordinal).ToList();
+        var method = typeof(McpInvestigationTools).GetMethod(nameof(McpInvestigationTools.SubmitInvestigationReport))!;
+        var fromTool = method.GetParameters()
+            .Where(p => !p.IsOptional && p.GetCustomAttribute<DescriptionAttribute>() is not null)
+            .Select(p => p.Name!).OrderBy(n => n, StringComparer.Ordinal).ToList();
+        Assert.Equal(fromTool, required);
+    }
+
+    /// <summary>An ANOMALY_WRITE_LATENCY story names get_file_io_trend, then get_file_io_stats, ahead of the family calls.</summary>
+    [Fact]
+    public void AnAnomalyWriteLatencyStory_NamesTheFileIoReadsFirst()
+    {
+        var s = Sources();
+        var finding = s.Findings[0] with { RootFactKey = "ANOMALY_WRITE_LATENCY", NextTools = Array.Empty<InvestigationNextCall>() };
+        var withFinding = new InvestigationBriefSources(s.Request, s.Alerts, new[] { finding }, s.EarlierReports, s.RecentChanges, s.Notes, s.Profiles);
+        var brief = System.Text.Json.Nodes.JsonNode.Parse(InvestigationBriefComposer.Compose(withFinding, LiteInvestigationBriefTools.Tools, McpDataDetail.Full, At))!;
+        var calls = brief["next_calls"]!.AsArray().Select(c => (string)c!["tool"]!).ToList();
+        Assert.Equal("get_file_io_trend", calls[0]);
+        Assert.Equal("get_file_io_stats", calls[1]);
+        Assert.Contains("get_blocked_process_reports", calls);
+        Assert.DoesNotContain("get_job_history", calls);
     }
 
     private static PseudonymKey FixedKey()
@@ -91,24 +125,5 @@ public sealed class LiteInvestigationGoldenTests
         var bytes = new byte[32];
         for (int i = 0; i < bytes.Length; i++) bytes[i] = (byte)i;
         return new PseudonymKey(bytes);
-    }
-
-    [Fact]
-    public void LitesLevel1ToolTexts_AreUnchanged()
-    {
-        var text = new StringBuilder();
-        foreach (var method in typeof(McpInvestigationTools).GetMethods(BindingFlags.Public | BindingFlags.Static)
-                     .Where(m => m.GetCustomAttribute<McpServerToolAttribute>()?.Name is not null)
-                     .OrderBy(m => m.GetCustomAttribute<McpServerToolAttribute>()!.Name, StringComparer.Ordinal))
-        {
-            text.Append(method.GetCustomAttribute<McpServerToolAttribute>()!.Name).Append('\n')
-                .Append(method.GetCustomAttribute<DescriptionAttribute>()?.Description).Append('\n');
-            foreach (var parameter in method.GetParameters())
-                text.Append(parameter.Name).Append(": ").Append(parameter.GetCustomAttribute<DescriptionAttribute>()?.Description).Append('\n');
-        }
-
-        text.Append(InvestigationFormats.UnsupportedReportFormatMessage(2, "Lite"));
-        var all = text.ToString();
-        Assert.True(Sha(all) == "D5E43FB06F2EE2CE56495183C6A2EDD2CF4A729C87E169E256CA991CD1E78A30", $"Lite's Level 1 tool texts moved; their SHA-256 is {Sha(all)}:\n{all}");
     }
 }

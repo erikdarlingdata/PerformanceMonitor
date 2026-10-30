@@ -348,6 +348,9 @@ WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
         var matchRows = 0;
         var limited = false;
         string? nextMarker = null;
+        var candidates = new List<string>();
+        var candidateIsUtc = false;
+        string? candidateSetting = null;
 
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -362,7 +365,7 @@ WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
 
             if (context.PgLogUsesCsvlog)
             {
-                ReadCsvRow(reader, context, rows);
+                await ReadCsvRowAsync(reader, context, rows, cancellationToken);
                 continue;
             }
 
@@ -420,18 +423,32 @@ WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
                for: a partial history from a target declared unreadable is worse for the reader than a
                refusal that says one thing. Unless the target's own log_timezone renders UTC: then a candidate
                in another zone is not the server's, and it is skipped and counted instead (#4046). */
-            var parsed = PgDeadlockLogParser.FromReport(
-                firstColumn, PgServerLogTail.LogTimezoneIsUtc(reader, 1), out var foreignZoneLines);
-            PgServerLogTail.MeasureForeignZoneLines(context, foreignZoneLines);
+            /* #6866: parsed after the loop, so a named local log_timezone is checked against the server once for the
+               whole read (every candidate's stamps in one statement) and not once per report. */
+            candidates.Add(firstColumn);
+            candidateIsUtc = PgServerLogTail.LogTimezoneIsUtc(reader, 1);
+            candidateSetting = PgServerLogTail.LogTimezoneSetting(reader, 1);
+        }
 
-            /* A block that will not parse is skipped rather than reported. The window is bounded, so a
-               report cut in half at its edge is ordinary and is read whole on the next overlapping pass. */
-            if (parsed is null)
+        if (candidates.Count > 0)
+        {
+            var zones = await PgLogNamedZone.ResolveBodyAsync(
+                string.Join("\n", candidates), candidateIsUtc, candidateSetting, context.PgLogZoneResolver, cancellationToken);
+
+            foreach (var candidate in candidates)
             {
-                continue;
-            }
+                var parsed = PgDeadlockLogParser.FromReport(candidate, candidateIsUtc, zones, out var foreignZoneLines);
+                PgServerLogTail.MeasureForeignZoneLines(context, foreignZoneLines);
 
-            rows.Add(ToRow(parsed.Value));
+                /* A block that will not parse is skipped rather than reported. The window is bounded, so a
+                   report cut in half at its edge is ordinary and is read whole on the next overlapping pass. */
+                if (parsed is null)
+                {
+                    continue;
+                }
+
+                rows.Add(ToRow(parsed.Value));
+            }
         }
 
         /* The marker always advances: a read the cap cut kept the newest matches, and a marker held back would
@@ -471,7 +488,8 @@ WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
     /// whole tail body here, never a regexp candidate, so it is decoded exactly as <c>PgLogEventsCollector</c>'s
     /// own csvlog branch decodes it.
     /// </summary>
-    private static void ReadCsvRow(DbDataReader reader, CollectorContext context, List<Row> rows)
+    private static async Task ReadCsvRowAsync(
+        DbDataReader reader, CollectorContext context, List<Row> rows, CancellationToken cancellationToken)
     {
         var body = reader.IsDBNull(0)
             ? null
@@ -499,7 +517,8 @@ WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
         }
 
         var logTimezoneIsUtc = PgServerLogTail.LogTimezoneIsUtc(reader, 1);
-        var kept = PgLogEventsCollector.FilterForeignZoneEntries(entries, logTimezoneIsUtc, out var foreignZoneLines);
+        var (kept, foreignZoneLines) = await PgLogNamedZone.FilterEntriesAsync(
+            entries, logTimezoneIsUtc, PgServerLogTail.LogTimezoneSetting(reader, 1), context.PgLogZoneResolver, cancellationToken);
         PgServerLogTail.MeasureForeignZoneLines(context, foreignZoneLines);
 
         var raiseShapedSkipped = 0;

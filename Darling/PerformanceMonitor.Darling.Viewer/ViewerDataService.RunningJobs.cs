@@ -268,6 +268,32 @@ public sealed partial class ViewerDataService
 
         return CollectorRuntimePrecondition.CollectorLastRunFrom(reader);
     }
+
+    /// <summary>
+    /// The latest run's status, explanation and time for one collector and server, or all null when it has no run (#6861). It reads
+    /// <see cref="CollectorOutcomeStatements.LatestCollectorOutcomeSql"/>, the one statement the Darling service's get_* tools also
+    /// read for their <c>precondition</c> answer. The tab note for a collector that recorded a named skip such as PERMISSIONS is
+    /// built from it.
+    /// </summary>
+    public async Task<(string? Status, string? ErrorMessage, DateTime? ObservedUtc)> GetLatestCollectorOutcomeAsync(
+        int serverId, string collectorName, CancellationToken cancellationToken = default)
+    {
+        await using var command = _dataSource.CreateCommand(CollectorOutcomeStatements.LatestCollectorOutcomeSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+        command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = collectorName });
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return (null, null, null);
+        }
+
+        return (
+            reader.IsDBNull(0) ? null : reader.GetString(0),
+            reader.IsDBNull(1) ? null : reader.GetString(1),
+            reader.IsDBNull(2) ? null : DateTime.SpecifyKind(reader.GetDateTime(2), DateTimeKind.Utc));
+    }
 }
 
 /// <summary>

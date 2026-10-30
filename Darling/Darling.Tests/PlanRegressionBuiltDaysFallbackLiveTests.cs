@@ -82,6 +82,58 @@ public sealed class PlanRegressionBuiltDaysFallbackLiveTests
     }
 
     /// <summary>
+    /// #5506: the regressions read takes the recent window's whole days from the daily totals where it can. On a store without
+    /// the daily tables (before V168) the built-days read fails under its savepoint, the plan has no recent day, the
+    /// transaction stays usable, and the statement it then runs (which names no daily table) gives the same rows as the
+    /// recent-days form gave while the tables were there.
+    /// </summary>
+    [Fact]
+    public async Task OnAStoreWithoutTheDailyTables_TheRegressionsReadTakesNoRecentDay_AndAnswersTheSame()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #5506 fallback test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        var (periodStart, periodEnd) = await SeedAndBuildAsync(connection, ct);
+
+        /* The recent window starts four days before the pass window, so the cheap plan (five days before) is baseline and the
+           built day three days before the pass window's day is a whole recent day. */
+        var recentStart = periodStart.AddDays(-4);
+        var baselineStart = recentStart.AddDays(-7);
+
+        async Task<QueryStoreRegressionBaseline.Plan> ResolveAsync()
+        {
+            await using var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, ct);
+            var plan = await QueryStoreRegressionBaseline.ResolveAsync(connection, transaction, ServerId, baselineStart, recentStart, 60, null, ct, windowEnd: periodEnd);
+            await using (var usable = new NpgsqlCommand("SELECT 1", connection, transaction))
+            {
+                Assert.Equal(1, await usable.ExecuteScalarAsync(ct));
+            }
+
+            await transaction.CommitAsync(ct);
+            return plan;
+        }
+
+        var withTables = await ResolveAsync();
+        Assert.True(withTables.RegularFromLatest);
+        Assert.NotEmpty(withTables.RecentDays);
+        var reference = await QueryStoreRegressionsDailyBaselineLiveTests.RunFullAsync(connection, ServerId, "fallbackdb", recentStart, periodEnd, baselineStart, withTables, ct);
+        Assert.Single(reference);
+
+        await ExecAsync(connection, "ALTER TABLE collect.plan_regression_daily_built RENAME TO plan_regression_daily_built_gone", ct);
+        await ExecAsync(connection, "ALTER TABLE collect.plan_regression_daily RENAME TO plan_regression_daily_gone", ct);
+        var without = await ResolveAsync();
+        Assert.True(without.RegularFromLatest);
+        Assert.Empty(without.RecentDays);
+        Assert.Empty(without.RunDays);
+        Assert.Equal(reference, await QueryStoreRegressionsDailyBaselineLiveTests.RunFullAsync(connection, ServerId, "fallbackdb", recentStart, periodEnd, baselineStart, without, ct));
+    }
+
+    /// <summary>
     /// The built-days read and the daily read share one REPEATABLE READ transaction (#5448). Between them, from another
     /// connection, the day totals are deleted and committed: the daily read must still see the totals that made those days
     /// built, so the fact equals the undisturbed one. At READ COMMITTED the second read would see no totals for days the
@@ -316,6 +368,79 @@ public sealed class PlanRegressionBuiltDaysFallbackLiveTests
         var after = await DarlingCollectionCaveatReader.ReadAsync(postgres, ServerId, null, ct);
         Assert.Empty(after);
         Assert.Null(JsonNode.Parse(DarlingCollectionCaveatReader.AttachToJson("{\"server\":\"s\"}", after))!.AsObject()[DarlingCollectionCaveatReader.PayloadKey]);
+    }
+
+    /// <summary>
+    /// #6548: a regression of SQL Server's own change tracking cleanup is not an offender. The seeded query (id 1, a 10x CPU
+    /// regression) is read with no stored text, then with the text of a DMV read that merely names sys.change_tracking_tables
+    /// (still an offender: the rule is the engine's own wording, not any mention), then with the cleanup delete's text (no
+    /// PLAN_REGRESSION fact at all).
+    /// </summary>
+    [Fact]
+    public async Task ARegressionOfSqlServersOwnCleanup_IsNotAnOffender_AndALookalikeStillIs()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #6548 internal-statement test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        var (periodStart, periodEnd) = await SeedAndBuildAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        async Task<Fact?> ReadAsync() =>
+            (await new PgFactCollector(postgres).CollectFactsAsync(NewContext(periodStart, periodEnd))).SingleOrDefault(f => f.Key == "PLAN_REGRESSION");
+
+        var control = await ReadAsync();
+        Assert.NotNull(control);
+        Assert.Equal(1, control!.Metadata["offender_count"]);
+
+        await using (var insert = new NpgsqlCommand(
+            "INSERT INTO collect.query_store_text (server_id, database_name, query_id, query_sql_text, last_seen) VALUES ($1, 'fallbackdb', 1, $2, $3)", connection))
+        {
+            insert.Parameters.AddWithValue(ServerId);
+            insert.Parameters.AddWithValue("SELECT name FROM sys.change_tracking_tables WHERE name = @name");
+            insert.Parameters.AddWithValue(NpgsqlDbType.Timestamp, periodEnd);
+            await insert.ExecuteNonQueryAsync(ct);
+        }
+
+        var lookalike = await ReadAsync();
+        Assert.NotNull(lookalike);
+        Assert.Equal(1, lookalike!.Metadata["offender_count"]);
+
+        await using (var update = new NpgsqlCommand(
+            "UPDATE collect.query_store_text SET query_sql_text = $1 WHERE server_id = $2 AND database_name = 'fallbackdb' AND query_id = 1", connection))
+        {
+            update.Parameters.AddWithValue("(@p0 bigint)DELETE TOP(@batch_size) FROM sys.[change_tracking_1228027148] WHERE commit_ts < @p0");
+            update.Parameters.AddWithValue(ServerId);
+            await update.ExecuteNonQueryAsync(ct);
+        }
+
+        Assert.Null(await ReadAsync());
+
+        /* #6665: the monitor's own statement, stored only in the text table (the shape a live Darling store has), is no offender
+           either; the same row with an ordinary text is. */
+        await using (var restore = new NpgsqlCommand(
+            "UPDATE collect.query_store_text SET query_sql_text = $1 WHERE server_id = $2 AND database_name = 'fallbackdb' AND query_id = 1", connection))
+        {
+            restore.Parameters.AddWithValue("SELECT ordinary");
+            restore.Parameters.AddWithValue(ServerId);
+            await restore.ExecuteNonQueryAsync(ct);
+        }
+
+        Assert.NotNull(await ReadAsync());
+
+        await using (var own = new NpgsqlCommand(
+            "UPDATE collect.query_store_text SET query_sql_text = $1 WHERE server_id = $2 AND database_name = 'fallbackdb' AND query_id = 1", connection))
+        {
+            own.Parameters.AddWithValue("(@cutoff_time datetime2(7))SELECT /* " + PerformanceMonitor.Collectors.QueryStoreCollector.SelfQueryMarker + " */ qsrs.plan_id");
+            own.Parameters.AddWithValue(ServerId);
+            await own.ExecuteNonQueryAsync(ct);
+        }
+
+        Assert.Null(await ReadAsync());
     }
 
     private static List<CollectionFailure> PlanRegressionFailures(AnalysisContext context) =>

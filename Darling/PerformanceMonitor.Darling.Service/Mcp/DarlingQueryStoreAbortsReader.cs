@@ -78,7 +78,7 @@ internal static class DarlingQueryStoreAbortsReader
     /// aborted or exception run does not pass the HAVING, so a Regular-only query never appears. The page is cut before the text
     /// lookup, so the lateral runs for the rows kept only.
     /// </summary>
-    private const string Tail = """
+    private const string Tail = $$"""
         ranked AS (
             SELECT
                 database_name,
@@ -102,6 +102,15 @@ internal static class DarlingQueryStoreAbortsReader
                 r.aborted_runs + r.exception_runs AS failed_runs,
                 CAST(r.aborted_runs + r.exception_runs AS double precision) / NULLIF(r.total_runs, 0) AS failed_share
             FROM ranked AS r
+            /* #6665: the monitor's own statement is left out before the cap, by the shared read-side predicate. Its text is only in
+               query_store_text on Darling (the collector's drop never fires), and only the few queries with an aborted or failed run
+               reach this point, so the key lookup is cheap. Rows from before the separate text fetch carry inline text the collector
+               already filtered, so there is no inline fallback here. */
+            WHERE NOT EXISTS (SELECT 1 FROM query_store_text AS x
+                              WHERE x.server_id = $1
+                              AND   x.database_name = r.database_name
+                              AND   x.query_id = r.query_id
+                              AND   {{QueryStoreSelfStatement.SelfOfStoredText}})
             ORDER BY r.aborted_runs + r.exception_runs DESC,
                      CAST(r.aborted_runs + r.exception_runs AS double precision) / NULLIF(r.total_runs, 0) DESC NULLS LAST,
                      r.database_name, r.query_id, r.query_hash

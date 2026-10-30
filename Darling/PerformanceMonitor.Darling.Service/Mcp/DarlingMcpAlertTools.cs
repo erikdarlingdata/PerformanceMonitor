@@ -89,7 +89,7 @@ public sealed partial class DarlingMcpAlertTools
            positional C# caller can be re-bound by. */
         [Description("Include alerts an operator has dismissed in the Viewer. Default false, which is the Alert History grid's own read.")] bool include_dismissed = false,
         [Description("Only alerts with this metric name (e.g. 'High CPU', 'Blocking Detected'), matched exactly, ignoring case. Omit for every metric.")] string? metric_name = null,
-        [Description("Only alerts of this family: self-monitor, reports, agent-jobs, performance or external. Omit for every family.")] string? family = null,
+        [Description("Alert family: self-monitor, reports, agent-jobs, performance or external. Not an investigation family such as blocking or resources: filter those with metric_name. Omit for all.")] string? family = null,
         [Description("Add streak_days to each row: days in a row (up to 7) this metric fired at this time of day before the alert, muted fires counting. Default false: rows are unchanged.")] bool include_streak = false,
         McpDataDetailSetting? maskSetting = null,
         CancellationToken cancellationToken = default)
@@ -146,7 +146,7 @@ public sealed partial class DarlingMcpAlertTools
                 return dismissedExcludedCount > 0
                     ? McpHelpers.Status(
                         "empty",
-                        $"No undismissed alerts found in the specified time range{filterSentence}, but {dismissedExcludedCount} dismissed alert(s) were excluded by the default filter. Re-run with include_dismissed = true to see them — a dismissed alert still fired.")
+                        $"No undismissed alerts found in the specified time range{filterSentence}, but {dismissedExcludedCount} dismissed {(dismissedExcludedCount == 1 ? "alert was" : "alerts were")} excluded by the default filter. Re-run with include_dismissed = true to see them — a dismissed alert still fired.")
                     : McpHelpers.Status("empty", $"No alerts found in the specified time range{filterSentence}.");
             }
 
@@ -337,7 +337,7 @@ public sealed partial class DarlingMcpAlertTools
         }).ToArray());
     }
 
-    [McpServerTool(Name = "get_alert_settings"), Description("Gets the alert configuration currently in effect: enabled flags, thresholds, cooldowns, delivery mode, and cadences. cooldown_minutes gates whether an alert FIRES; delivery.cooldown_minutes separately bounds the resulting post, per alert fingerprint and, for a re-notification, per metric across every monitored server. Darling: an unseeded store answers status unavailable and darling.json's defaults still govern until it seeds. Lite always answers its live in-memory settings. An empty knob list (e.g. long_running_query's exclusions) means cleared, not a default in force.<<GUIDE>>Gets the current alert configuration the service is using: which alerts are enabled and their thresholds (CPU, blocking, deadlocks, poison waits, runnable queue (runnable tasks per scheduler), client timeouts (attentions per minute), long-running queries/jobs, tempdb, low disk, failed jobs, database state, Availability Group health, connection loss), the cooldown, excluded databases, the deadlock/blocking delivery mode and cooldown, the scheduled-analysis cadence, and the fleet-sweep cadence. TWO different cooldowns are reported and they govern different stages: top-level cooldown_minutes gates whether the alert engine FIRES at all, while delivery.cooldown_minutes bounds the resulting Slack/Teams/PagerDuty/webhook/email post twice over: once per alert FINGERPRINT, and once per METRIC across the whole fleet for a RE-notification. The second bound is why one fault on forty servers does not cost forty posts an hour; the servers it holds back are named on the post that does go out, under an 'Other Servers Affected' section. A first notice is never held back by either bound, and PerEvent delivery mode opts out of the per-metric one. A channel going quiet with alerts still in get_alert_history is delivery.cooldown_minutes, not cooldown_minutes. The self_alerts group holds the thresholds for alerts about the MONITOR STORE itself rather than a monitored server — those arrive with Server: 'Monitor Store' by default, or with the store's own peers.storeName label when the operator set that file-only field (a multi-store estate names each store on its own self-alerts), so an alert naming either spelling is tuned here and nowhere else, including Retention Held's warn/critical ratios. Mute rules match the alert row's server spelling, so on a store with storeName set, scope self-alert mutes to that label, not to 'Monitor Store'. The health_bands group is NOT an alert: its two tiers decide what band a server's card, the worst-first ranking and get_fleet_overview's counts read, in deadlocks per HOUR normalised over whatever window was asked for — so the same pair means the same condition on a 1-hour read and a 24-hour one. Tuning deadlocks.count_threshold does not move the band and tuning health_bands does not move the alert. The file_growth group's rise_mb is megabytes per HOUR, averaged over file_growth.lookback_minutes — a rate, not a total for the window: 10240 means 10 GB/hr whether the lookback is 5 minutes or 24 hours, and the engine scales it to the window (a 5-minute lookback asks for 853 MB inside it, a 24-hour one for 240 GB). The fleet_sweep group is NOT an alert family either, and its cadence is a SECOND cadence, separate from the scheduled-analysis one: fleet_sweep.enabled turns the scheduled whole-fleet sweep report on or off, and fleet_sweep.interval_minutes (15–1440, default 60 — hourly) is how often it runs. The alerts_enabled master switch deliberately does not govern sweep production, only delivery: sweeps keep running under alerts_enabled: false — that is when they carry the would-have-paged ledger — so muting the fleet does not blind the report surface. Separately, deadlocks.pg_count_threshold and blocking.pg_count_threshold are the PostgreSQL versions of those two alerts' count gates, reported inside those same groups, and they are deliberately NOT the same numbers as the count_threshold beside them: the two engines count with different instruments (captured deadlock graphs versus deadlocks parsed from the server log; engine-recorded blocked-process reports versus a periodic SAMPLE of pg_stat_activity), and while both engines' cards now band deadlocks through the same health_bands tiers, a PostgreSQL server still has no blocking band to calibrate against. The enabled switch in each group governs BOTH engines; the two thresholds do not move each other. On a store with no PostgreSQL targets both PostgreSQL keys are inert. poison_wait.threshold_ms is RETIRED: since the Poison Wait alert grades ACCUMULATED wait over a ten-minute window, this value is stored and reported for compatibility but consulted by nothing; poison_wait.threshold_ms_note says so beside it on every read, and update_alert_settings accepts it with a warning rather than refusing a round-tripped payload. poison_wait.enabled is the live switch. client_timeouts.enabled is the Client Timeouts alert's switch (OFF by default), and the alert's bars are RELATIVE to each server's own normal rate: client_timeouts.warning_per_minute and client_timeouts.critical_per_minute are the FLOORS (client attentions, a client cancelled a query or its timeout expired, per minute over the attention collector's last runs, about 3 minutes; Warning at least 1, Critical never below Warning), and client_timeouts.warning_multiple and client_timeouts.critical_multiple (defaults 3 and 10) scale the server's baseline, the p99.9 of its own 3-minute average attention rate over the last 7 days, read about once a day. The Warning bar is the higher of the Warning floor and warning_multiple x baseline, the Critical bar the higher of the Critical floor and critical_multiple x baseline, and a server with under a day of capture, or under 720 minutes with a successful collector run, has no baseline and uses the floors alone. The fired alert names the baseline, the multiple and the bar crossed. analysis.uncorroborated_route is where a notify-worthy but UNCORROBORATED finding goes — one fact in its chain and no matched co-fire check: 'digest' (the default) keeps it off every paging channel and puts it in the daily Analysis Singles Digest and the web/MCP surfaces, 'page' restores the earlier paging of every notify-worthy finding; a corroborated finding pages under either. It is the EFFECTIVE route, never null, resolved from the knob's two homes with the STORE winning: the settings row's analysis_uncorroborated_route column (V137) when it holds a route, else darling.json's analysis.uncorroboratedRoute (read once at service start), else the shipped 'digest'. analysis.uncorroborated_route_source says which home decided — 'store', 'file' or 'default' — and analysis.uncorroborated_route_note restates the precedence beside it; a store column left NULL (every store the morning after the V137 upgrade, and every fresh seed) reads 'file'. Set it with update_alert_settings or the Viewer's Settings window (Notifications > Automated Analysis): live in the running service within one collection sweep, consulted on the next scheduled-analysis delivery, no restart; send null through update_alert_settings to clear the column and hand the decision back to the file. long_running_query.excluded_program_name_prefixes and long_running_query.excluded_logins are the Long-Running Query alert's OPT-OUT knob: a session whose program_name STARTS WITH an entry of the first list, or whose login_name IS an entry of the second (both case-insensitive, no wildcard grammar), is NOT EVALUATED by that alert at all — not read into the decision, not counted, not fingerprinted — which is the opposite of a mute rule (a mute silences a fire already decided; an exclusion means the session never reaches the decision, and excluding a paging program resolves the open incident). The exclusion is applied in the read ahead of long_running_query.max_results, so an excluded session never consumes a result slot, and the fired alert's card carries Excluded Count / Excluded By Program Prefix / Excluded By Login items saying how many SESSIONS each list removed on that evaluation (a session matching both counts once, under the prefix). The lists ship SEEDED from a 7-day read of one large production store, whose long-running population fell into four classes: (1) SQL Agent job steps — program_name prefix 'SQLAgent - TSQL JobStep', ~460 sessions a week across 11 jobs, medians 35–62 min — the default prefix; (2) the NT AUTHORITY\\SYSTEM and NT AUTHORITY\\NETWORK SERVICE logins — the permanent multi-day CDC-shaped background — the default logins; (3) the application's admin login — deliberately NOT a default, because it runs the job wave but also real ad-hoc long-runners, and the job-step prefix already covers its share; (4) named humans — never excluded, they are what the page is for. The seeds are DEFAULTS: an empty list here means the operator cleared it and that arm excludes nothing. SMTP/webhook delivery credentials are managed separately and are not reported here. delivery.send_resolutions says, per channel (slack, teams, webhook for the generic webhook, email), whether the message that an alert has cleared is also sent to the destinations its fire reached; all four are off by default, and a notification route can override them (get_notification_routes, send_resolutions). The credentials themselves are not reported — configure them in the standalone Darling Viewer app's Settings window (Notifications section), which connects to this store (including remotely, not just localhost) rather than requiring desktop access to this specific box.")]    public static async Task<string> GetAlertSettings(        NpgsqlDataSource postgres,
+    [McpServerTool(Name = "get_alert_settings"), Description("Gets the alert configuration currently in effect: enabled flags, thresholds, cooldowns, delivery mode, and cadences. cooldown_minutes gates whether an alert FIRES; delivery.cooldown_minutes separately bounds the resulting post, per alert fingerprint and, for a re-notification, per metric across every monitored server. Darling: an unseeded store answers status unavailable and darling.json's defaults still govern until it seeds. Lite always answers its live in-memory settings. An empty knob list (e.g. long_running_query's exclusions) means cleared, not a default in force.<<GUIDE>>Gets the current alert configuration the service is using: which alerts are enabled and their thresholds (CPU, blocking, deadlocks, poison waits, runnable queue (runnable tasks per scheduler), client timeouts (attentions per minute), long-running queries/jobs, tempdb, low disk, failed jobs, database state, Availability Group health, connection loss), the cooldown, excluded databases, the deadlock/blocking delivery mode and cooldown, the scheduled-analysis cadence, and the fleet-sweep cadence. TWO different cooldowns are reported and they govern different stages: top-level cooldown_minutes gates whether the alert engine FIRES at all, while delivery.cooldown_minutes bounds the resulting Slack/Teams/PagerDuty/webhook/email post twice over: once per alert FINGERPRINT, and once per METRIC across the whole fleet for a RE-notification. The second bound is why one fault on forty servers does not cost forty posts an hour; the servers it holds back are named on the post that does go out, under an 'Other Servers Affected' section. A first notice is never held back by either bound, and PerEvent delivery mode opts out of the per-metric one. A channel going quiet with alerts still in get_alert_history is delivery.cooldown_minutes, not cooldown_minutes. The self_alerts group holds the thresholds for alerts about the MONITOR STORE itself rather than a monitored server — those arrive with Server: 'Monitor Store' by default, or with the store's own peers.storeName label when the operator set that file-only field (a multi-store estate names each store on its own self-alerts), so an alert naming either spelling is tuned here and nowhere else, including Retention Held's warn/critical ratios. Mute rules match the alert row's server spelling, so on a store with storeName set, scope self-alert mutes to that label, not to 'Monitor Store'. The health_bands group is NOT an alert: its two tiers decide what band a server's card, the worst-first ranking and get_fleet_overview's counts read, in deadlocks per HOUR normalised over whatever window was asked for — so the same pair means the same condition on a 1-hour read and a 24-hour one. Tuning deadlocks.count_threshold does not move the band and tuning health_bands does not move the alert. The file_growth group's rise_mb is megabytes per HOUR, averaged over file_growth.lookback_minutes — a rate, not a total for the window: 10240 means 10 GB/hr whether the lookback is 5 minutes or 24 hours, and the engine scales it to the window (a 5-minute lookback asks for 853 MB inside it, a 24-hour one for 240 GB). The fleet_sweep group is NOT an alert family either, and its cadence is a SECOND cadence, separate from the scheduled-analysis one: fleet_sweep.enabled turns the scheduled whole-fleet sweep report on or off, and fleet_sweep.interval_minutes (15–1440, default 60 — hourly) is how often it runs. The alerts_enabled master switch deliberately does not govern sweep production, only delivery: sweeps keep running under alerts_enabled: false — that is when they carry the would-have-paged ledger — so muting the fleet does not blind the report surface. Separately, deadlocks.pg_count_threshold and blocking.pg_count_threshold are the PostgreSQL versions of those two alerts' count gates, reported inside those same groups, and they are deliberately NOT the same numbers as the count_threshold beside them: the two engines count with different instruments (captured deadlock graphs versus deadlocks parsed from the server log; engine-recorded blocked-process reports versus a periodic SAMPLE of pg_stat_activity), and while both engines' cards now band deadlocks through the same health_bands tiers, a PostgreSQL server still has no blocking band to calibrate against. The enabled switch in each group governs BOTH engines; the two thresholds do not move each other. On a store with no PostgreSQL targets both PostgreSQL keys are inert. poison_wait.threshold_ms is RETIRED: since the Poison Wait alert grades ACCUMULATED wait over a ten-minute window, this value is stored and reported for compatibility but consulted by nothing; poison_wait.threshold_ms_note says so beside it on every read, and update_alert_settings accepts it with a warning rather than refusing a round-tripped payload. poison_wait.enabled is the live switch. client_timeouts.enabled is the Client Timeouts alert's switch (ON by default since V216), and the alert's bars are RELATIVE to each server's own normal rate: client_timeouts.warning_per_minute and client_timeouts.critical_per_minute are the FLOORS (client attentions, a client cancelled a query or its timeout expired, per minute over the attention collector's last runs, about 3 minutes; Warning at least 1, Critical never below Warning), and client_timeouts.warning_multiple and client_timeouts.critical_multiple (defaults 3 and 10) scale the server's baseline, the p99.9 of its own 3-minute average attention rate over the last 7 days, read about once a day. The Warning bar is the higher of the Warning floor and warning_multiple x baseline, the Critical bar the higher of the Critical floor and critical_multiple x baseline, and a server with under a day of capture, or under 720 minutes with a successful collector run, has no baseline and uses the floors alone. The fired alert names the baseline, the multiple and the bar crossed. analysis.uncorroborated_route is where a notify-worthy but UNCORROBORATED finding goes — one fact in its chain and no matched co-fire check: 'digest' (the default) keeps it off every paging channel and puts it in the daily Analysis Singles Digest and the web/MCP surfaces, 'page' restores the earlier paging of every notify-worthy finding; a corroborated finding pages under either. It is the EFFECTIVE route, never null, resolved from the knob's two homes with the STORE winning: the settings row's analysis_uncorroborated_route column (V137) when it holds a route, else darling.json's analysis.uncorroboratedRoute (read once at service start), else the shipped 'digest'. analysis.uncorroborated_route_source says which home decided — 'store', 'file' or 'default' — and analysis.uncorroborated_route_note restates the precedence beside it; a store column left NULL (every store the morning after the V137 upgrade, and every fresh seed) reads 'file'. Set it with update_alert_settings or the Viewer's Settings window (Notifications > Automated Analysis): live in the running service within one collection sweep, consulted on the next scheduled-analysis delivery, no restart; send null through update_alert_settings to clear the column and hand the decision back to the file. long_running_query.excluded_program_name_prefixes and long_running_query.excluded_logins are the Long-Running Query alert's OPT-OUT knob: a session whose program_name STARTS WITH an entry of the first list, or whose login_name IS an entry of the second (both case-insensitive, no wildcard grammar), is NOT EVALUATED by that alert at all — not read into the decision, not counted, not fingerprinted — which is the opposite of a mute rule (a mute silences a fire already decided; an exclusion means the session never reaches the decision, and excluding a paging program resolves the open incident). The exclusion is applied in the read ahead of long_running_query.max_results, so an excluded session never consumes a result slot, and the fired alert's card carries Excluded Count / Excluded By Program Prefix / Excluded By Login items saying how many SESSIONS each list removed on that evaluation (a session matching both counts once, under the prefix). The lists ship SEEDED from a 7-day read of one large production store, whose long-running population fell into four classes: (1) SQL Agent job steps — program_name prefix 'SQLAgent - TSQL JobStep', ~460 sessions a week across 11 jobs, medians 35–62 min — the default prefix; (2) the NT AUTHORITY\\SYSTEM and NT AUTHORITY\\NETWORK SERVICE logins — the permanent multi-day CDC-shaped background — the default logins; (3) the application's admin login — deliberately NOT a default, because it runs the job wave but also real ad-hoc long-runners, and the job-step prefix already covers its share; (4) named humans — never excluded, they are what the page is for. The seeds are DEFAULTS: an empty list here means the operator cleared it and that arm excludes nothing. SMTP/webhook delivery credentials are managed separately and are not reported here. delivery.send_resolutions says, per channel (slack, teams, webhook for the generic webhook, email), whether the message that an alert has cleared is also sent to the destinations its fire reached; all four are off by default, and a notification route can override them (get_notification_routes, send_resolutions). The credentials themselves are not reported — configure them in the standalone Darling Viewer app's Settings window (Notifications section), which connects to this store (including remotely, not just localhost) rather than requiring desktop access to this specific box.")]    public static async Task<string> GetAlertSettings(        NpgsqlDataSource postgres,
         [Description("Optional: a server name. Adds server_view: each tunable threshold with its global value, effective value and source, plus that server's database overrides.")] string? server_name = null,
         CancellationToken cancellationToken = default)
     {
@@ -477,7 +477,12 @@ public sealed partial class DarlingMcpAlertTools
         health_bands = new
         {
             deadlock_warn_per_hour = s.DeadlockWarnPerHour,
-            deadlock_critical_per_hour = s.DeadlockCriticalPerHour
+            deadlock_critical_per_hour = s.DeadlockCriticalPerHour,
+            /* #6927 (V228): the blocking band, beside the deadlock one: reports per hour and the longest single block in seconds. */
+            blocking_warn_per_hour = s.BlockingWarnPerHour,
+            blocking_critical_per_hour = s.BlockingCriticalPerHour,
+            blocking_warn_wait_seconds = s.BlockingWarnWaitSeconds,
+            blocking_critical_wait_seconds = s.BlockingCriticalWaitSeconds
         },
         poison_wait = new
         {
@@ -505,7 +510,7 @@ public sealed partial class DarlingMcpAlertTools
             critical_per_scheduler = DarlingMcpThresholdOverrideTools.GlobalValueAsEngineReadsIt(s, "runnable_queue.critical_per_scheduler")
         },
         /* #5640 (V179): the Client Timeouts alert. Client attentions (a client cancelled a query or its timeout expired) per
-           minute over the attention collector's last runs against two bars, OFF by default. Reported through
+           minute over the attention collector's last runs against two bars, ON by default since V216. Reported through
            AttentionEvaluator.ClampBars, the way the engine reads them, so the payload never shows a pair the engine would rewrite. */
         client_timeouts = new
         {
@@ -586,6 +591,15 @@ public sealed partial class DarlingMcpAlertTools
         long_running_job = new { enabled = s.LongRunningJobEnabled, multiplier = s.LongRunningJobMultiplier },
         failed_job = new { enabled = s.FailedJobEnabled, lookback_minutes = s.FailedJobLookbackMinutes },
         database_state = new { enabled = s.DatabaseStateEnabled },
+        /* #6875: the Identity Capacity alert (an identity column is nearly out of values). Off by default. The two bars are percent used; a threshold override
+           (identity_capacity.warning_percent, identity_capacity.critical_percent) replaces them for one server or one database. */
+        identity_capacity = new { enabled = s.IdentityCapacityEnabled, warning_percent = s.IdentityCapacityWarningPercent, critical_percent = s.IdentityCapacityCriticalPercent },
+        /* #6874: the Agent Alert Gaps alert (SQL Server Agent alert setup has a gap). Off by default. */
+        agent_alert_gaps = new { enabled = s.AgentAlertGapsEnabled },
+        /* #6873: the database protection alerts (a full backup, a log backup or a CHECKDB older than its threshold). Off by default. */
+        backup_overdue = new { enabled = s.BackupOverdueEnabled },
+        log_backup_overdue = new { enabled = s.LogBackupOverdueEnabled },
+        checkdb_overdue = new { enabled = s.CheckDbOverdueEnabled },
         /* #2417: the AG family, read out of the store since V35/V37 and emitted to nobody until now -- so
            an agent asked why nothing alerted when a replica fell behind could not see the lag threshold,
            could not see whether AG notification was on at all, and had no way to tell "configured not to
@@ -689,6 +703,7 @@ public sealed partial class DarlingMcpAlertTools
         "and agent_max_per_day; Darling only, Lite has no agent channel); it never changes a destination. " +
         "send_resolutions says whether the route's destinations also get the message that an alert has cleared: null " +
         "follows each channel's setting (get_alert_settings delivery.send_resolutions), true always sends it, false never does. " +
+        "severities (critical, warning or both) says which alerts the route takes by severity: both is the default and takes every alert, and a route whose filter excludes an alert does not match it, so matching goes on to the next route. " +
         "Routes are authored in the Viewer's Settings window or here (create_notification_route / update_notification_route); " +
         "they can also be disabled or deleted (set_notification_route_enabled / delete_notification_route).")]
     public static async Task<string> GetNotificationRoutes(
@@ -766,21 +781,31 @@ public sealed partial class DarlingMcpAlertTools
         "the next level (a family route, then the parent channels) on the next firing — the reversible form of " +
         "'send this family to the parent channels for now'. Returns {status:\"updated\", route:{...}} with the route AS " +
         "STORED, {status:\"unchanged\", route:{...}} when it already holds that value (a retry is safe and costs no " +
-        "write), {status:\"refused\"} for an agent route, or for turning off a route with an Off agent setting (that is done in the Viewer or on the web dashboard; turning it on is allowed), or {status:\"not_found\"}. The running service picks the change up on its next collection sweep, " +
+        "write); both carry previous {enabled} and undo (the call that sets the previous value back), {status:\"refused\"} for an agent route, or for turning off a route with an Off agent setting (that is done in the Viewer or on the web dashboard; turning it on is allowed), or {status:\"not_found\"}. An operator token is not refused: its change to a route with an agent setting goes through update_notification_route and is journaled as route_agent_changed, and it answers as update_notification_route does. The running service picks the change up on its next collection sweep, " +
         "when the write's config_version bump makes it reload its channel configuration. This tool cannot author or " +
         "re-point a route: destinations are bearer secrets, set with create_notification_route / update_notification_route or in the Viewer's Settings window.")]
     public static async Task<string> SetNotificationRouteEnabled(
         NpgsqlDataSource postgres,
         [Description("The route_id to enable or disable (from get_notification_routes).")] int route_id,
-        [Description("true to put the route back in force, false to skip it at resolution while keeping it.")] bool enabled)
+        [Description("true to put the route back in force, false to skip it at resolution while keeping it.")] bool enabled,
+        DarlingMcpServedPolicy? served = null,
+        CancellationToken cancellationToken = default)
     {
         try
         {
             var store = new PgNotificationRouteStore(postgres);
-            var existing = (await store.LoadSummariesAsync()).FirstOrDefault(r => r.RouteId == route_id);
+            var existing = (await store.LoadSummariesAsync(cancellationToken)).FirstOrDefault(r => r.RouteId == route_id);
             if (existing is null)
             {
                 return Outcome("not_found", $"No notification route with route_id {route_id}.");
+            }
+
+            /* #6542 part 2 (MCP is full admin): an operator-class token changes a route with an agent setting through update_notification_route's
+               store function, which journals it as route_agent_changed, as the Viewer's toggle does. */
+            if (existing.AgentLevel is not null && served?.Policy.OperatorActor is { } operatorActor)
+            {
+                return await UpdateNotificationRouteAsync(postgres, route_id, null, enabled, null, null, null, null, null, null,
+                    RouteDestinationRequest.None, DarlingPasswordKey.Current, null, cancellationToken, null, operatorActor);
             }
 
             if (AgentRouteRefusal(existing, "set_notification_route_enabled") is { } agentRefusal)
@@ -795,10 +820,16 @@ public sealed partial class DarlingMcpAlertTools
 
             if (existing.Enabled == enabled)
             {
-                return JsonSerializer.Serialize(new { status = "unchanged", route = RoutePayload(existing) }, McpHelpers.JsonOptions);
+                return JsonSerializer.Serialize(new
+                {
+                    status = "unchanged",
+                    route = RoutePayload(existing),
+                    previous = new { enabled = existing.Enabled },
+                    undo = UndoCall("set_notification_route_enabled", new { route_id, enabled = existing.Enabled }),
+                }, McpHelpers.JsonOptions);
             }
 
-            if (await store.SetEnabledAsync(route_id, enabled) == 0)
+            if (await store.SetEnabledAsync(route_id, enabled, cancellationToken) == 0)
             {
                 /* The write holds back a route with an agent setting in its own statement (#6281): one a person gave a setting after the read
                    above is refused here, one removed in the meantime is not found. */
@@ -806,10 +837,16 @@ public sealed partial class DarlingMcpAlertTools
             }
 
             /* Re-read AFTER the write, so the reported row is the stored one (set_mute_rule_enabled's rule). */
-            var stored = (await store.LoadSummariesAsync()).FirstOrDefault(r => r.RouteId == route_id);
-            return JsonSerializer.Serialize(new { status = "updated", route = stored is null ? null : RoutePayload(stored) }, McpHelpers.JsonOptions);
+            var stored = (await store.LoadSummariesAsync(cancellationToken)).FirstOrDefault(r => r.RouteId == route_id);
+            return JsonSerializer.Serialize(new
+            {
+                status = "updated",
+                route = stored is null ? null : RoutePayload(stored),
+                previous = new { enabled = existing.Enabled },
+                undo = UndoCall("set_notification_route_enabled", new { route_id, enabled = existing.Enabled }),
+            }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("set_notification_route_enabled", ex);
         }
@@ -824,21 +861,31 @@ public sealed partial class DarlingMcpAlertTools
         "of those to the 'Investigation Not Picked Up' self-alert. Pass a fallback_route_id to set it, or omit it to clear. " +
         "A route cannot be its own fallback and the fallback must be an existing route: either is refused with " +
         "{status:\"invalid\"}. Returns {status:\"updated\", route:{...}} with the route AS STORED, {status:\"unchanged\", route:{...}} " +
-        "when it already holds that value, or {status:\"not_found\"}. An agent route (agent_level 1 or more) is " +
-        "{status:\"refused\"}: it is changed in the Viewer. Deleting the fallback route clears the reference.")]
+        "when it already holds that value (both carry previous {fallback_route_id} and undo, the call that sets the previous fallback back), or {status:\"not_found\"}. An agent route (agent_level 1 or more) is " +
+        "{status:\"refused\"}: it is changed in the Viewer, or by an operator token, whose call goes through update_notification_route. Deleting the fallback route clears the reference.")]
     public static async Task<string> SetNotificationRouteFallback(
         NpgsqlDataSource postgres,
         [Description("The route to set the fallback on (from get_notification_routes).")] int route_id,
-        [Description("The route_id of the fallback route, from get_notification_routes. Omit to clear the fallback.")] int? fallback_route_id = null)
+        [Description("The route_id of the fallback route, from get_notification_routes. Omit to clear the fallback.")] int? fallback_route_id = null,
+        DarlingMcpServedPolicy? served = null,
+        CancellationToken cancellationToken = default)
     {
         try
         {
             var store = new PgNotificationRouteStore(postgres);
-            var routes = await store.LoadSummariesAsync();
+            var routes = await store.LoadSummariesAsync(cancellationToken);
             var existing = routes.FirstOrDefault(r => r.RouteId == route_id);
             if (existing is null)
             {
                 return Outcome("not_found", $"No notification route with route_id {route_id}.");
+            }
+
+            /* #6542 part 2: an operator-class token sets an agent route's fallback through update_notification_route's store function. */
+            if (existing.AgentLevel is >= 1 && served?.Policy.OperatorActor is { } operatorActor)
+            {
+                return await UpdateNotificationRouteAsync(postgres, route_id, null, null, null, null, null, null,
+                    fallback_route_id, fallback_route_id is null ? true : (bool?)null, RouteDestinationRequest.None, DarlingPasswordKey.Current, null,
+                    cancellationToken, null, operatorActor);
             }
 
             if (AgentRouteRefusal(existing, "set_notification_route_fallback") is { } agentRefusal)
@@ -853,14 +900,26 @@ public sealed partial class DarlingMcpAlertTools
 
             if (existing.FallbackRouteId == fallback_route_id)
             {
-                return JsonSerializer.Serialize(new { status = "unchanged", route = RoutePayload(existing) }, McpHelpers.JsonOptions);
+                return JsonSerializer.Serialize(new
+                {
+                    status = "unchanged",
+                    route = RoutePayload(existing),
+                    previous = new { fallback_route_id = existing.FallbackRouteId },
+                    undo = FallbackUndo(route_id, existing.FallbackRouteId),
+                }, McpHelpers.JsonOptions);
             }
 
-            await store.SetFallbackAsync(route_id, fallback_route_id);
-            var stored = (await store.LoadSummariesAsync()).FirstOrDefault(r => r.RouteId == route_id);
-            return JsonSerializer.Serialize(new { status = "updated", route = stored is null ? null : RoutePayload(stored) }, McpHelpers.JsonOptions);
+            await store.SetFallbackAsync(route_id, fallback_route_id, cancellationToken);
+            var stored = (await store.LoadSummariesAsync(cancellationToken)).FirstOrDefault(r => r.RouteId == route_id);
+            return JsonSerializer.Serialize(new
+            {
+                status = "updated",
+                route = stored is null ? null : RoutePayload(stored),
+                previous = new { fallback_route_id = existing.FallbackRouteId },
+                undo = FallbackUndo(route_id, existing.FallbackRouteId),
+            }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("set_notification_route_fallback", ex);
         }
@@ -869,7 +928,7 @@ public sealed partial class DarlingMcpAlertTools
     [McpServerTool(Name = "delete_notification_route"), Description(
         "Deletes a notification route by its route_id (from get_notification_routes). Permanent: the alerts it " +
         "matched fall to the next level (a family route, then the parent channels) on the next firing. Returns " +
-        "{status:\"deleted\", route_id}, {status:\"refused\"} for an agent route or a route with an Off agent setting (deleted in the Viewer or on the web dashboard), or {status:\"not_found\"}. Prefer set_notification_route_enabled for a " +
+        "{status:\"deleted\", route_id, previous (the route as it was), undo (the create_notification_route call that makes it again, under a new route_id; sealed webhook URLs and keys are not in it)}, {status:\"refused\"} for an agent route or a route with an Off agent setting (deleted in the Viewer or on the web dashboard), or {status:\"not_found\"}. Prefer set_notification_route_enabled for a " +
         "temporary change — a deleted route's destinations are gone and are secrets that cannot be read back, so a new route " +
         "(create_notification_route, or the Viewer's Settings window) needs them typed again. The running service stops honoring the route on its next collection sweep.")]
     public static async Task<string> DeleteNotificationRoute(
@@ -893,12 +952,59 @@ public sealed partial class DarlingMcpAlertTools
             var deleted = await store.DeleteAsync(route_id);
             return deleted == 0
                 ? await RefusedOrMissingAsync(store, route_id, "delete_notification_route", true)
-                : JsonSerializer.Serialize(new { status = "deleted", route_id }, McpHelpers.JsonOptions);
+                : JsonSerializer.Serialize(new
+                {
+                    status = "deleted",
+                    route_id,
+                    previous = existing is null ? null : RouteWritePayload(existing),
+                    undo = existing is null ? null : RouteRecreateUndo(existing),
+                }, McpHelpers.JsonOptions);
         }
         catch (Exception ex)
         {
             return McpHelpers.FormatError("delete_notification_route", ex);
         }
+    }
+
+    /// <summary>
+    /// The undo of delete_notification_route (#6403): the create_notification_route call carrying the deleted route's match, scope,
+    /// enabled flag, resolution override, fallback and recipients. A webhook URL or key is sealed and was never readable, so it is not
+    /// in the arguments; the answer says so and the caller passes them again. The route comes back under a new route_id.
+    /// </summary>
+    private static object RouteRecreateUndo(PgNotificationRouteStore.RouteSummary route)
+    {
+        var args = new Dictionary<string, object?>
+        {
+            ["metric_match"] = route.MetricMatch,
+            ["enabled"] = route.Enabled,
+            ["send_resolutions"] = route.SendResolutions switch { true => "always", false => "never", _ => "inherit" },
+            ["severities"] = route.Severities,
+        };
+        if (route.ScopeServerId.HasValue)
+        {
+            args["scope_server_id"] = route.ScopeServerId.Value;
+        }
+        else if (route.ScopeTagId.HasValue)
+        {
+            args["scope_tag_id"] = route.ScopeTagId.Value;
+        }
+
+        if (route.FallbackRouteId.HasValue)
+        {
+            args["fallback_route_id"] = route.FallbackRouteId.Value;
+        }
+
+        if (!string.IsNullOrWhiteSpace(route.EmailRecipients))
+        {
+            args["email_recipients"] = route.EmailRecipients;
+        }
+
+        return new
+        {
+            tool = "create_notification_route",
+            arguments = args,
+            destinations = "The route comes back with a new route_id. A webhook URL or key is sealed and never shown, so it is not in the arguments: pass each one again in its own field.",
+        };
     }
 
     /// <summary>The ONE Darling route projection (#5750): <c>get_notification_routes</c> lists it and
@@ -937,6 +1043,8 @@ public sealed partial class DarlingMcpAlertTools
         /* #5825: null follows each channel's "send resolutions" setting (get_alert_settings, delivery.send_resolutions);
            true or false overrides it for this route's destinations. */
         send_resolutions = r.SendResolutions,
+        /* #6928 (V229): which alerts the route takes by severity: both, critical or warning. */
+        severities = r.Severities,
         /* #6036 (D8 of #5632 Phase C): the route an expired investigation request goes to first. Null = none; the name is the
            fallback route's metric_match. */
         fallback_route_id = r.FallbackRouteId,
@@ -966,9 +1074,14 @@ public sealed partial class DarlingMcpAlertTools
     /// Viewer's Settings window or the web dashboard's admin notification routes page. Null for any other route,
     /// including agent_level 0: that is the route's explicit Off (null inherits, 0 is off, 1 investigates), so it opens
     /// no investigation. It can be turned on over MCP; turning it off or deleting it is <see cref="OffRouteRefusal"/>'s (#6281).
+    /// <para>#6542 part 2 (MCP is full admin): an operator-class caller (<paramref name="operatorActor"/>: a named operator token, or the legacy token
+    /// with writes) passes, so update_notification_route changes every field of an agent route: match, scope, enabled flag, send_resolutions,
+    /// fallback, destinations and agent fields. The store functions take the same actor and refuse any other. set_notification_route_enabled and
+    /// set_notification_route_fallback hand an operator's change to an agent route to update_notification_route. delete_notification_route
+    /// still refuses an agent route for every caller.</para>
     /// </summary>
-    internal static string? AgentRouteRefusal(PgNotificationRouteStore.RouteSummary route, string tool) =>
-        route.AgentLevel is null or < 1
+    internal static string? AgentRouteRefusal(PgNotificationRouteStore.RouteSummary route, string tool, string? operatorActor = null) =>
+        route.AgentLevel is null or < 1 || operatorActor is not null
             ? null
             : Outcome("refused",
                 $"Route {route.RouteId} is an agent route (agent_level {route.AgentLevel}): {tool} does not change it over MCP. " +
@@ -1032,7 +1145,7 @@ public sealed partial class DarlingMcpAlertTools
                     "empty",
                     configured == 0
                         ? "No mute rules are configured for this store, so no alert is being suppressed anywhere — a quiet alert history is genuine rather than muted."
-                        : $"No mute rules are in force right now: {configured} rule(s) exist but every one of them is disabled or expired, so nothing is being suppressed. Pass enabled_only=false to list them — this is a lapsed mute, not an absent one.",
+                        : $"No mute rules are in force right now: {configured} {(configured == 1 ? "rule exists but it is" : "rules exist but every one of them is")} disabled or expired, so nothing is being suppressed. Pass enabled_only=false to list them — this is a lapsed mute, not an absent one.",
                     new { enabled_only, configured_count = configured, excluded_by_filter = configured - list.Count });
             }
 
@@ -1101,6 +1214,11 @@ public sealed partial class DarlingMcpAlertTools
         "per hour is the tightest setting that is still a rate, so no value here can restore the 'any deadlock " +
         "is Critical' reading these tiers replaced. Setting critical BELOW warn is accepted and means every " +
         "banded rate is Critical. " +
+        "health_bands.blocking_warn_per_hour and health_bands.blocking_critical_per_hour are the blocking band's tiers in blocked-process reports per HOUR " +
+        "(accepting 1 to 10000), and health_bands.blocking_warn_wait_seconds and health_bands.blocking_critical_wait_seconds are its bars on the longest " +
+        "single block in seconds (accepting 1 to 86400). They default to 5 and 20 reports per hour and 10 and 60 seconds, and they decide the colour " +
+        "of the fleet cards, the Overview tab, the Daily Health Calendar and get_fleet_overview, so set them to match the blocking alert's own " +
+        "threshold. Unlike the deadlock tiers, each blocking pair must keep critical at or above warn, and a write that would leave it below is refused. " +
         "file_growth.rise_mb is megabytes per HOUR averaged over file_growth.lookback_minutes (a rate — the same 10240 is 10 GB/hr on any lookback; the engine scales it to the window), so shortening the lookback does not tighten the rise gate and lengthening it does not loosen it; only the rate does. " +
         "Two keys govern the PostgreSQL versions of the two count alerts and are NOT the same numbers as their SQL Server neighbours: deadlocks.pg_count_threshold and blocking.pg_count_threshold, both accepting 1 upward. They sit inside those groups rather than a section of their own so both engines' figures are visible together, but tuning deadlocks.count_threshold does NOT move the PostgreSQL gate and tuning deadlocks.pg_count_threshold does NOT move the SQL Server one. The enabled switch in each group DOES govern both engines. They are separate because the two engines count with different instruments - SQL Server's figure is captured deadlock graphs, the PostgreSQL one is deadlocks parsed from the server log (get_pg_deadlocks) - and an operator tuning one should not silently move the other. Both engines' fleet cards now band deadlocks through the SAME health_bands.deadlock_warn_per_hour tiers (the PostgreSQL card differences the server's own pg_stat_database.deadlocks counter over the window), so the move - raising a fire gate to meet the band's Warning bar so a page and an amber dot describe the same server - is available on either knob. On the blocking side the SQL Server count is engine-recorded blocked-process reports and the PostgreSQL one is distinct root blockers in a periodic SAMPLE of pg_stat_activity. Both PostgreSQL keys are ignored on a store with no PostgreSQL targets. " +
         "The fleet_sweep group is NOT an alert family and the alerts_enabled master switch does not govern it: " +
@@ -1124,7 +1242,7 @@ public sealed partial class DarlingMcpAlertTools
         "runnable_queue.enabled switches the Runnable Queue alert; runnable_queue.warning_per_scheduler (at least 1, default 8) and " +
         "runnable_queue.critical_per_scheduler (default 16) are runnable tasks per scheduler, averaged over the collections of the last 5 minutes when there are at least 3, otherwise over the newest 3 if all fall in the last 10 minutes (or in 4 times the gap between cpu_scheduler_stats collections when that is longer, so the Low-Impact preset's 5-minute collection still evaluates), and Critical may never sit below Warning: " +
         "a body that sends both bars in the wrong order, or one bar that would cross the stored other, writes nothing and returns status invalid. " +
-        "client_timeouts.enabled switches the Client Timeouts alert (OFF by default); client_timeouts.warning_per_minute (at least 1, default 10) and " +
+        "client_timeouts.enabled switches the Client Timeouts alert (ON by default since V216); client_timeouts.warning_per_minute (at least 1, default 10) and " +
         "client_timeouts.critical_per_minute (default 60) are the FLOORS of its bars, client attentions per minute over the attention collector's last runs (about 3 minutes), and Critical may never sit below Warning: " +
         "the same two-bars rule as runnable_queue, with the same status invalid and nothing written. client_timeouts.warning_multiple (at least 1, default 3) and client_timeouts.critical_multiple (default 10) " +
         "scale each server's own baseline (the p99.9 of its 3-minute average attention rate over the last 7 days): the Warning bar is the higher of the Warning floor and warning_multiple x baseline, the Critical bar the higher of the " +
@@ -1150,7 +1268,7 @@ public sealed partial class DarlingMcpAlertTools
         "the whole mount point, any case, a trailing \\ or / on either side ignored, never a prefix match. Excluded volumes are dropped before " +
         "the breach test, so the worst volume, the severity and the card come from the volumes that remain, and a server whose only low volumes " +
         "are excluded resolves. Pass the FULL list each time; an EMPTY array clears it. " +
-        "Returns {status:\"updated\", updated_fields:[...], warnings:[...], settings:{...}} with the full new settings (warnings is " +
+        "Returns {status:\"updated\", updated_fields:[...] (the delivery cooldown is named delivery.cooldown_minutes, as in the call and get_alert_settings), warnings:[...], settings:{...}, previous:{...}, undo} with the full new settings (previous holds the sent fields as they were, in the same nested shape, and undo is the update_alert_settings call that sets them back; an analysis.uncorroborated_route the file or the default was deciding comes back as null, which clears the store column again; warnings is " +
         "empty unless a stored-but-unconsulted field was sent, or a round-trip moved the route knob's source from the file to the store), or " +
         "{status:\"unavailable\"} when the settings row has not been seeded yet.")]
     public static async Task<string> UpdateAlertSettings(
@@ -1205,6 +1323,30 @@ public sealed partial class DarlingMcpAlertTools
             await using var connection = await postgres.OpenConnectionAsync();
             await using var transaction = await connection.BeginTransactionAsync();
 
+            /* #6403: the settings as they stand before the write, read INSIDE this transaction after the rows it updates are locked
+               (fixed table order, the same as the writes below), so `previous` is exactly what the write replaced: a concurrent
+               update_alert_settings waits on the lock rather than landing between this read and the UPDATE. A read in its own
+               transaction before this one would not hold that. */
+            foreach (var table in WritableTables)
+            {
+                if (!updates.Any(u => string.Equals(u.Table, table, StringComparison.Ordinal)))
+                {
+                    continue;
+                }
+
+                var lockSql = $"SELECT id FROM {table} WHERE id = 1 FOR UPDATE";
+                await using var lockCommand = new NpgsqlCommand(lockSql, connection) { Transaction = transaction };
+                lockCommand.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+                await lockCommand.ExecuteScalarAsync();
+            }
+
+            var (settingsBefore, cooldownBefore) = await DarlingAlertReader.GetAlertConfigurationAsync(connection, transaction);
+            var previous = settingsBefore is null || cooldownBefore is null
+                ? new JsonObject()
+                : AlertSettingsPreviousFields(
+                    JsonSerializer.SerializeToNode(BuildAlertSettingsPayload(settingsBefore, cooldownBefore), McpHelpers.JsonOptions),
+                    updates);
+
             foreach (var table in WritableTables)
             {
                 var forTable = updates.Where(u => string.Equals(u.Table, table, StringComparison.Ordinal)).ToList();
@@ -1256,6 +1398,29 @@ public sealed partial class DarlingMcpAlertTools
                 }
             }
 
+            /* #6927: the same lone-bar rule for the two blocking band pairs. */
+            if (updates.Any(u => u.Column is BlockingWarnPerHourColumn or BlockingCriticalPerHourColumn or BlockingWarnWaitColumn or BlockingCriticalWaitColumn))
+            {
+                const string blockingBandSql = "SELECT blocking_warn_per_hour, blocking_critical_per_hour, blocking_warn_wait_seconds, blocking_critical_wait_seconds FROM config_alert_settings WHERE id = 1";
+                await using var blockingBandCommand = new NpgsqlCommand(blockingBandSql, connection) { Transaction = transaction };
+                blockingBandCommand.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+                await using var blockingBandReader = await blockingBandCommand.ExecuteReaderAsync();
+                if (await blockingBandReader.ReadAsync())
+                {
+                    if (blockingBandReader.GetDouble(1) < blockingBandReader.GetDouble(0))
+                    {
+                        return Outcome("invalid", BlockingRateBarsOrderMessage
+                            + $" (stored after this write: warn {blockingBandReader.GetDouble(0).ToString("0.###", CultureInfo.InvariantCulture)}, critical {blockingBandReader.GetDouble(1).ToString("0.###", CultureInfo.InvariantCulture)}; nothing was written.)");
+                    }
+
+                    if (blockingBandReader.GetDouble(3) < blockingBandReader.GetDouble(2))
+                    {
+                        return Outcome("invalid", BlockingWaitBarsOrderMessage
+                            + $" (stored after this write: warn {blockingBandReader.GetDouble(2).ToString("0.###", CultureInfo.InvariantCulture)}, critical {blockingBandReader.GetDouble(3).ToString("0.###", CultureInfo.InvariantCulture)}; nothing was written.)");
+                    }
+                }
+            }
+
             /* #5640: the same lone-bar rule for the Client Timeouts pair. */
             if (updates.Any(u => u.Column == ClientTimeoutsWarningColumn || u.Column == ClientTimeoutsCriticalColumn))
             {
@@ -1297,13 +1462,18 @@ public sealed partial class DarlingMcpAlertTools
                 /* Bare column names, unqualified, even though two tables are now in play: this array is a
                    consumer API and qualifying the existing entries would redefine every one of them. No
                    writable column name appears on both tables, so a bare name is still unambiguous --
-                   asserted, not assumed, by WritableColumnNames_DoNotCollideAcrossTheTwoTables. */
-                updated_fields = updates.Select(u => u.Column).ToArray(),
+                   asserted, not assumed, by WritableColumnNames_DoNotCollideAcrossTheTwoTables. The one
+                   exception is the cooldown, reported as delivery.cooldown_minutes (#6455): that is the name
+                   DeliveryCooldownColumn's doc and Darling/README.md already gave it, so the code was the part
+                   that was wrong. */
+                updated_fields = updates.Select(u => UpdatedFieldName(u.Column)).ToArray(),
                 /* #3653: always present, usually empty — a caller branching on it should not have to probe
                    for the key. Non-empty only when a field was written that nothing consults (today:
                    poison_wait.threshold_ms); the field IS in updated_fields, because it was updated. */
                 warnings = warnings.ToArray(),
-                settings = reread is null || rereadCooldown is null ? null : BuildAlertSettingsPayload(reread, rereadCooldown)
+                settings = reread is null || rereadCooldown is null ? null : BuildAlertSettingsPayload(reread, rereadCooldown),
+                previous,
+                undo = UndoCall("update_alert_settings", new { settings_json = previous.ToJsonString() }),
             }, McpHelpers.JsonOptions);
         }
         catch (Exception ex)
@@ -1325,7 +1495,7 @@ public sealed partial class DarlingMcpAlertTools
         "built-in alert or another source's alert, and a rule without it still mutes an external alert whose other " +
         "fields match; a name that is not a valid source name is refused. starts_at is an optional ISO-8601 UTC timestamp before which the rule is stored but mutes nothing (a window set ahead of planned work; it must be before expires_at, and for a window with no other scope use set_quiet_window); expires_at is an optional ISO-8601 UTC timestamp after " +
         "which the rule stops applying; omit it for a permanent rule. Returns the stored rule, including its " +
-        "generated id (for delete_mute_rule). Repeating a call is safe: when an enabled, unexpired rule already " +
+        "generated id (for delete_mute_rule), with previous null and undo (the delete_mute_rule call that removes it). Repeating a call is safe: when an enabled, unexpired rule already " +
         "holds the same seven scope and pattern fields, the same external_source and the same expires_at, nothing is created and the answer is " +
         "status already_exists with that rule's id (a disabled or expired rule does not count; a different " +
         "expires_at is a different rule). The running service applies the rule on its next collection " +
@@ -1496,7 +1666,13 @@ public sealed partial class DarlingMcpAlertTools
                 return AlreadyExists(existing);
             }
 
-            return JsonSerializer.Serialize(new { status = "created", mute_rule = BuildMuteRulePayload(rule) }, McpHelpers.JsonOptions);
+            return JsonSerializer.Serialize(new
+            {
+                status = "created",
+                mute_rule = BuildMuteRulePayload(rule),
+                previous = (object?)null,
+                undo = UndoCall("delete_mute_rule", new { rule_id = rule.Id }),
+            }, McpHelpers.JsonOptions);
         }
         catch (Exception ex)
         {
@@ -1612,7 +1788,7 @@ public sealed partial class DarlingMcpAlertTools
 
     [McpServerTool(Name = "delete_mute_rule"), Description(
         "Agent arm: needs agent_action, request's server only. Deletes an alert mute rule by its id (from get_mute_rules or create_mute_rule). Returns " +
-        "{status:\"deleted\", rule_id} on success, or {status:\"not_found\"} when no rule has that id. Permanent. " +
+        "{status:\"deleted\", rule_id, previous {mute_rule}, undo} on success (undo is the create_mute_rule call carrying the deleted rule's fields; the re-created rule is a NEW rule with a new id and creation date, and is enabled), or {status:\"not_found\"} when no rule has that id. " +
         "The running service stops honoring the rule on its next collection sweep, when the delete's " +
         "config_version bump makes it reload its mute cache.")]
     public static Task<string> DeleteMuteRule(
@@ -1647,12 +1823,75 @@ public sealed partial class DarlingMcpAlertTools
                 return Outcome("not_found", $"No mute rule with id '{ruleId}'.");
             }
 
+            var deleted = rules.First(r => string.Equals(r.Id, ruleId, StringComparison.Ordinal));
             await store.DeleteAsync(ruleId);
-            return JsonSerializer.Serialize(new { status = "deleted", rule_id = ruleId }, McpHelpers.JsonOptions);
+            return JsonSerializer.Serialize(new
+            {
+                status = "deleted",
+                rule_id = ruleId,
+                previous = new { mute_rule = BuildMuteRulePayload(deleted) },
+                undo = UndoCall("create_mute_rule", MuteRuleCreateArguments(deleted)),
+            }, McpHelpers.JsonOptions);
         }
         catch (Exception ex)
         {
             return McpHelpers.FormatError("delete_mute_rule", ex);
+        }
+    }
+
+    [McpServerTool(Name = "purge_expired_mute_rules"), Description(
+        "Deletes every EXPIRED alert mute rule (an end time at or before now), the Viewer's Purge Expired button. Expired rules already suppress nothing, so this only tidies the list; active, upcoming, disabled-but-unexpired and no-end-time rules are left alone. Permanent. Returns each rule it deleted as it was, a count, and undo null.<<GUIDE>>" +
+        "Takes no arguments. Expired means the rule's expires_at is at or before now, the same test the Viewer's Purge Expired uses; " +
+        "every other rule is untouched. Answer: {status:\"purged\", count, previous:[each deleted rule as get_mute_rules shows it], " +
+        "undo:null, undo_note}, or {status:\"none_expired\", count:0} when nothing had expired. There is no undo because an expired rule " +
+        "had no effect; call create_mute_rule with a fresh expiry if one is wanted again. Needs mcp.allowWrites; an agent " +
+        "investigation arm can never call it.")]
+    public static async Task<string> PurgeExpiredMuteRules(
+        NpgsqlDataSource postgres,
+        ILogger? logger = null)
+    {
+        var answer = await PurgeExpiredMuteRulesCore(new PgMuteRuleStore(postgres), DateTime.UtcNow);
+        if (logger is not null && logger.IsEnabled(LogLevel.Information))
+        {
+            logger.LogInformation("MCP write purge_expired_mute_rules: {Answer}", answer.Length > 200 ? answer[..200] : answer);
+        }
+
+        return answer;
+    }
+
+    /// <summary>
+    /// purge_expired_mute_rules' body over the <see cref="IMuteRuleStore"/> seam (#6399). The rules to delete come from
+    /// <see cref="MuteRulePurge.SelectExpired"/> and the delete is the store's own (<see cref="MuteRulePurge.DeleteByIdSql"/>), the
+    /// same pair the Viewer's Purge Expired runs, so this is not a second copy of either.
+    /// </summary>
+    internal static async Task<string> PurgeExpiredMuteRulesCore(IMuteRuleStore store, DateTime nowUtc)
+    {
+        try
+        {
+            var expired = MuteRulePurge.SelectExpired(await store.LoadAllAsync(), nowUtc);
+            if (expired.Count == 0)
+            {
+                return JsonSerializer.Serialize(new
+                {
+                    status = "none_expired",
+                    count = 0,
+                    message = "No mute rule has expired, so nothing was deleted.",
+                }, McpHelpers.JsonOptions);
+            }
+
+            await store.DeleteExpiredAsync(expired.Select(r => r.Id).ToList());
+            return JsonSerializer.Serialize(new
+            {
+                status = "purged",
+                count = expired.Count,
+                previous = expired.Select(r => BuildMuteRuleWithState(r, nowUtc)).ToList(),
+                undo = (object?)null,
+                undo_note = "None needed: an expired rule had no effect, so deleting it changes nothing the service delivers; create_mute_rule makes a new rule with a fresh expiry if one is wanted again.",
+            }, McpHelpers.JsonOptions);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return McpHelpers.FormatError("purge_expired_mute_rules", ex);
         }
     }
 
@@ -1670,7 +1909,7 @@ public sealed partial class DarlingMcpAlertTools
         "actually has. And between the delete taking effect and the create taking effect, every alert the " +
         "rule was suppressing is delivered. NEITHER direction changes created_at_utc. Returns " +
         "{status:\"updated\", mute_rule:{...}} with the rule AS STORED, {status:\"unchanged\", mute_rule:{...}} " +
-        "when the rule already holds that value (so a retry is safe and costs no write), or " +
+        "when the rule already holds that value (so a retry is safe and costs no write); both carry previous {enabled} and undo (the call that sets the previous value back), or " +
         "{status:\"not_found\"} when no rule has that id. The running service applies the change on its next " +
         "collection sweep, when the write's config_version bump makes it reload its mute cache — so a " +
         "matching alert already mid-flight can still be delivered once after a disable, and one can still be " +
@@ -1728,7 +1967,13 @@ public sealed partial class DarlingMcpAlertTools
             if (existing.Enabled == enabled)
             {
                 return JsonSerializer.Serialize(
-                    new { status = "unchanged", mute_rule = BuildMuteRulePayload(existing) },
+                    new
+                    {
+                        status = "unchanged",
+                        mute_rule = BuildMuteRulePayload(existing),
+                        previous = new { enabled = existing.Enabled },
+                        undo = UndoCall("set_mute_rule_enabled", new { rule_id = ruleId, enabled = existing.Enabled }),
+                    },
                     McpHelpers.JsonOptions);
             }
 
@@ -1745,7 +1990,13 @@ public sealed partial class DarlingMcpAlertTools
             }
 
             return JsonSerializer.Serialize(
-                new { status = "updated", mute_rule = BuildMuteRulePayload(stored) },
+                new
+                {
+                    status = "updated",
+                    mute_rule = BuildMuteRulePayload(stored),
+                    previous = new { enabled = existing.Enabled },
+                    undo = UndoCall("set_mute_rule_enabled", new { rule_id = ruleId, enabled = existing.Enabled }),
+                },
                 McpHelpers.JsonOptions);
         }
         catch (Exception ex)
@@ -1786,7 +2037,7 @@ public sealed partial class DarlingMcpAlertTools
         "rule stays in force while matching nothing. Returns {status:\"updated\", updated_fields:[...], " +
         "mute_rule:{...}} with the rule AS STORED (re-read after the write), {status:\"unchanged\", " +
         "mute_rule:{...}} when every provided field already holds that value (so a retry is safe and costs no " +
-        "write), {status:\"not_found\"} when no rule has that id, or {status:\"invalid\", ...} on a bad field " +
+        "write); both carry previous (the sent fields as they were; an empty one is null) and undo (the update_mute_rule call that sets them back), {status:\"not_found\"} when no rule has that id, or {status:\"invalid\", ...} on a bad field " +
         "or value with NOTHING written. The running service applies the edit on its next collection sweep, when " +
         "the write's config_version bump makes it reload its mute cache.")]
     public static Task<string> UpdateMuteRule(
@@ -1897,7 +2148,13 @@ public sealed partial class DarlingMcpAlertTools
             if (SameEditableFields(existing, merged))
             {
                 return JsonSerializer.Serialize(
-                    new { status = "unchanged", mute_rule = BuildMuteRulePayload(existing) },
+                    new
+                    {
+                        status = "unchanged",
+                        mute_rule = BuildMuteRulePayload(existing),
+                        previous = MuteRulePreviousFields(existing, changes),
+                        undo = MuteRuleUpdateUndo(existing, changes),
+                    },
                     McpHelpers.JsonOptions);
             }
 
@@ -1920,7 +2177,9 @@ public sealed partial class DarlingMcpAlertTools
                    expires_at_utc) — what was SENT, not what differed: the write restates the whole editable
                    row either way, and 'unchanged' above is the no-difference answer. */
                 updated_fields = changes.Select(c => c.Field).ToArray(),
-                mute_rule = BuildMuteRulePayload(stored)
+                mute_rule = BuildMuteRulePayload(stored),
+                previous = MuteRulePreviousFields(existing, changes),
+                undo = MuteRuleUpdateUndo(existing, changes),
             }, McpHelpers.JsonOptions);
         }
         catch (Exception ex)
@@ -1933,6 +2192,106 @@ public sealed partial class DarlingMcpAlertTools
     /// (the expires_at alias normalizes to expires_at_utc, which is also what makes sending both spellings
     /// detectable as a duplicate) and the applier that writes it onto the merged rule.</summary>
     private sealed record MuteRuleFieldChange(string Field, Action<MuteRule> Apply);
+
+    /// <summary>
+    /// The fields an update_alert_settings call sent, as the settings held them BEFORE it (#6403), in the nested shape
+    /// get_alert_settings returns, so the object is the whole of what the undo sends. A field with no place in the read shape is left
+    /// out. The uncorroborated route reads as the store's own value only when the store decided it: when the file or the default
+    /// did, the previous is null, which clears the store column again so the file governs as before.
+    /// </summary>
+    private static JsonObject AlertSettingsPreviousFields(JsonNode? beforePayload, IEnumerable<UpdateTarget> updates)
+    {
+        var previous = new JsonObject();
+        if (beforePayload is not JsonObject root)
+        {
+            return previous;
+        }
+
+        foreach (var update in updates)
+        {
+            var path = (update.Field == DeliveryCooldownColumn ? "delivery.cooldown_minutes" : update.Field).Split('.');
+            JsonNode? value = root;
+            foreach (var segment in path)
+            {
+                if (value is not JsonObject obj || !obj.TryGetPropertyValue(segment, out value))
+                {
+                    value = null;
+                    goto next;
+                }
+            }
+
+            if (update.Field == "analysis.uncorroborated_route"
+                && !string.Equals((root["analysis"] as JsonObject)?["uncorroborated_route_source"]?.GetValue<string>(), DarlingAlertSettings.RouteSourceStore, StringComparison.Ordinal))
+            {
+                value = null;
+            }
+
+            var target = previous;
+            for (var i = 0; i < path.Length - 1; i++)
+            {
+                if (target[path[i]] is not JsonObject child)
+                {
+                    child = new JsonObject();
+                    target[path[i]] = child;
+                }
+
+                target = child;
+            }
+
+            target[path[^1]] = value?.DeepClone();
+            next:;
+        }
+
+        return previous;
+    }
+
+    /// <summary>The fields an update_mute_rule call took charge of, as the rule held them BEFORE it (#6403): the wire spelling of
+    /// get_mute_rules, a field that was empty as an explicit JSON null (which clears it again), so the object is the whole of what
+    /// the undo has to send.</summary>
+    private static JsonObject MuteRulePreviousFields(MuteRule before, IEnumerable<MuteRuleFieldChange> changes)
+    {
+        var image = (JsonObject)JsonSerializer.SerializeToNode(BuildMuteRulePayload(before), McpHelpers.JsonOptions)!;
+        var previous = new JsonObject();
+        foreach (var change in changes)
+        {
+            previous[change.Field] = image[change.Field]?.DeepClone();
+        }
+
+        return previous;
+    }
+
+    /// <summary>The undo of update_mute_rule: the same tool with the previous values of the fields it changed.</summary>
+    private static object MuteRuleUpdateUndo(MuteRule before, IEnumerable<MuteRuleFieldChange> changes) =>
+        UndoCall("update_mute_rule", new { rule_id = before.Id, changes_json = MuteRulePreviousFields(before, changes).ToJsonString() });
+
+    /// <summary>The arguments that create a rule like <paramref name="rule"/> (#6403): the undo of delete_mute_rule. Empty fields are
+    /// left out, since an omitted field is what create reads as "any". The re-created rule is a new rule (a new id and creation date,
+    /// and enabled), which the tool description says.</summary>
+    private static Dictionary<string, object> MuteRuleCreateArguments(MuteRule rule)
+    {
+        var arguments = new Dictionary<string, object>();
+        void Add(string name, object? value)
+        {
+            if (value is not null)
+            {
+                arguments[name] = value;
+            }
+        }
+
+        Add("server_name", rule.ServerName);
+        Add("server_id", rule.ServerId);
+        Add("metric_name", rule.MetricName);
+        Add("database_pattern", rule.DatabasePattern);
+        Add("query_text_pattern", rule.QueryTextPattern);
+        Add("wait_type_pattern", rule.WaitTypePattern);
+        Add("job_name_pattern", rule.JobNamePattern);
+        Add("client_app_pattern", rule.ClientAppPattern);
+        Add("external_source", rule.ExternalSource);
+        Add("reason", rule.Reason);
+        Add("starts_at", rule.StartsAtUtc?.ToString("o"));
+        Add("expires_at", rule.ExpiresAtUtc?.ToString("o"));
+        return arguments;
+    }
 
     /// <summary>
     /// The mute rule an <c>update_mute_rule</c> body would leave stored: <paramref name="before"/> cloned with the body's
@@ -2264,6 +2623,14 @@ public sealed partial class DarlingMcpAlertTools
         "'client_timeouts.critical_multiple' must not be lower than 'client_timeouts.warning_multiple' (the Critical bar can never sit below the Warning bar).";
     private const string ClientTimeoutsBarsOrderMessage =
         "'client_timeouts.critical_per_minute' must not be lower than 'client_timeouts.warning_per_minute' (the Critical bar can never sit below the Warning bar).";
+    private const string BlockingWarnPerHourColumn = "blocking_warn_per_hour";
+    private const string BlockingCriticalPerHourColumn = "blocking_critical_per_hour";
+    private const string BlockingWarnWaitColumn = "blocking_warn_wait_seconds";
+    private const string BlockingCriticalWaitColumn = "blocking_critical_wait_seconds";
+    private const string BlockingRateBarsOrderMessage =
+        "'health_bands.blocking_critical_per_hour' must not be lower than 'health_bands.blocking_warn_per_hour' (the Critical bar can never sit below the Warning bar).";
+    private const string BlockingWaitBarsOrderMessage =
+        "'health_bands.blocking_critical_wait_seconds' must not be lower than 'health_bands.blocking_warn_wait_seconds' (the Critical bar can never sit below the Warning bar).";
     private const string RunnableQueueBarsOrderMessage =
         "'runnable_queue.critical_per_scheduler' must not be lower than 'runnable_queue.warning_per_scheduler' (the Critical bar can never sit below the Warning bar).";
 
@@ -2274,6 +2641,26 @@ public sealed partial class DarlingMcpAlertTools
     /// the whole point of keeping it: <c>delivery.cooldown_minutes</c> is what the tool reports, and this is
     /// what every existing config file, Settings window and hand-written UPDATE already calls it.</summary>
     internal const string DeliveryCooldownColumn = "email_cooldown_minutes";
+
+    /// <summary>
+    /// The undo a write answer carries (#6403): the tool and arguments that put the change back, the same <c>{tool, arguments}</c>
+    /// shape the collection-state, schedule and plan tools answer with.
+    /// </summary>
+    internal static object UndoCall(string tool, object arguments) => new { tool, arguments };
+
+    /// <summary>The undo of set_notification_route_fallback: the same tool with the previous fallback, or with none when there was none (omitting it clears).</summary>
+    private static object FallbackUndo(int routeId, int? previousFallback) =>
+        previousFallback is { } id
+            ? UndoCall("set_notification_route_fallback", new { route_id = routeId, fallback_route_id = id })
+            : UndoCall("set_notification_route_fallback", new { route_id = routeId });
+
+    /// <summary>
+    /// The name update_alert_settings reports a written column under (#6455). The delivery cooldown is stored as
+    /// <c>email_cooldown_minutes</c> but called and read as <c>delivery.cooldown_minutes</c>, so the answer uses that name, whichever
+    /// of the two the caller sent. Every other column keeps its bare name.
+    /// </summary>
+    internal static string UpdatedFieldName(string column) =>
+        column == DeliveryCooldownColumn ? "delivery.cooldown_minutes" : column;
 
     private static string? Trimmed(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 
@@ -2494,6 +2881,39 @@ public sealed partial class DarlingMcpAlertTools
             {
                 case "alerts_enabled": AddBool("enabled", prop.Value, "alerts_enabled"); break;
                 case "notify_connection_changes": AddBool("notify_connection_changes", prop.Value, "notify_connection_changes"); break;
+                case "backup_overdue":
+                    Group(prop.Value, "backup_overdue", (k, n) =>
+                    {
+                        switch (k)
+                        {
+                            case "enabled": AddBool("backup_overdue_enabled", n, "backup_overdue.enabled"); break;
+                            default: error = $"Unknown field 'backup_overdue.{k}'."; break;
+                        }
+                    });
+                    break;
+
+                case "log_backup_overdue":
+                    Group(prop.Value, "log_backup_overdue", (k, n) =>
+                    {
+                        switch (k)
+                        {
+                            case "enabled": AddBool("log_backup_overdue_enabled", n, "log_backup_overdue.enabled"); break;
+                            default: error = $"Unknown field 'log_backup_overdue.{k}'."; break;
+                        }
+                    });
+                    break;
+
+                case "checkdb_overdue":
+                    Group(prop.Value, "checkdb_overdue", (k, n) =>
+                    {
+                        switch (k)
+                        {
+                            case "enabled": AddBool("checkdb_overdue_enabled", n, "checkdb_overdue.enabled"); break;
+                            default: error = $"Unknown field 'checkdb_overdue.{k}'."; break;
+                        }
+                    });
+                    break;
+
                 /* #2417: bounds mirror DarlingAlertSettings' clamps EXACTLY -- Clamp(0, 1440) on the
                    refire, nothing to clamp on the at-startup opt-in. Zero is IN range because 0 is the
                    shipped configuration (one alert per outage, no re-fire), not an invalid one. */
@@ -2587,6 +3007,27 @@ public sealed partial class DarlingMcpAlertTools
                                 AddDouble("deadlock_critical_per_hour", n, "health_bands.deadlock_critical_per_hour",
                                     ServerHealthThresholds.DeadlockRatePerHourFloor,
                                     ServerHealthThresholds.DeadlockRatePerHourCeiling);
+                                break;
+                            /* #6927 (V228): the blocking band, same named bounds BlockingBandThresholds clamps to. */
+                            case "blocking_warn_per_hour":
+                                AddDouble("blocking_warn_per_hour", n, "health_bands.blocking_warn_per_hour",
+                                    ServerHealthThresholds.BlockingRatePerHourFloor,
+                                    ServerHealthThresholds.BlockingRatePerHourCeiling);
+                                break;
+                            case "blocking_critical_per_hour":
+                                AddDouble("blocking_critical_per_hour", n, "health_bands.blocking_critical_per_hour",
+                                    ServerHealthThresholds.BlockingRatePerHourFloor,
+                                    ServerHealthThresholds.BlockingRatePerHourCeiling);
+                                break;
+                            case "blocking_warn_wait_seconds":
+                                AddDouble("blocking_warn_wait_seconds", n, "health_bands.blocking_warn_wait_seconds",
+                                    ServerHealthThresholds.BlockingWaitSecondsFloor,
+                                    ServerHealthThresholds.BlockingWaitSecondsCeiling);
+                                break;
+                            case "blocking_critical_wait_seconds":
+                                AddDouble("blocking_critical_wait_seconds", n, "health_bands.blocking_critical_wait_seconds",
+                                    ServerHealthThresholds.BlockingWaitSecondsFloor,
+                                    ServerHealthThresholds.BlockingWaitSecondsCeiling);
                                 break;
                             default: error = $"Unknown field 'health_bands.{k}'."; break;
                         }
@@ -2813,6 +3254,19 @@ public sealed partial class DarlingMcpAlertTools
                     });
                     break;
 
+                case "identity_capacity":
+                    Group(prop.Value, "identity_capacity", (k, n) =>
+                    {
+                        switch (k)
+                        {
+                            case "enabled": AddBool("identity_capacity_enabled", n, "identity_capacity.enabled"); break;
+                            case "warning_percent": AddInt("identity_capacity_warning_percent", n, "identity_capacity.warning_percent", 1, 100); break;
+                            case "critical_percent": AddInt("identity_capacity_critical_percent", n, "identity_capacity.critical_percent", 1, 100); break;
+                            default: error = $"Unknown field 'identity_capacity.{k}'."; break;
+                        }
+                    });
+                    break;
+
                 case "database_state":
                     Group(prop.Value, "database_state", (k, n) =>
                     {
@@ -2820,6 +3274,17 @@ public sealed partial class DarlingMcpAlertTools
                         {
                             case "enabled": AddBool("database_state_enabled", n, "database_state.enabled"); break;
                             default: error = $"Unknown field 'database_state.{k}'."; break;
+                        }
+                    });
+                    break;
+
+                case "agent_alert_gaps":
+                    Group(prop.Value, "agent_alert_gaps", (k, n) =>
+                    {
+                        switch (k)
+                        {
+                            case "enabled": AddBool("agent_alert_gaps_enabled", n, "agent_alert_gaps.enabled"); break;
+                            default: error = $"Unknown field 'agent_alert_gaps.{k}'."; break;
                         }
                     });
                     break;
@@ -2974,6 +3439,24 @@ public sealed partial class DarlingMcpAlertTools
             && criticalParam.TypedValue < warningParam.TypedValue)
         {
             error = RunnableQueueBarsOrderMessage;
+        }
+
+        /* #6927: both bars of a blocking band pair in one body must already be in order; a lone bar is compared with the stored other one
+           inside UpdateAlertSettings' transaction (the builder has no store). */
+        if (error == null
+            && updates.FirstOrDefault(u => u.Column == BlockingWarnPerHourColumn) is { Param: NpgsqlParameter<double> blockWarnRate }
+            && updates.FirstOrDefault(u => u.Column == BlockingCriticalPerHourColumn) is { Param: NpgsqlParameter<double> blockCriticalRate }
+            && blockCriticalRate.TypedValue < blockWarnRate.TypedValue)
+        {
+            error = BlockingRateBarsOrderMessage;
+        }
+
+        if (error == null
+            && updates.FirstOrDefault(u => u.Column == BlockingWarnWaitColumn) is { Param: NpgsqlParameter<double> blockWarnWait }
+            && updates.FirstOrDefault(u => u.Column == BlockingCriticalWaitColumn) is { Param: NpgsqlParameter<double> blockCriticalWait }
+            && blockCriticalWait.TypedValue < blockWarnWait.TypedValue)
+        {
+            error = BlockingWaitBarsOrderMessage;
         }
 
         /* #5640: both Client Timeouts bars in one body must already be in order; a lone bar is compared with the stored other one. */

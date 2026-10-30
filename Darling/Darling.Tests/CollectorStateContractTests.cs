@@ -144,9 +144,13 @@ public sealed class CollectorStateContractTests
            NINE since #5640. attention persists two things per scope (server, or per database on Azure SQL DB): the
            ring-buffer session's execution_count (XeShredGate, the same gate as the two collectors above) and the
            event_counter's last count (the prior its next delta is taken against). Both are staged and land only
-           once the run's rows are written; no host code. */
+           once the run's rows are written; no host code.
+
+           TEN since #6441. system_health_events persists the (file, buffer offset) bookmark of the newest event it read from the
+           session's event_file target, the one reading a MAX() over its rows cannot recover (a file offset is not a stored column).
+           It is used only while its event time is not ahead of the stored watermark; no host code, generic wiring. */
         Assert.Equal(
-            new[] { "attention", "blocked_process_report", "cpu_utilization", "deadlocks", "default_trace_events", "pg_deadlocks", "pg_log_events", "pg_plan_capture", "pg_statement_stats", "pg_wait_sampling", "pg_wait_stats", "wait_stats" },
+            new[] { "attention", "blocked_process_report", "cpu_utilization", "deadlocks", "default_trace_events", "pg_deadlocks", "pg_log_events", "pg_plan_capture", "pg_statement_stats", "pg_wait_sampling", "pg_wait_stats", "system_health_events", "wait_stats" },
             CollectorCatalog.All
                 .Where(c => c.StateKeys.Count > 0)
                 .Select(c => c.Name)

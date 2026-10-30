@@ -60,19 +60,73 @@ public static class DarlingXeSessions
             : null;
 
     /// <summary>
+    /// A deadlock or blocked-process session whose ensure failed (#6893): the message the run records, and whether the failure was a
+    /// permission denial (the run records PERMISSIONS and no Capture Down fires) or anything else (the run records SESSION_MISSING).
+    /// Either way the run does not read the absent session: the join to the session views returns no rows for it, which a run records
+    /// as a SUCCESS with zero rows, the same as a quiet server.
+    /// </summary>
+    public sealed record XeEnsureFailure(string Message, bool IsPermission);
+
+    /// <summary>
+    /// What the last ensure left for the deadlock and blocked-process runs (#6893), replaced by every ensure so a later success clears it.
+    /// <see cref="Deadlock"/> and <see cref="BlockedProcess"/> are set when the session exists nowhere the collector would read. The
+    /// partial notes are set on Azure SQL Database when the create failed in some databases and not in others: the survivors' read is
+    /// real, and the note names the databases it does not cover, so a zero cannot pass for a quiet server (the #3754 behaviour).
+    /// </summary>
+    public sealed class CaptureEnsureOutcome
+    {
+        public XeEnsureFailure? Deadlock { get; set; }
+
+        public XeEnsureFailure? BlockedProcess { get; set; }
+
+        public string? DeadlockPartialNote { get; set; }
+
+        public string? BlockedProcessPartialNote { get; set; }
+    }
+
+    /// <summary>The failure a failed deadlock or blocked-process ensure leaves for the run (#6893): PERMISSIONS for a denied create, SESSION_MISSING for anything else.</summary>
+    internal static XeEnsureFailure CaptureFaultFor(Exception ex, string captureName)
+    {
+        if (ErrorNumbersOf(ex).Any(SqlServerPermissionErrors.IsPermissionDenied))
+        {
+            return new XeEnsureFailure(
+                $"The {captureName} XE session could not be created because the monitoring login lacks the permission to create Extended Events sessions (ALTER ANY EVENT SESSION on-premises, CREATE ANY DATABASE EVENT SESSION on Azure SQL Database), so no {captureName} events can be captured until it is granted: {AlwaysOnXeSessions.DescribeFailure(ex)}",
+                IsPermission: true);
+        }
+
+        return new XeEnsureFailure(
+            $"The {captureName} XE session could not be created or started, so no {captureName} events can be captured until it is: {AlwaysOnXeSessions.DescribeFailure(ex)}",
+            IsPermission: false);
+    }
+
+    /// <summary>
+    /// Whether this target can hold an Extended Events session at all (#6893). Amazon RDS refuses every create on its Web and Express
+    /// editions, so nothing here is tried there: each refused attempt is also written into the instance's own error log.
+    /// </summary>
+    internal static bool CanHoldSessions(ServerRuntime server) => CollectorTargetInfo.XeSessionSupported(server.Target);
+
+    /// <summary>
     /// Ensures the always-on sessions. Returns the permission fault of the client-timeout session, or null (#5640). With
     /// <paramref name="attentionEnabled"/> false the client-timeout session is neither created nor started, and nothing is
     /// dropped: the collector is off, and the session captures statement text, so it is not brought back for a server that does not
     /// read it. The deadlock and blocked-process sessions are ensured either way.
     /// </summary>
     public static async Task<AttentionEnsureFault?> EnsureAllAsync(
-        ServerRuntime server, DarlingCollectorRunner runner, ILogger? logger, CancellationToken cancellationToken, bool attentionEnabled = true)
+        ServerRuntime server, DarlingCollectorRunner runner, ILogger? logger, CancellationToken cancellationToken, bool attentionEnabled = true,
+        CaptureEnsureOutcome? outcome = null)
     {
         /* Same self-gate as ReconcileLongQueryCompletionsAsync, same reason: this method constructs a
            SqlConnection from the engine-ambiguous connection string, so it enforces its own precondition
            rather than trusting the caller's gate (DarlingWorker's connect path) to be the only entry
            forever. XE does not exist on PostgreSQL. */
         if (server.Target.Engine != PerformanceMonitor.Collectors.CollectorTargetEngine.SqlServer)
+        {
+            return null;
+        }
+
+        /* #6893: Amazon RDS Web and Express refuse every session create, and write each refusal into the instance's error log. The four
+           captures do not apply there (CollectorTargetInfo.XeSessionSupported), so nothing is tried and nothing is logged. */
+        if (!CanHoldSessions(server))
         {
             return null;
         }
@@ -86,7 +140,7 @@ public static class DarlingXeSessions
 
         if (server.Target.IsAzureSqlDb)
         {
-            return await EnsureDatabaseScopedAsync(server, runner, logger, attentionEnabled, cancellationToken);
+            return await EnsureDatabaseScopedAsync(server, runner, logger, attentionEnabled, outcome, cancellationToken);
         }
 
         AttentionEnsureFault? attentionFault = null;
@@ -108,8 +162,15 @@ public static class DarlingXeSessions
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                logger?.LogError("[{Server}] Failed to ensure deadlock XE session: {Message} — deadlock collection will read zero rows until resolved",
-                    server.Config.DisplayName, ex.Message);
+                /* #6893: carried to the run, which records PERMISSIONS for a denied create and SESSION_MISSING for any other failure,
+                   instead of reading a session that cannot exist and recording a SUCCESS with zero rows. */
+                var fault = CaptureFaultFor(ex, "deadlock");
+                if (outcome is not null)
+                {
+                    outcome.Deadlock = fault;
+                }
+
+                LogCaptureFault(logger, server, "deadlock", "deadlock", fault, ex);
             }
 
             try
@@ -122,8 +183,13 @@ public static class DarlingXeSessions
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                logger?.LogError("[{Server}] Failed to ensure blocked process XE session: {Message} — blocked-process collection will read zero rows until resolved",
-                    server.Config.DisplayName, ex.Message);
+                var fault = CaptureFaultFor(ex, "blocked process");
+                if (outcome is not null)
+                {
+                    outcome.BlockedProcess = fault;
+                }
+
+                LogCaptureFault(logger, server, "blocked process", "blocked-process", fault, ex);
             }
 
             /* The client-timeout capture (#5640), its own try block like the two above: a failure of one capture never
@@ -159,11 +225,26 @@ public static class DarlingXeSessions
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            logger?.LogError("[{Server}] Failed to ensure XE sessions: {Message} — deadlock/blocked-process/client-timeout collection will not find its session until resolved",
+            logger?.LogError("[{Server}] Failed to ensure XE sessions: {Message} — the deadlock, blocked-process and client-timeout runs will fail to connect to read them until resolved",
                 server.Config.DisplayName, ex.Message);
         }
 
         return attentionFault;
+    }
+
+    /// <summary>#6893: a denied create is a permission state the run records as PERMISSIONS, so it is a Warning, like the client-timeout session's (#5640). Any other failure is a capture that broke.</summary>
+    private static void LogCaptureFault(ILogger? logger, ServerRuntime server, string captureName, string collectorWord, XeEnsureFailure fault, Exception ex)
+    {
+        if (fault.IsPermission)
+        {
+            logger?.LogWarning("[{Server}] Could not ensure the {Capture} XE session: {Message} — {Collector} collection will record PERMISSIONS until the login is granted ALTER ANY EVENT SESSION",
+                server.Config.DisplayName, captureName, ex.Message, collectorWord);
+        }
+        else
+        {
+            logger?.LogError("[{Server}] Failed to ensure {Capture} XE session: {Message} — {Collector} collection will record SESSION_MISSING until resolved",
+                server.Config.DisplayName, captureName, ex.Message, collectorWord);
+        }
     }
 
     /// <summary>
@@ -174,8 +255,12 @@ public static class DarlingXeSessions
     /// one broken session) never blocks the rest.
     /// </summary>
     private static async Task<AttentionEnsureFault?> EnsureDatabaseScopedAsync(
-        ServerRuntime server, DarlingCollectorRunner runner, ILogger? logger, bool attentionEnabled, CancellationToken cancellationToken)
+        ServerRuntime server, DarlingCollectorRunner runner, ILogger? logger, bool attentionEnabled, CaptureEnsureOutcome? outcome, CancellationToken cancellationToken)
     {
+        /* #6893: how each of the deadlock and blocked-process creates went, per database. */
+        var deadlockTally = new CaptureTally();
+        var blockedTally = new CaptureTally();
+
         /* #5640 (H2): the databases where the client-timeout create was refused for permission, against the databases it was tried
            in. The run records PERMISSIONS only when EVERY database refused it; a refusal in some leaves the survivors' read real. */
         var attentionTried = 0;
@@ -197,7 +282,7 @@ public static class DarlingXeSessions
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            logger?.LogError("[{Server}] Failed to enumerate databases for XE sessions: {Message} — deadlock/blocked-process collection will read zero rows until resolved",
+            logger?.LogError("[{Server}] Failed to enumerate databases for XE sessions: {Message} — the deadlock and blocked-process runs fail the same enumeration until resolved",
                 server.Config.DisplayName, ex.Message);
             return null;
         }
@@ -234,18 +319,18 @@ public static class DarlingXeSessions
                 }
 
                 /* #4961: the shared session when it is usable, this install's own when it is not, and back again. */
-                await DarlingAlwaysOnXeSessions.EnsureAsync(
-                    database, runner, server, databaseName, AlwaysOnXeSessionKind.Deadlock, "deadlock", logger, cancellationToken);
-                await DarlingAlwaysOnXeSessions.EnsureAsync(
-                    database, runner, server, databaseName, AlwaysOnXeSessionKind.BlockedProcess, "blocked process", logger, cancellationToken);
+                deadlockTally.Record(databaseName, await DarlingAlwaysOnXeSessions.EnsureAsync(
+                    database, runner, server, databaseName, AlwaysOnXeSessionKind.Deadlock, "deadlock", logger, cancellationToken));
+                blockedTally.Record(databaseName, await DarlingAlwaysOnXeSessions.EnsureAsync(
+                    database, runner, server, databaseName, AlwaysOnXeSessionKind.BlockedProcess, "blocked process", logger, cancellationToken));
                 if (attentionEnabled)
                 {
                     attentionTried++;
                     var denied = await DarlingAlwaysOnXeSessions.EnsureAsync(
                         database, runner, server, databaseName, AlwaysOnXeSessionKind.Attention, "client timeout", logger, cancellationToken);
-                    if (denied is not null)
+                    if (denied is { IsPermission: true })
                     {
-                        attentionDenied ??= denied;
+                        attentionDenied ??= new AttentionEnsureFault(denied.Message);
                         attentionDeniedIn++;
                     }
                 }
@@ -254,6 +339,11 @@ public static class DarlingXeSessions
             {
                 logger?.LogWarning("[{Server}] [{Database}] Failed to open a connection for XE session ensure: {Message}",
                     server.Config.DisplayName, databaseName, ex.Message);
+
+                /* #6893: a database that could not be reached has neither session ensured. */
+                var unreached = new XeEnsureFailure($"The database could not be reached to create its XE sessions: {ex.Message}", IsPermission: false);
+                deadlockTally.Record(databaseName, unreached);
+                blockedTally.Record(databaseName, unreached);
             }
             finally
             {
@@ -262,7 +352,57 @@ public static class DarlingXeSessions
             }
         }
 
+        if (outcome is not null)
+        {
+            (outcome.Deadlock, outcome.DeadlockPartialNote) = deadlockTally.Result();
+            (outcome.BlockedProcess, outcome.BlockedProcessPartialNote) = blockedTally.Result();
+        }
+
         return attentionTried > 0 && attentionDeniedIn == attentionTried ? attentionDenied : null;
+    }
+
+    /// <summary>
+    /// #6893: how one capture's create went across the monitored databases. A session that exists in no database the collector would
+    /// read is a fault for the run (PERMISSIONS when every refusal was a denial, otherwise SESSION_MISSING with the first refusal's
+    /// message). A session missing from only some is a partial note on the run, in the wording every other partial loss uses.
+    /// </summary>
+    private sealed class CaptureTally
+    {
+        private readonly List<string> _failed = new();
+        private readonly HashSet<string> _seen = new(StringComparer.OrdinalIgnoreCase);
+        private XeEnsureFailure? _first;
+        private bool _allPermission = true;
+
+        public void Record(string database, XeEnsureFailure? failure)
+        {
+            /* A database counts once: an unreachable one is recorded by the catch, after the ensure may already have recorded it. */
+            if (!_seen.Add(database))
+            {
+                return;
+            }
+
+            if (failure is not null)
+            {
+                _failed.Add(database);
+                _first ??= failure;
+                _allPermission &= failure.IsPermission;
+            }
+        }
+
+        public (XeEnsureFailure? Fault, string? PartialNote) Result()
+        {
+            if (_seen.Count == 0 || _failed.Count == 0)
+            {
+                return (null, null);
+            }
+
+            if (_failed.Count == _seen.Count)
+            {
+                return (_first! with { IsPermission = _allPermission }, null);
+            }
+
+            return (null, EnumeratedCollectorDriver.BuildPartialFailureNote(_failed.Count, _seen.Count, _failed, _first!.Message));
+        }
     }
 
     private static async Task EnsureDeadlockOnPremAsync(SqlConnection connection, ServerRuntime server, ILogger? logger, CancellationToken cancellationToken)

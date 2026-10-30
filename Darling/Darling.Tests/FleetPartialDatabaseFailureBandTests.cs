@@ -18,8 +18,10 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
@@ -599,5 +601,265 @@ CROSS JOIN generate_series(0, {SeededRuns - 1}) AS g", connection);
         Assert.Equal("WARNING", warmedBands[collectors[0]]);
         Assert.Equal("HEALTHY", warmedBands[collectors[1]]);
         Assert.Equal("HEALTHY", warmedBands[collectors[2]]);
+    }
+
+    /* ───────────── #6690: the blocking baseline aggregate leaves self-waits out ───────────── */
+
+    private const string BlockedReportInsertSql = @"
+INSERT INTO collect.blocked_process_reports (blocked_report_id, collection_time, server_id, server_name, event_time, database_name, blocked_spid, blocked_ecid, blocking_spid, blocking_ecid, wait_time_ms, wait_resource, lock_mode, blocked_status, blocked_isolation_level, blocked_log_used, blocked_transaction_count, blocked_client_app, blocked_host_name, blocked_login_name, blocked_sql_text, blocking_status, blocking_isolation_level, blocking_client_app, blocking_host_name, blocking_login_name, blocking_sql_text, blocked_transaction_name, blocking_transaction_name, blocked_last_tran_started, blocking_last_tran_started, blocked_last_batch_started, blocking_last_batch_started, blocked_last_batch_completed, blocking_last_batch_completed, blocked_priority, blocking_priority, blocked_process_report_xml, object_id, database_id, contentious_object, monitor_loop, blocked_query_plan_xml, blocking_query_plan_xml)
+VALUES ($1, $2, -6690, 'srv-6690', $2, 'testdb', $3, 0, $4, 0, 100, 'KEY', 'X', 'suspended', 'READ COMMITTED', 0, 1, 'app', 'host', 'login', 'select 1', 'suspended', 'READ COMMITTED', 'app', 'host', 'login', 'select 2', NULL, NULL, $2, $2, $2, $2, $2, $2, 0, 0, '<x/>', 1, 1, 'obj', 1, NULL, NULL)";
+
+    private static string PreSelfWaitFilterBaselineSql()
+        => Regex.Replace(TimescaleSupport.CreateBlockedProcessBaselineSql, @"WHERE [^\r\n]*\r?\n", string.Empty);
+
+    private static async Task InsertBlockedReportAsync(NpgsqlConnection connection, long id, DateTime t, int blocked, int blocking, CancellationToken ct)
+    {
+        await using var insert = new NpgsqlCommand(BlockedReportInsertSql, connection);
+        insert.Parameters.AddWithValue(id);
+        insert.Parameters.AddWithValue(t);
+        insert.Parameters.AddWithValue(blocked);
+        insert.Parameters.AddWithValue(blocking);
+        await insert.ExecuteNonQueryAsync(ct);
+    }
+
+    private static async Task<long> BaselineEventsAsync(NpgsqlConnection connection, DateTime from, DateTime to, CancellationToken ct)
+    {
+        await using var sum = new NpgsqlCommand("SELECT COALESCE(sum(event_count), 0) FROM collect.blocked_process_baseline WHERE server_id = -6690 AND collection_time >= $1 AND collection_time < $2", connection);
+        sum.Parameters.AddWithValue(from);
+        sum.Parameters.AddWithValue(to);
+        return Convert.ToInt64(await sum.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture);
+    }
+
+    [Fact]
+    public async Task BlockingBaselineBuiltWithoutTheSelfWaitFilter_IsRebuiltFilteredAndBackfilledOverTheWholeWindow_AgainstDevPostgres()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #6690 reshape test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct), "the dev fixture is expected to have TimescaleDB installed");
+
+        /* No scheduler: the refresh policy's own run must not move the watermark under the test. */
+        await using (var stop = new NpgsqlCommand("SELECT _timescaledb_functions.stop_background_workers()", connection))
+        {
+            await stop.ExecuteNonQueryAsync(ct);
+        }
+
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+
+        /* The pre-#6690 aggregate: the same select with no WHERE. */
+        var oldShape = PreSelfWaitFilterBaselineSql();
+        Assert.DoesNotContain("blocking_spid", oldShape, StringComparison.Ordinal);
+        await using (var create = new NpgsqlCommand(oldShape.Replace("WITH NO DATA", "WITH DATA", StringComparison.Ordinal), connection))
+        {
+            await create.ExecuteNonQueryAsync(ct);
+        }
+
+        /* A recent day and a day older than any refresh policy's window, each holding one real report (spid 1
+           blocked by 2) and one self-wait (spid 5 waiting on itself). */
+        var now = LiveClock.Now();
+        long id = 66900;
+        foreach (var t in new[] { now.AddHours(-3), now.AddDays(-10) })
+        {
+            await InsertBlockedReportAsync(connection, id++, t, 1, 2, ct);
+            await InsertBlockedReportAsync(connection, id++, t, 5, 5, ct);
+        }
+
+        await using (var refreshAll = new NpgsqlCommand("CALL refresh_continuous_aggregate('collect.blocked_process_baseline', NULL, NULL)", connection))
+        {
+            await refreshAll.ExecuteNonQueryAsync(ct);
+        }
+
+        Assert.Equal(2L, await BaselineEventsAsync(connection, now.AddDays(-11), now.AddDays(-9), ct));
+
+        /* The sweep drops it (only it), the ensure sweep recreates it filtered. */
+        Assert.Equal(1, await TimescaleSupport.DropStaleContinuousAggregatesAsync(connection, null, ct));
+        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+
+        /* The trap: the policy's recent window is all a refresh would cover, so the old day reads EMPTY. */
+        await using (var recentOnly = new NpgsqlCommand("CALL refresh_continuous_aggregate('collect.blocked_process_baseline', $1, $2)", connection))
+        {
+            recentOnly.Parameters.AddWithValue(now.AddDays(-1));
+            recentOnly.Parameters.AddWithValue(now.AddHours(1));
+            await recentOnly.ExecuteNonQueryAsync(ct);
+        }
+
+        Assert.Equal(0L, await BaselineEventsAsync(connection, now.AddDays(-11), now.AddDays(-9), ct));
+
+        /* The start path's coverage-gated backfill closes it over the whole baseline window, counting only the real report. */
+        Assert.True(await TimescaleSupport.BackfillBaselineAggregatesAsync(connection, null, ct) >= 1);
+        Assert.Equal(1L, await BaselineEventsAsync(connection, now.AddDays(-11), now.AddDays(-9), ct));
+        Assert.Equal(1L, await BaselineEventsAsync(connection, now.AddDays(-1), now.AddHours(1), ct));
+
+        /* A converged store: nothing left to drop. */
+        Assert.Equal(0, await TimescaleSupport.DropStaleContinuousAggregatesAsync(connection, null, ct));
+        Assert.Equal(1L, await BaselineEventsAsync(connection, now.AddDays(-11), now.AddDays(-9), ct));
+    }
+
+    [Fact]
+    public async Task PlainBlockingBaselineViewWithoutTheSelfWaitFilter_IsReplacedInPlace_AgainstDevPostgres()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the live #6690 plain-view test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        /* A store without TimescaleDB that built the plain fallback view before #6690. */
+        await using (var create = new NpgsqlCommand(TimescaleSupport.CreateBaselineFallbackViewSql(TimescaleSupport.BlockedProcessBaselineView, PreSelfWaitFilterBaselineSql()), connection))
+        {
+            await create.ExecuteNonQueryAsync(ct);
+        }
+
+        var now = LiveClock.Now();
+        await InsertBlockedReportAsync(connection, 66950, now.AddHours(-3), 1, 2, ct);
+        await InsertBlockedReportAsync(connection, 66951, now.AddHours(-3), 5, 5, ct);
+
+        Assert.Equal(2L, await BaselineEventsAsync(connection, now.AddDays(-1), now, ct));
+        await TimescaleSupport.EnsureBaselineFallbackViewsAsync(connection, null, ct);
+        Assert.Equal(1L, await BaselineEventsAsync(connection, now.AddDays(-1), now, ct));
+
+        /* Converged: the next pass fills and replaces nothing. */
+        Assert.Equal(0, await TimescaleSupport.EnsureBaselineFallbackViewsAsync(connection, null, ct));
+    }
+
+    /* ───────────── #6705: the rebuilt aggregate's supply floor (the #3590 trap) ───────────── */
+
+    [Theory]
+    [InlineData(null, null)]
+    [InlineData("", null)]
+    [InlineData("not a floor", null)]
+    [InlineData("supply_floor_utc=garbage", null)]
+    [InlineData("supply_floor_utc=2026-09-24", null)]
+    [InlineData("supply_floor_utc=2026-09-24T12:34:56", "2026-09-24T12:34:56")]
+    public void TheSupplyFloorComment_ParsesOnlyAValidFloor(string? comment, string? expected)
+        => Assert.Equal(
+            expected is null ? null : DateTime.ParseExact(expected, "yyyy-MM-dd'T'HH:mm:ss", CultureInfo.InvariantCulture),
+            TimescaleSupport.ParseBlockedBaselineSupplyFloor(comment));
+
+    private static async Task<(long Covered, double Events)> BlockingBaselineTotalsAsync(NpgsqlDataSource postgres, DateTime analysisTime, CancellationToken ct)
+    {
+        var map = await new PgBaselineProvider(postgres).GetBucketMapAsync(-6690, MetricNames.Blocking, analysisTime, analysisTime.AddHours(1), ct);
+        return (map.Buckets.Values.Sum(b => b.SampleCount), map.Buckets.Values.Sum(b => b.Mean * b.SampleCount));
+    }
+
+    /// <summary>#6705: the ensure sweep records no floor on a fresh store, where raw holds nothing and the aggregate will hold everything raw ever gets.</summary>
+    [Fact]
+    public async Task EnsureOnAFreshStore_RecordsNoSupplyFloor_AgainstDevPostgres()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #6705 fresh-store test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct), "the dev fixture is expected to have TimescaleDB installed");
+        await using (var stop = new NpgsqlCommand("SELECT _timescaledb_functions.stop_background_workers()", connection))
+        {
+            await stop.ExecuteNonQueryAsync(ct);
+        }
+
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+        Assert.Null(await TimescaleSupport.ReadBlockedBaselineSupplyFloorAsync(connection, ct));
+    }
+
+    [Fact]
+    public async Task BlockingBaseline_OfARebuiltAggregate_CountsNoDayBeforeTheFloor_AndAStoreWithNoFloorReadsAsBefore_AgainstDevPostgres()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #6705 supply-floor test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct), "the dev fixture is expected to have TimescaleDB installed");
+        await using (var stop = new NpgsqlCommand("SELECT _timescaledb_functions.stop_background_workers()", connection))
+        {
+            await stop.ExecuteNonQueryAsync(ct);
+        }
+
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+
+        /* The operator keeps blocked process reports 10 days, not the 30 of the default. */
+        await using (var retention = new NpgsqlCommand("INSERT INTO config.config_collector_schedules (server_id, collector_name, frequency_minutes, retention_days, enabled) VALUES (NULL, 'blocked_process_report', 1, 10, TRUE)", connection))
+        {
+            await retention.ExecuteNonQueryAsync(ct);
+        }
+
+        await using (var create = new NpgsqlCommand(PreSelfWaitFilterBaselineSql().Replace("WITH NO DATA", "WITH DATA", StringComparison.Ordinal), connection))
+        {
+            await create.ExecuteNonQueryAsync(ct);
+        }
+
+        /* Raw holds one real report 2 days back and one 8 days back (inside the 10), each at 14:00 UTC. The collector logged a
+           SUCCESS run at 14:00 on each of the last 30 days, which the log keeps twice as long as the reports. */
+        var now = LiveClock.Now();
+        var dayStart = now.Date;
+        long id = 67050;
+        foreach (var back in new[] { 2, 8 })
+        {
+            await InsertBlockedReportAsync(connection, id++, dayStart.AddDays(-back).AddHours(14), 1, 2, ct);
+        }
+
+        await using (var log = new NpgsqlCommand(@"
+INSERT INTO collect.collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, error_message, rows_collected, sql_duration_ms, duckdb_duration_ms)
+SELECT -670500 - g, -6690, 'srv-6690', 'blocked_process_report', $1 - make_interval(days => g) + interval '14 hours', 100, 'SUCCESS', NULL, 0, 80, 20
+FROM generate_series(0, 29) AS g", connection))
+        {
+            log.Parameters.AddWithValue(DateTime.SpecifyKind(dayStart, DateTimeKind.Unspecified));
+            await log.ExecuteNonQueryAsync(ct);
+        }
+
+        /* The reshape drops the old aggregate and the ensure sweep recreates it over raw rows, which records the floor on that
+           pass: a service that stops before the backfill, with the refresh policy then materializing the last day, still has it. */
+        Assert.Equal(1, await TimescaleSupport.DropStaleContinuousAggregatesAsync(connection, null, ct));
+        var before = DateTime.UtcNow;
+        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+        var floor = await TimescaleSupport.ReadBlockedBaselineSupplyFloorAsync(connection, ct);
+        Assert.NotNull(floor);
+        Assert.InRange(floor!.Value, before.AddDays(-10).AddMinutes(-5), DateTime.UtcNow.AddDays(-10).AddSeconds(1));
+
+        /* The policy's run materializes the last day before the backfill; the backfill then sees a non-empty materialization. */
+        await using (var recentOnly = new NpgsqlCommand("CALL refresh_continuous_aggregate('collect.blocked_process_baseline', $1, $2)", connection))
+        {
+            recentOnly.Parameters.AddWithValue(now.AddDays(-1));
+            recentOnly.Parameters.AddWithValue(now.AddHours(1));
+            await recentOnly.ExecuteNonQueryAsync(ct);
+        }
+
+        Assert.True(await TimescaleSupport.BackfillBaselineAggregatesAsync(connection, null, ct) >= 1);
+        Assert.Equal(floor, await TimescaleSupport.ReadBlockedBaselineSupplyFloorAsync(connection, ct));
+
+        /* A later start does not move it. */
+        await TimescaleSupport.BackfillBaselineAggregatesAsync(connection, null, ct);
+        Assert.Equal(floor, await TimescaleSupport.ReadBlockedBaselineSupplyFloorAsync(connection, ct));
+
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var runs = Enumerable.Range(0, 30).Select(g => dayStart.AddDays(-g).AddHours(14)).ToList();
+        var coveredAfterFloor = runs.Count(t => t >= floor.Value && t < dayStart);
+        Assert.InRange(coveredAfterFloor, 8, 10);
+
+        var (covered, events) = await BlockingBaselineTotalsAsync(postgres, now, ct);
+        Assert.Equal(coveredAfterFloor, covered);
+        Assert.Equal(2.0, events, precision: 6);
+
+        /* No floor: every logged day of the window is a covered day, as before. */
+        await using (var clear = new NpgsqlCommand($"COMMENT ON VIEW collect.{TimescaleSupport.BlockedProcessBaselineView} IS NULL", connection))
+        {
+            await clear.ExecuteNonQueryAsync(ct);
+        }
+
+        Assert.Null(await TimescaleSupport.ReadBlockedBaselineSupplyFloorAsync(connection, ct));
+        var (coveredWithoutFloor, eventsWithoutFloor) = await BlockingBaselineTotalsAsync(postgres, now, ct);
+        Assert.Equal(runs.Count(t => t < dayStart), coveredWithoutFloor);
+        Assert.Equal(2.0, eventsWithoutFloor, precision: 6);
     }
 }

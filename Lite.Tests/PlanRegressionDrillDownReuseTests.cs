@@ -125,6 +125,36 @@ public sealed class PlanRegressionDrillDownReuseTests : IClassFixture<SharedDuck
         Assert.Equal(standalone.Select(r => r.GetRawText()), (await DrillDownRowsAsync(emptied)).Select(r => r.GetRawText()));
     }
 
+    /// <summary>#6548 review: the drill-down ranks regressions the way the PLAN_REGRESSION fact does, so a SQL Server housekeeping statement that
+    /// regressed (change tracking cleanup) cannot lead it or use up one of its five rows.</summary>
+    [Fact]
+    public async Task TheDrillDown_LeavesOutASqlServerHousekeepingStatement_BeforeItsLimit()
+    {
+        await SeedAsync();
+
+        var before = await DrillDownRowsAsync(NewContext());
+        Assert.Contains(before, r => r.GetProperty("query_id").GetInt64() == TwoReplicaQueryId);
+
+        using (var readLock = _duckDb.AcquireReadLock())
+        {
+            _seedConn ??= _duckDb.CreateConnection();
+            if (_seedConn.State != System.Data.ConnectionState.Open)
+            {
+                await _seedConn.OpenAsync();
+            }
+
+            using var cmd = _seedConn.CreateCommand();
+            cmd.CommandText = "UPDATE query_store_stats SET query_text = 'DELETE TOP (@batch_size) FROM sys.[change_tracking_1228027148] WHERE commit_ts < 5' WHERE query_id = $1";
+            cmd.Parameters.Add(new DuckDBParameter { Value = TwoReplicaQueryId });
+            await cmd.ExecuteNonQueryAsync();
+        }
+
+        var after = await DrillDownRowsAsync(NewContext());
+
+        Assert.Equal(5, after.Count);
+        Assert.DoesNotContain(after, r => r.GetProperty("query_id").GetInt64() == TwoReplicaQueryId);
+    }
+
     private async Task<List<JsonElement>> DrillDownRowsAsync(AnalysisContext context)
     {
         var finding = new AnalysisFinding

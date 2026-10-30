@@ -418,7 +418,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         var root = Parse(await McpAlertTools.GetAlertHistory(_dataService, 24, 50));
         Assert.Equal("empty", root.GetProperty("status").GetString());
         var message = root.GetProperty("message").GetString()!;
-        Assert.Contains("2 dismissed alert(s) were excluded", message, StringComparison.Ordinal);
+        Assert.Contains("2 dismissed alerts were excluded", message, StringComparison.Ordinal);
         Assert.Contains("include_dismissed", message, StringComparison.Ordinal);
 
         /* And with nothing dismissed either, the plain sentence — the count is a measurement, not a hedge. */
@@ -426,6 +426,18 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         var quiet = Parse(await McpAlertTools.GetAlertHistory(_dataService, 24, 50));
         Assert.Equal("empty", quiet.GetProperty("status").GetString());
         Assert.DoesNotContain("dismissed", quiet.GetProperty("message").GetString()!, StringComparison.Ordinal);
+    }
+
+    /// <summary>#6703: one dismissed alert reads "1 dismissed alert was excluded", not "1 dismissed alert(s) were".</summary>
+    [Fact]
+    public async Task GetAlertHistory_OneDismissed_EmptyAnswerReadsInTheSingular()
+    {
+        await SeedAlertAsync(WholeSecondsNow(), dismissed: true);
+
+        var root = Parse(await McpAlertTools.GetAlertHistory(_dataService, 24, 50));
+
+        Assert.Equal("empty", root.GetProperty("status").GetString());
+        Assert.Contains("1 dismissed alert was excluded", root.GetProperty("message").GetString()!, StringComparison.Ordinal);
     }
 
     /// <summary>

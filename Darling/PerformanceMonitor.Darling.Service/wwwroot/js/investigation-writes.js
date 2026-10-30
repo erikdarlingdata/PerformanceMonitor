@@ -60,7 +60,16 @@ export function buildNoteBody(values) {
   return body;
 }
 
+/** What is missing from a note before the service is asked, or null: the same sentence the service answers a blank note with, so an
+    empty submit shows it at once instead of after a request that is refused (and logs a 400 in the console). */
+export function noteMissing(values) {
+  const text = values && typeof values.note_text === "string" ? values.note_text : "";
+  return text.trim() === "" ? "Enter the note's text." : null;
+}
+
 export async function writeNote(values) {
+  const missing = noteMissing(values);
+  if (missing) return { ok: false, message: "The note was not written. " + missing };
   const res = await apiWrite("PUT", "/api/investigation-notes", buildNoteBody(values));
   return writeOutcome(res, "approved", (b) => "Note " + b.note_id + " written. It is approved and goes into the briefs for its scope.", "The note was not written.");
 }

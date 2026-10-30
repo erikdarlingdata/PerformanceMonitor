@@ -11,7 +11,7 @@ namespace PerformanceMonitorLite.Mcp;
 public sealed class McpIoTools
 {
     [ReadsLatestSnapshot(LatestSnapshotShape.Stamped)]
-    [McpServerTool(Name = "get_file_io_stats"), Description("Gets the latest per-database-file I/O stats: read/write counts, bytes, stall times, calculated latency. LATEST IS A TIME: the newest snapshot, not a window; captured_at is when it was collected, and the deltas cover the sample_interval_seconds ending there. sample_interval_seconds 0 means no delta was knowable for that file (first sighting, counter reset, a gap) and that row's latencies are null, not 0. <<GUIDE>> Gets the latest file I/O statistics per database file: read/write counts, bytes, stall times, and calculated latency. High read latency (>20ms) or write latency (>10ms for data, >2ms for log) often indicates storage bottlenecks. Each row carries sample_interval_seconds, the measured seconds its deltas accrued over; a 0 means no delta was knowable for that file at this collection (first sighting, counter reset, or a gap past the delta policy — typically a restart) and its latencies are null rather than 0. LATEST IS A TIME: this reads the newest file-I/O snapshot, not a window, and captured_at is the instant it was collected; the deltas cover the sample_interval_seconds ending there.")]
+    [McpServerTool(Name = "get_file_io_stats"), Description("Gets the latest per-database-file I/O stats: read/write counts, bytes, stall times, calculated latency. LATEST IS A TIME: the newest snapshot, not a window; captured_at is when it was collected, and the deltas cover the sample_interval_seconds ending there. It takes no as_of or hours_back. For latency at a past time use get_file_io_trend (as_of, hours_back). sample_interval_seconds 0 means no delta was knowable for that file (first sighting, counter reset, a gap) and that row's latencies are null, not 0. <<GUIDE>> Gets the latest file I/O statistics per database file: read/write counts, bytes, stall times, and calculated latency. High read latency (>20ms) or write latency (>10ms for data, >2ms for log) often indicates storage bottlenecks. Each row carries sample_interval_seconds, the measured seconds its deltas accrued over; a 0 means no delta was knowable for that file at this collection (first sighting, counter reset, or a gap past the delta policy — typically a restart) and its latencies are null rather than 0. LATEST IS A TIME: this reads the newest file-I/O snapshot, not a window, and captured_at is the instant it was collected; the deltas cover the sample_interval_seconds ending there.")]
     public static async Task<string> GetFileIoStats(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -42,7 +42,7 @@ public sealed class McpIoTools
                 }
 
                 return McpHelpers.WithDatabase(
-                           await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "file_io_stats"),
+                           await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "file_io_stats", awsRdsKind: AwsRdsKind.None),
                            echo)
                     ?? McpHelpers.StatusForDatabase("unavailable", "No file I/O stats available.", echo);
             }
@@ -129,7 +129,7 @@ public sealed class McpIoTools
                    server whose file_io_stats collector ran every cycle. */
                 /* #5244: every answer shape says which database it was limited to (null for every database), as Darling's twin does. */
                 var gated = McpHelpers.WithDatabase(
-                    await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "file_io_stats"), scope);
+                    await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "file_io_stats", awsRdsKind: AwsRdsKind.None), scope);
                 if (gated != null)
                 {
                     return gated;

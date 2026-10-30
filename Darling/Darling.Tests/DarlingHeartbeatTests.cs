@@ -114,7 +114,7 @@ public sealed class DarlingHeartbeatTests
         var problems = config.Validate();
         Assert.Contains(problems, p => p.Contains("heartbeat.url", StringComparison.Ordinal));
         Assert.Contains(problems, p => p.Contains("heartbeat.intervalSeconds", StringComparison.Ordinal));
-        Assert.Contains(problems, p => p.Contains("servers must contain at least one entry", StringComparison.Ordinal));
+        Assert.DoesNotContain(problems, p => p.Contains("at least one", StringComparison.Ordinal));
         Assert.DoesNotContain(problems, p => p.Contains(Token, StringComparison.Ordinal));
     }
 

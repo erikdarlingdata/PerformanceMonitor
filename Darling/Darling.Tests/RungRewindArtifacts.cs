@@ -503,6 +503,104 @@ END IF; END $$;"),
         new(214, "hasKnownPatterns",
             @"
 DROP TABLE IF EXISTS config.config_known_patterns;"),
+        // V215: the agent-table indexes. The reports index is the probe's newest sentinel. The rewind drops all six, so a re-run of V215 builds them
+        // again. Safe on a store that never had them.
+        new(215, "hasAgentTableIndexes",
+            @"
+DROP INDEX IF EXISTS config.ix_investigation_requests_reported_condition, config.ix_investigation_requests_follow_up_of,
+    config.ix_investigation_requests_follow_up_at, config.ix_investigation_requests_opened_at,
+    config.ix_investigation_requests_practice_of, config.ix_investigation_reports_family_of;"),
+        // V216 (#5736): the Client Timeouts switch's column default is TRUE, the probe's newest sentinel. The rewind sets the default back to
+        // FALSE (V179's), so a re-run of V216 sets it again. The row's value is left as it is: V216 only ever moves FALSE to TRUE. Guarded, so
+        // it is safe on a store whose V179 columns are already gone.
+        new(216, "hasClientTimeoutsOnByDefault",
+            @"
+DO $$ BEGIN
+    IF EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('config.config_alert_settings') AND attname = 'client_timeouts_enabled' AND NOT attisdropped) THEN
+        ALTER TABLE config.config_alert_settings ALTER COLUMN client_timeouts_enabled SET DEFAULT FALSE;
+    END IF;
+END $$;"),
+        // V217 (#6581): the Query Store hints table. The table is the probe's newest sentinel. The rewind drops it (its indexes go with it), so a
+        // re-run of V217 does everything again. Safe on a store that never had it.
+        new(217, "hasQueryStoreHints",
+            "DROP TABLE IF EXISTS collect.query_store_hints;"),
+        // V218 (#6569): the module recompile and plan guide switches. The stored CHECK naming it is the probe's newest sentinel. The rewind puts V196's three-word CHECK
+        // back (it deletes any recompile_module row first, which the old CHECK could not hold), so a re-run of V218 widens it again. Safe on a store that never had it.
+        new(218, "hasServerActionRecompile",
+            @"
+DO $$ BEGIN IF to_regclass('config.config_server_actions') IS NOT NULL THEN
+  DELETE FROM config.config_server_actions WHERE action IN ('recompile_module', 'create_plan_guide', 'drop_plan_guide');
+  ALTER TABLE config.config_server_actions DROP CONSTRAINT IF EXISTS ck_config_server_actions_action;
+  ALTER TABLE config.config_server_actions ADD CONSTRAINT ck_config_server_actions_action CHECK (action IN ('force_plan', 'evict_plan', 'kill_session'));
+END IF; END $$;"),
+        // V219 (#6750): the Query Store self-statement key tables and the two triggers on the text table that fill the key table. The state
+        // table is the probe's newest sentinel. The rewind drops the triggers and their function first (a trigger left behind would write to a
+        // dropped table on the next marked text), then both tables, so a re-run of V219 creates them again. Safe on a store that never had them.
+        new(219, "hasQueryStoreSelfKeys",
+            @"
+DROP TRIGGER IF EXISTS trg_query_store_self_keys_ins ON collect.query_store_text;
+DROP TRIGGER IF EXISTS trg_query_store_self_keys_upd ON collect.query_store_text;
+DROP FUNCTION IF EXISTS collect.query_store_self_keys_track();
+DROP TABLE IF EXISTS collect.query_store_self_keys_state, collect.query_store_self_keys;"),
+        // V220 (#6798): the Job History statistics index on collect.job_history. The index is the probe's newest sentinel. The rewind drops
+        // it, so a re-run of V220 builds it again. Safe on a store that never had it.
+        new(220, "hasJobHistorySuccessIndex",
+            "DROP INDEX IF EXISTS collect.idx_job_history_job_success;"),
+        // V221 (#6800): the Query Store hash-hourly table, the day tables and the ledger's hash_built_seq column. The table is the probe's newest sentinel.
+        // The rewind drops both, so a re-run of V221 builds them again. Safe on a store that never had them.
+        new(221, "hasQueryStoreHashHourly",
+            @"DROP TABLE IF EXISTS collect.query_store_hash_hourly, collect.query_store_hash_daily, collect.query_store_hash_daily_built, collect.query_store_hash_daily_failures;
+ALTER TABLE collect.query_store_compose_stamp_built DROP COLUMN IF EXISTS hash_built_seq;"),
+        // V222 (#6874): the Agent alerts table. The table is the probe's newest sentinel. The rewind drops it (its index goes with it), so a
+        // re-run of V222 builds it again. Safe on a store that never had it.
+        new(222, "hasAgentAlerts",
+            @"DROP TABLE IF EXISTS collect.agent_alerts;
+ALTER TABLE config.config_alert_settings DROP COLUMN IF EXISTS agent_alert_gaps_enabled;"),
+        // V223 (#6873): the database protection table. The table is the probe's newest sentinel. The rewind drops it (its index goes with it), so a
+        // re-run of V223 does everything again. Safe on a store that never had it.
+        new(223, "hasDatabaseProtection",
+            @"DROP TABLE IF EXISTS collect.database_protection;
+ALTER TABLE config.config_alert_settings DROP COLUMN IF EXISTS backup_overdue_enabled, DROP COLUMN IF EXISTS log_backup_overdue_enabled, DROP COLUMN IF EXISTS checkdb_overdue_enabled;"),
+        // V224 (#6875): the identity capacity table. The table is the probe's newest sentinel. The rewind drops it (its indexes go with it), so a
+        // re-run of V224 does everything again. Safe on a store that never had it.
+        new(224, "hasIdentityCapacity",
+            @"DROP TABLE IF EXISTS collect.identity_capacity;
+ALTER TABLE config.config_alert_settings
+    DROP COLUMN IF EXISTS identity_capacity_enabled,
+    DROP COLUMN IF EXISTS identity_capacity_warning_percent,
+    DROP COLUMN IF EXISTS identity_capacity_critical_percent;"),
+        // V225 (#6894): the AWS RDS fact on the server registry. The column is the probe's newest sentinel. The rewind drops it, so a re-run of
+        // V225 does everything again. Safe on a store that never had it.
+        new(225, "hasServerAwsRds",
+            @"ALTER TABLE collect.servers DROP COLUMN IF EXISTS is_aws_rds;"),
+        // V226 (#6893): the AWS RDS Web or Express fact on the server registry. The column is the probe's newest sentinel. The rewind drops it,
+        // so a re-run of V226 does everything again. Safe on a store that never had it.
+        new(226, "hasServerAwsRdsWebOrExpress",
+            @"ALTER TABLE collect.servers DROP COLUMN IF EXISTS is_aws_rds_web_or_express;"),
+        // V227 (#6926): the tag scope on the threshold overrides. The column is the probe's newest sentinel. The rewind removes the tag rows,
+        // the two constraints and the tag index, puts server_id back to NOT NULL and drops the column, so a re-run of V227 does everything
+        // again. Safe on a store that never had it.
+        new(227, "hasThresholdOverrideTagScope",
+            @"DELETE FROM config.config_threshold_overrides WHERE server_id IS NULL;
+ALTER TABLE config.config_threshold_overrides DROP CONSTRAINT IF EXISTS ck_config_threshold_overrides_one_scope;
+ALTER TABLE config.config_threshold_overrides DROP CONSTRAINT IF EXISTS ck_config_threshold_overrides_tag_no_database;
+DROP INDEX IF EXISTS config.ux_config_threshold_overrides_tag;
+ALTER TABLE config.config_threshold_overrides ALTER COLUMN server_id SET NOT NULL;
+ALTER TABLE config.config_threshold_overrides DROP COLUMN IF EXISTS scope_tag_id;"),
+        // V228 (#6927): the four blocking band columns on the alert settings row. The warn per hour column is the probe's newest sentinel. The
+        // rewind drops all four, so a re-run of V228 adds them again. Safe on a store that never had them.
+        new(228, "hasBlockingBands",
+            @"ALTER TABLE config.config_alert_settings
+    DROP COLUMN IF EXISTS blocking_warn_per_hour,
+    DROP COLUMN IF EXISTS blocking_critical_per_hour,
+    DROP COLUMN IF EXISTS blocking_warn_wait_seconds,
+    DROP COLUMN IF EXISTS blocking_critical_wait_seconds;"),
+        // V229 (#6928): the severity filter on the notification routes. The column is the probe's newest sentinel. The rewind drops the column
+        // (its CHECK goes with it), so a re-run of V229 does everything again. Safe on a store that never had it.
+        new(229, "hasRouteSeverities",
+            @"ALTER TABLE config.config_notification_routes DROP COLUMN IF EXISTS severities;
+ALTER TABLE IF EXISTS config.external_alert_state DROP COLUMN IF EXISTS fired_severities;
+ALTER TABLE IF EXISTS config.investigation_request_alerts DROP COLUMN IF EXISTS severity;"),
     ];
 
     /// <summary>

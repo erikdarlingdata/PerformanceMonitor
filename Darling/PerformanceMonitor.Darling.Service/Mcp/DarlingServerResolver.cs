@@ -14,6 +14,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Hosting;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -64,9 +65,6 @@ internal static class DarlingServerResolver
     /// triage note/card can recognize this specific store fault and route it through <c>ServerErrorResult</c>
     /// instead of leaving it a bare 400 string, without the two sides drifting on the literal text.</summary>
     internal const string RegistryReadFaultPrefix = "Could not read the servers registry from the Postgres store: ";
-
-    /// <summary>One enabled row from the servers registry — the resolver's pure-matching input.</summary>
-    internal sealed record RegisteredServer(int ServerId, string ServerName, string? DisplayName);
 
     /// <summary>
     /// The registry read — exposed const so Darling.Tests can pin the dialect ungated
@@ -320,7 +318,7 @@ ORDER BY server_name";
                 : (default, McpHelpers.Refusal("server_name", MissSentence(servers, serverName, peers)));
         }
 
-        var match = DarlingMcpServerAdminTools.ResolveForRemoval(servers, serverName, storageNameIgnoresCase: true, nameClash: nameClash);
+        var match = ServerNameMatcher.Match(servers, serverName, storageNameIgnoresCase: true, nameClash: nameClash);
 
         if (match.Candidates.Count == 1)
         {
@@ -333,22 +331,8 @@ ORDER BY server_name";
             return (default, McpHelpers.Refusal("server_name", MissSentence(servers, serverName, peers)));
         }
 
-        return (default, McpHelpers.Refusal(
-            "server_name",
-            $"'{serverName.Trim()}' matches {match.Candidates.Count} monitored servers" +
-            (match.MatchedBy == "exact" ? " (several registrations share that name)" : " (as part of their names)") +
-            ". Pass one server's full name from this list:\n" + ListCandidates(match.Candidates)));
+        return (default, McpHelpers.Refusal("server_name", ServerNameMatcher.AmbiguitySentence(serverName, match)));
     }
-
-    /// <summary>
-    /// The servers a name answers to, one per line: the storage name, which is unique and is the value a caller
-    /// passes back to select exactly that server, and the display name beside it when it differs.
-    /// </summary>
-    private static string ListCandidates(IReadOnlyList<RegisteredServer> candidates) =>
-        string.Join("\n", candidates.Select(c =>
-            string.IsNullOrEmpty(c.DisplayName) || c.DisplayName == c.ServerName
-                ? c.ServerName
-                : $"{c.ServerName} ({c.DisplayName})"));
 
     /// <summary>
     /// The miss SENTENCE — the local listing plus the #2339 peer disclosure when one applies — as text, which

@@ -14,6 +14,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Npgsql;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -37,6 +38,12 @@ public enum ViewerConfigSource
 
     /// <summary>darling.json one level up — the release zip's viewer\ under the service root.</summary>
     ServiceRoot,
+
+    /// <summary>
+    /// darling.json in the folder the installed Darling Windows service runs from, found through the service's
+    /// registered ImagePath (#6473) — for a viewer installed in its own folder, where nothing above is near it.
+    /// </summary>
+    InstalledService,
 }
 
 /// <summary>
@@ -147,7 +154,7 @@ public sealed class ViewerSettings
     private const string ViewerRoleName = "viewer";
     private const string AdminCredentialFileName = "pg-admin-credential.dpapi";
     private const string ViewerCredentialFileName = "pg-viewer-credential.dpapi";
-    private const string ManagedSearchPath = "collect,config,public";
+    internal const string ManagedSearchPath = DarlingStoreConnection.StoreSearchPath;
 
     /// <summary>
     /// The viewer's own store connection's <c>ApplicationName</c> (#4479) — the twin, under the same
@@ -229,8 +236,13 @@ public sealed class ViewerSettings
 
     /// <param name="explicitPath">A path handed on the command line; wins outright.</param>
     /// <param name="baseDirectory">The viewer binary's directory; null means AppContext.BaseDirectory (tests pass a temp directory).</param>
-    public static string ResolveConfigPath(string? explicitPath = null, string? baseDirectory = null) =>
-        ResolveConfigLocation(explicitPath, baseDirectory).Path;
+    /// <param name="installedServiceFolder">
+    /// Looks up the folder the installed Darling service runs from, or returns null; null here means the real
+    /// lookup in <see cref="ViewerInstalledService"/>. Tests pass their own so no real service is consulted.
+    /// </param>
+    public static string ResolveConfigPath(
+        string? explicitPath = null, string? baseDirectory = null, Func<string?>? installedServiceFolder = null) =>
+        ResolveConfigLocation(explicitPath, baseDirectory, installedServiceFolder).Path;
 
     /// <summary>
     /// The resolver itself: the same explicit path → <c>DARLING_CONFIG</c> → beside-the-viewer →
@@ -240,7 +252,12 @@ public sealed class ViewerSettings
     /// </summary>
     /// <param name="explicitPath">A path handed on the command line; wins outright.</param>
     /// <param name="baseDirectory">The viewer binary's directory; null means AppContext.BaseDirectory (tests pass a temp directory).</param>
-    public static ViewerConfigLocation ResolveConfigLocation(string? explicitPath = null, string? baseDirectory = null)
+    /// <param name="installedServiceFolder">
+    /// Looks up the folder the installed Darling service runs from (#6473), or returns null; null here means the
+    /// real lookup in <see cref="ViewerInstalledService"/>. Tests pass their own so no real service is consulted.
+    /// </param>
+    public static ViewerConfigLocation ResolveConfigLocation(
+        string? explicitPath = null, string? baseDirectory = null, Func<string?>? installedServiceFolder = null)
     {
         if (!string.IsNullOrWhiteSpace(explicitPath))
         {
@@ -272,6 +289,22 @@ public sealed class ViewerSettings
             if (File.Exists(besideService))
             {
                 return new ViewerConfigLocation(besideService, ViewerConfigSource.ServiceRoot, true);
+            }
+        }
+
+        /* #6473: a viewer installed in its own folder (the Setup.exe on the service host) is near none of the
+           above. Last, ask Windows where the installed service lives and use the darling.json in that folder.
+           Last, so an explicit choice and a file the operator put beside the viewer still win. File.Exists is
+           true for the installer's restricted darling.json even when this account cannot open it, so a refused
+           file is returned here and TryLoad reports "restricted, join the operator group" rather than "not
+           found"; a folder with no darling.json in it falls through. */
+        var serviceFolder = (installedServiceFolder ?? (() => ViewerInstalledService.FindInstallFolder()))();
+        if (!string.IsNullOrWhiteSpace(serviceFolder))
+        {
+            var inServiceFolder = Path.Combine(serviceFolder, "darling.json");
+            if (File.Exists(inServiceFolder))
+            {
+                return new ViewerConfigLocation(inServiceFolder, ViewerConfigSource.InstalledService, true);
             }
         }
 
@@ -320,20 +353,27 @@ public sealed class ViewerSettings
     /// Parses without an anchor — a relative <c>Root Certificate</c> is left as written (Npgsql will resolve
     /// it against the process working directory). Only for callers with no file behind the JSON.
     /// </summary>
-    public static ViewerSettings Parse(string json) => Parse(json, configDirectory: null);
+    public static ViewerSettings Parse(string json) => Parse(json, configDirectory: null, serviceState: static () => ViewerServiceRunState.Unknown);
 
     /// <param name="configDirectory">
     /// The directory of the darling.json <paramref name="json"/> came from; a relative
     /// <c>Root Certificate</c> in a bring-your-own connection string is anchored to it (#1970).
     /// </param>
-    public static ViewerSettings Parse(string json, string? configDirectory)
+    public static ViewerSettings Parse(string json, string? configDirectory) =>
+        Parse(json, configDirectory, ViewerServiceState.Query);
+
+    /// <param name="serviceState">
+    /// Reads the Windows service's state, asked only when the managed store's credential is missing (#6470). A parse with no
+    /// file behind it passes one that answers Unknown, so it never asks the machine it runs on.
+    /// </param>
+    internal static ViewerSettings Parse(string json, string? configDirectory, Func<ViewerServiceRunState> serviceState)
     {
         var config = JsonSerializer.Deserialize<ConfigDto>(json, s_jsonOptions);
         var analyzerConfig = config?.Analyzer ?? PerformanceMonitor.PlanAnalysis.AnalyzerConfig.Default;
 
         if (config?.Postgres?.Managed == true)
         {
-            return new ViewerSettings(DeriveManagedConnectionString(config.Postgres), managed: true, configDirectory, analyzerConfig);
+            return new ViewerSettings(DeriveManagedConnectionString(config.Postgres, serviceState), managed: true, configDirectory, analyzerConfig);
         }
 
         var connectionString = config?.Postgres?.ConnectionString;
@@ -355,7 +395,7 @@ public sealed class ViewerSettings
     /// its first run (which provisions the roles + writes their credentials) yet — a readable message,
     /// because the main window shows parse failures to the user.
     /// </summary>
-    private static string DeriveManagedConnectionString(PostgresDto postgres)
+    private static string DeriveManagedConnectionString(PostgresDto postgres, Func<ViewerServiceRunState> serviceState)
     {
         var dataDirectory = string.IsNullOrWhiteSpace(postgres.DataDirectory)
             ? Path.Combine(
@@ -389,16 +429,7 @@ public sealed class ViewerSettings
                 $"'{role}' role ({credentialPath ?? "beside " + dataDirectory})";
             var evidence = FindBootstrapEvidence(dataDirectory, parent);
 
-            throw new InvalidDataException(evidence is null
-                ? $"{subject} does not exist yet. Start the PerformanceMonitor Darling service once — its first run " +
-                  "initializes the bundled Postgres and provisions the least-privilege roles and their credentials. " +
-                  "If you have ALREADY started it, its first run never got this far and starting it again will not " +
-                  $"either — the reason is in the service log ({ServiceLogPath()}), not in darling.json."
-                : $"{subject} does not exist, and this is NOT a first run: {evidence}. The service has already run " +
-                  "against this store and its bootstrap stopped before it got this far, so starting it again is not " +
-                  $"the fix. Read the newest service log ({ServiceLogPath()}) and work the FIRST error in it — a " +
-                  "bundled Postgres tool that Windows killed is decoded there in words rather than left as a bare " +
-                  "exit code. Nothing in darling.json produces this.");
+            throw new InvalidDataException(DescribeMissingCredential(subject, serviceState(), evidence));
         }
 
         string credentialText;
@@ -435,6 +466,63 @@ public sealed class ViewerSettings
             MaxPoolSize = ManagedMaxPoolSize,
         };
         return builder.ConnectionString;
+    }
+
+    /// <summary>
+    /// What to tell the person when the managed store's credential is not there (#6470, on top of #2197). Three situations
+    /// want three different messages, and the facts that tell them apart are the Windows service's state and whether the
+    /// store exists yet:
+    /// <list type="bullet">
+    /// <item><description>The service is Running or starting: it is still starting. Its first start creates the store and
+    /// the role credentials, which takes minutes (the bundled initdb alone is allowed three), so wait and try again.
+    /// This wins over the evidence of a part-made store, because a first start that is part-way through leaves exactly
+    /// that evidence. Only a service that is NOT running can have a bootstrap that "stopped before it got this far".</description></item>
+    /// <item><description>The service is not running and a store was started: the bootstrap failed (#2197).</description></item>
+    /// <item><description>The service is not running and nothing of the store exists: it has never run (not installed, or
+    /// installed and never started).</description></item>
+    /// </list>
+    /// State Unknown gives the earlier wording, which hedges both ways.
+    /// </summary>
+    internal static string DescribeMissingCredential(string subject, ViewerServiceRunState service, string? evidence)
+    {
+        var logPath = ServiceLogPath();
+        if (service == ViewerServiceRunState.Running)
+        {
+            var progress = evidence is null
+                ? "It has not created the store yet"
+                : $"It is part-way through creating the store ({evidence})";
+            return $"{subject} does not exist yet: the PerformanceMonitor Darling service is running and still starting. " +
+                   $"{progress}, and the credential is written when its first start finishes. That takes a few minutes " +
+                   "(the bundled Postgres's initdb alone is allowed three), so wait and open the Viewer again. " +
+                   $"If this message is still here after about ten minutes, that first start did not get through; the reason is in the service log ({logPath}).";
+        }
+
+        if (evidence is not null)
+        {
+            return $"{subject} does not exist, and this is NOT a first run: {evidence}. The service has already run " +
+                   "against this store and its bootstrap stopped before it got this far, so starting it again is not " +
+                   $"the fix. Read the newest service log ({logPath}) and work the FIRST error in it — a " +
+                   "bundled Postgres tool that Windows killed is decoded there in words rather than left as a bare " +
+                   "exit code. Nothing in darling.json produces this.";
+        }
+
+        return service switch
+        {
+            ViewerServiceRunState.NotInstalled =>
+                $"{subject} does not exist: the PerformanceMonitor Darling service is not installed on this machine, so it has " +
+                "never run here and there is no store yet. Install it with install-darling.ps1 from the " +
+                "folder you extracted the Darling zip into; the installer starts it and waits for its first start to finish.",
+            ViewerServiceRunState.NotRunning =>
+                $"{subject} does not exist: the PerformanceMonitor Darling service is installed but is not running, and it has " +
+                "never created the store. Start it (Start-Service 'PerformanceMonitor Darling' from an elevated PowerShell, or " +
+                "Services.msc). Its first start initializes the bundled Postgres and provisions the least-privilege roles and " +
+                $"their credentials, which takes a few minutes; if it stops again, the reason is in the service log ({logPath}).",
+            _ =>
+                $"{subject} does not exist yet. Start the PerformanceMonitor Darling service once — its first run " +
+                "initializes the bundled Postgres and provisions the least-privilege roles and their credentials. " +
+                "If you have ALREADY started it, its first run never got this far and starting it again will not " +
+                $"either — the reason is in the service log ({logPath}), not in darling.json.",
+        };
     }
 
     /// <summary>

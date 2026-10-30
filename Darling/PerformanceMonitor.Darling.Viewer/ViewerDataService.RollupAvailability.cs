@@ -96,7 +96,7 @@ public sealed partial class ViewerDataService
     /// the service's MCP reads bind too), the empty string when it has none (a null ceiling means no bound). A bucket at
     /// or after the ceiling is never read, so "nothing after the ceiling was read" holds by construction.
     /// </summary>
-    internal static string HourlyCeilingSql(DateTime? ceiling) => ceiling is null ? "" : "\n        AND   bucket < $6";
+    internal static string HourlyCeilingSql(DateTime? ceiling, int index = 6) => ceiling is null ? "" : $"\n        AND   bucket < ${index}";
 
     /// <summary>Binds the ceiling <see cref="HourlyCeilingSql"/> names, as a naive UTC instant, when there is one.</summary>
     internal static void AddHourlyCeilingParameter(NpgsqlCommand command, DateTime? ceiling)
@@ -150,4 +150,5 @@ public sealed partial class ViewerDataService
 /// grid really covers).
 /// </summary>
 public sealed record ViewerRoutedRead<TRow>(
-    List<TRow> Rows, string Tier, string? HourlyEdgesNote, bool IoRoute = false, DateTime? HourlyFirstBucket = null);
+    List<TRow> Rows, string Tier, string? HourlyEdgesNote, bool IoRoute = false, DateTime? HourlyFirstBucket = null,
+    IReadOnlyList<string>? LeftOutDatabases = null);

@@ -219,8 +219,10 @@ public sealed class AnalysisPassTokenThreadingTests
            28 since #5630: the plan-input check's plan read is one more guarded read; it lets the pass's own abandonment
            through and keeps the candidate, counted unverified, on a fault.
            29 since #6267: the failure read of the plan-regression pass is one more; it lets the abandonment through and
-           records any other fault as a collection caveat. */
-        Assert.Equal(29, AnalysisSources()
+           records any other fault as a collection caveat.
+           30 since #6640: the spill ranking read that names the queries behind QUERY_SPILLS is one more; it lets the
+           abandonment through and drops the names on any other fault, so the fact stays without them. */
+        Assert.Equal(30, AnalysisSources()
             .Where(s => Path.GetFileName(s.File).StartsWith("PgFactCollector.", StringComparison.Ordinal))
             .SelectMany(s => s.Code)
             .Count(line => classified.IsMatch(line)));

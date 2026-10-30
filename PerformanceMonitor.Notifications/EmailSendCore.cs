@@ -209,7 +209,8 @@ public sealed class EmailSendCore
                    and a recipient list without them is not a configuration. #4751: `smtpConfigured` above only
                    asks that SOME enabled route names recipients, so the fall-through to the parent's list can now
                    be blank — a firing no route covers, with no default list, has nobody to send to. */
-                emailRoute = NotificationRouter.Resolve(metricName, _settings.NotificationRoutes, _settings, NotificationRouter.ParseServerId(serverId));
+                emailRoute = NotificationRouter.Resolve(metricName, _settings.NotificationRoutes, _settings, NotificationRouter.ParseServerId(serverId),
+                    AlertSeverity.RouteLevelOf(metricName, context?.SeverityOverride));
                 var recipients = emailRoute.Email.Destination ?? _settings.SmtpRecipients;
 
                 if (string.IsNullOrWhiteSpace(recipients))
@@ -324,7 +325,7 @@ public sealed class EmailSendCore
 
         return new EmailFanoutResult(
             emailOutcome, sendError, webhook.Outcome, webhook.SendError, anyChannelConfigured,
-            webhook.Route ?? emailRoute, channelOutcomes);
+            webhook.Route ?? emailRoute, channelOutcomes, webhook.GenericDedupKey, webhook.PagerDutyDedupKey);
     }
 
     /// <summary>Gets email delivery health summary (consecutive failures + last error).</summary>
@@ -520,6 +521,10 @@ public sealed class EmailSendCore
 /// <paramref name="WebhookSendError"/> stay where a reason is written. Trailing and defaulted like
 /// <paramref name="Route"/>.
 /// </param>
+/// <param name="GenericDedupKey">#6718: the webhook fan-out's <see cref="WebhookFanoutResult.GenericDedupKey"/>, the key the
+/// generic post rendered, passed through for the deliverer to record. Trailing and defaulted like <paramref name="Route"/>.</param>
+/// <param name="PagerDutyDedupKey">The webhook fan-out's <see cref="WebhookFanoutResult.PagerDutyDedupKey"/>, the key the
+/// PagerDuty trigger carried, passed through for the deliverer to record. Trailing and defaulted like <paramref name="Route"/>.</param>
 public readonly record struct EmailFanoutResult(
     AlertChannelOutcome EmailOutcome,
     string? SendError,
@@ -527,7 +532,9 @@ public readonly record struct EmailFanoutResult(
     string? WebhookSendError,
     bool AnyChannelConfigured,
     NotificationRouteDecision? Route = null,
-    IReadOnlyDictionary<string, AlertChannelOutcome>? ChannelOutcomes = null)
+    IReadOnlyDictionary<string, AlertChannelOutcome>? ChannelOutcomes = null,
+    string? GenericDedupKey = null,
+    string? PagerDutyDedupKey = null)
 {
     /// <summary>Whether an SMTP send was attempted — configured, outside its cooldown, and not folded.</summary>
     public bool EmailAttempted =>

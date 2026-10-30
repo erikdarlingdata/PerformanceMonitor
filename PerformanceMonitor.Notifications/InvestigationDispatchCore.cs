@@ -50,21 +50,26 @@ public sealed class InvestigationDispatchCore
     private readonly Action<int>? _opened;
     private readonly Func<string, string, CancellationToken, Task<bool>>? _agentGate;
     private readonly IPseudonymKeySource? _keys;
+    private readonly Func<InvestigationAlert, CancellationToken, Task>? _recurringSkipped;
 
     /// <param name="openOrJoin">The store's open-or-join (<see cref="IInvestigationRequestStore.OpenOrJoinAsync"/>).</param>
     /// <param name="settings">The live alert settings: the route list and the PagerDuty auto-resolve flag are read per call.</param>
     /// <param name="logger">Where a failure is logged.</param>
     /// <param name="opened">Called with the route id when a request opens (#5822); null calls nothing.</param>
     /// <param name="keys">#6066: the store's pseudonym key, read when a webhook token's brief is masked at <c>metadataOnly</c>; null numbers per answer.</param>
+    /// <param name="recurringSkipped">#6596: the store's journal write for an alert whose story is recurring at this hour, which
+    /// opens no request; null journals nothing (the skip is still logged).</param>
     public InvestigationDispatchCore(
         Func<InvestigationAlert, CancellationToken, Task<InvestigationOpenResult>> openOrJoin,
         IAlertSettings settings,
         ILogger logger,
         Action<int>? opened = null,
         Func<string, string, CancellationToken, Task<bool>>? agentGate = null,
-        IPseudonymKeySource? keys = null)
+        IPseudonymKeySource? keys = null,
+        Func<InvestigationAlert, CancellationToken, Task>? recurringSkipped = null)
     {
         _agentGate = agentGate;
+        _recurringSkipped = recurringSkipped;
         _keys = keys;
         _openOrJoin = openOrJoin ?? throw new ArgumentNullException(nameof(openOrJoin));
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
@@ -81,7 +86,8 @@ public sealed class InvestigationDispatchCore
     /// </summary>
     /// <returns>What the store did, or null when nothing was asked of it (muted, no family, no agent route) or it failed.</returns>
     public async Task<InvestigationOpenOutcome?> DispatchAsync(
-        AlertHistoryRecord record, AlertContext? context, string? storyPathHash = null, CancellationToken cancellationToken = default)
+        AlertHistoryRecord record, AlertContext? context, string? storyPathHash = null, bool recurringAtThisHour = false,
+        CancellationToken cancellationToken = default)
     {
         if (record is null)
         {
@@ -94,7 +100,7 @@ public sealed class InvestigationDispatchCore
             context, storyPathHash,
             Facts(record.CurrentValueText, record.NumericCurrentValue, record.ThresholdValueText, record.NumericThresholdValue,
                 record.Muted, record.DetailText, record.ContextJson),
-            cancellationToken);
+            cancellationToken, recurringAtThisHour: recurringAtThisHour);
         return result?.Outcome;
     }
 
@@ -125,20 +131,25 @@ public sealed class InvestigationDispatchCore
     /// #5821: whether the generic webhook this alert posts to has <c>{{investigation_json}}</c> in its body template, resolved
     /// through the same router the send uses. Only then is the request read back: the token is in no shipped template.
     /// </summary>
-    public bool GenericPostCarriesToken(string serverId, string metricName) =>
+    public bool GenericPostCarriesToken(string serverId, string metricName, AlertSeverityLevel? severity = null) =>
         WebhookAlertService.TemplateCarriesInvestigationToken(_settings.GenericWebhookBodyTemplate)
-        && NotificationRouter.Resolve(metricName, _settings.NotificationRoutes, _settings, NotificationRouter.ParseServerId(serverId))
+        && NotificationRouter.Resolve(metricName, _settings.NotificationRoutes, _settings, NotificationRouter.ParseServerId(serverId), severity)
             .Generic.Destination is not null;
 
     /// <summary>
     /// Opens or joins the request for one alert when its route sends it to an agent, and calls the open signal when the
     /// store opened one. Never throws.
     /// </summary>
-    /// <returns>What the store answered, or null when nothing was asked of it (muted, no family, no agent route) or it failed.</returns>
+    /// <param name="recurringAtThisHour">#6596: the analysis pass labelled the story that raised this alert "recurring at this
+    /// hour" (<c>RecurrenceLabeler</c>). Such an alert opens and joins no request: the skip is journaled through the
+    /// <c>recurringSkipped</c> delegate instead. The alert itself is the caller's and is unchanged.</param>
+    /// <returns>What the store answered, or null when nothing was asked of it (muted, no family, no agent route, recurring at
+    /// this hour) or it failed.</returns>
     public async Task<InvestigationOpenResult?> OpenOrJoinAsync(
         string serverId, string serverName, string metricName, bool muted, DateTime alertTimeUtc, AlertContext? context,
         string? storyPathHash, InvestigationAlertFacts? facts, CancellationToken cancellationToken,
-        string triggerKind = InvestigationTriggerKinds.Alert, IReadOnlyList<string>? dedupKeys = null, Action<Exception>? failed = null)
+        string triggerKind = InvestigationTriggerKinds.Alert, IReadOnlyList<string>? dedupKeys = null, Action<Exception>? failed = null,
+        bool recurringAtThisHour = false)
     {
         if (muted)
         {
@@ -154,7 +165,8 @@ public sealed class InvestigationDispatchCore
             }
 
             var routeServerId = NotificationRouter.ParseServerId(serverId);
-            var route = NotificationRouter.ResolveAgent(metricName, _settings.NotificationRoutes, routeServerId);
+            var route = NotificationRouter.ResolveAgent(metricName, _settings.NotificationRoutes, routeServerId,
+                AlertSeverity.RouteLevelOf(metricName, context?.SeverityOverride));
             if (route is null)
             {
                 return null;
@@ -192,6 +204,24 @@ public sealed class InvestigationDispatchCore
                 /* #6234: a change watch's request goes through this same route, gate and store call; only its kind differs. */
                 TriggerKind = triggerKind,
             };
+
+            /* #6596 (Erik's option 1, for the request only): a story the analysis pass labelled "recurring at this hour" fired
+               in this hour and weekday slot for three weeks running, which is a scheduled job's signature. An agent would spend
+               a claim and about ten tool calls to report that, every week. So no request is opened or joined. The skip is
+               journaled so a person can see it. The alert row, its severity and its send are the caller's and stay as they are:
+               ruling Q3 (#3653) is "label, not discount". */
+            if (recurringAtThisHour)
+            {
+                _logger.LogInformation(
+                    "Investigation request for {Metric} on {Server} not opened: its story is recurring at this hour (route {RouteId})",
+                    metricName, serverName, route.RouteId);
+                if (_recurringSkipped is not null)
+                {
+                    await _recurringSkipped(alert, cancellationToken);
+                }
+
+                return null;
+            }
 
             var result = await _openOrJoin(alert, cancellationToken);
             switch (result.Outcome)
@@ -260,10 +290,11 @@ public sealed class InvestigationDispatchCore
         string serverId, string serverName, string metricName, bool muted, DateTime alertTimeUtc, AlertContext? context,
         string? storyPathHash, InvestigationAlertFacts? facts,
         Func<Guid, CancellationToken, Task<(InvestigationRequestRow Row, string? Brief)?>>? readRequest,
-        McpDataDetail dataDetail, CancellationToken cancellationToken)
+        McpDataDetail dataDetail, bool recurringAtThisHour = false, CancellationToken cancellationToken = default)
     {
         var result = await OpenOrJoinAsync(
-            serverId, serverName, metricName, muted, alertTimeUtc, context, storyPathHash, facts, cancellationToken);
+            serverId, serverName, metricName, muted, alertTimeUtc, context, storyPathHash, facts, cancellationToken,
+            recurringAtThisHour: recurringAtThisHour);
         if (result is not { RequestId: Guid requestId } || result.Outcome == InvestigationOpenOutcome.LimitReached)
         {
             return null;
@@ -273,7 +304,7 @@ public sealed class InvestigationDispatchCore
         try
         {
             (InvestigationRequestRow Row, string? Brief)? read = null;
-            if (readRequest is not null && GenericPostCarriesToken(serverId, metricName))
+            if (readRequest is not null && GenericPostCarriesToken(serverId, metricName, AlertSeverity.RouteLevelOf(metricName, context?.SeverityOverride)))
             {
                 try
                 {

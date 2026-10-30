@@ -477,6 +477,21 @@ public partial class MainWindow : Window
         JobHistoryContent.Initialize(_dataService);
         JobHistoryContent.StatusChanged += OnServerTabStatusChanged;
 
+        /* Database Protection (#6873): a self-loading read-only control over the last backups and CHECKDB of one server. */
+        DatabaseProtectionContent.Initialize(_dataService);
+        DatabaseProtectionContent.StatusChanged += OnServerTabStatusChanged;
+
+        /* Fleet Sweeps (#6390): a self-loading read-only control over the fleet sweep engine's record. */
+        FleetSweepsContent.Initialize(_dataService);
+        FleetSweepsContent.StatusChanged += OnServerTabStatusChanged;
+
+        /* Agent Alerts (#6874): a self-loading control over the SQL Server Agent alert setup of one server; it loads on activation and its own Refresh. */
+        AgentAlertsContent.Initialize(_dataService);
+        AgentAlertsContent.StatusChanged += OnServerTabStatusChanged;
+        /* Identity Capacity (#6875): a self-loading read-only control over the identity column capacity scans. */
+        IdentityCapacityContent.Initialize(_dataService);
+        IdentityCapacityContent.StatusChanged += OnServerTabStatusChanged;
+
         /* Availability Groups (#991): a self-loading fleet-wide control. Its TabItem ships Collapsed and is
            revealed only once a load finds AG rows, so an Always-On-less fleet never carries a dead tab. */
         AvailabilityGroupsContent.Initialize(_dataService);
@@ -523,6 +538,15 @@ public partial class MainWindow : Window
             }
         }
 
+        /* --add-server (#6480): the MSI's finish page starts the viewer with it, so a new install lands on the same
+           add-server dialog the empty state offers. Queued at idle priority so OnLoaded finishes (tray, timers)
+           before the modal dialog's loop starts, and the window is on screen behind it. No store connection means
+           no dialog (the message overlay already says why). */
+        if (_dataService is not null && ViewerArgs.AddServerRequested(Environment.GetCommandLineArgs().Skip(1).ToArray()))
+        {
+            _ = Dispatcher.BeginInvoke(new Action(() => AddServerButton_Click(this, new RoutedEventArgs())), DispatcherPriority.ContextIdle);
+        }
+
         /* System tray + in-app alert toasts (the ported Lite tray, adapted for headless). The tray icon lives
            for the process; restore shares the single-instance SurfaceWindow path so the tray Restore and a
            second-launch surface behave identically. Minimize-to-tray reads the live _minimizeToTray value. */
@@ -543,7 +567,7 @@ public partial class MainWindow : Window
         _toastCoordinator = new AlertToastCoordinator(s_alertSeenRetention);
         try
         {
-            var existing = await _dataService.GetAlertHistoryAsync(
+            var existing = await dataService.GetAlertHistoryAsync(
                 DateTime.UtcNow - s_alertPollWindow, serverId: null, limit: 500);
             _toastCoordinator.Prime(existing);
 
@@ -646,6 +670,8 @@ public partial class MainWindow : Window
            otherwise double-refresh the same grid). Every other aggregate tab still auto-refreshes. */
         if (ReferenceEquals(MainTabs.SelectedItem, RecommendationsTab)
             || ReferenceEquals(MainTabs.SelectedItem, JobHistoryTabItem)
+            || ReferenceEquals(MainTabs.SelectedItem, DatabaseProtectionTabItem)
+            || ReferenceEquals(MainTabs.SelectedItem, AgentAlertsTabItem)
             || ReferenceEquals(MainTabs.SelectedItem, FinOpsTab)
             || ReferenceEquals(MainTabs.SelectedItem, OverviewTab))
         {
@@ -1028,6 +1054,13 @@ public partial class MainWindow : Window
             return;
         }
 
+        /* The tab now on screen puts its own server's clock on the process-wide helper before anything renders, so a
+           PostgreSQL tab does not format with the clock of the SQL Server tab that was open before it. */
+        if (MainTabs.SelectedItem is TabItem { Content: ViewerServerTab activated })
+        {
+            activated.ApplyServerClockToHelper();
+        }
+
         await RefreshVisibleAsync();
         /* The status bar's collector-health scope flips with the active tab (a per-server tab shows that
            server; an aggregate tab shows the fleet-cumulative total), so refresh it now rather than waiting
@@ -1278,6 +1311,22 @@ public partial class MainWindow : Window
                 case TabItem tab when ReferenceEquals(tab, JobHistoryTabItem):
                     await JobHistoryContent.RefreshJobsAsync();
                     StampRefreshed("job history");
+                    break;
+                case TabItem tab when ReferenceEquals(tab, DatabaseProtectionTabItem):
+                    await DatabaseProtectionContent.RefreshAsync();
+                    StampRefreshed("database protection");
+                    break;
+                case TabItem tab when ReferenceEquals(tab, AgentAlertsTabItem):
+                    await AgentAlertsContent.RefreshAsync();
+                    StampRefreshed("agent alerts");
+                    break;
+                case TabItem tab when ReferenceEquals(tab, FleetSweepsTabItem):
+                    await FleetSweepsContent.RefreshAsync();
+                    StampRefreshed("fleet sweeps");
+                    break;
+                case TabItem tab when ReferenceEquals(tab, IdentityCapacityTabItem):
+                    await IdentityCapacityContent.RefreshAsync();
+                    StampRefreshed("identity capacity");
                     break;
                 case TabItem tab when ReferenceEquals(tab, AvailabilityGroupsTabItem):
                     await RefreshAvailabilityGroupsAsync();
@@ -1620,6 +1669,17 @@ public partial class MainWindow : Window
             deadlockTiers = DeadlockRateThresholds.Default;
         }
 
+        /* #6927: the blocking band's tiers, hoisted like the deadlock ones above and for the same reasons. */
+        BlockingBandThresholds blockingTiers;
+        try
+        {
+            blockingTiers = await service.GetBlockingBandThresholdsAsync();
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            blockingTiers = BlockingBandThresholds.Default;
+        }
+
         var perLane = await Task.WhenAll(lanes.Select(async lane =>
         {
             var found = new List<ServerSummaryItem>(lane.Count);
@@ -1630,6 +1690,8 @@ public partial class MainWindow : Window
                 {
                     var summary = await service.GetServerSummaryAsync(
                         server.ServerId, server.DisplayName, deadlockTiers);
+                    /* #6927: the store's blocking tiers; the card's blocking band and its re-band read them from the item. */
+                    summary.BlockingBandThresholds = blockingTiers;
                     summary.ServerName = server.ServerName;
                     /* #3029: the engine discriminator comes from the REGISTRY row, which already carries it
                        (servers.engine_kind, via ManagedServersSql / ServersSql) — the per-server summary
@@ -2200,22 +2262,48 @@ public partial class MainWindow : Window
     /// time, through the same open-tab path the Recommendations deep link uses. Null (no link) for any other alert, a
     /// server no longer registered, or a PostgreSQL server, whose tab has no Blocking tab.
     /// </summary>
-    private Action? FullChainOpenerFor(ViewerAlertRow row)
+    private AlertChainOpener? FullChainOpenerFor(ViewerAlertRow row)
     {
-        var view = AlertChainLink.ViewFor(row.MetricName);
-        if (view == AlertChainView.None)
+        var server = FindManagedServerById(row.ServerId);
+        if (server is null)
         {
             return null;
         }
 
-        var server = FindManagedServerById(row.ServerId);
-        if (server is null || server.IsPostgres)
+        /* One choice for the target and the link's text (AlertChainLink.TargetFor), so the label names where it opens. */
+        var target = AlertChainLink.TargetFor(row.MetricName, server.IsPostgres);
+        if (target is null)
         {
             return null;
+        }
+
+        var view = target.View;
+        var tab = target.Tab;
+
+        /* #6390 S6: every other metric with a server tab (and a PostgreSQL server's Blocking Detected, which has no Blocked Process
+           Reports grid) opens that tab over the same window: the viewer's Triage. */
+        if (tab != AlertServerTab.None)
+        {
+            var (tabFrom, tabTo) = AlertChainLink.WindowUtc(row.AlertTime);
+            return new AlertChainOpener(target.Text, async () =>
+            {
+                try
+                {
+                    var serverTab = OpenServerTab(server);
+                    if (serverTab is not null)
+                    {
+                        await serverTab.DeepLinkToTabAsync(tab, tabFrom, tabTo);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    OnServerTabStatusChanged($"Opening the {tab} tab failed: {ex.Message}");
+                }
+            });
         }
 
         var (fromUtc, toUtc) = AlertChainLink.WindowUtc(row.AlertTime);
-        return async () =>
+        return new AlertChainOpener(target.Text, async () =>
         {
             try
             {
@@ -2229,7 +2317,7 @@ public partial class MainWindow : Window
             {
                 OnServerTabStatusChanged($"Opening the {view} view failed: {ex.Message}");
             }
-        };
+        });
     }
 
     /// <summary>Finds a registered server by id in the Recommendations tab's own selector list (populated

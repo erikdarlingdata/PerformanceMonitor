@@ -257,11 +257,11 @@ public sealed class WebFetchLayerTests
         var util = UtilJs;
 
         Assert.Contains("export function hasInFlightReads() {", util, StringComparison.Ordinal);
-        Assert.Contains("inFlightReads++;", util, StringComparison.Ordinal);
-        Assert.Contains("inFlightReads--;", util, StringComparison.Ordinal);
+        Assert.Contains("scope.n++;", util, StringComparison.Ordinal);
+        Assert.Contains("scope.n--;", util, StringComparison.Ordinal);
 
         // apiGetFleet's own signature took no signal/counter change — still the #3895 shared-request shape.
-        Assert.Contains("export async function apiGetFleet() {", util, StringComparison.Ordinal);
+        Assert.Contains("export async function apiGetFleet(store) {", util, StringComparison.Ordinal);
         Assert.Contains("export async function apiSend(method, path, body) {", util, StringComparison.Ordinal);
     }
 

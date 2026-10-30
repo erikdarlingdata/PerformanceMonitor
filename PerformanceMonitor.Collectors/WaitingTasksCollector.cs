@@ -40,7 +40,8 @@ SELECT /* PerformanceMonitorLite */
     session_id = wt.session_id,
     wait_type = wt.wait_type,
     wait_duration_ms = wt.wait_duration_ms,
-    blocking_session_id = wt.blocking_session_id,
+    /* #6896: a memory-grant wait can name this collector's own session as the blocker. The wait is real, so keep the row and drop the blocker. */
+    blocking_session_id = NULLIF(wt.blocking_session_id, @@SPID),
     database_name = d.name
 FROM sys.dm_os_waiting_tasks AS wt
 LEFT JOIN sys.dm_exec_requests AS er

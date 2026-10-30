@@ -97,6 +97,27 @@ public sealed class CurrentWaitsTrendToolTests : IClassFixture<SharedDuckDbFixtu
         Assert.DoesNotContain("EVER", text, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #6453: a collector whose newest run completed clean and stored no rows is HEALTHY in get_collection_health, so the read
+    /// says <c>empty</c>, not <c>unavailable</c>; a faulting newest run keeps <c>unavailable</c>.
+    /// </summary>
+    [Fact]
+    public async Task NeverSampled_ButTheCollectorRanClean_IsEmpty_AndAFaultingRunStaysUnavailable()
+    {
+        var service = new LocalDataService(_duckDb);
+        await SeedCollectionLogAsync(DateTime.UtcNow.AddMinutes(-5), "SUCCESS", null);
+
+        var healthy = JsonDocument.Parse(await McpHealthTools.GetCurrentWaitsTrend(service, _serverManager, ServerName, 4, null)).RootElement;
+        Assert.Equal("empty", healthy.GetProperty("status").GetString());
+        var text = healthy.GetProperty("message").GetString()!;
+        Assert.Contains("true negative", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("NOT an all-clear", text, StringComparison.Ordinal);
+
+        await SeedCollectionLogAsync(DateTime.UtcNow.AddMinutes(-1), "ERROR", "login failed");
+        var faulted = JsonDocument.Parse(await McpHealthTools.GetCurrentWaitsTrend(service, _serverManager, ServerName, 4, null)).RootElement;
+        Assert.Equal("unavailable", faulted.GetProperty("status").GetString());
+    }
+
     [Fact]
     public async Task BothSeriesComeBackTogether_AndOnlyBlockedRowsCountAsBlocked()
     {
@@ -143,6 +164,25 @@ public sealed class CurrentWaitsTrendToolTests : IClassFixture<SharedDuckDbFixtu
             await _seedConn.OpenAsync();
         }
         return _seedConn;
+    }
+
+    private async Task SeedCollectionLogAsync(DateTime collectionTimeUtc, string status, string? errorMessage)
+    {
+        using var readLock = _duckDb.AcquireReadLock();
+        var connection = await SeedConnectionAsync();
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = @"
+INSERT INTO collection_log (log_id, collection_time, server_id, server_name, collector_name, status, error_message, rows_collected)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)";
+        cmd.Parameters.Add(new DuckDBParameter { Value = _nextId++ });
+        cmd.Parameters.Add(new DuckDBParameter { Value = DateTime.SpecifyKind(collectionTimeUtc, DateTimeKind.Unspecified) });
+        cmd.Parameters.Add(new DuckDBParameter { Value = _serverId });
+        cmd.Parameters.Add(new DuckDBParameter { Value = ServerName });
+        cmd.Parameters.Add(new DuckDBParameter { Value = "waiting_tasks" });
+        cmd.Parameters.Add(new DuckDBParameter { Value = status });
+        cmd.Parameters.Add(new DuckDBParameter { Value = (object?)errorMessage ?? DBNull.Value });
+        cmd.Parameters.Add(new DuckDBParameter { Value = 0 });
+        await cmd.ExecuteNonQueryAsync();
     }
 
     private async Task SeedWaitAsync(

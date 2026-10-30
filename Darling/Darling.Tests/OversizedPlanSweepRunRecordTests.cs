@@ -16,6 +16,7 @@ using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
 using static Darling.Tests.RepoFile;
+using PerformanceMonitor.Darling.Storage;
 
 namespace Darling.Tests;
 
@@ -457,7 +458,7 @@ public sealed class OversizedPlanSweepRunRecordTests
     {
         var registry = new[]
         {
-            new DarlingServerResolver.RegisteredServer(12345, "a-monitored-host", null),
+            new RegisteredServer(12345, "a-monitored-host", null),
         };
 
         var (_, error) = DarlingServerResolver.ResolveOrError(registry, name, DarlingPeerDirectory.Snapshot.Empty);

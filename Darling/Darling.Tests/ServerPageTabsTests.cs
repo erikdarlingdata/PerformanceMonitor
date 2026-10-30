@@ -807,8 +807,8 @@ public sealed class ServerPageTabsTests
            the render. A repeat render paints from the remembered card synchronously; a card that does not
            arrive leaves a painted page alone, because a failed fleet read is not evidence the engine changed. */
         Assert.Contains("const remembered = lastCard.get(server);", ServerJs, StringComparison.Ordinal);
-        Assert.Contains("painted = paintTabsKeeping(keep, tabsSlot, server, tabId, remembered.card);", ServerJs, StringComparison.Ordinal);
-        Assert.Contains("if (!painted || (card && serverTabsFor(card) !== painted)) {", ServerJs, StringComparison.Ordinal);
+        Assert.Contains("painted = paintTabsKeeping(keep, tabsSlot, server, tabId, remembered.card, inPlace);", ServerJs, StringComparison.Ordinal);
+        Assert.Contains("if (!painted || (card && serverTabsFor(card) !== painted) ||", ServerJs, StringComparison.Ordinal);
         Assert.DoesNotContain("card.is_postgres", ServerJs, StringComparison.Ordinal);
         Assert.DoesNotContain("card.engine_kind", ServerJs, StringComparison.Ordinal);
         Assert.DoesNotContain("\"aurora-postgres\"", ServerJs, StringComparison.Ordinal);
@@ -844,7 +844,7 @@ public sealed class ServerPageTabsTests
         Assert.Contains("function subtabBar(server, active, tabs) {", ServerJs, StringComparison.Ordinal);
         Assert.Contains("tabs.map((t) =>", ServerJs, StringComparison.Ordinal);
         Assert.DoesNotContain("SERVER_TABS.map(", ServerJs, StringComparison.Ordinal);
-        Assert.Contains("\"#/server/\" + encodeURIComponent(server) + \"/\" + t.id", ServerJs, StringComparison.Ordinal);
+        Assert.Contains("storeHash(\"#/server/\") + encodeURIComponent(server) + \"/\" + t.id", ServerJs, StringComparison.Ordinal);
 
         /* And the router parses that second segment back out and hands it to the page. (#4190/#4191 added a
            trailing opts argument — the poll flag renderServer uses to decide whether to re-fetch /api/fleet —

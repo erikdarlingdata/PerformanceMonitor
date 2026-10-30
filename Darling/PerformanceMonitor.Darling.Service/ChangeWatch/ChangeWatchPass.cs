@@ -16,8 +16,10 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using NpgsqlTypes;
+using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitor.Darling.Storage;
@@ -124,7 +126,7 @@ WITH fresh AS (
                           AND q.collection_time < m.t AND q.collection_time >= m.t - interval '1 day') AS p
     WHERE p.prev_t IS NOT NULL AND m.t - p.prev_t <= $4 * interval '1 minute'
 )
-SELECT 'forced' AS change_kind, n.t, n.database_name, f.query_id, f.plan_id
+SELECT 'forced' AS change_kind, n.t, n.database_name, f.query_id, f.plan_id, f.plan_forcing_type
 FROM fresh AS n
 JOIN collect.query_store_forced_plans AS f
   ON f.server_id = $1 AND f.collection_time = n.t AND f.database_name = n.database_name AND f.plan_id IS NOT NULL AND f.query_id IS NOT NULL
@@ -136,7 +138,7 @@ WHERE before.hit IS NULL
                   WHERE a.server_id = $1 AND a.database_name = f.database_name AND a.query_id = f.query_id AND a.plan_id = f.plan_id
                     AND a.outcome = 'succeeded' AND a.action_time > n.prev_t AND a.action_time <= n.t)
 UNION ALL
-SELECT 'unforced', n.t, n.database_name, p.query_id, p.plan_id
+SELECT 'unforced', n.t, n.database_name, p.query_id, p.plan_id, p.plan_forcing_type
 FROM fresh AS n
 JOIN collect.query_store_forced_plans AS p
   ON p.server_id = $1 AND p.collection_time = n.prev_t AND p.database_name = n.database_name AND p.plan_id IS NOT NULL AND p.query_id IS NOT NULL
@@ -147,6 +149,55 @@ WHERE after.hit IS NULL
   AND NOT EXISTS (SELECT 1 FROM collect.plan_force_actions AS a
                   WHERE a.server_id = $1 AND a.database_name = p.database_name AND a.query_id = p.query_id AND a.plan_id = p.plan_id
                     AND a.outcome = 'succeeded' AND a.action_time > n.prev_t AND a.action_time <= n.t)";
+
+    /* #6581 slice 2: Query Store hint changes, read the way PlanSnapshotChangesSql reads forced plans, from collect.query_store_hints (V217). The collector
+       writes ONE all-NULL marker row (query_hint_id IS NULL) per captured database per pass, then one row per hint. A capture is a marker row, and its previous
+       capture is the newest marker row of the same database in the day before it (a LATERAL seek on idx_query_store_hints_markers), so a database with no
+       previous capture is a baseline, one that has no capture in a run (Query Store off, the collector failed or skipped it, SQL Server before 2022) has nothing
+       to compare and is never read as a clear, and a database whose previous capture is more than $4 minutes before this one is a NEW BASELINE (the same gap
+       rule as the plan diff, from the hints collector's own frequency). A hint id new in this capture is 'set'; the same id with different text is
+       'changed'; an id in the previous capture and not in this one is 'cleared'. The captures are a GROUP BY and not a SELECT DISTINCT for the reason the plan
+       diff's are (TimescaleDB's SkipScan rewrite of DISTINCT, #6234). Darling sets no hints, so no ledger explains a change away. (database, query_id, query_hint_id) identifies a hint, the key the reader
+       uses, and a row without a query_id is not a hint to compare (it would also fail the GetInt64 read of query_id), as in the plan diff. */
+    internal const string HintSnapshotChangesSql = @"
+WITH fresh AS (
+    SELECT m.t, m.database_name, p.prev_t
+    FROM (SELECT collection_time AS t, database_name
+          FROM collect.query_store_hints
+          WHERE server_id = $1 AND collection_time > $2 AND collection_time <= $3 AND database_name IS NOT NULL AND query_hint_id IS NULL
+          GROUP BY collection_time, database_name) AS m
+    CROSS JOIN LATERAL (SELECT max(q.collection_time) AS prev_t
+                        FROM collect.query_store_hints AS q
+                        WHERE q.server_id = $1 AND q.database_name = m.database_name AND q.query_hint_id IS NULL
+                          AND q.collection_time < m.t AND q.collection_time >= m.t - interval '1 day') AS p
+    WHERE p.prev_t IS NOT NULL AND m.t - p.prev_t <= $4 * interval '1 minute'
+)
+SELECT CASE WHEN before.query_hint_id IS NULL THEN 'set' ELSE 'changed' END AS change_kind, n.t, n.database_name, h.query_id, h.query_hint_id,
+       h.query_hint_text, before.query_hint_text AS previous_text
+FROM fresh AS n
+JOIN collect.query_store_hints AS h
+  ON h.server_id = $1 AND h.collection_time = n.t AND h.database_name = n.database_name AND h.query_hint_id IS NOT NULL AND h.query_id IS NOT NULL
+LEFT JOIN LATERAL (SELECT p.query_hint_id, p.query_hint_text FROM collect.query_store_hints AS p
+                   WHERE p.server_id = $1 AND p.collection_time = n.prev_t AND p.database_name = n.database_name
+                     AND p.query_id = h.query_id AND p.query_hint_id = h.query_hint_id LIMIT 1) AS before ON true
+WHERE before.query_hint_id IS NULL OR before.query_hint_text IS DISTINCT FROM h.query_hint_text
+UNION ALL
+SELECT 'cleared', n.t, n.database_name, p.query_id, p.query_hint_id, p.query_hint_text, NULL
+FROM fresh AS n
+JOIN collect.query_store_hints AS p
+  ON p.server_id = $1 AND p.collection_time = n.prev_t AND p.database_name = n.database_name AND p.query_hint_id IS NOT NULL AND p.query_id IS NOT NULL
+LEFT JOIN LATERAL (SELECT 1 AS hit FROM collect.query_store_hints AS h
+                   WHERE h.server_id = $1 AND h.collection_time = n.t AND h.database_name = n.database_name
+                     AND h.query_id = p.query_id AND h.query_hint_id = p.query_hint_id LIMIT 1) AS after ON true
+WHERE after.hit IS NULL";
+
+    /// <summary>#6551: the databases of <paramref name="serverId"/> that are readable-secondary copies, whose plan-snapshot changes are the primary's.
+    /// The rule is the shared one every other read of the store uses (<see cref="PgSecondaryReplicaScope"/>): the newest availability-group snapshots at or
+    /// before <paramref name="end"/>, both within <see cref="AgReplicaScope.SnapshotFreshness"/>, and nothing is left out when they are stale or unreadable.
+    /// A snapshot older than that is not trusted to say this node is still a secondary: when the collectors stopped at or before a failover, a day-old
+    /// SECONDARY row would drop this node's real plan changes.</summary>
+    internal async Task<IReadOnlySet<string>> ReadReplicaDatabasesAsync(int serverId, DateTime end, CancellationToken cancellationToken)
+        => await PgSecondaryReplicaScope.ReadAsync(_readSource, serverId, end, _logger, cancellationToken);
 
     private readonly NpgsqlDataSource _readSource;
     private readonly ChangeWatchStore _store;
@@ -196,11 +247,18 @@ WHERE after.hit IS NULL
     /// #6234: the frequency, in minutes, the forced-plans collector runs at on one server, resolved the way the worker resolves it: the server's own
     /// override row, else the fleet-wide row, else the shipped default (<see cref="CollectorScheduleDefaults.ResolveEffectiveIntervalMinutes"/>).
     /// </summary>
-    internal async Task<int> ForcedPlansFrequencyMinutesAsync(int serverId, CancellationToken cancellationToken)
+    internal Task<int> ForcedPlansFrequencyMinutesAsync(int serverId, CancellationToken cancellationToken) =>
+        CollectorFrequencyMinutesAsync(ForcedPlansCollector, serverId, cancellationToken);
+
+    /// <summary>#6581 slice 2: the Query Store hints collector, whose captures the hint-change diff reads (its frequency is settable on its own).</summary>
+    internal const string HintsCollector = "query_store_hints";
+
+    /// <summary>The frequency, in minutes, a collector runs at on one server, resolved the way the worker resolves it.</summary>
+    internal async Task<int> CollectorFrequencyMinutesAsync(string collector, int serverId, CancellationToken cancellationToken)
     {
         var overrides = await DarlingDataReader.ReadScheduleOverridesAsync(_readSource, serverId, cancellationToken);
-        return CollectorScheduleDefaults.ResolveEffectiveIntervalMinutes(ForcedPlansCollector, serverId, overrides)
-               ?? CollectorScheduleDefaults.All[ForcedPlansCollector].FrequencyMinutes;
+        return CollectorScheduleDefaults.ResolveEffectiveIntervalMinutes(collector, serverId, overrides)
+               ?? CollectorScheduleDefaults.All[collector].FrequencyMinutes;
     }
 
     private static DateTime Naive(DateTime utc) => DateTime.SpecifyKind(utc, DateTimeKind.Unspecified);
@@ -402,6 +460,14 @@ WHERE after.hit IS NULL
                      await DarlingConfigHistoryReader.GetDatabaseConfigSnapshotsAsync(_readSource, serverId, DatabaseFilter.All, databaseMark, cancellationToken),
                      databaseMark, naiveEnd).Where(c => c.ChangeTime > databaseMark))
         {
+            /* #6566: log_reuse_wait_desc is the engine's live reason the log cannot be truncated, a status that flips with no operator action. The analysis
+               leaves it out (ConfigChangeAttribution.DatabaseStatusColumns); a watch counted it as a configuration change and opened requests on it. */
+            if (!ConfigChangeAttribution.IsAttributableDatabaseSetting(c.SettingName))
+            {
+                continue;
+            }
+
+
             changes.Add(new ChangeWatchChange($"database_config:{c.DatabaseName}:{c.SettingName}:{Stamp(c.ChangeTime)}", "database_config", Utc(c.ChangeTime),
                 $"database {c.DatabaseName} {c.SettingName}: {c.ChangeDescription}", c.DatabaseName));
         }
@@ -439,10 +505,13 @@ WHERE after.hit IS NULL
             {
                 var database = reader.GetString(2);
                 changes.Add(new ChangeWatchChange($"plan_force:action:{reader.GetInt64(0)}", "plan_force", Utc(reader.GetDateTime(1)),
-                    $"plan {reader.GetInt64(4)} of query {reader.GetInt64(3)} in {database}: {reader.GetString(5)} by the plan-force ledger", database, reader.GetInt64(3), reader.GetInt64(4)));
+                    $"plan {reader.GetInt64(4)} of query {reader.GetInt64(3)} in {database}: {reader.GetString(5)} by the plan-force ledger{ChangeWatchPlanForcing.Suffix(ChangeWatchPlanForcing.Manual)}", database, reader.GetInt64(3), reader.GetInt64(4)));
             }
         }
 
+        /* #6551: a plan change in a database this server holds as a readable secondary was made on the primary, and the primary's watch records it once.
+           The plan-force ledger (above) is this server's own action and is kept. */
+        var replicaDatabases = await ReadReplicaDatabasesAsync(serverId, end, cancellationToken);
         var gapLimit = CaptureGapLimit(await ForcedPlansFrequencyMinutesAsync(serverId, cancellationToken));
         await using (var command = WithGapLimit(Bind(_readSource.CreateCommand(PlanSnapshotChangesSql), serverId, Mark("plan_snapshots"), naiveEnd), gapLimit))
         await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
@@ -451,13 +520,50 @@ WHERE after.hit IS NULL
             {
                 var forced = string.Equals(reader.GetString(0), "forced", StringComparison.Ordinal);
                 var database = reader.GetString(2);
+                if (replicaDatabases.Contains(database))
+                {
+                    continue;
+                }
+
                 var time = reader.GetDateTime(1);
                 var queryId = reader.GetInt64(3);
                 var planId = reader.GetInt64(4);
+                /* #6550: the forcing type of the capture the plan was seen in (the previous one for an unforce), so the change says whether the server forced it itself. */
+                var forcingType = ChangeWatchPlanForcing.Suffix(reader.IsDBNull(5) ? null : reader.GetString(5));
                 changes.Add(new ChangeWatchChange(
                     $"plan_force:{(forced ? "snapshot" : "unforced")}:{database}:{queryId}:{planId}:{Stamp(time)}", "plan_force", Utc(time),
-                    $"plan {planId} of query {queryId} in {database}: {(forced ? "forced" : "unforced (in the database's previous forced-plan capture, not in this one)")}",
+                    $"plan {planId} of query {queryId} in {database}: {(forced ? "forced" : "unforced (in the database's previous forced-plan capture, not in this one)")}{forcingType}",
                     database, queryId, planId));
+            }
+        }
+
+        /* #6581 slice 2: a Query Store hint set, changed or cleared. The same secondary rule as the plan snapshots: a readable secondary's hints are the primary's.
+           A server whose hints collector does not run (SQL Server before 2022) writes no marker row, so nothing is diffed and no hint change is recorded for it. */
+        var hintGapLimit = CaptureGapLimit(await CollectorFrequencyMinutesAsync(HintsCollector, serverId, cancellationToken));
+        await using (var command = WithGapLimit(Bind(_readSource.CreateCommand(HintSnapshotChangesSql), serverId, Mark("hint_snapshots"), naiveEnd), hintGapLimit))
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+        {
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var database = reader.GetString(2);
+                if (replicaDatabases.Contains(database))
+                {
+                    continue;
+                }
+
+                var what = reader.GetString(0);
+                var time = reader.GetDateTime(1);
+                var queryId = reader.GetInt64(3);
+                var hintId = reader.GetInt64(4);
+                var text = reader.IsDBNull(5) ? "(no text)" : reader.GetString(5);
+                var description = what switch
+                {
+                    "set" => $"Query Store hint {hintId} set on query {queryId} in {database}: {text}",
+                    "changed" => $"Query Store hint {hintId} on query {queryId} in {database} changed from {(reader.IsDBNull(6) ? "(no text)" : reader.GetString(6))} to {text}",
+                    _ => $"Query Store hint {hintId} cleared from query {queryId} in {database} (it was: {text})",
+                };
+                changes.Add(new ChangeWatchChange($"query_store_hint:{what}:{database}:{queryId}:{hintId}:{Stamp(time)}", "query_store_hint", Utc(time),
+                    description, database, queryId));
             }
         }
 
@@ -530,6 +636,14 @@ WHERE after.hit IS NULL
                 {
                     /* #6239 round 3, L9: an agent's own plan change under a change-watch request is recorded and measured, and opens no further request. */
                     await _store.CloseAsync(watch.WatchId, ChangeWatchStore.ResultAgentChange, null, evaluation.ResultJson, cancellationToken);
+                    continue;
+                }
+
+                if (watch.Changes.Count > 0 && watch.Changes.All(c => string.Equals(c.PlanForcingType, ChangeWatchPlanForcing.Auto, StringComparison.Ordinal)))
+                {
+                    /* #6550: automatic plan correction forcing and reverting plans is SQL Server doing its job, and the regression that set it off has its own
+                       alerts. The watch is recorded and measured, and opens no request; a watch that mixes AUTO with any other change still does. */
+                    await _store.CloseAsync(watch.WatchId, ChangeWatchStore.ResultAutoPlanCorrection, null, evaluation.ResultJson, cancellationToken);
                     continue;
                 }
 

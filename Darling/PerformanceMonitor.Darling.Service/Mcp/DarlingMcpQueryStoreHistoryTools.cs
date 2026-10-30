@@ -279,8 +279,8 @@ public sealed class DarlingMcpQueryStoreHistoryTools
         try
         {
             var read = await DarlingForcedPlanStateReader.ReadAsync(
-                postgres, serverId, DatabaseFilter.One(databaseName), queryId, start, end, null, McpCommandDeadlines.ReadSeconds, cancellationToken);
-            var facts = read.Plans.Where(f => f.QueryId == queryId && f.State != ForcedPlanState.Removed).Take(MaxPlans).ToList();
+                postgres, serverId, DatabaseFilter.One(databaseName), queryId, start, end, null, McpCommandDeadlines.ReadSeconds, cancellationToken: cancellationToken);
+            var facts = PickForces(read.Plans, databaseName, queryId);
             return (facts, read.Captures.Count == 0 ? "no_capture_in_window" : "ok");
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -290,6 +290,35 @@ public sealed class DarlingMcpQueryStoreHistoryTools
         }
     }
 
+    /// <summary>
+    /// A plan forced in the newest capture is always listed, cut or not, run or not. One that never ran in the window gets a row of zeros that is
+    /// forced only while its force stands (#6598), so a REMOVED force with no rows is not marked forced.
+    /// </summary>
+    internal static List<PlanTotals> WithForcedPlans(List<PlanTotals> plans, List<PlanTotals> allPlans, IReadOnlyList<ForcedPlanFact> facts) =>
+        plans
+            .Concat(allPlans.Where(p => facts.Any(f => f.PlanId == p.PlanId) && !plans.Any(k => k.PlanId == p.PlanId)))
+            .Concat(facts.Where(f => !allPlans.Any(p => p.PlanId == f.PlanId))
+                .Select(f => new PlanTotals(f.PlanId, 0, null, 0, null, 0, null, null, IsStanding(f))))
+            .OrderBy(p => p.PlanId).ToList();
+
+    /// <summary>A force that still stands. REMOVED is a record that a force ended (#6598).</summary>
+    internal static bool IsStanding(ForcedPlanFact fact) => fact.State != ForcedPlanState.Removed;
+
+    /// <summary>Forced when sampled, or standing now. A REMOVED fact alone does not make a plan forced (#6598).</summary>
+    internal static bool IsForced(bool sampledForced, ForcedPlanFact? fact) =>
+        sampledForced || (fact is not null && IsStanding(fact));
+
+    /// <summary>
+    /// The facts of the query in the named database (#6598), standing forces first, so a REMOVED force never pushes a standing one out of the
+    /// <see cref="MaxPlans"/> cap. The reader emits one fact per (database, plan_id) (<c>DISTINCT ON</c>), so with the database named there is one fact
+    /// per plan_id and no tiebreak is needed. Facts of other databases are dropped: a blank database_name widens the read to every database, the same
+    /// plan_id can be forced in two of them, and the history rows never match a blank name.
+    /// </summary>
+    internal static List<ForcedPlanFact> PickForces(IEnumerable<ForcedPlanFact> facts, string databaseName, long queryId) =>
+        facts.Where(f => f.QueryId == queryId && string.Equals(f.DatabaseName, databaseName, StringComparison.Ordinal))
+            .OrderBy(f => f.State == ForcedPlanState.Removed ? 1 : 0).ThenBy(f => f.PlanId)
+            .Take(MaxPlans).ToList();
+
     [McpServerTool(Name = "get_query_store_query_history"), Description(
         "One Query Store query's history, plan by plan: per-plan executions, duration and CPU, plus a per-interval series. window_truncated marks a history floor. <<GUIDE>>" +
         "Per-plan averages are execution-weighted (total over executions), so they can differ from get_query_store_top, which averages the interval averages. " +
@@ -297,11 +326,14 @@ public sealed class DarlingMcpQueryStoreHistoryTools
         "Reads the raw tier, or the per-interval table (kept 10 days) past raw retention, by get_query_store_top's own rule, so it covers what that grid does; effective_start is where complete history begins. " +
         "points keeps the newest 150 of the listed plans (points_truncated) and plans the 20 longest by total duration (plans_truncated). " +
         "Every plan of the query forced in its database's newest forced-plan capture is listed (forced_state: WORKING, NOT_EXERCISED, IGNORED, FAILING or UNKNOWN_PLAN_NOT_COLLECTED; get_forced_plans explains the states), even with no executions in the window. " +
+        "A force removed in the window is listed too, as forced_state REMOVED, after the standing forces in forced_plans; it does not make is_forced_plan true, which means forced when sampled or standing now. " +
+        "A REMOVED entry has runs_read false and null run fields (forced_plan, variant_plans, other_plans, unknown_plans): its runs are not read, so null means not measured, not zero runs. The plans list has the plan's own executions. " +
+        "is_forced_plan true with forced_state null: when forced_plans_status is ok, no force is in the capture at all; when it is no_capture_in_window or unavailable, the force state is unknown. " +
         "Each forced_plans entry also lists variant_plans (plans SQL Server compiled to run the force, which count as the forced plan running) and plan_guide (a plan guide that covers the query), as get_forced_plans does.")]
     public static async Task<string> GetQueryStoreQueryHistory(
         NpgsqlDataSource postgres,
         [Description("The database_name from get_query_store_top.")] string database_name,
-        [Description("The query_id from get_query_store_top.")] long query_id,
+        [Description("The query_id (an integer) from get_query_store_top. Not query_hash: get_query_store_top returns both.")] long query_id,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history ending at as_of (default 24).")] int hours_back = 24,
         [Description("Window end, ISO 8601 UTC. Default: now.")] string? as_of = null,
@@ -376,11 +408,7 @@ public sealed class DarlingMcpQueryStoreHistoryTools
             var plans = plansTruncated ? allPlans.OrderByDescending(p => p.TotalDurationMs).Take(MaxPlans).OrderBy(p => p.PlanId).ToList() : allPlans;
             var forcedById = forced.Facts.ToDictionary(f => f.PlanId);
             /* A plan forced in the newest capture is always listed, cut or not, run or not. */
-            plans = plans
-                .Concat(allPlans.Where(p => forcedById.ContainsKey(p.PlanId) && !plans.Any(k => k.PlanId == p.PlanId)))
-                .Concat(forced.Facts.Where(f => !allPlans.Any(p => p.PlanId == f.PlanId))
-                    .Select(f => new PlanTotals(f.PlanId, 0, null, 0, null, 0, null, null, true)))
-                .OrderBy(p => p.PlanId).ToList();
+            plans = WithForcedPlans(plans, allPlans, forced.Facts);
             var allPoints = BuildPoints(rows, plans.Select(p => p.PlanId));
             var points = NewestWithinBudget(allPoints, p => JsonSerializer.SerializeToUtf8Bytes(p, McpHelpers.JsonOptions).Length, MaxPoints, PointByteBudget);
             var pointsTruncated = points.Count < allPoints.Count;
@@ -400,7 +428,7 @@ public sealed class DarlingMcpQueryStoreHistoryTools
                     total_cpu_ms = p.TotalCpuMs,
                     first_execution_time = p.FirstExecutionTime?.ToString("o", CultureInfo.InvariantCulture),
                     last_execution_time = p.LastExecutionTime?.ToString("o", CultureInfo.InvariantCulture),
-                    is_forced_plan = p.IsForcedPlan || forcedById.ContainsKey(p.PlanId),
+                    is_forced_plan = IsForced(p.IsForcedPlan, forcedById.GetValueOrDefault(p.PlanId)),
                     forced_state = forcedById.TryGetValue(p.PlanId, out var forcedFact) ? DarlingMcpForcedPlanTools.StateName(forcedFact.State) : null
                 }),
                 plans_truncated = plansTruncated,

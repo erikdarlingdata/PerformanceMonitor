@@ -811,6 +811,12 @@
                                                Padding="8,4" FontWeight="Bold"
                                                Foreground="{DynamicResource ForegroundBrush}"
                                                Background="#22FFAA00"/>
+                                    <!-- #6651: the databases the ranking left out (dropped since an earlier snapshot), and the empty-page
+                                         sentence when that left nothing. -->
+                                    <TextBlock x:Name="ProcStatsLeftOutBanner" Visibility="Collapsed" TextWrapping="Wrap"
+                                               Padding="8,4" FontWeight="Bold"
+                                               Foreground="{DynamicResource ForegroundBrush}"
+                                               Background="#22FFAA00"/>
                                     <TextBlock x:Name="ProcStatsComparisonBanner" Visibility="Collapsed"
                                                Padding="8,4" FontWeight="Bold"
                                                Foreground="{DynamicResource ForegroundBrush}"
@@ -1534,7 +1540,7 @@
                                         <TextBlock x:Name="BufferPoolText" Text="--" FontSize="18" FontWeight="SemiBold"/>
                                     </StackPanel>
                                     <StackPanel Margin="0,0,24,0">
-                                        <TextBlock Text="Plan Cache" Foreground="{DynamicResource ForegroundDimBrush}" FontSize="11"/>
+                                        <TextBlock Text="Plan cache (all cache stores)" Foreground="{DynamicResource ForegroundDimBrush}" FontSize="11"/>
                                         <TextBlock x:Name="PlanCacheText" Text="--" FontSize="18" FontWeight="SemiBold"/>
                                     </StackPanel>
                                     <StackPanel Margin="0,0,24,0">
@@ -1718,6 +1724,19 @@
 
                     <Border Grid.Row="2" Margin="0,4,0,0">
                         <ScottPlot:WpfPlot x:Name="TempDbFileIoChart"/>
+                    </Border>
+
+                    <!-- Shown over the usage and size charts when tempdb_stats recorded a named skip such as PERMISSIONS and the window has no tempdb rows (#6861). -->
+                    <!-- Shown over the file latency chart on an Azure SQL Database, whose file I/O view never returns tempdb's files (#6861). -->
+                    <Border Grid.Row="2" HorizontalAlignment="Center" VerticalAlignment="Center" IsHitTestVisible="False"
+                            Background="{DynamicResource BackgroundDarkBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="4" Padding="16,12"
+                            Visibility="{Binding Visibility, ElementName=TempDbFileIoNoDataMessage}">
+                        <TextBlock x:Name="TempDbFileIoNoDataMessage" Visibility="Collapsed" TextAlignment="Center" TextWrapping="Wrap" MaxWidth="520" FontStyle="Italic" Foreground="{DynamicResource ForegroundDimBrush}"/>
+                    </Border>
+                    <Border Grid.Row="0" Grid.RowSpan="2" HorizontalAlignment="Center" VerticalAlignment="Center" IsHitTestVisible="False"
+                            Background="{DynamicResource BackgroundDarkBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="4" Padding="16,12"
+                            Visibility="{Binding Visibility, ElementName=TempDbNoDataMessage}">
+                        <TextBlock x:Name="TempDbNoDataMessage" Visibility="Collapsed" TextAlignment="Center" TextWrapping="Wrap" MaxWidth="520" FontStyle="Italic" Foreground="{DynamicResource ForegroundDimBrush}"/>
                     </Border>
                 </Grid>
             </TabItem>
@@ -2706,8 +2725,8 @@
                                     <DataGridTextColumn Binding="{Binding CollectorName}" Width="180">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CollectorName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Collector" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding HealthStatus}" Width="90">
-                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="HealthStatus" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Status" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                    <DataGridTextColumn Binding="{Binding DisplayStatus}" Width="100">
+                                        <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DisplayStatus" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Status" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding TotalRuns, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="80">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalRuns" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Runs" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>

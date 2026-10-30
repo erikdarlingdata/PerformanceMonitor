@@ -16,6 +16,7 @@ using Npgsql;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
 using Xunit;
 
@@ -130,8 +131,8 @@ public sealed class CustomAlertBacktestTests
         await using var dataSource = NpgsqlDataSource.Create("Host=127.0.0.1;Port=1;Username=x;Password=x;Database=x;Timeout=1");
         var deliverer = new RecordingDeliverer();
         var evaluator = new CustomAlertEvaluator(
-            new CustomAlertRuleStore(dataSource), new CustomAlertStateStore(dataSource), dataSource, deliverer,
-            isAlertMuted: _ => false, alertsEnabled: static () => true, new PgAlertHistoryStore(dataSource),
+            new CustomAlertRuleStore(dataSource, StorageCommandDeadlines.McpReadSeconds), new CustomAlertStateStore(dataSource, StorageCommandDeadlines.McpReadSeconds), dataSource, deliverer,
+            isAlertMuted: _ => false, alertsEnabled: static () => true, new PgAlertHistoryStore(dataSource, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds),
             defaultIntervalSeconds: 0, cacheTtl: TimeSpan.Zero, new CapturingTestLogger());
         var row = new CustomAlertRule(5911, "backtest parity", DefinitionJson, null, true, 1, End, End, null);
         var state = CustomAlertRuleState.Fresh(1);

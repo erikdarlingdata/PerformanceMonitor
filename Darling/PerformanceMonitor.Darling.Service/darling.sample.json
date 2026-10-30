@@ -237,7 +237,7 @@
   "procedureStatsDeferredPlanFetch": "on",
 
   // The alert engine (optional section). Every default mirrors Performance Monitor Lite's:
-  // cpu 80% (total mode), blocking 1, deadlock 1, poison wait 500 ms, runnable queue 8 / 16 per scheduler, client timeouts OFF (floors 10 / 60 per minute, times 3 / 10 the server's baseline), long-running query
+  // cpu 80% (total mode), blocking 1, deadlock 1, poison wait 500 ms, runnable queue 8 / 16 per scheduler, client timeouts ON (floors 10 / 60 per minute, times 3 / 10 the server's baseline), long-running query
   // 30 min, tempdb 80%, low disk 10% / 5 GB, job multiplier 3x, failed-job lookback 60 min,
   // cooldown 5 min. Omit the whole section (or any key) for those defaults.
   "alerts": {
@@ -390,10 +390,20 @@
   // full tool list. Default OFF; port 5152 avoids the Dashboard (5150) and Lite (5151) defaults so all
   // three can run on one machine.
   //
-  // OPT-IN NETWORK EXPOSURE for MCP (managed mode only) — omit "network" for the secure default
-  // (loopback-only, tokenless HTTP, today's behavior). A "token" or "encryptedToken" with no non-loopback
-  // "listen" keeps it loopback-only and gates the loopback listener on that token too: every local client
-  // presents "Authorization: Bearer <token>". When present with a non-loopback "listen", the
+  // TOKEN: once enabled, MCP needs a bearer token on loopback too. Put it in "network" as "encryptedToken"
+  // (from --encrypt-password) or "token" (the token itself, env:NAME or file:PATH). On Windows use
+  // "encryptedToken"; env: and file: references are for the compose and Linux setups. To make a token, see the
+  // token note in Darling/README.md (a PowerShell one-liner). Leave "listen" out and MCP stays loopback-only.
+  // Every client then sends "Authorization: Bearer <token>". A project's .mcp.json gets committed, so read the
+  // token from an environment variable there, or register the server at user scope instead:
+  //   "darling": { "type": "http", "url": "http://localhost:5152/", "headers": { "Authorization": "Bearer ${DARLING_MCP_TOKEN}" } }
+  // With no token, an enabled MCP server does not start, and the log names these settings. Set
+  // "allowTokenlessLoopback": true to serve local clients with no token instead; the write and investigation
+  // tools then stay off, and every start logs a line saying so. The token covers every tool, analyze_server included, which opens live
+  // connections to your monitored servers as the service account.
+  //
+  // OPT-IN NETWORK EXPOSURE for MCP (managed mode only) — omit "listen" for the default (loopback-only HTTP,
+  // gated by the token above). When present with a non-loopback "listen", the
   // MCP host binds the LAN interface behind a REQUIRED bearer token + an in-app CIDR check, fail-closed
   // (any missing precondition — token / valid allowFrom / managed mode — keeps it loopback-only).
   // THREAT MODEL: the token gates the whole read surface AND analyze_server, which opens LIVE outbound
@@ -412,10 +422,26 @@
     "enabled": false,
     "port": 5152,
 
+    // Uncomment to serve local MCP clients with no token (see TOKEN above). Default off.
+    // "allowTokenlessLoopback": true,
+
     // Uncomment to serve claim_investigation_request and submit_investigation_report to your own agent (#5632).
-    // They write only investigation state, need a bearer token (mcp.network.encryptedToken or token), and stay
-    // off while "allowWrites" is on: one token cannot tell an agent from a person. Default off.
+    // They write investigation state, need a bearer token (mcp.network.encryptedToken or token), and stay
+    // off while "allowWrites" is on: one token cannot tell an agent from a person. Default off. The same
+    // setting serves the 13 Level 2 agent action tools: each call needs an "agent_action" argument and a live
+    // claim, and agent_actions_enabled (default on). The 9 store actions need a Level 2 route. The 4 server
+    // actions (session kill, plan force, unforce and evict) need a Level 3 request, the server's own action
+    // switch (default off) and a remediation login reference.
     // "allowInvestigations": true,
+
+    // Uncomment to give an operator and your investigation agents their own tokens on one service (#6542).
+    // Each token has a name (1-64 of A-Za-z0-9._:-) and a role, "operator" (the reads and the write tools) or
+    // "agent" (the reads, the investigation tools and the Level 2 action tools). An agent's agent_id must be the
+    // token's name. Each name and each value is used once. Every request, loopback included, must present a token.
+    // "tokens": [
+    //   { "name": "ops-lead",   "encryptedToken": "<from --encrypt-password>", "role": "operator" },
+    //   { "name": "triage-bot", "encryptedToken": "<from --encrypt-password>", "role": "agent" }
+    // ],
 
     // Uncomment to expose MCP on the LAN (a comma already follows "port" above):
     // "network": {
@@ -452,20 +478,31 @@
     // }
   },
 
-  // Embedded WEB DASHBOARD (optional): a read-only, browser-based view of the monitoring store, served by
+  // Embedded WEB DASHBOARD (optional): a browser-based view of the monitoring store, served by
   // the Darling service on its OWN port (default 5153, avoiding the MCP family: Dashboard 5150, Lite 5151,
   // Darling MCP 5152). A SEPARATE surface from "mcp" above -- its own enable flag, port, token, and exposure
   // block -- because the two gate different blast radii (the MCP token guards analyze_server's LIVE outbound
-  // connections to your monitored SQL Servers; the web dashboard is read-only over the collected store).
-  // Default OFF.
+  // connections to your monitored SQL Servers; the web dashboard works on the collected store).
+  // Default OFF. The dashboard reads the store and can also change monitoring settings: the server list,
+  // alert routes, mutes and custom alert rules.
   //
-  // OPT-IN NETWORK EXPOSURE for the dashboard (managed mode only) -- omit "network" for the secure default
-  // (loopback-only HTTP, today's behavior). When present with a non-loopback "listen", the web host binds the
+  // TOKEN: once enabled, the dashboard needs a token on loopback too. Put it in "network" as "encryptedToken"
+  // (from --encrypt-password) or "token" (the token itself, env:NAME or file:PATH). On Windows use
+  // "encryptedToken"; env: and file: references are for the compose and Linux setups. To make a token, see the
+  // token note in Darling/README.md (a PowerShell one-liner). Leave "listen" out and the dashboard stays
+  // loopback-only. The browser shows a sign-in page. Paste the token there once, and it is exchanged for a
+  // session cookie. A token shorter than 16 characters (or with fewer than 6 different ones) still signs in, but
+  // the dashboard then serves reads only. With no token, an enabled dashboard does not start, and the log names
+  // these settings. Set "allowTokenlessLoopback": true to serve local browsers with no token instead, for reads
+  // only: a change is refused with a message naming the token setting. Every start then logs a line saying so.
+  //
+  // OPT-IN NETWORK EXPOSURE for the dashboard (managed mode only) -- omit "listen" for the default
+  // (loopback-only HTTP, gated by the token above). When present with a non-loopback "listen", the web host binds the
   // LAN interface behind an in-app CIDR check and a token gate: a browser pastes the token ONCE into the sign-in form,
   // which is exchanged for an HMAC-signed session cookie.
   // LOOPBACK is exempt from the CIDR check ONLY -- while exposed it presents the token like anyone else
   // (#1649: the Custom Views composer is a write path, so a tokenless local process could mutate views).
-  // A dashboard with NO token configured registers no auth middleware at all and stays tokenless. A "token" or
+  // A dashboard with NO token configured does not start unless "allowTokenlessLoopback" is true (reads only). A "token" or
   // "encryptedToken" with no non-loopback "listen" keeps it loopback-only and puts the same token gate on it.
   // Fail-closed: any missing precondition (token / valid allowFrom / managed mode) keeps it loopback-only.
   // TLS is OPT-IN via the "tls" block (#2562) and applies to the network listener only -- loopback stays
@@ -484,6 +521,32 @@
   "web": {
     "enabled": false,
     "port": 5153,
+
+    // Uncomment to serve local browsers with no token (see TOKEN above). Default off.
+    // "allowTokenlessLoopback": true,
+
+    // On the managed store the dashboard reads as the read-only "viewer" login. A person signed in to the dashboard
+    // as an admin (the shared web token or an OIDC admin) can also make its Admin writes (routes and environment
+    // profiles, threshold overrides, report feedback, server actions, note decisions, undoing an agent change and
+    // the agent switch, closing a request, writing a note, practice requests, case export), when this is true:
+    // it opens a second small connection pool that signs in as the managed "admin" login (the one the Viewer uses).
+    // A darling.json WITHOUT this key keeps it false (the dashboard stays list-only on the managed store), so an
+    // upgrade from 3.11 changes nothing until you set it. The installer and the compose sample write true for a
+    // new install. With OIDC on and no role mapping every signed-in user is an admin, so map roles
+    // (network.oidc.roleClaim, adminRoles, viewerRoles) before you turn this on. Restart to change.
+    // A store you bring yourself is not affected.
+    "allowAdminWrites": true,
+
+    // Adding or editing a server in the dashboard defaults to Windows authentication, where the service presents
+    // its own computer account to the host the form names. By default the dashboard refuses a Windows-authentication
+    // server that also sets trust_server_certificate or an encrypt_mode other than Mandatory or Strict, because the
+    // service could not confirm which server it reached. An edit is judged only when it changes the machine the entry
+    // names or its sign-in and certificate settings: the host, the port, the auth type, trust_server_certificate,
+    // encrypt_mode or the Query Store replica. read_only_intent and multi_subnet_failover do not change the host the
+    // entry names, so they are not judged. Uncomment to allow it. SQL authentication and the
+    // Entra modes are not affected. The same rule as mcp.allowWindowsAuthOverUnverifiedTls for MCP. Default off.
+    // Restart to change.
+    // "allowWindowsAuthOverUnverifiedTls": true,
 
     // The base URL RECIPIENTS can reach this dashboard on (e.g. "http://10.0.0.5:5153", or a DNS name
     // fronted by a proxy). Set it and every alert webhook (Teams/Slack/PagerDuty/generic {{triage_url}})

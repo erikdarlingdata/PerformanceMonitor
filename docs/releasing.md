@@ -1,5 +1,7 @@
 # Release upgrade validation
 
+Audience: maintainers.
+
 Seeded after #2119, where 3.4.0 shipped a migration ladder no store from a released 3.3.0 could
 climb — every pre-release check had run either a **fresh** store (full generator, no ladder) or the
 dogfood box (which walks each rung in the era it ships). Nobody pointed new binaries at a store a

@@ -182,7 +182,7 @@ public sealed partial class ViewerDataService
         foreach (var definition in postgresCollectors)
         {
             var gap = CollectorEngineCapability.NotCollectedMessage(
-                server.DisplayName, server.EngineEdition, server.EngineKind, definition.Name);
+                server.DisplayName, server.EngineEdition, server.EngineKind, definition.Name, awsRdsKind: AwsRdsKind.None);
 
             byName.TryGetValue(definition.Name, out var facts);
 
@@ -340,6 +340,38 @@ public sealed partial class ViewerDataService
     public Task<List<DarlingPgServerConfigReader.PgConfigRow>> GetPgServerConfigAsync(
         int serverId, int limit = 500, CancellationToken cancellationToken = default) =>
         DarlingPgServerConfigReader.GetCurrentConfigAsync(_dataSource, serverId, limit, cancellationToken);
+
+    /// <summary>The newest-first row cap of the Overview tab's configuration-changes grid (#6387): the same 100 the web
+    /// panel and <c>get_pg_server_config_changes</c> default to.</summary>
+    public const int PgConfigChangesRowCap = 100;
+
+    /// <summary>Overview tab - the configuration parameters whose value changed in the window (#6387), newest first,
+    /// old beside new. The SAME read the web panel and <c>get_pg_server_config_changes</c> call
+    /// (<see cref="DarlingPgServerConfigReader.GetConfigChangesAsync"/>), so the three cannot disagree. Unlike
+    /// <see cref="GetPgServerConfigAsync"/> this IS windowed: a change is an event, stamped at the snapshot that saw it.</summary>
+    public Task<List<DarlingPgServerConfigReader.PgConfigChangeRow>> GetPgServerConfigChangesAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, int limit = PgConfigChangesRowCap,
+        CancellationToken cancellationToken = default) =>
+        DarlingPgServerConfigReader.GetConfigChangesAsync(_dataSource, serverId, startUtc, endUtc, limit, cancellationToken);
+
+    /// <summary>Overview tab - the logging-settings audit (#6387): the newest stored <c>pg_server_config</c> snapshot judged
+    /// setting by setting, through the SAME snapshot read and judgment <c>get_pg_logging_audit</c> and the web panel use
+    /// (<see cref="DarlingPgLoggingAuditReader.GetNewestSnapshotAsync"/>, <see cref="DarlingPgLoggingAudit.Audit"/>).
+    /// Null when no configuration snapshot has been collected: an audit of nothing would say "unknown" seven times and
+    /// read as a verdict.</summary>
+    public async Task<DarlingPgLoggingAudit.Result?> GetPgLoggingAuditAsync(
+        int serverId, CancellationToken cancellationToken = default)
+    {
+        var snapshot = await DarlingPgLoggingAuditReader.GetNewestSnapshotAsync(_dataSource, serverId, cancellationToken);
+        return snapshot.Count == 0 ? null : DarlingPgLoggingAudit.Audit(snapshot);
+    }
+
+    /// <summary>Activity tab - one deadlock's whole wait graph (#6387), by the identity <see cref="GetPgDeadlocksAsync"/>
+    /// returned on its row. The SAME read the web "Deadlock Graphs" panel and <c>get_pg_deadlock_detail</c> call
+    /// (<see cref="DarlingPgDeadlockReader.GetDeadlockDetailAsync"/>).</summary>
+    public Task<List<DarlingPgDeadlockReader.PgDeadlockDetailRow>> GetPgDeadlockDetailAsync(
+        int serverId, string deadlockHash, int limit = 1, CancellationToken cancellationToken = default) =>
+        DarlingPgDeadlockReader.GetDeadlockDetailAsync(_dataSource, serverId, deadlockHash, limit, cancellationToken);
 
     /// <summary>Overview tab - instance-level CPU utilization for a managed PostgreSQL/Aurora target
     /// (#2719), sourced from AWS Performance Insights rather than a database connection. Newest first, so

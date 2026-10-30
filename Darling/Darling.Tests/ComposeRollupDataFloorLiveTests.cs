@@ -194,7 +194,7 @@ public sealed class ComposeRollupDataFloorLiveTests
         return (DateTime)(await first.ExecuteScalarAsync(ct))!;
     }
 
-    private static Task<DarlingWebEndpoints.ComposeRunOutcome> RunAsync(NpgsqlDataSource dataSource, string server, CancellationToken ct)
+    private static Task<ComposeRunOutcome> RunAsync(NpgsqlDataSource dataSource, string server, CancellationToken ct)
     {
         var body = new JsonObject
         {

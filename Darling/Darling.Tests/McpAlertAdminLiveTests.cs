@@ -214,6 +214,13 @@ VALUES ((now() at time zone 'utc') - interval '1 hour', 7, 's7', 'Blocking', 9, 
             Assert.Equal(1, await VisibleAsync());
 
             Assert.Equal("invalid", Status(await DarlingMcpAlertTools.DismissAlertHistory(source, "not json", cancellationToken: ct)));
+
+            /* #6455: keys that name no row are not_found (never a success word), and rows already in the asked state are unchanged. */
+            var noSuchRow = JsonSerializer.Serialize(new[] { new { alert_time = "2001-01-01T00:00:00", server_id = 99, metric_name = "NoSuchMetric" } });
+            Assert.Equal("not_found", Status(await DarlingMcpAlertTools.DismissAlertHistory(source, noSuchRow, cancellationToken: ct)));
+            Assert.Equal("not_found", Status(await DarlingMcpAlertTools.RestoreAlertHistory(source, noSuchRow, cancellationToken: ct)));
+            var visibleRow = JsonSerializer.Serialize(all.Where(r => r.metric_name == "Blocking").ToList());
+            Assert.Equal("unchanged", Status(await DarlingMcpAlertTools.RestoreAlertHistory(source, visibleRow, cancellationToken: ct)));
             bodySucceeded = true;
         }
         finally

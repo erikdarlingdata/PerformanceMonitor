@@ -35,6 +35,11 @@ internal static class InvestigationToolContract
 
     private const string Required = "(required)";
 
+    /* #6462: the submit entry takes its required parameter names from the list the brief's report_contract also reads, so the
+       reflection tests that check this table against both products' real tool methods cover the brief too. Only the names alias;
+       the types and descriptions below stay here. Declared before Tools: static initializers run in textual order. */
+    private static readonly string[] SubmitRequired = InvestigationToolCore.SubmitReportRequired;
+
     /// <summary>The four tools both products serve; <c>wait_for_investigation_requests</c> is Darling's alone.</summary>
     internal static readonly IReadOnlyDictionary<string, ToolShape> Tools = new Dictionary<string, ToolShape>(StringComparer.Ordinal)
     {
@@ -60,17 +65,17 @@ internal static class InvestigationToolContract
             new[] { "reported", "invalid", "unsupported_format", "lease_lost", "already_reported", "not_found" },
             new[]
             {
-                P("request_id", "string", Required, "The request you claimed."),
-                P("claim_id", "string", Required, "From claim_investigation_request."),
-                P("report_format", "int", Required, "1."),
-                P("verdict", "string", Required, "real, false_positive or needs_person."),
-                P("root_cause", "string", Required, "What caused the alert, or that you could not tell."),
-                P("evidence", "string", Required, "JSON array of {tool, arguments, key_numbers, basis}; basis (" + InvestigationReportFields.BasesAlternation + ") is required on each item; see the guide."),
-                P("summary", "string", Required, "At most 4,000 characters."),
+                P(SubmitRequired[0], "string", Required, "The request you claimed."),
+                P(SubmitRequired[1], "string", Required, "From claim_investigation_request."),
+                P(SubmitRequired[2], "int", Required, "1."),
+                P(SubmitRequired[3], "string", Required, "real, false_positive or needs_person."),
+                P(SubmitRequired[4], "string", Required, "What caused the alert, or that you could not tell."),
+                P(SubmitRequired[5], "string", Required, "JSON array of {tool, arguments, key_numbers, basis}; basis (" + InvestigationReportFields.BasesAlternation + ") is required on each item; see the guide."),
+                P(SubmitRequired[6], "string", Required, "At most 4,000 characters."),
                 P("proposed_note", "string?", "null", "Optional note for a person to approve, at most 2,000 characters."),
                 P("action_proposals", "string?", "null", "Refused at Level 1. Omit."),
                 P("links", "string?", "null", "Optional JSON array of at most 10 {kind, url, key}; https only. See the guide."),
-                P("family_of", "string?", "null", "Optional. The request_id of the first report in this family; it must exist."),
+                P("family_of", "string?", "null", "Optional. The request_id of an earlier request on this store; it need not have a report yet."),
                 P("queries_run", "string?", "null", "Optional JSON array of statements you ran, " + InvestigationReportFields.QueriesRunRule + "."),
                 P("follow_up_at", "string?", "null", "Optional. When to open a follow-up request: " + InvestigationReportFields.FollowUpRule + "."),
             }),

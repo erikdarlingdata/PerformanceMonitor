@@ -131,10 +131,11 @@ public sealed class KnownPatternRow
 
     public string CreatedBy => Entry.CreatedBy ?? "";
 
-    /// <summary>The last editor and when (UTC), or empty for an entry never edited.</summary>
+    /// <summary>The last editor and when, or empty for an entry never edited. The time reads as every fleet-wide
+    /// window words one (#6457): the viewer's Local or UTC reading with the zone's name after it.</summary>
     public string UpdatedDisplay => Entry.UpdatedBy is null && Entry.UpdatedAtUtc is null
         ? ""
-        : (Entry.UpdatedBy ?? "") + (Entry.UpdatedAtUtc is { } edited ? ", " + edited.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture) + " UTC" : "");
+        : (Entry.UpdatedBy ?? "") + (Entry.UpdatedAtUtc is { } edited ? ", " + ViewerTimeHelper.FormatFleetWide(edited, "yyyy-MM-dd HH:mm") : "");
 
     /// <summary>What the Expires column sorts by: the UTC expiry, with "Never" as the latest value (it sorted after every date as text).</summary>
     public DateTime ExpiresSortUtc => Entry.ExpiresAtUtc ?? DateTime.MaxValue;

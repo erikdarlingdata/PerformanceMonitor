@@ -118,7 +118,7 @@ LIMIT 5000";
         Assert.Contains(rows, r => r.BlockedSqlText.Length > 0);
 
         var reconstruction = BlockingChainReconstructor.Reconstruct(
-            rows, maxDepth: 50, maxPairs: 5000, stepBudget: 100_000, scopeByMonitorLoop: false);
+            rows, maxDepth: 50, maxPairs: 5000, stepBudget: 100_000, scopeByMonitorLoop: true);
         return JsonSerializer.Serialize(reconstruction.Chains.Take(3).Select(chain => (object)new
         {
             apex_spid = chain.ApexSpid,

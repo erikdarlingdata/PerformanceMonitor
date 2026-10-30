@@ -57,6 +57,8 @@ public partial class CorrelatedTimelineLanesControl : UserControl
     public CorrelatedTimelineLanesControl()
     {
         InitializeComponent();
+        // #6652: the lanes scroll at small sizes; the wheel over a lane stays that lane's zoom.
+        PerformanceMonitor.Ui.ChartLayout.KeepWheelOnPlot(CpuChart, WaitStatsChart, BlockingChart, MemoryChart, FileIoChart);
         /* No Unloaded → Dispose() handler: WPF fires Unloaded for transient
            reasons (tab virtualization, layout rebuilds) and Dispose() clears
            the crosshair manager's lane list, permanently breaking the crosshair
@@ -624,6 +626,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
     private static void ClearChart(ScottPlot.WPF.WpfPlot chart)
     {
         chart.Reset();
+        PerformanceMonitor.Ui.ChartDisplayScale.Apply(chart); // #6678: Reset swaps in a plot at scale 1
         chart.Plot.Clear();
     }
 

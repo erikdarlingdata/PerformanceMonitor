@@ -131,8 +131,10 @@ public sealed partial class DarlingMcpFinOpsTools
         if (!Views.Contains(normalized))
             return McpHelpers.Refusal("view", $"Invalid view value '{view}'. Valid views: {string.Join(", ", Views)}.");
 
-        /* storage_growth validates its own window (24, or 7 to 90 whole days): the shared ceiling is 168 hours. */
-        var validation = normalized == StorageGrowthView ? null : McpHelpers.ValidateHoursBack(hours_back);
+        /* storage_growth validates its own window (24, or 7 to 90 whole days): the shared ceiling is 168 hours. utilization and
+           index_analysis take only 24, so each refuses every other value in its own words. The shared range check would answer
+           336 with "exceeds maximum of 168", a value those views then refuse (#6830). */
+        var validation = normalized is StorageGrowthView or UtilizationView or IndexAnalysisView ? null : McpHelpers.ValidateHoursBack(hours_back);
         if (validation != null) return validation;
         var maxLimit = MaxLimitFor(normalized);
         if (limit < 1 || limit > maxLimit)

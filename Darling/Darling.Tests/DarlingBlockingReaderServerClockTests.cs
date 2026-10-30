@@ -329,6 +329,34 @@ public sealed class DarlingBlockingReaderServerClockTests
         "blocked_last_batch_completed", "blocking_last_batch_completed",
     ];
 
+    /// <summary>The report XML has no head-blocker session facts, so a DMV row dropped because a report row covers its pair and minute
+    /// hands them over (get_blocking showed them null on the normal case); a report row with no covering DMV row keeps nulls, and a
+    /// value the report row already has is kept.</summary>
+    [Fact]
+    public void DroppedDmvRow_HandsItsHeadEvidenceToTheCoveringReportRow_AndAReportRowWithNoDmvRowKeepsNulls()
+    {
+        var t = Naive(2026, 11, 2, 15, 1);
+        var covered = new DarlingBlockingReader.BlockedProcessReadRow { EventTime = t, BlockedSpid = 51, BlockingSpid = 60 };
+        var alone = new DarlingBlockingReader.BlockedProcessReadRow { EventTime = t.AddSeconds(5), BlockedSpid = 52, BlockingSpid = 61 };
+        var dmv = new DarlingBlockingReader.BlockedProcessReadRow
+        {
+            EventTime = t.AddSeconds(20), BlockedSpid = 51, BlockingSpid = 60, Source = PerformanceMonitor.Alerting.BlockedProcessAlertRow.DmvSnapshotSource,
+            BlockingLoginTimeUtc = t.AddHours(-3), BlockingLastRequestEndTimeUtc = t.AddMinutes(-9), BlockingOpenTransactionCount = 2, BlockingTranLogBytesUsed = 8192,
+        };
+        var items = new System.Collections.Generic.List<DarlingBlockingReader.BlockedProcessReadRow> { covered, alone };
+
+        PerformanceMonitor.Alerting.BlockedProcessReportMerge.AppendDmvFallbackRows(items, new System.Collections.Generic.List<DarlingBlockingReader.BlockedProcessReadRow> { dmv });
+
+        Assert.Equal(t.AddHours(-3), covered.BlockingLoginTimeUtc);
+        Assert.Equal(t.AddMinutes(-9), covered.BlockingLastRequestEndTimeUtc);
+        Assert.Equal(2, covered.BlockingOpenTransactionCount);
+        Assert.Equal(8192, covered.BlockingTranLogBytesUsed);
+        Assert.Null(alone.BlockingLoginTimeUtc);
+        Assert.Null(alone.BlockingLastRequestEndTimeUtc);
+        Assert.Null(alone.BlockingOpenTransactionCount);
+        Assert.Null(alone.BlockingTranLogBytesUsed);
+    }
+
     private static readonly string[] DmvStampNames =
         ["blocked_last_tran_started", "blocking_last_tran_started", "blocking_login_time", "blocking_last_request_end_time"];
 }

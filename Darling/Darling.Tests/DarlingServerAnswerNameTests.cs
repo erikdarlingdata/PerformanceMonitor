@@ -8,6 +8,7 @@
 
 using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
+using PerformanceMonitor.Darling.Storage;
 
 namespace Darling.Tests;
 
@@ -23,8 +24,8 @@ public class DarlingServerAnswerNameTests
     {
         var servers = new[]
         {
-            new DarlingServerResolver.RegisteredServer(1, "example-host:salesdb", "Sales"),
-            new DarlingServerResolver.RegisteredServer(2, "example-host:hrdb", "HR"),
+            new RegisteredServer(1, "example-host:salesdb", "Sales"),
+            new RegisteredServer(2, "example-host:hrdb", "HR"),
         };
 
         var (resolved, error) = DarlingServerResolver.ResolveOrErrorForAnswer(servers, "example-host:salesdb");
@@ -39,9 +40,9 @@ public class DarlingServerAnswerNameTests
     {
         var servers = new[]
         {
-            new DarlingServerResolver.RegisteredServer(1, "example-host:salesdb", "example-host"),
-            new DarlingServerResolver.RegisteredServer(2, "example-host:hrdb", "example-host"),
-            new DarlingServerResolver.RegisteredServer(3, "other-host", "Other"),
+            new RegisteredServer(1, "example-host:salesdb", "example-host"),
+            new RegisteredServer(2, "example-host:hrdb", "example-host"),
+            new RegisteredServer(3, "other-host", "Other"),
         };
 
         var first = DarlingServerResolver.ResolveOrErrorForAnswer(servers, "example-host:salesdb");
@@ -65,7 +66,7 @@ public class DarlingServerAnswerNameTests
     [Fact]
     public void AnEntryWithNoDisplayName_AnswersWithItsKey()
     {
-        var servers = new[] { new DarlingServerResolver.RegisteredServer(1, "example-host:salesdb", null) };
+        var servers = new[] { new RegisteredServer(1, "example-host:salesdb", null) };
 
         Assert.Equal("example-host:salesdb", DarlingServerResolver.ResolveOrErrorForAnswer(servers, null).resolved.DisplayName);
     }
@@ -75,8 +76,8 @@ public class DarlingServerAnswerNameTests
     {
         var servers = new[]
         {
-            new DarlingServerResolver.RegisteredServer(1, "example-host:salesdb", "Sales"),
-            new DarlingServerResolver.RegisteredServer(2, "example-host:hrdb", "Sales"),
+            new RegisteredServer(1, "example-host:salesdb", "Sales"),
+            new RegisteredServer(2, "example-host:hrdb", "Sales"),
         };
 
         var (resolved, error) = DarlingServerResolver.ResolveWithFingerprintName(servers, "example-host:hrdb");

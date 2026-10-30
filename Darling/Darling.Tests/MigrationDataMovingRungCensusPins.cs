@@ -289,6 +289,10 @@ public sealed class MigrationDataMovingRungCensusPins
             + "config.config_server_actions table is created empty, and the migration inserts no row. It does not move the "
             + "lock-wait floor."),
         new(
+            218,
+            SetsTheFloor: false,
+            "ADD CONSTRAINT ... CHECK on config.config_server_actions (#6569, created V196): the action CHECK is replaced by one that also allows recompile_module, create_plan_guide and drop_plan_guide and validated against every stored row. The table holds at most one row per server and action, so the scan is microseconds, and the replacement runs only when the stored definition does not already name the action. It does not move the lock-wait floor."),
+        new(
             197,
             SetsTheFloor: false,
             "CREATE UNIQUE INDEX on config.investigation_requests (#5632, created V184): a partial index over the two columns this rung "
@@ -329,6 +333,50 @@ public sealed class MigrationDataMovingRungCensusPins
             + "weeks) and is milliseconds. The rung also builds one partial index on collect.query_store_forced_plans, WHERE plan_id IS NULL "
             + "(the marker rows, one per captured database per pass): a read of that plain table once, a few seconds on a store that keeps "
             + "30 days of captures. It does not move the lock-wait floor."),
+        new(
+            220,
+            SetsTheFloor: false,
+            "CREATE INDEX over the populated collect.job_history hypertable (#6798, created V1/V24), a partial index on the successful "
+            + "job outcomes (step_id = 0 AND run_status = 1). V150's case on the same table: a real collected series, costed rather than "
+            + "assumed. Measured on a rig shaped like one production store (42 servers, 9.8M rows in 101 twelve-hour chunks, 98 "
+            + "compressed): the build took 0.18 s, because a compressed chunk's index is an empty shell and only the uncompressed newest "
+            + "day or so holds rows, and the partial predicate keeps about 23% of those. A store many times that size still builds in "
+            + "seconds, nowhere near a MigrationCommandTimeoutSeconds window, so this rung does not move the multiple"),
+        new(
+            215,
+            SetsTheFloor: false,
+            "six CREATE INDEX IF NOT EXISTS over config.investigation_requests and config.investigation_reports (both created V184), "
+            + "five of them partial. Real index builds over rows an earlier rung created, so the scan counts it, but both tables are "
+            + "narrow control-plane tables: a request is one row per incident (about a hundred a day at the route limits), kept "
+            + "InvestigationRetentionDays (a year), and a report is at most one row per request. The rung's own measurement loaded a year "
+            + "of requests at a production store's rate (73,000 rows) and a production store holds hundreds today, so each build "
+            + "reads the table once and takes milliseconds. A different class from V104's collected hypertable. It does not move the "
+            + "lock-wait floor, so the multiple stays 5."),
+        new(
+            216,
+            SetsTheFloor: false,
+            "ALTER COLUMN ... SET DEFAULT plus a narrow-predicate UPDATE on config.config_alert_settings (created V17), the one-row settings "
+            + "singleton (id = 1): turns the Client Timeouts alert on by default (#5736). V147's shape on the same kind of table. The "
+            + "UPDATE's WHERE client_timeouts_enabled = FALSE touches at most one row, the SET DEFAULT is catalog-only, and neither reads "
+            + "any collected data, so the rung spends none of the lock-wait budget and the multiple stays 5."),
+        new(
+            227,
+            SetsTheFloor: false,
+            "one CREATE UNIQUE INDEX and two ADD CONSTRAINT ... CHECK on config.config_threshold_overrides (#6926, created V191), "
+            + "which hold the new tag scope. The table is an operator-written config table: one row per threshold somebody chose to "
+            + "override for a server, so a store holds a handful of rows and a very large one a few hundred. The CHECKs are validated "
+            + "against every stored row and the partial index (WHERE scope_tag_id IS NOT NULL) indexes nothing, because the column the "
+            + "same rung adds is null on every stored row, so each statement reads the table once and takes milliseconds. The ADD "
+            + "COLUMN is nullable with no default and the DROP NOT NULL on server_id is catalog-only, so neither rewrites a row. It does "
+            + "not move the lock-wait floor, so the multiple stays 5."),
+        new(
+            229,
+            SetsTheFloor: false,
+            "ADD COLUMN IF NOT EXISTS severities text NOT NULL DEFAULT 'both' plus ADD CONSTRAINT ... CHECK on config.config_notification_routes "
+            + "(created V131), the notification routes registry (#6928). The ADD COLUMN with a constant default is catalog-only. The CHECK "
+            + "reads the table once to validate it, and the table is a hand-edited registry of at most a few hundred rows (one per route "
+            + "an operator made), so the scan takes milliseconds. It reads no collected data and spends none of the lock-wait budget, so "
+            + "the multiple stays 5."),
     ];
 
     /// <summary>

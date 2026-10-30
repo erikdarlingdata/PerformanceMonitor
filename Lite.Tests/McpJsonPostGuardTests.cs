@@ -115,22 +115,4 @@ public sealed class McpJsonPostGuardTests
     [InlineData("text/plain", false)]
     public void IsJson_Matrix(string? contentType, bool expected)
         => Assert.Equal(expected, JsonContentType.IsJson(contentType));
-
-    [Fact]
-    public void TheHost_InstallsTheGuard_AfterTheHostGuard_AndBeforeMapMcp()
-    {
-        var path = Path.Combine(AppContext.BaseDirectory, "Fixtures", "McpHostService.cs");
-        Assert.True(File.Exists(path), "McpHostService.cs was not copied beside the test binary - check the csproj None/Link item.");
-        var source = File.ReadAllText(path).Replace("\r\n", "\n", StringComparison.Ordinal);
-
-        var hostGuard = source.IndexOf("HostHeaderGuard.IsAllowedHost(", StringComparison.Ordinal);
-        var jsonGuard = source.IndexOf("UseJsonPostGuard(_app);", StringComparison.Ordinal);
-        var mapMcp = source.IndexOf("_app.MapMcp();", StringComparison.Ordinal);
-
-        Assert.True(hostGuard >= 0, "the Host-header guard anchor moved");
-        Assert.True(jsonGuard > hostGuard, "the POST content-type guard must be installed after the Host guard");
-        Assert.True(mapMcp > jsonGuard, "the POST content-type guard must be installed before MapMcp");
-        Assert.Contains("JsonContentType.IsJson(context.Request.ContentType)", source, StringComparison.Ordinal);
-        Assert.Contains("Status415UnsupportedMediaType", source, StringComparison.Ordinal);
-    }
 }

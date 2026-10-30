@@ -59,7 +59,7 @@ public sealed class DarlingMcpServerTagTools
     internal const int WriteCommandSeconds = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds;
 
     [McpServerTool(Name = "create_server_tag"), Description(
-        "Creates a fleet server tag, at the root or under parent_id. Tags organize the server list and scope custom alert rules: a rule scoped to a tag covers every server under its whole subtree. Names are trimmed, 1-100 characters, unique among siblings ignoring case; tags nest at most four levels. colour is #RRGGBB; omit it for the palette colour the Viewer assigns. Returns the stored tag, or invalid/conflict/not_found with nothing written. Find tag ids and server ids in get_fleet_overview.")]
+        "Creates a fleet server tag, at the root or under parent_id. Tags organize the server list and scope custom alert rules: a rule scoped to a tag covers every server under its whole subtree. Names are trimmed, 1-100 characters, unique among siblings ignoring case; tags nest at most four levels. colour is #RRGGBB; omit it for the palette colour the Viewer assigns. Returns the stored tag, or invalid/conflict/not_found with nothing written. Find tag ids and server ids in get_fleet_overview. Answers with previous (null) and undo (delete_server_tag).")]
     public static Task<string> CreateServerTag(
         NpgsqlDataSource postgres,
         [Description("The tag name (1-100 characters, trimmed, unique among siblings).")] string name,
@@ -69,7 +69,7 @@ public sealed class DarlingMcpServerTagTools
         CreateServerTagCore(McpStore(postgres), name, parent_id, colour, cancellationToken);
 
     [McpServerTool(Name = "update_server_tag"), Description(
-        "PARTIAL edit of a fleet server tag: send only name, colour or parent_id in changes_json; an explicit null clears colour or moves the tag to the root. A move carries the subtree and its assignments, is refused on a cycle or past four levels, and changes which servers rules scoped to old or new ancestors cover: affected_rules names them. To reorder among siblings send {\"move\":\"up\"} or {\"move\":\"down\"} alone (edge = unchanged). Returns updated, unchanged, or invalid/conflict/not_found with nothing written.")]
+        "PARTIAL edit of a fleet server tag: send only name, colour or parent_id in changes_json; an explicit null clears colour or moves the tag to the root. A move carries the subtree and its assignments, is refused on a cycle or past four levels, and changes which servers rules scoped to old or new ancestors cover: affected_rules names them. To reorder among siblings send {\"move\":\"up\"} or {\"move\":\"down\"} alone (edge = unchanged). Returns updated, unchanged, or invalid/conflict/not_found with nothing written. Carries previous and undo (a move undoes with the opposite move).")]
     public static Task<string> UpdateServerTag(
         NpgsqlDataSource postgres,
         [Description("The tag id (from get_fleet_overview tags).")] int tag_id,
@@ -78,7 +78,7 @@ public sealed class DarlingMcpServerTagTools
         UpdateServerTagCore(McpStore(postgres), tag_id, changes_json, cancellationToken);
 
     [McpServerTool(Name = "delete_server_tag"), Description(
-        "Deletes a fleet server tag AND its whole subtree of child tags and their server assignments; servers and collected data are untouched. Permanent. If a custom alert rule is scoped to the tag or a descendant, that rule would match no server: the call answers confirm_required naming those rules and deletes nothing; repeat with confirm=true to proceed. Rules scoped to an ancestor are reported as losing servers. Returns deleted with the removed tag ids and assignment count.")]
+        "Deletes a fleet server tag AND its whole subtree of child tags and their server assignments; servers and collected data are untouched. Permanent. If a custom alert rule is scoped to the tag or a descendant, that rule would match no server: the call answers confirm_required naming those rules and deletes nothing; repeat with confirm=true to proceed. Rules scoped to an ancestor are reported as losing servers. Returns deleted with the removed tag ids and assignment count. Carries previous and undo (create_server_tag for a lone tag; null with undo_note when more went with it).")]
     public static Task<string> DeleteServerTag(
         NpgsqlDataSource postgres,
         [Description("The tag id (from get_fleet_overview tags).")] int tag_id,
@@ -87,7 +87,7 @@ public sealed class DarlingMcpServerTagTools
         DeleteServerTagCore(McpStore(postgres), tag_id, confirm, cancellationToken);
 
     [McpServerTool(Name = "assign_server_tag"), Description(
-        "Assigns one fleet server tag to one or more servers (server_ids from get_fleet_overview) in one write; servers already carrying it are a no-op. Every server_id must be a monitored server or nothing is written. Custom alert rules scoped to the tag or an ancestor start covering the added servers: affected_rules names them. Returns assigned with added and already-assigned ids, unchanged, not_found or invalid.")]
+        "Assigns one fleet server tag to one or more servers (server_ids from get_fleet_overview) in one write; servers already carrying it are a no-op. Every server_id must be a monitored server or nothing is written. Custom alert rules scoped to the tag or an ancestor start covering the added servers: affected_rules names them. Returns assigned with added and already-assigned ids, unchanged, not_found or invalid. Carries previous and undo (unassign_server_tag for the servers added).")]
     public static Task<string> AssignServerTag(
         NpgsqlDataSource postgres,
         [Description("The tag id (from get_fleet_overview tags).")] int tag_id,
@@ -96,7 +96,7 @@ public sealed class DarlingMcpServerTagTools
         AssignServerTagCore(McpStore(postgres), tag_id, server_ids, cancellationToken);
 
     [McpServerTool(Name = "unassign_server_tag"), Description(
-        "Removes one fleet server tag from one or more servers (server_ids) in one write; servers not carrying it are a no-op. Custom alert rules scoped to the tag or an ancestor stop covering a removed server unless another tag under the rule's scope still holds it: affected_rules names each rule and the servers it loses. No confirm step; assign again to undo. Returns unassigned, unchanged, not_found or invalid.")]
+        "Removes one fleet server tag from one or more servers (server_ids) in one write; servers not carrying it are a no-op. Custom alert rules scoped to the tag or an ancestor stop covering a removed server unless another tag under the rule's scope still holds it: affected_rules names each rule and the servers it loses. No confirm step. Returns unassigned, unchanged, not_found or invalid. Carries previous and undo (assign_server_tag).")]
     public static Task<string> UnassignServerTag(
         NpgsqlDataSource postgres,
         [Description("The tag id (from get_fleet_overview tags).")] int tag_id,
@@ -141,6 +141,8 @@ public sealed class DarlingMcpServerTagTools
             {
                 ["status"] = "created",
                 ["tag"] = TagNode(after, tag),
+                ["previous"] = null,
+                ["undo"] = DarlingMcpUndoShape.Call("delete_server_tag", new JsonObject { ["tag_id"] = tag.Id }),
                 ["affected_rules"] = RulesNode(ServerTagCoverage.Diff(before, after), before, after),
             });
         }
@@ -203,6 +205,8 @@ public sealed class DarlingMcpServerTagTools
                 {
                     ["status"] = "unchanged",
                     ["tag"] = TagNode(before, stored),
+                    ["previous"] = PreviousTagValues(stored),
+                    ["undo"] = UpdateUndo(tagId, stored, edit),
                     ["affected_rules"] = new JsonArray(),
                 });
             }
@@ -225,6 +229,8 @@ public sealed class DarlingMcpServerTagTools
                 ["status"] = "updated",
                 ["updated_fields"] = new JsonArray(changed.Select(f => (JsonNode?)JsonValue.Create(f)).ToArray()),
                 ["tag"] = TagNode(after, tag),
+                ["previous"] = PreviousTagValues(stored),
+                ["undo"] = UpdateUndo(tagId, stored, reduced),
                 ["affected_rules"] = RulesNode(ServerTagCoverage.Diff(before, after), before, after),
             });
         }
@@ -258,6 +264,8 @@ public sealed class DarlingMcpServerTagTools
             return MoveUnchanged(before, tagId);
         }
 
+        var orderBefore = OrderNode(before.Tags, tagId);
+
         var written = await store.MoveAsync(tagId, direction, ct);
         if (written is not ServerTagWriteResult.Ok ok)
         {
@@ -278,12 +286,19 @@ public sealed class DarlingMcpServerTagTools
             return MoveUnchanged(after, tagId);
         }
 
+        // #6403: the opposite move swaps the tag back past the same neighbour, so the sibling order is restored.
         return Serialize(new JsonObject
         {
             ["status"] = "updated",
             ["updated_fields"] = new JsonArray((JsonNode?)JsonValue.Create("sort_order")),
             ["tag"] = TagNode(after, tag),
             ["order"] = OrderNode(after.Tags, tagId),
+            ["previous"] = new JsonObject { ["order"] = orderBefore },
+            ["undo"] = DarlingMcpUndoShape.Call("update_server_tag", new JsonObject
+            {
+                ["tag_id"] = tagId,
+                ["changes_json"] = new JsonObject { ["move"] = direction == TagMoveDirection.Up ? "down" : "up" }.ToJsonString(),
+            }),
             ["affected_rules"] = new JsonArray(),
         });
     }
@@ -294,6 +309,8 @@ public sealed class DarlingMcpServerTagTools
             ["status"] = "unchanged",
             ["tag"] = TagNode(snapshot, snapshot.Tags.First(t => t.Id == tagId)),
             ["order"] = OrderNode(snapshot.Tags, tagId),
+            ["previous"] = new JsonObject { ["order"] = OrderNode(snapshot.Tags, tagId) },
+            ["undo"] = "None needed: the tag was already at that edge and nothing was written.",
             ["affected_rules"] = new JsonArray(),
         });
 
@@ -362,6 +379,7 @@ public sealed class DarlingMcpServerTagTools
                 return FromWriteResult(refusal, null)!;
             }
 
+            var storedTag = before.Tags.First(t => t.Id == tagId);
             var scoped = ServerTagCoverage.RulesScopedInSubtree(before, tagId);
             if (scoped.Count > 0 && !confirm)
             {
@@ -391,14 +409,42 @@ public sealed class DarlingMcpServerTagTools
                 });
             }
 
-            return Serialize(new JsonObject
+            var removedTags = ok.RemovedTagIds ?? new[] { tagId };
+            var deleted = new JsonObject
             {
                 ["status"] = "deleted",
                 ["tag_id"] = tagId,
-                ["deleted_tag_ids"] = IntArray(ok.RemovedTagIds ?? new[] { tagId }),
+                ["deleted_tag_ids"] = IntArray(removedTags),
                 ["removed_assignments"] = ok.RemovedAssignments,
                 ["affected_rules"] = RulesNode(ServerTagCoverage.Diff(before, after), before, after),
-            });
+                ["previous"] = TagNode(before, storedTag),
+            };
+
+            // #6403: a lone tag with nothing under it and no rule scoped to it is undone by a create (under a new id).
+            // Anything else the delete took with it cannot come back through one call.
+            if (removedTags.Count <= 1 && ok.RemovedAssignments == 0 && scoped.Count == 0)
+            {
+                var create = new JsonObject { ["name"] = storedTag.Name };
+                if (storedTag.ParentId is int parent)
+                {
+                    create["parent_id"] = parent;
+                }
+
+                if (storedTag.Colour is not null)
+                {
+                    create["colour"] = storedTag.Colour;
+                }
+
+                deleted["undo"] = DarlingMcpUndoShape.Call("create_server_tag", create);
+                deleted["undo_note"] = "The undo recreates the tag under a NEW id, at the end of its siblings' order.";
+            }
+            else
+            {
+                deleted["undo"] = null;
+                deleted["undo_note"] = "No single call undoes this: the delete also removed the child tags, server assignments or rule scopes counted above, and the previous tag is only the one you named. Recreate the tag with create_server_tag, then re-create the child tags, re-assign the servers with assign_server_tag and re-scope the custom alert rules.";
+            }
+
+            return Serialize(deleted);
         }
         catch (PostgresException ex) when (ex.SqlState == AgentRouteSqlState)
         {
@@ -410,6 +456,32 @@ public sealed class DarlingMcpServerTagTools
         {
             return McpHelpers.FormatError("delete_server_tag", ex);
         }
+    }
+
+    /// <summary>What a tag held before an update (#6403): every field the update tool can change.</summary>
+    private static JsonObject PreviousTagValues(ServerTagRow stored) =>
+        new() { ["name"] = stored.Name, ["colour"] = stored.Colour, ["parent_id"] = stored.ParentId };
+
+    /// <summary>The update that puts back the fields <paramref name="applied"/> touched, as update_server_tag's own changes_json.</summary>
+    private static JsonObject UpdateUndo(int tagId, ServerTagRow stored, ServerTagEdit applied)
+    {
+        var changes = new JsonObject();
+        if (applied.HasName)
+        {
+            changes["name"] = stored.Name;
+        }
+
+        if (applied.HasColour)
+        {
+            changes["colour"] = stored.Colour;
+        }
+
+        if (applied.HasParent)
+        {
+            changes["parent_id"] = stored.ParentId;
+        }
+
+        return DarlingMcpUndoShape.Call("update_server_tag", new JsonObject { ["tag_id"] = tagId, ["changes_json"] = changes.ToJsonString() });
     }
 
     private static string ConfirmRequiredEnvelope(
@@ -485,6 +557,10 @@ public sealed class DarlingMcpServerTagTools
             {
                 ["status"] = added.Count == 0 ? "unchanged" : "assigned",
                 ["tag"] = TagNode(after, tag),
+                ["previous"] = new JsonObject { ["assigned_server_ids"] = IntArray(ids.Where(held.Contains).OrderBy(i => i)) },
+                ["undo"] = added.Count == 0
+                    ? "None needed: every server already carried the tag."
+                    : DarlingMcpUndoShape.Call("unassign_server_tag", new JsonObject { ["tag_id"] = tagId, ["server_ids"] = IntArray(added.OrderBy(i => i)) }),
             };
             if (added.Count > 0)
             {
@@ -547,6 +623,10 @@ public sealed class DarlingMcpServerTagTools
             {
                 ["status"] = removed.Count == 0 ? "unchanged" : "unassigned",
                 ["tag"] = TagNode(after, tag),
+                ["previous"] = new JsonObject { ["assigned_server_ids"] = IntArray(ids.Where(held.Contains).OrderBy(i => i)) },
+                ["undo"] = removed.Count == 0
+                    ? "None needed: no server carried the tag."
+                    : DarlingMcpUndoShape.Call("assign_server_tag", new JsonObject { ["tag_id"] = tagId, ["server_ids"] = IntArray(removed.OrderBy(i => i)) }),
             };
             if (removed.Count > 0)
             {

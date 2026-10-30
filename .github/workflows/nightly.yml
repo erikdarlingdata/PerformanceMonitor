@@ -166,10 +166,21 @@ jobs:
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && github.sha || 'dev' }}
 
+      # The exact SDK version from global.json, not its feature band. Given a band, setup-dotnet resolves the newest
+      # patch through aka.ms links, and on 2026-10-25 those links sent every run to a download that failed with HTTP 409.
+      # With an exact version the install script downloads from the release feed and never asks aka.ms.
+      - name: Read the SDK version from global.json
+        id: globaljson_sdk
+        shell: pwsh
+        run: |
+          $version = (Get-Content -Raw (Join-Path $env:GITHUB_WORKSPACE 'global.json') | ConvertFrom-Json).sdk.version
+          if (-not $version) { throw 'global.json names no sdk.version' }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
       - name: Setup .NET 10.0
         uses: actions/setup-dotnet@v6
         with:
-          global-json-file: global.json
+          dotnet-version: ${{ steps.globaljson_sdk.outputs.version }}
           cache: true
           cache-dependency-path: '**/packages.lock.json'
 
@@ -240,16 +251,18 @@ jobs:
       - name: Publish Lite
         run: dotnet publish Lite/PerformanceMonitorLite.csproj -c Release -r win-x64 --self-contained -o publish/Lite -p:Version=${{ steps.version.outputs.VERSION }}
 
+      # #6471: the Windows service and the zip's viewer\ folder are self-contained, like Lite above.
       - name: Publish Darling Service
-        run: dotnet publish Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj -c Release -o publish/DarlingService -p:Version=${{ steps.version.outputs.VERSION }}
+        run: dotnet publish Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj -c Release -r win-x64 --self-contained -o publish/DarlingService -p:Version=${{ steps.version.outputs.VERSION }}
 
       - name: Publish Darling Viewer
-        run: dotnet publish Darling/PerformanceMonitor.Darling.Viewer/PerformanceMonitor.Darling.Viewer.csproj -c Release -o publish/DarlingViewer -p:Version=${{ steps.version.outputs.VERSION }}
+        run: dotnet publish Darling/PerformanceMonitor.Darling.Viewer/PerformanceMonitor.Darling.Viewer.csproj -c Release -r win-x64 --self-contained -o publish/DarlingViewer -p:Version=${{ steps.version.outputs.VERSION }}
 
       # Self-contained viewer publish that feeds the remote-seat Velopack Setup.exe (#1555), the same
       # publish shape build.yml uses for the Dashboard/Lite Velopack packs. This is IN ADDITION to the
-      # framework-dependent "Publish Darling Viewer" above, which still feeds the co-located viewer\
-      # folder inside PerformanceMonitorDarling-*.zip — that zip is unchanged.
+      # self-contained "Publish Darling Viewer" above, which feeds the co-located viewer\ folder inside
+      # PerformanceMonitorDarling-*.zip. The service publish above is self-contained too (#6471), so that zip
+      # needs no .NET runtime installed on the Windows host.
       - name: Publish Darling Viewer (self-contained for Velopack)
         run: dotnet publish Darling/PerformanceMonitor.Darling.Viewer/PerformanceMonitor.Darling.Viewer.csproj -c Release -r win-x64 --self-contained -o publish/DarlingViewer-velopack -p:Version=${{ steps.version.outputs.VERSION }}
 
@@ -300,7 +313,7 @@ jobs:
         shell: pwsh
         run: |
           $version = "${{ steps.version.outputs.VERSION }}"
-          dotnet tool install -g vpk --version 1.2.158
+          dotnet tool install -g vpk --version 1.2.161
           New-Item -ItemType Directory -Force -Path releases/velopack-darlingviewer
           vpk pack -u PerformanceMonitorDarlingViewer -v $version -p publish/DarlingViewer-velopack -e PerformanceMonitor.Darling.Viewer.exe -o releases/velopack-darlingviewer --channel darlingviewer
           $setup = Get-ChildItem releases/velopack-darlingviewer/*Setup.exe | Select-Object -First 1
@@ -411,10 +424,21 @@ jobs:
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && github.sha || 'dev' }}
 
+      # The exact SDK version from global.json, not its feature band. Given a band, setup-dotnet resolves the newest
+      # patch through aka.ms links, and on 2026-10-25 those links sent every run to a download that failed with HTTP 409.
+      # With an exact version the install script downloads from the release feed and never asks aka.ms.
+      - name: Read the SDK version from global.json
+        id: globaljson_sdk
+        shell: pwsh
+        run: |
+          $version = (Get-Content -Raw (Join-Path $env:GITHUB_WORKSPACE 'global.json') | ConvertFrom-Json).sdk.version
+          if (-not $version) { throw 'global.json names no sdk.version' }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
       - name: Setup .NET 10.0
         uses: actions/setup-dotnet@v6
         with:
-          global-json-file: global.json
+          dotnet-version: ${{ steps.globaljson_sdk.outputs.version }}
           cache: true
           cache-dependency-path: '**/packages.lock.json'
 
@@ -676,10 +700,21 @@ jobs:
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && github.sha || 'dev' }}
 
+      # The exact SDK version from global.json, not its feature band. Given a band, setup-dotnet resolves the newest
+      # patch through aka.ms links, and on 2026-10-25 those links sent every run to a download that failed with HTTP 409.
+      # With an exact version the install script downloads from the release feed and never asks aka.ms.
+      - name: Read the SDK version from global.json
+        id: globaljson_sdk
+        shell: pwsh
+        run: |
+          $version = (Get-Content -Raw (Join-Path $env:GITHUB_WORKSPACE 'global.json') | ConvertFrom-Json).sdk.version
+          if (-not $version) { throw 'global.json names no sdk.version' }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
       - name: Setup .NET 10.0
         uses: actions/setup-dotnet@v6
         with:
-          global-json-file: global.json
+          dotnet-version: ${{ steps.globaljson_sdk.outputs.version }}
           cache: true
           cache-dependency-path: '**/packages.lock.json'
 
@@ -763,10 +798,21 @@ jobs:
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && github.sha || 'dev' }}
 
+      # The exact SDK version from global.json, not its feature band. Given a band, setup-dotnet resolves the newest
+      # patch through aka.ms links, and on 2026-10-25 those links sent every run to a download that failed with HTTP 409.
+      # With an exact version the install script downloads from the release feed and never asks aka.ms.
+      - name: Read the SDK version from global.json
+        id: globaljson_sdk
+        shell: pwsh
+        run: |
+          $version = (Get-Content -Raw (Join-Path $env:GITHUB_WORKSPACE 'global.json') | ConvertFrom-Json).sdk.version
+          if (-not $version) { throw 'global.json names no sdk.version' }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
       - name: Setup .NET 10.0
         uses: actions/setup-dotnet@v6
         with:
-          global-json-file: global.json
+          dotnet-version: ${{ steps.globaljson_sdk.outputs.version }}
           cache: true
           cache-dependency-path: '**/packages.lock.json'
 
@@ -1174,10 +1220,21 @@ jobs:
         with:
           ref: ${{ github.sha }}
 
+      # The exact SDK version from global.json, not its feature band. Given a band, setup-dotnet resolves the newest
+      # patch through aka.ms links, and on 2026-10-25 those links sent every run to a download that failed with HTTP 409.
+      # With an exact version the install script downloads from the release feed and never asks aka.ms.
+      - name: Read the SDK version from global.json
+        id: globaljson_sdk
+        shell: pwsh
+        run: |
+          $version = (Get-Content -Raw (Join-Path $env:GITHUB_WORKSPACE 'global.json') | ConvertFrom-Json).sdk.version
+          if (-not $version) { throw 'global.json names no sdk.version' }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
       - name: Setup .NET 10.0
         uses: actions/setup-dotnet@v6
         with:
-          global-json-file: global.json
+          dotnet-version: ${{ steps.globaljson_sdk.outputs.version }}
           cache: true
           cache-dependency-path: '**/packages.lock.json'
 
@@ -1378,7 +1435,7 @@ jobs:
           ref: ${{ github.sha }}
 
       - name: Download the shard reports
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v8
         with:
           pattern: test-map-shard-*
           path: shards
@@ -1451,10 +1508,21 @@ jobs:
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && github.sha || 'dev' }}
 
+      # The exact SDK version from global.json, not its feature band. Given a band, setup-dotnet resolves the newest
+      # patch through aka.ms links, and on 2026-10-25 those links sent every run to a download that failed with HTTP 409.
+      # With an exact version the install script downloads from the release feed and never asks aka.ms.
+      - name: Read the SDK version from global.json
+        id: globaljson_sdk
+        shell: pwsh
+        run: |
+          $version = (Get-Content -Raw (Join-Path $env:GITHUB_WORKSPACE 'global.json') | ConvertFrom-Json).sdk.version
+          if (-not $version) { throw 'global.json names no sdk.version' }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
       - name: Setup .NET 10.0
         uses: actions/setup-dotnet@v6
         with:
-          global-json-file: global.json
+          dotnet-version: ${{ steps.globaljson_sdk.outputs.version }}
           cache: true
           cache-dependency-path: '**/packages.lock.json'
 
@@ -1577,25 +1645,25 @@ jobs:
           ref: ${{ github.event_name == 'workflow_dispatch' && github.sha || 'dev' }}
 
       - name: Download windows release assets
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v8
         with:
           name: windows-release-assets
           path: releases
 
       - name: Download the nightly version string
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v8
         with:
           name: windows-version
           path: .
 
       - name: Download linux release assets
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v8
         with:
           name: linux-release-assets
           path: releases
 
       - name: Download container image
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v8
         with:
           name: darling-container-image
           path: releases

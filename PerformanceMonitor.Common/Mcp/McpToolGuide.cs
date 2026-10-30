@@ -118,7 +118,7 @@ public static class McpToolGuide
             return JsonSerializer.Serialize(new
             {
                 status = "ok",
-                message = "Pass tool names in tools, or topic names in topics, to read their guides.",
+                message = "This lists names only. Call again with tools=[\"name\", ...] or topics=[...] to read each guide.",
                 tools_with_guides = catalog.ToolsWithGuides,
                 topics = topics.Select(t => new { name = t.Name, summary = t.Summary }).ToArray(),
             }, McpHelpers.JsonOptions);

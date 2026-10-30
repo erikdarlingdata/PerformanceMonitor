@@ -32,6 +32,7 @@ using PerformanceMonitor.Ui;
 using AlertEngine = PerformanceMonitor.Alerting.AlertEngine;
 using FailedSendRetryTracker = PerformanceMonitor.Alerting.FailedSendRetryTracker;
 using AlertReadFailureCounter = PerformanceMonitor.Alerting.AlertReadFailureCounter;
+using PerformanceMonitor.Collectors;
 
 namespace PerformanceMonitorLite;
 
@@ -116,6 +117,7 @@ public partial class MainWindow : Window
     private readonly MuteRuleService _muteRuleService;
     /// <summary>#5750: the scoped notification-route store, for the Settings window (its writes invalidate the route cache).</summary>
     internal DuckDbNotificationRouteStore NotificationRouteStore { get; private set; } = null!;
+    private Func<IReadOnlyList<NotificationRoute>>? _routeLoader;
 
     /// <summary>The Level 1 investigation store (#5820): Lite's DuckDB twin of Darling's, behind the shared interface the
     /// route list (its use counts), the dispatcher and the MCP tools read.</summary>
@@ -174,7 +176,9 @@ public partial class MainWindow : Window
             _webhookAlertService,
             new AppLoggerAdapter<EmailAlertService>(),
             new InvestigationDispatchCore(
-                investigationStore.OpenOrJoinAsync, _alertSettings, new AppLoggerAdapter<InvestigationDispatchCore>(), opened: null, keys: _pseudonymKeys),
+                investigationStore.OpenOrJoinAsync, _alertSettings, new AppLoggerAdapter<InvestigationDispatchCore>(), opened: null, keys: _pseudonymKeys,
+                /* #6596: an alert whose story is recurring at this hour opens no request; the skip is journaled. */
+                recurringSkipped: duckInvestigationStore.RecordRecurringSkipAsync),
             (requestId, token) => investigationStore.ReadRequestAsync(requestId, token),
             () => _mcpDataDetail);
         _muteRuleService = new MuteRuleService(
@@ -192,7 +196,9 @@ public partial class MainWindow : Window
             _serverManager.GetKnownServerIds,
             RouteSecretAccess.CredentialManager());
         var routeStore = NotificationRouteStore;
-        NotificationRouteCache.Configure(() => Task.Run(() => routeStore.ListAsync()).GetAwaiter().GetResult());
+        /* The loader is installed in MainWindow_Loaded, right after the store is initialized: installing it here primed a load
+           against a store that did not have notification_routes yet (#6458). */
+        _routeLoader = () => Task.Run(() => routeStore.ListAsync()).GetAwaiter().GetResult();
         /* The edition comes from _engineEditions, the same as the alert sweep's: the live status when it has read
            one, else the edition seeded from the store in MainWindow_Loaded. */
         PerformanceMonitorLite.Analysis.AnalysisService.SeparatelyMonitoredDatabasesProvider = serverId =>
@@ -253,6 +259,57 @@ public partial class MainWindow : Window
         Activate();
     }
 
+    /// <summary>
+    /// The server_name values in this user's collector tables: the storage name (host, database and read-only intent) each
+    /// server's rows were collected under, so which hosts this user collected from. collection_log is not read: it keeps the
+    /// display name. A table that cannot be read counts as none, so its servers wait for their settings to be confirmed
+    /// instead of being bound.
+    /// </summary>
+    private IReadOnlyCollection<string> ReadStoredServerNames()
+    {
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            using var readLock = _databaseInitializer.AcquireReadLock();
+            using var connection = _databaseInitializer.CreateConnection();
+            connection.Open();
+            foreach (var table in DuckDbSchemaGenerator.CollectorTableNames())
+            {
+                try
+                {
+                    using var command = connection.CreateCommand();
+                    command.CommandText = $"SELECT DISTINCT server_name FROM {table} WHERE server_name IS NOT NULL";
+                    using var reader = command.ExecuteReader();
+                    while (reader.Read())
+                        names.Add(reader.GetString(0));
+                }
+                catch (Exception ex)
+                {
+                    AppLogger.Debug("ServerHostBindings", $"Could not read the server names in {table}: {ex.Message}");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Debug("ServerHostBindings", $"Could not open the local store to read the server names: {ex.Message}");
+        }
+
+        return names;
+    }
+
+    private bool _hostRecordProblemShown;
+
+    /// <summary>Shows, once per run, that the record of confirmed server settings could not be written; the status line
+    /// carries it every time.</summary>
+    private void ShowHostRecordSaveProblem(string message)
+    {
+        StatusText.Text = message;
+        if (_hostRecordProblemShown)
+            return;
+        _hostRecordProblemShown = true;
+        MessageBox.Show(this, message, "Server settings not saved", MessageBoxButton.OK, MessageBoxImage.Warning);
+    }
+
     private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
     {
         try
@@ -260,7 +317,14 @@ public partial class MainWindow : Window
             StatusText.Text = "Initializing database...";
 
             // Initialize the DuckDB database
-            await _databaseInitializer.InitializeAsync();
+            await NotificationRouteCache.InitializeStoreThenConfigureAsync(() => _databaseInitializer.InitializeAsync(), _routeLoader);
+
+            /* The first run of the per-user record of confirmed server settings, before anything below connects: a user who
+               used an earlier Lite gets bound the servers whose current host has rows in this store; a new user, and a
+               server with only a saved password, confirms each one. A record that cannot be written is shown, not passed over. */
+            _serverManager.HostRecordSaveFailed += message => Dispatcher.BeginInvoke(() => ShowHostRecordSaveProblem(message));
+            var storedServerNames = App.HadLiteDataAtStart ? await Task.Run(ReadStoredServerNames) : [];
+            _serverManager.BindHostsOnFirstRun(App.HadLiteDataAtStart, storedServerNames);
 
             /* #5775: remove route credentials no route points at (a crash between writing a new generation and the row, or a
                delete that failed). Off the UI thread and not awaited: the sweep takes the write lock briefly, logs only a count
@@ -736,7 +800,27 @@ public partial class MainWindow : Window
                 return;
             }
 
-            _mcpService = new McpHostService(_dataService!, _serverManager, _muteRuleService, _databaseInitializer, mcpSettings.Port, InvestigationStore, _scheduleManager, mcpSettings.AllowWrites, mcpSettings.AllowInvestigations, mcpSettings.DataDetail, _pseudonymKeys);
+            /* The MCP token (Windows Credential Manager, this user's): read, or made the first time the server starts with
+               none, which includes the first start after an upgrade with MCP already on. With mcp_allow_tokenless_loopback
+               on there is none and nothing is made. A token that cannot be read or saved stops the start: serving without it
+               would drop the check, and a new one would break every client that holds the old one. */
+            var mcpToken = McpTokenStore.ForApp(new AppLoggerAdapter<McpTokenStore>())
+                .Resolve(mcpSettings, out var tokenFailure, out var tokenCreated);
+            if (tokenFailure is not null)
+            {
+                AppLogger.Error("MCP", $"The MCP server is not started: {tokenFailure}. Its token lives in Windows Credential Manager as PerformanceMonitorLite.Mcp_McpToken. " +
+                    $"Fix that entry and restart Lite, or set {McpSettings.AllowTokenlessLoopbackSetting} to true in settings.json to serve without a token.");
+                return;
+            }
+
+            if (tokenCreated)
+            {
+                AppLogger.Warn("MCP", "The MCP server now needs a token. A new one was made and saved for this Windows user. " +
+                    "Open Settings, Access tab, and use Copy MCP config to give your MCP client the new setup, or add the header Authorization: Bearer <token> to it. " +
+                    $"To serve without a token as before, set {McpSettings.AllowTokenlessLoopbackSetting} to true in settings.json.");
+            }
+
+            _mcpService = new McpHostService(_dataService!, _serverManager, _muteRuleService, _databaseInitializer, mcpSettings.Port, InvestigationStore, mcpToken, mcpSettings.AllowTokenlessLoopback, _scheduleManager, mcpSettings.AllowWrites, mcpSettings.AllowInvestigations, mcpSettings.DataDetail, _pseudonymKeys);
             _mcpDataDetail = mcpSettings.DataDetail;
             _ = _mcpService.StartAsync(_backgroundCts!.Token);
         }
@@ -770,6 +854,7 @@ public partial class MainWindow : Window
         foreach (var server in servers)
         {
             server.IsOnline = _serverManager.GetConnectionStatus(server.Id).IsOnline;
+            server.HostChangeNotice = _serverManager.HostChange(server)?.Describe(server);
             server.HasCollectorErrors = _collectorService != null
                 && server.IsOnline == true
                 && _collectorService.GetHealthSummary(server).ErroringCollectors > 0;
@@ -1290,6 +1375,23 @@ public partial class MainWindow : Window
             return;
         }
 
+        /* A server whose host this user has not confirmed opens Edit Server instead, once, with the sentence saying what
+           changed: saving it (with the password entered again where the server has one) confirms the host, and only then
+           does this connect. Closing it connects to nothing. */
+        if (_serverManager.HostChange(server) is { } hostChange)
+        {
+            StatusText.Text = hostChange.Describe(server);
+            var confirmDialog = new AddServerDialog(_serverManager, _profileManager, server) { Owner = this };
+            var saved = confirmDialog.ShowDialog() == true;
+            RefreshServerList();
+            if (!saved || _serverManager.HostChange(server) != null)
+            {
+                return;
+            }
+
+            StatusText.Text = string.Empty;
+        }
+
         /* Clear a previously declined interactive sign-in when the user explicitly connects: opening
            a server IS the fresh attempt. Asked about the mode rather than tested against EntraMFA,
            so a new interactive mode is not stuck declined for the session because this line did not
@@ -1312,7 +1414,7 @@ public partial class MainWindow : Window
         }
 
         var utcOffset = status.UtcOffsetMinutes ?? 0;
-        var serverTab = new ServerTab(server, _databaseInitializer, _serverManager.CredentialResolver, utcOffset, status.HasMsdbAccess, status.SqlEngineEdition, isAwsRds: status.IsAwsRds,
+        var serverTab = new ServerTab(server, _databaseInitializer, _serverManager.CredentialResolver, utcOffset, status.HasMsdbAccess, status.SqlEngineEdition, awsRdsKind: CollectorEngineCapability.AwsRdsKindOf(status.IsAwsRds, status.IsAwsRdsWebOrExpress),
             isLongQueryTraceEnabled: () => _scheduleManager.GetScheduleForServer(server.Id, "long_query_completions")?.Enabled ?? false);
         var tabHeader = CreateTabHeader(server);
         var tabItem = new TabItem
@@ -2389,6 +2491,7 @@ public partial class MainWindow : Window
             {
                 var status = _serverManager.GetConnectionStatus(server.Id);
                 server.IsOnline = status?.IsOnline;
+                server.HostChangeNotice = _serverManager.HostChange(server)?.Describe(server);
                 if (status?.IsOnline == null) continue;
 
                 bool isOnline = status.IsOnline == true;

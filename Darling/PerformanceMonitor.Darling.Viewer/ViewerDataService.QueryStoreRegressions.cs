@@ -16,6 +16,16 @@ using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
+/// <summary>The regressions rows with the databases the read left out (#6654 review): the dropped ones, named for the grid's banner.
+/// <see cref="DatabasesLeftOut"/> is null when none were left out.
+/// <para>#6750: <see cref="Source"/> is the tier that answered (<c>interval_table</c> or <c>raw</c>). <see cref="CostBaselineStart"/> and
+/// <see cref="FailureBaselineStart"/> are set only when the table read reached below raw's floor: the cost baseline (latest) and the
+/// timeouts and errors baseline (the wide table) then start where their own table proves complete history, and the banner names the
+/// cost start instead of raw's data start.</para></summary>
+public sealed record ViewerQueryStoreRegressionsRead(
+    List<ViewerQueryStoreRegressionRow> Rows, IReadOnlyList<string>? DatabasesLeftOut,
+    string Source = "raw", DateTime? CostBaselineStart = null, DateTime? FailureBaselineStart = null);
+
 /// <summary>
 /// One Query-Store regression row — the viewer copy of the Dashboard's
 /// <c>QueryStoreRegressionItem</c> (Dashboard/Models/QueryStoreRegressionItem.cs), fed by the Postgres
@@ -63,7 +73,7 @@ public sealed class ViewerQueryStoreRegressionRow
     public bool CanGetActualPlan => QueryId != 0;
     public DateTime? LastExecutionTime { get; set; }
 
-    /// <summary>#5506: why the row is listed: <c>cost</c> (Regular CPU up more than 25%), <c>timeouts</c> (Aborted runs per hour
+    /// <summary>#5506: why the row is listed: <c>cost</c> (Regular CPU up more than 25%, with at least 1 s of added CPU, #6781), <c>timeouts</c> (Aborted runs per hour
     /// at least doubled), <c>errors</c> (Exception runs per hour at least doubled), or a comma-separated combination.</summary>
     public string RegressionReason { get; set; } = "";
 
@@ -98,6 +108,14 @@ public sealed class ViewerQueryStoreRegressionRow
 
 public sealed partial class ViewerDataService
 {
+    /// <summary>#6750 part 3: <paramref name="sql"/> with the self-statement test on the key table once its backfill has run
+    /// (<see cref="QueryStoreSelfKeys.ReadyAsync"/>, read in this read's snapshot, closed on a store without the state table), else as it
+    /// is, with the text probe. The MCP read's <c>DarlingQueryStoreRegressionReader.WithSelfKeysWhenReadyAsync</c> is the same shape.</summary>
+    private static async Task<string> WithSelfKeysWhenReadyAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, string sql, CancellationToken cancellationToken) =>
+        await QueryStoreSelfKeys.ReadyAsync(connection, transaction, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken)
+            ? QueryStoreRegressionBaseline.WithSelfKeys(sql)
+            : sql;
+
     /// <summary>
     /// The baseline's lookback (#4217, the same bound #4195 gave the MCP tool and Lite's copy of this same
     /// read): a fixed 7 days ending at the recent window's start, so the comparison period stops growing with
@@ -113,13 +131,15 @@ public sealed partial class ViewerDataService
     /// <see cref="QueryStoreRegressionBaseline.WideArmsSql"/>), the aggregates, and <see cref="QueryStoreRegressionBaseline.SuffixSql"/>,
     /// bound to this read's parameters: $1 server_id, $2 window start (baseline is &lt; $2), $3 window end, $4 database filter
     /// (text[]), $5 baseline start (window start minus <see cref="BaselineLookbackDays"/>), $6 the baseline days read from the
-    /// daily totals (date[]), $7 and $8 the live half's <c>first_execution_time</c> bounds.
+    /// daily totals (date[]), $7 and $8 the live half's <c>first_execution_time</c> bounds, $9 the databases left out (#6654, text[] or NULL), $10 the start of the hours held (#6750, used only by the <c>windows</c> CTE).
     /// </summary>
-    internal static string BuildQueryStoreRegressionsSql(bool wide, bool useDailyTotals) =>
+    /// <para><paramref name="recentFromDaily"/> (latest only, #5506): the recent window's whole days from the daily totals,
+    /// $13 the days (date[]), $14 and $15 the recent arm's live <c>first_execution_time</c> bounds (#6750 put the failure arm's row-filter
+    /// start at $11 and its hours-held start at $12).</para>
+    internal static string BuildQueryStoreRegressionsSql(bool wide, bool useDailyTotals, bool regularFromLatest = false, bool recentFromDaily = false) =>
         QueryStoreRegressionBaseline.Bind(
-            (wide ? QueryStoreRegressionBaseline.WideArmsSql : QueryStoreRegressionBaseline.RawArmsSql)
-            + "\n" + QueryStoreRegressionBaseline.AggregatesSql(useDailyTotals) + "\n" + QueryStoreRegressionBaseline.SuffixSql,
-            "$5", "$6", "$7", "$8", "50");
+            QueryStoreRegressionBaseline.Statement(wide, useDailyTotals, regularFromLatest, recentFromDaily),
+            "$5", "$6", "$7", "$8", "50", "$9", "$10", "$11", "$12", "$13", "$14", "$15");
 
     /// <summary>
     /// The Query-Store regressions read — the Dashboard's <c>report.query_store_regressions(@start,@end)</c> inline TVF
@@ -133,7 +153,7 @@ public sealed partial class ViewerDataService
     /// projection joins them per (database, query_id), computes the duration and CPU regression percents, the
     /// execution-count-weighted <c>additional_duration_ms</c>
     /// (extra total time = per-exec delta × recent exec count), and a DURATION-driven severity band, keeping
-    /// rows whose Regular CPU regressed > 25% (the TVF's single-metric gate) or whose Aborted or Exception runs per hour at
+    /// rows whose Regular CPU regressed > 25% with at least 1 s of added CPU over the window (the TVF's single-metric gate plus the #6781 floor) or whose Aborted or Exception runs per hour at
     /// least doubled (#5506), ranked by additional_duration_ms (failure-only rows after the cost rows, within a share of the
     /// cap) and capped at the TVF's TOP (50). Logical reads are not part of it (#5506).
     ///
@@ -146,7 +166,7 @@ public sealed partial class ViewerDataService
     /// Darling's text is already decompressed, where the TVF <c>DECOMPRESS()</c>es a compressed
     /// <c>query_sql_text</c>.
     /// (3) The stale INTENT comment on the Dashboard's C# caller does NOT match what the TVF actually runs; this ports the
-    /// ACTUAL gate (CPU-only > 25%, no minimums), with the baseline bounded per #4217.</para>
+    /// ACTUAL gate (CPU-only > 25%, no run-count minimum), plus the 1 s added-CPU floor Darling adds (#6781), with the baseline bounded per #4217.</para>
     ///
     /// <para>Since #5809 this raw form is the fallback: <see cref="QueryStoreRegressionsTableSql"/> serves wherever the
     /// interval table's gate allows.</para>
@@ -156,6 +176,23 @@ public sealed partial class ViewerDataService
     private static readonly string s_rawLiveSql = BuildQueryStoreRegressionsSql(wide: false, useDailyTotals: false);
 
     private static readonly string s_wideLiveSql = BuildQueryStoreRegressionsSql(wide: true, useDailyTotals: false);
+
+    /* #5506: the table forms with the Regular arms on query_store_interval_latest, where the baseline plan's gate allows. */
+    private static readonly string s_latestDailySql = BuildQueryStoreRegressionsSql(wide: true, useDailyTotals: true, regularFromLatest: true);
+
+    private static readonly string s_latestLiveSql = BuildQueryStoreRegressionsSql(wide: true, useDailyTotals: false, regularFromLatest: true);
+
+    private static readonly string s_recentDailySql = BuildQueryStoreRegressionsSql(wide: true, useDailyTotals: true, regularFromLatest: true, recentFromDaily: true);
+
+    private static readonly string s_recentLiveSql = BuildQueryStoreRegressionsSql(wide: true, useDailyTotals: false, regularFromLatest: true, recentFromDaily: true);
+
+    /// <summary>The table form for a resolved baseline plan, as the MCP read's <c>TableSqlFor</c> picks it (#5506).</summary>
+    internal static string QueryStoreRegressionsTableSqlFor(QueryStoreRegressionBaseline.Plan plan) =>
+        QueryStoreRegressionBaseline.ReadsRecentDays(plan)
+            ? (plan.BuiltDayCount > 0 ? s_recentDailySql : s_recentLiveSql)
+            : plan.RegularFromLatest
+                ? (plan.BuiltDayCount > 0 ? s_latestDailySql : s_latestLiveSql)
+                : (plan.BuiltDayCount > 0 ? QueryStoreRegressionsTableSql : s_wideLiveSql);
 
     /// <summary>
     /// The regression read over <c>query_store_interval_wide</c> (#5809), with the baseline's closed days from the daily
@@ -197,24 +234,55 @@ public sealed partial class ViewerDataService
     /// </summary>
     public async Task<List<ViewerQueryStoreRegressionRow>> GetQueryStoreRegressionsAsync(
         int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null, DateTime? literalEndUtc = null,
-        CancellationToken cancellationToken = default)
-    {
+        CancellationToken cancellationToken = default) =>
+        (await GetQueryStoreRegressionsWithScopeAsync(serverId, startUtc, endUtc, databaseNames, literalEndUtc, cancellationToken: cancellationToken)).Rows;
 
+    /// <summary>
+    /// <see cref="GetQueryStoreRegressionsAsync"/> with the databases it left out (#6654 review): the grid has no envelope, so the
+    /// names come back beside the rows for the banner (<c>ViewerServerTab.DatabasesLeftOutBannerText</c>). Null when none were left
+    /// out, as <see cref="DatabasesLeftOut.Distinct"/> answers.
+    /// <para><paramref name="dataStartProbe"/> (#6750) is the tab's own <see cref="GetQueryStoreRegressionsDataStartAsync"/> task, which it
+    /// started beside this read and shows as the "Showing since" banner: the read divides each per-hour rate by the hours from the later of
+    /// its answer and the plan's start, so the grid and its banner name one instant. A caller with none gets the same probe here. A probe
+    /// that throws leaves the plan's start (the banner step logs it).</para>
+    /// </summary>
+    public async Task<ViewerQueryStoreRegressionsRead> GetQueryStoreRegressionsWithScopeAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null, DateTime? literalEndUtc = null,
+        Task<DateTime?>? dataStartProbe = null, CancellationToken cancellationToken = default)
+    {
         // #4217: the baseline's lower bound, computed here (not as a SQL interval) so the bound stays a plain
         // timestamp parameter — the same reason DarlingQueryStoreRegressionReader takes it as a parameter
         // rather than computing it inside the statement (an in-statement interval costs TimescaleDB its
         // plan-time chunk exclusion).
         var baselineStartUtc = QueryStoreRegressionsBaselineStart(startUtc);
 
+        DateTime? dataStartUtc = null;
+        try
+        {
+            dataStartUtc = await (dataStartProbe ?? GetQueryStoreRegressionsDataStartAsync(serverId, startUtc, endUtc, cancellationToken));
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            System.Diagnostics.Trace.TraceWarning($"#6750 regressions data-start probe failed, so the rates divide by the plan's start: {ex.GetType().Name}: {ex.Message}");
+        }
+
+        /* #6654: with no database chosen the grid leaves out the databases the server DROPPED (named by an earlier database_states
+           snapshot, absent from the newest), as get_query_store_regressions and the top-procedures ranking do (#5633 item 4): their
+           queries would otherwise fill the 50-row cap. A database the user picked is read as asked; an unknown set leaves out nothing. */
+        var excludedDatabases = databaseNames is { Count: > 0 }
+            ? null
+            : (await CurrentDatabaseScope.NarrowAsync(_dataSource, serverId, DatabaseFilter.All, windowStartUtc: baselineStartUtc, asOfUtc: literalEndUtc, logger: ViewerStoreLogger.Instance, cancellationToken: cancellationToken)).ExcludedNames;
+
         /* #5809: the interval table where the Queries grid's own gate allows, raw otherwise. */
         var schemaVersion = _cachedStoreSchemaVersion ??= await GetStoreSchemaVersionAsync(cancellationToken);
         if (schemaVersion is int version && version >= QueryStoreIntervalWideMinSchemaVersion)
         {
-            var tableRows = await TryGetQueryStoreRegressionsFromTableAsync(
-                serverId, startUtc, endUtc, literalEndUtc, databaseNames, baselineStartUtc, cancellationToken);
-            if (tableRows is not null)
+            var table = await TryReadFromTableAsync(
+                serverId, startUtc, endUtc, literalEndUtc, databaseNames, baselineStartUtc, excludedDatabases, dataStartUtc, cancellationToken);
+            if (table is { } t)
             {
-                return tableRows;
+                return new ViewerQueryStoreRegressionsRead(t.Rows, DatabasesLeftOut.Distinct(excludedDatabases), "interval_table",
+                    t.BelowRawFloor ? t.CostStart : null, t.BelowRawFloor ? t.FailureStart : null);
             }
         }
 
@@ -230,10 +298,14 @@ public sealed partial class ViewerDataService
         var plan = await QueryStoreRegressionBaseline.ResolveAsync(
             connection, transaction, serverId, baselineStartUtc, startUtc, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, null, cancellationToken,
             clampToRawFloor: true);
-        await using var command = new NpgsqlCommand(plan.BuiltDayCount > 0 ? QueryStoreRegressionsSql : s_rawLiveSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds };
-        AddQueryStoreRegressionsParameters(command, serverId, startUtc, endUtc, databaseNames, baselineStartUtc, plan);
+        plan = QueryStoreRegressionBaseline.WithHoursHeldStart(plan, baselineStartUtc, dataStartUtc);
+        /* #6750 part 3: the self-statement test on the key table once its backfill has run, read in this snapshot. */
+        var rawSql = await WithSelfKeysWhenReadyAsync(connection, transaction, plan.BuiltDayCount > 0 ? QueryStoreRegressionsSql : s_rawLiveSql, cancellationToken);
+
+        await using var command = new NpgsqlCommand(rawSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds };
+        AddQueryStoreRegressionsParameters(command, serverId, startUtc, endUtc, databaseNames, baselineStartUtc, plan, excludedDatabases);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        return await ReadQueryStoreRegressionRowsAsync(reader, cancellationToken);
+        return new ViewerQueryStoreRegressionsRead(await ReadQueryStoreRegressionRowsAsync(reader, cancellationToken), DatabasesLeftOut.Distinct(excludedDatabases));
     }
 
     /// <summary>
@@ -246,7 +318,13 @@ public sealed partial class ViewerDataService
     /// the span <see cref="GetQueryStoreRegressionsDataStartAsync"/>'s notice describes.
     /// </summary>
     internal async Task<List<ViewerQueryStoreRegressionRow>?> TryGetQueryStoreRegressionsFromTableAsync(
-        int serverId, DateTime startUtc, DateTime endUtc, DateTime? literalEndUtc, IReadOnlyList<string>? databaseNames, DateTime baselineStartUtc, CancellationToken cancellationToken)
+        int serverId, DateTime startUtc, DateTime endUtc, DateTime? literalEndUtc, IReadOnlyList<string>? databaseNames, DateTime baselineStartUtc, IReadOnlyList<string>? excludedDatabases, CancellationToken cancellationToken, DateTime? dataStartUtc = null)
+        => (await TryReadFromTableAsync(serverId, startUtc, endUtc, literalEndUtc, databaseNames, baselineStartUtc, excludedDatabases, dataStartUtc, cancellationToken))?.Rows;
+
+    /// <summary>The table read with where each arm started (#6750), the same binding as the MCP read
+    /// (<see cref="QueryStoreRegressionBaseline.ResolveSpansAsync"/>).</summary>
+    private async Task<(List<ViewerQueryStoreRegressionRow> Rows, DateTime CostStart, DateTime FailureStart, bool BelowRawFloor)?> TryReadFromTableAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, DateTime? literalEndUtc, IReadOnlyList<string>? databaseNames, DateTime baselineStartUtc, IReadOnlyList<string>? excludedDatabases, DateTime? dataStartUtc, CancellationToken cancellationToken)
     {
         try
         {
@@ -265,12 +343,43 @@ public sealed partial class ViewerDataService
                 return null;
             }
 
+            /* #6750: each arm's own exact start, as the MCP read binds it. */
+            var spans = await QueryStoreRegressionBaseline.ResolveSpansAsync(
+                connection, transaction, serverId, baselineStartUtc, plan, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, null, cancellationToken);
             var baselinePlan = await QueryStoreRegressionBaseline.ResolveAsync(
-                connection, transaction, serverId, plan.ClampedStart, startUtc, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, null, cancellationToken);
-            await using var command = new NpgsqlCommand(baselinePlan.BuiltDayCount > 0 ? QueryStoreRegressionsTableSql : s_wideLiveSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds };
-            AddQueryStoreRegressionsParameters(command, serverId, startUtc, endUtc, databaseNames, plan.ClampedStart, baselinePlan);
+                connection, transaction, serverId, spans.RegularStart, startUtc, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, null, cancellationToken,
+                windowEnd: endUtc, spans: spans);
+            /* #6750: the cost start the plan chose, as in the MCP read, so the banner and the divisors follow it. */
+            spans = QueryStoreRegressionBaseline.WithPlanStart(spans, baselinePlan);
+            baselinePlan = QueryStoreRegressionBaseline.WithArmStarts(baselinePlan, spans, plan.ClampedStart, dataStartUtc);
+            /* #6750 part 3: as the MCP read, the key table once its backfill has run. */
+            var wideSql = await WithSelfKeysWhenReadyAsync(connection, transaction, QueryStoreRegressionsTableSqlFor(baselinePlan), cancellationToken);
+
+            /* #5506 step 2: the same measured margin as the MCP read (DarlingQueryStoreRegressionReader.TryGetQueryStoreRegressionsFromTableAsync
+               explains it): the server's longest interval in place of the 26-hour floor, or the 26 hours where it is not known. */
+            var edgeMargin = await QueryStoreIntervalWide.ResolveEdgeMarginAsync(
+                connection, serverId, spans.RegularStart < spans.FailureStart ? spans.RegularStart : spans.FailureStart, endUtc, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+            if (edgeMargin < QueryStoreIntervalWide.PurgeEdgeMargin)
+            {
+                wideSql = QueryStoreIntervalWide.WithEdgeMargin(wideSql, QueryStoreIntervalWide.EdgeMarginSqlFor(edgeMargin));
+            }
+
+            /* #5506: the latest form's high live range starts at the next midnight minus the margin, as in the MCP read. */
+            baselinePlan = QueryStoreRegressionBaseline.WithMeasuredHighStart(baselinePlan, edgeMargin);
+
+            /* #6750: the 97 MB recent-sort spill, the same SET LOCAL as the MCP read (DarlingQueryStoreRegressionReader.TableReadWorkMemSql). */
+            await using (var workMem = new NpgsqlCommand(QueryStoreRegressionBaseline.TableReadWorkMemSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds })
+            {
+                await workMem.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            await using var command = new NpgsqlCommand(wideSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds };
+            AddQueryStoreRegressionsParameters(command, serverId, startUtc, endUtc, databaseNames, spans.RegularStart, baselinePlan, excludedDatabases, spans.FailureStart);
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-            return await ReadQueryStoreRegressionRowsAsync(reader, cancellationToken);
+            var rows = await ReadQueryStoreRegressionRowsAsync(reader, cancellationToken);
+            var clamp = DateTime.SpecifyKind(plan.ClampedStart, DateTimeKind.Unspecified);
+            return (rows, baselinePlan.HoursHeldStart ?? spans.RegularStart, baselinePlan.FailureHoursHeldStart ?? spans.FailureStart,
+                spans.RegularStart < clamp || spans.FailureStart < clamp);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -279,12 +388,14 @@ public sealed partial class ViewerDataService
         }
     }
 
-    /// <summary>The eight parameters both forms of the read take: $1 server_id, $2 window start, $3 window end, $4 database
+    /// <summary>The ten parameters both forms of the read take: $1 server_id, $2 window start, $3 window end, $4 database
     /// filter, $5 baseline start, $6 the baseline days read from the daily totals (#5506), $7 the end of the live half's low
-    /// <c>first_execution_time</c> range, $8 the start of its high range.</summary>
+    /// <c>first_execution_time</c> range, $8 the start of its high range, $9 the databases left out (#6654), $10 the start of the hours held
+    /// (#6750, <see cref="QueryStoreRegressionBaseline.Plan.HoursHeldStart"/>), $11 the failure arm's row-filter start and $12 the start
+    /// of its hours held (#6750: the same as $5 and $10 on raw).</summary>
     private static void AddQueryStoreRegressionsParameters(
         NpgsqlCommand command, int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames, DateTime baselineStartUtc,
-        QueryStoreRegressionBaseline.Plan plan)
+        QueryStoreRegressionBaseline.Plan plan, IReadOnlyList<string>? excludedDatabases, DateTime? failureBaselineStartUtc = null)
     {
         AddServerWindowParameters(command, serverId, startUtc, endUtc);
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
@@ -292,6 +403,17 @@ public sealed partial class ViewerDataService
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Date, Value = plan.RunDays });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.LowEnd, DateTimeKind.Unspecified) });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.HighStart, DateTimeKind.Unspecified) });
+        command.Parameters.Add(DatabaseFilter.Excluding(excludedDatabases).ExcludeParameter());
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.HoursHeldStart ?? baselineStartUtc, DateTimeKind.Unspecified) });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(failureBaselineStartUtc ?? baselineStartUtc, DateTimeKind.Unspecified) });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.FailureHoursHeldStart ?? plan.HoursHeldStart ?? baselineStartUtc, DateTimeKind.Unspecified) });
+        if (QueryStoreRegressionBaseline.ReadsRecentDays(plan))
+        {
+            /* #5506: $13 to $15, only on the recent-days form, the only text that names them. */
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Date, Value = plan.RecentDays });
+            command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.RecentLowEnd, DateTimeKind.Unspecified) });
+            command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.RecentHighStart, DateTimeKind.Unspecified) });
+        }
     }
 
     private static double? NullableMs(NpgsqlDataReader reader, int ordinal) =>

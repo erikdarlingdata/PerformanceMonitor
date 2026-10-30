@@ -54,6 +54,20 @@ public sealed class InvestigationReportFieldsTests
         Assert.Contains("commit or release", thrown.Message, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void FamilyOf_AFullRequestIdParses_AShortFormIsAProblem_AndBlankIsNone()
+    {
+        var id = Guid.NewGuid();
+        Assert.Null(InvestigationReportFields.ValidateFamilyOf(id.ToString(), out var full));
+        Assert.Equal(id, full);
+
+        Assert.NotNull(InvestigationReportFields.ValidateFamilyOf(id.ToString()[..8], out var shortForm));
+        Assert.Null(shortForm);
+
+        Assert.Null(InvestigationReportFields.ValidateFamilyOf("  ", out var blank));
+        Assert.Null(blank);
+    }
+
     private static System.Collections.Generic.List<string> Problems(string evidence, bool requireBasis) =>
         InvestigationToolCore.ValidateReport(Guid.NewGuid().ToString(), Guid.NewGuid().ToString(), "real", "cause", evidence, "summary",
             null, null, out _, out _, out _, requireBasis);

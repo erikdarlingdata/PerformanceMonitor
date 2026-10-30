@@ -110,6 +110,60 @@ WHERE rp.server_id = $1
 ORDER BY rp.submitted_at DESC
 LIMIT $4";
 
+    /* #6565: the reports of other requests on the same server and family, reported in the last SameRootCauseHours hours, whose analysis
+       story has the same root fact (key and database) as this request's story. The story hash is a pure hash of the
+       story's path, so one chain gives one hash; what differs between two requests is the 30-minute join window (FindJoinSql), and a
+       later request on the same fault opens its own request. The root fact (for example the regressed query's hash and database) is what
+       the reports share. Computed here, when the brief is composed, from analysis_findings: a request stores only its story hash. The
+       root is the newest finding for this request's hash at or before the request's open time: the brief composes at claim time, up
+       to the lease after open, and a later analysis run (another database_name, another offender list) must not re-point the match. $1 server, $2 family, $3 this request, $4 limit,
+       $5 now (the live-practice filter), $6 this request's story hash (null: no rows), $7 reported since. Same practice exclusions as
+       EarlierReportsSql. The key and database do not name a plan regression's query (PLAN_REGRESSION is server-wide), so a row also
+       carries this finding's and the candidate's newest remediation_action_json and the reader compares their force targets
+       (InvestigationRootFactMatch). $4 is therefore a candidate cap, not the count a brief names. */
+    internal static readonly string SameRootCauseReportsSql = @"
+WITH root AS (
+    SELECT f.root_fact_key, f.database_name, f.remediation_action_json
+    FROM analysis_findings AS f
+    WHERE f.server_id = $1 AND f.story_path_hash = $6
+      AND f.analysis_time <= (SELECT r0.opened_at AT TIME ZONE 'UTC' FROM config.investigation_requests AS r0 WHERE r0.request_id = $3)
+    ORDER BY f.analysis_time DESC
+    LIMIT 1
+)
+SELECT rp.request_id, rp.submitted_at, rp.agent_id, rp.verdict, rp.root_cause, rp.root_cause_found, rp.summary,
+       root.root_fact_key, root.remediation_action_json,
+       (SELECT f3.remediation_action_json FROM analysis_findings AS f3
+        WHERE f3.server_id = rq.server_id
+          AND f3.story_path_hash = rq.story_path_hash
+          AND f3.root_fact_key = root.root_fact_key
+          AND f3.database_name IS NOT DISTINCT FROM root.database_name
+        ORDER BY f3.analysis_time DESC
+        LIMIT 1) AS candidate_remediation_action_json
+FROM root
+JOIN config.investigation_requests AS rq ON true
+JOIN config.investigation_reports AS rp ON rp.request_id = rq.request_id
+WHERE rq.server_id = $1
+  AND rq.family = $2
+  AND rq.request_id <> $3
+  AND rq.practice_of IS NULL
+  AND rp.submitted_at > $7
+  AND NOT EXISTS (SELECT 1 FROM (" + InvestigationRequestStore.LivePracticeRequestsSql("$5") + @") AS lp WHERE lp.practice_of = rp.request_id)
+  AND EXISTS (
+        SELECT 1 FROM analysis_findings AS f2
+        WHERE f2.server_id = rq.server_id
+          AND f2.story_path_hash = rq.story_path_hash
+          AND f2.root_fact_key = root.root_fact_key
+          AND f2.database_name IS NOT DISTINCT FROM root.database_name)
+ORDER BY rp.submitted_at DESC
+LIMIT $4";
+
+    /// <summary>#6565: how many same-root-cause reports a brief names at most (the newest first).</summary>
+    public const int MaxSameRootCauseReports = 3;
+
+    /// <summary>#6565: how many candidate reports the SQL returns before the reader drops a plan regression on another query, so a
+    /// run of other-query regressions cannot crowd the real match out of <see cref="MaxSameRootCauseReports"/>.</summary>
+    public const int SameRootCauseCandidateCap = 50;
+
     /* #6001: the evidence the capture froze for the request, in the order the sections were written. */
     internal const string EvidenceSql = @"
 SELECT section, state, content::text, captured_at
@@ -365,6 +419,43 @@ ORDER BY m.metric_name, f.day DESC";
             }
         }
 
+        /* #6565: a reported request with the same root fact under another story hash comes first, marked, so the brief names it even when
+           ten newer reports crowd it out of the list. A practice request reads none (above). */
+        if (practiceOf is null && request.StoryPathHash is { } storyHash)
+        {
+            var sameRoot = new List<InvestigationEarlierReport>();
+            await using (var command = Command(connection, SameRootCauseReportsSql, request.ServerId, request.Family, requestId,
+                SameRootCauseCandidateCap, now, storyHash, now.AddHours(-InvestigationBriefComposer.SameRootCauseHours)))
+            await using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
+            {
+                while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                {
+                    if (sameRoot.Count >= MaxSameRootCauseReports ||
+                        !InvestigationRootFactMatch.IsSameRootCause(
+                            reader.GetString(7),
+                            reader.IsDBNull(8) ? null : reader.GetString(8),
+                            reader.IsDBNull(9) ? null : reader.GetString(9)))
+                        continue;
+
+                    sameRoot.Add(new InvestigationEarlierReport(
+                        reader.GetGuid(0),
+                        reader.GetFieldValue<DateTime>(1),
+                        reader.GetString(2),
+                        reader.GetString(3),
+                        reader.GetString(4),
+                        reader.GetBoolean(5),
+                        reader.IsDBNull(6) ? null : reader.GetString(6),
+                        SameRootCause: true));
+                }
+            }
+
+            if (sameRoot.Count > 0)
+            {
+                var ids = sameRoot.Select(r => r.RequestId).ToHashSet();
+                earlier = sameRoot.Concat(earlier.Where(r => !ids.Contains(r.RequestId))).Take(Math.Max(MaxEarlierReports, sameRoot.Count)).ToList();
+            }
+        }
+
         var notes = new List<InvestigationBriefNote>();
         await using (var command = Command(connection, NotesSql, request.ServerId, now, (object?)practiceOf ?? DBNull.Value))
         await using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
@@ -509,8 +600,17 @@ ORDER BY m.metric_name, f.day DESC";
         return new InvestigationBriefSources(request, alerts, findings, earlier, changes, notes, profiles,
             priorLinks.Count > 0 ? priorLinks : null, requestUrl, practiceOf is not null,
             recurrence.Count > 0 ? recurrence : null, evidence.Count > 0 ? evidence : null,
-            knownPatterns.Count > 0 ? knownPatterns : null);
+            knownPatterns.Count > 0 ? knownPatterns : null,
+            await QueryStoreNotCollectedAsync(request, cancellationToken).ConfigureAwait(false));
     }
+
+    /// <summary>#6554: the reason a Change Watch request's Query Store reads will be empty, or null (every other request, and a server whose
+    /// Query Store is collected). The wording is <see cref="DarlingRuntimePrecondition.QueryStoreReadableSecondaryMessageAsync"/>'s, the same
+    /// text the Query Store reads answer with.</summary>
+    private Task<string?> QueryStoreNotCollectedAsync(InvestigationBriefRequest request, CancellationToken cancellationToken) =>
+        string.Equals(request.FirstMetric, InvestigationTriggerKinds.ChangeWatchMetric, StringComparison.Ordinal)
+            ? DarlingRuntimePrecondition.QueryStoreReadableSecondaryMessageAsync(_postgres, request.ServerId, request.ServerName, cancellationToken)
+            : Task.FromResult<string?>(null);
 
     /// <summary>The latest findings for the server over 24 hours, collapsed per chain, the request's own story first, each
     /// remediation reduced to its verdict and blockers (the store's forcing state read as <c>get_analysis_findings</c> does).</summary>

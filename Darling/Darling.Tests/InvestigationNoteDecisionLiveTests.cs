@@ -154,7 +154,8 @@ WHERE event = 'note_rejected' AND actor = 'person:tester' AND request_id = '{rej
     /// source logging in as a role holding exactly what the managed <paramref name="managedRole"/> holds, on a scratch store with
     /// two pending notes (the older one first). The body gets the owner source, the web login's source and a sender for the routes.</summary>
     private static async Task WithWebRoutesAsync(
-        string managedRole, Func<NpgsqlDataSource, NpgsqlDataSource, Func<string, string, string?, Task<(int Status, JsonNode? Body)>>, CancellationToken, Task> body)
+        string managedRole, Func<NpgsqlDataSource, NpgsqlDataSource, Func<string, string, string?, Task<(int Status, JsonNode? Body)>>, CancellationToken, Task> body,
+        AdminArmShape arm = AdminArmShape.None, bool managedStore = false, PerformanceMonitor.Darling.Service.Hosting.DarlingWebSeat? seat = null)
     {
         var baseConnectionString = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the investigation note decision live tests.");
@@ -184,6 +185,7 @@ WHERE event = 'note_rejected' AND actor = 'person:tester' AND request_id = '{rej
                 Pooling = false,
             }.ConnectionString;
             await using var webLogin = NpgsqlDataSource.Create(asSeat);
+            using var adminArm = await AdminArmLive.BuildAsync(owner, scratch, roleName, arm, ct);
 
             var builder = WebApplication.CreateBuilder(new WebApplicationOptions
             {
@@ -198,10 +200,11 @@ WHERE event = 'note_rejected' AND actor = 'person:tester' AND request_id = '{rej
             app.Use(async (http, next) =>
             {
                 http.Items[PerformanceMonitor.Darling.Service.Hosting.DarlingWebSeat.HttpContextItemKey] =
-                    new PerformanceMonitor.Darling.Service.Hosting.DarlingWebSeat(null, true);
+                    seat ?? new PerformanceMonitor.Darling.Service.Hosting.DarlingWebSeat(null, true);
                 await next(http);
             });
-            DarlingWebEndpoints.MapAll(app, webLogin, new CollectorRuntimeState(), new CapturingTestLogger());
+            DarlingWebEndpoints.MapAll(app, webLogin, new CollectorRuntimeState(), new CapturingTestLogger(),
+                postgresConfig: managedStore ? new PostgresConfig { Managed = true } : null, adminArm: adminArm);
             await app.StartAsync(ct);
             using var server = app.GetTestServer();
 
@@ -232,7 +235,7 @@ WHERE event = 'note_rejected' AND actor = 'person:tester' AND request_id = '{rej
             await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (connection, token) =>
             {
                 NpgsqlConnection.ClearAllPools();
-                await using var drop = new NpgsqlCommand($"DROP OWNED BY {roleName}; DROP ROLE IF EXISTS {roleName}", connection);
+                await using var drop = new NpgsqlCommand(AdminArmLive.DropRolesSql(roleName), connection);
                 await drop.ExecuteNonQueryAsync(token);
             });
         }
@@ -279,6 +282,59 @@ WHERE event = 'note_rejected' AND actor = 'person:tester' AND request_id = '{rej
             Assert.Equal("2", await ScalarAsync(owner,
                 "SELECT count(*) FROM config.investigation_journal WHERE event IN ('note_approved', 'note_rejected') AND actor = 'person:web'", ct));
         });
+    }
+
+    /* #6600: the managed store's shape. The web reads as the viewer role; a signed-in admin's decision goes through the arm and the journal names
+       the person. */
+    [Fact]
+    public async Task OnTheManagedStore_ASignedInAdminSeat_DecidesThroughTheArm_AsThePerson()
+    {
+        await WithWebRoutesAsync("viewer", async (owner, _, Send, ct) =>
+        {
+            var list = await Send("GET", "/api/investigation-notes/pending", null);
+            Assert.Equal(2, (int)list.Body!["notes_returned"]!);
+            var firstId = (long)list.Body["notes"]![0]!["note_id"]!;
+            var secondId = (long)list.Body["notes"]![1]!["note_id"]!;
+
+            var approved = await Send("PUT", $"/api/investigation-notes/{firstId}/approve", "application/json");
+            Assert.Equal(200, approved.Status);
+            Assert.Equal("person:alice", (string)approved.Body!["decided_by"]!);
+            Assert.Equal(200, (await Send("PUT", $"/api/investigation-notes/{secondId}/reject", "application/json")).Status);
+
+            Assert.Equal("approved|person:alice,rejected|person:alice", await ScalarAsync(owner,
+                "SELECT string_agg(state || '|' || decided_by, ',' ORDER BY note_id) FROM config.investigation_notes", ct));
+            Assert.Equal("2", await ScalarAsync(owner,
+                "SELECT count(*) FROM config.investigation_journal WHERE event IN ('note_approved', 'note_rejected') AND actor = 'person:alice'", ct));
+        }, arm: AdminArmShape.Admin, managedStore: true, seat: new PerformanceMonitor.Darling.Service.Hosting.DarlingWebSeat("alice", true));
+    }
+
+    /* #6600: a seat that is not a signed-in admin never opens the arm (its login is refused here, so opening it would fail); the answer is today's. */
+    [Fact]
+    public async Task OnTheManagedStore_AViewerSeat_NeverOpensTheArm_AndAnswersAsToday()
+    {
+        await WithWebRoutesAsync("viewer", async (owner, _, Send, ct) =>
+        {
+            var firstId = (long)(await Send("GET", "/api/investigation-notes/pending", null)).Body!["notes"]![0]!["note_id"]!;
+            var refused = await Send("PUT", $"/api/investigation-notes/{firstId}/approve", "application/json");
+            Assert.Equal(403, refused.Status);
+            Assert.Equal(DarlingWebEndpoints.InvestigationWriteSignInMessage, (string)refused.Body!["error"]!);
+            Assert.Equal("2", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_notes WHERE state = 'pending'", ct));
+        }, arm: AdminArmShape.Refused, managedStore: true, seat: new PerformanceMonitor.Darling.Service.Hosting.DarlingWebSeat("viewer-person", false));
+    }
+
+    /* #6600: with the switch off (no arm on a managed store) the answer is today's list-only 403, and it names the switch. */
+    [Fact]
+    public async Task OnTheManagedStore_WithTheSwitchOff_TheSignedInAdminStillGets403_NamingTheSwitch()
+    {
+        await WithWebRoutesAsync("viewer", async (owner, _, Send, ct) =>
+        {
+            var firstId = (long)(await Send("GET", "/api/investigation-notes/pending", null)).Body!["notes"]![0]!["note_id"]!;
+            var refused = await Send("PUT", $"/api/investigation-notes/{firstId}/approve", "application/json");
+            Assert.Equal(403, refused.Status);
+            Assert.Equal(DarlingWebEndpoints.NoteDecisionRefusedMessage(true, adminWritesOff: true), (string)refused.Body!["error"]!);
+            Assert.Contains("web.allowAdminWrites", (string)refused.Body["error"]!, StringComparison.Ordinal);
+            Assert.Equal("2", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_notes WHERE state = 'pending'", ct));
+        }, managedStore: true, seat: new PerformanceMonitor.Darling.Service.Hosting.DarlingWebSeat("alice", true));
     }
 
     [Fact]

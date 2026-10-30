@@ -445,6 +445,70 @@ internal static class DarlingNetworkConfigEditor
     /// </summary>
     internal static readonly IReadOnlyList<string> StoreNetworkOwnedKeys = ["listen", "allowFrom", "role"];
 
+    /// <summary>The keys of an <c>mcp.network</c> or <c>web.network</c> block that serve the endpoint beyond loopback
+    /// (<see cref="RemoveEndpointExposure"/>). The token keys are not among them: a token gates the loopback listener too.</summary>
+    internal static readonly IReadOnlyList<string> EndpointExposureKeys = ["listen", "allowFrom", "tls", "hostName", "trustedProxies", "oidc"];
+
+    /// <summary>
+    /// Removes the <see cref="EndpointExposureKeys"/> from a LIVE <c>parentKey.network</c> block and keeps every other
+    /// member (the token, <c>encryptedToken</c>, and anything else) with its same-line comment, so the endpoint goes
+    /// back to loopback-only and keeps asking for its token there. A block left with no member is removed whole
+    /// (<see cref="RemoveNetworkBlock"/>); a block with no exposure key, or no live block, is a no-op. Pure.
+    /// </summary>
+    internal static string RemoveEndpointExposure(string json, string parentKey)
+    {
+        var regions = Classify(json);
+        var rootOpen = FindRootObjectOpen(json, regions);
+        var rootClose = rootOpen < 0 ? -1 : FindMatchingClose(json, regions, rootOpen);
+        if (rootClose < 0)
+        {
+            return json;
+        }
+
+        var parent = FindObjectValueSpan(json, regions, rootOpen, rootClose, parentKey);
+        if (parent is null || json[parent.Value.ValueStart] != '{')
+        {
+            return json;
+        }
+
+        var existing = FindObjectValueSpan(json, regions, parent.Value.ValueStart, parent.Value.ValueEnd - 1, "network");
+        if (existing is null || json[existing.Value.ValueStart] != '{')
+        {
+            return existing is null ? json : RemoveNetworkBlock(json, parentKey);
+        }
+
+        var open = existing.Value.ValueStart;
+        var close = existing.Value.ValueEnd - 1;
+        var members = EnumerateObjectMembers(json, regions, open, close);
+        var kept = new List<(string Core, string Comment)>();
+        foreach (var member in members)
+        {
+            if (!IsOwned(EndpointExposureKeys, member.Name))
+            {
+                kept.Add((json[member.KeyStart..member.ValueEnd], SameLineComment(json, regions, member.ValueEnd, close)));
+            }
+        }
+
+        if (kept.Count == members.Count)
+        {
+            return json;
+        }
+
+        if (kept.Count == 0)
+        {
+            return RemoveNetworkBlock(json, parentKey);
+        }
+
+        var lines = new List<string>(kept.Count);
+        for (var i = 0; i < kept.Count; i++)
+        {
+            lines.Add(kept[i].Core + (i < kept.Count - 1 ? "," : "") + kept[i].Comment);
+        }
+
+        var block = "{\n" + FieldIndent + string.Join("\n" + FieldIndent, lines) + "\n" + ChildIndent + "}";
+        return json[..open] + block + json[existing.Value.ValueEnd..];
+    }
+
     /// <summary>
     /// The active (uncommented) <c>postgres.network</c> block the wizard writes — a sample-styled block
     /// (per-field trailing comments, no fragile column alignment) whose VALUES are live so the store

@@ -39,7 +39,7 @@ internal sealed record ViewerPostgresTab(
 /// dashboard's <c>POSTGRES_TABS</c> in <c>server-tabs.js</c> (#2547). Same seven tabs, same ids, same
 /// grouping, so the two front ends do not teach an operator two different shapes for one engine.
 ///
-/// <para><b>Why a registry rather than "read the XAML".</b> The SQL Server surface has nineteen inner tabs
+/// <para><b>Why a registry rather than "read the XAML".</b> The SQL Server surface has inner tabs
 /// declared in XAML and dispatched by integer index, and nothing there is machine-readable enough to ask
 /// "does every PostgreSQL collector reach a screen?". That question is the whole point of this issue: the
 /// first nine PostgreSQL collectors spent three releases MCP-only precisely because no check could see that the
@@ -47,7 +47,7 @@ internal sealed record ViewerPostgresTab(
 /// <c>ViewerPostgresTabsTests</c> derives the other side of it from <see cref="CollectorCatalog"/> — so a
 /// THIRTEENTH PostgreSQL collector turns the pin red naming itself, rather than quietly shipping invisible.</para>
 ///
-/// <para><b>Seven tabs against SQL Server's nineteen is the design.</b> Parity was never the constraint;
+/// <para><b>Seven tabs, against the SQL Server surface's longer list, is the design.</b> Parity was never the constraint;
 /// the missing tabs (tempdb, Query Store, trace flags, plan cache, <c>system_health</c>, Always On) have no
 /// PostgreSQL analogue to fill, and the signals that DO matter here — wraparound headroom, the xmin
 /// horizon, vacuum backlog, WAL retention — have no SQL Server analogue either. A PostgreSQL surface built

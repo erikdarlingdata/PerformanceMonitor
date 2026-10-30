@@ -14,6 +14,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
 using Xunit;
 
@@ -90,8 +91,8 @@ public sealed class CustomAlertFailedSendRetryTests
             }
 
             Evaluator = new CustomAlertEvaluator(
-                new CustomAlertRuleStore(_dataSource), new CustomAlertStateStore(_dataSource), _dataSource, Deliverer,
-                isAlertMuted: _ => Muted, alertsEnabled: static () => true, new PgAlertHistoryStore(_dataSource),
+                new CustomAlertRuleStore(_dataSource, StorageCommandDeadlines.McpReadSeconds), new CustomAlertStateStore(_dataSource, StorageCommandDeadlines.McpReadSeconds), _dataSource, Deliverer,
+                isAlertMuted: _ => Muted, alertsEnabled: static () => true, new PgAlertHistoryStore(_dataSource, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds),
                 defaultIntervalSeconds: 0, cacheTtl: TimeSpan.Zero, Log);
         }
 

@@ -599,6 +599,14 @@ public class CollectorMeasurementSeamTests
                 RingBufferXml.TruncatedMeasurement,
                 RingBufferXml.EventsHiddenMeasurement,
                 RingBufferXml.NewestVisibleAgeMeasurement,
+                /* #6441 part 2: which source system_health_events read this pass. The event count on an event_file read (0 on a
+                   quiet pass), the fallback flag on a ring-buffer read. Declared in SystemHealthEventsCollector.cs beside its
+                   .Measure( calls. */
+                SystemHealthEventsCollector.EventFileEventsMeasurement,
+                SystemHealthEventsCollector.EventFileFallbackMeasurement,
+                SystemHealthEventsCollector.EventFileErrorMeasurement,
+                SystemHealthEventsCollector.EventFileBufferCutMeasurement,
+                SystemHealthEventsCollector.EventFileWildcardMeasurement,
             }.OrderBy(l => l, StringComparer.Ordinal).ToList(),
             resolved.Distinct(StringComparer.Ordinal).OrderBy(l => l, StringComparer.Ordinal).ToList());
     }

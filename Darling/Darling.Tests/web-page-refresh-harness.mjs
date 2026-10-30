@@ -18,6 +18,7 @@ class FakeNode {
   appendChild(c) { if (c && typeof c === "object") c.parentNode = this; this.children.push(c); return c; }
   append(...cs) { cs.forEach((c) => this.appendChild(c)); }
   prepend(c) { this.children.unshift(c); }
+  insertBefore(c, ref) { const i = ref ? this.children.indexOf(ref) : -1; if (c && typeof c === "object") c.parentNode = this; if (i < 0) this.children.push(c); else this.children.splice(i, 0, c); return c; }
   removeChild(c) { const i = this.children.indexOf(c); if (i >= 0) this.children.splice(i, 1); return c; }
   replaceChildren(...cs) { this.children = []; cs.forEach((c) => this.appendChild(c)); }
   remove() {}
@@ -52,6 +53,8 @@ globalThis.document = {
   cookie: "", hidden: false,
 };
 globalThis.Node = FakeNode;
+/* The in-place refresh (#6933) watches a staged panel for its loading strip to go. These scenarios do not read what lands, so the observer never fires. */
+globalThis.MutationObserver = class { observe() {} disconnect() {} };
 globalThis.window = globalThis;
 globalThis.location = { hash: "#/server/alpha", pathname: "/", search: "", href: "http://localhost/", origin: "http://localhost" };
 globalThis.history = { pushState() {}, replaceState() {}, back() {} };
@@ -81,6 +84,11 @@ let fetches = 0; let renders = 0; const fetchLog = [];
 let fetchDelayMs = 0; // simulated time a read takes: each fetch holds open until the clock passes this
 let pending = [];
 globalThis.fetch = (url) => {
+  /* app.js asks /api/session before it starts (#6840: is this a front door?). A store answers it at once and it is not a
+     page read, so it is neither counted nor held open by the simulated read time: the page then starts as it always did. */
+  if (String(url).split("?")[0] === "/api/session") {
+    return Promise.resolve({ ok: true, status: 200, json: async () => ({ can_edit: false }), text: async () => JSON.stringify({ can_edit: false }) });
+  }
   fetches++; if (String(url).includes('get_server_summary')) renders++; fetchLog.push(Math.round((now - 1000000) / 1000) + ' ' + url);
   return new Promise((resolve) => {
     pending.push({ at: now + fetchDelayMs, done: () => resolve({ ok: false, status: 500, json: async () => ({}), text: async () => "" }) });

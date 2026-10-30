@@ -15,6 +15,7 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Ui;
 using PerformanceMonitor.Darling.Storage;
 
@@ -85,11 +86,86 @@ public partial class ViewerServerTab
            await is not priced against contention that has already finished. */
         readFanOut.Release();
 
+        ApplyEngineGate(healthTask.Result, _server.DisplayName, _server.EngineEdition, _server.EngineKind, _server.AwsRdsKind);
         await ShowCollectionHealthAsync(
             healthTask.Result, logTask.Result, durationTask.Result, caveatsTask.Result, dataStartTask, startUtc, CollectionLogTruncationBanner,
             _collectionHealthFilterMgr!.UpdateData, _collectionLogFilterMgr!.UpdateData, RenderCollectorDurationChart, ShowCollectionCaveats);
 
         await ShowSkippedCyclesAsync();
+        await ShowSweepPressureAsync();
+    }
+
+    /// <summary>
+    /// #6912: marks the rows of the collectors this server's engine does not run, so the Status column reads <c>not_collected</c> and the
+    /// Note column carries the engine's sentence, as <c>get_collection_health</c> lists them. What such a collector logged before the gate
+    /// existed (an Amazon RDS Web or Express server's SESSION_MISSING runs for <c>attention</c>) stays in the seven-day window and bands
+    /// FAILING, and a collector that does not run can never replace it. The set is <see cref="FleetEngineGatedCollectors.For"/>, the gate
+    /// the status bar, the Overview card and the fleet card count with. An engine not read yet makes no claim, so those rows stand.
+    /// </summary>
+    internal static void ApplyEngineGate(List<CollectorHealthRow> health, string serverName, int engineEdition, string? engineKind, AwsRdsKind awsRdsKind)
+    {
+        var gated = FleetEngineGatedCollectors.For(engineEdition, engineKind, awsRdsKind);
+        if (gated.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var row in health)
+        {
+            if (gated.Contains(row.CollectorName))
+            {
+                row.EngineGated = true;
+                row.EngineNotCollectedMessage = CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind, row.CollectorName, awsRdsKind);
+            }
+        }
+    }
+
+    /// <summary>
+    /// #6384: the Sweep Pressure and Heaviest Collectors panels. Its own read after the tab has drawn, as the skipped-slot line is, so it is
+    /// not one of the reads the tab's declared width counts and its failure costs these two panels alone (they say "could not be completed",
+    /// which is not the all-clear); a cancellation still throws.
+    /// </summary>
+    private async Task ShowSweepPressureAsync()
+    {
+        try
+        {
+            /* #6912: the same gate get_collection_health leaves the gated collectors' runs out with, so the panel and the tool name the same peak collector. */
+            var engineGated = FleetEngineGatedCollectors.For(_server.EngineEdition, _server.EngineKind, _server.AwsRdsKind);
+            ShowSweepPressure(await _dataService.GetSweepPressureAsync(_server.ServerId, engineGated: engineGated));
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            ViewerLogger.Warn("Collection Health", $"Sweep pressure read failed: {ex.Message}");
+            ShowSweepPressure(null, SweepPressurePanel.Unreadable);
+        }
+    }
+
+    /// <summary>
+    /// Draws both panels from the report: the roll-up lines and the heaviest-collector rows, or, when there is no report (the server has no
+    /// collection log rows in the window, which the web answers as unavailable) or the read failed, the one sentence in place of the grids' rows.
+    /// </summary>
+    /// <param name="report">The report, or null.</param>
+    /// <param name="emptyText">What to say when there is no report.</param>
+    internal void ShowSweepPressure(SweepPressureReport? report, string emptyText = SweepPressurePanel.NoLogRows)
+    {
+        if (report is null)
+        {
+            SweepPressureStatsGrid.ItemsSource = null;
+            HeaviestCollectorsGrid.ItemsSource = null;
+            SweepPressureNoDataMessage.Text = emptyText;
+            SweepPressureNoDataMessage.Visibility = Visibility.Visible;
+            return;
+        }
+
+        SweepPressureStatsGrid.ItemsSource = SweepPressurePanel.StatRows(report.Pressure);
+        var rows = SweepPressurePanel.GridRows(report);
+        HeaviestCollectorsGrid.ItemsSource = rows;
+        SweepPressureNoDataMessage.Text = SweepPressurePanel.NoTimings;
+        SweepPressureNoDataMessage.Visibility = rows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
     }
 
     /// <summary>

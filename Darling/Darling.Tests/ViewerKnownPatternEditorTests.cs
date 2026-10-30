@@ -222,6 +222,8 @@ public sealed class ViewerKnownPatternEditorLivePostgresTests
 
         // Take V214's table away: the probe's newest sentinel goes, and the store reads as the version before it.
         await DarlingMcpTestData.ExecAsync(connection, ct, "DROP TABLE config.config_known_patterns CASCADE");
+        // The probe answers the NEWEST sentinel present, so a real store before V214 has no V215 indexes either.
+        await RungRewindArtifacts.DropSentinelsAboveAsync(connection, 214, ct);
         await using var viewer = new ViewerDataService(scratch.ConnectionString);
 
         var probed = await viewer.GetStoreSchemaVersionAsync(ct);

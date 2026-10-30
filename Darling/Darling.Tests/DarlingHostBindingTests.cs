@@ -201,7 +201,7 @@ public sealed class DarlingHostBindingTests
     [Fact]
     public void TheDocumentedAllowFromInvalidLine_NamesTheCommaList_AndNoJsonArray()
     {
-        var doc = RepoFile.ReadRepoFile("docs", "uat-onboarding.md");
+        var doc = RepoFile.ReadRepoFile("docs", "mcp-server.md"); // #6416: the MCP setup page merged into this page
         var line = Array.Find(
             doc.Split('\n'),
             l => l.StartsWith("MCP network exposure requested but mcp.network.allowFrom", StringComparison.Ordinal));

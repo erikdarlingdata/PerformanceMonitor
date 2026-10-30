@@ -156,7 +156,7 @@ public sealed class StatementScrubEndToEndLiveTests
         try
         {
             var runner = new DarlingCollectorRunner(postgres, new CollectorDeltaCalculator());
-            bool withPlan = runner.ShouldCapturePlanXmlFor(DeadlocksCollector.Instance.Name, CollectDeadlocksId);
+            bool withPlan = runner.ShouldCapturePlanXmlFor(DeadlocksCollector.Instance.Name, CollectDeadlocksId, serverCapturePlans: null);
             runner.TargetProviderOverrideForTests = _ => new FakeTargetProvider(_ => DeadlocksReader(withPlan));
             runner.AzureDatabaseListOverrideForTests = (_, _) => Task.FromResult(new List<string> { "alpha" });
 

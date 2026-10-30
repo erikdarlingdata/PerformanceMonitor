@@ -529,6 +529,46 @@ public class GenericWebhookTests
         Assert.Empty(missing);
     }
 
+    /// <summary>
+    /// #6718: <c>{{status}}</c> is <c>firing</c> on a fire and on the settings window's test send, and <c>resolved</c> only when the
+    /// resolution send says so.
+    /// </summary>
+    [Fact]
+    public void StatusToken_IsFiringByDefault_OnTheTestSend_AndResolvedWhenAsked()
+    {
+        const string template = """{"status": "{{status}}"}""";
+
+        string Status(bool isTest = false, string? status = null) =>
+            JsonDocument.Parse(status is null
+                ? WebhookAlertService.BuildGenericPayload("High CPU", "SRV", "9", "5", Branding, isTest: isTest, bodyTemplate: template)
+                : WebhookAlertService.BuildGenericPayload("High CPU", "SRV", "9", "5", Branding, isTest: isTest, bodyTemplate: template, status: status))
+                .RootElement.GetProperty("status").GetString()!;
+
+        Assert.Equal("firing", Status());
+        Assert.Equal("firing", Status(isTest: true));
+        Assert.Equal("resolved", Status(status: "resolved"));
+    }
+
+    /// <summary>
+    /// #6718: a resolution renders the key it is given, and a fire renders the key its own alert derives, so a caller that hands
+    /// the fire's key back gets one key for both halves of the episode.
+    /// </summary>
+    [Fact]
+    public void DedupKeyOverride_RendersTheFiresKey_OnAResolution()
+    {
+        const string template = """{"key": "{{dedup_key}}", "metric": "{{metric}}"}""";
+
+        var fire = JsonDocument.Parse(WebhookAlertService.BuildGenericPayload(
+            "High CPU", "SRV", "9", "5", Branding, bodyTemplate: template, serverId: "7")).RootElement;
+        var resolution = JsonDocument.Parse(WebhookAlertService.BuildGenericPayload(
+            "CPU Resolved", "SRV", "resolved", "", Branding, bodyTemplate: template, serverId: "7",
+            status: "resolved", dedupKeyOverride: WebhookAlertService.DeriveGenericDedupKey("7", "SRV", "High CPU", null))).RootElement;
+
+        Assert.Equal("7:High CPU", fire.GetProperty("key").GetString());
+        Assert.Equal(fire.GetProperty("key").GetString(), resolution.GetProperty("key").GetString());
+        Assert.Equal("CPU Resolved", resolution.GetProperty("metric").GetString());
+    }
+
     private static string RepoRoot([CallerFilePath] string thisFile = "")
     {
         /* Locate the repo from this file, the AlertFiringLogTests idiom — no build-output copying. */

@@ -32,10 +32,20 @@ public sealed record PlanChangeFacts(
     long? BeforeForcedPlanId,
     string? BeforeForcingType,
     AgentChangeResult Result,
-    JsonNode? Target)
+    JsonNode? Target,
+    JsonNode? Guide = null)
 {
     /// <summary>True for <c>plan_force</c>: the undo puts back what was forced before, or removes the force.</summary>
     public bool IsForce => Kind == AgentChangeKinds.PlanForce;
+
+    /// <summary>True for <c>plan_guide_create</c> (#6569): the undo drops the guide <see cref="GuideName"/>. <see cref="QueryId"/> and <see cref="PlanId"/> are 0 and mean nothing.</summary>
+    public bool IsGuide => Kind is AgentChangeKinds.PlanGuideCreate or AgentChangeKinds.PlanGuideDrop;
+
+    /// <summary>True for <c>plan_guide_drop</c> (#6569, slice 2b): the undo re-creates the guide from the definition the drop journaled (<see cref="Guide"/>).</summary>
+    public bool IsGuideDrop => Kind == AgentChangeKinds.PlanGuideDrop;
+
+    /// <summary>The guide a create made: its name, from the journaled target's id.</summary>
+    public string? GuideName => Guide is JsonObject g && g["name"] is JsonValue v && v.TryGetValue(out string? s) ? s : null;
 }
 
 /// <summary>
@@ -126,7 +136,7 @@ WHERE NOT EXISTS (
 RETURNING journal_id";
 
     private const string PlanCalledSql = @"
-SELECT c.detail::text, c.request_id, c.server_id, c.event_time, r.server_name
+SELECT c.detail::text, c.request_id, c.server_id, c.event_time, r.server_name, c.actor, r.server_id, r.autonomy_level
 FROM config.investigation_journal AS c
 LEFT JOIN config.investigation_requests AS r ON r.request_id = c.request_id
 WHERE c.journal_id = $1 AND c.event = 'action_called'";
@@ -177,6 +187,9 @@ WHERE c.journal_id = $1 AND c.event = 'action_called'";
         int? serverId;
         DateTime calledAt;
         string? serverName;
+        string? calledActor;
+        int? requestServerId;
+        int? requestLevel;
         await using (var command = Command(connection, transaction, PlanCalledSql, P(calledId)))
         await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
         {
@@ -187,6 +200,9 @@ WHERE c.journal_id = $1 AND c.event = 'action_called'";
             serverId = reader.IsDBNull(2) ? null : reader.GetInt32(2);
             calledAt = Utc(reader.GetDateTime(3));
             serverName = reader.IsDBNull(4) ? null : reader.GetString(4);
+            calledActor = reader.IsDBNull(5) ? null : reader.GetString(5);
+            requestServerId = reader.IsDBNull(6) ? null : reader.GetInt32(6);
+            requestLevel = reader.IsDBNull(7) ? null : Convert.ToInt32(reader.GetValue(7), CultureInfo.InvariantCulture);
         }
 
         if (Now() - calledAt > Window)
@@ -194,8 +210,8 @@ WHERE c.journal_id = $1 AND c.event = 'action_called'";
         if (JsonNode.Parse(calledDetail ?? "{}") is not JsonObject called)
             return (null, AgentUndoResult.Refused("not_undoable", "This change has no recorded before image."));
         var kind = called["kind"] is JsonValue kv && kv.TryGetValue(out string? k) ? k : null;
-        if (kind is not (AgentChangeKinds.PlanForce or AgentChangeKinds.PlanUnforce))
-            return (null, AgentUndoResult.Refused("not_undoable", "This kind of change is not a plan force or unforce."));
+        if (kind is not (AgentChangeKinds.PlanForce or AgentChangeKinds.PlanUnforce or AgentChangeKinds.PlanGuideCreate or AgentChangeKinds.PlanGuideDrop))
+            return (null, AgentUndoResult.Refused("not_undoable", "This kind of change is not a plan force, an unforce or a plan guide create or drop."));
         if (await FirstDetailAsync(connection, transaction, "action_undone", calledId, requestId, cancellationToken) is not null)
             return (null, AgentUndoResult.Refused("already_undone", "This change was already undone."));
 
@@ -208,6 +224,23 @@ WHERE c.journal_id = $1 AND c.event = 'action_called'";
         string? Text(JsonNode? node) => node is JsonValue v && v.TryGetValue(out string? s) ? s : node?.ToString();
         long? Number(JsonNode? node) => node is JsonValue v && v.TryGetValue(out long n) ? n : (long.TryParse(Text(node), NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed) ? parsed : null);
         var database = Text(target?["database"]) ?? Text(before?["database"]);
+        if (kind is AgentChangeKinds.PlanGuideCreate or AgentChangeKinds.PlanGuideDrop)
+        {
+            /* #6569: a plan guide create is undone by dropping the guide by name, a drop by re-creating it from the journaled definition, so the facts are the target's id and the definition the call journaled. */
+            var guide = before?["guide"] as JsonObject;
+            var guideName = Text(target?["id"]);
+            if (requestId is not Guid guideRequest || serverId is not int guideServer || string.IsNullOrWhiteSpace(database) || string.IsNullOrWhiteSpace(guideName) || guide is null)
+                return (null, AgentUndoResult.Refused("not_undoable", "This change's guide or database was not recorded, so it cannot be undone from here."));
+            /* #6569 round 2: the Undo acts only on a row the create and drop tools wrote. They record an agent actor ("agent:" + the agent id) under a request of the same server that was
+               Level 3 when the call was made, so a journal row without those is not one of theirs. */
+            if (calledActor is null || !calledActor.StartsWith("agent:", StringComparison.Ordinal) || requestServerId != guideServer || requestLevel is not >= 3)
+                return (null, AgentUndoResult.Refused("not_undoable", "This row was not written by a plan guide create or drop made by an agent under a Level 3 request on this server, so it cannot be undone from here."));
+            var guideFacts = guide.DeepClone().AsObject();
+            guideFacts["name"] = guideName;
+            return (new PlanChangeFacts(calledId, guideRequest, guideServer, serverName ?? ("server " + guideServer.ToString(CultureInfo.InvariantCulture)), kind, database, 0, 0, null, null,
+                result, target?.DeepClone(), guideFacts), null);
+        }
+
         var queryId = Number(before?["query_id"]);
         var planId = Number(target?["id"]) ?? Number(before?["plan_id"]);
         var forcedBefore = before?["forced_plan"] as JsonObject;
@@ -248,15 +281,20 @@ WHERE c.journal_id = $1 AND c.event = 'action_called'";
         /// a Level 3 request) are not asked. A refusal is journaled with the person as the actor, once per call, code and hour.
         /// <paramref name="planId"/> is the plan the permit is for: the executor refuses a write on any other.
         /// </summary>
-        public async Task<ServerActionDecision> AuthorizeAsync(long planId, NpgsqlDataSource ownerSource, CancellationToken cancellationToken = default)
+        public Task<ServerActionDecision> AuthorizeAsync(long planId, NpgsqlDataSource ownerSource, CancellationToken cancellationToken = default) =>
+            AuthorizeAsync(planId.ToString(CultureInfo.InvariantCulture), ownerSource, cancellationToken);
+
+        /// <summary>The same two server-side conditions for the object the permit is for: a plan id (as text) for a force or unforce, the guide's name for a plan guide create's or drop's undo, which that server's <c>create_plan_guide</c> or <c>drop_plan_guide</c> switch gates (#6569).</summary>
+        public async Task<ServerActionDecision> AuthorizeAsync(string permitId, NpgsqlDataSource ownerSource, CancellationToken cancellationToken = default)
         {
             ArgumentNullException.ThrowIfNull(ownerSource);
+            var serverAction = Facts.IsGuideDrop ? ServerActionNames.DropPlanGuide : Facts.IsGuide ? ServerActionNames.CreatePlanGuide : ServerActionNames.ForcePlan;
             var store = new InvestigationRequestStore(_owner._dataSource, _owner._commandTimeoutSeconds);
             /* The shared form of the server's switch lock, in the session's transaction and before the switch is read, as an agent's write takes it:
                a switch writer that takes the exclusive form then waits for this undo, and an undo that starts after it reads the committed switch. */
-            await ServerActionSwitchLock.AcquireSharedAsync(_connection, _transaction, Facts.ServerId, ServerActionNames.ForcePlan,
+            await ServerActionSwitchLock.AcquireSharedAsync(_connection, _transaction, Facts.ServerId, serverAction,
                 _owner._commandTimeoutSeconds, cancellationToken);
-            var refusal = await store.SwitchAndCredentialRefusalAsync(_connection, _transaction, Facts.ServerId, Facts.ServerName, ServerActionNames.ForcePlan,
+            var refusal = await store.SwitchAndCredentialRefusalAsync(_connection, _transaction, Facts.ServerId, Facts.ServerName, serverAction,
                 (serverId, token) => store.ReadServerCredentialStateAsync(ownerSource, serverId, token), person: true, cancellationToken);
             if (refusal is not null)
             {
@@ -264,8 +302,8 @@ WHERE c.journal_id = $1 AND c.event = 'action_called'";
                 return new ServerActionDecision(null, refusal);
             }
 
-            return new ServerActionDecision(new ServerActionPermit(ServerActionNames.ForcePlan, Facts.ServerId, Facts.ServerName,
-                planId.ToString(CultureInfo.InvariantCulture), Facts.Database, Facts.RequestId, Actor), null);
+            return new ServerActionDecision(new ServerActionPermit(serverAction, Facts.ServerId, Facts.ServerName,
+                permitId, Facts.Database, Facts.RequestId, Actor), null);
         }
 
         /// <summary>Journals a refusal of this undo with the person as the actor: <c>refused</c>, once per call, code and hour.</summary>

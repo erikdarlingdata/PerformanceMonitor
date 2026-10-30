@@ -168,6 +168,24 @@ public sealed class WebClampCellBehaviourTests
     }
 
     [Fact]
+    public void ACellsPlainMode_PicksItsOwnPass_CountsKeepsAToolNameInARealError()
+    {
+        // #6649: the Collection Log's Error column is `plain: "counts"`; a mistyped key would fall through to the full pass, which
+        // turns a real error's get_ name into a tab name.
+        var p = Run().GetProperty("plainModes");
+        var raw = p.GetProperty("raw").GetString()!;
+        var counts = p.GetProperty("counts").GetString()!;
+        Assert.Equal("Connection failed (timeout=30): ring buffer truncated: 1, ring buffer events hidden: 167, newest visible event age s: 4300; ask get_collection_health for the time range", counts);
+        var full = p.GetProperty("full").GetString()!;
+        Assert.Contains("ask Collection Health for the time range", full);
+        Assert.DoesNotContain("get_collection_health", full);
+        var named = p.GetProperty("named").GetString()!;
+        Assert.Contains("ring_buffer_truncated=1", named);
+        Assert.Contains("get_collection_health for the time range", named);
+        Assert.Equal(raw, p.GetProperty("asStored").GetString());
+    }
+
+    [Fact]
     public void EnterOpensTheCell_AndOtherKeysDoNot()
     {
         var r = Run();

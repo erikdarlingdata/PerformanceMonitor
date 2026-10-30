@@ -109,7 +109,7 @@ public sealed class PolicyJobFailingRetryTests
         /* The retry is due and still reports the three failures. */
         await rig.PassAsync(TimeSpan.FromHours(1) + TimeSpan.FromSeconds(60), 3);
         Assert.Equal(2, rig.Deliverer.Outcomes.Count);
-        Assert.Equal("3 new failure(s), 3 total", rig.Deliverer.Outcomes[1].CurrentValue);
+        Assert.Equal("3 new failures, 3 total", rig.Deliverer.Outcomes[1].CurrentValue);
     }
 
     [Fact]
@@ -129,6 +129,6 @@ public sealed class PolicyJobFailingRetryTests
         /* ... so when the cooldown is over, two more failures read as two, not five. */
         await rig.PassAsync(TimeSpan.FromHours(4), 5);
         Assert.Equal(2, rig.Deliverer.Outcomes.Count);
-        Assert.Equal("2 new failure(s), 5 total", rig.Deliverer.Outcomes[1].CurrentValue);
+        Assert.Equal("2 new failures, 5 total", rig.Deliverer.Outcomes[1].CurrentValue);
     }
 }

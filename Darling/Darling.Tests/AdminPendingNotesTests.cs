@@ -87,6 +87,87 @@ public sealed class AdminPendingNotesTests
         Assert.Equal(JsonValueKind.Null, expired.GetProperty("message").ValueKind);
     }
 
+    /* An empty Write note says "Enter the note's text." at once, as the service would, and sends no change: before, the click made a
+       round trip, logged a 400 in the console and only then showed the sentence. */
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void WritingABlankNote_SaysSoWithoutSendingARequest_Pure(string noteText)
+    {
+        var run = AdminServerEditBehaviourTests.Run("pure", JsonSerializer.Serialize(new
+        {
+            fn = "writeNote",
+            args = new object[] { new { server_id = "", metric_name = "", note_text = noteText, days = "90" } },
+        }));
+        var result = run.GetProperty("result");
+
+        Assert.False(result.GetProperty("ok").GetBoolean());
+        Assert.Equal("The note was not written. Enter the note's text.", result.GetProperty("message").GetString());
+        Assert.Equal(0, run.GetProperty("writes").GetInt32());
+    }
+
+    /* An empty Add route says what the service says (a family or an exact metric name is needed) before anything is sent: the save
+       shows an error from routePayload without a request. A route with a match builds its body. */
+    [Fact]
+    public void AddingARouteWithNoMatch_IsRefusedByTheFormBeforeARequest_Pure()
+    {
+        var blank = Pure("routePayload", new { id = (int?)null, match = "  ", perHour = "10", perDay = "50", lease = "30", expiry = "120", fallback = "", scope = "", level = "", resolutions = "", enabled = true });
+        var named = Pure("routePayload", new { id = (int?)null, match = "blocking", perHour = "10", perDay = "50", lease = "30", expiry = "120", fallback = "", scope = "", level = "", resolutions = "", enabled = true });
+
+        Assert.Equal("Choose a family or enter an exact metric name.", blank.GetProperty("error").GetString());
+        Assert.False(blank.TryGetProperty("payload", out _));
+        Assert.False(named.TryGetProperty("error", out _));
+        Assert.Equal("blocking", named.GetProperty("payload").GetProperty("metric_match").GetString());
+    }
+
+    /* #6928: the Routes list names the severity filter in the desktop window's words (Both when the field is missing or unknown), the editor
+       reads it back from a route and the save sends it, and a word the page does not know is sent as both. */
+    [Fact]
+    public void TheRoutesList_ShowsTheSeverityBesideTheScope_AndTheEditorRoundTripsIt_Pure()
+    {
+        var data = JsonNode.Parse("""
+            {"routes":[
+              {"route_id":1,"metric_match":"blocking","severities":"critical","enabled":true},
+              {"route_id":2,"metric_match":"performance","severities":"warning","enabled":true},
+              {"route_id":3,"metric_match":"reports","severities":"both","enabled":true},
+              {"route_id":4,"metric_match":"agent-jobs","enabled":true},
+              {"route_id":5,"metric_match":"waits","severities":"someday","enabled":true}
+            ]}
+            """);
+        var rows = Pure("routeRows", data).EnumerateArray().ToArray();
+        Assert.Equal(new[] { "Critical only", "Warning only", "Both", "Both", "Both" }, rows.Select(r => r.GetProperty("severities").GetString()));
+
+        var columns = Pure("ROUTE_COLUMNS").EnumerateArray().Select(c => c.GetProperty("key").GetString()).ToList();
+        Assert.Equal(columns.IndexOf("applies_to") + 1, columns.IndexOf("severities"));
+
+        Assert.Equal("critical", Pure("entriesFromRoute", new { route_id = 1, metric_match = "blocking", severities = "critical" }).GetProperty("severities").GetString());
+        Assert.Equal("both", Pure("entriesFromRoute", new { route_id = 1, metric_match = "blocking" }).GetProperty("severities").GetString());
+        Assert.Equal("both", Pure("entriesFromRoute", (object?)null).GetProperty("severities").GetString());
+
+        string Sent(string severities) => Pure("routePayload", new { id = (int?)null, match = "blocking", perHour = "10", perDay = "50", lease = "30", expiry = "120", fallback = "", scope = "", level = "", resolutions = "", enabled = true, severities })
+            .GetProperty("payload").GetProperty("severities").GetString()!;
+        Assert.Equal("warning", Sent("warning"));
+        Assert.Equal("critical", Sent("critical"));
+        Assert.Equal("both", Sent("both"));
+        Assert.Equal("both", Sent("someday"));
+    }
+
+    /* #6936: Edit then Save on the Routes tab sends the version the form read (expected_modified_at), because the service refuses an edit
+       without it with a 400. The test drives the page itself: it opens the editor on a stored Critical only route, picks Warning only,
+       presses Save and reads the write the page made. */
+    [Fact]
+    public void SavingAnEditedRoute_SendsTheVersionTheFormRead_AndTheChosenSeverity()
+    {
+        var writes = AdminServerEditBehaviourTests.Run("routeEdit:warning").GetProperty("writes").EnumerateArray().ToArray();
+
+        var write = Assert.Single(writes);
+        Assert.Equal("/api/notification-routes/7", write.GetProperty("url").GetString());
+        var body = write.GetProperty("body");
+        Assert.Equal("2026-01-01T00:00:00.1234567Z", body.GetProperty("expected_modified_at").GetString());
+        Assert.Equal("warning", body.GetProperty("severities").GetString());
+        Assert.Equal("blocking", body.GetProperty("metric_match").GetString());
+    }
+
     [Fact]
     public void OnlyASeatThatCanEdit_GetsTheDecideColumn_Pure()
     {

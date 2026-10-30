@@ -20,9 +20,16 @@ public partial class TagNameDialog : Window
     /// <summary>The entered name, trimmed. Only meaningful when the dialog returned true.</summary>
     public string TagName => NameBox.Text.Trim();
 
-    public TagNameDialog(string title, string prompt, string initial = "")
+    private readonly bool _allowEmpty;
+
+    /// <param name="maxLength">The longest entry (the tag dialogs' 100).</param>
+    /// <param name="allowEmpty">True when an empty entry is an answer (the Custom Views folder prompt: empty is the top level).</param>
+    public TagNameDialog(string title, string prompt, string initial = "", int maxLength = 100, bool allowEmpty = false)
     {
         InitializeComponent();
+
+        _allowEmpty = allowEmpty;
+        NameBox.MaxLength = maxLength;
 
         Title = title;
         PromptLabel.Text = prompt;
@@ -37,7 +44,7 @@ public partial class TagNameDialog : Window
 
     private void Ok_Click(object sender, RoutedEventArgs e)
     {
-        if (string.IsNullOrWhiteSpace(NameBox.Text))
+        if (!_allowEmpty && string.IsNullOrWhiteSpace(NameBox.Text))
         {
             return;
         }

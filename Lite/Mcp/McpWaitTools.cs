@@ -10,7 +10,7 @@ namespace PerformanceMonitorLite.Mcp;
 [McpServerToolType]
 public sealed class McpWaitTools
 {
-    [McpServerTool(Name = "get_wait_stats"), Description("Gets the top SQL Server wait types over a time period ending at as_of, heaviest total wait first. Bounded by limit: wait_types_returned is how many you got; truncated means the window held more. The page holds only the heaviest waits — a sum over the page is not a sum over the server. <<GUIDE>> Gets the top SQL Server wait types aggregated over a time period, heaviest total wait first. Wait stats reveal what SQL Server spends time waiting on — high signal waits indicate CPU pressure, high resource waits indicate I/O or lock contention. Use this first to identify the dominant wait category, then drill into specific tools based on the wait type. THE PAGE IS BOUNDED BY limit: wait_types_returned is how many wait types you got and truncated says the window observed more than limit — the rows you have are the heaviest, and the ones past the cap are lighter, but a sum over the page is a sum over the page rather than over the server.")]
+    [McpServerTool(Name = "get_wait_stats"), Description("Gets the top SQL Server wait types over a time period ending at as_of, heaviest total wait first. Bounded by limit: wait_types_returned is how many you got; truncated means the window held more. The page holds only the heaviest waits — a sum over the page is not a sum over the server. <<GUIDE>> Gets the top SQL Server wait types aggregated over a time period, heaviest total wait first. Wait stats reveal what SQL Server spends time waiting on — high signal waits indicate CPU pressure, high resource waits indicate I/O or lock contention. Use this first to identify the dominant wait category, then drill into specific tools based on the wait type. THE PAGE IS BOUNDED BY limit: wait_types_returned is how many wait types you got and truncated says the window observed more than limit — the rows you have are the heaviest, and the ones past the cap are lighter, but a sum over the page is a sum over the page rather than over the server. A wait is counted in sys.dm_os_wait_stats only when it ends, so a wait still in progress (a long blocking incident, for example) reads zero until it finishes. For waits happening now use get_waiting_tasks or get_current_waits_trend.")]
     public static async Task<string> GetWaitStats(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -35,7 +35,7 @@ public sealed class McpWaitTools
             var rows = await dataService.GetWaitStatsAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd, limit: limit + 1);
             if (rows.Count == 0)
             {
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "wait_stats")
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "wait_stats", awsRdsKind: AwsRdsKind.None)
                     ?? McpHelpers.Status("unavailable", "No wait stats data available for the specified time range.");
             }
 
@@ -111,7 +111,7 @@ public sealed class McpWaitTools
                     wants somebody to look at collection, and widening will never fill it. Same words as
                     Darling's twin.
                 */
-                var gated = await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "wait_stats");
+                var gated = await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "wait_stats", awsRdsKind: AwsRdsKind.None);
                 if (gated != null)
                 {
                     return gated;
@@ -139,7 +139,7 @@ public sealed class McpWaitTools
         }
     }
 
-    [McpServerTool(Name = "get_wait_trend"), Description("Gets one wait type's wait time per second over time, in time buckets. Use get_wait_types first to discover available wait types." + BaselineDiscontinuities.DescriptionSentence)]
+    [McpServerTool(Name = "get_wait_trend"), Description("Gets one wait type's wait time per second over time, in time buckets. Use get_wait_types first to discover available wait types. A wait is counted in sys.dm_os_wait_stats only when it ends, so a wait still in progress (a long blocking incident, for example) reads zero until it finishes. For waits happening now use get_waiting_tasks or get_current_waits_trend." + BaselineDiscontinuities.DescriptionSentence)]
     public static async Task<string> GetWaitTrend(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -170,7 +170,7 @@ public sealed class McpWaitTools
                    the miss path, so either order keeps the property that matters — but a permanently gated
                    engine takes this branch on every call, forever, and the probe below could never tell it
                    anything. Asking first makes that case one query instead of two. */
-                var gated = await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "wait_stats");
+                var gated = await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "wait_stats", awsRdsKind: AwsRdsKind.None);
                 if (gated != null)
                 {
                     return gated;
@@ -246,7 +246,7 @@ public sealed class McpWaitTools
                 /* #5244: a filtered miss still asks whether the collector ever ran first (never collected stays
                    not_collected), and only then says the CHOSEN database had none, in Darling's words: it is not a
                    verdict on the databases nobody read. */
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "waiting_tasks")
+                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "waiting_tasks", awsRdsKind: AwsRdsKind.None)
                     ?? McpHelpers.Status("empty",
                         database == null
                             ? "No waiting tasks captured in the specified time range."

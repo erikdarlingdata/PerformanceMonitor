@@ -57,6 +57,10 @@ namespace PerformanceMonitor.Collectors;
 /// (<see cref="AllItemsFailed"/>) surfaces the ORIGINAL type and stack for classification — a SqlException
 /// still classifies PERMISSIONS on its number, a TimeoutException still reads as a timeout. Null when
 /// nothing failed.</param>
+/// <param name="StoppedAfter">The last item the loop started when the pass budget (<see cref="PassBudget"/>) ended it
+/// before the list was done. Null when the loop covered every item. The host keeps it and hands it to the next
+/// pass's <see cref="PassBudget.ResumeOrder"/>.</param>
+/// <param name="Total">The item list's count, so the stop note can say how many were left.</param>
 public readonly record struct EnumeratedRunResult(
     int Rows,
     long SqlMs,
@@ -64,7 +68,9 @@ public readonly record struct EnumeratedRunResult(
     int Attempted = 0,
     int Failed = 0,
     IReadOnlyList<string>? FailedItems = null,
-    Exception? FirstError = null)
+    Exception? FirstError = null,
+    string? StoppedAfter = null,
+    int Total = 0)
 {
     /// <summary>
     /// True when the loop reached at least one item and EVERY item it reached faulted — the run stored
@@ -203,6 +209,13 @@ public sealed record ProbeFailureOutcome(
 public sealed class CycleProbeFailures
 {
     private readonly List<EnumerationProbeFailure> _failures = new();
+    private readonly bool _awsRds;
+
+    /// <param name="awsRds">True for an Amazon RDS target, so a no-access sentence names the CREATE USER that fixes it (#6889).</param>
+    public CycleProbeFailures(bool awsRds = false)
+    {
+        _awsRds = awsRds;
+    }
 
     /// <summary>Every failure this cycle's databases reported, in the order they were read.</summary>
     public IReadOnlyList<EnumerationProbeFailure> Failures => _failures;
@@ -212,7 +225,7 @@ public sealed class CycleProbeFailures
     /// both other channels use, so its wording cannot drift from theirs. Null when nothing failed —
     /// identical to the pre-#1875 behavior, where this path never set a note at all.
     /// </summary>
-    public string? Note => EnumeratedCollectorDriver.BuildNote(enumerationWasEmpty: false, _failures.Count);
+    public string? Note => EnumeratedCollectorDriver.BuildNote(enumerationWasEmpty: false, _failures, _awsRds);
 
     /// <summary>
     /// Folds one database's read into the cycle. The outcome's own note is discarded on purpose (see the
@@ -584,7 +597,7 @@ public static class EnumeratedCollectorDriver
     /// </para>
     /// </summary>
     /// <param name="reader">An open reader positioned on the enumeration's first result set.</param>
-    public static async Task<EnumerationOutcome> ReadEnumerationAsync(DbDataReader reader, CancellationToken cancellationToken)
+    public static async Task<EnumerationOutcome> ReadEnumerationAsync(DbDataReader reader, CancellationToken cancellationToken, bool awsRds = false)
     {
         ArgumentNullException.ThrowIfNull(reader);
 
@@ -595,7 +608,7 @@ public static class EnumeratedCollectorDriver
         }
 
         var probeFailures = await ReadProbeFailuresAsync(reader, cancellationToken);
-        return new EnumerationOutcome(items, probeFailures, BuildNote(items.Count == 0, probeFailures.Count));
+        return new EnumerationOutcome(items, probeFailures, BuildNote(items.Count == 0, probeFailures, awsRds));
     }
 
     /// <summary>
@@ -626,7 +639,8 @@ public static class EnumeratedCollectorDriver
     /// <param name="reader">The payload reader, already drained by the definition's own read.</param>
     public static async Task<ProbeFailureOutcome> ReadPayloadProbeFailuresAsync(
         DbDataReader reader,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool awsRds = false)
     {
         ArgumentNullException.ThrowIfNull(reader);
 
@@ -651,7 +665,7 @@ public static class EnumeratedCollectorDriver
 
         /* enumerationWasEmpty: false — a payload collector has no enumeration whose emptiness could be
            reported, and its own empty-payload case is already visible as rows_collected = 0. */
-        return new ProbeFailureOutcome(failures, BuildNote(enumerationWasEmpty: false, failures.Count));
+        return new ProbeFailureOutcome(failures, BuildNote(enumerationWasEmpty: false, failures, awsRds));
     }
 
     /// <summary>
@@ -660,6 +674,18 @@ public static class EnumeratedCollectorDriver
     /// ordinary path. The single place either note text is built, so the two hosts write the same string
     /// and an operator can grep for one wording.
     /// </summary>
+    public static string? BuildNote(bool enumerationWasEmpty, IReadOnlyList<EnumerationProbeFailure> probeFailures, bool awsRds = false)
+    {
+        ArgumentNullException.ThrowIfNull(probeFailures);
+
+        /* #6889: the rows that say "the login has no user in this database" are not failures to probe; they get their
+           own sentence, naming the databases, and the generic count covers only the rest. */
+        var (noAccess, _) = NoDatabaseAccessNote.Partition(probeFailures);
+        var generic = BuildNote(enumerationWasEmpty, probeFailures.Count - noAccess.Count);
+        return MergeNotes(generic, NoDatabaseAccessNote.Sentence(noAccess, awsRds));
+    }
+
+    /// <summary>The count-only form of <see cref="BuildNote(bool, IReadOnlyList{EnumerationProbeFailure}, bool)"/>.</summary>
     public static string? BuildNote(bool enumerationWasEmpty, int probeFailureCount)
     {
         var probeNote = probeFailureCount > 0
@@ -814,6 +840,11 @@ public static class EnumeratedCollectorDriver
     /// the WRITE is deliberately outside the budget, because abandoning a flush that is already underway
     /// would trade a slow cycle for a partially-written one.
     /// </param>
+    /// <param name="passBudget">
+    /// The whole pass's ceiling (#6875), from <c>ICollectorDefinition.PassWallClockBudget</c>. Null leaves the loop
+    /// as it was. Once spent, no further item starts and <see cref="EnumeratedRunResult.StoppedAfter"/> names the
+    /// last one started.
+    /// </param>
     public static async Task<EnumeratedRunResult> RunAsync<TRow>(
         IReadOnlyList<string> items,
         Func<string, CancellationToken, Task>? perItemWatermark,
@@ -822,9 +853,12 @@ public static class EnumeratedCollectorDriver
         Action<string, int, long, long> onItemComplete,
         Action<string, Exception> onItemError,
         CancellationToken cancellationToken,
-        TimeSpan? perItemBudget = null)
+        TimeSpan? perItemBudget = null,
+        PassBudget? passBudget = null)
     {
         var totalRows = 0;
+        string? stoppedAfter = null;
+        string? lastStarted = null;
         long sqlMs = 0;
         long storageMs = 0;
 
@@ -843,6 +877,18 @@ public static class EnumeratedCollectorDriver
         foreach (var item in items)
         {
             cancellationToken.ThrowIfCancellationRequested();
+
+            /* #6875: the pass budget, checked before an item STARTS and never inside one. The first item always
+               runs (attempted is still 0), so a budget shorter than one database's read still moves the rotation
+               on. Items from here on are not read and write nothing, so a collector that stores a per-database
+               marker stores none for them. */
+            if (attempted > 0 && passBudget is { Spent: true })
+            {
+                stoppedAfter = lastStarted;
+                break;
+            }
+
+            lastStarted = item;
             attempted++;
 
             List<TRow>? batch = null;
@@ -939,7 +985,7 @@ public static class EnumeratedCollectorDriver
             onItemComplete(item, batch.Count, itemSqlMs, itemStorageMs);
         }
 
-        return new EnumeratedRunResult(totalRows, sqlMs, storageMs, attempted, failed, failedItems, firstError);
+        return new EnumeratedRunResult(totalRows, sqlMs, storageMs, attempted, failed, failedItems, firstError, stoppedAfter, items.Count);
     }
 
     /// <summary>

@@ -107,8 +107,8 @@ public sealed class CustomAlertTeardownLiveTests
         var ct = TestContext.Current.CancellationToken;
         await using var dataSource = await MigrateAndOpenAsync(connectionString, ct);
 
-        var rules = new CustomAlertRuleStore(dataSource);
-        var state = new CustomAlertStateStore(dataSource);
+        var rules = new CustomAlertRuleStore(dataSource, StorageCommandDeadlines.McpReadSeconds);
+        var state = new CustomAlertStateStore(dataSource, StorageCommandDeadlines.McpReadSeconds);
 
         var ruleName = "car_del_" + Guid.NewGuid().ToString("N");
         const int serverId = 990101;
@@ -148,8 +148,8 @@ public sealed class CustomAlertTeardownLiveTests
         var ct = TestContext.Current.CancellationToken;
         await using var dataSource = await MigrateAndOpenAsync(connectionString, ct);
 
-        var rules = new CustomAlertRuleStore(dataSource);
-        var state = new CustomAlertStateStore(dataSource);
+        var rules = new CustomAlertRuleStore(dataSource, StorageCommandDeadlines.McpReadSeconds);
+        var state = new CustomAlertStateStore(dataSource, StorageCommandDeadlines.McpReadSeconds);
 
         var ruleName = "car_dis_" + Guid.NewGuid().ToString("N");
         const int serverId = 990202;
@@ -175,7 +175,7 @@ public sealed class CustomAlertTeardownLiveTests
             var evaluator = new CustomAlertEvaluator(
                 rules, state, dataSource /* viewer: unused by reconcile */, new NoopDeliverer(),
                 isAlertMuted: null, alertsEnabled: static () => true,
-                new PgAlertHistoryStore(dataSource), defaultIntervalSeconds: 60,
+                new PgAlertHistoryStore(dataSource, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds), defaultIntervalSeconds: 60,
                 cacheTtl: TimeSpan.Zero /* force a fresh rule read */, NullLogger.Instance);
 
             await evaluator.ReconcileStateAsync(monitored, ct);

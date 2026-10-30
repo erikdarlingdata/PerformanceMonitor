@@ -97,6 +97,10 @@ public class StoreLogClassifierTests
         /* shared_memory_reservation_retry — the benign Windows fork-emulation artifact. */
         "2026-09-05 14:04:10.700 UTC [1188] LOG:  could not reserve shared memory region (addr=0000000002130000) for child 000000000000047C: error code 487",
 
+        /* compression_ratio_warning (#6647) - a tiny chunk that compressed to a larger size, with its continuation lines. */
+        "2026-09-05 14:04:15.100 UTC [1190] WARNING:  poor compression ratio detected for chunk \"_hyper_26_829_chunk\"",
+        "2026-09-05 14:04:15.100 UTC [1190] HINT:  Changing compression settings for \"dmv_blocking_snapshots\" can improve compression rate",
+
         /* ADVERSARIAL 2: the SAME benign text at ERROR severity. The exclusion is LOG-scoped and anchored at
            the start of the message, so this must NOT be excluded - it lands in the retained residue. */
         "2026-09-05 14:04:22.000 UTC [1188] ERROR:  could not reserve shared memory region while re-attaching a backend",
@@ -1158,7 +1162,7 @@ public class StoreLogClassifierTests
         Assert.True(census.EntriesRead > 0, "the fixture produced no entries at all");
         Assert.True(census.Groups.Count > 0, "the fixture produced no groups at all");
 
-        Assert.Equal(15, StoreLogClassifier.ClassNames.Count);
+        Assert.Equal(16, StoreLogClassifier.ClassNames.Count);
 
         var covered = census.Groups.Select(g => g.EventClass).ToHashSet(StringComparer.Ordinal);
         Assert.Equal(
@@ -1273,6 +1277,32 @@ public class StoreLogClassifierTests
         /* Stored under its grouping key (#3944), the entry itself kept as written. */
         Assert.Equal("could not reserve shared memory region (addr=?) for child 47C: error code ?", realGroup.MessageText);
         Assert.Contains(Message, realGroup.SampleLine!, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #6647: TimescaleDB's "poor compression ratio" WARNING (a tiny chunk compressed to a larger size) is its own class, kept with
+    /// its HINT (which names the hypertable), not <c>unclassified</c>. The same text at ERROR severity is not filed there.
+    /// </summary>
+    [Fact]
+    public void ThePoorCompressionRatioWarning_IsItsOwnRetainedClass_AndOnlyAtWarning()
+    {
+        var slab =
+            DefaultPrefix + "WARNING:  poor compression ratio detected for chunk \"_hyper_26_829_chunk\"\n"
+            + DefaultPrefix + "DETAIL:  Chunk \"_hyper_26_829_chunk\" has a poor compression ratio: 0.75. Size before compression: 49152 bytes. Size after compression: 65536 bytes\n"
+            + DefaultPrefix + "HINT:  Changing compression settings for \"dmv_blocking_snapshots\" can improve compression rate\n"
+            + DefaultPrefix + "CONTEXT:  SQL statement \"SELECT collect.compress_chunk(...)\"\n";
+
+        var census = StoreLogClassifier.Classify(slab);
+
+        Assert.Equal(1, census.EntriesRead);
+        Assert.Equal(3, census.ContinuationLines);
+        var group = Assert.Single(census.Groups);
+        Assert.Equal("compression_ratio_warning", group.EventClass);
+        Assert.True(StoreLogClassifier.IsRetainedClass(group.EventClass));
+        Assert.Contains("dmv_blocking_snapshots", group.SampleLine!, StringComparison.Ordinal);
+
+        var error = StoreLogClassifier.Classify(DefaultPrefix + "ERROR:  poor compression ratio detected for chunk \"x\"\n");
+        Assert.Equal(StoreLogClassifier.UnclassifiedClass, Assert.Single(error.Groups).EventClass);
     }
 
     /// <summary>

@@ -193,9 +193,8 @@ public sealed class CollectorRuntimeStateTests
             CollectorRuntimeState.ConfigurationProblemsDetail(["problem one", "problem two"]));
 
         /* End to end, through a real invalid config: PublishConfigurationProblems calls Validate itself and
-           wires the two helpers above into the published snapshot. A server entry is included so Validate's
-           independent "servers must contain at least one entry" problem does not also fire and join in -
-           the point here is the Postgres-section gate, alone. */
+           wires the two helpers above into the published snapshot. The only problem is the Postgres-section gate: an empty
+           server list is not a problem (#6468), and this one is isolated. */
         var state = new CollectorRuntimeState();
         state.PublishConfigurationProblems(new DarlingConfig
         {

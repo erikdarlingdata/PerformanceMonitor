@@ -120,29 +120,47 @@ public sealed class FinOpsUtilizationFiguresTests
         }
     }
 
+    /// <summary>The RIGHT_SIZED sentence for each reason a server is RIGHT_SIZED, written out as literals (not a copy of the switch). The
+    /// default Dto is a 12.5% average with a 40% peak and a buffer pool at exactly half of physical memory.</summary>
     [Theory]
-    [InlineData("RIGHT_SIZED", 0)]
-    [InlineData("RIGHT_SIZED", 5)]
-    [InlineData("OVER_PROVISIONED", 0)]
-    [InlineData("OVER_PROVISIONED", 5)]
-    [InlineData("UNDER_PROVISIONED", 0)]
-    [InlineData("NOT_APPLICABLE", 0)]
-    [InlineData("", 0)]
-    public void Explanation_EqualsTheOldSwitch_InTheCurrentCulture(string status, int edition)
+    [InlineData(0, 40, 12.5, 4000, "CPU averaged 12.5% (p95 35.0%), but one sample reached 40%, so this server is not rated over-provisioned and memory is well-utilized (buffer pool uses 50% of physical RAM). No action needed.")]
+    [InlineData(5, 40, 12.5, 4000, "CPU averaged 12.5% (p95 35.0%), but one sample reached 40%, so this database is not rated over-provisioned and memory is well-utilized (buffer pool uses 50% of the database's memory limit). No action needed.")]
+    [InlineData(0, 40, 12.5, 3999, "CPU averaged 12.5% (p95 35.0%), but one sample reached 40%, so this server is not rated over-provisioned and the buffer pool uses 50% of physical RAM. No action needed.")]
+    [InlineData(0, 70, 30.0, 800, "CPU is moderately loaded (avg 30.0%, p95 35.0%) and the buffer pool uses 10% of physical RAM. No action needed.")]
+    [InlineData(0, 70, 30.0, 6000, "CPU is moderately loaded (avg 30.0%, p95 35.0%) and memory is well-utilized (buffer pool uses 75% of physical RAM). No action needed.")]
+    public void Explanation_ForRightSized_NamesTheCauseAndTheMemoryShare(int edition, int max, double avg, int bp, string expected)
+    {
+        var dto = Dto("RIGHT_SIZED", edition, avg: (decimal)avg, max: max, bp: bp);
+        Assert.Equal(expected, FinOpsUtilizationFigures.Explanation(dto, CultureInfo.InvariantCulture));
+    }
+
+    /// <summary>The idle-average, quiet-peak RIGHT_SIZED server is held there by its measured grant utilization, and the sentence prints it.</summary>
+    [Fact]
+    public void Explanation_ForRightSized_WithAnIdleQuietServer_PrintsTheMeasuredGrantUtilization()
+    {
+        var dto = Dto("RIGHT_SIZED", avg: 5m, max: 12, p95: 8m) with { GrantUtilizationPct = 77m };
+        Assert.Equal(
+            "CPU is lightly loaded (avg 5.0%, p95 8.0%), but its memory grants peaked at 77% of their target (threshold: 50%), so this server is not rated over-provisioned and memory is well-utilized (buffer pool uses 50% of physical RAM). No action needed.",
+            FinOpsUtilizationFigures.Explanation(dto, CultureInfo.InvariantCulture));
+    }
+
+    [Theory]
+    [InlineData("OVER_PROVISIONED", 0, "CPU is lightly loaded (avg 12.5%, max 40%) and the buffer pool uses 50% of physical RAM. This server may have more resources than it needs.")]
+    [InlineData("OVER_PROVISIONED", 5, "CPU is lightly loaded (avg 12.5%, max 40%) and the buffer pool uses 50% of the database's memory limit. This database may have more resources than it needs.")]
+    [InlineData("NOT_APPLICABLE", 0, null)]
+    [InlineData("", 0, "")]
+    public void Explanation_ForTheOtherStatuses_IsTheirSentence(string status, int edition, string? expected)
     {
         var dto = Dto(status, edition, p95: 90m, waiters: 2);
-        var bpPct = dto.PhysicalMemoryMb > 0 ? (double)dto.BufferPoolMb / dto.PhysicalMemoryMb * 100.0 : 0;
-        var azure = ServerHardwareScope.HardwareIsTheHosts(dto.EngineEdition);
-        var old = dto.ProvisioningStatus switch
-        {
-            "RIGHT_SIZED" => ServerHardwareScope.RightSizedExplanation(dto.AvgCpuPct, dto.P95CpuPct, bpPct, azure),
-            "OVER_PROVISIONED" => ServerHardwareScope.OverProvisionedExplanation(dto.AvgCpuPct, dto.MaxCpuPct, bpPct, azure),
-            "UNDER_PROVISIONED" => ProvisioningVerdict.UnderProvisionedReason(
-                dto.P95CpuPct, dto.MaxGrantWaiters, dto.GrantTimeouts, dto.ForcedGrants, dto.MaxWorkersCount, dto.CurrentWorkersCount),
-            ProvisioningVerdict.NotApplicable => ProvisioningVerdict.NotApplicableExplanation,
-            _ => ""
-        };
-        Assert.Equal(old, FinOpsUtilizationFigures.Explanation(dto, CultureInfo.CurrentCulture));
+        var actual = FinOpsUtilizationFigures.Explanation(dto, CultureInfo.InvariantCulture);
+        Assert.Equal(expected ?? ProvisioningVerdict.NotApplicableExplanation, actual);
+    }
+
+    [Fact]
+    public void Explanation_ForUnderProvisioned_SaysWhyItWasFlagged()
+    {
+        var dto = Dto("UNDER_PROVISIONED", p95: 90m);
+        Assert.Contains("90", FinOpsUtilizationFigures.Explanation(dto, CultureInfo.InvariantCulture));
     }
 
     /// <summary>#6139: six samples is no verdict, and the sentence says how many the window holds and how many it needs.</summary>

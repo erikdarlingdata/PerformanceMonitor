@@ -29,16 +29,16 @@ public sealed partial class ViewerPasswordSealer(PasswordPublicKey key)
     private static readonly UTF8Encoding s_strictUtf8 = new(false, true);
 
     /// <summary>The refusal for a password that is not valid text (a lone surrogate).</summary>
-    public const string PasswordCharactersText = "The password contains characters that cannot be stored.";
+    public const string PasswordCharactersText = SmtpPasswordSealing.PasswordCharactersText;
 
     /// <summary>The refusal for a password longer than a sealed value can hold.</summary>
-    public const string PasswordTooLongText = "The password is longer than can be stored.";
+    public const string PasswordTooLongText = SmtpPasswordSealing.PasswordTooLongText;
 
     /// <summary>The key id the passwords are sealed to.</summary>
     public string KeyId => key.KeyId;
 
     /// <summary>The refusal for a connection field that is not valid text, naming the field.</summary>
-    public static string FieldCharactersText(string field) => $"The {field} contains characters that cannot be stored.";
+    public static string FieldCharactersText(string field) => SmtpPasswordSealing.FieldCharactersText(field);
 
     /// <summary>The connection settings of a row, mapped the one way every reader maps a stored row.</summary>
     public static ServerConnectionIdentity IdentityOf(MonitoredServerRow row) =>

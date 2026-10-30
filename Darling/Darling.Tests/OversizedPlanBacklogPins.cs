@@ -997,7 +997,7 @@ public sealed class OversizedPlanBacklogPins
 
            Derived from the shipped names, not retyped, so a rename fails here instead of leaving the README
            confidently wrong. */
-        var readme = ReadRepoFile("Darling", "README.md");
+        var readme = ReadRepoFile("docs", "darling", "operations.md"); // #6416: moved from Darling/README.md
 
         Assert.Contains(OversizedPlanBacklog.TableName, readme, StringComparison.Ordinal);
         Assert.Contains("query_plan_xml_bytes", readme, StringComparison.Ordinal);

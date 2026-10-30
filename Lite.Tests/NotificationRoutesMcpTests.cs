@@ -226,6 +226,47 @@ public sealed class NotificationRoutesMcpTests : IDisposable
         }
     }
 
+    /// <summary>#6403: the answer carries previous {enabled} and an undo that, run through the same tool, puts the route's flag back.</summary>
+    [Fact]
+    public async Task SetEnabled_AnswersWithThePreviousValue_AndAnUndoThatRestoresIt()
+    {
+        var ids = await SeedAsync();
+        var tags = await _data.GetServerTagsAsync();
+
+        using var off = JsonDocument.Parse(await McpAlertTools.SetRouteEnabledAsync(_store, _servers, tags, ids.Fleet, false));
+        Assert.True(off.RootElement.GetProperty("previous").GetProperty("enabled").GetBoolean());
+        var undo = off.RootElement.GetProperty("undo");
+        Assert.Equal("set_notification_route_enabled", undo.GetProperty("tool").GetString());
+        Assert.False((await _store.GetAsync(ids.Fleet))!.Enabled);
+
+        var arguments = undo.GetProperty("arguments");
+        using var back = JsonDocument.Parse(await McpAlertTools.SetRouteEnabledAsync(
+            _store, _servers, tags, arguments.GetProperty("route_id").GetInt32(), arguments.GetProperty("enabled").GetBoolean()));
+        Assert.Equal("updated", back.RootElement.GetProperty("status").GetString());
+        Assert.True((await _store.GetAsync(ids.Fleet))!.Enabled);
+
+        /* A retry that changes nothing still names the value and the call that sets it. */
+        using var same = JsonDocument.Parse(await McpAlertTools.SetRouteEnabledAsync(_store, _servers, tags, ids.Fleet, true));
+        Assert.Equal("unchanged", same.RootElement.GetProperty("status").GetString());
+        Assert.True(same.RootElement.GetProperty("previous").GetProperty("enabled").GetBoolean());
+    }
+
+    /// <summary>#6403: a delete answers with the route as it was. Lite has no tool that creates a route, so undo is null and the note says where a route is authored.</summary>
+    [Fact]
+    public async Task Delete_AnswersWithTheRouteAsItWas_AndNoUndoCall()
+    {
+        var ids = await SeedAsync();
+
+        using var gone = JsonDocument.Parse(await McpAlertTools.DeleteRouteAsync(_store, ids.Fleet, _servers, await _data.GetServerTagsAsync()));
+        Assert.Equal("deleted", gone.RootElement.GetProperty("status").GetString());
+        var previous = gone.RootElement.GetProperty("previous");
+        Assert.Equal(ids.Fleet, previous.GetProperty("route_id").GetInt32());
+        Assert.True(previous.GetProperty("enabled").GetBoolean());
+        Assert.Equal(System.Text.Json.JsonValueKind.Null, gone.RootElement.GetProperty("undo").ValueKind);
+        Assert.Contains("Settings > Manage Notification Routes", gone.RootElement.GetProperty("undo_note").GetString(), StringComparison.Ordinal);
+        Assert.Null(await _store.GetAsync(ids.Fleet));
+    }
+
     [Fact]
     public async Task Delete_RemovesTheRouteAndItsCredentials_AndNotFoundTheSecondTime()
     {
@@ -412,6 +453,8 @@ public sealed class NotificationRoutesMcpTests : IDisposable
             /* #6036: the fallback route (D8 of #5632 Phase C) is Darling-only; Lite has no request events. */
             "fallback_route_id",
             "fallback_route_name",
+            /* #6928: route severity is Darling-only. */
+            "severities",
         };
         Assert.All(darlingOnly, f => Assert.Contains(f, darling));
         Assert.Equal(darling.Except(darlingOnly).OrderBy(n => n, StringComparer.Ordinal), lite.OrderBy(n => n, StringComparer.Ordinal));

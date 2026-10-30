@@ -8,6 +8,7 @@ using System;
 using System.IO;
 using PerformanceMonitor.Darling.Service;
 using Xunit;
+using PerformanceMonitor.Darling.Storage;
 
 namespace Darling.Tests;
 
@@ -23,7 +24,8 @@ public class ComposeHourlyEdgesRunnerTests
     private static string Source(params string[] relative) =>
         File.ReadAllText(RepoFile.PathTo(relative)).Replace("\r\n", "\n");
 
-    private static string Web() => Source("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs");
+    /* #6390 S2c: the run core moved to Storage; the rules read the endpoints and the runner as one text. */
+    private static string Web() => Source("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs") + Source("Darling", "PerformanceMonitor.Darling.Storage", "Compose", "ComposePanelRunner.cs");
 
     private static string Resolver()
     {
@@ -60,11 +62,11 @@ public class ComposeHourlyEdgesRunnerTests
     public void TheGuardTimeout_IsSetBeforeTheGuard_AndRestoredAfterItAndBeforeThePanel()
     {
         var body = Resolver();
-        var set = body.IndexOf("HourlyEdgesGuardTimeoutSql(guardSeconds), McpCommandDeadlines", StringComparison.Ordinal);
+        var set = body.IndexOf("HourlyEdgesGuardTimeoutSql(guardSeconds), StorageCommandDeadlines", StringComparison.Ordinal);
 
         /* The guard's own statement: the schema-version probe (#4605) also executes a scalar, but ahead of the timeout, by design. */
         var guard = body.IndexOf("guard.ExecuteScalarAsync(", StringComparison.Ordinal);
-        var restore = body.IndexOf("HourlyEdgesRestoreTimeoutSql, McpCommandDeadlines", StringComparison.Ordinal);
+        var restore = body.IndexOf("HourlyEdgesRestoreTimeoutSql, StorageCommandDeadlines", StringComparison.Ordinal);
 
         Assert.True(set > 0 && guard > set && restore > guard, "SET LOCAL statement_timeout, then the guard, then the restore");
         Assert.DoesNotContain("SET LOCAL statement_timeout = '15s'", Web(), StringComparison.Ordinal);
@@ -86,23 +88,23 @@ public class ComposeHourlyEdgesRunnerTests
         Assert.Contains("var guardSeconds = HourlyEdgesGuardSeconds(composedSeconds);", Resolver(), StringComparison.Ordinal);
         Assert.Contains("CommandTimeout = guardSeconds + HourlyEdgesGuardClientHeadroomSeconds", Resolver(), StringComparison.Ordinal);
         Assert.Contains("$\"SET LOCAL statement_timeout = '{guardSeconds}s'\"", code, StringComparison.Ordinal);
-        Assert.Equal(15, DarlingWebEndpoints.HourlyEdgesGuardSeconds(60));
-        Assert.Equal(15, DarlingWebEndpoints.HourlyEdgesGuardSeconds(15));
-        Assert.Equal(8, DarlingWebEndpoints.HourlyEdgesGuardSeconds(8));
-        Assert.Equal(1, DarlingWebEndpoints.HourlyEdgesGuardSeconds(0));
-        Assert.Equal("SET LOCAL statement_timeout = '8s'", DarlingWebEndpoints.HourlyEdgesGuardTimeoutSql(8));
+        Assert.Equal(15, ComposePanelRunner.HourlyEdgesGuardSeconds(60));
+        Assert.Equal(15, ComposePanelRunner.HourlyEdgesGuardSeconds(15));
+        Assert.Equal(8, ComposePanelRunner.HourlyEdgesGuardSeconds(8));
+        Assert.Equal(1, ComposePanelRunner.HourlyEdgesGuardSeconds(0));
+        Assert.Equal("SET LOCAL statement_timeout = '8s'", ComposePanelRunner.HourlyEdgesGuardTimeoutSql(8));
     }
 
     [Fact]
     public void OnTheCandidatePath_TheDeadlineIsResolvedBeforeTheSnapshotOpensItsConnection()
     {
         var code = Web();
-        var core = code.IndexOf("private static async Task<ComposeRunOutcome> RunComposedPanelCoreAsync(", StringComparison.Ordinal);
+        var core = code.IndexOf("internal static async Task<ComposeRunOutcome> RunComposedPanelCoreAsync(", StringComparison.Ordinal);
         Assert.True(core > 0);
         var candidate = code.IndexOf("if (hourlyEdgesCandidate is not null)", core, StringComparison.Ordinal);
-        var resolve = code.IndexOf("candidateComposedSeconds = await McpCommandDeadlines.ResolveComposedQuerySecondsAsync(postgres, cancellationToken);", candidate, StringComparison.Ordinal);
+        var resolve = code.IndexOf("candidateComposedSeconds = await host.ResolveComposedQuerySeconds(postgres, cancellationToken);", candidate, StringComparison.Ordinal);
         var begin = code.IndexOf("await BeginHourlyEdgesSnapshotAsync(postgres, hourlyEdgesCandidate", core, StringComparison.Ordinal);
-        var panelResolve = code.IndexOf("candidateComposedSeconds ?? await McpCommandDeadlines.ResolveComposedQuerySecondsAsync(postgres, cancellationToken)", core, StringComparison.Ordinal);
+        var panelResolve = code.IndexOf("candidateComposedSeconds ?? await host.ResolveComposedQuerySeconds(postgres, cancellationToken)", core, StringComparison.Ordinal);
 
         Assert.True(candidate > core && resolve > candidate && begin > resolve, "the deadline is resolved before the snapshot begins");
         Assert.True(panelResolve > begin, "the panel uses the value already resolved, and resolves itself only without a candidate");
@@ -123,7 +125,7 @@ public class ComposeHourlyEdgesRunnerTests
         Assert.DoesNotContain("ComposeStoreOpenException", begin[firstTry..], StringComparison.Ordinal);
         Assert.DoesNotContain("catch (Exception ex) when (ex is not OperationCanceledException)", begin[..firstTry], StringComparison.Ordinal);
 
-        var core = code.IndexOf("private static async Task<ComposeRunOutcome> RunComposedPanelCoreAsync(", StringComparison.Ordinal);
+        var core = code.IndexOf("internal static async Task<ComposeRunOutcome> RunComposedPanelCoreAsync(", StringComparison.Ordinal);
         var call = code.IndexOf("await BeginHourlyEdgesSnapshotAsync(postgres, hourlyEdgesCandidate", core, StringComparison.Ordinal);
         var pg = code.IndexOf("catch (PostgresException ex)", call, StringComparison.Ordinal);
         var pgOutcome = code.IndexOf("return FromPostgresException(ex);", pg, StringComparison.Ordinal);
@@ -166,7 +168,7 @@ public class ComposeHourlyEdgesRunnerTests
     {
         var code = Web();
         var begin = code.IndexOf("BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead", StringComparison.Ordinal);
-        var readOnly = code.IndexOf("HourlyEdgesReadOnlySql, McpCommandDeadlines", begin, StringComparison.Ordinal);
+        var readOnly = code.IndexOf("HourlyEdgesReadOnlySql, StorageCommandDeadlines", begin, StringComparison.Ordinal);
         var guard = code.IndexOf("await ResolveHourlyEdgesVerdictAsync(connection, candidate", readOnly, StringComparison.Ordinal);
 
         Assert.True(begin > 0 && readOnly > begin && guard > readOnly, "transaction begins, is made read only, then the guard runs on the same connection");
@@ -195,13 +197,13 @@ public class ComposeHourlyEdgesRunnerTests
     public void AnUncoveredLedger_IsNotedQuietlyAsLedgerUncovered_AfterTheTimeoutRestore_AndBeforeThePassTest()
     {
         var body = Resolver();
-        var restore = body.IndexOf("HourlyEdgesRestoreTimeoutSql, McpCommandDeadlines", StringComparison.Ordinal);
+        var restore = body.IndexOf("HourlyEdgesRestoreTimeoutSql, StorageCommandDeadlines", StringComparison.Ordinal);
         var uncovered = body.IndexOf("if (mismatches == IntervalRollupCountGuard.UncoveredResult)", StringComparison.Ordinal);
         var pass = body.IndexOf("return mismatches == 0", StringComparison.Ordinal);
         Assert.True(restore > 0 && uncovered > restore && pass > uncovered, "restore, then the uncovered branch, then the pass test");
 
         var branch = body[uncovered..pass];
-        Assert.Contains("ReadScope.Note(ReadFallback.LedgerUncovered);", branch, StringComparison.Ordinal);
+        Assert.Contains("ComposeReadNotes.Note(ReadFallback.LedgerUncovered);", branch, StringComparison.Ordinal);
         Assert.Contains("return null;", branch, StringComparison.Ordinal);
         Assert.DoesNotContain("GateFailed", branch, StringComparison.Ordinal);
         Assert.DoesNotContain("NoteFallback", branch, StringComparison.Ordinal);
@@ -216,11 +218,11 @@ public class ComposeHourlyEdgesRunnerTests
     public void AStoreBeforeTheLedger_IsFoundByItsSchemaVersion_BeforeTheGuardRuns_WhileEveryGuardFaultStillWarns()
     {
         var body = Resolver();
-        var savepoint = body.IndexOf("HourlyEdgesSavepointSql, McpCommandDeadlines", StringComparison.Ordinal);
-        var probe = body.IndexOf("new NpgsqlCommand(QueryStoreWideSchemaVersionSql, connection) { CommandTimeout = McpCommandDeadlines.ReadSeconds }", StringComparison.Ordinal);
+        var savepoint = body.IndexOf("HourlyEdgesSavepointSql, StorageCommandDeadlines", StringComparison.Ordinal);
+        var probe = body.IndexOf("new NpgsqlCommand(QueryStoreWideSchemaVersionSql, connection) { CommandTimeout = StorageCommandDeadlines.ComposedReadSeconds }", StringComparison.Ordinal);
         var below = body.IndexOf("if (schemaVersion < QueryStatsHourLedger.RungVersion)", StringComparison.Ordinal);
-        var quiet = body.IndexOf("ReadScope.Note(ReadFallback.GateFailed);", StringComparison.Ordinal);
-        var set = body.IndexOf("HourlyEdgesGuardTimeoutSql(guardSeconds), McpCommandDeadlines", StringComparison.Ordinal);
+        var quiet = body.IndexOf("ComposeReadNotes.Note(ReadFallback.GateFailed);", StringComparison.Ordinal);
+        var set = body.IndexOf("HourlyEdgesGuardTimeoutSql(guardSeconds), StorageCommandDeadlines", StringComparison.Ordinal);
         var guardSql = body.IndexOf("var guardSql = IntervalRollupCountGuard.SqlFor(", StringComparison.Ordinal);
         Assert.True(savepoint > 0 && probe > savepoint && below > probe && quiet > below && set > quiet && guardSql > set,
             "savepoint, then the schema-version read, then the below-the-rung branch, then the guard's timeout and SQL");
@@ -240,8 +242,8 @@ public class ComposeHourlyEdgesRunnerTests
         var tail = body[catchAt..];
         Assert.DoesNotContain("UndefinedTable", body, StringComparison.Ordinal);
         Assert.DoesNotContain("PostgresException", body, StringComparison.Ordinal);
-        Assert.DoesNotContain("ReadScope.Note(ReadFallback.GateFailed);", tail, StringComparison.Ordinal);
-        var loud = tail.IndexOf("ReadScope.NoteFallback(ReadFallback.GateFailed, \"#4605 compose hourly-edges count guard\", ex);", StringComparison.Ordinal);
+        Assert.DoesNotContain("ComposeReadNotes.Note(ReadFallback.GateFailed);", tail, StringComparison.Ordinal);
+        var loud = tail.IndexOf("ComposeReadNotes.NoteFallback(ReadFallback.GateFailed, \"#4605 compose hourly-edges count guard\", ex);", StringComparison.Ordinal);
         var rollback = tail.IndexOf("HourlyEdgesRollbackToSavepointSql", StringComparison.Ordinal);
         Assert.True(loud >= 0 && rollback > loud, "any guard fault warns, then rolls back to the savepoint");
     }

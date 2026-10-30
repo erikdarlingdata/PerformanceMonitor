@@ -59,6 +59,24 @@ public sealed class ClientTimeoutAlertDetailTests
     }
 
     [Fact]
+    public void TheDetailText_NamesTheTopClientHosts_NextToTheTopApplications()
+    {
+        /* #6553: who was timing out, in the alert itself. A window without hosts lists no host block. */
+        var window = Window() with { TopHosts = new[] { new AttentionTopItem("WS-ERIK", 90), new AttentionTopItem("APP01", 12) } };
+        var context = new AlertContext();
+        foreach (var item in AlertContextBuilders.BuildClientTimeoutItems(Finding(false), window))
+        {
+            context.Details.Add(item);
+        }
+
+        var hosts = Assert.Single(context.Details, i => i.Heading.StartsWith("Top client hosts", StringComparison.Ordinal));
+        Assert.Equal(new[] { "WS-ERIK", "APP01" }, hosts.Fields.Where(f => f.Label == "Client Host").Select(f => f.Value));
+        Assert.Contains("Client Host: WS-ERIK", AlertContextBuilders.ContextToDetailText(context), StringComparison.Ordinal);
+        Assert.DoesNotContain(AlertContextBuilders.BuildClientTimeoutItems(Finding(false), Window()),
+            i => i.Heading.StartsWith("Top client hosts", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void OnlyTheTopFiveStatements_AreListed_EachWithItsSampleText()
     {
         var items = AlertContextBuilders.BuildClientTimeoutItems(Finding(false), Window(statements: 7));

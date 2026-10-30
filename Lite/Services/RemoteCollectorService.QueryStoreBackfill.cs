@@ -93,6 +93,13 @@ public partial class RemoteCollectorService
                 return;
             }
 
+            /* A server whose host this user has not confirmed is not connected to (ServerHostBindings); every connection
+               string is refused for it, so it is passed over here rather than failing a slice every tick. */
+            if (_serverManager.HostChange(server) != null)
+            {
+                continue;
+            }
+
             /* #2165: the other half of the gate, and it has to stay closed PAST an abandonment — that is
                the one outcome where the statement is genuinely still running on the monitored server and the
                tick must keep yielding to it. So the lease is HANDED to the step (holdUntilStepEnds) rather
@@ -243,6 +250,7 @@ public partial class RemoteCollectorService
             IsAzureSqlDb = status.SqlEngineEdition == 5,
             IsAzureManagedInstance = status.SqlEngineEdition == 8,
             IsAwsRds = status.IsAwsRds,
+            IsAwsRdsWebOrExpress = status.IsAwsRdsWebOrExpress,
             SqlMajorVersion = status.SqlMajorVersion,
             HasMsdbAccess = status.HasMsdbAccess,
         };

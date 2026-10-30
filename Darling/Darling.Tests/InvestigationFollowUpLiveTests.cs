@@ -37,8 +37,8 @@ public sealed class InvestigationFollowUpLiveTests
 
     private DateTime _now = DateTime.UtcNow.AddSeconds(-5);
 
-    private InvestigationAlert Alert(string family) =>
-        new(1, 7, "srv-7", family, "Blocking", _now, new[] { "key-" + family }, null, 500, 500, LeaseMinutes: 15, ExpiryMinutes: 240);
+    private InvestigationAlert Alert(string family, string metric = "Blocking") =>
+        new(1, 7, "srv-7", family, metric, _now, new[] { "key-" + family }, null, 500, 500, LeaseMinutes: 15, ExpiryMinutes: 240);
 
     private static JsonElement Root(string json) => JsonDocument.Parse(json).RootElement;
 
@@ -48,10 +48,11 @@ public sealed class InvestigationFollowUpLiveTests
         return Convert.ToString(await command.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture);
     }
 
-    /// <summary>Opens a request for <paramref name="family"/>, claims it and returns its id and claim.</summary>
-    private async Task<(Guid Id, Guid Claim)> ClaimedAsync(InvestigationRequestStore store, string family, CancellationToken ct)
+    /// <summary>Opens a request for <paramref name="family"/>, claims it and returns its id and claim. A later call with the same
+    /// <paramref name="metric"/> would join the reported request quietly (#6778), so a caller that needs several requests passes a new metric for each.</summary>
+    private async Task<(Guid Id, Guid Claim)> ClaimedAsync(InvestigationRequestStore store, string family, CancellationToken ct, string metric = "Blocking")
     {
-        var id = (await store.OpenOrJoinAsync(Alert(family), ct)).RequestId!.Value;
+        var id = (await store.OpenOrJoinAsync(Alert(family, metric), ct)).RequestId!.Value;
         return (id, (await store.ClaimAsync(id, "agent-a", ct)).ClaimId!.Value);
     }
 
@@ -93,11 +94,11 @@ public sealed class InvestigationFollowUpLiveTests
             var at = At(DateTime.UtcNow.AddDays(1));
             for (var i = 0; i < InvestigationReportFields.MaxPendingFollowUpsPerRoute; i++)
             {
-                var request = await ClaimedAsync(store, "blocking", ct);
+                var request = await ClaimedAsync(store, "blocking", ct, metric: "Blocking " + i.ToString(CultureInfo.InvariantCulture));
                 Assert.Equal("reported", Root(await SubmitAsync(store, request, at, ct)).GetProperty("status").GetString());
             }
 
-            var twentyFirst = await ClaimedAsync(store, "blocking", ct);
+            var twentyFirst = await ClaimedAsync(store, "blocking", ct, metric: "Blocking last");
             var refused = Root(await SubmitAsync(store, twentyFirst, at, ct));
             Assert.Equal("refused", refused.GetProperty("status").GetString());
             Assert.Contains("pending follow-ups", refused.GetProperty("message").GetString(), StringComparison.Ordinal);

@@ -16,6 +16,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
@@ -101,12 +102,14 @@ public sealed class QueryStoreRegressionsIntervalTableLiveTests
             ]);
         }
 
-        /* Window: query 10 regresses on a new plan and also times out once per interval; query 20 does not. */
+        /* Window: query 10 regresses on a new plan and also times out once per interval; query 20 does not.
+           #6781: 60 ms of CPU a run against the baseline's 1 ms adds 2.1 s over its 36 runs, over the 1 s floor, so the row is a cost row
+           and not only a timeouts row (at 5 ms it added 144 ms and survived on its Aborted runs alone). */
         foreach (var hour in new[] { 2, 10 })
         {
             await IntervalAsync(start.AddHours(hour), (f, k) =>
             [
-                Row(10, 102, "Regular", f, 6 * k, 5_000, 9_000),
+                Row(10, 102, "Regular", f, 6 * k, 60_000, 9_000),
                 Row(10, 102, "Aborted", f, k, 40_000, 30_000_000),
                 Row(20, 201, "Regular", f, 4 * k, 3_000, 3_000),
             ]);
@@ -123,11 +126,12 @@ public sealed class QueryStoreRegressionsIntervalTableLiveTests
         Math.Round(r.RecentCpuMs, 6), Math.Round(r.AdditionalDurationMs, 6),
         r.BaselineExecCount, r.RecentExecCount, r.BaselinePlanCount, r.RecentPlanCount, r.Severity, r.QueryTextSample, r.LastExecutionTime);
 
-    /// <summary>The old read, run as it shipped: <see cref="DarlingQueryStoreRegressionReader.QueryStoreRegressionsSql"/> over raw.</summary>
-    private static async Task<List<string>> RawReadAsync(NpgsqlConnection connection, DateTime start, DateTime end, DateTime baselineStart, CancellationToken ct)
+    /// <summary>The old read, run as it shipped: <see cref="DarlingQueryStoreRegressionReader.QueryStoreRegressionsSql"/> over raw,
+    /// or <paramref name="sql"/> when a test runs another form of the statement (the table form, at its fixed 26-hour margin).</summary>
+    private static async Task<List<string>> RawReadAsync(NpgsqlConnection connection, DateTime start, DateTime end, DateTime baselineStart, CancellationToken ct, string? sql = null)
     {
         var rows = new List<string>();
-        await using var command = new NpgsqlCommand(DarlingQueryStoreRegressionReader.QueryStoreRegressionsSql, connection);
+        await using var command = new NpgsqlCommand(sql ?? DarlingQueryStoreRegressionReader.QueryStoreRegressionsSql, connection);
         AddParameters(command, start, end, baselineStart);
         await using var reader = await command.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
@@ -154,6 +158,12 @@ public sealed class QueryStoreRegressionsIntervalTableLiveTests
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Date, Value = plan.RunDays });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = plan.LowEnd });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = plan.HighStart });
+        command.Parameters.Add(DatabaseFilter.All.ExcludeParameter());
+        /* #6750: the start of the hours held, the row filters' start here. */
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = baselineStart });
+        /* #6750: the failure arm's row-filter start and its hours held, the same on this one-tier read. */
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = baselineStart });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = baselineStart });
     }
 
     /// <summary>
@@ -178,6 +188,12 @@ public sealed class QueryStoreRegressionsIntervalTableLiveTests
                 command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Date, Value = plan.RunDays });
                 command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = plan.LowEnd });
                 command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = plan.HighStart });
+                command.Parameters.Add(DatabaseFilter.All.ExcludeParameter());
+                /* #6750: the start of the hours held, the row filters' start here. */
+                command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = baselineStart });
+                /* #6750: the failure arm's row-filter start and its hours held, the same on this one-tier read. */
+                command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = baselineStart });
+                command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = baselineStart });
             }
             else
             {
@@ -281,6 +297,8 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
         /* Latest snapshots only, Regular executions only (#5506: the daily totals hold no other kind): baseline 3 x 30, window 2 x 18. */
         Assert.Equal(90, row.BaselineExecCount);
         Assert.Equal(36, row.RecentExecCount);
+        /* #6781: the row clears the cost test's added-CPU floor, so the equality below compares a cost row on every side. */
+        Assert.True((row.RecentCpuMs - row.BaselineCpuMs) * row.RecentExecCount >= QueryStoreRegressionRules.CostMinAddedCpuMs, Describe(row));
 
         var served = await DarlingQueryStoreRegressionReader.ReadQueryStoreRegressionsAsync(
             postgres, ServerId, start, end, DatabaseFilter.One(Db), 50, baselineStart, ct);
@@ -291,7 +309,7 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
         /* The viewer's grid takes the same route to the same rows. */
         await using (var viewer = new ViewerDataService(scratch.ConnectionString))
         {
-            var viewerTable = await viewer.TryGetQueryStoreRegressionsFromTableAsync(ServerId, start, end, null, [Db], baselineStart, ct);
+            var viewerTable = await viewer.TryGetQueryStoreRegressionsFromTableAsync(ServerId, start, end, null, [Db], baselineStart, null, ct);
             Assert.NotNull(viewerTable);
             Assert.Equal(raw, viewerTable.Select(Describe).ToList());
             var viewerRows = await viewer.GetQueryStoreRegressionsAsync(ServerId, start, end, [Db], cancellationToken: ct);
@@ -320,10 +338,181 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
         Assert.Equal("raw", fallback.Source);
         await using (var viewer = new ViewerDataService(scratch.ConnectionString))
         {
-            Assert.Null(await viewer.TryGetQueryStoreRegressionsFromTableAsync(ServerId, start, end, null, [Db], baselineStart, ct));
+            Assert.Null(await viewer.TryGetQueryStoreRegressionsFromTableAsync(ServerId, start, end, null, [Db], baselineStart, null, ct));
             var viewerRows = await viewer.GetQueryStoreRegressionsAsync(ServerId, start, end, [Db], cancellationToken: ct);
             Assert.Equal(raw, viewerRows.Select(Describe).ToList());
         }
+    }
+
+    /// <summary>
+    /// #5506 step 2: one server with the seeded intervals of <see cref="SeedAsync"/>, the table's gate satisfied, and a health
+    /// capture every six hours at <paramref name="intervalMinutes"/> (none when null), so the measured margin is three hours for
+    /// 60-minute intervals and the fixed 26 hours with no capture.
+    /// </summary>
+    private sealed class MarginRig : IAsyncDisposable
+    {
+        public required ScratchPostgres Scratch { get; init; }
+        public required NpgsqlConnection Connection { get; init; }
+        public required NpgsqlDataSource Postgres { get; init; }
+        public required DateTime Start { get; init; }
+        public required DateTime End { get; init; }
+        public required DateTime BaselineStart { get; init; }
+
+        public async ValueTask DisposeAsync()
+        {
+            await Postgres.DisposeAsync();
+            await Connection.DisposeAsync();
+            await Scratch.DisposeAsync();
+        }
+    }
+
+    private static async Task<MarginRig> CreateMarginRigAsync(string baseCs, int? intervalMinutes, CancellationToken ct)
+    {
+        var scratch = await ScratchPostgres.CreateAsync(baseCs, ct);
+        var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+        await QueryStoreIntervalWideBelowFloorLiveTests.ExecAsync(connection, @"
+INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_major_version, created_date, modified_date)
+VALUES (@server_id, 'qsreg', 'qsreg', TRUE, 16, now(), now())
+ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
+
+        var start = LiveClock.Now().AddHours(-24);
+        start = start.AddTicks(-(start.Ticks % TimeSpan.TicksPerSecond));
+        var baselineStart = start.AddDays(-DarlingQueryStoreRegressionReader.BaselineLookbackDays);
+        await SeedAsync(postgres, baselineStart, start, ct);
+        var end = LiveClock.Now();
+        var realNow = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+        end = end > realNow ? end : realNow;
+        end = end.AddTicks(-(end.Ticks % TimeSpan.TicksPerSecond)).AddSeconds(1);
+        await QueryStoreIntervalWideBelowFloorLiveTests.SeedQueryStoreLogAsync(connection, ServerId, baselineStart.AddDays(-5), end, null, null, ct);
+        await QueryStoreIntervalWideBelowFloorLiveTests.ForceFilledSinceAsync(connection, baselineStart.AddDays(-3), ct);
+
+        if (intervalMinutes is int minutes)
+        {
+            /* The oldest capture is five days before the baseline starts, so it is older than the day the margin lookup needs. */
+            await using var health = new NpgsqlCommand("""
+                INSERT INTO collect.query_store_health (config_id, capture_time, server_id, server_name, database_name, interval_length_minutes)
+                SELECT row_number() OVER (), c.c, $1, 'qsreg', $2, $3
+                FROM generate_series($4, $5, interval '6 hours') AS c(c)
+                """, connection);
+            health.Parameters.Add(new NpgsqlParameter<int> { TypedValue = ServerId });
+            health.Parameters.Add(new NpgsqlParameter<string> { TypedValue = Db });
+            health.Parameters.Add(new NpgsqlParameter<int> { TypedValue = minutes });
+            health.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(baselineStart.AddDays(-5), DateTimeKind.Unspecified) });
+            health.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(end, DateTimeKind.Unspecified) });
+            await health.ExecuteNonQueryAsync(ct);
+        }
+
+        return new MarginRig { Scratch = scratch, Connection = connection, Postgres = postgres, Start = start, End = end, BaselineStart = baselineStart };
+    }
+
+    /// <summary>
+    /// Two intervals that break the invariant a 60-minute server keeps (every row's first execution lies within the interval length
+    /// plus the catch-up of its collection), so only the shorter margin can miss them. Both are query 10's. The baseline one began
+    /// ten hours before the baseline starts and ran into it. The recent one began ten hours before the window and ran into it.
+    /// The 26-hour margin reads both, the three-hour margin reads neither.
+    /// </summary>
+    private static async Task SeedOutOfMarginIntervalsAsync(NpgsqlConnection connection, MarginRig rig, CancellationToken ct)
+    {
+        const string columns = """
+            (collection_time, server_id, database_name, query_id, plan_id, execution_type_desc, first_execution_time,
+             last_execution_time, query_hash, query_plan_hash, execution_count, avg_duration_us, avg_cpu_time_us,
+             avg_logical_io_reads, avg_logical_io_writes, avg_physical_io_reads, avg_rowcount, runtime_stats_interval_id, interval_start_time_utc)
+            """;
+        await using var insert = new NpgsqlCommand($"""
+            INSERT INTO collect.query_store_interval_wide {columns}
+            VALUES ($1, $2, $3, 10, 101, 'Regular', $4, $5, '0x0000000A', '0x00000065', 50, 2000, 1000, 100, 0, 0, 1, 7001, $4),
+                   ($6, $2, $3, 10, 102, 'Regular', $7, $8, '0x0000000A', '0x00000066', 100, 9000, 5000, 500, 0, 0, 1, 7002, $7)
+            """, connection);
+        DateTime U(DateTime d) => DateTime.SpecifyKind(d, DateTimeKind.Unspecified);
+        insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = U(rig.BaselineStart.AddMinutes(30)) });
+        insert.Parameters.Add(new NpgsqlParameter<int> { TypedValue = ServerId });
+        insert.Parameters.Add(new NpgsqlParameter<string> { TypedValue = Db });
+        insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = U(rig.BaselineStart.AddHours(-10)) });
+        insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = U(rig.BaselineStart.AddMinutes(10)) });
+        insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = U(rig.Start.AddHours(1)) });
+        insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = U(rig.Start.AddHours(-10)) });
+        insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = U(rig.Start.AddMinutes(5)) });
+        await insert.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>
+    /// #5506 step 2: on a server whose measured interval is 60 minutes the table read uses the three-hour margin
+    /// (<see cref="QueryStoreIntervalWide.ResolveEdgeMarginAsync"/>), as the aborts and top reads do, and returns the rows the
+    /// fixed 26-hour margin returns on a store that keeps the invariant. Two seeded intervals that break it prove the narrower
+    /// statement ran: the fixed statement counts them, the MCP read and the viewer's grid do not. Without that proof the
+    /// equality would hold for either margin.
+    /// </summary>
+    [Fact]
+    public async Task AServerWithAMeasuredMargin_ReadsTheNarrowFloor_AndReturnsTheFixedMarginsRows()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #5506 live tests.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var rig = await CreateMarginRigAsync(baseCs!, 60, ct);
+        Assert.Equal(TimeSpan.FromHours(3),
+            await QueryStoreIntervalWide.ResolveEdgeMarginAsync(rig.Connection, ServerId, rig.BaselineStart, rig.End, 60, ct));
+
+        /* The invariant holds: the narrow read and the 26-hour statement agree, and there is a regression to agree on. */
+        var fixedBefore = await RawReadAsync(rig.Connection, rig.Start, rig.End, rig.BaselineStart, ct, DarlingQueryStoreRegressionReader.QueryStoreRegressionsTableSql);
+        Assert.Single(fixedBefore);
+        var narrowBefore = await DarlingQueryStoreRegressionReader.ReadQueryStoreRegressionsAsync(
+            rig.Postgres, ServerId, rig.Start, rig.End, DatabaseFilter.One(Db), 50, rig.BaselineStart, ct);
+        Assert.Equal("interval_table", narrowBefore.Source);
+        Assert.Equal(fixedBefore, narrowBefore.Rows.Select(Describe).ToList());
+        /* #6781: the seeded row clears the cost test's added-CPU floor on its own (the later reads add to its runs, never take away). */
+        var seeded = Assert.Single(narrowBefore.Rows);
+        Assert.True((seeded.RecentCpuMs - seeded.BaselineCpuMs) * seeded.RecentExecCount >= QueryStoreRegressionRules.CostMinAddedCpuMs, Describe(seeded));
+
+        /* Two intervals the 26-hour margin admits and the three-hour margin drops. */
+        await SeedOutOfMarginIntervalsAsync(rig.Connection, rig, ct);
+        var fixedAfter = await RawReadAsync(rig.Connection, rig.Start, rig.End, rig.BaselineStart, ct, DarlingQueryStoreRegressionReader.QueryStoreRegressionsTableSql);
+        Assert.NotEqual(fixedBefore, fixedAfter);
+        Assert.Contains("|140|136|", Assert.Single(fixedAfter), StringComparison.Ordinal);
+
+        var served = await DarlingQueryStoreRegressionReader.ReadQueryStoreRegressionsAsync(
+            rig.Postgres, ServerId, rig.Start, rig.End, DatabaseFilter.One(Db), 50, rig.BaselineStart, ct);
+        Assert.Equal("interval_table", served.Source);
+        Assert.Equal(fixedBefore, served.Rows.Select(Describe).ToList());
+
+        await using var viewer = new ViewerDataService(rig.Scratch.ConnectionString);
+        var viewerTable = await viewer.TryGetQueryStoreRegressionsFromTableAsync(ServerId, rig.Start, rig.End, null, [Db], rig.BaselineStart, null, ct);
+        Assert.NotNull(viewerTable);
+        Assert.Equal(fixedBefore, viewerTable.Select(Describe).ToList());
+        var viewerRows = await viewer.GetQueryStoreRegressionsAsync(ServerId, rig.Start, rig.End, [Db], cancellationToken: ct);
+        Assert.Equal(fixedBefore, viewerRows.Select(Describe).ToList());
+    }
+
+    /// <summary>
+    /// #5506 step 2: a server with no usable measurement (no health capture) keeps the fixed 26-hour margin, so the same two
+    /// intervals ARE counted, by the MCP read and by the viewer's grid.
+    /// </summary>
+    [Fact]
+    public async Task AServerWithNoMeasurement_KeepsTheFixedMargin()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #5506 live tests.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var rig = await CreateMarginRigAsync(baseCs!, null, ct);
+        Assert.Equal(QueryStoreIntervalWide.PurgeEdgeMargin,
+            await QueryStoreIntervalWide.ResolveEdgeMarginAsync(rig.Connection, ServerId, rig.BaselineStart, rig.End, 60, ct));
+
+        await SeedOutOfMarginIntervalsAsync(rig.Connection, rig, ct);
+        var fixedRows = await RawReadAsync(rig.Connection, rig.Start, rig.End, rig.BaselineStart, ct, DarlingQueryStoreRegressionReader.QueryStoreRegressionsTableSql);
+        Assert.Contains("|140|136|", Assert.Single(fixedRows), StringComparison.Ordinal);
+
+        var served = await DarlingQueryStoreRegressionReader.ReadQueryStoreRegressionsAsync(
+            rig.Postgres, ServerId, rig.Start, rig.End, DatabaseFilter.One(Db), 50, rig.BaselineStart, ct);
+        Assert.Equal("interval_table", served.Source);
+        Assert.Equal(fixedRows, served.Rows.Select(Describe).ToList());
+
+        await using var viewer = new ViewerDataService(rig.Scratch.ConnectionString);
+        var viewerRows = await viewer.GetQueryStoreRegressionsAsync(ServerId, rig.Start, rig.End, [Db], cancellationToken: ct);
+        Assert.Equal(fixedRows, viewerRows.Select(Describe).ToList());
     }
 
     /// <summary>

@@ -178,6 +178,89 @@ public sealed class AgentChangeToolUndoLiveTests
         });
     }
 
+    /// <summary>#6403: the Level 2 answer of set_mute_rule_enabled carries previous and an undo that, run through the writes surface, turns the rule back on.</summary>
+    [Fact]
+    public async Task TheLevel2SetMuteRuleEnabledAnswer_CarriesThePreviousValue_AndAnUndoThatRestoresIt()
+    {
+        await RunAsync(async c =>
+        {
+            var id = (string)Parse(await CreateMute(c))["mute_rule"]!["id"]!;
+            var answer = Parse(await DarlingMcpAlertTools.SetMuteRuleEnabled(c.Source, id, false, c.Arg, AgentSeat));
+            Assert.Equal("updated", (string?)answer["status"]);
+            Assert.True((bool)answer["previous"]!["enabled"]!);
+            Assert.Equal("set_mute_rule_enabled", (string?)answer["undo"]!["tool"]);
+
+            var arguments = answer["undo"]!["arguments"]!;
+            await DarlingMcpAlertTools.SetMuteRuleEnabled(c.Source, (string)arguments["rule_id"]!, (bool)arguments["enabled"]!);
+            Assert.Equal("True", await ScalarAsync(c, $"SELECT enabled FROM config.config_mute_rules WHERE id = '{id}'"));
+        });
+    }
+
+    /// <summary>#6403: the Level 2 answer of create_mute_rule carries previous null and an undo that, run through the writes surface, deletes the rule.</summary>
+    [Fact]
+    public async Task TheLevel2CreateMuteRuleAnswer_CarriesAnUndoThatDeletesTheRule()
+    {
+        await RunAsync(async c =>
+        {
+            var answer = Parse(await CreateMute(c));
+            Assert.Equal("created", (string?)answer["status"]);
+            Assert.Null(answer["previous"]);
+            Assert.Equal("delete_mute_rule", (string?)answer["undo"]!["tool"]);
+            Assert.Equal("1", await ScalarAsync(c, "SELECT count(*) FROM config.config_mute_rules"));
+
+            var arguments = answer["undo"]!["arguments"]!;
+            Assert.Equal("deleted", (string?)Parse(await DarlingMcpAlertTools.DeleteMuteRule(c.Source, (string)arguments["rule_id"]!))["status"]);
+            Assert.Equal("0", await ScalarAsync(c, "SELECT count(*) FROM config.config_mute_rules"));
+        });
+    }
+
+    /// <summary>#6403: the Level 2 answer of update_mute_rule carries the sent fields as they were and an undo that puts them back.</summary>
+    [Fact]
+    public async Task TheLevel2UpdateMuteRuleAnswer_CarriesThePreviousFields_AndAnUndoThatRestoresThem()
+    {
+        await RunAsync(async c =>
+        {
+            const string read = "SELECT reason || '|' || enabled || '|' || coalesce(database_pattern, '-') FROM config.config_mute_rules WHERE id = '{0}'";
+            var id = (string)Parse(await CreateMute(c))["mute_rule"]!["id"]!;
+            var before = await ScalarAsync(c, string.Format(CultureInfo.InvariantCulture, read, id));
+
+            var answer = Parse(await DarlingMcpAlertTools.UpdateMuteRule(c.Source, id, "{\"reason\":\"agent edit\",\"database_pattern\":\"shop\"}", c.Arg, AgentSeat));
+            Assert.Equal("updated", (string?)answer["status"]);
+            Assert.StartsWith("known batch", (string?)answer["previous"]!["reason"], StringComparison.Ordinal);
+            Assert.Equal("update_mute_rule", (string?)answer["undo"]!["tool"]);
+            Assert.NotEqual(before, await ScalarAsync(c, string.Format(CultureInfo.InvariantCulture, read, id)));
+
+            var arguments = answer["undo"]!["arguments"]!;
+            await DarlingMcpAlertTools.UpdateMuteRule(c.Source, (string)arguments["rule_id"]!, (string)arguments["changes_json"]!);
+            Assert.Equal(before, await ScalarAsync(c, string.Format(CultureInfo.InvariantCulture, read, id)));
+        });
+    }
+
+    /// <summary>#6403: the Level 2 answer of delete_mute_rule carries the deleted rule and an undo that creates it again.</summary>
+    [Fact]
+    public async Task TheLevel2DeleteMuteRuleAnswer_CarriesTheDeletedRule_AndAnUndoThatCreatesItAgain()
+    {
+        await RunAsync(async c =>
+        {
+            var id = (string)Parse(await CreateMute(c))["mute_rule"]!["id"]!;
+            var answer = Parse(await DarlingMcpAlertTools.DeleteMuteRule(c.Source, id, c.Arg, AgentSeat));
+            Assert.Equal("deleted", (string?)answer["status"]);
+            Assert.Equal(id, (string?)answer["previous"]!["mute_rule"]!["id"]);
+            Assert.Equal("create_mute_rule", (string?)answer["undo"]!["tool"]);
+            Assert.Equal("0", await ScalarAsync(c, "SELECT count(*) FROM config.config_mute_rules"));
+
+            var arguments = answer["undo"]!["arguments"]!.AsObject();
+            string? Text(string name) => arguments[name]?.ToString();
+            var again = Parse(await DarlingMcpAlertTools.CreateMuteRule(
+                c.Source, server_name: Text("server_name"), metric_name: Text("metric_name"), database_pattern: Text("database_pattern"),
+                query_text_pattern: Text("query_text_pattern"), wait_type_pattern: Text("wait_type_pattern"), job_name_pattern: Text("job_name_pattern"),
+                reason: Text("reason"), expires_at: Text("expires_at"), server_id: arguments["server_id"] is { } sid ? sid.GetValue<int>() : null,
+                client_app_pattern: Text("client_app_pattern"), external_source: Text("external_source"), starts_at: Text("starts_at")));
+            Assert.Equal("created", (string?)again["status"]);
+            Assert.Equal("1", await ScalarAsync(c, "SELECT count(*) FROM config.config_mute_rules WHERE reason LIKE 'known batch%' AND server_id = 7 AND metric_name = 'Blocking Detected'"));
+        });
+    }
+
     [Fact]
     public async Task AMuteTheAgentDeleted_ComesBackWithItsIdAndItsCreatedTime()
     {

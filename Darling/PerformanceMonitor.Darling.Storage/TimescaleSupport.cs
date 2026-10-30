@@ -791,9 +791,14 @@ GROUP BY server_id, bucket, collection_time
 WITH NO DATA";
 
 
-    /// <summary>Blocking AND BlockingPerMinute baseline supply -- both families share this source and both
-    /// have NO row-level filter, so one aggregate serves both. Event counts per collection re-aggregate to
-    /// either shape: Blocking sums them per hour/dow bucket, BlockingPerMinute re-buckets by minute.</summary>
+    /// <summary>Blocking AND BlockingPerMinute baseline supply -- both families share this source and the same
+    /// row-level filter, so one aggregate serves both. Both are compared with series that leave a parallel query's
+    /// self-waits out (<see cref="PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql"/>): Blocking with its current window
+    /// (<c>PgAnomalyDetector.BlockingWindowSql</c>, #6663), BlockingPerMinute with the bars drawn over its band (the Viewer's
+    /// <c>BlockingTrendSql</c> and <c>get_blocking_trend</c>, #6705). So the baseline leaves them out too (#6690): a count over
+    /// every report row would read a server's baseline high and under-flag its real blocking. Event counts per collection re-aggregate to either shape: Blocking sums them per
+    /// hour/dow bucket, BlockingPerMinute re-buckets by minute. A store that built this aggregate before #6690 is
+    /// rebuilt by <see cref="DropStaleContinuousAggregatesAsync(NpgsqlConnection, ILogger?, CancellationToken)"/>.</summary>
     public const string CreateBlockedProcessBaselineSql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.blocked_process_baseline
 WITH (timescaledb.continuous, timescaledb.materialized_only = false) AS
 SELECT
@@ -802,6 +807,7 @@ SELECT
     collection_time,
     count(*) AS event_count
 FROM collect.blocked_process_reports
+WHERE " + PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql + @"
 GROUP BY server_id, bucket, collection_time
 WITH NO DATA";
 
@@ -901,6 +907,13 @@ WITH NO DATA";
                 if (coverageOldest is not null && coverageOldest <= needFrom)
                 {
                     continue;
+                }
+
+                /* #6705: an EMPTY materialization over a raw table that holds rows is a rebuilt (or first-built)
+                   aggregate, and it is about to hold only what raw still holds. Say where that begins BEFORE the refresh. */
+                if (view == BlockedProcessBaselineView && coverageOldest is null)
+                {
+                    await TryRecordBlockedBaselineSupplyFloorAsync(connection, logger, cancellationToken);
                 }
 
                 var after = await RefreshFromAsync(connection, view, needFrom.Value, force: false, cancellationToken);
@@ -1068,6 +1081,23 @@ WITH NO DATA";
                 {
                     if (await probe.ExecuteScalarAsync(cancellationToken) is true)
                     {
+                        /* #6690: the one relation that is "present" and still wrong: a plain view built before the
+                           blocking baseline left self-waits out. A plain view has no data to lose, so it is replaced
+                           in place; a continuous aggregate is never touched here (the reshape sweep rebuilds it). */
+                        if (view == BlockedProcessBaselineView && await IsStalePlainBlockedBaselineViewAsync(connection, cancellationToken))
+                        {
+                            using var replace = new NpgsqlCommand(CreateBaselineFallbackViewSql(view, createSql), connection)
+                            {
+                                CommandTimeout = SetupTimeoutSeconds,
+                            };
+                            await replace.ExecuteNonQueryAsync(cancellationToken);
+                            filled++;
+
+                            logger?.LogInformation(
+                                "Baseline relation {View} was a plain view that still counted blocking self-waits (#6690) -- replaced it with the filtered select.",
+                                view);
+                        }
+
                         continue;
                     }
                 }
@@ -1092,6 +1122,126 @@ WITH NO DATA";
         }
 
         return filled;
+    }
+
+    /// <summary>
+    /// #6690: is <c>collect.blocked_process_baseline</c> a PLAIN view (not a continuous aggregate) whose select does
+    /// not carry the self-wait filter? <see cref="ResolveMaterializationAsync"/> is null for a plain view and for a
+    /// store without the extension, which is what separates it from an aggregate (also a <c>relkind='v'</c> view);
+    /// the filter is recognised by its <c>blocking_spid</c> column, which the pre-#6690 select never named.
+    /// </summary>
+    private static async Task<bool> IsStalePlainBlockedBaselineViewAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        if (await ResolveMaterializationAsync(connection, BlockedProcessBaselineView, cancellationToken) is not null)
+        {
+            return false;
+        }
+
+        using var probe = new NpgsqlCommand(
+            $"SELECT COALESCE(position('blocking_spid' IN pg_get_viewdef('collect.{BlockedProcessBaselineView}'::regclass)) = 0, false) FROM pg_class WHERE oid = 'collect.{BlockedProcessBaselineView}'::regclass AND relkind = 'v'",
+            connection) { CommandTimeout = SetupTimeoutSeconds };
+        return await probe.ExecuteScalarAsync(cancellationToken) is true;
+    }
+
+    /// <summary>
+    /// #6705 (the #3590 trap): the prefix of the view comment that records where the Blocking baseline's EVENT supply begins.
+    /// <see cref="PgBaselineProvider"/>'s event arm counts a <c>collection_log</c> run with no event as a measured zero, and that
+    /// log is kept twice the base, so a day the rebuilt <c>blocked_process_baseline</c> cannot back would read as a quiet day, not a
+    /// missing one. The comment is the floor: the instant the rebuild's raw supply begins (see
+    /// <see cref="RecordBlockedBaselineSupplyFloorAsync"/>). No migration: the service owns the view, and a rebuild
+    /// (<c>DROP ... CASCADE</c>) clears the comment with the view.
+    /// </summary>
+    public const string BlockedBaselineSupplyFloorPrefix = "supply_floor_utc=";
+
+    private const string SupplyFloorFormat = "yyyy-MM-dd'T'HH:mm:ss";
+
+    /// <summary>The view comment and the fleet <c>blocked_process_report</c> retention in force, in one row. A view that does not exist reads NULL.</summary>
+    private static readonly string BlockedBaselineSupplyFloorProbeSql =
+        $"SELECT obj_description(to_regclass('collect.{BlockedProcessBaselineView}'), 'pg_class'), "
+        + DarlingRetentionHorizons.FleetRetentionDaysSql("blocked_process_report");
+
+    /// <summary>The floor a view comment records; null for an absent comment or one that is not a floor.</summary>
+    public static DateTime? ParseBlockedBaselineSupplyFloor(string? comment)
+        => comment is not null
+            && comment.StartsWith(BlockedBaselineSupplyFloorPrefix, StringComparison.Ordinal)
+            && DateTime.TryParseExact(comment.AsSpan(BlockedBaselineSupplyFloorPrefix.Length), SupplyFloorFormat, CultureInfo.InvariantCulture, DateTimeStyles.None, out var floor)
+            ? floor
+            : null;
+
+    private static async Task<(DateTime? Floor, int RetentionDays)> ReadBlockedBaselineSupplyAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        using var probe = new NpgsqlCommand(BlockedBaselineSupplyFloorProbeSql, connection) { CommandTimeout = SetupTimeoutSeconds };
+        await using var reader = await probe.ExecuteReaderAsync(cancellationToken);
+        await reader.ReadAsync(cancellationToken);
+        return (ParseBlockedBaselineSupplyFloor(reader.IsDBNull(0) ? null : reader.GetString(0)), Convert.ToInt32(reader.GetValue(1), CultureInfo.InvariantCulture));
+    }
+
+    /// <summary>
+    /// The instant before which the rebuilt <c>blocked_process_baseline</c> cannot back a day, or null (no floor recorded: the
+    /// aggregate was never rebuilt by this build, or the comment is not a floor). The provider raises the Blocking
+    /// baseline's window start to it, so the days the aggregate does not hold are left out of the covered days rather than
+    /// counted as quiet. Never the aggregate's own oldest bucket: a server that rarely blocks has real zero days.
+    /// </summary>
+    public static async Task<DateTime?> ReadBlockedBaselineSupplyFloorAsync(NpgsqlConnection connection, CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        return (await ReadBlockedBaselineSupplyAsync(connection, cancellationToken)).Floor;
+    }
+
+    /// <summary>
+    /// Records the floor on the pass that runs the backfill of a rebuilt <c>blocked_process_baseline</c>: <paramref name="utcNow"/>
+    /// minus the <c>blocked_process_report</c> retention the daily purge applies right now
+    /// (<see cref="DarlingRetentionHorizons.FleetRetentionDaysSql"/>, the fleet override or the default). Raw drops its chunks at
+    /// that horizon and the backfill clamps to what raw holds, so the rebuilt aggregate begins there; the aggregate's own 35 days
+    /// never remove a materialized hour that raw has since dropped (the purge is <c>drop_chunks</c>, which records no invalidation,
+    /// and the refresh policy reaches back one day). Written once: a floor already recorded for this view is left alone, so a
+    /// store whose aggregate stays empty (a server with only self-waits) does not move its floor forward on every start.
+    /// </summary>
+    private static async Task RecordBlockedBaselineSupplyFloorAsync(NpgsqlConnection connection, ILogger? logger, DateTime utcNow, CancellationToken cancellationToken)
+    {
+        var (recorded, retentionDays) = await ReadBlockedBaselineSupplyAsync(connection, cancellationToken);
+        if (recorded is not null)
+        {
+            return;
+        }
+
+        var floor = utcNow - TimeSpan.FromDays(retentionDays);
+        using var comment = new NpgsqlCommand(
+            $"COMMENT ON VIEW collect.{BlockedProcessBaselineView} IS '{BlockedBaselineSupplyFloorPrefix}{floor.ToString(SupplyFloorFormat, CultureInfo.InvariantCulture)}'",
+            connection) { CommandTimeout = SetupTimeoutSeconds };
+        await comment.ExecuteNonQueryAsync(cancellationToken);
+        logger?.LogInformation(
+            "TimescaleDB: {View} was rebuilt over the {RetentionDays} days of blocked process reports the store keeps -- the Blocking baseline counts no day before {Floor:u}.",
+            BlockedProcessBaselineView, retentionDays, floor);
+    }
+
+    private static async Task<bool> RawHoldsRowsAsync(NpgsqlConnection connection, string sourceTable, CancellationToken cancellationToken)
+    {
+        using var probe = new NpgsqlCommand($"SELECT EXISTS (SELECT 1 FROM collect.{sourceTable})", connection) { CommandTimeout = SetupTimeoutSeconds };
+        return await probe.ExecuteScalarAsync(cancellationToken) is true;
+    }
+
+    /// <summary>
+    /// #6705: <see cref="RecordBlockedBaselineSupplyFloorAsync"/>, failure-isolated. A failed comment write must not skip the
+    /// backfill that follows it (it would fail again on every start and the baseline would never be backfilled); it logs and the
+    /// pass goes on, and the next start tries the write again.
+    /// </summary>
+    private static async Task TryRecordBlockedBaselineSupplyFloorAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await RecordBlockedBaselineSupplyFloorAsync(connection, logger, DateTime.UtcNow, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogWarning(
+                "Could not record where the {View} supply begins -- the Blocking baseline counts quiet days it cannot back until this succeeds: {Message}",
+                BlockedProcessBaselineView, ex.Message);
+        }
     }
 
     /// <summary>Does this baseline relation exist under any implementation — continuous aggregate or plain view?</summary>
@@ -6202,6 +6352,13 @@ WITH NO DATA";
                answer from raw, exactly; WarmCollectionHealthHourlyAsync closes that window with one refresh. */
             (View: CollectionHealthHourlyView,
              StaleCheck: "SELECT (EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'collect' AND table_name = 'collection_health_hourly') AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'collect' AND table_name = 'collection_health_hourly' AND column_name = 'latest_run_note'))"),
+            /* blocked_process_baseline gained the self-wait filter (#6690) -> stale iff the aggregate EXISTS but its
+               definition does not mention blocking_spid (the filter's column; the old text had no WHERE at all).
+               Nothing is built on it, so the CASCADE drops only the view; the ensure sweep recreates it WITH NO DATA
+               and the start path's coverage-gated BackfillBaselineAggregatesAsync (its materialization is empty, so
+               its gate fires on this very start) re-materializes it from raw. NULL view_definition is not stale. */
+            (View: BlockedProcessBaselineView,
+             StaleCheck: "SELECT EXISTS (SELECT 1 FROM timescaledb_information.continuous_aggregates WHERE view_schema = 'collect' AND view_name = 'blocked_process_baseline' AND position('blocking_spid' IN view_definition) = 0)"),
         };
 
         var dropped = 0;
@@ -6237,7 +6394,7 @@ WITH NO DATA";
                 hold = AggregateJobHold.None;
                 dropped++;
                 logger?.LogInformation(
-                    "TimescaleDB: dropped stale continuous aggregate {View} (composer-dimension reshape) — recreated in the new shape this cycle.",
+                    "TimescaleDB: dropped stale continuous aggregate {View} (reshape) — recreated in the new shape this cycle.",
                     view);
             }
             catch (OperationCanceledException) when (hold.Unscheduled.Count > 0)
@@ -6369,9 +6526,27 @@ WITH NO DATA";
         {
             try
             {
+                /* #6705: was the blocking baseline absent before this CREATE? The plain fallback view was dropped above, so
+                   a relation that exists here is a real aggregate. Read before the CREATE, as IF NOT EXISTS says nothing. */
+                var createsBlockedBaseline = false;
+                if (view == BlockedProcessBaselineView)
+                {
+                    using var exists = new NpgsqlCommand(BaselineRelationExistsSql(view), connection) { CommandTimeout = SetupTimeoutSeconds };
+                    createsBlockedBaseline = await exists.ExecuteScalarAsync(cancellationToken) is false;
+                }
+
                 using (var create = new NpgsqlCommand(createSql, connection) { CommandTimeout = SetupTimeoutSeconds })
                 {
                     await create.ExecuteNonQueryAsync(cancellationToken);
+                }
+
+                /* #6705: the floor is written on the pass that CREATES the baseline, before its refresh policy can materialize
+                   anything. Written only at backfill time, a service that stopped between this CREATE and the backfill left the
+                   policy to materialize the last day first, so the backfill saw a non-empty materialization and recorded
+                   nothing. A fresh store (raw empty) records nothing: its aggregate will hold everything raw ever gets. */
+                if (createsBlockedBaseline && await RawHoldsRowsAsync(connection, SourceTableFor(view), cancellationToken))
+                {
+                    await TryRecordBlockedBaselineSupplyFloorAsync(connection, logger, cancellationToken);
                 }
 
                 /* #3893: an off-grid aggregate's materialization width is set HERE, after its CREATE and BEFORE
@@ -8997,24 +9172,22 @@ AND   j.hypertable_name = '{relation}'";
         => $"SELECT add_compression_policy('collect.{view}', compress_after => INTERVAL '{AggregateCompressAfterFor(view)}', schedule_interval => INTERVAL '{AggregateCompressionScheduleInterval}', if_not_exists => true, initial_start => {AggregateCompressionInitialStartSql(AggregateCompressionBandHourFor(view), AggregateCompressionBandMinute, nightOffset)})";
 
     /// <summary>
-    /// Every registered aggregate's compression state in one read: whether compression is enabled on the
-    /// materialization, its compression job if any (with the four things a converged policy is made of —
-    /// <c>compress_after</c>, cadence, fixed schedule, and the UTC hour and minute it is pinned to), how large the
-    /// materialization is, and how many of its chunks would compress on the policy's first run under EACH
-    /// tier's <c>compress_after</c> — both counted, the caller picks its tier's, because the tier is a C#
-    /// registry fact and the read should not restate it.
+    /// Every registered aggregate's compression state in one cheap read: whether compression is enabled on the
+    /// materialization, and its compression job if any (with the four things a converged policy is made of —
+    /// <c>compress_after</c>, cadence, fixed schedule, and the UTC hour and minute it is pinned to).
     ///
     /// <para>Joins the job on EITHER identity, the view or its materialization, for the reason
     /// <see cref="ContinuousAggregateRefreshStateSql"/> documents: the job catalog resolves an aggregate's
     /// jobs back to the user view (measured for compression jobs too — <c>collect</c> / <c>&lt;view&gt;</c>),
     /// but the underlying row carries the materialization, and the two schemas are disjoint so no job can
-    /// match twice. Chunks are keyed by the MATERIALIZATION, which is the only identity
-    /// <c>timescaledb_information.chunks</c> knows an aggregate by — a count keyed by the view name reads zero
-    /// forever, silently, which is the shape #3582 recorded for the store-metrics tool.</para>
+    /// match twice. The hour and minute are extracted in UTC so a session time zone cannot make a correctly
+    /// pinned job read as stale.</para>
     ///
-    /// <para>Sizes come from <c>hypertable_size</c> over the materialization — the whole relation, indexes
-    /// included, because indexes are what compression removes on a chunk — and the hour and minute are
-    /// extracted in UTC so a session time zone cannot make a correctly pinned job read as stale.</para>
+    /// <para><b>Sizes and chunk counts are NOT here (#6648).</b> They were columns of this read, so every hourly
+    /// ensure ran <c>hypertable_size</c> and two correlated counts over <c>timescaledb_information.chunks</c> for
+    /// every one of the registered aggregates, and that read grows with the chunk count — to feed a staging
+    /// decision that only an aggregate with no policy yet ever makes. <see cref="AggregateCompressionSizeSql"/>
+    /// reads them, for those aggregates only; a converged store makes no second read at all.</para>
     /// </summary>
     public static string AggregateCompressionStateSql =>
         $@"
@@ -9026,24 +9199,7 @@ SELECT
     EXTRACT(EPOCH FROM j.schedule_interval)::bigint AS schedule_interval_seconds,
     j.fixed_schedule,
     CASE WHEN j.initial_start IS NULL THEN NULL ELSE EXTRACT(HOUR FROM j.initial_start AT TIME ZONE 'UTC')::int END AS phase_hour,
-    CASE WHEN j.initial_start IS NULL THEN NULL ELSE EXTRACT(MINUTE FROM j.initial_start AT TIME ZONE 'UTC')::int END AS phase_minute,
-    hypertable_size(format('%I.%I', ca.materialization_hypertable_schema, ca.materialization_hypertable_name)::regclass) AS materialization_bytes,
-    (
-        SELECT count(*)
-        FROM timescaledb_information.chunks AS c
-        WHERE c.hypertable_schema = ca.materialization_hypertable_schema
-        AND   c.hypertable_name = ca.materialization_hypertable_name
-        AND   NOT c.is_compressed
-        AND   c.range_end < now() - INTERVAL '{HourlyAggregateCompressAfter}'
-    ) AS eligible_under_hourly_rule,
-    (
-        SELECT count(*)
-        FROM timescaledb_information.chunks AS c
-        WHERE c.hypertable_schema = ca.materialization_hypertable_schema
-        AND   c.hypertable_name = ca.materialization_hypertable_name
-        AND   NOT c.is_compressed
-        AND   c.range_end < now() - INTERVAL '{DailyAggregateCompressAfter}'
-    ) AS eligible_under_daily_rule
+    CASE WHEN j.initial_start IS NULL THEN NULL ELSE EXTRACT(MINUTE FROM j.initial_start AT TIME ZONE 'UTC')::int END AS phase_minute
 FROM timescaledb_information.continuous_aggregates AS ca
 LEFT JOIN timescaledb_information.jobs AS j
   ON  (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')
@@ -9052,6 +9208,87 @@ LEFT JOIN timescaledb_information.jobs AS j
      OR (j.hypertable_schema = ca.materialization_hypertable_schema AND j.hypertable_name = ca.materialization_hypertable_name)
       )
 WHERE ca.view_schema = 'collect'";
+
+    /// <summary>
+    /// How large each named materialization is, and how many of its chunks would compress on a policy's first
+    /// run under EACH tier's <c>compress_after</c> — both counted, the caller picks its tier's, because the tier
+    /// is a C# registry fact and the read should not restate it (#6648; the columns
+    /// <see cref="AggregateCompressionStateSql"/> used to carry for all registered aggregates every hour).
+    /// <c>$1</c> is the view names (<c>text[]</c>): only the aggregates still without a policy, the ones
+    /// <see cref="StageAggregateCompressionNights"/> orders. Columns: view, bytes, eligible under the hourly rule,
+    /// eligible under the daily rule.
+    ///
+    /// <para>One grouped pass over <c>timescaledb_information.chunks</c>, restricted to the named
+    /// materializations, rather than two correlated counts per aggregate. Chunks are keyed by the
+    /// MATERIALIZATION, which is the only identity that view knows an aggregate by — a count keyed by the view
+    /// name reads zero forever, silently, which is the shape #3582 recorded for the store-metrics tool. Sizes
+    /// come from <c>hypertable_size</c> over the materialization — the whole relation, indexes included, because
+    /// indexes are what compression removes on a chunk.</para>
+    /// </summary>
+    public static string AggregateCompressionSizeSql =>
+        $@"
+WITH wanted AS (
+    SELECT ca.view_name, ca.materialization_hypertable_schema AS schema_name, ca.materialization_hypertable_name AS table_name
+    FROM timescaledb_information.continuous_aggregates AS ca
+    WHERE ca.view_schema = 'collect'
+    AND   ca.view_name = ANY($1::text[])
+),
+eligible AS (
+    SELECT
+        c.hypertable_schema,
+        c.hypertable_name,
+        count(*) FILTER (WHERE NOT c.is_compressed AND c.range_end < now() - INTERVAL '{HourlyAggregateCompressAfter}') AS eligible_under_hourly_rule,
+        count(*) FILTER (WHERE NOT c.is_compressed AND c.range_end < now() - INTERVAL '{DailyAggregateCompressAfter}') AS eligible_under_daily_rule
+    FROM timescaledb_information.chunks AS c
+    WHERE EXISTS (SELECT 1 FROM wanted AS w WHERE w.schema_name = c.hypertable_schema AND w.table_name = c.hypertable_name)
+    GROUP BY c.hypertable_schema, c.hypertable_name
+)
+SELECT
+    w.view_name,
+    hypertable_size(format('%I.%I', w.schema_name, w.table_name)::regclass) AS materialization_bytes,
+    COALESCE(e.eligible_under_hourly_rule, 0) AS eligible_under_hourly_rule,
+    COALESCE(e.eligible_under_daily_rule, 0) AS eligible_under_daily_rule
+FROM wanted AS w
+LEFT JOIN eligible AS e
+  ON  e.hypertable_schema = w.schema_name
+  AND e.hypertable_name = w.table_name";
+
+    /// <summary>
+    /// Applies the size rows of <see cref="AggregateCompressionSizeSql"/> to the aggregates about to be staged (#6648).
+    /// The tier picks the chunk count: an hourly target takes <c>EligibleHourly</c>, a daily or baseline one
+    /// <c>EligibleDaily</c>. A view the rows do not name is returned as unread and is NOT in the sized list: its
+    /// 0 bytes and 0 eligible chunks mean "not read", and staging them would read as "nothing eligible, night zero is
+    /// harmless" and put a full backlog on night zero, the thing #3581 staged against. That is what a failed read does
+    /// too; the caller adds no policy for an unread view this pass and the next ensure sizes it. A converged store
+    /// never gets here: only an aggregate with no policy yet is in <paramref name="needingPolicy"/>.
+    /// </summary>
+    internal static (List<AggregateCompressionState> Sized, List<string> Unread) ApplyAggregateCompressionSizes(
+        IReadOnlyList<AggregateCompressionState> needingPolicy,
+        IReadOnlyDictionary<string, (long Bytes, long EligibleHourly, long EligibleDaily)> sizes)
+    {
+        ArgumentNullException.ThrowIfNull(needingPolicy);
+        ArgumentNullException.ThrowIfNull(sizes);
+
+        var sized = new List<AggregateCompressionState>(needingPolicy.Count);
+        var unread = new List<string>();
+        foreach (var state in needingPolicy)
+        {
+            if (sizes.TryGetValue(state.View, out var size))
+            {
+                sized.Add(state with
+                {
+                    MaterializationBytes = size.Bytes,
+                    EligibleChunksNow = AggregateCompressionTargetFor(state.View).Hourly ? size.EligibleHourly : size.EligibleDaily,
+                });
+            }
+            else
+            {
+                unread.Add(state.View);
+            }
+        }
+
+        return (sized, unread);
+    }
 
     /// <summary>
     /// Moves one EXISTING aggregate compression policy onto the shipped <c>compress_after</c>, cadence and band
@@ -9111,7 +9348,7 @@ WHERE j.job_id = $1::integer";
     /// <para><b>Largest first, by measured materialization size.</b> The largest aggregate is the one whose
     /// backlog pass costs the most and saves the most disk; taking it first front-loads the saving onto the
     /// store that needs it and puts the biggest single night where the operator is watching most closely —
-    /// the first one. Size is read from the store (<see cref="AggregateCompressionStateSql"/>) rather than
+    /// the first one. Size is read from the store (<see cref="AggregateCompressionSizeSql"/>) rather than
     /// assumed from the registry, because which aggregate is largest is a property of the workload: on a store
     /// with no writable Query Store primary the Query Store family is empty and the query_stats rollups
     /// lead.</para>
@@ -9189,7 +9426,7 @@ WHERE j.job_id = $1::integer";
     /// <c>timescaledb_information.dimensions</c> carries one <c>time_interval</c> per hypertable dimension; a
     /// materialization has exactly one, its time dimension, and the join is on the materialization identity
     /// because that is the only name the dimensions view knows an aggregate by (the same rule as the chunk
-    /// counts in <see cref="AggregateCompressionStateSql"/>). Seconds rather than the interval itself so the
+    /// counts in <see cref="AggregateCompressionSizeSql"/>). Seconds rather than the interval itself so the
     /// comparison is an integer equality in C# against <see cref="MaterializationChunkIntervalSpan"/>, and a
     /// session setting cannot change how the interval renders.
     /// </summary>
@@ -9538,6 +9775,28 @@ ORDER BY i.indexname";
         => "\"" + identifier.Replace("\"", "\"\"", StringComparison.Ordinal) + "\"";
 
     /// <summary>
+    /// Reads <see cref="AggregateCompressionSizeSql"/> for the named views (#6648): the materialization's bytes and the chunk
+    /// counts under each tier's rule, keyed by view. A view the store no longer has is absent from the result.
+    /// </summary>
+    internal static async Task<Dictionary<string, (long Bytes, long EligibleHourly, long EligibleDaily)>> ReadAggregateCompressionSizesAsync(
+        NpgsqlConnection connection, string[] views, CancellationToken cancellationToken)
+    {
+        var sized = new Dictionary<string, (long, long, long)>(StringComparer.Ordinal);
+        using var command = new NpgsqlCommand(AggregateCompressionSizeSql, connection) { CommandTimeout = SetupTimeoutSeconds };
+        command.Parameters.AddWithValue(views);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            sized[reader.GetString(0)] = (
+                reader.IsDBNull(1) ? 0L : Convert.ToInt64(reader.GetValue(1), CultureInfo.InvariantCulture),
+                Convert.ToInt64(reader.GetValue(2), CultureInfo.InvariantCulture),
+                Convert.ToInt64(reader.GetValue(3), CultureInfo.InvariantCulture));
+        }
+
+        return sized;
+    }
+
+    /// <summary>
     /// Puts every continuous aggregate this product owns on the compression ladder (#3581): enables columnar
     /// compression on each materialization, attaches a once-a-day compression policy on the daily band, stages
     /// the first runs one aggregate per night largest first, and converges any policy an earlier build left on
@@ -9635,7 +9894,6 @@ ORDER BY i.indexname";
                     continue;
                 }
 
-                var hourly = AggregateCompressionTargetFor(view).Hourly;
                 states[view] = new AggregateCompressionState(
                     View: view,
                     CompressionEnabled: !reader.IsDBNull(1) && reader.GetBoolean(1),
@@ -9645,8 +9903,9 @@ ORDER BY i.indexname";
                     FixedSchedule: !reader.IsDBNull(5) && reader.GetBoolean(5),
                     PhaseHour: reader.IsDBNull(6) ? null : reader.GetInt32(6),
                     PhaseMinute: reader.IsDBNull(7) ? null : reader.GetInt32(7),
-                    MaterializationBytes: reader.IsDBNull(8) ? 0L : Convert.ToInt64(reader.GetValue(8), CultureInfo.InvariantCulture),
-                    EligibleChunksNow: Convert.ToInt64(reader.GetValue(hourly ? 9 : 10), CultureInfo.InvariantCulture));
+                    /* Sized below, and only for an aggregate that is still without a policy (#6648). */
+                    MaterializationBytes: 0L,
+                    EligibleChunksNow: 0L);
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -9701,6 +9960,41 @@ ORDER BY i.indexname";
                 logger?.LogWarning(
                     "Compression could not be enabled on continuous aggregate {View} — it stays uncompressed, at its full materialized size, until the next restart retries: {Message}",
                     view, ex.Message);
+            }
+        }
+
+        /* Size and eligible chunks for the aggregates that are about to be staged, and only those (#6648): the staging is
+           the one decision that reads them. needingPolicy holds only aggregates with compression enabled and no policy,
+           so a converged store has none and makes no second read. */
+        if (needingPolicy.Count > 0)
+        {
+            try
+            {
+                var sizes = await ReadAggregateCompressionSizesAsync(connection, needingPolicy.Select(s => s.View).ToArray(), cancellationToken);
+                var (sized, unread) = ApplyAggregateCompressionSizes(needingPolicy, sizes);
+                foreach (var state in sized)
+                {
+                    states[state.View] = state;
+                }
+
+                needingPolicy = sized;
+                if (unread.Count > 0)
+                {
+                    /* Unsized is not "nothing eligible" (#3707): the aggregate left the catalog between the two reads, so
+                       it gets no policy this pass, like a failed read, and the next hourly ensure sizes it. */
+                    logger?.LogWarning(
+                        "TimescaleDB: the size read did not return {Views}, so no compression policy was added to {Count} continuous aggregate(s) this pass — the next ensure retries",
+                        string.Join(", ", unread), unread.Count);
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                /* Staging without sizes would put every backlog on night zero, the one thing #3581 staged against, so no policy
+                   is added this pass; the next hourly ensure reads again. */
+                logger?.LogWarning(
+                    "TimescaleDB: could not read the sizes of the continuous aggregates that still need a compression policy, so none was added this pass — the next ensure retries: {Message}",
+                    ex.Message);
+                needingPolicy.Clear();
             }
         }
 

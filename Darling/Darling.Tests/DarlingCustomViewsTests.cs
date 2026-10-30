@@ -64,6 +64,34 @@ public sealed class DarlingCustomViewsTests
 
     /* ── ValidateDefinition: the authority ── */
 
+    /// <summary>#6390 S2b-B: the Storage list of read names a v1 read panel may name IS the read dispatch's key set, so a read added to the
+    /// dispatch cannot be missed by the shared validator.</summary>
+    [Fact]
+    public void KnownReadNames_EqualTheReadDispatchKeys() =>
+        Assert.True(
+            new HashSet<string>(DarlingWebEndpoints.BuildReadDispatch().Keys, StringComparer.Ordinal)
+                .SetEquals(CustomViewValidation.KnownReadNames),
+            "CustomViewValidation.KnownReadNames differs from BuildReadDispatch().Keys");
+
+    /// <summary>#6390 S5: the Viewer has no catalog, so it validates against <see cref="CustomViewValidation.KnownReadParams"/>. For every known
+    /// read that table equals what the Service's <c>ReadPanelParams</c> (its catalog) returns, in the catalog's order, so a parameter added to or
+    /// made required in the catalog cannot leave the Viewer accepting or refusing what the web does not.</summary>
+    [Fact]
+    public void KnownReadParams_EqualTheCatalogsDeclaredParameters()
+    {
+        Assert.True(
+            new HashSet<string>(CustomViewValidation.KnownReadParams.Keys, StringComparer.Ordinal).SetEquals(CustomViewValidation.KnownReadNames),
+            "CustomViewValidation.KnownReadParams has different keys than KnownReadNames");
+        foreach (var name in CustomViewValidation.KnownReadNames)
+        {
+            var catalog = DarlingWebEndpoints.ReadPanelParams(name);
+            Assert.NotNull(catalog);
+            Assert.True(
+                catalog!.SequenceEqual(CustomViewValidation.KnownReadParams[name]),
+                $"KnownReadParams['{name}'] differs from the catalog's declared parameters");
+        }
+    }
+
     [Fact]
     public void ValidateDefinition_AcceptsAWellFormedDefinition()
     {

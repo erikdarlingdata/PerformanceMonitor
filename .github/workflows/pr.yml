@@ -1,0 +1,534 @@
+name: PR CI
+
+# #6656: the pull request and dev-push CI. One plan job decides the work from the changed files, one build job builds
+# both test projects once, N test legs run weighted slices of the classes from that build, and one verdict job turns the
+# result into the commit status `CI result`. `CI result` is a commit status and not a job: a skipped required job counts
+# as passing, so a draft's skipped run could leave a green on a SHA nobody tested. The status stays pending until the
+# verdict sets it, so a run that is cancelled or dies early never passes.
+#
+# Every pull request that is ready for review runs (PR 2 of the rollout removed the `ci-next` label gate); a draft costs
+# the plan job and sets no status. Whether it is a draft is read live from the pull request API at plan time, not from the
+# event payload: a push to a draft and `gh pr ready` seconds apart start the push run last, it cancels the ready run, and
+# its payload still says draft, which would leave the final head with no `CI result` (#6656).
+# No `labeled` trigger: an unrelated label would cancel and restart the run.
+
+on:
+  push:
+    branches: [dev]
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    branches: [dev, main]
+
+permissions:
+  contents: read
+  statuses: write
+  issues: write
+  pull-requests: read
+  actions: read # the verdict job asks whether a newer run of this workflow exists for the pull request (#6656)
+
+# A new push to a pull request cancels that pull request's earlier run. Dev pushes never cancel a running run: at most one
+# runs and one newest waits, so every run covers every merge up to its SHA.
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('pr-ci-{0}', github.event.pull_request.number) || 'dev-push' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CI_RESULT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+
+jobs:
+  plan:
+    name: CI plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      run: ${{ steps.plan.outputs.run }}
+      outcome: ${{ steps.plan.outputs.outcome }}
+      areas: ${{ steps.plan.outputs.areas }}
+      darling_scope: ${{ steps.plan.outputs.darling_scope }}
+      darling_classes: ${{ steps.plan.outputs.darling_classes }}
+      lite_classes: ${{ steps.plan.outputs.lite_classes }}
+      build: ${{ steps.plan.outputs.build }}
+      legs: ${{ steps.plan.outputs.legs }}
+      legs_json: ${{ steps.plan.outputs.legs_json }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Plan the run from the changed files
+        id: plan
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref || github.ref_name }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          IS_DRAFT: ${{ github.event.pull_request.draft || 'false' }}
+          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          # The payload's draft flag is as old as the event. A push to a draft and `gh pr ready` seconds apart start the push run
+          # last: it cancels the ready run and its payload still says draft, so it would skip and the head would get no `CI result`.
+          # Read the live state instead; if the call fails, keep the payload's value.
+          if [ "${EVENT_NAME}" = "pull_request" ]; then
+            if live_draft=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.draft' 2>/dev/null) && [[ "${live_draft}" =~ ^(true|false)$ ]]; then
+              if [ "${live_draft}" != "${IS_DRAFT}" ]; then
+                echo "::notice title=Draft state read live::The pull request is draft=${live_draft} now, but the event payload said draft=${IS_DRAFT}. Using the live state."
+              fi
+              IS_DRAFT="${live_draft}"
+            else
+              echo "::notice title=Draft state read from the payload::The pull request API call failed, so the event payload's draft=${IS_DRAFT} is used."
+            fi
+          fi
+
+          # A push runs every area whatever it changed, so it needs no file list.
+          : > changed.txt
+          if [ "${EVENT_NAME}" = "pull_request" ]; then
+            # The files API can fail (a 5xx, a rate limit) and caps its list at 3000 files. Either way the list cannot be
+            # trusted, so give the plan one path no area knows: it then runs every area, and the PR is slower, not red.
+            if gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files?per_page=100" --jq '.[].filename' > changed.part; then
+              mv changed.part changed.txt
+              if [ "$(wc -l < changed.txt)" -ge 3000 ]; then
+                echo "::warning title=Changed-file list may be cut::The files API returned 3000 or more files, its limit, so the list may be cut short. Running every area."
+                echo "unknown/changed-files-cut-off" > changed.txt
+              fi
+            else
+              echo "::warning title=Changed-file list unavailable::The pull request files API call failed, so the changed files are unknown. Running every area."
+              echo "unknown/changed-files-unavailable" > changed.txt
+            fi
+          fi
+          echo "$(wc -l < changed.txt) changed file(s)"
+
+          python -I .github/scripts/ci-plan.py --event "${EVENT_NAME}" --base "${BASE_REF}" --head-ref "${HEAD_REF}" \
+            --draft "${IS_DRAFT}" --labels "${LABELS}" --files-file changed.txt --github-output "${GITHUB_OUTPUT}"
+
+      # Pending from the moment the plan says the run goes. A fork's read-only token cannot write it (the verdict job
+      # says so in one notice), and a draft sets nothing.
+      - name: Set CI result to pending
+        if: steps.plan.outputs.run == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          gh api "repos/${GITHUB_REPOSITORY}/statuses/${CI_RESULT_SHA}" -f state=pending -f context='CI result' \
+            -f description='CI is running' -f target_url="${TARGET_URL}" > /dev/null
+
+      # As build.yml's workflow-lint job does: on every push, and on a pull request when a workflow file changed.
+      - name: Lint the workflow files with actionlint and shellcheck
+        if: steps.plan.outputs.run == 'true' && (steps.plan.outputs.actionlint == 'true' || github.event_name == 'push')
+        shell: bash
+        env:
+          ACTIONLINT_IMAGE: rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
+        run: |
+          set -uo pipefail
+          # No -ignore and no shellcheck-off flag: a finding is fixed in the workflow, not silenced here.
+          if ! docker run --rm -v "${GITHUB_WORKSPACE}:/repo" -w /repo "${ACTIONLINT_IMAGE}" -no-color; then
+            echo "::error title=actionlint found problems::Fix them in the workflow file. The findings, shellcheck's among them, are listed above."
+            exit 1
+          fi
+
+      - name: Parse and link every wwwroot/js module
+        if: steps.plan.outputs.run == 'true' && steps.plan.outputs.check_web_js == 'true'
+        shell: bash
+        run: bash .github/scripts/check-web-js.sh
+
+  build:
+    name: Build the test projects
+    needs: plan
+    if: ${{ needs.plan.outputs.run == 'true' && needs.plan.outputs.build == 'true' }}
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      # #6497: a runner whose processes cannot start (0xC0000142 STATUS_DLL_INIT_FAILED) would otherwise fail one
+      # step at a time and pay each job's own timeout. This is the first step, so such a runner fails here in seconds.
+      - name: Check the runner can start a process
+        timeout-minutes: 2
+        shell: bash
+        run: dotnet --version
+
+      - uses: actions/checkout@v7
+
+      # The exact SDK version from global.json, not its feature band. Given a band, setup-dotnet resolves the newest
+      # patch through aka.ms links, and on 2026-10-25 those links sent every run to a download that failed with HTTP 409.
+      # With an exact version the install script downloads from the release feed and never asks aka.ms.
+      - name: Read the SDK version from global.json
+        id: globaljson_sdk
+        shell: pwsh
+        run: |
+          $version = (Get-Content -Raw (Join-Path $env:GITHUB_WORKSPACE 'global.json') | ConvertFrom-Json).sdk.version
+          if (-not $version) { throw 'global.json names no sdk.version' }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Setup .NET 10.0
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: ${{ steps.globaljson_sdk.outputs.version }}
+          cache: true
+          cache-dependency-path: '**/packages.lock.json'
+
+      # Locked mode and `set -euo pipefail`: a multi-line run block under the default shell reports only its last
+      # command's exit code, so the first restore could fail unseen (LockedModeRestoreCoverageTests enforces both).
+      - name: Restore the test projects
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          dotnet restore Darling/Darling.Tests/Darling.Tests.csproj --locked-mode
+          dotnet restore Lite.Tests/Lite.Tests.csproj --locked-mode
+
+      - name: Build the Darling test project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          dotnet build Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-restore
+
+      - name: Build the Lite test project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          dotnet build Lite.Tests/Lite.Tests.csproj -c Release --no-restore
+
+      # Where this build was made and from what, for the legs' check. No dot-prefix (upload-artifact skips hidden files).
+      - name: Record where this build was made
+        shell: pwsh
+        env:
+          PRODUCER_WORKSPACE: ${{ github.workspace }}
+          PRODUCER_SHA: ${{ github.sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-Content -Path guard-build-origin.txt -Value @("workspace=$env:PRODUCER_WORKSPACE", "sha=$env:PRODUCER_SHA") -Encoding utf8NoBOM
+
+      # The legs run on windows-latest (win-x64), which loads only runtimes/win, runtimes/unix and runtimes/win-x64. The
+      # other platforms' native libraries (osx, linux, arm, x86: DuckDB, Skia, MSAL, HarfBuzz) were 822 of the 1,054 MB
+      # of the first artifact and what 16 legs spent minutes downloading at once (#6656). Nothing reads them: the tests
+      # that name runtimes/ plant their own tree. PDBs stay, for stack traces with line numbers.
+      - name: Leave other platforms' native libraries out of the artifact
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $keep = @('win', 'win-x64', 'unix')
+          $roots = @('Darling/Darling.Tests/bin/Release', 'Darling/PerformanceMonitor.Darling.Service/bin/Release', 'Lite.Tests/bin/Release')
+          $removed = 0
+          foreach ($root in $roots) {
+            foreach ($runtimes in @(Get-ChildItem -Path $root -Directory -Recurse -Filter runtimes)) {
+              foreach ($rid in @(Get-ChildItem -Path $runtimes.FullName -Directory)) {
+                if ($keep -notcontains $rid.Name) {
+                  Remove-Item -Recurse -Force $rid.FullName
+                  $removed++
+                }
+              }
+            }
+          }
+          Write-Host "Removed $removed runtime folder(s) for other platforms."
+
+      # The same file lists the Guard build uploaded for the two projects. One day of retention: only this run's legs read it.
+      - name: Upload the built test projects
+        uses: actions/upload-artifact@v6
+        with:
+          name: ci-test-build
+          path: |
+            guard-build-origin.txt
+            Darling/Darling.Tests/bin/Release
+            Darling/PerformanceMonitor.Darling.Service/bin/Release
+            Darling/Darling.Tests/obj/project.assets.json
+            Darling/Darling.Tests/obj/project.nuget.cache
+            Darling/Darling.Tests/obj/*.nuget.g.props
+            Darling/Darling.Tests/obj/*.nuget.g.targets
+            Darling/Darling.Tests/obj/*.nuget.dgspec.json
+            Lite.Tests/bin/Release
+            Lite/bin/**/PerformanceMonitorLite.runtimeconfig.json
+            Lite.Tests/obj/project.assets.json
+            Lite.Tests/obj/project.nuget.cache
+            Lite.Tests/obj/*.nuget.g.props
+            Lite.Tests/obj/*.nuget.g.targets
+            Lite.Tests/obj/*.nuget.dgspec.json
+          retention-days: 1
+          compression-level: 1
+          overwrite: true
+          if-no-files-found: error
+
+  test:
+    name: Test leg ${{ matrix.leg }}/${{ needs.plan.outputs.legs }}
+    needs: [plan, build]
+    if: ${{ needs.plan.outputs.run == 'true' && needs.plan.outputs.legs != '0' }}
+    runs-on: windows-latest
+    # The test step has 25 minutes; the rest is setup, the artifact fetch and the uploads.
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        leg: ${{ fromJSON(needs.plan.outputs.legs_json) }}
+    steps:
+      # #6497: a runner whose processes cannot start (0xC0000142 STATUS_DLL_INIT_FAILED) would otherwise fail one
+      # step at a time and pay each job's own timeout. This is the first step, so such a runner fails here in seconds.
+      - name: Check the runner can start a process
+        timeout-minutes: 2
+        shell: bash
+        run: dotnet --version
+
+      - uses: actions/checkout@v7
+
+      - name: Fetch the build
+        uses: actions/download-artifact@v8
+        with:
+          name: ci-test-build
+          path: .
+
+      # A fetched build that is not for THIS workspace and commit is an error: the tests find the repo root through
+      # [CallerFilePath], so a binary built at another path would read another tree.
+      - name: Check the fetched build is for this workspace and commit
+        shell: pwsh
+        env:
+          THIS_WORKSPACE: ${{ github.workspace }}
+          THIS_SHA: ${{ github.sha }}
+          REQUIRED_FILES: Darling/Darling.Tests/bin/Release/net10.0-windows/Darling.Tests.dll;Darling/Darling.Tests/obj/project.assets.json;Lite.Tests/bin/Release/net10.0-windows/Lite.Tests.dll;Lite.Tests/obj/project.assets.json
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $origin = @{}
+          if (Test-Path guard-build-origin.txt) {
+            foreach ($line in Get-Content guard-build-origin.txt) { if ($line -match '^(\w+)=(.*)$') { $origin[$Matches[1]] = $Matches[2] } }
+          }
+          if ($origin['workspace'] -ne $env:THIS_WORKSPACE -or $origin['sha'] -ne $env:THIS_SHA) {
+            Write-Host "::error title=Build is for another workspace or commit::The fetched build says workspace '$($origin['workspace'])' at '$($origin['sha'])'; this leg is at '$env:THIS_WORKSPACE' at '$env:THIS_SHA'."
+            exit 1
+          }
+          foreach ($file in ($env:REQUIRED_FILES -split ';')) {
+            if (-not (Test-Path $file)) {
+              Write-Host "::error title=Build is incomplete::The fetched build has no $file."
+              exit 1
+            }
+          }
+
+      # The exact SDK version from global.json, not its feature band. Given a band, setup-dotnet resolves the newest
+      # patch through aka.ms links, and on 2026-10-25 those links sent every run to a download that failed with HTTP 409.
+      # With an exact version the install script downloads from the release feed and never asks aka.ms.
+      - name: Read the SDK version from global.json
+        id: globaljson_sdk
+        shell: pwsh
+        run: |
+          $version = (Get-Content -Raw (Join-Path $env:GITHUB_WORKSPACE 'global.json') | ConvertFrom-Json).sdk.version
+          if (-not $version) { throw 'global.json names no sdk.version' }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Setup .NET 10.0
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: ${{ steps.globaljson_sdk.outputs.version }}
+
+      # Same cache key as build.yml and nightly.yml (the fetch script's own content hash), so a warm cache from any of
+      # them means no ~340MB download here. Every leg that runs any Darling class needs the runtime: a 'full' scope runs
+      # all of them, and 'reads-lite' (a Lite-only change) still runs the Stage=Guard and Lite-reads classes, some of which
+      # are live PostgreSQL classes (#6656).
+      # A Lite-only change whose plan has darling_scope 'none' and areas 'lite' runs the same Stage=Guard and Lite-reads
+      # classes under -Areas lite, so it needs the runtime and PostgreSQL too (#6656, #6684).
+      - name: Cache Darling pg-runtime.zip
+        if: (needs.plan.outputs.darling_scope != 'none' || needs.plan.outputs.areas == 'lite')
+        id: cache-pg-runtime
+        uses: actions/cache@v6
+        with:
+          path: Darling/artifacts/pg-runtime.zip
+          key: pg-runtime-${{ runner.os }}-${{ hashFiles('Darling/tools/fetch-pg-runtime.ps1') }}
+
+      - name: Build Darling pg-runtime.zip (cache miss only)
+        if: (needs.plan.outputs.darling_scope != 'none' || needs.plan.outputs.areas == 'lite') && steps.cache-pg-runtime.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: ./Darling/tools/fetch-pg-runtime.ps1
+
+      - name: Extract pg-runtime
+        if: (needs.plan.outputs.darling_scope != 'none' || needs.plan.outputs.areas == 'lite')
+        shell: pwsh
+        run: |
+          $zip  = "$env:GITHUB_WORKSPACE\Darling\artifacts\pg-runtime.zip"
+          $dest = "$env:GITHUB_WORKSPACE\Darling\artifacts\pg-runtime"
+          if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          [System.IO.Compression.ZipFile]::ExtractToDirectory($zip, $dest)
+          if (-not (Test-Path "$dest\pgsql\bin\pg_ctl.exe")) { throw "pg-runtime missing pgsql\bin\pg_ctl.exe" }
+
+      - name: Start PostgreSQL
+        if: (needs.plan.outputs.darling_scope != 'none' || needs.plan.outputs.areas == 'lite')
+        shell: pwsh
+        run: ./.github/scripts/start-test-pg.ps1 -Mode Start
+
+      # -NoTreeGuards: leg 1's whole-tree guards piece is the whole Darling suite once more with no store. Measured on
+      # run 39996992603 it took 12.7 minutes (36,832 tests), not the half minute the design assumed, and it timed leg 1
+      # out. The legs already run every Darling class (and for a Lite-only change the Guard and Lite-reads classes), with
+      # the store. The step has its own timeout, so a hang still reaches the upload steps below.
+      - name: Run test leg ${{ matrix.leg }}
+        timeout-minutes: 25
+        shell: pwsh
+        env:
+          LEG: ${{ matrix.leg }}
+          LEG_COUNT: ${{ needs.plan.outputs.legs }}
+          AREAS: ${{ needs.plan.outputs.areas }}
+          DARLING_CLASSES: ${{ needs.plan.outputs.darling_classes }}
+          LITE_CLASSES: ${{ needs.plan.outputs.lite_classes }}
+        run: ./.github/scripts/run-ci-leg.ps1 -Leg $env:LEG -LegCount $env:LEG_COUNT -Areas $env:AREAS -OnlyDarlingClasses $env:DARLING_CLASSES -OnlyLiteClasses $env:LITE_CLASSES -NoTreeGuards
+
+      - name: Stop PostgreSQL
+        if: always() && (needs.plan.outputs.darling_scope != 'none' || needs.plan.outputs.areas == 'lite')
+        shell: pwsh
+        run: ./.github/scripts/start-test-pg.ps1 -Mode Stop
+
+      - name: Upload the leg's results
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: actions/upload-artifact@v6
+        with:
+          name: ci-test-results-${{ matrix.leg }}
+          path: |
+            TestResults/
+            ${{ runner.temp }}/darling-pg*.log
+          retention-days: 7
+          overwrite: true
+          if-no-files-found: ignore
+
+  # Named "CI verdict", never "CI result": `CI result` is the commit status this job sets.
+  verdict:
+    name: CI verdict
+    needs: [plan, build, test]
+    # Nothing to say for a draft, which sets no status: skip the runner too.
+    if: ${{ always() && (needs.plan.result != 'success' || needs.plan.outputs.run == 'true' || needs.plan.outputs.outcome == 'train-blocked') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Set CI result
+        id: verdict
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          IS_FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+          PLAN_RESULT: ${{ needs.plan.result }}
+          PLAN_OUTCOME: ${{ needs.plan.outputs.outcome }}
+          PLAN_BUILD: ${{ needs.plan.outputs.build }}
+          PLAN_LEGS: ${{ needs.plan.outputs.legs }}
+          BUILD_RESULT: ${{ needs.build.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+          TARGET_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          HEAD_REF: ${{ github.head_ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -uo pipefail
+
+          # Success only when every job is success, or was skipped because the plan did not ask for it.
+          state=success
+          desc="CI passed"
+          failed=""
+          if [ "${PLAN_RESULT}" != "success" ]; then
+            state=failure; failed="plan (${PLAN_RESULT})"
+          elif [ "${PLAN_OUTCOME}" = "train-blocked" ]; then
+            state=failure
+            desc="This pull request carries the merge-train label; only an admin override merges it."
+            echo "::error title=CI result failed::This pull request carries the merge-train label, so its train run covers it. It can be merged only by an admin override after a merge train covered it."
+          else
+            want_build=skipped; [ "${PLAN_BUILD}" = "true" ] && want_build=success
+            want_test=skipped;  [ "${PLAN_LEGS}" != "0" ] && want_test=success
+            [ "${BUILD_RESULT}" = "${want_build}" ] || { state=failure; failed="${failed} build (${BUILD_RESULT})"; }
+            [ "${TEST_RESULT}" = "${want_test}" ]   || { state=failure; failed="${failed} test (${TEST_RESULT})"; }
+          fi
+          # #6656: a run that a newer push or ready-for-review replaced is cancelled, but cancelled() inside this job reports the
+          # job's own state, so the step cannot tell. Ask the API instead: when a newer run of this workflow exists for this pull
+          # request, it sets CI result and this one posts no failure. A newer run is this pull request's when it comes from this
+          # head repository (a fork's runs list no pull requests, so the repository is what tells two forks that both use
+          # `patch-1` apart) and its pull request list is empty or names this number. -f makes gh URL-encode the branch name. A test
+          # leg that hits its timeout also reports cancelled, but no newer run exists then, so that failure still posts. If the call
+          # fails, post as before.
+          if [ "${state}" = "failure" ] && [ "${EVENT_NAME}" = "pull_request" ]; then
+            newer=$(gh api -X GET "repos/${GITHUB_REPOSITORY}/actions/workflows/pr.yml/runs"               -f event=pull_request -f branch="${HEAD_REF}" -f per_page=20               --jq '[.workflow_runs[]
+                     | select(.id > (env.GITHUB_RUN_ID | tonumber)
+                              and .head_repository.full_name == env.HEAD_REPO
+                              and (((.pull_requests // []) | length) == 0
+                                   or any((.pull_requests // [])[]; (.number | tostring) == env.PR_NUMBER)))] | length' 2>/dev/null) || newer=""
+            if [[ "${newer}" =~ ^[1-9][0-9]*$ ]]; then
+              echo "::notice title=CI result left to a newer run::A newer run of this workflow exists on this pull request, so it sets CI result and this run (${failed# }) posts no failure."
+              echo "state=" >> "${GITHUB_OUTPUT}"
+              echo "failed=" >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
+          fi
+          if [ "${state}" = "failure" ] && [ "${PLAN_OUTCOME}" != "train-blocked" ]; then
+            desc="CI failed: ${failed# }"
+            echo "::error title=CI failed::${desc}"
+          fi
+          echo "state=${state}" >> "${GITHUB_OUTPUT}"
+          echo "failed=${failed}" >> "${GITHUB_OUTPUT}"
+
+          if [ "${IS_FORK}" = "true" ]; then
+            echo "::notice title=CI result is not set on a fork pull request::A fork's token is read-only, so this run cannot set the CI result status (it would be '${state}'). A maintainer pushes the branch to this repository to run CI there, or an admin merges."
+            exit 0
+          fi
+
+          gh api "repos/${GITHUB_REPOSITORY}/statuses/${CI_RESULT_SHA}" -f state="${state}" -f context='CI result' \
+            -f description="${desc:0:140}" -f target_url="${TARGET_URL}" > /dev/null
+
+      # A dev push that turns red opens one "dev is red" issue, or comments on the open one; a green dev push closes it.
+      # Only a failure opens it: a cancelled or skipped-by-cancel run says nothing about the code.
+      - name: Open, update or close the "dev is red" issue
+        if: ${{ always() && github.event_name == 'push' && steps.verdict.outputs.state != '' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STATE: ${{ steps.verdict.outputs.state }}
+          FAILED: ${{ steps.verdict.outputs.failed }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          ANY_FAILURE: ${{ contains(needs.*.result, 'failure') }}
+        run: |
+          set -uo pipefail
+
+          issue=$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --search '"dev is red" in:title' --json number,title \
+            --jq '[.[] | select(.title == "dev is red")][0].number // empty')
+
+          if [ "${STATE}" = "success" ]; then
+            if [ -n "${issue}" ]; then
+              gh issue close "${issue}" --repo "${GITHUB_REPOSITORY}" --comment "dev is green again at ${GITHUB_SHA}: ${RUN_URL}"
+            fi
+            exit 0
+          fi
+          if [ "${ANY_FAILURE}" != "true" ]; then
+            echo "No job failed (the run was cancelled or skipped), so the dev is red issue is left as it is."
+            exit 0
+          fi
+
+          # The commits since the last dev commit whose CI result is success (newest first, at most 30 looked at).
+          since=""
+          nl=$'\n'
+          tab=$'\t'
+          seen_self=false
+          while IFS="${tab}" read -r sha subject; do
+            if [ "${seen_self}" = "false" ]; then
+              [ "${sha}" = "${GITHUB_SHA}" ] && seen_self=true
+              [ "${seen_self}" = "true" ] || continue
+            else
+              green=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${sha}/statuses" \
+                --jq '[.[] | select(.context == "CI result" and .state == "success")] | length' 2>/dev/null || echo 0)
+              if [ "${green}" != "0" ]; then
+                since="${since}(stopped at ${sha:0:9}, the last dev commit with a green CI result)${nl}"
+                break
+              fi
+            fi
+            since="${since}- ${sha:0:9} ${subject//@/(at)}${nl}"
+          done < <(gh api "repos/${GITHUB_REPOSITORY}/commits?sha=dev&per_page=30" --jq '.[] | [.sha, (.commit.message | split("\n")[0])] | @tsv')
+          [ -n "${since}" ] || since="(none found in the last 30 commits)"$'\n'
+
+          {
+            echo "The dev push CI failed at ${GITHUB_SHA}."
+            echo
+            echo "Run: ${RUN_URL}"
+            echo "Failed:${FAILED:- see the run}"
+            echo
+            echo "Commits since the last green dev run (newest first):"
+            printf '%s' "${since}"
+          } > body.txt
+
+          if [ -n "${issue}" ]; then
+            gh issue comment "${issue}" --repo "${GITHUB_REPOSITORY}" --body-file body.txt
+          else
+            gh issue create --repo "${GITHUB_REPOSITORY}" --title "dev is red" --body-file body.txt
+          fi

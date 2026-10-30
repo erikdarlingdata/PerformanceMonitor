@@ -86,7 +86,8 @@ public sealed partial class ViewerDataService
     /// default), and cap at top — no LATERAL / WAITFOR trim (procedures aren't ad-hoc text). Viewer
     /// deviations: summed bigints CAST back to bigint for GetInt64; Lite's staleness filter +
     /// utcOffsetMinutes param dropped.
-    /// $1 server_id, $2 window start, $3 window end (naive UTC), $4 top.
+    /// $1 server_id, $2 window start, $3 window end (naive UTC), $4 top, $5 the databases chosen (NULL is every one),
+    /// $6 the databases the server dropped (#6651, NULL leaves out none).
     /// </summary>
     public const string TopProceduresSql = """
         SELECT
@@ -134,6 +135,7 @@ public sealed partial class ViewerDataService
         AND   collection_time >= $2
         AND   collection_time <= $3
         AND   ($5::text[] IS NULL OR database_name = ANY($5))
+        AND   ($6::text[] IS NULL OR database_name IS NULL OR database_name <> ALL($6))
         /*TAG:object:database_name,schema_name,object_name*/
         GROUP BY database_name, schema_name, object_name, object_type
         HAVING SUM(delta_execution_count) > 0 OR SUM(delta_elapsed_time) > 0
@@ -185,9 +187,20 @@ public sealed partial class ViewerDataService
     private async Task<ViewerRoutedRead<ViewerProcedureStatsRow>> GetTopProceduresByCpuRoutedUntaggedAsync(
         int serverId, DateTime startUtc, DateTime endUtc, int top, IReadOnlyList<string>? databaseNames, QueryTagFilter? tags, CancellationToken cancellationToken)
     {
+        /* #6651 (#5633 item 4): with no database chosen the ranking leaves out the databases the server dropped, the way
+           get_top_procedures_by_cpu does (CurrentDatabaseScope.NarrowAsync, the one rule the service and the web share). The exclusion
+           is in the statement ($6), so the rank's LIMIT is not filled by a dropped database; a database the user names is read as asked;
+           an unknown set (no recent snapshot) leaves out nothing. A custom range that ended in the past is anchored at its end, as the
+           MCP tool's as_of read is, so a database dropped since still ranks for a window it existed in. */
+        var now = DateTime.UtcNow;
+        var databases = await CurrentDatabaseScope.NarrowAsync(
+            _dataSource, serverId, DatabaseFilter.Of(databaseNames), nowUtc: now, asOfUtc: endUtc < now ? endUtc : null,
+            windowStartUtc: startUtc, logger: null, cancellationToken: cancellationToken);
+        var leftOut = DatabasesLeftOut.Distinct(databases.ExcludedNames);
+
         var (rollups, coverage) = await GetRollupAvailabilityAsync(cancellationToken);
         var routedTier = RetentionTierRouter.Resolve(
-            DateTime.UtcNow, startUtc, rollups.ProcedureGrainHourly, dailyAvailable: false,
+            now, startUtc, rollups.ProcedureGrainHourly, dailyAvailable: false,
             coverage.For(TimescaleSupport.ProcedureStatsHourlyView, TimescaleSupport.ProcedureStatsDailyView));
         if (routedTier == RetentionTier.Daily)
         {
@@ -196,10 +209,13 @@ public sealed partial class ViewerDataService
 
         if (routedTier == RetentionTier.Hourly)
         {
-            return await GetTopProceduresByCpuHourlyAsync(rollups, coverage, serverId, startUtc, endUtc, top, databaseNames, tags, cancellationToken);
+            var hourly = await GetTopProceduresByCpuHourlyAsync(rollups, coverage, serverId, startUtc, endUtc, top, databaseNames, databases, tags, cancellationToken);
+            return hourly with { LeftOutDatabases = leftOut };
         }
 
-        return new ViewerRoutedRead<ViewerProcedureStatsRow>(await GetTopProceduresByCpuRawAsync(serverId, startUtc, endUtc, top, databaseNames, tags, cancellationToken), "raw", null);
+        return new ViewerRoutedRead<ViewerProcedureStatsRow>(
+            await GetTopProceduresByCpuRawAsync(serverId, startUtc, endUtc, top, databaseNames, databases, tags, cancellationToken), "raw", null,
+            LeftOutDatabases: leftOut);
     }
 
     /// <summary>#4231 stage 3b: the hourly-rollup arm — builds its FROM clause ONLY through
@@ -209,7 +225,7 @@ public sealed partial class ViewerDataService
     /// rollup has none of those columns.</summary>
     private async Task<ViewerRoutedRead<ViewerProcedureStatsRow>> GetTopProceduresByCpuHourlyAsync(
         RollupAvailability rollups, RollupCoverage coverage, int serverId, DateTime startUtc, DateTime endUtc, int top,
-        IReadOnlyList<string>? databaseNames, QueryTagFilter? tags, CancellationToken cancellationToken)
+        IReadOnlyList<string>? databaseNames, DatabaseFilter databases, QueryTagFilter? tags, CancellationToken cancellationToken)
     {
         /* #5329: the io hourly rollup, when it reaches the window's start, in place of the interval rollup (same
            columns plus the three I/O sums); otherwise today's route and blank columns. See the queries arm. */
@@ -231,6 +247,7 @@ public sealed partial class ViewerDataService
             AddServerWindowParameters(command, serverId, startUtc, endUtc);
             command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = top });
             command.Parameters.Add(DatabaseFilterParameter(databaseNames));
+            command.Parameters.Add(databases.ExcludeParameter());
             AddHourlyCeilingParameter(command, ceiling);
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
@@ -280,8 +297,8 @@ public sealed partial class ViewerDataService
         FROM {fromClause}
         WHERE server_id = $1
         AND   bucket >= $2
-        AND   bucket < $3{HourlyCeilingSql(ceiling)}
-        AND   ($5::text[] IS NULL OR database_name = ANY($5))
+        AND   bucket < $3{HourlyCeilingSql(ceiling, 7)}
+        AND   ($5::text[] IS NULL OR database_name = ANY($5)){DatabaseFilter.ExcludeClause("database_name", 6)}
         /*TAG:object:database_name,schema_name,object_name*/
         GROUP BY database_name, schema_name, object_name
         HAVING (SUM(execution_count_sum) > 0 OR SUM(elapsed_time_sum) > 0)
@@ -292,7 +309,7 @@ public sealed partial class ViewerDataService
     /// <summary>The Raw-tier read, unchanged — what <see cref="GetTopProceduresByCpuAsync"/> ran before #4231
     /// stage 3b added the hourly arm.</summary>
     private async Task<List<ViewerProcedureStatsRow>> GetTopProceduresByCpuRawAsync(
-        int serverId, DateTime startUtc, DateTime endUtc, int top, IReadOnlyList<string>? databaseNames, QueryTagFilter? tags, CancellationToken cancellationToken)
+        int serverId, DateTime startUtc, DateTime endUtc, int top, IReadOnlyList<string>? databaseNames, DatabaseFilter databases, QueryTagFilter? tags, CancellationToken cancellationToken)
     {
         var rows = new List<ViewerProcedureStatsRow>();
 
@@ -301,6 +318,7 @@ public sealed partial class ViewerDataService
         AddServerWindowParameters(command, serverId, startUtc, endUtc);
         command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = top });
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
+        command.Parameters.Add(databases.ExcludeParameter());
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -339,6 +357,38 @@ public sealed partial class ViewerDataService
         }
 
         return rows;
+    }
+
+    /// <summary>#6651: the procedure_stats collector's own run history (successful runs, and how many fell inside the window), the
+    /// facts <see cref="CollectorRunFacts.ProcedureStatsEmpty"/> words an empty page from. The same three counts as the service's
+    /// <c>DarlingCollectorRunFactsReader</c>, in one statement; read only when the page is empty and databases were left out.</summary>
+    public const string ProcedureStatsRunFactsSql = """
+        SELECT
+            (SELECT COUNT(*) FROM (SELECT 1 FROM v_collection_log
+                                   WHERE server_id = $1 AND collector_name = 'procedure_stats' AND status = 'SUCCESS'
+                                   ORDER BY collection_time DESC LIMIT 2) AS newest) AS runs,
+            (SELECT MAX(collection_time) FROM v_collection_log
+             WHERE server_id = $1 AND collector_name = 'procedure_stats' AND status = 'SUCCESS' AND collection_time <= $3) AS last_success,
+            (SELECT COUNT(*) FROM v_collection_log
+             WHERE server_id = $1 AND collector_name = 'procedure_stats' AND status = 'SUCCESS'
+             AND   collection_time >= $2 AND collection_time <= $3) AS in_window
+        """;
+
+    /// <summary>#6651: <see cref="ProcedureStatsRunFactsSql"/> for the window [<paramref name="startUtc"/>, <paramref name="endUtc"/>].</summary>
+    public async Task<CollectorRunFacts> GetProcedureStatsRunFactsAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
+    {
+        await using var command = _dataSource.CreateCommand(ProcedureStatsRunFactsSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+        AddServerWindowParameters(command, serverId, startUtc, endUtc);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return CollectorRunFacts.None;
+        }
+
+        DateTime? last = reader.IsDBNull(1) ? null : DateTime.SpecifyKind(reader.GetDateTime(1), DateTimeKind.Utc);
+        return new CollectorRunFacts(reader.GetInt64(0), reader.GetInt64(2), last, null);
     }
 
     /// <summary>

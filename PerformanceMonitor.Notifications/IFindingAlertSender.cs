@@ -164,6 +164,10 @@ public static class FindingSummary
 /// so the investigation request a page opens takes the whole hash from here. Null when the producer has none (every
 /// caller that predates it, and Lite, which opens no request).
 /// </param>
+/// <param name="RecurringAtThisHour">
+/// #6596: the lead finding's story carries the analysis pass's "recurring at this hour" label (<c>RecurrenceLabeler</c>).
+/// Such a page opens no investigation request. Its severity, its row and its send are unchanged (ruling Q3, #3653).
+/// </param>
 public sealed record FindingAlert(
     string MetricName,
     string ServerName,
@@ -176,7 +180,8 @@ public sealed record FindingAlert(
     string DetailText,
     bool DeliverDetailText,
     FindingRoute Route = FindingRoute.Page,
-    string? StoryPathHash = null)
+    string? StoryPathHash = null,
+    bool RecurringAtThisHour = false)
 {
     /// <summary>
     /// The prose a delivery channel should render for this alert, or null when the structured

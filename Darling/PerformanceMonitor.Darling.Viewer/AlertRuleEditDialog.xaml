@@ -1,0 +1,113 @@
+<Window x:Class="PerformanceMonitor.Darling.Viewer.AlertRuleEditDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Add Alert Rule"
+        SizeToContent="Height" Width="640"
+        WindowStartupLocation="CenterOwner"
+        Icon="EDD.ico"
+        ResizeMode="NoResize"
+        Background="{DynamicResource BackgroundLightBrush}"
+        Foreground="{DynamicResource ForegroundBrush}">
+    <!-- The custom alert rule form (#6390 S4), built like KnownPatternEditDialog: dark-styled via the shared ViewerDarkTheme dictionary.
+         Validate and Save both run AlertRuleEditorModel, which hands the definition to CustomAlertRuleDefinition.TryParse, the same
+         validator /api/alerts/validate uses, and show its text unchanged. -->
+    <Window.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="ViewerDarkTheme.xaml"/>
+            </ResourceDictionary.MergedDictionaries>
+        </ResourceDictionary>
+    </Window.Resources>
+
+    <StackPanel Margin="20">
+        <TextBlock x:Name="HeaderText" Text="Add Alert Rule" FontSize="18" FontWeight="Bold" HorizontalAlignment="Left" Margin="0,0,0,8"/>
+
+        <TextBlock Text="Name (required, 200 characters at most)" HorizontalAlignment="Left" Margin="0,0,0,4"/>
+        <TextBox x:Name="NameBox" Margin="0,0,0,8"/>
+        <TextBlock Text="Description" HorizontalAlignment="Left" Margin="0,0,0,4"/>
+        <TextBox x:Name="DescriptionBox" Margin="0,0,0,8"/>
+        <CheckBox x:Name="EnabledCheck" Content="Enabled (an unchecked rule is paused: it never evaluates)" IsChecked="True" Margin="0,0,0,10"/>
+
+        <TextBlock Text="Metric" FontWeight="Bold" HorizontalAlignment="Left" Margin="0,0,0,4"/>
+        <ComboBox x:Name="MeasureCombo" Margin="0,0,0,8" SelectionChanged="MeasureCombo_SelectionChanged"/>
+        <Grid Margin="0,0,0,8">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/><ColumnDefinition Width="12"/><ColumnDefinition Width="*"/><ColumnDefinition Width="12"/><ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <StackPanel Grid.Column="0">
+                <TextBlock Text="Aggregate" HorizontalAlignment="Left" Margin="0,0,0,4"/>
+                <ComboBox x:Name="AggregateCombo" SelectionChanged="AggregateCombo_SelectionChanged"/>
+            </StackPanel>
+            <StackPanel Grid.Column="2">
+                <TextBlock Text="Unit" HorizontalAlignment="Left" Margin="0,0,0,4"/>
+                <ComboBox x:Name="UnitCombo"/>
+            </StackPanel>
+            <StackPanel Grid.Column="4">
+                <TextBlock Text="Window (hours, 0.017 to 24)" HorizontalAlignment="Left" Margin="0,0,0,4"/>
+                <TextBox x:Name="HoursBox" Text="0.25"/>
+            </StackPanel>
+        </Grid>
+
+        <TextBlock Text="Predicate" FontWeight="Bold" HorizontalAlignment="Left" Margin="0,0,0,4"/>
+        <Grid Margin="0,0,0,8">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/><ColumnDefinition Width="12"/><ColumnDefinition Width="*"/><ColumnDefinition Width="12"/><ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+            <StackPanel Grid.Column="0" Grid.Row="0" Margin="0,0,0,6">
+                <TextBlock Text="Operator" HorizontalAlignment="Left" Margin="0,0,0,4"/>
+                <ComboBox x:Name="OpCombo" SelectionChanged="OpCombo_SelectionChanged"/>
+            </StackPanel>
+            <StackPanel Grid.Column="2" Grid.Row="0" Margin="0,0,0,6">
+                <TextBlock Text="Warning threshold" HorizontalAlignment="Left" Margin="0,0,0,4"/>
+                <TextBox x:Name="WarnBox"/>
+            </StackPanel>
+            <StackPanel Grid.Column="4" Grid.Row="0" Margin="0,0,0,6">
+                <TextBlock Text="Critical threshold (optional)" HorizontalAlignment="Left" Margin="0,0,0,4"/>
+                <TextBox x:Name="CriticalBox"/>
+            </StackPanel>
+            <StackPanel Grid.Column="0" Grid.Row="1">
+                <TextBlock Text="Lower bound (between/outside)" HorizontalAlignment="Left" Margin="0,0,0,4"/>
+                <TextBox x:Name="LowerBox"/>
+            </StackPanel>
+            <StackPanel Grid.Column="2" Grid.Row="1">
+                <TextBlock Text="Upper bound (between/outside)" HorizontalAlignment="Left" Margin="0,0,0,4"/>
+                <TextBox x:Name="UpperBox"/>
+            </StackPanel>
+            <StackPanel Grid.Column="4" Grid.Row="1">
+                <TextBlock Text="Critical band (lower, upper; optional)" HorizontalAlignment="Left" Margin="0,0,0,4"/>
+                <StackPanel Orientation="Horizontal">
+                    <TextBox x:Name="CriticalLowerBox" Width="85"/>
+                    <TextBox x:Name="CriticalUpperBox" Width="85" Margin="6,0,0,0"/>
+                </StackPanel>
+            </StackPanel>
+        </Grid>
+
+        <TextBlock Text="Hysteresis (consecutive evaluations; blank keeps the default)" FontWeight="Bold" HorizontalAlignment="Left" Margin="0,0,0,4"/>
+        <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+            <TextBlock Text="Breach" VerticalAlignment="Center" Margin="0,0,6,0"/>
+            <TextBox x:Name="BreachBox" Width="60" Text="3"/>
+            <TextBlock Text="Clear" VerticalAlignment="Center" Margin="16,0,6,0"/>
+            <TextBox x:Name="ClearBox" Width="60" Text="2"/>
+        </StackPanel>
+
+        <TextBlock Text="Scope" FontWeight="Bold" HorizontalAlignment="Left" Margin="0,0,0,4"/>
+        <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+            <RadioButton x:Name="ScopeAll" Content="All servers" IsChecked="True" Margin="0,0,16,0" Checked="Scope_Changed"/>
+            <RadioButton x:Name="ScopeServers" Content="These servers" Margin="0,0,16,0" Checked="Scope_Changed"/>
+            <RadioButton x:Name="ScopeTag" Content="Servers with tag" Checked="Scope_Changed"/>
+        </StackPanel>
+        <ListBox x:Name="ServerList" SelectionMode="Multiple" Height="80" Margin="0,0,0,4" Visibility="Collapsed"/>
+        <ComboBox x:Name="TagCombo" DisplayMemberPath="Name" Margin="0,0,0,4" Visibility="Collapsed"/>
+
+        <TextBlock Text="Expires (ISO-8601 UTC, such as 2026-12-01T00:00:00Z; empty for never)" HorizontalAlignment="Left" Margin="0,4,0,4"/>
+        <TextBox x:Name="ExpiresBox" Margin="0,0,0,8"/>
+
+        <TextBlock x:Name="StatusText" TextWrapping="Wrap" Margin="0,0,0,4" MinHeight="18"/>
+        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,8,0,0">
+            <Button Content="_Validate" Width="80" Height="30" Margin="0,0,8,0" Click="Validate_Click"/>
+            <Button Content="_Save" Width="80" Height="30" Margin="0,0,8,0" Click="Save_Click"/>
+            <Button Content="_Cancel" Width="80" Height="30" Click="Cancel_Click" IsCancel="True"/>
+        </StackPanel>
+    </StackPanel>
+</Window>

@@ -16,12 +16,27 @@ using System.Threading.Tasks;
 using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitor.Darling.Storage;
 
 /// <summary>One Level 2 change, as a tool hands it to the gate (#5912): the tool, the kind of change (the journal's word,
 /// e.g. <c>mute</c>), the validated <c>agent_action</c> and the target.</summary>
-public sealed record AgentActionCall(string Tool, string Kind, AgentAction Action, AgentActionTarget Target);
+public sealed record AgentActionCall(string Tool, string Kind, AgentAction Action, AgentActionTarget Target, string? TokenName = null);
+
+/// <summary>The journal events one agent action writes (#6569): the call, then its result. Only the store owner journals them, as
+/// <c>server_action_switched</c> is (#6269): <see cref="InvestigationRequestStore.RunAgentActionAsync"/>, a person's undo through the
+/// owner, and nothing else. The journal's trigger refuses them from the <c>mcp</c> and <c>admin</c> logins (<c>refused</c> and
+/// <c>journal_capped</c> stay writable by both, because the claim and submit tools journal them too).</summary>
+public static class AgentActionEvents
+{
+    public const string Called = "action_called";
+    public const string Done = "action_done";
+    public const string Failed = "action_failed";
+
+    /// <summary>The events above, for the journal trigger's owner-only list.</summary>
+    public static IReadOnlyList<string> OwnerOnly { get; } = [Called, Done, Failed];
+}
 
 /// <summary>What the gate knows about the request when it asks a tool's kind rule (#5912).</summary>
 public sealed record AgentActionContext(AgentActionCall Call, int RequestServerId, string RequestServerName, int ClaimNo);
@@ -48,7 +63,7 @@ public sealed class AgentActionHooks
     /// at most once per gate pass, so a request with several metrics does not read the route table (and its scope inputs) again
     /// for each one.
     /// </summary>
-    public required Func<NpgsqlConnection, NpgsqlTransaction, CancellationToken, Task<Func<string, int, int?>>> LoadLevels { get; init; }
+    public required Func<NpgsqlConnection, NpgsqlTransaction, CancellationToken, Task<Func<string, int, AlertSeverityLevel?, int?>>> LoadLevels { get; init; }
 
     /// <summary>Check 7, the kind rule; null when the kind has none.</summary>
     public Func<NpgsqlConnection, NpgsqlTransaction, AgentActionContext, CancellationToken, Task<AgentActionRefusal?>>? KindRule { get; init; }
@@ -146,7 +161,7 @@ FOR SHARE";
 
     /// <summary>Every metric that opened or joined the request, for the re-resolve: the lowest level wins.</summary>
     internal const string AgentActionMetricsSql = @"
-SELECT DISTINCT metric_name
+SELECT DISTINCT metric_name, severity
 FROM config.investigation_request_alerts
 WHERE request_id = $1";
 
@@ -177,11 +192,14 @@ RETURNING journal_id";
     /// 5 <c>not_level_2</c> (the stamped level, and every metric of the request re-resolved over the live routes; the lowest
     /// wins), 6 <c>other_server</c>, 7 the kind rule, 8 <c>journal_capped</c>. Check 1 (the argument) is the caller's, through
     /// <c>InvestigationToolCore.ParseAgentAction</c>, before the gate. The first failing check answers its refusal, changes
-    /// nothing, and is journaled <c>refused</c> at most once per request, tool, code and hour. On a pass the gate reads the
+    /// nothing, and is journaled <c>refused</c> at most once per request, verified token, tool, code and hour. On a pass the gate reads the
     /// before image and commits <c>action_called</c> first, which drops the lock; the change then runs in its own
     /// transaction, which takes the row <c>FOR SHARE</c> again and re-checks 3, 5 and 6 before it writes, and journals
     /// <c>action_done</c> with it, or <c>action_failed</c>. No row holds the claim id: the journal names the claim by its
-    /// number (<c>claim_no</c>).
+    /// number (<c>claim_no</c>). Every transaction here, and the late <c>action_done</c>, runs on the store owner's data source
+    /// when the store was given one (#6569): the journal keeps <see cref="AgentActionEvents"/> to the owner, so the checks, the
+    /// store change a tool's write hook makes and the rows stay in one transaction on the login that may write them. The agent's
+    /// own identity checks (token, claim, request) are the same; only the login that writes changed.
     /// </summary>
     public async Task<AgentActionResult> RunAgentActionAsync(AgentActionCall call, AgentActionHooks hooks,
         CancellationToken cancellationToken = default)
@@ -193,7 +211,7 @@ RETURNING journal_id";
         var now = Now();
 
         long calledId;
-        await using (var connection = await _dataSource.OpenConnectionAsync(cancellationToken))
+        await using (var connection = await AgentActionSource.OpenConnectionAsync(cancellationToken))
         await using (var transaction = await connection.BeginTransactionAsync(cancellationToken))
         {
             var request = await ReadAgentActionRequestAsync(connection, transaction, action.RequestId, cancellationToken);
@@ -232,7 +250,7 @@ RETURNING journal_id";
             if (refusal is not null)
             {
                 await JournalRefusedAsync(connection, transaction, now, request is null ? null : action.RequestId,
-                    request?.ServerId, actor, call.Tool, refusal.Reason, cancellationToken);
+                    request?.ServerId, actor, call.TokenName, call.Tool, refusal.Reason, cancellationToken);
                 await transaction.CommitAsync(cancellationToken);
                 return new AgentActionResult(refusal, null, null);
             }
@@ -263,7 +281,7 @@ RETURNING journal_id";
         var requestServerId = call.Target.ServerId;
         try
         {
-            await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+            await using var connection = await AgentActionSource.OpenConnectionAsync(cancellationToken);
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
             var request = await ReadAgentActionRequestAsync(connection, transaction, action.RequestId, cancellationToken);
             /* Everything the gate checked is checked again here (#5632): a person can turn agent changes off, turn this server's switch off or
@@ -342,7 +360,7 @@ RETURNING journal_id";
                does: its called row stays with no result, which reads as "result unknown"): the change rolled back with
                its transaction (a store change) or never happened (a refused write), so journal the failure on its own. A
                failure to write this row leaves the called row with neither result, which reads as "result unknown". */
-            await using var connection = await _dataSource.OpenConnectionAsync(CancellationToken.None);
+            await using var connection = await AgentActionSource.OpenConnectionAsync(CancellationToken.None);
             await using var transaction = await connection.BeginTransactionAsync(CancellationToken.None);
             await JournalReturningAsync(connection, transaction, Now(), action.RequestId, call.Target.ServerId, "action_failed",
                 actor, "error", new JsonObject { ["called_id"] = calledId, ["error"] = ex.Message }.ToJsonString(),
@@ -371,7 +389,7 @@ RETURNING journal_id";
         {
             try
             {
-                await using var connection = await _dataSource.OpenConnectionAsync(CancellationToken.None);
+                await using var connection = await AgentActionSource.OpenConnectionAsync(CancellationToken.None);
                 await using var command = Command(connection, null, AgentActionLateDoneSql,
                     P(at), P(requestId), new NpgsqlParameter<int?> { TypedValue = serverId, NpgsqlDbType = NpgsqlDbType.Integer },
                     P(actor), P(detail), P(calledId.ToString(CultureInfo.InvariantCulture)));
@@ -391,10 +409,13 @@ RETURNING journal_id";
 
     /// <summary>
     /// Journals a refusal the gate's caller made before the gate (#5912, check 1, or the tool's own refusal): <c>refused</c>,
-    /// at most once per request, tool, code and hour. An unparsed request id journals with no request, once per tool, code
-    /// and hour. An actor the agent id rule refuses is journaled as <see cref="InvestigationRules.InvalidAgentId"/>.
+    /// at most once per request, verified token, tool, code and hour. An unparsed request id journals with no request, once per verified
+    /// token, tool, code and hour. The key is the named agent token's name (<paramref name="tokenName"/>), else <see cref="RefusalUnboundKey"/>, never the
+    /// agent id the caller typed: with no named token a new agent id is free text, and a key built on it would write a new row on every call.
+    /// The row's actor is the agent id (the token's name when there is one). An actor the agent id rule refuses is journaled as
+    /// <see cref="InvestigationRules.InvalidAgentId"/>.
     /// </summary>
-    public async Task RecordAgentActionRefusalAsync(Guid? requestId, string? agentId, string tool, string code,
+    public async Task RecordAgentActionRefusalAsync(Guid? requestId, string? agentId, string tool, string code, string? tokenName,
         CancellationToken cancellationToken = default)
     {
         var actor = "agent:" + (InvestigationRules.IsValidAgentId(agentId) ? agentId : InvestigationRules.InvalidAgentId);
@@ -412,7 +433,7 @@ RETURNING journal_id";
             }
         }
 
-        await JournalRefusedAsync(connection, transaction, Now(), known, serverId, actor, tool, code, cancellationToken);
+        await JournalRefusedAsync(connection, transaction, Now(), known, serverId, actor, tokenName, tool, code, cancellationToken);
         await transaction.CommitAsync(cancellationToken);
     }
 
@@ -508,18 +529,18 @@ RETURNING journal_id";
     /// after the request opened resolves to null and lowers the request to 0: fail closed (pinned live).
     /// </summary>
     private static async Task<int> ResolveRequestLevelAsync(NpgsqlConnection connection, NpgsqlTransaction transaction,
-        AgentActionRequest request, Func<NpgsqlConnection, NpgsqlTransaction, CancellationToken, Task<Func<string, int, int?>>> loadLevels,
+        AgentActionRequest request, Func<NpgsqlConnection, NpgsqlTransaction, CancellationToken, Task<Func<string, int, AlertSeverityLevel?, int?>>> loadLevels,
         int floor, CancellationToken cancellationToken)
     {
         var level = request.AutonomyLevel;
         if (level >= floor)
         {
             var resolve = await loadLevels(connection, transaction, cancellationToken);
-            foreach (var metric in request.Metrics)
+            foreach (var (metric, severity) in request.Metrics)
             {
                 if (level < floor)
                     break;
-                level = Math.Min(level, resolve(metric, request.ServerId) ?? 0);
+                level = Math.Min(level, resolve(metric, request.ServerId, severity) ?? 0);
             }
         }
 
@@ -528,7 +549,7 @@ RETURNING journal_id";
 
     private sealed record AgentActionRequest(string State, Guid? ClaimId, string? ClaimedBy, DateTime? LeaseUntil,
         DateTime ExpiresAt, int ServerId, string ServerName, Guid? PracticeOf, int AutonomyLevel, int ClaimCount,
-        IReadOnlyList<string> Metrics);
+        IReadOnlyList<(string Metric, AlertSeverityLevel? Severity)> Metrics);
 
     private async Task<AgentActionRequest?> ReadAgentActionRequestAsync(NpgsqlConnection connection,
         NpgsqlTransaction transaction, Guid requestId, CancellationToken cancellationToken)
@@ -552,29 +573,41 @@ RETURNING journal_id";
                 reader.IsDBNull(7) ? null : reader.GetGuid(7),
                 reader.GetInt16(8),
                 reader.GetInt32(9),
-                Array.Empty<string>());
+                Array.Empty<(string, AlertSeverityLevel?)>());
         }
 
-        var metrics = new List<string> { firstMetric };
+        /* #6928: each alert's metric at the tier it arrived at, so the live routes are read at the tier dispatch used: a Critical alert
+           dispatched under one route is not re-resolved under a Warning-only route that dispatch skipped. The first metric stands
+           alone only when no alert row names it (an old request), and resolves with no tier. */
+        var metrics = new List<(string Metric, AlertSeverityLevel? Severity)>();
         await using (var command = Command(connection, transaction, AgentActionMetricsSql, P(requestId)))
         await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
         {
             while (await reader.ReadAsync(cancellationToken))
             {
                 var metric = reader.GetString(0);
-                if (!metrics.Contains(metric, StringComparer.Ordinal))
-                    metrics.Add(metric);
+                var severity = reader.IsDBNull(1) ? null
+                    : string.Equals(reader.GetString(1), InvestigationEvents.Critical, StringComparison.Ordinal) ? AlertSeverityLevel.Critical
+                    : (AlertSeverityLevel?)AlertSeverityLevel.Warning;
+                if (!metrics.Contains((metric, severity)))
+                    metrics.Add((metric, severity));
             }
         }
+
+        if (!metrics.Any(m => string.Equals(m.Metric, firstMetric, StringComparison.Ordinal)))
+            metrics.Insert(0, (firstMetric, null));
 
         return row with { Metrics = metrics };
     }
 
+    /// <summary>The once-key segment of a refusal that no named agent token made (the legacy token, or a named operator token).</summary>
+    internal const string RefusalUnboundKey = "unbound";
+
     private Task<int> JournalRefusedAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, DateTime now,
-        Guid? requestId, int? serverId, string actor, string tool, string code, CancellationToken cancellationToken)
+        Guid? requestId, int? serverId, string actor, string? tokenName, string tool, string code, CancellationToken cancellationToken)
     {
         var onceKey = string.Create(CultureInfo.InvariantCulture,
-            $"agent_refused:{(requestId is Guid id ? id.ToString() : "unknown")}:{tool}:{code}:{now:yyyy-MM-ddTHH}");
+            $"agent_refused:{(requestId is Guid id ? id.ToString() : "unknown")}:{tokenName ?? RefusalUnboundKey}:{tool}:{code}:{now:yyyy-MM-ddTHH}");
         return JournalAsync(connection, transaction, now, requestId, null, serverId, "refused", actor, code,
             new JsonObject { ["tool"] = tool }.ToJsonString(), onceKey, cancellationToken);
     }

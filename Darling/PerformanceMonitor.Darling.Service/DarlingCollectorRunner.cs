@@ -359,7 +359,8 @@ public sealed class DarlingCollectorRunner
        collectors capture the execution plan when true (darling.json "capturePlans", default true).
        Lite never sets the context flag; this is what makes Darling the plan-capturing SKU. Read
        through a provider (not a captured bool) so a control-plane store reload of config_service's
-       capture_plans is honored on the NEXT cycle without reconstructing the runner. */
+       capture_plans is honored on the NEXT cycle without reconstructing the runner. #6771: this is the service-wide
+       value; a server's own capture_plans (ServerRuntime.CapturePlans) wins over it when not null (CapturePlansFor). */
     private readonly Func<bool> _capturePlans;
 
     /* Feeds CollectorContext.CollectSchemaChangeEvents on every cycle — the default_trace_events
@@ -707,6 +708,43 @@ public sealed class DarlingCollectorRunner
        first-contact behaviour, not a regression. */
     private readonly ConcurrentDictionary<int, bool> _lastPgLogUsesCsvlogVerdict = new();
 
+    /* #6875: where a per-database pass that spent its PassWallClockBudget stopped, per (server, collector): the last database
+       it started. The next pass reads the databases after it first and wraps (PassBudget.ResumeOrder). A pass that covered every
+       database removes its entry, so the next one starts at the first. In memory on purpose, like the caches around it: a restart
+       begins at the first database, which only repeats the databases the pass before it already read. */
+    private readonly ConcurrentDictionary<(int ServerId, string Collector), string> _passResumeAfter = new();
+
+    /// <summary>The pass budget for one run of <paramref name="definition"/> on <paramref name="server"/>, and the databases in the order it
+    /// reads them (#6875). A definition with no pass budget gets a null budget and the list as it came.</summary>
+    internal (PassBudget? Budget, IReadOnlyList<string> Items) BeginPass(ICollectorSchemaInfo definition, int serverId, IReadOnlyList<string> items)
+    {
+        if (definition.PassWallClockBudget is not { } span)
+        {
+            return (null, items);
+        }
+
+        _passResumeAfter.TryGetValue((serverId, definition.Name), out var resumeAfter);
+        return (new PassBudget(span), PassBudget.ResumeOrder(items, resumeAfter));
+    }
+
+    /// <summary>Keeps (or clears) the resume point after a pass and returns the stop note, null when the pass covered every database (#6875).</summary>
+    internal string? EndPass(PassBudget? budget, ICollectorSchemaInfo definition, int serverId, string? stoppedAfter, int reached, int total)
+    {
+        if (budget is null)
+        {
+            return null;
+        }
+
+        if (stoppedAfter is null)
+        {
+            _passResumeAfter.TryRemove((serverId, definition.Name), out _);
+            return null;
+        }
+
+        _passResumeAfter[(serverId, definition.Name)] = stoppedAfter;
+        return PassBudget.StopNote(budget.BudgetSeconds, reached, total);
+    }
+
     /* #4735: the (target, log-tail collector) pairs whose last cycle used every read start and was refused at each.
        A start inside a character is cured by one of the later starts. A byte that is invalid in the database
        encoding, anywhere in the 4 MB window, is refused at all four and would be again on every cycle, so while a
@@ -1014,8 +1052,16 @@ public sealed class DarlingCollectorRunner
     /// decision is reachable from a test — a bare conjunction there is droppable by a refactor with every
     /// pin still green, which is the failure mode this shape removes.
     /// </summary>
-    internal bool ShouldCapturePlanXmlFor(string collectorName, int serverId) =>
-        _capturePlans() && ShouldCapturePlanForCollector(collectorName, serverId);
+    internal bool ShouldCapturePlanXmlFor(string collectorName, int serverId, bool? serverCapturePlans) =>
+        CapturePlansFor(serverCapturePlans) && ShouldCapturePlanForCollector(collectorName, serverId);
+
+    /// <summary>
+    /// #6771: whether plan XML is fetched for a server at all: the server's own <c>capture_plans</c> when it has one, else the
+    /// service-wide setting, read live. An explicit false stops the plan fetch for that server with the service-wide setting on, and
+    /// an explicit true keeps it with the service-wide setting off. Every decision below that used to read the service-wide
+    /// provider directly goes through here.
+    /// </summary>
+    internal bool CapturePlansFor(bool? serverCapturePlans) => serverCapturePlans ?? _capturePlans();
 
     /// <summary>
     /// #5158: whether this run of this collector leaves plan XML out of its main query and fetches it in a
@@ -1023,8 +1069,10 @@ public sealed class DarlingCollectorRunner
     /// target that captures plans, with the knob on. Azure SQL Database reads per database through a path with no
     /// second query, so it keeps the inline capture.
     /// </summary>
-    internal bool ShouldDeferPlanFetchFor(string collectorName, bool capturePlanXml, CollectorTargetInfo target) =>
-        ShouldDeferPlanFetchFor(collectorName, capturePlanXml, target, ProcedureStatsPlanFetchModeFor(collectorName, target));
+    internal bool ShouldDeferPlanFetchFor(
+        string collectorName, bool capturePlanXml, CollectorTargetInfo target, bool? serverCapturePlans) =>
+        ShouldDeferPlanFetchFor(
+            collectorName, capturePlanXml, target, ProcedureStatsPlanFetchModeFor(collectorName, target, serverCapturePlans));
 
     /// <summary>
     /// The same decision with procedure_stats' mode already resolved, so one run reads the knob and the capture setting
@@ -1046,9 +1094,9 @@ public sealed class DarlingCollectorRunner
     /// <see cref="ProcedureStatsPlanFetchModes.OfRun"/>.
     /// </summary>
     internal (bool DeferPlanXmlFetch, bool PlanIdentityColumns) StampPlanFetchFlags(
-        string collectorName, bool capturePlanXml, CollectorTargetInfo target)
+        string collectorName, bool capturePlanXml, CollectorTargetInfo target, bool? serverCapturePlans)
     {
-        var mode = ProcedureStatsPlanFetchModeFor(collectorName, target);
+        var mode = ProcedureStatsPlanFetchModeFor(collectorName, target, serverCapturePlans);
         return (
             ShouldDeferPlanFetchFor(collectorName, capturePlanXml, target, mode),
             /* Shadow adds the identity columns after the inline plan on a capture cycle; on sends them every cycle, a
@@ -1062,11 +1110,12 @@ public sealed class DarlingCollectorRunner
     /// no plans, and on Azure SQL Database, where whether <c>sys.dm_exec_query_stats</c> lists a module's statements
     /// is unverified, so the identity could not be trusted there. An unrecognized knob value is off and warns once.
     /// </summary>
-    internal ProcedureStatsPlanFetchMode ProcedureStatsPlanFetchModeFor(string collectorName, CollectorTargetInfo target)
+    internal ProcedureStatsPlanFetchMode ProcedureStatsPlanFetchModeFor(
+        string collectorName, CollectorTargetInfo target, bool? serverCapturePlans)
     {
         if (!string.Equals(collectorName, PlanCadenceGatedCollector, StringComparison.Ordinal)
             || target.IsAzureSqlDb
-            || !_capturePlans())
+            || !CapturePlansFor(serverCapturePlans))
         {
             return ProcedureStatsPlanFetchMode.Off;
         }
@@ -1434,7 +1483,7 @@ public sealed class DarlingCollectorRunner
 
         /* #4046 part 1b: read on the target's own connection each cycle, since a sighup setting takes
            effect with no reconnect and #3604-style connect-time caching would miss that. */
-        var logTimezoneIsUtc = await TryReadLogTimezoneIsUtcAsync(server, cancellationToken);
+        var (logTimezoneIsUtc, zoneCheck) = await TryReadLogTimezoneAsync(server, cancellationToken);
 
         /* #4053 part c2: the same target-configuration read IngestRdsLogEventsAsync makes, for the same
            reason — this ingestor reaches the log through the AWS API, not SQL, so it carries no target
@@ -1444,7 +1493,8 @@ public sealed class DarlingCollectorRunner
         var started = Stopwatch.GetTimestamp();
 
         var outcome = await rdsDeadlocks.IngestAsync(
-            server.ServerId, server.StorageName, host, logTimezoneIsUtc, pgLogUsesCsvlog, server.ConnectionString, server.Config.AwsRoleKey, cancellationToken);
+            server.ServerId, server.StorageName, host, logTimezoneIsUtc, pgLogUsesCsvlog, server.ConnectionString, server.Config.AwsRoleKey, zoneCheck,
+            cancellationToken);
 
         var elapsedMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
 
@@ -1462,18 +1512,26 @@ public sealed class DarlingCollectorRunner
     /// connection of their own. False (today's refusal on a foreign-zone line) when the setting cannot be
     /// read, matching the self-hosted route's NULL-column fallback in <see cref="PgServerLogTail.LogTimezoneIsUtc"/>.
     /// </summary>
-    private async Task<bool> TryReadLogTimezoneIsUtcAsync(ServerRuntime server, CancellationToken cancellationToken)
+    private async Task<(bool IsUtc, PgLogZoneCheck? ZoneCheck)> TryReadLogTimezoneAsync(
+        ServerRuntime server, CancellationToken cancellationToken)
     {
         try
         {
             var provider = TargetProviders.For(server.Target);
             await using var connection = provider.CreateConnection(server.ConnectionString);
             await connection.OpenAsync(cancellationToken);
-            var isUtc = await ReadLogTimezoneIsUtcAsync(connection, cancellationToken);
+            var setting = await ReadLogTimezoneSettingAsync(connection, cancellationToken);
+            var isUtc = PgDeadlockLogParser.IsUtcLogTimezoneSetting(setting);
 
             /* A read that works again resets the throttle below, so the next failure warns at once. */
             _logTimezoneReadWarnedUtc.TryRemove(server.ServerId, out _);
-            return isUtc;
+
+            /* #6866: a setting that is not UTC may be a named local zone. The managed route has no connection of its
+               own to ask on while it parses (the log text came from the AWS API), so the check opens one when it
+               has stamps to prove, the same way the read above does. */
+            return (isUtc, isUtc || string.IsNullOrWhiteSpace(setting)
+                ? null
+                : new PgLogZoneCheck(setting!, CreatePgLogZoneResolver(server)));
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -1483,7 +1541,7 @@ public sealed class DarlingCollectorRunner
             _logger?.Log(LogTimezoneReadFailureLevel(_logTimezoneReadWarnedUtc, server.ServerId, DateTime.UtcNow), ex,
                 "Could not read log_timezone for '{Server}' (#4046 part 1b) — a foreign-zone "
                 + "line this cycle is refused as before.", server.Config.DisplayName);
-            return false;
+            return (false, null);
         }
     }
 
@@ -1523,16 +1581,34 @@ public sealed class DarlingCollectorRunner
     /// Whether the target's <c>log_timezone</c> renders UTC, read on <paramref name="connection"/>, which must
     /// already be open. Its own method so a live test can run the exact statement the managed route sends.
     /// </summary>
-    internal static async Task<bool> ReadLogTimezoneIsUtcAsync(DbConnection connection, CancellationToken cancellationToken)
+    internal static async Task<bool> ReadLogTimezoneIsUtcAsync(DbConnection connection, CancellationToken cancellationToken) =>
+        PgDeadlockLogParser.IsUtcLogTimezoneSetting(await ReadLogTimezoneSettingAsync(connection, cancellationToken));
+
+    /// <summary>The target's <c>log_timezone</c> as written, read on <paramref name="connection"/> (open), or null.</summary>
+    internal static async Task<string?> ReadLogTimezoneSettingAsync(DbConnection connection, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(connection);
 
         using var command = connection.CreateCommand();
         command.CommandTimeout = 10;
         command.CommandText = LogTimezoneReadSql;
-        var value = await command.ExecuteScalarAsync(cancellationToken);
-        return value is string setting && PgDeadlockLogParser.IsUtcLogTimezoneSetting(setting);
+        return await command.ExecuteScalarAsync(cancellationToken) as string;
     }
+
+    /// <summary>
+    /// How a log reader proves the time of lines stamped in a named local zone (#6866): a connection of its own to the
+    /// target, because the log read holds the main one open while it parses, running <see cref="PgLogNamedZone"/>'s one
+    /// batched statement with the command timeout the log tail read uses (<see cref="CommandTimeoutSeconds"/>). The
+    /// pool makes the extra connection cheap, and the read only happens when a named zone has stamps to prove.
+    /// </summary>
+    internal static PgLogZoneResolver CreatePgLogZoneResolver(ServerRuntime server) =>
+        async (setting, pairs, cancellationToken) =>
+        {
+            var provider = TargetProviders.For(server.Target);
+            await using var connection = provider.CreateConnection(server.ConnectionString);
+            await connection.OpenAsync(cancellationToken);
+            return await PgLogNamedZone.ResolveAsync(connection, setting, pairs, CommandTimeoutSeconds, cancellationToken);
+        };
 
     /// <summary>#4046 part 1b: the managed route's foreign-zone count, on a throwaway context so the RDS ingest
     /// path can report it the same way <see cref="PgServerLogTail.MeasureForeignZoneLines"/> does for the
@@ -1625,7 +1701,7 @@ public sealed class DarlingCollectorRunner
 
         /* #4046 part 1b: see IngestRdsDeadlocksAsync's TryReadLogTimezoneIsUtcAsync call for why this reads
            the target fresh each cycle rather than caching it at connect. */
-        var logTimezoneIsUtc = await TryReadLogTimezoneIsUtcAsync(server, cancellationToken);
+        var (logTimezoneIsUtc, zoneCheck) = await TryReadLogTimezoneAsync(server, cancellationToken);
 
         /* #4053 part c1: the same target-configuration read the self-hosted pg_read_file route makes through
            ResolvePgReadBinaryFileGrantAsync, on the managed route's own throwaway connection for the same reason
@@ -1638,7 +1714,8 @@ public sealed class DarlingCollectorRunner
         var started = Stopwatch.GetTimestamp();
 
         var outcome = await rdsLogEvents.IngestAsync(
-            server.ServerId, server.StorageName, host, logTimezoneIsUtc, pgLogUsesCsvlog, server.ConnectionString, server.Config.AwsRoleKey, cancellationToken);
+            server.ServerId, server.StorageName, host, logTimezoneIsUtc, pgLogUsesCsvlog, server.ConnectionString, server.Config.AwsRoleKey, zoneCheck,
+            cancellationToken);
 
         var elapsedMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
 
@@ -1892,6 +1969,10 @@ public sealed class DarlingCollectorRunner
     {
         if (server.Target.Engine == CollectorTargetEngine.PostgreSql && ReadsPgServerLogTail(collectorName))
         {
+            /* #6866: a named local log_timezone is proved against the target by a connection of its own, since the
+               tail read below holds this one open while the collector parses. */
+            context.PgLogZoneResolver = CreatePgLogZoneResolver(server);
+
             var targetKey = ReadBinaryFileCacheKey(server);
             context.PgReadBinaryFileGranted = await PgReadBinaryFileCapability.IsGrantedAsync(
                 targetConnection, targetKey, cancellationToken);
@@ -2040,6 +2121,24 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
                one function the extension ships is used from the extension's schema only while pg_depend shows it is a
                member there. */
             context.PgFunctionSchemas = CollectorContext.ChoosePgFunctionSchemas(functions, statementsSchema);
+        }
+
+        /* #6888: the read above succeeded and a declared extension the query reads is not created in this database, so
+           the answer is already known and the query is not sent. Sending it would fail with 42883 / 42P01, which the host
+           classifies as a missing extension, and PostgreSQL writes that failure into the MONITORED server's own log, where
+           a DBA reads it as an error from the monitor. Raised as the same 42P01 the query would have raised, so the
+           worker's classification (PostgresFaultOutcome) records the same EXTENSION_MISSING outcome with the same advice,
+           on the server-scoped path and, stamped with the database, on the per-database path. A failed read threw above
+           and still fails the run. A collector that runs without the extension on this target (ReadsPgExtension false)
+           keeps running. */
+        foreach (var dependency in definition.RequiredPgExtensions)
+        {
+            if (!schemas.ContainsKey(dependency.ExtensionName) && definition.ReadsPgExtension(dependency, context))
+            {
+                throw new PostgresException(
+                    $"extension \"{dependency.ExtensionName}\" is not created in this database",
+                    "ERROR", "ERROR", PostgresErrorCodes.UndefinedTable);
+            }
         }
 
         return true;
@@ -2733,8 +2832,8 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
             }
         }
 
-        var capturePlanXml = ShouldCapturePlanXmlFor(definition.Name, server.ServerId);
-        var planFetchFlags = StampPlanFetchFlags(definition.Name, capturePlanXml, server.Target);
+        var capturePlanXml = ShouldCapturePlanXmlFor(definition.Name, server.ServerId, server.CapturePlans);
+        var planFetchFlags = StampPlanFetchFlags(definition.Name, capturePlanXml, server.Target, server.CapturePlans);
         var context = new CollectorContext
         {
             ServerId = server.ServerId,
@@ -2758,7 +2857,7 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
             PerfmonCounterOverride = null,
             LongQuerySessionName = LongQuerySessionName(),
             /* #2862: plan capture is additionally cadence-gated for procedure_stats — see
-               ShouldCapturePlanForCollector. Every other collector reads exactly _capturePlans().
+               ShouldCapturePlanForCollector. Every other collector reads exactly CapturePlansFor(server.CapturePlans) (#6771).
                Only this path is gated: FetchRowsAsync below is the on-demand live fetch, which an
                operator asked for by name and which stores nothing, so it always renders. */
             CapturePlanXml = capturePlanXml,
@@ -2917,15 +3016,33 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
             /* #1875: this path reads the trailing probe-failure set once PER DATABASE, so the note and the
                log cap are decided for the cycle after the loop rather than inside it — see
                CycleProbeFailures for why neither generalizes from the single-read plain path. */
-            var cycleProbeFailures = new CycleProbeFailures();
+            var cycleProbeFailures = new CycleProbeFailures(context.Target.IsAwsRds);
 
             /* One pooled store connection for the whole body; one binary COPY per database on it
                (completing an importer commits that database — commit-1..N-1 semantics on abort). */
             await using var pgConnection = await _postgres.OpenConnectionAsync(cancellationToken);
 
+            /* #6875: the same pass budget and rotation as the enumerated driver, for the per-database connection loop. */
+            var (azurePassBudget, azureOrder) = BeginPass(definition, server.ServerId, databases);
+            if (azurePassBudget is not null)
+            {
+                databases = [.. azureOrder];
+            }
+
+            string? azureLastStarted = null;
+            string? azureStoppedAfter = null;
+
             foreach (var databaseName in databases)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+
+                if (attempted > 0 && azurePassBudget is { Spent: true })
+                {
+                    azureStoppedAfter = azureLastStarted;
+                    break;
+                }
+
+                azureLastStarted = databaseName;
                 attempted++;
 
                 /* #2150: THE path the field report is on — Azure SQL DB collects query_store per database
@@ -3238,7 +3355,7 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
                         if (definition.EmitsProbeFailures)
                         {
                             cycleProbeFailures.Add(
-                                await EnumeratedCollectorDriver.ReadPayloadProbeFailuresAsync(dbReader, dbToken));
+                                await EnumeratedCollectorDriver.ReadPayloadProbeFailuresAsync(dbReader, dbToken, context.Target.IsAwsRds));
                         }
                     }
                     /* #6182: procedure_stats' plan phase on Azure SQL Database. #5449 moved the plan out of the main query into a second
@@ -3600,8 +3717,10 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
                 emptyListNote,
                 EnumeratedCollectorDriver.MergeNotes(
                     cycleProbeFailures.Note,
-                    EnumeratedCollectorDriver.BuildPartialFailureNote(
-                        failed, attempted, failedDatabases, firstFailure?.Message)));
+                    EnumeratedCollectorDriver.MergeNotes(
+                        EnumeratedCollectorDriver.BuildPartialFailureNote(
+                            failed, attempted, failedDatabases, firstFailure?.Message),
+                        EndPass(azurePassBudget, definition, server.ServerId, azureStoppedAfter, attempted, databases.Count))));
             LogEnumerationProbeFailures(definition, server, cycleProbeFailures.Failures);
 
             /* One database failing is routine (offline, mid-restore, a permissions oddity) and stays a
@@ -3669,7 +3788,7 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
                     /* Shared read (#1837): the item list, then the OPTIONAL second result set of items the
                        enumeration could not probe. Both hosts route through it so the item read, the
                        failure read, and the note wording cannot drift. */
-                    enumeration = await EnumeratedCollectorDriver.ReadEnumerationAsync(enumerationReader, cancellationToken);
+                    enumeration = await EnumeratedCollectorDriver.ReadEnumerationAsync(enumerationReader, cancellationToken, context.Target.IsAwsRds);
                     if (qsRun is { Configured: true })
                     {
                         foreach (var fact in await QueryStoreCollector.ReadPrimaryFactsAsync(enumerationReader, cancellationToken))
@@ -3692,6 +3811,10 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
                        were simply quiet (#1837). Mirrors Lite's _lastCollectionNote. */
                     return new CollectorRunResult(0, sqlMs, 0, CollectorContext.NoMeasurements, enumeration.Note);
                 }
+
+                /* #6875: a collector with a pass budget reads the databases from where the last pass stopped. */
+                var (passBudget, passItems) = BeginPass(definition, server.ServerId, items);
+                items = passItems;
 
                 /* Optional quick scalar probe (query_store's live PRODUCTVERSION check) —
                    best-effort on a 10-second budget; failure leaves the documented default. */
@@ -4222,7 +4345,8 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
                        Not "every collector but query_store", which is what this said: four definitions
                        declare a budget and two of them also enumerate, so plan_correction arrives here
                        non-null too. */
-                    perItemBudget: definition.PerItemWallClockBudget);
+                    perItemBudget: definition.PerItemWallClockBudget,
+                    passBudget: passBudget);
 
                 /* #3754: the enumerated fan-out's failure account, treated exactly as the Azure per-database
                    loop above treats its own (#2623) - and for the first time. Until this the driver handed
@@ -4245,6 +4369,9 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
                    failed. rowsWritten and the slices are assigned only on the surviving path: a run that
                    read nothing has no rows to report and RunOneAsync's fault arm reports its own wall clock. */
                 collectionNote = EnumeratedCollectorDriver.MergeNotes(collectionNote, driverResult.PartialFailureNote);
+                collectionNote = EnumeratedCollectorDriver.MergeNotes(
+                    collectionNote,
+                    EndPass(passBudget, definition, server.ServerId, driverResult.StoppedAfter, driverResult.Attempted, driverResult.Total));
 
                 if (driverResult.AllItemsFailed)
                 {
@@ -4429,7 +4556,7 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
                        exactly what they were. */
                     if (definition.EmitsProbeFailures)
                     {
-                        var probes = await EnumeratedCollectorDriver.ReadPayloadProbeFailuresAsync(reader, itemToken);
+                        var probes = await EnumeratedCollectorDriver.ReadPayloadProbeFailuresAsync(reader, itemToken, context.Target.IsAwsRds);
                         collectionNote = EnumeratedCollectorDriver.MergeNotes(collectionNote, probes.Note);
                         LogEnumerationProbeFailures(definition, server, probes.ProbeFailures);
                     }
@@ -4698,7 +4825,7 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
     /// an enumeration probe — accurate for both, since a payload collector reaches this only by
     /// enumerating and probing databases inside its own server-side cursor.</para>
     /// </summary>
-    private void LogEnumerationProbeFailures<TRow>(
+    internal void LogEnumerationProbeFailures<TRow>(
         ICollectorDefinition<TRow> definition,
         ServerRuntime server,
         IReadOnlyList<EnumerationProbeFailure> probeFailures)
@@ -4708,17 +4835,27 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
             return;
         }
 
-        var shown = Math.Min(probeFailures.Count, EnumeratedCollectorDriver.MaxLoggedProbeFailures);
+        /* #6889: a login with no user in a database is a posture that does not change, so those rows get ONE Information
+           line per run (the same ten names the SUCCESS-row note uses) and never a Warning. Every other probe failure keeps
+           the capped per-item Warning below. */
+        var (noAccess, others) = NoDatabaseAccessNote.Partition(probeFailures);
+        if (noAccess.Count > 0)
+        {
+            _logger?.LogInformation(NoDatabaseAccessNote.NoAccessLogTemplate,
+                definition.Name, server.Config.DisplayName, noAccess.Count, NoDatabaseAccessNote.NamedList(noAccess));
+        }
+
+        var shown = Math.Min(others.Count, EnumeratedCollectorDriver.MaxLoggedProbeFailures);
         for (var i = 0; i < shown; i++)
         {
             _logger?.LogWarning(EnumeratedCollectorDriver.ProbeFailureLogTemplate,
-                definition.Name, server.Config.DisplayName, probeFailures[i].Item, probeFailures[i].Error);
+                definition.Name, server.Config.DisplayName, others[i].Item, others[i].Error);
         }
 
-        if (probeFailures.Count > shown)
+        if (others.Count > shown)
         {
             _logger?.LogWarning(EnumeratedCollectorDriver.ProbeFailureOverflowLogTemplate,
-                definition.Name, server.Config.DisplayName, probeFailures.Count, probeFailures.Count - shown, shown);
+                definition.Name, server.Config.DisplayName, others.Count, others.Count - shown, shown);
         }
     }
 
@@ -5581,7 +5718,7 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
             IgnoredWaitTypes = IgnoredWaitDefaults.All,
             ExcludedDatabases = server.Config.ExcludedDatabases?.ToArray() ?? Array.Empty<string>(),
             PerfmonCounterOverride = null,
-            CapturePlanXml = _capturePlans(),
+            CapturePlanXml = CapturePlansFor(server.CapturePlans),
             /* #2150: stays FALSE here, and NOT because the readers are behind — this is FetchRowsAsync, the
                on-demand live fetch. It returns the rows straight to the caller and writes nothing: no store
                insert, no text fetch, no watermark. Turning it on would null query_sql_text in rows that have

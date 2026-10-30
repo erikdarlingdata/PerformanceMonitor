@@ -1,16 +1,18 @@
 # Features and screenshots
 
+Audience: operators.
+
 Part of the [Performance Monitor documentation](../README.md#documentation).
 
 ## What You Get
 
-🔍 **Specialized collectors** on configurable schedules — wait stats, query performance, blocking chains, deadlock graphs, memory grants, file I/O, tempdb, perfmon counters, FinOps/capacity, and more. Query text and execution plan collection can be disabled per-collector for sensitive environments.
+🔍 **Specialized collectors** on configurable schedules — wait stats, query performance, blocking chains, deadlock graphs, memory grants, file I/O, tempdb, perfmon counters, FinOps/capacity, and more. You can turn each collector off on its own. Darling also has one `capturePlans` setting in `darling.json`, on by default, that stops execution plan capture for every server.
 
-🚨 **Real-time alerts** for blocking, deadlocks, and high CPU — system tray notifications, styled HTML emails with full XML attachments, and webhook notifications for external integrations
+🚨 **Real-time alerts** for blocking, deadlocks, high CPU, low disk space, and the other conditions listed in [Alerts & Notifications](alerts.md) — system tray notifications, styled HTML emails with full XML attachments, and webhook notifications for external integrations
 
-📊 **NOC-style overview** with green/yellow/red health cards, auto-refresh, configurable time ranges, and dark/light themes
+📊 **NOC-style overview** with green/yellow/red health cards, auto-refresh, configurable time ranges, and Dark, Light and Cool Breeze themes
 
-📋 **Graphical plan viewer** with native ShowPlan rendering, 30-rule PlanAnalyzer, operator-level cost breakdown, and a standalone mode for opening `.sqlplan` files without a server connection
+📋 **Graphical plan viewer** with native ShowPlan rendering, 37-rule PlanAnalyzer, operator-level cost breakdown, and a standalone mode for opening `.sqlplan` files without a server connection
 
 💡 **Recommendations engine (advise-and-act)** — a dedicated Recommendations tab surfaces prioritized findings from your own monitoring data with the reasoning behind each one, and can apply selected fixes directly. Destructive changes (like enabling Read Committed Snapshot Isolation) are gated behind an informed-consent dialog that spells out both the risk of acting and the risk of doing nothing.
 

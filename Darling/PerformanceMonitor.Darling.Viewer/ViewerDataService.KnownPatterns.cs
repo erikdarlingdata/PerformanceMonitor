@@ -18,8 +18,8 @@ using PerformanceMonitor.Common.KnownPatterns;
 namespace PerformanceMonitor.Darling.Viewer;
 
 /// <summary>
-/// The viewer's known-pattern editor writes (#6334): list, add, edit and delete over <c>config.config_known_patterns</c>. An
-/// operator-only surface (the MCP server has no write tool for it). Straight to Postgres like the mute rules, through the three
+/// The viewer's known-pattern editor writes (#6334): list, add, edit and delete over <c>config.config_known_patterns</c>. The
+/// web editor and the MCP write tools (#6398) write through the same functions. Straight to Postgres like the mute rules, through the three
 /// store functions V214 adds, which are the one write path and bump the <c>config_version</c> reload beacon themselves. The shared
 /// <see cref="KnownPatternInput.Validate"/> decides what a refused save says, so the editor, the web editor and the store
 /// functions' callers all show one text.
@@ -183,9 +183,9 @@ public sealed partial class ViewerDataService
         {
             return await call();
         }
-        catch (PostgresException ex) when (ex.SqlState == "DL404")
+        catch (PostgresException ex) when (ex.SqlState is "DL404" or "DL409")
         {
-            /* The store refused a server id that names no registered server (another operator removed it): the editor shows the sentence. */
+            /* The store refused a server id that names no registered server (another operator removed it), or an add past the entry cap (DL409): the editor shows the sentence. */
             throw new ArgumentException(ex.MessageText);
         }
         catch (PostgresException ex) when (ex.SqlState is UndefinedColumnSqlState or UndefinedTableSqlState or "42883")

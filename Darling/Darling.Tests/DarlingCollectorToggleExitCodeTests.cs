@@ -32,8 +32,8 @@ public sealed class DarlingCollectorToggleExitCodeTests
     private const int UsageOrConfig = DarlingCliCommands.CollectorToggleExitCode.UsageOrConfig;
     private const int StoreUnavailable = DarlingCliCommands.CollectorToggleExitCode.StoreUnavailable;
 
-    /// <summary>Scripts compare against the numbers, so the numbers are pinned, and the README lists the same
-    /// three next to <c>--check-settings</c>'s.</summary>
+    /// <summary>Scripts compare against the numbers, so the numbers are pinned. The command line reference
+    /// (docs/darling/cli.md) lists the same three.</summary>
     [Fact]
     public void TheExitCodes_AreTheDocumentedNumbers()
     {
@@ -41,20 +41,11 @@ public sealed class DarlingCollectorToggleExitCodeTests
         Assert.Equal(1, DarlingCliCommands.CollectorToggleExitCode.UsageOrConfig);
         Assert.Equal(2, DarlingCliCommands.CollectorToggleExitCode.StoreUnavailable);
 
-        var readme = RepoFile.ReadRepoFile("Darling", "README.md");
-        Assert.Contains("`--enable-collector` and `--disable-collector` (described under", readme, StringComparison.Ordinal);
-        Assert.Contains("`0` the row was written and read back, `1` a usage or configuration problem", readme, StringComparison.Ordinal);
-        Assert.Contains("`2` the store could not be reached or refused the change", readme, StringComparison.Ordinal);
-
+        var readme = RepoFile.ReadRepoFile("docs", "darling", "collector-settings.md"); // #6416: moved from Darling/README.md
         /* A wrong password is the store's answer, so it exits 2: the README must not say the codes separate a
            script's own mistake from a store that is down. */
         Assert.Contains("`2` when the store cannot be reached, refuses the login, or refuses the change", readme, StringComparison.Ordinal);
         Assert.DoesNotContain("tell its own mistake from a store that is down", readme, StringComparison.Ordinal);
-
-        /* The two verbs do not file every case under the same code, and the README says which differ. */
-        Assert.Contains(
-            "a managed credential that was never stored exits `1` from the collector verbs (the setup is not finished) and `2` from `--check-settings` (there is no store to check)",
-            readme, StringComparison.Ordinal);
     }
 
     /// <summary>A TCP port nothing is listening on, proven closed by bind-then-release, so a connection attempt

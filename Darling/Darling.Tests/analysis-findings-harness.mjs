@@ -103,6 +103,17 @@ try {
       await settle();
       return { pre: pre.map((p) => p.textContent), preChildren: pre.map((p) => p.children.length), clipboard, label: copy.textContent, buttons: byTag(root, "button").length };
     },
+    askAi: async () => {
+      const root = await run("srv-a");
+      body = JSON.stringify({ prompt: "THE PROMPT" });
+      fetches.length = 0;
+      clipboard.length = 0;
+      const ask = byTag(root, "button").find((b) => b.textContent === "Ask AI");
+      ask.handlers.click();
+      await settle();
+      const u = new URL(fetches[0], "http://x.test");
+      return { path: u.pathname, params: Object.fromEntries(u.searchParams), clipboard, label: ask.textContent, buttons: byTag(root, "button").filter((b) => b.textContent === "Ask AI" || b.textContent === "AI prompt copied").length };
+    },
     link: async () => {
       const root = await run("srv-a");
       return byTag(root, "a").map((a) => a.attrs.href);
@@ -116,6 +127,11 @@ try {
     },
     nullSeverity: async () => {
       const root = await run("srv-a", { findings: [finding({ finding_id: 1, severity: null })] });
+      return { text: root.textContent };
+    },
+    scoreWording: async () => {
+      /* The severity score is labelled as a score and the category follows a dot: "0.80 waits" read as a count of waits. */
+      const root = await run("srv-a", { findings: [finding({ finding_id: 1, severity: 0.8, category: "waits" })] });
       return { text: root.textContent };
     },
     truncation: async () => {

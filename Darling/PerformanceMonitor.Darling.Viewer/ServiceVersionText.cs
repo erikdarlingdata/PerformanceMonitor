@@ -67,10 +67,6 @@ public static class ServiceVersionText
     /// <summary>A host's process start time as "yyyy-MM-dd HH:mm" and its zone label, on the invariant culture.</summary>
     private static string FormatStarted(DateTime startedUtc, TimeDisplayMode mode)
     {
-        var utc = DateTime.SpecifyKind(startedUtc, DateTimeKind.Utc);
-        var shownMode = mode == TimeDisplayMode.LocalTime ? TimeDisplayMode.LocalTime : TimeDisplayMode.UTC;
-        var shown = ViewerTimeHelper.ConvertToDisplay(utc, shownMode, ServerClock.Utc);
-        var zone = ViewerTimeHelper.GetTimezoneLabel(shownMode, ServerClock.Utc, utc);
-        return shown.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture) + " " + zone;
+        return ViewerTimeHelper.FormatFleetWide(startedUtc, "yyyy-MM-dd HH:mm", mode);
     }
 }

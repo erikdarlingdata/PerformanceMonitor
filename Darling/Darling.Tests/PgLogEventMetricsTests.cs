@@ -596,8 +596,9 @@ public sealed class PgLogEventMetricsRungTests
         Assert.Contains("| `get_pg_autovacuum_health` | tables ranked by how far past their **own** trigger threshold, each with `recent_runs`", runbook, StringComparison.Ordinal);
 
         var readme = RepoFile.ReadRepoFile("Darling", "README.md");
-        Assert.Contains("**V130** (#3602, #3603) widened the row rather than adding sibling tables", readme, StringComparison.Ordinal);
-        Assert.Contains("(#3603, V130 — `get_pg_autovacuum_health` shows them per table as `recent_runs`)", readme, StringComparison.Ordinal);
+        /* #6416: the V130 sentence lived in the README's hand-kept migration table, which is gone; the ladder fixtures hold the rungs. */
+        var targets = RepoFile.ReadRepoFile("docs", "darling", "postgresql-targets.md"); // #6416: moved from Darling/README.md
+        Assert.Contains("(#3603, V130 — `get_pg_autovacuum_health` shows them per table as `recent_runs`)", targets, StringComparison.Ordinal);
         Assert.DoesNotContain("for the structured tables #3602 / #3603 add", readme, StringComparison.Ordinal);
     }
 }

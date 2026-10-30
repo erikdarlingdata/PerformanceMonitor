@@ -24,7 +24,7 @@ namespace PerformanceMonitorLite.Services;
 /// </summary>
 public class CredentialService
 {
-    private const string CredentialPrefix = "PerformanceMonitorLite_";
+    internal const string CredentialPrefix = "PerformanceMonitorLite_";
 
     private readonly CredentialStore _store;
 

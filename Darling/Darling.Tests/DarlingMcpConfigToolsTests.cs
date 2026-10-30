@@ -225,6 +225,13 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
             var dbConfig = await DarlingMcpConfigTools.GetDatabaseConfig(postgres, ServerName);
             DarlingMcpTestData.AssertEnvelope(dbConfig, ServerName, "databases");
             Assert.Contains("FULL", dbConfig, StringComparison.Ordinal);
+            Assert.DoesNotContain("\"note\"", dbConfig, StringComparison.Ordinal);
+
+            /* A filter that matches nothing in a snapshot that holds databases keeps the data shape (count 0, no databases) and says why. */
+            var missed = System.Text.Json.JsonDocument.Parse(await DarlingMcpConfigTools.GetDatabaseConfig(postgres, ServerName, "NoSuchDb")).RootElement;
+            Assert.Equal(0, missed.GetProperty("database_count").GetInt32());
+            Assert.False(missed.TryGetProperty("status", out _));
+            Assert.Contains("master, model and msdb are not collected", missed.GetProperty("note").GetString(), StringComparison.Ordinal);
 
             var traceFlags = await DarlingMcpConfigTools.GetTraceFlags(postgres, ServerName);
             DarlingMcpTestData.AssertEnvelope(traceFlags, ServerName, "trace_flags");

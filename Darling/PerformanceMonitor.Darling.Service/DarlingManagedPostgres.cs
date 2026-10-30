@@ -127,6 +127,14 @@ public sealed class DarlingManagedPostgres
     public const string WebApplicationName = "PerformanceMonitorDarling-Web";
     public const string McpApplicationName = "PerformanceMonitorDarling-Mcp";
 
+    /// <summary>#6600: the <c>ApplicationName</c> of the web dashboard's second, small pool, which signs in as the managed <c>admin</c> role for the
+    /// Admin writes. Its own name tells it apart from the read pool's <see cref="WebApplicationName"/> in the store's <c>pg_stat_activity</c>.</summary>
+    public const string WebAdminApplicationName = "PerformanceMonitorDarling-WebAdmin";
+
+    /// <summary>#6600: the most connections the web dashboard's admin pool opens. The pool serves only a signed-in admin's writes and their
+    /// access checks, so a handful is enough, and every pooled connection is a postgres.exe process.</summary>
+    internal const int WebAdminMaxPoolSize = 4;
+
     /// <summary>
     /// The <c>ApplicationName</c> the SERVICE's own collection-loop store connection presents (#4479, the
     /// rest of #4442's pattern): the worker's data source, set through
@@ -153,7 +161,7 @@ public sealed class DarlingManagedPostgres
     /// <c>PgSchemaGenerator.SearchPath</c> the V8 split writes as the database default — the
     /// connection-string form omits spaces; a test pins the order against the SQL form.
     /// </summary>
-    public const string SearchPath = "collect,config,public";
+    public const string SearchPath = DarlingStoreConnection.StoreSearchPath;
 
     /// <summary>The server log pg_ctl appends to, beside (not inside) the data directory.</summary>
     public const string ServerLogFileName = "pg.log";
@@ -3003,7 +3011,7 @@ public sealed class DarlingManagedPostgres
     /// roles (#4442 scope 2) so the connection names itself in <c>pg_stat_activity</c> without a store-side
     /// change.
     /// </summary>
-    private static string BuildRoleConnectionString(int port, string username, string password, string? applicationName = null)
+    private static string BuildRoleConnectionString(int port, string username, string password, string? applicationName = null, int maxPoolSize = 24)
     {
         var builder = new NpgsqlConnectionStringBuilder
         {
@@ -3038,7 +3046,7 @@ public sealed class DarlingManagedPostgres
                Raising this number would have been the wrong fix for the same reason it is bounded at all:
                every pooled connection is a postgres.exe PROCESS, and this store logged 8 "could not reserve
                shared memory region" retries on 2026-09-03. Fewer acquisitions, not a bigger pool. */
-            MaxPoolSize = 24,
+            MaxPoolSize = maxPoolSize,
         };
         return builder.ConnectionString;
     }
@@ -3098,6 +3106,25 @@ public sealed class DarlingManagedPostgres
         }
 
         return BuildRoleConnectionString(config.Port, ViewerRoleName, DarlingSecrets.Unprotect(File.ReadAllText(credentialPath).Trim()), WebApplicationName);
+    }
+
+    /// <summary>
+    /// Derives the web dashboard's ADMIN-writes connection string from the stored <c>admin</c>-role credential WITHOUT touching the server (#6600):
+    /// the login the Viewer already uses, on a pool of at most <see cref="WebAdminMaxPoolSize"/> connections named
+    /// <see cref="WebAdminApplicationName"/>. Null until <see cref="DarlingManagedRoles.EnsureProvisionedAsync"/> has written the credential,
+    /// the twin of <see cref="TryBuildViewerConnectionStringFromStoredCredential"/>.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    public static string? TryBuildWebAdminConnectionStringFromStoredCredential(PostgresConfig config)
+    {
+        var credentialPath = AdminCredentialPathFor(ResolveDataDirectory(config));
+        if (!File.Exists(credentialPath))
+        {
+            return null;
+        }
+
+        return BuildRoleConnectionString(config.Port, AdminRoleName, DarlingSecrets.Unprotect(File.ReadAllText(credentialPath).Trim()),
+            WebAdminApplicationName, WebAdminMaxPoolSize);
     }
 
     /// <summary>#4280: the real-start fallback runs only for a "trial-passed" carry, and never for a requested

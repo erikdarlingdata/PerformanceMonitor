@@ -196,19 +196,21 @@ public sealed class McpInvestigationGateTests
     [Fact]
     public void StartupLine_IsOneInformationLine_WhenServed_OneCriticalLine_WhenBothOn_AndNothingWhenOff()
     {
-        Assert.Null(McpInvestigationPolicy.StartupLine(allowInvestigations: false, allowWrites: false));
-        Assert.Null(McpInvestigationPolicy.StartupLine(allowInvestigations: false, allowWrites: true));
+        Assert.Null(McpInvestigationPolicy.StartupLine(allowInvestigations: false, allowWrites: false, tokenUsable: true));
+        Assert.Null(McpInvestigationPolicy.StartupLine(allowInvestigations: false, allowWrites: true, tokenUsable: true));
 
-        var served = McpInvestigationPolicy.StartupLine(allowInvestigations: true, allowWrites: false);
+        var served = McpInvestigationPolicy.StartupLine(allowInvestigations: true, allowWrites: false, tokenUsable: true);
         Assert.Equal(LogLevel.Information, served!.Value.Level);
         foreach (var name in InvestigationToolNames)
         {
             Assert.Contains(name, served.Value.Message, StringComparison.Ordinal);
         }
 
-        Assert.Contains("any local process", served.Value.Message, StringComparison.Ordinal);
+        var noToken = McpInvestigationPolicy.StartupLine(allowInvestigations: true, allowWrites: false, tokenUsable: false);
+        Assert.Equal(LogLevel.Critical, noToken!.Value.Level);
+        Assert.Contains("OFF", noToken.Value.Message, StringComparison.Ordinal);
 
-        var conflict = McpInvestigationPolicy.StartupLine(allowInvestigations: true, allowWrites: true);
+        var conflict = McpInvestigationPolicy.StartupLine(allowInvestigations: true, allowWrites: true, tokenUsable: true);
         Assert.Equal(LogLevel.Critical, conflict!.Value.Level);
         Assert.Contains("OFF", conflict.Value.Message, StringComparison.Ordinal);
         Assert.Contains("mcp_allow_investigations", conflict.Value.Message, StringComparison.Ordinal);

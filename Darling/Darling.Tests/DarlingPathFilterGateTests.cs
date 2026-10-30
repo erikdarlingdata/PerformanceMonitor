@@ -136,7 +136,6 @@ public sealed class DarlingPathFilterGateTests
     /// of the dependency fact, and a private copy is what nothing compares.</para>
     /// </summary>
     [Theory]
-    [InlineData("darling-pg")]
     [InlineData("darling-linux")]
     public void EachDarlingJob_ReadsTheSharedGate_AndCarriesNoListOfItsOwn(string jobId)
     {
@@ -158,7 +157,6 @@ public sealed class DarlingPathFilterGateTests
     /// Requiring the message to interpolate the changed-file count leaves it reporting what the gate saw.</para>
     /// </summary>
     [Theory]
-    [InlineData("darling-pg", "Report the Darling PG gate decision")]
     [InlineData("darling-linux", "Report the Linux gate decision")]
     public void EachGateDecisionNotice_ReportsTheDecisionRatherThanACause(string jobId, string stepName)
     {

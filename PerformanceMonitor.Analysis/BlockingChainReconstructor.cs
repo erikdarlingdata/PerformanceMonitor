@@ -24,7 +24,7 @@ internal sealed class BlockingPairRow
     public int BlockingSpid { get; init; }
     public DateTime? BlockingTranStarted { get; init; }
     /// <summary>The blocked-process-report's monitorLoop — the episode (one monitor scan) the row belongs to.
-    /// Nullable: only the viewer scopes by it; the collector passes scopeByMonitorLoop=false (treated as null).</summary>
+    /// Nullable: a row without one is scoped by its event second when the reconstruction scopes by monitor_loop.</summary>
     public int? MonitorLoop { get; init; }
     /// <summary>Execution-context id of each side; with spid it forms the session identity the reconstruction
     /// keys on (mirrors sp_HumanEventsBlockViewer's spid:ecid). 0 for the common non-parallel case.</summary>
@@ -55,8 +55,9 @@ internal sealed class BlockingPairRow
 
 /// <summary>
 /// Stable session identity mirroring sp_HumanEventsBlockViewer: spid:ecid scoped to a monitor_loop (one
-/// blocked-process-report scan = one episode). MonitorLoop is null when the caller reconstructs cumulatively
-/// across the window (the collector) rather than per-scan (the viewer); ecid distinguishes parallel workers.
+/// blocked-process-report scan = one episode). MonitorLoop is null only when the caller does not scope by monitor_loop
+/// (a unit-test or ad-hoc call: the fact, both drill-downs and both viewers scope per scan, #6931); ecid
+/// distinguishes parallel workers.
 /// Transaction start is NOT part of the identity — the blocking-process node omits it, so it is null on every
 /// blocker and cannot disambiguate.
 /// </summary>
@@ -109,7 +110,7 @@ internal sealed class ReconstructedChain
 {
     public int ApexSpid { get; init; }
     public int ApexEcid { get; init; }
-    /// <summary>The chain's episode (monitor_loop) when scoped per-scan; null for a cumulative reconstruction.
+    /// <summary>The chain's episode (monitor_loop) when scoped per-scan; null when the reconstruction is not scoped.
     /// All nodes in a scoped chain share it (one report's two sides carry the same monitor_loop).</summary>
     public int? MonitorLoop { get; init; }
     /// <summary>Transaction start of the apex — display only (null for a blocker, which has none).</summary>
@@ -119,6 +120,10 @@ internal sealed class ReconstructedChain
     public int VictimCount { get; init; }
     public long MaxWaitMs { get; init; }
     public double Magnitude { get; init; }
+    /// <summary>The BLOCKING_CHAIN grade for this chain (<see cref="FactScorer.ScoreBlockingChainShape"/>): structure
+    /// and the longest wait. <see cref="Magnitude"/> (structure only) keeps ordering <see cref="BlockingReconstruction.Chains"/>
+    /// and the viewer tree; the fact's worst-chain pick and both drill-downs rank by this, so they agree.</summary>
+    public double Grade { get; init; }
     public IReadOnlyList<ChainLevel> Levels { get; init; } = Array.Empty<ChainLevel>();
 }
 
@@ -149,7 +154,16 @@ internal static class BlockingChainReconstructor
     // available when building the ChainLevel without re-listing each one here.
     private sealed record EdgeInfo(BlockingPairRow Row);
 
-    /// <summary>Builds a session key. MonitorLoop is null when reconstructing cumulatively (collector).</summary>
+    /// <summary>The scope of a row that carries no monitor_loop: its event second, as a negative number the way the
+    /// DMV snapshot collector synthesizes its per-cycle loop, so it can never collide with a real (non-negative)
+    /// blocked-process-report loop (#6931).</summary>
+    private static int SyntheticScope(DateTime eventTime)
+    {
+        var seconds = (long)(eventTime - new DateTime(2020, 1, 1)).TotalSeconds;
+        return -(int)Math.Clamp(seconds, 1, int.MaxValue);
+    }
+
+    /// <summary>Builds a session key. MonitorLoop is null only when not scoping by monitor_loop.</summary>
     public static SessionKey MakeKey(int? monitorLoop, int spid, int ecid) => new(monitorLoop, spid, ecid);
 
     /// <summary>Normalizes the 1900-01-01 sentinel to NULL for display tran values.</summary>
@@ -162,8 +176,7 @@ internal static class BlockingChainReconstructor
     /// the clicked monitor_loop is unavailable (e.g. a lead-blocker grid row), it falls back to a
     /// monitor_loop-agnostic spid:ecid match — the reconstruction window is already tight, so this still lands
     /// on the right chain rather than reporting "no reconstructable chain." Returns null when no chain holds
-    /// the session. Only the viewer calls this, on a per-scan (scoped) reconstruction; the collector takes the
-    /// worst chain directly.
+    /// the session. Only the viewer calls this; the collector takes the worst chain directly.
     /// </summary>
     public static ReconstructedChain? FindChainForSession(
         BlockingReconstruction reconstruction, int? monitorLoop, int spid, int ecid)
@@ -212,9 +225,16 @@ internal static class BlockingChainReconstructor
 
         foreach (var row in pairs)
         {
-            // The collector reconstructs cumulatively (loop = null) so an episode's per-scan re-fires merge into
-            // one chain (preserves window-level depth/victims for the severity fact); the viewer scopes per scan.
-            var loop = scopeByMonitorLoop ? row.MonitorLoop : null;
+            // #6645: a parallel query's threads write reports with blocked spid = blocking spid (different ecid).
+            // That is the query waiting on itself, not blocking: make no node, so no edge or cycle either.
+            if (row.BlockingSpid == row.BlockedSpid)
+                continue;
+
+            // #6931: every caller scopes per scan (monitor_loop). Over a window of hours SQL Server reuses spid
+            // numbers for unrelated sessions, so keying on spid:ecid alone linked sessions from different minutes
+            // into chains and cycles that never existed. A scan lists every session blocked at that moment, so its
+            // depth and victim count are the real ones. A row with no monitor_loop is scoped by its own event second.
+            int? loop = scopeByMonitorLoop ? row.MonitorLoop ?? SyntheticScope(row.EventTime) : null;
             var blocker = MakeKey(loop, row.BlockingSpid, row.BlockingEcid);
             var blocked = MakeKey(loop, row.BlockedSpid, row.BlockedEcid);
 
@@ -244,7 +264,6 @@ internal static class BlockingChainReconstructor
         var roots = allNodes.Where(n => adjacency.ContainsKey(n) && !blockedNodes.Contains(n)).ToList();
         AddFallbackRoots(roots, allNodes, blockedNodes, adjacency);
 
-        var steps = stepBudget;
         var depthCapped = false;
         var truncated = false;
         var depthMemo = new Dictionary<SessionKey, int>();
@@ -252,9 +271,14 @@ internal static class BlockingChainReconstructor
         var chains = new List<ReconstructedChain>(roots.Count);
         foreach (var root in roots)
         {
+            // #6931: each root gets its own budgets, one for the depth search and one for the walk. A shared budget
+            // let the first root on a cyclic graph use it all, so every later chain walked zero steps and
+            // reported 0 victims and 0 ms. A cut search still sets TraversalTruncated.
+            var depthSteps = stepBudget;
+            var walkSteps = stepBudget;
             var depth = LongestDepth(root, adjacency, maxDepth, !cycleDetected, depthMemo,
-                new HashSet<SessionKey>(), ref steps, ref depthCapped, ref truncated);
-            var (victimCount, maxWait, levels) = WalkChain(root, adjacency, ref steps, ref truncated);
+                new HashSet<SessionKey>(), ref depthSteps, ref depthCapped, ref truncated);
+            var (victimCount, maxWait, levels) = WalkChain(root, adjacency, ref walkSteps, ref truncated);
 
             var magnitude = Math.Max(
                 FactScorer.ApplyThresholdFormula(depth, 3, 8),
@@ -277,6 +301,7 @@ internal static class BlockingChainReconstructor
                 VictimCount = victimCount,
                 MaxWaitMs = maxWait,
                 Magnitude = magnitude,
+                Grade = FactScorer.ScoreBlockingChainShape(depth, victimCount, maxWait),
                 Levels = levels
             });
         }

@@ -35,7 +35,10 @@ public sealed class XeShredGateTests
     [InlineData(100L, 100L, false, "unchanged: skip the cast+shred")]
     [InlineData(105L, 100L, true, "grew: shred")]
     [InlineData(95L, 100L, true, "went down: session restarted/recreated, shred")]
-    [InlineData(0L, 0L, false, "both zero (a session that has delivered nothing yet, twice) still counts as unchanged")]
+    [InlineData(0L, 0L, true, "#6868: both zero shreds, because a Managed Instance never moves the count off 0 even with events buffered")]
+    [InlineData(0L, null, true, "#6868: a current count of 0 with no prior shreds")]
+    [InlineData(0L, 100L, true, "#6868: a current count of 0 against a non-zero prior shreds (session recreated)")]
+    [InlineData(5L, 5L, false, "a non-zero count that has not moved still skips the cast+shred")]
     public void ShouldShred_MatchesTheFiveGateShapes(long? current, long? last, bool expected, string because)
     {
         Assert.True(expected == XeShredGate.ShouldShred(current, last), because);

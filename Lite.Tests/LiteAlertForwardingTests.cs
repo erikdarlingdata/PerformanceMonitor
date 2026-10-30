@@ -642,7 +642,7 @@ public partial class LiteAlertForwardingTests : IDisposable
         Assert.Equal("Blocking Detected", fired.MetricName);
         Assert.Equal("2", fired.CurrentValue);                      /* :180 */
         Assert.Equal("1", fired.ThresholdValue);                    /* :181 */
-        Assert.Equal("2 blocking session(s)", fired.ShortMessage);  /* :167 toast body */
+        Assert.Equal("2 blocking sessions", fired.ShortMessage);  /* :167 toast body */
         Assert.NotNull(fired.Context);                              /* :174 context built from the same rows */
         /* :149-151 — the #1145 watermark persisted on change, keyed by the shared metric row key. */
         Assert.Equal(2, h.StateStore.EdgeWatermarks[(Key, "Blocking Detected")]);
@@ -801,8 +801,8 @@ public partial class LiteAlertForwardingTests : IDisposable
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal("Failed Agent Job", fired.MetricName);
-        Assert.Equal("1 job failure(s) in last 60m — NightlyETL", fired.CurrentValue); /* :703 */
-        Assert.Equal("1 job failure(s) — NightlyETL", fired.ShortMessage);             /* :690 toast body */
+        Assert.Equal("1 job failure in last 60m — NightlyETL", fired.CurrentValue); /* :703 */
+        Assert.Equal("1 job failure — NightlyETL", fired.ShortMessage);             /* :690 toast body */
         /* :684 — the server-local watermark persisted the moment the alert fired. */
         Assert.Equal(runTime, h.FailedJobWatermark());
 
@@ -917,7 +917,7 @@ public partial class LiteAlertForwardingTests : IDisposable
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal("Deadlocks Detected", fired.MetricName);
         Assert.Equal("1", fired.CurrentValue);                                /* :257 */
-        Assert.Equal("1 deadlock(s) in the last hour", fired.ShortMessage);   /* :244 toast body */
+        Assert.Equal("1 deadlock in the last hour", fired.ShortMessage);   /* :244 toast body */
     }
 
     /// <summary>
@@ -968,7 +968,7 @@ public partial class LiteAlertForwardingTests : IDisposable
         await h.Build().EvaluateServerAsync(Harness.Snapshot());
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
-        Assert.Equal("1 query(s), longest 45m", fired.CurrentValue);          /* :387 */
+        Assert.Equal("1 query, longest 45m", fired.CurrentValue);          /* :387 */
         Assert.Equal("30m", fired.ThresholdValue);                            /* :388 */
         var expectedPreview = PerformanceMonitor.Alerting.AlertContextBuilders.TruncateText(longText, 80);
         Assert.EndsWith("...", expectedPreview);
@@ -1054,7 +1054,7 @@ public partial class LiteAlertForwardingTests : IDisposable
         await h.Build().EvaluateServerAsync(Harness.Snapshot());
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
-        Assert.Equal("1 job(s) exceeding 3x average", fired.CurrentValue);       /* :608 */
+        Assert.Equal("1 job exceeding 3x average", fired.CurrentValue);       /* :608 */
         Assert.Equal("3x historical avg", fired.ThresholdValue);                 /* :609 */
         Assert.Equal("NightlyETL at 450% of avg (90m)", fired.ShortMessage);     /* :595 toast body */
     }
@@ -1102,14 +1102,14 @@ public partial class LiteAlertForwardingTests : IDisposable
            Warning for CPU (:85), blocking (:168), LRQ (:375), tempdb (:436), volume (:511),
            long-running job (:596), failed job (:691). Title == metric name in every branch. */
         await deliverer.DeliverAsync(Outcome("High CPU", shortMessage: "Total CPU at 92% (threshold: 80%)"));
-        await deliverer.DeliverAsync(Outcome("Deadlocks Detected", shortMessage: "1 deadlock(s) in the last hour"));
+        await deliverer.DeliverAsync(Outcome("Deadlocks Detected", shortMessage: "1 deadlock in the last hour"));
         await deliverer.DeliverAsync(Outcome("Poison Wait", shortMessage: "[THREADPOOL] 900s of wait accumulated in the last 10 minutes across 30,000 waits — on average 1.5 task(s) continuously stuck"));
         await deliverer.DeliverAsync(Outcome("Volume Free Space", shortMessage: "D:\\ 8% free (64.0 GB)"));
 
         Assert.Equal(4, toasts.Count);
         Assert.Equal(new ToastCall("High CPU", "SRV-A: Total CPU at 92% (threshold: 80%)", BalloonIcon.Warning, Name, "High CPU"), toasts[0]);
         Assert.Equal(BalloonIcon.Error, toasts[1].Icon);
-        Assert.Equal("SRV-A: 1 deadlock(s) in the last hour", toasts[1].Message); /* :244 full toast */
+        Assert.Equal("SRV-A: 1 deadlock in the last hour", toasts[1].Message); /* :244 full toast */
         Assert.Equal(BalloonIcon.Error, toasts[2].Icon);
         Assert.Equal(BalloonIcon.Warning, toasts[3].Icon);
     }
@@ -1141,7 +1141,7 @@ public partial class LiteAlertForwardingTests : IDisposable
         };
         var (deliverer, _, sends) = BuildDeliverer();
 
-        await deliverer.DeliverAsync(Outcome("Long-Running Query", current: "1 query(s), longest 45m", threshold: "30m", context: context, numCur: 45, numThr: 30));
+        await deliverer.DeliverAsync(Outcome("Long-Running Query", current: "1 query, longest 45m", threshold: "30m", context: context, numCur: 45, numThr: 30));
 
         var send = Assert.Single(sends);
         Assert.Equal(45, send.NumericCurrentValue);
@@ -1172,6 +1172,29 @@ public partial class LiteAlertForwardingTests : IDisposable
     }
 
     [Fact]
+    public async Task Deliverer_Blocking_PerEventMode_TwoOverflowIncidents_ReadInThePlural()
+    {
+        /* #6703: the trailer for one held-back incident reads "+1 more incident" (above); two read "+2 more incidents". */
+        App.AlertDeliveryMode = AlertNotificationMode.PerEvent;
+        App.AlertPerEventMaxPerCycle = 1;
+        var context = new AlertContext
+        {
+            Incidents = new List<AlertIncident>
+            {
+                new("a", new[] { "dbo.Users" }, OccurrenceCount: 3),
+                new("b", new[] { "dbo.Posts" }, OccurrenceCount: 1),
+                new("c", new[] { "dbo.Badges" }, OccurrenceCount: 2)
+            }
+        };
+        var (deliverer, _, sends) = BuildDeliverer();
+
+        await deliverer.DeliverAsync(Outcome("Blocking Detected", current: "6", threshold: "1", context: context, numCur: 6, numThr: 1));
+
+        Assert.Equal(2, sends.Count); /* 1 per-incident + 1 overflow */
+        Assert.Equal("+2 more incidents this cycle", sends[1].CurrentValue);
+    }
+
+    [Fact]
     public async Task Deliverer_Blocking_PerEventMode_SplitsPerIncident_WithCapOverflow()
     {
         /* :748-757 — Per-event mode: one send per distinct incident, capped at
@@ -1197,7 +1220,7 @@ public partial class LiteAlertForwardingTests : IDisposable
         Assert.Equal(3, sends.Count); /* 2 per-incident + 1 overflow */
         Assert.Equal("3", sends[0].CurrentValue);   /* DescribeIncident = occurrence count */
         Assert.Equal("1", sends[1].CurrentValue);
-        Assert.Equal("+1 more incident(s) this cycle", sends[2].CurrentValue);
+        Assert.Equal("+1 more incident this cycle", sends[2].CurrentValue);
         /* #1830: per-event sends carry per-incident numerics — occurrence counts, then the overflow
            COUNT for the "+N more" trailer whose text is unparseable (it stored 0 before). The
            threshold stays the outcome's on every send. */

@@ -168,6 +168,22 @@ internal static class DarlingStoreLogins
 
     internal static ComposeStoreVerdict? ReadComposeStoreVerdict() => Volatile.Read(ref s_composeStoreVerdict);
 
+    /* Which login the MCP host's store pool was last built from (-1: none yet). The verdict cannot say whether this
+       process is on the compose distribution's own store: a refusal on a bring-your-own store in a container and a
+       stand-down both publish "not provisioned" too. A role login (this start's or an earlier start's) can: only the
+       service's own provisioning ever hands one out. */
+    private static int s_mcpLoginSource = -1;
+
+    /// <summary>Whether the MCP host's store login is a compose-store role, this start's or an earlier start's. False
+    /// before the host resolved a login, and for a configured login or the owner.</summary>
+    internal static bool McpLoginIsComposeStoreRole() =>
+        (LoginSource)Volatile.Read(ref s_mcpLoginSource) is LoginSource.ComposeStoreRole or LoginSource.ComposeStoreRoleFromEarlierStart;
+
+    internal static void RecordMcpLoginSource(LoginSource source) => Volatile.Write(ref s_mcpLoginSource, (int)source);
+
+    /// <summary>Test seam: the source is process state.</summary>
+    internal static void ResetMcpLoginSourceForTests() => Volatile.Write(ref s_mcpLoginSource, -1);
+
     /// <summary>Test seam: the verdict is process state, so a test that asserts on it starts from none. Only the
     /// serialized <c>darling-config-env</c> test collection calls it.</summary>
     internal static void ResetComposeStoreVerdictForTests() => Volatile.Write(ref s_composeStoreVerdict, null);
@@ -376,6 +392,11 @@ internal static class DarlingStoreLogins
         }
 
         var login = Resolve(surface, postgres.ConnectionString, configured, inContainer, verdict, earlier);
+        if (surface == Surface.Mcp)
+        {
+            RecordMcpLoginSource(login.Source);
+        }
+
         if (login.Warning is { } warning)
         {
             WarnOnce(surface, warning, logger);

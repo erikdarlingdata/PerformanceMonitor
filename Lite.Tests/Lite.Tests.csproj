@@ -77,6 +77,8 @@
     <Compile Include="..\Darling\Darling.Tests\TestTimeHelpers.cs" Link="TestTimeHelpers.cs" />
     <!-- #5596: the test that proves this process runs with the WPF exit switch on (the switch itself is declared above), so both suites check their own process. -->
     <Compile Include="..\Darling\Darling.Tests\WpfExitSwitchTests.cs" Link="WpfExitSwitchTests.cs" />
+    <!-- The UI smoke walk's seed guard (tools/ui-smoke-wpf is not a test shard), compiled here so its tests run with this suite. -->
+    <Compile Include="..\tools\ui-smoke-wpf\LiteSeedGuard.cs" Link="LiteSeedGuard.cs" />
   </ItemGroup>
 
   <ItemGroup>
@@ -88,11 +90,6 @@
     <!-- system_health event samples (one per feeder event; shapes per sp_HealthParser xpath) for the
          System Events reader round-trip tests. Mirrors Darling.Tests' Fixtures\SystemHealth set. -->
     <None Include="Fixtures\SystemHealth\*.xml" CopyToOutputDirectory="PreserveNewest" />
-    <!-- Lite's MCP host source, copied beside the test binary (it lives outside this project directory, so the
-         default Compile glob never sees it) so HostHeaderGuardTests can pin that the #1648 DNS-rebinding
-         middleware is installed FIRST, ahead of MapMcp. Mirrors Darling.Tests' guard on its two hosts — the
-         defect was a wiring omission in both apps, and only the wiring can regress. -->
-    <None Include="..\Lite\Mcp\McpHostService.cs" Link="Fixtures\McpHostService.cs" CopyToOutputDirectory="PreserveNewest" />
     <!-- The three services that build DuckDB COPY/read_parquet path literals, so DataImportPathEscapingTests
          can pin that none of them interpolates a path without EscapeSqlPath. DataImportService was the one
          that had drifted from its siblings, and a forgotten call is only visible in the source. -->

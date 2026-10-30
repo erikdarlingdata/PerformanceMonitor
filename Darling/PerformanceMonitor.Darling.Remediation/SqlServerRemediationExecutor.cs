@@ -574,6 +574,18 @@ SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actua
         {
             await using var connection = new SqlConnection(RemediationConnection.BuildConnectionString(_server, login, database));
             await connection.OpenAsync(ct);
+            if (!string.IsNullOrWhiteSpace(database))
+            {
+                /* The server resolves the sign-in database under its own collation, which can ignore character width (and accents), so a name the
+                   caller's exclusion list check did not match can still land in a database it excludes. Read the name the connection really landed
+                   in and compare it with the requested one the way the exclusion list does, before any statement of the action runs. */
+                string? landed;
+                await using (var probe = Command(connection, "SELECT DB_NAME();"))
+                    landed = (await probe.ExecuteScalarAsync(ct)) as string;
+                if (LandedElsewhere(name, dryRun, database, landed) is { } wrong)
+                    return Log(wrong);
+            }
+
             return Log(await body(connection, login.Secret));
         }
         catch (OperationCanceledException)
@@ -590,6 +602,18 @@ SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actua
         {
             return Log(RemediationResult.Failed(name, dryRun, ErrorText(ex, login)));
         }
+    }
+
+    /// <summary>
+    /// The refusal when the connection landed in a database whose real name is not the requested one, or null when it is the requested one (compared
+    /// trimmed and without regard to case, as the exclusion list is). Names the database asked for and the one reached, and says nothing was run.
+    /// </summary>
+    internal static RemediationResult? LandedElsewhere(string name, bool dryRun, string requested, string? landed)
+    {
+        if (landed is not null && string.Equals(landed, requested.Trim(), StringComparison.OrdinalIgnoreCase))
+            return null;
+        return RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.WrongDatabase,
+            $"The connection was asked to open database {requested.Trim()}, but it reached {(landed is null ? "no database" : "database " + landed)}, which is not the same name. Nothing was run.");
     }
 
     private static SqlCommand Command(SqlConnection connection, string text) =>

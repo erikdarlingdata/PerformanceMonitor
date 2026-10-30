@@ -18,7 +18,9 @@ namespace Darling.Tests;
 
 /// <summary>
 /// Release walk V8, Darling side: the service's own statements against a monitored SQL Server carry the
-/// <c>PerformanceMonitorLite</c> marker the collectors' self-exclusion reads, so they never top a Top Queries or Query Store list.
+/// <c>PerformanceMonitorLite</c> marker the collectors' self-exclusion reads. On Darling the Query Store collector's drop of the
+/// statement does not fire (the text is fetched separately, so the row it tests is empty); the readers that rank Query Store
+/// queries hide it instead (<c>QueryStoreSelfStatement</c>, #6665).
 /// Darling runs the shared Query Store collector in its own shape (plan XML and query text fetched by id), which Lite's census
 /// does not build, so the by-id fetches, the database probe and the connect-time detection query are checked here.
 /// </summary>

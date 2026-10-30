@@ -262,8 +262,10 @@ SELECT now() at time zone 'utc' - interval '1 hour', 7, 'srv-7', 'Blocking', 9, 
     {
         await RunAsync(async (undo, connection, ct) =>
         {
+            /* The service creates the row when it copies darling.json; the switch only updates it (#6401). */
+            await ExecAsync(connection, "INSERT INTO config.config_service (id) VALUES (1) ON CONFLICT DO NOTHING", ct);
             Assert.True(await undo.ReadEnabledAsync(ct));
-            await undo.SetEnabledAsync(false, Login, ct);
+            Assert.True(await undo.SetEnabledAsync(false, Login, ct));
             Assert.False(await undo.ReadEnabledAsync(ct));
             Assert.Equal("person:erik|false", await ScalarAsync(connection,
                 "SELECT actor || '|' || (detail->>'enabled')::boolean FROM config.investigation_journal WHERE event = 'agent_actions_switched' ORDER BY journal_id DESC LIMIT 1", ct));
@@ -275,7 +277,7 @@ SELECT now() at time zone 'utc' - interval '1 hour', 7, 'srv-7', 'Blocking', 9, 
             var writes = 0;
             var hooks = new AgentActionHooks
             {
-                LoadLevels = (_, _, _) => Task.FromResult<Func<string, int, int?>>((_, _) => 2),
+                LoadLevels = (_, _, _) => Task.FromResult<Func<string, int, PerformanceMonitor.Notifications.AlertSeverityLevel?, int?>>((_, _, _) => 2),
                 ReadBefore = (_, _, _) => Task.FromResult<string?>(null),
                 Write = (_, _, _) => { writes++; return Task.FromResult<string?>("{}"); },
             };
@@ -286,7 +288,7 @@ SELECT now() at time zone 'utc' - interval '1 hour', 7, 'srv-7', 'Blocking', 9, 
             Assert.Equal(AgentActionCodes.ActionsOff, (await store.RunAgentActionAsync(call, hooks, ct)).Refusal?.Reason);
             Assert.Equal(0, writes);
 
-            await undo.SetEnabledAsync(true, Login, ct);
+            Assert.True(await undo.SetEnabledAsync(true, Login, ct));
             Assert.True((await store.RunAgentActionAsync(call, hooks, ct)).Done);
             Assert.Equal(1, writes);
         });

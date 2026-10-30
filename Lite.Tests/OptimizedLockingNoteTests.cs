@@ -136,6 +136,20 @@ public sealed class OptimizedLockingNoteTests : IClassFixture<SharedDuckDbFixtur
             empty.RootElement.GetProperty("hints").GetProperty("optimized_locking_note").GetString());
     }
 
+    [Fact]
+    public async Task GetDatabaseConfig_FilterThatMatchesNothing_KeepsTheDataShape_AndSaysWhy()
+    {
+        await SeedConfigAsync(DateTime.UtcNow.AddMinutes(-30), "Sales", null);
+
+        using var all = JsonDocument.Parse(await McpConfigTools.GetDatabaseConfig(_dataService, _serverManager, ServerName));
+        Assert.False(all.RootElement.TryGetProperty("note", out _));
+
+        using var missed = JsonDocument.Parse(await McpConfigTools.GetDatabaseConfig(_dataService, _serverManager, ServerName, "NoSuchDb"));
+        Assert.Equal(0, missed.RootElement.GetProperty("database_count").GetInt32());
+        Assert.False(missed.RootElement.TryGetProperty("status", out _));
+        Assert.Contains("master, model and msdb are not collected", missed.RootElement.GetProperty("note").GetString(), StringComparison.Ordinal);
+    }
+
     private async Task<string?> NoteAsync()
     {
         var json = await McpObjectStatsTools.GetObjectLocking(_dataService, _serverManager, ServerName);

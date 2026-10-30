@@ -28,18 +28,20 @@ public static class BaselineContextFormatter
     /// Formats baseline context from anomaly fact metadata into a structured dictionary
     /// (deviation, ratio, baseline mean/stddev, time bucket, tier, samples). Used by MCP
     /// output and by the analysis notification path's finding formatter.
+    /// <paramref name="plainWording"/> (#6925) renders the two deviations as "6.1 times its usual variation"
+    /// for text a person reads (the notification path); the default keeps the compact "6.1σ" that MCP clients parse.
     /// </summary>
-    public static Dictionary<string, object>? FormatBaselineContext(Dictionary<string, double> metadata)
+    public static Dictionary<string, object>? FormatBaselineContext(Dictionary<string, double> metadata, bool plainWording = false)
     {
         var result = new Dictionary<string, object>();
 
         if (metadata.TryGetValue("deviation_sigma", out var sigma))
-            result["deviation"] = $"{sigma:F1}σ";
+            result["deviation"] = plainWording ? $"{sigma:F1} times its usual variation" : $"{sigma:F1}σ";
 
         /* #3653 (A8): the window MEAN's deviation beside the peak's, so the MCP baseline_context and the
            notification formatter carry the pair the gate now fires on. Absent on a pre-pair fact. */
         if (metadata.TryGetValue("mean_deviation_sigma", out var meanSigma))
-            result["window_mean_deviation"] = $"{meanSigma:F1}σ";
+            result["window_mean_deviation"] = plainWording ? $"{meanSigma:F1} times its usual variation" : $"{meanSigma:F1}σ";
 
         if (metadata.TryGetValue("ratio", out var ratio))
             result["ratio"] = $"{ratio:F1}x";
