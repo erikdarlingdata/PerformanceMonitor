@@ -199,6 +199,7 @@ public sealed class DatabaseProtectionCollectorTests
         Assert.Equal(90, CollectorScheduleDefaults.All["database_protection"].RetentionDays);
         Assert.True(instance.StaysPlainTable);
         Assert.True(instance.IsDarlingOnly);
+        Assert.True(CollectorCatalog.YieldsOnLockTimeout("database_protection"));
         Assert.False(instance.RunsPerDatabase(new CollectorTargetInfo { IsAzureSqlDb = true }));
         Assert.True(CollectorCatalog.AppliesTo(instance, new CollectorTargetInfo { IsAzureSqlDb = true }));
         Assert.True(CollectorCatalog.AppliesTo(instance, new CollectorTargetInfo { IsAwsRds = true }));

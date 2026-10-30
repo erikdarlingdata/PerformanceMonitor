@@ -159,6 +159,7 @@ LEFT JOIN sys.dm_hadr_database_replica_states AS rs
   AND rs.is_local = 1
 WHERE d.database_id <> 2
 AND   d.source_database_id IS NULL
+" + DatabaseScopeFilter.VendorControlledDatabaseScreen + @"
 ORDER BY
     d.name
 OPTION(RECOMPILE);";
@@ -214,6 +215,9 @@ OPTION(RECOMPILE);";
     public override string TargetTable => "database_protection";
 
     public override int? CommandTimeoutSecondsOverride => CommandTimeoutSeconds;
+
+    /// <summary>The query sets a five-second lock timeout, so a 1222 on an msdb backup history lock is a yield, not a failure.</summary>
+    public override bool YieldsOnLockTimeout => true;
 
     /// <summary>A plain table with a time-sliced DELETE: one row per database per hour.</summary>
     public override bool StaysPlainTable => true;
