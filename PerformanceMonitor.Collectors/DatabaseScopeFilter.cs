@@ -33,7 +33,7 @@ public static class DatabaseScopeFilter
     /// The vendor-controlled database names (#1565, #6889): Amazon RDS's admin database and Google Cloud SQL's. Every login can
     /// enter <c>rdsadmin</c> on RDS, so a per-database list that does not screen it collects Amazon's own database (Query Store
     /// READ_WRITE, its scoped configurations, its user tables). One definition for every default screen: the three Query Store
-    /// lists and the four lists that carry <see cref="VendorControlledDatabaseScreen"/>.
+    /// lists and the five lists that carry <see cref="VendorControlledDatabaseScreen"/>.
     /// </summary>
     public const string VendorControlledDatabaseNames = "N'rdsadmin', N'gcloud_cloudsqladmin'";
 
