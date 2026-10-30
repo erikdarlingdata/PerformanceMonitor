@@ -349,6 +349,9 @@ internal static class DarlingWebhookSecrets
             Add(r.AgentExpiryMinutes.ToString(System.Globalization.CultureInfo.InvariantCulture));
             Add(r.FallbackRouteId?.ToString(System.Globalization.CultureInfo.InvariantCulture));
             Add(r.OffChannels is null ? "-" : string.Join(",", r.OffChannels.OrderBy(c => c, StringComparer.Ordinal)));
+
+            /* #6928: the severity filter. Delivery reads it from the cached route, so an edit of only this member must reopen the cache. */
+            Add(r.Severities);
         }
 
         return text.ToString();

@@ -2010,7 +2010,7 @@ GRANT INSERT ON {config}.investigation_request_alerts TO {admin};
 --     every start, so no migration rung carries this.
 GRANT INSERT (request_id, route_id, server_id, server_name, family, first_metric, story_path_hash, first_alert_at, last_alert_at,
    window_until, opened_at, expires_at, lease_minutes, autonomy_level, alert_count, practice_of) ON {config}.investigation_requests TO {mcp};
-GRANT INSERT (request_id, alert_time, server_id, metric_name, dedup_key, current_value, threshold_value, muted, detail_text, context_json)
+GRANT INSERT (request_id, alert_time, server_id, metric_name, dedup_key, current_value, threshold_value, muted, detail_text, context_json, severity)
    ON {config}.investigation_request_alerts TO {mcp};
 GRANT INSERT (request_id, verdict, corrected_verdict, missed_step, comment, author) ON {config}.investigation_feedback TO {mcp};
 GRANT UPDATE (verdict, corrected_verdict, missed_step, comment, author, created_at) ON {config}.investigation_feedback TO {mcp};
