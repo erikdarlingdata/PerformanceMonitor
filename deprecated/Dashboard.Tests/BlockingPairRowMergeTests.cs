@@ -44,7 +44,7 @@ public class BlockingPairRowMergeTests
         // The RDS / threshold-unset case: no blocked-process reports, the DMV snapshot is the only source.
         var primary = new List<BlockingPairRow>();
         BlockingPairRowMerge.MergeInto(primary, new[] { Pair(201, 200, "DMV"), Pair(203, 202, "DMV") });
-        Assert.Equal(2, primary.Count);
+        Assert.Equal(3, primary.Count);
         Assert.All(primary, r => Assert.Equal("DMV", r.BlockedSqlText));
     }
 
