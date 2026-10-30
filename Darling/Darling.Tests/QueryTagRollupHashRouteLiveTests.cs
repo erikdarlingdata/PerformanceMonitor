@@ -781,14 +781,13 @@ VALUES (TIMESTAMP '{at}', 1, 'dbX', 99, 99, 'Regular', TIMESTAMP '{at}', TIMESTA
     }
 
     /// <summary>
-    /// #6865: a writer whose start nobody can read (<c>track_activities</c> off, or another role's session without <c>pg_read_all_stats</c>) counts
-    /// as open from before every hour, so the planner holds back every hour and nothing builds. The read must not wait for hours that cannot build:
-    /// it answers the whole window from the wide table, as it did before the hash table, instead of only the last few hours. When the writer
-    /// finishes, the hour is backlog again. A writer whose start is readable and recent holds back no old hour, so the same hour stays backlog and
-    /// the read is cut after it, as without a writer.
+    /// #6865, #6945: a writer whose start the reading role cannot read (<c>track_activities</c> off, or another role's session without
+    /// <c>pg_read_all_stats</c>) holds no hour back from the READ. The planner still counts it as open from before every hour (it runs as the
+    /// owner, and a start it cannot read cannot be shown to be late enough), but the read only decides where the answer starts: the backlog hour
+    /// stays backlog and the read is cut after it, the same as with a writer whose start is readable and recent, and the same as with no writer.
     /// </summary>
     [Fact]
-    public async Task AWriterWhoseStartCannotBeRead_HoldsEveryHourBack_SoTheReadAnswersTheFullWindow_AndANormalWriterChangesNothing()
+    public async Task AWriterWhoseStartCannotBeRead_DoesNotHoldBackTheBacklogCut_ANormalWriterAndNoWriterGiveTheSameCut()
     {
         Assert.SkipWhen(string.IsNullOrEmpty(ComposeStampLiveSupport.BaseConnectionString), SkipReason);
         var ct = TestContext.Current.CancellationToken;
@@ -802,39 +801,126 @@ VALUES (TIMESTAMP '{at}', 1, 'dbX', 99, 99, 'Regular', TIMESTAMP '{at}', TIMESTA
             await MakeBacklogAsync(a, stuck, ct);
             var windowStart = a.HourNow.AddHours(-168).AddMinutes(17);
             var starts = Servers.ToDictionary(s => s, _ => windowStart);
-            var first = QueryTagRollupHashRoute.CeilHour(windowStart);
 
-            (writer, open) = await OpenWriterAsync(a, trackActivities: true, ct);
-            var normal = await FleetFromAsync(a, starts, ct);
-            Assert.Equal(1, normal.BacklogHoursWaiting);
-            Assert.All(normal.RoutedStarts!.Values, start => Assert.Equal(stuck.AddHours(1), start));
-            await CloseWriterAsync(writer, open, ct);
-
-            (writer, open) = await OpenWriterAsync(a, trackActivities: false, ct);
-            var full = await FleetFromAsync(a, starts, ct);
-            Assert.Equal(0, full.BacklogHoursWaiting);
-            Assert.Equal(0, full.BacklogHoursLeftOut);
-            Assert.All(full.RoutedStarts!.Values, start => Assert.Equal(first, start));
-            Assert.Equal(Canon(await TodaysAsync(a, Snapped(full), a.End, ct)), Canon(full.Facts));
-            using (var doc = await ToolAsync(a, ct))
+            foreach (var trackActivities in new[] { true, false })
             {
-                var section = QueryStoreSection(doc);
-                Assert.False(section.TryGetProperty("backlog_note", out _));
-                Assert.False(section.TryGetProperty("hours_left_out", out _));
+                (writer, open) = await OpenWriterAsync(a, trackActivities, ct);
+                var read = await FleetFromAsync(a, starts, ct);
+                Assert.Equal(1, read.BacklogHoursWaiting);
+                Assert.All(read.RoutedStarts!.Values, start => Assert.Equal(stuck.AddHours(1), start));
+                await CloseWriterAsync(writer, open, ct);
+                writer = null;
+                open = null;
             }
 
-            await CloseWriterAsync(writer, open, ct);
-            writer = null;
-            open = null;
-            var cut = await FleetFromAsync(a, starts, ct);
-            Assert.Equal(1, cut.BacklogHoursWaiting);
-            Assert.All(cut.RoutedStarts!.Values, start => Assert.Equal(stuck.AddHours(1), start));
+            var none = await FleetFromAsync(a, starts, ct);
+            Assert.Equal(1, none.BacklogHoursWaiting);
+            Assert.All(none.RoutedStarts!.Values, start => Assert.Equal(stuck.AddHours(1), start));
             bodySucceeded = true;
         }
         finally
         {
             await CloseWriterAsync(writer, open, ct);
             await CleanupAsync(a, bodySucceeded);
+        }
+    }
+
+    /// <summary>
+    /// #6945: the roles the tag rollup reads run as (<c>mcp</c>, <c>viewer</c>) are not members of <c>pg_read_all_stats</c>, so the store owner's
+    /// open writer shows them no <c>xact_start</c>. The ledger used to read that as a writer open from before every hour: every built hour came
+    /// back blocked, the backlog was empty and the read fell back to the wide table. Run as each role with the owner's writer open, no built
+    /// hour is blocked (a writer under an hour old can touch none of them) and the backlog hour is recognised.
+    /// </summary>
+    [Fact]
+    public async Task TheOwnersOpenWriter_IsHiddenFromTheMcpAndViewerRoles_AndBlocksNoBuiltHourOnTheirLedger()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ComposeStampLiveSupport.BaseConnectionString), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        var a = await ArrangeAsync(ct);
+        var bodySucceeded = false;
+        NpgsqlConnection? writer = null;
+        NpgsqlTransaction? open = null;
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var roles = new[] { "mcp_6945_" + suffix, "viewer_6945_" + suffix };
+        try
+        {
+            var stuck = a.HourNow.AddHours(-20);
+            await MakeBacklogAsync(a, stuck, ct);
+            var windowStart = a.HourNow.AddHours(-168).AddMinutes(17);
+            var starts = Servers.ToDictionary(s => s, _ => windowStart);
+            foreach (var role in roles)
+            {
+                await ExecAsync(a.Connection, $"CREATE ROLE {role} LOGIN", ct);
+                await ExecAsync(a.Connection, $"GRANT USAGE ON SCHEMA collect TO {role}", ct);
+                await ExecAsync(a.Connection, $"GRANT SELECT ON ALL TABLES IN SCHEMA collect TO {role}", ct);
+            }
+
+            (writer, open) = await OpenWriterAsync(a, trackActivities: true, ct);
+            foreach (var role in roles)
+            {
+                var builder = new NpgsqlConnectionStringBuilder(a.Scratch.ConnectionString) { Username = role, Password = null, Pooling = false };
+                await using var reader = new NpgsqlConnection(builder.ConnectionString);
+                await reader.OpenAsync(ct);
+
+                /* The premise: the owner's session is there, and this role gets no start for it. */
+                await using (var seen = new NpgsqlCommand("SELECT count(*) FILTER (WHERE xact_start IS NULL), count(*) FROM pg_stat_activity WHERE application_name = 'writer_6865'", reader))
+                await using (var counts = await seen.ExecuteReaderAsync(ct))
+                {
+                    Assert.True(await counts.ReadAsync(ct));
+                    Assert.Equal(1L, counts.GetInt64(1));
+                    Assert.Equal(1L, counts.GetInt64(0));
+                }
+
+                var built = 0;
+                var blocked = new List<DateTime>();
+                await using (var ledger = new NpgsqlCommand(QueryTagRollupHashRoute.LedgerSql, reader))
+                {
+                    ledger.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = QueryTagRollupHashRoute.CeilHour(windowStart) });
+                    ledger.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = a.HourNow });
+                    ledger.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer, Value = Servers });
+                    await using var rows = await ledger.ExecuteReaderAsync(ct);
+                    while (await rows.ReadAsync(ct))
+                    {
+                        if (rows.IsDBNull(1) && !rows.GetBoolean(3))
+                        {
+                            built++;
+                            if (rows.GetBoolean(4))
+                            {
+                                blocked.Add(rows.GetDateTime(0));
+                            }
+                        }
+                    }
+                }
+
+                Assert.True(built > 20, role + " saw " + built + " built hours");
+                Assert.Empty(blocked);
+
+                var plan = await QueryTagRollupHashRoute.TryPlanAsync(reader, starts, windowStart, a.End, 60, ct);
+                Assert.NotNull(plan);
+                Assert.Equal(1, plan.BacklogHoursWaiting);
+                Assert.All(plan.Starts.Values, start => Assert.Equal(stuck.AddHours(1), start));
+            }
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await CloseWriterAsync(writer, open, ct);
+            await CleanupAsync(a, bodySucceeded);
+            foreach (var role in roles)
+            {
+                await using var drop = new NpgsqlConnection(ComposeStampLiveSupport.BaseConnectionString);
+                try
+                {
+                    await drop.OpenAsync(CancellationToken.None);
+                    await using var command = new NpgsqlCommand($"DROP ROLE IF EXISTS {role}", drop);
+                    await command.ExecuteNonQueryAsync(CancellationToken.None);
+                }
+                catch (PostgresException)
+                {
+                    /* The scratch database is already dropped, so its grants are gone with it; a role left behind carries a fresh suffix. */
+                }
+            }
         }
     }
 

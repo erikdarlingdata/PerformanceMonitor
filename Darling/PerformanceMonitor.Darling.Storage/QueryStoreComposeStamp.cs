@@ -502,12 +502,33 @@ WHERE hour < $1;";
       AND a.pid <> pg_backend_pid()";
 
     /// <summary>
-    /// The writer cutoff (#5582 review round 2) as the ONE definition the planner (<see cref="PlanSql"/>) and the fleet rollup read
-    /// (<c>QueryTagRollupHashRoute.LedgerSql</c>, #6865) share: a one-row <c>SELECT</c> of <c>since</c>, the start of the oldest open writer
-    /// of the wide table. No writer is <c>infinity</c>, and a writer whose <c>xact_start</c> reads NULL is <c>-infinity</c> (it counts as open
-    /// from before every hour, see <see cref="OpenWriterSql"/>). Used as a CTE named <c>cutoff</c>, with <see cref="BlockedByWriterTail"/>.
+    /// The writer cutoff (#5582 review round 2) the planner (<see cref="PlanSql"/>) uses, which runs as the store owner and sees every session:
+    /// a one-row <c>SELECT</c> of <c>since</c>, the start of the oldest open writer of the wide table. No writer is <c>infinity</c>, and a
+    /// writer whose <c>xact_start</c> reads NULL is <c>-infinity</c> (it counts as open from before every hour, see <see cref="OpenWriterSql"/>).
+    /// Used as a CTE named <c>cutoff</c>, with <see cref="BlockedByWriterTail"/>. The fleet rollup read uses <see cref="ReaderWriterCutoffSql"/> (#6945).
     /// </summary>
     internal const string WriterCutoffSql = @"SELECT coalesce(min(coalesce(w.xact_start AT TIME ZONE 'UTC', '-infinity'::timestamp)), 'infinity'::timestamp) AS since
+    FROM (" + WideWriterRowsSql + @"
+    ) AS w";
+
+    /// <summary>
+    /// The writer cutoff for a READER that cannot see every session (#6945): the fleet rollup read (<c>QueryTagRollupHashRoute.LedgerSql</c>),
+    /// which runs as the <c>mcp</c> or <c>viewer</c> role. Like <see cref="WriterCutoffSql"/> it is a one-row <c>SELECT</c> of <c>since</c>, but a
+    /// writer whose <c>xact_start</c> reads NULL counts for nothing. PostgreSQL shows another role's <c>xact_start</c> only to a superuser or a
+    /// member of <c>pg_read_all_stats</c>, and the service writes the wide table as the store owner, so for these two roles EVERY open writer reads
+    /// NULL: under <see cref="WriterCutoffSql"/> the cutoff is <c>-infinity</c>, every built hour is blocked, and the backlog cut (#6865) never
+    /// applies whenever a collector transaction happens to be open at the read. A writer the role can see still counts, as before.
+    /// <para>Why that is safe on the read: <c>blocked</c> has one consumer, the backlog filter in <c>QueryTagRollupHashRoute.TryPlanAsync</c>. It
+    /// only keeps an hour out of the backlog, which decides where the answer starts. It never decides which rows an hour contributes: that is
+    /// the ledger's validity facts and the data statement, which share the read's one REPEATABLE READ snapshot, and an hour left out of the
+    /// answer is named in its note. The planner builds an hour only once the store's clock is <see cref="BuildLag"/> (3 hours) past it, so
+    /// a built hour H is over by at least 3 hours, and a writer defers it only when <c>xact_start &lt; H + 2 h</c>, which takes a transaction
+    /// open for over an hour. The collector's transactions last seconds, so the one case this ignores is an unreadable writer open for over an
+    /// hour, which holds the cut back until it closes. The code has no bound on a writer's whole transaction to size a guess by
+    /// (<c>ServiceCommandDeadlines.CollectionSweepSeconds</c> bounds one command and nothing encloses the transaction), so the read does not
+    /// guess one.</para>
+    /// </summary>
+    internal const string ReaderWriterCutoffSql = @"SELECT coalesce(min(w.xact_start AT TIME ZONE 'UTC'), 'infinity'::timestamp) AS since
     FROM (" + WideWriterRowsSql + @"
     ) AS w";
 
