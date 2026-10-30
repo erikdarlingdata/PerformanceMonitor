@@ -152,6 +152,22 @@ public sealed class AdminPendingNotesTests
         Assert.Equal("both", Sent("someday"));
     }
 
+    /* #6936: Edit then Save on the Routes tab sends the version the form read (expected_modified_at), because the service refuses an edit
+       without it with a 400. The test drives the page itself: it opens the editor on a stored Critical only route, picks Warning only,
+       presses Save and reads the write the page made. */
+    [Fact]
+    public void SavingAnEditedRoute_SendsTheVersionTheFormRead_AndTheChosenSeverity()
+    {
+        var writes = AdminServerEditBehaviourTests.Run("routeEdit:warning").GetProperty("writes").EnumerateArray().ToArray();
+
+        var write = Assert.Single(writes);
+        Assert.Equal("/api/notification-routes/7", write.GetProperty("url").GetString());
+        var body = write.GetProperty("body");
+        Assert.Equal("2026-01-01T00:00:00.1234567Z", body.GetProperty("expected_modified_at").GetString());
+        Assert.Equal("warning", body.GetProperty("severities").GetString());
+        Assert.Equal("blocking", body.GetProperty("metric_match").GetString());
+    }
+
     [Fact]
     public void OnlyASeatThatCanEdit_GetsTheDecideColumn_Pure()
     {

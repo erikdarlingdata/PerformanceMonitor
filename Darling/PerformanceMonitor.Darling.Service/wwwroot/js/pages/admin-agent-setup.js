@@ -243,7 +243,8 @@ function routeForm(options) {
   const recipients = text("recipients", entries.recipients, { placeholder: "name@example.com, other@example.com" });
   const read = () => {
     const e = {
-      id: entries.id, enabled: enabled.checked, saved: entries.saved, recipientsWas: entries.recipientsWas, hooks: {}, removes: {},
+      /* #6936: modifiedAt rides along, or an edit goes out without expected_modified_at and the service refuses it with a 400. */
+      id: entries.id, modifiedAt: entries.modifiedAt, enabled: enabled.checked, saved: entries.saved, recipientsWas: entries.recipientsWas, hooks: {}, removes: {},
     };
     for (const k of Object.keys(controls)) e[k] = controls[k].value;
     for (const d of WEBHOOK_DESTINATIONS) {

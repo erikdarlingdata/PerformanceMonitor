@@ -1248,6 +1248,27 @@ try {
         writes: requests.filter((r) => r.method === "PUT").length,
       };
     },
+    /* #6936: the Routes tab on an editing seat. Edit on route 7 (a stored Critical only route), choose `severity` in the Severity box, Save:
+       returns the write the page sent (method, url, body). The service answers 200 so the page repaints; the body is what is under test. */
+    routeEdit: async (severity) => {
+      state.canEdit = true;
+      const route = { route_id: 7, metric_match: "blocking", match_kind: "exact_metric", family: "performance", configured_channels: [], smtp_recipients: [],
+        enabled: true, modified_at_utc: "2026-01-01T00:00:00.1234567Z", scope_server_id: null, scope_tag_id: null, agent_level: null, agent_max_per_hour: 10,
+        agent_max_per_day: 50, agent_lease_minutes: 30, agent_expiry_minutes: 120, send_resolutions: null, fallback_route_id: null, severities: "critical" };
+      state.responder = (method, url) => {
+        if (method === "GET" && url === "/api/read/get_notification_routes") return { status: 200, body: { routes: [route] } };
+        if (method === "GET" && url === "/api/agent-setup/access") return { status: 200, body: { can_edit_routes: true, can_edit_profiles: true } };
+        if (method === "PUT" && url === "/api/notification-routes/7") return { status: 200, body: { status: "updated", route_id: 7 } };
+        return { status: 404, body: { error: "no such request " + url } };
+      };
+      await mountPage("routes");
+      await fire(byAttr(main, "data-action", "edit-route")[0], "click");
+      await settle(30);
+      await typeInto(field("severities"), severity);
+      await fire(byAttr(main, "data-action", "save-route")[0], "click");
+      await settle(30);
+      return { writes: requests.filter((r) => r.method === "PUT").map((r) => ({ method: r.method, url: r.url, body: r.body })) };
+    },
     /* One call of an admin.js export, {"fn": "buildEditBody", "args": [...]} on stdin, printed as {"result": ...}; or
        {"calls": [{"fn": ..., "args": [...]}, ...]} for a table of calls in one process, printed as {"results": [...]}.
        An export that is not a function (EDIT_FIELDS) is returned as it is. */
