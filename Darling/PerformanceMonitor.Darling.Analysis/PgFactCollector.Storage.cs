@@ -227,7 +227,8 @@ AND   (delta_reads > 0 OR delta_writes > 0)";
             {
                 /* #6959: the scored value is the log files and tempdb data files only (a session waits on a log flush
                    and on a tempdb spill write). User data files are checkpoint and lazy-writer targets that no session
-                   waits on, so their write latency rides along as unscored metadata and the card still shows it. */
+                   waits on, so their write latency rides along as unscored metadata, and FactAdvice.ComposeIoLatency shows it as its
+                   own sentence on the card. */
                 var avgWriteLatency = (double)totalStallWriteMs / totalWrites;
                 var writeMetadata = new Dictionary<string, double>
                 {
