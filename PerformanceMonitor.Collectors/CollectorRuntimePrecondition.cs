@@ -1083,7 +1083,7 @@ public static class CollectorRuntimePrecondition
                " to the monitoring login. The next run uses it. ";
     }
 
-    private static string JoinWithAnd(IReadOnlyList<string> items) =>
+    private static string JoinWithAnd(List<string> items) =>
         items.Count <= 2
             ? string.Join(" and ", items)
             : string.Join(", ", items.Take(items.Count - 1)) + " and " + items[^1];
