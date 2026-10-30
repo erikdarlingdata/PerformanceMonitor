@@ -1996,9 +1996,10 @@ public class WebhookAlertService
     /// <summary>
     /// Builds a Slack incoming webhook payload with a colored attachment sidebar.
     /// Uses Slack Block Kit for rich formatting.
-    /// <para>#2710: a non-null <paramref name="triageUrl"/> adds an actions block with a LINK button (a url
-    /// button needs no interactivity config on the webhook, unlike an action_id button) pointing at the
-    /// computed triage page, placed above the "Sent by" context footer. Null renders the pre-#2710 payload.</para>
+    /// <para>#2710: a non-null <paramref name="triageUrl"/> adds a context block holding a mrkdwn link to the
+    /// computed triage page, placed above the "Sent by" context footer. #6965: a link, not a url button, because
+    /// a url button still sends Slack interaction payloads that a webhook-only app cannot answer. Null renders
+    /// the pre-#2710 payload.</para>
     /// <para>#3297: <paramref name="detailText"/> is the alert's flat prose detail, rendered as mrkdwn
     /// <c>section</c> blocks directly under the field block — Block Kit's home for prose, and above
     /// the per-incident dividers so the remedy reads before the drill-down. #3493: as many section blocks
@@ -2087,7 +2088,7 @@ public class WebhookAlertService
            unchanged: head, prose, details, footer — exactly where each has always rendered. */
         var footerBlocks = new List<object>();
 
-        /* #5642: the newest-sample age, one small context block ahead of the triage button; it counts
+        /* #5642: the newest-sample age, one small context block ahead of the triage link; it counts
            against the budget below with the rest of the footer. */
         var slackAgeLine = AlertDetailText.SampleAgeLineFor(context, prose);
         if (slackAgeLine is not null)
@@ -2099,21 +2100,22 @@ public class WebhookAlertService
             });
         }
 
-        /* #2710: the triage-page link button, above the footer so it reads as part of the alert rather than
-           the boilerplate. A url button opens the link directly with no Slack app interactivity required. */
+        /* #2710: the triage-page link, above the footer so it reads as part of the alert rather than the
+           boilerplate. #6965: a mrkdwn <url|label> link in a context block, not a url button. A url button
+           still makes Slack send an interaction payload to the app, so a webhook-only app with no
+           Interactivity Request URL showed "This app is not configured to handle interactive responses" on
+           every click. A text link opens the page and sends nothing. The label and the URL are escaped for
+           mrkdwn, and a pipe in the URL (it can only come from the operator's base URL, the query is
+           percent-encoded) is percent-encoded so it cannot end the link target early. */
         if (triageUrl is not null)
         {
+            var slackLinkUrl = SlackEscape(triageUrl).Replace("|", "%7C", StringComparison.Ordinal);
             footerBlocks.Add(new
             {
-                type = "actions",
+                type = "context",
                 elements = new object[]
                 {
-                    new
-                    {
-                        type = "button",
-                        text = new { type = "plain_text", text = TriageLink.LinkLabel(triageUrl), emoji = false },
-                        url = triageUrl
-                    }
+                    new { type = "mrkdwn", text = $"<{slackLinkUrl}|{SlackEscape(TriageLink.LinkLabel(triageUrl))}>" }
                 }
             });
         }
