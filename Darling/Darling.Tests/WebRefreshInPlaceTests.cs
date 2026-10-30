@@ -120,6 +120,15 @@ public sealed class WebRefreshInPlaceTests
     }
 
     [Fact]
+    public void ServerPoll_WithAHiddenPanelThatKeepsItsLoadingStrip_StillRefreshesTheOtherPanels()
+    {
+        if (!TryRun("hiddenPanelPoll", out var r)) return;
+        Assert.True(r.GetProperty("sameShown").GetBoolean());
+        Assert.True(r.GetProperty("sameHidden").GetBoolean());
+        Assert.Contains("new", r.GetProperty("textAfter").GetString());
+    }
+
+    [Fact]
     public void ServerNavigation_StillDrawsAFreshGrid_WithLoadingStrips()
     {
         if (!TryRun("serverNavigation", out var r)) return;

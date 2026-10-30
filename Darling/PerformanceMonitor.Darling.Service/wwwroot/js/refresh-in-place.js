@@ -94,9 +94,13 @@ const isLoading = (n) => hasClass(n, "loading");
 const isRefreshError = (n) => hasClass(n, "refresh-error");
 const isError = (n) => hasClass(n, "strip") && hasClass(n, "error") && !isRefreshError(n);
 
-/** Whether a panel has drawn: no loading strip is left anywhere inside it. */
+/** Whether a panel has drawn: no loading strip is left anywhere inside it. A hidden element is skipped: a panel that does not
+ *  apply to this server (`hideWhenNotCollected`, the Instance CPU panel on PostgreSQL that is not Aurora) hides itself and leaves
+ *  its loading strip behind, and waiting on that strip would hold every poll of the page forever. */
 function settled(n) {
-  return !find(n, isLoading);
+  if (n.hidden === true) return true;
+  if (isLoading(n)) return false;
+  return Array.from(n.children || []).every(settled);
 }
 
 /* The panel's key: the page's own markers for the read and its title, plus the read's parameters when renderPanel recorded

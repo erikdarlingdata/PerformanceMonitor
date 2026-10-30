@@ -210,6 +210,26 @@ try {
       out.errorsAfterRecovery = refreshErrors(main).length;
       out.textAfterRecovery = text(panel);
     },
+    /* A panel hidden because it does not apply to this server (hideWhenNotCollected) leaves its loading strip inside the hidden
+       element. It must not hold the poll: the other panels still refresh in place. */
+    async hiddenPanelPoll() {
+      const rip = await load("refresh-in-place.js");
+      const panel = (title, body, hidden) => {
+        const p = new FakeNode("div"); p.className = "panel"; p.setAttribute("data-panel", title); p.setAttribute("data-title", title); p.hidden = hidden;
+        const b = new FakeNode("div"); b.className = "panel-body"; p.appendChild(b);
+        const c = new FakeNode("div"); c.className = hidden ? "strip loading" : "stub-result"; c.textContent = body; b.appendChild(c);
+        return p;
+      };
+      const live = new FakeNode("div"); live.className = "panel-grid"; live.isRoot = true;
+      const hiddenLive = panel("Instance CPU", "Loading", true);
+      const shownLive = panel("Stats", "old", false);
+      live.appendChild(hiddenLive); live.appendChild(shownLive);
+      rip.refreshGridInPlace(live, [panel("Instance CPU", "Loading", true), panel("Stats", "new", false)]);
+      await settle();
+      out.sameShown = live.children[1] === shownLive;
+      out.sameHidden = live.children[0] === hiddenLive;
+      out.textAfter = text(shownLive);
+    },
     /* The reader's own navigation (the same tab again, as a click or a range change does) draws a fresh grid with a loading strip. */
     async serverNavigation() {
       const server = await load("pages/server.js");
