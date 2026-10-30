@@ -33,6 +33,11 @@ public partial class NotificationRouteEditDialog : Window
     internal const string ResolutionsChannelChoice = "Use channel setting";
     internal const string ResolutionsAlwaysChoice = "Always";
     internal const string ResolutionsNeverChoice = "Never";
+
+    /* #6928: the severity filter's three choices, in the order they are offered. */
+    internal const string SeveritiesBothChoice = "Both (Warning and Critical)";
+    internal const string SeveritiesCriticalChoice = "Critical only";
+    internal const string SeveritiesWarningChoice = "Warning only";
     private const string AgentOffChoice = "Off";
     /* #5912: shown only on a route already stored at Level 2, and never chosen from here (the write path for Act is a later slice). */
     private const string AgentActChoice = "Act (Level 2: investigate and change alert settings)";
@@ -93,6 +98,12 @@ public partial class NotificationRouteEditDialog : Window
         SendResolutionsCombo.Items.Add(new ComboBoxItem { Content = ResolutionsNeverChoice, Tag = false });
         var storedResolutions = existing?.SendResolutions;
         SendResolutionsCombo.SelectedItem = SendResolutionsCombo.Items.Cast<ComboBoxItem>().First(i => Equals(i.Tag, storedResolutions));
+
+        SeveritiesCombo.Items.Add(new ComboBoxItem { Content = SeveritiesBothChoice, Tag = NotificationRouteKinds.SeveritiesBoth });
+        SeveritiesCombo.Items.Add(new ComboBoxItem { Content = SeveritiesCriticalChoice, Tag = NotificationRouteKinds.SeveritiesCritical });
+        SeveritiesCombo.Items.Add(new ComboBoxItem { Content = SeveritiesWarningChoice, Tag = NotificationRouteKinds.SeveritiesWarning });
+        var storedSeverities = NotificationRouteKinds.NormalizeSeverities(existing?.Severities);
+        SeveritiesCombo.SelectedItem = SeveritiesCombo.Items.Cast<ComboBoxItem>().First(i => Equals(i.Tag, storedSeverities));
 
         /* #6036: the fallback picker lists every OTHER route, with a none choice; the route being edited is never offered. */
         FallbackRouteCombo.Items.Add(new ComboBoxItem { Content = FallbackNoneChoice, Tag = null });
@@ -226,6 +237,7 @@ public partial class NotificationRouteEditDialog : Window
         Route.PagerDutyRoutingKey = ViewerWebhookSealing.CarryKept(PagerDutyKeyBox.Text, _stored?.PagerDutyRoutingKey);
         Route.SmtpRecipients = SmtpRecipientsBox.Text.Trim();
         Route.Enabled = EnabledCheckBox.IsChecked == true;
+        Route.Severities = NotificationRouteKinds.NormalizeSeverities((SeveritiesCombo.SelectedItem as ComboBoxItem)?.Tag as string);
 
         var error = ReadAgent();
         error ??= ViewerDataService.ValidateNotificationRoute(Route);

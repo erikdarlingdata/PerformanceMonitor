@@ -166,6 +166,14 @@ public sealed record NotificationRoute(
     /// each channel's own setting, true sends it and false does not, whatever the channel says.</summary>
     public bool? SendResolutions { get; init; }
 
+    /// <summary>The severity filter (<c>severities</c>, #6928): <see cref="NotificationRouteKinds.SeveritiesBoth"/> (the default, every route
+    /// before the filter), <see cref="NotificationRouteKinds.SeveritiesCritical"/> or <see cref="NotificationRouteKinds.SeveritiesWarning"/>.
+    /// A route whose filter excludes an alert's severity does not match it, and matching goes on to the next route.</summary>
+    public string Severities { get; init; } = NotificationRouteKinds.SeveritiesBoth;
+
+    /// <summary>Whether this route's severity filter takes an alert of <paramref name="severity"/> (#6928). Null takes every route.</summary>
+    public bool AcceptsSeverity(AlertSeverityLevel? severity) => NotificationRouteKinds.SeveritiesAccept(Severities, severity);
+
     /// <summary>Whether this route sets the agent channel at all (#5632): either level, as opposed to inheriting.</summary>
     public bool HasAgentLevel => AgentLevel.HasValue;
 

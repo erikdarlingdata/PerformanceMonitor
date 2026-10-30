@@ -453,6 +453,8 @@ public sealed class NotificationRoutesMcpTests : IDisposable
             /* #6036: the fallback route (D8 of #5632 Phase C) is Darling-only; Lite has no request events. */
             "fallback_route_id",
             "fallback_route_name",
+            /* #6928: route severity is Darling-only. */
+            "severities",
         };
         Assert.All(darlingOnly, f => Assert.Contains(f, darling));
         Assert.Equal(darling.Except(darlingOnly).OrderBy(n => n, StringComparer.Ordinal), lite.OrderBy(n => n, StringComparer.Ordinal));

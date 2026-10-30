@@ -48,4 +48,33 @@ public static class NotificationRouteKinds
     public static string? FamilyOf(string? metricMatch) =>
         IsWildcard(metricMatch) ? null
         : AlertFamily.NormalizeFamily(metricMatch) ?? AlertFamily.Of(metricMatch ?? string.Empty);
+
+    /// <summary><c>severities</c> value (#6928): a route that takes Warning and Critical alerts alike. The default, and what every route was before the filter existed.</summary>
+    public const string SeveritiesBoth = "both";
+
+    /// <summary><c>severities</c> value (#6928): a route that takes Critical alerts only.</summary>
+    public const string SeveritiesCritical = "critical";
+
+    /// <summary><c>severities</c> value (#6928): a route that takes Warning alerts only. Every alert that is not Critical counts as Warning here.</summary>
+    public const string SeveritiesWarning = "warning";
+
+    /// <summary>The stored word for a route's severity filter: <c>both</c>, <c>critical</c> or <c>warning</c>. Blank, null or
+    /// anything unknown reads as <c>both</c>, so a value this build does not know widens to today's behaviour and never hides a route.</summary>
+    public static string NormalizeSeverities(string? value) =>
+        value?.Trim().ToLowerInvariant() switch
+        {
+            SeveritiesCritical => SeveritiesCritical,
+            SeveritiesWarning => SeveritiesWarning,
+            _ => SeveritiesBoth,
+        };
+
+    /// <summary>Whether a route with severity filter <paramref name="severities"/> takes an alert of <paramref name="severity"/>.
+    /// A null severity (a caller that does not know the alert's tier) is taken by every route.</summary>
+    public static bool SeveritiesAccept(string? severities, AlertSeverityLevel? severity) =>
+        severity is null || NormalizeSeverities(severities) switch
+        {
+            SeveritiesCritical => severity == AlertSeverityLevel.Critical,
+            SeveritiesWarning => severity == AlertSeverityLevel.Warning,
+            _ => true,
+        };
 }

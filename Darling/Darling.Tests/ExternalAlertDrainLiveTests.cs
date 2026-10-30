@@ -218,6 +218,25 @@ public sealed class ExternalAlertDrainLiveTests
         });
     }
 
+    /// <summary>#6928: the PagerDuty close is routed at the severity the fire went out at, so a severity filter on a route sends the close
+    /// to the route the fire used. A critical fire closes as Critical and a warning fire as Warning.</summary>
+    [Theory]
+    [InlineData("critical", AlertSeverityLevel.Critical)]
+    [InlineData("warning", AlertSeverityLevel.Warning)]
+    public async Task TheClear_AsksForThePagerDutyCloseAtTheSeverityTheFireWentOutAt(string fireSeverity, AlertSeverityLevel expected)
+    {
+        await WithDrainAsync(async rig =>
+        {
+            await rig.SubmitAsync("fire", "disk", server: "SQL01", severity: fireSeverity);
+            await rig.Drain.RunPassAsync(rig.Ct);
+            var clear = await rig.SubmitAsync("clear", "disk", server: "SQL01");
+            await rig.Drain.RunPassAsync(rig.Ct);
+
+            Assert.Equal("delivered", await rig.StatusAsync(clear));
+            Assert.Equal(new AlertSeverityLevel?[] { expected }, rig.PagerDutySeverities.ToArray());
+        });
+    }
+
     [Fact]
     public async Task AClearWithNoFire_IsIgnored_AndAsksForNoResolve()
     {
@@ -487,6 +506,29 @@ public sealed class ExternalAlertDrainLiveTests
         });
     }
 
+    /// <summary>#6928: an external alert that fired Warning and then climbed to Critical closes the PagerDuty incident at both tiers, so a
+    /// Warning-only route's key is resolved as well as the Critical-only route's.</summary>
+    [Fact]
+    public async Task TheClear_AfterAWarningThatEscalatedToCritical_AsksForTheCloseAtBothTiers()
+    {
+        await WithDrainAsync(async rig =>
+        {
+            await rig.SubmitAsync("fire", "disk", server: "SQL01", severity: "warning");
+            await rig.Drain.RunPassAsync(rig.Ct);
+            await rig.SubmitAsync("fire", "disk", server: "SQL01", severity: "critical");
+            await rig.Drain.RunPassAsync(rig.Ct);
+            Assert.Equal("critical", await rig.ScalarAsync("SELECT fired_severity FROM config.external_alert_state WHERE alert_key = 'disk'"));
+            Assert.Equal("warning,critical", await rig.ScalarAsync("SELECT fired_severities FROM config.external_alert_state WHERE alert_key = 'disk'"));
+
+            var clear = await rig.SubmitAsync("clear", "disk", server: "SQL01");
+            await rig.Drain.RunPassAsync(rig.Ct);
+
+            Assert.Equal("delivered", await rig.StatusAsync(clear));
+            Assert.Equal(
+                new AlertSeverityLevel?[] { AlertSeverityLevel.Warning, AlertSeverityLevel.Critical }, rig.PagerDutySeverities.ToArray());
+        });
+    }
+
     [Fact]
     public async Task AFireOpenedByARetryThatSucceeds_IsConfirmed_AndItsClearResolvesIt()
     {
@@ -577,9 +619,10 @@ public sealed class ExternalAlertDrainLiveTests
                         AlertContextSerializer.Serialize(outcome.Context!)));
                     return delivery;
                 },
-                (metric, serverName, serverKey, _, _) =>
+                (metric, serverName, serverKey, _, firedSeverities, _) =>
                 {
                     PagerDutyResolves.Add(metric.Split(':')[2]);
+                    PagerDutySeverities.AddRange(firedSeverities);
                     PagerDutyIdentities.Add(serverName + "|" + serverKey);
                     return Task.FromResult(AlertChannelOutcome.Delivered);
                 },
@@ -597,6 +640,9 @@ public sealed class ExternalAlertDrainLiveTests
         public ExternalAlertDrain Drain { get; }
         public List<AlertOutcome> Sent { get; } = new();
         public List<string> PagerDutyResolves { get; } = new();
+
+        /// <summary>The severity each PagerDuty resolve was asked to route at (#6928): the tier the fire went out at.</summary>
+        public List<AlertSeverityLevel?> PagerDutySeverities { get; } = new();
 
         /// <summary>The server name and server key each PagerDuty resolve was asked to close, as <c>name|key</c>.</summary>
         public List<string> PagerDutyIdentities { get; } = new();
@@ -618,16 +664,17 @@ public sealed class ExternalAlertDrainLiveTests
                 await ScalarAsync($"INSERT INTO config.external_alert_source (source_name, role_name) VALUES ('{name}', 'role_{name}') RETURNING source_id"),
                 CultureInfo.InvariantCulture);
 
-        public async Task<long> SubmitAsync(string kind, string key, string? server = null, double? value = null, string source = "nagios")
+        public async Task<long> SubmitAsync(string kind, string key, string? server = null, double? value = null, string source = "nagios", string severity = "warning")
         {
             await using var command = new NpgsqlCommand(
                 "INSERT INTO config.external_alert_pending (source_id, kind, alert_key, severity, title, server_name, value, expires_at)"
-                + " VALUES ($1, $2, $3, 'warning', 'a title', $4, $5, now() + interval '15 minutes') RETURNING pending_id", _seed);
+                + " VALUES ($1, $2, $3, $6, 'a title', $4, $5, now() + interval '15 minutes') RETURNING pending_id", _seed);
             command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = _sourceIds[source] });
             command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = kind });
             command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = key });
             command.Parameters.Add(new NpgsqlParameter { Value = (object?)server ?? DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text });
             command.Parameters.Add(new NpgsqlParameter { Value = (object?)value ?? DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Double });
+            command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = severity });
             return Convert.ToInt64(await command.ExecuteScalarAsync(Ct), CultureInfo.InvariantCulture);
         }
 

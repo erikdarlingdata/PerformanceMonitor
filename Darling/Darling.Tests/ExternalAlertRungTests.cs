@@ -127,7 +127,7 @@ public sealed class ExternalAlertRungTests
                 "pending_id:bigint:NO,source_id:integer:NO,kind:text:NO,alert_key:text:NO,severity:text:NO,title:text:YES,detail:text:YES,server_name:text:YES,value:double precision:YES,submitted_at:timestamp with time zone:NO,expires_at:timestamp with time zone:NO,status:text:NO,claimed_at:timestamp with time zone:YES,service_instance:text:YES,attempts:integer:NO,next_attempt_at:timestamp with time zone:YES,reason:text:YES,completed_at:timestamp with time zone:YES",
                 await ColumnsAsync(connection, "external_alert_pending", ct));
             Assert.Equal(
-                "source_id:integer:NO,alert_key:text:NO,server_label:text:NO,server_id:integer:NO,server_key:text:NO,server_name:text:NO,firing:boolean:NO,fired_severity:text:YES,last_fired_at:timestamp with time zone:YES",
+                "source_id:integer:NO,alert_key:text:NO,server_label:text:NO,server_id:integer:NO,server_key:text:NO,server_name:text:NO,firing:boolean:NO,fired_severity:text:YES,last_fired_at:timestamp with time zone:YES,fired_severities:text:YES",
                 await ColumnsAsync(connection, "external_alert_state", ct));
             Assert.Equal("external_source:text:YES", await ScalarAsync(connection,
                 "SELECT column_name || ':' || data_type || ':' || is_nullable FROM information_schema.columns WHERE table_schema = 'config' AND table_name = 'config_mute_rules' AND column_name = 'external_source'", ct));

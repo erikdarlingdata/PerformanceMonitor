@@ -116,11 +116,11 @@ internal static class DarlingAgentActionGate
     /// that one list, so a route an operator lowered refuses the next change, not the next reload. A failed tag read logs
     /// through <paramref name="logger"/> and leaves a tag-scoped route unexpanded, so it matches nothing: fail closed.
     /// </summary>
-    internal static async Task<Func<string, int, int?>> LoadLevelsAsync(NpgsqlConnection connection, ILogger logger,
+    internal static async Task<Func<string, int, AlertSeverityLevel?, int?>> LoadLevelsAsync(NpgsqlConnection connection, ILogger logger,
         CancellationToken cancellationToken)
     {
         var routes = await StoreConfigProvider.ReadNotificationRoutesAsync(connection, logger, cancellationToken);
-        return (metric, serverId) => NotificationRouter.ResolveAgent(metric, routes, serverId)?.AgentLevel;
+        return (metric, serverId, severity) => NotificationRouter.ResolveAgent(metric, routes, serverId, severity)?.AgentLevel;
     }
 
     /// <summary>The request id of a refused argument, when one parses, so its refusal is journaled with its request.</summary>

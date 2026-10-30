@@ -89,6 +89,9 @@ public sealed class PgNotificationRouteStore
         /// <summary>The route an expired investigation request goes to first (#6036, D8 of #5632 Phase C), or null for none.</summary>
         public int? FallbackRouteId { get; init; }
 
+        /// <summary>The severity filter (V229, #6928): both, critical or warning.</summary>
+        public string Severities { get; init; } = NotificationRouteKinds.SeveritiesBoth;
+
         /// <summary>The fallback route's name (its <c>metric_match</c>), or null when there is no fallback.</summary>
         public string? FallbackRouteName { get; init; }
 
@@ -103,7 +106,7 @@ public sealed class PgNotificationRouteStore
     /// the one a superuser-run test never notices.</summary>
     public const string SelectSummariesSql = @"
 SELECT route_id, metric_match, configured_channels, smtp_recipients, enabled, modified_at, scope_server_id, scope_tag_id,
-       agent_level, agent_max_per_hour, agent_max_per_day, agent_lease_minutes, agent_expiry_minutes, send_resolutions, fallback_route_id
+       agent_level, agent_max_per_hour, agent_max_per_day, agent_lease_minutes, agent_expiry_minutes, send_resolutions, fallback_route_id, severities
 FROM config_notification_routes
 ORDER BY route_id";
 
@@ -170,6 +173,7 @@ UPDATE config_notification_routes
                 AgentExpiryMinutes = reader.GetInt32(12),
                 SendResolutions = reader.IsDBNull(13) ? null : reader.GetBoolean(13),
                 FallbackRouteId = reader.IsDBNull(14) ? null : reader.GetInt32(14),
+                Severities = NotificationRouteKinds.NormalizeSeverities(reader.GetString(15)),
             });
         }
 

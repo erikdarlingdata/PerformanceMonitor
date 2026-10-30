@@ -52,6 +52,8 @@
                     <DataGridTextColumn Header="Matches" Binding="{Binding MetricMatch}" Width="170"/>
                     <DataGridTextColumn Header="Kind" Binding="{Binding MatchKindDisplay}" Width="100"/>
                     <DataGridTextColumn Header="Scope" Binding="{Binding ScopeDisplay}" Width="160"/>
+                    <!-- #6928: the severity filter, Both / Critical only / Warning only. -->
+                    <DataGridTextColumn Header="Severity" Binding="{Binding SeveritiesDisplay}" Width="100"/>
                     <DataGridTextColumn Header="Channels set" Binding="{Binding ChannelsDisplay}" Width="*"/>
                     <!-- #5632: the agent channel, Inherit / Off / Investigate with its hourly and daily limits. -->
                     <DataGridTextColumn Header="Agent" Binding="{Binding AgentDisplay}" Width="150"/>

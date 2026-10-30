@@ -365,6 +365,35 @@ public sealed class AlertResolutionDeliveryTests
         Assert.Equal(AlertDelivery.ChannelNotApplicable, rig.History.Records[^1].NotificationType);
     }
 
+    /// <summary>#6928: a clear goes to the channels the fire reached, not to wherever the severity filter would send it now. The fire
+    /// was Critical and went to the Critical-only route's endpoint. The routes' filters are then swapped (the other endpoint's route has the lower id, so a re-match at the clear would pick it), and the clear still goes to
+    /// that endpoint and never to the other.</summary>
+    [Fact]
+    public async Task AClear_GoesToTheChannelTheFireReached_WhateverTheSeverityFiltersSayAtTheClear()
+    {
+        using var criticalEndpoint = new CapturingWebhookEndpoint();
+        using var warningEndpoint = new CapturingWebhookEndpoint();
+        var config = new DarlingConfig();
+        config.Webhooks.SlackSendResolutions = true;
+        NotificationRoute[] RoutesWith(string first, string second) => new[]
+        {
+            new NotificationRoute(2, Metric, "", criticalEndpoint.Url, "", "", "", true) { Severities = first },
+            new NotificationRoute(1, Metric, "", warningEndpoint.Url, "", "", "", true) { Severities = second },
+        };
+        config.NotificationRoutes = RoutesWith("critical", "warning");
+        var rig = Rig.Build(config);
+
+        await rig.Deliverer.DeliverAsync(Fire() with { Severity = AlertSeverityLevel.Critical }, TestContext.Current.CancellationToken);
+        Assert.Single(criticalEndpoint.Bodies);
+        Assert.Empty(warningEndpoint.Bodies);
+
+        config.NotificationRoutes = RoutesWith("warning", "critical");
+        await rig.Deliverer.DeliverResolutionAsync(CpuResolution(), cancellationToken: TestContext.Current.CancellationToken);
+
+        Assert.Equal(2, criticalEndpoint.Bodies.Count);
+        Assert.Empty(warningEndpoint.Bodies);
+    }
+
     private static AlertOutcome Fire() =>
         new(ServerKey, Server, Metric, "97%", "90%", Context: null, DetailText: null,
             NumericCurrentValue: 97, NumericThresholdValue: 90, Muted: false, Severity: null);
