@@ -2975,8 +2975,52 @@ $rung$;";
         new Migration(224, "identity-capacity", V224Sql),
         new Migration(225, "server-aws-rds", V225Sql),
         new Migration(226, "server-aws-rds-web-or-express", V226Sql),
+        new Migration(227, "threshold-override-tag-scope", V227Sql),
         new Migration(229, "notification-route-severities", V229Sql),
     };
+
+    /// <summary>
+    /// V227 (#6926): a threshold override can be held for a server tag. <c>config.config_threshold_overrides</c> gains the nullable
+    /// <c>scope_tag_id</c> (a <c>config.server_tags</c> id), <c>server_id</c> becomes nullable, and a CHECK says exactly one of the two is set,
+    /// so a stored row (server set, tag NULL) keeps its meaning and stays valid. A tag row holds no database (CHECK), because a tag value is
+    /// the server-level value for every server under the tag. A second unique index keeps one value per tag and key, since the V191 index is
+    /// on <c>server_id</c> and NULLs never collide.
+    ///
+    /// <para><b>No foreign key on the tag, deliberately</b>, as V181 did for a route: an override whose tag was deleted stays as written and
+    /// shows as orphaned, and the service resolves it to nothing. A cascade would delete the person's setting, and SET NULL would break the
+    /// exactly-one CHECK. The table's reload trigger (V191) and the tag tables' (V181) already bump the config version, so the service
+    /// re-reads when a tag moves. No GRANT: the table-level grants of V191 (admin and mcp write, viewer read) cover the new column. Every
+    /// statement is idempotent. <b>No Lite twin:</b> Lite has no overrides.</para>
+    /// </summary>
+    private const string V227Sql = @"
+ALTER TABLE config.config_threshold_overrides
+    ADD COLUMN IF NOT EXISTS scope_tag_id integer;
+
+ALTER TABLE config.config_threshold_overrides
+    ALTER COLUMN server_id DROP NOT NULL;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                   WHERE conname = 'ck_config_threshold_overrides_one_scope'
+                     AND conrelid = 'config.config_threshold_overrides'::regclass) THEN
+        ALTER TABLE config.config_threshold_overrides
+            ADD CONSTRAINT ck_config_threshold_overrides_one_scope
+            CHECK ((server_id IS NOT NULL) <> (scope_tag_id IS NOT NULL));
+    END IF;
+
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                   WHERE conname = 'ck_config_threshold_overrides_tag_no_database'
+                     AND conrelid = 'config.config_threshold_overrides'::regclass) THEN
+        ALTER TABLE config.config_threshold_overrides
+            ADD CONSTRAINT ck_config_threshold_overrides_tag_no_database
+            CHECK (scope_tag_id IS NULL OR database_name IS NULL);
+    END IF;
+END $$;
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_config_threshold_overrides_tag
+    ON config.config_threshold_overrides (scope_tag_id, threshold_key)
+    WHERE scope_tag_id IS NOT NULL;";
 
     /// <summary>
     /// V225 (#6894): <c>collect.servers.is_aws_rds</c>, whether the target is an Amazon RDS for SQL Server instance (the connect query's

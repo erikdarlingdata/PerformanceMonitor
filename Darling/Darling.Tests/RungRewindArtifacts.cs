@@ -577,6 +577,16 @@ ALTER TABLE config.config_alert_settings
         // so a re-run of V226 does everything again. Safe on a store that never had it.
         new(226, "hasServerAwsRdsWebOrExpress",
             @"ALTER TABLE collect.servers DROP COLUMN IF EXISTS is_aws_rds_web_or_express;"),
+        // V227 (#6926): the tag scope on the threshold overrides. The column is the probe's newest sentinel. The rewind removes the tag rows,
+        // the two constraints and the tag index, puts server_id back to NOT NULL and drops the column, so a re-run of V227 does everything
+        // again. Safe on a store that never had it.
+        new(227, "hasThresholdOverrideTagScope",
+            @"DELETE FROM config.config_threshold_overrides WHERE server_id IS NULL;
+ALTER TABLE config.config_threshold_overrides DROP CONSTRAINT IF EXISTS ck_config_threshold_overrides_one_scope;
+ALTER TABLE config.config_threshold_overrides DROP CONSTRAINT IF EXISTS ck_config_threshold_overrides_tag_no_database;
+DROP INDEX IF EXISTS config.ux_config_threshold_overrides_tag;
+ALTER TABLE config.config_threshold_overrides ALTER COLUMN server_id SET NOT NULL;
+ALTER TABLE config.config_threshold_overrides DROP COLUMN IF EXISTS scope_tag_id;"),
         // V229 (#6928): the severity filter on the notification routes. The column is the probe's newest sentinel. The rewind drops the column
         // (its CHECK goes with it), so a re-run of V229 does everything again. Safe on a store that never had it.
         new(229, "hasRouteSeverities",

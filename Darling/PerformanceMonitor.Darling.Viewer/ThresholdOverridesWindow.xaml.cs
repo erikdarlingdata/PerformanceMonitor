@@ -59,9 +59,13 @@ public partial class ThresholdOverridesWindow : Window
         try
         {
             var servers = await _dataService.GetMonitoredServersAsync();
+            var tags = await _dataService.GetServerTagsAsync();
             ServerCombo.ItemsSource = servers
                 .OrderBy(s => s.Name, StringComparer.OrdinalIgnoreCase)
                 .Select(s => new ThresholdOverrideServerChoice(s.ServerId, s.Name))
+                .Concat(tags
+                    .OrderBy(t => t.Name, StringComparer.OrdinalIgnoreCase)
+                    .Select(t => new ThresholdOverrideServerChoice(0, "Tag: " + t.Name, t.Id)))
                 .ToList();
             _rows.Clear();
             foreach (var row in await _model.LoadAsync())
@@ -85,7 +89,8 @@ public partial class ThresholdOverridesWindow : Window
         }
 
         /* Selecting a row loads it into the form, so Save changes it and Remove removes it. */
-        ServerCombo.SelectedItem = ServerCombo.Items.OfType<ThresholdOverrideServerChoice>().FirstOrDefault(s => s.ServerId == row.ServerId);
+        ServerCombo.SelectedItem = ServerCombo.Items.OfType<ThresholdOverrideServerChoice>()
+            .FirstOrDefault(s => row.IsTag ? s.TagId == row.TagId : s.TagId is null && s.ServerId == row.ServerId);
         KeyCombo.SelectedItem = row.Key;
         DatabaseBox.Text = row.Database ?? "";
         ValueBox.Text = row.Row.Value.ToString("0.##", System.Globalization.CultureInfo.CurrentCulture);
@@ -98,7 +103,9 @@ public partial class ThresholdOverridesWindow : Window
         try
         {
             var server = ServerCombo.SelectedItem as ThresholdOverrideServerChoice;
-            var outcome = await _model.SaveAsync(server?.ServerId, KeyCombo.SelectedItem as string, ValueBox.Text, DatabaseBox.Text);
+            var outcome = server?.TagId is { } tagId
+                ? await _model.SaveForTagAsync(tagId, KeyCombo.SelectedItem as string, ValueBox.Text, DatabaseBox.Text)
+                : await _model.SaveAsync(server?.ServerId, KeyCombo.SelectedItem as string, ValueBox.Text, DatabaseBox.Text);
             SetStatus(outcome.Message, !outcome.Ok);
             if (outcome.Ok)
             {

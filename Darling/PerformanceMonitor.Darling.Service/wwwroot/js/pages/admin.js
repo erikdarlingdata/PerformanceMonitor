@@ -1816,12 +1816,12 @@ async function buildPending(body, generation) {
 
 /* ─────────────────────────── threshold overrides (#5916) ─────────────────────────── */
 
-/* A threshold held for one server (or one database on it) that differs from the global value. The list is GET
+/* A threshold held for one server (or one database on it), or for a server tag (#6926), that differs from the global value. The list is GET
    /api/threshold-overrides; a change is PUT /api/threshold-overrides, accepted only under a store login with the admin role.
    A managed or compose store connects this page as the viewer role, so there the grid is a list: the form and the Remove
    buttons are not drawn, and the note says where to change one. The service checks the key and the bounds again. */
 export const OVERRIDE_COLUMNS = [
-  { key: "server_name", label: "Server" },
+  { key: "scope_text", label: "Scope" },
   { key: "database_text", label: "Database" },
   { key: "key", label: "Key" },
   { key: "value", label: "Value" },
@@ -1832,10 +1832,10 @@ export const OVERRIDE_COLUMNS = [
 ];
 
 const OVERRIDES_NOTE_EDITING =
-  "A threshold held for one server, or for one database on it, that differs from the global value. The alert engine uses it for that server only " +
-  "and applies a change within its reload interval. To silence an alert, mute it.";
+  "A threshold held for one server, for one database on it, or for a server tag (every server under the tag and the tags below it), that differs from the global value. " +
+  "A database override wins over a server override, then the deepest tag the server is under, then the global value. A change applies within the alert engine's reload interval. To silence an alert, mute it.";
 const overridesNoteReadOnly = (managed, adminWritesOff) =>
-  "A threshold held for one server, or for one database on it, that differs from the global value. " +
+  "A threshold held for one server, for one database on it, or for a server tag, that differs from the global value. " +
   listOnlyNote(managed, "this page lists them only", "To change an override", adminWritesOff);
 const OVERRIDE_DENIED = "Changing a threshold override needs";
 
@@ -1843,8 +1843,12 @@ const OVERRIDE_DENIED = "Changing a threshold override needs";
 export function overrideRows(data) {
   const list = data && Array.isArray(data.overrides) ? data.overrides : [];
   return list.map((o) => ({
-    server_id: o.server_id,
-    server_name: o.server_name,
+    server_id: o.server_id == null ? null : o.server_id,
+    server_name: o.server_name == null ? null : o.server_name,
+    tag_id: o.tag_id == null ? null : o.tag_id,
+    tag_name: o.tag_name == null ? null : o.tag_name,
+    orphaned: o.orphaned === true,
+    scope_text: o.tag_id == null ? o.server_name : (o.orphaned === true ? "Tag (deleted): orphaned, matches nothing" : "Tag: " + (o.tag_name || "")),
     database: o.database || null,
     database_text: o.database || "Whole server",
     key: o.key,
@@ -1860,7 +1864,10 @@ export function overrideRows(data) {
     inside its bounds, and a database only on a key that takes one. The service applies the same rules again. */
 export function validateOverride(keys, form) {
   const list = Array.isArray(keys) ? keys : [];
-  if (!form || !String(form.server || "").trim()) return "Choose a server.";
+  const hasServer = !!(form && String(form.server || "").trim());
+  const hasTag = !!(form && String(form.tag || "").trim());
+  if (hasServer && hasTag) return "Choose a server or a tag, not both.";
+  if (!hasServer && !hasTag) return "Choose a server or a tag.";
   const entry = list.find((k) => k.key === String(form.key || "").trim());
   if (!entry) return "Choose a key from the list: only a tunable threshold can be overridden.";
   const text = String(form.value == null ? "" : form.value).trim();
@@ -1868,6 +1875,9 @@ export function validateOverride(keys, form) {
   const n = Number(text);
   if (!Number.isSafeInteger(n) || n < entry.min || n > entry.max) {
     return entry.key + " must be a whole number between " + entry.min + " and " + entry.max + ", the same bounds the global setting has.";
+  }
+  if (hasTag && String(form.database || "").trim()) {
+    return "A tag override holds a server-level value, so it takes no database.";
   }
   if (String(form.database || "").trim() && entry.database_scope !== true) {
     return entry.key + " is compared against a server-level figure, so it takes a server override only, not a database.";
@@ -1896,7 +1906,7 @@ export function overrideOutcome(verb, res) {
 }
 
 /* The form's entries and the last answer, in module scope so the 60 s repaint keeps what was typed. */
-const EMPTY_OVERRIDE_FORM = { server: "", key: "", database: "", value: "" };
+const EMPTY_OVERRIDE_FORM = { server: "", tag: "", key: "", database: "", value: "" };
 let overrideEntries = { ...EMPTY_OVERRIDE_FORM };
 let overrideStatus = null;
 let overrideBusy = false;
@@ -1912,7 +1922,9 @@ async function changeOverride(verb, entry) {
   overrideBusy = true;
   let out;
   try {
-    const payload = { server_name: entry.server, key: entry.key, database_name: entry.database || null };
+    const payload = { key: entry.key, database_name: entry.database || null };
+    if (entry.tag) payload.tag = String(entry.tag);
+    else payload.server_name = entry.server;
     if (verb === "clear") payload.clear = true;
     else payload.value = Number(String(entry.value).trim());
     out = overrideOutcome(verb, await apiWrite("PUT", "/api/threshold-overrides", payload));
@@ -1925,19 +1937,22 @@ async function changeOverride(verb, entry) {
   await redrawOverrides();
 }
 
-function overrideFormNode(servers, keys) {
+function overrideFormNode(servers, keys, tags) {
   const field = (label, control) => el("label", { class: "tag-field" }, [el("span", { class: "mute-label", text: label }), control]);
   const choose = (items, textOf) => [el("option", { value: "", text: "(choose)" })].concat(items.map((i) => el("option", { value: textOf(i), text: textOf(i) })));
   const server = el("select", { class: "tag-input", "data-field": "server" }, choose(servers, (s) => s.server_name));
+  const tag = el("select", { class: "tag-input", "data-field": "tag" },
+    [el("option", { value: "", text: "(none)" })].concat((Array.isArray(tags) ? tags : []).map((t) => el("option", { value: String(t.tag_id), text: t.tag_name }))));
   const key = el("select", { class: "tag-input", "data-field": "key" }, choose(keys, (k) => k.key));
   const database = el("input", { type: "text", class: "tag-input", "data-field": "database", placeholder: "blank = whole server" });
   const value = el("input", { type: "text", class: "tag-input", "data-field": "value", inputmode: "numeric" });
   server.value = overrideEntries.server;
+  tag.value = overrideEntries.tag;
   key.value = overrideEntries.key;
   database.value = overrideEntries.database;
   value.value = overrideEntries.value;
-  const sync = () => { overrideEntries = { server: server.value, key: key.value, database: database.value, value: value.value }; };
-  for (const c of [server, key, database, value]) c.addEventListener("input", sync);
+  const sync = () => { overrideEntries = { server: server.value, tag: tag.value, key: key.value, database: database.value, value: value.value }; };
+  for (const c of [server, tag, key, database, value]) c.addEventListener("input", sync);
   const save = el("button", {
     class: "btn primary", type: "button", text: "Save override", "data-action": "save-override",
     onClick: async () => {
@@ -1952,21 +1967,21 @@ function overrideFormNode(servers, keys) {
     },
   });
   return el("div", { class: "tag-form", "data-override-form": "1" }, [
-    field("Server:", server), field("Key:", key), field("Database:", database), field("Value:", value), save,
+    field("Server:", server), field("or Tag:", tag), field("Key:", key), field("Database:", database), field("Value:", value), save,
   ]);
 }
 
 function overrideActions(row) {
   const edit = el("button", {
-    class: "btn", type: "button", text: "Edit", "aria-label": "Edit " + row.key + " for " + row.server_name,
+    class: "btn", type: "button", text: "Edit", "aria-label": "Edit " + row.key + " for " + row.scope_text,
     onClick: async () => {
-      overrideEntries = { server: row.server_name, key: row.key, database: row.database || "", value: String(row.value) };
+      overrideEntries = { server: row.tag_id == null ? row.server_name : "", tag: row.tag_id == null ? "" : String(row.tag_id), key: row.key, database: row.database || "", value: String(row.value) };
       await redrawOverrides();
     },
   });
   const remove = el("button", {
-    class: "btn", type: "button", text: "Remove", "aria-label": "Remove " + row.key + " for " + row.server_name, "data-action": "remove-override",
-    onClick: () => changeOverride("clear", { server: row.server_name, key: row.key, database: row.database }),
+    class: "btn", type: "button", text: "Remove", "aria-label": "Remove " + row.key + " for " + row.scope_text, "data-action": "remove-override",
+    onClick: () => changeOverride("clear", { server: row.tag_id == null ? row.server_name : "", tag: row.tag_id == null ? "" : String(row.tag_id), key: row.key, database: row.database }),
   });
   return el("span", { class: "row-actions" }, [edit, remove]);
 }
@@ -1990,11 +2005,11 @@ async function buildOverrides(body, generation) {
   const keys = Array.isArray(res.data && res.data.keys) ? res.data.keys : [];
   nodes.push(noticeStrip(canEdit ? OVERRIDES_NOTE_EDITING : overridesNoteReadOnly(session.managed_store === true, session.admin_writes_off === true)));
   if (res.data && typeof res.data.note === "string" && res.data.note) nodes.push(noticeStrip(res.data.note));
-  if (canEdit) nodes.push(overrideFormNode(Array.isArray(res.data.servers) ? res.data.servers : [], keys));
+  if (canEdit) nodes.push(overrideFormNode(Array.isArray(res.data.servers) ? res.data.servers : [], keys, res.data.tags));
   nodes.push(VIZ.table({ overrides: overrideRows(res.data) }, {
     rowsKey: "overrides",
     columns: overrideColumns(canEdit),
-    emptyText: "No server holds an override: every server uses the global values.",
+    emptyText: "No server or tag holds an override: every server uses the global values.",
   }));
   mount(body, nodes);
 }

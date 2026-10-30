@@ -518,7 +518,7 @@ public sealed partial class ViewerDataService
     /// pre-gate runs are left out of both panels, as <c>get_collection_health</c> computes its figures from the running rows only, so the
     /// panel and the tool name the same peak collector for the same server. Null leaves every row in.</param>
     public async Task<SweepPressureReport?> GetSweepPressureAsync(
-        int serverId, CancellationToken cancellationToken = default, IReadOnlySet<string>? engineGated = null)
+        int serverId, IReadOnlySet<string>? engineGated = null, CancellationToken cancellationToken = default)
     {
         var scheduleOverrides = await ReadScheduleOverridesForHealthAsync(cancellationToken);
         var costs = new List<(CollectorHealthRow Row, double Avg, double P95, double Max)>();
