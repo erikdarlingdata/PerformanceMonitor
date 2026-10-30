@@ -200,6 +200,14 @@ More than 40 collectors run on independent, configurable schedules (the long-run
 | database_scoped_config | On connect | Database-scoped configurations |
 | trace_flags | On connect | `DBCC TRACESTATUS` |
 
-Darling runs these same collectors across a fleet of servers, plus `query_store_forced_plans`, which reads each database's forced plans, and `query_store_hints`, which reads each database's Query Store hints (SQL Server 2022 and later), and `identity_capacity`, which reads how full each database's identity columns are. Lite has none of these. Darling also runs more than 25 PostgreSQL collectors. See the [Darling collector reference](../Darling/README.md).
+Darling runs these same collectors across a fleet of servers. It adds five more that Lite does not have:
+
+- `query_store_forced_plans` reads each database's forced plans.
+- `query_store_hints` reads each database's Query Store hints (SQL Server 2022 and later).
+- `identity_capacity` reads how full each database's identity columns are.
+- `database_protection` reads the last good CHECKDB and the last full and log backup of each database.
+- `agent_alerts` reads the SQL Server Agent alerts and the operators they notify.
+
+Darling also runs more than 25 PostgreSQL collectors. See the [Darling collector reference](../Darling/README.md).
 
 The Extended Events sessions that Lite creates on a monitored server, and how to remove them, are on their own page: [The Extended Events Sessions Lite Creates](lite-extended-events.md).

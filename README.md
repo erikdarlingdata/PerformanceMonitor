@@ -22,7 +22,7 @@ It supports SQL Server 2016 SP2 to 2025. SQL Server 2017 needs CU3 or later. It 
 - **Lite** is a single desktop app that monitors your servers remotely, on demand. Nothing is installed on your server. It stores data in local DuckDB and Parquet files.
 - **Darling** is a service on Windows or Linux that collects 24/7 into a central PostgreSQL store. The Windows viewer and the web dashboard read that store from any seat.
 
-Both editions can hand an alert to an AI agent that you run, and Lite lets the agent read and report. Darling can also let it change alert settings (mutes, custom alert rules and thresholds). On a server, it can force or unforce a Query Store plan, evict a cached plan or kill a session. Each of these has its own switch per server, and all are off until you turn them on. Darling records every change, and a person can undo alert-setting changes and plan forces but not a plan eviction or a session kill. [Agent dispatch](docs/darling-agent-dispatch.md) explains the levels.
+Both editions can hand an alert to an AI agent that you run, and Lite lets the agent read and report. Darling can also let it change alert settings (mutes, custom alert rules and thresholds). On a server, it can force or unforce a Query Store plan or evict a cached plan. It can recompile a module, create or drop a plan guide, or kill a session. Each of these has its own switch per server, and all are off until you turn them on. Darling records every change. A person can undo alert-setting changes, plan forces and plan guide changes. A plan eviction, a recompile or a session kill cannot be undone. [Agent dispatch](docs/darling-agent-dispatch.md) explains the levels.
 
 The Dashboard edition is deprecated. Existing installs keep working, but we recommend Lite or Darling for new deployments. [Choosing an edition](docs/editions.md) compares all three.
 
@@ -46,9 +46,9 @@ Before you upgrade an older install with `Setup.exe`, read the warning in the [L
 
 1. Download `PerformanceMonitorDarling-<version>.zip` and `SHA256SUMS.txt` from the [latest release](https://github.com/erikdarlingdata/PerformanceMonitor/releases/latest). Check the zip hash against `SHA256SUMS.txt`. The zip carries its own .NET runtime, so there is nothing to install first.
 2. Extract the zip to `C:\Program Files\PerformanceMonitorDarling`. Do not use your Desktop, Downloads, or any folder under `C:\Users\`. The service runs as a virtual account that cannot read a user profile ([why](docs/darling/install.md#step-3-extract-to-a-machine-scoped-path)).
-3. Copy `darling.sample.json` to `darling.json` and add one server. `darling.json` is only a seed. The service reads it on the first start, and after that the store is the authority. If you edit the file later to add a server, nothing changes. Add servers in the viewer instead ([why](docs/darling/install.md#darlingjson-is-only-a-seed)).
-4. From an elevated PowerShell in the install folder, run `.\install-darling.ps1`. It installs the Windows service and creates a **Darling Viewer** shortcut.
-5. Wait about two minutes for the first start, then open **Darling Viewer**. It opens on the fleet.
+3. Double-click `Install-Darling.cmd` in the install folder. It asks Windows for administrator rights and runs `install-darling.ps1`. You can also run `.\install-darling.ps1` from an elevated PowerShell. It installs the Windows service and creates a **Darling Viewer** shortcut. With no `darling.json` it writes a minimal one, and the service starts with no monitored servers.
+4. Wait about two minutes for the first start, then open **Darling Viewer**. It opens on the fleet.
+5. Add your first server in the viewer. `darling.json` is only a seed. The service reads it on its first start, so a server added to the file later is ignored ([why](docs/darling/install.md#darlingjson-is-only-a-seed)).
 6. The service log is in `%ProgramData%\PerformanceMonitorDarling\logs`.
 
 [Install Darling](docs/darling/install.md) gives each step with the log line or screen that proves it worked. To upgrade, run `upgrade-darling.ps1`. To remove the service, run `uninstall-darling.ps1`. Both are in the install folder. For Linux and the web dashboard, read the [Darling quick start](docs/darling-quick-start.md). The [Darling operator guide](Darling/README.md) is the configuration reference.

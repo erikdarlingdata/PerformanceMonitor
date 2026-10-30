@@ -106,23 +106,25 @@ Collectors that hit a permission error (SQL errors 229/297/300, plus 8189 from `
 
 ### Which collectors run on which platform
 
-Every collector declares its own applicability in code (`AppliesTo(CollectorTargetInfo)`), so this is not a hand-maintained per-collector list — the SQL Server collectors fall into seven groups, and a collector outside its supported platform is **skipped before it runs**, not failed and logged every cycle.
+Every collector declares its own applicability in code (`AppliesTo(CollectorTargetInfo)`), so this is not a hand-maintained per-collector list — the SQL Server collectors fall into eight groups, and a collector outside its supported platform is **skipped before it runs**, not failed and logged every cycle.
 
 | Runs on | Collectors | Gate |
 |---|---|---|
-| Everything | wait stats, CPU utilization, memory (stats/clerks/grants), file I/O, tempdb, latches, spinlocks, plan cache, session summary, plus blocking, deadlocks, blocked-process reports, DMV blocking snapshots, perfmon, query snapshots, procedure stats, index/object stats, long-query completions, client timeouts (`attention`), database config/scoped-config/size, server properties, session stats, waiting tasks | no gate |
-| On-prem, Managed Instance, RDS — **not** Azure SQL DB | CPU scheduler stats, default trace events, memory pressure events, server config, system health events, trace flags, database states, Availability Group replica states, Availability Group database replica states | `!IsAzureSqlDb` |
-| On-prem and Managed Instance, needs msdb | job history | `!IsAzureSqlDb && HasMsdbAccess` |
-| On-prem and Managed Instance, needs msdb — **not** RDS | agent status, running jobs | `!IsAzureSqlDb && !IsAwsRds && HasMsdbAccess` |
+| Everything | wait stats, CPU utilization, memory (stats/clerks/grants), file I/O, tempdb, latches, spinlocks, plan cache, session summary, plus blocking, deadlocks, blocked-process reports, DMV blocking snapshots, perfmon, query snapshots, procedure stats, index/object stats, long-query completions, client timeouts (`attention`), database config/scoped-config/size, server properties, session stats, waiting tasks, identity capacity (on Azure SQL Database it reads one database at a time), database protection (backups and CHECKDB, labelled by platform) | no gate |
+| On-prem, Managed Instance, RDS — **not** Azure SQL DB | CPU scheduler stats, default trace events, memory pressure events, server config, system health events, trace flags, database states, Availability Group replica states, Availability Group database replica states, job history | `!IsAzureSqlDb` |
+| On-prem and Managed Instance, **not** RDS | agent status, running jobs | `!IsAzureSqlDb && !IsAwsRds` |
+| On-prem only, **not** Managed Instance, RDS or Azure SQL DB | Agent alerts | `!IsAzureSqlDb && !IsAwsRds && !IsAzureManagedInstance` |
 | SQL Server 2016+ (or any Azure flavour) | query stats, Query Store stats, Query Store health, Query Store forced plans | `SqlMajorVersion >= 13 \|\| IsAzureSqlDb \|\| IsAzureManagedInstance` |
 | SQL Server 2017+ (or any Azure flavour) | plan correction (automatic tuning recommendations) | `SqlMajorVersion >= 14 \|\| IsAzureSqlDb \|\| IsAzureManagedInstance` |
 | SQL Server 2019+ (or any Azure flavour) | persistent version store stats | `SqlMajorVersion >= 15 \|\| IsAzureSqlDb \|\| IsAzureManagedInstance` |
+| SQL Server 2022+ (or any Azure flavour) | Query Store hints | `SqlMajorVersion >= 16 \|\| IsAzureSqlDb \|\| IsAzureManagedInstance` |
 
 Notes:
 
-- **Azure SQL DB** is the most restricted target: the nine `!IsAzureSqlDb` collectors above, and job history, read server-scoped DMVs or on-disk artifacts that do not exist there, and the SQL Agent collectors have no Agent to read. Nothing about that is a permission problem, so it is not reported as one.
-- **AWS RDS** blocks direct `msdb` job reads specifically; the rest of the SQL Agent surface is unaffected.
-- **`HasMsdbAccess`** is probed per server at connect and is exactly `HAS_DBACCESS('msdb')` — *any* access to msdb, not a specific role or table grant. Losing msdb access later moves those collectors from running to skipped without an error storm. A login that can enter msdb but lacks `SELECT` on the job tables passes this probe and is caught one layer down as a `PERMISSIONS` skip instead.
+- **Azure SQL DB** is the most restricted target: the ten `!IsAzureSqlDb` collectors above read server-scoped DMVs or on-disk artifacts that do not exist there, and the SQL Agent collectors have no Agent to read. Nothing about that is a permission problem, so it is not reported as one.
+- **AWS RDS** refuses most `msdb` reads to its master user. Agent status, running jobs and Agent alerts do not run there. Job history still does. The database protection collector runs on RDS and labels its rows by platform.
+- **Azure SQL Managed Instance** refuses `sp_add_alert`, so its `sysalerts` is always empty and the Agent alerts collector does not run there. Database protection shows backup and CHECKDB ages on Managed Instance and on Azure SQL Database, and never calls them overdue.
+- **msdb access** is not a gate. A login that cannot read the msdb tables is not skipped up front. Its Agent collectors run, are denied, and log a `PERMISSIONS` row, which shows as `NO_PERMISSIONS` in Collection Health. A grant added later takes effect on the next cycle with no restart.
 - An unknown version (`SqlMajorVersion == 0`, i.e. detection has not completed yet) is treated as capable rather than skipped, so a collector is never silently dropped because a probe was slow.
 
 If a tab or column is empty and you expect data, check **Collection Health**: a collector skipped for platform reasons shows no runs at all, whereas one denied by permissions logs `PERMISSIONS` and is classified `NO_PERMISSIONS`. Those are different problems with different fixes — the first is expected on that platform, the second is a grant to add from the table above.
