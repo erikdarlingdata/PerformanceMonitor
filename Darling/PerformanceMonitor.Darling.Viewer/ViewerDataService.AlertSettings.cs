@@ -99,7 +99,9 @@ public sealed partial class ViewerDataService
         /* #6873 (V223): the three database protection alert switches (backup, log backup, CHECKDB overdue), APPENDED, same gate. */
         "backup_overdue_enabled, log_backup_overdue_enabled, checkdb_overdue_enabled, " +
         /* #6875 (V224): the Identity Capacity alert's switch (off by default) and its two bars, APPENDED for the same reason and under the same gate. */
-        "identity_capacity_enabled, identity_capacity_warning_percent, identity_capacity_critical_percent";
+        "identity_capacity_enabled, identity_capacity_warning_percent, identity_capacity_critical_percent, " +
+        /* #6927 (V228): the blocking health band's four tiers, APPENDED for the same reason and under the same connect-time store gate. */
+        "blocking_warn_per_hour, blocking_critical_per_hour, blocking_warn_wait_seconds, blocking_critical_wait_seconds";
 
     /// <summary>The single global alert-settings row (id=1), for the Settings window prefill + the migrate-in
     /// defaults check. Column order matches <see cref="AlertSettingsColumns"/>.</summary>
@@ -116,7 +118,7 @@ INSERT INTO config_alert_settings (id, " + AlertSettingsColumns + @", modified_a
 VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22,
         $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43,
         $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62,
-        $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81, $82, $83, $84, $85, $86,
+        $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81, $82, $83, $84, $85, $86, $87, $88, $89, $90,
         (now() AT TIME ZONE 'UTC'))
 ON CONFLICT (id) DO UPDATE SET
     enabled = EXCLUDED.enabled,
@@ -205,6 +207,10 @@ ON CONFLICT (id) DO UPDATE SET
     identity_capacity_enabled = EXCLUDED.identity_capacity_enabled,
     identity_capacity_warning_percent = EXCLUDED.identity_capacity_warning_percent,
     identity_capacity_critical_percent = EXCLUDED.identity_capacity_critical_percent,
+    blocking_warn_per_hour = EXCLUDED.blocking_warn_per_hour,
+    blocking_critical_per_hour = EXCLUDED.blocking_critical_per_hour,
+    blocking_warn_wait_seconds = EXCLUDED.blocking_warn_wait_seconds,
+    blocking_critical_wait_seconds = EXCLUDED.blocking_critical_wait_seconds,
     modified_at = (now() AT TIME ZONE 'UTC')";
 
     /// <summary>The two <c>cpu_mode</c> values the service honors (it compares case-insensitively against
@@ -344,6 +350,11 @@ ON CONFLICT (id) DO UPDATE SET
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = r.IdentityCapacityEnabled });       // $84 (#6875, V224)
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = identityWarning });                  // $85 (#6875, V224)
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = Math.Clamp(r.IdentityCapacityCriticalPercent, identityWarning, 100) }); // $86 (#6875, V224)
+        /* #6927 (V228): the blocking band tiers, stored raw like the deadlock pair above them. */
+        command.Parameters.Add(new NpgsqlParameter<double> { TypedValue = r.BlockingWarnPerHour });         // $87 (#6927, V228)
+        command.Parameters.Add(new NpgsqlParameter<double> { TypedValue = r.BlockingCriticalPerHour });     // $88 (#6927, V228)
+        command.Parameters.Add(new NpgsqlParameter<double> { TypedValue = r.BlockingWarnWaitSeconds });     // $89 (#6927, V228)
+        command.Parameters.Add(new NpgsqlParameter<double> { TypedValue = r.BlockingCriticalWaitSeconds }); // $90 (#6927, V228)
     }
 
     private static AlertSettingsRow ReadAlertSettingsRow(NpgsqlDataReader reader) => new()
@@ -457,6 +468,11 @@ ON CONFLICT (id) DO UPDATE SET
         IdentityCapacityEnabled = reader.GetBoolean(83),
         IdentityCapacityWarningPercent = reader.GetInt32(84),
         IdentityCapacityCriticalPercent = reader.GetInt32(85),
+        /* #6927 (V228) the four blocking band tiers appended at ordinals 86-89. */
+        BlockingWarnPerHour = reader.GetDouble(86),
+        BlockingCriticalPerHour = reader.GetDouble(87),
+        BlockingWarnWaitSeconds = reader.GetDouble(88),
+        BlockingCriticalWaitSeconds = reader.GetDouble(89),
     };
 
     /// <summary>Maps the Settings window's CPU-mode combo tag ("Total"/"SqlOnly") to the store value.</summary>
@@ -614,6 +630,11 @@ public sealed class AlertSettingsRow
     public int IdentityCapacityWarningPercent { get; set; } = 70;
     /// <summary>#6875 (V224): percent used at which an identity column is critical.</summary>
     public int IdentityCapacityCriticalPercent { get; set; } = 90;
+    /// <summary>#6927 (V228): the blocking health band's tiers, today's constants by default.</summary>
+    public double BlockingWarnPerHour { get; set; } = ServerHealthThresholds.BlockingWarnPerHour;
+    public double BlockingCriticalPerHour { get; set; } = ServerHealthThresholds.BlockingCriticalPerHour;
+    public double BlockingWarnWaitSeconds { get; set; } = ServerHealthThresholds.BlockingWarnWaitSeconds;
+    public double BlockingCriticalWaitSeconds { get; set; } = ServerHealthThresholds.BlockingCriticalWaitSeconds;
     public bool LongRunningQueryEnabled { get; set; } = true;
     public int LongRunningQueryThresholdMinutes { get; set; } = 30;
     public bool TempDbSpaceEnabled { get; set; } = true;
@@ -749,6 +770,10 @@ public sealed class AlertSettingsRow
             && IdentityCapacityEnabled == other.IdentityCapacityEnabled
             && IdentityCapacityWarningPercent == other.IdentityCapacityWarningPercent
             && IdentityCapacityCriticalPercent == other.IdentityCapacityCriticalPercent
+            && Math.Abs(BlockingWarnPerHour - other.BlockingWarnPerHour) < 0.0001
+            && Math.Abs(BlockingCriticalPerHour - other.BlockingCriticalPerHour) < 0.0001
+            && Math.Abs(BlockingWarnWaitSeconds - other.BlockingWarnWaitSeconds) < 0.0001
+            && Math.Abs(BlockingCriticalWaitSeconds - other.BlockingCriticalWaitSeconds) < 0.0001
             && LongRunningQueryEnabled == other.LongRunningQueryEnabled
             && LongRunningQueryThresholdMinutes == other.LongRunningQueryThresholdMinutes
             && TempDbSpaceEnabled == other.TempDbSpaceEnabled

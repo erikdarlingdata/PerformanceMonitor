@@ -1333,7 +1333,8 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         ClientTimeoutsWarningMultiple: 2, ClientTimeoutsCriticalMultiple: 7,
         AgentAlertGapsEnabled: true,
         BackupOverdueEnabled: true, LogBackupOverdueEnabled: true, CheckDbOverdueEnabled: true,
-        IdentityCapacityEnabled: true, IdentityCapacityWarningPercent: 72, IdentityCapacityCriticalPercent: 92);
+        IdentityCapacityEnabled: true, IdentityCapacityWarningPercent: 72, IdentityCapacityCriticalPercent: 92,
+        BlockingWarnPerHour: 6.5, BlockingCriticalPerHour: 22.5, BlockingWarnWaitSeconds: 11.5, BlockingCriticalWaitSeconds: 62.5);
 
     [Fact]
     public void AlertSettingsSql_ReadsSingleGlobalRow()

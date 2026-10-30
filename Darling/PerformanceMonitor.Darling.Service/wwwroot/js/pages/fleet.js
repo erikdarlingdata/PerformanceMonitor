@@ -705,7 +705,9 @@ export function rollup(d) {
      not a confirmed incident either — warning is the "interrogate this number" class without claiming a
      deadlock happened. A real deadlock keeps critical whatever the coverage: a measured incident outranks an
      incomplete denominator, and the sub-line under it already says the count may be short. */
-  const deadlockClass = d.total_deadlocks > 0 ? "critical" : deadlockSub && deadlockSub.partial ? "warning" : "";
+  /* #6927: banded by the service through the same classifier and the store's tiers as the cards, not on any non-zero count. */
+  const totalClass = (sev) => (sev === "Critical" ? "critical" : sev === "Warning" ? "warning" : "");
+  const deadlockClass = totalClass(d.total_deadlock_severity) || (deadlockSub && deadlockSub.partial ? "warning" : "");
 
   /* Two fixed groups (server-band counts | event counts) split by a divider; a non-zero blocking / deadlock
      total takes a severity color. */
@@ -719,7 +721,7 @@ export function rollup(d) {
     ]),
     el("div", { class: "rollup-divider" }),
     el("div", { class: "rollup-group" }, [
-      tile(d.total_blocking_events, "Blocking (recent)", d.total_blocking_events > 0 ? "warning" : ""),
+      tile(d.total_blocking_events, "Blocking (recent)", totalClass(d.total_blocking_severity)),
       /* The API's own note rides along as the tile's title — the causes and the two windows, in the words the
          service already renders for get_fleet_overview, so the hover is DETAIL on a signal that is already
          visible rather than the only place the signal exists. */

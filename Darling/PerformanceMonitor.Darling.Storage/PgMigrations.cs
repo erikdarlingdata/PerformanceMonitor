@@ -2976,6 +2976,7 @@ $rung$;";
         new Migration(225, "server-aws-rds", V225Sql),
         new Migration(226, "server-aws-rds-web-or-express", V226Sql),
         new Migration(227, "threshold-override-tag-scope", V227Sql),
+        new Migration(228, "blocking-band-tiers", V228Sql),
     };
 
     /// <summary>
@@ -3045,6 +3046,24 @@ ALTER TABLE collect.servers
     private const string V226Sql = @"
 ALTER TABLE collect.servers
     ADD COLUMN IF NOT EXISTS is_aws_rds_web_or_express boolean;";
+
+    /// <summary>
+    /// V228 (#6927): the blocking health band's four tiers on the alert settings row, beside the V120 deadlock ones. They carry the
+    /// figures <c>ServerHealthThresholds.BlockingWarnPerHour</c>, <c>BlockingCriticalPerHour</c>, <c>BlockingWarnWaitSeconds</c> and
+    /// <c>BlockingCriticalWaitSeconds</c> have always been, so a store that never sets them bands exactly as before. They are literals here
+    /// because SQL text cannot name a C# constant. No CHECK ordering the two tiers of a pair, for the reason V120 gives: the writers refuse
+    /// a pair with critical below warn, and a hand-edited row reads as written. Idempotent: every column is added with IF NOT EXISTS, so a
+    /// store that already has them is left as it is. Table-level grants already cover new columns on this table, so no GRANT is added.
+    /// </summary>
+    private const string V228Sql = @"
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS blocking_warn_per_hour double precision NOT NULL DEFAULT 5.0;
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS blocking_critical_per_hour double precision NOT NULL DEFAULT 20.0;
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS blocking_warn_wait_seconds double precision NOT NULL DEFAULT 10.0;
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS blocking_critical_wait_seconds double precision NOT NULL DEFAULT 60.0;";
 
     /// <summary>
     /// V189 (#5867): <c>collect.query_store_compose_stamp_failures</c>, the failure record of the Query Store compose builder: one row

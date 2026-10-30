@@ -275,6 +275,10 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 AND {Collectio
         /// defaults holds anyway.</summary>
         public DeadlockRateThresholds RateTiers { get; init; } = DeadlockRateThresholds.Default;
 
+        /// <summary>The blocking band's tiers the day is banded on (#6927), the store's values for the same reason
+        /// <see cref="RateTiers"/> is.</summary>
+        public BlockingBandThresholds BlockingTiers { get; init; } = BlockingBandThresholds.Default;
+
         /// <summary>The clock the still-forming day's window clamps against (#3525 review): anchored
         /// reads hand their resolved window end so a backdated as_of clamps against its own "now";
         /// unanchored reads (the explicit-date tool, the viewer path) band against the wall clock.</summary>
@@ -337,7 +341,7 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 AND {Collectio
         };
 
         public DailyHealthBand HealthBand =>
-            DailyHealthBandCalculator.Classify(ToSignals(), new DailyHealthThresholds { DeadlockRates = RateTiers });
+            DailyHealthBandCalculator.Classify(ToSignals(), new DailyHealthThresholds { DeadlockRates = RateTiers, BlockingBands = BlockingTiers });
 
         /// <summary>Human label for the band ("Healthy" / "Warning" / "Critical" / "No Data").</summary>
         public string OverallHealth => DailyHealthBandCalculator.Label(HealthBand);
@@ -496,6 +500,7 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 AND {Collectio
            DarlingFleetReader's own hoist argument: a settings write mid-read must not band some days on the
            old pair and the rest on the new one. */
         var rateTiers = await ReadDeadlockRateThresholdsAsync(postgres, cancellationToken);
+        var blockingTiers = await BlockingBandStore.ReadAsync(postgres, McpCommandDeadlines.ReadSeconds, cancellationToken);
 
         /* #3541 A9: the retention horizon, from the store's effective retention and the READER's wall clock.
            The clock is deliberately NOT the caller's anchor — a purge is a wall-clock event and a backdated
@@ -592,6 +597,7 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 AND {Collectio
         var results = rawResults.Select(row => row with
         {
             RateTiers = rateTiers,
+            BlockingTiers = blockingTiers,
             ReferenceUtc = referenceUtc ?? DateTime.UtcNow,
             DataState = DailySummaryRetention.StateFor(row.SummaryDate, row.CollectionRuns, row.SignalSourcesPresent, horizon),
             RetentionHorizon = horizon,

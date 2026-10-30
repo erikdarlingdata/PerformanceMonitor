@@ -623,6 +623,11 @@ WHERE id = 1";
     /// <para>Values come back RAW; <see cref="DeadlockRateThresholds"/> clamps on read, so a hand-edited row
     /// cannot drive a nonsense threshold.</para>
     /// </summary>
+    /// <summary>The store's blocking-band tiers (#6927), or today's constants when the singleton row is absent. The same read
+    /// the service uses (<see cref="BlockingBandStore"/>).</summary>
+    public Task<BlockingBandThresholds> GetBlockingBandThresholdsAsync(CancellationToken cancellationToken = default) =>
+        BlockingBandStore.ReadAsync(_dataSource, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+
     public async Task<DeadlockRateThresholds> GetDeadlockRateThresholdsAsync(CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(DeadlockRateThresholdSql);
@@ -1333,10 +1338,10 @@ public sealed class ServerSummaryItem
             : null;
 
     /// <summary>Blocking band (#3539 A3) — a 60 s block Critical whatever the rate; else blocking events per
-    /// hour over the window against the shared tiers (20/hr Critical, 5/hr Warning); a 10 s block Warning;
-    /// no source Unknown.</summary>
+    /// hour over the window against the store's tiers (#6927, 20/hr Critical, 5/hr Warning by default); a 10 s block
+    /// Warning by default; no source Unknown.</summary>
     public HealthSeverity BlockingSeverity =>
-        ServerHealthClassifier.BlockingSeverity(BlockingCountForBand, MaxBlockedSeconds, BlockingWindow);
+        ServerHealthClassifier.BlockingSeverity(BlockingCountForBand, MaxBlockedSeconds, BlockingWindow, BlockingBandThresholds);
 
     /// <summary>
     /// The window <see cref="DeadlockCount"/> and <see cref="BlockingCount"/> cover (#3368) — the
@@ -1353,6 +1358,10 @@ public sealed class ServerSummaryItem
     /// read from <c>config_alert_settings</c>, so this card and the service's fleet card cannot disagree
     /// about which numbers are in force.</summary>
     public DeadlockRateThresholds? DeadlockRateThresholds { get; set; }
+
+    /// <summary>The store's blocking-band tiers (#6927), or null to band on today's constants, set by the read from
+    /// <c>config_alert_settings</c> so this card and the service's fleet card agree.</summary>
+    public BlockingBandThresholds? BlockingBandThresholds { get; set; }
 
     /// <summary>Deadlocks per HOUR over <see cref="DeadlockWindow"/> — what the band evaluates (#3368), or
     /// null when the window is too short to normalise. Rendered beside the count so the dot's reason is
@@ -1429,6 +1438,7 @@ public sealed class ServerSummaryItem
            contradicting itself, which is the shape #3281 fixed on the CPU arm. */
         DeadlockWindow = DeadlockWindow,
         DeadlockRateThresholds = DeadlockRateThresholds,
+        BlockingBandThresholds = BlockingBandThresholds,
         TotalThreads = TotalThreads,
         AvailableThreads = AvailableThreads,
         ThreadsWaitingForCpu = ThreadsWaitingForCpu,

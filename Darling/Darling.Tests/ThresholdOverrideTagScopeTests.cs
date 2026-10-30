@@ -313,7 +313,7 @@ public sealed class ThresholdOverrideTagScopeTests
             "SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = 'config.config_threshold_overrides'::regclass AND attname = 'scope_tag_id' AND NOT attisdropped)", ct));
 
         await PgMigrations.MigrateAsync(store, ct);
-        Assert.Equal("227", await ScalarAsync(store, "SELECT max(version) FROM darling_schema_version", ct));
+        Assert.Equal(StorageVersion.SchemaVersion.ToString(CultureInfo.InvariantCulture), await ScalarAsync(store, "SELECT max(version) FROM darling_schema_version", ct));
         Assert.Equal("2", await ScalarAsync(store, "SELECT count(*) FROM config.config_threshold_overrides WHERE server_id = 7 AND scope_tag_id IS NULL", ct));
         Assert.Equal("91", await ScalarAsync(store, "SELECT value FROM config.config_threshold_overrides WHERE database_name IS NULL", ct));
 

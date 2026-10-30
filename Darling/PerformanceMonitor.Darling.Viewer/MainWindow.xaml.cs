@@ -1669,6 +1669,17 @@ public partial class MainWindow : Window
             deadlockTiers = DeadlockRateThresholds.Default;
         }
 
+        /* #6927: the blocking band's tiers, hoisted like the deadlock ones above and for the same reasons. */
+        BlockingBandThresholds blockingTiers;
+        try
+        {
+            blockingTiers = await service.GetBlockingBandThresholdsAsync();
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            blockingTiers = BlockingBandThresholds.Default;
+        }
+
         var perLane = await Task.WhenAll(lanes.Select(async lane =>
         {
             var found = new List<ServerSummaryItem>(lane.Count);
@@ -1679,6 +1690,8 @@ public partial class MainWindow : Window
                 {
                     var summary = await service.GetServerSummaryAsync(
                         server.ServerId, server.DisplayName, deadlockTiers);
+                    /* #6927: the store's blocking tiers; the card's blocking band and its re-band read them from the item. */
+                    summary.BlockingBandThresholds = blockingTiers;
                     summary.ServerName = server.ServerName;
                     /* #3029: the engine discriminator comes from the REGISTRY row, which already carries it
                        (servers.engine_kind, via ManagedServersSql / ServersSql) — the per-server summary
