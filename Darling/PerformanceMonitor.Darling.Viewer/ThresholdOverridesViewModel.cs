@@ -25,10 +25,18 @@ public interface IThresholdOverrideGateway
     Task SaveThresholdOverrideAsync(int serverId, string? database, string key, int value, string setBy, CancellationToken cancellationToken = default);
 
     Task RemoveThresholdOverrideAsync(int serverId, string? database, string key, CancellationToken cancellationToken = default);
+
+    /// <summary>Sets a tag's override (#6926): the value for every server under the tag and the tags below it.</summary>
+    Task SaveThresholdOverrideForTagAsync(int tagId, string key, int value, string setBy, CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException();
+
+    Task RemoveThresholdOverrideForTagAsync(int tagId, string key, CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException();
 }
 
-/// <summary>One server the add form can pick.</summary>
-public sealed record ThresholdOverrideServerChoice(int ServerId, string Name);
+/// <summary>One scope the add form can pick: a server, or (<paramref name="TagId"/> set, #6926) a server tag, whose <see cref="Name"/>
+/// reads <c>Tag: name</c> and whose <paramref name="ServerId"/> is 0.</summary>
+public sealed record ThresholdOverrideServerChoice(int ServerId, string Name, int? TagId = null);
 
 /// <summary>The grid's row: the stored override as the window shows it.</summary>
 public sealed class ThresholdOverrideViewRow
@@ -39,6 +47,11 @@ public sealed class ThresholdOverrideViewRow
 
     public int ServerId => Row.ServerId;
     public string ServerName => Row.ServerName;
+    public bool IsTag => Row.IsTag;
+    public int? TagId => Row.TagId;
+    /// <summary>The Scope column (#6926): the server's name, or <c>Tag: name</c> for a tag override. A tag override whose tag was deleted reads
+    /// <c>Tag: (deleted) - orphaned, matches nothing</c>, as an orphaned notification route is marked.</summary>
+    public string ScopeText => !Row.IsTag ? Row.ServerName : Row.Orphaned ? "Tag: (deleted) - orphaned, matches nothing" : "Tag: " + Row.ServerName;
     public string? Database => Row.Database;
     public string DatabaseText => Row.Database ?? "Whole server";
     public string Key => Row.Key;
@@ -91,6 +104,18 @@ public sealed class ThresholdOverridesViewModel
         return DarlingThresholdKeys.ValidateValue(entry, value, database)?.Message;
     }
 
+    /// <summary>Why a tag entry is refused, or null: a tag must be chosen, the key must be a tunable threshold, the value a whole number
+    /// inside its bounds, and no database is given, because a tag value is the server-level value for every server under the tag.</summary>
+    public static string? ValidateForTag(int? tagId, string? key, string? valueText, string? databaseText, out int value)
+    {
+        value = 0;
+        if (tagId is null)
+            return "Choose a tag.";
+        if (!string.IsNullOrWhiteSpace(databaseText))
+            return "A tag override holds a server-level value, so it takes no database. Clear the Database box.";
+        return Validate(0, key, valueText, null, out value);
+    }
+
     public async Task<IReadOnlyList<ThresholdOverrideViewRow>> LoadAsync(CancellationToken cancellationToken = default) =>
         (await _gateway.ListThresholdOverridesAsync(cancellationToken)).Select(r => new ThresholdOverrideViewRow(r)).ToList();
 
@@ -115,6 +140,26 @@ public sealed class ThresholdOverridesViewModel
         return new ThresholdOverrideOutcome(true, $"Override saved: {entry.Wire} = {value.ToString(CultureInfo.CurrentCulture)}. The service applies it within its reload interval.");
     }
 
+    /// <summary>Checks a tag entry, then writes it (#6926). An entry that fails the check changes nothing.</summary>
+    public async Task<ThresholdOverrideOutcome> SaveForTagAsync(
+        int? tagId, string? key, string? valueText, string? databaseText, CancellationToken cancellationToken = default)
+    {
+        if (ValidateForTag(tagId, key, valueText, databaseText, out var value) is { } refusal)
+            return new ThresholdOverrideOutcome(false, refusal);
+
+        DarlingThresholdKeys.TryGet(key, out var entry);
+        try
+        {
+            await _gateway.SaveThresholdOverrideForTagAsync(tagId!.Value, entry.Wire, value, _setBy, cancellationToken);
+        }
+        catch (ViewerReadOnlyException ex)
+        {
+            return new ThresholdOverrideOutcome(false, ex.Message);
+        }
+
+        return new ThresholdOverrideOutcome(true, $"Tag override saved: {entry.Wire} = {value.ToString(CultureInfo.CurrentCulture)}. The service applies it within its reload interval to every server under the tag that has no override of its own.");
+    }
+
     /// <summary>Removes the chosen override so the global value applies again.</summary>
     public async Task<ThresholdOverrideOutcome> RemoveAsync(ThresholdOverrideViewRow? row, CancellationToken cancellationToken = default)
     {
@@ -122,13 +167,16 @@ public sealed class ThresholdOverridesViewModel
             return new ThresholdOverrideOutcome(false, "Select an override to remove.");
         try
         {
-            await _gateway.RemoveThresholdOverrideAsync(row.ServerId, row.Database, row.Key, cancellationToken);
+            if (row.TagId is { } tagId)
+                await _gateway.RemoveThresholdOverrideForTagAsync(tagId, row.Key, cancellationToken);
+            else
+                await _gateway.RemoveThresholdOverrideAsync(row.ServerId, row.Database, row.Key, cancellationToken);
         }
         catch (ViewerReadOnlyException ex)
         {
             return new ThresholdOverrideOutcome(false, ex.Message);
         }
 
-        return new ThresholdOverrideOutcome(true, $"Override removed: {row.Key} on {row.ServerName} uses the global value again.");
+        return new ThresholdOverrideOutcome(true, $"Override removed: {row.Key} on {row.ScopeText} uses the global value again.");
     }
 }

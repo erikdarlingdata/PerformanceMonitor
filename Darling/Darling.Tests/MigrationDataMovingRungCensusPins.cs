@@ -359,6 +359,16 @@ public sealed class MigrationDataMovingRungCensusPins
             + "singleton (id = 1): turns the Client Timeouts alert on by default (#5736). V147's shape on the same kind of table. The "
             + "UPDATE's WHERE client_timeouts_enabled = FALSE touches at most one row, the SET DEFAULT is catalog-only, and neither reads "
             + "any collected data, so the rung spends none of the lock-wait budget and the multiple stays 5."),
+        new(
+            227,
+            SetsTheFloor: false,
+            "one CREATE UNIQUE INDEX and two ADD CONSTRAINT ... CHECK on config.config_threshold_overrides (#6926, created V191), "
+            + "which hold the new tag scope. The table is an operator-written config table: one row per threshold somebody chose to "
+            + "override for a server, so a store holds a handful of rows and a very large one a few hundred. The CHECKs are validated "
+            + "against every stored row and the partial index (WHERE scope_tag_id IS NOT NULL) indexes nothing, because the column the "
+            + "same rung adds is null on every stored row, so each statement reads the table once and takes milliseconds. The ADD "
+            + "COLUMN is nullable with no default and the DROP NOT NULL on server_id is catalog-only, so neither rewrites a row. It does "
+            + "not move the lock-wait floor, so the multiple stays 5."),
     ];
 
     /// <summary>
