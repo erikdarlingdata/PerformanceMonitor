@@ -22,6 +22,8 @@ namespace Darling.Tests;
 /// the filter in words, and a route's choice round-trips through the viewer's insert, update and sealed save. A store below V229 has no
 /// column, so the list still opens and every route reads as Both.
 /// </summary>
+/* #1776 own-store: its one live fact mints its own scratch database through ScratchPostgres and touches nothing on the shared
+   one, so it is not serialized against the live-postgres collection. */
 public sealed class ViewerNotificationRouteSeveritiesTests
 {
     /// <summary>The first sixteen sentinels, all present (the V16 to V31 floor), so only the one named after them decides the answer.</summary>
@@ -66,7 +68,6 @@ public sealed class ViewerNotificationRouteSeveritiesTests
         await command.ExecuteNonQueryAsync(ct);
     }
 
-    /* #1776 own-store: this class mints its own scratch database, so it is not [Collection("live-postgres")]. */
     [Fact]
     public async Task Live_TheSeverityRoundTripsThroughTheViewer_AndAStoreBelowV229StillOpensTheList()
     {
