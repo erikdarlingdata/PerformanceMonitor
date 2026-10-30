@@ -70,12 +70,15 @@ const DATABASE_COLUMNS = [
 ];
 
 export async function renderAg(main, opts) {
+  const ourHash = location.hash;
   /* #6933: the poll reads again with the page still on screen and swaps the new one in when the reads return. */
   if (!holdsPage(main, "ag", opts && opts.poll === true)) mount(main, [pageHead(null), loadingStrip("Loading availability groups…")]);
 
   /* #6157: a card names the reporting server by its display name, as the fleet page and the sidebar do. The fleet read is the
      source of that name; if it fails the cards fall back to the connection key rather than blocking the page. */
   const [res, fleet] = await Promise.all([apiGet("/api/ag"), apiGetFleet()]);
+  /* A poll that lands after the reader went to another page must not draw the groups over it. */
+  if (location.hash !== ourHash) return;
   const fleetCards = fleet.kind === "data" && fleet.data && Array.isArray(fleet.data.cards) ? fleet.data.cards : [];
   if (res.kind === "error") {
     if (!showRefreshError(main, "ag", res.message)) mount(main, [pageHead(null), errorStrip(res.message)]);

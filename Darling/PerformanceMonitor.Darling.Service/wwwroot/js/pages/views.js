@@ -645,7 +645,15 @@ export async function renderView(main, id, opts) {
   }
 
   /* The chrome is only meaningful when a composed panel can re-scope; a pure v1 read view skips it. */
-  const onChange = () => { rememberScope(id, state); renderGrid(); };
+  /* #6933: a scope change draws new-scope panels, so an in-place refresh still outstanding is for the old scope and must not land over them. */
+  const onChange = () => {
+    if (cancelViewRefresh) {
+      cancelViewRefresh();
+      cancelViewRefresh = null;
+    }
+    rememberScope(id, state);
+    renderGrid();
+  };
   const controls = hasComposed ? buildViewControls(fleet, variables, state, defaultHours, onChange) : null;
 
   if (liveGrid) {

@@ -374,7 +374,7 @@ export function renderServer(main, server, tabId, opts) {
          from the remembered, still-online card). A null card never repaints over a painted page: a fleet read that
          failed says nothing about which engine this server runs, and it leaves lastCard, so the online state, as it was. */
       if (!painted || (card && serverTabsFor(card) !== painted) || serverIsOffline(server) !== paintedOffline) {
-        painted = paintTabsKeeping(keep && !painted, tabsSlot, server, tabId, card);
+        painted = paintTabsKeeping(keep && !painted, tabsSlot, server, tabId, card, inPlace);
         paintedOffline = serverIsOffline(server);
       }
     });

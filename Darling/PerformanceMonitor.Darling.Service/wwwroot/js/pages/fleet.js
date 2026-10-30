@@ -332,10 +332,14 @@ export async function renderFleet(main, opts) {
     return;
   }
   silenceNotice = null; /* a notice lasts until the next rebuild (the 60 s poll) */
+  const ourHash = location.hash;
   canEditSilence = !!(await api.getSession()).can_edit;
+  /* A poll that lands after the reader went to another page must not draw the fleet over it. */
+  if (location.hash !== ourHash) return;
   if (!holdsPage(main, "fleet", isPoll)) mount(main, [pageHead(null), loadingStrip("Loading fleet…")]);
 
   const res = await apiGetFleet();
+  if (location.hash !== ourHash) return;
   if (res.kind === "error") {
     if (!showRefreshError(main, "fleet", res.message)) mount(main, [pageHead(null), errorStrip(res.message)]);
     return;

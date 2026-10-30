@@ -136,4 +136,33 @@ public sealed class WebRefreshInPlaceTests
         Assert.Equal(1, r.GetProperty("loadingWhileReading").GetInt32());
         Assert.Equal(0, r.GetProperty("loadingAfter").GetInt32());
     }
+
+    [Fact]
+    public void FleetPoll_ThatLandsAfterTheReaderLeft_DrawsNothingOverTheNewPage()
+    {
+        if (!TryRun("fleetPollAfterNavigation", out var r)) return;
+        Assert.True(r.GetProperty("onlyOtherPage").GetBoolean());
+        Assert.False(r.GetProperty("hasServer").GetBoolean());
+    }
+
+    [Fact]
+    public void ServerPoll_WhoseCardFlipsTheServerOffline_RepaintsThePanelsInPlace()
+    {
+        if (!TryRun("serverPollOfflineFlip", out var r)) return;
+        Assert.True(r.GetProperty("samePanelWhileReading").GetBoolean());
+        Assert.Equal(0, r.GetProperty("loadingWhileReading").GetInt32());
+        Assert.Contains("value-1", r.GetProperty("textWhileReading").GetString());
+        Assert.True(r.GetProperty("samePanelAfter").GetBoolean());
+        Assert.Contains("value-2", r.GetProperty("textAfter").GetString());
+        Assert.Equal(0, r.GetProperty("loadingAfter").GetInt32());
+    }
+
+    [Fact]
+    public void WholeGridSwap_StartedBeforeTheGridWasRedrawn_DoesNotLandOverTheNewPanels()
+    {
+        if (!TryRun("staleGridSwap", out var r)) return;
+        Assert.True(r.GetProperty("keepsNewScope").GetBoolean());
+        Assert.Contains("new-scope", r.GetProperty("text").GetString());
+        Assert.True(r.GetProperty("swapsWhenUnchanged").GetBoolean());
+    }
 }

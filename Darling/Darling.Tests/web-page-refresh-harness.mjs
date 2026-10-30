@@ -53,6 +53,8 @@ globalThis.document = {
   cookie: "", hidden: false,
 };
 globalThis.Node = FakeNode;
+/* The in-place refresh (#6933) watches a staged panel for its loading strip to go. These scenarios do not read what lands, so the observer never fires. */
+globalThis.MutationObserver = class { observe() {} disconnect() {} };
 globalThis.window = globalThis;
 globalThis.location = { hash: "#/server/alpha", pathname: "/", search: "", href: "http://localhost/", origin: "http://localhost" };
 globalThis.history = { pushState() {}, replaceState() {}, back() {} };

@@ -63,6 +63,10 @@ class FakeNode {
 }
 
 globalThis.Node = FakeNode;
+/* The in-place refresh (#6933) watches a staged panel for its loading strip to go. These scenarios do not read what lands, so the observer never fires. */
+globalThis.MutationObserver = class { observe() {} disconnect() {} };
+/* renderAg and renderFleet stop when the route changed under them, so they read location.hash. */
+if (typeof globalThis.location === "undefined") globalThis.location = { hash: "#/ag" };
 globalThis.document = {
   activeElement: null,
   createElement: (tag) => new FakeNode(tag),

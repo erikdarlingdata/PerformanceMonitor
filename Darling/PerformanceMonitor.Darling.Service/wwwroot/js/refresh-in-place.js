@@ -123,7 +123,8 @@ function unitSig(n) {
  * every live panel has drawn, each live panel's element stays and its body is replaced in one step when its own new read has
  * returned. A panel whose new read failed keeps its old content and shows the error. Otherwise (a different set of panels,
  * or a live panel still loading) the whole grid is swapped in one step once every staged panel has drawn. Returns a cancel
- * function: a newer render calls it so a late answer cannot land on a page that has moved on.
+ * function: a newer render calls it so a late answer cannot land on a page that has moved on. A whole-grid swap also drops itself when `live`'s children are no longer the
+ * ones it was started against.
  */
 export function refreshGridInPlace(live, staged) {
   staged = Array.isArray(staged) ? staged : [staged]; /* a tab may return one node, as mount() accepts */
@@ -132,7 +133,10 @@ export function refreshGridInPlace(live, staged) {
   const sameShape = staged.length === liveUnits.length && staged.every((n, i) => unitSig(n) === unitSig(liveUnits[i]) && settled(liveUnits[i]));
 
   if (!sameShape) {
-    cancels.push(whenSettled(staged, () => keepScroll(() => mount(live, staged))));
+    /* The grid may have been redrawn while the staged panels loaded (a saved view's scope control mounts new-scope panels). The
+       staged panels were built for the old scope, so they only go in over the units they were built against. */
+    const unchanged = () => live.children.length === liveUnits.length && liveUnits.every((u, i) => live.children[i] === u);
+    cancels.push(whenSettled(staged, () => { if (unchanged()) keepScroll(() => mount(live, staged)); }));
   } else {
     staged.forEach((fresh, i) => {
       cancels.push(whenSettled([fresh], () => swapUnit(live, liveUnits[i], fresh)));

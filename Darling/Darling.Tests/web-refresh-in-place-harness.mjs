@@ -66,9 +66,9 @@ globalThis.scrollTo = (x, y) => { scrolledTo = y; };
 const [jsDir, scenario] = process.argv.slice(-2);
 
 /* ── the scripted fetch: each route has a version the scenario bumps, and a gate that holds the answer until released ── */
-const state = { fleetVersion: 1, readVersion: 1, fleetFail: false, readFail: false, fleetGate: null, readGate: null, fleetCalls: 0, readCalls: 0 };
+const state = { fleetVersion: 1, readVersion: 1, fleetFail: false, readFail: false, fleetGate: null, readGate: null, fleetCalls: 0, readCalls: 0, online: true };
 const reply = (status, body) => ({ status, ok: status >= 200 && status < 300, text: async () => JSON.stringify(body) });
-const card = () => ({ server_id: 7, server_name: "SRV1", display_name: "SRV1", is_postgres: false, band: "Healthy", band_label: "Healthy", is_online: true, status: "ok", last_collection: null, tags: [], is_silenced: false, metric_count: 0, measured_metric_count: 0 });
+const card = () => ({ server_id: 7, server_name: "SRV1", display_name: "SRV1", is_postgres: false, band: "Healthy", band_label: "Healthy", is_online: state.online, status: "ok", last_collection: null, tags: [], is_silenced: false, metric_count: 0, measured_metric_count: 0 });
 globalThis.fetch = async (url) => {
   const u = String(url);
   if (u === "/api/session") return reply(200, { can_edit: false });
@@ -148,6 +148,76 @@ try {
       state.fleetFail = false;
       await fleet.renderFleet(main, { poll: true });
       out.errorsAfterRecovery = refreshErrors(main).length;
+    },
+    /* The poll lands after the reader went to another page: it must not draw the fleet over that page. */
+    async fleetPollAfterNavigation() {
+      const fleet = await load("pages/fleet.js");
+      const main = root();
+      location.hash = "#/fleet";
+      await fleet.renderFleet(main, {});
+      const g = gate();
+      state.fleetGate = g.p;
+      const polling = fleet.renderFleet(main, { poll: true });
+      await settle();
+      /* the reader opens another page while the read is out */
+      location.hash = "#/ag";
+      const other = new FakeNode("div"); other.className = "other-page"; other.textContent = "OTHER";
+      main.children.forEach((c) => (c.parent = null)); main.children = []; main.appendChild(other);
+      g.release();
+      await polling;
+      out.onlyOtherPage = main.children.length === 1 && main.firstChild === other;
+      out.hasServer = text(main).includes("SRV1");
+    },
+    /* A poll whose fresh card says the server went offline repaints the panels, and that repaint reads in place too. */
+    async serverPollOfflineFlip() {
+      const server = await load("pages/server.js");
+      const main = root();
+      server.renderServer(main, "SRV1", "cpu", {});
+      await settle();
+      const panel = main.byClass("panel")[0];
+      const g = gate();
+      state.readGate = g.p;
+      state.online = false;
+      state.readVersion = 2;
+      server.renderServer(main, "SRV1", "cpu", { poll: true });
+      await settle();
+      out.samePanelWhileReading = main.byClass("panel")[0] === panel;
+      out.loadingWhileReading = loadingStrips(main);
+      out.textWhileReading = text(panel);
+      g.release();
+      await settle();
+      out.samePanelAfter = main.byClass("panel")[0] === panel;
+      out.textAfter = text(panel);
+      out.loadingAfter = loadingStrips(main);
+    },
+    /* A whole-grid swap started against one set of panels must not land after the grid was redrawn with others (a saved view's scope change). */
+    async staleGridSwap() {
+      const rip = await load("refresh-in-place.js");
+      const panel = (title, body, loading) => {
+        const p = new FakeNode("div"); p.className = "panel"; p.setAttribute("data-panel", title); p.setAttribute("data-title", title);
+        const b = new FakeNode("div"); b.className = "panel-body"; p.appendChild(b);
+        const c = new FakeNode("div"); c.className = loading ? "strip loading" : "stub-result"; c.textContent = body; b.appendChild(c);
+        return p;
+      };
+      const live = new FakeNode("div"); live.className = "panel-grid"; live.isRoot = true;
+      live.appendChild(panel("A", "old-scope", true));
+      const stagedPanel = panel("A", "stale", true);
+      rip.refreshGridInPlace(live, [stagedPanel]);
+      /* the scope control redraws the grid with new-scope panels before the staged panel settles */
+      const fresh = panel("A", "new-scope", false);
+      live.children.forEach((c) => (c.parent = null)); live.children = []; live.appendChild(fresh);
+      const strip = stagedPanel.byClass("loading")[0]; strip.className = "stub-result"; strip.textContent = "stale";
+      await settle();
+      out.keepsNewScope = live.children.length === 1 && live.children[0] === fresh;
+      out.text = text(live);
+      /* with no redraw in between the swap still lands */
+      const live2 = new FakeNode("div"); live2.className = "panel-grid"; live2.isRoot = true;
+      live2.appendChild(panel("A", "old", true));
+      const staged2 = panel("A", "next", true);
+      rip.refreshGridInPlace(live2, [staged2]);
+      const s2 = staged2.byClass("loading")[0]; s2.className = "stub-result"; s2.textContent = "next";
+      await settle();
+      out.swapsWhenUnchanged = live2.children[0] === staged2;
     },
     /* The reader's own navigation still draws fresh: the loading strip shows and the old page goes. */
     async fleetNavigation() {
