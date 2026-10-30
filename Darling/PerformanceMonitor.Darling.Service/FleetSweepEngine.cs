@@ -197,7 +197,8 @@ public static class FleetSweepEngine
         IReadOnlyList<FleetSweepServerVerdict> previousVerdicts,
         IReadOnlyList<FleetSweepWatchItem> activeWatchItems,
         FleetSweepInstrumentCounters instruments,
-        DeadlockRateThresholds deadlockRateTiers)
+        DeadlockRateThresholds deadlockRateTiers,
+        BlockingBandThresholds? blockingBandTiers = null)
     {
         ArgumentNullException.ThrowIfNull(readings);
         ArgumentNullException.ThrowIfNull(previousVerdicts);
@@ -209,7 +210,12 @@ public static class FleetSweepEngine
            a caller that kept the old call would compile and silently band on the shipped pair while the
            Overview card used the store's. Built once, because the banding thresholds must be one
            configuration for the whole sweep. */
-        var banding = new DailyHealthThresholds { DeadlockRates = deadlockRateTiers };
+        /* #6927: the blocking band's tiers travel the same way; null is today's constants. */
+        var banding = new DailyHealthThresholds
+        {
+            DeadlockRates = deadlockRateTiers,
+            BlockingBands = blockingBandTiers ?? BlockingBandThresholds.Default,
+        };
 
         var sweepId = nowUtc.Ticks;
         var inSettleWindow = nowUtc - instruments.ServiceStartedUtc < PostRestartSettleWindow;
@@ -785,26 +791,26 @@ public static class FleetSweepEngine
            unit its rate tiers were measured in; BlockingEvents counts WAITS and is what the evidence shows as the
            count. Classify reads the same pair, so the ledger still cannot page on a count the verdict did not band. */
         var bandedBlocking = signals.BlockingReports ?? signals.BlockingEvents;
-        if (ServerHealthClassifier.BlockingSeverity(bandedBlocking, peakBlockSeconds, signals.Window)
+        if (ServerHealthClassifier.BlockingSeverity(bandedBlocking, peakBlockSeconds, signals.Window, thresholds.BlockingBands)
             == HealthSeverity.Critical)
         {
-            yield return (FamilyBlocking, BlockingEvidence(signals.BlockingEvents, bandedBlocking, signals.BlockingReports.HasValue, signals.Window, peakBlockSeconds));
+            yield return (FamilyBlocking, BlockingEvidence(signals.BlockingEvents, bandedBlocking, signals.BlockingReports.HasValue, signals.Window, peakBlockSeconds, thresholds.BlockingBands));
         }
     }
 
     /// <summary>The blocking family's evidence (#3539 A3): the arm that banded is the one named. A 60 s
     /// block is the wait arm's Critical whatever the rate; otherwise the RATE is the value, with the raw
     /// count as its own member for the operator reconciling against the blocking grid.</summary>
-    private static string BlockingEvidence(long count, long bandedCount, bool bandedOnReports, TimeSpan window, double peakBlockSeconds)
+    private static string BlockingEvidence(long count, long bandedCount, bool bandedOnReports, TimeSpan window, double peakBlockSeconds, BlockingBandThresholds tiers)
     {
-        if (peakBlockSeconds >= ServerHealthThresholds.BlockingCriticalWaitSeconds)
+        if (peakBlockSeconds >= tiers.CriticalWaitSeconds)
         {
             return JsonSerializer.Serialize(new
             {
                 derivation = "summary-scoring critical trigger under alerts_enabled: false — not an alert-engine replay",
                 trigger = "longest single block in the sweep span, seconds",
                 value = peakBlockSeconds,
-                threshold = ServerHealthThresholds.BlockingCriticalWaitSeconds,
+                threshold = tiers.CriticalWaitSeconds,
                 blocking_count = count,
             });
         }
@@ -819,7 +825,7 @@ public static class FleetSweepEngine
                 ? "blocked-process reports per hour over the sweep span"
                 : "blocking events per hour over the sweep span",
             value = ratePerHour,
-            threshold = ServerHealthThresholds.BlockingCriticalPerHour,
+            threshold = tiers.CriticalPerHour,
             blocking_count = count,
         });
     }
@@ -924,6 +930,7 @@ public static class FleetSweepEngine
                — an engine-seam read, so a fault here loudly costs this sweep slot rather than quietly
                banding the fleet on the shipped pair. */
             var deadlockRateTiers = await ReadDeadlockRateThresholdsAsync(postgres, cancellationToken).ConfigureAwait(false);
+            var blockingBandTiers = await BlockingBandStore.ReadAsync(postgres, McpCommandDeadlines.ReadSeconds, cancellationToken).ConfigureAwait(false);
 
             var nowUtc = DateTime.UtcNow;
             var spanStartUtc = ComputeSpanStart(nowUtc, interval, previousRun);
@@ -942,7 +949,7 @@ public static class FleetSweepEngine
 
             var composition = Compose(
                 nowUtc, spanStartUtc, alertsEnabled, servers.Count, readings,
-                previousRun, previousVerdicts, activeItems, ReadInstrumentCounters(), deadlockRateTiers);
+                previousRun, previousVerdicts, activeItems, ReadInstrumentCounters(), deadlockRateTiers, blockingBandTiers);
 
             await FleetSweepStore.RecordSweepAsync(
                 postgres, composition.Run, composition.Verdicts,

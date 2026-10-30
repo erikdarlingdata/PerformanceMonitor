@@ -369,6 +369,7 @@ public sealed class MigrationDataMovingRungCensusPins
             + "same rung adds is null on every stored row, so each statement reads the table once and takes milliseconds. The ADD "
             + "COLUMN is nullable with no default and the DROP NOT NULL on server_id is catalog-only, so neither rewrites a row. It does "
             + "not move the lock-wait floor, so the multiple stays 5."),
+        new(
             229,
             SetsTheFloor: false,
             "ADD COLUMN IF NOT EXISTS severities text NOT NULL DEFAULT 'both' plus ADD CONSTRAINT ... CHECK on config.config_notification_routes "

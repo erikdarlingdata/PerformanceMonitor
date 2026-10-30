@@ -225,6 +225,78 @@ FROM config.investigation_requests WHERE request_id = '{first.RequestId}'", ct))
         });
     }
 
+    /* #6919: an unregistered external name arrives with server_id 0 and family other. */
+    private static InvestigationAlert ExternalAlert(DateTime at, string label, string source, string key = "cpu", int serverId = 0,
+        string family = "other") =>
+        new(1, serverId, label, family, "External:" + source + ":" + key, at, Array.Empty<string>(), null,
+            20, 100, LeaseMinutes: 15, ExpiryMinutes: 240);
+
+    /// <summary>#6919 case 1: two unregistered external alerts with one label and different sources, a minute apart, open two
+    /// requests. The old key (server_id and family) joined them.</summary>
+    [Fact]
+    public async Task UnregisteredExternalAlerts_OfDifferentSources_OpenTwoRequests()
+    {
+        await RunAsync(async (store, _, ct) =>
+        {
+            var first = await store.OpenOrJoinAsync(ExternalAlert(T0, "label-a", "source_one"), ct);
+            _now = T0.AddMinutes(1);
+            var second = await store.OpenOrJoinAsync(ExternalAlert(_now, "label-a", "source_two"), ct);
+            Assert.Equal(InvestigationOpenOutcome.Opened, first.Outcome);
+            Assert.Equal(InvestigationOpenOutcome.Opened, second.Outcome);
+            Assert.NotEqual(first.RequestId, second.RequestId);
+        });
+    }
+
+    /// <summary>#6919 case 2: one source with two labels opens two requests. The old key joined them.</summary>
+    [Fact]
+    public async Task UnregisteredExternalAlerts_OfOneSourceWithDifferentLabels_OpenTwoRequests()
+    {
+        await RunAsync(async (store, _, ct) =>
+        {
+            var first = await store.OpenOrJoinAsync(ExternalAlert(T0, "label-a", "source_one"), ct);
+            _now = T0.AddMinutes(1);
+            var second = await store.OpenOrJoinAsync(ExternalAlert(_now, "label-b", "source_one"), ct);
+            Assert.Equal(InvestigationOpenOutcome.Opened, second.Outcome);
+            Assert.NotEqual(first.RequestId, second.RequestId);
+        });
+    }
+
+    /// <summary>#6919 case 3: one source and one label inside the window still join one request, whatever the alert key, and a
+    /// request of another pair is not taken by them.</summary>
+    [Fact]
+    public async Task UnregisteredExternalAlerts_OfOneSourceAndLabel_JoinOneRequest()
+    {
+        await RunAsync(async (store, _, ct) =>
+        {
+            var first = await store.OpenOrJoinAsync(ExternalAlert(T0, "label-a", "source_one"), ct);
+            _now = T0.AddMinutes(1);
+            var other = await store.OpenOrJoinAsync(ExternalAlert(_now, "label-a", "source_two"), ct);
+            _now = T0.AddMinutes(2);
+            var same = await store.OpenOrJoinAsync(ExternalAlert(_now, "label-a", "source_one", key: "disk"), ct);
+            Assert.Equal(InvestigationOpenOutcome.Joined, same.Outcome);
+            Assert.Equal(first.RequestId, same.RequestId);
+            _now = T0.AddMinutes(3);
+            Assert.Equal(other.RequestId, (await store.OpenOrJoinAsync(ExternalAlert(_now, "label-a", "source_two", key: "disk"), ct)).RequestId);
+        });
+    }
+
+    /// <summary>#6919 case 4: a registered server (server_id above 0) keeps the old key, so alerts of different external sources
+    /// and metrics in one family join one request.</summary>
+    [Fact]
+    public async Task ARegisteredServer_StillJoinsAlertsOfDifferentSourcesAndMetrics_InOneFamily()
+    {
+        await RunAsync(async (store, _, ct) =>
+        {
+            var first = await store.OpenOrJoinAsync(ExternalAlert(T0, "srv-9", "source_one", serverId: 9, family: "resources"), ct);
+            _now = T0.AddMinutes(1);
+            var second = await store.OpenOrJoinAsync(ExternalAlert(_now, "srv-9", "source_two", key: "disk", serverId: 9, family: "resources"), ct);
+            Assert.Equal(InvestigationOpenOutcome.Joined, second.Outcome);
+            Assert.Equal(first.RequestId, second.RequestId);
+            _now = T0.AddMinutes(2);
+            var builtIn = await store.OpenOrJoinAsync(Alert(_now, family: "resources", serverId: 9), ct);
+            Assert.Equal(first.RequestId, builtIn.RequestId);
+        });
+    }
     [Fact]
     public async Task AReportedRequest_IsNotJoined_ByAHigherSeverity_ANewMetric_OrAnotherServer()
     {

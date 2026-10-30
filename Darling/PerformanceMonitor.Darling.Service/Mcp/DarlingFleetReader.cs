@@ -930,6 +930,8 @@ GROUP BY server_id, collector_name";
            servers on the old pair and the rest on the new one — a mixed reading no configuration ever held,
            and the band counts and the worst-first ranking would be derived from it. */
         var deadlockTiers = await ReadDeadlockRateThresholdsAsync(postgres, cancellationToken);
+        /* #6927 (V228): the blocking band's tiers, read once per roll-up for the same reason. */
+        var blockingTiers = await BlockingBandStore.ReadAsync(postgres, McpCommandDeadlines.ReadSeconds, cancellationToken);
         var identityCapacity = await ReadIdentityCapacityAsync(postgres, now, cancellationToken);
 
         var cards = new List<FleetServerCard>(servers.Count);
@@ -967,7 +969,7 @@ GROUP BY server_id, collector_name";
 
             cards.Add(BuildCard(
                 server, c, pg, m, mp, t, b, deadlock, pgDeadlock, collected.LastCollection, collectors, serverTags, now,
-                windowEndUtc - windowStartUtc, deadlockTiers, collected.RegisteredAt, collected.OlderCollection, serverAgentAlertGaps, serverDatabaseProtection, serverIdentityCapacity));
+                windowEndUtc - windowStartUtc, deadlockTiers, collected.RegisteredAt, collected.OlderCollection, serverAgentAlertGaps, serverDatabaseProtection, serverIdentityCapacity, blockingTiers));
         }
 
         return BuildRollup(cards, now, windowStartUtc, windowEndUtc, worstCount, tagForest, collectionHealthAgeSeconds,
@@ -1093,7 +1095,8 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
         DateTime? olderCollection = null,
         IReadOnlyList<FleetAgentAlertGap>? agentAlertGaps = null,
         IReadOnlyList<FleetDatabaseProtectionOverdue>? databaseProtectionOverdue = null,
-        FleetIdentityCapacity? identityCapacity = null)
+        FleetIdentityCapacity? identityCapacity = null,
+        BlockingBandThresholds? blockingTiers = null)
     {
 
         /* Lite's XE-preferred / DMV-fallback, per server: XE when it has any row this window, else the DMV
@@ -1188,6 +1191,8 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
                arm, one metric over. */
             DeadlockWindow = deadlockWindow,
             DeadlockRateThresholds = deadlockTiers,
+            /* #6927: the blocking tiers travel with the count and the window, for the reason the deadlock ones do. */
+            BlockingBandThresholds = blockingTiers,
             TotalThreads = threads.TotalThreads,
             AvailableThreads = availableThreads,
             ThreadsWaitingForCpu = threads.RunnableTasks,
@@ -1268,7 +1273,7 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
                 ? ServerHealthClassifier.BlockingRatePerHour(blockingForBand.Value, deadlockWindow)
                 : null,
             BlockingWindow = deadlockWindow,
-            BlockingSeverity = ServerHealthClassifier.BlockingSeverity(blockingForBand, maxBlockedSeconds, deadlockWindow),
+            BlockingSeverity = ServerHealthClassifier.BlockingSeverity(blockingForBand, maxBlockedSeconds, deadlockWindow, blockingTiers),
             DeadlockCount = deadlockCount,
             DeadlockLastSeen = deadlockLastSeen,
             DeadlockMeasured = deadlockMeasured,
@@ -1281,6 +1286,7 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
                 : null,
             DeadlockWindow = deadlockWindow,
             DeadlockRateThresholds = deadlockTiers,
+            BlockingBandThresholds = blockingTiers,
             /* #6875: set only when a column is at the warning bar or past it. The Band below is not read from it. */
             IdentityCapacity = identityCapacity,
             DeadlockSeverity = ServerHealthClassifier.DeadlockSeverity(
@@ -1299,6 +1305,7 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
             HealthyCollectorCount = collectors.Healthy,
             WarningCollectorCount = collectors.Warning,
             NotCollectedCollectorCount = collectors.NotCollected,
+            NoPermissionCollectorCount = collectors.NoPermission,
             FailedCollectorCount = collectors.Failing,
             RegressedCollectorCount = collectors.Regressed,
             CollectorCount = collectors.Total,
@@ -1332,6 +1339,11 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
         var failures = 0;
         long totalBlocking = 0;
         long totalDeadlocks = 0;
+        /* #6927: each totals tile takes the worst band among the cards for that signal, the classification the cards already show.
+           A fleet total is not a per-server rate: ten servers at 3 an hour each would otherwise band the sum of 30 against the
+           per-server tiers and turn Critical with no card even Warning. */
+        var blockingTileSeverity = HealthSeverity.Healthy;
+        var deadlockTileSeverity = HealthSeverity.Healthy;
         var deadlockSourcesRead = 0;
         var deadlockPostgresTargets = 0;
         var deadlockCollectorsSilent = 0;
@@ -1375,6 +1387,8 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
 
             totalBlocking += card.BlockingCount;
             totalDeadlocks += card.DeadlockCount;
+            if (card.BlockingSeverity > blockingTileSeverity) blockingTileSeverity = card.BlockingSeverity;
+            if (card.DeadlockSeverity > deadlockTileSeverity) deadlockTileSeverity = card.DeadlockSeverity;
         }
 
         var problems = cards
@@ -1410,6 +1424,8 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
             ServersWithCollectionFailures = failures,
             TotalBlockingEvents = totalBlocking,
             TotalDeadlocks = totalDeadlocks,
+            TotalBlockingSeverity = blockingTileSeverity,
+            TotalDeadlockSeverity = deadlockTileSeverity,
             DeadlockCoverage = new FleetDeadlockCoverage
             {
                 ServersRead = deadlockSourcesRead,
@@ -2295,7 +2311,7 @@ AND   {SqlServerCollectedTargetSql}";
         var status = health.HealthStatus;
         /* #6828: one tally for every count surface (CollectorHealthClassifier.BandTally). A WARNING collector is not healthy, and a
            HEALTHY Always On collector on a server with Always On off is not collected. */
-        var tally = new CollectorHealthClassifier.BandTally(existing.Healthy, existing.Warning, existing.Failing, existing.NotCollected, existing.Total)
+        var tally = new CollectorHealthClassifier.BandTally(existing.Healthy, existing.Warning, existing.Failing, existing.NotCollected, existing.NoPermission, existing.Total)
             .Add(health.CollectorName, status, alwaysOnOff, engineGated);
         return new CollectorCounts(
             tally.Healthy,
@@ -2330,7 +2346,8 @@ AND   {SqlServerCollectedTargetSql}";
                 ? status
                 : existing.PgDeadlockBand,
             tally.Warning,
-            tally.NotCollected);
+            tally.NotCollected,
+            tally.NoPermission);
     }
 
     /// <summary>
@@ -2502,7 +2519,7 @@ AND   {SqlServerCollectedTargetSql}";
     /// old), so the band floor moves it to WARNING; by the second day the success clock has run out and
     /// the same collector reads FAILING while still being regressed. Counting off the band would make
     /// this go quiet precisely as the regression got worse.</para></param>
-    internal readonly record struct CollectorCounts(int Healthy, int Failing, int Total, int Regressed, string? DeadlockBand = null, string? PgDeadlockBand = null, int Warning = 0, int NotCollected = 0);
+    internal readonly record struct CollectorCounts(int Healthy, int Failing, int Total, int Regressed, string? DeadlockBand = null, string? PgDeadlockBand = null, int Warning = 0, int NotCollected = 0, int NoPermission = 0);
 
     /// <summary>One completed 7-day collection-health scan (#3735): the per-server counts
     /// <see cref="ReadFailingCollectorCountsAsync"/> produced and the <c>nowUtc</c> the scan was started with —
@@ -2950,6 +2967,11 @@ public sealed class FleetServerCard
     [JsonIgnore]
     public DeadlockRateThresholds DeadlockRateThresholds { get; init; }
 
+    /// <summary>The blocking tiers this card banded on (#6927), or null for today's constants. Carried, not serialized, for
+    /// <see cref="ToHealthMetrics"/>, so the worst-first score re-bands on the card's own tiers.</summary>
+    [JsonIgnore]
+    public BlockingBandThresholds? BlockingBandThresholds { get; init; }
+
     /// <summary>This server's deadlock-source collector band over the trailing seven days of collection
     /// health (#3017) — the fact that explains a <see cref="DeadlockCount"/> of zero. The collector is
     /// <c>deadlocks</c> on SQL Server and <c>pg_database_stats</c> on PostgreSQL (#3539). Null when that
@@ -2986,6 +3008,11 @@ public sealed class FleetServerCard
     /// <summary>#6828: Always On collectors on a server with Always On off, which <c>get_collection_health</c> lists as <c>not_collected</c> and
     /// the card does not count as healthy.</summary>
     [JsonPropertyName("not_collected_collector_count")] public int NotCollectedCollectorCount { get; init; }
+
+    /// <summary>#6932: collectors the monitored server refused (NO_PERMISSIONS) or lacks an extension for (EXTENSION_MISSING), the two bands
+    /// a person fixes at the monitored server. Healthy + warning + failed + not collected + this = <c>collector_count</c>. It does not move
+    /// <c>collector_severity</c>, so an optional collector refused after an upgrade shows here without turning the card yellow.</summary>
+    [JsonPropertyName("no_permission_collector_count")] public int NoPermissionCollectorCount { get; init; }
     [JsonPropertyName("failed_collector_count")] public int FailedCollectorCount { get; init; }
 
     /// <summary>
@@ -3080,6 +3107,7 @@ public sealed class FleetServerCard
            dot used the store's. */
         DeadlockWindow = DeadlockWindow,
         DeadlockRateThresholds = DeadlockRateThresholds,
+        BlockingBandThresholds = BlockingBandThresholds,
         TotalThreads = TotalThreads,
         AvailableThreads = AvailableThreads,
         ThreadsWaitingForCpu = ThreadsWaitingForCpu,
@@ -3144,6 +3172,13 @@ public sealed class FleetOverviewResult
     [JsonPropertyName("servers_with_collection_failures")] public int ServersWithCollectionFailures { get; init; }
     [JsonPropertyName("total_blocking_events")] public long TotalBlockingEvents { get; init; }
     [JsonPropertyName("total_deadlocks")] public long TotalDeadlocks { get; init; }
+
+    /// <summary>The Blocking totals tile's band (#6927): the fleet's blocked-process reports per hour and longest block against the
+    /// store's blocking tiers, through the same classifier the cards use. Unknown when no card has a blocking source.</summary>
+    [JsonPropertyName("total_blocking_severity")] public HealthSeverity TotalBlockingSeverity { get; init; }
+
+    /// <summary>The Deadlocks totals tile's band (#6927): the fleet's deadlocks per hour against the store's deadlock tiers.</summary>
+    [JsonPropertyName("total_deadlock_severity")] public HealthSeverity TotalDeadlockSeverity { get; init; }
 
     /// <summary>How much of the fleet <see cref="TotalDeadlocks"/> actually read a deadlock source for, with
     /// the causes named (#3017). Never null — a total with no denominator beside it is the defect.</summary>

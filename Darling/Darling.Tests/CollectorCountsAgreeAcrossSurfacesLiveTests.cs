@@ -96,15 +96,16 @@ VALUES (6828001, $1, $2, $3, 'Edition', '15.0.2000.5', 'RTM', 3, $4::boolean)", 
                 statuses.Count(s => s == CollectorHealthClassifier.Warning),
                 statuses.Count(s => s == CollectorHealthClassifier.Failing),
                 statuses.Count(s => s == "not_collected"),
+                statuses.Count(s => s == CollectorHealthClassifier.NoPermissions || s == CollectorHealthClassifier.ExtensionMissing),
                 statuses.Count);
-            Assert.Equal(new CollectorHealthClassifier.BandTally(2, 1, 0, 1, 4), mcp);
+            Assert.Equal(new CollectorHealthClassifier.BandTally(2, 1, 0, 1, 0, 4), mcp);
 
             /* The fleet card's counts. */
             var read = typeof(DarlingFleetReader).GetMethod("ReadFailingCollectorCountsAsync", BindingFlags.NonPublic | BindingFlags.Static)
                 ?? throw new InvalidOperationException("ReadFailingCollectorCountsAsync not found");
             var counts = await (Task<Dictionary<int, DarlingFleetReader.CollectorCounts>>)read.Invoke(null, [postgres, DateTime.UtcNow, ct])!;
             var card = counts[ServerId];
-            Assert.Equal(mcp, new CollectorHealthClassifier.BandTally(card.Healthy, card.Warning, card.Failing, card.NotCollected, card.Total));
+            Assert.Equal(mcp, new CollectorHealthClassifier.BandTally(card.Healthy, card.Warning, card.Failing, card.NotCollected, card.NoPermission, card.Total));
 
             /* The Viewer's fleet read (the Overview cards and the status bar) and its Collection Health grid. */
             await using var viewer = new ViewerDataService(scratch.ConnectionString);
@@ -125,9 +126,9 @@ VALUES (6828001, $1, $2, $3, 'Edition', '15.0.2000.5', 'RTM', 3, $4::boolean)", 
             /* The Viewer's Overview card counts, the number its Healthy / Warning / Failing text is built from. */
             var cardRead = typeof(ViewerDataService).GetMethod("GetCollectorHealthCountsAsync", BindingFlags.NonPublic | BindingFlags.Instance)
                 ?? throw new InvalidOperationException("GetCollectorHealthCountsAsync not found");
-            var (healthy, warning, failing, notCollected, total, _, _) =
-                await (Task<(int, int, int, int, int, string?, string?)>)cardRead.Invoke(viewer, [ServerId, ct])!;
-            Assert.Equal(mcp, new CollectorHealthClassifier.BandTally(healthy, warning, failing, notCollected, total));
+            var (healthy, warning, failing, notCollected, noPermission, total, _, _) =
+                await (Task<(int, int, int, int, int, int, string?, string?)>)cardRead.Invoke(viewer, [ServerId, ct])!;
+            Assert.Equal(mcp, new CollectorHealthClassifier.BandTally(healthy, warning, failing, notCollected, noPermission, total));
 
             bodySucceeded = true;
         }

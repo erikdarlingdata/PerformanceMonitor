@@ -231,7 +231,7 @@ public static partial class PgTargetAdvice
                     $"The all-types wait rate estimated from sampling peaked at about {currentText} ms of sampled waiting per second the " +
                     $"sampler was watching this window (mean {meanText} ms/sec; CPU/Running excluded), led by {led}. This server's " +
                     $"{s_baselineSpan} sampled-wait baseline for this hour-of-week is not thin — it is a measured ZERO: {ZeroHistoryRestsOn(fact)}, " +
-                    "not one of them above zero. That makes this an extremity rather than a deviation to count in sigmas or a multiple of a " +
+                    "not one of them above zero. That makes this an extremity rather than a deviation to count against its usual variation or a multiple of a " +
                     "normal rate: the sampled wait rate went from never-happens to this, and a rate that is zero has no multiple to print. " +
                     "It fired because the peak reached the sampled wait-profile bar on its absolute level, so the change itself is the " +
                     "lead — the named contributors are where to look." + instrument + s_anomalyHedge,
@@ -256,12 +256,12 @@ public static partial class PgTargetAdvice
         var mean = fact.Metadata.GetValueOrDefault("baseline_mean");
         var meanBaselineText = mean.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture);
         var deviation = modifiedZ > 0
-            ? $"{modifiedZ.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture)} robust sigmas above its {meanBaselineText} ms/sec baseline"
+            ? $"{modifiedZ.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture)} times its usual variation above its {meanBaselineText} ms/sec baseline"
             : $"about {ratio.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture)}× its {meanBaselineText} ms/sec baseline";
         return s_sampledWaitProfileStatic with
         {
             Headline = modifiedZ > 0
-                ? $"The server's sampled wait profile shifted to {currentText} ms/sec — {modifiedZ.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture)}σ above its baseline for this time of week (estimated from sampling)"
+                ? $"The server's sampled wait profile shifted to {currentText} ms/sec — {modifiedZ.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture)} times its usual variation above its normal level for this time of week (estimated from sampling)"
                 : $"The server's sampled wait profile shifted to about {ratio.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture)}× its baseline for this time of week (estimated from sampling)",
             Investigation =
                 $"The all-types wait rate estimated from sampling peaked at about {currentText} ms of sampled waiting per second the " +

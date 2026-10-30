@@ -90,10 +90,10 @@ public sealed class McpToolAuditFactAdviceTextTests
     {
         var advice = Compose("ANOMALY_CPU_SPIKE", CpuMetadata(sigma: 6.1, meanSigma: 3.2, median: 20, mad: 4));
 
-        Assert.Contains("6.1 robust σ above its 20% baseline median for this hour-of-week", advice.Investigation);
+        Assert.Contains("6.1 times its usual variation above its 20% normal level for this hour-of-week", advice.Investigation);
         Assert.DoesNotContain("40%", advice.Investigation);
-        Assert.Contains("3.2 robust σ above it", advice.Investigation);
-        Assert.Contains("6.1 robust σ above its baseline median for this time of week", advice.Headline);
+        Assert.Contains("3.2 times its usual variation above it", advice.Investigation);
+        Assert.Contains("6.1 times its usual variation above its normal level for this time of week", advice.Headline);
     }
 
     [Fact]
@@ -101,7 +101,7 @@ public sealed class McpToolAuditFactAdviceTextTests
     {
         var advice = Compose("ANOMALY_CPU_SPIKE", CpuMetadata(sigma: 6.1, meanSigma: 3.2, median: 0, mad: 0));
 
-        Assert.Contains("6.1σ above its 40% baseline for this hour-of-week", advice.Investigation);
+        Assert.Contains("6.1 times its usual variation above its 40% normal level for this hour-of-week", advice.Investigation);
         Assert.DoesNotContain("median", advice.Investigation);
     }
 
@@ -111,10 +111,36 @@ public sealed class McpToolAuditFactAdviceTextTests
         var cap = AnomalyThresholds.SigmaDisplayCap;
         var advice = Compose("ANOMALY_CPU_SPIKE", CpuMetadata(sigma: cap, meanSigma: cap, median: 20, mad: 4));
 
-        Assert.Contains("at least 25 robust σ above its 20% baseline median", advice.Investigation);
-        Assert.Contains("sat at least 25 robust σ above it", advice.Investigation);
-        Assert.Contains("at least 25 robust σ above its baseline median for this time of week", advice.Headline);
-        Assert.DoesNotContain("25σ", advice.Headline);
+        Assert.Contains("at least 25 times its usual variation above its 20% normal level", advice.Investigation);
+        Assert.Contains("sat at least 25 times its usual variation above it", advice.Investigation);
+        Assert.Contains("at least 25 times its usual variation above its normal level for this time of week", advice.Headline);
+        Assert.DoesNotContain("σ", advice.Headline);
+    }
+
+    // #6925: file I/O latency advice had to read in plain words, with no Greek letter and no "robust".
+    [Fact]
+    public void ReadLatencyAnomaly_AtDisplayCap_ReadsInPlainWords_WithNoSigma()
+    {
+        var advice = Compose("ANOMALY_READ_LATENCY", new()
+        {
+            ["current_latency_ms"] = 140,
+            ["avg_latency_ms"] = 90,
+            ["baseline_mean"] = 12,
+            ["baseline_median"] = 8,
+            ["baseline_mad"] = 2,
+            ["deviation_sigma"] = AnomalyThresholds.SigmaDisplayCap,
+            ["mean_deviation_sigma"] = 6.1,
+        });
+
+        Assert.Contains("at least 25 times its usual variation above its 8 ms normal level for this hour-of-week", advice.Investigation);
+        Assert.Contains("sat 6.1 times its usual variation above it", advice.Investigation);
+        Assert.Contains("at least 25 times its usual variation above its normal level for this time of week", advice.Headline);
+        foreach (var text in new[] { advice.Headline, advice.Investigation, advice.Remediation })
+        {
+            Assert.DoesNotContain("σ", text);
+            Assert.DoesNotContain("robust", text, System.StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("sigma", text, System.StringComparison.OrdinalIgnoreCase);
+        }
     }
 
     [Fact]
@@ -129,6 +155,6 @@ public sealed class McpToolAuditFactAdviceTextTests
             ["mean_modified_z"] = AnomalyThresholds.SigmaDisplayCap,
         });
 
-        Assert.Contains("sat at least 25 robust σ above the baseline median", advice.Investigation);
+        Assert.Contains("sat at least 25 times its usual variation above its normal level", advice.Investigation);
     }
 }

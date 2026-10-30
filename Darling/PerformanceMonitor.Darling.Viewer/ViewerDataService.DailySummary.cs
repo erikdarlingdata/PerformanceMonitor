@@ -124,6 +124,7 @@ public sealed partial class ViewerDataService
         var banding = new DailyHealthThresholds
         {
             DeadlockRates = await GetDeadlockRateThresholdsAsync(cancellationToken),
+            BlockingBands = await GetBlockingBandThresholdsAsync(cancellationToken),
         };
 
         /* #3653: the horizon, read once per range like the banding tiers above — a schedule save mid-read must

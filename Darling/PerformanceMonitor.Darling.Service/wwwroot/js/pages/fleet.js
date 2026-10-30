@@ -13,6 +13,7 @@
  * API reports it (band = Warning, status text verbatim) — never the red offline treatment.
  */
 
+import { holdsPage, keepScroll, noteRefreshError, replaceNodes, showPage, showRefreshError } from "../refresh-in-place.js";
 import { el, mount, readTool, apiGetFleet, loadingStrip, errorStrip, emptyStrip, localTime, localClock, relTime, fmtInt, fmtNum, fmtPct, fmtMb, fmtMs, bandClass, rollupTextId, tagPill, frontDoor, currentStore } from "../util.js";
 import { frontDoorStores, healthBandClass, healthLabel, currentFirst, currentMark } from "../store-picker.js";
 import { VIZ, navigateServer } from "../panels.js";
@@ -261,7 +262,7 @@ function silenceButton(c) {
  * and the others still draw. Search, the needs-attention filter, grouping by tag and Silence are the single-store page's
  * controls over one fleet; here they are left out (a server's Silence is on its own page), and the cards sort worst first.
  */
-async function renderStoreFleets(main) {
+async function renderStoreFleets(main, isPoll) {
   silenceNotice = null;
   canEditSilence = false;
   const current = currentStore();
@@ -282,22 +283,39 @@ async function renderStoreFleets(main) {
     ]);
     return { st, body, section: el("section", { class: "fleet-store", dataset: { store: st.name } }, [head, body]) };
   });
-  mount(main, [pageHead(null), ...parts.map((x) => x.section)]);
+  /* #6933: a poll over the same stores in the same order keeps each section's body on screen and swaps it when that store's read
+     returns. A store whose read fails keeps what it showed, with the error above it. */
+  const shown = Array.from(main.children).filter((n) => n.dataset && n.dataset.store);
+  const inPlace = holdsPage(main, "fleet-stores", isPoll) && shown.length === parts.length && parts.every((x, i) => shown[i].dataset.store === x.st.name);
+  if (inPlace) {
+    parts.forEach((x, i) => {
+      replaceNodes(shown[i], [shown[i].firstChild], [x.section.firstChild]);
+      x.body = shown[i].children[1];
+    });
+  } else {
+    showPage(main, "fleet-stores", [pageHead(null), ...parts.map((x) => x.section)]);
+  }
 
   await Promise.all(
     parts.map(async (x) => {
       try {
         const res = await apiGetFleet(x.st.name);
         if (res.kind !== "data") {
-          mount(x.body, [errorStrip(res.message || "This store's fleet could not be read.")]);
+          showStoreFailure(x.body, inPlace, res.message || "This store's fleet could not be read.");
           return;
         }
-        mount(x.body, storeFleetBody(res.data, x.st.name, x.st.name === current));
+        keepScroll(() => mount(x.body, storeFleetBody(res.data, x.st.name, x.st.name === current)));
       } catch (e) {
-        mount(x.body, [errorStrip("This store's fleet could not be drawn: " + (e && e.message ? e.message : String(e)))]);
+        showStoreFailure(x.body, inPlace, "This store's fleet could not be drawn: " + (e && e.message ? e.message : String(e)));
       }
     })
   );
+}
+
+/** A store section whose read failed: its error replaces the loading line, or sits above the section's old content on a poll. */
+function showStoreFailure(body, inPlace, message) {
+  if (inPlace) noteRefreshError(body, message);
+  else mount(body, [errorStrip(message)]);
 }
 
 function storeFleetBody(d, store, own) {
@@ -306,18 +324,24 @@ function storeFleetBody(d, store, own) {
   return [rollup(d), el("div", { class: "grid server-grid" }, cards.map((c) => serverCard(c, store, own)))];
 }
 
-export async function renderFleet(main) {
+export async function renderFleet(main, opts) {
+  /* #6933: the poll reads again with the page still on screen and swaps the new one in when the read returns. */
+  const isPoll = !!(opts && opts.poll === true);
   if (frontDoor()) {
-    await renderStoreFleets(main);
+    await renderStoreFleets(main, isPoll);
     return;
   }
   silenceNotice = null; /* a notice lasts until the next rebuild (the 60 s poll) */
+  const ourHash = location.hash;
   canEditSilence = !!(await api.getSession()).can_edit;
-  mount(main, [pageHead(null), loadingStrip("Loading fleet…")]);
+  /* A poll that lands after the reader went to another page must not draw the fleet over it. */
+  if (location.hash !== ourHash) return;
+  if (!holdsPage(main, "fleet", isPoll)) mount(main, [pageHead(null), loadingStrip("Loading fleet…")]);
 
   const res = await apiGetFleet();
+  if (location.hash !== ourHash) return;
   if (res.kind === "error") {
-    mount(main, [pageHead(null), errorStrip(res.message)]);
+    if (!showRefreshError(main, "fleet", res.message)) mount(main, [pageHead(null), errorStrip(res.message)]);
     return;
   }
 
@@ -328,7 +352,7 @@ export async function renderFleet(main) {
     nodes.push(
       emptyStrip("No servers are enabled yet. Add one in the desktop Viewer (Add Server) or with --add-server, and cards appear here as collection begins.")
     );
-    mount(main, nodes);
+    showPage(main, "fleet", nodes);
     return;
   }
 
@@ -377,7 +401,7 @@ export async function renderFleet(main) {
   redrawCards();
   nodes.push(gridNode);
 
-  mount(main, nodes);
+  showPage(main, "fleet", nodes);
 }
 
 /** Filter the cached cards by the search term AND the needs-attention toggle, sort by the current choice, and
@@ -681,7 +705,9 @@ export function rollup(d) {
      not a confirmed incident either — warning is the "interrogate this number" class without claiming a
      deadlock happened. A real deadlock keeps critical whatever the coverage: a measured incident outranks an
      incomplete denominator, and the sub-line under it already says the count may be short. */
-  const deadlockClass = d.total_deadlocks > 0 ? "critical" : deadlockSub && deadlockSub.partial ? "warning" : "";
+  /* #6927: banded by the service through the same classifier and the store's tiers as the cards, not on any non-zero count. */
+  const totalClass = (sev) => (sev === "Critical" ? "critical" : sev === "Warning" ? "warning" : "");
+  const deadlockClass = totalClass(d.total_deadlock_severity) || (deadlockSub && deadlockSub.partial ? "warning" : "");
 
   /* Two fixed groups (server-band counts | event counts) split by a divider; a non-zero blocking / deadlock
      total takes a severity color. */
@@ -695,7 +721,7 @@ export function rollup(d) {
     ]),
     el("div", { class: "rollup-divider" }),
     el("div", { class: "rollup-group" }, [
-      tile(d.total_blocking_events, "Blocking (recent)", d.total_blocking_events > 0 ? "warning" : ""),
+      tile(d.total_blocking_events, "Blocking (recent)", totalClass(d.total_blocking_severity)),
       /* The API's own note rides along as the tile's title — the causes and the two windows, in the words the
          service already renders for get_fleet_overview, so the hover is DETAIL on a signal that is already
          visible rather than the only place the signal exists. */
@@ -848,7 +874,7 @@ export function metricBands(c) {
   const collectorsDetail = collectorsStale
     ? "no recent collection · " + (c.last_collection ? "last " + relTime(c.last_collection) : DARK_PAST_WINDOW)
     : c.collector_count > 0
-    ? fmtInt(c.healthy_collector_count) + " healthy · " + (c.warning_collector_count > 0 ? fmtInt(c.warning_collector_count) + " warning · " : "") + fmtInt(c.failed_collector_count) + " failing" + (c.not_collected_collector_count > 0 ? " · " + fmtInt(c.not_collected_collector_count) + " not collected" : "")
+    ? fmtInt(c.healthy_collector_count) + " healthy · " + (c.warning_collector_count > 0 ? fmtInt(c.warning_collector_count) + " warning · " : "") + fmtInt(c.failed_collector_count) + " failing" + (c.not_collected_collector_count > 0 ? " · " + fmtInt(c.not_collected_collector_count) + " not collected" : "") + (c.no_permission_collector_count > 0 ? " · " + fmtInt(c.no_permission_collector_count) + " no permission" : "")
     : "no collector banded yet";
   const collectorsSeverity = collectorsStale ? "Unknown" : c.collector_severity;
 
@@ -865,7 +891,7 @@ export function metricBands(c) {
       chip("Memory", "n/a", "Unknown", staleDetail),
       chip("Blocking", "n/a", "Unknown", staleDetail),
       chip("Deadlocks", "n/a", "Unknown", staleDetail),
-      chip("Collectors", collectorsValue, collectorsSeverity, collectorsDetail),
+      chip("Collectors", collectorsValue, collectorsSeverity, collectorsDetail, true),
     ]);
   }
 
@@ -877,7 +903,7 @@ export function metricBands(c) {
     chip("Memory", memValue, c.memory_severity, memDetail),
     chip("Blocking", fmtInt(c.blocking_count), c.blocking_severity, blockingDetail),
     chip("Deadlocks", fmtInt(c.deadlock_count), c.deadlock_severity, deadlockDetail),
-    chip("Collectors", collectorsValue, collectorsSeverity, collectorsDetail),
+    chip("Collectors", collectorsValue, collectorsSeverity, collectorsDetail, true),
     /* #6875: a chip only when a column is at the warning bar or past it. It is not a band: nothing above reads it, and a server without one shows no extra chip. */
     ...identityCapacityChip(c),
     /* #6874: a chip only when the server's Agent alert setup has a gap. It is not a band: nothing above reads it, and a
@@ -912,7 +938,9 @@ function identityCapacityChip(c) {
     "At or past 70% used (the shipped bar, the alert's own bars may differ). The fullest is " + ic.worst_band + ".")];
 }
 
-function chip(label, value, sev, detail) {
+/* wrapDetail: the Collectors chip's count line is the one detail that carries counts a person acts on (not collected, no permission,
+   #6932), and a nowrap ellipsis cut the newest clause off at every width, so it wraps and the other chips keep their one line. */
+function chip(label, value, sev, detail, wrapDetail) {
   const badge = SEV_BADGE[sev];
   return el("div", { class: "metric-chip sev-" + (sev || "Unknown") }, [
     el("div", { class: "label" }, [
@@ -920,6 +948,6 @@ function chip(label, value, sev, detail) {
       badge ? el("span", { class: "sev-badge", text: badge }) : null,
     ]),
     el("div", { class: "value", text: value }),
-    detail ? el("div", { class: "detail", text: detail, title: detail }) : null,
+    detail ? el("div", { class: wrapDetail ? "detail wrap" : "detail", text: detail, title: detail }) : null,
   ]);
 }

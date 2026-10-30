@@ -448,6 +448,69 @@ namespace PerformanceMonitor.Common
         /// reach it first regardless.</para>
         /// </summary>
         public const double DeadlockRatePerHourCeiling = 1000.0;
+
+        /* ── the settable blocking band (#6927) ── */
+
+        /// <summary>
+        /// The FLOOR the settable blocking rate tiers clamp to (#6927): one event per hour, for the reason
+        /// <see cref="DeadlockRatePerHourFloor"/> gives. It keeps a tier a rate, and it keeps zero and
+        /// negative values, which would band every window Critical, out of the classifier.
+        /// </summary>
+        public const double BlockingRatePerHourFloor = 1.0;
+
+        /// <summary>The CEILING the settable blocking rate tiers clamp to (#6927), so a tier stays a threshold and
+        /// not an undisclosed off switch. The worst measured server-hour held 232 reports, so 10,000 is far
+        /// above anything real.</summary>
+        public const double BlockingRatePerHourCeiling = 10000.0;
+
+        /// <summary>The FLOOR the settable blocking wait tiers clamp to, seconds (#6927). A tier of zero would
+        /// band every block Critical.</summary>
+        public const double BlockingWaitSecondsFloor = 1.0;
+
+        /// <summary>The CEILING the settable blocking wait tiers clamp to, seconds (#6927): one day.</summary>
+        public const double BlockingWaitSecondsCeiling = 86400.0;
+    }
+
+    /// <summary>
+    /// The four settable tiers of the blocking band (#6927): events per hour and the longest single block in
+    /// seconds, each with a Warning and a Critical bar. The same shape as <see cref="DeadlockRateThresholds"/>:
+    /// the store holds what the operator set, these accessors clamp on read, and a <c>default</c> struct
+    /// (every field zero) clamps to the floors rather than to zero.
+    ///
+    /// <para><b>Defaults are today's constants</b> (<see cref="ServerHealthThresholds.BlockingWarnPerHour"/> and
+    /// its three siblings), so a store that never set them bands exactly as every build before this one
+    /// did. Lite has no store and keeps the constants.</para>
+    ///
+    /// <para>Like the deadlock pair, the critical bar is not floored at the warning bar here, so a hand-edited
+    /// pair reads as written. The writers refuse a pair with critical below warn.</para>
+    /// </summary>
+    public readonly record struct BlockingBandThresholds(
+        double WarnPerHourRaw,
+        double CriticalPerHourRaw,
+        double WarnWaitSecondsRaw,
+        double CriticalWaitSecondsRaw)
+    {
+        /// <summary>Warning bar, events per hour, clamped.</summary>
+        public double WarnPerHour => Clamp(WarnPerHourRaw, ServerHealthThresholds.BlockingRatePerHourFloor, ServerHealthThresholds.BlockingRatePerHourCeiling);
+
+        /// <summary>Critical bar, events per hour, clamped independently of the warning bar.</summary>
+        public double CriticalPerHour => Clamp(CriticalPerHourRaw, ServerHealthThresholds.BlockingRatePerHourFloor, ServerHealthThresholds.BlockingRatePerHourCeiling);
+
+        /// <summary>Warning bar, longest block in seconds, clamped.</summary>
+        public double WarnWaitSeconds => Clamp(WarnWaitSecondsRaw, ServerHealthThresholds.BlockingWaitSecondsFloor, ServerHealthThresholds.BlockingWaitSecondsCeiling);
+
+        /// <summary>Critical bar, longest block in seconds, clamped independently of the warning bar.</summary>
+        public double CriticalWaitSeconds => Clamp(CriticalWaitSecondsRaw, ServerHealthThresholds.BlockingWaitSecondsFloor, ServerHealthThresholds.BlockingWaitSecondsCeiling);
+
+        /// <summary>Today's constants: what a store at its V228 column defaults hands the band.</summary>
+        public static BlockingBandThresholds Default => new(
+            ServerHealthThresholds.BlockingWarnPerHour,
+            ServerHealthThresholds.BlockingCriticalPerHour,
+            ServerHealthThresholds.BlockingWarnWaitSeconds,
+            ServerHealthThresholds.BlockingCriticalWaitSeconds);
+
+        private static double Clamp(double value, double floor, double ceiling) =>
+            double.IsNaN(value) ? floor : Math.Clamp(value, floor, ceiling);
     }
 
     /// <summary>
@@ -581,6 +644,12 @@ namespace PerformanceMonitor.Common
         /// did not stick" reading.</para>
         /// </summary>
         public DeadlockRateThresholds? DeadlockRateThresholds { get; init; }
+
+        /// <summary>The blocking band's four tiers (#6927), or <c>null</c> for today's constants
+        /// (<see cref="BlockingBandThresholds.Default"/>). A Darling path with a store hands the
+        /// <c>config_alert_settings</c> values in so the card, the Overview tab, the calendar and the fleet
+        /// sweep band on what the operator set. Lite has no such knobs and leaves it null.</summary>
+        public BlockingBandThresholds? BlockingBandThresholds { get; init; }
 
         /// <summary>Worker-thread ceiling (max_workers_count), or null with no scheduler snapshot (e.g. Azure SQL DB).</summary>
         public int? TotalThreads { get; init; }
@@ -887,7 +956,8 @@ namespace PerformanceMonitor.Common
         public static HealthSeverity BlockingSeverity(
             long? blockingCountOrNullWhenUnmeasured,
             double maxBlockedSeconds,
-            TimeSpan window)
+            TimeSpan window,
+            BlockingBandThresholds? thresholds = null)
         {
             if (!blockingCountOrNullWhenUnmeasured.HasValue)
             {
@@ -895,19 +965,20 @@ namespace PerformanceMonitor.Common
             }
 
             var blockingCount = blockingCountOrNullWhenUnmeasured.Value;
+            var tiers = thresholds ?? BlockingBandThresholds.Default;
 
-            if (maxBlockedSeconds >= ServerHealthThresholds.BlockingCriticalWaitSeconds)
+            if (maxBlockedSeconds >= tiers.CriticalWaitSeconds)
             {
                 return HealthSeverity.Critical;
             }
 
             var ratePerHour = BlockingRatePerHour(blockingCount, window);
-            if (ratePerHour.HasValue && ratePerHour.Value >= ServerHealthThresholds.BlockingCriticalPerHour)
+            if (ratePerHour.HasValue && ratePerHour.Value >= tiers.CriticalPerHour)
             {
                 return HealthSeverity.Critical;
             }
 
-            if (maxBlockedSeconds >= ServerHealthThresholds.BlockingWarnWaitSeconds)
+            if (maxBlockedSeconds >= tiers.WarnWaitSeconds)
             {
                 return HealthSeverity.Warning;
             }
@@ -917,7 +988,7 @@ namespace PerformanceMonitor.Common
                 return blockingCount > 0 ? HealthSeverity.Warning : HealthSeverity.Unknown;
             }
 
-            return ratePerHour.Value >= ServerHealthThresholds.BlockingWarnPerHour
+            return ratePerHour.Value >= tiers.WarnPerHour
                 ? HealthSeverity.Warning
                 : HealthSeverity.Healthy;
         }
@@ -1140,7 +1211,7 @@ namespace PerformanceMonitor.Common
             yield return CpuSeverity(m.CpuPercentForAlert, m.CapacityUtilizationPercent, m.CpuSource);
             yield return ThreadsSeverity(m.TotalThreads, m.AvailableThreads, m.ThreadsWaitingForCpu, m.RequestsWaitingForThreads);
             yield return MemorySeverity(m.HasMemoryPressure);
-            yield return BlockingSeverity(m.BlockingCount, m.MaxBlockedSeconds, m.BlockingWindow);
+            yield return BlockingSeverity(m.BlockingCount, m.MaxBlockedSeconds, m.BlockingWindow, m.BlockingBandThresholds);
             yield return DeadlockSeverity(
                 m.DeadlockCount,
                 m.DeadlockWindow,
@@ -2239,25 +2310,42 @@ namespace PerformanceMonitor.Common
             alwaysOnOff && IsAlwaysOnCollector(collectorName) && string.Equals(band, Healthy, StringComparison.Ordinal);
 
         /// <summary>
-        /// One server's collector counts by band (#6828), the one tally every count surface reads: the fleet card and its web header and
+        /// One server's collector counts by band (#6828, #6932), the one tally every count surface reads: the fleet card and its web header and
         /// footer, and the Viewer's card and status bar. <c>get_collection_health</c> lists the same rows one by one, so counting its rows by
-        /// status gives these numbers. <see cref="Healthy"/> is HEALTHY rows only, so a WARNING collector is never counted as healthy, and a
-        /// row a server without Always On reports as not collected is counted there instead. <see cref="Total"/> is every banded row.
+        /// status gives these numbers. The five buckets always add up to <see cref="Total"/>, because every banded row lands in exactly one:
+        /// <list type="bullet">
+        /// <item><see cref="Healthy"/>: HEALTHY rows only, so a WARNING collector is never counted as healthy.</item>
+        /// <item><see cref="Warning"/>: WARNING, and STALE (it read recently enough to still be running, but has no success inside its cadence,
+        /// which is the same "degrading, not yet failing" verdict).</item>
+        /// <item><see cref="Failing"/>: FAILING only. The card's severity grades this count, so it stays exactly FAILING.</item>
+        /// <item><see cref="NoPermission"/>: NO_PERMISSIONS and EXTENSION_MISSING, the two bands a person has to fix at the monitored server
+        /// (a grant, or CREATE EXTENSION). Counting them does not move the card's severity.</item>
+        /// <item><see cref="NotCollected"/>: NEVER_RUN and STOPPED (nothing is being collected and nothing is refused), a row the engine does
+        /// not run (#6912), and a HEALTHY Always On collector on a server with Always On off.</item>
+        /// </list>
         /// </summary>
-        public readonly record struct BandTally(int Healthy, int Warning, int Failing, int NotCollected, int Total)
+        public readonly record struct BandTally(int Healthy, int Warning, int Failing, int NotCollected, int NoPermission, int Total)
         {
             /// <summary>This tally plus one collector row, banded by the caller through the shared ladder.</summary>
             /// <param name="engineGated">#6912: the collector does not run on this server's engine. Whatever band the logged runs left it, it is
             /// not collected and counts as neither healthy, warning nor failing.</param>
             public BandTally Add(string? collectorName, string band, bool alwaysOnOff, bool engineGated)
             {
-                var notCollected = engineGated || IsNotCollectedWhenAlwaysOnOff(collectorName, band, alwaysOnOff);
-                return new BandTally(
-                    Healthy + (!notCollected && string.Equals(band, CollectorHealthClassifier.Healthy, StringComparison.Ordinal) ? 1 : 0),
-                    Warning + (!notCollected && string.Equals(band, CollectorHealthClassifier.Warning, StringComparison.Ordinal) ? 1 : 0),
-                    Failing + (!notCollected && string.Equals(band, CollectorHealthClassifier.Failing, StringComparison.Ordinal) ? 1 : 0),
-                    NotCollected + (notCollected ? 1 : 0),
-                    Total + 1);
+                if (engineGated || IsNotCollectedWhenAlwaysOnOff(collectorName, band, alwaysOnOff))
+                {
+                    return this with { NotCollected = NotCollected + 1, Total = Total + 1 };
+                }
+
+                return band switch
+                {
+                    CollectorHealthClassifier.Healthy => this with { Healthy = Healthy + 1, Total = Total + 1 },
+                    CollectorHealthClassifier.Warning or CollectorHealthClassifier.Stale => this with { Warning = Warning + 1, Total = Total + 1 },
+                    CollectorHealthClassifier.Failing => this with { Failing = Failing + 1, Total = Total + 1 },
+                    CollectorHealthClassifier.NoPermissions or CollectorHealthClassifier.ExtensionMissing => this with { NoPermission = NoPermission + 1, Total = Total + 1 },
+                    /* NEVER_RUN, STOPPED, and any band this ladder does not know: nothing is being collected, and counting it here keeps the
+                       buckets adding up to Total. */
+                    _ => this with { NotCollected = NotCollected + 1, Total = Total + 1 },
+                };
             }
         }
 

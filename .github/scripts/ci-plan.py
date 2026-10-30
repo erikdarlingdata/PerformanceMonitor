@@ -61,14 +61,19 @@ TRAIN_BRANCH_PREFIX = "train/"
 # measured on that run's 9 legs (checkout, build download, .NET and PostgreSQL start: 52 to 103 s, mean 70 s, plus about 7 s
 # of post steps), so a leg is about 8.5 + 1.3 = 9.8 minutes. A dev push uses the same estimate, at least DEV_PUSH_MIN_LEGS
 # legs (4 timed out) and at most DEV_PUSH_MAX_LEGS (the free plan runs about 20 jobs at once across the repo, so a
-# push must leave runners for open PRs). A full push is 8 legs: about 131 / 8 + 1.3 = 17.7 minutes a leg, under the
+# push must leave runners for open PRs). A full push was 8 legs: about 131 / 8 + 1.3 = 17.7 minutes a leg, under the
 # 25-minute step timeout, and 12 runners stay free for PRs.
+# By 2026-10-29 the suites had grown to about 152 weighted minutes (the refreshed tables), which made 8 legs 152 / 8 + 1.3 =
+# 20.3 minutes a leg even when perfectly balanced, and the stale tables left the slowest leg at 22.9 weighted minutes: leg 8
+# of dev run 40959511081 took 23.5 minutes and leg 8 of run 40953502699 timed out the 25-minute step (#6941). The same leg's
+# Darling test seconds also moved by up to 270 s between runs (live-postgres contention), so a push is 10 legs: 152 / 10 + 1.3
+# = 16.5 minutes a leg and 10 runners stay free for PRs.
 # A fixed 4 legs put a push's Darling.Tests alone at 1266 to 1452 s a leg, and every dev push run (40034434899,
 # 40031691584, 40020225933, 40015830041) timed out the 25-minute test step (#6656).
 MINUTES_PER_LEG = 8.5
 MAX_LEGS = 16
 DEV_PUSH_MIN_LEGS = 6
-DEV_PUSH_MAX_LEGS = 8
+DEV_PUSH_MAX_LEGS = 10
 # The GitHub pull request files API returns at most 3000 files; a list that long may have been cut short.
 FILES_API_CAP = 3000
 

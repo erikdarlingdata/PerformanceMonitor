@@ -587,6 +587,14 @@ ALTER TABLE config.config_threshold_overrides DROP CONSTRAINT IF EXISTS ck_confi
 DROP INDEX IF EXISTS config.ux_config_threshold_overrides_tag;
 ALTER TABLE config.config_threshold_overrides ALTER COLUMN server_id SET NOT NULL;
 ALTER TABLE config.config_threshold_overrides DROP COLUMN IF EXISTS scope_tag_id;"),
+        // V228 (#6927): the four blocking band columns on the alert settings row. The warn per hour column is the probe's newest sentinel. The
+        // rewind drops all four, so a re-run of V228 adds them again. Safe on a store that never had them.
+        new(228, "hasBlockingBands",
+            @"ALTER TABLE config.config_alert_settings
+    DROP COLUMN IF EXISTS blocking_warn_per_hour,
+    DROP COLUMN IF EXISTS blocking_critical_per_hour,
+    DROP COLUMN IF EXISTS blocking_warn_wait_seconds,
+    DROP COLUMN IF EXISTS blocking_critical_wait_seconds;"),
         // V229 (#6928): the severity filter on the notification routes. The column is the probe's newest sentinel. The rewind drops the column
         // (its CHECK goes with it), so a re-run of V229 does everything again. Safe on a store that never had it.
         new(229, "hasRouteSeverities",

@@ -18,6 +18,7 @@ class FakeNode {
   appendChild(c) { if (c && typeof c === "object") c.parentNode = this; this.children.push(c); return c; }
   append(...cs) { cs.forEach((c) => this.appendChild(c)); }
   prepend(c) { this.children.unshift(c); }
+  insertBefore(c, ref) { const i = ref ? this.children.indexOf(ref) : -1; if (c && typeof c === "object") c.parentNode = this; if (i < 0) this.children.push(c); else this.children.splice(i, 0, c); return c; }
   removeChild(c) { const i = this.children.indexOf(c); if (i >= 0) this.children.splice(i, 1); return c; }
   replaceChildren(...cs) { this.children = []; cs.forEach((c) => this.appendChild(c)); }
   remove() {}
@@ -52,6 +53,8 @@ globalThis.document = {
   cookie: "", hidden: false,
 };
 globalThis.Node = FakeNode;
+/* The in-place refresh (#6933) watches a staged panel for its loading strip to go. These scenarios do not read what lands, so the observer never fires. */
+globalThis.MutationObserver = class { observe() {} disconnect() {} };
 globalThis.window = globalThis;
 globalThis.location = { hash: "#/server/alpha", pathname: "/", search: "", href: "http://localhost/", origin: "http://localhost" };
 globalThis.history = { pushState() {}, replaceState() {}, back() {} };

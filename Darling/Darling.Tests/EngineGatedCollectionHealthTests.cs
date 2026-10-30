@@ -96,7 +96,7 @@ public sealed class EngineGatedCollectionHealthTests
             tally = tally.Add(row.CollectorName, row.HealthStatus, alwaysOnOff: false, engineGated: gate.IsGated(row.CollectorName));
         }
 
-        Assert.Equal(new CollectorHealthClassifier.BandTally(Healthy: 1, Warning: 0, Failing: 0, NotCollected: 2, Total: 3), tally);
+        Assert.Equal(new CollectorHealthClassifier.BandTally(Healthy: 1, Warning: 0, Failing: 0, NotCollected: 2, NoPermission: 0, Total: 3), tally);
 
         /* Without the gate the same rows are the two failing collectors the viewer's status bar reported. */
         var ungated = new CollectorHealthClassifier.BandTally();

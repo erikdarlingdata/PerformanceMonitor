@@ -265,7 +265,7 @@ public class AnalysisNotificationTests : IClassFixture<SharedDuckDbFixture>, IDi
 
         var value = FindingMessageFormatter.CurrentValue(finding);
 
-        Assert.Contains("4.1σ", value);
+        Assert.Contains("4.1 times its usual variation", value);
         Assert.Contains("Tue 14:00", value);
     }
 

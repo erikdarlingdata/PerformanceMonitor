@@ -186,7 +186,7 @@ public static partial class PgTargetAdvice
 
         var inv = new StringBuilder();
         inv.Append(CultureInfo.InvariantCulture,
-            $"Statement queryid {queryId} held {windowShare * 100:0.#}% of the window's total statement execution time against {RoutineClause(anomaly)} — {Sigma(sigma)}σ on the window's peak per-collection share ({peakShare * 100:0.#}%) and {Sigma(meanSigma)}σ on its mean ({meanShare * 100:0.#}%)");
+            $"Statement queryid {queryId} held {windowShare * 100:0.#}% of the window's total statement execution time against {RoutineClause(anomaly)} — {Sigma(sigma)} times its usual variation above normal on the window's peak per-collection share ({peakShare * 100:0.#}%) and {Sigma(meanSigma)} times on its mean ({meanShare * 100:0.#}%)");
         if (samples > 0)
             inv.Append(CultureInfo.InvariantCulture, $", over {samples:N0} baseline samples");
         inv.Append('.');
@@ -217,7 +217,7 @@ public static partial class PgTargetAdvice
         return fallback with
         {
             Headline = string.Format(CultureInfo.InvariantCulture,
-                "One statement held {0:0}% of the window's execution time — {1}σ beyond its own normal for this hour", windowShare * 100, Sigma(sigma)),
+                "One statement held {0:0}% of the window's execution time — {1} times its usual variation above its own normal for this hour", windowShare * 100, Sigma(sigma)),
             Investigation = inv.ToString(),
             Remediation = rem.ToString(),
         };
@@ -242,7 +242,7 @@ public static partial class PgTargetAdvice
         {
             case 2 when anomaly is not null && string.Equals(anomaly.ObjectName, queryId, StringComparison.Ordinal):
                 return string.Format(CultureInfo.InvariantCulture,
-                    "This is {0}σ beyond the statement's OWN hour-of-week normal ({1}) — which is the grade (ANOMALY_PG_BAD_ACTOR_SHARE, walked into this card): the statement holds far more of the window than it usually holds of this hour.",
+                    "This is {0} times its usual variation above the statement's OWN hour-of-week normal ({1}) — which is the grade (ANOMALY_PG_BAD_ACTOR_SHARE, walked into this card): the statement holds far more of the window than it usually holds of this hour.",
                     Sigma(anomaly.Metadata.GetValueOrDefault("deviation_sigma")), RoutineClause(anomaly));
             case 2:
                 return string.Format(CultureInfo.InvariantCulture,
@@ -290,7 +290,7 @@ public static partial class PgTargetAdvice
 
     private static string HeadlineSuffix(int? ownNormal, Fact? anomaly) => ownNormal switch
     {
-        2 when anomaly is not null => string.Format(CultureInfo.InvariantCulture, " — {0}σ beyond its own normal for this hour", Sigma(anomaly.Metadata.GetValueOrDefault("deviation_sigma"))),
+        2 when anomaly is not null => string.Format(CultureInfo.InvariantCulture, " — {0} times its usual variation above its own normal for this hour", Sigma(anomaly.Metadata.GetValueOrDefault("deviation_sigma"))),
         1 => " — within its own normal for this hour",
         0 => " — no own-normal yet",
         _ => string.Empty,

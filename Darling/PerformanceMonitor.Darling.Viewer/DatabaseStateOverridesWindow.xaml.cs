@@ -98,7 +98,8 @@ public partial class DatabaseStateOverridesWindow : Window
     /// </summary>
     internal static async System.Threading.Tasks.Task<string?> GapNoteForAsync(
         IEnumerable<ServerPick> picks, ViewerServerTab.CollectorLastRunReader readLastRun,
-        ViewerServerTab.CollectorOutcomeReader readLatestOutcome, int serverId, int rowCount)
+        ViewerServerTab.CollectorOutcomeReader readLatestOutcome, int serverId, int rowCount,
+        ViewerServerTab.ServiceStartReader? readServiceStarted = null)
     {
         var pick = picks.FirstOrDefault(p => p.ServerId == serverId);
         if (pick is null)
@@ -107,7 +108,7 @@ public partial class DatabaseStateOverridesWindow : Window
         }
 
         var (text, visibility) = await ViewerServerTab.ReadEngineGapStateAsync(
-            readLastRun, null, pick.ServerId, pick.ServerName, pick.EngineEdition, pick.EngineKind, "database_states", rowCount, readLatestOutcome, awsRdsKind: AwsRdsKind.None);
+            readLastRun, null, pick.ServerId, pick.ServerName, pick.EngineEdition, pick.EngineKind, "database_states", rowCount, readLatestOutcome, awsRdsKind: AwsRdsKind.None, readServiceStarted);
 
         return visibility == Visibility.Visible ? text : null;
     }
@@ -164,7 +165,8 @@ public partial class DatabaseStateOverridesWindow : Window
             var gap = rowCount == 0
                 ? await GapNoteForAsync(
                     _picks, (id, collector) => _dataService.GetCollectorLastRunAsync(id, collector),
-                    (id, collector) => _dataService.GetLatestCollectorOutcomeAsync(id, collector), serverId, rowCount)
+                    (id, collector) => _dataService.GetLatestCollectorOutcomeAsync(id, collector), serverId, rowCount,
+                    () => _dataService.GetServiceStartedAsync())
                 : null;
 
             /* A newer load for this grid has started, so this answer is not the one the operator is

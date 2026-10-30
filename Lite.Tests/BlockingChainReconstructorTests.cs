@@ -22,11 +22,11 @@ public class BlockingChainReconstructorTests
     private static BlockingPairRow Pair(
         int blockedSpid, int blockingSpid,
         int? monitorLoop = null, int blockedEcid = 0, int blockingEcid = 0,
-        long waitMs = 1000, string blockingStatus = "running")
+        long waitMs = 1000, string blockingStatus = "running", DateTime? at = null)
     {
         return new BlockingPairRow
         {
-            EventTime = new DateTime(2026, 5, 22, 10, 0, 0),
+            EventTime = at ?? new DateTime(2026, 5, 22, 10, 0, 0),
             DatabaseName = "TestDb",
             BlockedSpid = blockedSpid,
             BlockedTranStarted = TranFor(blockedSpid),
@@ -43,7 +43,7 @@ public class BlockingChainReconstructorTests
         };
     }
 
-    // Default scope is cumulative (the collector path); the viewer-style tests pass scopeByMonitorLoop: true.
+    // Default scope is cumulative (monitor_loop ignored); the per-scan tests pass scopeByMonitorLoop: true.
     private static BlockingReconstruction Run(IEnumerable<BlockingPairRow> rows, bool scopeByMonitorLoop = false) =>
         BlockingChainReconstructor.Reconstruct(rows, MaxDepth, MaxPairs, StepBudget, scopeByMonitorLoop);
 
@@ -161,9 +161,8 @@ public class BlockingChainReconstructorTests
     [Fact]
     public void Cumulative_MergesAcrossScans()
     {
-        // The collector (scopeByMonitorLoop:false) ignores monitor_loop, so an episode's per-scan re-fires
-        // merge into ONE chain — preserving window-level depth/victims for the severity fact (per-scan scoping
-        // would under-count). 200 → 201 (scan 1) and 201 → 202 (scan 2) form one depth-2 chain.
+        // scopeByMonitorLoop:false ignores monitor_loop, so 200 → 201 (scan 1) and 201 → 202 (scan 2) form one
+        // depth-2 chain. No analysis caller uses it any more (#6931): it links reused spids across the window.
         var result = Run(new[]
         {
             Pair(201, 200, monitorLoop: 1),
@@ -327,5 +326,77 @@ public class BlockingChainReconstructorTests
         var chain = BlockingChainReconstructor.FindChainForSession(result, null, 200, 0);
         Assert.NotNull(chain);
         Assert.Equal(200, chain!.ApexSpid);
+    }
+
+    [Fact]
+    public void SpidReuse_AcrossScansAnHourApart_IsNoCycle_WhenScopedByScan()
+    {
+        // #6931: 132 blocks 133 in one scan and 133 blocks 132 an hour later, two unrelated moments. Keyed on
+        // spid alone that is a cycle, scoped by scan it is two depth-1 chains.
+        var rows = new[]
+        {
+            Pair(133, 132, monitorLoop: 10, waitMs: 142_000, at: new DateTime(2026, 5, 22, 13, 23, 0)),
+            Pair(132, 133, monitorLoop: 90, waitMs: 20_000, at: new DateTime(2026, 5, 22, 14, 23, 0)),
+        };
+
+        Assert.True(Run(rows, scopeByMonitorLoop: false).CycleDetected);
+
+        var scoped = Run(rows, scopeByMonitorLoop: true);
+        Assert.False(scoped.CycleDetected);
+        Assert.Equal(2, scoped.Chains.Count);
+        Assert.All(scoped.Chains, c => { Assert.Equal(1, c.Depth); Assert.Equal(1, c.VictimCount); });
+    }
+
+    [Fact]
+    public void NoMonitorLoop_ScopedRows_AreScopedByTheirEventSecond()
+    {
+        var rows = new[]
+        {
+            Pair(133, 132, waitMs: 142_000, at: new DateTime(2026, 5, 22, 13, 23, 0)),
+            Pair(132, 133, waitMs: 20_000, at: new DateTime(2026, 5, 22, 14, 23, 0)),
+        };
+
+        var scoped = Run(rows, scopeByMonitorLoop: true);
+        Assert.False(scoped.CycleDetected);
+        Assert.Equal(2, scoped.Chains.Count);
+
+        // Rows of one second stay one scan: a real three-level chain keeps its depth.
+        var oneScan = Run(new[] { Pair(11, 10), Pair(12, 11), Pair(13, 12) }, scopeByMonitorLoop: true);
+        Assert.Equal(3, Assert.Single(oneScan.Chains).Depth);
+    }
+
+    [Fact]
+    public void ARealThreeLevelChainInsideOneScan_ReportsDepthThree()
+    {
+        var result = Run(new[]
+        {
+            Pair(11, 10, monitorLoop: 4), Pair(12, 11, monitorLoop: 4), Pair(13, 12, monitorLoop: 4),
+            Pair(21, 20, monitorLoop: 5)
+        }, scopeByMonitorLoop: true);
+
+        var chain = result.Chains.First(c => c.ApexSpid == 10);
+        Assert.Equal(3, chain.Depth);
+        Assert.Equal(3, chain.VictimCount);
+        Assert.False(result.CycleDetected);
+    }
+
+    [Theory]
+    [InlineData(6)]
+    [InlineData(2)]
+    public void StepBudget_IsPerRoot_SoALaterChainNeverReportsZeroVictims(int stepBudget)
+    {
+        // Four heads each block 50, and 50 and 51 block each other: a cyclic graph, so the depth search has no memo.
+        // On one shared budget the first head used it all and the other three walked nothing (0 victims, 0 ms).
+        var rows = new[]
+        {
+            Pair(50, 1, waitMs: 4_000), Pair(50, 2, waitMs: 3_000), Pair(50, 3, waitMs: 2_000), Pair(50, 4, waitMs: 1_000),
+            Pair(51, 50), Pair(50, 51)
+        };
+
+        var result = BlockingChainReconstructor.Reconstruct(rows, MaxDepth, MaxPairs, stepBudget, scopeByMonitorLoop: true);
+
+        Assert.Equal(4, result.Chains.Count);
+        Assert.All(result.Chains, c => { Assert.True(c.VictimCount > 0); Assert.True(c.MaxWaitMs > 0); });
+        Assert.Equal(stepBudget < 3, result.TraversalTruncated);
     }
 }
