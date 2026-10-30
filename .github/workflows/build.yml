@@ -737,10 +737,10 @@ jobs:
       # and not on the day signing is switched on. WiX's ICE validation runs as part of the build and any error fails it.
       #
       # An MSI is signed as a whole, and the three steps after this one (upload for signing, SignPath, the copy into
-      # releases/) run only when the repository variable DARLING_MSI_SIGNING is 'true'. Nothing sets it yet: it waits
-      # on the SignPath artifact configuration 'DarlingMsi' (the MSI file at the root) and is then set to 'true'. With
-      # it unset nothing is submitted and no MSI ships; the signature step below fails the job if an .msi reaches
-      # releases/ without a Valid SignPath Foundation signature.
+      # releases/) run only when the repository variable DARLING_MSI_SIGNING is 'true'. It has been set to 'true' since
+      # 2026-10-23, so each release signs the MSI (SignPath artifact configuration 'DarlingMsi', the MSI file at the
+      # root) and ships it. Unsetting the variable skips the MSI: nothing is submitted and no MSI ships. The signature
+      # step below fails the job if an .msi reaches releases/ without a Valid SignPath Foundation signature.
       - name: Build Darling MSI
         if: github.event_name == 'release'
         shell: pwsh
