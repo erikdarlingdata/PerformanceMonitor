@@ -199,12 +199,16 @@ public static class NotificationRouter
     /// <paramref name="serverId"/> (#5750) is the product's server id for the firing - Lite's hash id, Darling's
     /// registry id - or null for a firing with no server (a fleet-level preview): only fleet-wide routes can match
     /// then. Optional so a caller with no server keeps compiling.
+    /// <paramref name="severity"/> (#6928) is the alert's tier: a route whose severity filter excludes it is dropped before
+    /// the order below runs, so matching goes on to the next route and ends at the defaults. Null (a caller that does not
+    /// know the tier) is taken by every route, which is today's behaviour.
     /// </summary>
     public static NotificationRouteDecision Resolve(
         string metricName,
         IReadOnlyList<NotificationRoute>? routes,
         IAlertSettings defaults,
-        int? serverId = null)
+        int? serverId = null,
+        AlertSeverityLevel? severity = null)
     {
         if (metricName is null)
         {
@@ -217,7 +221,7 @@ public static class NotificationRouter
         }
 
         var family = AlertFamily.Of(metricName);
-        var ordered = OrderedCandidates(metricName, routes, serverId);
+        var ordered = OrderedCandidates(metricName, routes, serverId, severity);
 
         /* The winning route for the ledger's headline: the most specific one that matched at all, whether
            or not it ended up supplying every channel. Per-channel provenance sits on each destination. */
@@ -261,14 +265,15 @@ public static class NotificationRouter
     public static NotificationRoute? ResolveAgent(
         string metricName,
         IReadOnlyList<NotificationRoute>? routes,
-        int? serverId = null)
+        int? serverId = null,
+        AlertSeverityLevel? severity = null)
     {
         if (metricName is null)
         {
             throw new ArgumentNullException(nameof(metricName));
         }
 
-        foreach (var (route, _, _, _) in OrderedCandidates(metricName, routes, serverId))
+        foreach (var (route, _, _, _) in OrderedCandidates(metricName, routes, serverId, severity))
         {
             if (route.AgentLevel is { } level)
             {
@@ -294,14 +299,15 @@ public static class NotificationRouter
     private static List<(NotificationRoute Route, RouteScopeTier Tier, int Level, RouteSource Source)> OrderedCandidates(
         string metricName,
         IReadOnlyList<NotificationRoute>? routes,
-        int? serverId)
+        int? serverId,
+        AlertSeverityLevel? severity)
     {
         var candidates = new List<(NotificationRoute Route, RouteScopeTier Tier, int Level, RouteSource Source)>();
         if (routes is not null)
         {
             foreach (var route in routes)
             {
-                if (route is null || !route.CanMatch || !route.AppliesTo(serverId))
+                if (route is null || !route.CanMatch || !route.AppliesTo(serverId) || !route.AcceptsSeverity(severity))
                 {
                     continue;
                 }

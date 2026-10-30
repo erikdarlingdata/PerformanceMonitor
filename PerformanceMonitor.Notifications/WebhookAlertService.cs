@@ -240,7 +240,8 @@ public class WebhookAlertService
                comes from this one snapshot. With an adapter that does not override SnapshotForDelivery (Lite)
                it is the live settings. */
             var delivery = _settings.SnapshotForDelivery();
-            var route = NotificationRouter.Resolve(metricName, delivery.NotificationRoutes, delivery, NotificationRouter.ParseServerId(serverId));
+            var route = NotificationRouter.Resolve(metricName, delivery.NotificationRoutes, delivery, NotificationRouter.ParseServerId(serverId),
+                AlertSeverity.RouteLevelOf(metricName, context?.SeverityOverride));
 
             /* #5469: the PagerDuty auto-resolve behaviour reaches the cooldown only when PagerDuty will
                actually be sent this alert: the flag on AND a destination for this metric. The flag is read
@@ -2903,9 +2904,20 @@ public class WebhookAlertService
     /// is off or PagerDuty is not routed for the metric, <see cref="AlertChannelOutcome.Delivered"/> or
     /// <see cref="AlertChannelOutcome.Failed"/> otherwise. Never throws except for the caller's own cancellation.
     /// </summary>
+    public Task<AlertChannelOutcome> TrySendPagerDutyResolveAsync(
+        string firingMetric, string serverName, string serverId, string? detailText,
+        AlertSeverityLevel? firedSeverity = null, CancellationToken cancellationToken = default) =>
+        TrySendPagerDutyResolveAsync(firingMetric, serverName, serverId, detailText, new[] { firedSeverity }, cancellationToken);
+
+    /// <summary>
+    /// The same close for an episode that fired at more than one tier (#6928). The route is resolved at each of
+    /// <paramref name="firedSeverities"/> (a null entry resolves with no tier, as before the filter), and a <c>resolve</c> goes to every
+    /// distinct routing key that gives, so a Warning-only route's incident is closed after the alert climbed to Critical and a
+    /// Critical-only route took the later fires. Delivered when a resolve posted and none failed, Failed when any failed.
+    /// </summary>
     public async Task<AlertChannelOutcome> TrySendPagerDutyResolveAsync(
         string firingMetric, string serverName, string serverId, string? detailText,
-        CancellationToken cancellationToken = default)
+        IReadOnlyCollection<AlertSeverityLevel?> firedSeverities, CancellationToken cancellationToken = default)
     {
         try
         {
@@ -2915,26 +2927,44 @@ public class WebhookAlertService
                 return AlertChannelOutcome.NotAttempted;
             }
 
-            var route = NotificationRouter.Resolve(firingMetric, delivery.NotificationRoutes, delivery, NotificationRouter.ParseServerId(serverId));
-            if (route.PagerDuty.Destination is not { } pagerDutyKey)
+            /* #6928: routed at each severity the fire went out at, so the close lands on the key each fire's route carried, not on a
+               route the severity filter would send another tier to. */
+            var keys = new List<string>();
+            foreach (var severity in firedSeverities.Count == 0 ? new AlertSeverityLevel?[] { null } : firedSeverities)
+            {
+                var route = NotificationRouter.Resolve(firingMetric, delivery.NotificationRoutes, delivery, NotificationRouter.ParseServerId(serverId), severity);
+                if (route.PagerDuty.Destination is { } pagerDutyKey && !keys.Contains(pagerDutyKey, StringComparer.Ordinal))
+                {
+                    keys.Add(pagerDutyKey);
+                }
+            }
+
+            if (keys.Count == 0)
             {
                 return AlertChannelOutcome.NotAttempted;
             }
 
-            var error = await TrySendPagerDutyAlertAsync(
-                delivery, autoResolve: true, pagerDutyKey, firingMetric, serverName, "resolved", "", serverId,
-                context: null, triageUrl: null, detailText, _utcNow(), displayName: null,
-                resolveIncident: true, cancellationToken: cancellationToken);
-            if (error is null)
+            var failed = false;
+            foreach (var pagerDutyKey in keys)
             {
-                /* As the built-in pairs do after a delivered close: the cooldown entry the fire stamped describes an
-                   incident PagerDuty just closed, so the next fire of the same key must open a new one instead of being
-                   throttled against it. Only a resolve that posted clears it (#5654). */
-                _cooldown.ClearMetric(serverId, firingMetric, null);
-                return AlertChannelOutcome.Delivered;
+                var error = await TrySendPagerDutyAlertAsync(
+                    delivery, autoResolve: true, pagerDutyKey, firingMetric, serverName, "resolved", "", serverId,
+                    context: null, triageUrl: null, detailText, _utcNow(), displayName: null,
+                    resolveIncident: true, cancellationToken: cancellationToken);
+                if (error is null)
+                {
+                    /* As the built-in pairs do after a delivered close: the cooldown entry the fire stamped describes an
+                       incident PagerDuty just closed, so the next fire of the same key must open a new one instead of being
+                       throttled against it. Only a resolve that posted clears it (#5654). */
+                    _cooldown.ClearMetric(serverId, firingMetric, null);
+                }
+                else
+                {
+                    failed = true;
+                }
             }
 
-            return AlertChannelOutcome.Failed;
+            return failed ? AlertChannelOutcome.Failed : AlertChannelOutcome.Delivered;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {

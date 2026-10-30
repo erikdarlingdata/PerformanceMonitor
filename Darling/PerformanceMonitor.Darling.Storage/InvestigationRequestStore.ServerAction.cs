@@ -11,6 +11,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitor.Darling.Storage;
 
@@ -24,7 +25,7 @@ public sealed record ServerActionCall(string Tool, string ServerAction, AgentAct
 /// <see cref="InvestigationRequestStore.ReadServerCredentialStateAsync"/>. It never resolves the secret.</summary>
 public sealed class ServerActionHooks
 {
-    public required Func<NpgsqlConnection, NpgsqlTransaction, CancellationToken, Task<Func<string, int, int?>>> LoadLevels { get; init; }
+    public required Func<NpgsqlConnection, NpgsqlTransaction, CancellationToken, Task<Func<string, int, AlertSeverityLevel?, int?>>> LoadLevels { get; init; }
 
     public required Func<int, CancellationToken, Task<ServerCredentialState>> ReadCredential { get; init; }
 }
@@ -131,7 +132,7 @@ public sealed partial class InvestigationRequestStore
     /// </summary>
     private async Task<AgentActionRefusal?> ServerActionConditionsRefusalAsync(NpgsqlConnection connection, NpgsqlTransaction transaction,
         AgentActionRequest? request, string serverAction, AgentAction action, AgentActionTarget target,
-        Func<NpgsqlConnection, NpgsqlTransaction, CancellationToken, Task<Func<string, int, int?>>> loadLevels, DateTime now, bool practice,
+        Func<NpgsqlConnection, NpgsqlTransaction, CancellationToken, Task<Func<string, int, AlertSeverityLevel?, int?>>> loadLevels, DateTime now, bool practice,
         CancellationToken cancellationToken)
     {
         if (ClaimOrPracticeRefusal(request, action, now, practice) is { } claimRefusal)

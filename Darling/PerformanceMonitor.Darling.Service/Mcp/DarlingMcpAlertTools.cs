@@ -703,6 +703,7 @@ public sealed partial class DarlingMcpAlertTools
         "and agent_max_per_day; Darling only, Lite has no agent channel); it never changes a destination. " +
         "send_resolutions says whether the route's destinations also get the message that an alert has cleared: null " +
         "follows each channel's setting (get_alert_settings delivery.send_resolutions), true always sends it, false never does. " +
+        "severities (critical, warning or both) says which alerts the route takes by severity: both is the default and takes every alert, and a route whose filter excludes an alert does not match it, so matching goes on to the next route. " +
         "Routes are authored in the Viewer's Settings window or here (create_notification_route / update_notification_route); " +
         "they can also be disabled or deleted (set_notification_route_enabled / delete_notification_route).")]
     public static async Task<string> GetNotificationRoutes(
@@ -977,6 +978,7 @@ public sealed partial class DarlingMcpAlertTools
             ["metric_match"] = route.MetricMatch,
             ["enabled"] = route.Enabled,
             ["send_resolutions"] = route.SendResolutions switch { true => "always", false => "never", _ => "inherit" },
+            ["severities"] = route.Severities,
         };
         if (route.ScopeServerId.HasValue)
         {
@@ -1041,6 +1043,8 @@ public sealed partial class DarlingMcpAlertTools
         /* #5825: null follows each channel's "send resolutions" setting (get_alert_settings, delivery.send_resolutions);
            true or false overrides it for this route's destinations. */
         send_resolutions = r.SendResolutions,
+        /* #6928 (V229): which alerts the route takes by severity: both, critical or warning. */
+        severities = r.Severities,
         /* #6036 (D8 of #5632 Phase C): the route an expired investigation request goes to first. Null = none; the name is the
            fallback route's metric_match. */
         fallback_route_id = r.FallbackRouteId,

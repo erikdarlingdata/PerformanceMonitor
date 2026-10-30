@@ -87,7 +87,8 @@ public sealed record ExternalAlertFireResult(
 /// the incident under these, whatever the server registry says by then.
 /// </summary>
 public sealed record ExternalAlertFiringState(
-    bool Firing, string? FiredSeverity, DateTime? LastFiredAtUtc, int ServerId, string ServerKey, string ServerName);
+    bool Firing, string? FiredSeverity, DateTime? LastFiredAtUtc, int ServerId, string ServerKey, string ServerName,
+    string? FiredSeverities = null);
 
 /// <summary>
 /// The service's side of the external alert queue (#5654): claims what a source submitted through
@@ -299,7 +300,7 @@ WHERE pending_id = ANY($1)
 
     /// <summary>Reads one subject's firing state. $1 source_id, $2 alert_key, $3 server_label (the normalized submitted name).</summary>
     public const string GetStateSql = @"
-SELECT firing, fired_severity, last_fired_at, server_id, server_key, server_name
+SELECT firing, fired_severity, last_fired_at, server_id, server_key, server_name, fired_severities
 FROM config.external_alert_state
 WHERE source_id = $1 AND alert_key = $2 AND server_label = $3";
 
@@ -329,6 +330,7 @@ up AS (
         server_key = CASE WHEN config.external_alert_state.firing THEN config.external_alert_state.server_key ELSE EXCLUDED.server_key END,
         server_name = CASE WHEN config.external_alert_state.firing THEN config.external_alert_state.server_name ELSE EXCLUDED.server_name END,
         fired_severity = CASE WHEN config.external_alert_state.firing THEN config.external_alert_state.fired_severity ELSE NULL END,
+        fired_severities = CASE WHEN config.external_alert_state.firing THEN config.external_alert_state.fired_severities ELSE NULL END,
         firing = true,
         last_fired_at = EXCLUDED.last_fired_at
     RETURNING server_id, server_key, server_name
@@ -339,10 +341,16 @@ FROM up";
     /// <summary>
     /// Records that a fire's send went out (#5654), so the severity is the one the operator was told. $1 source_id,
     /// $2 alert_key, $3 server_label, $4 severity. Touches only a subject that is firing.
+    /// <para><c>fired_severities</c> (#6928) is every severity sent during the open episode, comma separated, each once, so the
+    /// clear can close what a Warning-only route opened after the alert climbed to Critical. <c>fired_severity</c> stays the newest.</para>
     /// </summary>
     public const string ConfirmFireSql = @"
 UPDATE config.external_alert_state
-SET fired_severity = $4
+SET fired_severity = $4,
+    fired_severities = CASE
+        WHEN fired_severities IS NULL THEN $4::text
+        WHEN position(',' || $4::text || ',' IN ',' || fired_severities || ',') > 0 THEN fired_severities
+        ELSE fired_severities || ',' || $4::text END
 WHERE source_id = $1 AND alert_key = $2 AND server_label = $3
   AND firing";
 
@@ -672,7 +680,8 @@ ORDER BY s.source_name, p.status";
             reader.IsDBNull(2) ? null : reader.GetFieldValue<DateTime>(2),
             reader.GetInt32(3),
             reader.GetString(4),
-            reader.GetString(5));
+            reader.GetString(5),
+            reader.IsDBNull(6) ? null : reader.GetString(6));
     }
 
     /// <summary>
