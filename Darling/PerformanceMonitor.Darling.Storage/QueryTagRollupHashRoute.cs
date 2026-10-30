@@ -59,12 +59,13 @@ public static class QueryTagRollupHashRoute
     /// <c>collect.query_store_compose_stamp_failures</c>, an hour the builder does not build in its backlog pass (in back-off or being retried).
     /// <c>blocked</c> (#6865) is true on a built-hour row an open writer of the wide table would defer: the planner drops such an hour before it
     /// picks a build, so it never builds and never gets a failure record, and the read must not wait for it either. It is the planner's own
-    /// predicate (<see cref="QueryStoreComposeStamp.WriterCutoffSql"/> and <see cref="QueryStoreComposeStamp.BlockedByWriterTail"/>).
+    /// predicate (<see cref="QueryStoreComposeStamp.BlockedByWriterTail"/>) over the cutoff a reader can compute (<see cref="QueryStoreComposeStamp.ReaderWriterCutoffSql"/>, #6945):
+    /// a writer whose start the reading role cannot see (the <c>mcp</c> and <c>viewer</c> roles see none of the owner's sessions) counts for nothing, where the planner counts it as open from before every hour.
     /// </summary>
     internal const string LedgerSql = @"
 WITH cutoff AS
 (
-    " + QueryStoreComposeStamp.WriterCutoffSql + @"
+    " + QueryStoreComposeStamp.ReaderWriterCutoffSql + @"
 )
 SELECT h.hour, NULL::integer AS server_id, false AS late_write, false AS failing,
        (h.hour" + QueryStoreComposeStamp.BlockedByWriterTail + @") AS blocked
@@ -321,8 +322,8 @@ AND   f.hour < $2";
         /* #6865: a built hour whose pairs are stale only for the hash table (and no pair of it is a late write) is backlog: the read starts after the
            newest one instead of reading it from the wide table. An hour the builder will not build soon is not: one with a failure record (in
            back-off, or retried by the normal selection, so it may not build for a day or more) and one an open writer of the wide table would
-           defer (the planner drops it before it picks a build, so it never builds and never gets a failure record; with a writer whose start
-           reads NULL that is every hour). An hour that stays stale must not pin the cut and take every older hour with it. Such an hour is read
+           defer (the planner drops it before it picks a build, so it never builds and never gets a failure record). A writer whose start this
+           role cannot read is not counted (#6945, QueryStoreComposeStamp.ReaderWriterCutoffSql). An hour that stays stale must not pin the cut and take every older hour with it. Such an hour is read
            wide, as before, unless a backlog hour newer than it puts it before the cut. */
         var backlog = stale.Select(p => p.Hour)
             .Where(h => built.Contains(h) && !lateWriteHours.Contains(h) && !failingHours.Contains(h) && !blockedHours.Contains(h))
