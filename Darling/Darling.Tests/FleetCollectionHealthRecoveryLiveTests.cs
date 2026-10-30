@@ -120,6 +120,15 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ServerId, ServerName);
         using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
+        if (scratch.TimescaleEnabled)
+        {
+            /* V23 made collection_log a hypertable with a compression policy (compress_after 1 day), and every
+               seeded chunk is older than that. TimescaleDB's scheduler runs the policy on its own clock, so a run
+               landing between the seed and the plan compressed a chunk, and a compressed chunk is read through its
+               own "compressed_server_id__ts_meta_v2_first_col_idx" instead of idx_collection_log_watermark (dev run
+               40987085936, #6944). The plan is not the thing under test there, so no policy job runs here. */
+            await DarlingMcpTestData.ExecAsync(connection, ct, "SELECT _timescaledb_functions.stop_background_workers()");
+        }
         await DeleteRowsAsync(connection, ct);
 
         var bodySucceeded = false;
@@ -144,6 +153,12 @@ SELECT -5666000000 - (c * 100000 + g), $1, $2, 'c' || c,
        CASE WHEN g % 7 = 0 THEN 'ERROR' ELSE 'SUCCESS' END, NULL, 5, 80, 20
 FROM generate_series(1, 6) c, generate_series(1, 2000) g", ServerId, ServerName, newest);
             await DarlingMcpTestData.ExecAsync(connection, ct, "ANALYZE collection_log");
+            if (scratch.TimescaleEnabled)
+            {
+                await using var compressed = new NpgsqlCommand(
+                    "SELECT count(*) FROM timescaledb_information.chunks WHERE hypertable_name = 'collection_log' AND is_compressed", connection);
+                Assert.Equal(0L, (long)(await compressed.ExecuteScalarAsync(ct))!);
+            }
 
             var windowStart = DarlingMcpTestData.Naive(DateTime.UtcNow.AddDays(-7));
             await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
