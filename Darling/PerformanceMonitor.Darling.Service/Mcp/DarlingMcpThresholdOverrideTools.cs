@@ -382,9 +382,10 @@ public sealed class DarlingMcpThresholdOverrideTools
                 await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
                 var inputs = await StoreConfigProvider.ReadRouteScopeInputsAsync(connection, null, cancellationToken);
                 var names = new System.Collections.Generic.Dictionary<int, string>();
-                await using (var command = new NpgsqlCommand("SELECT id, name FROM config.server_tags", connection) { CommandTimeout = McpCommandDeadlines.ReadSeconds })
-                await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+                await using (var command = postgres.CreateCommand("SELECT id, name FROM config.server_tags"))
                 {
+                    command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+                    await using var reader = await command.ExecuteReaderAsync(cancellationToken);
                     while (await reader.ReadAsync(cancellationToken))
                         names[reader.GetInt32(0)] = reader.GetString(1);
                 }
