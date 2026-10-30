@@ -280,7 +280,7 @@ function route(opts) {
   setActiveNav(r);
   if (r.name === "server") renderServer(main, r.param, r.tab, opts);
   else if (r.name === "finops") renderFinops(main, r.param, r.tab, opts);
-  else if (r.name === "ag") renderAg(main);
+  else if (r.name === "ag") renderAg(main, opts);
   else if (r.name === "sweeps") renderSweeps(main, opts);
   else if (r.name === "alerts") renderAlerts(main);
   else if (r.name === "investigations") renderInvestigations(main);
@@ -289,9 +289,9 @@ function route(opts) {
   else if (r.name === "admin") renderAdmin(main, r.tab);
   else if (r.name === "triage") renderTriage(main, r.query);
   else if (r.name === "views") renderViewList(main);
-  else if (r.name === "view") renderView(main, r.id);
+  else if (r.name === "view") renderView(main, r.id, opts);
   else if (r.name === "editor") renderEditor(main, r.id);
-  else if (r.name === "notebook") renderView(main, r.id); // renderView kind-detects -> notebook document
+  else if (r.name === "notebook") renderView(main, r.id, opts); // renderView kind-detects -> notebook document
   else if (r.name === "notebookEditor") renderNotebookEditor(main, r.id, r.template);
   else if (r.name === "muteRules") renderMuteRules(main, r.query);
   else if (r.name === "knownPatterns") renderKnownPatterns(main);
@@ -299,7 +299,7 @@ function route(opts) {
   else if (r.name === "manageQueryTags") renderManageQueryTags(main);
   else if (r.name === "queryTagUsage") renderQueryTagUsage(main);
   else if (r.name === "jobHistory") renderJobHistory(main);
-  else renderFleet(main);
+  else renderFleet(main, opts);
 }
 
 /* Whether a route targets a specific saved view/notebook (its renderer or composer) — the routes whose sidebar
