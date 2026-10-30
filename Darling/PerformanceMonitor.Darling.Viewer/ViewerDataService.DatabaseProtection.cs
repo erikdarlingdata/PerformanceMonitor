@@ -78,7 +78,8 @@ public sealed partial class ViewerDataService
         var (text, _) = await ViewerServerTab.ReadEngineGapStateAsync(
             (serverId, collector) => GetCollectorLastRunAsync(serverId, collector, cancellationToken), null,
             server.ServerId, server.DisplayName, server.EngineEdition, server.EngineKind, "database_protection", 0,
-            (serverId, collector) => GetLatestCollectorOutcomeAsync(serverId, collector, cancellationToken), awsRdsKind: AwsRdsKind.None);
+            (serverId, collector) => GetLatestCollectorOutcomeAsync(serverId, collector, cancellationToken), awsRdsKind: AwsRdsKind.None,
+            () => GetServiceStartedAsync(cancellationToken));
         if (!string.IsNullOrEmpty(text))
         {
             return new ViewerDatabaseProtectionRead(ViewerDatabaseProtectionRead.Precondition, text, null, [], null);

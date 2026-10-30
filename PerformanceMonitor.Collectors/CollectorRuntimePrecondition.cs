@@ -324,7 +324,7 @@ public static class CollectorRuntimePrecondition
         {
             return $"The {collectorName} collector is running against {serverName} but the PostgreSQL " +
                    $"extension it reads is not installed there: its last run{observed} was recorded as a " +
-                   $"named non-fatal skip, so {CapturePathOf(collectorName)} is not being stored.{said} " +
+                   $"named non-fatal skip, so nothing from {CapturePathOf(collectorName)} is being stored.{said} " +
                    "The stored sentence names the extension and the database to create it in — installing " +
                    "it is the remedy, and no grant will change this. An optional extension left " +
                    "uninstalled is also a legitimate resting state; the skip simply keeps that choice " +
@@ -336,7 +336,8 @@ public static class CollectorRuntimePrecondition
         {
             return $"The {collectorName} collector is running against {serverName} but cannot read its " +
                    $"source: its last run{observed} was recorded as a non-fatal skip rather than a failure, " +
-                   $"so {CapturePathOf(collectorName)} is not being stored.{said} " +
+                   $"so nothing from {CapturePathOf(collectorName)} is being stored.{said} " +
+                   MsdbGrantSentence(collectorName) +
                    (forReader ? "" : DegradedClientSentence + " ") +
                    PreconditionEpilogue;
         }
@@ -421,15 +422,19 @@ public static class CollectorRuntimePrecondition
     /// <param name="serverFirstCollectedUtc">The server's oldest run by ANY collector in the same store, or null
     /// when it has none. Null makes no first-run grace claim, so the never-ran arm speaks as before. It has no default,
     /// so a caller cannot drop the grace by leaving it out.</param>
+    /// <param name="serviceStartedUtc">#6932: when the collecting service process started, or null where the caller does not know it. A
+    /// collector added by an upgrade has no run of its own and the server's first collection is long past, so without this the first
+    /// slot after the restart reads as "switched off". See <see cref="IsInsideFirstRunGrace"/>.</param>
     public static string? GatedOffMessage(
         string serverName,
         string collectorName,
         string gateCandidates,
         DateTime? collectorLastRunUtc,
         DateTime? serverLastCollectedUtc,
-        DateTime? serverFirstCollectedUtc)
+        DateTime? serverFirstCollectedUtc,
+        DateTime? serviceStartedUtc = null)
     {
-        switch (ClassifyGatedOff(collectorName, collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc))
+        switch (ClassifyGatedOff(collectorName, collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc, serviceStartedUtc))
         {
             case GatedOffCase.GoneDark:
                 /* Both instants, because this is a claim about NOW assembled from two stored measurements and the
@@ -445,7 +450,7 @@ public static class CollectorRuntimePrecondition
                        ConnectScopedEpilogue;
 
             case GatedOffCase.NotYetDue:
-                return NotYetRunMessage(serverName, collectorName, serverLastCollectedUtc, serverFirstCollectedUtc);
+                return NotYetRunMessage(serverName, collectorName, serverLastCollectedUtc, serverFirstCollectedUtc, serviceStartedUtc);
 
             case GatedOffCase.NeverRan:
                 return $"The {collectorName} collector has never run against {serverName}, while the server itself " +
@@ -478,11 +483,12 @@ public static class CollectorRuntimePrecondition
         string gateCandidates,
         DateTime? collectorLastRunUtc,
         DateTime? serverLastCollectedUtc,
-        DateTime? serverFirstCollectedUtc)
+        DateTime? serverFirstCollectedUtc,
+        DateTime? serviceStartedUtc = null)
     {
         var causes = gateCandidates.Trim();
         var tail = (causes.Length == 0 ? "" : " " + causes) + ReconnectStep;
-        switch (ClassifyGatedOff(collectorName, collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc))
+        switch (ClassifyGatedOff(collectorName, collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc, serviceStartedUtc))
         {
             case GatedOffCase.GoneDark:
                 return $"The {CollectorWords(collectorName)} collector has not run for this server for over " +
@@ -495,7 +501,7 @@ public static class CollectorRuntimePrecondition
 
             default:
                 return GatedOffMessage(
-                    serverName, collectorName, gateCandidates, collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc);
+                    serverName, collectorName, gateCandidates, collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc, serviceStartedUtc);
         }
     }
 
@@ -565,8 +571,9 @@ public static class CollectorRuntimePrecondition
         string collectorName,
         DateTime? collectorLastRunUtc,
         DateTime? serverLastCollectedUtc,
-        DateTime? serverFirstCollectedUtc) =>
-        ClassifyGatedOff(collectorName, collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc)
+        DateTime? serverFirstCollectedUtc,
+        DateTime? serviceStartedUtc = null) =>
+        ClassifyGatedOff(collectorName, collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc, serviceStartedUtc)
             == GatedOffCase.NotYetDue
             ? NotYetDueStatusWord
             : StatusWord;
@@ -581,14 +588,44 @@ public static class CollectorRuntimePrecondition
     /// collecting early stays inside the grace. False when either instant is null, for a collector with no default schedule,
     /// and for one that is off by default, so a caller that read nothing makes no grace claim.
     /// </summary>
-    public static bool IsInsideFirstRunGrace(string collectorName, DateTime? serverLastCollectedUtc, DateTime? serverFirstCollectedUtc)
+    public static bool IsInsideFirstRunGrace(
+        string collectorName, DateTime? serverLastCollectedUtc, DateTime? serverFirstCollectedUtc, DateTime? serviceStartedUtc = null)
     {
-        return serverLastCollectedUtc is { } lastCollected
-               && serverFirstCollectedUtc is { } firstCollected
-               && CollectorScheduleDefaults.All.TryGetValue(collectorName, out var schedule)
-               && schedule.DefaultEnabled
-               && schedule.FrequencyMinutes >= 0
-               && lastCollected < firstCollected.AddMinutes(schedule.FrequencyMinutes + FirstRunSlackMinutes);
+        return InsideGrace(collectorName, serverLastCollectedUtc, serverFirstCollectedUtc, serviceStartedUtc, out _);
+    }
+
+    /// <summary>
+    /// The grace test, and which instant it counted from. <paramref name="fromServiceStart"/> is true when only the collecting
+    /// service's start (#6932) puts the collector inside the grace: a collector an upgrade adds has no run, and the server's first
+    /// collection was long ago, so the grace measured from it is spent while the first slot after the restart is not yet due. A
+    /// collector that runs when monitoring starts (cadence 0) has no slot to wait for, so the service start never applies to it.
+    /// </summary>
+    private static bool InsideGrace(
+        string collectorName,
+        DateTime? serverLastCollectedUtc,
+        DateTime? serverFirstCollectedUtc,
+        DateTime? serviceStartedUtc,
+        out bool fromServiceStart)
+    {
+        fromServiceStart = false;
+        if (serverLastCollectedUtc is not { } lastCollected
+            || !CollectorScheduleDefaults.All.TryGetValue(collectorName, out var schedule)
+            || !schedule.DefaultEnabled
+            || schedule.FrequencyMinutes < 0)
+        {
+            return false;
+        }
+
+        if (serverFirstCollectedUtc is { } firstCollected
+            && lastCollected < firstCollected.AddMinutes(schedule.FrequencyMinutes + FirstRunSlackMinutes))
+        {
+            return true;
+        }
+
+        fromServiceStart = schedule.FrequencyMinutes > 0
+                           && serviceStartedUtc is { } started
+                           && lastCollected < started.AddMinutes(schedule.FrequencyMinutes + FirstRunSlackMinutes);
+        return fromServiceStart;
     }
 
     /// <summary>
@@ -599,11 +636,26 @@ public static class CollectorRuntimePrecondition
     /// a user may have changed the schedule. The times are UTC, marked with a "Z".
     /// </summary>
     public static string? NotYetRunMessage(
-        string serverName, string collectorName, DateTime? serverLastCollectedUtc, DateTime? serverFirstCollectedUtc)
+        string serverName,
+        string collectorName,
+        DateTime? serverLastCollectedUtc,
+        DateTime? serverFirstCollectedUtc,
+        DateTime? serviceStartedUtc = null)
     {
-        if (!IsInsideFirstRunGrace(collectorName, serverLastCollectedUtc, serverFirstCollectedUtc))
+        if (!InsideGrace(collectorName, serverLastCollectedUtc, serverFirstCollectedUtc, serviceStartedUtc, out var fromServiceStart))
         {
             return null;
+        }
+
+        /* #6932: inside the grace the collecting service's start gives, and not the one the server's first collection gives, the
+           collector's first slot is one cadence after the service started. Say when it is due rather than when the server first
+           collected, which is long ago and has nothing to do with this collector. */
+        if (fromServiceStart && serviceStartedUtc is { } started)
+        {
+            var interval = CollectorScheduleDefaults.All[collectorName].FrequencyMinutes;
+            return $"The {collectorName} collector has not had its first run against {serverName} yet. The collecting service " +
+                   $"started at {UtcText(started)}, and by default this collector runs {CadenceText(interval)}, so its first run " +
+                   $"is due at about {UtcText(started.AddMinutes(interval))}.";
         }
 
         var everyMinutes = CollectorScheduleDefaults.All[collectorName].FrequencyMinutes;
@@ -661,7 +713,8 @@ public static class CollectorRuntimePrecondition
         string collectorName,
         DateTime? collectorLastRunUtc,
         DateTime? serverLastCollectedUtc,
-        DateTime? serverFirstCollectedUtc)
+        DateTime? serverFirstCollectedUtc,
+        DateTime? serviceStartedUtc)
     {
         if (serverLastCollectedUtc is not { } lastCollected)
         {
@@ -679,7 +732,7 @@ public static class CollectorRuntimePrecondition
                 : GatedOffCase.GoneDark;
         }
 
-        return IsInsideFirstRunGrace(collectorName, serverLastCollectedUtc, serverFirstCollectedUtc)
+        return IsInsideFirstRunGrace(collectorName, serverLastCollectedUtc, serverFirstCollectedUtc, serviceStartedUtc)
             ? GatedOffCase.NotYetDue
             : GatedOffCase.NeverRan;
     }
@@ -990,6 +1043,51 @@ public static class CollectorRuntimePrecondition
     /// be the drift <see cref="CollectorEngineCapability.CapturePathByCollector"/>'s own doc-comment warns
     /// about, doubled.
     /// </summary>
+    /// <summary>
+    /// #6932: the msdb objects a collector reads through a grant of its own, by collector (the grant is <c>SELECT</c> unless the entry
+    /// says otherwise). The monitoring login does not get these from an ordinary install, and a refusal on one of them is the
+    /// <c>PERMISSIONS</c> run the degraded message above answers, which used to name the refusal and not the fix. The objects are the
+    /// ones <c>MonitoringGrantScript</c> grants in msdb, spelled the same way, and a test holds each pair against that script so the
+    /// message cannot name a grant the script does not give.
+    /// </summary>
+    public static readonly IReadOnlyDictionary<string, IReadOnlyList<(string Permission, string Object)>> MsdbGrantsByCollector =
+        new Dictionary<string, IReadOnlyList<(string Permission, string Object)>>(StringComparer.Ordinal)
+        {
+            ["agent_alerts"] = [("SELECT", "dbo.sysalerts"), ("SELECT", "dbo.sysnotifications")],
+            ["database_protection"] = [("SELECT", "dbo.backupset")],
+            ["job_history"] = [("SELECT", "dbo.sysjobs"), ("SELECT", "dbo.sysjobhistory"), ("SELECT", "dbo.syscategories")],
+            ["running_jobs"] = [("SELECT", "dbo.sysjobs"), ("SELECT", "dbo.sysjobactivity"), ("SELECT", "dbo.sysjobhistory"), ("SELECT", "dbo.syssessions")],
+            ["agent_status"] = [("SELECT", "dbo.sysjobs"), ("SELECT", "dbo.sysjobschedules"), ("EXECUTE", "dbo.agent_datetime")],
+        };
+
+    /// <summary>
+    /// The sentence that names the grant a refused msdb collector needs (#6932), or empty for a collector that reads nothing in msdb
+    /// through a grant. It says what to run, where, and that the next run uses it. The collector's own stored sentence stays the
+    /// authority on which object was refused: this lists every object the collector reads, because a login missing one is often
+    /// missing the others.
+    /// </summary>
+    internal static string MsdbGrantSentence(string collectorName)
+    {
+        if (!MsdbGrantsByCollector.TryGetValue(collectorName, out var grants))
+        {
+            return string.Empty;
+        }
+
+        var parts = new List<string>();
+        foreach (var byPermission in grants.GroupBy(g => g.Permission, StringComparer.Ordinal))
+        {
+            parts.Add(byPermission.Key + " on " + JoinWithAnd(byPermission.Select(g => "msdb." + g.Object).ToList()));
+        }
+
+        return "If that is a permission denial, grant " + JoinWithAnd(parts) +
+               " to the monitoring login. The next run uses it. ";
+    }
+
+    private static string JoinWithAnd(IReadOnlyList<string> items) =>
+        items.Count <= 2
+            ? string.Join(" and ", items)
+            : string.Join(", ", items.Take(items.Count - 1)) + " and " + items[^1];
+
     private static string CapturePathOf(string collectorName) =>
         CollectorEngineCapability.CapturePathByCollector.TryGetValue(collectorName, out var described)
             ? described

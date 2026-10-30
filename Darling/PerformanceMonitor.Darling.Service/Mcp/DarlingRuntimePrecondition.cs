@@ -223,11 +223,15 @@ ORDER BY database_name";
         DateTime? collectorLastRunUtc;
         DateTime? serverLastCollectedUtc;
         DateTime? serverFirstCollectedUtc;
+        DateTime? serviceStartedUtc;
 
         try
         {
             (collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc) =
                 await ReadCollectorLastRunAsync(postgres, serverId, collectorName, cancellationToken);
+            serviceStartedUtc = collectorLastRunUtc is null
+                ? await ReadServiceStartedAsync(postgres, cancellationToken)
+                : null;
         }
         catch (Exception)
         {
@@ -237,10 +241,10 @@ ORDER BY database_name";
         }
 
         var message = CollectorRuntimePrecondition.GatedOffMessage(
-            serverName, collectorName, gateCandidates, collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc);
+            serverName, collectorName, gateCandidates, collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc, serviceStartedUtc);
 
         return message is null ? null : McpHelpers.Status(
-            CollectorRuntimePrecondition.GatedOffStatusWord(collectorName, collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc),
+            CollectorRuntimePrecondition.GatedOffStatusWord(collectorName, collectorLastRunUtc, serverLastCollectedUtc, serverFirstCollectedUtc, serviceStartedUtc),
             message);
     }
 
@@ -437,6 +441,20 @@ SELECT
             reader.IsDBNull(0) ? null : reader.GetString(0),
             reader.IsDBNull(1) ? null : reader.GetString(1),
             reader.IsDBNull(2) ? null : DateTime.SpecifyKind(reader.GetDateTime(2), DateTimeKind.Utc));
+    }
+
+    /// <summary>
+    /// #6932: when the newest collecting service process started, from the version row each service host writes at startup
+    /// (<c>config.service_version</c>), or null when no host has recorded one. Read only for a collector with no run at all, which is
+    /// the one case that needs it: a collector an upgrade adds waits one cadence after this instant for its first slot, and the
+    /// server's first collection (long ago) cannot say so.
+    /// </summary>
+    private static async Task<DateTime?> ReadServiceStartedAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
+    {
+        await using var command = postgres.CreateCommand("SELECT MAX(process_started_at) FROM config.service_version");
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        var value = await command.ExecuteScalarAsync(cancellationToken);
+        return value is DateTime started ? DateTime.SpecifyKind(started, DateTimeKind.Utc) : null;
     }
 
     private static async Task<(DateTime? CollectorLastRunUtc, DateTime? ServerLastCollectedUtc, DateTime? ServerFirstCollectedUtc)>

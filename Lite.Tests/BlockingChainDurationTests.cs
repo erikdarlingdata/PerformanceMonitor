@@ -90,7 +90,7 @@ public class BlockingChainDurationTests : IClassFixture<SharedDuckDbFixture>
 
     private static Fact Build(List<BlockingPairRow> rows, DateTime windowEnd, int intervalMinutes = 1, DateTime? asOfUtc = null)
     {
-        var reconstruction = BlockingChainReconstructor.Reconstruct(rows, 50, 5000, 100_000, scopeByMonitorLoop: false);
+        var reconstruction = BlockingChainReconstructor.Reconstruct(rows, 50, 5000, 100_000, scopeByMonitorLoop: true);
         return BlockingChainFactBuilder.Build(
             new AnalysisContext { ServerId = 7, TimeRangeStart = windowEnd.AddHours(-4), TimeRangeEnd = windowEnd, AsOfUtc = asOfUtc },
             reconstruction, rows, intervalMinutes);
@@ -127,6 +127,25 @@ public class BlockingChainDurationTests : IClassFixture<SharedDuckDbFixture>
 
         Assert.Equal(1, fact.Metadata["worst_chain_open_at_end"]);
         Assert.Equal(110_000, fact.Metadata["worst_chain_last_seen_age_ms"]);
+    }
+
+    [Fact]
+    public void Build_DmvOnlyServerOnAFiveMinuteCollector_OneLongBlockIsOneEpisode_AndStillOpen()
+    {
+        // No blocked-process report (an RDS Web or Express server): the DMV snapshot is the only source, sampled every
+        // 5 minutes. One lead blocker held for 30 minutes is seven samples. A fixed 2-minute episode gap counted
+        // seven episodes and looked for the newest sample only 2 minutes past the worst scan, so a live block read
+        // as closed (#6931).
+        var end = new DateTime(2026, 10, 25, 12, 0, 0);
+        var rows = new List<BlockingPairRow>();
+        for (var i = 0; i < 7; i++)
+            rows.Add(Pair(end.AddMinutes(-33 + 5 * i), 501, 500, 60_000 * (i + 1)));
+
+        var fact = Build(rows, end, intervalMinutes: 5);
+
+        Assert.Equal(1, fact.Metadata["total_reconstructed_chains"]);
+        Assert.Equal(1, fact.Metadata["worst_chain_open_at_end"]);
+        Assert.Equal(TimeSpan.FromMinutes(3).TotalMilliseconds, fact.Metadata["worst_chain_last_seen_age_ms"]);
     }
 
     [Fact]
@@ -344,7 +363,7 @@ public class BlockingChainDurationTests : IClassFixture<SharedDuckDbFixture>
 
     private long _nextReportId = -7_000;
 
-    private async Task InsertReportAsync(DateTime at, int blocked, int blocking, long waitMs)
+    private async Task InsertReportAsync(DateTime at, int blocked, int blocking, long waitMs, int monitorLoop = 7)
     {
         using var readLock = _duckDb.AcquireReadLock();
         using var conn = _duckDb.CreateConnection();
@@ -353,8 +372,8 @@ public class BlockingChainDurationTests : IClassFixture<SharedDuckDbFixture>
         cmd.CommandText = @"
 INSERT INTO blocked_process_reports (blocked_report_id, collection_time, server_id, server_name, event_time, database_name,
     blocked_spid, blocking_spid, wait_time_ms, lock_mode, blocked_sql_text, blocking_sql_text, blocked_ecid, blocking_ecid, monitor_loop)
-VALUES ($1, $2, $3, $4, $2, 'RankDb', $5, $6, $7, 'X', 'SELECT 1', 'SELECT 2', 0, 0, 7)";
-        foreach (var value in new object[] { _nextReportId--, at, TestDataSeeder.TestServerId, TestDataSeeder.TestServerName, blocked, blocking, waitMs })
+VALUES ($1, $2, $3, $4, $2, 'RankDb', $5, $6, $7, 'X', 'SELECT 1', 'SELECT 2', 0, 0, $8)";
+        foreach (var value in new object[] { _nextReportId--, at, TestDataSeeder.TestServerId, TestDataSeeder.TestServerName, blocked, blocking, waitMs, monitorLoop })
             cmd.Parameters.Add(new DuckDBParameter { Value = value });
         await cmd.ExecuteNonQueryAsync();
     }
@@ -387,5 +406,118 @@ VALUES ($1, $2, $3, $4, $2, 'RankDb', $5, $6, $7, 'X', 'SELECT 1', 'SELECT 2', 0
         var apexes = shown.EnumerateArray().Select(c => c.GetProperty("apex_spid").GetInt32()).ToList();
         Assert.Equal(3, apexes.Count);
         Assert.Contains(500, apexes);
+    }
+
+    /* ── #6931: sessions are scoped by scan, so a reused spid never links two unrelated moments ── */
+
+    private static readonly DateTime SpidReuseEnd = TestDataSeeder.TestPeriodEnd;
+
+    /// <summary>The issue's window: spid 132 holds a lock for 142 s early on (re-fired every 5 s), an unrelated
+    /// session on spid 133 later blocks a session on spid 132, and a new session on 132 blocks one on 133 an hour after that.</summary>
+    private async Task SeedReusedSpidWindowAsync()
+    {
+        var first = SpidReuseEnd.AddHours(-3.6);
+        for (var i = 0; i < 29; i++)
+            await InsertReportAsync(first.AddSeconds(5 * i), 133, 132, 5_000 * (i + 1) - 3_000, monitorLoop: 100 + i);
+        await InsertReportAsync(SpidReuseEnd.AddHours(-2), 132, 133, 20_000, monitorLoop: 300);
+        await InsertReportAsync(SpidReuseEnd.AddHours(-1), 133, 132, 30_000, monitorLoop: 500);
+    }
+
+    [Fact]
+    public async Task Collect_ReusedSpidsAcrossScans_ReportNoCycle_AndTheRealDepthVictimsAndWait()
+    {
+        using var seeder = new TestDataSeeder(_duckDb);
+        await seeder.SeedCleanServerAsync();
+        await SeedReusedSpidWindowAsync();
+
+        var facts = await new DuckDbFactCollector(_duckDb).CollectFactsAsync(TestDataSeeder.CreateTestContext());
+        var fact = Assert.Single(facts, f => f.Key == "BLOCKING_CHAIN");
+
+        Assert.Equal(0, fact.Metadata["cycle_detected"]);
+        Assert.Equal(0, fact.Metadata["traversal_truncated"]);
+        Assert.Equal(1, fact.Metadata["worst_chain_depth"]);
+        Assert.Equal(1, fact.Metadata["worst_chain_victim_count"]);
+        Assert.Equal(142_000, fact.Metadata["worst_chain_max_wait_ms"]);
+        Assert.Equal(3, fact.Metadata["total_reconstructed_chains"]);
+    }
+
+    [Fact]
+    public async Task DrillDown_ReusedSpidsAcrossScans_ListsEachEpisodeOnce_WithNoZeroVictimChain()
+    {
+        using var seeder = new TestDataSeeder(_duckDb);
+        await seeder.SeedCleanServerAsync();
+        await SeedReusedSpidWindowAsync();
+
+        var finding = new AnalysisFinding { RootFactKey = "BLOCKING_CHAIN", StoryPath = "BLOCKING_CHAIN", PathKeys = ["BLOCKING_CHAIN"], Severity = 1.0 };
+        await new DrillDownCollector(_duckDb).EnrichFindingsAsync([finding], TestDataSeeder.CreateTestContext());
+
+        var shown = System.Text.Json.JsonSerializer.SerializeToElement(finding.DrillDown!["reconstructed_blocking_chains"])
+            .EnumerateArray().ToList();
+        Assert.Equal(3, shown.Count);
+        Assert.All(shown, c => Assert.Equal(1, c.GetProperty("victim_count").GetInt32()));
+        Assert.Equal(142_000, shown.Max(c => c.GetProperty("max_wait_ms").GetInt64()));
+    }
+
+    [Fact]
+    public async Task Collect_ARealThreeLevelChainInsideOneScan_StillReportsDepthThree()
+    {
+        using var seeder = new TestDataSeeder(_duckDb);
+        await seeder.SeedCleanServerAsync();
+        var at = SpidReuseEnd.AddHours(-1);
+        await InsertReportAsync(at, 11, 10, 9_000, monitorLoop: 5);
+        await InsertReportAsync(at, 12, 11, 8_000, monitorLoop: 5);
+        await InsertReportAsync(at, 13, 12, 7_000, monitorLoop: 5);
+
+        var facts = await new DuckDbFactCollector(_duckDb).CollectFactsAsync(TestDataSeeder.CreateTestContext());
+        var fact = Assert.Single(facts, f => f.Key == "BLOCKING_CHAIN");
+
+        Assert.Equal(3, fact.Metadata["worst_chain_depth"]);
+        Assert.Equal(3, fact.Metadata["worst_chain_victim_count"]);
+        Assert.Equal(0, fact.Metadata["cycle_detected"]);
+    }
+
+    [Fact]
+    public void Build_OneEpisodeReFiredEveryFiveSeconds_CountsAsOneEpisode()
+    {
+        var end = new DateTime(2026, 10, 27, 17, 0, 0);
+        var start = end.AddHours(-3.6);
+        var rows = Enumerable.Range(0, 29).Select(i => Pair(start.AddSeconds(5 * i), 133, 132, 5_000 * (i + 1) - 3_000)).ToList();
+
+        var fact = Build(rows, end);
+
+        Assert.Equal(1, fact.Metadata["total_reconstructed_chains"]);
+        Assert.Equal(142_000, fact.Metadata["worst_chain_max_wait_ms"]);
+    }
+
+    [Fact]
+    public void Build_TheWorstChainIsNotKeptOpenByAnUnrelatedEpisodeThatReusesItsSpids()
+    {
+        // #6931: the 13:23 block on 132/133 ended at 13:25 and is the worst chain. An unrelated block on the same
+        // spids at 16:08 is another episode: it is not a later sighting of the worst chain.
+        var end = new DateTime(2026, 10, 27, 17, 0, 0);
+        var at = new DateTime(2026, 10, 27, 13, 23, 0);
+        var rows = Enumerable.Range(0, 29).Select(i => Pair(at.AddSeconds(5 * i), 133, 132, 5_000 * (i + 1) - 3_000)).ToList();
+        rows.Add(Pair(new DateTime(2026, 10, 27, 16, 8, 0), 133, 132, 20_000));
+
+        var fact = Build(rows, end);
+
+        Assert.Equal(142_000, fact.Metadata["worst_chain_max_wait_ms"]);
+        Assert.Equal(0, fact.Metadata["worst_chain_open_at_end"]);
+        Assert.Equal((end - at.AddSeconds(140)).TotalMilliseconds, fact.Metadata["worst_chain_last_seen_age_ms"]);
+    }
+
+    [Fact]
+    public void Build_TheSameApexSpidAnHourLater_CountsAsASecondEpisode()
+    {
+        // The issue's spid 132: it heads one block early on and an unrelated one much later.
+        var end = new DateTime(2026, 10, 27, 17, 0, 0);
+        var rows = new List<BlockingPairRow>
+        {
+            Pair(end.AddHours(-3.6), 133, 132, 142_000),
+            Pair(end.AddHours(-3.6).AddSeconds(5), 133, 132, 142_000),
+            Pair(end.AddHours(-0.9), 133, 132, 20_000)
+        };
+
+        Assert.Equal(2, Build(rows, end).Metadata["total_reconstructed_chains"]);
     }
 }

@@ -686,7 +686,7 @@ LIMIT 5000";
 
             if (rows.Count == 0) return;
 
-            var reconstruction = BlockingChainReconstructor.Reconstruct(rows, maxDepth, maxPairs, stepBudget, scopeByMonitorLoop: false);
+            var reconstruction = BlockingChainReconstructor.Reconstruct(rows, maxDepth, maxPairs, stepBudget, scopeByMonitorLoop: true);
             if (reconstruction.Chains.Count == 0) return;
 
             /* Built by the shared BlockingChainFactBuilder, so both products grade and describe the chain the

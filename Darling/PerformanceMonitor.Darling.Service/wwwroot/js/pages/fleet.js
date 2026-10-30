@@ -850,7 +850,7 @@ export function metricBands(c) {
   const collectorsDetail = collectorsStale
     ? "no recent collection · " + (c.last_collection ? "last " + relTime(c.last_collection) : DARK_PAST_WINDOW)
     : c.collector_count > 0
-    ? fmtInt(c.healthy_collector_count) + " healthy · " + (c.warning_collector_count > 0 ? fmtInt(c.warning_collector_count) + " warning · " : "") + fmtInt(c.failed_collector_count) + " failing" + (c.not_collected_collector_count > 0 ? " · " + fmtInt(c.not_collected_collector_count) + " not collected" : "")
+    ? fmtInt(c.healthy_collector_count) + " healthy · " + (c.warning_collector_count > 0 ? fmtInt(c.warning_collector_count) + " warning · " : "") + fmtInt(c.failed_collector_count) + " failing" + (c.not_collected_collector_count > 0 ? " · " + fmtInt(c.not_collected_collector_count) + " not collected" : "") + (c.no_permission_collector_count > 0 ? " · " + fmtInt(c.no_permission_collector_count) + " no permission" : "")
     : "no collector banded yet";
   const collectorsSeverity = collectorsStale ? "Unknown" : c.collector_severity;
 
@@ -867,7 +867,7 @@ export function metricBands(c) {
       chip("Memory", "n/a", "Unknown", staleDetail),
       chip("Blocking", "n/a", "Unknown", staleDetail),
       chip("Deadlocks", "n/a", "Unknown", staleDetail),
-      chip("Collectors", collectorsValue, collectorsSeverity, collectorsDetail),
+      chip("Collectors", collectorsValue, collectorsSeverity, collectorsDetail, true),
     ]);
   }
 
@@ -879,7 +879,7 @@ export function metricBands(c) {
     chip("Memory", memValue, c.memory_severity, memDetail),
     chip("Blocking", fmtInt(c.blocking_count), c.blocking_severity, blockingDetail),
     chip("Deadlocks", fmtInt(c.deadlock_count), c.deadlock_severity, deadlockDetail),
-    chip("Collectors", collectorsValue, collectorsSeverity, collectorsDetail),
+    chip("Collectors", collectorsValue, collectorsSeverity, collectorsDetail, true),
     /* #6875: a chip only when a column is at the warning bar or past it. It is not a band: nothing above reads it, and a server without one shows no extra chip. */
     ...identityCapacityChip(c),
     /* #6874: a chip only when the server's Agent alert setup has a gap. It is not a band: nothing above reads it, and a
@@ -914,7 +914,9 @@ function identityCapacityChip(c) {
     "At or past 70% used (the shipped bar, the alert's own bars may differ). The fullest is " + ic.worst_band + ".")];
 }
 
-function chip(label, value, sev, detail) {
+/* wrapDetail: the Collectors chip's count line is the one detail that carries counts a person acts on (not collected, no permission,
+   #6932), and a nowrap ellipsis cut the newest clause off at every width, so it wraps and the other chips keep their one line. */
+function chip(label, value, sev, detail, wrapDetail) {
   const badge = SEV_BADGE[sev];
   return el("div", { class: "metric-chip sev-" + (sev || "Unknown") }, [
     el("div", { class: "label" }, [
@@ -922,6 +924,6 @@ function chip(label, value, sev, detail) {
       badge ? el("span", { class: "sev-badge", text: badge }) : null,
     ]),
     el("div", { class: "value", text: value }),
-    detail ? el("div", { class: "detail", text: detail, title: detail }) : null,
+    detail ? el("div", { class: wrapDetail ? "detail wrap" : "detail", text: detail, title: detail }) : null,
   ]);
 }

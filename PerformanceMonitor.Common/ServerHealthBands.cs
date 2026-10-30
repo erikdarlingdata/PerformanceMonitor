@@ -2310,25 +2310,42 @@ namespace PerformanceMonitor.Common
             alwaysOnOff && IsAlwaysOnCollector(collectorName) && string.Equals(band, Healthy, StringComparison.Ordinal);
 
         /// <summary>
-        /// One server's collector counts by band (#6828), the one tally every count surface reads: the fleet card and its web header and
+        /// One server's collector counts by band (#6828, #6932), the one tally every count surface reads: the fleet card and its web header and
         /// footer, and the Viewer's card and status bar. <c>get_collection_health</c> lists the same rows one by one, so counting its rows by
-        /// status gives these numbers. <see cref="Healthy"/> is HEALTHY rows only, so a WARNING collector is never counted as healthy, and a
-        /// row a server without Always On reports as not collected is counted there instead. <see cref="Total"/> is every banded row.
+        /// status gives these numbers. The five buckets always add up to <see cref="Total"/>, because every banded row lands in exactly one:
+        /// <list type="bullet">
+        /// <item><see cref="Healthy"/>: HEALTHY rows only, so a WARNING collector is never counted as healthy.</item>
+        /// <item><see cref="Warning"/>: WARNING, and STALE (it read recently enough to still be running, but has no success inside its cadence,
+        /// which is the same "degrading, not yet failing" verdict).</item>
+        /// <item><see cref="Failing"/>: FAILING only. The card's severity grades this count, so it stays exactly FAILING.</item>
+        /// <item><see cref="NoPermission"/>: NO_PERMISSIONS and EXTENSION_MISSING, the two bands a person has to fix at the monitored server
+        /// (a grant, or CREATE EXTENSION). Counting them does not move the card's severity.</item>
+        /// <item><see cref="NotCollected"/>: NEVER_RUN and STOPPED (nothing is being collected and nothing is refused), a row the engine does
+        /// not run (#6912), and a HEALTHY Always On collector on a server with Always On off.</item>
+        /// </list>
         /// </summary>
-        public readonly record struct BandTally(int Healthy, int Warning, int Failing, int NotCollected, int Total)
+        public readonly record struct BandTally(int Healthy, int Warning, int Failing, int NotCollected, int NoPermission, int Total)
         {
             /// <summary>This tally plus one collector row, banded by the caller through the shared ladder.</summary>
             /// <param name="engineGated">#6912: the collector does not run on this server's engine. Whatever band the logged runs left it, it is
             /// not collected and counts as neither healthy, warning nor failing.</param>
             public BandTally Add(string? collectorName, string band, bool alwaysOnOff, bool engineGated)
             {
-                var notCollected = engineGated || IsNotCollectedWhenAlwaysOnOff(collectorName, band, alwaysOnOff);
-                return new BandTally(
-                    Healthy + (!notCollected && string.Equals(band, CollectorHealthClassifier.Healthy, StringComparison.Ordinal) ? 1 : 0),
-                    Warning + (!notCollected && string.Equals(band, CollectorHealthClassifier.Warning, StringComparison.Ordinal) ? 1 : 0),
-                    Failing + (!notCollected && string.Equals(band, CollectorHealthClassifier.Failing, StringComparison.Ordinal) ? 1 : 0),
-                    NotCollected + (notCollected ? 1 : 0),
-                    Total + 1);
+                if (engineGated || IsNotCollectedWhenAlwaysOnOff(collectorName, band, alwaysOnOff))
+                {
+                    return this with { NotCollected = NotCollected + 1, Total = Total + 1 };
+                }
+
+                return band switch
+                {
+                    CollectorHealthClassifier.Healthy => this with { Healthy = Healthy + 1, Total = Total + 1 },
+                    CollectorHealthClassifier.Warning or CollectorHealthClassifier.Stale => this with { Warning = Warning + 1, Total = Total + 1 },
+                    CollectorHealthClassifier.Failing => this with { Failing = Failing + 1, Total = Total + 1 },
+                    CollectorHealthClassifier.NoPermissions or CollectorHealthClassifier.ExtensionMissing => this with { NoPermission = NoPermission + 1, Total = Total + 1 },
+                    /* NEVER_RUN, STOPPED, and any band this ladder does not know: nothing is being collected, and counting it here keeps the
+                       buckets adding up to Total. */
+                    _ => this with { NotCollected = NotCollected + 1, Total = Total + 1 },
+                };
             }
         }
 

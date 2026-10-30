@@ -49,8 +49,31 @@ public sealed partial class InvestigationRequestStore : IInvestigationRequestSto
     public const int RouteLockKey = 5632;
 
 
+    /* #6919: an unregistered external name arrives with server_id 0, so server_id and family alone would join every such alert. For
+       server_id 0 the lock text also carries the label ($3) and the external source ($4), the same two values FindJoinSql adds to the
+       join key. A registered server keeps the text it always had. */
     internal const string GroupLockSql =
-        "SELECT pg_advisory_xact_lock(hashtextextended('investigation:' || $1::text || ':' || $2, 5632))";
+        "SELECT pg_advisory_xact_lock(hashtextextended('investigation:' || $1::text || ':' || $2"
+        + " || CASE WHEN $1::int = 0 THEN ':' || $3 || ':' || $4 ELSE '' END, 5632))";
+
+    /* #6919: the source of an External:<source>:<key> metric. A source name matches [a-z][a-z0-9_]{1,30}
+       (ck_external_alert_source_name), so it holds no colon and the second colon-separated part is the whole source. Any other metric
+       at server_id 0 has no source and reads as empty, so those alerts keep grouping by label and family alone. */
+    internal static string ExternalSourceSql(string metric) =>
+        $"CASE WHEN {metric} LIKE 'External:%' THEN split_part({metric}, ':', 2) ELSE '' END";
+
+    /// <summary>The source part of an <c>External:&lt;source&gt;:&lt;key&gt;</c> metric name, or empty for any other metric (#6919).</summary>
+    internal static string ExternalSourceOf(string metricName)
+    {
+        const string prefix = "External:";
+        if (!metricName.StartsWith(prefix, StringComparison.Ordinal))
+        {
+            return string.Empty;
+        }
+
+        var colon = metricName.IndexOf(':', prefix.Length);
+        return colon < 0 ? metricName[prefix.Length..] : metricName[prefix.Length..colon];
+    }
 
     internal const string RouteLockSql = "SELECT pg_advisory_xact_lock($1, $2)";
 
@@ -74,6 +97,7 @@ SELECT r.request_id,
 FROM config.investigation_requests AS r
 WHERE r.server_id = $1
   AND r.family = $2
+  AND ($1 <> 0 OR r.server_name = $7 AND " + ExternalSourceSql("r.first_metric") + @" = $8)
   AND r.practice_of IS NULL
   AND r.force_check_of IS NULL
   AND r.trigger_kind = 'alert'
@@ -656,7 +680,8 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
-        await ExecAsync(connection, transaction, GroupLockSql, cancellationToken, P(alert.ServerId), P(alert.Family));
+        await ExecAsync(connection, transaction, GroupLockSql, cancellationToken,
+            P(alert.ServerId), P(alert.Family), P(alert.ServerName), P(ExternalSourceOf(alert.MetricName)));
 
         var severity = AlertSeverityWord(alert.Severity);
         Guid? joinId = null;
@@ -666,7 +691,8 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
         if (string.Equals(alert.TriggerKind, InvestigationTriggerKinds.Alert, StringComparison.Ordinal))
         {
             await using var find = Command(connection, transaction, FindJoinSql,
-                P(alert.ServerId), P(alert.Family), P(now), P(alertTime), P(alert.MetricName), P(severity));
+                P(alert.ServerId), P(alert.Family), P(now), P(alertTime), P(alert.MetricName), P(severity),
+                P(alert.ServerName), P(ExternalSourceOf(alert.MetricName)));
             await using var found = await find.ExecuteReaderAsync(cancellationToken);
             if (await found.ReadAsync(cancellationToken))
             {

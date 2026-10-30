@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -97,6 +98,18 @@ WHERE s.server_id <> 0";
     /// </summary>
     public Task<IReadOnlyList<ServiceVersionRow>> GetServiceVersionsAsync(CancellationToken cancellationToken = default) =>
         ServiceVersionTable.ReadAsync(_dataSource, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+
+    /// <summary>
+    /// When the newest collecting service process started (#6932), the latest start any service host recorded in
+    /// <c>config.service_version</c>, or null when no host has recorded one. It is the instant a collector added by an upgrade
+    /// counts its first cadence from, which the MCP service reads the same way.
+    /// </summary>
+    public async Task<DateTime?> GetServiceStartedAsync(CancellationToken cancellationToken = default)
+    {
+        var rows = await GetServiceVersionsAsync(cancellationToken);
+
+        return rows.Count == 0 ? null : DateTime.SpecifyKind(rows.Max(r => r.ProcessStartedUtc), DateTimeKind.Utc);
+    }
 
     /// <summary>
     /// Reads MAX(collection_time) for every server in a single query, keyed by server_id. A server with no

@@ -486,14 +486,14 @@ public sealed class RobustBaselineTests
 
         var paired = Cpu(withMean: true);
         var composed = FactAdvice.Compose("ANOMALY_CPU_SPIKE", new Dictionary<string, Fact> { ["ANOMALY_CPU_SPIKE"] = paired })!;
-        Assert.Contains("16σ above its 10% baseline", composed.Investigation, StringComparison.Ordinal);
-        Assert.Contains("the window's mean of 30% sat 4σ above it", composed.Investigation, StringComparison.Ordinal);
-        Assert.Contains("16σ above its baseline", composed.Headline, StringComparison.Ordinal); // the headline stays the peak's
+        Assert.Contains("16 times its usual variation above its 10% normal level", composed.Investigation, StringComparison.Ordinal);
+        Assert.Contains("the window's mean of 30% sat 4 times its usual variation above it", composed.Investigation, StringComparison.Ordinal);
+        Assert.Contains("16 times its usual variation above its normal level", composed.Headline, StringComparison.Ordinal); // the headline stays the peak's
 
         var legacy = Cpu(withMean: false);
         var legacyComposed = FactAdvice.Compose("ANOMALY_CPU_SPIKE", new Dictionary<string, Fact> { ["ANOMALY_CPU_SPIKE"] = legacy })!;
         Assert.DoesNotContain("window's mean", legacyComposed.Investigation, StringComparison.Ordinal);
-        Assert.Contains("16σ above its 10% baseline", legacyComposed.Investigation, StringComparison.Ordinal);
+        Assert.Contains("16 times its usual variation above its 10% normal level", legacyComposed.Investigation, StringComparison.Ordinal);
 
         Assert.Equal(Score(legacy), Score(paired));
         Assert.Equal(1.0, Score(paired), precision: 3); // 16σ against a 2.0 anchor saturates — the peak's grade, as before
@@ -817,14 +817,14 @@ public sealed class RobustBaselineTests
         var gateArm = Profile(withMean: true, robust: true, isNew: false);
         var story = Story(gateArm);
         Assert.Contains("peaked at about 3200 ms/sec", story, StringComparison.Ordinal);
-        Assert.Contains("the window's mean of 1606.3 ms/sec sat 9.5 robust σ above the baseline median", story, StringComparison.Ordinal);
+        Assert.Contains("the window's mean of 1606.3 ms/sec sat 9.5 times its usual variation above its normal level", story, StringComparison.Ordinal);
         Assert.Contains("fires only when the mean clears its bar as well", story, StringComparison.Ordinal);
 
         var ratioArm = Profile(withMean: true, robust: false, isNew: false);
         var ratioStory = Story(ratioArm);
         Assert.Contains("the window's mean of 1606.3 ms/sec was roughly 8× that baseline", ratioStory, StringComparison.Ordinal);
         Assert.Contains("fires only when the mean clears its bar as well", ratioStory, StringComparison.Ordinal);
-        Assert.DoesNotContain("robust σ", ratioStory, StringComparison.Ordinal);
+        Assert.DoesNotContain("times its usual variation", ratioStory, StringComparison.Ordinal);
 
         var isNewArm = Profile(withMean: true, robust: false, isNew: true);
         var isNewStory = Story(isNewArm);
@@ -1128,8 +1128,8 @@ public sealed class RobustBaselineTests
         var block = PgTargetAdvice.Compose(PgTargetFactKeys.AnomalyBlocking, new Dictionary<string, Fact> { [PgTargetFactKeys.AnomalyBlocking] = extremity })!;
         Assert.Equal("Blocked sessions per capture reached 92 sessions — against a month in which this hour saw none", block.Headline);
         Assert.Contains("is not thin — it is a measured ZERO: 257 baseline samples across 30 distinct days, not one of them above zero", block.Investigation, StringComparison.Ordinal);
-        Assert.Contains("Beyond any σ", block.Investigation, StringComparison.Ordinal);
-        Assert.DoesNotContain("σ above", block.Investigation, StringComparison.Ordinal);
+        Assert.Contains("far outside its normal range", block.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("times its usual variation above", block.Investigation, StringComparison.Ordinal);
         Assert.DoesNotContain("first occurrence", block.Investigation, StringComparison.Ordinal);
         Assert.DoesNotContain("too thin", block.Investigation, StringComparison.Ordinal);
         /* The source sentence survives: the composed prose still names the table and the zero rule. */
@@ -1150,7 +1150,7 @@ public sealed class RobustBaselineTests
             },
         };
         var trustedBlock = PgTargetAdvice.Compose(PgTargetFactKeys.AnomalyBlocking, new Dictionary<string, Fact> { [PgTargetFactKeys.AnomalyBlocking] = trusted })!;
-        Assert.Equal("Blocked sessions per capture spiked to 12 sessions — 6.2σ above its baseline for this time of week", trustedBlock.Headline);
+        Assert.Equal("Blocked sessions per capture spiked to 12 sessions — 6.2 times its usual variation above its normal level for this time of week", trustedBlock.Headline);
 
         var unstamped = new Fact { Source = trusted.Source, Key = trusted.Key, Value = trusted.Value, Metadata = new Dictionary<string, double>(trusted.Metadata) };
         unstamped.Metadata.Remove("baseline_zero_history");
@@ -1183,11 +1183,11 @@ public sealed class RobustBaselineTests
         var extremity = FactAdvice.Compose("ANOMALY_SESSION_SPIKE", new Dictionary<string, Fact> { ["ANOMALY_SESSION_SPIKE"] = Sessions(zeroHistory: true) })!;
         Assert.Contains("against a month in which this hour saw none", extremity.Headline, StringComparison.Ordinal);
         Assert.Contains("257 baseline samples across 30 distinct days, not one of them above zero", extremity.Investigation, StringComparison.Ordinal);
-        Assert.Contains("Beyond any σ", extremity.Investigation, StringComparison.Ordinal);
-        Assert.DoesNotContain("σ above its", extremity.Investigation, StringComparison.Ordinal);
+        Assert.Contains("far outside its normal range", extremity.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("times its usual variation above its", extremity.Investigation, StringComparison.Ordinal);
 
         var trusted = FactAdvice.Compose("ANOMALY_SESSION_SPIKE", new Dictionary<string, Fact> { ["ANOMALY_SESSION_SPIKE"] = Sessions(zeroHistory: false) })!;
-        Assert.Contains("8σ above its", trusted.Investigation, StringComparison.Ordinal);
+        Assert.Contains("8 times its usual variation above its", trusted.Investigation, StringComparison.Ordinal);
         Assert.DoesNotContain("Beyond any", trusted.Investigation, StringComparison.Ordinal);
 
         var unstamped = Sessions(zeroHistory: false);

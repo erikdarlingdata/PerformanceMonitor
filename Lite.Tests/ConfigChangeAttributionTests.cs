@@ -348,7 +348,7 @@ public sealed class ConfigChangeAttributionTests
         Assert.Contains("compared the 4 h before the observation with the 4 h after it", advice.Investigation, StringComparison.Ordinal);
         Assert.DoesNotContain("still filling in", advice.Investigation, StringComparison.Ordinal);
         Assert.Contains("PAGEIOLATCH_SH +50% (worse); CPU_SQL_PERCENT", advice.Investigation, StringComparison.Ordinal);
-        Assert.Contains("σ (better)", advice.Investigation, StringComparison.Ordinal);
+        Assert.Contains("times its usual variation below normal (better)", advice.Investigation, StringComparison.Ordinal);
         Assert.Contains("not an accusation", advice.Remediation, StringComparison.Ordinal);
         Assert.Contains("get_server_config_changes", advice.Remediation, StringComparison.Ordinal);
         Assert.Contains("compare_analysis", advice.Remediation, StringComparison.Ordinal);
@@ -544,7 +544,7 @@ public sealed class ConfigChangeAttributionTests
         Assert.Contains("1 metric moved beyond band after it", advice.Headline, StringComparison.Ordinal);
         Assert.DoesNotContain("not yet comparable", advice.Headline, StringComparison.Ordinal);
         Assert.Contains("CPU_SQL_PERCENT", advice.Investigation, StringComparison.Ordinal);
-        Assert.Contains("σ (better)", advice.Investigation, StringComparison.Ordinal);
+        Assert.Contains("times its usual variation below normal (better)", advice.Investigation, StringComparison.Ordinal);
         Assert.Contains("1 more metric appeared in or vanished from the compare and is not yet comparable: the after half covers only 10 minutes, under the 1 h the compare needs before a missing metric means anything.", advice.Investigation, StringComparison.Ordinal);
         Assert.DoesNotContain("WRITELOG", advice.Investigation, StringComparison.Ordinal);
         Assert.DoesNotContain("resolved", advice.Investigation, StringComparison.Ordinal);
