@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Data;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
@@ -185,8 +186,27 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
         public string EnvName => "PM_PGK_" + _tag;
     }
 
+    /// <summary>#6963: runs superuser cleanup on an open connection. The shared admin connection may be the thing the failure broke, and a cleanup on
+    /// it throws "Connection is not open" over the body's own exception, so a closed one is replaced by a fresh one. As in
+    /// <see cref="LiveStoreCleanup.RunOwnedAsync"/>, a cleanup failure after a failed body is dropped and one after a passing body fails the test.</summary>
+    private static Task AdminCleanupAsync(NpgsqlConnection admin, ScramTlsCluster target, bool bodySucceeded, Func<NpgsqlConnection, Task> cleanup) =>
+        LiveStoreCleanup.RunOwnedAsync(bodySucceeded, async () =>
+        {
+            if (admin.State == ConnectionState.Open)
+            {
+                await cleanup(admin);
+                return;
+            }
+
+            await using var fresh = new NpgsqlConnection(target.SuperuserConnectionString);
+            await fresh.OpenAsync(CancellationToken.None);
+            await cleanup(fresh);
+        });
+
     private sealed record Ctx(NpgsqlDataSource Source, NpgsqlConnection Store, NpgsqlConnection Admin, ScramTlsCluster Target, Roles Roles, string Arg, CancellationToken Ct)
     {
+        public Task CleanupAsync(bool bodySucceeded, Func<NpgsqlConnection, Task> cleanup) => AdminCleanupAsync(Admin, Target, bodySucceeded, cleanup);
+
         /// <summary>The kill as an agent calls it: backend_id and, unless <paramref name="omitPid"/>, the pid (by default the one inside backend_id).</summary>
         public Task<string> Kill(string? backendId, bool dryRun, int? session = null, bool omitPid = false) =>
             DarlingMcpPlanForceTools.RunKillAsync(Source, Source, null, "pg-7",
@@ -280,16 +300,19 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
         finally
         {
             Environment.SetEnvironmentVariable(roles.EnvName, null);
-            try
+            await AdminCleanupAsync(admin, target, bodySucceeded, async cleanup =>
             {
-                await ExecAsync(admin, $"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename IN ('{roles.Victim}', '{roles.Remediation}')", CancellationToken.None);
-                await ExecAsync(admin, $"DROP ROLE IF EXISTS \"{roles.Victim}\"", CancellationToken.None);
-                await ExecAsync(admin, $"DROP ROLE IF EXISTS \"{roles.Remediation}\"", CancellationToken.None);
-            }
-            catch (PostgresException)
-            {
-                /* A role that cannot be dropped is named for this test alone; the assertions already reported what went wrong. */
-            }
+                try
+                {
+                    await ExecAsync(cleanup, $"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename IN ('{roles.Victim}', '{roles.Remediation}')", CancellationToken.None);
+                    await ExecAsync(cleanup, $"DROP ROLE IF EXISTS \"{roles.Victim}\"", CancellationToken.None);
+                    await ExecAsync(cleanup, $"DROP ROLE IF EXISTS \"{roles.Remediation}\"", CancellationToken.None);
+                }
+                catch (PostgresException)
+                {
+                    /* A role that cannot be dropped is named for this test alone; the assertions already reported what went wrong. */
+                }
+            });
 
             await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
         }
@@ -714,6 +737,7 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
                the server's start time. */
             var monitor = "pmk_mon_" + Guid.NewGuid().ToString("N")[..12];
             await ExecAsync(c.Admin, $"CREATE ROLE \"{monitor}\" LOGIN PASSWORD '{VictimPassword}'", c.Ct);
+            var monitorDone = false;
             try
             {
                 string collected;
@@ -737,11 +761,15 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
 
                 Assert.True(await c.AliveAsync(pid));
                 Assert.Equal(0, await c.JournalAsync("action_called"));
+                monitorDone = true;
             }
             finally
             {
-                await ExecAsync(c.Admin, $"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = '{monitor}'", CancellationToken.None);
-                await ExecAsync(c.Admin, $"DROP ROLE IF EXISTS \"{monitor}\"", CancellationToken.None);
+                await c.CleanupAsync(monitorDone, async cleanup =>
+                {
+                    await ExecAsync(cleanup, $"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = '{monitor}'", CancellationToken.None);
+                    await ExecAsync(cleanup, $"DROP ROLE IF EXISTS \"{monitor}\"", CancellationToken.None);
+                });
             }
         });
     }
@@ -811,6 +839,7 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
             var owner = "pmk_own_" + Guid.NewGuid().ToString("N")[..12];
             await ExecAsync(c.Admin, $"CREATE ROLE \"{owner}\" LOGIN PASSWORD '{VictimPassword}'", c.Ct);
             await ExecAsync(c.Admin, $"ALTER DATABASE postgres OWNER TO \"{owner}\"", c.Ct);
+            var ownerDone = false;
             try
             {
                 /* A database owner who is not a superuser can do all of this. */
@@ -846,14 +875,18 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
                 Assert.False(await c.AliveAsync(pid));
                 Assert.True(await c.AliveAsync(bystanderPid));
                 Assert.Equal(0, await CallsAsync(c));
+                ownerDone = true;
             }
             finally
             {
-                await ExecAsync(c.Admin, "ALTER DATABASE postgres RESET search_path", CancellationToken.None);
-                await ExecAsync(c.Admin, "DROP SCHEMA IF EXISTS planted CASCADE", CancellationToken.None);
-                await ExecAsync(c.Admin, $"ALTER DATABASE postgres OWNER TO \"{ScramTlsCluster.Superuser}\"", CancellationToken.None);
-                await ExecAsync(c.Admin, $"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = '{owner}'", CancellationToken.None);
-                await ExecAsync(c.Admin, $"DROP ROLE IF EXISTS \"{owner}\"", CancellationToken.None);
+                await c.CleanupAsync(ownerDone, async cleanup =>
+                {
+                    await ExecAsync(cleanup, "ALTER DATABASE postgres RESET search_path", CancellationToken.None);
+                    await ExecAsync(cleanup, "DROP SCHEMA IF EXISTS planted CASCADE", CancellationToken.None);
+                    await ExecAsync(cleanup, $"ALTER DATABASE postgres OWNER TO \"{ScramTlsCluster.Superuser}\"", CancellationToken.None);
+                    await ExecAsync(cleanup, $"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = '{owner}'", CancellationToken.None);
+                    await ExecAsync(cleanup, $"DROP ROLE IF EXISTS \"{owner}\"", CancellationToken.None);
+                });
             }
         });
     }
@@ -882,6 +915,7 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
         var owner = "pmk_own_" + Guid.NewGuid().ToString("N")[..12];
         await ExecAsync(c.Admin, $"CREATE ROLE \"{owner}\" LOGIN PASSWORD '{VictimPassword}'", c.Ct);
         await ExecAsync(c.Admin, $"ALTER DATABASE postgres OWNER TO \"{owner}\"", c.Ct);
+        var bodySucceeded = false;
         try
         {
             await using (var asOwner = new NpgsqlConnection(c.Target.ConnectionString(owner, VictimPassword)))
@@ -893,14 +927,18 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
             }
 
             await body();
+            bodySucceeded = true;
         }
         finally
         {
-            await ExecAsync(c.Admin, "ALTER DATABASE postgres RESET search_path", CancellationToken.None);
-            await ExecAsync(c.Admin, "DROP SCHEMA IF EXISTS planted CASCADE", CancellationToken.None);
-            await ExecAsync(c.Admin, $"ALTER DATABASE postgres OWNER TO \"{ScramTlsCluster.Superuser}\"", CancellationToken.None);
-            await ExecAsync(c.Admin, $"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = '{owner}'", CancellationToken.None);
-            await ExecAsync(c.Admin, $"DROP ROLE IF EXISTS \"{owner}\"", CancellationToken.None);
+            await c.CleanupAsync(bodySucceeded, async cleanup =>
+            {
+                await ExecAsync(cleanup, "ALTER DATABASE postgres RESET search_path", CancellationToken.None);
+                await ExecAsync(cleanup, "DROP SCHEMA IF EXISTS planted CASCADE", CancellationToken.None);
+                await ExecAsync(cleanup, $"ALTER DATABASE postgres OWNER TO \"{ScramTlsCluster.Superuser}\"", CancellationToken.None);
+                await ExecAsync(cleanup, $"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = '{owner}'", CancellationToken.None);
+                await ExecAsync(cleanup, $"DROP ROLE IF EXISTS \"{owner}\"", CancellationToken.None);
+            });
         }
     }
 
@@ -995,6 +1033,7 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
             var md5 = "pmk_md5_" + Guid.NewGuid().ToString("N")[..12];
             await ExecAsync(c.Admin, $"SET password_encryption = 'md5'; CREATE ROLE \"{md5}\" LOGIN PASSWORD '{c.Roles.Secret}'; RESET password_encryption;", c.Ct);
             await ExecAsync(c.Admin, $"GRANT pg_signal_backend, pg_read_all_stats TO \"{md5}\"", c.Ct);
+            var md5Done = false;
             try
             {
                 /* A TLS mode that requires TLS: under Optional, Npgsql tries again without TLS after a failed sign-in, and the server then
@@ -1008,11 +1047,13 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
                     Assert.Contains("\"MD5\" authentication method is not allowed", (string?)json["message"], StringComparison.Ordinal);
                     Assert.Contains("password_encryption = 'scram-sha-256'", (string?)json["message"], StringComparison.Ordinal);
                 }
+
+                md5Done = true;
             }
             finally
             {
                 await ExecAsync(c.Store, $"UPDATE config.config_monitored_servers SET remediation_username = '{c.Roles.Remediation}', encrypt_mode = 'Optional' WHERE server_id = 7", CancellationToken.None);
-                await ExecAsync(c.Admin, $"DROP ROLE IF EXISTS \"{md5}\"", CancellationToken.None);
+                await c.CleanupAsync(md5Done, async cleanup => await ExecAsync(cleanup, $"DROP ROLE IF EXISTS \"{md5}\"", CancellationToken.None));
             }
 
             /* No TLS: SCRAM is offered, but channel binding needs TLS. */
@@ -1048,16 +1089,18 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
             var (connection, pid, id) = await c.OpenVictimAsync();
             await using var victimConnection = connection;
             await ExecAsync(c.Admin, "REVOKE CONNECT ON DATABASE postgres FROM PUBLIC", c.Ct);
+            var refused = false;
             try
             {
                 var json = Parse(await c.Kill(id, dryRun: false));
                 Assert.Equal("refused", (string?)json["status"]);
                 Assert.Equal(RemediationResult.Reasons.SignInFailed, (string?)json["reason"]);
                 Assert.Contains("GRANT CONNECT ON DATABASE postgres", (string?)json["message"], StringComparison.Ordinal);
+                refused = true;
             }
             finally
             {
-                await ExecAsync(c.Admin, "GRANT CONNECT ON DATABASE postgres TO PUBLIC", CancellationToken.None);
+                await c.CleanupAsync(refused, async cleanup => await ExecAsync(cleanup, "GRANT CONNECT ON DATABASE postgres TO PUBLIC", CancellationToken.None));
             }
 
             Assert.True(await c.AliveAsync(pid));
