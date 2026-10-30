@@ -24,7 +24,7 @@ permissions:
 
 # The released builds the legs install first. Change them here and nowhere else.
 env:
-  DARLING_CURRENT_RELEASE: '3.10.0'
+  DARLING_CURRENT_RELEASE: '3.11.0'
   DARLING_OLD_RELEASE: '3.7.1'
 
 concurrency:
