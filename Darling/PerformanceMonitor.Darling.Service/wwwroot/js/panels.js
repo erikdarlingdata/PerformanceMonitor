@@ -21,6 +21,7 @@
  * server names render inert.
  */
 
+import { notePanelKey } from "./refresh-in-place.js";
 import {
   storeHash,
   el,
@@ -142,6 +143,8 @@ export function renderPanel(desc, onSettled) {
     desc.control || null,
     body,
   ]);
+  /* #6933: the key a poll matches this panel by, so it keeps the panel on screen while the same read runs again. */
+  notePanelKey(panel, JSON.stringify([desc.read || desc.path || null, desc.params || null]));
   loadPanel(desc, body, signal, onSettled);
   return panel;
 }
