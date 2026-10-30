@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using PerformanceMonitor.Analysis;
 using Xunit;
 
@@ -7,7 +8,7 @@ namespace PerformanceMonitorDashboard.Tests;
 
 /// <summary>
 /// Unit tests for BlockingPairRowMerge — merging always-on DMV-snapshot pair-rows into blocked-process-report
-/// rows: BPR preferred, DMV-only filled in (the AWS RDS / threshold-unset case), overlapping edges deduped.
+/// rows: BPR preferred, DMV-only filled in (the AWS RDS / threshold-unset case), overlapping edges kept from both sources.
 /// No database.
 /// </summary>
 public class BlockingPairRowMergeTests
@@ -49,12 +50,13 @@ public class BlockingPairRowMergeTests
     }
 
     [Fact]
-    public void OverlappingEdge_PrefersBprAndDropsDmv()
+    public void OverlappingEdge_KeepsBothSources()
     {
-        // Same edge (blocked/blocker spid:ecid, same minute) from both sources -> only the BPR row survives.
+        // Same edge (blocked/blocker spid:ecid, same minute) from both sources: both stay. Reconstruction is per scan
+        // and a BPR row and a DMV row never share a scan, so neither is a double count (#6931).
         var primary = new List<BlockingPairRow> { Pair(201, 200, "BPR") };
         BlockingPairRowMerge.MergeInto(primary, new[] { Pair(201, 200, "DMV") });
-        Assert.Equal("BPR", Assert.Single(primary).BlockedSqlText);
+        Assert.Equal(new[] { "BPR", "DMV" }, primary.Select(r => r.BlockedSqlText));
     }
 
     [Fact]
