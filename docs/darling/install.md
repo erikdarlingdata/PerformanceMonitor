@@ -181,7 +181,7 @@ The script does these things:
 - It reconciles the firewall rules and starts the service.
 - It creates **Darling Viewer** shortcuts on the Desktop and in the Start Menu.
 
-`.\uninstall-darling.ps1` reverses the install. It leaves your store and config alone unless you pass `-PurgeData`.
+`.\uninstall-darling.ps1` reverses the install. It leaves your store, your config and the `PerformanceMonitor Darling Operators` group alone unless you pass `-PurgeData`. With `-PurgeData` it also removes that group, but only when the install made it.
 
 To set up the LAN endpoints in the same pass, use `.\install-darling.ps1 -Network`. It runs the guided wizard at the end. You can also do this later (see [the web dashboard](web-dashboard.md) and [MCP](../mcp-server.md#darling)).
 
@@ -425,7 +425,7 @@ These properties are available:
 | `INSTALLFOLDER` | The install folder. The default is `C:\Program Files\PerformanceMonitorDarling`. Setup stops and rolls back if any account other than SYSTEM, Administrators and TrustedInstaller can change files in the folder. A folder made directly under `C:\` is one of these, because it gets Modify for Authenticated Users from the drive. The MSI log (`msiexec /l*v`) names the accounts. Choose a folder under Program Files, or remove those permissions and run setup again. |
 | `OPERATORACCOUNT` | A `DOMAIN\user` account to add to the `PerformanceMonitor Darling Operators` group. |
 | `WEBDASHBOARD` | If you set `1`, the `darling.json` that setup writes has `web.enabled` on and a web token that setup makes for you. The token is stored encrypted in `web.network.encryptedToken`. The dashboard listens on this machine only and asks for that token. To show it, run `& "C:\Program Files\PerformanceMonitorDarling\PerformanceMonitor.Darling.Service.exe" --print-web-token` in an elevated PowerShell (use your install folder if you chose another). If `darling.json` already exists, setup ignores this property and leaves its web settings as they are. |
-| `PURGEDATA` | If you set `1` on uninstall, the uninstall also deletes the store. |
+| `PURGEDATA` | If you set `1` on uninstall, the uninstall also deletes the store, and removes the `PerformanceMonitor Darling Operators` group when the install made it. A group an administrator made is kept. |
 
 The MSI and the scripts must not manage the same install. If `install-darling.ps1` already installed the service on this machine, the MSI stops and changes nothing. To switch, run `uninstall-darling.ps1` from the script install's folder, which keeps `darling.json` and the store. Then run the MSI again with the same `INSTALLFOLDER`. To stay on the scripts, keep using `upgrade-darling.ps1`. In the other direction, `install-darling.ps1`, `upgrade-darling.ps1` and `uninstall-darling.ps1` refuse to run over an MSI install. Uninstall an MSI install from Settings, Apps.
 

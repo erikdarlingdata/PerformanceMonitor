@@ -226,6 +226,8 @@ With `-PurgeData`:
 2. The script prints what it will delete. Type `DELETE` to confirm. Any other answer keeps the data.
 3. It then deletes `C:\ProgramData\PerformanceMonitorDarling`. This removes the store in that folder (all collected history), the generated store credentials and the service logs. You cannot undo this. If `postgres.dataDirectory` in `darling.json` names a folder outside `C:\ProgramData\PerformanceMonitorDarling`, the script leaves that store folder alone. Delete it yourself.
 
+After the store is deleted, `-PurgeData` also removes the local group `PerformanceMonitor Darling Operators`, with its members, but only when the install made it. The script judges that by the group's description: the installer gives the group it makes a fixed description, and a group that still has it is removed. A group an administrator made first has a different description, so the script leaves it and prints the command to remove it yourself (`net localgroup "PerformanceMonitor Darling Operators" /delete`). If you answer anything but `DELETE`, the store stays and so does the group. On a domain controller the script never looks up or removes a group. A plain uninstall without `-PurgeData` keeps the group, so a reinstall gets back the same members.
+
 `-PurgeData` does not delete the program folder or `darling.json`. To remove them, delete them yourself. It also does not delete the Viewer's per-user files under `%APPDATA%\PerformanceMonitorDarling`.
 
 For a script run that cannot answer a question, add `-ConfirmPurge` to `-PurgeData`. It deletes without the `DELETE` prompt.
