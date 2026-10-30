@@ -599,6 +599,15 @@ $v184$;
 GRANT SELECT (send_resolutions) ON config.config_notification_routes TO viewer;
 $v187$;
       END IF;
+      -- V229 (#6928): a route's severity filter. Non-secret. Granted on its own column inside the routes table's guard, so a
+      -- store below V229 still commits.
+      IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+                 WHERE attrelid = 'config.config_notification_routes'::regclass
+                   AND attname = 'severities' AND NOT attisdropped) THEN
+         EXECUTE $v229$
+GRANT SELECT (severities) ON config.config_notification_routes TO viewer;
+$v229$;
+      END IF;
    END IF;
 END $$;
 -- V187 (#5825): the four per-channel "send resolutions" flags. Non-secret (behaviour toggles, like
@@ -714,6 +723,15 @@ $v184$;
          EXECUTE $v187$
 GRANT SELECT (send_resolutions) ON config.config_notification_routes TO mcp;
 $v187$;
+      END IF;
+      -- V229 (#6928): a route's severity filter. Non-secret. Granted on its own column inside the routes table's guard, so a
+      -- store below V229 still commits.
+      IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+                 WHERE attrelid = 'config.config_notification_routes'::regclass
+                   AND attname = 'severities' AND NOT attisdropped) THEN
+         EXECUTE $v229$
+GRANT SELECT (severities) ON config.config_notification_routes TO mcp;
+$v229$;
       END IF;
    END IF;
 END $$;
@@ -1533,13 +1551,16 @@ GRANT EXECUTE ON FUNCTION config.request_analyze_now(integer, text) TO viewer;
 --     (the address list is plain text). All three re-read the row FOR UPDATE and refuse an agent route inside the transaction,
 --     unless the actor the service passes is an operator-class token (#6542 part 2). Granted to mcp only.
 BEGIN;
+-- #6928 (V229): p_severities joins the argument list, so the six-argument function is dropped and stays uncallable. NULL is both.
+DROP FUNCTION IF EXISTS config.create_notification_route(text, boolean, integer, integer, boolean, integer);
 CREATE OR REPLACE FUNCTION config.create_notification_route(
    p_metric_match text,
    p_enabled boolean,
    p_scope_server_id integer,
    p_scope_tag_id integer,
    p_send_resolutions boolean,
-   p_fallback_route_id integer)
+   p_fallback_route_id integer,
+   p_severities text DEFAULT NULL)
 RETURNS integer
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -1547,8 +1568,12 @@ SET search_path = pg_catalog, pg_temp
 AS $fn$
 DECLARE
    v_match text := btrim(COALESCE(p_metric_match, ''));
+   v_severities text := lower(btrim(COALESCE(p_severities, 'both')));
    v_id integer;
 BEGIN
+   IF v_severities NOT IN ('both', 'critical', 'warning') THEN
+      RAISE EXCEPTION 'severities is critical, warning or both.' USING ERRCODE = 'DL400';
+   END IF;
    IF v_match = '' THEN
       RAISE EXCEPTION 'Choose a family or enter an exact metric name.' USING ERRCODE = 'DL400';
    END IF;
@@ -1574,17 +1599,20 @@ BEGIN
    -- goes where it went before (the next matching route, else the Settings channels), and no caller of this function can name a URL, a key or an address list.
    -- The agent columns keep their defaults too: this function never makes an agent route.
    INSERT INTO config.config_notification_routes
-      (metric_match, enabled, scope_server_id, scope_tag_id, send_resolutions, fallback_route_id, modified_at)
+      (metric_match, enabled, scope_server_id, scope_tag_id, send_resolutions, fallback_route_id, severities, modified_at)
    VALUES
-      (v_match, COALESCE(p_enabled, true), p_scope_server_id, p_scope_tag_id, p_send_resolutions, p_fallback_route_id,
+      (v_match, COALESCE(p_enabled, true), p_scope_server_id, p_scope_tag_id, p_send_resolutions, p_fallback_route_id, v_severities,
        (now() AT TIME ZONE 'UTC'))
    RETURNING route_id INTO v_id;
    RETURN v_id;
 END
 $fn$;
-REVOKE ALL ON FUNCTION config.create_notification_route(text, boolean, integer, integer, boolean, integer) FROM PUBLIC;
+REVOKE ALL ON FUNCTION config.create_notification_route(text, boolean, integer, integer, boolean, integer, text) FROM PUBLIC;
 -- #6542 part 2: the actor is an argument now and the before row comes back, so the old signature is dropped and stays uncallable.
 DROP FUNCTION IF EXISTS config.update_notification_route(integer, text[], text, boolean, integer, integer, boolean, integer);
+-- #6928 (V229): p_severities joins the argument list, so the nine-argument function is dropped and stays uncallable. It is read only when
+-- p_columns names severities.
+DROP FUNCTION IF EXISTS config.update_notification_route(integer, text, text[], text, boolean, integer, integer, boolean, integer);
 CREATE OR REPLACE FUNCTION config.update_notification_route(
    p_route_id integer,
    p_actor text,
@@ -1594,7 +1622,8 @@ CREATE OR REPLACE FUNCTION config.update_notification_route(
    p_scope_server_id integer,
    p_scope_tag_id integer,
    p_send_resolutions boolean,
-   p_fallback_route_id integer)
+   p_fallback_route_id integer,
+   p_severities text DEFAULT NULL)
 RETURNS jsonb
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -1611,11 +1640,12 @@ DECLARE
    v_tag integer;
    v_resolutions boolean;
    v_fallback integer;
+   v_severities text;
 BEGIN
    IF p_columns IS NULL OR cardinality(p_columns) = 0
       OR EXISTS (SELECT 1 FROM unnest(p_columns) AS c(name)
-                 WHERE c.name IS NULL OR c.name NOT IN ('metric_match', 'enabled', 'scope', 'send_resolutions', 'fallback_route_id')) THEN
-      RAISE EXCEPTION 'The columns to change are metric_match, enabled, scope, send_resolutions and fallback_route_id.' USING ERRCODE = 'DL400';
+                 WHERE c.name IS NULL OR c.name NOT IN ('metric_match', 'enabled', 'scope', 'send_resolutions', 'fallback_route_id', 'severities')) THEN
+      RAISE EXCEPTION 'The columns to change are metric_match, enabled, scope, send_resolutions, fallback_route_id and severities.' USING ERRCODE = 'DL400';
    END IF;
    -- The row is read again here, under its lock, so the agent-route refusal and every check below are on what is stored now
    -- and not on what the caller read a moment ago.
@@ -1629,7 +1659,7 @@ BEGIN
    -- What a route matches and which servers it covers decide which servers an agent route covers, so a route with an
    -- explicit agent setting (Off included) keeps both in the Viewer. A route's own destinations do not stop a change
    -- to what it matches: the destinations are set over MCP too. (#6231)
-   IF ('metric_match' = ANY (p_columns) OR 'scope' = ANY (p_columns)) AND v_row.agent_level IS NOT NULL AND NOT v_operator THEN
+   IF ('metric_match' = ANY (p_columns) OR 'scope' = ANY (p_columns) OR 'severities' = ANY (p_columns)) AND v_row.agent_level IS NOT NULL AND NOT v_operator THEN
       RAISE EXCEPTION 'That route has an agent setting (Off), so what it matches and which servers it covers are changed in the Viewer or on the web dashboard, not over MCP. Turning it on, send_resolutions and fallback_route_id can still be changed here.' USING ERRCODE = 'DL403';
    END IF;
    -- An Off route keeps servers away from a broader agent route, so turning it off widens agent coverage: that is done in the Viewer
@@ -1643,6 +1673,10 @@ BEGIN
    v_tag := CASE WHEN 'scope' = ANY (p_columns) THEN p_scope_tag_id ELSE v_row.scope_tag_id END;
    v_resolutions := CASE WHEN 'send_resolutions' = ANY (p_columns) THEN p_send_resolutions ELSE v_row.send_resolutions END;
    v_fallback := CASE WHEN 'fallback_route_id' = ANY (p_columns) THEN p_fallback_route_id ELSE v_row.fallback_route_id END;
+   v_severities := CASE WHEN 'severities' = ANY (p_columns) THEN lower(btrim(COALESCE(p_severities, ''))) ELSE v_row.severities END;
+   IF v_severities NOT IN ('both', 'critical', 'warning') THEN
+      RAISE EXCEPTION 'severities is critical, warning or both.' USING ERRCODE = 'DL400';
+   END IF;
    IF v_match = '' THEN
       RAISE EXCEPTION 'Choose a family or enter an exact metric name.' USING ERRCODE = 'DL400';
    END IF;
@@ -1676,6 +1710,7 @@ BEGIN
           scope_tag_id = v_tag,
           send_resolutions = v_resolutions,
           fallback_route_id = v_fallback,
+          severities = v_severities,
           modified_at = (now() AT TIME ZONE 'UTC')
     WHERE route_id = p_route_id;
    -- The row as it was before this change, in the journal's words: set_notification_route_agent journals it as the before of a
@@ -1683,10 +1718,11 @@ BEGIN
    RETURN jsonb_build_object(
       'metric_match', btrim(v_row.metric_match), 'scope_server_id', v_row.scope_server_id, 'scope_tag_id', v_row.scope_tag_id,
       'agent_level', v_row.agent_level, 'agent_max_per_hour', v_row.agent_max_per_hour, 'agent_max_per_day', v_row.agent_max_per_day,
-      'agent_lease_minutes', v_row.agent_lease_minutes, 'agent_expiry_minutes', v_row.agent_expiry_minutes, 'enabled', v_row.enabled);
+      'agent_lease_minutes', v_row.agent_lease_minutes, 'agent_expiry_minutes', v_row.agent_expiry_minutes, 'enabled', v_row.enabled,
+      'severities', v_row.severities);
 END
 $fn$;
-REVOKE ALL ON FUNCTION config.update_notification_route(integer, text, text[], text, boolean, integer, integer, boolean, integer) FROM PUBLIC;
+REVOKE ALL ON FUNCTION config.update_notification_route(integer, text, text[], text, boolean, integer, integer, boolean, integer, text) FROM PUBLIC;
 -- #6542: a named operator token sets a route's agent level, its four limits and its fallback over MCP through this function, and
 -- the change is journaled as route_agent_changed under the token's name (operator:<name>), in the same transaction. Levels 0 to 3 are
 -- set here (MCP is full admin). A level 3 server action still needs that server's switch (config_server_actions) and its remediation login.
@@ -1768,6 +1804,10 @@ BEGIN
       IF (p_before ->> 'metric_match') IS DISTINCT FROM btrim(v_row.metric_match) THEN v_changed := array_append(v_changed, 'metric_match'); END IF;
       IF (p_before ->> 'scope_server_id')::integer IS DISTINCT FROM v_row.scope_server_id THEN v_changed := array_append(v_changed, 'scope_server_id'); END IF;
       IF (p_before ->> 'scope_tag_id')::integer IS DISTINCT FROM v_row.scope_tag_id THEN v_changed := array_append(v_changed, 'scope_tag_id'); END IF;
+      -- #6928: the severity filter moves alerts between agent routes, so it is named like the match and the scope. Only a route with an agent setting.
+      IF (p_before ->> 'severities') IS DISTINCT FROM v_row.severities AND ((p_before ->> 'agent_level') IS NOT NULL OR v_level IS NOT NULL) THEN
+         v_changed := array_append(v_changed, 'severities');
+      END IF;
    END IF;
    IF v_level IS DISTINCT FROM v_row.agent_level THEN v_changed := array_append(v_changed, 'agent_level'); END IF;
    IF v_hour IS DISTINCT FROM v_row.agent_max_per_hour THEN v_changed := array_append(v_changed, 'agent_max_per_hour'); END IF;
@@ -1793,11 +1833,13 @@ BEGIN
       v_before := CASE WHEN COALESCE(p_created, false) THEN NULL WHEN p_before IS NOT NULL THEN p_before ELSE jsonb_build_object(
          'metric_match', btrim(v_row.metric_match), 'scope_server_id', v_row.scope_server_id, 'scope_tag_id', v_row.scope_tag_id,
          'agent_level', v_row.agent_level, 'agent_max_per_hour', v_row.agent_max_per_hour, 'agent_max_per_day', v_row.agent_max_per_day,
-         'agent_lease_minutes', v_row.agent_lease_minutes, 'agent_expiry_minutes', v_row.agent_expiry_minutes, 'enabled', v_row.enabled) END;
+         'agent_lease_minutes', v_row.agent_lease_minutes, 'agent_expiry_minutes', v_row.agent_expiry_minutes, 'enabled', v_row.enabled,
+         'severities', v_row.severities) END;
       v_after := jsonb_build_object(
          'metric_match', btrim(v_row.metric_match), 'scope_server_id', v_row.scope_server_id, 'scope_tag_id', v_row.scope_tag_id,
          'agent_level', v_level, 'agent_max_per_hour', v_hour, 'agent_max_per_day', v_day,
-         'agent_lease_minutes', v_lease, 'agent_expiry_minutes', v_expiry, 'enabled', v_row.enabled);
+         'agent_lease_minutes', v_lease, 'agent_expiry_minutes', v_expiry, 'enabled', v_row.enabled,
+         'severities', v_row.severities);
       INSERT INTO config.investigation_journal (event_time, request_id, route_id, server_id, event, actor, reason, detail)
       VALUES (now(), NULL, p_route_id, v_row.scope_server_id, 'route_agent_changed', p_actor,
               CASE WHEN COALESCE(p_created, false) THEN 'created route' ELSE 'changed ' || array_to_string(v_changed, ', ') END,
@@ -1896,8 +1938,8 @@ BEGIN
 END
 $fn$;
 REVOKE ALL ON FUNCTION config.set_notification_route_destinations(integer, text, text[], text, text, text, text, text) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION config.create_notification_route(text, boolean, integer, integer, boolean, integer) TO mcp;
-GRANT EXECUTE ON FUNCTION config.update_notification_route(integer, text, text[], text, boolean, integer, integer, boolean, integer) TO mcp;
+GRANT EXECUTE ON FUNCTION config.create_notification_route(text, boolean, integer, integer, boolean, integer, text) TO mcp;
+GRANT EXECUTE ON FUNCTION config.update_notification_route(integer, text, text[], text, boolean, integer, integer, boolean, integer, text) TO mcp;
 GRANT EXECUTE ON FUNCTION config.set_notification_route_destinations(integer, text, text[], text, text, text, text, text) TO mcp;
 GRANT EXECUTE ON FUNCTION config.set_notification_route_agent(integer, text, text[], integer, integer, integer, integer, integer, integer, boolean, jsonb) TO mcp;
 -- #6394: the MCP generate_webhook_signing_key and remove_webhook_signing_key tools. mcp holds no UPDATE on a signing key column of config.config_notification
@@ -3191,7 +3233,7 @@ BEGIN
    --     statements set and nothing more. BRING-YOUR-OWN STORES: re-run this script to add them.
    GRANT INSERT (request_id, route_id, server_id, server_name, family, first_metric, story_path_hash, first_alert_at, last_alert_at,
       window_until, opened_at, expires_at, lease_minutes, autonomy_level, alert_count, practice_of) ON config.investigation_requests TO mcp;
-   GRANT INSERT (request_id, alert_time, server_id, metric_name, dedup_key, current_value, threshold_value, muted, detail_text, context_json)
+   GRANT INSERT (request_id, alert_time, server_id, metric_name, dedup_key, current_value, threshold_value, muted, detail_text, context_json, severity)
       ON config.investigation_request_alerts TO mcp;
    GRANT INSERT (request_id, verdict, corrected_verdict, missed_step, comment, author) ON config.investigation_feedback TO mcp;
    GRANT UPDATE (verdict, corrected_verdict, missed_step, comment, author, created_at) ON config.investigation_feedback TO mcp;
@@ -3407,8 +3449,8 @@ BEGIN
    'config.request_snapshot_now(integer, text, text)',
    'config.request_active_queries_live(integer, text)',
    'config.request_analyze_now(integer, text)',
-   'config.create_notification_route(text, boolean, integer, integer, boolean, integer)',
-   'config.update_notification_route(integer, text, text[], text, boolean, integer, integer, boolean, integer)',
+   'config.create_notification_route(text, boolean, integer, integer, boolean, integer, text)',
+   'config.update_notification_route(integer, text, text[], text, boolean, integer, integer, boolean, integer, text)',
    'config.set_notification_route_agent(integer, text, text[], integer, integer, integer, integer, integer, integer, boolean, jsonb)',
    'config.set_notification_route_destinations(integer, text, text[], text, text, text, text, text)',
    'config.request_mcp_command(text, integer, integer, text)',

@@ -92,6 +92,7 @@ export const ROUTE_COLUMNS = [
   { key: "match_kind", label: "Kind" },
   { key: "family", label: "Family" },
   { key: "applies_to", label: "Applies to" },
+  { key: "severities", label: "Severity" },
   { key: "status", label: "Status" },
   { key: "channels", label: "Channels set", wrap: true },
   { key: "agent", label: "Agent" },
@@ -308,6 +309,13 @@ export function routeAgentText(r) {
   return "Off";
 }
 
+/** The Severity column (#6928), in the desktop routes window's words: which alerts the route takes by severity. A route read without
+    the field, or with a word this page does not know, reads as Both, the same as the service. */
+export function routeSeveritiesText(r) {
+  const word = r && typeof r.severities === "string" ? r.severities.trim().toLowerCase() : "";
+  return word === "critical" ? "Critical only" : word === "warning" ? "Warning only" : "Both";
+}
+
 /** The Send resolutions column (#5825), in the route dialog's words: send_resolutions null follows each channel's own
     "Send resolutions" setting, true always sends the cleared message to this route's destinations, false never does. A
     route read without the field reads as the channel setting, the same as null. */
@@ -326,6 +334,7 @@ export function routeRows(data) {
     match_kind: r.match_kind,
     family: r.family,
     applies_to: routeScopeText(r),
+    severities: routeSeveritiesText(r),
     status: routeStatusText(r),
     channels: Array.isArray(r.configured_channels) ? r.configured_channels.filter((c) => !isSecretKey(c)).join(", ") : null,
     agent: routeAgentText(r),

@@ -527,7 +527,7 @@ public sealed class AgentLevel2StoreGrantLiveTests
             "[{\"tool\":\"get_blocking\",\"arguments\":{},\"key_numbers\":\"12\"}]"), new AgentActionTarget(7, "srv-7", null, null));
         AgentActionHooks Hooks(int level) => new()
         {
-            LoadLevels = (_, _, _) => Task.FromResult<Func<string, int, int?>>((_, _) => level),
+            LoadLevels = (_, _, _) => Task.FromResult<Func<string, int, PerformanceMonitor.Notifications.AlertSeverityLevel?, int?>>((_, _, _) => level),
             ReadBefore = (_, _, _) => Task.FromResult<string?>(null),
             Write = (_, _, _) => { writes++; return Task.FromResult<string?>("{}"); },
         };

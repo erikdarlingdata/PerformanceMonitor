@@ -3763,7 +3763,7 @@ LIMIT 1";
             externalAlertStore,
             alertsEnabled: () => alertSettings.AlertsEnabled,
             (outcome, token) => deliverer.DeliverAndReportAsync(outcome, token),
-            (metric, serverName, serverKey, detail, token) => deliverer.TryResolvePagerDutyAsync(metric, serverName, serverKey, detail, token),
+            (metric, serverName, serverKey, detail, severity, token) => deliverer.TryResolvePagerDutyAsync(metric, serverName, serverKey, detail, severity, token),
             historyStore,
             muteRuleService.IsAlertMuted,
             name =>

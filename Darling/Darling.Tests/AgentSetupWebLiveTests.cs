@@ -246,6 +246,17 @@ public sealed class AgentSetupWebLiveTests
             Assert.Equal("Analysis: Waits|ops@example.com|3|60|500|false", await ScalarAsync(owner,
                 $"SELECT metric_match || '|' || smtp_recipients || '|' || agent_level || '|' || agent_max_per_hour || '|' || agent_max_per_day || '|' || enabled::text FROM config_notification_routes WHERE route_id = {seeded}", ct));
 
+            /* #6928: the severity filter. A new route is Both, an edit sets it (any case), an edit that leaves it out keeps it. */
+            Assert.Equal("both", await ScalarAsync(owner, $"SELECT severities FROM config_notification_routes WHERE route_id = {seeded}", ct));
+            Assert.Equal(200, (await Send("PUT", $"/api/notification-routes/{seeded}", Json, "{\"severities\":\"Critical\"}")).Status);
+            Assert.Equal("critical", await ScalarAsync(owner, $"SELECT severities FROM config_notification_routes WHERE route_id = {seeded}", ct));
+            Assert.Equal(200, (await Send("PUT", $"/api/notification-routes/{seeded}", Json, "{\"enabled\":true}")).Status);
+            Assert.Equal("critical", await ScalarAsync(owner, $"SELECT severities FROM config_notification_routes WHERE route_id = {seeded}", ct));
+            var warningOnly = await Send("POST", "/api/notification-routes", Json, "{\"metric_match\":\"blocking\",\"agent_level\":1,\"severities\":\"warning\"}");
+            Assert.Equal(200, warningOnly.Status);
+            Assert.Equal("warning", await ScalarAsync(owner, $"SELECT severities FROM config_notification_routes WHERE route_id = {(int)warningOnly.Body!["route_id"]!}", ct));
+            Assert.Equal(200, (await Send("PUT", $"/api/notification-routes/{seeded}", Json, "{\"severities\":\"both\"}")).Status);
+
             /* Level 0 (Off) and Inherit are both settable. */
             Assert.Equal(200, (await Send("PUT", $"/api/notification-routes/{seeded}", Json, "{\"agent_level\":0}")).Status);
             Assert.Equal("0", await ScalarAsync(owner, $"SELECT agent_level FROM config_notification_routes WHERE route_id = {seeded}", ct));
@@ -401,6 +412,8 @@ public sealed class AgentSetupWebLiveTests
             await Refused("POST", "/api/notification-routes", "{\"metric_match\":\"blocking\"}", "at least one destination or the agent channel");
             await Refused("POST", "/api/notification-routes", "{\"metric_match\":\"blocking\",\"agent_level\":1,\"fallback_route_id\":99999}", "Fallback route 99999 does not exist");
             await Refused("PUT", $"/api/notification-routes/{seeded}", $"{{\"fallback_route_id\":{seeded}}}", "its own fallback");
+            await Refused("POST", "/api/notification-routes", "{\"metric_match\":\"blocking\",\"agent_level\":1,\"severities\":\"major\"}", "severities is critical, warning or both");
+            await Refused("POST", "/api/notification-routes", "{\"metric_match\":\"blocking\",\"agent_level\":1,\"severities\":3}", "severities must be text");
             await Refused("POST", "/api/notification-routes", "{\"metric_match\":\"blocking\",\"agent_level\":\"one\"}", "agent_level must be a whole number");
             await Refused("POST", "/api/notification-routes", "{\"metric_match\":\"blocking\",\"agent_level\":1,\"agent_max_per_hour\":1.5}", "agent_max_per_hour must be a whole number");
 

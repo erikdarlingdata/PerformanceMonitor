@@ -46,9 +46,17 @@
         <TextBlock Grid.Row="2" Text="Applies to" FontWeight="Bold" HorizontalAlignment="Left" Margin="0,0,0,4"/>
         <ComboBox Grid.Row="3" x:Name="ScopeCombo" Margin="0,0,0,4" SelectionChanged="ScopeCombo_SelectionChanged"
                   ToolTip="All servers, one server, or a tag (the route covers every server with that tag or any sub-tag). A server route beats a tag route, and a tag route beats an all-servers route. A route whose server or tag is deleted later matches nothing."/>
-        <TextBlock Grid.Row="4" x:Name="ScopeNoteText" Foreground="{DynamicResource ForegroundMutedBrush}"
-                   TextWrapping="Wrap" HorizontalAlignment="Left" Margin="0,0,0,12"
-                   Text="Generic webhook headers and the body template stay app-wide: set them in Notifications. A route changes only where the post goes."/>
+        <StackPanel Grid.Row="4" Margin="0,0,0,12">
+            <!-- #6928: the severity filter. A route that excludes an alert's severity is skipped and matching goes on to the next route. -->
+            <StackPanel Orientation="Horizontal" Margin="0,4,0,4">
+                <TextBlock Text="Severity" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                <ComboBox x:Name="SeveritiesCombo" Width="180"
+                          ToolTip="Which alerts this route takes. Both: Warning and Critical. Critical only, or Warning only: an alert of the other severity skips this route and goes to the next matching route, then to the default channels."/>
+            </StackPanel>
+            <TextBlock x:Name="ScopeNoteText" Foreground="{DynamicResource ForegroundMutedBrush}"
+                       TextWrapping="Wrap" HorizontalAlignment="Left"
+                       Text="Generic webhook headers and the body template stay app-wide: set them in Notifications. A route changes only where the post goes."/>
+        </StackPanel>
 
         <TextBlock Grid.Row="5" Text="Matches" FontWeight="Bold" HorizontalAlignment="Left" Margin="0,0,0,4"/>
         <Grid Grid.Row="6" Margin="0,0,0,12">

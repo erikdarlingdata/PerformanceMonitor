@@ -149,7 +149,7 @@ public sealed class ServerActionSwitchWriteLiveTests
                 new AgentActionTarget(SqlServerId, "alpha-sql-01", null, null));
             var hooks = new ServerActionHooks
             {
-                LoadLevels = (_, _, _) => Task.FromResult<Func<string, int, int?>>((_, _) => 3),
+                LoadLevels = (_, _, _) => Task.FromResult<Func<string, int, PerformanceMonitor.Notifications.AlertSeverityLevel?, int?>>((_, _, _) => 3),
                 ReadCredential = (serverId, token) => store.ReadServerCredentialStateAsync(owner, serverId, token),
             };
 

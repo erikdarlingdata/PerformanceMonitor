@@ -16,6 +16,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitor.Darling.Storage;
 
@@ -62,7 +63,7 @@ public sealed class AgentActionHooks
     /// at most once per gate pass, so a request with several metrics does not read the route table (and its scope inputs) again
     /// for each one.
     /// </summary>
-    public required Func<NpgsqlConnection, NpgsqlTransaction, CancellationToken, Task<Func<string, int, int?>>> LoadLevels { get; init; }
+    public required Func<NpgsqlConnection, NpgsqlTransaction, CancellationToken, Task<Func<string, int, AlertSeverityLevel?, int?>>> LoadLevels { get; init; }
 
     /// <summary>Check 7, the kind rule; null when the kind has none.</summary>
     public Func<NpgsqlConnection, NpgsqlTransaction, AgentActionContext, CancellationToken, Task<AgentActionRefusal?>>? KindRule { get; init; }
@@ -160,7 +161,7 @@ FOR SHARE";
 
     /// <summary>Every metric that opened or joined the request, for the re-resolve: the lowest level wins.</summary>
     internal const string AgentActionMetricsSql = @"
-SELECT DISTINCT metric_name
+SELECT DISTINCT metric_name, severity
 FROM config.investigation_request_alerts
 WHERE request_id = $1";
 
@@ -528,18 +529,18 @@ RETURNING journal_id";
     /// after the request opened resolves to null and lowers the request to 0: fail closed (pinned live).
     /// </summary>
     private static async Task<int> ResolveRequestLevelAsync(NpgsqlConnection connection, NpgsqlTransaction transaction,
-        AgentActionRequest request, Func<NpgsqlConnection, NpgsqlTransaction, CancellationToken, Task<Func<string, int, int?>>> loadLevels,
+        AgentActionRequest request, Func<NpgsqlConnection, NpgsqlTransaction, CancellationToken, Task<Func<string, int, AlertSeverityLevel?, int?>>> loadLevels,
         int floor, CancellationToken cancellationToken)
     {
         var level = request.AutonomyLevel;
         if (level >= floor)
         {
             var resolve = await loadLevels(connection, transaction, cancellationToken);
-            foreach (var metric in request.Metrics)
+            foreach (var (metric, severity) in request.Metrics)
             {
                 if (level < floor)
                     break;
-                level = Math.Min(level, resolve(metric, request.ServerId) ?? 0);
+                level = Math.Min(level, resolve(metric, request.ServerId, severity) ?? 0);
             }
         }
 
@@ -548,7 +549,7 @@ RETURNING journal_id";
 
     private sealed record AgentActionRequest(string State, Guid? ClaimId, string? ClaimedBy, DateTime? LeaseUntil,
         DateTime ExpiresAt, int ServerId, string ServerName, Guid? PracticeOf, int AutonomyLevel, int ClaimCount,
-        IReadOnlyList<string> Metrics);
+        IReadOnlyList<(string Metric, AlertSeverityLevel? Severity)> Metrics);
 
     private async Task<AgentActionRequest?> ReadAgentActionRequestAsync(NpgsqlConnection connection,
         NpgsqlTransaction transaction, Guid requestId, CancellationToken cancellationToken)
@@ -572,20 +573,29 @@ RETURNING journal_id";
                 reader.IsDBNull(7) ? null : reader.GetGuid(7),
                 reader.GetInt16(8),
                 reader.GetInt32(9),
-                Array.Empty<string>());
+                Array.Empty<(string, AlertSeverityLevel?)>());
         }
 
-        var metrics = new List<string> { firstMetric };
+        /* #6928: each alert's metric at the tier it arrived at, so the live routes are read at the tier dispatch used: a Critical alert
+           dispatched under one route is not re-resolved under a Warning-only route that dispatch skipped. The first metric stands
+           alone only when no alert row names it (an old request), and resolves with no tier. */
+        var metrics = new List<(string Metric, AlertSeverityLevel? Severity)>();
         await using (var command = Command(connection, transaction, AgentActionMetricsSql, P(requestId)))
         await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
         {
             while (await reader.ReadAsync(cancellationToken))
             {
                 var metric = reader.GetString(0);
-                if (!metrics.Contains(metric, StringComparer.Ordinal))
-                    metrics.Add(metric);
+                var severity = reader.IsDBNull(1) ? null
+                    : string.Equals(reader.GetString(1), InvestigationEvents.Critical, StringComparison.Ordinal) ? AlertSeverityLevel.Critical
+                    : (AlertSeverityLevel?)AlertSeverityLevel.Warning;
+                if (!metrics.Contains((metric, severity)))
+                    metrics.Add((metric, severity));
             }
         }
+
+        if (!metrics.Any(m => string.Equals(m.Metric, firstMetric, StringComparison.Ordinal)))
+            metrics.Insert(0, (firstMetric, null));
 
         return row with { Metrics = metrics };
     }

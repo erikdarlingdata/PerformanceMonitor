@@ -56,7 +56,7 @@ internal static class DarlingWebAgentSetup
     private static readonly string[] s_routeKeys =
     [
         "metric_match", "enabled", "scope_server_id", "scope_tag_id", "agent_level", "agent_max_per_hour", "agent_max_per_day",
-        "agent_lease_minutes", "agent_expiry_minutes", "send_resolutions", "fallback_route_id",
+        "agent_lease_minutes", "agent_expiry_minutes", "send_resolutions", "fallback_route_id", "severities",
         "teams_webhook_url", "slack_webhook_url", "generic_webhook_url", "pagerduty_routing_key", "email_recipients",
         "expected_modified_at",
     ];
@@ -318,6 +318,17 @@ SELECT has_table_privilege(current_user, 'config_notification_routes', 'INSERT')
             }
 
             draft.SendResolutions = kind == JsonValueKind.Null ? null : body["send_resolutions"]!.GetValue<bool>();
+        }
+
+        /* #6928: the severity filter. A word other than both, critical or warning is refused by the writer's validation with its sentence. */
+        if (body.ContainsKey("severities"))
+        {
+            if (body["severities"] is not JsonValue severities || severities.GetValueKind() != JsonValueKind.String)
+            {
+                return "severities must be text.";
+            }
+
+            draft.Severities = severities.GetValue<string>();
         }
 
         if (!TryInt(body, "scope_server_id", out var hasServer, out var server, out var error)
