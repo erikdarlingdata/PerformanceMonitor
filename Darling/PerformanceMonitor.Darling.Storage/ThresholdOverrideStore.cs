@@ -20,7 +20,12 @@ namespace PerformanceMonitor.Darling.Storage;
 /// override replaces (null when the store has no global row or no such column yet).</summary>
 public sealed record ThresholdOverrideRow(
     int ServerId, string ServerName, string? Database, string Key, double Value, double? GlobalValue,
-    string SetBy, Guid? RequestId, DateTime UpdatedAt);
+    string SetBy, Guid? RequestId, DateTime UpdatedAt, int? TagId = null, bool Orphaned = false)
+{
+    /// <summary>True for a row held for a tag (#6926): <see cref="TagId"/> is set, <see cref="ServerId"/> is 0, <see cref="ServerName"/>
+    /// holds the tag's name (empty when the tag was deleted) and <see cref="Orphaned"/> says the tag no longer exists, so the row matches nothing.</summary>
+    public bool IsTag => TagId.HasValue;
+}
 
 /// <summary>
 /// The statements behind <c>config.config_threshold_overrides</c> (#5916), shared by the <c>set_alert_threshold_override</c> tool,
@@ -28,7 +33,7 @@ public sealed record ThresholdOverrideRow(
 /// and transaction (the tool journals its write in the same transaction) or a data source (the list). Key and bound checks are
 /// not here: they are <c>DarlingThresholdKeys</c>' (<c>PerformanceMonitor.Alerting</c>), applied by every caller before any write.
 /// </summary>
-public static class ThresholdOverrideStore
+public static partial class ThresholdOverrideStore
 {
     /// <summary>The table, schema-qualified; the mcp role holds SELECT, INSERT, UPDATE and DELETE on it (#5920).</summary>
     public const string Table = "config.config_threshold_overrides";
@@ -139,6 +144,28 @@ public static class ThresholdOverrideStore
             rows.Add(new ThresholdOverrideRow(
                 reader.GetInt32(0), reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetString(2), key, reader.GetDouble(4), globalValue,
                 reader.GetString(5), reader.IsDBNull(6) ? null : reader.GetGuid(6), reader.GetDateTime(7)));
+        }
+
+        await reader.DisposeAsync();
+
+        await using var tagCommand = postgres.CreateCommand(TagListSql);
+        tagCommand.CommandTimeout = CommandTimeoutSeconds;
+        await using var tagReader = await tagCommand.ExecuteReaderAsync(ct);
+        while (await tagReader.ReadAsync(ct))
+        {
+            var key = tagReader.GetString(2);
+            double? globalValue = null;
+            if (global is { } g && columnFor(key) is { } column
+                && g.TryGetProperty(column, out var element) && element.ValueKind == JsonValueKind.Number)
+            {
+                globalValue = element.GetDouble();
+            }
+
+            var name = tagReader.IsDBNull(1) ? null : tagReader.GetString(1);
+            rows.Add(new ThresholdOverrideRow(
+                0, name ?? string.Empty, null, key, tagReader.GetDouble(3), globalValue,
+                tagReader.GetString(4), tagReader.IsDBNull(5) ? null : tagReader.GetGuid(5), tagReader.GetDateTime(6),
+                tagReader.GetInt32(0), name is null));
         }
 
         return rows;

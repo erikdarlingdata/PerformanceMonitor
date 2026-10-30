@@ -14,11 +14,12 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service;
 
 /// <summary>
-/// The per-server and per-database threshold overrides the alert engine and the PostgreSQL count checks resolve through
+/// The per-server, per-database and per-tag threshold overrides the alert engine and the PostgreSQL count checks resolve through
 /// (#5916): the Darling loader behind <see cref="IAlertThresholdOverrides"/>. It holds one immutable snapshot of
 /// <c>config.config_threshold_overrides</c> and answers from it, so the sweep path does no I/O. The service reloads it at
 /// start and on every control-plane reload (the table is on the <c>config_version</c> beacon), and a failed load keeps the
@@ -27,69 +28,109 @@ namespace PerformanceMonitor.Darling.Service;
 internal sealed class DarlingThresholdOverrides : IAlertThresholdOverrides
 {
     internal const string SelectSql =
-        "SELECT server_id, database_name, threshold_key, value FROM config.config_threshold_overrides";
+        "SELECT id, server_id, database_name, scope_tag_id, threshold_key, value FROM config.config_threshold_overrides";
+
+    /// <summary>The direct (server and database) overrides, and the tag override that wins per server and key.</summary>
+    private sealed record Snapshot(Dictionary<(int Server, string Database, string Key), int> Direct, Dictionary<(int Server, string Key), int> Tag);
 
     private readonly ILogger? _logger;
-    private volatile Dictionary<(int Server, string Database, string Key), int> _snapshot = new();
+    private volatile Snapshot _snapshot = new(new(), new());
 
     internal DarlingThresholdOverrides(ILogger? logger = null) => _logger = logger;
 
-    /// <summary>How many overrides are in force.</summary>
-    internal int Count => _snapshot.Count;
+    /// <summary>How many overrides are in force: the server and database ones, and the tag ones that some server resolves to.</summary>
+    internal int Count => _snapshot.Direct.Count + _snapshot.Tag.Count;
 
     /// <summary>
     /// Replaces the snapshot with the table's rows. The read is awaited before the swap and nothing here catches, so a
     /// read that throws leaves the overrides already in force. A row whose key is not a tunable threshold, whose value is
     /// not an integer inside the key's bounds, or whose database name sits on a server-only key is skipped and logged,
-    /// never applied: the engine uses the value as-is.
+    /// never applied: the engine uses the value as-is. Tag overrides (#6926) are resolved with the tag tree and the server-to-tag
+    /// map, read only when the table holds a tag row; a tag-table read that fails throws, so the whole snapshot already in force stays (it is not replaced by one with no tag overrides).
     /// </summary>
     internal async Task LoadAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken = default)
     {
-        var next = new Dictionary<(int, string, string), int>();
-        await using var command = postgres.CreateCommand(SelectSql);
-        command.CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds;
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
+        var direct = new List<(int ServerId, string? Database, string Key, double Value)>();
+        var tag = new List<(long RowId, int TagId, string Key, double Value)>();
+        await using (var command = postgres.CreateCommand(SelectSql))
         {
-            var serverId = reader.GetInt32(0);
-            var database = reader.IsDBNull(1) ? string.Empty : reader.GetString(1);
-            var key = reader.GetString(2);
-            var raw = reader.GetDouble(3);
-            if (Accept(key, raw, database, out var value) is { } problem)
+            command.CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds;
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
             {
-                LogSkipped(serverId, key, database, problem);
-                continue;
+                var key = reader.GetString(4);
+                var raw = reader.GetDouble(5);
+                if (!reader.IsDBNull(3))
+                    tag.Add((reader.GetInt64(0), reader.GetInt32(3), key, raw));
+                else if (!reader.IsDBNull(1))
+                    direct.Add((reader.GetInt32(1), reader.IsDBNull(2) ? null : reader.GetString(2), key, raw));
             }
-
-            next[(serverId, database, key)] = value;
         }
 
-        _snapshot = next;
+        StoreConfigProvider.RouteScopeInputs? inputs = null;
+        if (tag.Count > 0)
+        {
+            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+            inputs = await StoreConfigProvider.ReadRouteScopeInputsAsync(connection, _logger, cancellationToken);
+            /* ReadRouteScopeInputsAsync swallows a failed tag read, and installing a snapshot with no tag winners would drop every
+               tag override to the global value until the next config change. Throw so the worker keeps the snapshot in force. */
+            if (!inputs.TagsReadable)
+                throw new InvalidOperationException("The server tag tables could not be read, so the tag overrides cannot be resolved.");
+        }
+
+        Replace(direct, tag, inputs);
     }
 
-    private void LogSkipped(int serverId, string key, string database, string problem) =>
+    private void LogSkipped(string scope, string key, string database, string problem) =>
         _logger?.LogWarning(
-            "Threshold override for server {ServerId} key '{Key}' database '{Database}' was skipped: {Problem}",
-            serverId, key, database, problem);
+            "Threshold override for {Scope} key '{Key}' database '{Database}' was skipped: {Problem}",
+            scope, key, database, problem);
 
     /// <summary>Replaces the snapshot from rows already in hand (the loader's own tests, and any caller that read the table). A
     /// skipped row is logged the way <see cref="LoadAsync"/> logs it.</summary>
-    internal void Replace(IEnumerable<(int ServerId, string? Database, string Key, double Value)> rows)
+    internal void Replace(IEnumerable<(int ServerId, string? Database, string Key, double Value)> rows) =>
+        Replace(rows, [], null);
+
+    /// <summary>The same with tag overrides (#6926). <paramref name="tagRows"/> carry the table row id, which breaks a tie between two
+    /// tags of the same depth, and <paramref name="inputs"/> the registry, tag tree and server-to-tag map the routes expand against
+    /// (null: the tag tables were not read, and a tag override matches nothing).</summary>
+    internal void Replace(
+        IEnumerable<(int ServerId, string? Database, string Key, double Value)> rows,
+        IEnumerable<(long RowId, int TagId, string Key, double Value)> tagRows,
+        StoreConfigProvider.RouteScopeInputs? inputs)
     {
-        var next = new Dictionary<(int, string, string), int>();
+        var direct = new Dictionary<(int, string, string), int>();
         foreach (var (serverId, database, key, raw) in rows)
         {
             var db = database ?? string.Empty;
             if (Accept(key, raw, db, out var value) is { } problem)
-                LogSkipped(serverId, key, db, problem);
+                LogSkipped("server " + serverId.ToString(CultureInfo.InvariantCulture), key, db, problem);
             else
-                next[(serverId, db, key)] = value;
+                direct[(serverId, db, key)] = value;
         }
 
-        _snapshot = next;
+        var accepted = new List<TagOverrideCandidate>();
+        foreach (var (rowId, tagId, key, raw) in tagRows)
+        {
+            if (Accept(key, raw, string.Empty, out var value) is { } problem)
+                LogSkipped("tag " + tagId.ToString(CultureInfo.InvariantCulture), key, string.Empty, problem);
+            else
+                accepted.Add(new TagOverrideCandidate(rowId, tagId, key, value));
+        }
+
+        var tagWinners = new Dictionary<(int, string), int>();
+        if (accepted.Count > 0 && inputs is not null)
+        {
+            foreach (var (slot, winner) in TagThresholdResolver.Resolve(
+                         accepted, inputs.KnownServerIds, inputs.TagParents, inputs.ServerTags, inputs.TagsReadable))
+                tagWinners[slot] = (int)winner.Value;
+        }
+
+        _snapshot = new Snapshot(direct, tagWinners);
     }
 
-    private static string? Accept(string key, double raw, string database, out int value)
+    /// <summary>Why a stored value cannot be applied (null: it can). The MCP server view filters tag rows through this too, so it never names a tag the engine skips.</summary>
+    internal static string? Accept(string key, double raw, string database, out int value)
     {
         value = 0;
         if (!DarlingThresholdKeys.TryGet(key, out var entry))
@@ -106,18 +147,21 @@ internal sealed class DarlingThresholdOverrides : IAlertThresholdOverrides
 
     /// <summary>
     /// The value of the wire-named threshold for the server (and database): a database override first, then the
-    /// server's, else <paramref name="globalValue"/>. <paramref name="serverKey"/> is the store server id as text, the
-    /// engine's server key. This is the one resolution the PostgreSQL count thresholds use too.
+    /// server's, then the tag's (#6926: the deepest tag the server is under), else <paramref name="globalValue"/>.
+    /// <paramref name="serverKey"/> is the store server id as text, the engine's server key. This is the one resolution the
+    /// PostgreSQL count thresholds use too.
     /// </summary>
     internal int ResolveWire(string wire, string serverKey, string? database, int globalValue)
     {
         if (!int.TryParse(serverKey, NumberStyles.Integer, CultureInfo.InvariantCulture, out var serverId))
             return globalValue;
         var snapshot = _snapshot;
-        if (snapshot.Count == 0)
+        if (snapshot.Direct.Count == 0 && snapshot.Tag.Count == 0)
             return globalValue;
-        if (!string.IsNullOrEmpty(database) && snapshot.TryGetValue((serverId, database, wire), out var perDatabase))
+        if (!string.IsNullOrEmpty(database) && snapshot.Direct.TryGetValue((serverId, database, wire), out var perDatabase))
             return perDatabase;
-        return snapshot.TryGetValue((serverId, string.Empty, wire), out var perServer) ? perServer : globalValue;
+        if (snapshot.Direct.TryGetValue((serverId, string.Empty, wire), out var perServer))
+            return perServer;
+        return snapshot.Tag.TryGetValue((serverId, wire), out var perTag) ? perTag : globalValue;
     }
 }

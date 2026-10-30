@@ -30,7 +30,7 @@
 
         <TextBlock Grid.Row="0" Text="Threshold Overrides" FontSize="18" FontWeight="Bold" HorizontalAlignment="Left" Margin="0,0,0,4"/>
         <TextBlock Grid.Row="1"
-                   Text="A threshold held for one server, or for one database on it, that differs from the global value. The alert engine uses it for that server only; the global value is not changed. To silence an alert, mute it: an override moves a threshold and never turns an alert off."
+                   Text="A threshold held for one server, for one database on it, or for a server tag (every server under the tag and the tags below it), that differs from the global value. A database override wins over a server override, then the deepest tag the server is under, then the global value; the global value is not changed. To silence an alert, mute it: an override moves a threshold and never turns an alert off."
                    Foreground="{DynamicResource ForegroundMutedBrush}" TextWrapping="Wrap" HorizontalAlignment="Left" Margin="0,0,0,12"/>
 
         <Grid Grid.Row="2">
@@ -40,7 +40,7 @@
                       IsReadOnly="True"
                       SelectionChanged="OverridesGrid_SelectionChanged">
                 <DataGrid.Columns>
-                    <DataGridTextColumn Header="Server" Binding="{Binding ServerName}" Width="160"/>
+                    <DataGridTextColumn Header="Scope" Binding="{Binding ScopeText}" SortMemberPath="ScopeText" Width="200"/>
                     <DataGridTextColumn Header="Database" Binding="{Binding DatabaseText}" Width="130"/>
                     <DataGridTextColumn Header="Key" Binding="{Binding Key}" Width="*"/>
                     <DataGridTextColumn Header="Value" Binding="{Binding ValueText}" SortMemberPath="Row.Value" Width="70"/>
@@ -51,7 +51,7 @@
                 </DataGrid.Columns>
             </DataGrid>
             <TextBlock x:Name="NoOverridesMessage"
-                       Text="No server holds an override: every server uses the global values."
+                       Text="No server or tag holds an override: every server uses the global values."
                        Foreground="{DynamicResource ForegroundMutedBrush}"
                        HorizontalAlignment="Center" VerticalAlignment="Center"
                        TextWrapping="Wrap" TextAlignment="Center" MaxWidth="460"
@@ -59,8 +59,8 @@
         </Grid>
 
         <StackPanel x:Name="EditPanel" Grid.Row="3" Orientation="Horizontal" Margin="0,12,0,0">
-            <TextBlock Text="Server" VerticalAlignment="Center" Margin="0,0,6,0"/>
-            <ComboBox x:Name="ServerCombo" Width="170" DisplayMemberPath="Name" Margin="0,0,12,0"/>
+            <TextBlock Text="Scope" VerticalAlignment="Center" Margin="0,0,6,0"/>
+            <ComboBox x:Name="ServerCombo" Width="190" DisplayMemberPath="Name" Margin="0,0,12,0" ToolTip="A server, or a Tag: the value then applies to every server under the tag and the tags below it. A server override wins over a tag override."/>
             <TextBlock Text="Key" VerticalAlignment="Center" Margin="0,0,6,0"/>
             <ComboBox x:Name="KeyCombo" Width="260" Margin="0,0,12,0"/>
             <TextBlock Text="Database" VerticalAlignment="Center" Margin="0,0,6,0"/>

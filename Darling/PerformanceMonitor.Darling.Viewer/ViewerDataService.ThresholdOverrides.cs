@@ -44,6 +44,37 @@ public sealed partial class ViewerDataService : IThresholdOverrideGateway
         }
     }
 
+    public async Task SaveThresholdOverrideForTagAsync(
+        int tagId, string key, int value, string setBy, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+            await ThresholdOverrideStore.UpsertTagAsync(connection, transaction, tagId, key, value, setBy, null, cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+        }
+        catch (PostgresException ex) when (ex.SqlState == InsufficientPrivilegeSqlState)
+        {
+            throw new ViewerReadOnlyException(ex);
+        }
+    }
+
+    public async Task RemoveThresholdOverrideForTagAsync(int tagId, string key, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+            await ThresholdOverrideStore.DeleteTagAsync(connection, transaction, tagId, key, cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+        }
+        catch (PostgresException ex) when (ex.SqlState == InsufficientPrivilegeSqlState)
+        {
+            throw new ViewerReadOnlyException(ex);
+        }
+    }
+
     public async Task RemoveThresholdOverrideAsync(
         int serverId, string? database, string key, CancellationToken cancellationToken = default)
     {
