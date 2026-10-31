@@ -35,7 +35,9 @@ Two mutually exclusive modes — setting `managed: true` together with `connecti
 | `webConnectionString` | *(unset)* | Bring-your-own only: the web dashboard's store login, normally the `viewer` role [`provision-roles.sql`](security.md#security--least-privilege-roles) creates, e.g. `Host=localhost;Port=5432;Username=viewer;Password=...;Database=darling`. Same forms as `connectionString` (a literal, or an `env:NAME` / `file:/path` reference), resolved when the dashboard starts, so an unreadable reference keeps the dashboard down with the reason logged rather than stopping collection. **Unset, the dashboard connects as the owner** (`connectionString`) and loses the `viewer` role's secret-column carve, narrow write grants and `statement_timeout` backstop; the service warns at startup. Not needed on the compose distribution's own store, where the service provisions the role itself, and a validation error in managed mode ([#3914](https://github.com/erikdarlingdata/PerformanceMonitor/issues/3914)). |
 | `mcpConnectionString` | *(unset)* | The same for the MCP server: normally the `mcp` role `provision-roles.sql` creates; unset, MCP connects as the owner, with the same warning. |
 
-## servers (array, at least one entry)
+## servers (array)
+
+The list can be empty. A new install starts with `"servers": []`, and you add the first server in the Viewer.
 
 | Key | Default | Notes |
 |---|---|---|

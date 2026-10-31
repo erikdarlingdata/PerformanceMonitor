@@ -209,7 +209,7 @@ For a large fleet, grant an Entra **group** instead of provisioning each identit
 
 ### Azure SQL Managed Instance
 
-Works like on-premises. Use server-level logins with `VIEW SERVER STATE`. SQL Agent is available.
+Works like on-premises. Use server-level logins and run the on-premises grant block above unchanged. It has the four required server grants and the optional msdb reads. SQL Agent is available.
 
 ### AWS RDS for SQL Server
 
@@ -258,5 +258,5 @@ The exact statements are in the Darling operator guide, in [Permissions on a Pos
 
 Darling can use two more logins, each with its own grants. Neither is part of the grant block above. The monitoring login stays read-only.
 
-- The remediation login runs the changes that an operator or an agent starts. These are: force or unforce a Query Store plan, evict a cached plan, and kill a session. Its grants are in the Darling operator guide, in [Configuration Reference](darling/configuration.md#servers-array-at-least-one-entry), under "Least privilege for the remediation credential".
+- The remediation login runs the changes that an operator or an agent starts. These are: force or unforce a Query Store plan, evict a cached plan, and kill a session. Its grants are in the Darling operator guide, in [Configuration Reference](darling/configuration.md#servers-array), under "Least privilege for the remediation credential".
 - The "Test an index" login is for PostgreSQL targets only. The check never runs under the monitoring login. The setup is in [Testing an index on PostgreSQL](darling/configuration.md#testing-an-index-on-postgresql).

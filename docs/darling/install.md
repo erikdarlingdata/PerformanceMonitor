@@ -59,6 +59,8 @@ PowerShell's `ConvertFrom-Json` fails on this file. Some parsers accept comments
 
 ## Step 2: Download and verify
 
+The release also has `PerformanceMonitorDarling-<version>.msi`. To install with the MSI instead of the zip, read [Installing with the MSI](#installing-with-the-msi) and skip to step 7.
+
 Take `PerformanceMonitorDarling-<version>.zip` and `SHA256SUMS.txt` from the release (or the nightly) that you were pointed at. Check the hash before you extract anything. Work from an **elevated** PowerShell in the folder that you downloaded to. The next step extracts into Program Files, and only administrators can write there.
 
 ```powershell
@@ -88,6 +90,8 @@ The service runs as the unprivileged virtual account `NT SERVICE\PerformanceMoni
 
 ## Step 4: Write `darling.json`
 
+This step is optional. If you skip it, step 6 writes a minimal `darling.json` with an empty `servers` list, and you add the first server in the Viewer. Do this step to name servers in the file before the first start.
+
 Stay elevated, so that Notepad can save into Program Files:
 
 ```powershell
@@ -95,7 +99,7 @@ Copy-Item "C:\Program Files\PerformanceMonitorDarling\darling.sample.json" "C:\P
 notepad "C:\Program Files\PerformanceMonitorDarling\darling.json"
 ```
 
-The minimum is one entry in `servers`. Everything else in the sample has a working default:
+You can leave `servers` as an empty list and add the first server in the Viewer. To name a server in the file, add one entry. Everything else in the sample has a working default:
 
 ```json
 {
@@ -183,6 +187,16 @@ The script does these things:
 
 `.\uninstall-darling.ps1` reverses the install. It leaves your store, your config and the `PerformanceMonitor Darling Operators` group alone unless you pass `-PurgeData`. With `-PurgeData` it also removes that group, but only when the install made it.
 
+These switches change what the script does:
+
+| Switch | Effect |
+|---|---|
+| `-SkipPreflight` | Skips the `--test-connection` check that the script runs first. |
+| `-NoShortcuts` | Does not create the **Darling Viewer** shortcuts. |
+| `-AddOperator <account>` | At the end of the install, adds that account (`DOMAIN\user`, or a local user's name) to the `PerformanceMonitor Darling Operators` group without asking. Use it for a scripted install. You cannot combine it with `-NoOperatorPrompt`. |
+| `-NoOperatorPrompt` | Never asks whether to add the signed-in account to that group. |
+| `-WebDashboard` | When the script writes the minimal `darling.json`, turns the web dashboard on and writes a web token. It does nothing when `darling.json` already exists. To show the token, run `PerformanceMonitor.Darling.Service.exe --print-web-token` from an elevated PowerShell. |
+
 To set up the LAN endpoints in the same pass, use `.\install-darling.ps1 -Network`. It runs the guided wizard at the end. You can also do this later (see [the web dashboard](web-dashboard.md) and [MCP](../mcp-server.md#darling)).
 
 ## Step 7: Wait about two minutes
@@ -258,8 +272,8 @@ These gaps are known and current. They are not bugs. Read this list so that you 
 - The viewer has no client-side secret store. The `darling.json` of a remote seat holds the store role password in cleartext. Set an ACL on it. This is fine for the read-only `viewer` role. Think about it for `admin`.
 - The web dashboard has no plan analysis and no live-server actions. That is the job of the WPF viewer. The page set of the dashboard is a deliberate subset of the page set of the viewer.
 - `network` blocks need a service restart. There is no hot reload for exposure. The service says so at startup and names the block that it loaded. So a config edit that appears to do nothing is at least explained.
-- PostgreSQL monitored targets collect, and you can read them on both UIs. Apart from the three Tier 0 outage predictors, they do not raise alerts or produce analysis findings yet. There is no execution plan capture at all for them. That is the largest remaining gap, because plans are the reason people open a database monitoring tool. See [PostgreSQL Targets](postgresql-targets.md#postgresql-targets).
-- The PostgreSQL tabs have no charts and no drill-downs. Every panel on both surfaces is a table over the window. There is no PostgreSQL equivalent of the correlated timeline lanes on the SQL Server Overview. You cannot click through from a blocking root to the sessions behind it. There is no history window for a single query.
+- PostgreSQL monitored targets collect, and you can read them on both UIs. Plan capture is available for them. Alerts and analysis findings for them cover less than for SQL Server. See [What it does not do yet](postgresql-targets.md#what-it-does-not-do-yet).
+- The Darling viewer charts four PostgreSQL trends and shows PostgreSQL deadlock graphs. The other PostgreSQL panels are tables over the window. There is no PostgreSQL equivalent of the correlated timeline lanes on the SQL Server Overview. You cannot click through from a blocking root to the sessions behind it.
 
 If you hit a problem that this list and [Troubleshooting](troubleshooting.md) do not cover, please report it. Include the service log lines around the failure.
 
