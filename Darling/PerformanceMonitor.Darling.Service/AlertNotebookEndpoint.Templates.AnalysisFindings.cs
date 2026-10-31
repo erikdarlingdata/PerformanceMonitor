@@ -96,7 +96,7 @@ internal static partial class AlertNotebookEndpoint
         if (!string.IsNullOrEmpty(finding.StoryText))
         {
             lines.Add(string.Empty);
-            lines.Add(LiteralBlock(finding.StoryText));
+            lines.Add(LiteralBlock(finding.StoryText, "text"));
         }
 
         return string.Join("\n\n", lines);
@@ -105,9 +105,10 @@ internal static partial class AlertNotebookEndpoint
     /// <summary>
     /// Text from the monitored server as a markdown code block: the notebook renders a fenced block verbatim, so a link, bold
     /// or heading written in the text stays as typed. The fence is one backtick longer than the longest run of backticks in the
-    /// text (three at least), so the text cannot close it.
+    /// text (three at least), so the text cannot close it. An <paramref name="info"/> of "text" makes the page wrap the block
+    /// as prose in the body font instead of scrolling it sideways in monospace; the text is still shown as typed.
     /// </summary>
-    private static string LiteralBlock(string text)
+    private static string LiteralBlock(string text, string info = "")
     {
         var longest = 0;
         var run = 0;
@@ -118,7 +119,7 @@ internal static partial class AlertNotebookEndpoint
         }
 
         var fence = new string('`', Math.Max(3, longest + 1));
-        return fence + "\n" + text + "\n" + fence;
+        return fence + info + "\n" + text + "\n" + fence;
     }
 
     /// <summary>The note a finding that could not be matched gets — never an error (#2710's degrade rule):

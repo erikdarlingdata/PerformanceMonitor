@@ -307,7 +307,12 @@ public sealed class DiagnosticsBundleHardeningTests
     [Fact]
     public void WriteAtomically_Restricted_OnUnix_CreatesAnOwnerOnlyFile()
     {
-        Assert.SkipUnless(!OperatingSystem.IsWindows(), "Unix file modes are not on Windows.");
+        /* The guard clause (not a bare Skip call) is what tells the platform analyzer the Unix mode calls below never run on Windows (CA1416). */
+        if (OperatingSystem.IsWindows())
+        {
+            Assert.Skip("Unix file modes are not on Windows.");
+            return;
+        }
 
         var root = Directory.CreateTempSubdirectory("darling-bundle-map-");
         try

@@ -126,6 +126,8 @@ public sealed class AlertNotebookTemplateAnalysisFindingsTests
 
         Assert.Contains(database, text, StringComparison.Ordinal);
         Assert.Contains(story, text, StringComparison.Ordinal);
+        /* The story's fence carries the "text" info string, so the page wraps it as prose (markdown.js, md-pre-text). */
+        Assert.Matches("(?m)^`{3,}text\n" + System.Text.RegularExpressions.Regex.Escape(story) + "\n`{3,}$", text);
         var outside = OutsideCode(text);
         Assert.DoesNotContain("](", outside, StringComparison.Ordinal);
         Assert.DoesNotContain("example.invalid", outside, StringComparison.Ordinal);
