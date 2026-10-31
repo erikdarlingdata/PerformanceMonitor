@@ -76,7 +76,7 @@ public partial class MuteRulesWindow : Window
 
     private async void AddRule_Click(object sender, RoutedEventArgs e)
     {
-        var dialog = new MuteRuleEditDialog((MuteRule?)null,await _dataService.SupportsMuteRecurrenceAsync()) { Owner = this };
+        var dialog = new MuteRuleEditDialog((MuteRule?)null, await _dataService.SupportsMuteRecurrenceAsync()) { Owner = this };
         if (dialog.ShowDialog() != true)
         {
             return;

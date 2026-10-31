@@ -203,11 +203,11 @@ internal static class DarlingMcpAgentActions
 
     /* ------------------------------------------------------------------ mute rules */
 
-    /// <summary>What an investigating agent is told when it sends a mute start (#6231): its mute applies at once.</summary>
     /// <summary>#7040: an agent's mute stays a one-off. A repeating schedule is a standing change to what an operator hears about, so it is left to a person.</summary>
     internal const string RecurrenceRefusal =
         "A repeat schedule (recur_days, recur_start, recur_end, recur_time_zone) is not available during an investigation: a mute made here is a one-off, and a rule that repeats is left to an operator. Nothing was written.";
 
+    /// <summary>What an investigating agent is told when it sends a mute start (#6231): its mute applies at once.</summary>
     internal const string StartsAtRefusal =
         "starts_at is not available during an investigation: a mute made here applies at once, so a window set ahead of planned work is left to an operator. Nothing was written.";
 
