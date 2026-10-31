@@ -167,6 +167,7 @@ public sealed class McpWindowMatrixLiveTests : IClassFixture<McpWindowMatrixStor
         ["get_database_protection"] = NoNotice,
         ["get_deadlock_trend"] = NoNotice,
         ["get_file_io_trend"] = NoNotice,
+        ["get_finops"] = NoNotice,
         ["get_fleet_overview"] = NoNotice,
         ["get_forced_plans"] = NoNotice,
         ["get_health_parser_cpu_tasks"] = NoNotice,
