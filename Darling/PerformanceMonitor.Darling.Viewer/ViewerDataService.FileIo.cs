@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -41,6 +42,12 @@ public sealed record FileIoLatencyPoint(
     bool InWriteTen = false);
 
 /// <summary>
+/// One point of the Overview timeline's I/O Latency row (#6970): the read latency across the ranked files at one
+/// time, as the row draws it. See <see cref="ViewerDataService.GetFileIoOverviewLatencyTrendAsync"/>.
+/// </summary>
+public sealed record FileIoOverviewLatencyPoint(DateTime CollectionTime, double ReadLatencyMs);
+
+/// <summary>
 /// One file's throughput point (MB/s) for the File I/O tab's Throughput sub-tab — a mirror of Lite's
 /// <c>FileIoThroughputPoint</c>. <c>file_label</c> is the pre-concatenated <c>database_name.file_name</c>
 /// the read builds, and the per-second rates come from the delta bytes divided by the row's stored
@@ -58,29 +65,11 @@ public sealed record FileIoThroughputPoint(
 public sealed partial class ViewerDataService
 {
     /// <summary>
-    /// The File I/O latency read — Lite's <c>GetFileIoLatencyTrendAsync</c> ported to Postgres, then bucketed
-    /// (#4234). Reads <c>v_file_io_stats</c> (a <c>SELECT *</c> passthrough over <c>file_io_stats</c>): a
-    /// <c>top_files</c> CTE picks the 10 busiest (database, file) pairs by total delta reads and the 10 busiest by total delta writes over the window (release walk V9) —
-    /// unchanged by bucketing — then average read/write (and queued read/write) latency per bucket is computed
-    /// as summed stall-ms / summed ops, with the delta-stall sums CAST to double precision before division. The
-    /// queued-stall columns are COALESCE'd to 0 so a server whose build predates them still reads 0.
-    /// <para>#3540, carried into the bucket: a row whose stored <c>sample_interval_seconds</c> is 0 (no delta
-    /// knowable — first sighting, counter reset, a gap past the policy) has its deltas nulled out of the sums
-    /// via the <c>rated</c> CTE rather than contributing a confident 0, exactly as the pre-bucket read dropped
-    /// the row outright. <c>IS DISTINCT FROM 0</c> still keeps pre-V127 rows (NULL: interval never recorded).
-    /// Unlike the pre-bucket read, the row is NOT removed from the FROM clause — it still counts toward
-    /// <c>collection_count</c> below, so a bucket is never mistaken for a true singleton just because its one
-    /// physical collection happened to be unrated. <c>HAVING COUNT(rated_reads) &gt; 0</c> drops a bucket whose
-    /// every row was unrated, matching the pre-bucket read's "absent, not 0.00 ms" answer for that case; a
-    /// bucket with at least one rated row keeps its per-metric <c>CASE ... ELSE 0</c> zero-safety exactly as
-    /// before (a rated row with 0 ops is a real 0 ms, not an absent point).</para>
-    /// <para>#4234 review (item 3): <c>first_collection_time</c> (<c>MIN(collection_time)</c>, every row in
-    /// <c>rated</c> — rated or not) and <c>collection_count</c> (<c>COUNT(*)</c> over that same population) ride
-    /// along so the caller can tell a true singleton bucket from one the bucketing actually merged, exactly like
-    /// <c>WaitTrendsSql</c>. $1 server_id, $2 window start, $3 window end (naive UTC), $4 bucket width minutes, $5 the saved database filter (#5312, a text[], NULL = every database), inside <c>top_files</c>: the busiest files are those of the CHOSEN databases.
-    /// </para>
+    /// The ranking and rating CTEs (<c>file_totals</c>, <c>ranked_files</c>, <c>top_files</c>, <c>rated</c>) that
+    /// <see cref="FileIoLatencyTrendSql"/> and <see cref="FileIoOverviewLatencyTrendSql"/> share, so both read the same
+    /// ten-plus-ten files and rate the same rows. $1 server_id, $2 window start, $3 window end, $5 database filter.
     /// </summary>
-    public const string FileIoLatencyTrendSql = $$"""
+    private const string FileIoLatencyRatedCtes = $$"""
         WITH file_totals AS (
             SELECT
                 database_name,
@@ -145,6 +134,33 @@ public sealed partial class ViewerDataService
             AND   f.collection_time >= $2
             AND   f.collection_time <= $3
         )
+        """;
+
+    /// <summary>
+    /// The File I/O latency read — Lite's <c>GetFileIoLatencyTrendAsync</c> ported to Postgres, then bucketed
+    /// (#4234). Reads <c>v_file_io_stats</c> (a <c>SELECT *</c> passthrough over <c>file_io_stats</c>): a
+    /// <c>top_files</c> CTE picks the 10 busiest (database, file) pairs by total delta reads and the 10 busiest by total delta writes over the window (release walk V9) —
+    /// unchanged by bucketing — then average read/write (and queued read/write) latency per bucket is computed
+    /// as summed stall-ms / summed ops, with the delta-stall sums CAST to double precision before division. The
+    /// queued-stall columns are COALESCE'd to 0 so a server whose build predates them still reads 0.
+    /// <para>#3540, carried into the bucket: a row whose stored <c>sample_interval_seconds</c> is 0 (no delta
+    /// knowable — first sighting, counter reset, a gap past the policy) has its deltas nulled out of the sums
+    /// via the <c>rated</c> CTE rather than contributing a confident 0, exactly as the pre-bucket read dropped
+    /// the row outright. <c>IS DISTINCT FROM 0</c> still keeps pre-V127 rows (NULL: interval never recorded).
+    /// Unlike the pre-bucket read, the row is NOT removed from the FROM clause — it still counts toward
+    /// <c>collection_count</c> below, so a bucket is never mistaken for a true singleton just because its one
+    /// physical collection happened to be unrated. <c>HAVING COUNT(rated_reads) &gt; 0</c> drops a bucket whose
+    /// every row was unrated, matching the pre-bucket read's "absent, not 0.00 ms" answer for that case; a
+    /// bucket with at least one rated row keeps its per-metric <c>CASE ... ELSE 0</c> zero-safety exactly as
+    /// before (a rated row with 0 ops is a real 0 ms, not an absent point).</para>
+    /// <para>#4234 review (item 3): <c>first_collection_time</c> (<c>MIN(collection_time)</c>, every row in
+    /// <c>rated</c> — rated or not) and <c>collection_count</c> (<c>COUNT(*)</c> over that same population) ride
+    /// along so the caller can tell a true singleton bucket from one the bucketing actually merged, exactly like
+    /// <c>WaitTrendsSql</c>. $1 server_id, $2 window start, $3 window end (naive UTC), $4 bucket width minutes, $5 the saved database filter (#5312, a text[], NULL = every database), inside <c>top_files</c>: the busiest files are those of the CHOSEN databases.
+    /// </para>
+    /// </summary>
+    public const string FileIoLatencyTrendSql = $$"""
+        {{FileIoLatencyRatedCtes}}
         SELECT
             database_name,
             file_name,
@@ -174,6 +190,45 @@ public sealed partial class ViewerDataService
         GROUP BY database_name, file_name, 3
         HAVING COUNT(rated_reads) > 0
         ORDER BY database_name, file_name, 3
+        """;
+
+    /// <summary>
+    /// #6970: the Overview timeline's I/O Latency row draws ONE ops-weighted read-latency line, so it needs one row
+    /// per bucket, not one per file per bucket (about 18,600 rows for 24 hours on a 16-file server, against the
+    /// at most 1,500 points the line holds). This is <see cref="FileIoLatencyTrendSql"/> with its final SELECT
+    /// folded to the line: the same ranking and rating CTEs and the same per-file bucket, then summed stall and
+    /// reads over the file buckets that had reads, which is exactly what <c>IoLatencyWeighting.Weighted</c> does
+    /// to the per-file points (a file bucket with no reads takes no part and its stall counts for nothing). The
+    /// stall is summed as a double, the same CAST the per-file average divides. A bucket whose files all had no
+    /// reads still comes back, with 0 stall and 0 reads, because the line draws it as 0.
+    /// <para>The groups are (bucket_start, first_collection_time), not bucket_start alone, so the caller can stamp
+    /// the line the way the per-file read does: at <c>first_collection_time</c> when no file bucket anywhere merged
+    /// two collections (<c>max_collection_count</c> is 1 on every row), otherwise at <c>bucket_start</c>, merging
+    /// rows that share one. $1 server_id, $2 window start, $3 window end (naive UTC), $4 bucket width minutes,
+    /// $5 the database filter (NULL here: the Overview row charts every database).</para>
+    /// </summary>
+    public const string FileIoOverviewLatencyTrendSql = $$"""
+        {{FileIoLatencyRatedCtes}},
+        file_buckets AS (
+            SELECT
+                GREATEST(date_bin(CAST($4 AS integer) * INTERVAL '1 minute', collection_time, {{TrendBucketSql.OriginSql}}), $2) AS bucket_start,
+                MIN(collection_time) AS first_collection_time,
+                COUNT(*) AS collection_count,
+                COALESCE(SUM(rated_reads), 0)::bigint AS reads,
+                COALESCE(SUM(CAST(rated_stall_read_ms AS double precision)), 0) AS stall_read_ms
+            FROM rated
+            GROUP BY database_name, file_name, 1
+            HAVING COUNT(rated_reads) > 0
+        )
+        SELECT
+            bucket_start,
+            first_collection_time,
+            COALESCE(SUM(stall_read_ms) FILTER (WHERE reads > 0), 0) AS stall_read_ms,
+            COALESCE(SUM(reads) FILTER (WHERE reads > 0), 0)::bigint AS reads,
+            MAX(collection_count) AS max_collection_count
+        FROM file_buckets
+        GROUP BY bucket_start, first_collection_time
+        ORDER BY bucket_start, first_collection_time
         """;
 
     /// <summary>
@@ -326,6 +381,56 @@ public sealed partial class ViewerDataService
         }
 
         return items;
+    }
+
+    /// <summary>
+    /// The Overview timeline's I/O Latency row (#6970): one point per time, the read latency weighted by reads across
+    /// the ranked files, from <see cref="FileIoOverviewLatencyTrendSql"/>. Returns the same series as grouping
+    /// <see cref="GetFileIoLatencyTrendAsync"/>'s points by <c>CollectionTime</c> and collapsing each group through
+    /// <c>IoLatencyWeighting.Weighted</c>, without sending a row per file per bucket. Same window, bucket width and
+    /// singleton-stamping rule as that read.
+    /// </summary>
+    public async Task<List<FileIoOverviewLatencyPoint>> GetFileIoOverviewLatencyTrendAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
+    {
+        var windowMinutes = Math.Max(1, (int)Math.Ceiling((endUtc - startUtc).TotalMinutes));
+        var bucketMinutes = TrendBuckets.AutoMinutes(windowMinutes, 1, TrendBudget.Chart.AutoPoints);
+
+        await using var command = _dataSource.CreateCommand(FileIoOverviewLatencyTrendSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+        command.Parameters.Add(new NpgsqlParameter<DateTime>
+        {
+            TypedValue = DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified),
+        });
+        command.Parameters.Add(new NpgsqlParameter<DateTime>
+        {
+            TypedValue = DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified),
+        });
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = bucketMinutes });
+        command.Parameters.Add(DatabaseFilterParameter(null));
+
+        var rows = new List<(DateTime BucketStart, DateTime FirstCollectionTime, double Stall, long Reads)>();
+        var everyBucketSingleton = true;
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            if (reader.GetInt64(4) != 1)
+            {
+                everyBucketSingleton = false;
+            }
+
+            rows.Add((reader.GetDateTime(0), reader.GetDateTime(1), reader.GetDouble(2), reader.GetInt64(3)));
+        }
+
+        return rows
+            .GroupBy(r => everyBucketSingleton ? r.FirstCollectionTime : r.BucketStart)
+            .OrderBy(g => g.Key)
+            .Select(g => new FileIoOverviewLatencyPoint(
+                g.Key,
+                PerformanceMonitor.Ui.IoLatencyWeighting.Weighted(g.Select(r => (r.Reads > 0 ? r.Stall / r.Reads : 0.0, r.Reads)))))
+            .ToList();
     }
 
     /// <summary>

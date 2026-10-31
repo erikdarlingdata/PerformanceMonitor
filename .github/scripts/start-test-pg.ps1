@@ -122,7 +122,7 @@ if ($Mode -eq 'StartTargets') {
         # No compute_query_id: the setting exists from 14 and an older server refuses to start on an unknown one.
         Add-Content -Path "$targetData\postgresql.conf" -Value "track_io_timing = on"
         Add-Content -Path "$targetData\postgresql.conf" -Value "fsync = off"
-        Add-Content -Path "$targetData\postgresql.conf" -Value "synchronous_commit = off"
+        # synchronous_commit stays on (#7012): a commit that returns before its WAL is flushed leaves the committed hint bits unset, so VACUUM cannot mark pages all-visible and an index scan cannot mark dead entries. With fsync off the flush never waits on disk.
         Add-Content -Path "$targetData\postgresql.conf" -Value "full_page_writes = off"
         & "$targetBin\pg_ctl.exe" -D $targetData -l $targetLog -w start
         if ($LASTEXITCODE -ne 0) { if (Test-Path $targetLog) { Get-Content $targetLog -Tail 50 }; throw "pg_ctl start failed for the PostgreSQL $m target ($LASTEXITCODE)" }
@@ -162,7 +162,7 @@ Add-Content -Path "$dataDir\postgresql.conf" -Value "listen_addresses = '127.0.0
 Add-Content -Path "$dataDir\postgresql.conf" -Value "timescaledb.max_background_workers = 74"
 Add-Content -Path "$dataDir\postgresql.conf" -Value "max_worker_processes = 85"
 Add-Content -Path "$dataDir\postgresql.conf" -Value "fsync = off"
-Add-Content -Path "$dataDir\postgresql.conf" -Value "synchronous_commit = off"
+# synchronous_commit stays on (#7012): a commit that returns before its WAL is flushed leaves the committed hint bits unset, so VACUUM cannot mark pages all-visible and an index scan cannot mark dead entries. With fsync off the flush never waits on disk.
 Add-Content -Path "$dataDir\postgresql.conf" -Value "full_page_writes = off"
 # #5549: the session id (%c) on every line, so a pooled connection reused by the next test can be told from two sessions.
 Add-Content -Path "$dataDir\postgresql.conf" -Value "log_line_prefix = '%m [%p] %c '"
@@ -196,7 +196,7 @@ function Start-LogFormatCluster($clusterDataDir, $logFile, $port, $extraConfLine
     Add-Content -Path "$clusterDataDir\postgresql.conf" -Value "timescaledb.max_background_workers = 8"
     Add-Content -Path "$clusterDataDir\postgresql.conf" -Value "max_worker_processes = 16"
     Add-Content -Path "$clusterDataDir\postgresql.conf" -Value "fsync = off"
-    Add-Content -Path "$clusterDataDir\postgresql.conf" -Value "synchronous_commit = off"
+    # synchronous_commit stays on (#7012): a commit that returns before its WAL is flushed leaves the committed hint bits unset, so VACUUM cannot mark pages all-visible and an index scan cannot mark dead entries. With fsync off the flush never waits on disk.
     Add-Content -Path "$clusterDataDir\postgresql.conf" -Value "full_page_writes = off"
     Add-Content -Path "$clusterDataDir\postgresql.conf" -Value "deadlock_timeout = '100ms'"
     Add-Content -Path "$clusterDataDir\postgresql.conf" -Value "compute_query_id = on"
