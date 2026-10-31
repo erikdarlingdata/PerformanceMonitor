@@ -49,7 +49,7 @@ public sealed class DarlingManagedRolesTests
     private static string[] GrantsOnMonitoredServers(string sql, string role) =>
         Regex.Matches(
                 Regex.Replace(sql, @"(?m)^\s*--.*$", ""),
-                @"GRANT (?!SELECT \([^)]*\) ON )[^;]*? ON config\.config_monitored_servers TO [^;]*" + Regex.Escape(role) + @"[^;]*;")
+                @"GRANT (?!SELECT \([^)]*\) ON )[^;]*? ON config\.config_monitored_servers TO [^;]*\b" + Regex.Escape(role) + @"\b[^;]*;")
             .Select(m => m.Value).ToArray();
 
     private static string[] ViewerGrantsOnMonitoredServers(string sql) => GrantsOnMonitoredServers(sql, "viewer");
