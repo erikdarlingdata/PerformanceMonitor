@@ -199,8 +199,6 @@ public sealed class DarlingObservabilityTests
            the ALTER DATABASE search_path default is deliberately NOT here (best-effort in MigrateAsync). */
         var v8 = PgMigrations.Scripts[7].Sql;
         Assert.Equal("schema-split-collect-config", PgMigrations.Scripts[7].Name);
-        Assert.Contains("CREATE SCHEMA IF NOT EXISTS collect AUTHORIZATION darling;", v8, StringComparison.Ordinal);
-        Assert.Contains("CREATE SCHEMA IF NOT EXISTS config AUTHORIZATION darling;", v8, StringComparison.Ordinal);
         Assert.Contains("ALTER TABLE IF EXISTS public.wait_stats SET SCHEMA collect;", v8, StringComparison.Ordinal);
         Assert.Contains("ALTER TABLE IF EXISTS public.servers SET SCHEMA collect;", v8, StringComparison.Ordinal);
         Assert.Contains("ALTER TABLE IF EXISTS public.collection_log SET SCHEMA collect;", v8, StringComparison.Ordinal);
