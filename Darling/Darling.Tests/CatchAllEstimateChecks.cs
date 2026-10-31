@@ -95,6 +95,9 @@ AND   object_kind IN ('{StoreSelfMetrics.OtherObjectKind}', '{StoreSelfMetrics.S
         NpgsqlConnection connection, bool timescale, DateTime previousHourlyTime, CancellationToken ct)
     {
         var baselineTime = previousHourlyTime.AddHours(1);
+        /* Bring every relation's relpages current first, so autovacuum has nothing pending that could move another catch-all
+           relation's relpages between the two sweeps and break the exact comparison below. */
+        await ExecAsync(connection, "VACUUM (ANALYZE)", ct);
         await StoreSelfMetrics.SweepAsync(connection, timescale, baselineTime, null, null, null, ct);
         var before = await ReadAsync(connection, baselineTime, ct);
 
