@@ -145,7 +145,7 @@ public sealed class StatementCutSourceScanTests
             "BuildPgBlockingIncident cuts a PostgreSQL root query the target already judged whole: PgBlockingCollector wraps blocker.query in PgSensitiveStatementFilter.SqlPredicate on the target before the row leaves it (PgSensitiveStatementFilterTests), and PgStatementTextScrub covers rows stored before that. Nothing here sees raw text"),
         new("PerformanceMonitor.Notifications/AnalysisNotificationService.cs", "element.getrawtext()", 1,
             "ScalarText shortens a nested drill-down object or array for the finding notification's field. The drill-down JSON is what DrillDownCollector stores: its statement values are judge-then-cut there (AnalysisStatementText.Preview), so this cuts judged values and never sees raw statement text"),
-        new("PerformanceMonitor.Notifications/WebhookAlertService.cs", "paragraph", 2,
+        new("PerformanceMonitor.Notifications/WebhookAlertService.Shared.cs", "paragraph", 2,
             "SplitProseLabel splits a synthesized advice paragraph on its first ': ' into label and value; both halves are kept, nothing is cut off (the name matches 'graph')"),
         new("Darling/PerformanceMonitor.Darling.Service/Mcp/TopRanking.cs", "sql", 2,
             "ReplaceOnce splices a ranking clause into the top-N query's own SQL script with string.Concat over AsSpan; the script is our text, not a statement read from a monitored server"),
