@@ -2163,12 +2163,14 @@ if (-not $SkipPreflight) {
 }
 
 # -- 3. Event Log source --------------------------------------------------------------------------
-try {
-    New-EventLog -LogName Application -Source $serviceName -ErrorAction Stop
-    Write-Host "Registered Event Log source '$serviceName'."
-}
-catch [System.InvalidOperationException] {
+# The .NET calls, not New-EventLog: PowerShell 7 runs New-EventLog through the Windows PowerShell compatibility
+# session, where an already-registered source fails with a type the catch below never matched (#6982).
+if ([System.Diagnostics.EventLog]::SourceExists($serviceName)) {
     Write-Host "Event Log source '$serviceName' already registered."
+}
+else {
+    [System.Diagnostics.EventLog]::CreateEventSource($serviceName, 'Application')
+    Write-Host "Registered Event Log source '$serviceName'."
 }
 
 }  # end of the PreStart-and-by-hand block that starts at 1a
