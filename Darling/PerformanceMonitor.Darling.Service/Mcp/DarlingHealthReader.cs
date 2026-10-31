@@ -313,6 +313,11 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 AND {Collectio
         /// hand-built row, which bands its <see cref="BlockingEvents"/>.</summary>
         public long? BlockingReports { get; init; }
 
+        /// <summary>#7028: the blocking band's snapshot arm value for the day, milliseconds, from the aggregate's
+        /// <c>peak_snapshot_wait_ms</c> column, or <c>null</c> on a row built without one. The largest gated total of
+        /// one DMV snapshot, the Blocking Wait Time alert's measure.</summary>
+        public long? PeakSnapshotWaitMs { get; init; }
+
         public DailyHealthSignals ToSignals() => new()
         {
             /* #3541 A9: a purged or past-horizon day is a NoData day to the band, whatever the spine still
@@ -330,6 +335,7 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 AND {Collectio
             /* #3539 A2: the day bands blocking through the card's BlockingSeverity, whose wait arm reads the
                longest block — so the peak travels in the signals rather than only into the reasons line. */
             PeakBlockWaitMs = MaxBlockDurationMs,
+            PeakSnapshotWaitMs = PeakSnapshotWaitMs,
             MemoryPressureEvents = MemoryPressureEvents,
             MemoryCriticalEvents = MemoryCriticalEvents,
             AlertCount = AlertCount,
