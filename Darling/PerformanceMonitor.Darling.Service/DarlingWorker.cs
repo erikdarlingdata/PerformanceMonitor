@@ -1469,7 +1469,8 @@ LIMIT 1";
     /// #7041: the Daily Health Report builder the scheduled send and <c>send_daily_health_report_now</c> share. This is the one place the real
     /// builder is wired in; null means the report is never built (the schedule check returns at once and the tool answers not_available).
     /// </summary>
-    private static PerformanceMonitor.Darling.Service.Reports.IDailyHealthReportSource? CreateDailyHealthReportSource(Npgsql.NpgsqlDataSource postgres) => null;
+    private static PerformanceMonitor.Darling.Service.Reports.DailyHealthReportBuilder CreateDailyHealthReportSource(Npgsql.NpgsqlDataSource postgres) =>
+        new PerformanceMonitor.Darling.Service.Reports.DailyHealthReportBuilder(postgres);
 
     /// <summary>
     /// True when another registration in the published registry carries this one's display name (ordinal), so
