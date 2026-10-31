@@ -69,6 +69,13 @@ public class MuteRule
         return next;
     }
 
+    /// <summary>Whether both rules carry the same schedule: the same days, times and zone (the zone compared ignoring case), or neither has one.</summary>
+    public bool HasSameSchedule(MuteRule other) =>
+        RecurDays == other.RecurDays
+        && RecurStartTime == other.RecurStartTime
+        && RecurEndTime == other.RecurEndTime
+        && string.Equals(RecurTimeZone, other.RecurTimeZone, StringComparison.OrdinalIgnoreCase);
+
     /// <summary>The schedule as one line (<c>Mon,Tue 22:00-02:00 America/New_York</c>), or null for a rule with none.</summary>
     public string? ScheduleText => MuteRecurrence.Describe(RecurDays, RecurStartTime, RecurEndTime, RecurTimeZone);
 
