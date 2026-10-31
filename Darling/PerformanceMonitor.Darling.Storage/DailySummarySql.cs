@@ -290,15 +290,17 @@ public static class DailySummarySql
     /// <summary>
     /// #7028: the snapshot arm for a window with the alert's own gate constants and the shipped default cadence, one
     /// definition for the fleet reads and the Viewer Overview (<see cref="BlockingWaits.GatedSnapshotWaitSql"/>).
-    /// <paramref name="serverIdSql"/> is the one server's id (<c>$1</c>), or null for every server.
+    /// <paramref name="serverIdSql"/> is the one server's id (<c>$1</c>), or null for every server. The snapshots are read
+    /// from the lookback floor with no upper bound (a snapshot after the window end is read and not kept, so a late
+    /// collection is not cut off), and <paramref name="floorSql"/> is the statement's partition-column floor for the
+    /// window start (<see cref="EventWindowFloor"/>), which the lookback floor never goes below.
     /// </summary>
     public static string BlockingSnapshotGateSql(
-        string name, string windowStartSql, string? windowEndSql, bool endInclusive, string? serverIdSql) =>
+        string name, string windowStartSql, string? windowEndSql, bool endInclusive, string? serverIdSql, string floorSql) =>
         BlockingWaits.GatedSnapshotWaitSql(
             name,
             @"SELECT server_id, collection_time, wait_time_ms, blocked_spid, blocking_spid FROM v_dmv_blocking_snapshots
-    WHERE collection_time >= " + BlockingSnapshotFloorSql(windowStartSql, serverIdSql)
-            + (windowEndSql is null ? string.Empty : " AND collection_time " + (endInclusive ? "<=" : "<") + " " + windowEndSql)
+    WHERE collection_time >= " + floorSql + " AND collection_time >= " + BlockingSnapshotFloorSql(windowStartSql, serverIdSql)
             + (serverIdSql is null ? string.Empty : " AND server_id = " + serverIdSql),
             windowStartSql, windowEndSql, endInclusive,
             AlertEngine.BlockingWaitBreachSamples, AlertEngine.BlockingWaitSingleSnapshotMultiplier,

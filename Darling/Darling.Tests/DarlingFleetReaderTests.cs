@@ -173,10 +173,12 @@ public sealed class DarlingFleetReaderSqlTests
         Assert.Contains("GROUP BY server_id", sql, StringComparison.Ordinal);
         Assert.Contains("event_time >= $1", sql, StringComparison.Ordinal);
         Assert.Contains("event_time <= $2", sql, StringComparison.Ordinal);
-        /* #3895: both scans carry the partition-column floor, and neither an upper bound on it: a late
-           collection is still an event in the window. */
-        Assert.Equal(2, Regex.Matches(sql, @"collection_time >= \$3").Count);
-        Assert.DoesNotContain("collection_time <", sql, StringComparison.Ordinal);
+        /* #3895: every scan (the two event scans and, #7028, the snapshot read for the gate) carries the
+           partition-column floor, and none an upper bound on it: a late collection is still an event in the window. */
+        Assert.Equal(3, Regex.Matches(sql, @"collection_time >= \$3").Count);
+        /* The one upper bound is the gate's keep filter on the gated snapshots (they are valued only inside the window),
+           not a scan. */
+        Assert.DoesNotContain("collection_time <", sql.Replace("f.collection_time <= $2", string.Empty, StringComparison.Ordinal), StringComparison.Ordinal);
     }
 
     [Fact]

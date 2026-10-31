@@ -174,7 +174,7 @@ WITH " + BlockingWaits.WaitsCteSql(
         BlockingWaits.SqlDialect.Postgres, "dmv_waits",
         @"SELECT blocked_spid, blocking_spid, event_time, collection_time, wait_time_ms FROM v_dmv_blocking_snapshots
     WHERE server_id = $1 AND event_time >= $2 AND collection_time >= $3") + ","
-    + DailySummarySql.BlockingSnapshotGateSql("dmv_gated", "$2", null, false, "$1") + @"
+    + DailySummarySql.BlockingSnapshotGateSql("dmv_gated", "$2", null, false, "$1", "$3") + @"
 SELECT
     (SELECT COUNT(*)          FROM xe_waits),
     (SELECT MAX(wait_time_ms) FROM xe_waits),

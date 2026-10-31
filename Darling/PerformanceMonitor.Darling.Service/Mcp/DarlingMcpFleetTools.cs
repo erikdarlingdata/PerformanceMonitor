@@ -43,10 +43,6 @@ public sealed class DarlingMcpFleetTools
         "One pre-banded card per server (CPU, memory, blocking, deadlocks, threads, collector health) plus a " +
         "fleet rollup (band counts, cross-server totals, worst-first ranking). Blocking/deadlock counts window " +
         "hours_back (default 1) ending now; collector-health fields use a separate scan, not hours_back. " +
-        "Blocking counts are blocked waits, chosen hour by hour between blocked-process reports and DMV snapshots; " +
-        "max_snapshot_wait_ms is the largest total blocked wait of one DMV snapshot after the Blocking Wait Time " +
-        "alert's consecutive-snapshot gate (null when the window holds no snapshot), banded only when the snapshot " +
-        "tiers in get_alert_settings are above 0. " +
         "cpu_source explains a missing total_cpu_percent: NotCollected is a real gap (get_collection_health); " +
         "NoSourceForEngine (non-Aurora PostgreSQL) is structural, no grant or upgrade fixes it. PostgreSQL " +
         "memory_mb, buffer_pool_mb and threads are always null (no DMV equivalent), not a gap. <<GUIDE>> " +
@@ -55,6 +51,10 @@ public sealed class DarlingMcpFleetTools
         "plus a rollup — counts by band, cross-server blocking and deadlock totals, and a worst-first 'needs " +
         "attention' ranking. Use this first to decide which server to drill into, then call the per-server tools. " +
         "This cross-server view is unique to the central store. " +
+        "Blocking counts are blocked waits, chosen hour by hour between blocked-process reports and DMV snapshots; " +
+        "max_snapshot_wait_ms is the largest total blocked wait of one DMV snapshot after the Blocking Wait Time " +
+        "alert's consecutive-snapshot gate (null when the window holds no snapshot), banded only when the snapshot " +
+        "tiers in get_alert_settings are above 0. " +
         "cpu_source names which collector produced each card's total_cpu_percent, so a missing number is never " +
         "ambiguous: RingBuffer (SQL Server, and the only arm that also fills cpu_percent / " +
         "other_process_cpu_percent with the per-process split), PerformanceInsights (an Aurora PostgreSQL " +

@@ -407,7 +407,7 @@ dmv_reports AS (
         BlockingWaits.SqlDialect.Postgres, "dmv_waits",
         "SELECT * FROM dmv_reports", new[] { "server_id" }) + "," + BlockingWaits.HourlyChosenWaitsSql(
         "chosen", "xe_waits", "dmv_waits", "$2", singleBucket, new[] { "server_id" }) + ","
-        + DailySummarySql.BlockingSnapshotGateSql("snapshot_gated", "$1", "$2", true, serverIdSql) + @",
+        + DailySummarySql.BlockingSnapshotGateSql("snapshot_gated", "$1", "$2", true, serverIdSql, "$3") + @",
 band AS (
     SELECT server_id, COUNT(*) AS band_count, MAX(wait_time_ms) AS band_max_wait
     FROM chosen
