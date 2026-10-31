@@ -857,6 +857,63 @@ public sealed class DarlingFleetReaderLivePostgresTests
         }
     }
 
+    /// <summary>
+    /// #7010: the fleet overview's blocking and deadlock counts window over hours_back, so each card says when ITS server's blocking data starts
+    /// after the window does. The XE server's first report is 23.5 hours back (inside the 90-minute slack of a 24-hour window: covered, bare card),
+    /// the DMV server's is 5 minutes back (its card is truncated), and a server that never collected stays bare. The top level reads truncated and
+    /// names the truncated server; a 1-hour window is never probed, so no card carries a notice.
+    /// </summary>
+    [Fact]
+    public async Task GetFleetOverview_Tool_SaysWhichCardsHoldLessThanTheWindow()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live fleet-reader test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteSentinelRowsAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+
+        var bodySucceeded = false;
+        try
+        {
+            var now = DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc);
+            await InsertServerAsync(connection, XeServerId, XeName, 5, ct);
+            await InsertServerAsync(connection, DmvServerId, DmvName, 3, ct);
+            await InsertServerAsync(connection, NoHistoryServerId, NoHistoryName, 3, ct);
+            await InsertBlockedProcessAsync(connection, XeServerId, XeName, now.AddHours(-23.5), ct);
+            await InsertBlockedProcessAsync(connection, DmvServerId, DmvName, now.AddMinutes(-5), ct);
+
+            using var wide = JsonDocument.Parse(await DarlingMcpFleetTools.GetFleetOverview(postgres, hours_back: 24, detail: "cards", cancellationToken: ct));
+            var cards = wide.RootElement.GetProperty("cards").EnumerateArray().ToDictionary(c => c.GetProperty("server_name").GetString()!);
+            Assert.False(cards[XeName].TryGetProperty("window_truncated", out _));
+            Assert.False(cards[NoHistoryName].TryGetProperty("window_truncated", out _));
+            Assert.True(cards[DmvName].GetProperty("window_truncated").GetBoolean());
+            Assert.NotNull(cards[DmvName].GetProperty("effective_start").GetString());
+            Assert.True(wide.RootElement.GetProperty("window_truncated").GetBoolean());
+            var named = wide.RootElement.GetProperty("window_truncated_servers").EnumerateArray().Select(n => n.GetString()).ToList();
+            Assert.Contains(DmvName, named);
+            Assert.DoesNotContain(XeName, named);
+            Assert.DoesNotContain(NoHistoryName, named);
+
+            using var oneHour = JsonDocument.Parse(await DarlingMcpFleetTools.GetFleetOverview(postgres, hours_back: 1, detail: "cards", cancellationToken: ct));
+            Assert.False(oneHour.RootElement.GetProperty("window_truncated").GetBoolean());
+            Assert.Empty(oneHour.RootElement.GetProperty("window_truncated_servers").EnumerateArray());
+            Assert.DoesNotContain(oneHour.RootElement.GetProperty("cards").EnumerateArray(), c => c.TryGetProperty("window_truncated", out _));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteSentinelRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
     [Fact]
     public async Task GetFleetOverview_PerServerFallbackAndBanding_AgainstDevPostgres()
     {

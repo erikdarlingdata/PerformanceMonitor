@@ -311,8 +311,13 @@ public static class DataWindowFloor
     /// instant as a further parameter, naive UTC, numbered after the scope's ($4 for a fleet probe, $5 otherwise, then
     /// one more for each such source in order), and starts both its window read and its walk there. Binding them is
     /// the caller's: <see cref="GetAsync"/> and <see cref="GetForServerAsync"/> add them in that order.</para>
+    ///
+    /// <para><paramref name="perServer"/> (#7010) keeps each server's own answer: every arm also selects the server's registry name,
+    /// and the outer select groups by it, so the rows are (server name, that server's coverage start) instead of the one earliest
+    /// start. The arms, the parameters and their numbering are the same text, so a fleet panel that needs each server's floor reads
+    /// the relation once, not once per server (<see cref="GetPerServerAsync"/>).</para>
     /// </summary>
-    public static string FloorSql(IReadOnlyList<Source> sources, Scope scope)
+    public static string FloorSql(IReadOnlyList<Source> sources, Scope scope, bool perServer = false)
     {
         ArgumentNullException.ThrowIfNull(sources);
         if (sources.Count == 0)
@@ -330,7 +335,7 @@ public static class DataWindowFloor
 
         var schema = PgSchemaGenerator.CollectSchema;
         var sql = new StringBuilder();
-        sql.Append("SELECT MIN(u.t)\nFROM\n(\n");
+        sql.Append(perServer ? "SELECT u.n, MIN(u.t)\nFROM\n(\n" : "SELECT MIN(u.t)\nFROM\n(\n");
         var nextBoundParameter = scope == Scope.Fleet ? 4 : 5;
         for (var i = 0; i < sources.Count; i++)
         {
@@ -379,7 +384,7 @@ public static class DataWindowFloor
                 coverage = $"COALESCE((SELECT h.{time} FROM {schema}.{source.Relation} AS h WHERE h.server_id = s.server_id AND h.{time}{endBound}{walkLowerBound} ORDER BY h.{time} LIMIT 1), s.created_date)";
             }
 
-            sql.Append("    SELECT LEAST(").Append(coverage).Append(", w.t) AS t\n");
+            sql.Append(perServer ? "    SELECT s.server_name AS n, LEAST(" : "    SELECT LEAST(").Append(coverage).Append(", w.t) AS t\n");
             sql.Append("    FROM ").Append(schema).Append(".servers AS s\n");
             sql.Append("    LEFT JOIN LATERAL\n");
             sql.Append("    (\n");
@@ -427,6 +432,11 @@ public static class DataWindowFloor
         }
 
         sql.Append(") AS u");
+        if (perServer)
+        {
+            sql.Append("\nGROUP BY u.n");
+        }
+
         return sql.ToString();
     }
 
@@ -462,6 +472,33 @@ public static class DataWindowFloor
         AddLowerBounds(command, sources);
 
         return CoverageWithin(await command.ExecuteScalarAsync(cancellationToken), endUtc);
+    }
+
+    /// <summary>
+    /// Where coverage starts for EACH registered server that counts (#7010): the answers of <see cref="GetAsync"/>'s own query, one per
+    /// server name instead of their minimum (<see cref="FloorSql"/> with <c>perServer</c>), each with the same rule for a start at or
+    /// after <paramref name="endUtc"/> (<c>null</c>, as <see cref="GetAsync"/> answers it). A server that does not count (it holds no
+    /// row and logged no run in the window) is absent. One read of the sources, whatever the number of servers.
+    /// </summary>
+    public static async Task<IReadOnlyDictionary<string, DateTime?>> GetPerServerAsync(
+        NpgsqlDataSource postgres, IReadOnlyList<Source> sources, DateTime startUtc, DateTime endUtc,
+        int commandTimeoutSeconds, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(postgres);
+
+        await using var command = postgres.CreateCommand(FloorSql(sources, Scope.Fleet, perServer: true));
+        command.CommandTimeout = commandTimeoutSeconds;
+        AddWindow(command, startUtc, endUtc);
+        AddLowerBounds(command, sources);
+
+        var floors = new Dictionary<string, DateTime?>(StringComparer.Ordinal);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            floors[reader.GetString(0)] = CoverageWithin(reader.IsDBNull(1) ? null : reader.GetValue(1), endUtc);
+        }
+
+        return floors;
     }
 
     /// <summary>
