@@ -21,9 +21,7 @@ PerformanceMonitor/
 │   Full Edition (deprecated) — server-installed collectors + separate dashboard
 ├── install/               # SQL installation scripts (Full edition)
 ├── upgrades/              # Version-specific upgrade scripts (Full edition)
-├── deprecated/Installer/  # CLI installer for the Full edition database (see deprecated/Installer/README.md)
-├── deprecated/Installer.Core/  # Shared installation library (CLI + Dashboard)
-├── deprecated/Dashboard/  # Full edition dashboard app (see deprecated/Dashboard/README.md)
+├── deprecated/            # Frozen zip of the Full Dashboard and CLI installer source (see deprecated/README.md)
 │
 └── README.md              # This file
 ```
@@ -39,8 +37,6 @@ dotnet build Lite/PerformanceMonitorLite.csproj
 # Darling Edition (service + viewer)
 dotnet build Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj
 dotnet build Darling/PerformanceMonitor.Darling.Viewer/PerformanceMonitor.Darling.Viewer.csproj
-
-# Full Edition (deprecated) — Dashboard app + CLI installer
-dotnet build deprecated/Dashboard/Dashboard.csproj
-dotnet publish deprecated/Installer/PerformanceMonitorInstaller.csproj -c Release
 ```
+
+The Full Dashboard and the CLI installer (deprecated) are not part of the build. Their source sits in `deprecated/dashboard-installer-source.zip`, and [`deprecated/README.md`](../deprecated/README.md) explains how to build it from the commit it was taken from.

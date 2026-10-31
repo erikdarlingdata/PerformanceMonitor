@@ -98,4 +98,4 @@ The operator guide lists every option, including `--hours`, `--server` and `--al
 - [Darling troubleshooting](darling/troubleshooting.md) has the full list of service log lines and what each one means.
 - [Things that will bite you](darling/install.md#things-that-will-bite-you) and [Known gaps](darling/install.md#known-gaps) cover install surprises.
 - [Running Darling day to day](darling/admin.md#where-everything-is) lists where each file is.
-- The Dashboard (Full edition) is in [deprecated/Dashboard/README.md](../deprecated/Dashboard/README.md).
+- The Dashboard (Full edition) is documented in the README inside the [frozen source zip](../deprecated/README.md).

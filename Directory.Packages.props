@@ -35,7 +35,7 @@
     <PackageVersion Include="System.IO.FileSystem.AccessControl" Version="5.0.0" />
     <!-- #5802: pinned to a patched version (10.0.13 or later) until a Microsoft.Data.SqlClient release depends on a patched Pkcs (7.1.1 pulls in 9.0.18); drop the direct references then.
          Transitive pinning is off, so this line alone lifts nothing: a transitive package gets a CentralTransitive lock entry
-         that still resolves the lower version (ProtectedData in deprecated/Installer.Tests/packages.lock.json shows it). The
+         that still resolves the lower version (a transitive ProtectedData lock entry showed it). The
          direct references in PlanAnalysis, Darling.Analysis and Darling.Service do the lifting. The self-contained Lite and
          Viewer builds never use this package: they ship the Windows Desktop runtime's own Pkcs, whose version global.json's
          SDK decides (runtime 10.0.13 or later, that is SDK 10.0.402 or later, carries the fix). -->
