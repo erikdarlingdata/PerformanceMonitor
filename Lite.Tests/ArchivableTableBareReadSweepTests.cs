@@ -50,6 +50,11 @@ public class ArchivableTableBareReadSweepTests
            reads tell the two apart or verify the UPDATE. The alert history itself reads v_config_alert_log. */
         [("LocalDataService.AlertHistory.cs", "config_alert_log")] = 6,
 
+        /* #7014: the hot half of the idle-coverage oldest-sample check. The hot table answers "a row at or before the cutoff"
+           first, and a server it does not decide goes to the bounded LIMIT 1 probes over v_query_stats, so an archived oldest
+           sample still counts. */
+        [("LocalDataService.FinOps.Recommendations.cs", "query_stats")] = 1,
+
         /* The newest AG snapshot. The alert path skips a snapshot that is not fresh, so an empty hot table right
            after a reset reads as "no data yet", not as healthy. */
         [("LocalDataService.AgTopology.cs", "ag_replica_states")] = 2,
