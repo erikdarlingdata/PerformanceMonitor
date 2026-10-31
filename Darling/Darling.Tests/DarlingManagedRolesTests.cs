@@ -304,9 +304,9 @@ public sealed class DarlingManagedRolesTests
     {
         var sql = DarlingManagedRoles.BuildProvisioningSql(ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp);
 
-        Assert.Contains("GRANT USAGE ON SCHEMA collect, config TO admin, viewer;", sql, StringComparison.Ordinal);
-        Assert.Contains("GRANT SELECT ON ALL TABLES IN SCHEMA collect TO admin, viewer;", sql, StringComparison.Ordinal);
-        Assert.Contains("GRANT SELECT ON ALL TABLES IN SCHEMA config  TO admin, viewer;", sql, StringComparison.Ordinal);
+        Assert.Contains("GRANT USAGE ON SCHEMA collect, config TO admin, viewer, web;", sql, StringComparison.Ordinal);
+        Assert.Contains("GRANT SELECT ON ALL TABLES IN SCHEMA collect TO admin, viewer, web;", sql, StringComparison.Ordinal);
+        Assert.Contains("GRANT SELECT ON ALL TABLES IN SCHEMA config  TO admin, viewer, web;", sql, StringComparison.Ordinal);
 
         /* config writes are admin-only — viewer never gets INSERT/UPDATE/DELETE. */
         Assert.Contains("GRANT INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA config TO admin;", sql, StringComparison.Ordinal);
@@ -379,7 +379,7 @@ public sealed class DarlingManagedRolesTests
 
         /* New collector tables (created bare into collect via search_path) auto-inherit SELECT. */
         Assert.Contains("ALTER DEFAULT PRIVILEGES FOR ROLE darling IN SCHEMA collect", sql, StringComparison.Ordinal);
-        Assert.Contains("GRANT SELECT ON TABLES TO admin, viewer;", sql, StringComparison.Ordinal);
+        Assert.Contains("GRANT SELECT ON TABLES TO admin, viewer, web;", sql, StringComparison.Ordinal);
         Assert.Contains("ALTER DEFAULT PRIVILEGES FOR ROLE darling IN SCHEMA config", sql, StringComparison.Ordinal);
         Assert.Contains("GRANT INSERT, UPDATE, DELETE ON TABLES TO admin;", sql, StringComparison.Ordinal);
 
@@ -394,7 +394,7 @@ public sealed class DarlingManagedRolesTests
 
         /* The blanket config SELECT to viewer is still present (covers the non-secret config tables), but
            the three credential-bearing tables are then carved to column-level for viewer. */
-        Assert.Contains("GRANT SELECT ON ALL TABLES IN SCHEMA config  TO admin, viewer;", sql, StringComparison.Ordinal);
+        Assert.Contains("GRANT SELECT ON ALL TABLES IN SCHEMA config  TO admin, viewer, web;", sql, StringComparison.Ordinal);
 
         foreach (var acl in DarlingManagedRoles.ViewerRestrictedConfigTables)
         {
@@ -487,7 +487,7 @@ public sealed class DarlingManagedRolesTests
 
         /* REVOKE ALL drops PUBLIC's implicit CONNECT, so admin/viewer must be re-granted it, or the
            Viewer could no longer connect — the correctness fix over the design's literal DDL. */
-        Assert.Contains("GRANT CONNECT ON DATABASE darling TO admin, viewer;", sql, StringComparison.Ordinal);
+        Assert.Contains("GRANT CONNECT ON DATABASE darling TO admin, viewer, web;", sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -509,7 +509,7 @@ public sealed class DarlingManagedRolesTests
         Assert.Contains("GRANT SELECT ON ALL TABLES IN SCHEMA config  TO mcp;", sql, StringComparison.Ordinal);
         Assert.Contains("GRANT CONNECT ON DATABASE darling TO mcp;", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("TO admin, viewer, mcp", sql, StringComparison.Ordinal);
-        Assert.Contains("GRANT SELECT ON ALL TABLES IN SCHEMA collect TO admin, viewer;", sql, StringComparison.Ordinal);
+        Assert.Contains("GRANT SELECT ON ALL TABLES IN SCHEMA collect TO admin, viewer, web;", sql, StringComparison.Ordinal);
 
         /* Exactly the two narrow ANALYSIS writes (Round 4 #1: INSERT-only). The mcp role's ONE other write —
            INSERT/UPDATE/DELETE on config.custom_views (#1599, the custom-view tools) — is a single-table grant
@@ -611,7 +611,7 @@ public sealed class DarlingManagedRolesTests
         var revoke = flat.IndexOf($"REVOKE ALL ON {Six} FROM PUBLIC, admin, viewer, mcp CASCADE;", StringComparison.Ordinal);
         Assert.True(revoke > flat.LastIndexOf("GRANT INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA config TO admin;", StringComparison.Ordinal));
         Assert.True(revoke < flat.IndexOf("REVOKE ALL ON config.password_key, ", StringComparison.Ordinal));
-        Assert.Contains($"GRANT SELECT ON {Six} TO admin, viewer;", flat, StringComparison.Ordinal);
+        Assert.Contains($"GRANT SELECT ON {Six} TO admin, viewer, web;", flat, StringComparison.Ordinal);
         Assert.Contains($"GRANT SELECT ON {Six} TO mcp;", flat, StringComparison.Ordinal);
 
         /* mcp: the claim and report columns, and a note by the columns an agent's proposal sets. Since #6400 mcp also holds the person-only

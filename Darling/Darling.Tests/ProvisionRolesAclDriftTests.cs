@@ -168,7 +168,7 @@ public sealed class ProvisionRolesAclDriftTests
         Assert.Equal(2, begin.Count);
         Assert.Equal(2, commit.Count);
 
-        var firstGrant = code.IndexOf("GRANT USAGE ON SCHEMA collect, config TO admin, viewer;", StringComparison.Ordinal);
+        var firstGrant = code.IndexOf("GRANT USAGE ON SCHEMA collect, config TO admin, viewer, web;", StringComparison.Ordinal);
         var adminWrites = code.IndexOf("GRANT INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA config TO admin;", StringComparison.Ordinal);
         Assert.True(firstGrant >= 0 && adminWrites > firstGrant, "the step 2 grants or step 3's admin write grant moved - update this pin with them.");
         Assert.True(begin[0].Index < firstGrant, "BEGIN must come before the first blanket grant.");
