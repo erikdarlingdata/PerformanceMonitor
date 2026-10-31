@@ -113,8 +113,8 @@ GitHub Copilot in VS Code can use Lite or Darling as an MCP server. The steps ar
 ```
 
    VS Code asks for the token the first time it starts the server, hides what you type, and keeps it in its own secure storage. The file holds only the name `darling-token`. The top-level key is `servers`, not `mcpServers`. That is the VS Code shape, so an entry copied from a `.mcp.json` written for another client needs the key changed.
-3. Start the server. VS Code starts an MCP server when chat first needs it. To start it sooner, run **MCP: List Servers**, choose `darling` and start it. The same list can stop or restart the server. It can also show the server's output, which is where a `401` or a refused connection shows up.
-4. Check that the tools loaded. Open the tools picker in Copilot Chat. The `darling` server is listed with its tools, such as `list_servers`, `get_wait_stats` and `get_blocking`. Then ask "what servers are being monitored?" and expand the tool call to see that it came from `darling`.
+3. Start the server. VS Code starts an MCP server only when chat needs it. If chat says the tools are not available, run **MCP: List Servers**, choose `darling` and start it. The same list can stop or restart the server. It can also show the server's output, which is where a `401` or a refused connection shows up.
+4. Check that the tools loaded. Open the tools picker in Copilot Chat. The `darling` server is listed with its tools, such as `list_servers`, `get_wait_stats` and `get_blocking`. Use a Local chat session in Agent mode. A Copilot CLI (background) session does not read `.vscode/mcp.json`. It cannot see the server. Ask mode does not call tools. Then ask `#list_servers which SQL Servers is Darling monitoring?` and expand the tool call to see that it came from `darling`. The `#` names the tool. A vague question such as "what servers are being monitored?" can make Copilot describe the `mcp.json` file instead of asking the server.
 
 ##### Why Darling uses /core
 
@@ -136,7 +136,9 @@ Lite listens on port `5151` and has no `/core` URL. Point Copilot at its only UR
 
 Lite does not need `/core`. Its code defines 113 tools in all. The default list leaves out the twelve write tools and the four investigation tools, so it is well under 128. Even all 113 are under the cap. The cap still counts every other MCP server in the same chat.
 
-These steps come from VS Code's own MCP documentation and from the two servers' code. This page does not show a Copilot answer, so run the check in step 4 against your own server.
+These steps were checked with VS Code and Copilot Free against a Darling service, where the server loaded its 75 `/core` tools and answered `list_servers`. Lite was not checked in Copilot, and the Lite steps follow the same entry with Lite's URL.
+
+A Copilot Business or Enterprise user needs their admin to allow the "MCP servers in Copilot" policy. GitHub describes it in [Configure MCP server access for your organization or enterprise](https://docs.github.com/en/copilot/how-tos/administer-copilot/manage-mcp-usage/configure-mcp-server-access).
 
 #### Ask a question
 
