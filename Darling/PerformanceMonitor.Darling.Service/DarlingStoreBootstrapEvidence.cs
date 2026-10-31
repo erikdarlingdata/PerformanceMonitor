@@ -119,6 +119,7 @@ internal static class DarlingStoreBootstrapEvidence
         DarlingManagedPostgres.AdminCredentialFileName,
         DarlingManagedPostgres.ViewerCredentialFileName,
         DarlingManagedPostgres.McpCredentialFileName,
+        DarlingManagedPostgres.WebCredentialFileName,
     ];
 
     /// <summary>

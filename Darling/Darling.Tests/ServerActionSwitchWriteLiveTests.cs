@@ -337,7 +337,7 @@ public sealed class ServerActionSwitchWriteLiveTests
     [Fact]
     public async Task OnTheManagedStore_ASignedInAdminSeat_ChangesASwitchThroughTheArm_AndCanDecideIsTrue()
     {
-        await WithWebAsync("viewer", async (owner, _, Send, ct) =>
+        await WithWebAsync("web", async (owner, _, Send, ct) =>
         {
             var list = await Send("GET", "/api/server-actions", null);
             Assert.Equal(200, list.Status);
@@ -355,7 +355,7 @@ public sealed class ServerActionSwitchWriteLiveTests
     [Fact]
     public async Task OnTheManagedStore_AViewerSeat_NeverOpensTheArm_AndAnswersAsToday()
     {
-        await WithWebAsync("viewer", async (owner, _, Send, ct) =>
+        await WithWebAsync("web", async (owner, _, Send, ct) =>
         {
             var list = await Send("GET", "/api/server-actions", null);
             Assert.Equal(200, list.Status);
@@ -372,7 +372,7 @@ public sealed class ServerActionSwitchWriteLiveTests
     [Fact]
     public async Task OnTheManagedStore_WithTheSwitchOff_TheSignedInAdminStillListsOnly_NamingTheSwitch()
     {
-        await WithWebAsync("viewer", async (owner, _, Send, ct) =>
+        await WithWebAsync("web", async (owner, _, Send, ct) =>
         {
             Assert.False((bool)(await Send("GET", "/api/server-actions", null)).Body!["can_decide"]!);
             var refused = await Send("PUT", "/api/servers/1/actions/force_plan", "application/json", "{\"enabled\":true}");
@@ -386,7 +386,7 @@ public sealed class ServerActionSwitchWriteLiveTests
     [Fact]
     public async Task TheWebRoutes_AsViewer_ListButRefuseEveryChangeWith403_ChangingNothing()
     {
-        await WithWebAsync("viewer", async (owner, _, Send, ct) =>
+        await WithWebAsync("web", async (owner, _, Send, ct) =>
         {
             var list = await Send("GET", "/api/server-actions", null);
             Assert.Equal(200, list.Status);

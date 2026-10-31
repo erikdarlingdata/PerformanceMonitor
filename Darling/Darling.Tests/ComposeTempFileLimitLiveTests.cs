@@ -62,6 +62,7 @@ public sealed class ComposeTempFileLimitLiveTests
                temp_file_limit) is exactly what BuildComposeStatementTimeoutSql emits for the real roles. */
             var rendered = (DarlingManagedRoles.BuildComposeStatementTimeoutSql(60) + "\n" + DarlingManagedRoles.BuildComposeTempFileLimitSql())
                 .Replace("viewer", roleName, StringComparison.Ordinal)
+                .Replace("ALTER ROLE web ", $"ALTER ROLE {roleName} ", StringComparison.Ordinal)
                 .Replace("mcp", roleName, StringComparison.Ordinal);
             await using (var applyRendered = new NpgsqlCommand(rendered, admin))
             {

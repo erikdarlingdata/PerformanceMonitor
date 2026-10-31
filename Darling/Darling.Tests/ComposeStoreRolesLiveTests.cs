@@ -159,7 +159,7 @@ public sealed class ComposeStoreRolesLiveTests
             var mcp = DarlingStoreLogins.Resolve(DarlingStoreLogins.Surface.Mcp, owner, null, inContainer: true, verdict);
             Assert.Equal(DarlingStoreLogins.LoginSource.ComposeStoreRole, web.Source);
             Assert.Equal(DarlingStoreLogins.LoginSource.ComposeStoreRole, mcp.Source);
-            await AssertLeastPrivilegeAsync(web.ConnectionString, "viewer", ct);
+            await AssertLeastPrivilegeAsync(web.ConnectionString, "web", ct);
             await AssertLeastPrivilegeAsync(mcp.ConnectionString, "mcp", ct);
 
             /* The continuous-aggregate case: a collect relation created AFTER provisioning — the TimescaleDB step
@@ -199,7 +199,7 @@ public sealed class ComposeStoreRolesLiveTests
             await webHost.StartAsync(ct);
             await mcpHost.StartAsync(ct);
 
-            Assert.Equal("viewer", await HostPoolUserAsync(webHost, webPort, webLog, ct));
+            Assert.Equal("web", await HostPoolUserAsync(webHost, webPort, webLog, ct));
             Assert.Equal("mcp", await HostPoolUserAsync(mcpHost, mcpPort, mcpLog, ct));
             Assert.DoesNotContain("connects to the store as the owner login", webLog.Joined + mcpLog.Joined, StringComparison.Ordinal);
 
@@ -229,7 +229,7 @@ public sealed class ComposeStoreRolesLiveTests
                 owner, "SELECT count(*) FROM pg_catalog.pg_auth_members AS a JOIN pg_catalog.pg_roles AS m ON m.oid = a.member WHERE m.rolname IN ('admin', 'viewer', 'mcp')", ct));
             Assert.False(await OwnerScalarAsync<bool>(owner, "SELECT pg_catalog.pg_has_role('reporting', 'pg_signal_backend', 'MEMBER')", ct));
             await AssertLeastPrivilegeAsync(mcp.ConnectionString, "mcp", ct);
-            await AssertLeastPrivilegeAsync(web.ConnectionString, "viewer", ct);
+            await AssertLeastPrivilegeAsync(web.ConnectionString, "web", ct);
 
             /* 6. A lost credential file (a container recreated without the volume) re-keys that role alone. */
             var viewerFile = Path.Combine(credentials, DarlingManagedRoles.ComposeStoreCredentialFileName("viewer"));
@@ -304,9 +304,9 @@ public sealed class ComposeStoreRolesLiveTests
             var web = await DarlingStoreLogins.ResolveUnmanagedAsync(DarlingStoreLogins.Surface.Web, postgres, refusedLog, ct);
             var mcp = await DarlingStoreLogins.ResolveUnmanagedAsync(DarlingStoreLogins.Surface.Mcp, postgres, refusedLog, ct);
             Assert.True(web is not null && mcp is not null, refusedLog.Joined);
-            await AssertLeastPrivilegeAsync(web!, "viewer", ct);
+            await AssertLeastPrivilegeAsync(web!, "web", ct);
             await AssertLeastPrivilegeAsync(mcp!, "mcp", ct);
-            Assert.Contains("The web dashboard connects to the store as the viewer role with the credential an earlier start provisioned", refusedLog.Joined, StringComparison.Ordinal);
+            Assert.Contains("The web dashboard connects to the store as the web role with the credential an earlier start provisioned", refusedLog.Joined, StringComparison.Ordinal);
             Assert.Contains("The MCP server connects to the store as the mcp role with the credential an earlier start provisioned", refusedLog.Joined, StringComparison.Ordinal);
             Assert.DoesNotContain("connects to the store as the owner login", refusedLog.Joined, StringComparison.Ordinal);
 
@@ -318,14 +318,14 @@ public sealed class ComposeStoreRolesLiveTests
             var stoodDown = new CapturingTestLogger();
             var afterStandDown = await DarlingStoreLogins.ResolveUnmanagedAsync(DarlingStoreLogins.Surface.Web, postgres, stoodDown, ct);
             Assert.True(afterStandDown is not null, stoodDown.Joined);
-            Assert.Equal("viewer", await CurrentUserAsync(afterStandDown!, ct));
+            Assert.Equal("web", await CurrentUserAsync(afterStandDown!, ct));
 
             /* 3. The role re-keyed by hand since: the store refuses that credential, and the surface stays down with the
                   store's error. It never becomes the owner. mcp, untouched, still connects. */
-            await ExecAsync(owner, "ALTER ROLE viewer PASSWORD 'ChangedByHand3914';", ct);
+            await ExecAsync(owner, "ALTER ROLE web PASSWORD 'ChangedByHand3914';", ct);
             var rekeyed = new CapturingTestLogger();
             Assert.Null(await DarlingStoreLogins.ResolveUnmanagedAsync(DarlingStoreLogins.Surface.Web, postgres, rekeyed, ct));
-            Assert.Contains("did not accept the viewer login an earlier start provisioned", rekeyed.Joined, StringComparison.Ordinal);
+            Assert.Contains("did not accept the web login an earlier start provisioned", rekeyed.Joined, StringComparison.Ordinal);
             Assert.Contains(PostgresErrorCodes.InvalidPassword, rekeyed.Joined, StringComparison.Ordinal);
             Assert.NotNull(await DarlingStoreLogins.ResolveUnmanagedAsync(DarlingStoreLogins.Surface.Mcp, postgres, NullLogger.Instance, ct));
 
@@ -543,7 +543,8 @@ public sealed class ComposeStoreRolesLiveTests
             var script = WithoutPsqlMetaCommands(File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", "provision-roles.sql")))
                 .Replace("CHANGE_ME_ADMIN_PASSWORD", "ScriptAdmin3914", StringComparison.Ordinal)
                 .Replace("CHANGE_ME_VIEWER_PASSWORD", "ScriptViewer3914", StringComparison.Ordinal)
-                .Replace("CHANGE_ME_MCP_PASSWORD", "ScriptMcp3914", StringComparison.Ordinal);
+                .Replace("CHANGE_ME_MCP_PASSWORD", "ScriptMcp3914", StringComparison.Ordinal)
+                .Replace("CHANGE_ME_WEB_PASSWORD", "ScriptWeb6991", StringComparison.Ordinal);
             await ExecAsync(owner, script, ct);
 
             /* The two settings through the host's own entry: a literal for the web dashboard, a file: reference for
@@ -553,13 +554,13 @@ public sealed class ComposeStoreRolesLiveTests
             var postgres = new PostgresConfig
             {
                 ConnectionString = owner,
-                WebConnectionString = Login(owner, "viewer", "ScriptViewer3914"),
+                WebConnectionString = Login(owner, "web", "ScriptWeb6991"),
                 McpConnectionString = "file:" + mcpLoginFile,
             };
 
             var webLogin = await DarlingStoreLogins.ResolveUnmanagedAsync(DarlingStoreLogins.Surface.Web, postgres, NullLogger.Instance, ct);
             var mcpLogin = await DarlingStoreLogins.ResolveUnmanagedAsync(DarlingStoreLogins.Surface.Mcp, postgres, NullLogger.Instance, ct);
-            await AssertLeastPrivilegeAsync(webLogin!, "viewer", ct);
+            await AssertLeastPrivilegeAsync(webLogin!, "web", ct);
             await AssertLeastPrivilegeAsync(mcpLogin!, "mcp", ct);
 
             /* Unset: the owner. An unreadable reference: the surface stays down, never the owner in its place. */
@@ -587,6 +588,21 @@ public sealed class ComposeStoreRolesLiveTests
                 before.SetEquals(after),
                 $"managed provisioning changed what the script granted. Added: [{string.Join("; ", after.Except(before).Order())}]. "
                 + $"Removed: [{string.Join("; ", before.Except(after).Order())}].");
+
+            /* One thing managed adds that the script leaves to the operator: CONNECT on the maintenance databases. Large
+               objects and TEMP are per database, so a login that can open postgres or template1 still has them there. */
+            await using (var check = await OpenAsync(owner, ct))
+            {
+                foreach (var role in new[] { "admin", "viewer", "web", "mcp" })
+                {
+                    foreach (var database in new[] { "postgres", "template1" })
+                    {
+                        Assert.False(
+                            await ScalarAsync<bool>(check, $"SELECT pg_catalog.has_database_privilege('{role}', '{database}', 'CONNECT')", ct),
+                            $"{role} can still connect to {database} after managed provisioning.");
+                    }
+                }
+            }
         }
         finally
         {
@@ -644,6 +660,68 @@ public sealed class ComposeStoreRolesLiveTests
     }
 
     /// <summary>
+    /// A password placeholder left unchanged stops the script before any password is set, whichever of the four it is,
+    /// and the stop holds under psql (exit 3) and under the runner these tests use (the meta-command lines dropped, so
+    /// the check is plain SQL). The case that matters: a routine written before the web role existed fills in the admin,
+    /// viewer and mcp placeholders only, which used to leave <c>web</c> with the placeholder text as its password. After
+    /// the stops no role holds a password; with all four filled in the script runs and <c>web</c> logs in.
+    /// </summary>
+    [Fact]
+    public async Task TheBringYourOwnScript_StopsBeforeAnyPassword_WhileAPasswordPlaceholderIsUnchanged_Gated()
+    {
+        var runtimeRoot = RequireRuntime();
+        var root = Directory.CreateTempSubdirectory("darling-6991-placeholder-");
+        var cluster = new DarlingManagedPostgres(
+            new PostgresConfig { Managed = true, Port = DarlingManagedPostgresTests.FindFreeTcpPort(), DataDirectory = Path.Combine(root.FullName, "pg") },
+            NullLogger.Instance, runtimeRoot);
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(10));
+            var ct = timeout.Token;
+            var owner = await BootMigratedAsync(cluster, ct);
+            const string PasswordCountSql =
+                "SELECT count(*) FROM pg_catalog.pg_authid WHERE rolname IN ('admin', 'viewer', 'web', 'mcp') AND rolpassword IS NOT NULL";
+
+            /* The old routine: three placeholders replaced, the web one left, by psql. */
+            var oldRoutine = File.ReadAllText(ShippedScriptPath())
+                .Replace("CHANGE_ME_ADMIN_PASSWORD", "OldAdmin6991", StringComparison.Ordinal)
+                .Replace("CHANGE_ME_VIEWER_PASSWORD", "OldViewer6991", StringComparison.Ordinal)
+                .Replace("CHANGE_ME_MCP_PASSWORD", "OldMcp6991", StringComparison.Ordinal);
+            var oldPath = Path.Combine(root.FullName, "old-routine.sql");
+            File.WriteAllText(oldPath, oldRoutine);
+            var run = await RunPsqlScriptAsync(runtimeRoot, owner, database: null, oldPath, ct);
+            Assert.True(run.ExitCode == 3, $"psql exited {run.ExitCode}, not 3.{Environment.NewLine}{run.Error}");
+            Assert.Contains("The password for role web is still the CHANGE_ME placeholder", run.Error, StringComparison.Ordinal);
+            Assert.Equal(0L, await OwnerScalarAsync<long>(owner, PasswordCountSql, ct));
+
+            /* Each of the four, under the runner the other tests use. */
+            foreach (var unchanged in new[] { "admin", "viewer", "web", "mcp" })
+            {
+                var text = WithoutPsqlMetaCommands(File.ReadAllText(ShippedScriptPath()));
+                foreach (var role in new[] { "admin", "viewer", "web", "mcp" }.Where(role => role != unchanged))
+                {
+                    text = text.Replace($"CHANGE_ME_{role.ToUpperInvariant()}_PASSWORD", "Filled6991", StringComparison.Ordinal);
+                }
+
+                var error = await Assert.ThrowsAsync<PostgresException>(() => ExecAsync(owner, text, ct));
+                Assert.Contains($"The password for role {unchanged} is still the CHANGE_ME placeholder", error.MessageText, StringComparison.Ordinal);
+                Assert.Equal(0L, await OwnerScalarAsync<long>(owner, PasswordCountSql, ct));
+            }
+
+            /* All four filled in: the script runs and web has its password. */
+            var filled = await RunFilledScriptAsync(runtimeRoot, root.FullName, owner, null, new[] { "OkAdmin6991", "OkViewer6991", "OkMcp6991" }, ct);
+            Assert.True(filled.ExitCode == 0, $"psql exited {filled.ExitCode}, not 0.{Environment.NewLine}{filled.Error}");
+            Assert.Equal("web", await CurrentUserAsync(Login(owner, "web", "ScriptWeb6991"), ct));
+        }
+        finally
+        {
+            DarlingStoreLogins.ResetComposeStoreVerdictForTests();
+            await cluster.StopIfStartedByThisProcessAsync();
+            DarlingManagedPostgresTests.TryDeleteRecursive(root.FullName);
+        }
+    }
+
+    /// <summary>
     /// The caller's own <c>ON_ERROR_STOP</c> survives the guard (#4746). Run against the cluster's <c>postgres</c>
     /// database, which has no store schema, the script's grants fail one after another. Left alone, psql goes on
     /// through them and exits 0. Started with <c>-v ON_ERROR_STOP=1</c>, it must stop at the first one and exit 3:
@@ -663,13 +741,13 @@ public sealed class ComposeStoreRolesLiveTests
             var ct = timeout.Token;
             var owner = await BootMigratedAsync(cluster, ct);
 
-            var goesOn = await RunPsqlScriptAsync(runtimeRoot, owner, "postgres", ShippedScriptPath(), ct);
+            var goesOn = await RunFilledScriptAsync(runtimeRoot, root.FullName, owner, "postgres", new[] { "OnA6991", "OnV6991", "OnM6991" }, ct);
             Assert.True(goesOn.ExitCode == 0,
                 $"psql exited {goesOn.ExitCode} on a run that asked for no stop: the script's own errors are meant to be carried on past.{Environment.NewLine}{goesOn.Error}");
             Assert.Contains("ERROR:", goesOn.Error, StringComparison.Ordinal);
             Assert.True(await RoleExistsAsync(owner, "viewer", ct), "the first run did not get through the guard and create the roles.");
 
-            var stops = await RunPsqlScriptAsync(runtimeRoot, owner, "postgres", ShippedScriptPath(), ct, "-v", "ON_ERROR_STOP=1");
+            var stops = await RunFilledScriptAsync(runtimeRoot, root.FullName, owner, "postgres", new[] { "StA6991", "StV6991", "StM6991" }, ct, "-v", "ON_ERROR_STOP=1");
             Assert.True(stops.ExitCode == 3,
                 $"psql exited {stops.ExitCode}, not 3, with -v ON_ERROR_STOP=1: the script switched the caller's stop off.{Environment.NewLine}{stops.Error}");
         }
@@ -851,7 +929,7 @@ public sealed class ComposeStoreRolesLiveTests
             }
 
             /* 2. A carve statement that fails. */
-            await ExecAsync(owner, "DROP OWNED BY admin, viewer, mcp CASCADE; DROP ROLE admin, viewer, mcp;", ct);
+            await ExecAsync(owner, "DROP OWNED BY admin, viewer, web, mcp CASCADE; DROP ROLE admin, viewer, web, mcp;", ct);
             await ExecAsync(owner, "ALTER TABLE config.config_command RENAME COLUMN service_instance TO service_instance_renamed", ct);
             foreach (var extra in new[] { new[] { "-v", "ON_ERROR_STOP=1" }, Array.Empty<string>() })
             {
@@ -867,7 +945,7 @@ public sealed class ComposeStoreRolesLiveTests
                         $"{role} kept USAGE on config from a transaction that did not commit.");
                 }
 
-                await ExecAsync(owner, "DROP OWNED BY admin, viewer, mcp CASCADE; DROP ROLE admin, viewer, mcp;", ct);
+                await ExecAsync(owner, "DROP OWNED BY admin, viewer, web, mcp CASCADE; DROP ROLE admin, viewer, web, mcp;", ct);
             }
         }
         finally
@@ -1030,7 +1108,7 @@ public sealed class ComposeStoreRolesLiveTests
             await Assert.ThrowsAsync<PostgresException>(() => CurrentUserAsync(Login(owner, "viewer", first[1]), ct));
 
             /* 4. Roles the owner made itself: it holds ADMIN OPTION on them, so its re-run is not stopped and rotates them. */
-            await ExecAsync(owner, "DROP OWNED BY admin, viewer, mcp CASCADE; DROP ROLE admin, viewer, mcp;", ct);
+            await ExecAsync(owner, "DROP OWNED BY admin, viewer, web, mcp CASCADE; DROP ROLE admin, viewer, web, mcp;", ct);
             var third = new[] { "AdminPwNoAdminR1c", "ViewerPwNoAdminR1c", "McpPwNoAdminR1c" };
             var created = await RunFilledScriptAsync(runtimeRoot, root.FullName, byo, null, third, ct);
             Assert.True(created.ExitCode == 0, $"psql exited {created.ExitCode} for the owner's own first run.{Environment.NewLine}{created.Error}");
@@ -1286,7 +1364,8 @@ public sealed class ComposeStoreRolesLiveTests
         var script = File.ReadAllText(ShippedScriptPath())
             .Replace("CHANGE_ME_ADMIN_PASSWORD", passwords[0], StringComparison.Ordinal)
             .Replace("CHANGE_ME_VIEWER_PASSWORD", passwords[1], StringComparison.Ordinal)
-            .Replace("CHANGE_ME_MCP_PASSWORD", passwords[2], StringComparison.Ordinal);
+            .Replace("CHANGE_ME_MCP_PASSWORD", passwords[2], StringComparison.Ordinal)
+            .Replace("CHANGE_ME_WEB_PASSWORD", "ScriptWeb6991", StringComparison.Ordinal);
         var path = Path.Combine(directory, $"provision-{Guid.NewGuid():N}.sql");
         File.WriteAllText(path, script);
         return await RunPsqlScriptAsync(runtimeRoot, login, database, path, ct, extraArguments);
@@ -1503,8 +1582,8 @@ ALTER ROLE byo SET pg_stat_statements.track_utility = on;", ct);
             Assert.True(verdict.Provisioned, provisioning.Joined);
 
             var viewerLogin = await DarlingStoreLogins.ResolveComposeCustomAlertViewerAsync(owner, NullLogger.Instance, ct);
-            Assert.Equal(verdict.ViewerConnectionString, viewerLogin);
-            await AssertLeastPrivilegeAsync(viewerLogin!, "viewer", ct);
+            Assert.Equal(verdict.WebConnectionString, viewerLogin);
+            await AssertLeastPrivilegeAsync(viewerLogin!, "web", ct);
 
             const int serverId = 993970;
             var storage = "car_3970_srv_" + Guid.NewGuid().ToString("N");
@@ -1603,19 +1682,20 @@ VALUES ($1, (now() AT TIME ZONE 'UTC'), $2, $3, (now() AT TIME ZONE 'UTC'), 60, 
                   host would (F1). */
             var trusted = await DarlingStoreLogins.ResolveComposeCustomAlertViewerAsync(owner, NullLogger.Instance, ct);
             Assert.NotNull(trusted);
-            await AssertLeastPrivilegeAsync(trusted!, "viewer", ct);
+            await AssertLeastPrivilegeAsync(trusted!, "web", ct);
 
             /* 2. The role re-keyed by hand since: the store refuses that credential, so the evaluator gets
                   nothing -- never the owner in its place. */
-            await ExecAsync(owner, "ALTER ROLE viewer PASSWORD 'ChangedByHand3970';", ct);
+            await ExecAsync(owner, "ALTER ROLE web PASSWORD 'ChangedByHand3970';", ct);
             var rekeyed = new CapturingTestLogger();
             Assert.Null(await DarlingStoreLogins.ResolveComposeCustomAlertViewerAsync(owner, rekeyed, ct));
             Assert.Contains(
-                "Custom alert evaluator not started this attempt: the store did not accept the viewer login an earlier start provisioned",
+                "Custom alert evaluator not started this attempt: the store did not accept the web login an earlier start provisioned",
                 rekeyed.Joined, StringComparison.Ordinal);
 
             /* 3. No trusted credential at all: a host falls back to the owner here (#3914's ruling); the
                   evaluator must not, which is the divergence this test exists to pin. */
+            File.Delete(Path.Combine(credentials, DarlingManagedRoles.ComposeStoreCredentialFileName("web")));
             File.Delete(Path.Combine(credentials, DarlingManagedRoles.ComposeStoreCredentialFileName("viewer")));
             Assert.Null(await DarlingStoreLogins.ResolveComposeCustomAlertViewerAsync(owner, NullLogger.Instance, ct));
 
@@ -1797,17 +1877,17 @@ VALUES ($1, (now() AT TIME ZONE 'UTC'), $2, $3, (now() AT TIME ZONE 'UTC'), 60, 
         }
     }
 
-    /// <summary>Every table, column and default privilege, and every role setting, the three roles hold.</summary>
+    /// <summary>Every table, column and default privilege, and every role setting, the four roles hold.</summary>
     private static async Task<HashSet<string>> PrivilegeSnapshotAsync(string owner, CancellationToken ct)
     {
         const string sql = @"
 SELECT 'table ' || grantee || ' ' || privilege_type || ' ' || table_schema || '.' || table_name
 FROM information_schema.role_table_grants
-WHERE grantee IN ('admin', 'viewer', 'mcp')
+WHERE grantee IN ('admin', 'viewer', 'web', 'mcp')
 UNION ALL
 SELECT 'column ' || grantee || ' ' || privilege_type || ' ' || table_schema || '.' || table_name || '.' || column_name
 FROM information_schema.column_privileges
-WHERE grantee IN ('admin', 'viewer', 'mcp')
+WHERE grantee IN ('admin', 'viewer', 'web', 'mcp')
 UNION ALL
 SELECT 'default ' || d.defaclnamespace::regnamespace::text || ' ' || d.defaclobjtype::text || ' ' || a.acl::text
 FROM pg_catalog.pg_default_acl AS d
@@ -1817,11 +1897,11 @@ SELECT 'setting ' || r.rolname || ' ' || c.setting
 FROM pg_catalog.pg_db_role_setting AS s
 JOIN pg_catalog.pg_roles AS r ON r.oid = s.setrole
 CROSS JOIN LATERAL pg_catalog.unnest(s.setconfig) AS c(setting)
-WHERE r.rolname IN ('admin', 'viewer', 'mcp')
+WHERE r.rolname IN ('admin', 'viewer', 'web', 'mcp')
 UNION ALL
 SELECT 'connect ' || r.rolname || ' ' || pg_catalog.has_database_privilege(r.rolname, pg_catalog.current_database(), 'CONNECT')::text
 FROM pg_catalog.pg_roles AS r
-WHERE r.rolname IN ('admin', 'viewer', 'mcp')";
+WHERE r.rolname IN ('admin', 'viewer', 'web', 'mcp')";
 
         var snapshot = new HashSet<string>(StringComparer.Ordinal);
         await using var connection = await OpenAsync(owner, ct);

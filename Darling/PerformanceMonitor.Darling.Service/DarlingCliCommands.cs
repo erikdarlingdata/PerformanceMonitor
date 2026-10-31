@@ -4986,6 +4986,7 @@ public static partial class DarlingCliCommands
             targets.Add(new(Path.Combine(storeRoot, "pg-admin-credential.dpapi"), AllowInteractive: true, IsDirectory: false, "the admin credential"));
             targets.Add(new(Path.Combine(storeRoot, "pg-viewer-credential.dpapi"), AllowInteractive: true, IsDirectory: false, "the viewer credential"));
             targets.Add(new(Path.Combine(storeRoot, "pg-mcp-credential.dpapi"), AllowInteractive: false, IsDirectory: false, "the mcp credential"));
+            targets.Add(new(Path.Combine(storeRoot, "pg-web-credential.dpapi"), AllowInteractive: false, IsDirectory: false, "the web credential"));
             targets.Add(new(Path.Combine(storeRoot, DarlingLogHashKeyFile.WindowsFileName), AllowInteractive: false, IsDirectory: false, "the log-hash key"));
             /* #5700: the store's own TLS key, read only by the service like the mcp credential. Absent until the store
                has TLS on, and then skipped like every other store file that is not there. */
