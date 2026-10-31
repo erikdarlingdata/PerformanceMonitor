@@ -140,8 +140,12 @@ public sealed class McpWindowMatrixLiveTests : IClassFixture<McpWindowMatrixStor
     /// <summary>The tool carries no window_truncated notice over a window that starts before the store's data (the notice is not rolled out to it; the PostgreSQL reads and the fleet and store-level reads are in this group, and so are tools whose probe table this seed does not fill).</summary>
     private const string NoNotice = "no window_truncated notice over a window that starts before the store's data (not rolled out to this tool, or its probe table is not seeded)";
 
+    /// <summary>#7010: the tool reads the newest snapshot and hours_back is only the span SEARCHED for it, not a span aggregated, so its
+    /// answer is one row stamped with captured_at and age_seconds; a coverage notice would describe a window the tool never reads.</summary>
+    private const string SnapshotSearch = "newest-snapshot read: hours_back is the span searched for the latest snapshot (captured_at and age_seconds say how old it is), not a data window (#7010)";
+
     /// <summary>The tool answers window_truncated, but false, for a window that starts before the store's data (a window that ends before it, or one the probe judged covered).</summary>
-    private const string NotTrue = "window_truncated is not true over a window that starts before the store's data";
+    private const string NotTrue ="window_truncated is not true over a window that starts before the store's data";
 
     /// <summary>The tool refuses the call because a parameter this matrix does not bind has no default (a required view or metric): a test binding gap, not a product defect.</summary>
     private const string NeedsArgument = "the generic binding leaves a required argument empty, so the tool answers invalid (test binding gap)";
@@ -157,15 +161,13 @@ public sealed class McpWindowMatrixLiveTests : IClassFixture<McpWindowMatrixStor
         ["get_alert_history"] = NoNotice,
         ["get_analysis_facts"] = NoNotice,
         ["get_analysis_findings"] = NoNotice,
-        ["get_blocking_trend"] = NoNotice,
         ["get_client_timeouts"] = NoNotice,
         ["get_collection_health"] = NoNotice,
         ["get_cpu_by_database"] = NoNotice,
-        ["get_cpu_scheduler_pressure"] = NoNotice,
+        ["get_cpu_scheduler_pressure"] = SnapshotSearch,
         ["get_cpu_utilization"] = NoNotice,
         ["get_current_waits_trend"] = NoNotice,
         ["get_database_protection"] = NoNotice,
-        ["get_deadlock_trend"] = NoNotice,
         ["get_file_io_trend"] = NoNotice,
         ["get_finops"] = NoNotice,
         ["get_fleet_overview"] = NoNotice,
@@ -182,8 +184,6 @@ public sealed class McpWindowMatrixLiveTests : IClassFixture<McpWindowMatrixStor
         ["get_identity_capacity"] = NoNotice,
         ["get_investigation_reports"] = NoNotice,
         ["get_job_history"] = NotTrue,
-        ["get_latch_stats"] = NoNotice,
-        ["get_lock_wait_trend"] = NoNotice,
         ["get_memory_grants"] = NoNotice,
         ["get_memory_trend"] = NoNotice,
         ["get_perfmon_trend"] = NoNotice,
@@ -206,7 +206,7 @@ public sealed class McpWindowMatrixLiveTests : IClassFixture<McpWindowMatrixStor
         ["get_pg_wait_trend"] = NoNotice,
         ["get_pg_wraparound_risk"] = NoNotice,
         ["get_pg_xmin_horizon"] = NoNotice,
-        ["get_plan_cache_bloat"] = NoNotice,
+        ["get_plan_cache_bloat"] = SnapshotSearch,
         ["get_plan_force_precheck"] = NoNotice,
         ["get_procedure_duration_trend"] = NotTrue,
         ["get_query_duration_trend"] = NotTrue,
@@ -220,7 +220,6 @@ public sealed class McpWindowMatrixLiveTests : IClassFixture<McpWindowMatrixStor
         ["get_resource_semaphore"] = NoNotice,
         ["get_resource_use_by_tag"] = NoNotice,
         ["get_server_trend"] = NoNotice,
-        ["get_spinlock_stats"] = NoNotice,
         ["get_store_log"] = NoNotice,
         ["get_store_query_history"] = NoNotice,
         ["get_sweep_reports"] = NoNotice,
