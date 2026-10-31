@@ -92,6 +92,10 @@ public sealed class DarlingBlockingTrendEmptyTests
                collected before is a coverage gap, not a server that never collected. */
             Assert.DoesNotContain("EVER", gapText, StringComparison.Ordinal);
 
+            /* #7010: the window keys ride under hints; the one run is 48 hours back, outside this 1-hour window, so the store holds
+               no collection in it. */
+            Assert.Equal(JsonValueKind.True, gapRoot.GetProperty("hints").GetProperty("window_truncated").ValueKind);
+
             /* ── the collector ran inside the window and stored nothing: a genuine all-clear ── */
             var t10 = MinutesAgo(10);
             await SeedRunAsync(connection, ct, "blocked_process_report", t10);
@@ -122,6 +126,9 @@ public sealed class DarlingBlockingTrendEmptyTests
             var hitRoot = JsonDocument.Parse(hit).RootElement;
             Assert.False(hitRoot.TryGetProperty("status", out _));
             Assert.Equal(1, hitRoot.GetProperty("trend").GetArrayLength());
+            /* #7010: a data answer carries the three window keys, as get_blocking does. */
+            Assert.True(hitRoot.TryGetProperty("window_truncated", out _));
+            Assert.True(hitRoot.TryGetProperty("effective_start", out _));
 
             bodySucceeded = true;
         }
@@ -225,12 +232,17 @@ public sealed class DarlingBlockingTrendEmptyTests
             Assert.Contains("genuine all-clear", clearText, StringComparison.Ordinal);
             Assert.DoesNotContain("EVER", clearText, StringComparison.Ordinal);
             Assert.Equal(1, clear.GetProperty("hints").GetProperty("capture_count").GetInt64());
+            /* #7010: the window keys ride beside the run counts under hints. */
+            Assert.True(clear.GetProperty("hints").TryGetProperty("window_truncated", out _));
 
             await SeedDeadlockAsync(connection, ct, MinutesAgo(5));
             var hit = JsonDocument.Parse(
                 await DarlingMcpBlockingTools.GetDeadlockTrend(dataSource, ServerName, 4)).RootElement;
             Assert.False(hit.TryGetProperty("status", out _));
             Assert.Equal(1, hit.GetProperty("trend").GetArrayLength());
+            /* #7010: a data answer carries the three window keys. */
+            Assert.True(hit.TryGetProperty("window_truncated", out _));
+            Assert.True(hit.TryGetProperty("effective_start", out _));
 
             bodySucceeded = true;
         }

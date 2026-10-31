@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading;
@@ -17,6 +18,7 @@ using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
 
@@ -143,6 +145,11 @@ public sealed class DarlingMcpFleetTools
                from "no servers have cards". */
             var node = JsonSerializer.SerializeToNode(result, DarlingFleetReader.JsonOptions)!.AsObject();
 
+            /* #7010: the window notice, one fleet-wide and one per truncated card (summary mode strips the cards, and only the top level stays). */
+            var windowNotice = await ReadWindowNoticeAsync(
+                postgres, result.Cards.Select(c => c.ServerName).ToList(), now.AddHours(-hours_back), now, logger, cancellationToken);
+            windowNotice?.AttachTop(node);
+
             if (wantsCards)
             {
                 if (worst_only || bandFilter != null)
@@ -167,6 +174,7 @@ public sealed class DarlingMcpFleetTools
                     node["cards"] = filteredCards;
                 }
 
+                windowNotice?.AttachCards(node["cards"] as JsonArray);
                 node["cards_included"] = true;
                 return node.ToJsonString(DarlingFleetReader.JsonOptions);
             }
@@ -186,6 +194,117 @@ public sealed class DarlingMcpFleetTools
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_fleet_overview", ex);
+        }
+    }
+
+    /// <summary>The relations the cards' blocking and deadlock counts read (#7010): the XE blocked process reports, the DMV blocking snapshots
+    /// that stand in for them, the deadlock graphs, and a PostgreSQL target's own deadlock counter table. One per-server probe each.</summary>
+    private static readonly string[] s_cardCountRelations = ["blocked_process_reports", "dmv_blocking_snapshots", "deadlocks", "pg_database_stats"];
+
+    private const int MaxTruncatedServersNamed = 20;
+
+    /// <summary>
+    /// The window notice of the fleet overview (#7010): the cards' blocking and deadlock counts are the windowed part, so each card's floor is
+    /// the LATEST of its server's floors over <see cref="s_cardCountRelations"/> (a card is only as complete as its least-covered count), and the
+    /// top level carries the latest of the cards' floors, so the fleet reads truncated when any card does. Each relation is read ONCE for the
+    /// whole fleet (<see cref="DataWindowFloor.GetPerServerAsync"/>), never once per server. A server that has no floor (it never collected a
+    /// relation in the window) adds nothing, so a never-collected server's card stays bare. A window no longer than the truncation slack is
+    /// not probed (covered whatever the probe would read), and a probe that fails costs the notice, never the answer. Null: no notice at all.
+    /// </summary>
+    private static async Task<FleetWindowNotice?> ReadWindowNoticeAsync(
+        NpgsqlDataSource postgres, IReadOnlyList<string> serverNames, DateTime windowStart, DateTime windowEnd, ILogger? logger,
+        CancellationToken cancellationToken)
+    {
+        var floors = new Dictionary<string, DateTime?>(StringComparer.Ordinal);
+        if (windowEnd - windowStart > DurationTrendRouting.TruncationSlack)
+        {
+            try
+            {
+                foreach (var relation in s_cardCountRelations)
+                {
+                    var perServer = await DataWindowFloor.GetPerServerAsync(
+                        postgres, [DataWindowFloor.Source.ForCollectorTable(relation)], windowStart, windowEnd,
+                        StorageCommandDeadlines.McpReadSeconds, cancellationToken);
+                    foreach (var (name, floor) in perServer)
+                    {
+                        floors[name] = floors.TryGetValue(name, out var seen) ? DarlingMcpWindowNotice.Later(seen, floor) : floor;
+                    }
+                }
+            }
+            catch (Exception ex) when (!(ex is OperationCanceledException && cancellationToken.IsCancellationRequested))
+            {
+                logger?.LogWarning(ex, "The coverage probe of the fleet overview's blocking and deadlock tables failed; the answer goes without its window-floor notice.");
+                return null;
+            }
+        }
+
+        DateTime? latest = null;
+        var cards = new Dictionary<string, McpWindowNotice>(StringComparer.Ordinal);
+        var truncated = new List<string>();
+        foreach (var name in serverNames.Distinct(StringComparer.Ordinal))
+        {
+            if (!floors.TryGetValue(name, out var floor) || floor is null)
+            {
+                continue;
+            }
+
+            latest = DarlingMcpWindowNotice.Later(latest, floor);
+            if (RawWindowFloor.IsTruncated(floor, windowStart))
+            {
+                truncated.Add(name);
+                cards[name] = DarlingMcpWindowNotice.Build(
+                    floor, windowStart, "blocking and deadlock data",
+                    "The blocking and deadlock counts on this card cover the window only from effective_start, so they under-count the window that was asked for.");
+            }
+        }
+
+        truncated.Sort(StringComparer.Ordinal);
+        var top = DarlingMcpWindowNotice.Build(
+            latest, windowStart, "blocking and deadlock data",
+            "The fleet blocking and deadlock totals sum the cards' counts, so they under-count the window that was asked for; window_truncated_servers names the servers whose cards are affected.");
+        return new FleetWindowNotice(top, cards, truncated);
+    }
+
+    /// <summary>The notices <see cref="ReadWindowNoticeAsync"/> built: the top-level one, each truncated card's, and the truncated servers' names.</summary>
+    private sealed record FleetWindowNotice(McpWindowNotice Top, Dictionary<string, McpWindowNotice> Cards, List<string> TruncatedServers)
+    {
+        /// <summary>The three window-floor keys, and <c>window_truncated_servers</c> (the first 20 names, sorted) with <c>window_truncated_servers_more</c>
+        /// (the count of the rest) only when there are more than 20.</summary>
+        public void AttachTop(JsonObject node)
+        {
+            node["effective_start"] = Top.EffectiveStart;
+            node["window_truncated"] = Top.WindowTruncated;
+            node["truncation_note"] = Top.TruncationNote;
+            var named = new JsonArray();
+            foreach (var name in TruncatedServers.Take(MaxTruncatedServersNamed))
+            {
+                named.Add(name);
+            }
+
+            node["window_truncated_servers"] = named;
+            if (TruncatedServers.Count > MaxTruncatedServersNamed)
+            {
+                node["window_truncated_servers_more"] = TruncatedServers.Count - MaxTruncatedServersNamed;
+            }
+        }
+
+        /// <summary>The three keys on each card whose server is truncated; every other card stays as it was.</summary>
+        public void AttachCards(JsonArray? cards)
+        {
+            if (cards is null)
+            {
+                return;
+            }
+
+            foreach (var card in cards.OfType<JsonObject>())
+            {
+                if (card["server_name"]?.GetValue<string>() is { } name && Cards.TryGetValue(name, out var notice))
+                {
+                    card["effective_start"] = notice.EffectiveStart;
+                    card["window_truncated"] = notice.WindowTruncated;
+                    card["truncation_note"] = notice.TruncationNote;
+                }
+            }
         }
     }
 }

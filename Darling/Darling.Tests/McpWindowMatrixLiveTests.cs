@@ -102,7 +102,9 @@ public sealed class McpWindowMatrixStore : IAsyncLifetime
 
             /* Registered when the collection log starts: the first collection the registry knows is not later than the log's first run. */
             await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
-            await DarlingMcpTestData.ExecAsync(connection, ct, "UPDATE collect.servers SET created_date = $2 WHERE server_id = $1",
+            /* SQL Server 2022 (major 16): get_query_store_hints answers not_collected, bare, on an older server (the Query Store hints DMV starts there), so
+               the matrix would never see its window notice on the helper's default of 15. */
+            await DarlingMcpTestData.ExecAsync(connection, ct, "UPDATE collect.servers SET created_date = $2, sql_major_version = 16 WHERE server_id = $1",
                 ServerId, DarlingMcpTestData.Naive(now - LogFloorBack));
 
             /* Query Store: a baseline interval at the raw floor and a regressed one 30 minutes back (the 25.9 s of added CPU clears the
@@ -121,6 +123,98 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
                         -698400 - (++collectionId), DarlingMcpTestData.Naive(now - back), ServerId, ServerName, "TenantDb00", 1000L + q, 9L, "Regular",
                         executions, avgUs, avgUs, 100L, interval * 10 + q, "SELECT " + q, DarlingMcpTestData.Naive(now - back));
                 }
+            }
+
+            /* #7010: system_health_events, the table the nine get_health_parser_* reads probe (get_query_heatmap reads the query_stats rows seeded below). A few
+               rows at the raw floor and 30 minutes back, so the store holds them from three days back. The health rows carry an event type
+               none of the nine reads asks for, so each read answers an empty window (its probe finds the table's coverage) instead of the
+               "nothing ever collected" answer an unseeded table gives, which has no window notice by design. */
+            long healthId = 0;
+            foreach (var back in new[] { RawFloorBack, TimeSpan.FromMinutes(30) })
+            {
+                await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO collect.system_health_events
+    (system_health_event_id, collection_time, server_id, server_name, event_time, event_type, event_xml)
+VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                    -698500 - (++healthId), DarlingMcpTestData.Naive(now - back), ServerId, ServerName, DarlingMcpTestData.Naive(now - back),
+                    "matrix_seed_event", "<event name=\"matrix_seed_event\" />");
+            }
+
+            /* #7010: the raw tables the core data tools read (wait stats, CPU, tempdb, waiting tasks, query and procedure stats), a few rows
+               each from LogFloorBack on, so a window past the store's data answers over rows that start there and not over an empty table. */
+            long rawId = 0;
+            foreach (var back in new[] { LogFloorBack, TimeSpan.FromDays(2), TimeSpan.FromDays(1), TimeSpan.FromMinutes(40), TimeSpan.FromMinutes(5) })
+            {
+                var at = DarlingMcpTestData.Naive(now - back);
+                await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO collect.wait_stats
+    (collection_id, collection_time, server_id, server_name, wait_type, waiting_tasks_count, wait_time_ms, signal_wait_time_ms,
+     delta_waiting_tasks, delta_wait_time_ms, delta_signal_wait_time_ms)
+VALUES ($1, $2, $3, $4, 'SOS_SCHEDULER_YIELD', 10, 5000, 100, 10, 5000, 100)", -698500 - (++rawId), at, ServerId, ServerName);
+                await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO collect.cpu_utilization_stats
+    (collection_id, collection_time, server_id, server_name, sample_time, sqlserver_cpu_utilization, other_process_cpu_utilization)
+VALUES ($1, $2, $3, $4, $2, 30, 5)", -698500 - (++rawId), at, ServerId, ServerName);
+                await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO collect.tempdb_stats
+    (collection_id, collection_time, server_id, server_name, user_object_reserved_mb, internal_object_reserved_mb,
+     version_store_reserved_mb, total_reserved_mb, unallocated_mb)
+VALUES ($1, $2, $3, $4, 10, 5, 2, 17, 900)", -698500 - (++rawId), at, ServerId, ServerName);
+                await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO collect.waiting_tasks
+    (collection_id, collection_time, server_id, server_name, wait_type, wait_duration_ms, database_name)
+VALUES ($1, $2, $3, $4, 'LCK_M_X', 250, 'TenantDb00')", -698500 - (++rawId), at, ServerId, ServerName);
+                await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO collect.query_stats
+    (collection_id, collection_time, server_id, server_name, database_name, query_hash, sql_handle,
+     delta_worker_time, delta_elapsed_time, delta_execution_count, sample_interval_seconds)
+VALUES ($1, $2, $3, $4, 'TenantDb00', '0xAB01', '0xCD01', 500000, 600000, 5, 300)", -698500 - (++rawId), at, ServerId, ServerName);
+                await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO collect.procedure_stats
+    (collection_id, collection_time, server_id, server_name, database_name, schema_name, object_name, sql_handle,
+     delta_worker_time, delta_elapsed_time, delta_execution_count, sample_interval_seconds)
+VALUES ($1, $2, $3, $4, 'TenantDb00', 'dbo', 'usp_Seeded', '0xEF01', 500000, 600000, 5, 300)", -698500 - (++rawId), at, ServerId, ServerName);
+            }
+
+            /* #7010: memory grants, client timeouts (attention events), and the two Query Store capture tables (forced plans, hints), a few rows
+               each from LogFloorBack on. The two capture tables get the marker row a capture writes (the database and no plan or hint), so
+               their reads answer "captured, nothing forced or hinted" over rows that start there, not the no-capture answer of an empty table. */
+            long grantId = 0;
+            foreach (var back in new[] { LogFloorBack, TimeSpan.FromDays(2), TimeSpan.FromDays(1), TimeSpan.FromMinutes(40), TimeSpan.FromMinutes(5) })
+            {
+                var at = DarlingMcpTestData.Naive(now - back);
+                await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO collect.memory_grant_stats
+    (collection_id, collection_time, server_id, server_name, resource_semaphore_id, pool_id, available_memory_mb, granted_memory_mb, waiter_count)
+VALUES ($1, $2, $3, $4, 0, 1, 2048, 512, 0)", -698600 - (++grantId), at, ServerId, ServerName);
+                await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO collect.attention_events
+    (attention_event_id, collection_time, server_id, server_name, event_kind, attention_count)
+VALUES ($1, $2, $3, $4, 'count', 3)", -698600 - (++grantId), at, ServerId, ServerName);
+                await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO collect.query_store_forced_plans
+    (collection_id, collection_time, server_id, server_name, database_name)
+VALUES ($1, $2, $3, $4, 'TenantDb00')", -698600 - (++grantId), at, ServerId, ServerName);
+                await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO collect.query_store_hints
+    (collection_id, collection_time, server_id, server_name, database_name)
+VALUES ($1, $2, $3, $4, 'TenantDb00')", -698600 - (++grantId), at, ServerId, ServerName);
+            }
+
+            /* #7010: the store's statement history (get_store_query_history), a few captures from LogFloorBack on with one statement each, so its
+               earliest capture (the notice's floor) is where the store's history starts and the read answers rows, not the "no snapshot yet" precondition. */
+            foreach (var back in new[] { LogFloorBack, TimeSpan.FromDays(2), TimeSpan.FromDays(1), TimeSpan.FromMinutes(40), TimeSpan.FromMinutes(5) })
+            {
+                var at = DarlingMcpTestData.Naive(now - back);
+                await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO collect.store_statement_captures
+    (capture_time, interval_seconds, statements_seen, statements_kept, hidden_statements, outcome)
+VALUES ($1, 3600, 1, 1, 0, 'ok')", at);
+                await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO collect.store_statement_history
+    (capture_time, interval_seconds, role_name, queryid, delta_calls, delta_total_exec_ms, delta_rows, delta_shared_blks_hit,
+     delta_shared_blks_read, delta_temp_blks_written, max_exec_ms, first_seen, entry_restarted, reset_in_interval)
+VALUES ($1, 3600, 'admin', 7010, 10, 250, 10, 100, 1, 0, 50, false, false, false)", at);
             }
 
             /* The collection log: every SQL Server collector from LogFloorBack on; the Query Store collector also ran 30 days back, long
@@ -250,8 +344,12 @@ public sealed class McpWindowMatrixLiveTests : IClassFixture<McpWindowMatrixStor
     /// <summary>The tool carries no window_truncated notice over a window that starts before the store's data (the notice is not rolled out to it; the PostgreSQL reads and the fleet and store-level reads are in this group, and so are tools whose probe table this seed does not fill).</summary>
     private const string NoNotice = "no window_truncated notice over a window that starts before the store's data (not rolled out to this tool, or its probe table is not seeded)";
 
+    /// <summary>#7010: the tool reads the newest snapshot and hours_back is only the span SEARCHED for it, not a span aggregated, so its
+    /// answer is one row stamped with captured_at and age_seconds; a coverage notice would describe a window the tool never reads.</summary>
+    private const string SnapshotSearch = "newest-snapshot read: hours_back is the span searched for the latest snapshot (captured_at and age_seconds say how old it is), not a data window (#7010)";
+
     /// <summary>The tool answers window_truncated, but false, for a window that starts before the store's data (a window that ends before it, or one the probe judged covered).</summary>
-    private const string NotTrue = "window_truncated is not true over a window that starts before the store's data";
+    private const string NotTrue ="window_truncated is not true over a window that starts before the store's data";
 
     /// <summary>The tool refuses the call because a parameter this matrix does not bind has no default (a required view or metric): a test binding gap, not a product defect.</summary>
     private const string NeedsArgument = "the generic binding leaves a required argument empty, so the tool answers invalid (test binding gap)";
@@ -263,40 +361,12 @@ public sealed class McpWindowMatrixLiveTests : IClassFixture<McpWindowMatrixStor
     /// NotTrue rows (the product reasons, not the binding gaps) are tracked in #7010.</summary>
     private static readonly Dictionary<string, string> ExemptTools = new(StringComparer.Ordinal)
     {
-        ["get_agent_alerts"] = NoNotice,
-        ["get_alert_history"] = NoNotice,
-        ["get_analysis_facts"] = NoNotice,
-        ["get_analysis_findings"] = NoNotice,
-        ["get_blocking_trend"] = NoNotice,
-        ["get_client_timeouts"] = NoNotice,
+        /* #7010: not a data window by design. One server: "always 7 days" of collector health read from the collection log (hours_back is ignored). Fleet mode (server_name "*") takes hours_back, but only to read one collector's liveness per server, not a windowed row set. */
         ["get_collection_health"] = NoNotice,
-        ["get_cpu_by_database"] = NoNotice,
-        ["get_cpu_scheduler_pressure"] = NoNotice,
-        ["get_cpu_utilization"] = NoNotice,
-        ["get_current_waits_trend"] = NoNotice,
-        ["get_database_protection"] = NoNotice,
-        ["get_deadlock_trend"] = NoNotice,
-        ["get_file_io_trend"] = NoNotice,
-        ["get_finops"] = NoNotice,
-        ["get_fleet_overview"] = NoNotice,
-        ["get_forced_plans"] = NoNotice,
-        ["get_health_parser_cpu_tasks"] = NoNotice,
-        ["get_health_parser_io_issues"] = NoNotice,
-        ["get_health_parser_memory_broker"] = NoNotice,
-        ["get_health_parser_memory_conditions"] = NoNotice,
-        ["get_health_parser_memory_node_oom"] = NoNotice,
-        ["get_health_parser_scheduler_issues"] = NoNotice,
-        ["get_health_parser_severe_errors"] = NoNotice,
-        ["get_health_parser_significant_waits"] = NoNotice,
-        ["get_health_parser_system_health"] = NoNotice,
-        ["get_identity_capacity"] = NoNotice,
-        ["get_investigation_reports"] = NoNotice,
-        ["get_job_history"] = NotTrue,
-        ["get_latch_stats"] = NoNotice,
-        ["get_lock_wait_trend"] = NoNotice,
-        ["get_memory_grants"] = NoNotice,
-        ["get_memory_trend"] = NoNotice,
-        ["get_perfmon_trend"] = NoNotice,
+        ["get_cpu_scheduler_pressure"] = SnapshotSearch,
+        ["get_database_protection"] = SnapshotSearch,
+        /* #7010: not a data window by design. The reads are investigation REQUESTS opened in the last hours_back hours (hours_back 1-168, no as_of), the service's own work log of alert-triggered runs, not a span of collected data: a window with no request is a true negative, and the log is not floored by the collector tables. */
+        ["get_investigation_reports"] = "investigation request log: hours_back is the age of requests opened, not a collected-data window (#7010)",
         ["get_pg_autovacuum_health"] = NoNotice,
         ["get_pg_blocking"] = NoNotice,
         ["get_pg_buffer_usage"] = NoNotice,
@@ -316,30 +386,13 @@ public sealed class McpWindowMatrixLiveTests : IClassFixture<McpWindowMatrixStor
         ["get_pg_wait_trend"] = NoNotice,
         ["get_pg_wraparound_risk"] = NoNotice,
         ["get_pg_xmin_horizon"] = NoNotice,
-        ["get_plan_cache_bloat"] = NoNotice,
-        ["get_plan_force_precheck"] = NoNotice,
-        ["get_procedure_duration_trend"] = NotTrue,
-        ["get_query_duration_trend"] = NotTrue,
-        ["get_query_heatmap"] = NoNotice,
-        ["get_query_store_aborts"] = NotTrue,
-        ["get_query_store_clutter"] = NoNotice,
-        ["get_query_store_duration_trend"] = NotTrue,
-        ["get_query_store_hints"] = NoNotice,
-        ["get_query_store_top"] = NoNotice,
-        ["get_query_trend"] = NoNotice,
-        ["get_resource_semaphore"] = NoNotice,
-        ["get_resource_use_by_tag"] = NoNotice,
-        ["get_server_trend"] = NoNotice,
-        ["get_spinlock_stats"] = NoNotice,
-        ["get_store_log"] = NoNotice,
-        ["get_store_query_history"] = NoNotice,
-        ["get_sweep_reports"] = NoNotice,
-        ["get_tempdb_trend"] = NoNotice,
-        ["get_top_procedures_by_cpu"] = NoNotice,
-        ["get_top_queries_by_cpu"] = NoNotice,
-        ["get_wait_stats"] = NoNotice,
-        ["get_wait_trend"] = NoNotice,
-        ["get_wait_types"] = NoNotice,
+        ["get_plan_cache_bloat"] = SnapshotSearch,
+        /* #7010: not a data window by design. The window selects captures of the store's own PostgreSQL log, and every answer carries the capture
+           denominator (captures against expected, bytes read and unread), which is how a window the store did not capture is told apart from a quiet one. */
+        ["get_store_log"] = "store-log window: the answer's capture denominator says how much of the window was captured (#7010)",
+        /* #7010: not a data window by design. The window picks the fleet sweeper's own run records for the timeline, the latest sweep is read outside
+           it on purpose, and no collector table backs it for a coverage probe. */
+        ["get_sweep_reports"] = "sweep timeline of the store's own run records; the latest sweep is read outside the window (#7010)",
     };
 
     /// <summary>The arguments a tool needs beyond the window that the generic binding cannot supply: a required view, metric or counter, the
@@ -360,6 +413,7 @@ public sealed class McpWindowMatrixLiveTests : IClassFixture<McpWindowMatrixStor
             case "get_finops": yield return new("view", "high_impact"); break;
             case "get_server_trend": yield return new("metric", "total_waits"); break;
             case "get_perfmon_trend": yield return new("counter_name", "Batch Requests/sec"); break;
+            case "get_wait_trend": yield return new("wait_type", "SOS_SCHEDULER_YIELD"); break;
             case "get_plan_force_precheck":
                 yield return new("database_name", "TenantDb00");
                 yield return new("query_id", 1000L);
@@ -509,11 +563,13 @@ public sealed class McpWindowMatrixLiveTests : IClassFixture<McpWindowMatrixStor
         }
     }
 
-    /// <summary>The key at the top level, else under <c>hints</c>.</summary>
+    /// <summary>The key at the top level, else under <c>hints</c>, else under <c>window</c>.</summary>
     private static JsonElement? Find(JsonElement root, string key)
     {
         if (root.TryGetProperty(key, out var top)) return top;
         if (root.TryGetProperty("hints", out var hints) && hints.ValueKind == JsonValueKind.Object && hints.TryGetProperty(key, out var inHints)) return inHints;
+        /* #7010: get_query_store_clutter keeps the notice in its window block (the reach vocabulary, held beside a page cut by the payload census). */
+        if (root.TryGetProperty("window", out var window) && window.ValueKind == JsonValueKind.Object && window.TryGetProperty(key, out var inWindow)) return inWindow;
         return null;
     }
 

@@ -86,24 +86,37 @@ public sealed class DarlingMcpIdentityCapacityTools
                 postgres, resolved.ServerId, databases, start, windowEnd, McpCommandDeadlines.ReadSeconds, cancellationToken);
             ReadScope.NoteSource(ReadScope.SourceRaw);
 
+            /* #7010: the window is a data window here (each column's rate runs from its oldest stored value in it), so a window that reaches past
+               the store's identity_capacity data says so. The refused, denied and unmet-engine answers below say their own cause and stay bare;
+               a failed probe costs the notice, never the answer. */
+            Task<McpWindowNotice> NoticeAsync(bool emptyAnswer) => DarlingMcpWindowNotice.ReadAsync(
+                () => DarlingMcpWindowNotice.Probe(postgres, "identity_capacity", resolved.ServerName, start, windowEnd, cancellationToken),
+                start, windowEnd, "identity_capacity", emptyAnswer: emptyAnswer, cancellationToken: cancellationToken);
+
             var scope = databases.Describe();
             var where = scope is null ? "" : $" for database '{scope}'";
             var unscanned = read.Unscanned;
             var skipped = read.Skipped;
             if (!read.HasScan)
             {
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "identity_capacity", cancellationToken)
+                var unmet = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "identity_capacity", cancellationToken)
                     /* A refused or denied run says so in the monitored server's own words, as the Viewer's tab does. */
-                    ?? await DarlingRuntimePrecondition.StatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "identity_capacity", cancellationToken)
-                    ?? McpHelpers.Status("unavailable",
+                    ?? await DarlingRuntimePrecondition.StatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "identity_capacity", cancellationToken);
+                if (unmet is not null) return unmet;
+
+                var noScan = await NoticeAsync(emptyAnswer: true);
+                return DarlingMcpWindowNotice.FinishEmpty(McpHelpers.Status("unavailable",
                         $"No identity capacity scan{where} in the {hours_back}-hour window ending {Format(windowEnd)}" +
                         (unscanned.Count == 0 ? "" : $", and {unscanned.Count} database(s) not yet scanned ({string.Join(", ", unscanned.Take(10).Select(u => u.DatabaseName))}{(unscanned.Count > 10 ? ", ..." : "")})") +
                         (skipped.Count == 0 ? "" : $", and {skipped.Count} database(s) skipped on purpose ({string.Join("; ", skipped.Take(10).Select(u => $"{u.DatabaseName} - {u.Text}"))}{(skipped.Count > 10 ? "; ..." : "")})") +
                         ". The identity_capacity collector has not run in it, " +
                         "or has not reached the database yet (it runs every 6 hours, stops a pass after 5 minutes and starts the next one where the last stopped). " +
                         "A snapshot, a readable secondary or a database the monitoring login cannot enter is skipped on purpose and listed with its reason. " +
-                        "A database that is offline, restoring, a system or vendor database, or left out by the server's database filter or the collector's database scope is never scanned.");
+                        "A database that is offline, restoring, a system or vendor database, or left out by the server's database filter or the collector's database scope is never scanned.",
+                        noScan.AsHints()), noScan);
             }
+
+            var notice = await NoticeAsync(emptyAnswer: false);
 
             var worst = read.Columns.Count == 0 ? null : read.Columns[0];
             double? worstPercent = worst?.PercentUsed is double wp ? Math.Round(wp, 4) : null;
@@ -153,24 +166,28 @@ public sealed class DarlingMcpIdentityCapacityTools
 
             if (read.Columns.Count == 0 && unscanned.Count == 0 && skipped.Count == 0)
             {
-                return JsonSerializer.Serialize(new
+                return DarlingMcpWindowNotice.FinishEmpty(JsonSerializer.Serialize(new
                 {
                     server = resolved.DisplayName,
                     status = "empty",
                     message = $"{read.Databases.Count} database(s){where} scanned in the window and none has an identity column above 10 percent used.",
                     as_of = Format(windowEnd),
                     hours_back,
+                    hints = notice.AsHints(),
                     summary,
                     databases = databaseNodes,
-                }, McpHelpers.JsonOptions);
+                }, McpHelpers.JsonOptions), notice);
             }
 
             var listed = read.Columns.Take(limit).ToList();
-            return JsonSerializer.Serialize(new
+            return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
                 as_of = Format(windowEnd),
                 hours_back,
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 summary,
                 databases = databaseNodes,
                 columns_returned = listed.Count,
@@ -198,7 +215,7 @@ public sealed class DarlingMcpIdentityCapacityTools
                 note = "Times are UTC. values_remaining, last_value, seed_value and increment_value are text. rate_per_day is identity values issued per day (one step is one increment). " +
                        "days_to_exhaustion assumes the rate between the two samples holds, and is null with one sample, a value that did not move, or one that moved backwards (reseeded). " +
                        "A database in databases[] with columns_above_10_percent 0 was scanned and is clean. The band uses 70 and 90 percent. truncated is true when more columns exist than limit allowed: the summary counts them all, and database_name narrows the read.",
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions), notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

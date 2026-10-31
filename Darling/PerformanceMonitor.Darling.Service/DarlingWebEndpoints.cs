@@ -7165,7 +7165,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 : !OptionalInt(c, "blocked_ecid", out var chainEcid) ? UnparseableParam("blocked_ecid")
                 : DarlingWebBlockChain.GetBlockChain(pg, Server(c), chainEventTime, chainSpid.Value, chainEcid ?? 0, c.RequestAborted),
             ["get_blocking_trend"] = (c, pg, an) => DatabaseNames(c) is { } databases
-                ? DarlingMcpBlockingTools.GetBlockingTrend(pg, Server(c), Hours(c, 24), AsOf(c), databases, c.RequestAborted)
+                ? DarlingMcpBlockingTools.GetBlockingTrend(pg, Server(c), Hours(c, 24), AsOf(c), databases, cancellationToken: c.RequestAborted)
                 : DatabaseNamesRefusal(c),
             /* #4254: full_graph defaults false on the MCP signature (a preview keeps a busy production
                store's tools/list-driven call under the shared response budget), but the web viewer has

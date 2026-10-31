@@ -181,25 +181,33 @@ public sealed class DarlingMcpQueryStoreClutterTools
                    collector's own last run recorded a precondition; and only then the plain miss. Waits and
                    the clerk are not consulted here — a server with QDS waits and no Query Store rows is a
                    server whose Query Store this tool cannot see, which is what the miss says. */
-                return McpHelpers.WithDatabasesLeftOut(McpHelpers.WithDatabase(await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, DarlingQueryStoreClutterReader.CollectorName, cancellationToken), databaseFilter.Describe())
+                var unmet = McpHelpers.WithDatabase(await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, DarlingQueryStoreClutterReader.CollectorName, cancellationToken), databaseFilter.Describe())
                     ?? McpHelpers.WithDatabase(await DarlingRuntimePrecondition.QueryStoreStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, databaseFilter, cancellationToken), databaseFilter.Describe())
-                    ?? McpHelpers.WithDatabase(await DarlingRuntimePrecondition.StatusAsync(postgres, resolved.ServerId, resolved.DisplayName, DarlingQueryStoreClutterReader.CollectorName, cancellationToken), databaseFilter.Describe())
-                    ?? (!databaseFilter.IsAll
-                        ? McpHelpers.StatusForDatabase(
-                            "empty",
-                            $"No Query Store rows, no query_store fan-out run and no query_store_health capture{DarlingMcpBlockingTools.ForChosenDatabases(databaseFilter)} in the {hours_back}-hour window. "
-                            + "A chosen database either has Query Store OFF, is not on this server, or has not completed a cycle yet. Widen the selection to read the whole server.", databaseFilter.Describe())
-                        : null)
-                    ?? (leftOut is not null
+                    ?? McpHelpers.WithDatabase(await DarlingRuntimePrecondition.StatusAsync(postgres, resolved.ServerId, resolved.DisplayName, DarlingQueryStoreClutterReader.CollectorName, cancellationToken), databaseFilter.Describe());
+                if (unmet is not null) return McpHelpers.WithDatabasesLeftOut(unmet, leftOut)!;
+
+                /* #7010: the three answers above say their own cause and stay bare. What is left is a window with no Query Store row in it,
+                   which is not a true negative when the store does not reach back to it: the hints carry the window-floor notice over
+                   query_store_stats (the probe's table is the one the rows come from). A failed probe costs the hints, never the answer. */
+                var noRows = await DarlingMcpWindowNotice.ReadAsync(
+                    () => DarlingMcpWindowNotice.Probe(postgres, "query_store_stats", resolved.ServerName, requestedStart, now, cancellationToken),
+                    requestedStart, now, "query_store_stats", emptyAnswer: true, logger: logger, cancellationToken: cancellationToken);
+                var emptyAnswer = !databaseFilter.IsAll
+                    ? McpHelpers.StatusForDatabase(
+                        "empty",
+                        $"No Query Store rows, no query_store fan-out run and no query_store_health capture{DarlingMcpBlockingTools.ForChosenDatabases(databaseFilter)} in the {hours_back}-hour window. "
+                        + "A chosen database either has Query Store OFF, is not on this server, or has not completed a cycle yet. Widen the selection to read the whole server.", databaseFilter.Describe(), noRows.AsHints())
+                    : leftOut is not null
                         ? McpHelpers.StatusForDatabase(
                             "empty",
                             $"No Query Store rows in the {hours_back}-hour window for a database this server still has. {leftOut.Count} database(s) the server no longer lists were left out of this read (see databases_left_out).",
-                            databaseFilter.Describe())
+                            databaseFilter.Describe(), noRows.AsHints())
                         : McpHelpers.StatusForDatabase(
                             "unavailable",
                             $"No Query Store rows, no query_store fan-out run and no query_store_health capture for this server in the {hours_back}-hour window. "
                             + "The query_store collector runs every 5 minutes and query_store_health hourly on SQL Server 2016+; a server with none of the three either predates Query Store, has it OFF everywhere, or has not completed a cycle yet. "
-                            + "The plan-churn arm reads the raw tier, which a store with the rollups armed drops at 4 days — try a shorter window before concluding nothing ran.", databaseFilter.Describe())), leftOut)!;
+                            + "The plan-churn arm reads the raw tier, which a store with the rollups armed drops at 4 days — try a shorter window before concluding nothing ran.", databaseFilter.Describe(), noRows.AsHints());
+                return McpHelpers.WithDatabasesLeftOut(DarlingMcpWindowNotice.FinishEmpty(emptyAnswer, noRows), leftOut)!;
             }
 
             /* #2364 / #3653 item 17: what the raw tier actually held, beside what was asked for. The
