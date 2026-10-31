@@ -375,6 +375,52 @@ public sealed class TestMapProducerGuardTests : IDisposable
         }
     }
 
+    /// <summary>#7025: a test that reads `Svc.cs` reads its `Svc.Part.cs` partial files too (`RepoFile.ReadRepoFile` joins
+    /// them), so the partials carry the same text pattern; a test that names a partial alone does not gain the main file.</summary>
+    [Fact]
+    public void ATestThatReadsAMainFile_ReadsItsPartialFiles_ButANamedPartialStaysAlone()
+    {
+        Write("tracked.txt", string.Join("\n", new[]
+        {
+            "Darling/Darling.Tests/MainReaderTests.cs", "Darling/Darling.Tests/PartReaderTests.cs",
+            "Darling/PerformanceMonitor.Darling.Service/Svc.cs", "Darling/PerformanceMonitor.Darling.Service/Svc.Part.cs",
+        }));
+        Write("Darling/Darling.Tests/MainReaderTests.cs", """
+            public sealed class MainReaderTests
+            {
+                public void Reads() { var s = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Svc.cs"); }
+            }
+            """);
+        Write("Darling/Darling.Tests/PartReaderTests.cs", """
+            public sealed class PartReaderTests
+            {
+                public void Reads() { var s = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Svc.Part.cs"); }
+            }
+            """);
+        Write("shards/a/shard-darling-0.json", ShardJson("darling", 0,
+            ("Ns.MainReaderTests", Array.Empty<string>(), 0.1, 1, 0),
+            ("Ns.PartReaderTests", Array.Empty<string>(), 0.1, 1, 0)));
+        Write("shards/b/shard-lite-0.json", ShardJson("lite", 0, ("Ns.BetaTests", Array.Empty<string>(), 0.1, 1, 0)));
+        Write("Lite.Tests/BetaTests.cs", "public sealed class BetaTests { public void Runs() { } }\n");
+
+        var (code, output, map) = Build();
+        Assert.True(code == 0, output);
+        using (map)
+        {
+            var patterns = map!.RootElement.GetProperty("text_patterns");
+            List<string?> Of(string cls) => patterns.GetProperty(cls).EnumerateArray().Select(e => e.GetString()).ToList();
+
+            Assert.Equal(
+                new List<string?>
+                {
+                    "Darling/PerformanceMonitor.Darling.Service/Svc.cs",
+                    "Darling/PerformanceMonitor.Darling.Service/Svc.Part.cs",
+                },
+                Of("MainReaderTests"));
+            Assert.Equal(new List<string?> { "Darling/PerformanceMonitor.Darling.Service/Svc.Part.cs" }, Of("PartReaderTests"));
+        }
+    }
+
     [Fact]
     public void TheSummary_NamesTheHoles_AndTheSize()
     {

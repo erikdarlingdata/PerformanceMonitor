@@ -180,7 +180,14 @@ public sealed class QueryStatsWriterCensusPins
                     continue;
                 }
 
-                sources.Add((project + "/" + rel, File.ReadAllText(path)));
+                /* #7025: the runner is split into DarlingCollectorRunner.<Area>.cs files; the census reads them as the one
+                   file RunnerFile names, so its partials are not listed on their own. */
+                if (rel.StartsWith("DarlingCollectorRunner.", StringComparison.Ordinal) && rel != "DarlingCollectorRunner.cs")
+                {
+                    continue;
+                }
+
+                sources.Add((project + "/" + rel, rel == "DarlingCollectorRunner.cs" ? RepoFile.ReadRepoFile(path) : File.ReadAllText(path)));
             }
         }
 
@@ -400,7 +407,7 @@ public sealed class QueryStatsWriterCensusPins
     [Fact]
     public void TheRunnersCopySite_SitsInsideCopyBatchOnceAsync_WhichIsDeclaredOnce()
     {
-        var text = File.ReadAllText(RepoFile.PathTo("Darling", "PerformanceMonitor.Darling.Service", "DarlingCollectorRunner.cs"));
+        var text = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingCollectorRunner.cs");
         var span = CopyBatchOnceSpan(text);
         Assert.True(span is not null, "DarlingCollectorRunner.CopyBatchOnceAsync is gone or renamed: the writer this census names no longer exists (#4605)");
         Assert.Equal(1, span!.Value.Declarations);
