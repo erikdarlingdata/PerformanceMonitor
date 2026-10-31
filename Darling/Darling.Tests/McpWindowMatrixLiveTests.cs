@@ -51,24 +51,31 @@ public sealed class McpWindowMatrixStore : IAsyncLifetime
 
     /// <summary>Collectors whose runs, not table rows, the window probe reads (the read is SPARSE, see WebDataStartNote.CollectorRunsByRead): a
     /// collection_log run from the log's start on, for the PostgreSQL target.</summary>
-    private static readonly string[] PgLoggedCollectors = ["pg_replication_stats"];
+    private static readonly string[] PgLoggedCollectors = ["pg_blocking", "pg_replication_stats"];
 
     /// <summary>The collector tables the PostgreSQL target is seeded for, by the read that windows on each (#7015). Every other
     /// <c>get_pg_*</c> read keeps answering for the SQL Server target, as before.</summary>
     public static readonly IReadOnlyDictionary<string, string> PgSeededTables = new Dictionary<string, string>(StringComparer.Ordinal)
     {
+        ["get_pg_blocking"] = "pg_blocking_edges",
         ["get_pg_cpu_utilization"] = "pg_cpu_utilization",
+        ["get_pg_database_stats"] = "pg_database_stats",
+        ["get_pg_database_trend"] = "pg_database_stats",
         ["get_pg_deadlocks"] = "pg_deadlocks",
         ["get_pg_index_usage"] = "pg_index_usage_stats",
         ["get_pg_io_stats"] = "pg_io_stats",
+        ["get_pg_io_trend"] = "pg_io_stats",
         ["get_pg_kernel_stats"] = "pg_kernel_stats",
         ["get_pg_lock_stats"] = "pg_lock_stats",
         ["get_pg_log_events"] = "pg_log_events",
         ["get_pg_plans"] = "pg_plan_capture",
         ["get_pg_predicate_stats"] = "pg_predicate_stats",
+        ["get_pg_query_duration_trend"] = "pg_statement_stats",
         ["get_pg_replication_stats"] = "pg_replication_stats",
         ["get_pg_server_config_changes"] = "pg_server_config",
+        ["get_pg_top_queries"] = "pg_statement_stats",
         ["get_pg_wait_sampling"] = "pg_wait_sampling",
+        ["get_pg_wait_trend"] = "pg_wait_sampling",
         ["get_pg_write_stats"] = "pg_write_stats",
     };
 
@@ -243,9 +250,12 @@ VALUES ($1, 3600, 'admin', 7010, 10, 250, 10, 100, 1, 0, 50, false, false, false
                 "INSERT INTO collect.servers (server_id, server_name, display_name, is_enabled, engine_kind, postgres_major_version, created_date, modified_date) VALUES ($1, $2, $2, TRUE, 'aurora-postgres', 16, $3, $3)",
                 PgAuroraServerId, PgAuroraServerName, DarlingMcpTestData.Naive(now - LogFloorBack));
             long pgRowId = 0;
+            /* #7010: several reads window on one table (the trends and their list reads), and a table is seeded once per server. */
+            var pgSeeded = new HashSet<(string Table, int ServerId)>();
             foreach (var (tool, table) in PgSeededTables)
             {
                 var (serverId, serverName) = tool == "get_pg_cpu_utilization" ? (PgAuroraServerId, PgAuroraServerName) : (PgServerId, PgServerName);
+                if (!pgSeeded.Add((table, serverId))) continue;
                 foreach (var back in new[] { LogFloorBack, TimeSpan.FromDays(2), TimeSpan.FromDays(1), TimeSpan.FromMinutes(40), TimeSpan.FromMinutes(5) })
                 {
                     await SeedPgRowAsync(connection, table, -698500 - (++pgRowId), DarlingMcpTestData.Naive(now - back), serverId, serverName, ct);
@@ -348,6 +358,11 @@ public sealed class McpWindowMatrixLiveTests : IClassFixture<McpWindowMatrixStor
     /// answer is one row stamped with captured_at and age_seconds; a coverage notice would describe a window the tool never reads.</summary>
     private const string SnapshotSearch = "newest-snapshot read: hours_back is the span searched for the latest snapshot (captured_at and age_seconds say how old it is), not a data window (#7010)";
 
+    /// <summary>#7010: the tool binds the notice on its empty and data answers, but a window with no collection at all answers "unavailable",
+    /// which stays bare by design (#4966: nothing is known about such a window, so it is not an all-clear and carries no notice; pinned by
+    /// DarlingMcpPgWindowD8bLiveTests and PgGridsMcpDataStartLiveTests). The matrix's window that ends before the store's data is that window.</summary>
+    private const string UnavailableBare = "the tool binds the window notice, but a window before any collection answers unavailable, which stays bare by design (#4966)";
+
     /// <summary>The tool answers window_truncated, but false, for a window that starts before the store's data (a window that ends before it, or one the probe judged covered).</summary>
     private const string NotTrue ="window_truncated is not true over a window that starts before the store's data";
 
@@ -368,22 +383,18 @@ public sealed class McpWindowMatrixLiveTests : IClassFixture<McpWindowMatrixStor
         /* #7010: not a data window by design. The reads are investigation REQUESTS opened in the last hours_back hours (hours_back 1-168, no as_of), the service's own work log of alert-triggered runs, not a span of collected data: a window with no request is a true negative, and the log is not floored by the collector tables. */
         ["get_investigation_reports"] = "investigation request log: hours_back is the age of requests opened, not a collected-data window (#7010)",
         ["get_pg_autovacuum_health"] = NoNotice,
-        ["get_pg_blocking"] = NoNotice,
+        ["get_pg_blocking"] = UnavailableBare,
         ["get_pg_buffer_usage"] = NoNotice,
         ["get_pg_column_stats"] = NoNotice,
-        ["get_pg_database_stats"] = NoNotice,
-        ["get_pg_database_trend"] = NoNotice,
+        ["get_pg_database_stats"] = UnavailableBare,
         ["get_pg_extensions"] = NoNotice,
         ["get_pg_index_bloat"] = NoNotice,
-        ["get_pg_io_trend"] = NoNotice,
         ["get_pg_plan_capture_readiness"] = NoNotice,
-        ["get_pg_query_duration_trend"] = NoNotice,
         ["get_pg_replication_slots"] = NoNotice,
         ["get_pg_session_states"] = NoNotice,
         ["get_pg_table_bloat"] = NoNotice,
-        ["get_pg_top_queries"] = NoNotice,
-        ["get_pg_wait_stats"] = NoNotice,
-        ["get_pg_wait_trend"] = NoNotice,
+        ["get_pg_top_queries"] = UnavailableBare,
+        ["get_pg_wait_stats"] = UnavailableBare,
         ["get_pg_wraparound_risk"] = NoNotice,
         ["get_pg_xmin_horizon"] = NoNotice,
         ["get_plan_cache_bloat"] = SnapshotSearch,
