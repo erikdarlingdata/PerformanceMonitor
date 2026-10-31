@@ -2979,6 +2979,7 @@ $rung$;";
         new Migration(228, "blocking-band-tiers", V228Sql),
         new Migration(229, "notification-route-severities", V229Sql),
         new Migration(230, "blocking-band-snapshot-wait-tiers", V230Sql),
+        new Migration(231, "mute-rule-recurrence", V231Sql),
     };
 
     /// <summary>
@@ -3108,6 +3109,31 @@ ALTER TABLE config.config_alert_settings
     ADD COLUMN IF NOT EXISTS blocking_warn_snapshot_wait_seconds double precision NOT NULL DEFAULT 0;
 ALTER TABLE config.config_alert_settings
     ADD COLUMN IF NOT EXISTS blocking_critical_snapshot_wait_seconds double precision NOT NULL DEFAULT 0;";
+
+    /// <summary>
+    /// V231 (#7040): the repeat schedule of a mute rule, on <c>config.config_mute_rules</c>. <c>recur_days</c> is a smallint bit mask
+    /// (bit n = day of week n, Sunday = bit 0; NULL = every day), <c>recur_start_time</c> and <c>recur_end_time</c> are the daily window in
+    /// the rule's zone (an end earlier than the start is a window that crosses midnight), and <c>recur_time_zone</c> is the IANA id the
+    /// times are read in. All four are nullable with no default and no backfill: NULL times mean a rule with no schedule, which is every
+    /// stored rule, so each keeps exactly its effect. A CHECK holds the two times to both-null or both-set. Needs no GRANT (the roles'
+    /// table-level grants cover a new column) and no trigger (the V117 reload beacon fires on any change to the table). An older build
+    /// ignores the four columns and would mute a repeating rule at every hour, so a rolled-back build mutes more than the schedule allows.
+    /// </summary>
+    private const string V231Sql = @"
+ALTER TABLE config.config_mute_rules ADD COLUMN IF NOT EXISTS recur_days smallint;
+ALTER TABLE config.config_mute_rules ADD COLUMN IF NOT EXISTS recur_start_time time;
+ALTER TABLE config.config_mute_rules ADD COLUMN IF NOT EXISTS recur_end_time time;
+ALTER TABLE config.config_mute_rules ADD COLUMN IF NOT EXISTS recur_time_zone text;
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_config_mute_rules_recur_times'
+                   AND conrelid = 'config.config_mute_rules'::regclass) THEN
+        ALTER TABLE config.config_mute_rules
+            ADD CONSTRAINT ck_config_mute_rules_recur_times
+            CHECK ((recur_start_time IS NULL) = (recur_end_time IS NULL));
+    END IF;
+END
+$$;";
 
     /// <summary>
     /// V189 (#5867): <c>collect.query_store_compose_stamp_failures</c>, the failure record of the Query Store compose builder: one row

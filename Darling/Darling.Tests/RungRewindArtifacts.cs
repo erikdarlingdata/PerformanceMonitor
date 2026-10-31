@@ -607,6 +607,14 @@ ALTER TABLE IF EXISTS config.investigation_request_alerts DROP COLUMN IF EXISTS 
             @"ALTER TABLE config.config_alert_settings
     DROP COLUMN IF EXISTS blocking_warn_snapshot_wait_seconds,
     DROP COLUMN IF EXISTS blocking_critical_snapshot_wait_seconds;"),
+        // V231 (#7040): the recurring schedule on the mute rules. The start time column is the probe's newest sentinel. The rewind drops all
+        // four columns, so a re-run of V231 adds them again. Safe on a store that never had them.
+        new(231, "hasMuteRecurrence",
+            @"ALTER TABLE config.config_mute_rules
+    DROP COLUMN IF EXISTS recur_days,
+    DROP COLUMN IF EXISTS recur_start_time,
+    DROP COLUMN IF EXISTS recur_end_time,
+    DROP COLUMN IF EXISTS recur_time_zone;"),
     ];
 
     /// <summary>

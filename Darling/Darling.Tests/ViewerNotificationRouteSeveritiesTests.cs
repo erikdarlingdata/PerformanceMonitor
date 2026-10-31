@@ -116,6 +116,8 @@ public sealed class ViewerNotificationRouteSeveritiesTests
             /* A store below V229 has no column, and the V230 columns go too: the version probe reads newest first and would still answer 230 without them. The list still reads, and every route is Both. */
             await ExecAsync(connection, "ALTER TABLE config.config_alert_settings DROP COLUMN blocking_warn_snapshot_wait_seconds, DROP COLUMN blocking_critical_snapshot_wait_seconds", ct);
             await ExecAsync(connection, "ALTER TABLE config.config_notification_routes DROP COLUMN severities", ct);
+            /* The probe reads newest first, so the mute schedule columns (V231, #7040) go too, or the store would still read as V231. */
+            await ExecAsync(connection, "ALTER TABLE config.config_mute_rules DROP COLUMN IF EXISTS recur_days, DROP COLUMN IF EXISTS recur_start_time, DROP COLUMN IF EXISTS recur_end_time, DROP COLUMN IF EXISTS recur_time_zone", ct);
             await using (var older = new ViewerDataService(scratch.ConnectionString))
             {
                 Assert.True(await older.GetStoreSchemaVersionAsync(ct) < 229);

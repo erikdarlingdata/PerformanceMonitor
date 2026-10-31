@@ -144,7 +144,9 @@ function noPatterns(rule) {
     && rule.query_text_pattern == null
     && rule.wait_type_pattern == null
     && rule.job_name_pattern == null
-    && rule.client_app_pattern == null;
+    && rule.client_app_pattern == null
+    /* #7040: a rule that repeats on a schedule mutes only inside its windows, so it is not a whole-server silence. */
+    && rule.recur_start_time == null;
 }
 
 /** A whole-server silence keyed on this server's id. Enabled/expiry are not part of the match (as on the desktop). */

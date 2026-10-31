@@ -89,7 +89,7 @@ internal static class DarlingFleetReader
     /// same COALESCE(display, storage) name the card shows) with NO narrowing pattern on any other field and no external source (#5654: a rule limited to one source mutes only that source's alerts, so it is not a whole-server silence). The
     /// column is read-only; the fleet page's Silence / Unsilence button writes the rule it reads back. It exists so a dataless-quiet server and a silenced one stop looking
     /// identical on the fleet cards and to <c>get_fleet_overview</c>.</para> $ none.</summary>
-    public const string FleetServersSql = @"
+    public static readonly string FleetServersSql = $@"
 SELECT s.server_id, COALESCE(s.display_name, s.server_name) AS display_name, s.server_name, s.sql_engine_edition, s.engine_kind,
        EXISTS
        (
@@ -99,6 +99,7 @@ SELECT s.server_id, COALESCE(s.display_name, s.server_name) AS display_name, s.s
            AND   m.enabled
            AND   (m.expires_at_utc IS NULL OR m.expires_at_utc > (CURRENT_TIMESTAMP AT TIME ZONE 'UTC'))
            AND   (m.starts_at_utc IS NULL OR m.starts_at_utc <= (CURRENT_TIMESTAMP AT TIME ZONE 'UTC'))
+           AND   {MuteRuleRecurrenceSql.InWindow()}
            AND   m.metric_name IS NULL
            AND   m.external_source IS NULL
            AND   m.database_pattern IS NULL

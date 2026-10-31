@@ -377,6 +377,13 @@ public sealed class MigrationDataMovingRungCensusPins
             + "reads the table once to validate it, and the table is a hand-edited registry of at most a few hundred rows (one per route "
             + "an operator made), so the scan takes milliseconds. It reads no collected data and spends none of the lock-wait budget, so "
             + "the multiple stays 5."),
+        new(
+            231,
+            SetsTheFloor: false,
+            "Four nullable ADD COLUMNs plus one ADD CONSTRAINT ... CHECK on config.config_mute_rules (created V3, #7040). The columns carry "
+            + "no default, so they are catalog-only. The CHECK reads the table once to validate it, and the table is a hand-edited registry "
+            + "of mute rules (a store holds a handful, a very large one a few hundred), so the scan takes milliseconds. It reads no collected "
+            + "data and spends none of the lock-wait budget, so the multiple stays 5."),
     ];
 
     /// <summary>

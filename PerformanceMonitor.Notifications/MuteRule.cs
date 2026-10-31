@@ -25,6 +25,79 @@ public class MuteRule
     /// store does not persist it, so a Lite rule never carries one.</summary>
     public DateTime? StartsAtUtc { get; set; }
 
+    /// <summary>The days of the week a recurring schedule (#7040) runs on, as a bit mask (bit n = <see cref="DayOfWeek"/> value n,
+    /// Sunday = bit 0), or null for every day. Meaningful only with <see cref="RecurStartTime"/> and <see cref="RecurEndTime"/>.
+    /// Darling only; Lite never sets any of the four recurrence fields, so a Lite rule is never recurring.</summary>
+    public int? RecurDays { get; set; }
+
+    /// <summary>The daily time the recurring window opens, in <see cref="RecurTimeZone"/>, or null for a rule with no schedule.
+    /// Set together with <see cref="RecurEndTime"/>; a window that crosses midnight has the end earlier than the start.</summary>
+    public TimeOnly? RecurStartTime { get; set; }
+
+    /// <summary>The daily time the recurring window closes (exclusive); see <see cref="RecurStartTime"/>.</summary>
+    public TimeOnly? RecurEndTime { get; set; }
+
+    /// <summary>The IANA id of the zone the recurring times are read in. Set whenever the times are.</summary>
+    public string? RecurTimeZone { get; set; }
+
+    /// <summary>Whether the rule carries a recurring schedule.</summary>
+    public bool IsRecurring => RecurStartTime.HasValue;
+
+    /// <summary>Checks the rule's recurrence fields and normalises <see cref="RecurTimeZone"/> to an IANA id (the host's own zone
+    /// when times are given with none). The one check every write path (MCP, web, Viewer) runs; see <see cref="MuteRecurrence.TryNormalize"/>.</summary>
+    public bool TryNormalizeRecurrence(out string? error)
+    {
+        var zone = RecurTimeZone;
+        if (!MuteRecurrence.TryNormalize(RecurDays, RecurStartTime, RecurEndTime, ref zone, out error)) return false;
+        RecurTimeZone = zone;
+        return true;
+    }
+
+    /// <summary>Whether the recurring schedule is inside a window at <paramref name="nowUtc"/>; always true for a rule with none.
+    /// This is the schedule alone: the rule's start, expiry and enabled flag are separate (see <see cref="IsInEffectAt"/>).</summary>
+    public bool IsInWindowAt(DateTime nowUtc) =>
+        MuteRecurrence.IsInWindowAt(RecurDays, RecurStartTime, RecurEndTime, RecurTimeZone, nowUtc);
+
+    /// <summary>The UTC start of the next recurring window after <paramref name="nowUtc"/> that falls inside the rule's span, or
+    /// null for a rule with no schedule or no later window. A rule that has not started yet is searched from its
+    /// <see cref="StartsAtUtc"/>: it reports the first window after it begins, or the start itself when a window is already open then.</summary>
+    public DateTime? NextWindowStartUtc(DateTime nowUtc)
+    {
+        DateTime? next;
+        if (StartsAtUtc.HasValue && StartsAtUtc.Value > nowUtc)
+        {
+            /* The rule mutes nothing before it starts. If a window is open at that moment (it opened before the start, or opens exactly then),
+               the rule begins muting at the start; otherwise the first window after the start is the next one. */
+            next = IsRecurring && IsInWindowAt(StartsAtUtc.Value)
+                ? StartsAtUtc.Value
+                : MuteRecurrence.NextWindowStartUtc(RecurDays, RecurStartTime, RecurEndTime, RecurTimeZone, StartsAtUtc.Value);
+        }
+        else
+        {
+            next = MuteRecurrence.NextWindowStartUtc(RecurDays, RecurStartTime, RecurEndTime, RecurTimeZone, nowUtc);
+        }
+
+        if (next is null) return null;
+        if (ExpiresAtUtc.HasValue && next.Value >= ExpiresAtUtc.Value) return null;
+        return next;
+    }
+
+    /// <summary>Whether both rules carry the same schedule: the same days, times and zone (the zone compared ignoring case), or neither has one.</summary>
+    public bool HasSameSchedule(MuteRule other) =>
+        RecurDays == other.RecurDays
+        && RecurStartTime == other.RecurStartTime
+        && RecurEndTime == other.RecurEndTime
+        && string.Equals(RecurTimeZone, other.RecurTimeZone, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The schedule as one line (<c>Mon,Tue 22:00-02:00 America/New_York</c>), or null for a rule with none.</summary>
+    public string? ScheduleText => MuteRecurrence.Describe(RecurDays, RecurStartTime, RecurEndTime, RecurTimeZone);
+
+    /// <summary>Whether the rule applies at <paramref name="nowUtc"/>: enabled, past its start, before its expiry, and (for a
+    /// recurring rule) inside a window. The single "is this rule active now" check, so every path that mutes uses the schedule.
+    /// Match fields are separate (see <see cref="MatchesAt"/>).</summary>
+    public bool IsInEffectAt(DateTime nowUtc) =>
+        Enabled && !IsExpiredAt(nowUtc) && !IsUpcomingAt(nowUtc) && IsInWindowAt(nowUtc);
+
     public string? Reason { get; set; }
 
     public string? ServerName { get; set; }
@@ -105,6 +178,10 @@ public class MuteRule
         CreatedAtUtc = CreatedAtUtc,
         ExpiresAtUtc = ExpiresAtUtc,
         StartsAtUtc = StartsAtUtc,
+        RecurDays = RecurDays,
+        RecurStartTime = RecurStartTime,
+        RecurEndTime = RecurEndTime,
+        RecurTimeZone = RecurTimeZone,
         Reason = Reason,
         ServerName = ServerName,
         ServerId = ServerId,
@@ -196,7 +273,7 @@ public class MuteRule
     /// </summary>
     public bool MatchesAt(AlertMuteContext context, DateTime nowUtc)
     {
-        if (!Enabled || IsExpiredAt(nowUtc) || IsUpcomingAt(nowUtc)) return false;
+        if (!IsInEffectAt(nowUtc)) return false;
 
         /* An id-keyed rule is decided on the id ALONE: the name is only the label the rule lists under, so a
            same-named sibling does not match and a renamed server does not escape. A context with no id never

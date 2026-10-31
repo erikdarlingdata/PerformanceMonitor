@@ -98,7 +98,7 @@ Read this section before you file a bug. The web dashboard connects to the store
 The web host also writes to the monitoring store. Everything below changes monitoring configuration or monitoring state. This page does not cover which seats can use each one.
 
 - Custom Views: create, edit and delete, and preview one with `POST /api/compose/run`.
-- Mute rules: add, edit, enable or disable, and delete.
+- Mute rules: add, edit, enable or disable, and delete. A rule can repeat on a schedule (#7040). Tick the days (none ticked is every day), then set a daily From and To time and a time zone, which starts as the browser's. Leave the times blank for a one-off rule. The list shows each rule's schedule and whether a window is open now. A message from the service about a bad schedule shows under the field it names.
 - Alert rules: custom alert rules (add, edit, delete, validate and test), threshold overrides, environment profiles, and notification routes (add, edit and delete).
 - Alert History: dismiss alerts.
 - Servers: add a server and edit the connection of a server. The web host has no route that removes a server.

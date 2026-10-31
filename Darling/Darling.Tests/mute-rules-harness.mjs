@@ -20,7 +20,7 @@ const context = vm.createContext({
   reportSessionExpired: () => { expiredCalls++; },
   storeHeaders: (h) => h, /* util.js: adds X-Darling-Store behind a front door (#6840); a store is not behind one */
 });
-vm.runInContext(source + "\nglobalThis.__p = { TEXT_FIELDS, formToCreateBody, buildPatch, isEmptyCreate, interpretWrite, EMPTY_CREATE_WARNING, send, closeForm, parsePrefill, openForm: (f) => { form = { errors: {}, ...f }; }, setLast: (v) => { lastPrefillQuery = v; }, getLast: () => lastPrefillQuery };", context);
+vm.runInContext(source + "\nglobalThis.__p = { TEXT_FIELDS, scheduleOf, scheduleCell, valuesOf, browserZone, formToCreateBody, buildPatch, isEmptyCreate, interpretWrite, EMPTY_CREATE_WARNING, send, closeForm, parsePrefill, openForm: (f) => { form = { errors: {}, ...f }; }, setLast: (v) => { lastPrefillQuery = v; }, getLast: () => lastPrefillQuery };", context);
 const ctx2 = vm.createContext({});
 vm.runInContext(ctxSource + "\nglobalThis.__c = { mutePrefillParams, parseDetailContext };", ctx2);
 const c = ctx2.__c;
@@ -109,6 +109,30 @@ const scenarios = {
     invalid: j(p.interpretWrite(400, { status: "invalid", message: "'external_source' is not a valid source name (got 'X')." })),
     fields: p.TEXT_FIELDS.map((f) => f.key),
   }),
+  /* #7040: the repeating schedule travels as one unit, and a one-off rule never carries the zone the form starts with. */
+  schedule: () => {
+    const nightly = { ...original, recur_days: ["Mon", "Fri"], recur_start_time: "22:00", recur_end_time: "02:00", recur_time_zone: "America/New_York" };
+    const same = formOf({ recur_days: ["Mon", "Fri"], recur_start: "22:00", recur_end: "02:00", recur_time_zone: "America/New_York" });
+    return {
+      oneOff: j(p.formToCreateBody(formOf({ recur_time_zone: "America/New_York" }))),
+      oneOffPatch: j(p.buildPatch(original, formOf({ recur_time_zone: "America/New_York" }))),
+      create: j(p.formToCreateBody(formOf({ recur_days: ["Sat", "Sun"], recur_start: "22:00", recur_end: "02:00", recur_time_zone: " UTC " }))),
+      everyDay: j(p.formToCreateBody(formOf({ recur_start: "01:00", recur_end: "03:00", recur_time_zone: "UTC" }))),
+      daysOnly: j(p.formToCreateBody(formOf({ recur_days: ["Mon"] }))),
+      scheduleAloneIsNotAScope: p.isEmptyCreate(p.formToCreateBody({ recur_start: "22:00", recur_end: "02:00", recur_time_zone: "UTC" })),
+      unchanged: j(p.buildPatch(nightly, same)),
+      changedEnd: j(p.buildPatch(nightly, { ...same, recur_end: "03:00" })),
+      cleared: j(p.buildPatch(nightly, formOf({ recur_days: [], recur_start: "", recur_end: "", recur_time_zone: "America/New_York" }))),
+      added: j(p.buildPatch(original, same)),
+      values: j(p.valuesOf(nightly)),
+      invalid: j(p.interpretWrite(400, { status: "invalid", message: "'recur_start' and 'recur_end' go together: set both or neither." })),
+      cell: [
+        p.scheduleCell({}),
+        p.scheduleCell({ schedule: "daily 22:00-02:00 UTC", in_window_now: true }),
+        p.scheduleCell({ schedule: "daily 22:00-02:00 UTC", in_window_now: false }),
+      ],
+    };
+  },
   writes: () => ({
     exists: j(p.interpretWrite(409, { status: "already_exists", message: "dup", rule_id: "abc" })),
     invalid: j(p.interpretWrite(400, { status: "invalid", message: "'expires_at_utc' must be an ISO-8601 UTC timestamp" })),

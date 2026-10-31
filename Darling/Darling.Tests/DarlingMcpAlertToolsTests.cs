@@ -112,7 +112,7 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
     [InlineData("get_mute_rules", "enabled_only")]
     [InlineData("update_alert_settings", "settings_json")]
     /* #5915: each mute write tool also takes the optional agent_action, last (Level 2: ignored under the writes arm). */
-    [InlineData("create_mute_rule", "server_name,metric_name,database_pattern,query_text_pattern,wait_type_pattern,job_name_pattern,reason,expires_at,server_id,client_app_pattern,external_source,agent_action,starts_at")]
+    [InlineData("create_mute_rule", "server_name,metric_name,database_pattern,query_text_pattern,wait_type_pattern,job_name_pattern,reason,expires_at,server_id,client_app_pattern,external_source,agent_action,starts_at,recur_days,recur_start,recur_end,recur_time_zone")]
     [InlineData("delete_mute_rule", "rule_id,agent_action")]
     [InlineData("set_mute_rule_enabled", "rule_id,enabled,agent_action")]
     [InlineData("update_mute_rule", "rule_id,changes_json,agent_action")]
@@ -1593,6 +1593,12 @@ internal sealed class FakeMuteRuleStore : IMuteRuleStore
     /// create verb's write-to-read-back window (#3450). Takes the rule because, unlike the flag/edit verbs, the
     /// caller does not know the generated id before the write.</summary>
     internal Action<MuteRule>? AfterInsert { get; set; }
+
+    /// <summary>The store's own refusal of a rule's repeat schedule (#7040), like the zone check Darling's PostgreSQL store runs; null accepts.</summary>
+    internal Func<MuteRule, string?>? RecurrenceRefusal { get; set; }
+
+    public Task<string?> RecurrenceRefusalAsync(MuteRule rule, CancellationToken cancellationToken = default) =>
+        Task.FromResult(RecurrenceRefusal?.Invoke(rule));
 
     internal FakeMuteRuleStore Seed(MuteRule rule)
     {
