@@ -163,6 +163,22 @@ INSERT INTO collect.query_store_hints
 VALUES ($1, $2, $3, $4, 'TenantDb00')", -698600 - (++grantId), at, ServerId, ServerName);
             }
 
+            /* #7010: the store's statement history (get_store_query_history), a few captures from LogFloorBack on with one statement each, so its
+               earliest capture (the notice's floor) is where the store's history starts and the read answers rows, not the "no snapshot yet" precondition. */
+            foreach (var back in new[] { LogFloorBack, TimeSpan.FromDays(2), TimeSpan.FromDays(1), TimeSpan.FromMinutes(40), TimeSpan.FromMinutes(5) })
+            {
+                var at = DarlingMcpTestData.Naive(now - back);
+                await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO collect.store_statement_captures
+    (capture_time, interval_seconds, statements_seen, statements_kept, hidden_statements, outcome)
+VALUES ($1, 3600, 1, 1, 0, 'ok')", at);
+                await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO collect.store_statement_history
+    (capture_time, interval_seconds, role_name, queryid, delta_calls, delta_total_exec_ms, delta_rows, delta_shared_blks_hit,
+     delta_shared_blks_read, delta_temp_blks_written, max_exec_ms, first_seen, entry_restarted, reset_in_interval)
+VALUES ($1, 3600, 'admin', 7010, 10, 250, 10, 100, 1, 0, 50, false, false, false)", at);
+            }
+
             /* The collection log: every SQL Server collector from LogFloorBack on; the Query Store collector also ran 30 days back, long
                before the raw rows that are left (retention dropped them). */
             var collectors = CollectorCatalog.All.Where(d => d.TargetEngine == CollectorTargetEngine.SqlServer).Select(d => d.Name).ToArray();
@@ -236,10 +252,11 @@ public sealed class McpWindowMatrixLiveTests : IClassFixture<McpWindowMatrixStor
         /* #7010: not a data window by design. One server: "always 7 days" of collector health read from the collection log (hours_back is ignored). Fleet mode (server_name "*") takes hours_back, but only to read one collector's liveness per server, not a windowed row set. */
         ["get_collection_health"] = NoNotice,
         ["get_cpu_scheduler_pressure"] = SnapshotSearch,
-        ["get_database_protection"] = NoNotice,
-        ["get_finops"] = NoNotice,
-        ["get_fleet_overview"] = NoNotice,
-        ["get_identity_capacity"] = NoNotice,
+        ["get_database_protection"] = SnapshotSearch,
+        /* #7010: not bound. hours_back windows the blocking and deadlock counts of every server's card, so a window past the data under-counts, but
+           the fleet answer needs one coverage start per server (the fleet probe answers the EARLIEST start, which would call a fleet covered when one server
+           is not), a design call left to the coordinator. */
+        ["get_fleet_overview"] = "fleet roll-up with no window notice: the per-server coverage design is open (#7010)",
         /* #7010: not a data window by design. The reads are investigation REQUESTS opened in the last hours_back hours (hours_back 1-168, no as_of), the service's own work log of alert-triggered runs, not a span of collected data: a window with no request is a true negative, and the log is not floored by the collector tables. */
         ["get_investigation_reports"] = "investigation request log: hours_back is the age of requests opened, not a collected-data window (#7010)",
         ["get_pg_autovacuum_health"] = NoNotice,
@@ -262,11 +279,12 @@ public sealed class McpWindowMatrixLiveTests : IClassFixture<McpWindowMatrixStor
         ["get_pg_wraparound_risk"] = NoNotice,
         ["get_pg_xmin_horizon"] = NoNotice,
         ["get_plan_cache_bloat"] = SnapshotSearch,
-        ["get_plan_force_precheck"] = NoNotice,
-        ["get_query_store_clutter"] = NoNotice,
-        ["get_store_log"] = NoNotice,
-        ["get_store_query_history"] = NoNotice,
-        ["get_sweep_reports"] = NoNotice,
+        /* #7010: not a data window by design. The window selects captures of the store's own PostgreSQL log, and every answer carries the capture
+           denominator (captures against expected, bytes read and unread), which is how a window the store did not capture is told apart from a quiet one. */
+        ["get_store_log"] = "store-log window: the answer's capture denominator says how much of the window was captured (#7010)",
+        /* #7010: not a data window by design. The window picks the fleet sweeper's own run records for the timeline, the latest sweep is read outside
+           it on purpose, and no collector table backs it for a coverage probe. */
+        ["get_sweep_reports"] = "sweep timeline of the store's own run records; the latest sweep is read outside the window (#7010)",
     };
 
     /// <summary>The arguments a tool needs beyond the window that the generic binding cannot supply: a required view, metric or counter, the
@@ -427,11 +445,13 @@ public sealed class McpWindowMatrixLiveTests : IClassFixture<McpWindowMatrixStor
         }
     }
 
-    /// <summary>The key at the top level, else under <c>hints</c>.</summary>
+    /// <summary>The key at the top level, else under <c>hints</c>, else under <c>window</c>.</summary>
     private static JsonElement? Find(JsonElement root, string key)
     {
         if (root.TryGetProperty(key, out var top)) return top;
         if (root.TryGetProperty("hints", out var hints) && hints.ValueKind == JsonValueKind.Object && hints.TryGetProperty(key, out var inHints)) return inHints;
+        /* #7010: get_query_store_clutter keeps the notice in its window block (the reach vocabulary, held beside a page cut by the payload census). */
+        if (root.TryGetProperty("window", out var window) && window.ValueKind == JsonValueKind.Object && window.TryGetProperty(key, out var inWindow)) return inWindow;
         return null;
     }
 

@@ -284,21 +284,40 @@ public sealed class DarlingMcpPlanForcePrecheckTools
                 effectiveStart = start;
             }
 
+            /* #7010: where the window's coverage starts, as get_query_store_query_history says it: the interval table's own plan when it served the
+               read (the raw floor describes a tier that did not answer), else the raw tier's floor. An unmet engine answer below stays bare, so a
+               collector that never ran here is not read as a window past the data. A failed probe costs the notice, never the answer. */
+            McpWindowNotice notice;
+            if (table is { } tableServed)
+            {
+                var tableTruncated = RawWindowFloor.IsTruncated(effectiveStart, start);
+                notice = new McpWindowNotice(
+                    McpHelpers.FormatEffectiveStart(effectiveStart), tableTruncated,
+                    tableTruncated ? DarlingMcpDataTools.QueryStoreTableNote(effectiveStart, tableServed.Plan.StartBound) : null);
+            }
+            else
+            {
+                notice = await DarlingMcpWindowNotice.ReadAsync(
+                    () => DarlingDataReader.GetQueryStoreWindowFloorAsync(postgres, resolved.ServerId, start, windowEnd, cancellationToken),
+                    start, windowEnd, "query_store_stats", emptyAnswer: rows.Count == 0, logger: logger, cancellationToken: cancellationToken);
+            }
+
             if (rows.Count == 0)
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "query_store", cancellationToken)
-                    ?? PlanNotFound(resolved.DisplayName, database_name, query_id, plan_id, compare_plan_id, hours_back, windowEnd, effectiveStart, new List<PlanFold>());
+                    ?? PlanNotFound(resolved.DisplayName, database_name, query_id, plan_id, compare_plan_id, hours_back, windowEnd, notice, new List<PlanFold>());
 
             var plans = Fold(rows);
             var candidate = plans.FirstOrDefault(p => p.PlanId == plan_id);
             if (candidate is null)
-                return PlanNotFound(resolved.DisplayName, database_name, query_id, plan_id, compare_plan_id, hours_back, windowEnd, effectiveStart, plans);
+                return PlanNotFound(resolved.DisplayName, database_name, query_id, plan_id, compare_plan_id, hours_back, windowEnd, notice, plans);
 
             PlanFold? compare;
             if (compare_plan_id is long wanted)
             {
                 compare = plans.FirstOrDefault(p => p.PlanId == wanted);
                 if (compare is null)
-                    return McpHelpers.Status("empty", $"compare_plan_id {wanted} has no Query Store history for query_id {query_id} in the window searched.");
+                    return DarlingMcpWindowNotice.FinishEmpty(
+                        McpHelpers.Status("empty", $"compare_plan_id {wanted} has no Query Store history for query_id {query_id} in the window searched.", notice.AsHints()), notice);
             }
             else
             {
@@ -401,7 +420,7 @@ public sealed class DarlingMcpPlanForcePrecheckTools
             shown["job_name_matches"] = await JobNameMatchesAsync(postgres, resolved.ServerId, windowEnd, cancellationToken);
 
             /* A dictionary, not an anonymous object: "shown" is this read's own section, not a page cut (the cut-key census reads a `shown =` member as one). */
-            return JsonSerializer.Serialize(new Dictionary<string, object?>
+            return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new Dictionary<string, object?>
             {
                 ["server"] = resolved.DisplayName,
                 ["database_name"] = database_name,
@@ -410,14 +429,16 @@ public sealed class DarlingMcpPlanForcePrecheckTools
                 ["compare_plan_id"] = compare?.PlanId,
                 ["as_of"] = FormatTime(windowEnd),
                 ["hours_back"] = hours_back,
-                ["effective_start"] = McpHelpers.FormatEffectiveStart(effectiveStart),
+                ["effective_start"] = notice.EffectiveStart,
+                ["window_truncated"] = notice.WindowTruncated,
+                ["truncation_note"] = notice.TruncationNote,
                 ["verdict"] = blockers.Count > 0 ? VerdictBlocked : VerdictNotBlocked,
                 ["blockers"] = blockers.Select(r => new { code = r.Code, sentence = r.Sentence, evidence = r.Evidence }),
                 ["warnings"] = warnings.Select(r => new { code = r.Code, sentence = r.Sentence, evidence = r.Evidence }),
                 ["shown"] = shown,
                 ["unknown"] = unknown.Select(u => new { check = u.Check, reason = u.Reason }),
                 ["note"] = "not_blocked means the force can be tried, not that it is safe or will help. Warnings are for the caller's own instructions to weigh."
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions), notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -427,8 +448,8 @@ public sealed class DarlingMcpPlanForcePrecheckTools
 
     /// <summary>The blocked answer for a plan that is not among the query's Query Store rows in the window: nothing else is read, because there is nothing to force.</summary>
     private static string PlanNotFound(
-        string serverName, string database, long queryId, long planId, long? comparePlanId, int hoursBack, DateTime windowEnd, DateTime effectiveStart, List<PlanFold> plans) =>
-        JsonSerializer.Serialize(new Dictionary<string, object?>
+        string serverName, string database, long queryId, long planId, long? comparePlanId, int hoursBack, DateTime windowEnd, McpWindowNotice notice, List<PlanFold> plans) =>
+        DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new Dictionary<string, object?>
         {
             ["server"] = serverName,
             ["database_name"] = database,
@@ -437,7 +458,9 @@ public sealed class DarlingMcpPlanForcePrecheckTools
             ["compare_plan_id"] = comparePlanId,
             ["as_of"] = FormatTime(windowEnd),
             ["hours_back"] = hoursBack,
-            ["effective_start"] = McpHelpers.FormatEffectiveStart(effectiveStart),
+            ["effective_start"] = notice.EffectiveStart,
+            ["window_truncated"] = notice.WindowTruncated,
+            ["truncation_note"] = notice.TruncationNote,
             ["verdict"] = VerdictBlocked,
             ["blockers"] = new[]
             {
@@ -452,7 +475,7 @@ public sealed class DarlingMcpPlanForcePrecheckTools
             ["shown"] = new Dictionary<string, object?>(),
             ["unknown"] = Array.Empty<object>(),
             ["note"] = "blocked means the force cannot work; the other checks were not run. not_blocked would not mean the force is safe or will help.",
-        }, McpHelpers.JsonOptions);
+        }, McpHelpers.JsonOptions), notice);
 
     private static string? FormatTime(DateTime? t) => t?.ToString("o", CultureInfo.InvariantCulture);
 
