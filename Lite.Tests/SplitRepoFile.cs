@@ -21,7 +21,7 @@ namespace Lite.Tests;
 /// </summary>
 internal static class SplitRepoFile
 {
-    private static readonly string[] SplitTypes = ["DarlingCollectorRunner"];
+    private static readonly string[] SplitTypes = ["DarlingCollectorRunner", "DarlingWebEndpoints", "DarlingWorker"];
 
     /// <summary>Reads <paramref name="fullPath"/>, with its partial files joined after it when its type is split.</summary>
     internal static string ReadAllText(string fullPath)

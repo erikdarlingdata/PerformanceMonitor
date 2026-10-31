@@ -2757,7 +2757,7 @@ public sealed class AlertReadFailureSurfaceTests
 
         Assert.True(File.Exists(path), $"#3013 scan target not found: {path}");
 
-        return File.ReadAllText(path);
+        return RepoFile.ReadRepoFile(path);
     }
 
     private static string RepoRoot([CallerFilePath] string thisFile = "")

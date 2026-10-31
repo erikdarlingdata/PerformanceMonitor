@@ -220,5 +220,5 @@ public sealed class AnalysisShutdownResidueTests
         return dir!;
     }
 
-    private static string ReadSource(string relative) => File.ReadAllText(Path.Combine(RepoRoot(), relative));
+    private static string ReadSource(string relative) => RepoFile.ReadRepoFile(Path.Combine(RepoRoot(), relative));
 }

@@ -189,6 +189,14 @@ public sealed class CrossSkuSurfaceSourceTests
         })
         {
             var src = File.ReadAllText(Path.Combine(root, relative));
+            if (relative.EndsWith("DarlingWorker.cs", StringComparison.Ordinal))
+            {
+                /* DarlingWorker is split into DarlingWorker.<Area>.cs partials (#7024): read them as one. */
+                foreach (var part in Directory.GetFiles(Path.GetDirectoryName(Path.Combine(root, relative))!, "DarlingWorker.*.cs"))
+                {
+                    src += "\n" + File.ReadAllText(part);
+                }
+            }
 
             /* Singleline, because both of these calls are wrapped across lines — a line-bound pattern found
                one of the two and would have "proved" a single fleet-scoped site. */
