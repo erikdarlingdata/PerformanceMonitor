@@ -93,7 +93,9 @@ public static class MuteRecurrence
         time.ToString(time.Second == 0 ? "HH:mm" : "HH:mm:ss", CultureInfo.InvariantCulture);
 
     /// <summary>Turns a zone id the caller typed into the IANA id the store keeps. A Windows id
-    /// (<c>Eastern Standard Time</c>) is converted; an IANA id is kept as given. False when the host does not know the zone.</summary>
+    /// (<c>Eastern Standard Time</c>) is converted; an IANA id is kept as given. False when the host does not know the zone, and
+    /// false for a Windows id that has no IANA equivalent (<c>Mid-Atlantic Standard Time</c>): the store keeps IANA ids only, and
+    /// PostgreSQL cannot resolve a Windows one.</summary>
     public static bool TryNormalizeZone(string? zone, out string iana)
     {
         iana = "";
@@ -106,7 +108,8 @@ public static class MuteRecurrence
         }
         try
         {
-            _ = TimeZoneInfo.FindSystemTimeZoneById(z);
+            /* A zone found under a Windows id the table above could not convert has no IANA id; storing it would give PostgreSQL a name it rejects. */
+            if (!TimeZoneInfo.FindSystemTimeZoneById(z).HasIanaId) return false;
         }
         catch (Exception ex) when (ex is TimeZoneNotFoundException or InvalidTimeZoneException)
         {
@@ -169,13 +172,20 @@ public static class MuteRecurrence
         }
         else
         {
-            zone = HostZoneIana();
+            /* The host's own zone is stored the same way a typed one is: as an IANA id, or not at all. */
+            if (!TryNormalizeZone(HostZoneIana(), out var hostIana))
+            {
+                error = "This host's time zone has no IANA id to store. Give 'recur_time_zone' an IANA id such as America/New_York or UTC.";
+                return false;
+            }
+            zone = hostIana;
         }
         return true;
     }
 
     /// <summary>Whether the schedule is inside a window at <paramref name="nowUtc"/>. No times means no schedule, so always true.
-    /// A zone this host cannot resolve reads as outside the window: the rule mutes nothing rather than throwing in the alert path.</summary>
+    /// A zone this host cannot resolve, or one that is not an IANA id, reads as outside the window: the rule mutes nothing rather than
+    /// throwing in the alert path. The SQL form (<c>MuteRuleRecurrenceSql.InWindow</c>) reads a zone its PostgreSQL does not know the same way.</summary>
     public static bool IsInWindowAt(int? days, TimeOnly? start, TimeOnly? end, string? zone, DateTime nowUtc)
     {
         if (!start.HasValue || !end.HasValue) return true;
@@ -226,7 +236,8 @@ public static class MuteRecurrence
         try
         {
             tz = TimeZoneInfo.FindSystemTimeZoneById(zone);
-            return true;
+            /* A Windows id the host resolves but PostgreSQL cannot is outside the window here too, so both readers agree (#7040). */
+            return tz.HasIanaId;
         }
         catch (Exception ex) when (ex is TimeZoneNotFoundException or InvalidTimeZoneException)
         {

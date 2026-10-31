@@ -321,6 +321,19 @@ WHERE id = $1";
         }
     }
 
+    /// <summary>A repeating rule's zone must be one the store's PostgreSQL resolves (#7040): the fleet read treats any other as outside the
+    /// window, so a rule saved with one would mute nothing and say nothing. The host check above cannot see the store's tzdata.</summary>
+    private async Task ThrowIfZoneUnknownAsync(MuteRule rule, CancellationToken cancellationToken)
+    {
+        if (!rule.IsRecurring) return;
+        await using var command = _dataSource.CreateCommand();
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+        if (await MuteRuleRecurrenceSql.RefusalAsync(command, rule.RecurTimeZone, cancellationToken) is { } refusal)
+        {
+            throw new ArgumentException(refusal);
+        }
+    }
+
     private const string RecurrenceNeedsNewerStore = "This store is below the version that keeps recurring mute rules. Upgrade the Darling service first.";
 
     private static void AddNullableSmallInt(NpgsqlCommand command, int? value) =>
@@ -359,6 +372,8 @@ WHERE id = $1";
         {
             throw new InvalidOperationException(RecurrenceNeedsNewerStore);
         }
+
+        await ThrowIfZoneUnknownAsync(rule, cancellationToken);
 
         await using var command = _dataSource.CreateCommand(hasRecurrence ? MuteRuleInsertWithRecurrenceSql : MuteRuleInsertSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
@@ -400,6 +415,8 @@ WHERE id = $1";
         {
             throw new InvalidOperationException(RecurrenceNeedsNewerStore);
         }
+
+        await ThrowIfZoneUnknownAsync(rule, cancellationToken);
 
         await using var command = _dataSource.CreateCommand(hasRecurrence ? MuteRuleUpdateWithRecurrenceSql : MuteRuleUpdateSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;

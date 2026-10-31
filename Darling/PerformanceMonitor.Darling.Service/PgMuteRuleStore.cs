@@ -100,6 +100,27 @@ ORDER BY created_at_utc DESC", scope.Connection, scope.Transaction) { CommandTim
         return rules;
     }
 
+    /// <summary>
+    /// A repeating rule's zone must be one this store's PostgreSQL resolves (#7040): the fleet statement reads any other as outside
+    /// the window, so a rule saved with one would mute nothing and give no sign why. The service host's own check
+    /// (<see cref="MuteRule.TryNormalizeRecurrence"/>) cannot see the store's tzdata, which can be older than the host's.
+    /// </summary>
+    public async Task<string?> RecurrenceRefusalAsync(MuteRule rule, CancellationToken cancellationToken = default)
+    {
+        if (rule is null || !rule.IsRecurring) return null;
+        await using var scope = await OpenAsync(cancellationToken);
+        using var command = new NpgsqlCommand { Connection = scope.Connection, Transaction = scope.Transaction, CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
+        return await MuteRuleRecurrenceSql.RefusalAsync(command, rule.RecurTimeZone, cancellationToken);
+    }
+
+    private async Task ThrowIfZoneUnknownAsync(MuteRule rule)
+    {
+        if (await RecurrenceRefusalAsync(rule) is { } refusal)
+        {
+            throw new ArgumentException(refusal);
+        }
+    }
+
     public async Task InsertAsync(MuteRule rule)
     {
         if (rule is null)
@@ -107,6 +128,7 @@ ORDER BY created_at_utc DESC", scope.Connection, scope.Transaction) { CommandTim
             throw new ArgumentNullException(nameof(rule));
         }
 
+        await ThrowIfZoneUnknownAsync(rule);
         await using var scope = await OpenAsync();
         using var command = new NpgsqlCommand(@"
 INSERT INTO config_mute_rules
@@ -141,6 +163,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
             throw new ArgumentNullException(nameof(rule));
         }
 
+        await ThrowIfZoneUnknownAsync(rule);
         await using var scope = await OpenAsync();
         using var command = new NpgsqlCommand(@"
 UPDATE config_mute_rules SET

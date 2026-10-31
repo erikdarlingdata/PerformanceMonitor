@@ -1594,6 +1594,12 @@ internal sealed class FakeMuteRuleStore : IMuteRuleStore
     /// caller does not know the generated id before the write.</summary>
     internal Action<MuteRule>? AfterInsert { get; set; }
 
+    /// <summary>The store's own refusal of a rule's repeat schedule (#7040), like the zone check Darling's PostgreSQL store runs; null accepts.</summary>
+    internal Func<MuteRule, string?>? RecurrenceRefusal { get; set; }
+
+    public Task<string?> RecurrenceRefusalAsync(MuteRule rule, CancellationToken cancellationToken = default) =>
+        Task.FromResult(RecurrenceRefusal?.Invoke(rule));
+
     internal FakeMuteRuleStore Seed(MuteRule rule)
     {
         _rows.Add(rule.Clone());

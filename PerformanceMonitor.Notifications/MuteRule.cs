@@ -58,13 +58,26 @@ public class MuteRule
     public bool IsInWindowAt(DateTime nowUtc) =>
         MuteRecurrence.IsInWindowAt(RecurDays, RecurStartTime, RecurEndTime, RecurTimeZone, nowUtc);
 
-    /// <summary>The UTC start of the next recurring window after <paramref name="nowUtc"/> that falls inside the rule's span,
-    /// or null for a rule with no schedule or no later window.</summary>
+    /// <summary>The UTC start of the next recurring window after <paramref name="nowUtc"/> that falls inside the rule's span, or
+    /// null for a rule with no schedule or no later window. A rule that has not started yet is searched from its
+    /// <see cref="StartsAtUtc"/>: it reports the first window after it begins, or the start itself when a window is already open then.</summary>
     public DateTime? NextWindowStartUtc(DateTime nowUtc)
     {
-        var next = MuteRecurrence.NextWindowStartUtc(RecurDays, RecurStartTime, RecurEndTime, RecurTimeZone, nowUtc);
+        DateTime? next;
+        if (StartsAtUtc.HasValue && StartsAtUtc.Value > nowUtc)
+        {
+            /* The rule mutes nothing before it starts. If a window is open at that moment (it opened before the start, or opens exactly then),
+               the rule begins muting at the start; otherwise the first window after the start is the next one. */
+            next = IsRecurring && IsInWindowAt(StartsAtUtc.Value)
+                ? StartsAtUtc.Value
+                : MuteRecurrence.NextWindowStartUtc(RecurDays, RecurStartTime, RecurEndTime, RecurTimeZone, StartsAtUtc.Value);
+        }
+        else
+        {
+            next = MuteRecurrence.NextWindowStartUtc(RecurDays, RecurStartTime, RecurEndTime, RecurTimeZone, nowUtc);
+        }
+
         if (next is null) return null;
-        if (StartsAtUtc.HasValue && next.Value < StartsAtUtc.Value) return null;
         if (ExpiresAtUtc.HasValue && next.Value >= ExpiresAtUtc.Value) return null;
         return next;
     }

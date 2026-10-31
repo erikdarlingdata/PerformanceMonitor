@@ -1766,6 +1766,12 @@ public sealed partial class DarlingMcpAlertTools
                 return Outcome("invalid", recurrenceProblem + " Nothing was written.");
             }
 
+            /* #7040: the store's own zone check, on top of the host's: a zone its tzdata lacks reads as outside the window, so it is refused here. */
+            if (await store.RecurrenceRefusalAsync(rule) is { } zoneProblem)
+            {
+                return Outcome("invalid", zoneProblem);
+            }
+
             var existing = await InsertUnlessDuplicateAsync(store, rule, now);
             if (existing != null)
             {
@@ -1856,6 +1862,12 @@ public sealed partial class DarlingMcpAlertTools
             if (!rule.TryNormalizeRecurrence(out var coreRecurrenceProblem))
             {
                 return Outcome("invalid", coreRecurrenceProblem + " Nothing was written.");
+            }
+
+            /* #7040: the store's own zone check, on top of the host's: a zone its tzdata lacks reads as outside the window, so it is refused here. */
+            if (await store.RecurrenceRefusalAsync(rule) is { } coreZoneProblem)
+            {
+                return Outcome("invalid", coreZoneProblem);
             }
 
             /* The web route creates through here, so a server_id in its body is held to the create tool's rule:
@@ -2258,6 +2270,12 @@ public sealed partial class DarlingMcpAlertTools
             if (!merged.TryNormalizeRecurrence(out var mergedRecurrenceProblem))
             {
                 return Outcome("invalid", mergedRecurrenceProblem + " Nothing was written.");
+            }
+
+            /* #7040: the store's own zone check, on top of the host's: a zone its tzdata lacks reads as outside the window, so it is refused here. */
+            if (await store.RecurrenceRefusalAsync(merged) is { } mergedZoneProblem)
+            {
+                return Outcome("invalid", mergedZoneProblem);
             }
 
             if (merged.ServerId.HasValue && merged.ServerId != existing.ServerId

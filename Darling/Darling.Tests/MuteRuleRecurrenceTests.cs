@@ -157,8 +157,50 @@ public sealed class MuteRuleRecurrenceTests
         Assert.Equal(Utc(11, 2, 22, 0), rule.NextWindowStartUtc(Utc(11, 2, 12, 0)));
         Assert.Null(rule.NextWindowStartUtc(Utc(11, 2, 23, 0)));   // next is 11-03 22:00Z, past the expiry
         rule.ExpiresAtUtc = null;
-        rule.StartsAtUtc = Utc(11, 10, 0, 0);
-        Assert.Null(rule.NextWindowStartUtc(Utc(11, 2, 12, 0)));   // next is before the rule begins
+        rule.StartsAtUtc = Utc(11, 10, 3, 0);
+        /* The rule begins next week: the next window is the first one after it begins, not null. */
+        Assert.Equal(Utc(11, 10, 22, 0), rule.NextWindowStartUtc(Utc(11, 2, 12, 0)));
+        rule.ExpiresAtUtc = Utc(11, 10, 12, 0);
+        Assert.Null(rule.NextWindowStartUtc(Utc(11, 2, 12, 0)));   // the span ends before any window opens
+        rule.ExpiresAtUtc = null;
+        rule.StartsAtUtc = Utc(11, 1, 0, 0);
+        Assert.Equal(Utc(11, 2, 22, 0), rule.NextWindowStartUtc(Utc(11, 2, 12, 0)));   // already started: unchanged
+    }
+
+    [Fact]
+    public void NextWindowStart_ForAFutureStartInZone_IsTheFirstWindowAfterTheStartInThatZone()
+    {
+        // A daily 22:00-02:00 rule in New York that starts Tuesday 2026-11-10 (UTC-5): reports that Tuesday 22:00 local = Wednesday 03:00Z.
+        var rule = Rule(null, "22:00", "02:00", "America/New_York");
+        rule.StartsAtUtc = Utc(11, 10, 8, 0);   // Tuesday 03:00 local, after the window that opened Monday night has closed
+        Assert.Equal(Utc(11, 11, 3, 0), rule.NextWindowStartUtc(Utc(11, 2, 12, 0)));
+    }
+
+    [Fact]
+    public void NextWindowStart_WhenAWindowIsOpenAtTheStart_IsTheStartItself()
+    {
+        var rule = Rule(null, "22:00", "02:00");
+        rule.StartsAtUtc = Utc(11, 10, 23, 30);   // inside the 22:00-02:00 window that opened before the rule began
+        Assert.Equal(Utc(11, 10, 23, 30), rule.NextWindowStartUtc(Utc(11, 2, 12, 0)));
+        rule.StartsAtUtc = Utc(11, 10, 22, 0);    // a window opening exactly at the start
+        Assert.Equal(Utc(11, 10, 22, 0), rule.NextWindowStartUtc(Utc(11, 2, 12, 0)));
+    }
+
+    [Fact]
+    public void AWindowsIdWithNoIanaEquivalent_IsRefusedOnWrite_AndReadsAsOutsideTheWindow()
+    {
+        // Windows ids the host can find but .NET has no IANA mapping for (Windows-only); elsewhere the id is simply unknown. Either way: refused.
+        MuteRecurrence.TryParseTime("00:00", out var s);
+        MuteRecurrence.TryParseTime("23:00", out var e);
+        foreach (var id in new[] { "Mid-Atlantic Standard Time", "British Columbia Standard Time" })
+        {
+            Assert.False(MuteRecurrence.TryNormalizeZone(id, out _), id);
+            var zone = (string?)id;
+            Assert.False(MuteRecurrence.TryNormalize(null, s, e, ref zone, out var error), id);
+            Assert.Contains(id, error);
+            var rule = new MuteRule { RecurStartTime = s, RecurEndTime = e, RecurTimeZone = id };
+            Assert.False(rule.IsInWindowAt(Utc(11, 4, 12, 0)));
+        }
     }
 
     [Fact]

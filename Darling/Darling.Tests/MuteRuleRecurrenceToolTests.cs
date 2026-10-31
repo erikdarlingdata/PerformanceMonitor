@@ -133,6 +133,31 @@ public sealed class MuteRuleRecurrenceToolTests
         Assert.Null(row.RecurTimeZone);
     }
 
+    private const string StoreZoneRefusal = "'recur_time_zone' is not a time zone the store's PostgreSQL knows. Nothing was written.";
+
+    [Fact]
+    public async Task AZoneTheStoreRefuses_IsReportedInvalid_OnCreateAndOnUpdate_AndNothingIsWritten()
+    {
+        var store = new FakeMuteRuleStore();
+        var good = Parse(await Create(store, days: ["Mon"], start: "22:00", end: "02:00", zone: "Asia/Tokyo"))["mute_rule"]!["id"]!.GetValue<string>();
+
+        store.RecurrenceRefusal = r => r.RecurTimeZone == "America/New_York" ? StoreZoneRefusal : null;
+        var created = Parse(await Create(store, server: "srv2", start: "22:00", end: "02:00", zone: "America/New_York"));
+        Assert.Equal("invalid", created["status"]!.GetValue<string>());
+        Assert.Contains("Nothing was written", created["message"]!.GetValue<string>());
+        Assert.Equal(1, store.Count);
+
+        var viaWebBody = Parse(await DarlingMcpAlertTools.CreateMuteRuleCore(store,
+            """{"server_name":"srv3","recur_start":"22:00","recur_end":"02:00","recur_time_zone":"America/New_York"}"""));
+        Assert.Equal("invalid", viaWebBody["status"]!.GetValue<string>());
+        Assert.Equal(1, store.Count);
+
+        var updated = Parse(await DarlingMcpAlertTools.UpdateMuteRuleCore(store, good, """{"recur_time_zone":"America/New_York"}"""));
+        Assert.Equal("invalid", updated["status"]!.GetValue<string>());
+        Assert.Equal("Asia/Tokyo", store.Row(good)!.RecurTimeZone);
+        Assert.Equal(0, store.UpdateCalls);
+    }
+
     [Fact]
     public async Task Update_ClearingBothTimes_ClearsDaysAndZoneWithThem()
     {

@@ -14,6 +14,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
 using Xunit;
@@ -147,6 +148,119 @@ public sealed class MuteRuleRecurrenceLiveTests
                 else
                     Assert.True(trues > 0 && falses > 0, $"'{name}' never changed answer: {trues} in, {falses} out.");
             }
+        });
+    }
+
+    /* A zone the store's tzdata lacks, typed straight into the table past every write check. The names stand for the two ways it happens:
+       an IANA zone newer than the store's tzdata, and a Windows id the host could not map to an IANA one. */
+    private static readonly string[] UnknownZones =
+    [
+        "Mars/Olympus_Mons", "Mid-Atlantic Standard Time", "Eastern Standard Time", "America/New York", "Not A Zone",
+    ];
+
+    [Fact]
+    public async Task AZoneThePostgresStoreLacks_ReadsAsOutsideTheWindow_AndTheFleetStatementStillRuns()
+    {
+        await RunAsync(async (dataSource, connection, ct) =>
+        {
+            async Task Exec(string sql)
+            {
+                await using var command = new NpgsqlCommand(sql, connection);
+                await command.ExecuteNonQueryAsync(ct);
+            }
+
+            await Exec($"SET search_path TO {PgSchemaGenerator.SearchPath}");
+            foreach (var id in new[] { 1, 2, 3 })
+            {
+                await Exec($@"INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_major_version, created_date, modified_date)
+VALUES ({id}, 'srv-{id}', 'srv-{id}', TRUE, 15, now(), now())");
+            }
+
+            /* Server 1: a window that is open nearly all day in a zone PostgreSQL lacks (it would be open now were the zone known).
+               Server 3: a plain whole-server rule, silenced. The unknown-zone rule must neither raise nor silence server 1. */
+            var bypass = UnknownZones.ToList();
+            for (var i = 0; i < bypass.Count; i++)
+            {
+                await Exec($@"INSERT INTO config.config_mute_rules (id, enabled, created_at_utc, server_id, server_name, recur_start_time, recur_end_time, recur_time_zone)
+VALUES ('bad-{i}', TRUE, now() AT TIME ZONE 'UTC', 1, 'srv-1', '00:01', '00:00', '{bypass[i]}')");
+            }
+
+            await Exec(@"INSERT INTO config.config_mute_rules (id, enabled, created_at_utc, server_id, server_name)
+VALUES ('plain', TRUE, now() AT TIME ZONE 'UTC', 3, 'srv-3')");
+
+            /* The statement the fleet page and get_fleet_overview run. */
+            await using (var fleet = new NpgsqlCommand(DarlingFleetReader.FleetServersSql, connection))
+            await using (var reader = await fleet.ExecuteReaderAsync(ct))
+            {
+                var silenced = new Dictionary<int, bool>();
+                while (await reader.ReadAsync(ct))
+                {
+                    silenced[reader.GetInt32(0)] = reader.GetBoolean(reader.GetOrdinal("is_silenced"));
+                }
+
+                Assert.False(silenced[1], "A rule in a zone the store lacks mutes nothing.");
+                Assert.False(silenced[2]);
+                Assert.True(silenced[3]);
+            }
+
+            /* And the SQL window test agrees with the C# one on each such rule across a week. */
+            var store = new PgMuteRuleStore(dataSource);
+            var loaded = (await store.LoadAllAsync(ct)).Where(r => r.Id.StartsWith("bad-", StringComparison.Ordinal)).ToList();
+            Assert.Equal(bypass.Count, loaded.Count);
+            var sql = $"SELECT g, {MuteRuleRecurrenceSql.InWindow("m", "g")} FROM config.config_mute_rules m, generate_series($1::timestamptz, $1::timestamptz + interval '7 days', interval '30 minutes') g WHERE m.id = $2";
+            foreach (var rule in loaded)
+            {
+                await using var command = new NpgsqlCommand(sql, connection);
+                command.Parameters.Add(new NpgsqlParameter { Value = new DateTime(2026, 3, 5, 0, 0, 0, DateTimeKind.Utc), NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.TimestampTz });
+                command.Parameters.AddWithValue(rule.Id);
+                await using var reader = await command.ExecuteReaderAsync(ct);
+                var rows = 0;
+                while (await reader.ReadAsync(ct))
+                {
+                    var instant = DateTime.SpecifyKind(reader.GetDateTime(0), DateTimeKind.Utc);
+                    Assert.False(reader.GetBoolean(1), $"'{rule.RecurTimeZone}' read as inside a window in SQL at {instant:u}.");
+                    /* A host with ICU resolves a Windows id that has an IANA equivalent, so only the SQL answer is asserted for it. */
+                    if (rule.RecurTimeZone != "Eastern Standard Time")
+                        Assert.False(rule.IsInWindowAt(instant), $"'{rule.RecurTimeZone}' read as inside a window in C# at {instant:u}.");
+                    rows++;
+                }
+
+                Assert.True(rows > 300);
+            }
+        });
+    }
+
+    [Fact]
+    public async Task TheStore_RefusesAZoneItDoesNotKnow_OnInsertAndUpdate_AndAcceptsTheIanaZones()
+    {
+        await RunAsync(async (dataSource, connection, ct) =>
+        {
+            var store = new PgMuteRuleStore(dataSource);
+            foreach (var zone in UnknownZones)
+            {
+                var rule = Rule(null, 22, 0, 2, 0, zone);
+                Assert.NotNull(await store.RecurrenceRefusalAsync(rule));
+                var inserted = await Assert.ThrowsAsync<ArgumentException>(() => store.InsertAsync(rule));
+                Assert.Contains(zone, inserted.Message);
+                Assert.Contains("PostgreSQL", inserted.Message);
+            }
+
+            Assert.Empty(await store.LoadAllAsync(ct));
+
+            var kept = Rule(null, 22, 0, 2, 0, "America/New_York");
+            await store.InsertAsync(kept);
+            foreach (var zone in new[] { "UTC", "Europe/Kyiv", "Asia/Kolkata", "Etc/GMT+5", "america/chicago" })
+            {
+                Assert.Null(await store.RecurrenceRefusalAsync(Rule(null, 22, 0, 2, 0, zone)));
+            }
+
+            kept.RecurTimeZone = "Mars/Olympus_Mons";
+            var updated = await Assert.ThrowsAsync<ArgumentException>(() => store.UpdateAsync(kept));
+            Assert.Contains("Mars/Olympus_Mons", updated.Message);
+            Assert.Equal("America/New_York", (await store.LoadAllAsync(ct)).Single().RecurTimeZone);
+
+            /* A rule with no schedule has no zone to check, and disabling or deleting a rule never asks. */
+            Assert.Null(await store.RecurrenceRefusalAsync(new MuteRule { Reason = "one off" }));
         });
     }
 
