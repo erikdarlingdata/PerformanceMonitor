@@ -53,12 +53,12 @@ public sealed class ViewerMuteRecurrenceTests
     public void TheDialogFields_BecomeACheckedSchedule_WithTheZoneNormalised()
     {
         var rule = new MuteRule();
-        Assert.Null(MuteRuleEditDialog.ApplySchedule(rule, [DayOfWeek.Saturday, DayOfWeek.Sunday], "22:00", "02:00", " UTC "));
+        Assert.Null(MuteRuleEditDialog.ApplySchedule(rule, [DayOfWeek.Saturday, DayOfWeek.Sunday], "22:00", "02:00", " America/Chicago "));
         Assert.True(rule.IsRecurring);
         Assert.Equal(new TimeOnly(22, 0), rule.RecurStartTime);
         Assert.Equal(new TimeOnly(2, 0), rule.RecurEndTime);
         Assert.Equal(MuteRecurrence.Bit(DayOfWeek.Saturday) | MuteRecurrence.Bit(DayOfWeek.Sunday), rule.RecurDays);
-        Assert.Equal("UTC", rule.RecurTimeZone);
+        Assert.Equal("America/Chicago", rule.RecurTimeZone);
 
         var everyDay = new MuteRule();
         Assert.Null(MuteRuleEditDialog.ApplySchedule(everyDay, [], "01:00", "03:00", ""));
