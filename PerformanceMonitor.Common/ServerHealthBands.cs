@@ -322,9 +322,13 @@ namespace PerformanceMonitor.Common
         public static readonly TimeSpan BlockingRateMinimumWindow = TimeSpan.FromHours(1);
 
         /// <summary>
-        /// WARNING tier of the blocking COUNT arm: blocking WAITS per hour, normalised over the window (#7028;
-        /// the count is the blocked waits the blocking alerts count, not report rows). The tier was measured in
-        /// blocked-process reports below, and a wait is one or more reports, so the same number fires no more often.
+        /// WARNING tier of the blocking COUNT arm, normalised over the window. <b>Unit: Darling reads this as blocked
+        /// WAITS per hour (#7028), the count the blocking alerts use, and Lite reads it as blocked-process REPORTS per
+        /// hour.</b> Lite stays on report rows because #7028 was built for Darling only.
+        /// The tier keeps its stored value, which was measured in reports below. One wait is still one count however
+        /// many reports SQL Server wrote for it. In a window that mixes hours, each hour now takes its own source as the
+        /// alert does, so hours that have only DMV snapshots are no longer dropped and such a window can count more
+        /// waits than the old report count did.
         ///
         /// <para><b>The top of the measured quiet mode.</b> 14 days of <c>blocked_process_reports</c> on
         /// the 43-server dogfood fleet — 2,398 reports over 14,448 server-hours, bucketed one server-hour
@@ -343,7 +347,8 @@ namespace PerformanceMonitor.Common
         public const double BlockingWarnPerHour = 5.0;
 
         /// <summary>
-        /// CRITICAL tier of the blocking COUNT arm: blocking waits per hour (#7028; measured in reports, below).
+        /// CRITICAL tier of the blocking COUNT arm. <b>Unit: blocked WAITS per hour in Darling (#7028), blocked-process
+        /// REPORTS per hour in Lite.</b> The tier keeps its stored value, which was measured in reports, below.
         ///
         /// <para><b>Placed inside the measured trough, the #3368 method.</b> On the same 14-day distribution
         /// the interval [5, 19] holds 14 server-hours (5 at 5–10, 9 at 11–19) against 23 at 20 or more, and
