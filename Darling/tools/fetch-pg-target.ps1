@@ -60,6 +60,35 @@ $targets = @{
         Sha256 = 'A87722E090E2DCDED01C237609E9AD1673A0CA31C90BD766B63A8DFBB666AC47'
         VcRuntime = @('msvcr120.dll')
     }
+    # 13.23 (the last PostgreSQL 13 minor), 318,646,219 bytes, hashed 2026-10-30. 13 and later link the Visual C++
+    # 2015-2022 runtime (vcruntime140), which every supported Windows image and runner carries, so VcRuntime is empty.
+    '13' = @{
+        Version = '13.23'
+        Url = 'https://get.enterprisedb.com/postgresql/postgresql-13.23-1-windows-x64-binaries.zip'
+        Sha256 = 'B669F3E67AE20EA25D79B708E63E9237140775DACEFF092FC58A73206F63C3A7'
+        VcRuntime = @()
+    }
+    # 14.20, 319,602,886 bytes, hashed 2026-10-30.
+    '14' = @{
+        Version = '14.20'
+        Url = 'https://get.enterprisedb.com/postgresql/postgresql-14.20-1-windows-x64-binaries.zip'
+        Sha256 = '405326EFCEEA31E39AF278F327181CD736E5F5D75179416B60506D830407CBCB'
+        VcRuntime = @()
+    }
+    # 16.15, 332,441,502 bytes, hashed 2026-10-30.
+    '16' = @{
+        Version = '16.15'
+        Url = 'https://get.enterprisedb.com/postgresql/postgresql-16.15-1-windows-x64-binaries.zip'
+        Sha256 = '25E6FCDFB8CAEC38691BF461125E7564508760666F7B8E5DC6A5F0818F58F81E'
+        VcRuntime = @()
+    }
+    # 17.11, 340,719,294 bytes, hashed 2026-10-30.
+    '17' = @{
+        Version = '17.11'
+        Url = 'https://get.enterprisedb.com/postgresql/postgresql-17.11-1-windows-x64-binaries.zip'
+        Sha256 = '6EABDF00D2893713B75DB4336A23C3FDF505F056E217EC6E2E95D901750CFEA3'
+        VcRuntime = @()
+    }
 }
 # ----------------------------------------------------------------------------------------------
 

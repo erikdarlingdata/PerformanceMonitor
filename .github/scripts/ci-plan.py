@@ -20,6 +20,7 @@ changed file list. Outputs, as `key=value` lines (stdout, and $GITHUB_OUTPUT whe
   legs_json        [1, 2, ..., N], for the test job's matrix
   actionlint       true when a workflow file changed
   check_web_js     true when a dashboard JavaScript file changed
+  pg_old_targets   true when a pull request changed a file the old-PostgreSQL-target job covers (#6985, PG_OLD_TARGET_PATHS); never on a push, the nightly runs it
   dashboard_tests  true when the build job builds and runs deprecated/Dashboard.Tests (#6955): ci-select.py's build_dashboard_tests
   installer_tests  true when the build job builds and runs deprecated/Installer.Tests (#6955): ci-select.py's build_installer_tests
 
@@ -86,6 +87,14 @@ LITE_FULL_FALLBACK_MINUTES = 28.0
 LITE_READS_FALLBACK_MINUTES = 3.0
 
 WEB_JS_MARKER = "/wwwroot/js/"
+# #6985: the files whose change runs the old-PostgreSQL-target job (every PostgreSQL collector against a real PostgreSQL 10-17).
+PG_OLD_TARGET_PATHS = (
+    "PerformanceMonitor.Collectors/Pg",
+    "PerformanceMonitor.Collectors/CollectorCatalog.cs",
+    "Darling/Darling.Tests/PgCollectorsOnOldTargetsLiveTests.cs",
+    "Darling/tools/fetch-pg-target.ps1",
+    ".github/scripts/start-test-pg.ps1",
+)
 # The test trees a changed class file may sit in for the changed-classes plan (#6734).
 TEST_TREES = {"darling": "Darling/Darling.Tests/", "lite": "Lite.Tests/"}
 
@@ -309,7 +318,7 @@ def plan(event: str, base: str, head_ref: str, draft: bool, labels: "list[str]",
     out = {"run": "true" if outcome == "run" else "false", "outcome": outcome, "why": why,
            "areas": "none", "darling_scope": "none", "lite_scope": "none", "build": "false",
            "darling_classes": "", "lite_classes": "", "test_minutes": "0", "legs": "0", "legs_json": "[]",
-           "actionlint": "false", "check_web_js": "false", "dashboard_tests": "false", "installer_tests": "false"}
+           "actionlint": "false", "check_web_js": "false", "pg_old_targets": "false", "dashboard_tests": "false", "installer_tests": "false"}
     if outcome != "run":
         return out
 
@@ -321,6 +330,7 @@ def plan(event: str, base: str, head_ref: str, draft: bool, labels: "list[str]",
     out["build"] = "false" if c["areas"] == "docs-only" else "true"
     out["actionlint"] = _bool(any(f.startswith(".github/workflows/") for f in files))
     out["check_web_js"] = _bool(any(WEB_JS_MARKER in "/" + f for f in files))
+    out["pg_old_targets"] = _bool(event == "pull_request" and any(f.startswith(PG_OLD_TARGET_PATHS) for f in files))
     # A run that does not narrow (a push, another base, an unknown path) builds both; docs-only builds neither. Otherwise
     # ci-select.py's decide() answers from the same areas the workflow's own filter reads (#6955).
     if "dashboard_tests" in c:

@@ -37,14 +37,15 @@ namespace Darling.Tests;
 /// <c>WritePayload</c> through the store's COPY into the migrated throwaway store, which is <c>DARLING_TEST_PG</c>). A new
 /// collector therefore runs by default and stays out only with a row in <see cref="Excluded"/>. The second pass follows a
 /// write to the target, so the delta path sees rows.</para>
-/// <para>The class FAILS rather than skips when <c>CI</c> is set and an expected target variable is missing: a skipped live
-/// class reads as a pass.</para>
+/// <para>The class FAILS rather than skips when <c>DARLING_TEST_PG_TARGETS_REQUIRED</c> is set and an expected target variable is
+/// missing: a skipped live class reads as a pass. Only the dedicated CI job (pr.yml and nightly.yml, <c>pg-old-targets</c>) sets it.
+/// <c>CI</c> alone is not the trigger: the ordinary test legs also run every class, start no old targets, and must skip here.</para>
 /// </summary>
 [Collection("live-postgres")]
 public sealed class PgCollectorsOnOldTargetsLiveTests(ITestOutputHelper output)
 {
     /// <summary>The majors CI starts as targets. A major added to <c>start-test-pg.ps1 -Majors</c> is added here too.</summary>
-    public static IEnumerable<TheoryDataRow<int>> ExpectedMajors() => new[] { 10 }.Select(major => new TheoryDataRow<int>(major));
+    public static IEnumerable<TheoryDataRow<int>> ExpectedMajors() => new[] { 10, 13, 14, 16, 17 }.Select(major => new TheoryDataRow<int>(major));
 
     /// <summary>
     /// Collectors that do not run against a target started by <c>start-test-pg.ps1</c>, each with the reason. A collector
@@ -59,7 +60,7 @@ public sealed class PgCollectorsOnOldTargetsLiveTests(ITestOutputHelper output)
         ["pg_cpu_utilization"] = "reads RDS Performance Insights through the AWS API, not SQL on the target; a self-hosted host has no such source.",
     };
 
-    private static bool InCi => !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("CI"));
+    private static bool TargetsRequired => !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DARLING_TEST_PG_TARGETS_REQUIRED"));
 
     [Fact]
     public void ExclusionsNameCatalogDefinitions()
@@ -79,9 +80,9 @@ public sealed class PgCollectorsOnOldTargetsLiveTests(ITestOutputHelper output)
         var variable = $"DARLING_TEST_PG_TARGET_{major}";
         var targetConnectionString = Environment.GetEnvironmentVariable(variable);
         var storeConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
-        if (string.IsNullOrEmpty(targetConnectionString) && InCi)
+        if (string.IsNullOrEmpty(targetConnectionString) && TargetsRequired)
         {
-            Assert.Fail($"{variable} is not set in CI: the old-target clusters were not started, so no collector ran against PostgreSQL {major}. Run start-test-pg.ps1 -Mode StartTargets -Majors {major}.");
+            Assert.Fail($"{variable} is not set but DARLING_TEST_PG_TARGETS_REQUIRED is: the old-target clusters were not started, so no collector ran against PostgreSQL {major}. Run start-test-pg.ps1 -Mode StartTargets -Majors {major}.");
         }
 
         Assert.SkipWhen(string.IsNullOrEmpty(targetConnectionString), $"Set {variable} (start-test-pg.ps1 -Mode StartTargets) to run the collectors against a real PostgreSQL {major}.");
