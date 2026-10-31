@@ -1,0 +1,237 @@
+name: Darling Linux store
+
+# #6995: the Darling image run the way a Linux operator runs it, against a store on ANOTHER host. Three field reports in a
+# row (#5479, #6071, #6791) were about code that only runs on Linux, or only with the store off the machine, that no test
+# ever ran: every Darling test class runs on a Windows runner against a PostgreSQL on 127.0.0.1, so the store was always
+# the same machine and the same drive as the code under test. The tests cover the pure decisions with fakes; this workflow
+# runs the real files, the real image and the real network hop.
+#
+#   1. the launch guard's Linux memory reader, in the image under `docker run --memory 512m` (#5479: it read VmData, and
+#      never the container's own limit);
+#   2. the service on a store in its own container whose owner is NOT a superuser (a managed or CloudNativePG-style owner),
+#      with no servers: it must migrate and run its startup retention pass;
+#   3. the store verbs from a second container of the same image: `--backfill-rollups` with no `--free-space` must refuse and
+#      name the way out (#6791: it could not measure the store's volume from another host), `--free-space 41G` must dry-run,
+#      run and then find nothing left to do (#6071: the verb refused to run on Linux at all).
+#
+# Triggers: the nightly (as a reusable workflow), a manual dispatch, and a pull request that touches the files this
+# checks. The pull request workflow (pr.yml) is the one per-PR CI system (#6656); this narrow trigger exists because the
+# Linux image job moved to the release workflow, and these are the only paths that can break what this proves.
+# Never add `pull_request_target`: the job runs the checked-out Dockerfile and must not get a write token or secrets.
+on:
+  workflow_call:
+  workflow_dispatch:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - '.github/workflows/darling-linux-store.yml'
+      - 'Darling/Dockerfile'
+      - 'Darling/PerformanceMonitor.Darling.Service/LaunchMemoryGuard.cs'
+      - 'Darling/PerformanceMonitor.Darling.Service/DarlingLaunchMemorySelfCheck.cs'
+      - 'Darling/PerformanceMonitor.Darling.Service/DarlingCliCommands.cs'
+      - 'Darling/PerformanceMonitor.Darling.Service/DarlingStoreHostProfile.cs'
+
+permissions:
+  contents: read
+
+# The store the service talks to: the same image family and the same worker and preload settings as
+# Darling/compose/docker-compose.yml, pinned to a tag so a new TimescaleDB release cannot turn this red on its own.
+env:
+  STORE_IMAGE: timescale/timescaledb:2.31.0-pg17
+  DARLING_IMAGE: performancemonitor-darling:pr
+
+concurrency:
+  group: darling-linux-store-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-store:
+    name: Darling Linux store
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Build container image
+        timeout-minutes: 12
+        run: docker build -f Darling/Dockerfile -t "${DARLING_IMAGE}" .
+
+      # #5479: the guard's reader on the real /proc and cgroup files. `--memory 512m` makes the limit the cgroup's; the verb
+      # fails unless the guard measures resident memory and reads 512 MiB as its limit (cgroup v2 on ubuntu-latest).
+      - name: Check the launch memory guard under a 512 MiB container limit
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --memory 512m "${DARLING_IMAGE}" --self-check-launch-memory 512
+
+      - name: Start the store (a TimescaleDB container with a non-superuser owner)
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          owner_password="$(openssl rand -hex 16)"
+          admin_password="$(openssl rand -hex 16)"
+          echo "::add-mask::${owner_password}"
+          echo "::add-mask::${admin_password}"
+          echo "DARLING_STORE_CONNECTION=Host=store;Port=5432;Username=darling_owner;Password=${owner_password};Database=darling" >> "$GITHUB_ENV"
+          echo "DARLING_STORE_ADMIN_PASSWORD=${admin_password}" >> "$GITHUB_ENV"
+
+          docker network create darling-store-net
+          docker run -d --name store --network darling-store-net \
+            -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD="${admin_password}" \
+            "${STORE_IMAGE}" \
+            postgres -c shared_preload_libraries=timescaledb,pg_stat_statements -c pg_stat_statements.track_utility=off \
+              -c timescaledb.max_background_workers=74 -c max_worker_processes=85 -c work_mem=16MB
+
+          # The image starts a temporary server on the socket only, runs its init scripts, and starts the real one. A
+          # pg_isready over TCP answers only from the real one, so wait for the init line first and then for TCP.
+          ready=0
+          for _ in $(seq 1 60); do
+            if docker logs store 2>&1 | grep -q 'PostgreSQL init process complete' \
+              && docker exec store pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1; then
+              ready=1
+              break
+            fi
+            sleep 2
+          done
+          if [ "${ready}" != 1 ]; then
+            echo "::error::The store did not become ready in 120 seconds."
+            docker logs store 2>&1 | tail -n 40
+            exit 1
+          fi
+
+          # The owner a managed Postgres hands an application: it owns its database and is not a superuser, so it cannot read
+          # data_directory and cannot create an extension that is not trusted. The image already put timescaledb in template1.
+          docker exec -i store psql -h 127.0.0.1 -U postgres -v ON_ERROR_STOP=1 <<SQL
+          CREATE ROLE darling_owner LOGIN PASSWORD '${owner_password}' NOSUPERUSER NOCREATEDB NOCREATEROLE;
+          CREATE DATABASE darling OWNER darling_owner;
+          SQL
+          docker exec store psql -h 127.0.0.1 -U postgres -d darling -At \
+            -c "select 'owner is superuser: ' || rolsuper from pg_roles where rolname = 'darling_owner'" \
+            -c "select 'extension: ' || extname || ' ' || extversion from pg_extension where extname = 'timescaledb'"
+
+      # First check (#6995): as that owner, with no servers, the service must migrate and run the startup retention pass.
+      - name: Start the service against the store
+        timeout-minutes: 6
+        shell: bash
+        run: |
+          set -euo pipefail
+          config_dir="${RUNNER_TEMP}/darling-linux-store"
+          mkdir -p "${config_dir}"
+          cat > "${config_dir}/darling.json" <<'JSON'
+          {
+            "postgres": { "managed": false, "connectionString": "env:DARLING_STORE_CONNECTION" },
+            "servers": [],
+            "web": { "enabled": false },
+            "mcp": { "enabled": false }
+          }
+          JSON
+          echo "DARLING_CONFIG_DIR=${config_dir}" >> "$GITHUB_ENV"
+
+          docker run -d --name darling --network darling-store-net \
+            -e DARLING_STORE_CONNECTION \
+            -v "${config_dir}/darling.json:/config/darling.json:ro" \
+            "${DARLING_IMAGE}"
+
+          # A log-grep wait with a cap: both lines come from the service's startup, in this order.
+          for _ in $(seq 1 90); do
+            if docker logs darling 2>&1 | grep -q 'Retention evaluation at startup'; then
+              docker logs darling 2>&1 | grep -E 'Postgres store ready|Retention evaluation at startup|TimescaleDB:'
+              exit 0
+            fi
+            if [ "$(docker inspect -f '{{.State.Running}}' darling)" != "true" ]; then
+              echo "::error::The service stopped before its startup retention pass."
+              docker logs darling 2>&1 | tail -n 60
+              exit 1
+            fi
+            sleep 2
+          done
+          echo "::error::The service did not log its startup retention pass in 180 seconds."
+          docker logs darling 2>&1 | tail -n 60
+          exit 1
+
+      # A rollup short of its source: raw query_stats rows 9 to 12 days old, written straight into the raw table, so no
+      # refresh covers them (the INSERT of RollupBackfillLiveTests.SeedHourlyQueryStatsAsync, over a fixed window). The
+      # verb returns early on a store with nothing to back fill, so without this the free-space step would never run.
+      - name: Seed one rollup that is short of its source
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker exec -i store psql -h 127.0.0.1 -U postgres -d darling -v ON_ERROR_STOP=1 <<'SQL'
+          INSERT INTO collect.query_stats
+              (collection_id, collection_time, server_id, server_name, database_name, query_hash, sql_handle,
+               delta_worker_time, delta_elapsed_time, delta_execution_count)
+          SELECT (extract(epoch FROM g)::bigint * 100 + q), g, 1, 'linux-store-smoke', 'TestDb',
+                 decode(md5('q' || q::text), 'hex'), decode(md5('handle' || q::text), 'hex'), 1000, 2000, 10
+          FROM generate_series(date_trunc('hour', now() AT TIME ZONE 'utc') - INTERVAL '12 days',
+                               date_trunc('hour', now() AT TIME ZONE 'utc') - INTERVAL '9 days',
+                               INTERVAL '1 hour') AS g
+          CROSS JOIN generate_series(1, 5) AS q;
+          SQL
+
+      # #6071 and #6791: the verbs run from a SECOND container, so the store is on another host and the owner has no
+      # superuser. Each run prints its whole output; the checks below read it.
+      - name: Run the store verbs from another container
+        timeout-minutes: 6
+        shell: bash
+        run: |
+          set -uo pipefail
+          verb() {
+            # docker run --rm of the image on the store's network: the same config, no service running in it.
+            docker run --rm --network darling-store-net -e DARLING_STORE_CONNECTION \
+              -v "${DARLING_CONFIG_DIR}/darling.json:/config/darling.json:ro" \
+              "${DARLING_IMAGE}" "$@" 2>&1
+          }
+          fail=0
+          check() { # check <name> <expected exit> <actual exit> <output> <required text>...
+            local name="$1" want="$2" got="$3" out="$4"
+            shift 4
+            echo "::group::${name} (exit ${got})"
+            echo "${out}"
+            echo "::endgroup::"
+            if [ "${got}" != "${want}" ]; then
+              echo "::error::${name}: expected exit ${want}, got ${got}."
+              fail=1
+            fi
+            for text in "$@"; do
+              if ! grep -qF -- "${text}" <<<"${out}"; then
+                echo "::error::${name}: the output does not contain: ${text}"
+                fail=1
+              fi
+            done
+          }
+
+          out="$(verb --backfill-rollups --dry-run)"; code=$?
+          check "backfill dry run without --free-space" 1 "${code}" "${out}" "REFUSING" "--free-space"
+
+          out="$(verb --backfill-rollups --free-space 41G --dry-run)"; code=$?
+          check "backfill dry run with --free-space 41G" 0 "${code}" "${out}" \
+            "The free space above came from --free-space; it was not measured." \
+            "--dry-run: nothing was materialized"
+
+          out="$(verb --backfill-rollups --free-space 41G)"; code=$?
+          check "backfill with --free-space 41G" 0 "${code}" "${out}" \
+            "The free space above came from --free-space; it was not measured."
+
+          out="$(verb --backfill-rollups --free-space 41G --dry-run)"; code=$?
+          check "second backfill dry run" 0 "${code}" "${out}" "Every rollup already covers its own source"
+
+          exit "${fail}"
+
+      - name: Show the logs and remove the containers
+        if: always()
+        shell: bash
+        run: |
+          echo "::group::service log"
+          docker logs darling 2>&1 | tail -n 200 || true
+          echo "::endgroup::"
+          echo "::group::store log"
+          docker logs store 2>&1 | tail -n 100 || true
+          echo "::endgroup::"
+          docker rm -f darling store >/dev/null 2>&1 || true
+          docker network rm darling-store-net >/dev/null 2>&1 || true

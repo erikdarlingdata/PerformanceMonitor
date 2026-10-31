@@ -277,6 +277,12 @@ public static partial class DarlingCliCommands
     public static bool IsSelfCheckPasswordKeyVerb(string arg) =>
         string.Equals(arg, "--self-check-password-key", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>The hidden verb <see cref="DarlingLaunchMemorySelfCheck"/> handles: <c>--self-check-launch-memory [&lt;expected-limit-mib&gt;]</c>
+    /// samples the Linux launch guard's reader once and fails unless it reads resident memory against the cgroup limit (#6995).
+    /// It is not in <see cref="UsageText"/>: the container smoke runs it, an operator has no use for it.</summary>
+    public static bool IsSelfCheckLaunchMemoryVerb(string arg) =>
+        string.Equals(arg, "--self-check-launch-memory", StringComparison.OrdinalIgnoreCase);
+
     /// <summary>The text <c>--reset-password-key</c> prints when the key was marked replaced. <paramref name="sealedPasswords"/>
     /// is how many saved passwords are sealed to the old key and must be entered again.</summary>
     public static string ResetPasswordKeyRestartSentence(int sealedPasswords) =>
@@ -409,7 +415,8 @@ public static partial class DarlingCliCommands
         || IsDropXeSessionsVerb(arg)
         || IsGrantScriptVerb(arg)
         || IsResetPasswordKeyVerb(arg)
-        || IsSelfCheckPasswordKeyVerb(arg);
+        || IsSelfCheckPasswordKeyVerb(arg)
+        || IsSelfCheckLaunchMemoryVerb(arg);
 
     /// <summary>
     /// Classifies the exe's command line from its FIRST argument (#1581): no args → run the host; a recognized
