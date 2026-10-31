@@ -138,6 +138,31 @@ INSERT INTO collect.procedure_stats
 VALUES ($1, $2, $3, $4, 'TenantDb00', 'dbo', 'usp_Seeded', '0xEF01', 500000, 600000, 5, 300)", -698500 - (++rawId), at, ServerId, ServerName);
             }
 
+            /* #7010: memory grants, client timeouts (attention events), and the two Query Store capture tables (forced plans, hints), a few rows
+               each from LogFloorBack on. The two capture tables get the marker row a capture writes (the database and no plan or hint), so
+               their reads answer "captured, nothing forced or hinted" over rows that start there, not the no-capture answer of an empty table. */
+            long grantId = 0;
+            foreach (var back in new[] { LogFloorBack, TimeSpan.FromDays(2), TimeSpan.FromDays(1), TimeSpan.FromMinutes(40), TimeSpan.FromMinutes(5) })
+            {
+                var at = DarlingMcpTestData.Naive(now - back);
+                await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO collect.memory_grant_stats
+    (collection_id, collection_time, server_id, server_name, resource_semaphore_id, pool_id, available_memory_mb, granted_memory_mb, waiter_count)
+VALUES ($1, $2, $3, $4, 0, 1, 2048, 512, 0)", -698600 - (++grantId), at, ServerId, ServerName);
+                await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO collect.attention_events
+    (attention_event_id, collection_time, server_id, server_name, event_kind, attention_count)
+VALUES ($1, $2, $3, $4, 'count', 3)", -698600 - (++grantId), at, ServerId, ServerName);
+                await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO collect.query_store_forced_plans
+    (collection_id, collection_time, server_id, server_name, database_name)
+VALUES ($1, $2, $3, $4, 'TenantDb00')", -698600 - (++grantId), at, ServerId, ServerName);
+                await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO collect.query_store_hints
+    (collection_id, collection_time, server_id, server_name, database_name)
+VALUES ($1, $2, $3, $4, 'TenantDb00')", -698600 - (++grantId), at, ServerId, ServerName);
+            }
+
             /* The collection log: every SQL Server collector from LogFloorBack on; the Query Store collector also ran 30 days back, long
                before the raw rows that are left (retention dropped them). */
             var collectors = CollectorCatalog.All.Where(d => d.TargetEngine == CollectorTargetEngine.SqlServer).Select(d => d.Name).ToArray();
@@ -212,18 +237,14 @@ public sealed class McpWindowMatrixLiveTests : IClassFixture<McpWindowMatrixStor
         ["get_alert_history"] = NoNotice,
         ["get_analysis_facts"] = NoNotice,
         ["get_analysis_findings"] = NoNotice,
-        ["get_client_timeouts"] = NoNotice,
         /* #7010: not a data window by design. One server: "always 7 days" of collector health read from the collection log (hours_back is ignored). Fleet mode (server_name "*") takes hours_back, but only to read one collector's liveness per server, not a windowed row set. */
         ["get_collection_health"] = NoNotice,
-        ["get_cpu_by_database"] = NoNotice,
         ["get_cpu_scheduler_pressure"] = SnapshotSearch,
         ["get_database_protection"] = NoNotice,
         ["get_finops"] = NoNotice,
         ["get_fleet_overview"] = NoNotice,
-        ["get_forced_plans"] = NoNotice,
         ["get_identity_capacity"] = NoNotice,
         ["get_investigation_reports"] = NoNotice,
-        ["get_memory_grants"] = NoNotice,
         ["get_pg_autovacuum_health"] = NoNotice,
         ["get_pg_blocking"] = NoNotice,
         ["get_pg_buffer_usage"] = NoNotice,
@@ -246,8 +267,6 @@ public sealed class McpWindowMatrixLiveTests : IClassFixture<McpWindowMatrixStor
         ["get_plan_cache_bloat"] = SnapshotSearch,
         ["get_plan_force_precheck"] = NoNotice,
         ["get_query_store_clutter"] = NoNotice,
-        ["get_query_store_hints"] = NoNotice,
-        ["get_resource_semaphore"] = NoNotice,
         ["get_resource_use_by_tag"] = NoNotice,
         ["get_server_trend"] = NoNotice,
         ["get_store_log"] = NoNotice,

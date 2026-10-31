@@ -39,6 +39,17 @@ public sealed class DarlingMcpForcedPlanTools
     /// <summary>The most other plans one force lists (the busiest first).</summary>
     internal const int MaxOtherPlans = 5;
 
+    /// <summary>
+    /// #7010: the window-floor notice of one of the two raw capture tables over [<paramref name="start"/>, <paramref name="end"/>]. Both reads
+    /// take the newest capture of each database IN the window, so hours_back is a data window and a window past the store's data is cut.
+    /// A failed probe answers <see cref="McpWindowNotice.Unavailable"/>, which costs the notice and never the rows.
+    /// </summary>
+    private static Task<McpWindowNotice> NoticeAsync(
+        NpgsqlDataSource postgres, string serverName, string table, DateTime start, DateTime end, bool emptyAnswer, CancellationToken cancellationToken) =>
+        DarlingMcpWindowNotice.ReadAsync(
+            () => DarlingMcpWindowNotice.Probe(postgres, table, serverName, start, end, cancellationToken),
+            start, end, table, emptyAnswer: emptyAnswer, cancellationToken: cancellationToken);
+
     internal static string StateName(ForcedPlanState state) => state switch
     {
         ForcedPlanState.Failing => "FAILING",
@@ -135,16 +146,24 @@ public sealed class DarlingMcpForcedPlanTools
             {
                 /* #6753: no capture in the window is "could have it, does not now" (unavailable), as get_query_store_hints says for
                    the same state. Query Store OFF or in ERROR in every database in scope is a setup step, so it answers precondition. */
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "query_store_forced_plans", cancellationToken)
-                    ?? await DarlingRuntimePrecondition.QueryStoreStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, databases, cancellationToken)
-                    ?? McpHelpers.Status("unavailable",
-                        $"No forced-plan capture{where} in the {hours_back}-hour window ending {Format(windowEnd)}. Either the query_store_forced_plans collector has not run in it, " +
-                        "or Query Store is off, in error or a readable secondary in every database (such a database writes no capture).");
+                var unmet = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "query_store_forced_plans", cancellationToken)
+                    ?? await DarlingRuntimePrecondition.QueryStoreStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, databases, cancellationToken);
+                if (unmet is not null) return unmet;
+
+                /* #7010: the two answers above carry no notice (they say their own cause); this one is a window with no capture in it, which is
+                   not a true negative when the store does not reach back to it. */
+                var noCapture = await NoticeAsync(postgres, resolved.ServerName, "query_store_forced_plans", start, windowEnd, emptyAnswer: true, cancellationToken);
+                return DarlingMcpWindowNotice.FinishEmpty(McpHelpers.Status("unavailable",
+                    $"No forced-plan capture{where} in the {hours_back}-hour window ending {Format(windowEnd)}. Either the query_store_forced_plans collector has not run in it, " +
+                    "or Query Store is off, in error or a readable secondary in every database (such a database writes no capture).", noCapture.AsHints()), noCapture);
             }
+
+            /* #7010: a capture exists in the window, so the table holds rows; the notice says where its coverage of the window starts. */
+            var notice = await NoticeAsync(postgres, resolved.ServerName, "query_store_forced_plans", start, windowEnd, emptyAnswer: false, cancellationToken);
 
             if (read.Plans.Count == 0)
             {
-                return JsonSerializer.Serialize(new Dictionary<string, object?>
+                return DarlingMcpWindowNotice.FinishEmpty(JsonSerializer.Serialize(new Dictionary<string, object?>
                 {
                     ["server"] = resolved.DisplayName,
                     ["status"] = "empty",
@@ -153,8 +172,9 @@ public sealed class DarlingMcpForcedPlanTools
                         : $"No plan is forced{where} in the newest capture of each database in the window. Captured databases are listed.",
                     ["as_of"] = Format(windowEnd),
                     ["hours_back"] = hours_back,
+                    ["hints"] = notice.AsHints(),
                     ["captures"] = read.Captures.Select(CaptureNode),
-                }, McpHelpers.JsonOptions);
+                }, McpHelpers.JsonOptions), notice);
             }
 
             var ordered = read.Plans
@@ -177,11 +197,14 @@ public sealed class DarlingMcpForcedPlanTools
             if (readCapped)
                 pageNote = (pageNote is null ? "" : pageNote + " ") +
                     $"The read holds at most {DarlingForcedPlanStateReader.MaxForces} forces, failing ones first, and the window has more: the rest are not listed or counted. Filter by database_name, query_id or plan_id to reach them.";
-            return JsonSerializer.Serialize(new Dictionary<string, object?>
+            return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new Dictionary<string, object?>
             {
                 ["server"] = resolved.DisplayName,
                 ["as_of"] = Format(windowEnd),
                 ["hours_back"] = hours_back,
+                ["effective_start"] = notice.EffectiveStart,
+                ["window_truncated"] = notice.WindowTruncated,
+                ["truncation_note"] = notice.TruncationNote,
                 ["total_forces"] = ordered.Count,
                 ["state_counts"] = ordered.GroupBy(p => StateName(p.State)).OrderBy(g => g.Key, StringComparer.Ordinal).ToDictionary(g => g.Key, g => g.Count()),
                 ["matched_forces"] = matched.Count,
@@ -198,7 +221,7 @@ public sealed class DarlingMcpForcedPlanTools
                 ["note"] = FirstSeenNote + (read.StatsComplete
                     ? ""
                     : " The stored Query Store runs start after the oldest first_seen here (or are absent), so NOT_EXERCISED and WORKING say what the store holds, not what the server ran."),
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions), notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -260,16 +283,22 @@ public sealed class DarlingMcpForcedPlanTools
             var where = scope is null ? "" : $" for {(databases.Names.Count == 1 ? "database '" + scope + "'" : scope)}";
             if (read.Captures.Count == 0)
             {
-                return await HintsNotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, cancellationToken)
-                    ?? await DarlingRuntimePrecondition.QueryStoreStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, databases, cancellationToken)
-                    ?? McpHelpers.Status("unavailable",
-                        $"No Query Store hint capture{where} in the {hours_back}-hour window ending {Format(windowEnd)}. Either the query_store_hints collector has not run in it, " +
-                        "or Query Store is off, in error or a readable secondary in every database (such a database writes no capture).");
+                var unmet = await HintsNotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, cancellationToken)
+                    ?? await DarlingRuntimePrecondition.QueryStoreStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, databases, cancellationToken);
+                if (unmet is not null) return unmet;
+
+                /* #7010: as get_forced_plans: the two answers above carry no notice, a window with no capture in it does. */
+                var noCapture = await NoticeAsync(postgres, resolved.ServerName, "query_store_hints", start, windowEnd, emptyAnswer: true, cancellationToken);
+                return DarlingMcpWindowNotice.FinishEmpty(McpHelpers.Status("unavailable",
+                    $"No Query Store hint capture{where} in the {hours_back}-hour window ending {Format(windowEnd)}. Either the query_store_hints collector has not run in it, " +
+                    "or Query Store is off, in error or a readable secondary in every database (such a database writes no capture).", noCapture.AsHints()), noCapture);
             }
+
+            var notice = await NoticeAsync(postgres, resolved.ServerName, "query_store_hints", start, windowEnd, emptyAnswer: false, cancellationToken);
 
             if (read.Hints.Count == 0)
             {
-                return JsonSerializer.Serialize(new Dictionary<string, object?>
+                return DarlingMcpWindowNotice.FinishEmpty(JsonSerializer.Serialize(new Dictionary<string, object?>
                 {
                     ["server"] = resolved.DisplayName,
                     ["status"] = "empty",
@@ -278,8 +307,9 @@ public sealed class DarlingMcpForcedPlanTools
                         : $"No Query Store hint is in place{where} in the newest capture of each database in the window. Captured databases are listed.",
                     ["as_of"] = Format(windowEnd),
                     ["hours_back"] = hours_back,
+                    ["hints"] = notice.AsHints(),
                     ["captures"] = read.Captures.Select(HintCaptureNode),
-                }, McpHelpers.JsonOptions);
+                }, McpHelpers.JsonOptions), notice);
             }
 
             var listed = read.Hints.Skip(offset).Take(limit).ToList();
@@ -295,11 +325,14 @@ public sealed class DarlingMcpForcedPlanTools
             if (readCapped)
                 pageNote = (pageNote is null ? "" : pageNote + " ") +
                     $"The read holds at most {DarlingQueryStoreHintReader.MaxHints} hints, failing ones first, and this answer has {read.TotalHints}: the last {read.TotalHints - read.Hints.Count} (healthy ones, since failing hints sort first) are not listed. Filter by database_name or query_id to reach them.";
-            return JsonSerializer.Serialize(new Dictionary<string, object?>
+            return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new Dictionary<string, object?>
             {
                 ["server"] = resolved.DisplayName,
                 ["as_of"] = Format(windowEnd),
                 ["hours_back"] = hours_back,
+                ["effective_start"] = notice.EffectiveStart,
+                ["window_truncated"] = notice.WindowTruncated,
+                ["truncation_note"] = notice.TruncationNote,
                 ["total_hints"] = read.TotalHints,
                 ["failing_hints"] = read.FailingHints,
                 ["hints_returned"] = read.Hints.Count,
@@ -313,7 +346,7 @@ public sealed class DarlingMcpForcedPlanTools
                 ["page_note"] = pageNote,
                 ["captures"] = read.Captures.Select(HintCaptureNode),
                 ["note"] = "first_seen is the first capture in the window that shows the hint. Query Store keeps no set time, so the real one can be up to one collector pass earlier (5 minutes by default).",
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions), notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
