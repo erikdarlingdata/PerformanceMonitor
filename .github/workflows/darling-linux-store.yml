@@ -77,7 +77,7 @@ jobs:
           admin_password="$(openssl rand -hex 16)"
           echo "::add-mask::${owner_password}"
           echo "::add-mask::${admin_password}"
-          echo "DARLING_STORE_CONNECTION=Host=store;Port=5432;Username=darling_owner;Password=${owner_password};Database=darling" >> "$GITHUB_ENV"
+          echo "DARLING_STORE_CONNECTION=Host=store;Port=5432;Username=darling;Password=${owner_password};Database=darling" >> "$GITHUB_ENV"
           echo "DARLING_STORE_ADMIN_PASSWORD=${admin_password}" >> "$GITHUB_ENV"
 
           docker network create darling-store-net
@@ -104,14 +104,15 @@ jobs:
             exit 1
           fi
 
-          # The owner a managed Postgres hands an application: it owns its database and is not a superuser, so it cannot read
+          # The owner a managed Postgres hands an application: it owns its database and is not a superuser (named darling,
+          # because the V8 migration hardcodes "AUTHORIZATION darling": any other owner name fails to migrate, #6995), so it cannot read
           # data_directory and cannot create an extension that is not trusted. The image already put timescaledb in template1.
           docker exec -i store psql -h 127.0.0.1 -U postgres -v ON_ERROR_STOP=1 <<SQL
-          CREATE ROLE darling_owner LOGIN PASSWORD '${owner_password}' NOSUPERUSER NOCREATEDB NOCREATEROLE;
-          CREATE DATABASE darling OWNER darling_owner;
+          CREATE ROLE darling LOGIN PASSWORD '${owner_password}' NOSUPERUSER NOCREATEDB NOCREATEROLE;
+          CREATE DATABASE darling OWNER darling;
           SQL
           docker exec store psql -h 127.0.0.1 -U postgres -d darling -At \
-            -c "select 'owner is superuser: ' || rolsuper from pg_roles where rolname = 'darling_owner'" \
+            -c "select 'owner is superuser: ' || rolsuper from pg_roles where rolname = 'darling'" \
             -c "select 'extension: ' || extname || ' ' || extversion from pg_extension where extname = 'timescaledb'"
 
       # First check (#6995): as that owner, with no servers, the service must migrate and run the startup retention pass.
