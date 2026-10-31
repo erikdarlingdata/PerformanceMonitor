@@ -19,9 +19,10 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// <summary>
 /// Who made an MCP request (#6542): the name of the named token it presented (null for the legacy single token) and the tool
 /// policy that token's role is served. The bearer gate sets it on the request; the tool set, the Level 2 gate, the investigation
-/// reads and the route tools read it from there.
+/// reads and the route tools read it from there. <see cref="DataDetail"/> is the level the token's own <c>dataDetail</c> asks for (#7023),
+/// null when the entry sets none and for the legacy token; <see cref="DarlingMcpTokenSet.DetailFor"/> turns it into the level served.
 /// </summary>
-internal sealed record McpCaller(string? Name, DarlingMcpWritePolicy.Effective Policy);
+internal sealed record McpCaller(string? Name, DarlingMcpWritePolicy.Effective Policy, McpDataDetail? DataDetail = null);
 
 /// <summary>
 /// The bearer tokens one MCP start serves (#6542): the legacy single token (<c>mcp.network.token</c> or <c>encryptedToken</c>), whose
@@ -34,7 +35,7 @@ internal sealed class DarlingMcpTokenSet
     internal const string CallerKey = "darling.mcp.caller";
 
     /// <summary>One usable named token.</summary>
-    internal sealed record Entry(string Name, string Token, string Role);
+    internal sealed record Entry(string Name, string Token, string Role, McpDataDetail? DataDetail = null);
 
     internal DarlingMcpTokenSet(string legacyToken, DarlingMcpWritePolicy.Effective legacyPolicy, IReadOnlyList<Entry> named, bool serverAdmin)
     {
@@ -56,9 +57,9 @@ internal sealed class DarlingMcpTokenSet
     internal IReadOnlyList<Entry> Named { get; }
 
     /// <summary>The names of the served named tokens that hold the agent role (#6542): each is an agent's identity in the journal, so a
-    /// legacy-token call may not claim under one of them.</summary>
+    /// legacy-token call may not claim under one of them. An operator and a reader (#7023) are not agents and have no such identity.</summary>
     internal IReadOnlySet<string> AgentNames =>
-        Named.Where(e => !string.Equals(e.Role, McpTokenEntry.OperatorRole, StringComparison.Ordinal))
+        Named.Where(e => string.Equals(e.Role, McpTokenEntry.AgentRole, StringComparison.Ordinal))
             .Select(e => e.Name).ToHashSet(StringComparer.Ordinal);
 
     /// <summary>True when at least one named token is served, so each request's tool set follows its token.</summary>
@@ -69,11 +70,36 @@ internal sealed class DarlingMcpTokenSet
 
     /// <summary>The policy a named token's role is served: an operator gets the reads and the writes (the server admin tools only when
     /// <c>mcp.allowWrites</c> AND <c>mcp.allowServerAdmin</c> are both on, the one rule <see cref="DarlingMcpWritePolicy.Resolve"/> applies) and never the investigation tools; an agent gets the reads, the investigation tools and the Level 2
-    /// action tools, never a write in <see cref="DarlingMcpWritePolicy.NeverAgentTools"/>.</summary>
-    internal DarlingMcpWritePolicy.Effective PolicyFor(Entry entry) =>
-        string.Equals(entry.Role, McpTokenEntry.OperatorRole, StringComparison.Ordinal)
-            ? new DarlingMcpWritePolicy.Effective(true, _serverAdmin, false, entry.Name)
-            : new DarlingMcpWritePolicy.Effective(false, false, true, entry.Name);
+    /// action tools, never a write in <see cref="DarlingMcpWritePolicy.NeverAgentTools"/>; a reader (#7023) gets the reads and nothing else: no
+    /// write, no server admin, no investigation tool and so no Level 2 action, and no setting widens it.</summary>
+    internal DarlingMcpWritePolicy.Effective PolicyFor(Entry entry) => entry.Role switch
+    {
+        McpTokenEntry.OperatorRole => new DarlingMcpWritePolicy.Effective(true, _serverAdmin, false, entry.Name),
+        McpTokenEntry.AgentRole => new DarlingMcpWritePolicy.Effective(false, false, true, entry.Name),
+        _ => new DarlingMcpWritePolicy.Effective(false, false, false, entry.Name),
+    };
+
+    /// <summary>The level a call is served (#7023): the service's <c>mcp.dataDetail</c>, or the caller's own <c>dataDetail</c> when that is
+    /// stricter (full, then maskLiterals, then metadataOnly). A token can narrow the service's level, never widen it. No matched caller (stdio,
+    /// the legacy token, a test) keeps the service's level.</summary>
+    internal static McpDataDetail DetailFor(McpDataDetail service, McpCaller? caller) =>
+        caller?.DataDetail is { } own && own > service ? own : service;
+
+    /// <summary>The header a front door (and any other client) sends to ask a store for less detail on its connection (#7023): a level
+    /// word, <c>maskLiterals</c> or <c>metadataOnly</c>.</summary>
+    internal const string DataDetailHeader = "X-Darling-Data-Detail";
+
+    /// <summary>The level a call is served when the request also carries <see cref="DataDetailHeader"/> (#7023): the stricter of
+    /// <see cref="DetailFor(McpDataDetail, McpCaller?)"/> and the header's level. The header can only narrow. A missing, blank or
+    /// unrecognized value narrows nothing, so no value can serve a caller more than its own token and the service allow, and nothing about
+    /// the header needs trusting.</summary>
+    internal static McpDataDetail DetailFor(McpDataDetail service, McpCaller? caller, string? narrowingHeader)
+    {
+        var level = DetailFor(service, caller);
+        return !string.IsNullOrWhiteSpace(narrowingHeader) && McpDataDetailModes.TryParse(narrowingHeader, out var asked) && asked > level
+            ? asked
+            : level;
+    }
 
     /// <summary>Every tool any served token may see: the collection the host narrows once at start. Each request is then narrowed again
     /// to its own token's set.</summary>
@@ -120,7 +146,7 @@ internal sealed class DarlingMcpTokenSet
             var same = Compare(presented, entry.Token);
             if (same && found is null)
             {
-                found = new McpCaller(entry.Name, PolicyFor(entry));
+                found = new McpCaller(entry.Name, PolicyFor(entry), entry.DataDetail);
             }
         }
 
@@ -151,7 +177,8 @@ internal sealed class DarlingMcpTokenSet
     /// at Warning, every other sentence at Critical.</summary>
     internal const string LegacyBesideNamedAdvice =
         "mcp.tokens and the legacy mcp.network token are both set. The legacy token keeps the role mcp.allowWrites and " +
-        "mcp.allowInvestigations give it; give it a name and a role in mcp.tokens and remove it from mcp.network instead.";
+        "mcp.allowInvestigations give it; give it a name and a role in mcp.tokens (reader for a token that only reads) and remove it from " +
+        "mcp.network instead.";
 
     /// <summary>
     /// What is wrong with <c>mcp.tokens</c>, one sentence per problem, never a token value (#6542). <paramref name="resolve"/> reads
@@ -200,10 +227,23 @@ internal sealed class DarlingMcpTokenSet
 
             label += " (" + entry.Name + ")";
             var role = (entry.Role ?? "").Trim().ToLowerInvariant();
-            if (role is not (McpTokenEntry.OperatorRole or McpTokenEntry.AgentRole))
+            if (role is not (McpTokenEntry.OperatorRole or McpTokenEntry.AgentRole or McpTokenEntry.ReaderRole))
             {
-                problems.Add(label + " has no valid role: the role is operator or agent. The token is not served.");
+                problems.Add(label + " has no valid role: the role is operator, agent or reader. The token is not served.");
                 continue;
+            }
+
+            /* #7023: a dataDetail that is not a level is never served at a wider level than was asked, so the entry is left out. */
+            McpDataDetail? ownDetail = null;
+            if (entry.DataDetail is not null)
+            {
+                if (!McpDataDetailModes.TryParse(entry.DataDetail, out var parsed))
+                {
+                    problems.Add("mcp.tokens[" + entry.Name + "].dataDetail is not a level: it is full, maskLiterals or metadataOnly. The token is not served.");
+                    continue;
+                }
+
+                ownDetail = parsed;
             }
 
             var (token, unreadable) = resolve(entry);
@@ -219,7 +259,7 @@ internal sealed class DarlingMcpTokenSet
                 continue;
             }
 
-            candidates.Add(new Entry(entry.Name!, token, role));
+            candidates.Add(new Entry(entry.Name!, token, role, ownDetail));
         }
 
         var duplicateNames = candidates.GroupBy(c => c.Name, StringComparer.Ordinal).Where(g => g.Count() > 1).Select(g => g.Key).ToHashSet(StringComparer.Ordinal);
