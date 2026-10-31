@@ -1414,6 +1414,44 @@ AND   volume_total_mb > 0
 GROUP BY volume_mount_point
 ORDER BY MIN(volume_free_mb) / MAX(volume_total_mb)";
 
+    /// <summary>
+    /// #7017: <see cref="VolumeFreeSpaceSql"/> bounded below by <c>collection_time</c> $2, a value a previous read of the same
+    /// server returned (<see cref="NewestRowFloor"/>), never a clock, so a server whose newest snapshot is old (or that has none)
+    /// does not open every chunk between that snapshot and now on each pass. The bound sits on the newest-snapshot subquery AND
+    /// the outer filter. Same rows, same order.
+    /// </summary>
+    public const string VolumeFreeSpaceSinceSql = @"
+SELECT
+    volume_mount_point,
+    MAX(volume_total_mb) AS volume_total_mb,
+    MIN(volume_free_mb) AS volume_free_mb,
+    MAX(collection_time) AS newest_collection_time
+FROM database_size_stats
+WHERE server_id = $1
+AND   collection_time >= $2
+AND   collection_time = (
+    SELECT MAX(collection_time)
+    FROM database_size_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+)
+AND   volume_mount_point IS NOT NULL
+AND   volume_total_mb > 0
+GROUP BY volume_mount_point
+ORDER BY MIN(volume_free_mb) / MAX(volume_total_mb)";
+
+    /// <summary>Where each server's next volume free-space read starts (#7017).</summary>
+    private readonly NewestRowFloor _volumeFloor = new();
+
+    /// <summary>Adds the floor as the statement's $2: a typed naive timestamp, the column's own type.</summary>
+    private static void AddFloorParameter(NpgsqlCommand command, DateTime? since)
+    {
+        if (since is { } floor)
+        {
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = floor });
+        }
+    }
+
     public Task<List<VolumeFreeSpaceInfo>> GetVolumeFreeSpaceAsync(
         string serverKey, CancellationToken cancellationToken = default)
     {
@@ -1437,21 +1475,36 @@ ORDER BY MIN(volume_free_mb) / MAX(volume_total_mb)";
 
         var items = new List<VolumeFreeSpaceInfo>();
         await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
-        using var command = new NpgsqlCommand(VolumeFreeSpaceSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds };
-        command.Parameters.AddWithValue(serverId);
-
-        using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
+        /* #7017: the shared floor loop (see GetTempDbSpaceCoreAsync). Every row of one read carries the newest snapshot's instant,
+           so the floor is the newest one seen. A bounded read that finds nothing asks again without a bound. */
+        await _volumeFloor.ReadAsync(serverId, async since =>
         {
-            items.Add(new VolumeFreeSpaceInfo
+            items.Clear();
+            DateTime? newest = null;
+            using var command = new NpgsqlCommand(since is null ? VolumeFreeSpaceSql : VolumeFreeSpaceSinceSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds };
+            command.Parameters.AddWithValue(serverId);
+            AddFloorParameter(command, since);
+
+            using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
             {
-                MountPoint = reader.IsDBNull(0) ? "" : reader.GetString(0),
-                TotalMb = reader.IsDBNull(1) ? 0 : ToDouble(reader.GetValue(1)),
-                FreeMb = reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2)),
-                /* #5642: the newest snapshot's instant (naive UTC in the store). */
-                NewestSampleUtc = reader.IsDBNull(3) ? null : DateTime.SpecifyKind(reader.GetDateTime(3), DateTimeKind.Utc)
-            });
-        }
+                var item = new VolumeFreeSpaceInfo
+                {
+                    MountPoint = reader.IsDBNull(0) ? "" : reader.GetString(0),
+                    TotalMb = reader.IsDBNull(1) ? 0 : ToDouble(reader.GetValue(1)),
+                    FreeMb = reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2)),
+                    /* #5642: the newest snapshot's instant (naive UTC in the store). */
+                    NewestSampleUtc = reader.IsDBNull(3) ? null : DateTime.SpecifyKind(reader.GetDateTime(3), DateTimeKind.Utc)
+                };
+                items.Add(item);
+                if (item.NewestSampleUtc is { } sampled && (newest is null || sampled > newest))
+                {
+                    newest = sampled;
+                }
+            }
+
+            return newest;
+        });
 
         return items;
     }
@@ -1488,6 +1541,40 @@ ORDER BY
          THEN persistent_version_store_size_mb / database_data_size_mb
          ELSE 0 END DESC";
 
+    /// <summary>
+    /// #7017: <see cref="PvsPressureSql"/> bounded below by <c>collection_time</c> $2, a value a previous read of the same server
+    /// returned (<see cref="NewestRowFloor"/>), never a clock. The bound sits on the newest-snapshot subquery AND the outer
+    /// filter. Same rows, same order.
+    /// </summary>
+    public const string PvsPressureSinceSql = @"
+SELECT
+    database_name,
+    persistent_version_store_size_mb,
+    database_data_size_mb,
+    current_aborted_transaction_count,
+    oldest_active_transaction_id,
+    oldest_aborted_transaction_id,
+    aborted_version_cleaner_start_time,
+    aborted_version_cleaner_end_time,
+    collection_time
+FROM pvs_stats
+WHERE server_id = $1
+AND   collection_time >= $2
+AND   collection_time = (
+    SELECT MAX(collection_time)
+    FROM pvs_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+)
+AND   is_accelerated_database_recovery_on
+ORDER BY
+    CASE WHEN database_data_size_mb > 0
+         THEN persistent_version_store_size_mb / database_data_size_mb
+         ELSE 0 END DESC";
+
+    /// <summary>Where each server's next PVS pressure read starts (#7017).</summary>
+    private readonly NewestRowFloor _pvsFloor = new();
+
     public Task<List<PvsPressureInfo>> GetPvsPressureAsync(
         string serverKey, CancellationToken cancellationToken = default)
     {
@@ -1511,26 +1598,42 @@ ORDER BY
 
         var items = new List<PvsPressureInfo>();
         await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
-        using var command = new NpgsqlCommand(PvsPressureSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds };
-        command.Parameters.AddWithValue(serverId);
-
-        using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
+        /* #7017: the shared floor loop (see GetTempDbSpaceCoreAsync). Every row of one read carries the newest snapshot's instant,
+           so the floor is the newest one seen. A snapshot with no ADR-on database returns no row, which the floor treats as an
+           empty read: the unbounded read it falls back to returns no row either, so the result is the same. */
+        await _pvsFloor.ReadAsync(serverId, async since =>
         {
-            items.Add(new PvsPressureInfo
+            items.Clear();
+            DateTime? newest = null;
+            using var command = new NpgsqlCommand(since is null ? PvsPressureSql : PvsPressureSinceSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds };
+            command.Parameters.AddWithValue(serverId);
+            AddFloorParameter(command, since);
+
+            using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
             {
-                DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
-                PvsSizeMb = reader.IsDBNull(1) ? 0 : ToDouble(reader.GetValue(1)),
-                DatabaseDataSizeMb = reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2)),
-                CurrentAbortedTransactionCount = reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
-                OldestActiveTransactionId = reader.IsDBNull(4) ? 0 : reader.GetInt64(4),
-                OldestAbortedTransactionId = reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
-                /* MS's documented shape for "cleanup is ongoing": a start time with no end time. */
-                AbortedCleanupOngoing = !reader.IsDBNull(6) && reader.IsDBNull(7),
-                /* #5642: the newest snapshot's instant (naive UTC in the store). */
-                NewestSampleUtc = reader.IsDBNull(8) ? null : DateTime.SpecifyKind(reader.GetDateTime(8), DateTimeKind.Utc)
-            });
-        }
+                var item = new PvsPressureInfo
+                {
+                    DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
+                    PvsSizeMb = reader.IsDBNull(1) ? 0 : ToDouble(reader.GetValue(1)),
+                    DatabaseDataSizeMb = reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2)),
+                    CurrentAbortedTransactionCount = reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
+                    OldestActiveTransactionId = reader.IsDBNull(4) ? 0 : reader.GetInt64(4),
+                    OldestAbortedTransactionId = reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
+                    /* MS's documented shape for "cleanup is ongoing": a start time with no end time. */
+                    AbortedCleanupOngoing = !reader.IsDBNull(6) && reader.IsDBNull(7),
+                    /* #5642: the newest snapshot's instant (naive UTC in the store). */
+                    NewestSampleUtc = reader.IsDBNull(8) ? null : DateTime.SpecifyKind(reader.GetDateTime(8), DateTimeKind.Utc)
+                };
+                items.Add(item);
+                if (item.NewestSampleUtc is { } sampled && (newest is null || sampled > newest))
+                {
+                    newest = sampled;
+                }
+            }
+
+            return newest;
+        });
 
         return items;
     }
@@ -1926,22 +2029,69 @@ previous AS (
     SELECT ds.database_name, CASE WHEN ds.is_in_standby THEN 'STANDBY' ELSE ds.state_desc END AS eff
     FROM database_states ds
     WHERE ds.server_id = $1 AND ds.collection_time = (SELECT t FROM prev)
+),{DatabaseStateDeviationsTail}";
+
+    /// <summary>
+    /// #7017: <see cref="DatabaseStateDeviationsSql"/> bounded below by <c>collection_time</c> $2. The floor is the PREVIOUS
+    /// collection's time (<see cref="NewestRowFloor"/>), one collection back from the newest, never the newest itself: the
+    /// two-sample rule reads the newest collection AND the one before it, so a floor at the newest row would hide the row that
+    /// holds the previous state and turn every deviation into "no deviation". With the floor at the previous collection both
+    /// samples stay visible whether or not a new collection arrived since the last read: a new one makes the old newest the
+    /// previous, which is above the floor, and none leaves the same pair. Same rows, same order.
+    /// </summary>
+    public const string DatabaseStateDeviationsSinceSql = $@"
+WITH newest AS (
+    SELECT MAX(collection_time) AS t FROM database_states WHERE server_id = $1 AND collection_time >= $2
+),
+prev AS (
+    SELECT MAX(collection_time) AS t FROM database_states
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < (SELECT t FROM newest)
+),
+latest AS (
+    SELECT ds.database_name, CASE WHEN ds.is_in_standby THEN 'STANDBY' ELSE ds.state_desc END AS eff
+    FROM database_states ds
+    WHERE ds.server_id = $1 AND ds.collection_time >= $2 AND ds.collection_time = (SELECT t FROM newest)
+),
+previous AS (
+    SELECT ds.database_name, CASE WHEN ds.is_in_standby THEN 'STANDBY' ELSE ds.state_desc END AS eff
+    FROM database_states ds
+    WHERE ds.server_id = $1 AND ds.collection_time >= $2 AND ds.collection_time = (SELECT t FROM prev)
+),{DatabaseStateDeviationsTail}";
+
+    /// <summary>
+    /// The deviation rows and the final select the two reads above share. #7017: the read now ALWAYS returns at least one row
+    /// (a row whose <c>database_name</c> is NULL when nothing deviates), carrying the previous and newest collection times, because
+    /// the floor for the next read comes from those times and a tick with no deviation, the usual one, would otherwise leave it
+    /// nothing to take a floor from. A deviation row never has a NULL name (the join on the name drops those), so the reader treats
+    /// a NULL name as "no deviation" and skips it.
+    /// </summary>
+    private const string DatabaseStateDeviationsTail = $@"
+dev AS (
+    SELECT l.database_name, l.eff,
+           COALESCE(e.expected_state, '') AS expected_state,
+           COALESCE(e.last_alerted_state, '') AS last_alerted_state
+    FROM latest l
+    JOIN previous p
+      ON p.database_name = l.database_name
+    LEFT JOIN config.database_state_expected e
+      ON  e.server_id = $1
+      AND e.database_name = l.database_name
+    WHERE (e.expected_state IS NULL
+            AND l.eff IN ({DatabaseStateTokens.CriticalSqlList})
+            AND p.eff IN ({DatabaseStateTokens.CriticalSqlList}))
+       OR (e.expected_state IS NOT NULL AND e.expected_state <> '(ignore)'
+            AND l.eff IS DISTINCT FROM e.expected_state
+            AND p.eff IS DISTINCT FROM e.expected_state)
 )
-SELECT l.database_name, l.eff, COALESCE(e.expected_state, ''), COALESCE(e.last_alerted_state, ''),
+SELECT d.database_name, d.eff, d.expected_state, d.last_alerted_state,
+       (SELECT t FROM prev) AS previous_collection_time,
        (SELECT t FROM newest) AS newest_collection_time
-FROM latest l
-JOIN previous p
-  ON p.database_name = l.database_name
-LEFT JOIN config.database_state_expected e
-  ON  e.server_id = $1
-  AND e.database_name = l.database_name
-WHERE (e.expected_state IS NULL
-        AND l.eff IN ({DatabaseStateTokens.CriticalSqlList})
-        AND p.eff IN ({DatabaseStateTokens.CriticalSqlList}))
-   OR (e.expected_state IS NOT NULL AND e.expected_state <> '(ignore)'
-        AND l.eff IS DISTINCT FROM e.expected_state
-        AND p.eff IS DISTINCT FROM e.expected_state)
-ORDER BY l.database_name";
+FROM (SELECT 1) AS one
+LEFT JOIN dev AS d ON true
+ORDER BY d.database_name";
+
+    /// <summary>Where each server's next database-state read starts (#7017): the previous collection, not the newest.</summary>
+    private readonly NewestRowFloor _databaseStateFloor = new();
 
     public Task<List<DatabaseStateInfo>> GetDatabaseStatesAsync(
         string serverKey, CancellationToken cancellationToken = default)
@@ -2022,23 +2172,43 @@ ORDER BY l.database_name";
             }
         }, serverId, _logger);
 
-        using (var command = new NpgsqlCommand(DatabaseStateDeviationsSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds })
+        /* #7017: the shared floor loop (see GetTempDbSpaceCoreAsync), with the floor one collection back: the previous
+           collection's time, or the newest's when there is only one. The read returns a row even when nothing deviates, carrying
+           both times, and returns none only when the store has no collection at or above the bound (the floor row is gone, or
+           the server has no rows), which the loop answers with an unbounded read. */
+        await _databaseStateFloor.ReadAsync(serverId, async since =>
         {
+            items.Clear();
+            DateTime? previousCollection = null;
+            DateTime? newestCollection = null;
+            using var command = new NpgsqlCommand(since is null ? DatabaseStateDeviationsSql : DatabaseStateDeviationsSinceSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds };
             command.Parameters.AddWithValue(serverId);
+            AddFloorParameter(command, since);
+
             using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
+                previousCollection = reader.IsDBNull(4) ? null : reader.GetDateTime(4);
+                newestCollection = reader.IsDBNull(5) ? null : reader.GetDateTime(5);
+                if (reader.IsDBNull(0))
+                {
+                    /* The row that carries the times when nothing deviates. */
+                    continue;
+                }
+
                 items.Add(new DatabaseStateInfo
                 {
-                    DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
+                    DatabaseName = reader.GetString(0),
                     StateDesc = reader.IsDBNull(1) ? "" : reader.GetString(1),
                     ExpectedState = reader.IsDBNull(2) ? "" : reader.GetString(2),
                     LastAlertedState = reader.IsDBNull(3) ? "" : reader.GetString(3),
                     /* #5642: the newest collection both samples of the two-sample rule end at (naive UTC). */
-                    NewestSampleUtc = reader.IsDBNull(4) ? null : DateTime.SpecifyKind(reader.GetDateTime(4), DateTimeKind.Utc)
+                    NewestSampleUtc = reader.IsDBNull(5) ? null : DateTime.SpecifyKind(reader.GetDateTime(5), DateTimeKind.Utc)
                 });
             }
-        }
+
+            return previousCollection ?? newestCollection;
+        });
 
         return items;
     }
