@@ -1874,6 +1874,31 @@ LIMIT 5";
 
     /* ---------------- database state (baseline deviation) ---------------- */
 
+    /// <summary>The newest database_states collection of the server ($1), as the four upkeep statements below read it.</summary>
+    private const string NewestDatabaseStateTime = "(SELECT MAX(collection_time) FROM database_states WHERE server_id = $1)";
+
+    /// <summary>
+    /// #7017: <see cref="NewestDatabaseStateTime"/> bounded below by <c>collection_time</c> $2. The four upkeep statements (seed,
+    /// heal, prune, clear-recovered) read only the newest collection, and the bound is the database-state floor
+    /// (<see cref="NewestRowFloor"/>): the previous collection's time or earlier, never after the newest row, so the lookup returns
+    /// the same row while TimescaleDB leaves out the chunks older than the floor. Without it the seed alone cost about 29 s of
+    /// database time a day on a production store (147,522 calls). Each <c>...SinceSql</c> below is its unbounded statement with this
+    /// one fragment swapped in, so the two cannot drift.
+    /// </summary>
+    private const string NewestDatabaseStateTimeSince = "(SELECT MAX(collection_time) FROM database_states WHERE server_id = $1 AND collection_time >= $2)";
+
+    /// <summary>The seed with the newest-collection lookup bounded by $2 (#7017). Same rows as <see cref="SeedDatabaseStateExpectedSql"/>.</summary>
+    public static readonly string SeedDatabaseStateExpectedSinceSql = SeedDatabaseStateExpectedSql.Replace(NewestDatabaseStateTime, NewestDatabaseStateTimeSince, StringComparison.Ordinal);
+
+    /// <summary>The heal with the newest-collection lookup bounded by $2 (#7017). Same rows as <see cref="HealDatabaseStateBaselineToOnlineSql"/>.</summary>
+    public static readonly string HealDatabaseStateBaselineToOnlineSinceSql = HealDatabaseStateBaselineToOnlineSql.Replace(NewestDatabaseStateTime, NewestDatabaseStateTimeSince, StringComparison.Ordinal);
+
+    /// <summary>The prune with the newest-collection lookup bounded by $2 (#7017). Same rows as <see cref="PruneDatabaseStateExpectedSql"/>.</summary>
+    public static readonly string PruneDatabaseStateExpectedSinceSql = PruneDatabaseStateExpectedSql.Replace(NewestDatabaseStateTime, NewestDatabaseStateTimeSince, StringComparison.Ordinal);
+
+    /// <summary>The clear-recovered with the newest-collection lookup bounded by $2 (#7017). Same rows as <see cref="ClearRecoveredDatabaseStateAlertsSql"/>.</summary>
+    public static readonly string ClearRecoveredDatabaseStateAlertsSinceSql = ClearRecoveredDatabaseStateAlertsSql.Replace(NewestDatabaseStateTime, NewestDatabaseStateTimeSince, StringComparison.Ordinal);
+
     /// <summary>
     /// Seeds a first-observation baseline for any database in the latest snapshot that has none
     /// (insert-if-absent; never overwrites an existing baseline or user override). A first observation in
@@ -1889,7 +1914,7 @@ INSERT INTO config.database_state_expected (server_id, database_name, expected_s
 SELECT $1, ds.database_name, CASE WHEN ds.is_in_standby THEN 'STANDBY' ELSE ds.state_desc END, false, (now() AT TIME ZONE 'UTC')
 FROM database_states ds
 WHERE ds.server_id = $1
-AND   ds.collection_time = (SELECT MAX(collection_time) FROM database_states WHERE server_id = $1)
+AND   ds.collection_time = {NewestDatabaseStateTime}
 AND   ds.state_desc IS NOT NULL
 AND   (CASE WHEN ds.is_in_standby THEN 'STANDBY' ELSE ds.state_desc END) NOT IN ({DatabaseStateTokens.NeverBaselinedSqlList})
 ON CONFLICT (server_id, database_name) DO NOTHING";
@@ -1947,7 +1972,7 @@ AND   EXISTS (
     SELECT 1
     FROM database_states ds
     WHERE ds.server_id = $1
-    AND   ds.collection_time = (SELECT MAX(collection_time) FROM database_states WHERE server_id = $1)
+    AND   ds.collection_time = {NewestDatabaseStateTime}
     AND   ds.database_name = e.database_name
     AND   (CASE WHEN ds.is_in_standby THEN 'STANDBY' ELSE ds.state_desc END) = 'ONLINE'
 )";
@@ -1956,14 +1981,14 @@ AND   EXISTS (
     /// Tidies auto-baselines for databases no longer in the newest snapshot (dropped/renamed); user
     /// overrides are kept. $1 server_id.
     /// </summary>
-    public const string PruneDatabaseStateExpectedSql = @"
+    public const string PruneDatabaseStateExpectedSql = $@"
 DELETE FROM config.database_state_expected e
 WHERE e.server_id = $1
 AND   e.is_user_override = false
 AND   NOT EXISTS (
     SELECT 1 FROM database_states ds
     WHERE ds.server_id = $1
-    AND   ds.collection_time = (SELECT MAX(collection_time) FROM database_states WHERE server_id = $1)
+    AND   ds.collection_time = {NewestDatabaseStateTime}
     AND   ds.database_name = e.database_name
 )";
 
@@ -1987,7 +2012,7 @@ AND   NOT EXISTS (
     /// "(ignore)" sentinel clears too — an operator silencing a database should not leave a memory behind
     /// that outlives the silence. $1 server_id.</para>
     /// </summary>
-    public const string ClearRecoveredDatabaseStateAlertsSql = @"
+    public const string ClearRecoveredDatabaseStateAlertsSql = $@"
 UPDATE config.database_state_expected e
 SET last_alerted_state = NULL,
     last_alerted_at = NULL
@@ -1998,7 +2023,7 @@ AND   (e.expected_state = '(ignore)'
            SELECT 1
            FROM database_states ds
            WHERE ds.server_id = $1
-           AND   ds.collection_time = (SELECT MAX(collection_time) FROM database_states WHERE server_id = $1)
+           AND   ds.collection_time = {NewestDatabaseStateTime}
            AND   ds.database_name = e.database_name
            AND   (CASE WHEN ds.is_in_standby THEN 'STANDBY' ELSE ds.state_desc END) = e.expected_state
        ))";
@@ -2137,11 +2162,17 @@ ORDER BY d.database_name";
            of this exact deadlock. Repeat-safety here: the seed is INSERT ... ON CONFLICT DO NOTHING; the
            heal and prune are an UPDATE/DELETE keyed off the newest snapshot, each idempotent against its own
            output; clear-recovered is an UPDATE to a fixed NULL. */
+        /* #7017: the four statements read only the newest collection, so each takes the database-state floor as a lower bound on
+           that lookup when there is one (the floor is the previous collection's time or earlier, so the lookup returns the same
+           row). Read once for the sequence and only READ: settling the floor stays with the deviation read below, which is what
+           knows what the store holds. A retry of the sequence reuses the same bound, which is still at or before the newest row. */
+        var maintenanceSince = _databaseStateFloor.SinceFor(serverId);
         await ExecuteDatabaseStateMaintenanceWithDeadlockRetryAsync(async () =>
         {
-            using (var seed = new NpgsqlCommand(SeedDatabaseStateExpectedSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds })
+            using (var seed = new NpgsqlCommand(maintenanceSince is null ? SeedDatabaseStateExpectedSql : SeedDatabaseStateExpectedSinceSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds })
             {
                 seed.Parameters.AddWithValue(serverId);
+                AddFloorParameter(seed, maintenanceSince);
                 await seed.ExecuteNonQueryAsync(cancellationToken);
             }
 
@@ -2149,15 +2180,17 @@ ORDER BY d.database_name";
                baseline for a database that has none, this un-learns one the database has since outgrown.
                Both run before the read, so a poisoned expectation is corrected on the cycle that notices it
                rather than firing once more first. */
-            using (var heal = new NpgsqlCommand(HealDatabaseStateBaselineToOnlineSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds })
+            using (var heal = new NpgsqlCommand(maintenanceSince is null ? HealDatabaseStateBaselineToOnlineSql : HealDatabaseStateBaselineToOnlineSinceSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds })
             {
                 heal.Parameters.AddWithValue(serverId);
+                AddFloorParameter(heal, maintenanceSince);
                 await heal.ExecuteNonQueryAsync(cancellationToken);
             }
 
-            using (var prune = new NpgsqlCommand(PruneDatabaseStateExpectedSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds })
+            using (var prune = new NpgsqlCommand(maintenanceSince is null ? PruneDatabaseStateExpectedSql : PruneDatabaseStateExpectedSinceSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds })
             {
                 prune.Parameters.AddWithValue(serverId);
+                AddFloorParameter(prune, maintenanceSince);
                 await prune.ExecuteNonQueryAsync(cancellationToken);
             }
 
@@ -2165,9 +2198,10 @@ ORDER BY d.database_name";
                than one carried over from a restart (#2166). A database cleared here is one that is back at
                its expected state, so it cannot appear in the deviation read below either way — the
                ordering matters for the NEXT deviation, not this one. */
-            using (var clearRecovered = new NpgsqlCommand(ClearRecoveredDatabaseStateAlertsSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds })
+            using (var clearRecovered = new NpgsqlCommand(maintenanceSince is null ? ClearRecoveredDatabaseStateAlertsSql : ClearRecoveredDatabaseStateAlertsSinceSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds })
             {
                 clearRecovered.Parameters.AddWithValue(serverId);
+                AddFloorParameter(clearRecovered, maintenanceSince);
                 await clearRecovered.ExecuteNonQueryAsync(cancellationToken);
             }
         }, serverId, _logger);

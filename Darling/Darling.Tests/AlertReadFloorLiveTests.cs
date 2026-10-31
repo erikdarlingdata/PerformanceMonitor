@@ -7,10 +7,13 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -338,6 +341,229 @@ VALUES ($1, $2, $3, 'sentinel', 'AG1', $4, 'NODE2', $5, false)",
         }
 
         return rows;
+    }
+
+    /// <summary>The database-state deviation read as the unbounded statement returns it: the deviation rows only.</summary>
+    private static async Task<List<string>> UnboundedDeviationsAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        using var command = new NpgsqlCommand(DarlingAlertReadAdapter.DatabaseStateDeviationsSql, connection) { CommandTimeout = LiveTimeoutSeconds };
+        command.Parameters.AddWithValue(States);
+        using var reader = await command.ExecuteReaderAsync(ct);
+        var rows = new List<string>();
+        while (await reader.ReadAsync(ct))
+        {
+            if (!reader.IsDBNull(0))
+            {
+                rows.Add(string.Create(CultureInfo.InvariantCulture, $"{reader.GetString(0)}|{reader.GetString(1)}|{reader.GetString(2)}"));
+            }
+        }
+
+        return rows;
+    }
+
+    private static List<string> Describe(List<DatabaseStateInfo> items) =>
+        items.Select(i => string.Create(CultureInfo.InvariantCulture, $"{i.DatabaseName}|{i.StateDesc}|{i.ExpectedState}")).ToList();
+
+    /// <summary>
+    /// #7017: the read always returns a row that carries the previous and newest collection times, so a tick with no deviation still
+    /// leaves a floor taken from a row (the previous collection). Without that row the floor falls back to the one-hour empty-read
+    /// floor, and for a collector whose last two collections are more than an hour old that floor hides the previous collection: the
+    /// next tick finds one collection above the bound and reports no deviation where the unbounded read reports one. Every other test
+    /// here seeds collections within the hour, which the empty-read floor still reaches, so none of them covers this tail.
+    /// </summary>
+    [Fact]
+    public async Task DatabaseStateRead_NoDeviationTick_LeavesAFloorFromARow_SoAStaleCollectorKeepsItsPreviousCollection()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        using var connection = (await OpenAsync(connectionString, ct))!;
+        await using var dataSource = NpgsqlDataSource.Create(connectionString!);
+        var adapter = new DarlingAlertReadAdapter(dataSource);
+        var bodySucceeded = false;
+        try
+        {
+            var now = Now();
+            var a = now.AddHours(-3);
+            var b = now.AddHours(-2);
+
+            /* A: healthy. B: the same database in a critical state. Nothing deviates, the rule needs both samples critical. */
+            await InsertStateAsync(connection, a, "Payments", "ONLINE", ct);
+            await InsertStateAsync(connection, b, "Payments", "SUSPECT", ct);
+
+            Assert.Empty(await adapter.GetDatabaseStatesAsync(Key(States), ct));
+            Assert.Empty(await UnboundedDeviationsAsync(connection, ct));
+
+            /* C arrives with the database still critical: B and C are both critical, so the deviation exists, and it needs B as the
+               previous collection. A floor from the empty-read slack (one hour before the first read) would start above B. */
+            var c = now;
+            await InsertStateAsync(connection, c, "Payments", "SUSPECT", ct);
+
+            var unbounded = await UnboundedDeviationsAsync(connection, ct);
+            Assert.Single(unbounded);
+            var second = await adapter.GetDatabaseStatesAsync(Key(States), ct);
+            Assert.Equal(unbounded, Describe(second));
+            Assert.Equal(Utc(c), Assert.Single(second).NewestSampleUtc);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, (c, token) => DeleteSentinelsAsync(c, token));
+        }
+    }
+
+    /// <summary>Puts the upkeep scenario's baselines back: one row per case the four statements treat differently.</summary>
+    private static async Task SeedUpkeepBaselinesAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        await ExecAsync(connection, "DELETE FROM config.database_state_expected WHERE server_id = $1", ct, States);
+        await ExecAsync(connection, @"
+INSERT INTO config.database_state_expected (server_id, database_name, expected_state, is_user_override, updated_at, last_alerted_state, last_alerted_at)
+VALUES ($1, 'HealDb',     'RESTORING', false, now() AT TIME ZONE 'UTC', 'SUSPECT', now() AT TIME ZONE 'UTC'),
+       ($1, 'ClearDb',    'ONLINE',    false, now() AT TIME ZONE 'UTC', 'SUSPECT', now() AT TIME ZONE 'UTC'),
+       ($1, 'KeepDb',     'ONLINE',    false, now() AT TIME ZONE 'UTC', 'SUSPECT', now() AT TIME ZONE 'UTC'),
+       ($1, 'DroppedDb',  'ONLINE',    false, now() AT TIME ZONE 'UTC', NULL, NULL),
+       ($1, 'OverrideDb', 'OFFLINE',   true,  now() AT TIME ZONE 'UTC', NULL, NULL)",
+            ct, States);
+    }
+
+    /// <summary>The baselines as a comparable string, without the timestamps the statements stamp with the clock.</summary>
+    private static async Task<string> SnapshotBaselinesAsync(NpgsqlConnection connection, NpgsqlTransaction? transaction, CancellationToken ct)
+    {
+        using var command = new NpgsqlCommand(@"
+SELECT database_name, expected_state, is_user_override, COALESCE(last_alerted_state, '')
+FROM config.database_state_expected WHERE server_id = $1 ORDER BY database_name", connection, transaction) { CommandTimeout = LiveTimeoutSeconds };
+        command.Parameters.AddWithValue(States);
+        using var reader = await command.ExecuteReaderAsync(ct);
+        var rows = new List<string>();
+        while (await reader.ReadAsync(ct))
+        {
+            rows.Add(string.Create(CultureInfo.InvariantCulture, $"{reader.GetString(0)}={reader.GetString(1)}/{reader.GetBoolean(2)}/{reader.GetString(3)}"));
+        }
+
+        return string.Join(", ", rows);
+    }
+
+    /// <summary>Runs one statement on the seeded baselines inside a transaction, returns the baselines it leaves, and rolls back.</summary>
+    private static async Task<string> RunUpkeepAsync(NpgsqlConnection connection, string sql, DateTime? floor, CancellationToken ct)
+    {
+        await using var transaction = await connection.BeginTransactionAsync(ct);
+        using (var command = new NpgsqlCommand(sql, connection, transaction) { CommandTimeout = LiveTimeoutSeconds })
+        {
+            command.Parameters.AddWithValue(States);
+            if (floor is { } at)
+            {
+                command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(at, DateTimeKind.Unspecified) });
+            }
+
+            await command.ExecuteNonQueryAsync(ct);
+        }
+
+        var after = await SnapshotBaselinesAsync(connection, transaction, ct);
+        await transaction.RollbackAsync(ct);
+        return after;
+    }
+
+    /// <summary>
+    /// #7017: the seed, heal, prune and clear-recovered statements read only the newest collection, and each is bounded by the
+    /// database-state floor. For each: the bounded statement leaves the baselines exactly as the unbounded one does, with the floor at
+    /// the previous collection and at an older one, and the unbounded statement did change something (the scenario is not vacuous).
+    /// A database seen only in older collections is not seeded, and one missing from the newest collection is pruned, either way.
+    /// Then the adapter itself, tick by tick: the first tick has no floor and runs the statements as they were, the second runs
+    /// them bounded after a new collection arrives, and both leave the baselines the four unbounded statements leave.
+    /// </summary>
+    [Fact]
+    public async Task DatabaseStateUpkeep_BoundedByTheFloor_DoesTheSameWorkAsTheUnboundedStatements()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        using var connection = (await OpenAsync(connectionString, ct))!;
+        await using var dataSource = NpgsqlDataSource.Create(connectionString!);
+        var adapter = new DarlingAlertReadAdapter(dataSource);
+        var bodySucceeded = false;
+        try
+        {
+            var now = Now();
+            var t0 = now.AddMinutes(-20);
+            var t1 = now.AddMinutes(-10);
+            var t2 = now.AddMinutes(-5);
+
+            /* Older collections: DroppedDb, OverrideDb and OldOnlyDb are there, but not in the newest one. */
+            foreach (var at in new[] { t0, t1 })
+            {
+                await InsertStateAsync(connection, at, "DroppedDb", "ONLINE", ct);
+                await InsertStateAsync(connection, at, "OverrideDb", "ONLINE", ct);
+                await InsertStateAsync(connection, at, "OldOnlyDb", "ONLINE", ct);
+                await InsertStateAsync(connection, at, "HealDb", "RESTORING", ct);
+            }
+
+            /* The newest collection: HealDb is ONLINE (heal), ClearDb sits at its baseline (clear), KeepDb is still SUSPECT (its
+               alerted memory stays), NewDb has no baseline (seed). */
+            await InsertNewestAsync(connection, t2, ct);
+
+            await SeedUpkeepBaselinesAsync(connection, ct);
+            var initial = await SnapshotBaselinesAsync(connection, null, ct);
+
+            var statements = new (string Name, string Unbounded, string Bounded)[]
+            {
+                ("seed", DarlingAlertReadAdapter.SeedDatabaseStateExpectedSql, DarlingAlertReadAdapter.SeedDatabaseStateExpectedSinceSql),
+                ("heal", DarlingAlertReadAdapter.HealDatabaseStateBaselineToOnlineSql, DarlingAlertReadAdapter.HealDatabaseStateBaselineToOnlineSinceSql),
+                ("prune", DarlingAlertReadAdapter.PruneDatabaseStateExpectedSql, DarlingAlertReadAdapter.PruneDatabaseStateExpectedSinceSql),
+                ("clear", DarlingAlertReadAdapter.ClearRecoveredDatabaseStateAlertsSql, DarlingAlertReadAdapter.ClearRecoveredDatabaseStateAlertsSinceSql)
+            };
+
+            foreach (var (name, unbounded, bounded) in statements)
+            {
+                var expected = await RunUpkeepAsync(connection, unbounded, null, ct);
+                Assert.True(expected != initial, $"the {name} statement changed nothing, so the scenario proves nothing for it");
+                Assert.Equal(expected, await RunUpkeepAsync(connection, bounded, t1, ct));
+                Assert.Equal(expected, await RunUpkeepAsync(connection, bounded, t0, ct));
+            }
+
+            /* The four in the adapter's order, unbounded: what each adapter tick must leave. */
+            string afterAll;
+            await using (var transaction = await connection.BeginTransactionAsync(ct))
+            {
+                foreach (var (_, unbounded, _) in statements)
+                {
+                    using var command = new NpgsqlCommand(unbounded, connection, transaction) { CommandTimeout = LiveTimeoutSeconds };
+                    command.Parameters.AddWithValue(States);
+                    await command.ExecuteNonQueryAsync(ct);
+                }
+
+                afterAll = await SnapshotBaselinesAsync(connection, transaction, ct);
+                await transaction.RollbackAsync(ct);
+            }
+
+            Assert.Contains("NewDb=ONLINE/False/", afterAll, StringComparison.Ordinal);
+            Assert.Contains("KeepDb=ONLINE/False/SUSPECT", afterAll, StringComparison.Ordinal);
+            Assert.DoesNotContain("OldOnlyDb", afterAll, StringComparison.Ordinal);
+            Assert.DoesNotContain("DroppedDb", afterAll, StringComparison.Ordinal);
+            Assert.Contains("OverrideDb=OFFLINE/True/", afterAll, StringComparison.Ordinal);
+
+            /* Tick one: no floor yet. */
+            await adapter.GetDatabaseStatesAsync(Key(States), ct);
+            Assert.Equal(afterAll, await SnapshotBaselinesAsync(connection, null, ct));
+
+            /* A new collection arrives and the baselines are put back: tick two runs the statements bounded by the floor tick one left. */
+            await InsertNewestAsync(connection, now, ct);
+            await SeedUpkeepBaselinesAsync(connection, ct);
+            await adapter.GetDatabaseStatesAsync(Key(States), ct);
+            Assert.Equal(afterAll, await SnapshotBaselinesAsync(connection, null, ct));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, (c, token) => DeleteSentinelsAsync(c, token));
+        }
+    }
+
+    private static async Task InsertNewestAsync(NpgsqlConnection connection, DateTime at, CancellationToken ct)
+    {
+        await InsertStateAsync(connection, at, "HealDb", "ONLINE", ct);
+        await InsertStateAsync(connection, at, "ClearDb", "ONLINE", ct);
+        await InsertStateAsync(connection, at, "KeepDb", "SUSPECT", ct);
+        await InsertStateAsync(connection, at, "NewDb", "ONLINE", ct);
     }
 
     [Fact]
