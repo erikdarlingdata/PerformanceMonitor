@@ -250,13 +250,20 @@ compression AS (
     /// insert grows with the chunk count (0.7 s on day 1 to 3.3 s on day 9 of a 2.4 GB store). This form sizes:
     /// <list type="bullet">
     /// <item>the root, and every chunk that is NOT compressed (it has no <c>after_compression_total_bytes</c> in
-    /// <c>chunk_compression_stats</c>), with <c>pg_total_relation_size</c>; on a product store that is about two
-    /// chunks per hypertable (<c>TimescaleSupport.CompressAfterDays</c> is 1);</item>
+    /// <c>chunk_compression_stats</c>); on a product store that is about two chunks per hypertable
+    /// (<c>TimescaleSupport.CompressAfterDays</c> is 1). #6971: these are summed from <c>pg_class.relpages</c> times the
+    /// block size over the relation, its TOAST table and every index of either, the population
+    /// <c>pg_total_relation_size</c> adds up, so the sweep makes no file call at all. The call it replaces cost 3 to 5 ms
+    /// per chunk on Windows (a stat of every fork of every index), 0.4 to 0.8 s for 120 uncompressed chunks and 111
+    /// roots on the rig, and was the one cost of this form that still grew with the chunk and index count. relpages
+    /// is what the last VACUUM, ANALYZE or index build recorded, so a chunk still taking inserts reads a little low
+    /// until autovacuum visits it, and the free-space and visibility forks are not counted; the daily exact sweep
+    /// corrects both;</item>
     /// <item>every compressed chunk by <c>after_compression_total_bytes</c>, which TimescaleDB recorded in its catalog
     /// when it compressed the chunk (heap, TOAST and indexes of the compressed relation). Reading it makes no file
     /// call: <c>chunk_compression_stats</c> took 3 to 5 ms for 1,000 chunks on the rig.</item>
     /// </list>
-    /// The compressed chunks' own relations are NOT sized, and that is both the saving and the only systematic error.
+    /// The compressed chunks' own relations are NOT sized, and that is both the saving and the main systematic error (the page-count lag above is the other).
     /// After compression TimescaleDB truncates the chunk's own relation, so it holds only index metapages (16 KB on
     /// the rig, two 8 KB pages) plus any rows inserted after compression and not yet recompressed. The estimate is
     /// therefore a slight underestimate: 16 KB per compressed chunk on the rig, a fixed amount, so its share shrinks as
@@ -290,22 +297,46 @@ chunk_stats AS MATERIALIZED (
     FROM targets t
     CROSS JOIN LATERAL chunk_compression_stats(format('%I.%I', t.hypertable_schema, t.hypertable_name)::regclass) s
 ),
+sized_rels AS (
+    SELECT t.hypertable_schema, t.hypertable_name, pc.oid
+    FROM targets t
+    JOIN pg_namespace pn ON pn.nspname = t.hypertable_schema
+    JOIN pg_class pc ON pc.relnamespace = pn.oid AND pc.relname = t.hypertable_name
+    UNION ALL
+    SELECT r.hypertable_schema, r.hypertable_name, r.oid
+    FROM chunk_rels r
+    LEFT JOIN chunk_stats s
+        ON  s.hypertable_schema = r.hypertable_schema
+        AND s.hypertable_name = r.hypertable_name
+        AND s.chunk_schema = r.chunk_schema
+        AND s.chunk_name = r.chunk_name
+    WHERE s.after_compression_total_bytes IS NULL
+),
+page_rels AS (
+    SELECT hypertable_schema, hypertable_name, oid FROM sized_rels
+    UNION ALL
+    SELECT e.hypertable_schema, e.hypertable_name, c.reltoastrelid
+    FROM sized_rels e
+    JOIN pg_class c ON c.oid = e.oid
+    WHERE c.reltoastrelid <> 0
+    UNION ALL
+    SELECT e.hypertable_schema, e.hypertable_name, i.indexrelid
+    FROM sized_rels e
+    JOIN pg_index i ON i.indrelid = e.oid
+    UNION ALL
+    SELECT e.hypertable_schema, e.hypertable_name, i.indexrelid
+    FROM sized_rels e
+    JOIN pg_class c ON c.oid = e.oid
+    JOIN pg_index i ON i.indrelid = c.reltoastrelid
+    WHERE c.reltoastrelid <> 0
+),
 sizes AS (
     SELECT hypertable_schema, hypertable_name, sum(bytes)::bigint AS total_bytes
     FROM (
-        SELECT t.hypertable_schema, t.hypertable_name, pg_total_relation_size(pc.oid) AS bytes
-        FROM targets t
-        JOIN pg_namespace pn ON pn.nspname = t.hypertable_schema
-        JOIN pg_class pc ON pc.relnamespace = pn.oid AND pc.relname = t.hypertable_name
-        UNION ALL
-        SELECT r.hypertable_schema, r.hypertable_name, pg_total_relation_size(r.oid)
-        FROM chunk_rels r
-        LEFT JOIN chunk_stats s
-            ON  s.hypertable_schema = r.hypertable_schema
-            AND s.hypertable_name = r.hypertable_name
-            AND s.chunk_schema = r.chunk_schema
-            AND s.chunk_name = r.chunk_name
-        WHERE s.after_compression_total_bytes IS NULL
+        SELECT pr.hypertable_schema, pr.hypertable_name,
+               greatest(p.relpages, 0)::bigint * current_setting('block_size')::bigint AS bytes
+        FROM page_rels pr
+        JOIN pg_class p ON p.oid = pr.oid
         UNION ALL
         SELECT hypertable_schema, hypertable_name, after_compression_total_bytes
         FROM chunk_stats
@@ -1209,6 +1240,80 @@ SELECT $1, '{SystemObjectName}', '{SystemObjectKind}', coalesce(sum(pg_total_rel
 FROM census WHERE is_system";
 
     /// <summary>
+    /// The two catch-all rows sized from the catalog (#6971), the twin of <see cref="UnenumeratedInsertSql"/> in the form
+    /// <see cref="HypertableEstimateInsertSql"/> and <see cref="StoreEstimateInsertSql"/> already use: the sum of
+    /// <c>relpages</c> times the block size over each census relation, its TOAST table and every index of either (the
+    /// population <c>pg_total_relation_size</c> adds up), and <c>size_estimated = true</c>. The exact statement sizes a few
+    /// hundred relations with <c>pg_total_relation_size</c>, a stat of every fork of every index, and measured 0.64 s on the
+    /// rig on every hourly sweep; this one reads <c>pg_class</c> and <c>pg_index</c> and makes no file call. <c>chunk_count</c>
+    /// is the census relation count, as the exact form counts it. The hourly sweep writes this form and the sweep that is
+    /// exact (<see cref="ExactSizeIntervalHours"/>) writes <see cref="UnenumeratedInsertSql"/>. $1 metric_time.
+    /// </summary>
+    public const string UnenumeratedEstimateInsertSql = $@"
+INSERT INTO collect.store_metrics
+    (metric_time, object_name, object_kind, total_bytes, chunk_count, size_estimated)
+WITH census AS (
+    SELECT
+        c.oid,
+        {SystemSchemaPredicateSql} AS is_system
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE {CensusRelationPredicateSql}
+    AND   NOT {NamedRelationPredicateSql}
+    AND   {TimescaleInventoriedPredicateSql}
+),{UnenumeratedEstimateTailSql}";
+
+    /// <summary><see cref="UnenumeratedEstimateInsertSql"/> for a store without TimescaleDB, the twin of
+    /// <see cref="UnenumeratedPlainInsertSql"/>. $1 metric_time.</summary>
+    public const string UnenumeratedPlainEstimateInsertSql = $@"
+INSERT INTO collect.store_metrics
+    (metric_time, object_name, object_kind, total_bytes, chunk_count, size_estimated)
+WITH census AS (
+    SELECT
+        c.oid,
+        {SystemSchemaPredicateSql} AS is_system
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE {CensusRelationPredicateSql}
+    AND   NOT {NamedRelationPredicateSql}
+),{UnenumeratedEstimateTailSql}";
+
+    private const string UnenumeratedEstimateTailSql = $@"
+page_rels AS (
+    SELECT is_system, oid FROM census
+    UNION ALL
+    SELECT e.is_system, c.reltoastrelid
+    FROM census e
+    JOIN pg_class c ON c.oid = e.oid
+    WHERE c.reltoastrelid <> 0
+    UNION ALL
+    SELECT e.is_system, i.indexrelid
+    FROM census e
+    JOIN pg_index i ON i.indrelid = e.oid
+    UNION ALL
+    SELECT e.is_system, i.indexrelid
+    FROM census e
+    JOIN pg_class c ON c.oid = e.oid
+    JOIN pg_index i ON i.indrelid = c.reltoastrelid
+    WHERE c.reltoastrelid <> 0
+),
+pages AS (
+    SELECT pr.is_system, coalesce(sum(greatest(p.relpages, 0)), 0)::bigint AS page_count
+    FROM page_rels pr
+    JOIN pg_class p ON p.oid = pr.oid
+    GROUP BY pr.is_system
+)
+SELECT $1, '{OtherObjectName}', '{OtherObjectKind}',
+       coalesce((SELECT page_count FROM pages WHERE NOT is_system), 0) * current_setting('block_size')::bigint,
+       (SELECT count(*)::integer FROM census WHERE NOT is_system),
+       true
+UNION ALL
+SELECT $1, '{SystemObjectName}', '{SystemObjectKind}',
+       coalesce((SELECT page_count FROM pages WHERE is_system), 0) * current_setting('block_size')::bigint,
+       (SELECT count(*)::integer FROM census WHERE is_system),
+       true";
+
+    /// <summary>
     /// The <c>object_kind</c> of the owner's <c>job_history</c> evidence row (#3574). See
     /// <see cref="HypertableObjectKind"/> for why it is a const; the MCP reader filters on it to find the
     /// one row that can make <c>recording</c> a measurement in managed mode.
@@ -1625,7 +1730,9 @@ WHERE metric_time < $1";
            rows already size; the plain variant cannot name those catalogs and has nothing to remove. Last of
            the sizing statements on purpose — see the summary. */
         using (var unenumerated = new NpgsqlCommand(
-            timescaleAvailable ? UnenumeratedInsertSql : UnenumeratedPlainInsertSql, connection)
+            timescaleAvailable
+                ? (exact ? UnenumeratedInsertSql : UnenumeratedEstimateInsertSql)
+                : (exact ? UnenumeratedPlainInsertSql : UnenumeratedPlainEstimateInsertSql), connection)
             { CommandTimeout = SweepTimeoutSeconds })
         {
             unenumerated.Parameters.AddWithValue(metricTime);
