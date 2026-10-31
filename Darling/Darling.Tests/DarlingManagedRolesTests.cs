@@ -123,6 +123,8 @@ public sealed class DarlingManagedRolesTests
         var webWrites = Regex.Matches(batch, writePrivilege + @"[^;]*? TO [^;]*\bweb\b[^;]*;")
             .Select(match => match.Value)
             .Where(grant => !grant.Contains("record_custom_alert_resolution", StringComparison.Ordinal))
+            // The transaction advisory lock grant is the one statement the script cannot carry: the functions belong to a superuser, so security.md's doc block has it.
+            .Where(grant => !grant.Contains("pg_catalog.pg_advisory_xact_lock", StringComparison.Ordinal) && !grant.Contains("pg_catalog.pg_try_advisory_xact_lock", StringComparison.Ordinal))
             .Distinct()
             .ToList();
         Assert.True(webWrites.Count >= 20, $"expected the batch to give web its writes, found {webWrites.Count} statements");

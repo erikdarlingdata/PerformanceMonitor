@@ -95,7 +95,7 @@ public sealed class ProvisionRolesCollisionGuardTests
         /* The four unchanged-placeholder checks run inside the stop on purpose: each one has to end the run. Nothing else may. */
         var between = Regex.Replace(
             sql[afterGuard..restore.Index],
-            @"(?s)DO \$\$\s*BEGIN\s*IF 'CHANGE_ME_\w+' = 'CHANGE_ME_' \|\| '\w+' THEN.*?END \$\$;", string.Empty);
+            @"(?s)DO \$darling_placeholder_check\$\s*BEGIN\s*IF 'CHANGE_ME_\w+' = 'CHANGE_ME_' \|\| '\w+' THEN.*?END \$darling_placeholder_check\$;", string.Empty);
         Assert.True(
             string.IsNullOrWhiteSpace(string.Join("\n", between.Split('\n').Where(line => !line.TrimStart().StartsWith("--", StringComparison.Ordinal)))),
             "the caller's ON_ERROR_STOP must be put back right after the guard and the placeholder checks: nothing else may run between the guard's END and the restore.");

@@ -195,7 +195,9 @@ public sealed class WebStoreLoginLiveTests
                     "SELECT pg_try_advisory_xact_lock_shared(1, 2)",
                 })
                 {
-                    Assert.Equal("42501", (await Assert.ThrowsAsync<PostgresException>(() => ExecAsync(connection, sql, ct))).SqlState);
+                    var refused = await Record.ExceptionAsync(() => ExecAsync(connection, sql, ct));
+                    Assert.True(refused is PostgresException, $"viewer ran: {sql}");
+                    Assert.Equal("42501", ((PostgresException)refused!).SqlState);
                 }
             }
 

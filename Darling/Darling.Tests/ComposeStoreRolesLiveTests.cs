@@ -159,7 +159,7 @@ public sealed class ComposeStoreRolesLiveTests
             var mcp = DarlingStoreLogins.Resolve(DarlingStoreLogins.Surface.Mcp, owner, null, inContainer: true, verdict);
             Assert.Equal(DarlingStoreLogins.LoginSource.ComposeStoreRole, web.Source);
             Assert.Equal(DarlingStoreLogins.LoginSource.ComposeStoreRole, mcp.Source);
-            await AssertLeastPrivilegeAsync(web.ConnectionString, "viewer", ct);
+            await AssertLeastPrivilegeAsync(web.ConnectionString, "web", ct);
             await AssertLeastPrivilegeAsync(mcp.ConnectionString, "mcp", ct);
 
             /* The continuous-aggregate case: a collect relation created AFTER provisioning — the TimescaleDB step
@@ -229,7 +229,7 @@ public sealed class ComposeStoreRolesLiveTests
                 owner, "SELECT count(*) FROM pg_catalog.pg_auth_members AS a JOIN pg_catalog.pg_roles AS m ON m.oid = a.member WHERE m.rolname IN ('admin', 'viewer', 'mcp')", ct));
             Assert.False(await OwnerScalarAsync<bool>(owner, "SELECT pg_catalog.pg_has_role('reporting', 'pg_signal_backend', 'MEMBER')", ct));
             await AssertLeastPrivilegeAsync(mcp.ConnectionString, "mcp", ct);
-            await AssertLeastPrivilegeAsync(web.ConnectionString, "viewer", ct);
+            await AssertLeastPrivilegeAsync(web.ConnectionString, "web", ct);
 
             /* 6. A lost credential file (a container recreated without the volume) re-keys that role alone. */
             var viewerFile = Path.Combine(credentials, DarlingManagedRoles.ComposeStoreCredentialFileName("viewer"));
@@ -304,9 +304,9 @@ public sealed class ComposeStoreRolesLiveTests
             var web = await DarlingStoreLogins.ResolveUnmanagedAsync(DarlingStoreLogins.Surface.Web, postgres, refusedLog, ct);
             var mcp = await DarlingStoreLogins.ResolveUnmanagedAsync(DarlingStoreLogins.Surface.Mcp, postgres, refusedLog, ct);
             Assert.True(web is not null && mcp is not null, refusedLog.Joined);
-            await AssertLeastPrivilegeAsync(web!, "viewer", ct);
+            await AssertLeastPrivilegeAsync(web!, "web", ct);
             await AssertLeastPrivilegeAsync(mcp!, "mcp", ct);
-            Assert.Contains("The web dashboard connects to the store as the viewer role with the credential an earlier start provisioned", refusedLog.Joined, StringComparison.Ordinal);
+            Assert.Contains("The web dashboard connects to the store as the web role with the credential an earlier start provisioned", refusedLog.Joined, StringComparison.Ordinal);
             Assert.Contains("The MCP server connects to the store as the mcp role with the credential an earlier start provisioned", refusedLog.Joined, StringComparison.Ordinal);
             Assert.DoesNotContain("connects to the store as the owner login", refusedLog.Joined, StringComparison.Ordinal);
 
@@ -318,14 +318,14 @@ public sealed class ComposeStoreRolesLiveTests
             var stoodDown = new CapturingTestLogger();
             var afterStandDown = await DarlingStoreLogins.ResolveUnmanagedAsync(DarlingStoreLogins.Surface.Web, postgres, stoodDown, ct);
             Assert.True(afterStandDown is not null, stoodDown.Joined);
-            Assert.Equal("viewer", await CurrentUserAsync(afterStandDown!, ct));
+            Assert.Equal("web", await CurrentUserAsync(afterStandDown!, ct));
 
             /* 3. The role re-keyed by hand since: the store refuses that credential, and the surface stays down with the
                   store's error. It never becomes the owner. mcp, untouched, still connects. */
-            await ExecAsync(owner, "ALTER ROLE viewer PASSWORD 'ChangedByHand3914';", ct);
+            await ExecAsync(owner, "ALTER ROLE web PASSWORD 'ChangedByHand3914';", ct);
             var rekeyed = new CapturingTestLogger();
             Assert.Null(await DarlingStoreLogins.ResolveUnmanagedAsync(DarlingStoreLogins.Surface.Web, postgres, rekeyed, ct));
-            Assert.Contains("did not accept the viewer login an earlier start provisioned", rekeyed.Joined, StringComparison.Ordinal);
+            Assert.Contains("did not accept the web login an earlier start provisioned", rekeyed.Joined, StringComparison.Ordinal);
             Assert.Contains(PostgresErrorCodes.InvalidPassword, rekeyed.Joined, StringComparison.Ordinal);
             Assert.NotNull(await DarlingStoreLogins.ResolveUnmanagedAsync(DarlingStoreLogins.Surface.Mcp, postgres, NullLogger.Instance, ct));
 
@@ -560,7 +560,7 @@ public sealed class ComposeStoreRolesLiveTests
 
             var webLogin = await DarlingStoreLogins.ResolveUnmanagedAsync(DarlingStoreLogins.Surface.Web, postgres, NullLogger.Instance, ct);
             var mcpLogin = await DarlingStoreLogins.ResolveUnmanagedAsync(DarlingStoreLogins.Surface.Mcp, postgres, NullLogger.Instance, ct);
-            await AssertLeastPrivilegeAsync(webLogin!, "viewer", ct);
+            await AssertLeastPrivilegeAsync(webLogin!, "web", ct);
             await AssertLeastPrivilegeAsync(mcpLogin!, "mcp", ct);
 
             /* Unset: the owner. An unreadable reference: the surface stays down, never the owner in its place. */
@@ -1567,8 +1567,8 @@ ALTER ROLE byo SET pg_stat_statements.track_utility = on;", ct);
             Assert.True(verdict.Provisioned, provisioning.Joined);
 
             var viewerLogin = await DarlingStoreLogins.ResolveComposeCustomAlertViewerAsync(owner, NullLogger.Instance, ct);
-            Assert.Equal(verdict.ViewerConnectionString, viewerLogin);
-            await AssertLeastPrivilegeAsync(viewerLogin!, "viewer", ct);
+            Assert.Equal(verdict.WebConnectionString, viewerLogin);
+            await AssertLeastPrivilegeAsync(viewerLogin!, "web", ct);
 
             const int serverId = 993970;
             var storage = "car_3970_srv_" + Guid.NewGuid().ToString("N");
@@ -1667,19 +1667,20 @@ VALUES ($1, (now() AT TIME ZONE 'UTC'), $2, $3, (now() AT TIME ZONE 'UTC'), 60, 
                   host would (F1). */
             var trusted = await DarlingStoreLogins.ResolveComposeCustomAlertViewerAsync(owner, NullLogger.Instance, ct);
             Assert.NotNull(trusted);
-            await AssertLeastPrivilegeAsync(trusted!, "viewer", ct);
+            await AssertLeastPrivilegeAsync(trusted!, "web", ct);
 
             /* 2. The role re-keyed by hand since: the store refuses that credential, so the evaluator gets
                   nothing -- never the owner in its place. */
-            await ExecAsync(owner, "ALTER ROLE viewer PASSWORD 'ChangedByHand3970';", ct);
+            await ExecAsync(owner, "ALTER ROLE web PASSWORD 'ChangedByHand3970';", ct);
             var rekeyed = new CapturingTestLogger();
             Assert.Null(await DarlingStoreLogins.ResolveComposeCustomAlertViewerAsync(owner, rekeyed, ct));
             Assert.Contains(
-                "Custom alert evaluator not started this attempt: the store did not accept the viewer login an earlier start provisioned",
+                "Custom alert evaluator not started this attempt: the store did not accept the web login an earlier start provisioned",
                 rekeyed.Joined, StringComparison.Ordinal);
 
             /* 3. No trusted credential at all: a host falls back to the owner here (#3914's ruling); the
                   evaluator must not, which is the divergence this test exists to pin. */
+            File.Delete(Path.Combine(credentials, DarlingManagedRoles.ComposeStoreCredentialFileName("web")));
             File.Delete(Path.Combine(credentials, DarlingManagedRoles.ComposeStoreCredentialFileName("viewer")));
             Assert.Null(await DarlingStoreLogins.ResolveComposeCustomAlertViewerAsync(owner, NullLogger.Instance, ct));
 

@@ -119,7 +119,7 @@ public sealed class ProvisioningSerializationTests
 
         var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingManagedRoles.cs");
         Assert.Contains("pg_try_advisory_xact_lock(", source, StringComparison.Ordinal);
-        Assert.DoesNotContain("pg_advisory_xact_lock(", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("SELECT pg_advisory_xact_lock(", source, StringComparison.Ordinal);
     }
 
     /// <summary>

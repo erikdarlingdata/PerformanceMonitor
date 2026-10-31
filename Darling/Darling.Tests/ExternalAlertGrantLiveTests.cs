@@ -1010,8 +1010,8 @@ SET search_path = pg_temp, config, public", ct);
             await owner.OpenAsync(ct);
             await PgMigrations.MigrateAsync(owner, ct);
             Assert.SkipWhen(
-                await ScalarAsync<bool>(owner, "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'mcp'))", ct),
-                "A cluster-wide admin/viewer/mcp role already exists on this rig; the script would refuse it.");
+                await ScalarAsync<bool>(owner, "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'web', 'mcp'))", ct),
+                "A cluster-wide admin/viewer/web/mcp role already exists on this rig; the script would refuse it.");
             Assert.SkipUnless(
                 await ScalarAsync<bool>(owner, "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'darling')", ct),
                 "The script names the store owner 'darling', and this rig has no such role.");
@@ -1027,18 +1027,18 @@ SET search_path = pg_temp, config, public", ct);
                 .Replace("CHANGE_ME_WEB_PASSWORD", "ScriptWeb6991", StringComparison.Ordinal);
             await ExecAsync(owner, script, ct);
 
-            await using (var viewer = await LoginAsync(scratch, "viewer", "ScriptViewer5654", ct))
+            await using (var web = await LoginAsync(scratch, "web", "ScriptWeb6991", ct))
             {
-                await ExecAsync(viewer, "BEGIN ISOLATION LEVEL REPEATABLE READ", ct);
-                await ExecAsync(viewer, "SELECT 1", ct);
+                await ExecAsync(web, "BEGIN ISOLATION LEVEL REPEATABLE READ", ct);
+                await ExecAsync(web, "SELECT 1", ct);
                 var refused = await Assert.ThrowsAsync<PostgresException>(() =>
-                    ScalarAsync<long>(viewer, "SELECT config.request_active_queries_live(4242, 'web')", ct));
+                    ScalarAsync<long>(web, "SELECT config.request_active_queries_live(4242, 'web')", ct));
                 Assert.Equal("DL400", refused.SqlState);
                 Assert.Contains("READ COMMITTED", refused.MessageText, StringComparison.Ordinal);
-                await ExecAsync(viewer, "ROLLBACK", ct);
+                await ExecAsync(web, "ROLLBACK", ct);
 
                 Assert.Equal(0L, await ScalarAsync<long>(owner, "SELECT count(*) FROM config.config_command", ct));
-                Assert.True(await ScalarAsync<long>(viewer, "SELECT config.request_active_queries_live(4242, 'web')", ct) > 0);
+                Assert.True(await ScalarAsync<long>(web, "SELECT config.request_active_queries_live(4242, 'web')", ct) > 0);
             }
 
             bodySucceeded = true;
