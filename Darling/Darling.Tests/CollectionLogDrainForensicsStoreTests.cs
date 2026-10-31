@@ -244,7 +244,7 @@ public class CollectionLogDrainForensicsStoreTests
     [Fact]
     public void TheSessionIdIsResolvedRightAfterTheOpen_BeforeAnyReader()
     {
-        var runner = ReadSource("Darling/PerformanceMonitor.Darling.Service/DarlingCollectorRunner.cs");
+        var runner = RepoFile.ReadRepoFile("Darling/PerformanceMonitor.Darling.Service/DarlingCollectorRunner.cs");
 
         const string openCall = "await targetConnection.OpenAsync(cancellationToken);";
         const string captureCall = "await TargetSessionIdCache.Shared.ResolveAsync(targetConnection";

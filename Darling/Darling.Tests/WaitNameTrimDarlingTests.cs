@@ -68,7 +68,7 @@ public sealed class WaitNameTrimDarlingTests
     [Fact]
     public void TheServiceRunner_BindsTheSharedIgnoreList_AndNoOtherSource()
     {
-        var source = File.ReadAllText(Path.Combine(
+        var source = RepoFile.ReadRepoFile(Path.Combine(
             RepoRoot(), "Darling", "PerformanceMonitor.Darling.Service", "DarlingCollectorRunner.cs"));
 
         var bindings = Regex.Matches(source, @"IgnoredWaitTypes\s*=\s*([^,;\r\n]+)")

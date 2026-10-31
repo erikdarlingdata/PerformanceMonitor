@@ -590,7 +590,7 @@ public sealed class StragglerCommandTimeoutTests
     [Fact]
     public void TheCollectorRunnersUntimedSites_ThreadTheDeadlineAsAParameterInstead()
     {
-        var text = File.ReadAllText(SourcePath("DarlingCollectorRunner.cs"));
+        var text = RepoFile.ReadRepoFile(SourcePath("DarlingCollectorRunner.cs"));
         var code = CSharpSourceWalker.StripCommentsAndStrings(text);
         var offenders = new List<string>();
         var accountedFor = 0;
