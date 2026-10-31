@@ -191,15 +191,15 @@ public sealed class DarlingMcpJobTools
                 .ToList();
 
             var source = DataWindowFloor.Source.ForCollectorTable("job_history");
-            var floor = scope is { } one
-                ? await DataWindowFloor.GetForServerAsync(postgres, source, one.ServerId, requestedStart, windowEnd, McpCommandDeadlines.ReadSeconds, cancellationToken)
-                : await DataWindowFloor.GetAsync(postgres, [source], null, requestedStart, windowEnd, McpCommandDeadlines.ReadSeconds, cancellationToken);
-            /* Job history is an event surface: a run's own time can sit long before the collection that stored it,
-               so coverage starts at the earlier of the probe's floor and the oldest run shown. */
-            if (rows.Count > 0 && rows[^1].RunDateTimeUtc is { } oldest && (floor is null || oldest < floor))
-                floor = oldest;
-            var effectiveStart = RawWindowFloor.EffectiveStart(floor, requestedStart);
-            var windowTruncated = RawWindowFloor.IsTruncated(floor, requestedStart);
+            /* #7010: the shared notice. This read built its own verdict from GetForServerAsync, which answers null for a window of 90 minutes or
+               less and for one the store holds nothing in, and a null floor read as covered, so an EMPTY answer over a window before the data
+               said window_truncated false. The notice reads a null floor on an empty answer as NOT covered. Job history is an event surface (a
+               run's own time can sit long before the collection that stored it), so coverage starts at the earlier of the probe's floor and the
+               oldest run shown (ReadEventAsync). */
+            string[]? scopedNames = scope is { } one ? [servers.First(x => x.ServerId == one.ServerId).ServerName] : null;
+            var notice = await DarlingMcpWindowNotice.ReadEventAsync(
+                () => DataWindowFloor.GetAsync(postgres, [source], scopedNames, requestedStart, windowEnd, McpCommandDeadlines.ReadSeconds, cancellationToken),
+                rows.Count > 0 ? rows[^1].RunDateTimeUtc : null, requestedStart, windowEnd, "job_history", emptyAnswer: rows.Count == 0, cancellationToken: cancellationToken);
 
             if (rows.Count == 0)
             {
@@ -218,8 +218,13 @@ public sealed class DarlingMcpJobTools
 
                 /* An empty answer is where "the Agent was stopped" matters most, so its hints carry the Agent state too. */
                 var emptyHints = new Dictionary<string, object?>();
-                emptyHints["effective_start"] = McpHelpers.FormatEffectiveStart(effectiveStart);
-                emptyHints["window_truncated"] = windowTruncated;
+                if (!notice.IsUnavailable)
+                {
+                    emptyHints["effective_start"] = notice.EffectiveStart;
+                    emptyHints["window_truncated"] = notice.WindowTruncated;
+                    emptyHints["truncation_note"] = notice.TruncationNote;
+                }
+
                 AddAgentState(emptyHints, scope, answerNames, await TryReadAgentStatesAsync(postgres, scope?.ServerId, windowEnd, cancellationToken));
                 return McpHelpers.Status("empty", "No job runs matched in the requested time range.", emptyHints);
             }
@@ -243,8 +248,13 @@ public sealed class DarlingMcpJobTools
             var envelope = new Dictionary<string, object?>();
             envelope["server"] = scope?.DisplayName;
             envelope["hours_back"] = hours_back;
-            envelope["effective_start"] = McpHelpers.FormatEffectiveStart(effectiveStart);
-            envelope["window_truncated"] = windowTruncated;
+            if (!notice.IsUnavailable)
+            {
+                envelope["effective_start"] = notice.EffectiveStart;
+                envelope["window_truncated"] = notice.WindowTruncated;
+                envelope["truncation_note"] = notice.TruncationNote;
+            }
+
             envelope["shown"] = runs.Count;
             envelope["truncated"] = truncated;
             AddAgentState(envelope, scope, answerNames, await TryReadAgentStatesAsync(postgres, scope?.ServerId, windowEnd, cancellationToken));

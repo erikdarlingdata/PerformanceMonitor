@@ -87,6 +87,57 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
                 }
             }
 
+            /* #7010: system_health_events, the table the nine get_health_parser_* reads probe (get_query_heatmap reads the query_stats rows seeded below). A few
+               rows at the raw floor and 30 minutes back, so the store holds them from three days back. The health rows carry an event type
+               none of the nine reads asks for, so each read answers an empty window (its probe finds the table's coverage) instead of the
+               "nothing ever collected" answer an unseeded table gives, which has no window notice by design. */
+            long healthId = 0;
+            foreach (var back in new[] { RawFloorBack, TimeSpan.FromMinutes(30) })
+            {
+                await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO collect.system_health_events
+    (system_health_event_id, collection_time, server_id, server_name, event_time, event_type, event_xml)
+VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                    -698500 - (++healthId), DarlingMcpTestData.Naive(now - back), ServerId, ServerName, DarlingMcpTestData.Naive(now - back),
+                    "matrix_seed_event", "<event name=\"matrix_seed_event\" />");
+            }
+
+            /* #7010: the raw tables the core data tools read (wait stats, CPU, tempdb, waiting tasks, query and procedure stats), a few rows
+               each from LogFloorBack on, so a window past the store's data answers over rows that start there and not over an empty table. */
+            long rawId = 0;
+            foreach (var back in new[] { LogFloorBack, TimeSpan.FromDays(2), TimeSpan.FromDays(1), TimeSpan.FromMinutes(40), TimeSpan.FromMinutes(5) })
+            {
+                var at = DarlingMcpTestData.Naive(now - back);
+                await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO collect.wait_stats
+    (collection_id, collection_time, server_id, server_name, wait_type, waiting_tasks_count, wait_time_ms, signal_wait_time_ms,
+     delta_waiting_tasks, delta_wait_time_ms, delta_signal_wait_time_ms)
+VALUES ($1, $2, $3, $4, 'SOS_SCHEDULER_YIELD', 10, 5000, 100, 10, 5000, 100)", -698500 - (++rawId), at, ServerId, ServerName);
+                await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO collect.cpu_utilization_stats
+    (collection_id, collection_time, server_id, server_name, sample_time, sqlserver_cpu_utilization, other_process_cpu_utilization)
+VALUES ($1, $2, $3, $4, $2, 30, 5)", -698500 - (++rawId), at, ServerId, ServerName);
+                await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO collect.tempdb_stats
+    (collection_id, collection_time, server_id, server_name, user_object_reserved_mb, internal_object_reserved_mb,
+     version_store_reserved_mb, total_reserved_mb, unallocated_mb)
+VALUES ($1, $2, $3, $4, 10, 5, 2, 17, 900)", -698500 - (++rawId), at, ServerId, ServerName);
+                await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO collect.waiting_tasks
+    (collection_id, collection_time, server_id, server_name, wait_type, wait_duration_ms, database_name)
+VALUES ($1, $2, $3, $4, 'LCK_M_X', 250, 'TenantDb00')", -698500 - (++rawId), at, ServerId, ServerName);
+                await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO collect.query_stats
+    (collection_id, collection_time, server_id, server_name, database_name, query_hash, sql_handle,
+     delta_worker_time, delta_elapsed_time, delta_execution_count, sample_interval_seconds)
+VALUES ($1, $2, $3, $4, 'TenantDb00', '0xAB01', '0xCD01', 500000, 600000, 5, 300)", -698500 - (++rawId), at, ServerId, ServerName);
+                await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO collect.procedure_stats
+    (collection_id, collection_time, server_id, server_name, database_name, schema_name, object_name, sql_handle,
+     delta_worker_time, delta_elapsed_time, delta_execution_count, sample_interval_seconds)
+VALUES ($1, $2, $3, $4, 'TenantDb00', 'dbo', 'usp_Seeded', '0xEF01', 500000, 600000, 5, 300)", -698500 - (++rawId), at, ServerId, ServerName);
+            }
+
             /* The collection log: every SQL Server collector from LogFloorBack on; the Query Store collector also ran 30 days back, long
                before the raw rows that are left (retention dropped them). */
             var collectors = CollectorCatalog.All.Where(d => d.TargetEngine == CollectorTargetEngine.SqlServer).Select(d => d.Name).ToArray();
@@ -162,31 +213,17 @@ public sealed class McpWindowMatrixLiveTests : IClassFixture<McpWindowMatrixStor
         ["get_analysis_facts"] = NoNotice,
         ["get_analysis_findings"] = NoNotice,
         ["get_client_timeouts"] = NoNotice,
+        /* #7010: not a data window by design. One server: "always 7 days" of collector health read from the collection log (hours_back is ignored). Fleet mode (server_name "*") takes hours_back, but only to read one collector's liveness per server, not a windowed row set. */
         ["get_collection_health"] = NoNotice,
         ["get_cpu_by_database"] = NoNotice,
         ["get_cpu_scheduler_pressure"] = SnapshotSearch,
-        ["get_cpu_utilization"] = NoNotice,
-        ["get_current_waits_trend"] = NoNotice,
         ["get_database_protection"] = NoNotice,
-        ["get_file_io_trend"] = NoNotice,
         ["get_finops"] = NoNotice,
         ["get_fleet_overview"] = NoNotice,
         ["get_forced_plans"] = NoNotice,
-        ["get_health_parser_cpu_tasks"] = NoNotice,
-        ["get_health_parser_io_issues"] = NoNotice,
-        ["get_health_parser_memory_broker"] = NoNotice,
-        ["get_health_parser_memory_conditions"] = NoNotice,
-        ["get_health_parser_memory_node_oom"] = NoNotice,
-        ["get_health_parser_scheduler_issues"] = NoNotice,
-        ["get_health_parser_severe_errors"] = NoNotice,
-        ["get_health_parser_significant_waits"] = NoNotice,
-        ["get_health_parser_system_health"] = NoNotice,
         ["get_identity_capacity"] = NoNotice,
         ["get_investigation_reports"] = NoNotice,
-        ["get_job_history"] = NotTrue,
         ["get_memory_grants"] = NoNotice,
-        ["get_memory_trend"] = NoNotice,
-        ["get_perfmon_trend"] = NoNotice,
         ["get_pg_autovacuum_health"] = NoNotice,
         ["get_pg_blocking"] = NoNotice,
         ["get_pg_buffer_usage"] = NoNotice,
@@ -208,27 +245,14 @@ public sealed class McpWindowMatrixLiveTests : IClassFixture<McpWindowMatrixStor
         ["get_pg_xmin_horizon"] = NoNotice,
         ["get_plan_cache_bloat"] = SnapshotSearch,
         ["get_plan_force_precheck"] = NoNotice,
-        ["get_procedure_duration_trend"] = NotTrue,
-        ["get_query_duration_trend"] = NotTrue,
-        ["get_query_heatmap"] = NoNotice,
-        ["get_query_store_aborts"] = NotTrue,
         ["get_query_store_clutter"] = NoNotice,
-        ["get_query_store_duration_trend"] = NotTrue,
         ["get_query_store_hints"] = NoNotice,
-        ["get_query_store_top"] = NoNotice,
-        ["get_query_trend"] = NoNotice,
         ["get_resource_semaphore"] = NoNotice,
         ["get_resource_use_by_tag"] = NoNotice,
         ["get_server_trend"] = NoNotice,
         ["get_store_log"] = NoNotice,
         ["get_store_query_history"] = NoNotice,
         ["get_sweep_reports"] = NoNotice,
-        ["get_tempdb_trend"] = NoNotice,
-        ["get_top_procedures_by_cpu"] = NoNotice,
-        ["get_top_queries_by_cpu"] = NoNotice,
-        ["get_wait_stats"] = NoNotice,
-        ["get_wait_trend"] = NoNotice,
-        ["get_wait_types"] = NoNotice,
     };
 
     /// <summary>The arguments a tool needs beyond the window that the generic binding cannot supply: a required view, metric or counter, the
@@ -245,6 +269,7 @@ public sealed class McpWindowMatrixLiveTests : IClassFixture<McpWindowMatrixStor
             case "get_finops": yield return new("view", "high_impact"); break;
             case "get_server_trend": yield return new("metric", "total_waits"); break;
             case "get_perfmon_trend": yield return new("counter_name", "Batch Requests/sec"); break;
+            case "get_wait_trend": yield return new("wait_type", "SOS_SCHEDULER_YIELD"); break;
             case "get_plan_force_precheck":
                 yield return new("database_name", "TenantDb00");
                 yield return new("query_id", 1000L);
