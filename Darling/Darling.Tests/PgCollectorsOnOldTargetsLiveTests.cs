@@ -54,10 +54,8 @@ public sealed class PgCollectorsOnOldTargetsLiveTests(ITestOutputHelper output)
     /// </summary>
     private static readonly Dictionary<string, string> Excluded = new(StringComparer.Ordinal)
     {
-        ["pg_log_events"] = "reads the server log with pg_read_file; the target has no logging_collector. The log readers are covered live on the 5542-5550 clusters.",
-        ["pg_deadlocks"] = "reads the server log with pg_read_file; the target has no logging_collector. Covered live on the 5542-5550 clusters.",
-        ["pg_plan_capture"] = "reads auto_explain log events from the server log; the target has no logging_collector and the EDB zip's auto_explain is not preloaded. Covered live on 5542/5544.",
-        ["pg_cpu_utilization"] = "reads RDS Performance Insights through the AWS API, not SQL on the target; a self-hosted host has no such source.",
+        ["pg_kernel_stats"] = "reads pg_stat_kcache, which the EDB zip does not carry: the runner raises the #6888 precondition (42P01, extension not created) on every major. Measured on run 41158907025.",
+        ["pg_predicate_stats"] = "reads pg_qualstats, which the EDB zip does not carry: the runner raises the #6888 precondition (42P01, extension not created) on every major. Measured on run 41158907025.",
     };
 
     private static bool TargetsRequired => !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DARLING_TEST_PG_TARGETS_REQUIRED"));

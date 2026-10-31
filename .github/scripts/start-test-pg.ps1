@@ -135,6 +135,9 @@ if ($Mode -eq 'StartTargets') {
         $targetArgs = @("-h", "127.0.0.1", "-p", "$port", "-U", "darling", "-d", "darling", "-v", "ON_ERROR_STOP=1")
         & "$targetBin\psql.exe" @targetArgs -c "CREATE EXTENSION pg_stat_statements"
         if ($LASTEXITCODE -ne 0) { throw "CREATE EXTENSION pg_stat_statements failed on the PostgreSQL $m target ($LASTEXITCODE)" }
+        # pg_buffercache (contrib, in the EDB zip) is what pg_buffer_usage reads; the runner raises the #6888 precondition without it.
+        & "$targetBin\psql.exe" @targetArgs -c "CREATE EXTENSION pg_buffercache"
+        if ($LASTEXITCODE -ne 0) { throw "CREATE EXTENSION pg_buffercache failed on the PostgreSQL $m target ($LASTEXITCODE)" }
         & "$targetBin\psql.exe" @targetArgs -c "CREATE TABLE target_workload (id int PRIMARY KEY, payload text); INSERT INTO target_workload SELECT g, md5(g::text) FROM generate_series(1, 2000) AS g; ANALYZE target_workload"
         if ($LASTEXITCODE -ne 0) { throw "the PostgreSQL $m target workload (setup) failed ($LASTEXITCODE)" }
         & "$targetBin\psql.exe" @targetArgs -c "SELECT payload FROM target_workload WHERE id = 42" -c "SELECT count(*) FROM target_workload WHERE payload LIKE 'a%'" -c "UPDATE target_workload SET payload = payload || 'x' WHERE id <= 100" -c "SELECT pg_sleep(0.1)"
