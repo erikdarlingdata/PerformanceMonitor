@@ -339,5 +339,5 @@ public sealed class DarlingWedgedServerReportingTests
         return dir!;
     }
 
-    private static string ReadSource(string relative) => File.ReadAllText(Path.Combine(RepoRoot(), relative));
+    private static string ReadSource(string relative) => RepoFile.ReadRepoFile(Path.Combine(RepoRoot(), relative));
 }

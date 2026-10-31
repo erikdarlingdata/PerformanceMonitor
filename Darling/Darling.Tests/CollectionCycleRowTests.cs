@@ -191,7 +191,7 @@ public sealed class CycleSkipFeedTests
     [Fact]
     public void TheFeedSitesAndTheFlushAreWired()
     {
-        var worker = File.ReadAllText(Path.Combine(RepoRoot(), "Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"));
+        var worker = RepoFile.ReadRepoFile(Path.Combine(RepoRoot(), "Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"));
         Assert.Contains("server.CycleSkips.AddGrid(name, gridSkipped, due);", worker, StringComparison.Ordinal);
         Assert.Contains("server.CycleSkips.AddDailyLost(name, step.Skipped, due);", worker, StringComparison.Ordinal);
         Assert.Contains("server.CycleSkips.AddHeld(name, newlyHeld, due);", worker, StringComparison.Ordinal);

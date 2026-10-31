@@ -182,7 +182,7 @@ public sealed class CollectorRunnerConnectionEngineTests
     [Fact]
     public void TheScheduledAnalysisPassRoutesByRegistryEngine()
     {
-        var source = File.ReadAllText(WorkerSourcePath());
+        var source = RepoFile.ReadRepoFile(WorkerSourcePath());
 
         /* The tombstone and its latch are gone from the worker entirely, not merely unused. */
         Assert.DoesNotContain("PostgresAnalysisNotApplicable", source, StringComparison.Ordinal);

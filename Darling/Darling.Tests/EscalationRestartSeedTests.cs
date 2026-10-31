@@ -541,7 +541,7 @@ public sealed class EscalationRestartSeedTests
             System.IO.File.ReadAllText(RepoFile("Lite/MainWindow.xaml.cs")), StringComparison.Ordinal);
         Assert.Contains(
             "escalationSeedReader: EscalationSeed.ReaderFor(historyStore)",
-            System.IO.File.ReadAllText(RepoFile("Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs")), StringComparison.Ordinal);
+            Darling.Tests.RepoFile.ReadRepoFile(RepoFile("Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs")), StringComparison.Ordinal);
     }
 
     private static string RepoFile(string relative, [System.Runtime.CompilerServices.CallerFilePath] string thisFile = "")

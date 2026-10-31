@@ -68,7 +68,7 @@ internal static class RepoFile
     /// read joined; every other file reads exactly as it sits on disk, because a pin that reads one file at a
     /// time (a per-file scan, a per-file count) must not see the same text twice. A later split adds its type
     /// name here, and to the matching set in <c>Lite.Tests/SplitRepoFile.cs</c>.</summary>
-    private static readonly string[] SplitTypes = ["DarlingCollectorRunner"];
+    private static readonly string[] SplitTypes = ["DarlingCollectorRunner", "DarlingWebEndpoints", "DarlingWorker"];
 
     /// <summary>The page modules split into one file per server-page tab (#7027): <c>pages/server-tabs.js</c> keeps the
     /// registry and the files in <c>pages/server-tabs/</c> hold the rest. A read of the main file comes back with
