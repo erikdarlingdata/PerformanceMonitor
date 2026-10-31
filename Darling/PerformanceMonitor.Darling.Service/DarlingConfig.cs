@@ -1136,6 +1136,24 @@ public sealed class AlertsConfig
     [JsonPropertyName("blockingCriticalSnapshotWaitSeconds")]
     public double BlockingCriticalSnapshotWaitSeconds { get; set; }
 
+    /// <summary>The scheduled Daily Health Report (#7041): one report a day through the alert pipeline, as the "Daily Health Report" metric. Ships OFF.
+    /// Store column <c>daily_report_enabled</c> (V232).</summary>
+    [JsonPropertyName("dailyReportEnabled")]
+    public bool DailyReportEnabled { get; set; }
+
+    /// <summary>The local time of day (<c>HH:mm</c>, in <see cref="DailyReportTimeZone"/>) the Daily Health Report goes out; it covers the 24 hours before.
+    /// Store column <c>daily_report_send_at</c> (V232).</summary>
+    [JsonPropertyName("dailyReportSendAt")]
+    public string DailyReportSendAt { get; set; } = Reports.DailyHealthReportSettings.DefaultSendAt;
+
+    /// <summary>The report's time zone id; NULL means the service host's local zone. Store column <c>daily_report_time_zone</c> (V232).</summary>
+    [JsonPropertyName("dailyReportTimeZone")]
+    public string? DailyReportTimeZone { get; set; }
+
+    /// <summary>The report's title; NULL means "Daily Health Report". Store column <c>daily_report_title</c> (V232).</summary>
+    [JsonPropertyName("dailyReportTitle")]
+    public string? DailyReportTitle { get; set; }
+
     [JsonPropertyName("longRunningJobEnabled")]
     public bool LongRunningJobEnabled { get; set; } = true;
 

@@ -103,7 +103,9 @@ public sealed partial class ViewerDataService
         /* #6927 (V228): the blocking health band's four tiers, APPENDED for the same reason and under the same connect-time store gate. */
         "blocking_warn_per_hour, blocking_critical_per_hour, blocking_warn_wait_seconds, blocking_critical_wait_seconds, " +
         /* #7028 (V230): the two snapshot wait tiers, APPENDED under the same connect-time store gate. */
-        "blocking_warn_snapshot_wait_seconds, blocking_critical_snapshot_wait_seconds";
+        "blocking_warn_snapshot_wait_seconds, blocking_critical_snapshot_wait_seconds, " +
+        /* #7041 (V232): the Daily Health Report's switch, send time (a time of day), zone and title, APPENDED for the same reason and under the same connect-time store gate. */
+        "daily_report_enabled, daily_report_send_at, daily_report_time_zone, daily_report_title";
 
     /// <summary>The single global alert-settings row (id=1), for the Settings window prefill + the migrate-in
     /// defaults check. Column order matches <see cref="AlertSettingsColumns"/>.</summary>
@@ -120,7 +122,7 @@ INSERT INTO config_alert_settings (id, " + AlertSettingsColumns + @", modified_a
 VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22,
         $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43,
         $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62,
-        $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81, $82, $83, $84, $85, $86, $87, $88, $89, $90, $91, $92,
+        $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81, $82, $83, $84, $85, $86, $87, $88, $89, $90, $91, $92, $93, $94, $95, $96,
         (now() AT TIME ZONE 'UTC'))
 ON CONFLICT (id) DO UPDATE SET
     enabled = EXCLUDED.enabled,
@@ -215,6 +217,10 @@ ON CONFLICT (id) DO UPDATE SET
     blocking_critical_wait_seconds = EXCLUDED.blocking_critical_wait_seconds,
     blocking_warn_snapshot_wait_seconds = EXCLUDED.blocking_warn_snapshot_wait_seconds,
     blocking_critical_snapshot_wait_seconds = EXCLUDED.blocking_critical_snapshot_wait_seconds,
+    daily_report_enabled = EXCLUDED.daily_report_enabled,
+    daily_report_send_at = EXCLUDED.daily_report_send_at,
+    daily_report_time_zone = EXCLUDED.daily_report_time_zone,
+    daily_report_title = EXCLUDED.daily_report_title,
     modified_at = (now() AT TIME ZONE 'UTC')";
 
     /// <summary>The two <c>cpu_mode</c> values the service honors (it compares case-insensitively against
@@ -361,6 +367,11 @@ ON CONFLICT (id) DO UPDATE SET
         command.Parameters.Add(new NpgsqlParameter<double> { TypedValue = r.BlockingCriticalWaitSeconds }); // $90 (#6927, V228)
         command.Parameters.Add(new NpgsqlParameter<double> { TypedValue = r.BlockingWarnSnapshotWaitSeconds });     // $91 (#7028, V230)
         command.Parameters.Add(new NpgsqlParameter<double> { TypedValue = r.BlockingCriticalSnapshotWaitSeconds }); // $92 (#7028, V230)
+        /* #7041 (V232): the Daily Health Report. The send time binds as a time of day (a value that does not parse falls back to 07:00, as the service does), and a blank zone or title binds as a typed text NULL: NULL is "the host's zone" and "the default title". */
+        command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = r.DailyReportEnabled });                                                                       // $93 (#7041, V232)
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Time, Value = ViewerDailyReportRules.ResolveSendAt(r.DailyReportSendAt).ToTimeSpan() }); // $94 (#7041, V232)
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = ViewerDailyReportRules.TextOrNull(r.DailyReportTimeZone) });            // $95 (#7041, V232)
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = ViewerDailyReportRules.TextOrNull(r.DailyReportTitle) });               // $96 (#7041, V232)
     }
 
     private static AlertSettingsRow ReadAlertSettingsRow(NpgsqlDataReader reader) => new()
@@ -482,6 +493,11 @@ ON CONFLICT (id) DO UPDATE SET
         /* #7028 (V230) the two blocking band snapshot wait tiers appended at ordinals 90-91. */
         BlockingWarnSnapshotWaitSeconds = reader.GetDouble(90),
         BlockingCriticalSnapshotWaitSeconds = reader.GetDouble(91),
+        /* #7041 (V232) the Daily Health Report switch, send time, zone and title appended at ordinals 92-95. */
+        DailyReportEnabled = reader.GetBoolean(92),
+        DailyReportSendAt = ViewerDailyReportRules.FormatSendAt(TimeOnly.FromTimeSpan(reader.GetTimeSpan(93))),
+        DailyReportTimeZone = reader.IsDBNull(94) ? null : reader.GetString(94),
+        DailyReportTitle = reader.IsDBNull(95) ? null : reader.GetString(95),
     };
 
     /// <summary>Maps the Settings window's CPU-mode combo tag ("Total"/"SqlOnly") to the store value.</summary>
@@ -647,6 +663,14 @@ public sealed class AlertSettingsRow
     /// <summary>#7028 (V230): the snapshot wait tiers of the blocking band, seconds. 0 means the tier is off.</summary>
     public double BlockingWarnSnapshotWaitSeconds { get; set; }
     public double BlockingCriticalSnapshotWaitSeconds { get; set; }
+    /// <summary>#7041 (V232): send the scheduled Daily Health Report. Off by default: a new report must not start going out on upgrade.</summary>
+    public bool DailyReportEnabled { get; set; }
+    /// <summary>#7041 (V232): the local time of day, HH:mm, in <see cref="DailyReportTimeZone"/> the report goes out.</summary>
+    public string DailyReportSendAt { get; set; } = ViewerDailyReportRules.DefaultSendAt;
+    /// <summary>#7041 (V232): the report's time zone id; null means the service host's local zone.</summary>
+    public string? DailyReportTimeZone { get; set; }
+    /// <summary>#7041 (V232): the report's title; null means "Daily Health Report".</summary>
+    public string? DailyReportTitle { get; set; }
     public bool LongRunningQueryEnabled { get; set; } = true;
     public int LongRunningQueryThresholdMinutes { get; set; } = 30;
     public bool TempDbSpaceEnabled { get; set; } = true;
@@ -841,6 +865,10 @@ public sealed class AlertSettingsRow
             && (LongRunningQueryExcludedLogins ?? new List<string>()).SequenceEqual(other.LongRunningQueryExcludedLogins ?? new List<string>())
             /* #3712 (V137): the route knob's tri-state -- null and a route differ, two spellings of one route
                do not (the store holds the lower-case form; a row built from the combo does too). */
-            && string.Equals(AnalysisUncorroboratedRoute, other.AnalysisUncorroboratedRoute, StringComparison.OrdinalIgnoreCase);
+            && string.Equals(AnalysisUncorroboratedRoute, other.AnalysisUncorroboratedRoute, StringComparison.OrdinalIgnoreCase)
+            && DailyReportEnabled == other.DailyReportEnabled
+            && string.Equals(DailyReportSendAt, other.DailyReportSendAt, StringComparison.Ordinal)
+            && string.Equals(DailyReportTimeZone, other.DailyReportTimeZone, StringComparison.Ordinal)
+            && string.Equals(DailyReportTitle, other.DailyReportTitle, StringComparison.Ordinal);
     }
 }

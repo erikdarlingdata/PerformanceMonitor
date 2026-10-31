@@ -90,6 +90,7 @@ internal static class DarlingFrontDoorRouting
         "get_compiles_after_evict",
         "get_custom_alert_rule",
         "get_custom_view",
+        "get_daily_health_report",
         "get_finops_inventory",
         "get_fleet_overview",
         "get_investigation_evidence",

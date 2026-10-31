@@ -23,7 +23,7 @@ namespace Darling.Tests;
 /// #5640 (Lane E1): the Darling Viewer's Client Timeouts settings, the V179 twin of
 /// <c>RunnableQueueSettingsSurfaceTests</c>. The row carries the engine's defaults (ON, 10, 60), compares and saves
 /// all three columns through the engine's clamp, and the Settings window names the alert. V179 is the newest append, so
-/// this class owns the settings row's total width (92). The viewer needs no per-version gate for the columns: it refuses a
+/// this class owns the settings row's total width (96). The viewer needs no per-version gate for the columns: it refuses a
 /// store below <c>StorageVersion.SchemaVersion</c> at connect, as it did for V177's.
 /// </summary>
 public sealed class ClientTimeoutsSettingsSurfaceTests
@@ -72,7 +72,7 @@ public sealed class ClientTimeoutsSettingsSurfaceTests
 
     /// <summary>
     /// V179's three columns sit at the FIXED ordinals 73, 74 and 75 (parameters $74 to $76) on every positional
-    /// settings-row surface, and the row is 92 columns wide (V230 appended the two blocking band snapshot wait tiers at 90 and 91, V228 the four blocking band tiers at 86 to 89, V200 appended the excluded volumes at 76, V211 the two multiples at 77 and 78, V222 the Agent alert gaps switch at 79, V223 the three database protection switches at 80 to 82, V224 the three identity capacity columns at 83 to 85): the viewer's select and upsert, the service's own read and
+    /// settings-row surface, and the row is 96 columns wide (V232 appended the four Daily Health Report columns at 92 to 95, V230 appended the two blocking band snapshot wait tiers at 90 and 91, V228 appended the four blocking band tiers at 86 to 89, V200 appended the excluded volumes at 76, V211 the two multiples at 77 and 78, V222 the Agent alert gaps switch at 79, V223 the three database protection switches at 80 to 82, V224 the three identity capacity columns at 83 to 85): the viewer's select and upsert, the service's own read and
     /// its seed, and the MCP read with its positional record. This is the test that was red while the seed had 76 columns
     /// and the viewer 73.
     /// </summary>
@@ -82,7 +82,7 @@ public sealed class ClientTimeoutsSettingsSurfaceTests
         var viewerColumns = ViewerDataService.AlertSettingsSelectSql
             .Replace("SELECT ", "", StringComparison.Ordinal).Split(" FROM ")[0]
             .Split(',').Select(c => c.Trim()).ToList();
-        Assert.Equal(92, viewerColumns.Count);
+        Assert.Equal(96, viewerColumns.Count);
         Assert.Equal(Expected, viewerColumns.Skip(73).Take(3).ToArray());
 
         var service = File.ReadAllText(Path.Combine(RepoRoot(), "Darling", "PerformanceMonitor.Darling.Service", "StoreConfigProvider.cs"));
@@ -91,7 +91,7 @@ public sealed class ClientTimeoutsSettingsSurfaceTests
         var select = service[start..];
         select = select[(select.IndexOf("SELECT", StringComparison.Ordinal) + 6)..select.IndexOf("FROM config_alert_settings WHERE id = 1", StringComparison.Ordinal)];
         var serviceColumns = select.Split(',').Select(c => c.Trim()).Where(c => c.Length > 0).ToList();
-        Assert.Equal(92, serviceColumns.Count);
+        Assert.Equal(96, serviceColumns.Count);
         Assert.Equal(Expected, serviceColumns.Skip(73).Take(3).ToArray());
         Assert.Contains("ClientTimeoutsEnabled = reader.GetBoolean(73),", service, StringComparison.Ordinal);
         Assert.Contains("ClientTimeoutsWarningPerMinute = reader.GetInt32(74),", service, StringComparison.Ordinal);
@@ -107,10 +107,10 @@ public sealed class ClientTimeoutsSettingsSurfaceTests
         var mcpColumns = DarlingAlertReader.AlertSettingsSelectSql
             .Split("FROM config_alert_settings")[0].Replace("SELECT", "", StringComparison.Ordinal)
             .Split(',').Select(c => c.Trim()).Where(c => c.Length > 0).ToList();
-        Assert.Equal(92, mcpColumns.Count);
+        Assert.Equal(96, mcpColumns.Count);
         Assert.Equal(Expected, mcpColumns.Skip(73).Take(3).ToArray());
         var parameters = typeof(DarlingAlertReader.AlertSettingsReadRow).GetConstructors().Single().GetParameters();
-        Assert.Equal(92, parameters.Length);
+        Assert.Equal(96, parameters.Length);
         Assert.Equal(new[] { "ClientTimeoutsEnabled", "ClientTimeoutsWarningPerMinute", "ClientTimeoutsCriticalPerMinute" },
             parameters.Skip(73).Take(3).Select(p => p.Name!).ToArray());
         Assert.Equal(typeof(bool), parameters[73].ParameterType);
@@ -120,7 +120,7 @@ public sealed class ClientTimeoutsSettingsSurfaceTests
         /* The viewer's bind supplies $74 to $76 at indexes 73 to 75, in column order (V200's excluded_volumes follows at 76). */
         var row = new AlertSettingsRow { ClientTimeoutsEnabled = true, ClientTimeoutsWarningPerMinute = 5, ClientTimeoutsCriticalPerMinute = 11 };
         var command = Bind(row);
-        Assert.Equal(92, command.Parameters.Count);
+        Assert.Equal(96, command.Parameters.Count);
         Assert.Equal(true, command.Parameters[73].Value);
         Assert.Equal(5, command.Parameters[74].Value);
         Assert.Equal(11, command.Parameters[75].Value);

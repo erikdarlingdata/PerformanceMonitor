@@ -173,6 +173,9 @@ public sealed class ViewerMuteRecurrenceTests
             /* A store below V231 has no columns: the list still reads, and the viewer refuses a schedule it cannot keep. */
             await ExecAsync(connection,
                 "ALTER TABLE config.config_mute_rules DROP COLUMN recur_days, DROP COLUMN recur_start_time, DROP COLUMN recur_end_time, DROP COLUMN recur_time_zone", ct);
+            /* The probe reads newest first, so the Daily Health Report columns (V232, #7041) go too, or the store would still read as V232. */
+            await ExecAsync(connection,
+                "ALTER TABLE config.config_alert_settings DROP COLUMN daily_report_enabled, DROP COLUMN daily_report_send_at, DROP COLUMN daily_report_time_zone, DROP COLUMN daily_report_title", ct);
             await using (var older = new ViewerDataService(scratch.ConnectionString))
             {
                 Assert.False(await older.SupportsMuteRecurrenceAsync(ct));

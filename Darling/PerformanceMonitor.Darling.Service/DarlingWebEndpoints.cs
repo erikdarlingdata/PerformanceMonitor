@@ -166,6 +166,9 @@ public static partial class DarlingWebEndpoints
         "analyze_now",
         "purge_now",
         "undo_plan_change",
+        /* #7041: the manual send of the Daily Health Report goes through the alert pipeline over MCP; the web has no route for it (its Preview
+           is the read get_daily_health_report, which sends nothing). */
+        "send_daily_health_report_now",
         /* #6401: the global agent switch and the undo of a non-plan agent change over MCP; the web has its own PUT /api/agent-changes/switch and
            PUT /api/agent-changes/{id}/undo, neither a generic read. */
         "set_agent_actions_enabled",

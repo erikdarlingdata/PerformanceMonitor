@@ -1461,6 +1461,15 @@ LIMIT 1";
     private readonly StoreOwnerSource? _ownerSource;
     /* #6066: the store's pseudonym key, read over the owner connection the first time a metadataOnly webhook token needs it. */
     private readonly PseudonymKeySource? _pseudonymKeys;
+    /* #7041: where the running evaluator is published for send_daily_health_report_now. Null in a test-constructed worker. */
+    private readonly DailyHealthReportHub? _dailyReportHub;
+
+    /// <summary>
+    /// #7041: the Daily Health Report builder the scheduled send and <c>send_daily_health_report_now</c> share. This is the one place the real
+    /// builder is wired in; null means the report is never built (the schedule check returns at once and the tool answers not_available).
+    /// </summary>
+    private static PerformanceMonitor.Darling.Service.Reports.DailyHealthReportBuilder CreateDailyHealthReportSource(Npgsql.NpgsqlDataSource postgres) =>
+        new PerformanceMonitor.Darling.Service.Reports.DailyHealthReportBuilder(postgres);
 
     /// <summary>
     /// True when another registration in the published registry carries this one's display name (ordinal), so
@@ -1514,10 +1523,11 @@ LIMIT 1";
        and at each hourly flush); its own reads never go through admission. */
     private readonly ReadAdmission? _readAdmission;
 
-    public DarlingWorker(ILogger<DarlingWorker> logger, ILoggerFactory loggerFactory, McpRuntimeState mcpState, WebRuntimeState webState, MonitoredServerRegistryState registryState, CollectorRuntimeState collectorState, WebTlsCertificateState webTlsCertState, BaselineCache baselineCache, ReadLatencyAccumulator readLatency, SlowReadLog? slowReads = null, McpTlsCertificateState? mcpTlsCertState = null, ReadAdmission? readAdmission = null, StoreOwnerSource? ownerSource = null, PseudonymKeySource? pseudonymKeys = null)
+    public DarlingWorker(ILogger<DarlingWorker> logger, ILoggerFactory loggerFactory, McpRuntimeState mcpState, WebRuntimeState webState, MonitoredServerRegistryState registryState, CollectorRuntimeState collectorState, WebTlsCertificateState webTlsCertState, BaselineCache baselineCache, ReadLatencyAccumulator readLatency, SlowReadLog? slowReads = null, McpTlsCertificateState? mcpTlsCertState = null, ReadAdmission? readAdmission = null, StoreOwnerSource? ownerSource = null, PseudonymKeySource? pseudonymKeys = null, DailyHealthReportHub? dailyReportHub = null)
     {
         _ownerSource = ownerSource;
         _pseudonymKeys = pseudonymKeys;
+        _dailyReportHub = dailyReportHub;
         _slowReads = slowReads;
         _readAdmission = readAdmission;
         _mcpTlsCertState = mcpTlsCertState;

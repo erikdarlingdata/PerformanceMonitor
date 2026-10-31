@@ -92,6 +92,7 @@ public static partial class DarlingWebEndpoints
                     ? DarlingMcpAlertTools.GetAlertDetails(pg, detailsServerId, detailsMetric, detailsTime, c.RequestAborted)
                     : DarlingMcpAlertTools.GetAlertDetails(pg, 0, "", detailsTime, c.RequestAborted),
             ["get_alert_settings"] = (c, pg, an) => DarlingMcpAlertTools.GetAlertSettings(pg, Server(c), c.RequestAborted),
+            ["get_daily_health_report"] = (c, pg, an) => DarlingMcpDailyReportTools.GetDailyHealthReport(pg, Str(c, "date"), c.RequestAborted),
             ["get_mute_rules"] = (c, pg, an) => DarlingMcpAlertTools.GetMuteRules(pg, QueryBool(c, "enabled_only", true), c.RequestAborted),
             ["get_notification_routes"] = (c, pg, an) => DarlingMcpAlertTools.GetNotificationRoutes(pg, c.RequestAborted),
             ["list_investigation_requests"] = (c, pg, an) => DarlingMcpInvestigationTools.ListInvestigationRequests(pg, Str(c, "state"), Server(c), Str(c, "family"), QueryInt(c, "limit", null, 20), c.RequestAborted),

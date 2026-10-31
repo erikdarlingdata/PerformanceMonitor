@@ -295,6 +295,18 @@ public static partial class DarlingWebEndpoints
                 run.Body, "/api/notification-routes/{id}", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, run.Status);
         });
 
+        /* #7041: the Daily Health Report settings. The body is the daily_report group of get_alert_settings; update_alert_settings' own
+           body validates and writes it. A signed-in admin only, like the other agent setup writes. */
+        app.MapPut("/api/alert-settings/daily-report", async Task<IResult> (HttpContext context) =>
+        {
+            var stopwatch = Stopwatch.StartNew();
+            var run = await AgentSetupRunAsync(context, logger, "/api/alert-settings/daily-report",
+                (body, editor, ct) => DarlingWebAlertSettings.SaveDailyReportAsync(
+                    WebAdminArm.SourceFor(adminArm, context, postgres), body, managedStore, adminWritesOff));
+            return DarlingWebStatementSweep.JsonText(
+                run.Body, "/api/alert-settings/daily-report", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, run.Status);
+        });
+
         app.MapDelete("/api/notification-routes/{id:int}", async (HttpContext context, int id) =>
         {
             var stopwatch = Stopwatch.StartNew();

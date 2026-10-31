@@ -920,6 +920,16 @@ public sealed partial class DarlingWorker
                only: a webhook error can carry the endpoint URL, and the URL is the credential. */
             webhookChannelFailures: webhookAlertService.GetChannelFailureCounts);
 
+        /* #7041: the Daily Health Report. The settings are read live (a store edit lands on the next 15-second check) and the
+           builder is the one source the scheduled send and send_daily_health_report_now share. */
+        _selfAlerts.DailyReportSchedule = () => new PerformanceMonitor.Darling.Service.Reports.DailyHealthReportSchedule(
+            alertSettings.DailyReportEnabled, alertSettings.DailyReportSendAt, alertSettings.DailyReportTimeZone, alertSettings.DailyReportTitle);
+        _selfAlerts.DailyReportSource = CreateDailyHealthReportSource(postgres);
+        if (_dailyReportHub is not null)
+        {
+            _dailyReportHub.Evaluator = _selfAlerts;
+        }
+
         /* #1706: report this start's store runtime upgrade, now that there IS an alert engine to report it
            through. Fired once, here, and never re-evaluated — the store is down while an upgrade runs, so
            its start could only ever be a log line, and by the time this line is reached both terminal states
@@ -1588,6 +1598,20 @@ public sealed partial class DarlingWorker
             if (_selfAlerts is not null)
             {
                 await _selfAlerts.EvaluateNotificationChannelsAsync(stoppingToken);
+            }
+
+            /* #7041: the Daily Health Report's due check. Every 15-second tick pays one settings read and a clock compare; the report is
+               built only once it is due and not yet delivered today. A throw here must not stop the fleet loop. */
+            if (_selfAlerts is not null)
+            {
+                try
+                {
+                    await _selfAlerts.EvaluateDailyHealthReportAsync(stoppingToken);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger.LogWarning(ex, "Daily health report check failed; it will be tried again on the next tick");
+                }
             }
 
             /* #3514: the web-dashboard TLS certificate expiry self-alert. The web host loads the certificate

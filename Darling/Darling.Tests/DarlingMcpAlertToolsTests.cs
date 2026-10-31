@@ -1407,7 +1407,8 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         IdentityCapacityEnabled: true, IdentityCapacityWarningPercent: 72, IdentityCapacityCriticalPercent: 92,
         BlockingWarnPerHour: 6.5, BlockingCriticalPerHour: 22.5, BlockingWarnWaitSeconds: 11.5, BlockingCriticalWaitSeconds: 62.5,
         /* #7028 (V230): deliberately NOT the shipped 0 / 0 (off), so a payload that dropped the columns would not match. */
-        BlockingWarnSnapshotWaitSeconds: 33.5, BlockingCriticalSnapshotWaitSeconds: 95.5);
+        BlockingWarnSnapshotWaitSeconds: 33.5, BlockingCriticalSnapshotWaitSeconds: 95.5,
+        DailyReportEnabled: true, DailyReportSendAt: "06:30", DailyReportTimeZone: "America/New_York", DailyReportTitle: "Morning report");
 
     [Fact]
     public void AlertSettingsSql_ReadsSingleGlobalRow()

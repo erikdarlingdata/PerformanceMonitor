@@ -615,6 +615,14 @@ ALTER TABLE IF EXISTS config.investigation_request_alerts DROP COLUMN IF EXISTS 
     DROP COLUMN IF EXISTS recur_start_time,
     DROP COLUMN IF EXISTS recur_end_time,
     DROP COLUMN IF EXISTS recur_time_zone;"),
+        // V232 (#7041): the Daily Health Report columns on the alert settings row. The enabled column is the probe's newest sentinel. The rewind
+        // drops all four, so a re-run of V232 adds them again. Safe on a store that never had them.
+        new(232, "hasDailyReportSettings",
+            @"ALTER TABLE config.config_alert_settings
+    DROP COLUMN IF EXISTS daily_report_enabled,
+    DROP COLUMN IF EXISTS daily_report_send_at,
+    DROP COLUMN IF EXISTS daily_report_time_zone,
+    DROP COLUMN IF EXISTS daily_report_title;"),
     ];
 
     /// <summary>

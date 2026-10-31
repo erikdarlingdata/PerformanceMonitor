@@ -141,7 +141,7 @@ namespace PerformanceMonitor.Common
         /// otherwise.</para>
         /// </summary>
         public static bool IsInformational(string? metricName) =>
-            metricName is "Collector Cost Digest" or "Fleet Sweep Rollup" or "Analysis Singles Digest"
+            metricName is "Collector Cost Digest" or "Fleet Sweep Rollup" or "Analysis Singles Digest" or "Daily Health Report"
                 or "Store TOAST Slack" or "Store Checkpointer Pressure"
                 /* #3816: a policy job that fails and retries is alive — INFO at its fire site, INFO here. */
                 or "Store Job Failing";
@@ -239,7 +239,7 @@ namespace PerformanceMonitor.Common
                counts the external alerts the drain gave up on in the last hour. */
             "Blocking Detected" or "Deadlocks Detected" or "Failed Agent Job"
                 or "Custom Alert Rules Unhealthy" or "Stale Mute Rules" or "Store Settings Need Attention"
-                or "Collector Cost Digest" or "Fleet Sweep Rollup" or "Analysis Singles Digest"
+                or "Collector Cost Digest" or "Fleet Sweep Rollup" or "Analysis Singles Digest" or "Daily Health Report"
                 or "Notification Channel Failing" or "External Alerts Undelivered" => $"{value:F0}",
 
             /* #1846: a state-only metric never had a number — its display value is a role, a connection

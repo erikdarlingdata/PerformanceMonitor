@@ -614,6 +614,8 @@ public sealed partial class DarlingMcpAlertTools
         identity_capacity = new { enabled = s.IdentityCapacityEnabled, warning_percent = s.IdentityCapacityWarningPercent, critical_percent = s.IdentityCapacityCriticalPercent },
         /* #6874: the Agent Alert Gaps alert (SQL Server Agent alert setup has a gap). Off by default. */
         agent_alert_gaps = new { enabled = s.AgentAlertGapsEnabled },
+        /* #7041: the scheduled Daily Health Report. Off by default. send_at is a local time of day (HH:mm) in time_zone; time_zone null is the service host's zone; title null is "Daily Health Report". */
+        daily_report = new { enabled = s.DailyReportEnabled, send_at = s.DailyReportSendAt, time_zone = s.DailyReportTimeZone, title = s.DailyReportTitle },
         /* #6873: the database protection alerts (a full backup, a log backup or a CHECKDB older than its threshold). Off by default. */
         backup_overdue = new { enabled = s.BackupOverdueEnabled },
         log_backup_overdue = new { enabled = s.LogBackupOverdueEnabled },
@@ -1283,6 +1285,8 @@ public sealed partial class DarlingMcpAlertTools
         "the same two-bars rule as runnable_queue, with the same status invalid and nothing written. client_timeouts.warning_multiple (at least 1, default 3) and client_timeouts.critical_multiple (default 10) " +
         "scale each server's own baseline (the p99.9 of its 3-minute average attention rate over the last 7 days): the Warning bar is the higher of the Warning floor and warning_multiple x baseline, the Critical bar the higher of the " +
         "Critical floor and critical_multiple x baseline, and a server with under a day of capture is graded on the floors alone. The multiples follow the same order rule. " +
+        "daily_report is the scheduled Daily Health Report (off by default): enabled, send_at (a local time of day written HH:mm, default 07:00), time_zone (an IANA id the service host knows, for example America/New_York; null is the host's own zone) " +
+        "and title (up to 100 characters; null is \"Daily Health Report\"). A bad time, an unknown zone or a blank title is refused and nothing is written. " +
         "analysis.uncorroborated_route is WRITABLE since V137: 'digest' or 'page' (case-insensitive; stored lower-case) writes " +
         "config_alert_settings.analysis_uncorroborated_route, which the running service reads OVER darling.json's analysis.uncorroboratedRoute " +
         "from its next collection sweep and consults on the next scheduled-analysis delivery — no restart, no file edit; null CLEARS the column " +
@@ -3105,6 +3109,68 @@ public sealed partial class DarlingMcpAlertTools
             error = $"'{field}' must be '{FindingRouting.DigestText}', '{FindingRouting.PageText}', or null (null clears the store column so darling.json's analysis.uncorroboratedRoute governs again).";
         }
 
+        /* #7041: the Daily Health Report's send time, a local time of day as HH:mm. */
+        void AddSendAt(string column, JsonNode? node, string field)
+        {
+            if (error != null) return;
+            if (node is JsonValue v && v.TryGetValue<string>(out var text)
+                && Reports.DailyHealthReportSettings.TryParseSendAt(text, out var sendAt))
+            {
+                updates.Add(new UpdateTarget(AlertSettingsTable, column, field,
+                    new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Time, Value = sendAt.ToTimeSpan() }));
+                return;
+            }
+
+            error = $"'{field}' must be a time of day written HH:mm, for example \"07:00\".";
+        }
+
+        /* #7041: the report's time zone. null clears the column (the service host's zone); anything else must be an id the host resolves. */
+        void AddNullableZone(string column, JsonNode? node, string field)
+        {
+            if (error != null) return;
+            if (node is null)
+            {
+                updates.Add(new UpdateTarget(AlertSettingsTable, column, field,
+                    new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = DBNull.Value }));
+                return;
+            }
+
+            if (node is JsonValue v && v.TryGetValue<string>(out var text)
+                && !string.IsNullOrWhiteSpace(text) && Reports.DailyHealthReportSettings.TryResolveZone(text, out _))
+            {
+                updates.Add(new UpdateTarget(AlertSettingsTable, column, field, new NpgsqlParameter<string> { TypedValue = text.Trim() }));
+                return;
+            }
+
+            error = $"'{field}' must be a time zone id this host knows (an IANA id such as \"America/New_York\"), or null for the service host's zone.";
+        }
+
+        /* #7041: the report's title. null clears the column (the shipped title); anything else is checked for length and control characters. */
+        void AddNullableTitle(string column, JsonNode? node, string field)
+        {
+            if (error != null) return;
+            if (node is null)
+            {
+                updates.Add(new UpdateTarget(AlertSettingsTable, column, field,
+                    new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = DBNull.Value }));
+                return;
+            }
+
+            if (node is JsonValue v && v.TryGetValue<string>(out var text))
+            {
+                if (Reports.DailyHealthReportSettings.TryValidateTitle(text, out var titleError))
+                {
+                    updates.Add(new UpdateTarget(AlertSettingsTable, column, field, new NpgsqlParameter<string> { TypedValue = text.Trim() }));
+                    return;
+                }
+
+                error = $"'{field}' {titleError}";
+                return;
+            }
+
+            error = $"'{field}' must be a string, or null for the shipped title.";
+        }
+
         /* #3712: the route knob's provenance echo. get_alert_settings emits the EFFECTIVE route under
            analysis.uncorroborated_route and WHICH home decided it under analysis.uncorroborated_route_source, and
            this tool's own description tells a caller to hand the whole read payload back -- so a round-trip
@@ -3548,6 +3614,22 @@ public sealed partial class DarlingMcpAlertTools
                         {
                             case "enabled": AddBool("database_state_enabled", n, "database_state.enabled"); break;
                             default: error = $"Unknown field 'database_state.{k}'."; break;
+                        }
+                    });
+                    break;
+
+                /* #7041: the Daily Health Report. send_at is HH:mm and must parse; time_zone and title take null (the host's zone, the shipped title) and
+                   are otherwise validated here so a bad id or a blank title is refused with a message instead of being stored and silently replaced at the first tick. */
+                case "daily_report":
+                    Group(prop.Value, "daily_report", (k, n) =>
+                    {
+                        switch (k)
+                        {
+                            case "enabled": AddBool("daily_report_enabled", n, "daily_report.enabled"); break;
+                            case "send_at": AddSendAt("daily_report_send_at", n, "daily_report.send_at"); break;
+                            case "time_zone": AddNullableZone("daily_report_time_zone", n, "daily_report.time_zone"); break;
+                            case "title": AddNullableTitle("daily_report_title", n, "daily_report.title"); break;
+                            default: error = $"Unknown field 'daily_report.{k}'."; break;
                         }
                     });
                     break;
