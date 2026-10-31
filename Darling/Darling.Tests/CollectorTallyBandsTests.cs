@@ -25,17 +25,15 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class CollectorTallyBandsTests
 {
-    private static readonly string[] AllBands =
-    [
-        CollectorHealthClassifier.Healthy,
-        CollectorHealthClassifier.Warning,
-        CollectorHealthClassifier.Failing,
-        CollectorHealthClassifier.Stale,
-        CollectorHealthClassifier.NoPermissions,
-        CollectorHealthClassifier.ExtensionMissing,
-        CollectorHealthClassifier.NeverRun,
-        CollectorHealthClassifier.Stopped,
-    ];
+    /// <summary>Every band the classifier names, read from its public string constants (a band is an upper-case word such as
+    /// NO_PERMISSIONS; the class's other constants are prose or lower-case markers), so a band added later joins this list without
+    /// anyone remembering to edit it. #6828 and #6932 each dropped a band from a count because this list was written by hand.</summary>
+    private static readonly string[] AllBands = typeof(CollectorHealthClassifier)
+        .GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.FlattenHierarchy)
+        .Where(f => f.IsLiteral && f.FieldType == typeof(string))
+        .Select(f => (string)f.GetRawConstantValue()!)
+        .Where(v => v.Length > 0 && v.All(c => char.IsAsciiLetterUpper(c) || c == '_'))
+        .ToArray();
 
     [Fact]
     public void OneRowInEveryBand_FillsTheBuckets_AndTheyAddUpToTheTotal()
