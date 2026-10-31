@@ -215,6 +215,50 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ct, ServerId, ServerNa
         }
     }
 
+    /// <summary>
+    /// #7028: the gate reads the snapshots from before the window start, so a streak whose first snapshots fall before
+    /// the window is seen. Three snapshots a minute apart, the first 30 s before a one hour window starts and the other
+    /// two inside it, are one streak of 40 s each: the value inside the window is 40 s, not the 13.3 s a window that
+    /// started at its own first snapshot would give. Snapshots that all fall before the window set nothing.
+    /// </summary>
+    [Fact]
+    public async Task TheSnapshotArm_SeesAStreakThatStartedBeforeTheWindow_ButOnlyValuesSnapshotsInsideIt()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the live test.");
+        var ct = TestContext.Current.CancellationToken;
+        var bodySucceeded = false;
+        try
+        {
+            await using var connection = await OpenAsync(ct);
+            var now = DateTime.UtcNow;
+            var start = now.AddHours(-1);
+            await using var postgres = NpgsqlDataSource.Create(ConnectionString!);
+
+            foreach (var offsetSeconds in new[] { -30, 30, 90 })
+                for (var r = 0; r < 5; r++)
+                    await PlantDmvAsync(connection, Unspecified(start.AddSeconds(offsetSeconds)), 200 + r, RowWaitMs, ct);
+            var straddling = await DarlingFleetReader.GetFleetOverviewAsync(postgres, start, now, now, cancellationToken: ct);
+            Assert.Equal(40_000, straddling.Cards.Single(c => c.ServerId == ServerId).MaxSnapshotWaitMs);
+
+            await DeleteRowsAsync(connection, ct);
+            await ExecAsync(connection, @"
+INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_major_version, created_date, modified_date)
+VALUES ($1, $2, $2, TRUE, 16, now()::timestamp, now()::timestamp)
+ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ct, ServerId, ServerName);
+            foreach (var offsetSeconds in new[] { -150, -90, -30 })
+                for (var r = 0; r < 5; r++)
+                    await PlantDmvAsync(connection, Unspecified(start.AddSeconds(offsetSeconds)), 200 + r, RowWaitMs, ct);
+            var before = await DarlingFleetReader.GetFleetOverviewAsync(postgres, start, now, now, cancellationToken: ct);
+            Assert.Null(before.Cards.SingleOrDefault(c => c.ServerId == ServerId)?.MaxSnapshotWaitMs);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(ConnectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
     private static async Task<double> ReadSnapshotTierAsync(NpgsqlConnection c, CancellationToken ct)
     {
         using var cmd = new NpgsqlCommand("SELECT blocking_critical_snapshot_wait_seconds FROM config_alert_settings WHERE id = 1", c);

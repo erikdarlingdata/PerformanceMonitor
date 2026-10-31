@@ -244,22 +244,28 @@ public static class DailySummarySql
     /// </summary>
     public static readonly string RangeSql = RangeSqlTemplate.Replace(
         "/*blocking-waits*/",
-        BlockingWaits.WaitsCteSql(
+        /* The DMV rows are read once, from the lookback floor (a streak that began before $2 is seen), and the waits
+           and the gate both take them from here. */
+        @"dmv_src AS (
+    SELECT server_id, blocked_spid, blocking_spid, event_time, collection_time, wait_time_ms FROM v_dmv_blocking_snapshots
+    WHERE server_id = $1 AND collection_time >= " + BlockingSnapshotFloorSql("$2", "$1") + @" AND collection_time < $3
+),"
+        + BlockingWaits.WaitsCteSql(
             BlockingWaits.SqlDialect.Postgres, "bpr_waits",
             @"SELECT blocked_spid, blocking_spid, event_time, wait_time_ms, database_name FROM v_blocked_process_reports
     " + BprSourceWhere) + "," + BlockingWaits.WaitsCteSql(
             BlockingWaits.SqlDialect.Postgres, "dmv_waits",
-            @"SELECT blocked_spid, blocking_spid, event_time, collection_time, wait_time_ms FROM v_dmv_blocking_snapshots
-    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3") + ","
+            @"SELECT blocked_spid, blocking_spid, event_time, collection_time, wait_time_ms FROM dmv_src
+    WHERE collection_time >= $2") + ","
         /* Hourly buckets from a fixed midnight, so every bucket lies inside one day (date_bin on a day-aligned origin
            is date_trunc('hour')); the DMV side buckets on collection_time, as this statement always has. */
         + BlockingWaits.HourlyChosenWaitsSql(
             "blk", "bpr_waits", "dmv_waits", "TIMESTAMP '2000-01-01'", false, null, "event_time", "collection_time") + ","
-        + BlockingWaits.SnapshotTotalsSql(
-            "dmv_totals",
-            "SELECT date_trunc('day', collection_time) AS d, collection_time, wait_time_ms, blocked_spid, blocking_spid FROM dmv_waits_marked",
-            SnapshotPartition) + ","
-        + BlockingSnapshotGateSql("dmv_gated", "dmv_totals", SnapshotPartition) + ",",
+        + BlockingWaits.GatedSnapshotWaitSql(
+            "dmv_gated", "SELECT server_id, collection_time, wait_time_ms, blocked_spid, blocking_spid FROM dmv_src",
+            "$2", "$3", false,
+            AlertEngine.BlockingWaitBreachSamples, AlertEngine.BlockingWaitSingleSnapshotMultiplier,
+            AlertEngine.BlockingWaitEpisodeGapFactor, DefaultSnapshotCadenceMinutes, byDay: true) + ",",
         StringComparison.Ordinal);
 
     /// <summary>The blocked-process-report source's window, one line: <see cref="DailySummaryAzureMasterScope"/> appends
@@ -267,53 +273,36 @@ public static class DailySummarySql
     internal const string BprSourceWhere =
         "WHERE server_id = $1 AND event_time >= $2 AND event_time < $3 AND collection_time >= $4";
 
-    /* Properties, not static readonly fields: RangeSql is initialised above them and would read nulls and zeros. */
-    private static string[] SnapshotPartition => new[] { "d" };
-
-    /// <summary>The default collection cadence of the DMV blocking snapshot, in minutes (the cadence a store without an
-    /// override row runs).</summary>
+    /* A property, not a static readonly field: RangeSql is initialised above it and would read a zero. */
     private static int DefaultSnapshotCadenceMinutes =>
         PerformanceMonitor.Collectors.CollectorScheduleDefaults.All["dmv_blocking_snapshot"].FrequencyMinutes;
 
-    /// <summary>The alert's episode gap for the default cadence, seconds (the alert restarts a streak when a snapshot
-    /// lands more than <see cref="AlertEngine.BlockingWaitEpisodeGapFactor"/> cadences after the last).</summary>
-    private static double EpisodeGapSeconds =>
-        AlertEngine.BlockingWaitEpisodeGapFactor * 60.0 * Math.Max(1, DefaultSnapshotCadenceMinutes);
+    /// <summary>
+    /// #7028: where the snapshot reads start for a window that starts at <paramref name="windowStartSql"/>, so a streak
+    /// that began before the window is seen (<see cref="BlockingWaits.SnapshotLookbackFloorSql"/> with the alert's own
+    /// constants). <paramref name="serverIdSql"/> is the one server's id, or null for the fleet.
+    /// </summary>
+    public static string BlockingSnapshotFloorSql(string windowStartSql, string? serverIdSql) =>
+        BlockingWaits.SnapshotLookbackFloorSql(
+            windowStartSql, serverIdSql, AlertEngine.BlockingWaitBreachSamples, AlertEngine.BlockingWaitEpisodeGapFactor,
+            DefaultSnapshotCadenceMinutes);
 
     /// <summary>
-    /// #7028: the blocking band's snapshot arm as a CTE chain ending in <paramref name="name"/> (the partition columns
-    /// and <c>peak_snapshot_wait_ms</c>), built from a <see cref="BlockingWaits.SnapshotTotalsSql"/> CTE named
-    /// <paramref name="totals"/> with the Blocking Wait Time alert's own gate constants and the server's snapshot
-    /// cadence. <c>$1</c> must be the server id. Shared by this statement and the Viewer's Overview read, so both
-    /// gate the same way.
+    /// #7028: the snapshot arm for a window with the alert's own gate constants and the shipped default cadence, one
+    /// definition for the fleet reads and the Viewer Overview (<see cref="BlockingWaits.GatedSnapshotWaitSql"/>).
+    /// <paramref name="serverIdSql"/> is the one server's id (<c>$1</c>), or null for every server.
     /// </summary>
-    public static string BlockingSnapshotGateSql(string name, string totals, System.Collections.Generic.IReadOnlyList<string>? partitionColumns = null) =>
-        SnapshotGate(BlockingWaits.GatedSnapshotWaitSql(
-            name, totals, AlertEngine.BlockingWaitBreachSamples, AlertEngine.BlockingWaitSingleSnapshotMultiplier,
-            EpisodeGapSeconds, partitionColumns));
-
-    /// <summary>
-    /// The gate's episode gap is a literal in <see cref="BlockingWaits.GatedSnapshotWaitSql"/>, but the cadence is a
-    /// per-server schedule: a server whose snapshot runs every five minutes would see every pair of snapshots as a new
-    /// episode and never reach three in a row. The literal is replaced with the factor times the server's own cadence
-    /// (the override row, else the default). Throws when the gate text no longer holds the literal.
-    /// </summary>
-    private static string SnapshotGate(string gatedSql)
-    {
-        var inv = System.Globalization.CultureInfo.InvariantCulture;
-        var literal = "interval '" + EpisodeGapSeconds.ToString("R", inv) + " seconds'";
-        if (!gatedSql.Contains(literal, StringComparison.Ordinal))
-        {
-            throw new InvalidOperationException("The gated snapshot SQL no longer holds the episode gap literal " + literal + " (#7028).");
-        }
-
-        return gatedSql.Replace(
-            literal,
-            "(COALESCE(NULLIF((SELECT MAX(frequency_minutes) FROM config_collector_schedules WHERE server_id = $1 AND collector_name = 'dmv_blocking_snapshot'), 0), "
-            + Math.Max(1, DefaultSnapshotCadenceMinutes).ToString(inv)
-            + ") * interval '" + (AlertEngine.BlockingWaitEpisodeGapFactor * 60.0).ToString("R", inv) + " seconds')",
-            StringComparison.Ordinal);
-    }
+    public static string BlockingSnapshotGateSql(
+        string name, string windowStartSql, string? windowEndSql, bool endInclusive, string? serverIdSql) =>
+        BlockingWaits.GatedSnapshotWaitSql(
+            name,
+            @"SELECT server_id, collection_time, wait_time_ms, blocked_spid, blocking_spid FROM v_dmv_blocking_snapshots
+    WHERE collection_time >= " + BlockingSnapshotFloorSql(windowStartSql, serverIdSql)
+            + (windowEndSql is null ? string.Empty : " AND collection_time " + (endInclusive ? "<=" : "<") + " " + windowEndSql)
+            + (serverIdSql is null ? string.Empty : " AND server_id = " + serverIdSql),
+            windowStartSql, windowEndSql, endInclusive,
+            AlertEngine.BlockingWaitBreachSamples, AlertEngine.BlockingWaitSingleSnapshotMultiplier,
+            AlertEngine.BlockingWaitEpisodeGapFactor, DefaultSnapshotCadenceMinutes);
 
     /// <summary>
     /// The <c>queries</c> CTE exactly as it appears in <see cref="RangeSql"/> — the ONE part of the

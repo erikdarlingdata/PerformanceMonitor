@@ -163,7 +163,9 @@ FROM newest";
        #7028: the band bands on these waits (the card's window is one hour, so XE-or-DMV for the window is the per-hour
        choice the blocking alerts make for their rolling hour) and on the last column, the Blocking Wait Time alert's own
        measure: the largest total blocked wait of one DMV snapshot in the window after the alert's persistence gate,
-       in milliseconds, taken from the DMV snapshots whichever source the count chose. */
+       in milliseconds, taken from the DMV snapshots whichever source the count chose. The gate is the one shared definition
+       (DailySummarySql.BlockingSnapshotGateSql): the server's own snapshot cadence, snapshots read from before the window
+       start so a streak that began before it counts. */
     public static readonly string ServerSummaryBlockingSql = @"
 WITH " + BlockingWaits.WaitsCteSql(
         BlockingWaits.SqlDialect.Postgres, "xe_waits",
@@ -172,9 +174,7 @@ WITH " + BlockingWaits.WaitsCteSql(
         BlockingWaits.SqlDialect.Postgres, "dmv_waits",
         @"SELECT blocked_spid, blocking_spid, event_time, collection_time, wait_time_ms FROM v_dmv_blocking_snapshots
     WHERE server_id = $1 AND event_time >= $2 AND collection_time >= $3") + ","
-    + BlockingWaits.SnapshotTotalsSql(
-        "dmv_totals", "SELECT collection_time, wait_time_ms, blocked_spid, blocking_spid FROM dmv_waits_marked") + ","
-    + DailySummarySql.BlockingSnapshotGateSql("dmv_gated", "dmv_totals") + @"
+    + DailySummarySql.BlockingSnapshotGateSql("dmv_gated", "$2", null, false, "$1") + @"
 SELECT
     (SELECT COUNT(*)          FROM xe_waits),
     (SELECT MAX(wait_time_ms) FROM xe_waits),

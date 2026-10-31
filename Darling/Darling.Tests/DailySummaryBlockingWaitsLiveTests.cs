@@ -151,13 +151,16 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ct, ServerId, ServerNa
     }
 
     private static async Task<(long Events, long PeakBlockWaitMs, long PeakSnapshotWaitMs)> ReadDayAsync(
-        NpgsqlConnection connection, DateTime day, CancellationToken ct)
+        NpgsqlConnection connection, DateTime day, CancellationToken ct, DateTime? rangeStart = null)
     {
-        using var read = new NpgsqlCommand("SELECT blocking_events, peak_block_wait_ms, peak_snapshot_wait_ms FROM (" + DailySummarySql.RangeSql + ") AS calendar WHERE day = $2", connection);
+        /* rangeStart reads a longer range that ends with `day`, and picks `day`'s row out of it. */
+        var start = rangeStart ?? day;
+        using var read = new NpgsqlCommand("SELECT blocking_events, peak_block_wait_ms, peak_snapshot_wait_ms FROM (" + DailySummarySql.RangeSql + ") AS calendar WHERE day = $5", connection);
         read.Parameters.Add(new NpgsqlParameter<int> { TypedValue = ServerId });
-        read.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = day });
+        read.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = start });
         read.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = day.AddDays(1) });
-        read.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = EventWindowFloor.For(day) });
+        read.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = EventWindowFloor.For(start) });
+        read.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = day });
         using var reader = await read.ExecuteReaderAsync(ct);
         Assert.True(await reader.ReadAsync(ct));
         return (Convert.ToInt64(reader.GetValue(0), CultureInfo.InvariantCulture),
@@ -292,6 +295,46 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ct, ServerId, ServerNa
             Assert.Equal(20_000, blip.PeakSnapshotWaitMs);
             Assert.Equal(60_000, run.PeakSnapshotWaitMs);
             Assert.Equal(20_000, gap.PeakSnapshotWaitMs);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>#7028: the gate runs over the snapshots in time order, not per day. Three snapshots a minute apart that
+    /// straddle midnight (23:58, 23:59, 00:00, each 60 s in total) are one streak: the later day, whose range starts at
+    /// its own midnight, still sees the two before it and reads 60 s. In a range that holds both days the earlier day
+    /// holds only the first two snapshots, so it reads a third of 60 s, 20 s.</summary>
+    [Fact]
+    public async Task TheSnapshotArm_SeesAStreakAcrossMidnight_OnTheLaterDay()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live test.");
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+        var bodySucceeded = false;
+        try
+        {
+            await SeedServerAsync(connection, ct);
+            var earlier = DateTime.SpecifyKind(DateTime.UtcNow.Date.AddDays(-4), DateTimeKind.Unspecified);
+            var later = earlier.AddDays(1);
+            await PlantSnapshotAsync(connection, later.AddMinutes(-2), rows: 2, eachMs: 30_000, ct);
+            await PlantSnapshotAsync(connection, later.AddMinutes(-1), rows: 2, eachMs: 30_000, ct);
+            await PlantSnapshotAsync(connection, later, rows: 2, eachMs: 30_000, ct);
+
+            var laterAlone = await ReadDayAsync(connection, later, ct);
+            var laterInRange = await ReadDayAsync(connection, later, ct, rangeStart: earlier);
+            var earlierInRange = await ReadDayAsync(connection, earlier, ct, rangeStart: earlier.AddDays(-1));
+
+            Assert.Equal(60_000, laterAlone.PeakSnapshotWaitMs);
+            Assert.Equal(60_000, laterInRange.PeakSnapshotWaitMs);
+            Assert.Equal(20_000, earlierInRange.PeakSnapshotWaitMs);
             bodySucceeded = true;
         }
         finally

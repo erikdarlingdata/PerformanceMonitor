@@ -164,70 +164,103 @@ public static class BlockingWaits
     /// reads (<c>blocking.wait_threshold_seconds</c>) and the blocking band's snapshot arm reads. An aggregate
     /// expression over a relation that has <c>wait_time_ms</c>, <c>blocked_spid</c> and <c>blocking_spid</c>
     /// (PostgreSQL): the summed <c>wait_time_ms</c> of the rows that are real waits (<see cref="NotSelfWaitSql"/>),
-    /// 0 when none, as a bigint. The alert's one-snapshot read and <see cref="SnapshotTotalsSql"/> both aggregate it,
+    /// 0 when none, as a bigint. The alert's one-snapshot read and <see cref="GatedSnapshotWaitSql"/> both aggregate it,
     /// so there is one SUM expression.
     /// </summary>
     public const string SnapshotTotalWaitMsSql =
         "CAST(COALESCE(SUM(wait_time_ms) FILTER (WHERE " + NotSelfWaitSql + "), 0) AS bigint)";
 
     /// <summary>
-    /// #7028: a CTE named <paramref name="name"/>, one row per DMV snapshot, with the partition columns, the
-    /// <c>collection_time</c> that identifies the snapshot (the alert's observation identity), and
-    /// <c>total_wait_ms</c> = <see cref="SnapshotTotalWaitMsSql"/> over the snapshot's rows. <paramref name="source"/>
-    /// is a SELECT that returns <c>collection_time</c>, <c>wait_time_ms</c>, <c>blocked_spid</c>, <c>blocking_spid</c>
-    /// and every column in <paramref name="partitionColumns"/>. The text ends with the closing parenthesis, no
-    /// trailing comma. PostgreSQL only.
+    /// #7028: one server's EFFECTIVE <c>dmv_blocking_snapshot</c> cadence in minutes, as a SQL scalar for the server
+    /// named by <paramref name="serverIdSql"/>: the server's own schedule row, else the fleet-wide row (a NULL
+    /// <c>server_id</c>), else <paramref name="defaultCadenceMinutes"/>, a non-positive value counting as no row. This
+    /// is the order the service resolves the schedule the alert reads its cadence from
+    /// (<c>StoreConfigProvider.ResolveSchedule</c>), so the band and the alert measure adjacency on one cadence.
+    /// PostgreSQL only.
     /// </summary>
-    public static string SnapshotTotalsSql(
-        string name, string source, IReadOnlyList<string>? partitionColumns = null)
+    public static string SnapshotCadenceMinutesSql(string serverIdSql, int defaultCadenceMinutes) =>
+        "COALESCE("
+        + "NULLIF((SELECT MAX(c.frequency_minutes) FROM config_collector_schedules AS c WHERE c.server_id = " + serverIdSql
+        + " AND c.collector_name = 'dmv_blocking_snapshot'), 0), "
+        + "NULLIF((SELECT MAX(c.frequency_minutes) FROM config_collector_schedules AS c WHERE c.server_id IS NULL"
+        + " AND c.collector_name = 'dmv_blocking_snapshot'), 0), "
+        + Math.Max(1, defaultCadenceMinutes).ToString(System.Globalization.CultureInfo.InvariantCulture) + ")";
+
+    /// <summary>
+    /// #7028: how far BEFORE a window's start the gate must read snapshots so a streak that began before the window is
+    /// seen: <c>(breachSamples - 1)</c> adjacency gaps of the slowest cadence a server in scope runs
+    /// (<paramref name="serverIdSql"/> is null for the fleet, or the one server's id, such as <c>$1</c>). A SQL timestamp
+    /// expression. Reading more history than one server needs changes nothing: only the snapshots before an in-window
+    /// snapshot feed its value.
+    /// </summary>
+    public static string SnapshotLookbackFloorSql(
+        string windowStartSql, string? serverIdSql, int breachSamples, double gapFactor, int defaultCadenceMinutes)
     {
-        var cols = PartitionList(partitionColumns, "s.");
-        return $@"
-{name} AS (
-    SELECT {cols}s.collection_time, {SnapshotTotalWaitMsSql} AS total_wait_ms
-    FROM ({source}) AS s
-    GROUP BY {cols}s.collection_time
-)";
+        var inv = System.Globalization.CultureInfo.InvariantCulture;
+        var slowest = $"GREATEST({Math.Max(1, defaultCadenceMinutes).ToString(inv)}, COALESCE((SELECT MAX(c.frequency_minutes) "
+            + "FROM config_collector_schedules AS c WHERE c.collector_name = 'dmv_blocking_snapshot'"
+            + (serverIdSql is null ? string.Empty : " AND (c.server_id IS NULL OR c.server_id = " + serverIdSql + ")")
+            + "), 0))";
+        return $"({windowStartSql} - {Math.Max(0, breachSamples - 1).ToString(inv)} * {slowest} * interval '{(gapFactor * 60.0).ToString("R", inv)} seconds')";
     }
 
     /// <summary>
-    /// #7028: the blocking band's snapshot arm value, a CTE named <paramref name="name"/> with the partition columns
-    /// and <c>peak_snapshot_wait_ms</c> (double precision, milliseconds), one row per partition that has a snapshot,
-    /// built from a <see cref="SnapshotTotalsSql"/> CTE named <paramref name="totals"/>. It mirrors the gate that
-    /// decides whether <c>Blocking Wait Time</c> pages, so a snapshot that would not page does not colour the band:
-    /// for each snapshot take the larger of (a) the smallest total across that snapshot and the
-    /// <paramref name="breachSamples"/> - 1 snapshots before it, counted only while the snapshots are adjacent
-    /// (a gap of more than <paramref name="episodeGapSeconds"/> starts a new episode, as the alert restarts a
-    /// streak), 0 when fewer than <paramref name="breachSamples"/> adjacent snapshots exist, and (b) the total divided
-    /// by <paramref name="singleSnapshotMultiplier"/> (one snapshot at that multiple of the bar pages alone). The
-    /// value is the largest of those over the rows <paramref name="totals"/> holds. A tier then compares as
-    /// <c>value &gt;= tier</c>. Callers pass the alert's own constants (<c>AlertEngine.BlockingWaitBreachSamples</c>,
-    /// <c>BlockingWaitSingleSnapshotMultiplier</c> and the episode gap factor times the collector cadence). The text
-    /// ends with the closing parenthesis, no trailing comma. PostgreSQL only.
+    /// #7028: the blocking band's snapshot arm value, ONE definition for every surface that reads it (the fleet card and
+    /// sweep, the Azure master scope, the Viewer Overview and the daily calendar). A CTE chain ending in
+    /// <paramref name="name"/>, one row per server (and per day with <paramref name="byDay"/>) that has an in-window
+    /// snapshot, with <c>server_id</c>, <c>d</c> (the day, only with <paramref name="byDay"/>) and
+    /// <c>peak_snapshot_wait_ms</c> (double precision, milliseconds). It mirrors the gate that decides whether
+    /// <c>Blocking Wait Time</c> pages, so a snapshot that would not page does not colour the band.
+    ///
+    /// <para><b>The snapshots</b> are <paramref name="snapshots"/>, a relation with <c>server_id</c>, <c>collection_time</c>,
+    /// <c>wait_time_ms</c>, <c>blocked_spid</c> and <c>blocking_spid</c> (every row of each snapshot, as the alert reads
+    /// them), already read from <see cref="SnapshotLookbackFloorSql"/> before the window start. A snapshot is the
+    /// <c>collection_time</c> (the alert's observation identity) and its total is <see cref="SnapshotTotalWaitMsSql"/>.</para>
+    ///
+    /// <para><b>The gate</b> runs per server over its snapshots in time order, never split at a day or at the window
+    /// edge: for each snapshot take the larger of (a) the smallest total across that snapshot and the
+    /// <paramref name="breachSamples"/> - 1 before it, counted only while consecutive snapshots are adjacent, 0 when
+    /// fewer than <paramref name="breachSamples"/> adjacent snapshots exist, and (b) the total divided by
+    /// <paramref name="singleSnapshotMultiplier"/> (one snapshot at that multiple of the bar pages alone). Adjacent is
+    /// the alert's rule: the alert restarts a streak when a breaching snapshot lands more than
+    /// <paramref name="gapFactor"/> cadences after the last one it counted (<c>AlertEngine.BlockingWaitEpisodeGapFactor</c>),
+    /// the cadence being the server's own (<see cref="SnapshotCadenceMinutesSql"/>). A snapshot below the bar has a low
+    /// total, so it ends a streak in the minimum, as the alert's clear does.</para>
+    ///
+    /// <para><b>The value</b> is the largest of those over the snapshots at or after <paramref name="windowStartSql"/>
+    /// (and before <paramref name="windowEndSql"/>, inclusive with <paramref name="endInclusive"/>) only, per server or
+    /// per server and day. A tier then compares as <c>value &gt;= tier</c>. The text ends with the closing parenthesis,
+    /// no trailing comma. PostgreSQL only.</para>
     /// </summary>
     public static string GatedSnapshotWaitSql(
-        string name, string totals, int breachSamples, int singleSnapshotMultiplier, double episodeGapSeconds,
-        IReadOnlyList<string>? partitionColumns = null)
+        string name, string snapshots, string windowStartSql, string? windowEndSql, bool endInclusive,
+        int breachSamples, int singleSnapshotMultiplier, double gapFactor, int defaultCadenceMinutes, bool byDay = false)
     {
         var inv = System.Globalization.CultureInfo.InvariantCulture;
-        var cols = PartitionList(partitionColumns, string.Empty);
-        var partition = partitionColumns is { Count: > 0 }
-            ? "PARTITION BY " + string.Join(", ", partitionColumns)
-            : string.Empty;
-        var episodePartition = partitionColumns is { Count: > 0 }
-            ? partition + ", episode"
-            : "PARTITION BY episode";
         var samples = Math.Max(1, breachSamples);
-        var groupBy = string.IsNullOrEmpty(cols) ? string.Empty : "GROUP BY " + cols.Substring(0, cols.Length - 2);
+        var keep = $"f.collection_time >= {windowStartSql}"
+            + (windowEndSql is null ? string.Empty : $" AND f.collection_time {(endInclusive ? "<=" : "<")} {windowEndSql}");
+        var dayCol = byDay ? "date_trunc('day', f.collection_time) AS d, " : string.Empty;
+        var groupBy = byDay ? "f.server_id, date_trunc('day', f.collection_time)" : "f.server_id";
         return $@"
+{name}_totals AS (
+    SELECT s.server_id, s.collection_time, {SnapshotTotalWaitMsSql} AS total_wait_ms
+    FROM ({snapshots}) AS s
+    GROUP BY s.server_id, s.collection_time
+),
+{name}_cad AS (
+    SELECT sv.server_id, {SnapshotCadenceMinutesSql("sv.server_id", defaultCadenceMinutes)} * interval '{(gapFactor * 60.0).ToString("R", inv)} seconds' AS gap
+    FROM (SELECT DISTINCT server_id FROM {name}_totals) AS sv
+),
 {name}_gaps AS (
-    SELECT t.*, t.collection_time - LAG(t.collection_time) OVER ({partition} ORDER BY t.collection_time) AS since_prev
-    FROM {totals} AS t
+    SELECT t.*, c.gap, t.collection_time - LAG(t.collection_time) OVER (PARTITION BY t.server_id ORDER BY t.collection_time) AS since_prev
+    FROM {name}_totals AS t
+    JOIN {name}_cad AS c ON c.server_id = t.server_id
 ),
 {name}_episodes AS (
     SELECT g.*,
-        SUM(CASE WHEN g.since_prev IS NULL OR g.since_prev > interval '{episodeGapSeconds.ToString("R", inv)} seconds' THEN 1 ELSE 0 END)
-            OVER ({partition} ORDER BY g.collection_time) AS episode
+        SUM(CASE WHEN g.since_prev IS NULL OR g.since_prev > g.gap THEN 1 ELSE 0 END)
+            OVER (PARTITION BY g.server_id ORDER BY g.collection_time) AS episode
     FROM {name}_gaps AS g
 ),
 {name}_framed AS (
@@ -235,14 +268,15 @@ public static class BlockingWaits
         MIN(e.total_wait_ms) OVER w AS streak_min,
         COUNT(*) OVER w AS streak_len
     FROM {name}_episodes AS e
-    WINDOW w AS ({episodePartition} ORDER BY e.collection_time ROWS BETWEEN {(samples - 1).ToString(inv)} PRECEDING AND CURRENT ROW)
+    WINDOW w AS (PARTITION BY e.server_id, e.episode ORDER BY e.collection_time ROWS BETWEEN {(samples - 1).ToString(inv)} PRECEDING AND CURRENT ROW)
 ),
 {name} AS (
-    SELECT {cols}MAX(GREATEST(
+    SELECT f.server_id, {dayCol}MAX(GREATEST(
         CASE WHEN f.streak_len >= {samples.ToString(inv)} THEN CAST(f.streak_min AS double precision) ELSE 0 END,
         CAST(f.total_wait_ms AS double precision) / {Math.Max(1, singleSnapshotMultiplier).ToString(inv)})) AS peak_snapshot_wait_ms
     FROM {name}_framed AS f
-    {groupBy}
+    WHERE {keep}
+    GROUP BY {groupBy}
 )";
     }
 

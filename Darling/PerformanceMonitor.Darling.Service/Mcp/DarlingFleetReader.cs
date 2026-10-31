@@ -349,11 +349,11 @@ AND   {SqlServerCollectedTargetSql}";
     /// <para>$3 is the partition-column bound the event window cannot supply (#3895): without it both scans
     /// open every retained chunk to count the last hour. It cannot drop a row the window wants —
     /// <see cref="EventWindowFloor"/> says why.</para></summary>
-    public static readonly string FleetBlockingSql = BuildFleetBlockingSql(singleBucket: false, serverWhere: "", xeWhere: "");
+    public static readonly string FleetBlockingSql = BuildFleetBlockingSql(singleBucket: false, serverWhere: "", xeWhere: "", serverIdSql: null);
 
     /// <summary>The same statement for a window of one hour or less (#7028): one bucket, the alerts' rolling hour itself,
     /// so it skips the bucketing. Same parameters and columns as <see cref="FleetBlockingSql"/>.</summary>
-    public static readonly string FleetBlockingOneHourSql = BuildFleetBlockingSql(singleBucket: true, serverWhere: "", xeWhere: "");
+    public static readonly string FleetBlockingOneHourSql = BuildFleetBlockingSql(singleBucket: true, serverWhere: "", xeWhere: "", serverIdSql: null);
 
     /// <summary>The statement <see cref="ReadBlockingAsync"/> runs for a window of this length.</summary>
     internal static string FleetBlockingSqlFor(TimeSpan window) =>
@@ -365,7 +365,8 @@ AND   {SqlServerCollectedTargetSql}";
     internal static string AzureMasterBlockingBandSql(bool singleBucket) => BuildFleetBlockingSql(
         singleBucket,
         serverWhere: "\n    AND   server_id = $4",
-        xeWhere: "\n    AND   (database_name IS NULL OR NOT (lower(database_name) = ANY(SELECT lower(x) FROM unnest($5::text[]) x)))");
+        xeWhere: "\n    AND   (database_name IS NULL OR NOT (lower(database_name) = ANY(SELECT lower(x) FROM unnest($5::text[]) x)))",
+        serverIdSql: "$4");
 
     /* #5644 W1: the counts are WAITS, not report rows: SQL Server writes a report for a still-blocked session every
        threshold seconds, so one one-minute wait was about eleven tile counts. BlockingWaits.WaitsCteSql is the one
@@ -380,11 +381,11 @@ AND   {SqlServerCollectedTargetSql}";
 
        #6705: both reads leave a parallel query waiting on itself out (BlockingWaits.NotSelfWaitSql).
 
-       The snapshot arm: BlockingWaits.SnapshotTotalsSql sums each DMV snapshot (the Blocking Wait Time alert's
-       expression) and GatedSnapshotWaitSql applies the alert's persistence gate with the alert's own constants. The
-       snapshot cadence is the shipped one: a server whose dmv_blocking_snapshot schedule was changed keeps this
-       statement's 90 s adjacency, which under-fires the consecutive arm, never over-fires it. */
-    private static string BuildFleetBlockingSql(bool singleBucket, string serverWhere, string xeWhere) => @"
+       The snapshot arm: DailySummarySql.BlockingSnapshotGateSql (BlockingWaits.GatedSnapshotWaitSql) sums each DMV
+       snapshot (the Blocking Wait Time alert's expression) and applies the alert's persistence gate with the alert's
+       own constants, on each server's own dmv_blocking_snapshot cadence. It reads the snapshots from before the window
+       start, so a streak that began before the window counts, and keeps the ones inside it. */
+    private static string BuildFleetBlockingSql(bool singleBucket, string serverWhere, string xeWhere, string? serverIdSql) => @"
 WITH xe_reports AS (
     SELECT server_id, blocked_spid, blocking_spid, event_time, wait_time_ms
     FROM v_blocked_process_reports
@@ -405,12 +406,8 @@ dmv_reports AS (
         "SELECT * FROM xe_reports", new[] { "server_id" }) + "," + BlockingWaits.WaitsCteSql(
         BlockingWaits.SqlDialect.Postgres, "dmv_waits",
         "SELECT * FROM dmv_reports", new[] { "server_id" }) + "," + BlockingWaits.HourlyChosenWaitsSql(
-        "chosen", "xe_waits", "dmv_waits", "$2", singleBucket, new[] { "server_id" }) + "," + BlockingWaits.SnapshotTotalsSql(
-        "snapshot_totals", "SELECT server_id, collection_time, blocked_spid, blocking_spid, wait_time_ms FROM dmv_reports",
-        new[] { "server_id" }) + "," + BlockingWaits.GatedSnapshotWaitSql(
-        "snapshot_gated", "snapshot_totals",
-        AlertEngine.BlockingWaitBreachSamples, AlertEngine.BlockingWaitSingleSnapshotMultiplier, SnapshotEpisodeGapSeconds,
-        new[] { "server_id" }) + @",
+        "chosen", "xe_waits", "dmv_waits", "$2", singleBucket, new[] { "server_id" }) + ","
+        + DailySummarySql.BlockingSnapshotGateSql("snapshot_gated", "$1", "$2", true, serverIdSql) + @",
 band AS (
     SELECT server_id, COUNT(*) AS band_count, MAX(wait_time_ms) AS band_max_wait
     FROM chosen
@@ -423,12 +420,6 @@ SELECT
     g.peak_snapshot_wait_ms
 FROM band AS b
 FULL OUTER JOIN snapshot_gated AS g ON b.server_id = g.server_id";
-
-    /// <summary>#7028: how far apart (seconds) two DMV snapshots may be and still be consecutive: the alert's own
-    /// <see cref="AlertEngine.BlockingWaitEpisodeGapFactor"/> times the shipped <c>dmv_blocking_snapshot</c> cadence.</summary>
-    private static double SnapshotEpisodeGapSeconds =>
-        AlertEngine.BlockingWaitEpisodeGapFactor
-        * PerformanceMonitor.Collectors.CollectorScheduleDefaults.All["dmv_blocking_snapshot"].FrequencyMinutes * 60.0;
 
     /// <summary>Deadlocks in the window per server — count and newest deadlock instant (for each card's
     /// "last seen" detail). $1 window start, $2 window end, $3 the <see cref="EventWindowFloor"/> for $1 (all
@@ -2956,7 +2947,7 @@ public sealed class FleetServerCard
     public long? MaxSnapshotWaitMs { get; init; }
 
     [JsonPropertyName("max_blocking_wait_ms")] public long MaxBlockingWaitMs { get; init; }
-    /// <summary>Blocking events per HOUR over the card's window — the figure the count arm of
+    /// <summary>Blocking waits per HOUR over the card's window — the figure the count arm of
     /// <c>blocking_severity</c> banded on (#3539 A3), or null when the window was too short to normalise.
     /// Published beside the raw count for <see cref="DeadlockRatePerHour"/>'s reason.</summary>
     [JsonPropertyName("blocking_rate_per_hour")] public double? BlockingRatePerHour { get; init; }
@@ -3216,7 +3207,7 @@ public sealed class FleetOverviewResult
     [JsonPropertyName("total_blocking_events")] public long TotalBlockingEvents { get; init; }
     [JsonPropertyName("total_deadlocks")] public long TotalDeadlocks { get; init; }
 
-    /// <summary>The Blocking totals tile's band (#6927): the fleet's blocked-process reports per hour and longest block against the
+    /// <summary>The Blocking totals tile's band (#6927): the fleet's blocking waits per hour and longest block against the
     /// store's blocking tiers, through the same classifier the cards use. Unknown when no card has a blocking source.</summary>
     [JsonPropertyName("total_blocking_severity")] public HealthSeverity TotalBlockingSeverity { get; init; }
 

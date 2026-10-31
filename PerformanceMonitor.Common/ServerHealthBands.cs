@@ -322,8 +322,9 @@ namespace PerformanceMonitor.Common
         public static readonly TimeSpan BlockingRateMinimumWindow = TimeSpan.FromHours(1);
 
         /// <summary>
-        /// WARNING tier of the blocking COUNT arm: blocked-process reports per hour, normalised over the
-        /// window.
+        /// WARNING tier of the blocking COUNT arm: blocking WAITS per hour, normalised over the window (#7028;
+        /// the count is the blocked waits the blocking alerts count, not report rows). The tier was measured in
+        /// blocked-process reports below, and a wait is one or more reports, so the same number fires no more often.
         ///
         /// <para><b>The top of the measured quiet mode.</b> 14 days of <c>blocked_process_reports</c> on
         /// the 43-server dogfood fleet — 2,398 reports over 14,448 server-hours, bucketed one server-hour
@@ -342,7 +343,7 @@ namespace PerformanceMonitor.Common
         public const double BlockingWarnPerHour = 5.0;
 
         /// <summary>
-        /// CRITICAL tier of the blocking COUNT arm: reports per hour.
+        /// CRITICAL tier of the blocking COUNT arm: blocking waits per hour (#7028; measured in reports, below).
         ///
         /// <para><b>Placed inside the measured trough, the #3368 method.</b> On the same 14-day distribution
         /// the interval [5, 19] holds 14 server-hours (5 at 5–10, 9 at 11–19) against 23 at 20 or more, and
@@ -472,7 +473,7 @@ namespace PerformanceMonitor.Common
     }
 
     /// <summary>
-    /// The four settable tiers of the blocking band (#6927): events per hour and the longest single block in
+    /// The settable tiers of the blocking band (#6927): blocking waits per hour and the longest single block in
     /// seconds, each with a Warning and a Critical bar. The same shape as <see cref="DeadlockRateThresholds"/>:
     /// the store holds what the operator set, these accessors clamp on read, and a <c>default</c> struct
     /// (every field zero) clamps to the floors rather than to zero.
@@ -492,10 +493,10 @@ namespace PerformanceMonitor.Common
         double WarnSnapshotWaitSecondsRaw = 0,
         double CriticalSnapshotWaitSecondsRaw = 0)
     {
-        /// <summary>Warning bar, events per hour, clamped.</summary>
+        /// <summary>Warning bar, blocking waits per hour, clamped.</summary>
         public double WarnPerHour => Clamp(WarnPerHourRaw, ServerHealthThresholds.BlockingRatePerHourFloor, ServerHealthThresholds.BlockingRatePerHourCeiling);
 
-        /// <summary>Critical bar, events per hour, clamped independently of the warning bar.</summary>
+        /// <summary>Critical bar, blocking waits per hour, clamped independently of the warning bar.</summary>
         public double CriticalPerHour => Clamp(CriticalPerHourRaw, ServerHealthThresholds.BlockingRatePerHourFloor, ServerHealthThresholds.BlockingRatePerHourCeiling);
 
         /// <summary>Warning bar, longest block in seconds, clamped.</summary>
@@ -918,7 +919,7 @@ namespace PerformanceMonitor.Common
         }
 
         /// <summary>
-        /// Blocked-process reports per hour over <paramref name="window"/>, or <c>null</c> when the window
+        /// Blocking waits per hour over <paramref name="window"/>, or <c>null</c> when the window
         /// is too short to normalise honestly (below <see cref="ServerHealthThresholds.BlockingRateMinimumWindow"/>,
         /// which includes a zero, negative or undeclared one) — <see cref="DeadlockRatePerHour"/>'s arithmetic
         /// over the blocking count (#3539 A3). Public for the same reason: both cards and the day cell REPORT
@@ -930,7 +931,7 @@ namespace PerformanceMonitor.Common
 
         /// <summary>
         /// Blocking band (#3539 A3): three arms, in this order — the longest single block's magnitude,
-        /// then blocked-process reports per HOUR over the window against
+        /// then blocking waits per HOUR over the window against
         /// <see cref="ServerHealthThresholds.BlockingCriticalPerHour"/> / <see cref="ServerHealthThresholds.BlockingWarnPerHour"/>,
         /// then the wait arm's Warning bar; no source Unknown (#3272).
         ///

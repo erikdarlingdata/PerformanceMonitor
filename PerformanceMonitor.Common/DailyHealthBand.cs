@@ -652,10 +652,11 @@ namespace PerformanceMonitor.Common
 
         /// <summary>The blocking line — the count (of WAITS, #5644), then the per-hour rate the band evaluated when the
         /// window is rateable (#3539 A3, the deadlock line's rule), then the peak block duration when one is known,
-        /// e.g. "42 blocking events (1.8/hr, peak block 12.5 s)". The band's tiers are measured in blocked-process
-        /// reports per hour, so when <see cref="DailyHealthSignals.BlockingReports"/> is carried the rate is that
-        /// count's and says so ("19.8 reports/hr"), instead of a wait count's rate the band never read. An unrateable
-        /// window prints no rate.</summary>
+        /// e.g. "42 blocking events (1.8/hr, peak block 12.5 s)". Darling bands on the waits per hour (#7028), so the
+        /// rate is the wait count's. Lite still bands on report rows and carries
+        /// <see cref="DailyHealthSignals.BlockingReports"/>, so for Lite the rate is that count's and says so
+        /// ("19.8 reports/hr"), instead of a wait count's rate the band never read. An unrateable window prints no
+        /// rate.</summary>
         private static void AppendBlocking(List<string> lines, in DailyHealthSignals signals, long peakBlockMs)
         {
             var count = signals.BlockingEvents;
