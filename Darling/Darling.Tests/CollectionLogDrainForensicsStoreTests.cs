@@ -375,7 +375,7 @@ public class CollectionLogDrainForensicsStoreTests
         }
 
         Assert.NotNull(dir);
-        return File.ReadAllText(Path.Combine(dir!, relativePath));
+        return RepoFile.ReadRepoFile(Path.Combine(dir!, relativePath));
     }
 
     /// <summary>A minimal one-string-column reader, so the decorator is exercised without a live provider.</summary>

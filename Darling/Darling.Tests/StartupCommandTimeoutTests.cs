@@ -222,7 +222,7 @@ public sealed class StartupCommandTimeoutTests
     internal static string SerialLoopMemberBody(string file, string member)
     {
         var path = SourcePath(file);
-        return MemberBody(File.ReadAllText(path), member, path);
+        return MemberBody(RepoFile.ReadRepoFile(path), member, path);
     }
 
     /// <summary>
@@ -280,7 +280,7 @@ public sealed class StartupCommandTimeoutTests
         foreach (var (file, member, wantBootstrap, wantProbe, wantLoop, wantOther) in s_startupMembers)
         {
             var path = SourcePath(file);
-            var text = File.ReadAllText(path);
+            var text = RepoFile.ReadRepoFile(path);
             var body = MemberBody(text, member, path);
             var bodyCode = CSharpSourceWalker.StripCommentsAndStrings(body);
             int gotBootstrap = 0, gotProbe = 0, gotLoop = 0, gotOther = 0;
@@ -365,7 +365,7 @@ public sealed class StartupCommandTimeoutTests
         foreach (var (file, member) in s_excludedMembers)
         {
             var path = SourcePath(file);
-            var text = File.ReadAllText(path);
+            var text = RepoFile.ReadRepoFile(path);
             var body = MemberBody(text, member, path);
             var bodyCode = CSharpSourceWalker.StripCommentsAndStrings(body);
 
@@ -718,7 +718,7 @@ public sealed class StartupCommandTimeoutTests
         foreach (var (file, member, _, _, _, _) in s_startupMembers)
         {
             var path = SourcePath(file);
-            var text = File.ReadAllText(path);
+            var text = RepoFile.ReadRepoFile(path);
             var body = CSharpSourceWalker.StripCommentsAndStrings(MemberBody(text, member, path));
 
             foreach (Match hit in targetShapes.Matches(body))
