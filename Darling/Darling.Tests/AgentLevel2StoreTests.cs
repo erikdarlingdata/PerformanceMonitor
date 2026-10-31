@@ -377,8 +377,8 @@ public sealed class AgentLevel2StoreGrantLiveTests
 
     private static async Task<bool> SkipIfRolesExistAsync(NpgsqlConnection owner, CancellationToken ct)
     {
-        var exist = await ScalarAsync(owner, "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'mcp'))", ct) == "True";
-        Assert.SkipWhen(exist, "A cluster-wide admin/viewer/mcp role already exists on this rig; the grants would adopt it.");
+        var exist = await ScalarAsync(owner, "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'web', 'mcp'))", ct) == "True";
+        Assert.SkipWhen(exist, "A cluster-wide admin/viewer/web/mcp role already exists on this rig; the grants would adopt it.");
         return exist;
     }
 
@@ -391,12 +391,15 @@ public sealed class AgentLevel2StoreGrantLiveTests
             ("admin", "config.investigation_feedback", "SELECT,INSERT,UPDATE,DELETE"),
             ("viewer", "config.config_threshold_overrides", "SELECT"),
             ("viewer", "config.investigation_feedback", "SELECT"),
+            ("web", "config.config_threshold_overrides", "SELECT"),
+            ("web", "config.investigation_feedback", "SELECT"),
             ("mcp", "config.config_threshold_overrides", "SELECT,INSERT,UPDATE,DELETE"),
             ("mcp", "config.investigation_feedback", "SELECT"),
             /* V196 (#5632): the per-server action switches. Every role reads them; none writes them (the store owner does), so no MCP
                tool, web route or login the service hands out can turn one on. */
             ("admin", "config.config_server_actions", "SELECT"),
             ("viewer", "config.config_server_actions", "SELECT"),
+            ("web", "config.config_server_actions", "SELECT"),
             ("mcp", "config.config_server_actions", "SELECT"),
         ];
         foreach (var (role, table, verbs) in expected)
@@ -458,25 +461,26 @@ public sealed class AgentLevel2StoreGrantLiveTests
                 await ScalarAsync(owner, "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'darling')", ct) == "True",
                 "The script names the store owner 'darling', and this rig has no such role.");
 
-            const string AdminPassword = "ScriptAdmin5909", ViewerPassword = "ScriptViewer5909", McpPassword = "ScriptMcp5909";
+            const string AdminPassword = "ScriptAdmin5909", ViewerPassword = "ScriptViewer5909", WebPassword = "ScriptWeb5909", McpPassword = "ScriptMcp5909";
             var script = ComposeStoreRolesLiveTests.WithoutPsqlMetaCommands(
                     System.IO.File.ReadAllText(System.IO.Path.Combine(AppContext.BaseDirectory, "Fixtures", "provision-roles.sql")))
                 .Replace("ON DATABASE darling", $"ON DATABASE \"{scratch.DatabaseName}\"", StringComparison.Ordinal)
                 .Replace("CHANGE_ME_ADMIN_PASSWORD", AdminPassword, StringComparison.Ordinal)
                 .Replace("CHANGE_ME_VIEWER_PASSWORD", ViewerPassword, StringComparison.Ordinal)
+                .Replace("CHANGE_ME_WEB_PASSWORD", WebPassword, StringComparison.Ordinal)
                 .Replace("CHANGE_ME_MCP_PASSWORD", McpPassword, StringComparison.Ordinal);
 
             /* Behind the rung (the feedback table is absent): the script warns, skips the block and grants nothing on the overrides. */
             await RungRewindArtifacts.DropSentinelsAboveAsync(owner, 190, ct);
             await ExecAsync(owner, script, ct);
-            Assert.Equal("3", await ScalarAsync(owner, "SELECT count(*) FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'mcp')", ct));
+            Assert.Equal("4", await ScalarAsync(owner, "SELECT count(*) FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'web', 'mcp')", ct));
 
             /* #6170: the store's password-rules trigger and the edit function the script made must also run on a store that does not
-               have the V203 columns yet (a script run before the service migrated it): a viewer add and a viewer edit both go through. */
+               have the V203 columns yet (a script run before the service migrated it): a web add and a web edit both go through. */
             Assert.Equal("False", await ScalarAsync(owner,
                 "SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = 'config.config_monitored_servers'::regclass AND attname = 'hypothetical_index_username' AND NOT attisdropped)", ct));
             await ExecAsync(owner, "INSERT INTO config.config_service (id) VALUES (1) ON CONFLICT DO NOTHING", ct);
-            await ExecAsync(owner, "SET ROLE viewer", ct);
+            await ExecAsync(owner, "SET ROLE web", ct);
             await ExecAsync(owner, "INSERT INTO config.config_monitored_servers (server_id, name, host) VALUES (5911, 'behind-v203', 'host-b')", ct);
             Assert.Equal("saved", await ScalarAsync(owner,
                 "SELECT outcome FROM config.edit_monitored_server(5911, (SELECT modified_at FROM config.config_monitored_servers WHERE server_id = 5911), "
