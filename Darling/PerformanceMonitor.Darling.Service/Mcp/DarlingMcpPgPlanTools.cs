@@ -12,7 +12,6 @@ using System.ComponentModel;
 using System.Globalization;
 using System.Linq;
 using System.Text.Json;
-using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -126,7 +125,7 @@ public sealed class DarlingMcpPgPlanTools
     }
 
     [ReadsLatestSnapshot(LatestSnapshotShape.SearchBound)]
-    [McpServerTool(Name = "get_pg_plan_capture_readiness"), Description("Gets whether a PostgreSQL target can capture execution plans at all, facet by facet: is_satisfied, the observed value, and the operator remedy (detail), in CAUSAL order - fix them in that order. Runs HOURLY; a window under an hour can legitimately find nothing. An EMPTY answer here is NOT the healthy case: the collector writes one row per facet on every run, so empty means nothing was collected, not that every facet passed. Read this before trusting an empty get_pg_plans or any target log read. Never claims a plan was captured; get_pg_plans is that read. PostgreSQL-only. LATEST IS A TIME: captured_at is the newest facet reading in the search span and age_seconds is how old it is at the window end; hours_back is only the span searched, not a window of readings (#7010). <<GUIDE>> Gets whether a PostgreSQL target can capture execution plans at all, facet by facet, with the specific remedy for every step that is not in place. Read this FIRST when get_pg_plans is empty, and read it before concluding anything from an empty target-side log read: the facets are the preconditions, not a summary of them, and each one carries the operator-facing consequence and fix for its own state rather than a shared 'plans unavailable'. Every facet is reported whether or not it is satisfied, because the state somebody needs is the whole picture and a list of only the failures cannot show that capture is configured and working. The facets are returned in CAUSAL order - could this server run auto_explain, is it loaded, is it capturing, in what format, and can what it captures be attributed to a statement - so they read as the sequence they have to be fixed in rather than alphabetically. Two states are the ones people misread and each is its own facet with its own remedy: auto_explain loaded with log_min_duration = -1 is loaded and capturing NOTHING, which is indistinguishable from not loaded from the outside; and a log_line_prefix with no %Q means auto_explain captured the plan but nothing can join it to the statement it came from, because auto_explain puts no query id in the plan itself. On Aurora and RDS the remedy text says which changes need a custom cluster parameter group and a writer reboot rather than a SET, which is the misconception worth heading off. Two facets reach beyond plan capture: message_locale reports whether the target writes its log messages in English, which every target-side log read matches, and log_line_prefix_readable reports whether the log line prefix can be parsed, which the stderr deadlock and log-event reads need. Both matter to get_pg_deadlocks, where zero rows is the healthy state, so an unmet facet of either kind is the difference between a quiet server and a read that cannot see anything. This is PostgreSQL-only. It reports readiness and never claims a plan was captured; get_pg_plans is the read for the plans themselves. This is what bounds the page - read truncated to know whether a facet sat past it, in which case unsatisfied_facets is withheld; it is observed by fetching one row past this cap, so asking for exactly the number of facets the collector emits reads as complete.")]
+    [McpServerTool(Name = "get_pg_plan_capture_readiness"), Description("Gets whether a PostgreSQL target can capture execution plans at all, facet by facet: is_satisfied, the observed value, and the operator remedy (detail), in CAUSAL order - fix them in that order. Runs HOURLY; a window under an hour can legitimately find nothing. An EMPTY answer here is NOT the healthy case: the collector writes one row per facet on every run, so empty means nothing was collected, not that every facet passed. Read this before trusting an empty get_pg_plans or any target log read. Never claims a plan was captured; get_pg_plans is that read. PostgreSQL-only. <<GUIDE>> LATEST IS A TIME: captured_at is the newest facet reading in the search span and age_seconds is how old it is at the window end; hours_back is only the span searched, not a window of readings (#7010). Gets whether a PostgreSQL target can capture execution plans at all, facet by facet, with the specific remedy for every step that is not in place. Read this FIRST when get_pg_plans is empty, and read it before concluding anything from an empty target-side log read: the facets are the preconditions, not a summary of them, and each one carries the operator-facing consequence and fix for its own state rather than a shared 'plans unavailable'. Every facet is reported whether or not it is satisfied, because the state somebody needs is the whole picture and a list of only the failures cannot show that capture is configured and working. The facets are returned in CAUSAL order - could this server run auto_explain, is it loaded, is it capturing, in what format, and can what it captures be attributed to a statement - so they read as the sequence they have to be fixed in rather than alphabetically. Two states are the ones people misread and each is its own facet with its own remedy: auto_explain loaded with log_min_duration = -1 is loaded and capturing NOTHING, which is indistinguishable from not loaded from the outside; and a log_line_prefix with no %Q means auto_explain captured the plan but nothing can join it to the statement it came from, because auto_explain puts no query id in the plan itself. On Aurora and RDS the remedy text says which changes need a custom cluster parameter group and a writer reboot rather than a SET, which is the misconception worth heading off. Two facets reach beyond plan capture: message_locale reports whether the target writes its log messages in English, which every target-side log read matches, and log_line_prefix_readable reports whether the log line prefix can be parsed, which the stderr deadlock and log-event reads need. Both matter to get_pg_deadlocks, where zero rows is the healthy state, so an unmet facet of either kind is the difference between a quiet server and a read that cannot see anything. This is PostgreSQL-only. It reports readiness and never claims a plan was captured; get_pg_plans is the read for the plans themselves. This is what bounds the page - read truncated to know whether a facet sat past it, in which case unsatisfied_facets is withheld; it is observed by fetching one row past this cap, so asking for exactly the number of facets the collector emits reads as complete.")]
     public static async Task<string> GetPgPlanCaptureReadiness(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -170,10 +169,7 @@ public sealed class DarlingMcpPgPlanTools
                 captured_at = newestReading.ToString("o"),
                 age_seconds = LatestSnapshotStamp.AgeSeconds(newestReading, windowEnd),
             };
-            var payload = JsonNode.Parse(BuildReadinessJson(resolved.DisplayName, hours_back, rows, limit))!.AsObject();
-            payload["captured_at"] = stamp.captured_at;
-            payload["age_seconds"] = stamp.age_seconds;
-            return payload.ToJsonString(McpHelpers.JsonOptions);
+            return BuildReadinessJson(resolved.DisplayName, hours_back, rows, limit, stamp.captured_at, stamp.age_seconds);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -227,6 +223,8 @@ public sealed class DarlingMcpPgPlanTools
     /// The response body, split out so the WIRE SHAPE can be asserted without a live store — the same reason
     /// <see cref="BuildPlansJson"/> is separate.
     /// </summary>
+    /// <param name="capturedAt">The newest reading's stamp, published beside <c>hours_back</c> (#7010); null for a caller that has none.</param>
+    /// <param name="ageSeconds">How old that reading is at the window end.</param>
     /// <param name="fetched">The rows the reader returned for a request of <paramref name="limit"/><c> + 1</c>:
     /// up to one more than the caller asked for, the extra one being the truncation signal. The page this
     /// emits is the first <paramref name="limit"/> of them.</param>
@@ -234,7 +232,9 @@ public sealed class DarlingMcpPgPlanTools
         string serverName,
         int hoursBack,
         IReadOnlyList<DarlingPgPlanCaptureReadinessReader.PgPlanCaptureReadinessRow> fetched,
-        int limit)
+        int limit,
+        string? capturedAt = null,
+        long? ageSeconds = null)
     {
         /* #2629's lesson, applied to a read whose row count is small enough to make it look unnecessary: a
            summary taken over a CAPPED result describes the page and reads as a fact about the server. The
@@ -265,6 +265,8 @@ public sealed class DarlingMcpPgPlanTools
         {
             server = serverName,
             hours_back = hoursBack,
+            captured_at = capturedAt,
+            age_seconds = ageSeconds,
             facet_count = rows.Count,
             truncated,
             /* Deliberately NOT a single ready/not-ready verdict. The facets do not reduce to one: an unmet

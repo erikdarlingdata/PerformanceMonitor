@@ -160,13 +160,20 @@ public sealed class DarlingMcpPgServerStateTools
 
             if (fetched.Count == 0)
             {
-                /* #7010: the empty answer carries the window floor under hints (not_collected, decided first, stays bare). */
+                /* #7010: the empty answer carries the window floor under hints. not_collected is decided first and stays
+                   bare, so the probe is only paid for when that gate did not answer. */
+                var notCollected = await DarlingEngineCapability.NotCollectedStatusAsync(
+                    postgres, resolved.ServerId, resolved.DisplayName, "pg_extension_availability", cancellationToken);
+                if (notCollected != null)
+                {
+                    return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, notCollected, cancellationToken);
+                }
+
                 var emptyNotice = await DarlingMcpWindowNotice.ReadAsync(
                     () => DarlingMcpWindowNotice.Probe(postgres, ExtensionsTable, resolved.ServerName, windowStart, windowEnd, cancellationToken),
                     windowStart, windowEnd, ExtensionsTable, emptyAnswer: true, logger: logger, cancellationToken: cancellationToken);
-                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, await DarlingEngineCapability.NotCollectedStatusAsync(
-                    postgres, resolved.ServerId, resolved.DisplayName, "pg_extension_availability", cancellationToken)
-                    ?? DarlingMcpWindowNotice.FinishEmpty(McpHelpers.Status(
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd,
+                    DarlingMcpWindowNotice.FinishEmpty(McpHelpers.Status(
                         "empty",
                         $"No extension inventory for {resolved.DisplayName} in the last {hours_back} "
                         + "hour(s). This collector runs DAILY, so a short window can be empty on a healthy "
