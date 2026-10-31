@@ -43,7 +43,6 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpMemoryGrantTools
 {
-    [ReadsLatestSnapshot(LatestSnapshotShape.Windowed)]
     /// <summary>
     /// #7010: the window-floor notice of the raw memory_grant_stats table (the table the web's memory grants panels probe), over
     /// [<paramref name="start"/>, <paramref name="end"/>]. A failed probe answers <see cref="McpWindowNotice.Unavailable"/>, which costs the
@@ -70,6 +69,7 @@ public sealed class DarlingMcpMemoryGrantTools
         return DarlingMcpWindowNotice.FinishEmpty(McpHelpers.Status("unavailable", "No memory grant data available.", notice.AsHints()), notice);
     }
 
+    [ReadsLatestSnapshot(LatestSnapshotShape.Windowed)]
     [McpServerTool(Name = "get_resource_semaphore"), Description("Resource semaphore stats: granted/available memory vs target/max-target ceiling, waiters, timeout/forced pressure, window ends at as_of. TWO READS, per semaphore+pool: grants[] is the NEWEST snapshot (moment: captured_at/age_seconds); window[] aggregates EVERY snapshot (peak waiters+when, peak/min memory, summed timeout/forced deltas). Read window[] for 'was there pressure', grants[] for 'is there pressure now'. No rows: unavailable (not_collected first). sample_interval_seconds/interval_known null/false on a restart-marker or pre-column row; its zero deltas aren't 'no timeouts'. <<GUIDE>> Gets resource semaphore statistics showing granted vs available workspace memory against the target/max-target ceiling, waiter counts, and timeout/forced grant pressure indicators. High waiter counts or rising timeout/forced deltas indicate memory grant pressure affecting query performance. TWO READS UNDER ONE WINDOW: grants[] is the NEWEST snapshot in the window (one row per resource semaphore and pool), stamped once as captured_at with age_seconds against the window's end - it is a moment, not the window. window[] aggregates EVERY snapshot in the window per (resource_semaphore_id, pool_id): peak_waiter_count and peak_waiters_at (the most sessions ever seen waiting for a grant and when), peak_granted_memory_mb and peak_granted_at (the largest granted memory and when - not the time of peak waiters), min_available_memory_mb, and timeout_errors_in_window / forced_grants_in_window (the SUM of the per-interval deltas across the window). Each grants[] row also carries sample_interval_seconds, the measured seconds its two deltas accrued over; it is null with interval_known false when the row is a restart marker (no delta was knowable, so the zero deltas beside it are not 'no timeouts') or predates the column. interval_seconds is the interval these deltas cover, null when it can't be known - the same name the latch and spinlock tools use; sample_interval_seconds carries the same value and is kept for existing readers. " + McpToolGuideTopics.MemoryGrantWindowReadOrder)]
     public static async Task<string> GetResourceSemaphore(
         NpgsqlDataSource postgres,
@@ -191,6 +191,8 @@ public sealed class DarlingMcpMemoryGrantTools
         {
             var now = windowEnd;
             var windowStart = now.AddHours(-hours_back);
+            /* One name for both answers' notice: the window-floor census reads the write as `effective_start = notice.EffectiveStart,`. */
+            McpWindowNotice notice;
             if (chart)
             {
                 var points = await DarlingMemoryGrantReader.GetMemoryGrantChartAsync(
@@ -200,15 +202,15 @@ public sealed class DarlingMcpMemoryGrantTools
                 if (points.Count == 0)
                     return await UnavailableAsync(postgres, resolved.ServerId, resolved.ServerName, resolved.DisplayName, windowStart, now, cancellationToken);
 
-                var chartNotice = await NoticeAsync(postgres, resolved.ServerName, windowStart, now, emptyAnswer: false, cancellationToken);
+                notice = await NoticeAsync(postgres, resolved.ServerName, windowStart, now, emptyAnswer: false, cancellationToken);
 
                 return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new
                 {
                     server = resolved.DisplayName,
                     hours_back,
-                    effective_start = chartNotice.EffectiveStart,
-                    window_truncated = chartNotice.WindowTruncated,
-                    truncation_note = chartNotice.TruncationNote,
+                    effective_start = notice.EffectiveStart,
+                    window_truncated = notice.WindowTruncated,
+                    truncation_note = notice.TruncationNote,
                     window_start = windowStart.ToString("o"),
                     window_end = now.ToString("o"),
                     bucket_minutes = bucketMinutes,
@@ -228,7 +230,7 @@ public sealed class DarlingMcpMemoryGrantTools
                         forced_grant_count_delta = p.ForcedGrantCountDelta,
                         snapshots = p.Snapshots
                     })
-                }, McpHelpers.JsonOptions), chartNotice);
+                }, McpHelpers.JsonOptions), notice);
             }
 
             var rows = await DarlingMemoryGrantReader.GetMemoryGrantsLatestAsync(
@@ -252,7 +254,7 @@ public sealed class DarlingMcpMemoryGrantTools
                 forced_grant_count_delta = r.ForcedGrantCountDelta
             });
 
-            var notice = await NoticeAsync(postgres, resolved.ServerName, windowStart, now, emptyAnswer: false, cancellationToken);
+            notice = await NoticeAsync(postgres, resolved.ServerName, windowStart, now, emptyAnswer: false, cancellationToken);
             return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
