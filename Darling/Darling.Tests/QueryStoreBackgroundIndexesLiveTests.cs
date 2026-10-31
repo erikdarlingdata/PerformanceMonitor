@@ -285,6 +285,14 @@ ANALYZE collect.query_store_interval_wide;", ct);
 
         await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
         await using var connection = await OpenStoreAsync(scratch, ct);
+
+        /* #7012: the test clusters run with synchronous_commit = off (#6988). A commit then returns before its WAL is
+           flushed (the WAL writer flushes within about 200 ms), and VACUUM does not mark a page all-visible while a
+           committed insert on it is still unflushed. The VACUUM below ran right after the seed, so on the plan CI took
+           some runs it left every page not all-visible (relallvisible 0 on a 253-page table; measured), and the planner
+           priced the wide btree's index-only scan at random heap fetches and took the legacy index. A store's commits
+           are durable by default, so the seed's must be too: this connection's commits wait for the flush. */
+        await ExecAsync(connection, "SET synchronous_commit = on", ct);
         await SeedAsync(connection, ct);
         await EnsureAllAsync(connection, ct);
 
@@ -293,6 +301,11 @@ ANALYZE collect.query_store_interval_wide;", ct);
            marked all-visible the planner prices that scan's heap fetches at random cost and takes the older index instead,
            whose order follows the heap. */
         await ExecAsync(connection, "VACUUM (ANALYZE) collect.query_store_interval_wide", ct);
+
+        /* The premise the plan depends on: the VACUUM marked the table's pages all-visible. */
+        var allVisible = Convert.ToInt64(await ScalarAsync(connection,
+            "SELECT COALESCE(SUM(c.relallvisible), 0) FROM pg_partition_tree('collect.query_store_interval_wide'::regclass) AS p JOIN pg_class AS c ON c.oid = p.relid WHERE p.isleaf", ct), CultureInfo.InvariantCulture);
+        Assert.True(allVisible > 0, "VACUUM marked no page all-visible, so the wide btree's index-only scan is priced at random heap fetches");
 
         /* The premise: two servers, and a table of many pages, so a pass over the table is a real alternative. */
         Assert.Equal(2L, await ScalarAsync(connection, "SELECT count(DISTINCT server_id) FROM collect.query_store_interval_wide", ct));
