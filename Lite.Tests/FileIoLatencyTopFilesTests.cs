@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
@@ -136,21 +137,110 @@ public sealed class FileIoLatencyTopFilesTests : IClassFixture<SharedDuckDbFixtu
         Assert.True(plain < 2.0, $"plain average {plain}");
     }
 
-    [Theory]
-    [InlineData("Lite/Controls/CorrelatedTimelineLanesControl.xaml.cs")]
-    [InlineData("Darling/PerformanceMonitor.Darling.Viewer/CorrelatedTimelineLanesControl.xaml.cs")]
-    public void OverviewLane_AveragesReadLatencyByReads_NotPerFile(string relativePath)
+    /// <summary>The series the Overview I/O Latency row drew before #6970: the per-file points grouped by time and collapsed through the weighting.</summary>
+    private static List<(DateTime Time, double Value)> SeriesFromPerFilePoints(List<FileIoTrendPoint> points) =>
+        points.GroupBy(p => p.CollectionTime)
+            .OrderBy(g => g.Key)
+            .Select(g => (g.Key, IoLatencyWeighting.Weighted(g.Select(x => (x.AvgReadLatencyMs, x.Reads)))))
+            .ToList();
+
+    /// <summary>
+    /// A server where a bucket is a zero case: a log file that never reads, a file whose reads are NULL (so its bucket is
+    /// dropped), and a time at which only the log file reported (a point the row draws as 0).
+    /// </summary>
+    private async Task SeedOverviewShapesAsync()
     {
-        var dir = AppContext.BaseDirectory;
-        while (dir != null && !System.IO.File.Exists(System.IO.Path.Combine(dir, "PerformanceMonitor.sln")))
+        foreach (var minutes in new[] { 20, 19, 18, 10, 9 })
         {
-            dir = System.IO.Path.GetDirectoryName(dir);
+            for (var i = 0; i < 3; i++)
+            {
+                await SeedAsync($"Db{i}", $"Db{i}_log", "LOG", minutes, 0, 50_000, 0, 100_000);
+            }
+
+            await SeedAsync("Db0", "Db0_data", "ROWS", minutes, 500, 20, 4_000, 60);
+            await SeedAsync("Db1", "Db1_data", "ROWS", minutes, 300 + minutes, 10, 1_500 + minutes * 3, 30);
         }
 
-        Assert.NotNull(dir);
-        var source = System.IO.File.ReadAllText(System.IO.Path.Combine(dir!, relativePath.Replace('/', System.IO.Path.DirectorySeparatorChar)));
-        Assert.Contains("IoLatencyWeighting.Weighted(g.Select(x => (x.AvgReadLatencyMs, x.Reads)))", source, StringComparison.Ordinal);
-        Assert.DoesNotContain("g.Average(x => x.AvgReadLatencyMs)", source, StringComparison.Ordinal);
+        /* Only the log file reports at 15 minutes ago: the row draws 0 there. */
+        await SeedAsync("Db0", "Db0_log", "LOG", 15, 0, 50_000, 0, 100_000);
+
+        if (_conn is null)
+        {
+            _conn = _duckDb.CreateConnection();
+            await _conn.OpenAsync();
+        }
+
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = @"INSERT INTO file_io_stats
+            (collection_id, collection_time, server_id, server_name, database_name, file_name, file_type, physical_name, size_mb,
+             delta_reads, delta_writes, delta_read_bytes, delta_write_bytes, delta_stall_read_ms, delta_stall_write_ms, sample_interval_seconds)
+            VALUES ($1, $2, $3, 'Srv', 'Db9', 'nullreads_log', 'LOG', '', 100, NULL, 7, NULL, 7, NULL, 7, 60)";
+        cmd.Parameters.Add(new DuckDBParameter { Value = _nextId++ });
+        cmd.Parameters.Add(new DuckDBParameter { Value = _anchor.AddMinutes(-10) });
+        cmd.Parameters.Add(new DuckDBParameter { Value = ServerId });
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>
+    /// #6970: the Overview I/O Latency row reads one row per bucket, and it must be the series the per-file rows gave. An hour is
+    /// a one-minute bucket, so every bucket holds one collection and the points are stamped at their own collection times.
+    /// </summary>
+    [Fact]
+    public async Task OverviewRead_SingletonBuckets_MatchesTheSeriesTheChartComputedFromPerFileRows()
+    {
+        await SeedOverviewShapesAsync();
+
+        var expected = SeriesFromPerFilePoints(await _service.GetFileIoLatencyTrendAsync(ServerId, 1));
+        var actual = await _service.GetFileIoOverviewLatencyTrendAsync(ServerId, 1);
+
+        Assert.Equal(expected.Count, actual.Count);
+        Assert.Contains(expected, e => e.Value == 0);
+        Assert.Contains(expected, e => e.Value > 0);
+        for (var i = 0; i < expected.Count; i++)
+        {
+            Assert.Equal(expected[i].Time, actual[i].CollectionTime);
+            Assert.Equal(expected[i].Value, actual[i].ReadLatencyMs, 9);
+        }
+    }
+
+    /// <summary>
+    /// #6970: a seven-day window buckets wide enough that neighbouring collections share a bucket, so the points are stamped at the
+    /// bucket start, and a bucket holds several collections of each file.
+    /// </summary>
+    [Fact]
+    public async Task OverviewRead_MergedBuckets_MatchesTheSeriesTheChartComputedFromPerFileRows()
+    {
+        await SeedOverviewShapesAsync();
+
+        var perFile = await _service.GetFileIoLatencyTrendAsync(ServerId, 24 * 7);
+        var expected = SeriesFromPerFilePoints(perFile);
+        var actual = await _service.GetFileIoOverviewLatencyTrendAsync(ServerId, 24 * 7);
+
+        Assert.True(expected.Count < 6, $"expected merged buckets, got {expected.Count} points");
+        Assert.Equal(expected.Count, actual.Count);
+        for (var i = 0; i < expected.Count; i++)
+        {
+            Assert.Equal(expected[i].Time, actual[i].CollectionTime);
+            Assert.Equal(expected[i].Value, actual[i].ReadLatencyMs, 9);
+        }
+
+        Assert.True(actual.Count < perFile.Count, "the overview read returns fewer rows than the per-file read");
+    }
+
+    /// <summary>#6970: a server with no reads at all draws a 0 line, and one with no rows draws nothing, as the per-file path did.</summary>
+    [Fact]
+    public async Task OverviewRead_NoReads_DrawsZero_AndNoRows_DrawsNothing()
+    {
+        Assert.Empty(await _service.GetFileIoOverviewLatencyTrendAsync(ServerId, 1));
+
+        await SeedAsync("Db0", "Db0_log", "LOG", 10, 0, 50_000, 0, 100_000);
+
+        var actual = await _service.GetFileIoOverviewLatencyTrendAsync(ServerId, 1);
+        var expected = SeriesFromPerFilePoints(await _service.GetFileIoLatencyTrendAsync(ServerId, 1));
+
+        Assert.Single(actual);
+        Assert.Equal(0, actual[0].ReadLatencyMs);
+        Assert.Equal(expected.Single().Time, actual[0].CollectionTime);
     }
 
     [Fact]
