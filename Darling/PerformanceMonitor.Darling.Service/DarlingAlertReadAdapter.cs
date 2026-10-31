@@ -1605,10 +1605,13 @@ LIMIT 1";
         var serverId = ParseServerKey(serverKey);
 
         await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
-        var since = _tempDbFloor.SinceFor(serverId);
-        while (true)
+        TempDbSpaceInfo? found = null;
+        /* #6968: the shared floor loop remembers where the newest row is. A bounded read that finds nothing means the row the
+           bound came from is gone, so it asks again without one (the read that shipped before). collection_time is NOT NULL,
+           so a found row has one. */
+        await _tempDbFloor.ReadAsync(serverId, async since =>
         {
-            TempDbSpaceInfo? found = null;
+            found = null;
             using var command = new NpgsqlCommand(since is null ? TempDbSpaceSql : TempDbSpaceSinceSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds };
             command.Parameters.AddWithValue(serverId);
             if (since is { } floor)
@@ -1640,15 +1643,10 @@ LIMIT 1";
                 };
             }
 
-            /* #6968: remember where the newest row is. A bounded read that finds nothing means the row the bound came from is
-               gone, so ask again without one (the read that shipped before). collection_time is NOT NULL, so a found row has one. */
-            if (!_tempDbFloor.Settle(serverId, since, found?.CollectionTimeUtc, DateTime.UtcNow))
-            {
-                return found;
-            }
+            return found?.CollectionTimeUtc;
+        });
 
-            since = null;
-        }
+        return found;
     }
 
     /* ---------------- anomalous jobs ---------------- */

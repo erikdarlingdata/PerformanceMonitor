@@ -10016,8 +10016,9 @@ LIMIT 1";
         DateTime? sampleUtcOnly = null;
 
         await using var connection = await _postgres!.OpenConnectionAsync(cancellationToken);
-        var since = _latestCpuFloor.SinceFor(serverId);
-        while (true)
+        /* #6968: the shared floor loop remembers where the newest row is; a bounded read that finds nothing means the row the
+           bound came from is gone, so it asks again without one (the read that shipped before). */
+        await _latestCpuFloor.ReadAsync(serverId, async since =>
         {
             DateTime? newestCollection = null;
             using var command = new NpgsqlCommand(
@@ -10050,15 +10051,8 @@ LIMIT 1";
                 newestCollection = reader.GetDateTime(4);
             }
 
-            /* #6968: remember where the newest row is; a bounded read that finds nothing means the row the bound came from is
-               gone, so ask again without one (the read that shipped before). */
-            if (!_latestCpuFloor.Settle(serverId, since, newestCollection, DateTime.UtcNow))
-            {
-                break;
-            }
-
-            since = null;
-        }
+            return newestCollection;
+        });
 
         double? totalCpu = sqlCpu.HasValue ? sqlCpu.Value + (otherCpu ?? 0) : null;
         return (sqlCpu, totalCpu, sampleTime, sampleUtcOnly);

@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Concurrent;
+using System.Threading.Tasks;
 
 namespace PerformanceMonitor.Darling.Service;
 
@@ -78,5 +79,30 @@ internal sealed class NewestRowFloor
 
         _floors[serverId] = (DateTime.SpecifyKind(utcNow - EmptyProbeSlack, DateTimeKind.Unspecified), false);
         return false;
+    }
+
+    /// <summary>
+    /// The read loop both callers share (the latest CPU read and the tempdb read): bound the read by the server's floor when there
+    /// is one, settle the floor from what it found, and read again without a bound when <see cref="Settle"/> says the floor row
+    /// is gone. An unbounded read never repeats, so the loop runs at most twice.
+    /// </summary>
+    /// <param name="serverId">The server read.</param>
+    /// <param name="read">Runs ONE statement: the bounded one when <c>since</c> has a value, the unbounded one when it is null.
+    /// It captures the row into the caller's own locals and returns the row's <c>collection_time</c>, or null when it found no row.
+    /// A call that finds no row must leave the caller's locals as they were.</param>
+    /// <param name="utcNow">The clock for the empty-read floor, taken after each read; <see cref="DateTime.UtcNow"/> when null.</param>
+    internal async Task ReadAsync(int serverId, Func<DateTime?, Task<DateTime?>> read, Func<DateTime>? utcNow = null)
+    {
+        var since = SinceFor(serverId);
+        while (true)
+        {
+            var newest = await read(since);
+            if (!Settle(serverId, since, newest, (utcNow ?? (() => DateTime.UtcNow))()))
+            {
+                return;
+            }
+
+            since = null;
+        }
     }
 }
