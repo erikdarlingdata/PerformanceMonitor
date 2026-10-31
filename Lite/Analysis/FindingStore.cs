@@ -704,41 +704,6 @@ RETURNING mute_id, story_path, muted_date, reason";
         return result is long count ? count : Convert.ToInt64(result, System.Globalization.CultureInfo.InvariantCulture);
     }
 
-    /// <summary>
-    /// #7005: where the store's analysis runs cover a window for one server, the floor <c>get_analysis_facts</c> and <c>get_analysis_findings</c>
-    /// name when the window starts before the store's data. The oldest analysis run (<c>analysis_time</c> of a stored finding) is the
-    /// floor: the first run inside [start, end], or <paramref name="startUtc"/> when the store holds an older run (the window is covered
-    /// from its start). Floor is null when the server has no run in the window. OldestRun is the server's oldest run at all, for a window
-    /// that ends before it; null when the store holds no run for the server.
-    /// </summary>
-    public async Task<(DateTime? Floor, DateTime? OldestRun)> GetRunWindowFloorAsync(
-        int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
-    {
-        using var readLock = _duckDb.AcquireReadLock(cancellationToken);
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync(cancellationToken);
-
-        using var cmd = connection.CreateCommand();
-        cmd.CommandText = @"
-SELECT MIN(analysis_time) FILTER (WHERE analysis_time >= $2 AND analysis_time <= $3),
-       MIN(analysis_time)
-FROM analysis_findings
-WHERE server_id = $1";
-        cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
-        cmd.Parameters.Add(new DuckDBParameter { Value = startUtc });
-        cmd.Parameters.Add(new DuckDBParameter { Value = endUtc });
-        using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
-        if (!await reader.ReadAsync(cancellationToken))
-        {
-            return (null, null);
-        }
-
-        DateTime? inWindow = reader.IsDBNull(0) ? null : reader.GetDateTime(0);
-        DateTime? oldest = reader.IsDBNull(1) ? null : reader.GetDateTime(1);
-        var floor = inWindow is not null && oldest is DateTime old && old < startUtc ? startUtc : inWindow;
-        return (floor, oldest);
-    }
-
     /* #3653 item 3 (Q3): the prior weeks, for RecurrenceLabeler — ONE statement per analysis pass, not one per
        story. $1 server, $2 the lower bound (RecurrenceLabeler.ReadLowerBoundUtc — three weeks and an hour of
        slack), $3 the pass's reference instant, which is the exclusive upper bound: this pass has not persisted

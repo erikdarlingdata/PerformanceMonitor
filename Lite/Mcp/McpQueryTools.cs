@@ -1500,19 +1500,37 @@ public sealed class McpQueryTools
     /// answer: <c>window_truncated</c> true, no <c>effective_start</c>). A window the collector ran in is covered at its first
     /// run, as everywhere else.
     /// </summary>
-    internal static async Task<McpWindowNotice> EmptyWindowNoticeAsync(
+    internal static async Task<McpWindowNotice?> EmptyWindowNoticeAsync(
         LocalDataService dataService, QueryWindowRelation relation, int serverId, DateTime requestedStart, DateTime windowEnd, string table)
     {
+        /* A server never collected for this relation answers bare, so it stays apart from a quiet window (the rule the never-collected rungs and
+           their tests keep). Never collected is no row ever stored; for a relation that stores a row only when something happens (the event
+           and snapshot tables), a logged run of its collector also counts as collected, since a quiet start is covered by the runs. */
+        var oldest = await dataService.GetOldestWindowRowAsync(relation, serverId);
+        if (oldest is null
+            && (LocalDataService.QueryWindowRelationStoresEveryCycle(relation)
+                || LocalDataService.QueryWindowRelationCollector(relation) is not { } ranCollector
+                || !await dataService.HasCollectorRunAsync(serverId, ranCollector)))
+        {
+            return null;
+        }
+
         var floor = await dataService.GetQueryWindowFloorAsync(relation, serverId, requestedStart, windowEnd);
         if (floor is null
             /* The two Queries relations that store a row every cycle have no collector in the probe's map (it reads their rows only), but the log still names it. */
             && (LocalDataService.QueryWindowRelationCollector(relation)
                 ?? (relation == QueryWindowRelation.QueryStats ? "query_stats" : relation == QueryWindowRelation.QueryStoreStats ? "query_store" : null)) is { } collector
-            && await dataService.GetOldestWindowRowAsync(relation, serverId) is DateTime kept
+            && oldest is DateTime kept
             && kept + TruncationSlack >= windowEnd
             && await dataService.CollectorStoredRowsAtOrBeforeAsync(serverId, collector, requestedStart + TruncationSlack))
         {
             return WindowNotice(kept, requestedStart, table, "This window ends before the first row this server's store kept, so the data may have aged out.");
+        }
+
+        /* Rows sit before the window's start and none inside it: the store holds the window and nothing happened in it (a quiet window, not a cut one). */
+        if (floor is null && oldest <= requestedStart)
+        {
+            return WindowNotice(requestedStart, requestedStart, table, emptyAnswer: true);
         }
 
         return WindowNotice(floor, requestedStart, table, emptyAnswer: true);
@@ -1541,13 +1559,9 @@ public sealed class McpQueryTools
                 node["effective_start"] = notice.EffectiveStart ?? DateTime.SpecifyKind(requestedStart, DateTimeKind.Unspecified).ToString("o");
             }
 
+            /* Written in the block that writes window_truncated (the payload census reads the floor's spelling by block); the instant is read back with the invariant round-trip form FormatEffectiveStart writes. */
             if (node.ContainsKey("effective_hours_back"))
-            {
-                var effective = DateTime.TryParse(notice.EffectiveStart, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal, out var parsed)
-                    ? parsed
-                    : requestedStart;
-                node["effective_hours_back"] = Math.Round((windowEnd - effective).TotalHours, 1);
-            }
+                node["effective_hours_back"] = Math.Round((windowEnd - (DateTime.TryParseExact(notice.EffectiveStart, "o", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, out var parsed) ? parsed : requestedStart)).TotalHours, 1);
 
             return node.ToJsonString(McpHelpers.JsonOptions);
         }
@@ -1567,8 +1581,7 @@ public sealed class McpQueryTools
     }
 
     /// <summary>
-    /// #7005: a DATA answer (no <c>status</c> key) that carries no window notice yet, with the three keys written in right after
-    /// <c>hours_back</c> (at the end when it has none): the verdict of <see cref="WindowNoticeAsync"/> over the relation's probe,
+    /// #7005: a DATA answer (no <c>status</c> key) that carries no window notice yet, with the three keys written in after the tool's own keys: the verdict of <see cref="WindowNoticeAsync"/> over the relation's probe,
     /// the one every windowed tool shares, so a window that starts before the store's data says so. An answer that already
     /// carries <c>window_truncated</c>, or a status of any word, is returned as it was.
     /// </summary>
@@ -1591,25 +1604,21 @@ public sealed class McpQueryTools
         }
 
         var notice = await WindowNoticeAsync(floorProbe, requestedStart, windowEnd, table);
-        var rebuilt = new System.Text.Json.Nodes.JsonObject();
-        var written = false;
-        foreach (var (key, value) in node.ToList())
+        /* After the tool's own keys, the place Darling's twin writes them: a payload's key order is part of its shape. The one block that stays
+           last is collection_caveats (get_analysis_facts: the caveat block closes the payload), so the notice goes in front of it. */
+        var caveats = node.ContainsKey("collection_caveats") ? node["collection_caveats"] : null;
+        if (caveats is not null)
         {
-            node.Remove(key);
-            rebuilt[key] = value;
-            if (key == "hours_back")
-            {
-                AddNoticeKeys(rebuilt, notice);
-                written = true;
-            }
+            node.Remove("collection_caveats");
         }
 
-        if (!written)
+        AddNoticeKeys(node, notice);
+        if (caveats is not null)
         {
-            AddNoticeKeys(rebuilt, notice);
+            node["collection_caveats"] = caveats;
         }
 
-        return rebuilt.ToJsonString(McpHelpers.JsonOptions);
+        return node.ToJsonString(McpHelpers.JsonOptions);
     }
 
     private static void AddNoticeKeys(System.Text.Json.Nodes.JsonObject node, McpWindowNotice notice)
@@ -1639,14 +1648,18 @@ public sealed class McpQueryTools
     internal static async Task<string> WithWindowNoticeAsync(
         string answer, LocalDataService dataService, QueryWindowRelation relation, int serverId, DateTime requestedStart, DateTime windowEnd, string table) =>
         McpHelpers.IsEmptyOrUnavailableStatus(answer)
-            ? WithWindowNotice(answer, await EmptyWindowNoticeAsync(dataService, relation, serverId, requestedStart, windowEnd, table), requestedStart, windowEnd)
+            ? (await EmptyWindowNoticeAsync(dataService, relation, serverId, requestedStart, windowEnd, table) is { } emptyNotice
+                ? WithWindowNotice(answer, emptyNotice, requestedStart, windowEnd)
+                : answer)
             : await WithDataWindowNoticeAsync(answer, dataService, relation, serverId, requestedStart, windowEnd, table);
 
     /// <summary><see cref="WithWindowNotice"/> over <see cref="EmptyWindowNoticeAsync"/>: the probe runs only for an empty or unavailable answer.</summary>
     internal static async Task<string> WithEmptyWindowNoticeAsync(
         string answer, LocalDataService dataService, QueryWindowRelation relation, int serverId, DateTime requestedStart, DateTime windowEnd, string table) =>
         McpHelpers.IsEmptyOrUnavailableStatus(answer)
-            ? WithWindowNotice(answer, await EmptyWindowNoticeAsync(dataService, relation, serverId, requestedStart, windowEnd, table), requestedStart, windowEnd)
+            ? (await EmptyWindowNoticeAsync(dataService, relation, serverId, requestedStart, windowEnd, table) is { } emptyNotice
+                ? WithWindowNotice(answer, emptyNotice, requestedStart, windowEnd)
+                : answer)
             : answer;
 
     /// <summary>

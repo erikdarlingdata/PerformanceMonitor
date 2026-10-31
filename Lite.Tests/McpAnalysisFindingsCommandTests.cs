@@ -219,8 +219,7 @@ public sealed class McpAnalysisFindingsCommandTests : IClassFixture<SharedDuckDb
            the window-covering cap carries a present-but-null truncation_note. */
         Assert.Equal(2, root.GetProperty("finding_count").GetInt32());
         Assert.Equal(3, root.GetProperty("total_occurrences").GetInt32());
-        Assert.False(root.GetProperty("truncated").GetBoolean());
-        /* #7005: truncation_note also carries the window sentence when the window starts before the store's oldest run; this seed's runs are recent, so only the read-cap cut is asserted. */
+        Assert.Equal(JsonValueKind.Null, root.GetProperty("truncation_note").ValueKind);
 
         var findings = root.GetProperty("findings").EnumerateArray().ToList();
         Assert.Equal(2, findings.Count);

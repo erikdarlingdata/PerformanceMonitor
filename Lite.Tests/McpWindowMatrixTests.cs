@@ -255,8 +255,7 @@ public sealed class McpWindowMatrixTests : IClassFixture<SharedDuckDbFixture>, I
         Assert.InRange((DateTime.UtcNow - RawFloorBack - start).Duration(), TimeSpan.Zero, TimeSpan.FromMinutes(5));
     }
 
-    /// <summary>The floor of the analysis reads is the oldest analysis run the store holds for the server; a store with no run at all answers
-    /// as it did before, with no notice.</summary>
+    /// <summary>A store with no collector row at all answers as it did before, with no notice (the floor is the collector data, #7005 part 5).</summary>
     [Fact]
     public async Task GetAnalysisFindings_StoreWithNoRun_CarriesNoNotice()
     {
@@ -275,6 +274,47 @@ public sealed class McpWindowMatrixTests : IClassFixture<SharedDuckDbFixture>, I
         var json = await McpAnalysisTools.GetAnalysisFindings(new AnalysisService(_duckDb) { MinimumDataHours = 0 }, _serverManager, ServerName, hours_back: hours);
         using var doc = JsonDocument.Parse(json);
         Assert.Equal(truncated, Hint(doc.RootElement, "window_truncated")?.GetBoolean());
+    }
+
+    /// <summary>The floor of the analysis reads is the collector data they score (wait_stats), never the stored findings (#7005 part 5): a finding
+    /// an hour old beside a week of collector rows is a covered week, and collector rows only a couple of days deep make a week truncated.</summary>
+    [Theory]
+    [InlineData(170.0, 168, false)]
+    [InlineData(48.0, 168, true)]
+    public async Task GetAnalysisFindings_TakesItsFloorFromTheCollectorData_NotFromTheOldestFinding(double firstWaitStatsHoursBack, int hours, bool truncated)
+    {
+        await SeedWaitStatsAndOneRecentFindingAsync(firstWaitStatsHoursBack);
+        var json = await McpAnalysisTools.GetAnalysisFindings(new AnalysisService(_duckDb) { MinimumDataHours = 0 }, _serverManager, ServerName, hours_back: hours);
+        using var doc = JsonDocument.Parse(json);
+        Assert.Equal(truncated, Hint(doc.RootElement, "window_truncated")?.GetBoolean());
+    }
+
+    [Theory]
+    [InlineData(170.0, 4, false)]
+    [InlineData(1.0, 4, true)]
+    public async Task GetAnalysisFacts_TakesItsFloorFromTheCollectorData_NotFromTheOldestFinding(double firstWaitStatsHoursBack, int hours, bool truncated)
+    {
+        await SeedWaitStatsAndOneRecentFindingAsync(firstWaitStatsHoursBack);
+        var json = await McpAnalysisTools.GetAnalysisFacts(new AnalysisService(_duckDb) { MinimumDataHours = 0 }, _serverManager, ServerName, hours_back: hours);
+        using var doc = JsonDocument.Parse(json);
+        Assert.Equal(truncated, Hint(doc.RootElement, "window_truncated")?.GetBoolean());
+    }
+
+    /// <summary>wait_stats rows from <paramref name="firstHoursBack"/> hours back and 30 minutes back, and ONE finding an hour old.</summary>
+    private async Task SeedWaitStatsAndOneRecentFindingAsync(double firstHoursBack)
+    {
+        var now = DateTime.UtcNow;
+        foreach (var at in new[] { Naive(now.AddHours(-firstHoursBack)), Naive(now.AddMinutes(-30)) })
+        {
+            await ExecAsync("INSERT INTO wait_stats (collection_id, collection_time, server_id, server_name, wait_type, waiting_tasks_count, wait_time_ms, signal_wait_time_ms, delta_waiting_tasks, delta_wait_time_ms, delta_signal_wait_time_ms, sample_interval_seconds) VALUES ($1, $2, $3, $4, 'CXPACKET', 10, 100, 10, 5, 50, 5, 60)", _nextId--, at, _serverId, ServerName);
+        }
+
+        await ExecAsync(@"
+INSERT INTO analysis_findings
+    (finding_id, analysis_time, server_id, server_name, severity, confidence, category,
+     story_path, story_path_hash, story_text, root_fact_key, fact_count, incident_id)
+VALUES (1, $1, $2, $3, 0.5, 0.5, 'waits', 'CXPACKET', 'hash-1', 'CXPACKET leads', 'CXPACKET', 1, 'inc-1')",
+            Naive(now.AddHours(-1)), _serverId, ServerName);
     }
 
     /* ═══════════════════════════ get_query_store_regressions: 3 x 3 ═══════════════════════════ */

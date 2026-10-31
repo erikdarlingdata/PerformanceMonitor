@@ -287,18 +287,17 @@ public sealed class McpAnalysisTools
         CancellationToken cancellationToken = default)
     {
         var answer = await GetAnalysisFactsCore(analysisService, serverManager, server_name, hours_back, source, min_severity, as_of, cancellationToken);
-        return await WithRunWindowNoticeAsync(answer, analysisService, serverManager, server_name, hours_back, as_of, cancellationToken);
+        return await WithRunWindowNoticeAsync(answer, analysisService, serverManager, server_name, hours_back, as_of);
     }
 
     /// <summary>
-    /// #7005: the window notice of get_analysis_facts and get_analysis_findings. The floor is the oldest analysis run the store holds for the
-    /// server (<see cref="AnalysisService.GetRunWindowFloorAsync"/>), never "did anything fire": an empty answer over a window the store
-    /// covers is not truncation. A store with no run at all for the server answers as it always did, with no notice. A refusal or an
-    /// error carries its own status and is left as it was.
+    /// #7005: the window notice of get_analysis_facts and get_analysis_findings. The floor is the collector data the analysis reads
+    /// (the <c>wait_stats</c> relation, the anchor <c>analyze_server</c> requires), through the probe every windowed tool shares: not the
+    /// stored findings, which exist only for a pass that found something, so "the first finding" is not "the first pass". A server with
+    /// no collector row at all answers as it always did, with no notice. A refusal or an error carries its own status and is left as it was.
     /// </summary>
     private static async Task<string> WithRunWindowNoticeAsync(
-        string answer, AnalysisService analysisService, ServerManager serverManager, string? server_name, int hours_back, string? as_of,
-        CancellationToken cancellationToken = default)
+        string answer, AnalysisService analysisService, ServerManager serverManager, string? server_name, int hours_back, string? as_of)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null || McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd) != null)
@@ -308,15 +307,8 @@ public sealed class McpAnalysisTools
 
         try
         {
-            var windowStart = windowEnd.AddHours(-hours_back);
-            var (floor, oldest) = await analysisService.GetRunWindowFloorAsync(resolved.ServerId, windowStart, windowEnd, cancellationToken);
-            if (floor is null && oldest is null)
-            {
-                return answer;
-            }
-
-            return await McpQueryTools.WithProbedWindowNoticeAsync(
-                answer, () => Task.FromResult(floor), () => Task.FromResult(oldest), windowStart, windowEnd, "analysis findings");
+            return await McpQueryTools.WithWindowNoticeAsync(
+                answer, analysisService.CollectorWindowProbe(), QueryWindowRelation.WaitStats, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, "wait_stats");
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

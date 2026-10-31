@@ -60,19 +60,11 @@ public sealed class McpQueryTagUsageTools
             }
 
             var windowStart = windowEnd.AddHours(-hours_back);
+            /* One fleet-form probe per section relation, scoped to the servers the roll-up reads (six at most, whatever the server count), not one per relation per server. */
             return await McpQueryTools.WithProbedWindowNoticeAsync(
                 answer,
-                () => LatestSectionFloorAsync(relation => LocalDataService.EarliestCoverageAsync(ids, id => dataService.GetQueryWindowFloorAsync(relation, id, windowStart, windowEnd, includeAlsoCovered: false), windowStart)),
-                () => LatestSectionFloorAsync(async relation =>
-                {
-                    DateTime? earliest = null;
-                    foreach (var id in ids)
-                    {
-                        earliest = LocalDataService.EarlierCoverageFloor(earliest, await dataService.GetOldestWindowRowAsync(relation, id));
-                    }
-
-                    return earliest;
-                }),
+                () => LatestSectionFloorAsync(relation => dataService.GetFleetWindowFloorAsync(relation, windowStart, windowEnd, ids)),
+                () => LatestSectionFloorAsync(relation => dataService.GetOldestFleetWindowRowAsync(relation, ids)),
                 windowStart, windowEnd, "query tag roll-up tables");
         }
         catch (Exception ex) when (ex is not OperationCanceledException)

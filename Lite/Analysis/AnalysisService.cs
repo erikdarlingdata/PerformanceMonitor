@@ -739,16 +739,20 @@ public class AnalysisService
     }
 
     /// <summary>
+    /// #7005: the collector-data probe the MCP analysis reads take their window floor from: the same shared <see cref="LocalDataService"/>
+    /// window-floor read every other windowed tool uses, over the store this service reads. The floor is the data the analysis scores
+    /// (the <c>wait_stats</c> relation, the anchor <c>analyze_server</c> itself requires), not the stored findings, which a quiet
+    /// pass never writes.
+    /// </summary>
+    internal LocalDataService CollectorWindowProbe() => new(_duckDb);
+
+    /// <summary>
     /// Gets the latest findings for a server without running a new analysis.
     /// </summary>
     public async Task<List<AnalysisFinding>> GetLatestFindingsAsync(int serverId)
     {
         return await _findingStore.GetLatestFindingsAsync(serverId);
     }
-
-    /// <summary>#7005: the window floor of the stored analysis runs for one server, and its oldest run (<see cref="FindingStore.GetRunWindowFloorAsync"/>).</summary>
-    public Task<(DateTime? Floor, DateTime? OldestRun)> GetRunWindowFloorAsync(int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default) =>
-        _findingStore.GetRunWindowFloorAsync(serverId, startUtc, endUtc, cancellationToken);
 
     /// <summary>
     /// Gets recent findings for a server within the given time range. The MCP findings read
