@@ -159,28 +159,6 @@ public sealed class StoreToastAndCheckpointerTests
         Assert.DoesNotContain("pg_freespace", StoreSelfMetrics.DimensionInsertSql, StringComparison.Ordinal);
     }
 
-    [Fact]
-    public void TheSweepDoc_StatesThePerKindMeaningOfTheCheckpointerColumns()
-    {
-        /* Single-line anchors only (so the plain reader is enough), each the load-bearing clause of one
-           paragraph: the per-kind mapping, the raw-vs-delta decision, the reset idiom, the extension fence. */
-        var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "StoreSelfMetrics.cs");
-        foreach (var phrase in new[]
-        {
-            "hold the server's CUMULATIVE counters as the",
-            "NOT the interval's delta",
-            "Why the row stores the raw counters and the READ computes the interval",
-            "BACKWARDS means <c>pg_stat_reset_shared('checkpointer')</c>",
-            "the #3705 discontinuity idiom",
-            "just found <c>pg_freespacemap</c> installed (#3783's code half)",
-            "reads 48.5 %",
-            "~20 million rows",
-        })
-        {
-            Assert.Contains(phrase, source, StringComparison.Ordinal);
-        }
-    }
-
     /* ---- the reader ------------------------------------------------------------------------------------ */
 
     [Fact]

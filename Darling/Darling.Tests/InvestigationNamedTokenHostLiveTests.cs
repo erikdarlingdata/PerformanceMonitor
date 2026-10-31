@@ -143,7 +143,7 @@ public sealed class InvestigationNamedTokenHostLiveTests
     }
 
     [Fact]
-    public async Task TheSecondToken_ReadingEvidenceOnTheFirstTokensClaim_IsRefusedAndJournaledAsTheSecond()
+    public async Task TheSecondToken_ReadingEvidenceOnTheFirstTokensClaim_IsRefused_AndJournalsNothing()
     {
         await RunAsync(async c =>
         {
@@ -151,7 +151,8 @@ public sealed class InvestigationNamedTokenHostLiveTests
                 new JsonObject { ["request_id"] = c.RequestId, ["claim_id"] = c.ClaimId }, SecondBearer);
 
             Assert.Equal(DarlingMcpInvestigationTools.ClaimNotToken, answer.GetProperty("status").GetString());
-            Assert.Equal("1", await RefusedAsync(c, Second, "evidence:" + DarlingMcpInvestigationTools.ClaimNotToken));
+            /* The evidence read is a read: a refused one journals nothing (#6997). */
+            Assert.Equal("0", await RefusedAsync(c, Second, "evidence:" + DarlingMcpInvestigationTools.ClaimNotToken));
         });
     }
 
@@ -170,7 +171,7 @@ public sealed class InvestigationNamedTokenHostLiveTests
     }
 
     [Fact]
-    public async Task TheLegacyToken_UsingAServedTokensClaim_IsRefused_ForSubmitAndEvidence()
+    public async Task TheLegacyToken_UsingAServedTokensClaim_IsRefused_ForSubmitAndEvidence_AndOnlySubmitIsJournaled()
     {
         await RunAsync(async c =>
         {
@@ -183,7 +184,7 @@ public sealed class InvestigationNamedTokenHostLiveTests
             Assert.Equal(DarlingMcpInvestigationTools.AgentIdIsNamedToken, evidence.GetProperty("status").GetString());
 
             Assert.Equal("1", await RefusedAsync(c, "invalid", "submit:" + DarlingMcpInvestigationTools.AgentIdIsNamedToken));
-            Assert.Equal("1", await RefusedAsync(c, "invalid", "evidence:" + DarlingMcpInvestigationTools.AgentIdIsNamedToken));
+            Assert.Equal("0", await RefusedAsync(c, "invalid", "evidence:" + DarlingMcpInvestigationTools.AgentIdIsNamedToken));
         });
     }
 

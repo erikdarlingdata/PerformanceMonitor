@@ -8,15 +8,15 @@ Part of the [Performance Monitor documentation](../README.md#documentation).
 
 Pick by how you want collection to run — the monitoring brain (collectors, alert engine, plan analysis, MCP tools) is shared across all three at the library level.
 
-| | **[Lite](https://github.com/erikdarlingdata/PerformanceMonitor/releases/latest)** — flagship | **[Darling](../Darling/README.md)** — headless | **[Dashboard](../deprecated/Dashboard/README.md)** — *deprecated* |
+| | **[Lite](https://github.com/erikdarlingdata/PerformanceMonitor/releases/latest)** — flagship | **[Darling](../Darling/README.md)** — headless | **Dashboard** — *deprecated, frozen* |
 |---|---|---|---|
 | **How it runs** | Single desktop app monitors remotely, on demand | Service on Windows or Linux collects 24/7 into a central store. The Windows viewer and the web dashboard read it from any seat | SQL-Server-installed database + Agent collectors, separate viewer app |
 | **Installs on your server?** | No | No | Yes (a `PerformanceMonitor` database) |
 | **Stores data** | Local DuckDB + Parquet | PostgreSQL + TimescaleDB (bundled on Windows) | In the target SQL Server |
 | **Best for** | Quick triage, Azure SQL DB, locked-down servers, consultants, firefighting | Always-on monitoring of many SQL Server and PostgreSQL servers from one service | *Existing installs only — new deployments should use Lite or Darling* |
-| **Requires** | Four server grants: `VIEW SERVER STATE`, `CONNECT ANY DATABASE`, `VIEW ANY DEFINITION` and `ALTER ANY EVENT SESSION` ([permissions](permissions.md#permissions)) | The same four grants (SQL Server) or [these grants](darling/postgresql-targets.md#permissions-on-a-postgresql-target) (PostgreSQL), plus a place to run the service | SQL Agent ([Dashboard docs](../deprecated/Dashboard/README.md)) |
+| **Requires** | Four server grants: `VIEW SERVER STATE`, `CONNECT ANY DATABASE`, `VIEW ANY DEFINITION` and `ALTER ANY EVENT SESSION` ([permissions](permissions.md#permissions)) | The same four grants (SQL Server) or [these grants](darling/postgresql-targets.md#permissions-on-a-postgresql-target) (PostgreSQL), plus a place to run the service | SQL Agent ([frozen source](../deprecated/README.md)) |
 
-> **⚠️ The "Full" Dashboard edition is deprecated.** Existing installs keep working and remain on bug-fix support, but it is no longer the recommended path and — as of v3.3.0 — the Dashboard and its CLI installer are **no longer included in release assets**. The last shipped builds are in the [v3.2.0 release](https://github.com/erikdarlingdata/PerformanceMonitor/releases/tag/v3.2.0), and both remain buildable from the repo. New deployments should use **Lite** or **Darling**. Its docs live with the code: **[deprecated/Dashboard/README.md](../deprecated/Dashboard/README.md)** (the app, tabs, permissions) and **[deprecated/Installer/README.md](../deprecated/Installer/README.md)** (the CLI database installer).
+> **⚠️ The "Full" Dashboard edition is deprecated.** Existing installs keep working, but it is no longer the recommended path. As of v3.3.0 the Dashboard and its CLI installer are **no longer included in release assets**. Their source is now **frozen** in a zip in the repo. Nothing builds, tests or releases it. The last shipped builds are in the [v3.2.0 release](https://github.com/erikdarlingdata/PerformanceMonitor/releases/tag/v3.2.0). New deployments should use **Lite** or **Darling**. [deprecated/README.md](../deprecated/README.md) says what is in the zip and how to build it.
 
 **👉 Not sure? [Start with Lite.](https://github.com/erikdarlingdata/PerformanceMonitor/releases/latest)** One download, nothing installed on your server, data flowing in under 5 minutes.
 

@@ -123,6 +123,10 @@ public static class McpDataDetailKeys
             "owner_login_name", "session_login_name", "remediation_username",
             // The command queue and the agent-change log: who asked for a command, who undid a change, who acted.
             "requested_by", "undone_by", "actor", "paused_by",
+            // Who made a change: a threshold override's and a server action's set_by, and the investigation writes'
+            // closed_by, decided_by, opened_by, saved_by and modified_by echoes, plus a note's author (the brief
+            // composer already masks author and decided_by as logins by field name).
+            "set_by", "closed_by", "decided_by", "opened_by", "saved_by", "modified_by", "author",
             // Who wrote a record (a known-pattern entry's author and last editor, #6334).
             "created_by", "updated_by",
             // get_long_running_queries (the trace-based reader): the login that ran the statement.
