@@ -73,7 +73,7 @@ public sealed class OverviewLanesUtcFrameTests
 
     /// <summary>
     /// Every other lane plots the sample's instant as the read returned it (<c>CollectionTime</c> and <c>Time</c> are
-    /// UTC), the file-I/O lane groups on it and plots the group's instant, and the ghost lines of all five lanes go
+    /// UTC), the file-I/O lane included, and the ghost lines of all five lanes go
     /// back onto the current axis through <c>TimeWindows.GhostX</c> on the server's zone, with no shift added.
     /// </summary>
     [Fact]
