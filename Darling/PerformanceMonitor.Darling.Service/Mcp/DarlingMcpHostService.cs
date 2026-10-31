@@ -873,13 +873,10 @@ public sealed class DarlingMcpHostService : BackgroundService
             builder.Logging.ClearProviders();
             builder.Logging.SetMinimumLevel(LogLevel.Warning);
 
-            RegisterToolServices(builder.Services, postgres, _registryState, config.Postgres, config.Analyzer, planFetcher, _logger, _baselineCache, _ownerSource, _pseudonymKeys);
-            /* #7041: send_daily_health_report_now sends through the worker's alert evaluator, published on this hub. A tool parameter that
-               resolves to null (a test-constructed host) answers not_ready. */
-            if (_processServices?.GetService<DailyHealthReportHub>() is { } dailyReportHub)
-            {
-                builder.Services.AddSingleton(dailyReportHub);
-            }
+            /* #7041: send_daily_health_report_now sends through the worker's alert evaluator, published on this hub. A host without the
+               process services (a test-constructed one) gets an empty hub, so the tool answers not_ready. */
+            RegisterToolServices(builder.Services, postgres, _registryState, config.Postgres, config.Analyzer, planFetcher, _logger, _baselineCache, _ownerSource, _pseudonymKeys,
+                _processServices?.GetService<DailyHealthReportHub>());
 
             /* #2339: publish the declared peer stores before the instructions are rendered, so the same
                snapshot feeds the instructions section, list_servers' peer_fleets block, and the
@@ -1239,8 +1236,12 @@ public sealed class DarlingMcpHostService : BackgroundService
         ILogger logger,
         BaselineCache baselineCache,
         StoreOwnerSource? ownerSource = null,
-        IPseudonymKeySource? pseudonymKeys = null)
+        IPseudonymKeySource? pseudonymKeys = null,
+        DailyHealthReportHub? dailyReportHub = null)
     {
+        /* #7041: send_daily_health_report_now takes the hub as a service parameter. Always registered, so the MCP SDK never advertises it as a
+           schema property (and the front door's schema stays the tool's own plus store). */
+        services.AddSingleton(dailyReportHub ?? new DailyHealthReportHub());
         /* #6066: the store's pseudonym key, for the data-detail filter and the brief composer at metadataOnly. None: logins are numbered per answer. */
         if (pseudonymKeys is not null) services.AddSingleton<IPseudonymKeySource>(pseudonymKeys);
         /* #5632 step 7: force_query_store_plan and unforce_query_store_plan take this as a service parameter. Empty until the worker publishes. */
