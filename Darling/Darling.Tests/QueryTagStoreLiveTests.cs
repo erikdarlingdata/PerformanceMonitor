@@ -392,7 +392,7 @@ public sealed class QueryTagStoreGrantLiveTests
         Assert.Equal("42501", ex.SqlState);
     }
 
-    private static async Task RunAsync(bool managed, Func<NpgsqlConnection, ScratchPostgres, string, string, string, CancellationToken, Task> body)
+    private static async Task RunAsync(bool managed, Func<NpgsqlConnection, ScratchPostgres, string, string, string, string, CancellationToken, Task> body)
     {
         var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(connectionString), "Set DARLING_TEST_PG to a Postgres connection string, owner/superuser, to run the query-tag grant live tests.");
@@ -404,35 +404,36 @@ public sealed class QueryTagStoreGrantLiveTests
             await using var owner = new NpgsqlConnection(scratch.ConnectionString);
             await owner.OpenAsync(ct);
             await PgMigrations.MigrateAsync(owner, ct);
-            var exist = await ScalarAsync(owner, "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'mcp'))", ct) == "True";
-            Assert.SkipWhen(exist, "A cluster-wide admin/viewer/mcp role already exists on this rig; the grants would adopt it.");
+            var exist = await ScalarAsync(owner, "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'web', 'mcp'))", ct) == "True";
+            Assert.SkipWhen(exist, "A cluster-wide admin/viewer/web/mcp role already exists on this rig; the grants would adopt it.");
 
-            string adminPassword, viewerPassword, mcpPassword;
+            string adminPassword, viewerPassword, webPassword, mcpPassword;
             if (managed)
             {
                 var ownerRole = new NpgsqlConnectionStringBuilder(owner.ConnectionString).Username ?? "darling";
                 await ExecAsync(owner,
                     DarlingManagedRoles.BuildProvisioningSql(
                         ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp,
-                        15, PasswordReassert.All, ProvisioningTarget.ComposeStore(ownerRole, scratch.DatabaseName)), ct);
-                (adminPassword, viewerPassword, mcpPassword) = (ProvisioningTestSecrets.AdminPassword, ProvisioningTestSecrets.ViewerPassword, ProvisioningTestSecrets.McpPassword);
+                        15, PasswordReassert.All, ProvisioningTarget.ComposeStore(ownerRole, scratch.DatabaseName), ProvisioningTestSecrets.Web), ct);
+                (adminPassword, viewerPassword, webPassword, mcpPassword) = (ProvisioningTestSecrets.AdminPassword, ProvisioningTestSecrets.ViewerPassword, ProvisioningTestSecrets.WebPassword, ProvisioningTestSecrets.McpPassword);
             }
             else
             {
                 Assert.SkipUnless(
                     await ScalarAsync(owner, "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'darling')", ct) == "True",
                     "The script names the store owner 'darling', and this rig has no such role.");
-                (adminPassword, viewerPassword, mcpPassword) = ("ScriptAdmin5977", "ScriptViewer5977", "ScriptMcp5977");
+                (adminPassword, viewerPassword, webPassword, mcpPassword) = ("ScriptAdmin5977", "ScriptViewer5977", "ScriptWeb5977", "ScriptMcp5977");
                 var script = ComposeStoreRolesLiveTests.WithoutPsqlMetaCommands(
                         File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", "provision-roles.sql")))
                     .Replace("ON DATABASE darling", $"ON DATABASE \"{scratch.DatabaseName}\"", StringComparison.Ordinal)
                     .Replace("CHANGE_ME_ADMIN_PASSWORD", adminPassword, StringComparison.Ordinal)
                     .Replace("CHANGE_ME_VIEWER_PASSWORD", viewerPassword, StringComparison.Ordinal)
+                    .Replace("CHANGE_ME_WEB_PASSWORD", webPassword, StringComparison.Ordinal)
                     .Replace("CHANGE_ME_MCP_PASSWORD", mcpPassword, StringComparison.Ordinal);
                 await ExecAsync(owner, script, ct);
             }
 
-            await body(owner, scratch, adminPassword, viewerPassword, mcpPassword, ct);
+            await body(owner, scratch, adminPassword, viewerPassword, webPassword, mcpPassword, ct);
             bodySucceeded = true;
         }
         finally
@@ -447,7 +448,7 @@ public sealed class QueryTagStoreGrantLiveTests
     [InlineData(false)]
     public async Task TheServiceWritesSightingsAndTheMap_TheMcpRoleEditsTagsRulesAndAssignments_AndNeitherRoleWritesWhatIsNotItsOwn(bool managed)
     {
-        await RunAsync(managed, async (owner, scratch, _, viewerPassword, mcpPassword, ct) =>
+        await RunAsync(managed, async (owner, scratch, _, viewerPassword, webPassword, mcpPassword, ct) =>
         {
             /* The service, as the store owner, writes the sightings, the map and the state row. */
             await ExecAsync(owner, "INSERT INTO collect.query_tag_sightings (server_id, key_kind, key) VALUES (1, 'hash', '0x01'), (2, 'hash', '0x01')", ct);
@@ -475,14 +476,22 @@ public sealed class QueryTagStoreGrantLiveTests
             await using var viewer = await LoginAsync(scratch, "viewer", viewerPassword, ct);
             Assert.Equal("Reports", await ScalarAsync(viewer, "SELECT name FROM config.query_tags", ct));
             Assert.Equal("1", await ScalarAsync(viewer, "SELECT count(*) FROM config.query_tag_map", ct));
-            /* #5986: the web page that manages query tags runs the MCP cores as viewer, so viewer holds the same three writes mcp does. */
-            var viewerTag = int.Parse(await ScalarAsync(viewer, "INSERT INTO config.query_tags (name) VALUES ('FromWeb') RETURNING id", ct), CultureInfo.InvariantCulture);
-            await ExecAsync(viewer, "UPDATE config.query_tags SET colour = '#445566' WHERE name = 'FromWeb'", ct);
-            await ExecAsync(viewer, $"INSERT INTO config.query_tag_assignments (tag_id, kind, query_hash, created_by) VALUES ({viewerTag}, 'hash', '0x05', 'viewer')", ct);
-            await ExecAsync(viewer, "UPDATE config.query_tag_assignments SET created_by = 'viewer' WHERE query_hash = '0x05'", ct);
-            await ExecAsync(viewer, $"INSERT INTO config.query_tag_rules (tag_id, match_field, pattern, created_by) VALUES ({viewerTag}, 'login', 'x', 'viewer')", ct);
-            await ExecAsync(viewer, "UPDATE config.query_tag_rules SET enabled = false WHERE pattern = 'x'", ct);
-            await ExecAsync(viewer, "DELETE FROM config.query_tags WHERE name = 'FromWeb'", ct);
+            /* The viewer login is read-only: it holds none of the three writes mcp does. */
+            await AssertDeniedAsync(viewer, "INSERT INTO config.query_tags (name) VALUES ('FromViewer')", ct);
+            await AssertDeniedAsync(viewer, "UPDATE config.query_tags SET colour = '#445566'", ct);
+            await AssertDeniedAsync(viewer, $"INSERT INTO config.query_tag_assignments (tag_id, kind, query_hash, created_by) VALUES ({tag}, 'hash', '0x05', 'web')", ct);
+            await AssertDeniedAsync(viewer, $"INSERT INTO config.query_tag_rules (tag_id, match_field, pattern, created_by) VALUES ({tag}, 'login', 'x', 'web')", ct);
+            await AssertDeniedAsync(viewer, "DELETE FROM config.query_tags", ct);
+
+            /* #5986: the web page that manages query tags runs the MCP cores as web, so web holds the same three writes mcp does. */
+            await using var web = await LoginAsync(scratch, "web", webPassword, ct);
+            var webTag = int.Parse(await ScalarAsync(web, "INSERT INTO config.query_tags (name) VALUES ('FromWeb') RETURNING id", ct), CultureInfo.InvariantCulture);
+            await ExecAsync(web, "UPDATE config.query_tags SET colour = '#445566' WHERE name = 'FromWeb'", ct);
+            await ExecAsync(web, $"INSERT INTO config.query_tag_assignments (tag_id, kind, query_hash, created_by) VALUES ({webTag}, 'hash', '0x05', 'web')", ct);
+            await ExecAsync(web, "UPDATE config.query_tag_assignments SET created_by = 'web' WHERE query_hash = '0x05'", ct);
+            await ExecAsync(web, $"INSERT INTO config.query_tag_rules (tag_id, match_field, pattern, created_by) VALUES ({webTag}, 'login', 'x', 'web')", ct);
+            await ExecAsync(web, "UPDATE config.query_tag_rules SET enabled = false WHERE pattern = 'x'", ct);
+            await ExecAsync(web, "DELETE FROM config.query_tags WHERE name = 'FromWeb'", ct);
             Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.query_tags WHERE name = 'FromWeb'", ct));
             await AssertDeniedAsync(viewer, $"INSERT INTO config.query_tag_map (server_id, key_kind, key, tag_id, source) VALUES (9, 'hash', '0x09', {tag}, 'rule')", ct);
             await AssertDeniedAsync(viewer, "INSERT INTO collect.query_tag_sightings (server_id, key_kind, key) VALUES (9, 'hash', '0x09')", ct);
@@ -496,10 +505,10 @@ public sealed class QueryTagStoreGrantLiveTests
     [InlineData(false)]
     public async Task ServerRemoval_RunsAsEachRole_ThroughTheDeleteGrants_AndTheVersionBumpStillWorks(bool managed)
     {
-        await RunAsync(managed, async (owner, scratch, adminPassword, viewerPassword, mcpPassword, ct) =>
+        await RunAsync(managed, async (owner, scratch, adminPassword, viewerPassword, webPassword, mcpPassword, ct) =>
         {
             var tag = int.Parse(await ScalarAsync(owner, "INSERT INTO config.query_tags (name) VALUES ('Reports') RETURNING id", ct), CultureInfo.InvariantCulture);
-            foreach (var (role, password, server) in new[] { ("viewer", viewerPassword, 11), ("mcp", mcpPassword, 12), ("admin", adminPassword, 13) })
+            foreach (var (role, password, server) in new[] { ("web", webPassword, 11), ("mcp", mcpPassword, 12), ("admin", adminPassword, 13) })
             {
                 await ExecAsync(owner, $"INSERT INTO config.query_tag_assignments (tag_id, kind, server_id, query_hash, created_by) VALUES ({tag}, 'hash', {server}, '0x01', 'test')", ct);
                 await ExecAsync(owner, $"INSERT INTO config.query_tag_rules (tag_id, server_id, match_field, pattern, created_by) VALUES ({tag}, {server}, 'host', 'x', 'test')", ct);

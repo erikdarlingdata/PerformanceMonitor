@@ -46,7 +46,7 @@ public sealed class ServerAddViewerRoleLiveTests : IDisposable
 
     internal static readonly string RolePassword = Convert.ToHexString(RandomNumberGenerator.GetBytes(16));
 
-    private const string ServerGrant = "GRANT INSERT ON config.config_monitored_servers TO viewer;";
+    private const string ServerGrant = "GRANT INSERT ON config.config_monitored_servers TO web;";
 
     /// <summary>Pass as <c>skip</c> to provision a role WITHOUT the edit function (a store whose roles predate it).</summary>
     internal const string MissingEditFunction = "<no edit function>";
@@ -156,7 +156,7 @@ public sealed class ServerAddViewerRoleLiveTests : IDisposable
         await using var _ = scratch;
         await using var __ = owner;
 
-        Assert.Contains(ServerGrant.Replace(" TO viewer;", " TO " + roleName, StringComparison.Ordinal), ViewerStatements(roleName, DatabaseOf(ownerString), null));
+        Assert.Contains(ServerGrant.Replace(" TO web;", " TO " + roleName, StringComparison.Ordinal), ViewerStatements(roleName, DatabaseOf(ownerString), null));
         await using var asViewer = await ProvisionAsync(owner, ownerString, roleName, null, ct);
         var bodySucceeded = false;
         try

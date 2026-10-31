@@ -266,7 +266,7 @@ public sealed class DarlingManagedRolesTests
         Assert.Contains("FROM pg_catalog.pg_auth_members AS a", section, StringComparison.Ordinal);
         Assert.Contains("JOIN pg_catalog.pg_roles AS m ON m.oid = a.member", section, StringComparison.Ordinal);
         Assert.Contains("LEFT JOIN pg_catalog.pg_roles AS b ON b.oid = a.grantor", section, StringComparison.Ordinal);
-        Assert.Contains("WHERE m.rolname IN ('admin', 'viewer', 'mcp')", section, StringComparison.Ordinal);
+        Assert.Contains("WHERE m.rolname IN ('admin', 'viewer', 'web', 'mcp')", section, StringComparison.Ordinal);
         Assert.Contains("EXECUTE format('REVOKE %I FROM %I', membership.granted, membership.member)", section, StringComparison.Ordinal);
         Assert.Contains("format(' GRANTED BY %I', membership.grantor)", section, StringComparison.Ordinal);
         Assert.Contains("|| ' CASCADE';", section, StringComparison.Ordinal);
@@ -326,26 +326,26 @@ public sealed class DarlingManagedRolesTests
            dashboard's user-authored view store; editing is loopback-gated server-side). The viewer write set
            has since grown by the same single-table shape (custom_alert_rules #3285, database_state_expected
            #1986, config_mute_rules #3450 below) and by nothing wider. */
-        Assert.Contains("GRANT INSERT, UPDATE, DELETE ON config.custom_views TO viewer;", sql, StringComparison.Ordinal);
+        Assert.Contains("GRANT INSERT, UPDATE, DELETE ON config.custom_views TO web;", sql, StringComparison.Ordinal);
 
         /* #3450: the web mute-rule endpoints run as viewer, so it holds the SAME single-table mute write the
            mcp role has — plus the COLUMN-level config_service beacon grant the SECURITY-INVOKER bump trigger
            needs (trg_bump_mute_rules UPDATEs config_service.config_version AS the writing role), and never a
            table-wide config_service UPDATE that would reach paused / capture_plans / mcp_port. */
-        Assert.Contains("GRANT INSERT, UPDATE, DELETE ON config.config_mute_rules TO viewer;", sql, StringComparison.Ordinal);
-        Assert.Contains("GRANT UPDATE (config_version, updated_at) ON config.config_service TO viewer;", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("GRANT UPDATE ON config.config_service TO viewer", sql, StringComparison.Ordinal);
+        Assert.Contains("GRANT INSERT, UPDATE, DELETE ON config.config_mute_rules TO web;", sql, StringComparison.Ordinal);
+        Assert.Contains("GRANT UPDATE (config_version, updated_at) ON config.config_service TO web;", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("GRANT UPDATE ON config.config_service TO web", sql, StringComparison.Ordinal);
 
         /* #5085: the web server-tag endpoints run as viewer: the same two single-table writes mcp holds, and no
            default-privileges shortcut. */
-        Assert.Contains("GRANT INSERT, UPDATE, DELETE ON config.server_tags TO viewer;", sql, StringComparison.Ordinal);
-        Assert.Contains("GRANT INSERT, UPDATE, DELETE ON config.server_tag_map TO viewer;", sql, StringComparison.Ordinal);
+        Assert.Contains("GRANT INSERT, UPDATE, DELETE ON config.server_tags TO web;", sql, StringComparison.Ordinal);
+        Assert.Contains("GRANT INSERT, UPDATE, DELETE ON config.server_tag_map TO web;", sql, StringComparison.Ordinal);
 
         /* #4843: the web add-server route runs the add_servers core as viewer: INSERT on config_monitored_servers and nothing
            else on it: no UPDATE (#5240: the edit's write is the config.edit_monitored_server function, granted EXECUTE below),
            no DELETE. The census is the whole set of viewer grants on the table. The credential column stays SELECT-carved. */
-        Assert.Contains("GRANT INSERT ON config.config_monitored_servers TO viewer;", sql, StringComparison.Ordinal);
-        Assert.Equal(new[] { "GRANT INSERT ON config.config_monitored_servers TO viewer;" }, ViewerGrantsOnMonitoredServers(sql));
+        Assert.Contains("GRANT INSERT ON config.config_monitored_servers TO web;", sql, StringComparison.Ordinal);
+        Assert.Empty(ViewerGrantsOnMonitoredServers(sql));
 
         /* The REVOKE takes away any UPDATE an earlier build granted viewer; it is not a GRANT, so the census never sees it. */
         Assert.Single(Regex.Matches(Regex.Replace(sql, @"(?m)^\s*--.*$", ""), @"REVOKE UPDATE ON config\.config_monitored_servers FROM [^;]*viewer[^;]*;"));
@@ -583,8 +583,8 @@ public sealed class DarlingManagedRolesTests
         Assert.Contains("GRANT INSERT, UPDATE, DELETE ON config.custom_views TO mcp;", sql, StringComparison.Ordinal);
 
         /* Both write identities are pinned side by side and neither is folded into the other's line. */
-        Assert.Contains("GRANT INSERT, UPDATE, DELETE ON config.custom_views TO viewer;", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("ON config.custom_views TO viewer, mcp", sql, StringComparison.Ordinal);
+        Assert.Contains("GRANT INSERT, UPDATE, DELETE ON config.custom_views TO web;", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("ON config.custom_views TO web, mcp", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("ON config.custom_views TO mcp, viewer", sql, StringComparison.Ordinal);
 
         /* The write stays NARROW: it must NOT widen mcp to a schema-wide config write, and NO ALTER DEFAULT
@@ -608,7 +608,7 @@ public sealed class DarlingManagedRolesTests
         /* #5632: the blanket config writes gave admin INSERT/UPDATE/DELETE on all six tables. The REVOKE ALL comes after
            the last blanket grant and before the password key revoke, which stays the last grant-side statement. */
         const string Six = "config.investigation_requests, config.investigation_request_alerts, config.investigation_reports, config.investigation_journal, config.investigation_notes, config.agent_environment_profiles";
-        var revoke = flat.IndexOf($"REVOKE ALL ON {Six} FROM PUBLIC, admin, viewer, mcp CASCADE;", StringComparison.Ordinal);
+        var revoke = flat.IndexOf($"REVOKE ALL ON {Six} FROM PUBLIC, admin, viewer, web, mcp CASCADE;", StringComparison.Ordinal);
         Assert.True(revoke > flat.LastIndexOf("GRANT INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA config TO admin;", StringComparison.Ordinal));
         Assert.True(revoke < flat.IndexOf("REVOKE ALL ON config.password_key, ", StringComparison.Ordinal));
         Assert.Contains($"GRANT SELECT ON {Six} TO admin, viewer, web;", flat, StringComparison.Ordinal);
@@ -778,7 +778,8 @@ public sealed class DarlingManagedRolesTests
         Assert.DoesNotContain(admin, sql, StringComparison.Ordinal);
         Assert.DoesNotContain(viewer, sql, StringComparison.Ordinal);
         Assert.DoesNotContain(mcp, sql, StringComparison.Ordinal);
-        Assert.Equal(6, System.Text.RegularExpressions.Regex.Matches(sql, @"PASSWORD 'SCRAM-SHA-256\$4096:").Count);
+        /* Four roles, each a CREATE and an ALTER with a verifier (the web role's is a throwaway one when none is passed). */
+        Assert.Equal(8, System.Text.RegularExpressions.Regex.Matches(sql, @"PASSWORD 'SCRAM-SHA-256\$4096:").Count);
     }
 
     /// <summary>
@@ -818,26 +819,34 @@ public sealed class DarlingManagedRolesTests
             ["admin"] = ProvisioningTestSecrets.Admin,
             ["viewer"] = ScramSha256Verifier.Create("SomeOtherPassword"),
             ["mcp"] = "md5aaaabbbbccccddddeeeeffff00001111",
+            ["web"] = ProvisioningTestSecrets.Web,
         };
 
         Assert.Equal(
             PasswordReassert.Viewer | PasswordReassert.Mcp,
-            DarlingManagedRoles.PlanPasswordReassert(stored, ProvisioningTestSecrets.AdminPassword, ProvisioningTestSecrets.ViewerPassword, ProvisioningTestSecrets.McpPassword));
+            DarlingManagedRoles.PlanPasswordReassert(stored, ProvisioningTestSecrets.AdminPassword, ProvisioningTestSecrets.ViewerPassword, ProvisioningTestSecrets.McpPassword, ProvisioningTestSecrets.WebPassword));
+
+        /* The web role is planned like the others: a stored verifier that does not accept its file is re-asserted. */
+        stored["web"] = ScramSha256Verifier.Create("SomeOtherWebPassword");
+        Assert.Equal(
+            PasswordReassert.Viewer | PasswordReassert.Mcp | PasswordReassert.Web,
+            DarlingManagedRoles.PlanPasswordReassert(stored, ProvisioningTestSecrets.AdminPassword, ProvisioningTestSecrets.ViewerPassword, ProvisioningTestSecrets.McpPassword, ProvisioningTestSecrets.WebPassword));
 
         Assert.Equal(
             PasswordReassert.All,
-            DarlingManagedRoles.PlanPasswordReassert(new System.Collections.Generic.Dictionary<string, string?>(), "a", "b", "c"));
+            DarlingManagedRoles.PlanPasswordReassert(new System.Collections.Generic.Dictionary<string, string?>(), "a", "b", "c", "d"));
 
         var converged = new System.Collections.Generic.Dictionary<string, string?>
         {
             ["admin"] = ProvisioningTestSecrets.Admin,
             ["viewer"] = ScramSha256Verifier.Create(ProvisioningTestSecrets.ViewerPassword),
             ["mcp"] = ProvisioningTestSecrets.Mcp,
+            ["web"] = ProvisioningTestSecrets.Web,
             ["viewer_unrelated"] = null,
         };
         Assert.Equal(
             PasswordReassert.None,
-            DarlingManagedRoles.PlanPasswordReassert(converged, ProvisioningTestSecrets.AdminPassword, ProvisioningTestSecrets.ViewerPassword, ProvisioningTestSecrets.McpPassword));
+            DarlingManagedRoles.PlanPasswordReassert(converged, ProvisioningTestSecrets.AdminPassword, ProvisioningTestSecrets.ViewerPassword, ProvisioningTestSecrets.McpPassword, ProvisioningTestSecrets.WebPassword));
     }
 
     [Fact]
@@ -858,7 +867,7 @@ public sealed class DarlingManagedRolesTests
         /* A fresh function is EXECUTE-able by PUBLIC by default, so the REVOKE is mandatory and must precede the
            narrow grant; EXECUTE is the ONLY privilege the least-privilege roles get. */
         Assert.Contains("REVOKE ALL ON FUNCTION config.record_custom_alert_resolution(integer, text, text, text) FROM PUBLIC;", sql, StringComparison.Ordinal);
-        Assert.Contains("GRANT EXECUTE ON FUNCTION config.record_custom_alert_resolution(integer, text, text, text) TO viewer, mcp;", sql, StringComparison.Ordinal);
+        Assert.Contains("GRANT EXECUTE ON FUNCTION config.record_custom_alert_resolution(integer, text, text, text) TO web, mcp;", sql, StringComparison.Ordinal);
         var revokeAt = sql.IndexOf("REVOKE ALL ON FUNCTION config.record_custom_alert_resolution", StringComparison.Ordinal);
         var grantAt = sql.IndexOf("GRANT EXECUTE ON FUNCTION config.record_custom_alert_resolution", StringComparison.Ordinal);
         Assert.True(revokeAt >= 0 && grantAt > revokeAt, "the PUBLIC revoke must precede the EXECUTE grant.");
@@ -869,11 +878,11 @@ public sealed class DarlingManagedRolesTests
         Assert.Contains("false, 'none', NULL, false,", sql, StringComparison.Ordinal);
 
         /* NOT the rejected blanket grant: viewer/mcp never get a table-level write on the history table. The one
-           privilege on it that viewer holds is the single-column dismiss grant (#4843), so every statement naming
-           the table TO viewer must be exactly that one. */
+           privilege on it that the web login holds is the single-column dismiss grant (#4843), so every statement naming
+           the table TO viewer or web must be exactly that one. */
         Assert.Equal(
-            new[] { "GRANT UPDATE (dismissed) ON config.config_alert_log TO viewer;" },
-            System.Text.RegularExpressions.Regex.Matches(sql, @"GRANT [^;]*? ON config\.config_alert_log TO [^;]*viewer[^;]*;")
+            new[] { "GRANT UPDATE (dismissed) ON config.config_alert_log TO web;" },
+            System.Text.RegularExpressions.Regex.Matches(sql, @"GRANT [^;]*? ON config\.config_alert_log TO [^;]*\b(?:viewer|web)\b[^;]*;")
                 .Select(m => m.Value).ToArray());
         /* What mcp may do on the history table is proved by behaviour, as the mcp role:
            McpAlertAdminLiveTests.DismissAndRestore_RunAsTheMcpRole_SetOnlyTheDismissedColumn. */
@@ -1144,7 +1153,7 @@ public sealed class DarlingManagedRolesTests
         var write = body.IndexOf("PersistGeneratedRoleCredentials(", StringComparison.Ordinal);
         Assert.True(read > 0 && batch > read, "a credential must be read (or generated) before the batch is sent");
         Assert.True(write > batch, "a credential file must be written only after the batch has returned");
-        Assert.Equal(3, CountOf(body, "ReadOrGenerateRoleCredential("));
+        Assert.Equal(4, CountOf(body, "ReadOrGenerateRoleCredential("));
         Assert.Equal(1, CountOf(body, "PersistGeneratedRoleCredentials("));
 
         /* The read step writes nothing: a new file is only ever created by the persist step. */

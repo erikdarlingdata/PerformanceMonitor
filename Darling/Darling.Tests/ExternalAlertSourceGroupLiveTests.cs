@@ -88,12 +88,12 @@ public sealed class ExternalAlertSourceGroupLiveTests
     /// <summary>
     /// A migrated scratch store with the submit function, and a LOGIN CREATEROLE NOSUPERUSER role that holds every privilege on
     /// the store's objects WITH GRANT OPTION (what an owner needs) but owns none of them, so it acts as a bring-your-own owner.
-    /// No admin, viewer or mcp role exists (a store the script never ran on).
+    /// No admin, viewer, web or mcp role exists (a store the script never ran on).
     /// </summary>
     private async Task<NpgsqlConnection?> PrepareAsync(ScratchPostgres scratch, NpgsqlConnection superuser, CancellationToken ct, bool mayTurnTrackingOff = true)
     {
         await PgMigrations.MigrateAsync(superuser, ct);
-        if (await ScalarAsync<bool>(superuser, "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'mcp'))", ct)
+        if (await ScalarAsync<bool>(superuser, "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'web', 'mcp'))", ct)
             || superuser.PostgreSqlVersion.Major < 16)
         {
             return null;
@@ -227,10 +227,10 @@ GRANT ALL ON FUNCTION config.submit_external_alert({DarlingManagedRoles.External
             Assert.DoesNotContain("+" + GroupName, withExtra, StringComparison.Ordinal);
             Assert.Contains("hostssl darling viewer 192.0.2.0/24 scram-sha-256", withExtra, StringComparison.Ordinal);
 
-            /* The script's block, run by the same owner (the script creates admin, viewer and mcp first): a group that was given
+            /* The script's block, run by the same owner (the script creates admin, viewer, web and mcp first): a group that was given
                LOGIN and CREATEROLE is set back, attribute by attribute; an explicit grant of the login is revoked; the owner is
                named with the reject line. */
-            await ExecAsync(superuser, "CREATE ROLE admin NOLOGIN; CREATE ROLE viewer NOLOGIN; CREATE ROLE mcp NOLOGIN", ct);
+            await ExecAsync(superuser, "CREATE ROLE admin NOLOGIN; CREATE ROLE viewer NOLOGIN; CREATE ROLE web NOLOGIN; CREATE ROLE mcp NOLOGIN", ct);
             await ExecAsync(superuser, $"ALTER ROLE {GroupName} LOGIN CREATEROLE", ct);
             await ExecAsync(owner!, $"GRANT {RoleName} TO {OtherName}", ct);
             var notices = new List<string>();
@@ -301,7 +301,7 @@ WHERE nspname NOT IN ('pg_catalog', 'information_schema')
             await owner.OpenAsync(ct);
             await PgMigrations.MigrateAsync(owner, ct);
             Assert.SkipWhen(
-                await ScalarAsync<bool>(owner, "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'mcp'))", ct),
+                await ScalarAsync<bool>(owner, "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'web', 'mcp'))", ct),
                 "A cluster-wide admin/viewer/mcp role already exists on this rig; the managed provisioning batch would adopt it.");
             await ExecAsync(owner, "CREATE EXTENSION IF NOT EXISTS pg_stat_statements WITH SCHEMA public", ct);
             await ExecAsync(owner, StoreStatementStats.BuildRevokePublicSql("public", withInfoView: true), ct);
@@ -928,7 +928,7 @@ RESET ROLE", ct);
             Assert.Contains("  hostssl <database> \"all\" <range> reject", rotate.Output, StringComparison.Ordinal);
             Assert.DoesNotContain("<database> all <range>", rotate.Output, StringComparison.Ordinal);
 
-            await ExecAsync(superuser, "CREATE ROLE admin NOLOGIN; CREATE ROLE viewer NOLOGIN; CREATE ROLE mcp NOLOGIN", ct);
+            await ExecAsync(superuser, "CREATE ROLE admin NOLOGIN; CREATE ROLE viewer NOLOGIN; CREATE ROLE web NOLOGIN; CREATE ROLE mcp NOLOGIN", ct);
             var notices = new List<string>();
             owner!.Notice += (_, e) => notices.Add(e.Notice.MessageText);
             await ExecAsync(owner, ScriptAlertSourceBlock(), ct);
@@ -970,7 +970,7 @@ RESET ROLE", ct);
             Assert.True(await ScalarAsync<bool>(superuser, $"SELECT pg_has_role('{RoleName}', '{GroupName}', 'MEMBER')", ct));
 
             await ExecAsync(superuser, $"GRANT pg_monitor TO \"{RoleName}\"", ct);
-            await ExecAsync(superuser, "CREATE ROLE admin NOLOGIN; CREATE ROLE viewer NOLOGIN; CREATE ROLE mcp NOLOGIN", ct);
+            await ExecAsync(superuser, "CREATE ROLE admin NOLOGIN; CREATE ROLE viewer NOLOGIN; CREATE ROLE web NOLOGIN; CREATE ROLE mcp NOLOGIN", ct);
             var notices = new List<string>();
             owner!.Notice += (_, e) => notices.Add(e.Notice.MessageText);
             await ExecAsync(owner, ScriptAlertSourceBlock(), ct);

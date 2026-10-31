@@ -1132,9 +1132,9 @@ ALTER TABLE config.config_mute_rules DROP COLUMN external_source", ct);
             Assert.Contains(
                 $"REVOKE ALL ON FUNCTION config.submit_external_alert({DarlingManagedRoles.ExternalAlertSubmitSignature}) FROM PUBLIC;", sql, StringComparison.Ordinal);
             Assert.Contains(
-                $"REVOKE ALL ON FUNCTION config.submit_external_alert({DarlingManagedRoles.ExternalAlertSubmitSignature}) FROM admin, viewer, mcp;", sql, StringComparison.Ordinal);
+                $"REVOKE ALL ON FUNCTION config.submit_external_alert({DarlingManagedRoles.ExternalAlertSubmitSignature}) FROM admin, viewer, web, mcp;", sql, StringComparison.Ordinal);
             Assert.Contains("REVOKE ALL ON config.external_alert_source, config.external_alert_pending, config.external_alert_state", sql, StringComparison.Ordinal);
-            Assert.Contains("FROM PUBLIC, admin, viewer, mcp CASCADE", sql, StringComparison.Ordinal);
+            Assert.Contains("FROM PUBLIC, admin, viewer, web, mcp CASCADE", sql, StringComparison.Ordinal);
             Assert.Contains(DarlingManagedRoles.AlertSourceRoleMarker, sql, StringComparison.Ordinal);
             Assert.Contains("GRANT CONNECT ON DATABASE %I TO %I", sql, StringComparison.Ordinal);
             Assert.Contains("NOINHERIT CONNECTION LIMIT " + DarlingManagedRoles.AlertSourceConnectionLimit, sql, StringComparison.Ordinal);
