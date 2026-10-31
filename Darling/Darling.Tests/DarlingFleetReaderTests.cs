@@ -882,9 +882,10 @@ public sealed class DarlingFleetReaderLivePostgresTests
         try
         {
             var now = DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc);
-            await InsertServerAsync(connection, XeServerId, XeName, 5, ct);
-            await InsertServerAsync(connection, DmvServerId, DmvName, 3, ct);
-            await InsertServerAsync(connection, NoHistoryServerId, NoHistoryName, 3, ct);
+            /* Registered just now, so each server's coverage starts at its first collection and a report older than that moves it earlier. */
+            await InsertServerAsync(connection, XeServerId, XeName, 5, ct, now);
+            await InsertServerAsync(connection, DmvServerId, DmvName, 3, ct, now);
+            await InsertServerAsync(connection, NoHistoryServerId, NoHistoryName, 3, ct, now);
             await InsertBlockedProcessAsync(connection, XeServerId, XeName, now.AddHours(-23.5), ct);
             await InsertBlockedProcessAsync(connection, DmvServerId, DmvName, now.AddMinutes(-5), ct);
 
@@ -1015,14 +1016,18 @@ public sealed class DarlingFleetReaderLivePostgresTests
         }
     }
 
-    private static async Task InsertServerAsync(NpgsqlConnection connection, int serverId, string name, int engineEdition, System.Threading.CancellationToken ct)
+    private static async Task InsertServerAsync(
+        NpgsqlConnection connection, int serverId, string name, int engineEdition, System.Threading.CancellationToken ct, DateTime? createdDate = null)
     {
         using var command = new NpgsqlCommand(
-            "INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_engine_edition) VALUES ($1, $2, $3, TRUE, $4)", connection);
+            "INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_engine_edition, created_date) VALUES ($1, $2, $3, TRUE, $4, $5)", connection);
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(name);
         command.Parameters.AddWithValue(name);
         command.Parameters.AddWithValue(engineEdition);
+        /* A registered server has its first-collection time; a NULL one makes the window floor's coverage start fall back to the retention
+           horizon (30 days back), so nothing it holds ever reads as cut by the store. */
+        command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, createdDate.HasValue ? DateTime.SpecifyKind(createdDate.Value, DateTimeKind.Unspecified) : DBNull.Value);
         await command.ExecuteNonQueryAsync(ct);
     }
 

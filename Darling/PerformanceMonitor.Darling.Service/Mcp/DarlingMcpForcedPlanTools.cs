@@ -50,6 +50,22 @@ public sealed class DarlingMcpForcedPlanTools
             () => DarlingMcpWindowNotice.Probe(postgres, table, serverName, start, end, cancellationToken),
             start, end, table, emptyAnswer: emptyAnswer, cancellationToken: cancellationToken);
 
+    /// <summary>
+    /// #7010: the answer for a window with no capture in it, once the engine-capability and Query Store checks have each said nothing. That is
+    /// "could have it, does not now" (<c>unavailable</c>, #6753), not a true negative when the store does not reach back to the window, so it
+    /// carries the notice under <c>hints</c>. Built here, behind the <c>??</c> chain of its caller, so the notice probe runs only when those
+    /// two checks did not answer and the caller keeps no pass-through of a value no shared producer built.
+    /// </summary>
+    private static async Task<string> NoCaptureAnswerAsync(
+        NpgsqlDataSource postgres, string serverName, string table, string captureName, string where, int hoursBack, DateTime start, DateTime end,
+        CancellationToken cancellationToken)
+    {
+        var noCapture = await NoticeAsync(postgres, serverName, table, start, end, emptyAnswer: true, cancellationToken);
+        return DarlingMcpWindowNotice.FinishEmpty(McpHelpers.Status("unavailable",
+            $"No {captureName}{where} in the {hoursBack}-hour window ending {Format(end)}. Either the {table} collector has not run in it, " +
+            "or Query Store is off, in error or a readable secondary in every database (such a database writes no capture).", noCapture.AsHints()), noCapture);
+    }
+
     internal static string StateName(ForcedPlanState state) => state switch
     {
         ForcedPlanState.Failing => "FAILING",
@@ -146,16 +162,9 @@ public sealed class DarlingMcpForcedPlanTools
             {
                 /* #6753: no capture in the window is "could have it, does not now" (unavailable), as get_query_store_hints says for
                    the same state. Query Store OFF or in ERROR in every database in scope is a setup step, so it answers precondition. */
-                var unmet = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "query_store_forced_plans", cancellationToken)
-                    ?? await DarlingRuntimePrecondition.QueryStoreStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, databases, cancellationToken);
-                if (unmet is not null) return unmet;
-
-                /* #7010: the two answers above carry no notice (they say their own cause); this one is a window with no capture in it, which is
-                   not a true negative when the store does not reach back to it. */
-                var noCapture = await NoticeAsync(postgres, resolved.ServerName, "query_store_forced_plans", start, windowEnd, emptyAnswer: true, cancellationToken);
-                return DarlingMcpWindowNotice.FinishEmpty(McpHelpers.Status("unavailable",
-                    $"No forced-plan capture{where} in the {hours_back}-hour window ending {Format(windowEnd)}. Either the query_store_forced_plans collector has not run in it, " +
-                    "or Query Store is off, in error or a readable secondary in every database (such a database writes no capture).", noCapture.AsHints()), noCapture);
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "query_store_forced_plans", cancellationToken)
+                    ?? await DarlingRuntimePrecondition.QueryStoreStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, databases, cancellationToken)
+                    ?? await NoCaptureAnswerAsync(postgres, resolved.ServerName, "query_store_forced_plans", "forced-plan capture", where, hours_back, start, windowEnd, cancellationToken);
             }
 
             /* #7010: a capture exists in the window, so the table holds rows; the notice says where its coverage of the window starts. */
@@ -283,15 +292,9 @@ public sealed class DarlingMcpForcedPlanTools
             var where = scope is null ? "" : $" for {(databases.Names.Count == 1 ? "database '" + scope + "'" : scope)}";
             if (read.Captures.Count == 0)
             {
-                var unmet = await HintsNotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, cancellationToken)
-                    ?? await DarlingRuntimePrecondition.QueryStoreStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, databases, cancellationToken);
-                if (unmet is not null) return unmet;
-
-                /* #7010: as get_forced_plans: the two answers above carry no notice, a window with no capture in it does. */
-                var noCapture = await NoticeAsync(postgres, resolved.ServerName, "query_store_hints", start, windowEnd, emptyAnswer: true, cancellationToken);
-                return DarlingMcpWindowNotice.FinishEmpty(McpHelpers.Status("unavailable",
-                    $"No Query Store hint capture{where} in the {hours_back}-hour window ending {Format(windowEnd)}. Either the query_store_hints collector has not run in it, " +
-                    "or Query Store is off, in error or a readable secondary in every database (such a database writes no capture).", noCapture.AsHints()), noCapture);
+                return await HintsNotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, cancellationToken)
+                    ?? await DarlingRuntimePrecondition.QueryStoreStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, databases, cancellationToken)
+                    ?? await NoCaptureAnswerAsync(postgres, resolved.ServerName, "query_store_hints", "Query Store hint capture", where, hours_back, start, windowEnd, cancellationToken);
             }
 
             var notice = await NoticeAsync(postgres, resolved.ServerName, "query_store_hints", start, windowEnd, emptyAnswer: false, cancellationToken);
