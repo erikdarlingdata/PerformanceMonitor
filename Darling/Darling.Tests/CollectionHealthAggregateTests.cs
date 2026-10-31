@@ -1062,4 +1062,145 @@ ORDER BY range_start", connection);
         Assert.NotEmpty(raw);
         Assert.NotEmpty(bandedRaw);
     }
+
+    /// <summary>#6969: the hour scan that reads the materialization's bucket index returns exactly the hours the
+    /// scan of the aggregate returns, with no hole and with two (three and four days back).</summary>
+    [Fact]
+    public async Task MissingHours_ReadFromTheMaterialization_EqualTheAggregateScan_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var store = await OpenStoreAsync(ct);
+        Assert.SkipWhen(store is null, "Set DARLING_TEST_PG to a Postgres connection string with TimescaleDB to run the live missing-hours equality test.");
+        var (scratch, connection, jobId) = store!.Value;
+        await using var _s = scratch;
+        await using var _c = connection;
+
+        await PlantEveryArmAsync(connection, 90_000_000, ct);
+        await RunPolicyAsync(connection, jobId, ct);
+
+        string? materialization;
+        await using (var name = new NpgsqlCommand(CollectionHealthRollupSupport.MaterializationNameSql, connection))
+        {
+            materialization = await name.ExecuteScalarAsync(ct) as string;
+        }
+        Assert.NotNull(materialization);
+
+        async Task<List<DateTime>> ScanAsync(string sql, DateTime from, DateTime to)
+        {
+            var hours = new List<DateTime>();
+            await using var scan = new NpgsqlCommand(sql, connection);
+            scan.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = from });
+            scan.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = to });
+            await using var reader = await scan.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                hours.Add(reader.GetDateTime(0));
+            }
+
+            return hours;
+        }
+
+        DateTime mark;
+        await using (var watermark = new NpgsqlCommand(CollectionHealthRollupSupport.WatermarkSql, connection))
+        {
+            mark = (DateTime)(await watermark.ExecuteScalarAsync(ct))!;
+        }
+
+        var now = NaiveUtcNow();
+        var headEnd = CollectionHealthRollupSupport.CeilingHour(now.AddDays(-7));
+        var viaMaterialization = CollectionHealthRollupSupport.MissingHoursFromMaterializationSql(materialization!);
+
+        var clean = await ScanAsync(CollectionHealthRollupSupport.MissingHoursSql, headEnd, mark);
+        Assert.Equal(clean, await ScanAsync(viaMaterialization, headEnd, mark));
+
+        var thisHour = new DateTime(now.Year, now.Month, now.Day, now.Hour, 0, 0, DateTimeKind.Unspecified);
+        var wiped = new[] { thisHour.AddDays(-3), thisHour.AddDays(-4) };
+        foreach (var hour in wiped)
+        {
+            await DeleteOneBucketAsync(connection, hour, ct);
+        }
+
+        var holed = await ScanAsync(CollectionHealthRollupSupport.MissingHoursSql, headEnd, mark);
+        Assert.True(holed.Count >= wiped.Length);
+        Assert.Equal(holed, await ScanAsync(viaMaterialization, headEnd, mark));
+        foreach (var hour in wiped)
+        {
+            Assert.Contains(hour, holed);
+        }
+    }
+
+    /// <summary>#6969: a role that can read the aggregate and <c>collect</c> but not the materialization (the grant
+    /// TimescaleDB copies onto it is missing: an aggregate rebuilt after provisioning, an upgraded store, a
+    /// hand-granted role) must still get the continuity guard's answer. Without the privilege check in
+    /// <see cref="CollectionHealthRollupSupport.MaterializationNameSql"/> the scan of the materialization failed
+    /// with 42501 and the plan came back unusable, so the fleet read fell to the whole-window raw scan.</summary>
+    [Fact]
+    public async Task MissingHours_AsARoleWithoutTheMaterializationGrant_StillAnswerLikeTheOwner_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var store = await OpenStoreAsync(ct);
+        Assert.SkipWhen(store is null, "Set DARLING_TEST_PG to a Postgres connection string with TimescaleDB to run the live grant-fallback test.");
+        var (scratch, connection, jobId) = store!.Value;
+        await using var _s = scratch;
+        await using var _c = connection;
+        await using var owner = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        await PlantEveryArmAsync(connection, 90_000_000, ct);
+        await RunPolicyAsync(connection, jobId, ct);
+
+        var now = NaiveUtcNow();
+        var thisHour = new DateTime(now.Year, now.Month, now.Day, now.Hour, 0, 0, DateTimeKind.Unspecified);
+        await DeleteOneBucketAsync(connection, thisHour.AddDays(-3), ct);
+        var headEnd = CollectionHealthRollupSupport.CeilingHour(now.AddDays(-7));
+
+        var role = "cha_role_" + Guid.NewGuid().ToString("N")[..12];
+        try
+        {
+            string materialization;
+            await using (var name = new NpgsqlCommand(CollectionHealthRollupSupport.MaterializationNameSql, connection))
+            {
+                materialization = (string)(await name.ExecuteScalarAsync(ct))!;
+            }
+
+            /* The viewer role's shape (DarlingManagedRoles): usage on the schema, select on every table in it, and
+               then no select on the materialization, whatever the extension copied there. */
+            foreach (var sql in new[]
+            {
+                $"CREATE ROLE {role} NOLOGIN",
+                $"GRANT USAGE ON SCHEMA collect TO {role}",
+                $"GRANT SELECT ON ALL TABLES IN SCHEMA collect TO {role}",
+                $"REVOKE ALL ON {materialization} FROM {role}",
+            })
+            {
+                await using var setup = new NpgsqlCommand(sql, connection);
+                await setup.ExecuteNonQueryAsync(ct);
+            }
+
+            await using (var check = new NpgsqlCommand(
+                $"SELECT has_table_privilege('{role}', '{materialization}', 'SELECT')", connection))
+            {
+                Assert.False((bool)(await check.ExecuteScalarAsync(ct))!);
+            }
+
+            var ownerPlan = await CollectionHealthRollupSupport.RollupPlanAsync(owner, headEnd, ct);
+            Assert.True(ownerPlan.Usable);
+            Assert.NotEmpty(ownerPlan.HoleHours);
+
+            var asRole = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { Options = $"-c role={role}" };
+            await using var restricted = NpgsqlDataSource.Create(asRole.ConnectionString);
+            await using (var who = restricted.CreateCommand("SELECT current_user"))
+            {
+                Assert.Equal(role, (string)(await who.ExecuteScalarAsync(ct))!);
+            }
+
+            var rolePlan = await CollectionHealthRollupSupport.RollupPlanAsync(restricted, headEnd, ct);
+            Assert.True(rolePlan.Usable);
+            Assert.Equal(ownerPlan.HoleHours, rolePlan.HoleHours);
+        }
+        finally
+        {
+            await using var drop = new NpgsqlCommand($"DROP OWNED BY {role}; DROP ROLE IF EXISTS {role}", connection);
+            await drop.ExecuteNonQueryAsync(CancellationToken.None);
+        }
+    }
 }

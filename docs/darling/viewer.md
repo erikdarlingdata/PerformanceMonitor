@@ -133,6 +133,8 @@ To keep the folder somewhere else instead, point the `DARLING_CONFIG` environmen
 
 ### 3. Start the Viewer
 
+If you copied the folder next to `PerformanceMonitor.Darling.Viewer.exe`, run that exe. If you installed the Viewer with `PerformanceMonitorDarlingViewer-darlingviewer-Setup.exe` from the [latest release](https://github.com/erikdarlingdata/PerformanceMonitor/releases/latest), set `DARLING_CONFIG` to the exported `darling.json`, then start the Viewer.
+
 That is the whole setup. Re-run the export after a credential or certificate rotation — the store's certificate regenerates when its bind IP changes — and copy the folder over again; it replaces its own previous output without ceremony.
 
 ### If it does not connect
@@ -212,7 +214,7 @@ The defaults are opposite on purpose. The local seat belongs to the operator, an
 On connect the viewer runs one probe:
 
 ```sql
-SELECT has_table_privilege('config_mute_rules', 'INSERT')
+SELECT has_table_privilege('config_alert_log', 'UPDATE')
 ```
 
 True means read-write. False means read-only. Any other result also means read-only. The probe fails safe, so a permission quirk or a mis-provisioned store hides the write controls. You do not click one and hit a permission error. A failure to reach the store is not a read-only verdict. The viewer then shows "Can't reach the Darling store — is the Darling service running?" instead.

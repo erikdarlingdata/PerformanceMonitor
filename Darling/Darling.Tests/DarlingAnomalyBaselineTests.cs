@@ -426,9 +426,10 @@ public sealed class DarlingAnomalyBaselineTests
                write-only row a read sample (peak and mean NULL, read as 0), so the read gate admitted tiles and
                window_samples differed from Lite's. */
             "COUNT(*) FILTER (WHERE delta_reads > 0) AS read_sample_count",
-            "MAX(delta_stall_write_ms * 1.0 / NULLIF(delta_writes, 0)) AS peak_write_lat",
-            "AVG(delta_stall_write_ms * 1.0 / NULLIF(delta_writes, 0)) AS avg_write_lat",
-            "COUNT(*) FILTER (WHERE delta_writes > 0) AS write_sample_count",
+            /* #6959: the three write columns carry the log-and-tempdb file filter, the read columns do not. */
+            "MAX(delta_stall_write_ms * 1.0 / NULLIF(delta_writes, 0)) FILTER (WHERE file_type = 'LOG' OR lower(database_name) = 'tempdb') AS peak_write_lat",
+            "AVG(delta_stall_write_ms * 1.0 / NULLIF(delta_writes, 0)) FILTER (WHERE file_type = 'LOG' OR lower(database_name) = 'tempdb') AS avg_write_lat",
+            "COUNT(*) FILTER (WHERE delta_writes > 0 AND (file_type = 'LOG' OR lower(database_name) = 'tempdb')) AS write_sample_count",
         };
         foreach (var column in expectedColumns)
             Assert.Contains(column, sql, StringComparison.Ordinal);
@@ -1707,7 +1708,7 @@ public sealed class DarlingAnomalyBaselineTests
         const int ioServerId = TestServerId + 6; // own id — this test cleans its own rows
         const string ioServerName = "io-write-gate-e2e";
         const string insertIo =
-            "INSERT INTO file_io_stats (collection_id, collection_time, server_id, server_name, delta_reads, delta_writes, delta_stall_read_ms, delta_stall_write_ms) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)";
+            "INSERT INTO file_io_stats (collection_id, collection_time, server_id, server_name, delta_reads, delta_writes, delta_stall_read_ms, delta_stall_write_ms, file_type) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'LOG')";
 
         using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(ct);
@@ -1791,6 +1792,118 @@ public sealed class DarlingAnomalyBaselineTests
             Assert.Equal(300.0, fact.Metadata["current_latency_ms"], 0.001);
             Assert.InRange(fact.Metadata["baseline_median"], 8.0, 14.0);   // judged against the write history
             Assert.DoesNotContain(sustained, f => f.Key == "ANOMALY_READ_LATENCY");
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                using (var command = new NpgsqlCommand(
+                    $"DELETE FROM file_io_stats WHERE server_id = {ioServerId}; " +
+                    $"DELETE FROM wait_stats WHERE server_id = {ioServerId};", cleanup))
+                {
+                    await command.ExecuteNonQueryAsync(cleanupCt);
+                }
+                await DropBaselineFallbackViewsAsync(cleanup, cleanupCt);
+            });
+        }
+    }
+
+    /// <summary>
+    /// #6959: one server, one user database with two data files whose background writes peak at 250 ms, and a log
+    /// file near 1 ms. The write-latency gate reads the log and tempdb rows only, so the data files do not fire it.
+    /// The seeded rows are the same ones Lite's twin test seeds (<c>WriteLatency_UserDataFilesAreIgnored_LogFileRises</c>
+    /// in <c>AnomalyDetectorTileBehaviourBatchSessionQueryMemoryTests</c>), so the two products are held to one
+    /// result. Then the log's write latency rises to 30 ms and the gate fires on the log row.
+    /// </summary>
+    [Fact]
+    public async Task EndToEnd_WriteLatencyGate_IgnoresUserDataFiles_FiresOnLog_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live write-latency gate test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        const int ioServerId = TestServerId + 7; // own id — this test cleans its own rows
+        const string ioServerName = "io-write-gate-datafiles-e2e";
+        const string insertIo =
+            "INSERT INTO file_io_stats (collection_id, collection_time, server_id, server_name, database_name, file_name, file_type, delta_reads, delta_writes, delta_stall_read_ms, delta_stall_write_ms) VALUES ($1, $2, $3, $4, 'AppDb', $5, $6, 10, 10, 10, $7)";
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        await using (var cleanup = new NpgsqlCommand(
+            $"DELETE FROM file_io_stats WHERE server_id = {ioServerId}; " +
+            $"DELETE FROM wait_stats WHERE server_id = {ioServerId};", connection))
+        {
+            await cleanup.ExecuteNonQueryAsync(ct);
+        }
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var bodySucceeded = false;
+        try
+        {
+            var day = DateTime.UtcNow.Date.AddDays(-8);
+            while (day.DayOfWeek != DayOfWeek.Monday) day = day.AddDays(-1);
+            var lastHistoryMonday = DateTime.SpecifyKind(day.AddHours(10), DateTimeKind.Unspecified);
+            var analysisTime = lastHistoryMonday.AddDays(7);
+
+            var id = 900L;
+            async Task SeedHourAsync(DateTime hourStart, long logWriteMs)
+            {
+                for (var i = 0; i < 30; i++)
+                {
+                    var at = hourStart.AddMinutes(2 * i + 1);
+                    // Log: near 1 ms (a hair of spread), or the raised value. Two data files: 250 ms every row.
+                    await InsertAsync(connection, insertIo, id++, at, ioServerId, ioServerName, "AppDb_log", "LOG", (logWriteMs + i % 2) * 10);
+                    await InsertAsync(connection, insertIo, id++, at, ioServerId, ioServerName, "AppDb_data1", "ROWS", 250L * 10);
+                    await InsertAsync(connection, insertIo, id++, at, ioServerId, ioServerName, "AppDb_data2", "ROWS", 250L * 10);
+                }
+            }
+
+            foreach (var weeksBack in new[] { 3, 2, 1, 0 })
+                await SeedHourAsync(lastHistoryMonday.AddDays(-7 * weeksBack), 1L);
+
+            await InsertAsync(connection,
+                "INSERT INTO wait_stats (collection_id, collection_time, server_id, server_name, wait_type, delta_waiting_tasks, delta_wait_time_ms) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                600L, lastHistoryMonday, ioServerId, ioServerName, TestWaitType, 1L, 100L);
+
+            await TimescaleSupport.EnsureBaselineFallbackViewsAsync(connection, null, ct);
+
+            var provider = new PgBaselineProvider(postgres);
+            var writeBaseline = await provider.GetBaselineAsync(ioServerId, MetricNames.IoWriteLatency, analysisTime);
+            Assert.Equal(120L, writeBaseline.SampleCount);          // the log rows only: 4 hours of 30
+            Assert.InRange(writeBaseline.Median, 0.5, 2.5);        // not the 250 ms data files
+
+            var detector = new PgAnomalyDetector(postgres, provider);
+            var context = new AnalysisContext
+            {
+                ServerId = ioServerId,
+                ServerName = ioServerName,
+                TimeRangeStart = analysisTime,
+                TimeRangeEnd = analysisTime.AddMinutes(60),
+                ServerUtcOffset = TimeSpan.Zero
+            };
+
+            /* Window A: data files at 250 ms, log near 1 ms. */
+            await SeedHourAsync(analysisTime, 1L);
+            var quiet = await detector.DetectAnomaliesAsync(context);
+            Assert.DoesNotContain(quiet, f => f.Key == "ANOMALY_WRITE_LATENCY");
+
+            /* Window B: the log's write latency rises to 30 ms. */
+            await using (var clearWindow = new NpgsqlCommand(
+                $"DELETE FROM file_io_stats WHERE server_id = {ioServerId} AND collection_time > $1;", connection))
+            {
+                clearWindow.Parameters.AddWithValue(analysisTime);
+                await clearWindow.ExecuteNonQueryAsync(ct);
+            }
+            await SeedHourAsync(analysisTime, 30L);
+
+            var sustained = await detector.DetectAnomaliesAsync(context);
+            var fact = Assert.Single(sustained, f => f.Key == "ANOMALY_WRITE_LATENCY");
+            Assert.InRange(fact.Value, 30.0, 31.0);                 // the log row, not the 250 ms data files
 
             bodySucceeded = true;
         }

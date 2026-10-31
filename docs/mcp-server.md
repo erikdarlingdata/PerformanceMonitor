@@ -94,7 +94,7 @@ Open a new Claude Code session and ask questions like:
 
 ### Available Tools
 
-**Lite** exposes more than 100 tools. **Darling** exposes more than 200. The deprecated **Dashboard** exposes more than 60 (see [deprecated/Dashboard/README.md](../deprecated/Dashboard/README.md)). Most of Lite's tool names are also in Darling. Darling has many more. They are the PostgreSQL reads, Custom Views, custom alert rules, query tags, collector control, agent actions, investigation reads and fleet-wide reads.
+**Lite** exposes more than 100 tools. **Darling** exposes more than 200. The deprecated **Dashboard** exposes more than 60 (see the README inside the [frozen source zip](../deprecated/README.md)). Most of Lite's tool names are also in Darling. Darling has many more. They are the PostgreSQL reads, Custom Views, custom alert rules, query tags, collector control, agent actions, investigation reads and fleet-wide reads.
 
 Of Darling's tools, `mcp.allowWrites` with a token serves the write tools. `mcp.allowServerAdmin` adds the server administration tools (`add_servers`, `edit_server`, `remove_server` and `set_server_action`). `mcp.allowInvestigations` with a token adds the investigation tools, and only while `mcp.allowWrites` is off. A service started before an upgrade reports the older, smaller tool list until you restart it.
 

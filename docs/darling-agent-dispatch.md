@@ -303,7 +303,7 @@ To undo a change, select **Undo** on its row. Undo restores what the setting was
 
 To stop all agent changes at once, use **Turn off agent changes** in the Viewer or the web. The gate then refuses every change as `actions_off`. Nothing already made is undone. Over MCP, `set_agent_actions_enabled` can turn the switch off but never back on. A person turns it on in the Viewer or the web.
 
-The web can undo and switch only under the store's admin login. On a managed or compose store, the web signs in as the viewer role, so use the Viewer app there.
+The web can undo and switch only under the store's admin login. On a managed or compose store, the web signs in as the `web` role, so use the Viewer app there.
 
 ## Agent notes
 

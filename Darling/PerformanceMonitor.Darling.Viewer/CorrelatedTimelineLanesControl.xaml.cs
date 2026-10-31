@@ -182,7 +182,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
             var blockingTask = _dataService.GetBlockingTrendAsync(_serverId, startUtc, endUtc);
             var deadlockTask = _dataService.GetDeadlockTrendAsync(_serverId, startUtc, endUtc);
             var memoryTask = _dataService.GetMemoryTrendAsync(_serverId, startUtc, endUtc);
-            var fileIoTask = _dataService.GetFileIoLatencyTrendAsync(_serverId, startUtc, endUtc);
+            var fileIoTask = _dataService.GetFileIoOverviewLatencyTrendAsync(_serverId, startUtc, endUtc);
 
             // Fetch baselines for band rendering — chart-unit-matched metrics. referenceTime stays UTC
             // (the baseline buckets key on hour-of-day / day-of-week of the naive-UTC store timestamps).
@@ -246,10 +246,9 @@ public partial class CorrelatedTimelineLanesControl : UserControl
 
             if (fileIoTask.IsCompletedSuccessfully)
             {
+                /* #6970: the read already returns one weighted point per time, not one per file. */
                 var ioGrouped = fileIoTask.Result
-                    .GroupBy(d => d.CollectionTime)
-                    .OrderBy(g => g.Key)
-                    .Select(g => (g.Key.ToOADate(), IoLatencyWeighting.Weighted(g.Select(x => (x.AvgReadLatencyMs, x.Reads)))))
+                    .Select(d => (d.CollectionTime.ToOADate(), d.ReadLatencyMs))
                     .ToList();
                 UpdateLane(FileIoChart, "I/O ms", ioGrouped, "#81C784", baseline: ioBaseline, minAnomalyValue: 2);
             }

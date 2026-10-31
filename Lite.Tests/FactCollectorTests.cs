@@ -327,6 +327,14 @@ public class FactCollectorTests : IClassFixture<SharedDuckDbFixture>
         Assert.InRange(facts["IO_READ_LATENCY_MS"].Value, 45, 55);
         // 15,000,000 stall / 500,000 writes = 30ms avg
         Assert.InRange(facts["IO_WRITE_LATENCY_MS"].Value, 25, 35);
+
+        // #6959: the user data file wrote 400,000 times at 250ms. An unfiltered sum would score
+        // 115,000,000 / 900,000 = ~128ms, so the scored value above proves the fact filter. The data-file
+        // figure rides along as metadata.
+        Assert.Equal(30, facts["IO_WRITE_LATENCY_MS"].Metadata["avg_write_latency_ms"], precision: 0);
+        Assert.Equal(500_000, facts["IO_WRITE_LATENCY_MS"].Metadata["total_writes"]);
+        Assert.Equal(250, facts["IO_WRITE_LATENCY_MS"].Metadata["data_file_write_latency_ms"], precision: 0);
+        Assert.Equal(400_000, facts["IO_WRITE_LATENCY_MS"].Metadata["data_file_writes"]);
     }
 
     [Fact]

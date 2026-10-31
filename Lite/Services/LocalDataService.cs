@@ -59,6 +59,12 @@ public partial class LocalDataService
     public LocalDatabaseHealth LocalDatabaseHealth => _duckDb.LocalDatabaseHealth;
 
     /// <summary>
+    /// Test seam (#7000): runs on every read connection right after it opens, so a test can turn DuckDB's profiling on for the
+    /// statements a public read runs without copying the read's SQL. Null in the shipped app.
+    /// </summary>
+    internal Action<DuckDBConnection>? ConnectionOpened { get; set; }
+
+    /// <summary>
     /// Creates and opens a DuckDB connection wrapped in a read lock.
     /// The lock prevents CHECKPOINT and compaction from reorganizing the database file
     /// while this connection is reading from it.
@@ -90,6 +96,7 @@ public partial class LocalDataService
             {
                 var connection = _duckDb.CreateConnection();
                 await connection.OpenAsync(cancellationToken);
+                ConnectionOpened?.Invoke(connection);
                 return new LockedConnection(connection, readLock);
             }
         }

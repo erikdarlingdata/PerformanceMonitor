@@ -89,7 +89,7 @@ Point an uptime check at this route and alert on the status code. In the two 503
 
 ## What it does and does not do
 
-Read this section before you file a bug. The web dashboard reads the store as the least-privilege `viewer` role. Its `/api/read/*` surface comes from the MCP tool catalog, minus an explicit exclusion list. These exclusions matter to you:
+Read this section before you file a bug. The web dashboard connects to the store as its own least-privilege `web` role. Its `/api/read/*` surface comes from the MCP tool catalog, minus an explicit exclusion list. These exclusions matter to you:
 
 - No plan analysis. The whole `analyze_query_plan`, `analyze_procedure_plan`, `analyze_query_store_plan` and `analyze_plan_xml` family is excluded. Use the [WPF viewer](viewer.md) for plans. It has the graphical plan viewer, the block-chain reconstruction and the deadlock-graph renderer.
 - No `analyze_server`. That tool makes a live outbound connection to a monitored server, and the web host does not.
@@ -192,7 +192,7 @@ One consequence: a SQL Server read that targets a PostgreSQL server now answers 
 
 Custom Views are the saved dashboards and notebooks in `config.custom_views`. You create and edit them in the built-in composer. The write routes listed above are the reason that the loopback token exemption went away (see [Reach it from a browser on another machine](#reach-it-from-a-browser-on-another-machine)).
 
-The `viewer` role has one more narrow grant: `config.database_state_expected`. It is behind the per-database state-override editor of the WPF viewer. No web route reaches it. The WPF editor gates itself on the same read-only probe (see [Read-only versus read-write seats](viewer.md#read-only-versus-read-write-seats)), which a `viewer`-role seat fails. So no surface currently uses this grant.
+The `web` role has one more narrow grant: `config.database_state_expected`. It is behind the per-database state-override editor of the WPF viewer. No web route reaches it. The WPF editor gates itself on the same read-only probe (see [Read-only versus read-write seats](viewer.md#read-only-versus-read-write-seats)), which a `viewer`-role seat fails. So no surface currently uses this grant.
 
 ## Reach it from a browser on another machine
 

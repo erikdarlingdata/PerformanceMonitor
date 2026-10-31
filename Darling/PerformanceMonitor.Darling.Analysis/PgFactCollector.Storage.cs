@@ -170,8 +170,10 @@ SELECT
 SELECT
     SUM(delta_stall_read_ms) AS total_stall_read_ms,
     SUM(delta_reads) AS total_reads,
-    SUM(delta_stall_write_ms) AS total_stall_write_ms,
-    SUM(delta_writes) AS total_writes
+    SUM(delta_stall_write_ms) FILTER (WHERE file_type = 'LOG' OR lower(database_name) = 'tempdb') AS total_stall_write_ms,
+    SUM(delta_writes) FILTER (WHERE file_type = 'LOG' OR lower(database_name) = 'tempdb') AS total_writes,
+    SUM(delta_stall_write_ms) FILTER (WHERE NOT (file_type = 'LOG' OR lower(database_name) = 'tempdb')) AS data_file_stall_write_ms,
+    SUM(delta_writes) FILTER (WHERE NOT (file_type = 'LOG' OR lower(database_name) = 'tempdb')) AS data_file_writes
 FROM v_file_io_stats
 WHERE server_id = $1
 AND   collection_time >= $2
@@ -200,6 +202,8 @@ AND   (delta_reads > 0 OR delta_writes > 0)";
             var totalReads = reader.IsDBNull(1) ? 0L : ToInt64(reader.GetValue(1));
             var totalStallWriteMs = reader.IsDBNull(2) ? 0L : ToInt64(reader.GetValue(2));
             var totalWrites = reader.IsDBNull(3) ? 0L : ToInt64(reader.GetValue(3));
+            var dataFileStallWriteMs = reader.IsDBNull(4) ? 0L : ToInt64(reader.GetValue(4));
+            var dataFileWrites = reader.IsDBNull(5) ? 0L : ToInt64(reader.GetValue(5));
 
             if (totalReads > 0)
             {
@@ -221,19 +225,29 @@ AND   (delta_reads > 0 OR delta_writes > 0)";
 
             if (totalWrites > 0)
             {
+                /* #6959: the scored value is the log files and tempdb data files only (a session waits on a log flush
+                   and on a tempdb spill write). User data files are checkpoint and lazy-writer targets that no session
+                   waits on, so their write latency rides along as unscored metadata, and FactAdvice.ComposeIoLatency shows it as its
+                   own sentence on the card. */
                 var avgWriteLatency = (double)totalStallWriteMs / totalWrites;
+                var writeMetadata = new Dictionary<string, double>
+                {
+                    ["avg_write_latency_ms"] = avgWriteLatency,
+                    ["total_stall_write_ms"] = totalStallWriteMs,
+                    ["total_writes"] = totalWrites
+                };
+                if (dataFileWrites > 0)
+                {
+                    writeMetadata["data_file_write_latency_ms"] = (double)dataFileStallWriteMs / dataFileWrites;
+                    writeMetadata["data_file_writes"] = dataFileWrites;
+                }
                 facts.Add(new Fact
                 {
                     Source = "io",
                     Key = "IO_WRITE_LATENCY_MS",
                     Value = avgWriteLatency,
                     ServerId = context.ServerId,
-                    Metadata = new Dictionary<string, double>
-                    {
-                        ["avg_write_latency_ms"] = avgWriteLatency,
-                        ["total_stall_write_ms"] = totalStallWriteMs,
-                        ["total_writes"] = totalWrites
-                    }
+                    Metadata = writeMetadata
                 });
             }
         }

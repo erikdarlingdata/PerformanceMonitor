@@ -25,7 +25,7 @@ The folder that holds the data directory is the store root. Keep all of it. Thes
 |---|---|---|
 | `pg\` | the store root | The database files |
 | `pg-credential.dpapi` | the store root, beside `pg\` | The password of the store owner, `darling` |
-| `pg-admin-credential.dpapi`, `pg-viewer-credential.dpapi`, `pg-mcp-credential.dpapi` | the store root | The passwords of the three least-privilege roles |
+| `pg-admin-credential.dpapi`, `pg-viewer-credential.dpapi`, `pg-web-credential.dpapi`, `pg-mcp-credential.dpapi` | the store root | The passwords of the four least-privilege roles |
 | `password-key.dpapi` | the store root | The key that opens the SQL login passwords saved in the store |
 | `log-hash-key.dpapi` | the store root | The key for the identities of stored log events |
 | `server.crt` and `server.key` | the store root, only when the store has TLS on | The store's own certificate and key |
