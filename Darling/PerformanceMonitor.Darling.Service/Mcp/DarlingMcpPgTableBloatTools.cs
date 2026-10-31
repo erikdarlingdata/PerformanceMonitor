@@ -14,6 +14,7 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
@@ -34,6 +35,9 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpPgTableBloatTools
 {
+    /// <summary>#7010: the collector table this read windows on, for the window-floor notice.</summary>
+    private const string BloatTable = "pg_table_bloat_stats";
+
     /// <summary>
     /// The threshold, re-exported from the ONE place the rule lives so this tool's tests can pin it without
     /// reaching across projects. <see cref="DarlingPgTableBloatReader.StaleStatisticsChurnRatio"/> carries
@@ -236,6 +240,7 @@ public sealed class DarlingMcpPgTableBloatTools
         [Description("Hours of history to analyze. Default 168 (seven days), which shows whether the waste is growing or being reclaimed.")] int hours_back = 168,
         [Description("Maximum tables to return, biggest estimated waste first. Default 25. This is what bounds the page - read truncated to know whether the server held more measured tables than were returned.")] int limit = 25,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorForAnswerAsync(postgres, server_name, cancellationToken);
@@ -260,8 +265,16 @@ public sealed class DarlingMcpPgTableBloatTools
 
             if (rows.Count == 0)
             {
-                return await EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, hours_back, start, end, cancellationToken);
+                return await EmptyAsync(postgres, resolved.ServerId, resolved.ServerName, resolved.DisplayName, hours_back, start, end, logger, cancellationToken);
             }
+
+            /* #7010: heap_bytes_growth_in_window and first_seen_at are read across the window, so a store that starts later than the window
+               undercounts the growth. A failed probe costs the keys, never the rows. */
+            var notice = await DarlingMcpWindowNotice.ReadAsync(
+                () => DarlingMcpWindowNotice.Probe(postgres, BloatTable, resolved.ServerName, start, end, cancellationToken),
+                start, end, BloatTable,
+                "heap_bytes_growth_in_window and first_seen_at cover only effective_start onward, so a short history understates how much the waste grew.",
+                logger: logger, cancellationToken: cancellationToken);
 
             var suppressedCount = rows.Count(r => EstimateSuppressionReason(r) != null);
             var trusted = rows.Where(r => EstimateSuppressionReason(r) == null).ToList();
@@ -367,10 +380,14 @@ public sealed class DarlingMcpPgTableBloatTools
             })
             .ToList();
 
-            return JsonSerializer.Serialize(new
+            return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
                 hours_back,
+                /* #7010: the window floor, right after hours_back. */
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 status = "table_bloat",
                 /* The page's count under the page's name (#3594). */
                 tables_returned = tables.Count,
@@ -404,7 +421,7 @@ public sealed class DarlingMcpPgTableBloatTools
                          + "totals cover only the tables returned. Raise limit for the full picture."
                          : string.Empty),
                 tables,
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions), notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -421,8 +438,8 @@ public sealed class DarlingMcpPgTableBloatTools
     /// under the 1 MB floor.</para>
     /// </summary>
     private static async Task<string> EmptyAsync(
-        NpgsqlDataSource postgres, int serverId, string serverName, int hoursBack, DateTime start, DateTime end,
-        CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, int serverId, string registeredName, string serverName, int hoursBack, DateTime start, DateTime end,
+        ILogger? logger = null, CancellationToken cancellationToken = default)
     {
         var gated = await DarlingEngineCapability.NotCollectedStatusAsync(
             postgres, serverId, serverName, "pg_table_bloat_stats", cancellationToken);
@@ -433,23 +450,31 @@ public sealed class DarlingMcpPgTableBloatTools
 
         var probe = await DarlingPgTableBloatReader.ProbePgTableBloatAsync(postgres, serverId, start, end, cancellationToken);
 
-        var hints = new
+        /* #7010: the window keys ride under hints on the empty and the unavailable answers (nothing was read, so a short store reads as
+           "nothing happened" otherwise); not_collected, decided above, stays bare. */
+        var notice = await DarlingMcpWindowNotice.ReadAsync(
+            () => DarlingMcpWindowNotice.Probe(postgres, BloatTable, registeredName, start, end, cancellationToken),
+            start, end, BloatTable, emptyAnswer: true, logger: logger, cancellationToken: cancellationToken);
+
+        var hints = DarlingMcpWindowNotice.AttachToHints(new
         {
             server = serverName,
             hours_back = hoursBack,
             rows_in_window = probe.RowsInWindow,
             snapshots_in_window = probe.SnapshotsInWindow,
             ever_collected = probe.RowsEver > 0,
-        };
+        }, notice);
 
         if (probe.SnapshotsInWindow >= 1)
         {
             return await DarlingServerOfflineNote.EmptyAsync(postgres, serverId, serverName, end, McpHelpers.Status(
                 "empty",
-                $"No tables were recorded for {serverName} in the last {hoursBack} hour(s) even though "
-                + "collection ran. Every table on every collected database is under the collector's 1 MB "
-                + "floor, below which bloat is not an actionable amount of space. That is a genuine "
-                + "all-clear rather than missing data.",
+                McpHelpers.QuietUnlessCut(
+                    notice is { IsUnavailable: false, WindowTruncated: true }, notice.EffectiveStart,
+                    factual: $"No tables were recorded for {serverName} in the last {hoursBack} hour(s) even though "
+                        + "collection ran. Every table on every collected database is under the collector's 1 MB "
+                        + "floor, below which bloat is not an actionable amount of space",
+                    coveredClaim: ". That is a genuine all-clear rather than missing data."),
                 hints), cancellationToken);
         }
 

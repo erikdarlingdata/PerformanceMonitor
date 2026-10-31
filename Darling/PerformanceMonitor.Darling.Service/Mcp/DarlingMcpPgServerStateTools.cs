@@ -31,6 +31,9 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpPgServerStateTools
 {
+    /// <summary>The collector table get_pg_extensions reads, named in its window notice (#7010).</summary>
+    private const string ExtensionsTable = "pg_extension_availability";
+
     /// <summary>The collector table get_pg_write_stats reads, named in its window notice (#4966).</summary>
     private const string WriteStatsTable = "pg_write_stats";
 
@@ -43,11 +46,12 @@ public sealed class DarlingMcpPgServerStateTools
     /// </summary>
     private const int BuffersBackendRemovedInMajor = 17;
 
-    [McpServerTool(Name = "get_pg_buffer_usage"), Description("Gets what is actually resident in the PostgreSQL shared buffer pool, per relation, from the pg_buffercache extension: how many buffers each table or index occupies, how many of those are dirty, and the average usage count that PostgreSQL's clock-sweep eviction reads. This answers which objects the cache is actually spent on, which is a different question from which objects are read most - a small hot table and a large one scanned once can produce similar read counts and completely different residency. High dirty counts concentrated in one relation point at write pressure. Note that scanning pg_buffercache takes a lock on the buffer mapping, so the collector runs it sparingly.")]
+    [ReadsLatestSnapshot(LatestSnapshotShape.SearchBound)]
+    [McpServerTool(Name = "get_pg_buffer_usage"), Description("Gets what is actually resident in the PostgreSQL shared buffer pool, per relation, from the pg_buffercache extension: how many buffers each table or index occupies, how many of those are dirty, and the average usage count that PostgreSQL's clock-sweep eviction reads. This answers which objects the cache is actually spent on, which is a different question from which objects are read most - a small hot table and a large one scanned once can produce similar read counts and completely different residency. High dirty counts concentrated in one relation point at write pressure. Note that scanning pg_buffercache takes a lock on the buffer mapping, so the collector runs it sparingly. LATEST IS A TIME: this is the newest buffer pool snapshot in the search span, captured_at is when it was taken and age_seconds is how old it is at the window end. Not a window of snapshots (#7010).")]
     public static async Task<string> GetPgBufferUsage(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Hours of history to analyze. Default 24.")] int hours_back = 24,
+        [Description("Hours of history to search for the latest snapshot. Default 24.")] int hours_back = 24,
         [Description("Maximum rows to return. Default 25.")] int limit = 25,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         CancellationToken cancellationToken = default)
@@ -99,6 +103,9 @@ public sealed class DarlingMcpPgServerStateTools
             {
                 server = resolved.DisplayName,
                 hours_back,
+                /* #7010: the snapshot's own stamp and age (the read answers the newest snapshot, not a window). */
+                captured_at = newest.CaptureTime.ToString("o"),
+                age_seconds = LatestSnapshotStamp.AgeSeconds(newest.CaptureTime, windowEnd),
                 relation_count = rows.Count,
                 /* 8 kB is PostgreSQL's near-universal block size but it IS a compile-time setting, so the
                    buffer COUNT is the measurement and the megabyte figure is a convenience beside it. */
@@ -125,6 +132,7 @@ public sealed class DarlingMcpPgServerStateTools
         [Description("One database, or omit for every database. Rows are (database x extension), so a multi-database host can exceed limit. Pass this to complete one database's full slice. See the tool's reading guide.")]
             string? database_name = null,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorForAnswerAsync(postgres, server_name, cancellationToken);
@@ -152,9 +160,13 @@ public sealed class DarlingMcpPgServerStateTools
 
             if (fetched.Count == 0)
             {
+                /* #7010: the empty answer carries the window floor under hints (not_collected, decided first, stays bare). */
+                var emptyNotice = await DarlingMcpWindowNotice.ReadAsync(
+                    () => DarlingMcpWindowNotice.Probe(postgres, ExtensionsTable, resolved.ServerName, windowStart, windowEnd, cancellationToken),
+                    windowStart, windowEnd, ExtensionsTable, emptyAnswer: true, logger: logger, cancellationToken: cancellationToken);
                 return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, await DarlingEngineCapability.NotCollectedStatusAsync(
                     postgres, resolved.ServerId, resolved.DisplayName, "pg_extension_availability", cancellationToken)
-                    ?? McpHelpers.Status(
+                    ?? DarlingMcpWindowNotice.FinishEmpty(McpHelpers.Status(
                         "empty",
                         $"No extension inventory for {resolved.DisplayName} in the last {hours_back} "
                         + "hour(s). This collector runs DAILY, so a short window can be empty on a healthy "
@@ -164,7 +176,8 @@ public sealed class DarlingMcpPgServerStateTools
                             : $" You filtered to database_name '{scope}': check the spelling and "
                               + "that the collector enumerates it, because a name that matches nothing is "
                               + "indistinguishable here from a server with no inventory. Re-run without the "
-                              + "filter to see which databases are reported.")), cancellationToken);
+                              + "filter to see which databases are reported."),
+                        emptyNotice.AsHints()), emptyNotice), cancellationToken);
             }
 
             /* The result is capped at `limit`, so a summary count taken over the returned rows describes
@@ -196,6 +209,14 @@ public sealed class DarlingMcpPgServerStateTools
                Unreachable, telling a filtered caller they could not see what they were holding. */
             var census = await DarlingPgExtensionAvailabilityReader.GetInstallCensusAsync(
                 postgres, resolved.ServerId, windowStart, windowEnd, scope, cancellationToken);
+
+            /* #7010: the rows are the newest inventory per (database, extension) the window holds, so a window that starts before the store's
+               data reads as "nothing older existed" without this. A failed probe costs the keys, never the rows. */
+            var notice = await DarlingMcpWindowNotice.ReadAsync(
+                () => DarlingMcpWindowNotice.Probe(postgres, ExtensionsTable, resolved.ServerName, windowStart, windowEnd, cancellationToken),
+                windowStart, windowEnd, ExtensionsTable,
+                "The inventory holds only what the collector recorded from effective_start onward, so a database or extension seen only before then is absent.",
+                logger: logger, cancellationToken: cancellationToken);
 
             /* FROM THE CENSUS, not from the rows. Every row carries the same two scalars — they hang off a
                one-row relation the per-extension groups join to — so the first row is the whole answer, and
@@ -285,7 +306,7 @@ public sealed class DarlingMcpPgServerStateTools
                 comment = r.Comment,
             });
 
-            return JsonSerializer.Serialize(new
+            return DarlingMcpWindowNotice.Attach(JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
                 hours_back,
@@ -384,7 +405,7 @@ public sealed class DarlingMcpPgServerStateTools
                          : string.Empty)
                      + " " + reach.Message,
                 extensions,
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions), notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
