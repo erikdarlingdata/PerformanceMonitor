@@ -1761,6 +1761,8 @@ public sealed class DarlingMcpHostService : BackgroundService
                routes serve — one reader, one shape, the zero-drift rule get_fleet_overview and /api/fleet
                established, applied to the sweep rows. */
             .WithGeminiCompatibleTools<DarlingMcpFleetSweepTools>()
+            /* The Daily Health Report read - get_daily_health_report (#7041) - the report the scheduler sends, built on demand and never sent. */
+            .WithGeminiCompatibleTools<DarlingMcpDailyReportTools>()
             /* The change watch read - get_change_watches (#6234) - a server's watch windows, each with its changes, its measures and
                its result, over the same ChangeWatchStore the worker pass writes. A read of the monitoring store: the investigation
                agent may call it. */
