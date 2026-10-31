@@ -134,7 +134,7 @@ public sealed class PgSensitiveStatementFilterTests
             "|[[:<:]](crypt|hmac|encrypt|decrypt|encrypt_iv|decrypt_iv|pgp_sym_encrypt|pgp_sym_encrypt_bytea" +
             "|pgp_sym_decrypt|pgp_sym_decrypt_bytea|pgp_pub_encrypt|pgp_pub_encrypt_bytea|pgp_pub_decrypt" +
             "|pgp_pub_decrypt_bytea)" + gap + "*[(]([^()]|[(][^()]*[)])*([(][^()]*)?(''|[$][^0-9])" +
-            "|-----begin pgp private key block" +
+            "|-----begin[[:space:]]+pgp[[:space:]]+private[[:space:]]+key[[:space:]]+block" +
             "|[[:space:]]-u[[:space:]]*[^[:space:]-][^[:space:]]*[[:space:]]+-p[[:space:]]*[^[:space:]-]" +
             "|[[:<:]](bcp|sqlcmd|osql|isql)[[:>:]].*[[:space:]][-/]p[[:space:]]*[^[:space:]-]' " +
             "THEN '-- statement text withheld (#4348)' ELSE c END";

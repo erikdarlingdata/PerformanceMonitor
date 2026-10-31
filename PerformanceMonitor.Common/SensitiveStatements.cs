@@ -97,7 +97,7 @@ public static partial class SensitiveStatements
         + "|[[:<:]](crypt|hmac|encrypt|decrypt|encrypt_iv|decrypt_iv|pgp_sym_encrypt|pgp_sym_encrypt_bytea"
             + "|pgp_sym_decrypt|pgp_sym_decrypt_bytea|pgp_pub_encrypt|pgp_pub_encrypt_bytea|pgp_pub_decrypt"
             + "|pgp_pub_decrypt_bytea)" + TokenGap + "*[(]([^()]|[(][^()]*[)])*([(][^()]*)?('|[$][^0-9])"     // T12
-        + "|-----begin pgp private key block"                                                                  // T13
+        + "|-----begin[[:space:]]+pgp[[:space:]]+private[[:space:]]+key[[:space:]]+block"                      // T13
         + "|[[:space:]]-u[[:space:]]*[^[:space:]-][^[:space:]]*[[:space:]]+-p[[:space:]]*[^[:space:]-]"        // T14
         + "|" + ToolPasswordAlternative;                                                                       // T15
 
