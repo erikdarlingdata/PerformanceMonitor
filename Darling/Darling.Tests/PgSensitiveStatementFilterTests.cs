@@ -130,11 +130,13 @@ public sealed class PgSensitiveStatementFilterTests
             "|[[:<:]]([a-z0-9_]*(password|passwd|pwd|secret)|key_source)" + gap + "+((as|constant)" + gap + "+)?" +
             "[[]?[a-z_][a-z0-9_.]*]?([[:space:]]*[(][[:space:]0-9a-z,]{0,20}[)])?" + gap +
             "*(:?=|default[[:>:]])" + gap + "*(n?''|e''|u&''|0x|[$][^0-9])" +
-            "|[[:<:]]sslpassword[[:space:]]*=[[:space:]]*[^$[:space:]]" +
+            "|[[:<:]](ssl|sqlcmd)password[[:space:]]*=[[:space:]]*[^[:space:]]" +
             "|[[:<:]](crypt|hmac|encrypt|decrypt|encrypt_iv|decrypt_iv|pgp_sym_encrypt|pgp_sym_encrypt_bytea" +
             "|pgp_sym_decrypt|pgp_sym_decrypt_bytea|pgp_pub_encrypt|pgp_pub_encrypt_bytea|pgp_pub_decrypt" +
-            "|pgp_pub_decrypt_bytea)" + gap + "*[(]([^()]|[(][^()]*[)])*(''|[$][^0-9])" +
-            "|[[:<:]](bcp|sqlcmd|osql|isql)[[:>:]].*[[:space:]]-p[[:space:]]*[^[:space:]-]' " +
+            "|pgp_pub_decrypt_bytea)" + gap + "*[(]([^()]|[(][^()]*[)])*([(][^()]*)?(''|[$][^0-9])" +
+            "|-----begin pgp private key block" +
+            "|[[:space:]]-u[[:space:]]*[^[:space:]-][^[:space:]]*[[:space:]]+-p[[:space:]]*[^[:space:]-]" +
+            "|[[:<:]](bcp|sqlcmd|osql|isql)[[:>:]].*[[:space:]][-/]p[[:space:]]*[^[:space:]-]' " +
             "THEN '-- statement text withheld (#4348)' ELSE c END";
 
         Assert.Equal(expected, PgSensitiveStatementFilter.SqlPredicate("c"));

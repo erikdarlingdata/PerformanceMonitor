@@ -106,6 +106,21 @@ internal static class SensitiveStatementCorpus
         "EXEC xp_cmdshell 'osql -S PROD01 -U sa -PS3cret! -i x.sql'",
         "EXEC xp_cmdshell 'isql -S PROD01 -U sa -P S3cret!'",
         "EXEC xp_cmdshell 'bcp db.dbo.t in x.dat -P S3cret! -U etl -S PROD01'",
+
+        // a key or passphrase one call deep, an armored private key anywhere, a /P switch, SQLCMDPASSWORD, a $ and a
+        // digit at the start of a conninfo value, a login written before the tool name, and a multi-line bcp
+        "SELECT pgp_sym_decrypt(card, trim('K3y-2026')) FROM payments",
+        "SELECT id FROM app.users WHERE pw = crypt(lower('Hunter2'), pw)",
+        "SELECT id FROM app.users WHERE pw = crypt(CAST('hunter2' AS text), pw)",
+        "SELECT pgp_sym_decrypt(card, f('K3y-2026')) FROM payments",
+        "SELECT pgp_pub_decrypt(msg, dearmor('-----BEGIN PGP PRIVATE KEY BLOCK-----\n\nlQOYBF...\n-----END PGP PRIVATE KEY BLOCK-----')) FROM t",
+        "SELECT pgp_pub_decrypt(msg, dearmor(trim('-----BEGIN PGP PRIVATE KEY BLOCK-----\n\nlQOYBF...\n-----END PGP PRIVATE KEY BLOCK-----'))) FROM t",
+        "INSERT INTO app.keys (id, armored) VALUES (1, '-----BEGIN PGP PRIVATE KEY BLOCK-----\n\nlQOYBF...\n-----END PGP PRIVATE KEY BLOCK-----')",
+        @"EXEC xp_cmdshell 'sqlcmd /S PROD01 /U etl /P S3cret! /i D:\load.sql'",
+        @"EXEC xp_cmdshell 'set SQLCMDPASSWORD=S3cret!&& sqlcmd -S PROD01 -U etl -i D:\load.sql'",
+        "SELECT dblink_connect('c', 'host=db2 sslkey=/k/c.key sslpassword=$9Kite')",
+        @"DECLARE @creds varchar(100) = '-S PROD01 -U etl -P S3cret!'; DECLARE @cmd varchar(4000) = 'bcp Sales.dbo.Orders out D:\x.dat -c ' + @creds; EXEC xp_cmdshell @cmd;",
+        "EXEC master..xp_cmdshell 'bcp Sales.dbo.Orders out D:\\x.dat\n    -S PROD01 -U etl\n    -P S3cret! -c'",
     };
 
     /// <summary>Statements the filter must leave alone.</summary>
@@ -148,7 +163,6 @@ internal static class SensitiveStatementCorpus
         "CREATE TABLE passwords (id int)",
 
         // neighbours of the sslpassword, pgcrypto and client tool shapes
-        "SELECT dblink_connect('c', 'host=db2 sslkey=/k/c.key sslpassword=$1')",
         "SELECT * FROM t WHERE sslpassword_set = $1",
         "SELECT password_reset_at FROM users",
         "SELECT crypto_id FROM t",
@@ -157,9 +171,13 @@ internal static class SensitiveStatementCorpus
         "SELECT id FROM app.users WHERE pw = crypt($1, pw)",
         "SELECT id FROM app.users WHERE name = 'bob' AND pw = crypt($1, pw)",
         "SELECT pgp_sym_decrypt(card, $1) FROM payments",
+        "SELECT pgp_sym_decrypt(card, f($1)) FROM payments",
+        "SELECT pgp_pub_encrypt(note, dearmor($1)) FROM t",
+        "SELECT '-----BEGIN PGP PUBLIC KEY BLOCK-----'",
         @"EXEC master..xp_cmdshell 'bcp Sales.dbo.Orders out D:\x.dat -S PROD01 -T -c'",
         "EXEC master..xp_cmdshell 'sqlcmd -S PROD01 -E -Q \"select 1\"'",
         @"EXEC master..xp_cmdshell 'dir D:\'",
+        @"EXEC xp_cmdshell 'sqlcmd -S PROD01 -E -i D:\load.sql'",
         "SELECT * FROM t WHERE note = 'isql' AND pw = 5",
     };
 

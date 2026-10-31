@@ -551,6 +551,45 @@ public sealed class SensitiveStatementsTests
             headAlternatives: SensitiveStatements.JudgeHeadAlternatives,
             clock: static () => TimeSpan.Zero));
 
+    /// <summary>Thousands of tool names in one text, none followed by a -P option, behind a word the pre-check hits
+    /// (no word start is needed there). The tool-name alternative began a rescan of the rest of the text at every
+    /// tool name, so 16 KB took about half a second (past the 250 ms match timeout, so it came back TimedOut and
+    /// the statement was withheld); it now runs once from the first tool name.</summary>
+    [Fact]
+    public void ThousandsOfToolNamesWithNoPasswordSwitchAreCleanAndFast()
+    {
+        StatementFilterWarmUp.Ensure();
+        SensitiveStatements.Judge("warm the regex up");
+        var text = "SELECT 1 /* xopendatasourcex */ " + string.Concat(Enumerable.Repeat("bcp ", 4_000));
+
+        Assert.Equal(SensitiveStatements.Verdict.Clean, UnboundedJudge.Value(text));
+
+        var best = long.MaxValue;
+        for (var attempt = 0; attempt < 5 && best >= 250; attempt++)
+        {
+            var watch = Stopwatch.StartNew();
+            var verdict = SensitiveStatements.Judge(text);
+            watch.Stop();
+            if (verdict == SensitiveStatements.Verdict.Clean)
+            {
+                best = Math.Min(best, watch.ElapsedMilliseconds);
+            }
+        }
+
+        TimingClaim.AtMost(best == long.MaxValue ? double.PositiveInfinity : best, 99, "16 KB of tool names came back Clean");
+    }
+
+    /// <summary>The tool-name alternative still names a password switch after thousands of tool names, and a
+    /// tool name that comes after the first one still counts.</summary>
+    [Fact]
+    public void AToolPasswordSwitchAfterThousandsOfToolNamesIsNamed()
+    {
+        var manyTools = string.Concat(Enumerable.Repeat("bcp ", 4_000));
+        Assert.Equal(SensitiveStatements.Verdict.Named, UnboundedJudge.Value("xp_cmdshell '" + manyTools + "-P S3cret!'"));
+        Assert.Equal(SensitiveStatements.Verdict.Clean, UnboundedJudge.Value("xp_cmdshell '" + manyTools + "-T'"));
+        Assert.Equal(SensitiveStatements.Verdict.Named, UnboundedJudge.Value("SELECT 1 -- isql\nEXEC xp_cmdshell 'bcp t out x.dat -P S3cret!'"));
+    }
+
     private static long BestOfJudging(
         string text, SensitiveStatements.Verdict expected, int attempts, Func<string, SensitiveStatements.Verdict>? judge = null)
     {
