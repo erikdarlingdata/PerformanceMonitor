@@ -194,6 +194,9 @@ jobs:
           Add-Content -Path "$dataDir\postgresql.conf" -Value "listen_addresses = '127.0.0.1'"
           Add-Content -Path "$dataDir\postgresql.conf" -Value "timescaledb.max_background_workers = 74"
           Add-Content -Path "$dataDir\postgresql.conf" -Value "max_worker_processes = 85"
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "fsync = off"
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "synchronous_commit = off"
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "full_page_writes = off"
           Add-Content -Path "$dataDir\postgresql.conf" -Value "timezone = 'UTC'"
           Add-Content -Path "$dataDir\postgresql.conf" -Value "log_timezone = 'UTC'"
           & "$bin\pg_ctl.exe" -D $dataDir -l $logFile -w start
