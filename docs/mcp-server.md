@@ -4,7 +4,7 @@ Audience: operators.
 
 Part of the [Performance Monitor documentation](../README.md#documentation).
 
-Every edition includes an embedded [Model Context Protocol](https://modelcontextprotocol.io) server that exposes monitoring data to LLM clients like Claude Code and Cursor.
+Every edition includes an embedded [Model Context Protocol](https://modelcontextprotocol.io) server that exposes monitoring data to LLM clients like Claude Code, Cursor and [GitHub Copilot in VS Code](#github-copilot-in-vs-code).
 
 The tools answer from the monitor's own collected store, and that is the boundary worth stating up front: **no MCP tool runs SQL an AI client wrote against your monitored servers.** The write-capable tools (Darling's view authoring, alert tuning, collector control and server onboarding) change the monitor's own configuration. Five tools reach a monitored server live, each with the product's own fixed queries. They run under the same least-privilege monitoring login the collectors use: the analysis plan fetch, the onboarding connection probe (`add_servers`), the connection test `edit_server` runs before it saves a changed connection, `test_connection` and `run_collectors_now`, which runs that server's collectors once, now. All but the plan fetch are write tools, served only with `mcp.allowWrites` and a token (`add_servers` and `edit_server` also need `mcp.allowServerAdmin`).
 
@@ -82,6 +82,61 @@ Two details save a round of guessing:
 
 - The endpoint is the root path (`http://localhost:5152/`), not `/mcp` and not `/sse`.
 - The transport is stateless Streamable HTTP. Each request is self-contained, so a client that does not echo an `Mcp-Session-Id` still works.
+
+#### GitHub Copilot in VS Code
+
+GitHub Copilot in VS Code can use Lite or Darling as an MCP server. The steps are the same for both editions. Only the URL and the token differ.
+
+1. Open the `mcp.json` file that holds the entry. VS Code reads two places. A workspace file is `.vscode/mcp.json` in the folder you opened. A user file applies to every workspace: run **MCP: Open User Configuration** from the Command Palette to open it. You can also run **MCP: Add Server**, choose **HTTP**, and let VS Code write the entry. Pick the user file for a setup you keep to yourself, because a workspace file is usually committed.
+2. Add the server with the token as a prompted input, so the token is not in the file. For Darling:
+
+```json
+{
+  "inputs": [
+    {
+      "type": "promptString",
+      "id": "darling-token",
+      "description": "Darling MCP token",
+      "password": true
+    }
+  ],
+  "servers": {
+    "darling": {
+      "type": "http",
+      "url": "http://localhost:5152/core",
+      "headers": {
+        "Authorization": "Bearer ${input:darling-token}"
+      }
+    }
+  }
+}
+```
+
+   VS Code asks for the token the first time it starts the server, hides what you type, and keeps it in its own secure storage. The file holds only the name `darling-token`. The top-level key is `servers`, not `mcpServers`. That is the VS Code shape, so an entry copied from a `.mcp.json` written for another client needs the key changed.
+3. Start the server. VS Code starts an MCP server when chat first needs it. To start it sooner, run **MCP: List Servers**, choose `darling` and start it. The same list can stop or restart the server. It can also show the server's output, which is where a `401` or a refused connection shows up.
+4. Check that the tools loaded. Open the tools picker in Copilot Chat. The `darling` server is listed with its tools, such as `list_servers`, `get_wait_stats` and `get_blocking`. Then ask "what servers are being monitored?" and expand the tool call to see that it came from `darling`.
+
+##### Why Darling uses /core
+
+VS Code allows at most 128 tools in one chat request. Over that, the chat fails with "Cannot have more than 128 tools per request." Darling's root URL (`http://localhost:5152/`) serves 190 tools even with the write tools off, which is too many.
+
+The `http://localhost:5152/core` URL serves a subset of 75 tools. They are the diagnostic reads an assistant needs to investigate a server. A tool outside that set fails on `/core` as an unknown tool, the same as a tool that is switched off.
+
+Tools from every other MCP server enabled in the same chat count toward the 128 as well. A chat that also uses other servers has less room. Turn tools off in the picker if you reach the cap.
+
+##### A reader token for Copilot
+
+A named token with the `reader` role fits Copilot well. A `reader` token sees the reads and nothing else: no write tool, no server admin tool and no investigation tool.
+
+Give each Copilot user an entry under `mcp.tokens` in `darling.json`, for example `{ "name": "copilot-dba1", "token": "file:/run/secrets/darling/mcp-copilot-dba1", "role": "reader" }`. That user pastes the token when VS Code prompts. The entry can also set `dataDetail` to `maskLiterals` or `metadataOnly` to narrow what the answers carry. See `tokens` on the [Darling MCP configuration page](darling/configuration-mcp.md#mcp).
+
+##### Lite with Copilot
+
+Lite listens on port `5151` and has no `/core` URL. Point Copilot at its only URL, `http://localhost:5151/`. Use the same entry with that URL and a `lite-token` input. Paste the token from Lite's Settings, Access, **Copy Token**.
+
+Lite does not need `/core`. Its code defines 113 tools in all. The default list leaves out the twelve write tools and the four investigation tools, so it is well under 128. Even all 113 are under the cap. The cap still counts every other MCP server in the same chat.
+
+These steps come from VS Code's own MCP documentation and from the two servers' code. This page does not show a Copilot answer, so run the check in step 4 against your own server.
 
 #### Ask a question
 
