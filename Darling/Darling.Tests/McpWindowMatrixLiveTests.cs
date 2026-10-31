@@ -36,6 +36,30 @@ public sealed class McpWindowMatrixStore : IAsyncLifetime
     public const int ServerId = -698401;
     public const string ServerName = McpReadToolBudgetLiveTests.ServerName;
 
+    /// <summary>#7015: the PostgreSQL target the <c>get_pg_*</c> reads in <see cref="PgSeededTables"/> answer for, so each reaches the
+    /// window-floor logic instead of the no-collection path an empty table takes.</summary>
+    public const int PgServerId = -698402;
+    public const string PgServerName = "mcp-window-matrix-pg";
+
+    /// <summary>The collector tables the PostgreSQL target is seeded for, by the read that windows on each (#7015). Every other
+    /// <c>get_pg_*</c> read keeps answering for the SQL Server target, as before.</summary>
+    public static readonly IReadOnlyDictionary<string, string> PgSeededTables = new Dictionary<string, string>(StringComparer.Ordinal)
+    {
+        ["get_pg_cpu_utilization"] = "pg_cpu_utilization",
+        ["get_pg_deadlocks"] = "pg_deadlocks",
+        ["get_pg_index_usage"] = "pg_index_usage_stats",
+        ["get_pg_io_stats"] = "pg_io_stats",
+        ["get_pg_kernel_stats"] = "pg_kernel_stats",
+        ["get_pg_lock_stats"] = "pg_lock_stats",
+        ["get_pg_log_events"] = "pg_log_events",
+        ["get_pg_plans"] = "pg_plan_capture",
+        ["get_pg_predicate_stats"] = "pg_predicate_stats",
+        ["get_pg_replication_stats"] = "pg_replication_stats",
+        ["get_pg_server_config_changes"] = "pg_server_config",
+        ["get_pg_wait_sampling"] = "pg_wait_sampling",
+        ["get_pg_write_stats"] = "pg_write_stats",
+    };
+
     /// <summary>Where the store's raw rows start (the Query Store baseline interval), and where the collection log starts, earlier.</summary>
     public static readonly TimeSpan RawFloorBack = TimeSpan.FromDays(3);
     public static readonly TimeSpan LogFloorBack = TimeSpan.FromHours(84);
@@ -102,9 +126,66 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
                         -698400 - (++logId), ServerId, ServerName, collector, DarlingMcpTestData.Naive(now - back), 100, 10);
                 }
             }
+
+            /* #7015: a registered PostgreSQL target with a few rows in each table PgSeededTables names, spread from the log's start
+               (84 h back) to now so the store's data start holds. Only the columns a row cannot do without are filled (collection id, time,
+               server, and any other NOT NULL column with no default, by type): the window-floor probe reads collection_time alone. */
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                "INSERT INTO collect.servers (server_id, server_name, display_name, is_enabled, engine_kind, postgres_major_version, created_date, modified_date) VALUES ($1, $2, $2, TRUE, 'postgres', 16, $3, $3)",
+                PgServerId, PgServerName, DarlingMcpTestData.Naive(now - LogFloorBack));
+            long pgRowId = 0;
+            foreach (var table in PgSeededTables.Values)
+            {
+                foreach (var back in new[] { LogFloorBack, TimeSpan.FromDays(2), TimeSpan.FromDays(1), TimeSpan.FromMinutes(40), TimeSpan.FromMinutes(5) })
+                {
+                    await SeedPgRowAsync(connection, table, -698500 - (++pgRowId), DarlingMcpTestData.Naive(now - back), ct);
+                }
+            }
         }
 
         DataSource = NpgsqlDataSource.Create(_scratch.ConnectionString);
+    }
+
+    private static async Task SeedPgRowAsync(NpgsqlConnection connection, string table, long id, DateTime time, CancellationToken ct)
+    {
+        var columns = new List<(string Name, string Type, bool Required)>();
+        await using (var read = new NpgsqlCommand(
+            "SELECT column_name, data_type, (is_nullable = 'NO' AND column_default IS NULL AND is_generated = 'NEVER' AND is_identity = 'NO') FROM information_schema.columns WHERE table_schema = 'collect' AND table_name = $1", connection))
+        {
+            read.Parameters.AddWithValue(table);
+            await using var reader = await read.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct)) columns.Add((reader.GetString(0), reader.GetString(1), reader.GetBoolean(2)));
+        }
+
+        var names = new List<string>();
+        var values = new List<string>();
+        foreach (var (name, type, required) in columns)
+        {
+            var value = name switch
+            {
+                "collection_id" => "$1",
+                "collection_time" => "$2",
+                "server_id" => "$3",
+                "server_name" => "$4",
+                _ when !required => null,
+                _ => type switch
+                {
+                    "integer" or "bigint" or "smallint" or "numeric" or "double precision" or "real" => "0",
+                    "text" or "character varying" => "'x'",
+                    "boolean" => "FALSE",
+                    "jsonb" or "json" => "'{}'",
+                    var t when t.StartsWith("timestamp", StringComparison.Ordinal) => "$2",
+                    _ => throw new InvalidOperationException($"collect.{table}.{name} is NOT NULL with no default and type {type}: teach SeedPgRowAsync how to fill it."),
+                },
+            };
+            if (value is null) continue;
+            names.Add(name);
+            values.Add(value);
+        }
+
+        await DarlingMcpTestData.ExecAsync(connection, ct,
+            $"INSERT INTO collect.{table} ({string.Join(", ", names)}) VALUES ({string.Join(", ", values)})",
+            id, time, PgServerId, PgServerName);
     }
 
     public async ValueTask DisposeAsync()
@@ -308,6 +389,7 @@ public sealed class McpWindowMatrixLiveTests : IClassFixture<McpWindowMatrixStor
                     if (hasHours) overrides["hours_back"] = hours;
                     if (hasAsOf && asOfCase != AsOfCase.None) overrides["as_of"] = AsOfText(end);
                     foreach (var (argName, argValue) in ToolArguments(name, postgres)) overrides[argName] = argValue;
+                    if (McpWindowMatrixStore.PgSeededTables.ContainsKey(name)) overrides["server_name"] = McpWindowMatrixStore.PgServerName;
 
                     string json;
                     try
