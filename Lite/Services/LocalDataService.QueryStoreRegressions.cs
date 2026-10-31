@@ -592,4 +592,25 @@ LIMIT 1";
         command.Parameters.Add(new DuckDBParameter { Value = cutoffUtc });
         return await command.ExecuteScalarAsync() is not null and not DBNull;
     }
+
+    /// <summary>
+    /// #7005: the oldest row one window-floor relation holds for a server, on the time column its probe windows on
+    /// (<see cref="GetQueryWindowFloorAsync"/> answers null for a window that ends before the data starts, so the first row
+    /// is read here). The generic form of <see cref="GetOldestQueryStoreRowAsync"/>. The view and column come from the closed
+    /// <see cref="QueryWindowRelation"/> set, so nothing a caller typed reaches the SQL. A relation whose time column is the
+    /// server's wall clock answers null: its rows are not comparable to a UTC window end without the clock.
+    /// </summary>
+    public async Task<DateTime?> GetOldestWindowRowAsync(QueryWindowRelation relation, int serverId)
+    {
+        if (QueryWindowRelationTimeIsServerLocal(relation))
+        {
+            return null;
+        }
+
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+        command.CommandText = $"SELECT min({QueryWindowRelationTimeColumn(relation)}) FROM {QueryWindowRelationView(relation)} WHERE server_id = $1";
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        return await command.ExecuteScalarAsync() is DateTime first ? first : null;
+    }
 }

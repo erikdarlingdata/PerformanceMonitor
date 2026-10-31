@@ -751,7 +751,9 @@ public sealed class McpHealthParserTools
         return WitnessStatus(
                 "unavailable",
                 $"No system_health events of ANY type have EVER been captured for {serverName}, so this is NOT an all-clear — there is nothing here to be clear about. This read is served from the collected system_health ring buffer: check that collection is running for this server and that its system_health session is started before concluding nothing happened.",
-                sourceObserved: false, lastCapturedAt: null, lastCapturedOfTypeAt: null, eventsInWindow: 0);
+                sourceObserved: false, lastCapturedAt: null, lastCapturedOfTypeAt: null, eventsInWindow: 0,
+                /* #7005: the never-captured answer also says whether the store holds the window (every other rung above carries it). */
+                hints: (await WindowNoticeAsync(dataService, serverId, hoursBack, windowEnd, emptyAnswer: true)).AsHints());
     }
 
     /// <summary>

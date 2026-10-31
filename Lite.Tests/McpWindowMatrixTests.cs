@@ -81,10 +81,7 @@ public sealed class McpWindowMatrixTests : IClassFixture<SharedDuckDbFixture>, I
     /// The tools the window contract does not hold for yet, one row each with the reason. A fix deletes its row.
     /// </summary>
     /// <summary>The tool carries no window_truncated notice at all (only the Queries tools, #4966/#6829, and a few others do), so the "older than the store" rule cannot hold for it. Rolling the notice out to these tools is its own issue; the Queries tools in this group may also be missing from the seed's probe tables (query_stats and friends are not seeded).</summary>
-    private const string NoNotice = "no window_truncated notice over a window that starts before the store's data (notice not rolled out to this tool, or its probe table is not seeded)";
-
-    /// <summary>The tool answers a window that ENDS before the store's first row as covered (window_truncated false), where the regressions tool says the window may have aged out (#6877).</summary>
-    private const string WhollyBeforeCovered = "window wholly before the store's first row answers window_truncated false (the #6877 aged-out answer is not mirrored here)";
+    private const string NoNotice = "no window_truncated notice over a window that starts before the store's data (#7005: the notice is not rolled out to this tool yet; part 1 moved the Queries, Wait and System Health reads)";
 
     private static readonly Dictionary<string, string> ExemptTools = new(StringComparer.Ordinal)
     {
@@ -98,36 +95,16 @@ public sealed class McpWindowMatrixTests : IClassFixture<SharedDuckDbFixture>, I
         ["get_current_waits_trend"] = NoNotice,
         ["get_deadlock_trend"] = NoNotice,
         ["get_file_io_trend"] = NoNotice,
-        ["get_health_parser_cpu_tasks"] = NoNotice,
-        ["get_health_parser_io_issues"] = NoNotice,
-        ["get_health_parser_memory_broker"] = NoNotice,
-        ["get_health_parser_memory_conditions"] = NoNotice,
-        ["get_health_parser_memory_node_oom"] = NoNotice,
-        ["get_health_parser_scheduler_issues"] = NoNotice,
-        ["get_health_parser_severe_errors"] = NoNotice,
-        ["get_health_parser_significant_waits"] = NoNotice,
-        ["get_health_parser_system_health"] = NoNotice,
         ["get_latch_stats"] = NoNotice,
         ["get_lock_wait_trend"] = NoNotice,
         ["get_memory_grants"] = NoNotice,
         ["get_memory_trend"] = NoNotice,
         ["get_perfmon_trend"] = NoNotice,
         ["get_plan_cache_bloat"] = NoNotice,
-        ["get_procedure_duration_trend"] = WhollyBeforeCovered,
-        ["get_query_duration_trend"] = NoNotice,
-        ["get_query_heatmap"] = NoNotice,
-        ["get_query_store_duration_trend"] = WhollyBeforeCovered,
-        ["get_query_store_top"] = WhollyBeforeCovered,
-        ["get_query_trend"] = NoNotice,
         ["get_resource_semaphore"] = NoNotice,
         ["get_resource_use_by_tag"] = NoNotice,
         ["get_spinlock_stats"] = NoNotice,
         ["get_tempdb_trend"] = NoNotice,
-        ["get_top_procedures_by_cpu"] = NoNotice,
-        ["get_top_queries_by_cpu"] = NoNotice,
-        ["get_wait_stats"] = NoNotice,
-        ["get_wait_trend"] = NoNotice,
-        ["get_wait_types"] = NoNotice,
     };
 
     public enum AsOfCase { None, PartlyInside, WhollyBefore }
@@ -353,6 +330,26 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
                     _nextId--, Naive(now - back), _serverId, ServerName, "TenantDb00", 1000L + q, 9L, "Regular",
                     executions, avgUs, avgUs, 100L, interval * 10 + q, "SELECT " + q, Naive(now - back));
             }
+        }
+
+        /* #7005: the Queries tools' other probe tables, so a tool that says nothing over an empty table is told apart from one that
+           breaks the contract over rows: query_stats and procedure_stats, a row at the raw floor and one 30 minutes back. */
+        foreach (var back in new[] { RawFloorBack, TimeSpan.FromMinutes(30) })
+        {
+            await ExecAsync(@"
+INSERT INTO query_stats
+    (collection_id, collection_time, server_id, server_name, database_name,
+     query_hash, sql_handle, last_execution_time, delta_execution_count,
+     delta_worker_time, delta_elapsed_time, sample_interval_seconds, query_text)
+VALUES ($1, $2, $3, $4, 'TenantDb00', '0xAB', '0xH0xAB', $5, 10, 5000, 5000, 60, 'SELECT 1')",
+                _nextId--, Naive(now - back), _serverId, ServerName, Naive(now - back));
+            await ExecAsync(@"
+INSERT INTO procedure_stats
+    (collection_id, collection_time, server_id, server_name, database_name, schema_name, object_name, object_type,
+     execution_count, total_worker_time, total_elapsed_time, total_logical_reads, total_physical_reads, total_logical_writes,
+     delta_execution_count, delta_worker_time, delta_elapsed_time, sample_interval_seconds)
+VALUES ($1, $2, $3, $4, 'TenantDb00', 'dbo', 'p1', 'PROCEDURE', 10, 5000, 5000, 1, 1, 1, 10, 5000, 5000, 60)",
+                _nextId--, Naive(now - back), _serverId, ServerName);
         }
 
         var collectors = CollectorCatalog.All.Where(d => d.TargetEngine == CollectorTargetEngine.SqlServer).Select(d => d.Name).ToArray();
