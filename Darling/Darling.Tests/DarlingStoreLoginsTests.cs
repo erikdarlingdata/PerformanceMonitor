@@ -54,9 +54,9 @@ public sealed class DarlingStoreLoginsTests
     [Fact]
     public void AConfiguredLogin_Wins_InOrOutOfAContainer()
     {
-        var outside = DarlingStoreLogins.Resolve(DarlingStoreLogins.Surface.Web, Owner, ViewerLogin, inContainer: false, verdict: null);
+        var outside = DarlingStoreLogins.Resolve(DarlingStoreLogins.Surface.Web, Owner, WebLogin, inContainer: false, verdict: null);
         Assert.Equal(DarlingStoreLogins.LoginSource.Configured, outside.Source);
-        Assert.Equal(ViewerLogin, outside.ConnectionString);
+        Assert.Equal(WebLogin, outside.ConnectionString);
         Assert.Null(outside.Warning);
 
         /* Even over a provisioned compose store: the operator's explicit login is the operator's call. */
@@ -215,7 +215,7 @@ public sealed class DarlingStoreLoginsTests
 
     /// <summary>The ruling's warning: the surface, why, and the three things the owner login gives up.</summary>
     [Theory]
-    [InlineData("Web", "The web dashboard", "postgres.webConnectionString", "viewer")]
+    [InlineData("Web", "The web dashboard", "postgres.webConnectionString", "web")]
     [InlineData("Mcp", "The MCP server", "postgres.mcpConnectionString", "mcp")]
     public void TheOwnerFallbackWarning_NamesWhatTheOwnerLoginGivesUp(
         string surface, string what, string setting, string role)
@@ -249,12 +249,37 @@ public sealed class DarlingStoreLoginsTests
         var onCompose = DarlingStoreLogins.Resolve(DarlingStoreLogins.Surface.Web, Owner, ViewerLogin, inContainer: true, Provisioned());
         Assert.NotNull(onCompose.Warning);
         Assert.Contains("names the 'viewer' role, which the service provisions on this compose store and re-keys", onCompose.Warning, StringComparison.Ordinal);
-        Assert.Contains("and the web dashboard connects as the viewer role the service provisions.", onCompose.Warning, StringComparison.Ordinal);
+        Assert.Contains("and the web dashboard connects as the web role the service provisions.", onCompose.Warning, StringComparison.Ordinal);
 
         /* On any other store the same login is exactly what the operator should configure. */
-        Assert.Null(DarlingStoreLogins.Resolve(DarlingStoreLogins.Surface.Web, Owner, ViewerLogin, inContainer: false, Provisioned()).Warning);
+        Assert.Null(DarlingStoreLogins.Resolve(DarlingStoreLogins.Surface.Web, Owner, WebLogin, inContainer: false, Provisioned()).Warning);
         Assert.Null(DarlingStoreLogins.Resolve(
-            DarlingStoreLogins.Surface.Web, Owner, ViewerLogin, inContainer: true, DarlingStoreLogins.ComposeStoreVerdict.NotProvisioned("no")).Warning);
+            DarlingStoreLogins.Surface.Web, Owner, WebLogin, inContainer: true, DarlingStoreLogins.ComposeStoreVerdict.NotProvisioned("no")).Warning);
+    }
+
+    /// <summary>
+    /// The web dashboard's writes belong to the web login, and viewer is the read-only seat login. A webConnectionString that
+    /// names viewer (what the script's example and the docs gave before the web role existed) says so at startup, with what to
+    /// change. The same login on the MCP setting, and the web login on the web setting, say nothing.
+    /// </summary>
+    [Fact]
+    public void AWebConnectionString_ThatNamesViewer_IsWarnedAbout_AndNothingElseIs()
+    {
+        var web = DarlingStoreLogins.Resolve(DarlingStoreLogins.Surface.Web, Owner, ViewerLogin, inContainer: false, verdict: null);
+
+        Assert.Equal(DarlingStoreLogins.LoginSource.Configured, web.Source);
+        Assert.Equal(ViewerLogin, web.ConnectionString);
+        Assert.NotNull(web.Warning);
+        Assert.Contains("postgres.webConnectionString logs in as 'viewer', the read-only login meant for remote and locked-down Viewer seats.", web.Warning, StringComparison.Ordinal);
+        Assert.Contains("Set a password for the web role in tools/provision-roles.sql, run the script again, and point postgres.webConnectionString at the web login.", web.Warning, StringComparison.Ordinal);
+
+        /* The user name is read from the string, so a spelling that differs only in the other keys is still viewer. */
+        Assert.NotNull(DarlingStoreLogins.ConfiguredLoginWarning(
+            DarlingStoreLogins.Surface.Web, "Host=db;Username=viewer;Password=x;Database=darling;Application Name=web", Owner, verdict: null));
+
+        Assert.Null(DarlingStoreLogins.Resolve(DarlingStoreLogins.Surface.Web, Owner, WebLogin, inContainer: false, verdict: null).Warning);
+        Assert.Null(DarlingStoreLogins.Resolve(DarlingStoreLogins.Surface.Mcp, Owner, McpLogin, inContainer: false, verdict: null).Warning);
+        Assert.Null(DarlingStoreLogins.Resolve(DarlingStoreLogins.Surface.Mcp, Owner, ViewerLogin, inContainer: false, verdict: null).Warning);
     }
 
     [Fact]

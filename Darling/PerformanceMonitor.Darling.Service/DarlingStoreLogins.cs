@@ -21,7 +21,7 @@ namespace PerformanceMonitor.Darling.Service;
 /// The store login the web dashboard and the MCP server connect with on a store the service does not manage
 /// (#3914). On a managed store each host derives its least-privilege login from its DPAPI credential file and
 /// never comes here. Everywhere else both used to connect with <c>postgres.connectionString</c>, the collection
-/// login, which is the store OWNER, so none of the <c>viewer</c>/<c>mcp</c> roles' protections applied to a web
+/// login, which is the store OWNER, so none of the <c>web</c>/<c>mcp</c> roles' protections applied to a web
 /// session or an MCP token-holder: not the secret-column carve, not the narrow write grants, not the
 /// <c>statement_timeout</c> backstop. Now, in order:
 /// <list type="number">
@@ -30,7 +30,7 @@ namespace PerformanceMonitor.Darling.Service;
 /// <c>postgres.connectionString</c> (a literal, or an <c>env:</c>/<c>file:</c> reference), resolved here when the
 /// host starts rather than when the config is parsed, so an unreadable reference keeps that one surface down with
 /// the reason logged instead of stopping collection.</description></item>
-/// <item><description>On the Linux compose distribution's own store, the <c>viewer</c>/<c>mcp</c> role the service
+/// <item><description>On the Linux compose distribution's own store, the <c>web</c>/<c>mcp</c> role the service
 /// provisioned there itself (<see cref="DarlingManagedRoles.EnsureComposeStoreProvisionedAsync"/>). The worker
 /// publishes that verdict once the batch has committed, so a host never starts on a login the store does not
 /// accept yet; a host in a container waits for it.</description></item>
@@ -51,7 +51,7 @@ internal static class DarlingStoreLogins
     /// <summary>The two network surfaces with a store login of their own.</summary>
     internal enum Surface
     {
-        /// <summary>The web dashboard: the <c>viewer</c> role's surface.</summary>
+        /// <summary>The web dashboard: the <c>web</c> role's surface (its own login, not the read-only <c>viewer</c> one).</summary>
         Web,
 
         /// <summary>The MCP server: the <c>mcp</c> role's surface.</summary>
@@ -581,6 +581,18 @@ internal static class DarlingStoreLogins
                 + $"and {char.ToLowerInvariant(what[0])}{what[1..]} connects as the {role} role the service provisions.";
         }
 
+        /* The web dashboard's writes belong to the web login. A webConnectionString that names viewer (what the script's example
+           and the docs said before the web role existed) is the read-only seat login: once the script has been run again the
+           web pages' writes are refused for it, and on a store not yet moved it can still write, which a seat login must not. */
+        if (surface == Surface.Web
+            && string.Equals(configuredUser, DarlingManagedPostgres.ViewerRoleName, StringComparison.Ordinal))
+        {
+            return $"{setting} logs in as '{configuredUser}', the read-only login meant for remote and locked-down Viewer seats. "
+                + $"The web dashboard has its own '{role}' login that holds the writes its pages make (mute rules, dismissals, custom alerts, "
+                + $"server changes and the run-now buttons). Set a password for the {role} role in tools/provision-roles.sql, run the script again, "
+                + $"and point {setting} at the {role} login. Until then, once the script has been run again, those writes are refused.";
+        }
+
         return null;
     }
 
@@ -590,7 +602,7 @@ internal static class DarlingStoreLogins
         surface == Surface.Web ? DarlingManagedPostgres.WebRoleName : DarlingManagedPostgres.McpRoleName;
 
     private static (string What, string Setting, string Role) Describe(Surface surface) => surface == Surface.Web
-        ? ("The web dashboard", "postgres.webConnectionString", DarlingManagedPostgres.ViewerRoleName)
+        ? ("The web dashboard", "postgres.webConnectionString", DarlingManagedPostgres.WebRoleName)
         : ("The MCP server", "postgres.mcpConnectionString", DarlingManagedPostgres.McpRoleName);
 
     /// <summary>The warning is stated once per distinct text per surface, not on every supervisor restart.</summary>

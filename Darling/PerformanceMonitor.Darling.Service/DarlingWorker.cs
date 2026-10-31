@@ -798,6 +798,8 @@ public sealed class DarlingWorker : BackgroundService
     /// <item>Managed mode with an EXPOSED store whose <c>network.role</c> admits <c>admin</c> — names the
     /// <c>config_command</c> / <c>config_monitored_servers</c> / <c>config_notification</c>
     /// service-credential pivot a remote admin connection can reach (D7 — the operator's informed opt-in).</item>
+    /// <item>Managed mode with an EXPOSED store whose <c>network.role</c> admits <c>viewer</c> (the default) — says what a
+    /// read-only seat can read.</item>
     /// </list>
     /// Pure so a unit test asserts the returned strings without driving the loop or a live logger.
     /// </summary>
@@ -839,6 +841,18 @@ public sealed class DarlingWorker : BackgroundService
                warning that matters here. */
             warnings.Add(
                 "postgres.network.role admits 'admin' — a REMOTE admin connection can write config_command (the test_connect service-credential pivot), config_monitored_servers, and config_notification (webhook exfil). This is an explicit opt-in; the secure default is 'viewer' (read-only). Only expose admin on a trusted network.");
+        }
+
+        /* A seat on the viewer login reads everything the store holds for the dashboards, query text and plans included. The
+           login writes nothing, so this is a statement of what the opt-in reaches, not a pivot. Said whenever the store is
+           exposed and the role list includes viewer, which is the default list too. */
+        if (network is not null
+            && DarlingNetwork.IsExposedListenAddress(network.Listen)
+            && DarlingNetwork.NormalizeNetworkRoles(network.Role) is { } roles
+            && roles.Contains("viewer", StringComparer.Ordinal))
+        {
+            warnings.Add(
+                "postgres.network.role admits 'viewer' — a remote Viewer seat on that login can read the monitoring data the store holds, query text and plans included, and cannot write. Set postgres.network.allowFrom to the machines that need it, and give the viewer password only to people who may read that data. The web dashboard does not use this login: it has its own 'web' login, which is never reachable from the network.");
         }
 
         return warnings;

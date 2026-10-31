@@ -33,11 +33,11 @@ public sealed class DarlingManagedRolesTests
     /// <summary>The EXECUTE grant of the edit function (#5240), as the managed batch and <c>Darling/tools/provision-roles.sql</c>
     /// both carry it. The edit's one write goes through that function; viewer holds no UPDATE on the table.</summary>
     private static readonly string EditGrant =
-        "GRANT EXECUTE ON FUNCTION config.edit_monitored_server(" + DarlingManagedRoles.EditMonitoredServerSignature + ") TO viewer, mcp;";
+        "GRANT EXECUTE ON FUNCTION config.edit_monitored_server(" + DarlingManagedRoles.EditMonitoredServerSignature + ") TO web, mcp;";
 
     /// <summary>The REVOKE (#5240): revoking the table privilege also revokes every column privilege, so each run leaves viewer
     /// with no UPDATE on the table and strips one granted by an earlier build or by hand.</summary>
-    private const string EditRevoke = "REVOKE UPDATE ON config.config_monitored_servers FROM viewer;";
+    private const string EditRevoke = "REVOKE UPDATE ON config.config_monitored_servers FROM viewer, web;";
 
     /// <summary>
     /// The census of viewer grants on <c>config.config_monitored_servers</c> (#4843, #5240): every uncommented GRANT that names
@@ -99,10 +99,65 @@ public sealed class DarlingManagedRolesTests
 
         Assert.Contains(NormalizeSql(DarlingManagedRoles.BuildEditMonitoredServerFunctionSql("config")), NormalizeSql(byo), StringComparison.Ordinal);
         Assert.Contains(EditGrant, byo, StringComparison.Ordinal);
-        Assert.Contains("GRANT INSERT ON config.config_monitored_servers TO viewer;", byo, StringComparison.Ordinal);
+        Assert.Contains("GRANT INSERT ON config.config_monitored_servers TO web;", byo, StringComparison.Ordinal);
         Assert.DoesNotMatch(@"GRANT[^;]*\bUPDATE\b[^;]*ON config\.config_monitored_servers TO [^;]*viewer", byo);
         Assert.Single(Regex.Matches(byo, @"REVOKE UPDATE ON config\.config_monitored_servers FROM [^;]*viewer[^;]*;"));
         Assert.Contains(EditRevoke, byo, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A bring-your-own store gets the web login from the script, so the script must give <c>web</c> every write and EXECUTE the
+    /// managed batch gives it, give <c>viewer</c> none, and take from <c>viewer</c> each write an earlier version of the script
+    /// granted it. The batch revokes in one statement per kind; the script revokes per table, so one table a store has not
+    /// migrated to yet cannot skip the others. The record_custom_alert_resolution function is the one the script does not create.
+    /// </summary>
+    [Fact]
+    public void TheByoScript_GivesTheWebRoleTheBatchsWrites_AndViewerNone()
+    {
+        var byo = NormalizeSql(RepoFile.ReadRepoFile("Darling", "tools", "provision-roles.sql"));
+        var batch = NormalizeSql(DarlingManagedRoles.BuildProvisioningSql(ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp));
+        const string writePrivilege = @"GRANT (?:INSERT|UPDATE|DELETE|EXECUTE)";
+
+        var webWrites = Regex.Matches(batch, writePrivilege + @"[^;]*? TO [^;]*\bweb\b[^;]*;")
+            .Select(match => match.Value)
+            .Where(grant => !grant.Contains("record_custom_alert_resolution", StringComparison.Ordinal))
+            .Distinct()
+            .ToList();
+        Assert.True(webWrites.Count >= 20, $"expected the batch to give web its writes, found {webWrites.Count} statements");
+        foreach (var grant in webWrites)
+        {
+            Assert.Contains(grant, byo, StringComparison.Ordinal);
+        }
+
+        Assert.DoesNotMatch(writePrivilege + @"[^;]*? TO [^;]*\bviewer\b", batch);
+        Assert.DoesNotMatch(writePrivilege + @"[^;]*? TO [^;]*\bviewer\b", byo);
+
+        var revokedTables = Regex.Matches(batch, @"REVOKE (?:INSERT, UPDATE, DELETE|UPDATE) ON ((?:config\.\w+(?:, )?)+) FROM viewer;")
+            .SelectMany(match => match.Groups[1].Value.Split(", "))
+            .Distinct()
+            .ToList();
+        Assert.Contains("config.config_mute_rules", revokedTables);
+        Assert.Contains("config.config_alert_log", revokedTables);
+        foreach (var table in revokedTables)
+        {
+            Assert.Matches(@"REVOKE [A-Z, ]+ ON " + Regex.Escape(table) + " FROM viewer;", byo);
+        }
+
+        var revokedFunctions = Regex.Matches(batch, @"REVOKE EXECUTE ON FUNCTION [^;]*? FROM viewer;")
+            .Select(match => match.Value)
+            .Where(revoke => !revoke.Contains("record_custom_alert_resolution", StringComparison.Ordinal))
+            .ToList();
+        Assert.True(revokedFunctions.Count >= 8, $"expected the batch to revoke the moved functions from viewer, found {revokedFunctions.Count}");
+        foreach (var revoke in revokedFunctions)
+        {
+            Assert.Contains(revoke, byo, StringComparison.Ordinal);
+        }
+
+        /* The role itself, its password placeholder and its reads. */
+        Assert.Contains("CREATE ROLE web LOGIN NOSUPERUSER;", byo, StringComparison.Ordinal);
+        Assert.Contains("ALTER ROLE web LOGIN PASSWORD 'CHANGE_ME_WEB_PASSWORD';", byo, StringComparison.Ordinal);
+        Assert.Contains("GRANT SELECT ON ALL TABLES IN SCHEMA config TO admin, viewer, web;", byo, StringComparison.Ordinal);
+        Assert.Contains("GRANT CONNECT ON DATABASE darling TO admin, viewer, web;", byo, StringComparison.Ordinal);
     }
 
     /// <summary>
