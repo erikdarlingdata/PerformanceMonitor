@@ -78,17 +78,10 @@ public sealed class McpWindowMatrixTests : IClassFixture<SharedDuckDbFixture>, I
     }
 
     /// <summary>
-    /// The tools the window contract does not hold for yet, one row each with the reason. A fix deletes its row.
+    /// The tools the window contract does not hold for yet, one row each with the reason. A fix deletes its row. Empty since #7005 part 3: all 60 windowed tools answer the contract.
     /// </summary>
-    /// <summary>The tool carries no window_truncated notice at all (only the Queries tools, #4966/#6829, and a few others do), so the "older than the store" rule cannot hold for it. Rolling the notice out to these tools is its own issue; the Queries tools in this group may also be missing from the seed's probe tables (query_stats and friends are not seeded).</summary>
-    private const string NoNotice = "no window_truncated notice over a window that starts before the store's data (#7005: the notice is not rolled out to this tool yet; parts 1 and 2 moved the Queries, Wait, System Health, Blocking, Latch, CPU, Memory, File I/O, TempDB, Perfmon and Plan Cache reads)";
-
     private static readonly Dictionary<string, string> ExemptTools = new(StringComparer.Ordinal)
     {
-        ["get_alert_history"] = NoNotice,
-        ["get_analysis_facts"] = NoNotice,
-        ["get_analysis_findings"] = NoNotice,
-        ["get_resource_use_by_tag"] = NoNotice,
     };
 
     public enum AsOfCase { None, PartlyInside, WhollyBefore }
@@ -226,6 +219,46 @@ public sealed class McpWindowMatrixTests : IClassFixture<SharedDuckDbFixture>, I
         return null;
     }
 
+    /* ═══════════════════════════ #7005 part 3: the floor rules ═══════════════════════════ */
+
+    private static JsonElement? Hint(JsonElement root, string key) => Find(root, key);
+
+    /// <summary>The notice answers "does the store hold data this far back", never "did anything happen": an alert log with no alert over a
+    /// window the collectors cover is an empty answer that says covered; a window that starts before the data says truncated.</summary>
+    [Theory]
+    [InlineData(24, false)]
+    [InlineData(168, true)]
+    public async Task GetAlertHistory_EmptyAlertLog_IsTruncatedOnlyWhenTheStoreLacksTheWindow(int hours, bool truncated)
+    {
+        await SeedAsync();
+        var json = await McpAlertTools.GetAlertHistory(_dataService, hours_back: hours);
+        using var doc = JsonDocument.Parse(json);
+        Assert.Equal("empty", doc.RootElement.GetProperty("status").GetString());
+        Assert.Equal(truncated, Hint(doc.RootElement, "window_truncated")?.GetBoolean());
+    }
+
+    /// <summary>The floor of the analysis reads is the oldest analysis run the store holds for the server; a store with no run at all answers
+    /// as it did before, with no notice.</summary>
+    [Fact]
+    public async Task GetAnalysisFindings_StoreWithNoRun_CarriesNoNotice()
+    {
+        var json = await McpAnalysisTools.GetAnalysisFindings(new AnalysisService(_duckDb) { MinimumDataHours = 0 }, _serverManager, ServerName, hours_back: 168);
+        using var doc = JsonDocument.Parse(json);
+        Assert.Equal("empty", doc.RootElement.GetProperty("status").GetString());
+        Assert.Null(Hint(doc.RootElement, "window_truncated"));
+    }
+
+    [Theory]
+    [InlineData(24, false)]
+    [InlineData(168, true)]
+    public async Task GetAnalysisFindings_WindowOlderThanTheOldestRun_SaysTruncated(int hours, bool truncated)
+    {
+        await SeedAsync();
+        var json = await McpAnalysisTools.GetAnalysisFindings(new AnalysisService(_duckDb) { MinimumDataHours = 0 }, _serverManager, ServerName, hours_back: hours);
+        using var doc = JsonDocument.Parse(json);
+        Assert.Equal(truncated, Hint(doc.RootElement, "window_truncated")?.GetBoolean());
+    }
+
     /* ═══════════════════════════ get_query_store_regressions: 3 x 3 ═══════════════════════════ */
 
     /// <summary>What the seed says each window of the regressions read is: a regression listed, a recent side with no
@@ -351,6 +384,17 @@ VALUES ($1, $2, $3, $4, 'TenantDb00', 'dbo', 'p1', 'PROCEDURE', 10, 5000, 5000, 
             await ExecAsync("INSERT INTO plan_cache_stats (collection_id, collection_time, server_id, server_name, cacheobjtype, objtype) VALUES ($1, $2, $3, $4, 'Compiled Plan', 'Adhoc')", _nextId--, at, _serverId, ServerName);
             await ExecAsync("INSERT INTO latch_stats (collection_id, collection_time, server_id, server_name, latch_class) VALUES ($1, $2, $3, $4, 'BUFFER')", _nextId--, at, _serverId, ServerName);
             await ExecAsync("INSERT INTO spinlock_stats (collection_id, collection_time, server_id, server_name, spinlock_name) VALUES ($1, $2, $3, $4, 'LOCK_HASH')", _nextId--, at, _serverId, ServerName);
+        }
+
+        /* #7005 part 3: the analysis runs get_analysis_findings and get_analysis_facts take their floor from, a run at the raw floor and one 30 minutes back. */
+        foreach (var (back, id) in new[] { (RawFloorBack, 1L), (TimeSpan.FromMinutes(30), 2L) })
+        {
+            await ExecAsync(@"
+INSERT INTO analysis_findings
+    (finding_id, analysis_time, server_id, server_name, severity, confidence, category,
+     story_path, story_path_hash, story_text, root_fact_key, fact_count, incident_id)
+VALUES ($1, $2, $3, $4, 0.5, 0.5, 'waits', 'CXPACKET', 'hash-' || $1::VARCHAR, 'CXPACKET leads', 'CXPACKET', 1, 'inc-1')",
+                id, Naive(now - back), _serverId, ServerName);
         }
 
         var collectors = CollectorCatalog.All.Where(d => d.TargetEngine == CollectorTargetEngine.SqlServer).Select(d => d.Name).ToArray();

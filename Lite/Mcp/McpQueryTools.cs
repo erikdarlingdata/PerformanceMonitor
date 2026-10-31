@@ -1572,8 +1572,17 @@ public sealed class McpQueryTools
     /// the one every windowed tool shares, so a window that starts before the store's data says so. An answer that already
     /// carries <c>window_truncated</c>, or a status of any word, is returned as it was.
     /// </summary>
+    internal static Task<string> WithDataWindowNoticeAsync(
+        string answer, LocalDataService dataService, QueryWindowRelation relation, int serverId, DateTime requestedStart, DateTime windowEnd, string table) =>
+        WithDataWindowNoticeAsync(answer, () => dataService.GetQueryWindowFloorAsync(relation, serverId, requestedStart, windowEnd), requestedStart, windowEnd, table);
+
+    /// <summary>
+    /// #7005: the relation form of this method, over a
+    /// floor the caller works out itself: a read that spans servers or tables (<c>get_alert_history</c>, <c>get_resource_use_by_tag</c>) or
+    /// reads a store that is not a collector table (the analysis findings). The probe is not started for a window no longer than the slack.
+    /// </summary>
     internal static async Task<string> WithDataWindowNoticeAsync(
-        string answer, LocalDataService dataService, QueryWindowRelation relation, int serverId, DateTime requestedStart, DateTime windowEnd, string table)
+        string answer, Func<Task<DateTime?>> floorProbe, DateTime requestedStart, DateTime windowEnd, string table)
     {
         if (System.Text.Json.Nodes.JsonNode.Parse(answer) is not System.Text.Json.Nodes.JsonObject node
             || node.ContainsKey("status") || node.ContainsKey("window_truncated"))
@@ -1581,8 +1590,7 @@ public sealed class McpQueryTools
             return answer;
         }
 
-        var notice = await WindowNoticeAsync(
-            () => dataService.GetQueryWindowFloorAsync(relation, serverId, requestedStart, windowEnd), requestedStart, windowEnd, table);
+        var notice = await WindowNoticeAsync(floorProbe, requestedStart, windowEnd, table);
         var rebuilt = new System.Text.Json.Nodes.JsonObject();
         var written = false;
         foreach (var (key, value) in node.ToList())
@@ -1608,6 +1616,19 @@ public sealed class McpQueryTools
     {
         node["effective_start"] = notice.EffectiveStart;
         node["window_truncated"] = notice.WindowTruncated;
+        /* A payload that already has its own truncation_note (get_analysis_findings: the read-cap cut) keeps it: the window sentence is
+           appended when the window is truncated, and a covered window leaves the tool's own value (null when nothing was cut) as it was. */
+        if (node.ContainsKey("truncation_note"))
+        {
+            if (notice.TruncationNote is not null)
+            {
+                var own = node["truncation_note"]?.GetValue<string>();
+                node["truncation_note"] = own is null ? notice.TruncationNote : own + " " + notice.TruncationNote;
+            }
+
+            return;
+        }
+
         node["truncation_note"] = notice.TruncationNote;
     }
 
@@ -1627,6 +1648,29 @@ public sealed class McpQueryTools
         McpHelpers.IsEmptyOrUnavailableStatus(answer)
             ? WithWindowNotice(answer, await EmptyWindowNoticeAsync(dataService, relation, serverId, requestedStart, windowEnd, table), requestedStart, windowEnd)
             : answer;
+
+    /// <summary>
+    /// #7005: the one call for a windowed read whose floor is not one collector table's (<c>get_alert_history</c> over the whole store,
+    /// the analysis findings, <c>get_resource_use_by_tag</c> over several tables): an empty or unavailable answer gets the #5015 notice
+    /// over <paramref name="floorProbe"/> (null: the store holds nothing in the window), or, when the window ENDS before the oldest
+    /// row the store kept (<paramref name="oldestKeptProbe"/>, within the slack), the aged-out answer: <c>window_truncated</c> true and
+    /// <c>effective_start</c> that oldest row. A data answer gets the three keys from the same probe.
+    /// Any other status is left as it was. When the store holds no row at all, an empty answer says the #5015 no-collection answer.
+    /// </summary>
+    internal static async Task<string> WithProbedWindowNoticeAsync(
+        string answer, Func<Task<DateTime?>> floorProbe, Func<Task<DateTime?>> oldestKeptProbe, DateTime requestedStart, DateTime windowEnd, string table)
+    {
+        if (!McpHelpers.IsEmptyOrUnavailableStatus(answer))
+        {
+            return await WithDataWindowNoticeAsync(answer, floorProbe, requestedStart, windowEnd, table);
+        }
+
+        var floor = await floorProbe();
+        var notice = floor is null && await oldestKeptProbe() is DateTime kept && kept + TruncationSlack >= windowEnd
+            ? WindowNotice(kept, requestedStart, table, "This window ends before the first row this server's store kept, so the data may have aged out.")
+            : WindowNotice(floor, requestedStart, table, emptyAnswer: true);
+        return WithWindowNotice(answer, notice, requestedStart, windowEnd);
+    }
 
     /// <summary>
     /// The three window-floor keys <see cref="WindowNotice"/> answers, as the values a tool writes into its payload.

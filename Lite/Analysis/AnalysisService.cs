@@ -746,6 +746,10 @@ public class AnalysisService
         return await _findingStore.GetLatestFindingsAsync(serverId);
     }
 
+    /// <summary>#7005: the window floor of the stored analysis runs for one server, and its oldest run (<see cref="FindingStore.GetRunWindowFloorAsync"/>).</summary>
+    public Task<(DateTime? Floor, DateTime? OldestRun)> GetRunWindowFloorAsync(int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default) =>
+        _findingStore.GetRunWindowFloorAsync(serverId, startUtc, endUtc, cancellationToken);
+
     /// <summary>
     /// Gets recent findings for a server within the given time range. The MCP findings read
     /// passes <see cref="FindingOccurrences.WindowCoveringLimit"/> so its occurrence stats cover

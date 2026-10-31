@@ -738,7 +738,8 @@ VALUES ($1, $2, $3, $4, $5, $6)";
            inside the window drops the queued page. A READ, under the read lock like the mute filter it
            mirrors, taking the flush's own token (there is no analysis pass at flush time). The count is pinned
            so a new lock site is a decision someone makes here, not a tidy-up. */
-        Assert.Equal(9, CountOf(source, "_duckDb.AcquireReadLock("));
+        /* Ten since #7005 part 3: GetRunWindowFloorAsync, the window notice's oldest-run read (a READ, under the read lock, taking the caller's token). */
+        Assert.Equal(10, CountOf(source, "_duckDb.AcquireReadLock("));
 
         /* The explanation, at the class and at each write site — whichever one a reader lands on. */
         Assert.Contains("The read lock around the WRITES is deliberate (#2455)", source, StringComparison.Ordinal);

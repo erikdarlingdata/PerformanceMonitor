@@ -132,6 +132,44 @@ public partial class LocalDataService
     };
 
     /// <summary>
+    /// #7005: <see cref="GetQueryWindowFloorAsync"/> over every server that holds a row of <paramref name="relation"/> in the window, for a read
+    /// that spans servers (<c>get_alert_history</c> has no server argument): the EARLIEST floor any of those servers answers, because the store
+    /// holds data as far back as its oldest-reaching server. Null when no server holds a row in the window. UTC relations only.
+    /// </summary>
+    public async Task<DateTime?> GetFleetWindowFloorAsync(QueryWindowRelation relation, DateTime startUtc, DateTime endUtc)
+    {
+        var timeColumn = QueryWindowRelationTimeColumn(relation);
+        var ids = new System.Collections.Generic.List<int>();
+        using (var connection = await OpenConnectionAsync())
+        using (var command = connection.CreateCommand())
+        {
+            /* A server with a logged run of the relation's collector in the window counts as well as one with a row (a quiet collector stores none); the collector name is from the closed map. */
+            var runs = QueryWindowRelationCollector(relation) is { } collector
+                ? $" UNION SELECT server_id FROM v_collection_log WHERE collector_name = '{collector}' AND collection_time >= $1 AND collection_time <= $2"
+                : "";
+            command.CommandText = $"SELECT server_id FROM (SELECT server_id FROM {QueryWindowRelationView(relation)} WHERE {timeColumn} >= $1 AND {timeColumn} <= $2{runs}) AS u GROUP BY server_id ORDER BY server_id";
+            command.Parameters.Add(new DuckDBParameter { Value = startUtc });
+            command.Parameters.Add(new DuckDBParameter { Value = endUtc });
+            using var reader = await command.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                ids.Add((int)ToInt64(reader.GetValue(0)));
+            }
+        }
+
+        return await EarliestCoverageAsync(ids, id => GetQueryWindowFloorAsync(relation, id, startUtc, endUtc, includeAlsoCovered: false), startUtc);
+    }
+
+    /// <summary>#7005: the oldest row of <paramref name="relation"/> any server holds (the aged-out answer of a read that spans servers). Null when the relation is empty. UTC relations only.</summary>
+    public async Task<DateTime?> GetOldestFleetWindowRowAsync(QueryWindowRelation relation)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+        command.CommandText = $"SELECT min({QueryWindowRelationTimeColumn(relation)}) FROM {QueryWindowRelationView(relation)}";
+        return await command.ExecuteScalarAsync() is DateTime first ? first : null;
+    }
+
+    /// <summary>
     /// The collector whose runs <c>collection_log</c> records for a relation the probe reads by coverage
     /// (<see cref="QueryWindowRelation.QuerySnapshots"/>, <see cref="QueryWindowRelation.WaitingTasks"/>,
     /// <see cref="QueryWindowRelation.PlanCorrection"/>, <see cref="QueryWindowRelation.MemoryPressureEvents"/>,
