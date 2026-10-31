@@ -40,15 +40,18 @@ public sealed class McpPlanCacheSchedulerTools
             /* The summary's stamp is null exactly when the window held no snapshot, which is the same state
                the (0 plans, no groups) test below names — one branch, so a stamped payload always has rows. */
             if (summary.CollectionTime is not DateTime capturedAt || (summary.TotalPlans == 0 && cacheTypes.Count == 0))
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "plan_cache_stats", awsRdsKind: AwsRdsKind.None)
-                    ?? McpHelpers.Status("unavailable", "No plan cache statistics available in the requested time range.");
+                /* #7005: the window notice, so an empty answer says whether the store holds the window. */
+                return await McpQueryTools.WithEmptyWindowNoticeAsync(
+                    await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "plan_cache_stats", awsRdsKind: AwsRdsKind.None)
+                        ?? McpHelpers.Status("unavailable", "No plan cache statistics available in the requested time range."),
+                    dataService, QueryWindowRelation.PlanCacheStats, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, "plan_cache_stats");
 
             var bloat = LocalDataService.ClassifyPlanCacheBloat(summary.TotalPlans, summary.SingleUsePlans);
             var singleUsePercent = summary.TotalPlans > 0
                 ? Math.Round(100.0 * summary.SingleUsePlans / summary.TotalPlans, 1)
                 : 0;
 
-            return JsonSerializer.Serialize(new
+            return await McpQueryTools.WithDataWindowNoticeAsync(JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
                 captured_at = capturedAt.ToString("o"),
@@ -75,7 +78,8 @@ public sealed class McpPlanCacheSchedulerTools
                     avg_use_count = Math.Round(r.AvgUseCount, 2),
                     avg_size_kb = r.AvgSizeKb
                 })
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions),
+                dataService, QueryWindowRelation.PlanCacheStats, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, "plan_cache_stats");
         }
         catch (Exception ex)
         {
@@ -111,8 +115,11 @@ public sealed class McpPlanCacheSchedulerTools
 
             var item = await dataService.GetCpuSchedulerSnapshotAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             if (item == null)
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "cpu_scheduler_stats", awsRdsKind: AwsRdsKind.None)
-                    ?? McpHelpers.Status("unavailable", "No CPU scheduler snapshot in the requested time range. The scheduler collector may not have run yet, or its newest snapshot is older than hours_back.");
+                /* #7005: the window notice, so an empty answer says whether the store holds the window. */
+                return await McpQueryTools.WithEmptyWindowNoticeAsync(
+                    await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "cpu_scheduler_stats", awsRdsKind: AwsRdsKind.None)
+                    ?? McpHelpers.Status("unavailable", "No CPU scheduler snapshot in the requested time range. The scheduler collector may not have run yet, or its newest snapshot is older than hours_back."),
+                    dataService, QueryWindowRelation.CpuScheduler, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, "cpu_scheduler_stats");
 
             var workerUtilizationPercent = item.MaxWorkersCount > 0
                 ? Math.Round(item.TotalCurrentWorkersCount * 100.0 / item.MaxWorkersCount, 2)
@@ -123,7 +130,7 @@ public sealed class McpPlanCacheSchedulerTools
                same tool name answered with a verdict on one SKU and without one on the other. */
             var pressure = CpuSchedulerMetrics.ClassifyCpuPressure(item);
 
-            return JsonSerializer.Serialize(new
+            return await McpQueryTools.WithDataWindowNoticeAsync(JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
                 captured_at = item.CollectionTime.ToString("o"),
@@ -151,7 +158,8 @@ public sealed class McpPlanCacheSchedulerTools
                     physical_memory_pressure = item.PhysicalMemoryPressureWarning,
                     offline_cpu = item.OfflineCpuWarning
                 }
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions),
+                dataService, QueryWindowRelation.CpuScheduler, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, "cpu_scheduler_stats");
         }
         catch (Exception ex)
         {

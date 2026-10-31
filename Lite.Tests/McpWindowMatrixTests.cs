@@ -78,56 +78,10 @@ public sealed class McpWindowMatrixTests : IClassFixture<SharedDuckDbFixture>, I
     }
 
     /// <summary>
-    /// The tools the window contract does not hold for yet, one row each with the reason. A fix deletes its row.
+    /// The tools the window contract does not hold for yet, one row each with the reason. A fix deletes its row. Empty since #7005 part 3: all 60 windowed tools answer the contract.
     /// </summary>
-    /// <summary>The tool carries no window_truncated notice at all (only the Queries tools, #4966/#6829, and a few others do), so the "older than the store" rule cannot hold for it. Rolling the notice out to these tools is its own issue; the Queries tools in this group may also be missing from the seed's probe tables (query_stats and friends are not seeded).</summary>
-    private const string NoNotice = "no window_truncated notice over a window that starts before the store's data (notice not rolled out to this tool, or its probe table is not seeded)";
-
-    /// <summary>The tool answers a window that ENDS before the store's first row as covered (window_truncated false), where the regressions tool says the window may have aged out (#6877).</summary>
-    private const string WhollyBeforeCovered = "window wholly before the store's first row answers window_truncated false (the #6877 aged-out answer is not mirrored here)";
-
     private static readonly Dictionary<string, string> ExemptTools = new(StringComparer.Ordinal)
     {
-        ["get_alert_history"] = NoNotice,
-        ["get_analysis_facts"] = NoNotice,
-        ["get_analysis_findings"] = NoNotice,
-        ["get_blocking_trend"] = NoNotice,
-        ["get_client_timeouts"] = NoNotice,
-        ["get_cpu_scheduler_pressure"] = NoNotice,
-        ["get_cpu_utilization"] = NoNotice,
-        ["get_current_waits_trend"] = NoNotice,
-        ["get_deadlock_trend"] = NoNotice,
-        ["get_file_io_trend"] = NoNotice,
-        ["get_health_parser_cpu_tasks"] = NoNotice,
-        ["get_health_parser_io_issues"] = NoNotice,
-        ["get_health_parser_memory_broker"] = NoNotice,
-        ["get_health_parser_memory_conditions"] = NoNotice,
-        ["get_health_parser_memory_node_oom"] = NoNotice,
-        ["get_health_parser_scheduler_issues"] = NoNotice,
-        ["get_health_parser_severe_errors"] = NoNotice,
-        ["get_health_parser_significant_waits"] = NoNotice,
-        ["get_health_parser_system_health"] = NoNotice,
-        ["get_latch_stats"] = NoNotice,
-        ["get_lock_wait_trend"] = NoNotice,
-        ["get_memory_grants"] = NoNotice,
-        ["get_memory_trend"] = NoNotice,
-        ["get_perfmon_trend"] = NoNotice,
-        ["get_plan_cache_bloat"] = NoNotice,
-        ["get_procedure_duration_trend"] = WhollyBeforeCovered,
-        ["get_query_duration_trend"] = NoNotice,
-        ["get_query_heatmap"] = NoNotice,
-        ["get_query_store_duration_trend"] = WhollyBeforeCovered,
-        ["get_query_store_top"] = WhollyBeforeCovered,
-        ["get_query_trend"] = NoNotice,
-        ["get_resource_semaphore"] = NoNotice,
-        ["get_resource_use_by_tag"] = NoNotice,
-        ["get_spinlock_stats"] = NoNotice,
-        ["get_tempdb_trend"] = NoNotice,
-        ["get_top_procedures_by_cpu"] = NoNotice,
-        ["get_top_queries_by_cpu"] = NoNotice,
-        ["get_wait_stats"] = NoNotice,
-        ["get_wait_trend"] = NoNotice,
-        ["get_wait_types"] = NoNotice,
     };
 
     public enum AsOfCase { None, PartlyInside, WhollyBefore }
@@ -172,6 +126,9 @@ public sealed class McpWindowMatrixTests : IClassFixture<SharedDuckDbFixture>, I
                     var end = DateTime.UtcNow - EndBack(asOfCase);
                     var overrides = new Dictionary<string, object?>();
                     if (method.GetParameters().Any(p => p.Name == "counter_name")) overrides["counter_name"] = "Batch Requests/sec";
+                    /* #7005 part 4: get_wait_trend's wait_type is a required string, so BindArgs passes null, which no MCP client can send; with a wait_stats row in the store its miss path then
+                       throws on waitType.Trim(). The seeded wait type is what a caller would ask for. */
+                    if (method.GetParameters().Any(p => p.Name == "wait_type")) overrides["wait_type"] = "CXPACKET";
                     if (hasHours) overrides["hours_back"] = hours;
                     if (hasAsOf && asOfCase != AsOfCase.None) overrides["as_of"] = end.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture);
 
@@ -265,6 +222,101 @@ public sealed class McpWindowMatrixTests : IClassFixture<SharedDuckDbFixture>, I
         return null;
     }
 
+    /* ═══════════════════════════ #7005 part 3: the floor rules ═══════════════════════════ */
+
+    private static JsonElement? Hint(JsonElement root, string key) => Find(root, key);
+
+    /// <summary>The notice answers "does the store hold data this far back", never "did anything happen": an alert log with no alert over a
+    /// window the collectors cover is an empty answer that says covered; a window that starts before the data says truncated.</summary>
+    [Theory]
+    [InlineData(24, false)]
+    [InlineData(168, true)]
+    public async Task GetAlertHistory_EmptyAlertLog_IsTruncatedOnlyWhenTheStoreLacksTheWindow(int hours, bool truncated)
+    {
+        await SeedAsync();
+        var json = await McpAlertTools.GetAlertHistory(_dataService, hours_back: hours);
+        using var doc = JsonDocument.Parse(json);
+        Assert.Equal("empty", doc.RootElement.GetProperty("status").GetString());
+        Assert.Equal(truncated, Hint(doc.RootElement, "window_truncated")?.GetBoolean());
+    }
+
+    /// <summary>A window wholly before the store's first collected row (#7005 part 4): the empty alert log says truncated and names the first
+    /// row the collectors kept as <c>effective_start</c>, not the no-collection answer (which has no start to name).</summary>
+    [Fact]
+    public async Task GetAlertHistory_WindowWhollyBeforeTheFloor_NamesTheFirstKeptRow()
+    {
+        await SeedAsync();
+        var end = DateTime.UtcNow - EndBack(AsOfCase.WhollyBefore);
+        var json = await McpAlertTools.GetAlertHistory(_dataService, hours_back: 24, as_of: end.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture));
+        using var doc = JsonDocument.Parse(json);
+        Assert.Equal("empty", doc.RootElement.GetProperty("status").GetString());
+        Assert.True(Hint(doc.RootElement, "window_truncated")?.GetBoolean());
+        var start = DateTime.Parse(Hint(doc.RootElement, "effective_start")!.Value.GetString()!, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal);
+        Assert.InRange((DateTime.UtcNow - RawFloorBack - start).Duration(), TimeSpan.Zero, TimeSpan.FromMinutes(5));
+    }
+
+    /// <summary>A store with no collector row at all answers as it did before, with no notice (the floor is the collector data, #7005 part 5).</summary>
+    [Fact]
+    public async Task GetAnalysisFindings_StoreWithNoRun_CarriesNoNotice()
+    {
+        var json = await McpAnalysisTools.GetAnalysisFindings(new AnalysisService(_duckDb) { MinimumDataHours = 0 }, _serverManager, ServerName, hours_back: 168);
+        using var doc = JsonDocument.Parse(json);
+        Assert.Equal("empty", doc.RootElement.GetProperty("status").GetString());
+        Assert.Null(Hint(doc.RootElement, "window_truncated"));
+    }
+
+    [Theory]
+    [InlineData(24, false)]
+    [InlineData(168, true)]
+    public async Task GetAnalysisFindings_WindowOlderThanTheOldestRun_SaysTruncated(int hours, bool truncated)
+    {
+        await SeedAsync();
+        var json = await McpAnalysisTools.GetAnalysisFindings(new AnalysisService(_duckDb) { MinimumDataHours = 0 }, _serverManager, ServerName, hours_back: hours);
+        using var doc = JsonDocument.Parse(json);
+        Assert.Equal(truncated, Hint(doc.RootElement, "window_truncated")?.GetBoolean());
+    }
+
+    /// <summary>The floor of the analysis reads is the collector data they score (wait_stats), never the stored findings (#7005 part 5): a finding
+    /// an hour old beside a week of collector rows is a covered week, and collector rows only a couple of days deep make a week truncated.</summary>
+    [Theory]
+    [InlineData(170.0, 168, false)]
+    [InlineData(48.0, 168, true)]
+    public async Task GetAnalysisFindings_TakesItsFloorFromTheCollectorData_NotFromTheOldestFinding(double firstWaitStatsHoursBack, int hours, bool truncated)
+    {
+        await SeedWaitStatsAndOneRecentFindingAsync(firstWaitStatsHoursBack);
+        var json = await McpAnalysisTools.GetAnalysisFindings(new AnalysisService(_duckDb) { MinimumDataHours = 0 }, _serverManager, ServerName, hours_back: hours);
+        using var doc = JsonDocument.Parse(json);
+        Assert.Equal(truncated, Hint(doc.RootElement, "window_truncated")?.GetBoolean());
+    }
+
+    [Theory]
+    [InlineData(170.0, 4, false)]
+    [InlineData(1.0, 4, true)]
+    public async Task GetAnalysisFacts_TakesItsFloorFromTheCollectorData_NotFromTheOldestFinding(double firstWaitStatsHoursBack, int hours, bool truncated)
+    {
+        await SeedWaitStatsAndOneRecentFindingAsync(firstWaitStatsHoursBack);
+        var json = await McpAnalysisTools.GetAnalysisFacts(new AnalysisService(_duckDb) { MinimumDataHours = 0 }, _serverManager, ServerName, hours_back: hours);
+        using var doc = JsonDocument.Parse(json);
+        Assert.Equal(truncated, Hint(doc.RootElement, "window_truncated")?.GetBoolean());
+    }
+
+    /// <summary>wait_stats rows from <paramref name="firstHoursBack"/> hours back and 30 minutes back, and ONE finding an hour old.</summary>
+    private async Task SeedWaitStatsAndOneRecentFindingAsync(double firstHoursBack)
+    {
+        var now = DateTime.UtcNow;
+        foreach (var at in new[] { Naive(now.AddHours(-firstHoursBack)), Naive(now.AddMinutes(-30)) })
+        {
+            await ExecAsync("INSERT INTO wait_stats (collection_id, collection_time, server_id, server_name, wait_type, waiting_tasks_count, wait_time_ms, signal_wait_time_ms, delta_waiting_tasks, delta_wait_time_ms, delta_signal_wait_time_ms, sample_interval_seconds) VALUES ($1, $2, $3, $4, 'CXPACKET', 10, 100, 10, 5, 50, 5, 60)", _nextId--, at, _serverId, ServerName);
+        }
+
+        await ExecAsync(@"
+INSERT INTO analysis_findings
+    (finding_id, analysis_time, server_id, server_name, severity, confidence, category,
+     story_path, story_path_hash, story_text, root_fact_key, fact_count, incident_id)
+VALUES (1, $1, $2, $3, 0.5, 0.5, 'waits', 'CXPACKET', 'hash-1', 'CXPACKET leads', 'CXPACKET', 1, 'inc-1')",
+            Naive(now.AddHours(-1)), _serverId, ServerName);
+    }
+
     /* ═══════════════════════════ get_query_store_regressions: 3 x 3 ═══════════════════════════ */
 
     /// <summary>What the seed says each window of the regressions read is: a regression listed, a recent side with no
@@ -353,6 +405,56 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
                     _nextId--, Naive(now - back), _serverId, ServerName, "TenantDb00", 1000L + q, 9L, "Regular",
                     executions, avgUs, avgUs, 100L, interval * 10 + q, "SELECT " + q, Naive(now - back));
             }
+        }
+
+        /* #7005: the Queries tools' other probe tables, so a tool that says nothing over an empty table is told apart from one that
+           breaks the contract over rows: query_stats and procedure_stats, a row at the raw floor and one 30 minutes back. */
+        foreach (var back in new[] { RawFloorBack, TimeSpan.FromMinutes(30) })
+        {
+            await ExecAsync(@"
+INSERT INTO query_stats
+    (collection_id, collection_time, server_id, server_name, database_name,
+     query_hash, sql_handle, last_execution_time, delta_execution_count,
+     delta_worker_time, delta_elapsed_time, sample_interval_seconds, query_text)
+VALUES ($1, $2, $3, $4, 'TenantDb00', '0xAB', '0xH0xAB', $5, 10, 5000, 5000, 60, 'SELECT 1')",
+                _nextId--, Naive(now - back), _serverId, ServerName, Naive(now - back));
+            await ExecAsync(@"
+INSERT INTO procedure_stats
+    (collection_id, collection_time, server_id, server_name, database_name, schema_name, object_name, object_type,
+     execution_count, total_worker_time, total_elapsed_time, total_logical_reads, total_physical_reads, total_logical_writes,
+     delta_execution_count, delta_worker_time, delta_elapsed_time, sample_interval_seconds)
+VALUES ($1, $2, $3, $4, 'TenantDb00', 'dbo', 'p1', 'PROCEDURE', 10, 5000, 5000, 1, 1, 1, 10, 5000, 5000, 60)",
+                _nextId--, Naive(now - back), _serverId, ServerName);
+        }
+
+        /* #7005 part 2: the probe tables of the periodic collectors the trend and snapshot reads use, a row at the raw floor and one 30 minutes
+           back, so a tool that passes did it by saying so over rows, not because its table is empty. Only the columns the schema requires. */
+        foreach (var back in new[] { RawFloorBack, TimeSpan.FromMinutes(30) })
+        {
+            var at = Naive(now - back);
+            await ExecAsync("INSERT INTO cpu_utilization_stats (collection_id, collection_time, server_id, server_name, sample_time) VALUES ($1, $2, $3, $4, $5)", _nextId--, at, _serverId, ServerName, at);
+            foreach (var table in new[] { "memory_stats", "memory_grant_stats", "file_io_stats", "tempdb_stats", "cpu_scheduler_stats" })
+            {
+                await ExecAsync($"INSERT INTO {table} (collection_id, collection_time, server_id, server_name) VALUES ($1, $2, $3, $4)", _nextId--, at, _serverId, ServerName);
+            }
+
+            /* #7005 part 4: a wait_stats row the way the collector writes it (every payload column set, so the deltas and the interval are real), which is what the alert floor reads. */
+            await ExecAsync("INSERT INTO wait_stats (collection_id, collection_time, server_id, server_name, wait_type, waiting_tasks_count, wait_time_ms, signal_wait_time_ms, delta_waiting_tasks, delta_wait_time_ms, delta_signal_wait_time_ms, sample_interval_seconds) VALUES ($1, $2, $3, $4, 'CXPACKET', 10, 100, 10, 5, 50, 5, 60)", _nextId--, at, _serverId, ServerName);
+            await ExecAsync("INSERT INTO perfmon_stats (collection_id, collection_time, server_id, server_name, object_name, counter_name) VALUES ($1, $2, $3, $4, 'SQLServer:SQL Statistics', 'Batch Requests/sec')", _nextId--, at, _serverId, ServerName);
+            await ExecAsync("INSERT INTO plan_cache_stats (collection_id, collection_time, server_id, server_name, cacheobjtype, objtype) VALUES ($1, $2, $3, $4, 'Compiled Plan', 'Adhoc')", _nextId--, at, _serverId, ServerName);
+            await ExecAsync("INSERT INTO latch_stats (collection_id, collection_time, server_id, server_name, latch_class) VALUES ($1, $2, $3, $4, 'BUFFER')", _nextId--, at, _serverId, ServerName);
+            await ExecAsync("INSERT INTO spinlock_stats (collection_id, collection_time, server_id, server_name, spinlock_name) VALUES ($1, $2, $3, $4, 'LOCK_HASH')", _nextId--, at, _serverId, ServerName);
+        }
+
+        /* #7005 part 3: the analysis runs get_analysis_findings and get_analysis_facts take their floor from, a run at the raw floor and one 30 minutes back. */
+        foreach (var (back, id) in new[] { (RawFloorBack, 1L), (TimeSpan.FromMinutes(30), 2L) })
+        {
+            await ExecAsync(@"
+INSERT INTO analysis_findings
+    (finding_id, analysis_time, server_id, server_name, severity, confidence, category,
+     story_path, story_path_hash, story_text, root_fact_key, fact_count, incident_id)
+VALUES ($1, $2, $3, $4, 0.5, 0.5, 'waits', 'CXPACKET', 'hash-' || $1::VARCHAR, 'CXPACKET leads', 'CXPACKET', 1, 'inc-1')",
+                id, Naive(now - back), _serverId, ServerName);
         }
 
         var collectors = CollectorCatalog.All.Where(d => d.TargetEngine == CollectorTargetEngine.SqlServer).Select(d => d.Name).ToArray();

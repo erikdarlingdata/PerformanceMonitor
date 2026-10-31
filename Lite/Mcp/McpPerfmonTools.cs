@@ -108,10 +108,12 @@ public sealed class McpPerfmonTools
                 /* Nothing collected at all for this server in the window: the collector likely hasn't
                    produced perfmon data yet (delta counters need two cycles). Not retrievable now. */
                 if (collected.Count == 0)
-                    return McpHelpers.Status(
+                    /* #7005: the window notice, so an empty answer says whether the store holds the window. */
+                    return await McpQueryTools.WithEmptyWindowNoticeAsync(McpHelpers.Status(
                         "unavailable",
                         $"No trend data for counter '{counter_name}'. No perfmon counters have been collected for this server in the last {hours_back}h yet " +
-                        "(the collector may not have run, or delta counters need a second collection cycle).");
+                        "(the collector may not have run, or delta counters need a second collection cycle)."),
+                        dataService, QueryWindowRelation.PerfmonStats, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, "perfmon_stats");
 
                 /* Other counters exist but not this one: the name is almost certainly wrong. Hand back
                    the collected names so the caller can correct it. */
@@ -131,9 +133,10 @@ public sealed class McpPerfmonTools
             /* #3653 A5: the window's baseline discontinuities as the trailing key — see BaselineDiscontinuities. */
             var discontinuities = await dataService.GetBaselineDiscontinuitiesAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
 
-            return TrendPayloads.PerfmonTrend(
+            return await McpQueryTools.WithDataWindowNoticeAsync(TrendPayloads.PerfmonTrend(
                 resolved.DisplayName, counter_name, hours_back, points, bucketMinutes, bucket_minutes is not null,
-                budget.AutoPoints, BaselineDiscontinuities.ToPayload(discontinuities), bucketsResult.ArtifactsSetAside);
+                budget.AutoPoints, BaselineDiscontinuities.ToPayload(discontinuities), bucketsResult.ArtifactsSetAside),
+                dataService, QueryWindowRelation.PerfmonStats, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, "perfmon_stats");
         }
         catch (Exception ex)
         {
