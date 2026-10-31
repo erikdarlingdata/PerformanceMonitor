@@ -87,7 +87,7 @@ A reader is not an agent: it has no identity in the journal and cannot claim or 
 
 Behind a [front door](darling/front-door.md), the front door sends the level it serves its caller to each store with the call. The store serves the stricter of that level and its own. A `maskLiterals` reader gets masked free text (a report's `root_cause`, a known pattern's `note`) even when the store is at `full`. A store from an older build ignores the level.
 
-A key in a token entry that is not a field, such as `data_detail`, is reported at start like any other unknown key in `darling.json`. A web token is refused for web sign-in when it has the value of any MCP token in `darling.json`: the legacy token or a named entry, including a named entry that is not served because of a problem such as a role typo. The start warning and `--validate-config` say the same.
+A key in a token entry that is not a field, such as `data_detail`, is reported at start like any other unknown key in `darling.json`. A web token is refused for web sign-in when it has the value of any MCP token in `darling.json`. That means the legacy token or any named entry. It includes an entry that is not served because of a problem such as a role typo. The start warning and `--validate-config` say the same.
 
 `tools/list` shows only that set. A call to a tool outside it fails as an unknown tool. An unknown token gets 401, and so does a request with no token, loopback included.
 
