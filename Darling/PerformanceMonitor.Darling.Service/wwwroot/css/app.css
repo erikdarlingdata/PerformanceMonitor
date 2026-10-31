@@ -1185,6 +1185,8 @@ pre.code {
   overflow-x: auto;
 }
 .markdown-body .md-pre code { font-family: var(--mono); font-size: 0.8rem; color: var(--dim); white-space: pre; }
+/* A "text" fence (the notebook's finding story): still literal text, but wrapped prose in the body font. */
+.markdown-body .md-pre-text code { font-family: inherit; font-size: 0.9rem; color: inherit; white-space: pre-wrap; overflow-wrap: anywhere; }
 .markdown-body .md-link { color: var(--accent); }
 .markdown-body .md-link:hover { text-decoration: underline; }
 

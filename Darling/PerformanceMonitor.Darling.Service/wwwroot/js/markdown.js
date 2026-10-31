@@ -61,7 +61,10 @@ export function renderMarkdown(text) {
         body.push(lines[i]);
         i++;
       }
-      frag.appendChild(el("pre", { class: "md-pre" }, [el("code", { text: body.join("\n") })]));
+      /* An info string of "text" marks prose that must still show as typed (the alert notebook's finding story): the
+         block is still verbatim, but it wraps and uses the body font instead of scrolling sideways in monospace. */
+      const isProse = fence[2].trim() === "text";
+      frag.appendChild(el("pre", { class: isProse ? "md-pre md-pre-text" : "md-pre" }, [el("code", { text: body.join("\n") })]));
       continue;
     }
 

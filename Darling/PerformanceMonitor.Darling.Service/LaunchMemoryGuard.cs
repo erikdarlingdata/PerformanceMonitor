@@ -90,11 +90,7 @@ internal sealed class LaunchMemoryGuard
         Func<LaunchMemoryReading> sample;
         if (OperatingSystem.IsLinux())
         {
-            sample = new LinuxLaunchMemorySampler(
-                DarlingStoreHostProfile.TryReadFile,
-                () => { using var process = Process.GetCurrentProcess(); return process.WorkingSet64; },
-                () => GC.GetGCMemoryInfo().TotalAvailableMemoryBytes,
-                logger).Sample;
+            sample = CreateLinuxSampler(logger).Sample;
         }
         else
         {
@@ -107,6 +103,15 @@ internal sealed class LaunchMemoryGuard
             () => TimeSpan.FromMilliseconds(Environment.TickCount64),
             logger);
     }
+
+    /// <summary>The Linux sampler the production guard uses, built in one place so the hidden
+    /// <c>--self-check-launch-memory</c> verb (#6995) samples the same reader the guard does.</summary>
+    internal static LinuxLaunchMemorySampler CreateLinuxSampler(ILogger logger)
+        => new(
+            DarlingStoreHostProfile.TryReadFile,
+            () => { using var process = Process.GetCurrentProcess(); return process.WorkingSet64; },
+            () => GC.GetGCMemoryInfo().TotalAvailableMemoryBytes,
+            logger);
 
     /// <summary>
     /// Windows (and anything that is not Linux): committed private bytes against the GC's available-memory budget.
