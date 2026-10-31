@@ -671,7 +671,8 @@ SELECT deskewed FROM (
                     latest.Parameters.AddWithValue(ServerId);
                     using var reader = await latest.ExecuteReaderAsync(ct);
                     Assert.True(await reader.ReadAsync(ct));
-                    Assert.Equal(4, reader.FieldCount);
+                    Assert.Equal(5, reader.FieldCount);
+                    Assert.Equal("collection_time", reader.GetName(4));
                     Assert.Equal(31, reader.GetInt32(0));
                     Assert.Equal(straddleUtc.AddHours(-4), reader.GetDateTime(2));
                     Assert.Equal("sample_time_utc", reader.GetName(3));
