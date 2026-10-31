@@ -121,6 +121,8 @@ Do the steps from an elevated PowerShell on the service host.
 4. The script stops the service and copies the old files to `_rollback_manual_<stamp>`. It lays the new build down, checks that `darling.json` did not change, and starts the service. If it fails, run it again. That is safe.
 5. Work the checklist that the script prints about 10 to 15 minutes later. A running service does not prove that it collects.
 
+Windows PowerShell 5.1 and PowerShell 7 both run the script. Add `-Check` to the command from step 3 to see whether the upgrade can run. It runs the checks that come before the stop, tries the backup-folder step on a throwaway folder, prints the PowerShell version, and changes nothing.
+
 The script refuses to run from the install folder itself. It never kills a process. If it names a process that blocks the upgrade, close that process and run it again. It keeps the newest three rollback backups. To clear old ones, run `& "C:\Program Files\PerformanceMonitorDarling\upgrade-darling.ps1" -PruneOnly`.
 
 If you installed with the MSI, do not use this script. Run the newer MSI instead. It upgrades in place and keeps `darling.json` and the store.
