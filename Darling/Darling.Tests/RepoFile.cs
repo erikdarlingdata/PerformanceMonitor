@@ -64,10 +64,17 @@ internal static class RepoFile
     /// <summary>The absolute path of the repository root.</summary>
     internal static string Root => ResolveRoot();
 
-    /// <summary>Reads a repo file exactly as it sits on disk. A <c>.cs</c> file whose type is split into
-    /// <c>&lt;Type&gt;.&lt;Area&gt;.cs</c> partial files beside it (#7025) comes back with those files joined
-    /// after it, one newline apart, in ordinal file-name order, so a pin written before the split reads the
-    /// same text. A path that itself names a partial reads just that file.</summary>
+    /// <summary>The types split into <c>&lt;Type&gt;.&lt;Area&gt;.cs</c> partial files (#7025). Only these
+    /// read joined; every other file reads exactly as it sits on disk, because a pin that reads one file at a
+    /// time (a per-file scan, a per-file count) must not see the same text twice. A later split adds its type
+    /// name here, and to the matching set in <c>Lite.Tests/SplitRepoFile.cs</c>.</summary>
+    private static readonly string[] SplitTypes = ["DarlingCollectorRunner"];
+
+    /// <summary>Reads a repo file exactly as it sits on disk. A <c>.cs</c> file named
+    /// <c>&lt;Type&gt;.cs</c> for a type in <see cref="SplitTypes"/> comes back with its
+    /// <c>&lt;Type&gt;.&lt;Area&gt;.cs</c> partial files joined after it, one newline apart, in ordinal
+    /// file-name order, so a pin written before the split reads the same text. A path that itself names a
+    /// partial reads just that file.</summary>
     internal static string ReadRepoFile(params string[] segments)
     {
         var full = PathTo(segments);
@@ -89,13 +96,16 @@ internal static class RepoFile
     }
 
     /// <summary>The <c>&lt;Type&gt;.&lt;Area&gt;.cs</c> files beside <paramref name="full"/>, ordinal by file
-    /// name. Empty unless <paramref name="full"/> is a <c>&lt;Type&gt;.cs</c> file: a name that already has a
-    /// dot before <c>.cs</c> is a partial (or a code-behind) and reads alone.</summary>
+    /// name. Empty unless <paramref name="full"/> is a <c>&lt;Type&gt;.cs</c> file of a type in
+    /// <see cref="SplitTypes"/>: a name that already has a dot before <c>.cs</c> is a partial (or a
+    /// code-behind) and reads alone.</summary>
     private static string[] PartialsBeside(string full)
     {
         var stem = Path.GetFileNameWithoutExtension(full);
 
-        if (!full.EndsWith(".cs", StringComparison.Ordinal) || stem.Contains('.', StringComparison.Ordinal))
+        if (!full.EndsWith(".cs", StringComparison.Ordinal)
+            || stem.Contains('.', StringComparison.Ordinal)
+            || Array.IndexOf(SplitTypes, stem) < 0)
         {
             return [];
         }

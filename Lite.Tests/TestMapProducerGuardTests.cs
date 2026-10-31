@@ -413,8 +413,9 @@ public sealed class TestMapProducerGuardTests : IDisposable
             Assert.Equal(
                 new List<string?>
                 {
-                    "Darling/PerformanceMonitor.Darling.Service/Svc.cs",
+                    /* The map sorts a class's patterns, ordinal: `Svc.Part.cs` sorts before `Svc.cs`. */
                     "Darling/PerformanceMonitor.Darling.Service/Svc.Part.cs",
+                    "Darling/PerformanceMonitor.Darling.Service/Svc.cs",
                 },
                 Of("MainReaderTests"));
             Assert.Equal(new List<string?> { "Darling/PerformanceMonitor.Darling.Service/Svc.Part.cs" }, Of("PartReaderTests"));
