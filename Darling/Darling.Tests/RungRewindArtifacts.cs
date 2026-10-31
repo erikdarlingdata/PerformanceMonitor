@@ -601,6 +601,14 @@ ALTER TABLE config.config_threshold_overrides DROP COLUMN IF EXISTS scope_tag_id
             @"ALTER TABLE config.config_notification_routes DROP COLUMN IF EXISTS severities;
 ALTER TABLE IF EXISTS config.external_alert_state DROP COLUMN IF EXISTS fired_severities;
 ALTER TABLE IF EXISTS config.investigation_request_alerts DROP COLUMN IF EXISTS severity;"),
+        // V232 (#7041): the Daily Health Report columns on the alert settings row. The enabled column is the probe's newest sentinel. The rewind
+        // drops all four, so a re-run of V232 adds them again. Safe on a store that never had them.
+        new(232, "hasDailyReportSettings",
+            @"ALTER TABLE config.config_alert_settings
+    DROP COLUMN IF EXISTS daily_report_enabled,
+    DROP COLUMN IF EXISTS daily_report_send_at,
+    DROP COLUMN IF EXISTS daily_report_time_zone,
+    DROP COLUMN IF EXISTS daily_report_title;"),
     ];
 
     /// <summary>

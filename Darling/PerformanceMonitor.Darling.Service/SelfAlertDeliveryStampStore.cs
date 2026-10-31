@@ -107,6 +107,9 @@ public sealed class PgSelfAlertDeliveryStampStore : ISelfAlertDeliveryStampStore
     /// <summary>The fleet-sweep rollup's stamp key; the value is the slot the latest delivery served.</summary>
     public const string FleetSweepRollupStateKey = "sweep_rollup_delivered_at";
 
+    /// <summary>The Daily Health Report's stamp key (#7041). The value is the instant of the latest delivery; the gate compares its local date in the report's zone with today's.</summary>
+    public const string DailyHealthReportStateKey = "daily_health_report_delivered_at";
+
     /// <summary>The analysis singles digest's stamp key (#3712) — the third daily document, same shape.</summary>
     public const string AnalysisSinglesDigestStateKey = "singles_digest_delivered_at";
 

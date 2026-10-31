@@ -75,7 +75,7 @@ internal static class DarlingMcpAgentActions
     internal const string SelfMonitorMetric = "self_monitor_metric";
     internal const string RuleScope = "rule_scope";
 
-    /// <summary>The self alerts an agent may still mute: the five availability group metrics, Agent Not Running, Agent Alert Gaps, the three database-protection overdue alerts (#6873), Identity Capacity (#6875) and the three report digests.</summary>
+    /// <summary>The self alerts an agent may still mute: the five availability group metrics, Agent Not Running, Agent Alert Gaps, the three database-protection overdue alerts (#6873), Identity Capacity (#6875) and the four report documents.</summary>
     private static readonly HashSet<string> UnprotectedConstantNames = new(StringComparer.Ordinal)
     {
         nameof(DarlingSelfAlertEvaluator.AgFailoverMetric),
@@ -92,6 +92,7 @@ internal static class DarlingMcpAgentActions
         nameof(DarlingSelfAlertEvaluator.CollectorCostDigestMetric),
         nameof(DarlingSelfAlertEvaluator.FleetSweepRollupMetric),
         nameof(DarlingSelfAlertEvaluator.AnalysisSinglesDigestMetric),
+        nameof(DarlingSelfAlertEvaluator.DailyHealthReportMetric),
     };
 
     /// <summary>Every <c>*Metric</c> constant of <see cref="DarlingSelfAlertEvaluator"/> an agent may not mute (read by reflection, so a new one is protected without an edit here).</summary>

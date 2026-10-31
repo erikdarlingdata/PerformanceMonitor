@@ -195,6 +195,14 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
     /// <summary>#6875: the warning bar, 1 to 100 percent used. The critical bar below never falls under it.</summary>
     public int IdentityCapacityWarningPercent => Math.Clamp(_config.Alerts.IdentityCapacityWarningPercent, 1, 100);
     public int IdentityCapacityCriticalPercent => Math.Clamp(_config.Alerts.IdentityCapacityCriticalPercent, IdentityCapacityWarningPercent, 100);
+    /// <summary>#7041: the Daily Health Report's switch. Off by default; not on <see cref="IAlertEngineSettings"/> because Lite has no such report.</summary>
+    public bool DailyReportEnabled => _config.Alerts.DailyReportEnabled;
+    /// <summary>#7041: the local time of day the report goes out, in <see cref="DailyReportTimeZone"/>. An unparseable stored value reads as the shipped 07:00.</summary>
+    public TimeOnly DailyReportSendAt => Reports.DailyHealthReportSettings.ResolveSendAt(_config.Alerts.DailyReportSendAt);
+    /// <summary>#7041: the zone the report is scheduled in: the configured IANA id, or the service host's local zone when unset or unknown to the host.</summary>
+    public TimeZoneInfo DailyReportTimeZone => Reports.DailyHealthReportSettings.ResolveZone(_config.Alerts.DailyReportTimeZone);
+    /// <summary>#7041: the report's title; the shipped "Daily Health Report" when unset.</summary>
+    public string DailyReportTitle => Reports.DailyHealthReportSettings.ResolveTitle(_config.Alerts.DailyReportTitle);
     /// <summary>#6874: the Agent Alert Gaps alert's switch. Off by default; not on <see cref="IAlertEngineSettings"/> because Lite has no such alert.</summary>
     public bool AgentAlertGapsEnabled => _config.Alerts.AgentAlertGapsEnabled;
     /// <summary>#6873: the three database protection alerts' switches. Off by default; not on <see cref="IAlertEngineSettings"/> because Lite has no such alerts.</summary>

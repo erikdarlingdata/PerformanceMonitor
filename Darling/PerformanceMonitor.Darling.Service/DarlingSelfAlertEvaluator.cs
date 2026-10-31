@@ -22,6 +22,7 @@ using Npgsql;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Service.Reports;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
 
@@ -3102,6 +3103,222 @@ internal sealed class DarlingSelfAlertEvaluator
         await RecordDocumentDeliveredAsync(
             _lastSweepRollup, FleetSweepRollupKey, PgSelfAlertDeliveryStampStore.FleetSweepRollupStateKey,
             delivery, FleetSweepRollupInterval, now, "fleet-sweep rollup", cancellationToken);
+    }
+
+    /* ------------------------- #7041: the scheduled Daily Health Report ------------------------- */
+
+    /// <summary>
+    /// The metric name the Daily Health Report fires under (#7041). A WEBHOOK AUTOMATION KEY like its siblings (family
+    /// <c>reports</c>, declared INFO), so it is a const and must stay stable across releases. A route or a mute rule keyed on it
+    /// chooses the channels and recipients, or silences the report.
+    /// </summary>
+    internal const string DailyHealthReportMetric = "Daily Health Report";
+
+    /// <summary>Fleet-level key, non-numeric so it never collides with a real server_id (the <see cref="DiskKey"/> shape).</summary>
+    private const string DailyHealthReportKey = "dailyhealthreport";
+
+    /// <summary>When the report was last known DELIVERED, a cache of the stamp (the <see cref="_lastSweepRollup"/> idiom).</summary>
+    private readonly ConcurrentDictionary<string, DateTime> _lastDailyReport = new();
+
+    /// <summary>
+    /// How long after a failed build or a failed send the next attempt waits. The check rides the 15-second sweep, and a build reads the
+    /// store for every server, so a store that cannot answer must not be asked again every tick.
+    /// </summary>
+    internal static readonly TimeSpan DailyReportRetryDelay = TimeSpan.FromMinutes(5);
+
+    private DateTime _nextDailyReportAttemptUtc = DateTime.MinValue;
+
+    /// <summary>The longest <c>Text</c> a chat or webhook post carries. Teams rejects a card near 28 KB, so a long fleet's text is cut at a line and points at the email and the web page.</summary>
+    internal const int DailyReportMaxTextLength = 10_000;
+
+    /// <summary>Where the report is built from. Null (a test harness, or a build with no builder) means the report is never sent.</summary>
+    internal IDailyHealthReportSource? DailyReportSource { get; set; }
+
+    /// <summary>The report's settings, read live so a store edit takes effect on the next check. Null means off.</summary>
+    internal Func<DailyHealthReportSchedule>? DailyReportSchedule { get; set; }
+
+    /// <summary>
+    /// The scheduled send (#7041), called on every sweep tick (15 seconds): the due check is the only cost until a report is due. The
+    /// report is due at the first check at or after <c>send_at</c> local time in the report's zone, so a service that was down at
+    /// <c>send_at</c> sends when it is back the same local day. One report per local day: the delivered-today stamp
+    /// (<see cref="PgSelfAlertDeliveryStampStore.DailyHealthReportStateKey"/>) holds the instant of the last delivery and is
+    /// compared by local date. A failed delivery writes no stamp, so the next attempt (after <see cref="DailyReportRetryDelay"/>)
+    /// retries the same day. Never backfills: a missed day is not sent late on the next one. A store that cannot answer the stamp read
+    /// falls back to process memory, which re-sends once after a restart, the same fail-open rule the rollup has.
+    /// </summary>
+    public async Task EvaluateDailyHealthReportAsync(CancellationToken cancellationToken)
+    {
+        var source = DailyReportSource;
+        if (DailyReportSchedule?.Invoke() is not { Enabled: true } schedule || source is null || !_settings.AlertsEnabled)
+        {
+            return;
+        }
+
+        var now = _utcNow();
+        if (!schedule.IsDue(now) || now < _nextDailyReportAttemptUtc)
+        {
+            return;
+        }
+
+        if (await DailyReportDeliveredTodayAsync(schedule, now, cancellationToken))
+        {
+            return;
+        }
+
+        var buildClock = Stopwatch.StartNew();
+        DailyHealthReportRendered report;
+        try
+        {
+            report = await source.BuildAsync(schedule.MostRecentSendAtUtc(now), cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            /* A failed build consumes nothing: the next attempt is DailyReportRetryDelay away, the same day. */
+            _nextDailyReportAttemptUtc = now + DailyReportRetryDelay;
+            _logger?.LogWarning(ex, "Daily health report build failed after {ElapsedMs} ms; trying again in {Delay}", buildClock.ElapsedMilliseconds, DailyReportRetryDelay);
+            _readFailures?.RecordReadFailure(null, "daily-health-report self-alert", buildClock.ElapsedMilliseconds);
+            return;
+        }
+
+        var delivery = await DeliverDailyHealthReportAsync(report, schedule.Title, cancellationToken);
+        await RecordDailyReportDeliveredAsync(delivery, now, cancellationToken);
+    }
+
+    /// <summary>
+    /// Sends one built report through the normal alert pipeline: the metric <see cref="DailyHealthReportMetric"/> at the declared INFO tier,
+    /// so notification routes choose the channels and recipients and a mute rule on the metric mutes it. Email carries the report's own HTML
+    /// page and subject; Slack, Teams and the webhook carry its text. Does not touch the delivered-today stamp, so
+    /// <c>send_daily_health_report_now</c> shares this and leaves the day's scheduled report alone.
+    /// </summary>
+    internal Task<AlertDelivery?> DeliverDailyHealthReportAsync(
+        DailyHealthReportRendered report, string title, CancellationToken cancellationToken) =>
+        FireAsync(
+            StoreKey(DailyHealthReportKey), _storeLabel, DailyHealthReportMetric,
+            currentValue: report.ServerCount.ToString(CultureInfo.InvariantCulture),
+            thresholdValue: "no threshold (report)",
+            detail: CapDailyReportText(report.Text),
+            severity: null,
+            shortMessage: report.Subject,
+            numericCurrentValue: report.ServerCount,
+            numericThresholdValue: 0,
+            cancellationToken,
+            context: new AlertContext { EmailHtmlBody = report.Html, EmailSubject = report.Subject },
+            scheduledReport: true,
+            displayName: title);
+
+    /// <summary>
+    /// The manual send (#7041, <c>send_daily_health_report_now</c>): builds the report for the period that ended at the most recent
+    /// <c>send_at</c> and sends it through <see cref="DeliverDailyHealthReportAsync"/>. Never reads or writes the delivered-today stamp or
+    /// the retry delay, so the day's scheduled report is unaffected. Works while the report is off; refused while the alert master switch
+    /// is off, like every other alert delivery. A build failure propagates to the tool, which reports it.
+    /// </summary>
+    internal async Task<Mcp.DailyHealthReportSendResult> SendDailyHealthReportNowAsync(CancellationToken cancellationToken)
+    {
+        var source = DailyReportSource;
+        if (source is null || DailyReportSchedule is not { } scheduleSource)
+        {
+            return Mcp.DailyHealthReportSendResult.Refused("not_available", "This service has no Daily Health Report builder.");
+        }
+
+        if (!_settings.AlertsEnabled)
+        {
+            return Mcp.DailyHealthReportSendResult.Refused("alerts_disabled", "The alert master switch is off, so no alert is delivered.");
+        }
+
+        var schedule = scheduleSource();
+        var periodEnd = schedule.MostRecentSendAtUtc(_utcNow());
+        var report = await source.BuildAsync(periodEnd, cancellationToken);
+        var delivery = await DeliverDailyHealthReportAsync(report, schedule.Title, cancellationToken);
+        return new Mcp.DailyHealthReportSendResult(true, null, null, periodEnd, report.ServerCount, delivery?.Channel ?? "unreported");
+    }
+
+    /// <summary>Cuts the report text at a line break under <see cref="DailyReportMaxTextLength"/> and says where the rest is.</summary>
+    internal static string CapDailyReportText(string text)
+    {
+        if (text.Length <= DailyReportMaxTextLength)
+        {
+            return text;
+        }
+
+        var cut = text.LastIndexOf('\n', DailyReportMaxTextLength - 1);
+        if (cut < DailyReportMaxTextLength / 2)
+        {
+            cut = DailyReportMaxTextLength;
+        }
+
+        return text[..cut].TrimEnd() + "\n(Shortened for chat. The email and the web page carry the full report.)";
+    }
+
+    /// <summary>
+    /// Whether a report was already delivered on today's local date: process memory first, the stamp when memory cannot answer. A stamp
+    /// that cannot be read leaves the answer as "not delivered" (fail open, counted once), the rollup's rule.
+    /// </summary>
+    private async Task<bool> DailyReportDeliveredTodayAsync(DailyHealthReportSchedule schedule, DateTime now, CancellationToken cancellationToken)
+    {
+        if (!_lastDailyReport.TryGetValue(DailyHealthReportKey, out var known))
+        {
+            known = NoDeliveryKnown;
+            if (_deliveryStamps is not null)
+            {
+                var stampClock = Stopwatch.StartNew();
+                try
+                {
+                    known = await _deliveryStamps.GetDeliveredAtUtcAsync(
+                        PgSelfAlertDeliveryStampStore.DailyHealthReportStateKey, cancellationToken) ?? NoDeliveryKnown;
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    _logger?.LogWarning(ex,
+                        "Daily health report delivery stamp could not be read after {ElapsedMs} ms; gating on process memory from here, which re-sends once per restart until the store answers",
+                        stampClock.ElapsedMilliseconds);
+                    _readFailures?.RecordReadFailure(null, "daily-document delivery-stamp self-alert", stampClock.ElapsedMilliseconds);
+                }
+            }
+
+            _lastDailyReport[DailyHealthReportKey] = known;
+        }
+
+        return known != NoDeliveryKnown && schedule.LocalDate(known) == schedule.LocalDate(now);
+    }
+
+    /// <summary>
+    /// Stamps a delivery, memory first and then the store, unless every channel failed (a failed delivery is not a delivery: nothing reached
+    /// a reader, so the next attempt retries). A failed attempt also waits <see cref="DailyReportRetryDelay"/>.
+    /// </summary>
+    private async Task RecordDailyReportDeliveredAsync(AlertDelivery? delivery, DateTime now, CancellationToken cancellationToken)
+    {
+        if (delivery is { Channel: AlertDelivery.ChannelFailed })
+        {
+            _nextDailyReportAttemptUtc = now + DailyReportRetryDelay;
+            LogDocumentDeliveryFailure("daily health report", delivery.SendError ?? "no error text", now);
+            return;
+        }
+
+        LogDocumentDeliveryRecovered("daily health report");
+        _lastDailyReport[DailyHealthReportKey] = now;
+        if (_deliveryStamps is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await _deliveryStamps.RecordDeliveredAtUtcAsync(PgSelfAlertDeliveryStampStore.DailyHealthReportStateKey, now, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            /* NOT counted by #3013's swallowed-read counter: a stamp WRITE, not a condition read. */
+            _logger?.LogWarning(ex,
+                "The daily health report was delivered but its delivery stamp could not be written; process memory gates it until the next restart, which will re-send it");
+        }
     }
 
     /* ------------------------- #5450: the daily retained-history audit ------------------------- */
@@ -9536,7 +9753,7 @@ ORDER BY ag_name, database_name, replica_server_name";
         string serverKey, string serverName, string metricName, string currentValue, string thresholdValue,
         string detail, AlertSeverityLevel? severity, string shortMessage,
         double? numericCurrentValue, double? numericThresholdValue, CancellationToken cancellationToken,
-        AlertContext? context = null, bool? muted = null, bool scheduledReport = false)
+        AlertContext? context = null, bool? muted = null, bool scheduledReport = false, string? displayName = null)
     {
         /* Same mute treatment as the engine: a muted self-alert is still recorded (flagged muted) but its
            channels are skipped — the deliverer honors AlertOutcome.Muted. A caller that brought its own
@@ -9579,7 +9796,7 @@ ORDER BY ag_name, database_name, replica_server_name";
             serverKey, serverName, metricName, currentValue, thresholdValue,
             Context: context, DetailText: detail,
             NumericCurrentValue: numericCurrentValue, NumericThresholdValue: numericThresholdValue,
-            Muted: isMuted, Severity: severity, ShortMessage: shortMessage), cancellationToken);
+            Muted: isMuted, Severity: severity, ShortMessage: shortMessage, DisplayName: displayName), cancellationToken);
     }
 
     private async Task RecordResolutionAsync(AlertResolution resolution, CancellationToken cancellationToken)
