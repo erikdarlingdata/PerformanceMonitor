@@ -36,6 +36,14 @@ public sealed class OverviewReadScalingTests : IDisposable
        handles' (#6362: 14,400 procedure_stats rows in the 24 h window against about 2,700 for the handles it ranks), so this
        absolute ceiling is what fails when that filter goes. */
     private const long MaxWindowRows = Databases * SnapshotsPerDay / 2;
+    /* The test's one known exception. Top Queries by CPU takes each statement's newest module identity from ALL procedure_stats
+       history, as Darling's twin does on purpose (a collection_time bound would turn a module into "ad hoc" when the procedure_stats
+       collector is disabled or failed for the window), so its READ_PARQUET scan and its WINDOW rows grow with the archive: 72,000
+       rows with one archived day, 576,000 with eight, and 167 ms for the whole read at 30 archived days. It is exempt from the
+       two growth checks. It still fails above a third of the procedure_stats rows both stores hold: #6362's handle filter ranks
+       the handles of the page's groups (23,815 and 42,295 rows measured), a revert ranks every row (129,600 and 230,400). */
+    private const string TopQueriesRead = "top queries by CPU";
+    private const long MaxTopQueriesWindowRows = Databases * SnapshotsPerDay * (HotDays + 8) / 3;
 
     private readonly string _tempDir;
     private readonly List<DuckDbInitializer> _initializers = [];
@@ -205,7 +213,7 @@ FROM slots, range({2}) b(d) ORDER BY t;
         ("wait stats trend (picked types)", d => d.GetWaitStatsTrendsByTypesAsync(ServerId, ["WAIT_1", "WAIT_2"], 24)),
         ("wait stats trend (total)", d => d.GetTotalWaitTrendAsync(ServerId, 24)),
         ("utilization card", d => d.GetUtilizationEfficiencyAsync(ServerId)),
-        ("top queries by CPU", d => d.GetTopQueriesByCpuAsync(ServerId, 24, 50)),
+        (TopQueriesRead, d => d.GetTopQueriesByCpuAsync(ServerId, 24, 50)),
         ("collection health", d => d.GetCollectionHealthAsync(ServerId)),
     ];
 
@@ -222,9 +230,13 @@ FROM slots, range({2}) b(d) ORDER BY t;
             var largeRows = large.Scans.Sum(s => s.RowsScanned);
             var line = $"{name}: READ_PARQUET rows scanned {smallRows:N0} ({small.Scans.Count} nodes) with 1 archived day, {largeRows:N0} ({large.Scans.Count} nodes) with 8; rows out {small.Scans.Sum(x => x.RowsOut):N0} / {large.Scans.Sum(x => x.RowsOut):N0}; WINDOW rows {small.WindowRows:N0} / {large.WindowRows:N0}; nodes [{string.Join(" | ", large.Scans.Select(x => x.Columns))}]";
             report.Add(line);
-            if (largeRows > smallRows + AllowedExtraParquetRows
-                || large.WindowRows > small.WindowRows + AllowedExtraParquetRows
-                || Math.Max(small.WindowRows, large.WindowRows) > MaxWindowRows)
+            var window = Math.Max(small.WindowRows, large.WindowRows);
+            var failed = name == TopQueriesRead
+                ? window > MaxTopQueriesWindowRows
+                : largeRows > smallRows + AllowedExtraParquetRows
+                    || large.WindowRows > small.WindowRows + AllowedExtraParquetRows
+                    || window > MaxWindowRows;
+            if (failed)
                 failures.Add(line);
         }
 
@@ -242,5 +254,58 @@ FROM slots, range({2}) b(d) ORDER BY t;
         Assert.True(failures.Count == 0,
             "an Overview read scans the archive, not its window:" + Environment.NewLine + string.Join(Environment.NewLine, failures)
             + Environment.NewLine + "all reads:" + Environment.NewLine + string.Join(Environment.NewLine, report));
+    }
+
+    /// <summary>
+    /// The utilization card reads the hot memory_stats / server_properties table while it holds a row for the server (#7000). A
+    /// server whose rows there have all been archived (collection stopped for longer than the hot window) must still show its last
+    /// values, which only the v_ views can give. Built with the real archive pass.
+    /// </summary>
+    [Fact]
+    public async Task UtilizationCard_ServerWhoseMemoryRowsAreAllArchived_StillShowsItsLastValues()
+    {
+        var dir = Path.Combine(_tempDir, "fallback");
+        var archiveDir = Path.Combine(dir, "archive");
+        Directory.CreateDirectory(archiveDir);
+        var dbPath = Path.Combine(dir, "test.duckdb");
+        var initializer = new DuckDbInitializer(dbPath);
+        _initializers.Add(initializer);
+        await initializer.InitializeFromTemplateAsync();
+
+        using (var connection = new DuckDBConnection($"Data Source={dbPath}"))
+        {
+            await connection.OpenAsync(TestContext.Current.CancellationToken);
+            using var cmd = connection.CreateCommand();
+            var now = DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture);
+            /* The memory and properties rows are 10 days old (the server stopped being collected); a CPU sample is recent, so the card has a row. */
+            cmd.CommandText = $@"
+INSERT INTO memory_stats (collection_id, collection_time, server_id, server_name, total_physical_memory_mb, available_physical_memory_mb,
+    target_server_memory_mb, total_server_memory_mb, buffer_pool_mb)
+VALUES (1, TIMESTAMP '{now}' - INTERVAL 10 DAY, {ServerId}, 'SRV', 65536, 10000, 50000, 40000, 30000);
+INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, edition, product_version, product_level, engine_edition, cpu_count)
+VALUES (1, TIMESTAMP '{now}' - INTERVAL 10 DAY, {ServerId}, 'SRV', 'Edition', '15.0.2000.5', 'RTM', 3, 16);
+INSERT INTO cpu_utilization_stats (collection_id, collection_time, server_id, server_name, sample_time, sqlserver_cpu_utilization, other_process_cpu_utilization)
+VALUES (1, TIMESTAMP '{now}' - INTERVAL 1 HOUR, {ServerId}, 'SRV', TIMESTAMP '{now}' - INTERVAL 1 HOUR, 20, 2);";
+            await cmd.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        }
+
+        var archive = new ArchiveService(initializer, archiveDir);
+        archive.TimestampForTests = DateTime.UtcNow.ToString("yyyyMMdd_HHmm");
+        await archive.ArchiveOldDataAsync(hotDataHours: HotDays * 24);
+
+        using (var connection = new DuckDBConnection($"Data Source={dbPath}"))
+        {
+            await connection.OpenAsync(TestContext.Current.CancellationToken);
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = "SELECT (SELECT COUNT(*) FROM memory_stats) + (SELECT COUNT(*) FROM server_properties)";
+            Assert.Equal(0L, Convert.ToInt64(await cmd.ExecuteScalarAsync(TestContext.Current.CancellationToken)));
+        }
+
+        var row = await new LocalDataService(initializer).GetUtilizationEfficiencyAsync(ServerId);
+
+        Assert.NotNull(row);
+        Assert.Equal(65536, row.PhysicalMemoryMb);
+        Assert.Equal(40000, row.TotalMemoryMb);
+        Assert.Equal(16, row.CpuCount);
     }
 }

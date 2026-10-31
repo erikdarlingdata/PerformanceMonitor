@@ -130,25 +130,25 @@ public sealed class QueryStatsModuleAttributionReaderTests : IClassFixture<Share
     }
 
     /// <summary>
-    /// #7000: the module lookup reads the read's own window, not all history. A handle's procedure row from before the
-    /// window does not name a statement shown in it (the collector stores every procedure that ran in an interval, so a
-    /// statement that ran in the window has a procedure row in the window), and the newest row of the window still wins.
+    /// The module lookup reads all history, as Darling's does (#7000): a handle whose only procedure_stats row is before the
+    /// window still shows its module (a window bound would turn it into "ad hoc" when the procedure_stats collector is disabled
+    /// or failed for the window), and the newest row still wins.
     /// </summary>
     [Fact]
-    public async Task TopQueries_ModuleLookupReadsTheWindowOnly()
+    public async Task TopQueries_ModuleLookupReadsAllHistory_NewestRowWins()
     {
         var service = new LocalDataService(_duckDb);
 
         await SeedQueryStatsAsync("TestDb", "0xOLD", "0xOLDMOD", deltaExec: 4, deltaElapsedUs: 200_000, "SELECT old");
         await SeedProcedureStatsAsync("TestDb", "dbo", "usp_Before", "PROCEDURE", "0xOLDMOD", collectedOverride: Collected.AddDays(-3));
         await SeedQueryStatsAsync("TestDb", "0xIN", "0xINMOD", deltaExec: 4, deltaElapsedUs: 200_000, "SELECT in");
-        await SeedProcedureStatsAsync("TestDb", "dbo", "usp_Before", "PROCEDURE", "0xINMOD", collectedOverride: Collected.AddDays(-3));
-        await SeedProcedureStatsAsync("TestDb", "dbo", "usp_InWindow", "PROCEDURE", "0xINMOD", collectedOverride: Collected);
+        await SeedProcedureStatsAsync("TestDb", "dbo", "usp_Older", "PROCEDURE", "0xINMOD", collectedOverride: Collected.AddDays(-3));
+        await SeedProcedureStatsAsync("TestDb", "dbo", "usp_Newest", "PROCEDURE", "0xINMOD", collectedOverride: Collected);
 
         var rows = await service.GetTopQueriesByCpuAsync(ServerId);
 
-        Assert.Equal("ad hoc", rows.Single(r => r.QueryHash == "0xOLD").ModuleName);
-        Assert.Equal("TestDb.dbo.usp_InWindow", rows.Single(r => r.QueryHash == "0xIN").ModuleName);
+        Assert.Equal("TestDb.dbo.usp_Before", rows.Single(r => r.QueryHash == "0xOLD").ModuleName);
+        Assert.Equal("TestDb.dbo.usp_Newest", rows.Single(r => r.QueryHash == "0xIN").ModuleName);
     }
 
     // ── Seeding helpers (column-list INSERT; unset columns default to NULL) ──
