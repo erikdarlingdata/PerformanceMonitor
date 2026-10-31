@@ -109,7 +109,7 @@ FROM slots, range({2}) b(d) ORDER BY t;
     /// older days moved to Parquet by one real <c>ArchiveOldDataAsync</c> pass per day (each pass compacts, so the archive is a
     /// merged month file). Rows are stamped from .NET UTC; DuckDB's <c>now()::TIMESTAMP</c> goes through the session time zone.
     /// </summary>
-    private async Task<LocalDataService> BuildStoreAsync(string name, int archivedDays)
+    private async Task<LocalDataService> BuildStoreAsync(string name, int archivedDays, int hotDays = HotDays)
     {
         var dir = Path.Combine(_tempDir, name);
         var archiveDir = Path.Combine(dir, "archive");
@@ -119,7 +119,7 @@ FROM slots, range({2}) b(d) ORDER BY t;
         _initializers.Add(initializer);
         await initializer.InitializeFromTemplateAsync();
 
-        var totalDays = HotDays + archivedDays;
+        var totalDays = hotDays + archivedDays;
         using (var connection = new DuckDBConnection($"Data Source={dbPath}"))
         {
             await connection.OpenAsync(TestContext.Current.CancellationToken);
@@ -224,6 +224,8 @@ FROM slots, range({2}) b(d) ORDER BY t;
         ("collection health", d => d.GetCollectionHealthAsync(ServerId)),
         /* #7014: the FinOps Server Inventory read, with 40 databases per size snapshot (the field's shape, not Databases). */
         (InventoryRead, d => d.GetServerMetricsAsync()),
+        /* #7014: the per-server idle-coverage check (the Optimization tab's Idle Databases grid and the recommendation row). */
+        ("query stats idle coverage", d => d.HasQueryStatsCoverageAsync(ServerId)),
     ];
 
     private async Task<(List<string> Failures, List<string> Report)> CheckReadsAsync(LocalDataService oneDay, LocalDataService eightDays)
@@ -240,15 +242,7 @@ FROM slots, range({2}) b(d) ORDER BY t;
             var line = $"{name}: READ_PARQUET rows scanned {smallRows:N0} ({small.Scans.Count} nodes) with 1 archived day, {largeRows:N0} ({large.Scans.Count} nodes) with 8; rows out {small.Scans.Sum(x => x.RowsOut):N0} / {large.Scans.Sum(x => x.RowsOut):N0}; WINDOW rows {small.WindowRows:N0} / {large.WindowRows:N0}; nodes [{string.Join(" | ", large.Scans.Select(x => x.Columns))}]";
             report.Add(line);
             var window = Math.Max(small.WindowRows, large.WindowRows);
-            /* The inventory read keeps ONE archive scan on purpose: its idle-database coverage asks for the oldest query_stats sample, which
-               with the default 7 hot days only the archive can answer (a query_stats scan, 72,000 rows with one archived day and 576,000
-               with eight here). Every other lookup (memory, size snapshots, properties) must read the hot tables, so the rows outside the
-               largest scan must not grow (#7014: 807,552 rows over 7 nodes with 8 archived days before, one node after). */
-            var otherSmall = smallRows - small.Scans.Select(x => x.RowsScanned).DefaultIfEmpty(0).Max();
-            var otherLarge = largeRows - large.Scans.Select(x => x.RowsScanned).DefaultIfEmpty(0).Max();
-            var failed = name == InventoryRead
-                ? otherLarge > otherSmall + AllowedExtraParquetRows
-                : name == TopQueriesRead
+            var failed = name == TopQueriesRead
                 ? window > MaxTopQueriesWindowRows
                 : largeRows > smallRows + AllowedExtraParquetRows
                     || large.WindowRows > small.WindowRows + AllowedExtraParquetRows
@@ -271,6 +265,47 @@ FROM slots, range({2}) b(d) ORDER BY t;
         Assert.True(failures.Count == 0,
             "an Overview read scans the archive, not its window:" + Environment.NewLine + string.Join(Environment.NewLine, failures)
             + Environment.NewLine + "all reads:" + Environment.NewLine + string.Join(Environment.NewLine, report));
+    }
+
+    /// <summary>
+    /// The idle-coverage rule's second condition, the oldest sample at or before now minus 7 days, with a store whose hot table holds only
+    /// 3 days, so the hot table cannot decide it and the archive does (#7014). The answer is true in both stores (every older day is
+    /// archived, the 7 complete days before today are all sampled), and the archive rows the fleet rule and the per-server check read
+    /// must not grow with the archived days: the per-day count reads only its window, and the oldest-sample question stops at the first
+    /// matching row. Measured by rows OUT of the scans: with the archive compacted into one month file, DuckDB's rows-scanned count is the
+    /// file's row count whatever the filter (864,000 for a one-hour window and for the whole archive alike), while rows out are what the
+    /// pushed-down filter and a LIMIT let through (600 for one hour).
+    /// </summary>
+    [Fact]
+    public async Task IdleCoverageDecidedByTheArchive_ReadsABoundedPartOfItNotTheArchive()
+    {
+        const int hotDays = 3;
+        var small = await BuildStoreAsync("c5", archivedDays: 5, hotDays: hotDays);
+        var large = await BuildStoreAsync("c12", archivedDays: 12, hotDays: hotDays);
+
+        var lines = new List<string>();
+        long smallRows = 0, largeRows = 0;
+        foreach (var (name, read) in new (string, Func<LocalDataService, Task>)[]
+        {
+            ("per-server check", d => d.HasQueryStatsCoverageAsync(ServerId)),
+            ("fleet rule", d => d.IdleCoveredServerIdsAsync(DateTime.UtcNow, serverId: null)),
+        })
+        {
+            var tag = new string(name.Where(char.IsLetterOrDigit).ToArray());
+            var smallScans = await ParquetScansAsync(small, tag + "_s", read);
+            var largeScans = await ParquetScansAsync(large, tag + "_l", read);
+            smallRows += smallScans.Scans.Sum(x => x.RowsOut);
+            largeRows += largeScans.Scans.Sum(x => x.RowsOut);
+            lines.Add($"{name}: READ_PARQUET rows out {smallScans.Scans.Sum(x => x.RowsOut):N0} ({smallScans.Scans.Count} nodes) with 5 archived days, "
+                + $"{largeScans.Scans.Sum(x => x.RowsOut):N0} ({largeScans.Scans.Count} nodes) with 12");
+        }
+
+        Assert.True(await small.HasQueryStatsCoverageAsync(ServerId), "5 archived days: covered");
+        Assert.True(await large.HasQueryStatsCoverageAsync(ServerId), "12 archived days: covered");
+        Assert.Equal(new[] { ServerId }, (await large.IdleCoveredServerIdsAsync(DateTime.UtcNow, serverId: null)).ToArray());
+        /* The probe's LIMIT 1 ends after a few 2,048-row vectors (about 10,000 rows out), so the slack is a few vectors. */
+        Assert.True(largeRows <= smallRows + 5 * 2048,
+            "the idle-coverage reads scan the archive, not their window:" + Environment.NewLine + string.Join(Environment.NewLine, lines));
     }
 
     /// <summary>
