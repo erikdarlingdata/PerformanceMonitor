@@ -1893,8 +1893,10 @@ jobs:
       #   cosign verify ghcr.io/erikdarlingdata/performancemonitor-darling:nightly \
       #     --certificate-identity-regexp 'github.com/erikdarlingdata/PerformanceMonitor' \
       #     --certificate-oidc-issuer https://token.actions.githubusercontent.com
+      # The v4 action installs cosign v3, which stores the signature as a Sigstore bundle referrer (#7037).
+      # Checked: cosign 2.6.5 and 3.0.6 both verify it with the command above.
       - name: Install cosign
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@v4
 
       - name: Sign container image (keyless, Sigstore)
         shell: bash
