@@ -21,6 +21,10 @@ Releases before 3.0.0 are not archived: those entries carry no prose to move.
 
 ## [Unreleased]
 
+### Added
+
+- **Named MCP tokens can be read-only, and can ask for less data detail** ([#7023]) - A new `reader` role in `mcp.tokens` serves the read tools only, whatever `mcp.allowWrites`, `mcp.allowServerAdmin` and `mcp.allowInvestigations` say, and a reader is not an agent. Any token entry can also set `dataDetail` (`full`, `maskLiterals` or `metadataOnly`) to narrow `mcp.dataDetail` for that token; it can never widen it.
+
 ### Changed
 
 - **Write-latency anomalies and the write latency fact now read log files and tempdb data files only** ([#6959]) - user data-file writes are checkpoint and lazy-writer work no session waits on, so databases with several data files no longer trip the gate. The write latency card now says its figure covers log files and tempdb, and a separate sentence gives the user data files' own write latency.
@@ -31,11 +35,16 @@ Releases before 3.0.0 are not archived: those entries carry no prose to move.
 - **The Overview timeline's I/O Latency row loads one row for each time bucket** ([#6970]) - it loaded one row for each file before. On a server with 16 files, that was about 15 times as many rows. Darling and Lite draw the same line.
 - **Two hourly store upkeep reads no longer read the full index and job catalogs** ([#7016]) - the index check read every index in the database. It needs the indexes of one table only. The aggregate compression check read the job catalog once for each aggregate. On a test store with 8,321 chunks, the index check went from about 1.4 million buffer reads to about 100.
 
+- **The FinOps Server Inventory no longer rereads the whole archive for memory, size and properties** ([#7014]) - the Lite Server Inventory read looked up each server's newest memory row, database-size snapshot and properties row through views that include the Parquet archive, so its cost grew with archived days (807,552 archive rows with 8 archived days on a 40-database store). It now reads the live tables for a server that still has rows there. It reads the archive only for a server whose rows are all archived, so a stopped server still shows its last values. The idle-database coverage check behind the Idle DBs count and the Idle Databases grid no longer scans the whole `query_stats` archive either. It counts days inside its 7-day window. It then asks the live table whether the oldest sample is 7 days old, and runs one early-stopping archive probe per server it cannot decide. The answers are the same as before.
+
 ### Fixed
 
 - **`uninstall-darling.ps1 -PurgeData` now removes the `PerformanceMonitor Darling Operators` group the install created** ([#6953]) - the purge deleted the store but left the local group behind. It now removes the group, with its members, only when its description is the one the installer sets. A group with any other description stays, and the script prints the command to remove it by hand.
 - **Clicking the triage link in a Slack alert no longer shows "This app is not configured to handle interactive responses"** ([#6965]) - the link was a Slack button. Slack sends a request to the app on every button click, even when the button only opens a link. A Slack app set up with only an incoming webhook has nowhere to receive that request, so Slack showed the warning. The link is now plain text in the alert. It opens the triage page and sends nothing to the app.
 - **The record of chunk-interval reconcile runs is now deleted after 30 days** ([#6977]) - before, no rows were deleted. The record gets one row a day, plus one for each service start.
+- **Lite's windowed MCP reads now say when the window reaches past the data Lite holds** ([#7005]) - an empty answer over a window that starts before Lite's oldest data used to read as a quiet server. It now carries `window_truncated`, so an agent can tell "nothing happened" from "we hold no data that old". Answers that return rows carry `effective_start`, `window_truncated` and `truncation_note` as well. This covers the Queries, Wait Stats, System Health, Blocking, Latch and Spinlock, CPU, Memory, File I/O, TempDB, Perfmon, Plan Cache, Client Timeout and Current Waits reads. It also covers `get_alert_history`, `get_analysis_facts`, `get_analysis_findings` and `get_resource_use_by_tag`. A window that is fully covered still says so, including an empty alert log or no findings.
+- **Darling's MCP reads now say when the window reaches past the data the store holds** ([#7010]) - this covers the SQL Server reads and the PostgreSQL reads. The PostgreSQL ones include the wait, query duration, I/O and database trends, autovacuum health, replication slots, wraparound risk, table bloat and extensions. Over a window that starts before the store's data, a data answer carries `effective_start`, `window_truncated` and `truncation_note`. An empty or unavailable answer carries them under `hints`, so a quiet-looking answer no longer reads as an all-clear. Five reads used to answer `window_truncated` false over such a window: the query duration, procedure duration and Query Store duration trends, `get_job_history` and `get_query_store_aborts`. `get_fleet_overview` marks the server cards that hold less data than the window. The autovacuum and replication slot all-clear no longer claims the whole window was quiet when the store holds only part of it. `get_pg_index_bloat` and `get_pg_column_stats` carry no notice, because their own coverage verdict says what the window held. Reads that answer one newest snapshot, such as `get_pg_buffer_usage` and `get_pg_plan_capture_readiness`, state `captured_at` and `age_seconds` instead.
+- **`backtest_custom_alert_rule` now says when the span reaches back past the stored samples** ([#7015]) - a replay over a span older than the store's raw samples did not say so, so a no-fire answer over a partly uncovered span read as complete. It now carries `effective_start`, `window_truncated` and `truncation_note`, as the other windowed tools do, and over several servers it reports the least covered one. `get_daily_summary_range` is unchanged: each day it returns already carries its own data state.
 
 ## [3.12.0] - 2026-10-30
 
@@ -6290,5 +6299,10 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#6970]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6970
 [#6971]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6971
 [#6977]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6977
+[#7005]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7005
+[#7010]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7010
+[#7014]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7014
+[#7015]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7015
 [#7016]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7016
 [#7017]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7017
+[#7023]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7023
