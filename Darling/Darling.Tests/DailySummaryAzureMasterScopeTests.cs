@@ -46,8 +46,7 @@ public sealed class DailySummaryAzureMasterScopeTests
            hourly wait chain. The DMV source has no database column and is left alone. */
         var keep = "(database_name IS NULL OR NOT (lower(database_name) = ANY(SELECT lower(x) FROM unnest($5::text[]) x)))";
         Assert.Contains(DailySummarySql.BprSourceWhere + " AND " + keep, scoped, StringComparison.Ordinal);
-        Assert.DoesNotContain(keep + "
-", plain, StringComparison.Ordinal);
+        Assert.DoesNotContain("unnest($5", plain, StringComparison.Ordinal);
         Assert.Equal(1, scoped.Split(keep).Length - 1);
     }
 
