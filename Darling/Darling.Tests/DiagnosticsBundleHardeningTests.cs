@@ -348,6 +348,18 @@ public sealed class DiagnosticsBundleHardeningTests
     }
 
     [Fact]
+    public void FleetOverview_PausedCollection_KeepsThePausedFlagAndDropsWhoPausedIt()
+    {
+        var fleet = JsonNode.Parse("""{"total":2,"collection":{"paused":true,"paused_by":"jsmith (viewer)","paused_utc":"2026-10-30T12:00:00"}}""");
+        var shaped = DiagnosticsBundleRunner.ShapeFleetOverview(fleet)!;
+        var collection = shaped["collection"]!.AsObject();
+        Assert.True(collection["paused"]!.GetValue<bool>());
+        Assert.False(collection.ContainsKey("paused_by"));
+        Assert.Equal("2026-10-30T12:00:00", collection["paused_utc"]!.GetValue<string>());
+        Assert.DoesNotContain("jsmith", shaped.ToJsonString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void ConfigShape_ServersByEngine_IsKeyedByTheParsedEngine_NeverByConfigText()
     {
         var config = new DarlingConfig
