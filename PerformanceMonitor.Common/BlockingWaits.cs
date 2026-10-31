@@ -281,13 +281,18 @@ public static class BlockingWaits
     SELECT {dcols}{Bucket("d", dmvTimeColumn)} AS bucket, d.{dmvTimeColumn} AS event_time, d.wait_time_ms
     FROM {dmvWaits} AS d
 ),
+{name}_xe_hours AS (
+    /* One row per (partition, hour) that holds an XE wait: the anti-join below then probes a set, not every wait. */
+    SELECT DISTINCT {cols}bucket
+    FROM {name}_xe
+),
 {name} AS (
     SELECT {cols}bucket, event_time, wait_time_ms, TRUE AS from_xe
     FROM {name}_xe
     UNION ALL
     SELECT {dcols}d.bucket, d.event_time, d.wait_time_ms, FALSE
     FROM {name}_dmv AS d
-    WHERE NOT EXISTS (SELECT 1 FROM {name}_xe AS x WHERE {match}x.bucket = d.bucket)
+    WHERE NOT EXISTS (SELECT 1 FROM {name}_xe_hours AS x WHERE {match}x.bucket = d.bucket)
 )";
     }
 

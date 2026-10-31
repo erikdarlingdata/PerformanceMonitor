@@ -581,6 +581,10 @@ LIMIT 200";
     /// that holds only such rows still reads as a snapshot (its time and freshness) with nothing blocked.
     /// </para>
     /// <para>
+    /// #7028: the total is <see cref="BlockingWaits.SnapshotTotalWaitMsSql"/>, the one SUM expression the blocking band's
+    /// snapshot arm aggregates too, so the band and this alert read the same measure.
+    /// </para>
+    /// <para>
     /// ONE statement, deliberately: Npgsql fails SILENTLY on multi-statement commands with positional
     /// parameters, so the freshness probe cannot be batched onto this — the snapshot time comes back as
     /// a column of this same aggregate instead, which is one round trip rather than two anyway.
@@ -589,7 +593,7 @@ LIMIT 200";
     public const string CurrentBlockingWaitSql = $@"
 SELECT
     collection_time,
-    CAST(COALESCE(SUM(wait_time_ms) FILTER (WHERE {BlockingWaits.NotSelfWaitSql}), 0) AS bigint) AS total_wait_ms,
+    {BlockingWaits.SnapshotTotalWaitMsSql} AS total_wait_ms,
     CAST(COUNT(DISTINCT blocked_spid) FILTER (WHERE {BlockingWaits.NotSelfWaitSql}) AS integer) AS blocked_sessions
 FROM dmv_blocking_snapshots
 WHERE server_id = $1

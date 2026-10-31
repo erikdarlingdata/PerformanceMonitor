@@ -82,7 +82,7 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ct, ServerId, ServerNa
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task TheFleetCard_ShowsOneWait_AndBandsOnTheReports(bool dmv)
+    public async Task TheFleetCard_ShowsOneWait_AndBandsOnTheWaits(bool dmv)
     {
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the live test.");
         var ct = TestContext.Current.CancellationToken;
@@ -97,13 +97,14 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ct, ServerId, ServerNa
                 postgres, now.AddHours(-1), now, now, cancellationToken: ct);
 
             var card = result.Cards.Single(c => c.ServerId == ServerId);
-            Assert.Equal(1, card.BlockingCount);                       // displayed: ONE wait
-            Assert.Equal(Reports, card.BlockingReportCount);           // the band's unit
-            Assert.Equal((double)Reports, card.BlockingRatePerHour);   // reports per hour
-            Assert.Equal(HealthSeverity.Critical, card.BlockingSeverity);
+            /* #7028: the band reads the same count the card shows, the blocking WAITS (#5644). One wait that SQL
+               Server reported 22 times is ONE wait to the band too, so it is no longer Critical by count. */
+            Assert.Equal(1, card.BlockingCount);
+            Assert.Equal(1.0, card.BlockingRatePerHour);
+            Assert.Equal(HealthSeverity.Healthy, card.BlockingSeverity);
             Assert.True(card.MaxBlockingWaitMs < 10_000, "the wait arm must not be what bands this card");
-            /* The re-band the fleet ranking runs reads the same report count. */
-            Assert.Equal(Reports, card.ToHealthMetrics().BlockingCount);
+            /* The re-band the fleet ranking runs reads the same wait count. */
+            Assert.Equal(1, card.ToHealthMetrics().BlockingCount);
             bodySucceeded = true;
         }
         finally

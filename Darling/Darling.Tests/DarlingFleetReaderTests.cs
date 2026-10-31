@@ -169,7 +169,7 @@ public sealed class DarlingFleetReaderSqlTests
         Assert.Contains("FROM v_blocked_process_reports", sql, StringComparison.Ordinal);
         Assert.Contains("FROM v_dmv_blocking_snapshots", sql, StringComparison.Ordinal);
         Assert.Contains("FULL OUTER JOIN", sql, StringComparison.Ordinal);
-        Assert.Contains("COALESCE(xe.server_id, dmv.server_id)", sql, StringComparison.Ordinal);
+        Assert.Contains("COALESCE(b.server_id, g.server_id)", sql, StringComparison.Ordinal);
         Assert.Contains("GROUP BY server_id", sql, StringComparison.Ordinal);
         Assert.Contains("event_time >= $1", sql, StringComparison.Ordinal);
         Assert.Contains("event_time <= $2", sql, StringComparison.Ordinal);
