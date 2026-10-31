@@ -73,7 +73,7 @@ public sealed class OverviewLanesUtcFrameTests
 
     /// <summary>
     /// Every other lane plots the sample's instant as the read returned it (<c>CollectionTime</c> and <c>Time</c> are
-    /// UTC), the file-I/O lane groups on it and plots the group's instant, and the ghost lines of all five lanes go
+    /// UTC), the file-I/O lane included, and the ghost lines of all five lanes go
     /// back onto the current axis through <c>TimeWindows.GhostX</c> on the server's zone, with no shift added.
     /// </summary>
     [Fact]
@@ -85,9 +85,8 @@ public sealed class OverviewLanesUtcFrameTests
         Assert.Contains("(d.CollectionTime.ToOADate(), d.WaitTimeMsPerSecond)", refresh, StringComparison.Ordinal);
         Assert.Equal(2, Regex.Matches(refresh, Regex.Escape("(d.Time.ToOADate(), (double)d.Count)")).Count);
         Assert.Contains("(d.CollectionTime.ToOADate(), d.BufferPoolMb)", refresh, StringComparison.Ordinal);
-        // The I/O lane plots the group's own instant (g.Key); the read-weighted latency (IoLatencyWeighting) only
-        // changes the Y value, so the X guarantee is unchanged.
-        Assert.Contains("(g.Key.ToOADate(), IoLatencyWeighting.Weighted(g.Select(x => (x.AvgReadLatencyMs, x.Reads))))", refresh, StringComparison.Ordinal);
+        // The I/O lane plots the point's own instant; the read is already one read-weighted point per time (#6970).
+        Assert.Contains("(d.CollectionTime.ToOADate(), d.ReadLatencyMs)", refresh, StringComparison.Ordinal);
 
         Assert.Contains("var zone = serverClock.AsTimeZone();", refresh, StringComparison.Ordinal);
         Assert.Equal(5, Regex.Matches(refresh, Regex.Escape("TimeWindows.GhostX(")).Count);

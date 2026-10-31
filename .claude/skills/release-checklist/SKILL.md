@@ -9,7 +9,7 @@ disable-model-invocation: false
 
 Run through the full release prep checklist for PerformanceMonitor. `$ARGUMENTS` is the target version (e.g., `3.3.0`).
 
-> **Scope (since v3.3.0):** the Full Dashboard and the CLI Installer are DEPRECATED and OUT of this process — they ship no release artifacts and get no live install/upgrade testing here. The Darling service zip and the Linux tarball DO get live install and upgrade testing, in section 8a. They still build and their test suites still run in CI on the release event, and they inherit the single `<Version>` with everything else in the tree (below). The release artifacts are: Lite (zip + Velopack Setup.exe), the Darling service zip, and the Darling Viewer Setup.exe.
+> **Scope (since v3.3.0):** the Full Dashboard and the CLI Installer are DEPRECATED and OUT of this process — they ship no release artifacts and get no live install/upgrade testing here. The Darling service zip and the Linux tarball DO get live install and upgrade testing, in section 8a. Their source is frozen in `deprecated/dashboard-installer-source.zip`: nothing builds or tests it in CI, and it does not take the single `<Version>` (below). The release artifacts are: Lite (zip + Velopack Setup.exe), the Darling service zip, and the Darling Viewer Setup.exe.
 
 ## Checklist
 
@@ -68,7 +68,7 @@ Do NOT add internal/implementation changes — only user-facing features and beh
 
 ### 3. Upgrade Scripts — Schema Change Audit (conditional)
 
-Applies ONLY when `install/` or `upgrades/` changed since the last release (the deprecated Dashboard edition remains on bug-fix support, so its schema discipline still holds when it IS touched):
+Applies ONLY when `install/` or `upgrades/` changed since the last release. The frozen Dashboard in the zip reads this schema, so its schema discipline still holds when it IS touched:
 
 1. All schema changes MUST go through the `upgrades/{from}-to-{to}/` folder — never ad hoc, never baked into base install scripts. View-only changes flow through `CREATE OR ALTER` re-runs and need no upgrade script.
 2. **List all .sql files in the upgrade folder and compare against `upgrade.txt`.** A script that is not listed does not run.
@@ -84,7 +84,7 @@ All projects must succeed with **0 Warning(s) / 0 Error(s)** — the repo's bar 
 
 The statement-column census test fails while any entry or watched writer is pending, in every Darling test run, with or without the variable. Run `DARLING_RELEASE_CUT=1 Darling/Darling.Tests/bin/Debug/net10.0-windows/Darling.Tests.exe -method "*StatementCensus_PendingEntries_BlockARelease*"` to see the list early; the cut proceeds only when it passes. The release workflow (build.yml, the "Statement filter release gate" step) runs the same test with the variable set before it publishes or packages anything, so a release cannot ship while an entry is pending even if this step is skipped; run it here first to see the list early.
 
-(The deprecated Installer/Dashboard test suites run in CI on the release event with the CI's own filter; they are no longer run from this checklist.)
+(The frozen Installer and Dashboard test suites are not built or run anywhere. See `deprecated/README.md`.)
 
 ### 5. Cloud Platform Testing (shared collector layer — test via DARLING)
 

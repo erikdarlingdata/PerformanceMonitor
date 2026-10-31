@@ -6,7 +6,7 @@ A tour of the collection pipeline for people who know SQL but don't know this co
 
 There is **one collection brain and two storage engines**. Every collector — the exact T-SQL sent to a monitored server, the result-row mapping, the delta rules, the default cadence, the retention horizon — is defined once in the shared `PerformanceMonitor.Collectors` library. **Lite** writes those rows to DuckDB; **Darling** writes the same rows to PostgreSQL. A collector change lands once and both editions get it.
 
-> The **Full / Dashboard edition is deprecated** (SQL Agent jobs running T-SQL stored procedures into a `PerformanceMonitor` database). It still builds and existing installs keep working, but it does not share the collector library and is not described here. Its docs live with its code: [deprecated/Dashboard/README.md](../deprecated/Dashboard/README.md), [deprecated/Installer/README.md](../deprecated/Installer/README.md), and the `install/*.sql` scripts at the repo root belong to it.
+> The **Full / Dashboard edition is deprecated** (SQL Agent jobs running T-SQL stored procedures into a `PerformanceMonitor` database). Existing installs keep working, but it does not share the collector library and is not described here. Its source is frozen in a zip (see [deprecated/README.md](../deprecated/README.md)). Its READMEs are inside the zip. The `install/*.sql` scripts at the repo root belong to it.
 
 ---
 

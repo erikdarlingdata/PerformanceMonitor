@@ -1557,6 +1557,32 @@ WHERE server_id = $1
 ORDER BY collection_time DESC
 LIMIT 1";
 
+    /// <summary>
+    /// #6968: <see cref="TempDbSpaceSql"/> bounded below by <c>collection_time</c> $2, a value a previous read of the same server
+    /// returned (<see cref="NewestRowFloor"/>), never a clock. The planner then excludes every older chunk, so a server whose
+    /// newest row is old, or that has none, no longer opens every chunk between that row and now on each pass. Same
+    /// ordering, same row.
+    /// </summary>
+    public const string TempDbSpaceSinceSql = @"
+SELECT
+    total_reserved_mb,
+    unallocated_mb,
+    user_object_reserved_mb,
+    internal_object_reserved_mb,
+    version_store_reserved_mb,
+    top_session_tempdb_mb,
+    top_session_id,
+    max_size_mb,
+    collection_time
+FROM tempdb_stats
+WHERE server_id = $1
+AND   collection_time >= $2
+ORDER BY collection_time DESC
+LIMIT 1";
+
+    /// <summary>Where each server's next tempdb read starts (#6968).</summary>
+    private readonly NewestRowFloor _tempDbFloor = new();
+
     public Task<TempDbSpaceInfo?> GetTempDbSpaceAsync(
         string serverKey, CancellationToken cancellationToken = default)
     {
@@ -1579,34 +1605,48 @@ LIMIT 1";
         var serverId = ParseServerKey(serverKey);
 
         await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
-        using var command = new NpgsqlCommand(TempDbSpaceSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds };
-        command.Parameters.AddWithValue(serverId);
-
-        using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        if (await reader.ReadAsync(cancellationToken))
+        TempDbSpaceInfo? found = null;
+        /* #6968: the shared floor loop remembers where the newest row is. A bounded read that finds nothing means the row the
+           bound came from is gone, so it asks again without one (the read that shipped before). collection_time is NOT NULL,
+           so a found row has one. */
+        await _tempDbFloor.ReadAsync(serverId, async since =>
         {
-            return new TempDbSpaceInfo
+            found = null;
+            using var command = new NpgsqlCommand(since is null ? TempDbSpaceSql : TempDbSpaceSinceSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds };
+            command.Parameters.AddWithValue(serverId);
+            if (since is { } floor)
             {
-                TotalReservedMb = reader.IsDBNull(0) ? 0 : ToDouble(reader.GetValue(0)),
-                UnallocatedMb = reader.IsDBNull(1) ? 0 : ToDouble(reader.GetValue(1)),
-                UserObjectReservedMb = reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2)),
-                InternalObjectReservedMb = reader.IsDBNull(3) ? 0 : ToDouble(reader.GetValue(3)),
-                VersionStoreReservedMb = reader.IsDBNull(4) ? 0 : ToDouble(reader.GetValue(4)),
-                TopConsumerMb = reader.IsDBNull(5) ? 0 : ToDouble(reader.GetValue(5)),
-                TopConsumerSessionId = reader.IsDBNull(6) ? 0 : reader.GetInt32(6),
-                /* NULL on every row collected before the V81 rung, and 0 is what "no ceiling measured"
-                   is spelled as — so history keeps reporting the percentage it always did rather than
-                   dividing by a zero cap. */
-                MaxSizeMb = reader.IsDBNull(7) ? 0 : ToDouble(reader.GetValue(7)),
-                /* #3653 (A5): naive UTC off the `timestamp` column, read back Kind Unspecified and stamped Utc
-                   because that is what it IS and what the property's name says — the #3636 file-growth read's
-                   idiom. The engine only ever compares one server's stamps with each other, so the Kind is
-                   honesty rather than arithmetic. */
-                CollectionTimeUtc = reader.IsDBNull(8) ? null : DateTime.SpecifyKind(reader.GetDateTime(8), DateTimeKind.Utc)
-            };
-        }
+                command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = floor });
+            }
 
-        return null;
+            using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (await reader.ReadAsync(cancellationToken))
+            {
+                found = new TempDbSpaceInfo
+                {
+                    TotalReservedMb = reader.IsDBNull(0) ? 0 : ToDouble(reader.GetValue(0)),
+                    UnallocatedMb = reader.IsDBNull(1) ? 0 : ToDouble(reader.GetValue(1)),
+                    UserObjectReservedMb = reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2)),
+                    InternalObjectReservedMb = reader.IsDBNull(3) ? 0 : ToDouble(reader.GetValue(3)),
+                    VersionStoreReservedMb = reader.IsDBNull(4) ? 0 : ToDouble(reader.GetValue(4)),
+                    TopConsumerMb = reader.IsDBNull(5) ? 0 : ToDouble(reader.GetValue(5)),
+                    TopConsumerSessionId = reader.IsDBNull(6) ? 0 : reader.GetInt32(6),
+                    /* NULL on every row collected before the V81 rung, and 0 is what "no ceiling measured"
+                       is spelled as, so history keeps reporting the percentage it always did rather than
+                       dividing by a zero cap. */
+                    MaxSizeMb = reader.IsDBNull(7) ? 0 : ToDouble(reader.GetValue(7)),
+                    /* #3653 (A5): naive UTC off the `timestamp` column, read back Kind Unspecified and stamped Utc
+                       because that is what it IS and what the property's name says (the #3636 file-growth read's
+                       idiom). The engine only ever compares one server's stamps with each other, so the Kind is
+                       honesty rather than arithmetic. */
+                    CollectionTimeUtc = reader.IsDBNull(8) ? null : DateTime.SpecifyKind(reader.GetDateTime(8), DateTimeKind.Utc)
+                };
+            }
+
+            return found?.CollectionTimeUtc;
+        });
+
+        return found;
     }
 
     /* ---------------- anomalous jobs ---------------- */
