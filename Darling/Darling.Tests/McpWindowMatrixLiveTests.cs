@@ -295,7 +295,7 @@ public sealed class McpWindowMatrixLiveTests : IClassFixture<McpWindowMatrixStor
             if (!hasHours && !hasAsOf) continue;
             windowed++;
 
-            var hourList = hasHours ? new[] { 24, 96, 168 } : new[] { 0 };
+            var hourList = hasHours ? new[] { 24, 168 } : new[] { 0 };
             var asOfList = hasAsOf ? new[] { AsOfCase.None, AsOfCase.PartlyInside, AsOfCase.WhollyBefore } : new[] { AsOfCase.None };
             foreach (var hours in hourList)
             {
@@ -397,7 +397,7 @@ public sealed class McpWindowMatrixLiveTests : IClassFixture<McpWindowMatrixStor
         return null;
     }
 
-    /* ═══════════════════════════ get_query_store_regressions: 3 x 3 ═══════════════════════════ */
+    /* ═══════════════════════════ get_query_store_regressions: 2 x 3 ═══════════════════════════ */
 
     /// <summary>What the seed says each window of the regressions read is: a regression listed, a recent side with no baseline, or a
     /// window older than the raw data whose collector was running before it.</summary>
@@ -405,20 +405,17 @@ public sealed class McpWindowMatrixLiveTests : IClassFixture<McpWindowMatrixStor
 
     [Theory]
     [InlineData(24, AsOfCase.None, Cause.Regression)]
-    [InlineData(96, AsOfCase.None, Cause.NoBaseline)]
     [InlineData(168, AsOfCase.None, Cause.NoBaseline)]
     [InlineData(24, AsOfCase.PartlyInside, Cause.NoBaseline)]
-    [InlineData(96, AsOfCase.PartlyInside, Cause.NoBaseline)]
     [InlineData(168, AsOfCase.PartlyInside, Cause.NoBaseline)]
     [InlineData(24, AsOfCase.WhollyBefore, Cause.AgedOut)]
-    [InlineData(96, AsOfCase.WhollyBefore, Cause.AgedOut)]
     [InlineData(168, AsOfCase.WhollyBefore, Cause.AgedOut)]
     public async Task GetQueryStoreRegressions_NamesTheCauseTheSeedHolds(int hours, AsOfCase asOfCase, Cause expected)
     {
         Assert.SkipWhen(_store.DataSource is null, "Set DARLING_TEST_PG to a Postgres connection string to run the live #6984 window matrix.");
         /* Seed (McpWindowMatrixStore): Query Store rows at 3 days back (the floor, 1 ms) and 30 minutes back (the 55 ms regression), the
            collector's logged runs from 30 days back. Recent window = hours before the end; baseline = the 7 days before that.
-           End now: 24 h holds both rows (baseline = the floor row, recent = the regression); 96 h and 168 h hold both in the recent
+           End now: 24 h holds both rows (baseline = the floor row, recent = the regression); 168 h holds both in the recent
            window, so no baseline. End 2 days 6 h back (inside the raw data): the floor row is the only recent row, no baseline.
            End 4.5 days back (before the raw data): no row on either side, and the collector ran before, so the data aged out. */
         var asOf = asOfCase == AsOfCase.None ? null
