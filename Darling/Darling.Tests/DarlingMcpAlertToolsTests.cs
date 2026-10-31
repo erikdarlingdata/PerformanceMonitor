@@ -1334,7 +1334,8 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         AgentAlertGapsEnabled: true,
         BackupOverdueEnabled: true, LogBackupOverdueEnabled: true, CheckDbOverdueEnabled: true,
         IdentityCapacityEnabled: true, IdentityCapacityWarningPercent: 72, IdentityCapacityCriticalPercent: 92,
-        BlockingWarnPerHour: 6.5, BlockingCriticalPerHour: 22.5, BlockingWarnWaitSeconds: 11.5, BlockingCriticalWaitSeconds: 62.5);
+        BlockingWarnPerHour: 6.5, BlockingCriticalPerHour: 22.5, BlockingWarnWaitSeconds: 11.5, BlockingCriticalWaitSeconds: 62.5,
+        DailyReportEnabled: true, DailyReportSendAt: "06:30", DailyReportTimeZone: "America/New_York", DailyReportTitle: "Morning report");
 
     [Fact]
     public void AlertSettingsSql_ReadsSingleGlobalRow()

@@ -547,7 +547,12 @@ LIMIT 1";
         double BlockingWarnPerHour,
         double BlockingCriticalPerHour,
         double BlockingWarnWaitSeconds,
-        double BlockingCriticalWaitSeconds);
+        double BlockingCriticalWaitSeconds,
+        /* #7041 (V232): the Daily Health Report's switch (boolean NOT NULL, default off), send time (time NOT NULL, 07:00, carried as HH:mm), zone (text, NULL = the service host's zone) and title (text, NULL = the shipped title). */
+        bool DailyReportEnabled,
+        string DailyReportSendAt,
+        string? DailyReportTimeZone,
+        string? DailyReportTitle);
 
     /// <summary>The single global alert-settings row (id=1) — the viewer's <c>AlertSettingsSelectSql</c>. The
     /// columns are read in the SAME order the service reads them (<c>StoreConfigProvider</c>), and
@@ -588,7 +593,8 @@ SELECT enabled, cpu_enabled, cpu_threshold_percent, cpu_mode, blocking_enabled, 
        client_timeouts_warning_multiple, client_timeouts_critical_multiple,
        agent_alert_gaps_enabled, backup_overdue_enabled, log_backup_overdue_enabled, checkdb_overdue_enabled,
        identity_capacity_enabled, identity_capacity_warning_percent, identity_capacity_critical_percent,
-       blocking_warn_per_hour, blocking_critical_per_hour, blocking_warn_wait_seconds, blocking_critical_wait_seconds
+       blocking_warn_per_hour, blocking_critical_per_hour, blocking_warn_wait_seconds, blocking_critical_wait_seconds,
+       daily_report_enabled, daily_report_send_at, daily_report_time_zone, daily_report_title
 FROM config_alert_settings
 WHERE id = 1";
 
@@ -661,7 +667,12 @@ WHERE id = 1";
             /* #6875 (V224): the Identity Capacity switch and bars at 83-85. */
             reader.GetBoolean(83), reader.GetInt32(84), reader.GetInt32(85),
             /* #6927 (V228): the four blocking band tiers at 86-89. */
-            reader.GetDouble(86), reader.GetDouble(87), reader.GetDouble(88), reader.GetDouble(89));
+            reader.GetDouble(86), reader.GetDouble(87), reader.GetDouble(88), reader.GetDouble(89),
+            /* #7041 (V232): the Daily Health Report switch, send time, zone and title at 90-93. */
+            reader.GetBoolean(90),
+            PerformanceMonitor.Darling.Service.Reports.DailyHealthReportSettings.FormatSendAt(TimeOnly.FromTimeSpan(reader.GetTimeSpan(91))),
+            reader.IsDBNull(92) ? null : reader.GetString(92),
+            reader.IsDBNull(93) ? null : reader.GetString(93));
     }
 
     /* ─────────────────────── delivery cooldown (a SECOND config table) ─────────────────────── */

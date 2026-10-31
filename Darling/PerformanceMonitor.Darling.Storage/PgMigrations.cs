@@ -2978,6 +2978,7 @@ $rung$;";
         new Migration(227, "threshold-override-tag-scope", V227Sql),
         new Migration(228, "blocking-band-tiers", V228Sql),
         new Migration(229, "notification-route-severities", V229Sql),
+        new Migration(232, "daily-health-report", V232Sql),
     };
 
     /// <summary>
@@ -3093,6 +3094,23 @@ BEGIN
     END IF;
 END
 $$;";
+
+    /// <summary>
+    /// V232 (#7041): the scheduled Daily Health Report's four settings on the alert settings row. <c>daily_report_enabled</c> ships FALSE (the
+    /// report is off until an operator turns it on), <c>daily_report_send_at</c> is a local time of day defaulting to 07:00, and
+    /// <c>daily_report_time_zone</c> (an IANA id; NULL is the service host's zone) and <c>daily_report_title</c> (NULL is "Daily Health Report")
+    /// carry no default. Idempotent: every column is added with IF NOT EXISTS. Table-level grants already cover new columns on this table, so
+    /// no GRANT is added. Catalog-only, no backfill and no view refresh. An older build ignores the columns.
+    /// </summary>
+    private const string V232Sql = @"
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS daily_report_enabled boolean NOT NULL DEFAULT FALSE;
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS daily_report_send_at time NOT NULL DEFAULT '07:00';
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS daily_report_time_zone text;
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS daily_report_title text;";
 
     /// <summary>
     /// V189 (#5867): <c>collect.query_store_compose_stamp_failures</c>, the failure record of the Query Store compose builder: one row
