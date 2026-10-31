@@ -24,11 +24,18 @@ Releases before 3.0.0 are not archived: those entries carry no prose to move.
 ### Changed
 
 - **Write-latency anomalies and the write latency fact now read log files and tempdb data files only** ([#6959]) - user data-file writes are checkpoint and lazy-writer work no session waits on, so databases with several data files no longer trip the gate. The write latency card now says its figure covers log files and tempdb, and a separate sentence gives the user data files' own write latency.
+- **The alert pass no longer reads old chunks to find a server's newest CPU and tempdb sample** ([#6968]) - each read now starts at the newest time the last read returned. Before, each 30-second pass read every chunk between a server's newest sample and now. For a server with an old sample, or no sample, that was many chunks. The change watch's database-scoped configuration check now reads only the databases captured since its last check.
+- **Six more alert-pass reads start from the newest row they last found** ([#7017]) - they use the same start point as the CPU and tempdb reads. These are the PVS pressure, SQL Agent status, volume free space and database state reads, and the two Availability Group state reads. The four database state upkeep statements use the same start point. On a production store, these reads used about 300 seconds of store time a day. The results do not change.
+- **The hourly store size snapshot estimates hypertables, aggregates and the catch-all rows from the catalog** ([#6971]) - it no longer gets a file size for each chunk. The named tables and the dimension rows are still measured exactly each hour, and the daily snapshot is still exact.
+- **The collection health refresh no longer reads every materialized hour of the aggregate to find missing hours** ([#6969])
+- **The Overview timeline's I/O Latency row loads one row for each time bucket** ([#6970]) - it loaded one row for each file before. On a server with 16 files, that was about 15 times as many rows. Darling and Lite draw the same line.
+- **Two hourly store upkeep reads no longer read the full index and job catalogs** ([#7016]) - the index check read every index in the database. It needs the indexes of one table only. The aggregate compression check read the job catalog once for each aggregate. On a test store with 8,321 chunks, the index check went from about 1.4 million buffer reads to about 100.
 
 ### Fixed
 
 - **`uninstall-darling.ps1 -PurgeData` now removes the `PerformanceMonitor Darling Operators` group the install created** ([#6953]) - the purge deleted the store but left the local group behind. It now removes the group, with its members, only when its description is the one the installer sets. A group with any other description stays, and the script prints the command to remove it by hand.
 - **Clicking the triage link in a Slack alert no longer shows "This app is not configured to handle interactive responses"** ([#6965]) - the link was a Slack button. Slack sends a request to the app on every button click, even when the button only opens a link. A Slack app set up with only an incoming webhook has nowhere to receive that request, so Slack showed the warning. The link is now plain text in the alert. It opens the triage page and sends nothing to the app.
+- **The record of chunk-interval reconcile runs is now deleted after 30 days** ([#6977]) - before, no rows were deleted. The record gets one row a day, plus one for each service start.
 
 ## [3.12.0] - 2026-10-30
 
@@ -6278,3 +6285,10 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#6953]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6953
 [#6959]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6959
 [#6965]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6965
+[#6968]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6968
+[#6969]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6969
+[#6970]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6970
+[#6971]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6971
+[#6977]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6977
+[#7016]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7016
+[#7017]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7017
