@@ -3165,8 +3165,8 @@ internal sealed class DarlingSelfAlertEvaluator
             return;
         }
 
-        var buildClock = Stopwatch.StartNew();
         DailyHealthReportRendered report;
+        var buildClock = Stopwatch.StartNew();
         try
         {
             report = await source.BuildAsync(schedule.MostRecentSendAtUtc(now), cancellationToken);
@@ -3275,7 +3275,7 @@ internal sealed class DarlingSelfAlertEvaluator
                     _logger?.LogWarning(ex,
                         "Daily health report delivery stamp could not be read after {ElapsedMs} ms; gating on process memory from here, which re-sends once per restart until the store answers",
                         stampClock.ElapsedMilliseconds);
-                    _readFailures?.RecordReadFailure(null, "daily-document delivery-stamp self-alert", stampClock.ElapsedMilliseconds);
+                    _readFailures?.RecordReadFailure(null, "daily-health-report delivery-stamp self-alert", stampClock.ElapsedMilliseconds);
                 }
             }
 
@@ -3317,7 +3317,7 @@ internal sealed class DarlingSelfAlertEvaluator
         {
             /* NOT counted by #3013's swallowed-read counter: a stamp WRITE, not a condition read. */
             _logger?.LogWarning(ex,
-                "The daily health report was delivered but its delivery stamp could not be written; process memory gates it until the next restart, which will re-send it");
+                "The daily health report went out but its stamp could not be persisted; process memory gates it until the next restart, which will re-send it");
         }
     }
 
