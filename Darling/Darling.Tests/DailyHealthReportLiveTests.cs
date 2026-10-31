@@ -98,6 +98,79 @@ public sealed class DailyHealthReportLiveTests
         }
     }
 
+    /// <summary>
+    /// The counts are aggregates over the whole period, not a count of the newest page. 20,500 alerts and 20,500 failed job outcomes
+    /// (more than the 20,000 rows the report once read) spread over the period, plus a flood of failed steps that once used up the job
+    /// page, are all counted, including the oldest rows at the start of the period.
+    /// </summary>
+    [Fact]
+    public async Task Build_CountsEveryRowOfAFullPeriod_NotTheNewestPage()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the #7041 Daily Health Report live test.");
+
+        const int rows = 20_500;
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await CleanupAsync(connection, ct);
+
+        await using var dataSource = NpgsqlDataSource.Create(connectionString!);
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            var now = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
+
+            /* One row every 4 seconds back from 10 minutes ago, so the oldest sits near the start of the 24 hours. */
+            await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO config_alert_log
+    (alert_time, server_id, server_name, metric_name, current_value, threshold_value,
+     alert_sent, notification_type, send_error, muted, dismissed, detail_text, context_json)
+SELECT $1::timestamp - make_interval(secs => g * 4), $2, $3, 'Blocking', 1, 1, FALSE, 'none', NULL, FALSE, FALSE, NULL, NULL
+FROM generate_series(1, $4::int) AS g",
+                DarlingMcpTestData.Naive(now.AddMinutes(-10)), ServerId, ServerName, rows);
+
+            await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO job_history (job_history_id, collection_time, server_id, server_name, instance_id,
+                         job_id, job_name, job_enabled, category_name, step_id, step_name, run_status,
+                         run_status_desc, run_datetime, run_duration_seconds, retries_attempted, message)
+SELECT $5 + g, $1::timestamp - make_interval(secs => g * 4), $2, $3, $5 + g,
+       'Heavy job', 'Heavy job', true, 'cat', 0, 'step', 0,
+       'The job failed.', $1::timestamp - make_interval(secs => g * 4), 5, 0, NULL
+FROM generate_series(1, $4::int) AS g",
+                DarlingMcpTestData.Naive(now.AddMinutes(-10)), ServerId, ServerName, rows, 8_000_000L);
+
+            /* Newer failed steps (step 1) of the same job: not job outcomes, and newer than every outcome above. */
+            await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO job_history (job_history_id, collection_time, server_id, server_name, instance_id,
+                         job_id, job_name, job_enabled, category_name, step_id, step_name, run_status,
+                         run_status_desc, run_datetime, run_duration_seconds, retries_attempted, message)
+SELECT $5 + g, $1::timestamp - make_interval(secs => g), $2, $3, $5 + g,
+       'Heavy job', 'Heavy job', true, 'cat', 1, 'step', 0,
+       'The job failed.', $1::timestamp - make_interval(secs => g), 5, 0, NULL
+FROM generate_series(1, $4::int) AS g",
+                DarlingMcpTestData.Naive(now.AddMinutes(-5)), ServerId, ServerName, rows, 9_000_000L);
+
+            var data = await new DailyHealthReportBuilder(dataSource).BuildDataAsync(now, ct);
+
+            var server = Assert.Single(data.Servers, s => s.ServerId == ServerId);
+            Assert.Equal(("Blocking", rows), (server.Alerts.Single().Metric, server.Alerts.Single().Count));
+            Assert.Equal(rows, server.AlertTotal);
+            var job = Assert.Single(server.FailedJobs);
+            Assert.Equal(("Heavy job", rows), (job.JobName, job.Failures));
+            Assert.Equal(now.AddMinutes(-10).AddSeconds(-4), job.LastFailureUtc);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, CleanupAsync);
+        }
+    }
+
     private static Task InsertAlertAsync(NpgsqlConnection connection, CancellationToken ct, string metric, DateTime at) =>
         DarlingMcpTestData.ExecAsync(connection, ct, @"
 INSERT INTO config_alert_log

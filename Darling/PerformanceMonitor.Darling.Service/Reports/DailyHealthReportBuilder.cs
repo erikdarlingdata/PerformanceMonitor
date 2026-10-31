@@ -38,9 +38,6 @@ internal sealed class DailyHealthReportBuilder : IDailyHealthReportSource
     /// <summary>The metric name the report's own delivery is logged under, kept out of the count of alerts fired.</summary>
     internal const string DeliveryMetricName = "Daily Health Report";
 
-    /// <summary>The longest job history and alert history page one build reads; the reports counts are of these rows.</summary>
-    private const int HistoryRowCap = 20_000;
-
     private readonly NpgsqlDataSource _postgres;
 
     public DailyHealthReportBuilder(NpgsqlDataSource postgres)
@@ -73,37 +70,8 @@ internal sealed class DailyHealthReportBuilder : IDailyHealthReportSource
             _postgres, start, end, DateTime.UtcNow, worstCount: int.MaxValue, cancellationToken: ct).ConfigureAwait(false);
         var reasonById = fleet.WorstServers.ToDictionary(w => w.ServerId, w => w.Reason);
 
-        var alertRows = await DarlingAlertReader.GetAlertHistoryPageAsync(
-            _postgres, start, end, serverId: null, HistoryRowCap, includeDismissed: true, cancellationToken: ct).ConfigureAwait(false);
-        var alertsByServer = alertRows
-            .Where(a => !AlertMetricClassifier.IsResolution(a.MetricName)
-                        && !string.Equals(a.MetricName, DeliveryMetricName, StringComparison.OrdinalIgnoreCase))
-            .GroupBy(a => a.ServerId)
-            .ToDictionary(
-                g => g.Key,
-                g => (IReadOnlyList<DailyHealthAlertCount>)g
-                    .GroupBy(a => a.MetricName, StringComparer.OrdinalIgnoreCase)
-                    .Select(m => new DailyHealthAlertCount(m.First().MetricName, m.Count()))
-                    .OrderByDescending(m => m.Count).ThenBy(m => m.Metric, StringComparer.OrdinalIgnoreCase)
-                    .ToList());
-
-        var jobRows = await DarlingJobHistoryReader.GetAsync(
-            _postgres, start, serverId: null, HistoryRowCap, McpCommandDeadlines.ReadSeconds,
-            new JobHistoryFilter(RunStatus: 0, UntilUtc: end), ct).ConfigureAwait(false);
-        var jobsByServer = jobRows
-            .Where(j => j.StepId == 0 && j.RunDateTimeUtc is { } at && at >= start && at <= end)
-            .GroupBy(j => j.ServerId)
-            .ToDictionary(
-                g => g.Key,
-                g => (IReadOnlyList<DailyHealthFailedJob>)g
-                    .GroupBy(j => j.JobName, StringComparer.OrdinalIgnoreCase)
-                    .Select(j =>
-                    {
-                        var last = j.OrderByDescending(r => r.RunDateTimeUtc).First();
-                        return new DailyHealthFailedJob(last.JobName, j.Count(), last.RunDateTimeUtc!.Value, last.Message);
-                    })
-                    .OrderByDescending(j => j.Failures).ThenBy(j => j.JobName, StringComparer.OrdinalIgnoreCase)
-                    .ToList());
+        var alertsByServer = await ReadAlertCountsAsync(start, end, ct).ConfigureAwait(false);
+        var jobsByServer = await ReadFailedJobsAsync(start, end, fleet.Cards.Select(c => c.ServerId).ToList(), ct).ConfigureAwait(false);
 
         var disks = await ReadVolumesAsync(start, end, ct).ConfigureAwait(false);
 
@@ -232,6 +200,130 @@ JOIN newest AS n ON n.server_id = d.server_id AND n.collection_time = d.collecti
 WHERE d.volume_mount_point IS NOT NULL
 AND   d.volume_total_mb > 0
 GROUP BY d.server_id, d.volume_mount_point";
+
+    /// <summary>
+    /// The period's alert counts per (server, metric): $1 window start, $2 window end (naive UTC), $3 the report's own delivery row,
+    /// which is left out. An aggregate over the whole window with no page, so a busy fleet is counted in full (the report's counts are
+    /// not a fact about a capped page). Dismissed rows count: they fired. Resolution rows are dropped in code by their name.
+    /// </summary>
+    internal const string PeriodAlertCountsSql = @"
+SELECT a.server_id, a.metric_name, COUNT(*) AS fired
+FROM config_alert_log AS a
+WHERE a.alert_time >= $1
+AND   a.alert_time <= $2
+AND   lower(a.metric_name) <> lower($3)
+GROUP BY a.server_id, a.metric_name";
+
+    private async Task<Dictionary<int, IReadOnlyList<DailyHealthAlertCount>>> ReadAlertCountsAsync(DateTime start, DateTime end, CancellationToken ct)
+    {
+        var rows = new List<(int ServerId, string Metric, long Count)>();
+        await using (var command = _postgres.CreateCommand(PeriodAlertCountsSql))
+        {
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            DarlingMcpReadParameters.AddTimestamp(command, start);
+            DarlingMcpReadParameters.AddTimestamp(command, end);
+            DarlingMcpReadParameters.AddText(command, DeliveryMetricName);
+            await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
+            while (await reader.ReadAsync(ct).ConfigureAwait(false))
+            {
+                rows.Add((reader.IsDBNull(0) ? 0 : reader.GetInt32(0), reader.IsDBNull(1) ? "" : reader.GetString(1), reader.GetInt64(2)));
+            }
+        }
+
+        return CountAlerts(rows);
+    }
+
+    /// <summary>Folds (server, metric, count) rows into each server's counts: resolutions dropped, metric names that differ only by
+    /// case summed under the first spelling, most frequent first.</summary>
+    internal static Dictionary<int, IReadOnlyList<DailyHealthAlertCount>> CountAlerts(IEnumerable<(int ServerId, string Metric, long Count)> rows) =>
+        rows
+            .Where(a => !AlertMetricClassifier.IsResolution(a.Metric)
+                        && !string.Equals(a.Metric, DeliveryMetricName, StringComparison.OrdinalIgnoreCase))
+            .GroupBy(a => a.ServerId)
+            .ToDictionary(
+                g => g.Key,
+                g => (IReadOnlyList<DailyHealthAlertCount>)g
+                    .GroupBy(a => a.Metric, StringComparer.OrdinalIgnoreCase)
+                    .Select(m => new DailyHealthAlertCount(m.First().Metric, (int)Math.Min(int.MaxValue, m.Sum(r => r.Count))))
+                    .OrderByDescending(m => m.Count).ThenBy(m => m.Metric, StringComparer.OrdinalIgnoreCase)
+                    .ToList());
+
+    /// <summary>
+    /// The period's failed Agent job outcomes per (server, job): $1 server ids, $2 each server's window start and $3 its window end as
+    /// that server's own wall clock (<c>run_datetime</c> is the server's local time, converted with its clock in code so a DST zone is
+    /// exact), $4 the <c>collection_time</c> floor that lets the planner skip chunks. Only step 0 (the job's own outcome) with
+    /// <c>run_status = 0</c> (failed) counts. The count is a window over every matching row, taken before DISTINCT ON keeps the newest
+    /// one for its time and message, so the count has no page.
+    /// </summary>
+    internal const string PeriodFailedJobsSql = @"
+SELECT DISTINCT ON (jh.server_id, lower(jh.job_name))
+    jh.server_id,
+    jh.job_name,
+    COUNT(*) OVER (PARTITION BY jh.server_id, lower(jh.job_name)) AS failures,
+    jh.run_datetime,
+    jh.message
+FROM unnest($1::int[], $2::timestamp[], $3::timestamp[]) AS w(server_id, window_start, window_end)
+JOIN job_history AS jh ON jh.server_id = w.server_id
+WHERE jh.collection_time >= $4
+AND   jh.step_id = 0
+AND   jh.run_status = 0
+AND   jh.run_datetime >= w.window_start
+AND   jh.run_datetime <= w.window_end
+ORDER BY jh.server_id, lower(jh.job_name), jh.run_datetime DESC, jh.instance_id DESC";
+
+    private async Task<Dictionary<int, IReadOnlyList<DailyHealthFailedJob>>> ReadFailedJobsAsync(
+        DateTime start, DateTime end, List<int> serverIds, CancellationToken ct)
+    {
+        var result = new Dictionary<int, IReadOnlyList<DailyHealthFailedJob>>();
+        if (serverIds.Count == 0)
+        {
+            return result;
+        }
+
+        var clocks = await DarlingServerClocksReader.GetAsync(_postgres, serverId: null, McpCommandDeadlines.ReadSeconds, ct).ConfigureAwait(false);
+        var starts = new DateTime[serverIds.Count];
+        var ends = new DateTime[serverIds.Count];
+        for (var i = 0; i < serverIds.Count; i++)
+        {
+            var clock = DarlingServerClocksReader.ClockFor(clocks, serverIds[i]);
+            starts[i] = DateTime.SpecifyKind(clock.ToServerLocal(start), DateTimeKind.Unspecified);
+            ends[i] = DateTime.SpecifyKind(clock.ToServerLocal(end), DateTimeKind.Unspecified);
+        }
+
+        var rows = new List<DailyHealthFailedJobRow>();
+        await using (var command = _postgres.CreateCommand(PeriodFailedJobsSql))
+        {
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            command.Parameters.Add(new NpgsqlParameter<int[]> { TypedValue = serverIds.ToArray() });
+            command.Parameters.Add(new NpgsqlParameter<DateTime[]> { TypedValue = starts });
+            command.Parameters.Add(new NpgsqlParameter<DateTime[]> { TypedValue = ends });
+            command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = EventWindowFloor.For(start) });
+            await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
+            while (await reader.ReadAsync(ct).ConfigureAwait(false))
+            {
+                var serverId = reader.GetInt32(0);
+                var clock = DarlingServerClocksReader.ClockFor(clocks, serverId);
+                rows.Add(new DailyHealthFailedJobRow(
+                    serverId,
+                    reader.IsDBNull(1) ? "" : reader.GetString(1),
+                    reader.GetInt64(2),
+                    clock.ToUtc(reader.GetDateTime(3)),
+                    reader.IsDBNull(4) ? null : reader.GetString(4)));
+            }
+        }
+
+        foreach (var group in rows.GroupBy(r => r.ServerId))
+        {
+            result[group.Key] = group
+                .Select(r => new DailyHealthFailedJob(r.JobName, (int)Math.Min(int.MaxValue, r.Failures), r.LastRunUtc, r.Message))
+                .OrderByDescending(j => j.Failures).ThenBy(j => j.JobName, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+
+        return result;
+    }
+
+    private readonly record struct DailyHealthFailedJobRow(int ServerId, string JobName, long Failures, DateTime LastRunUtc, string? Message);
 
     private async Task<Dictionary<int, List<VolumeFreeSpaceInfo>>> ReadVolumesAsync(DateTime start, DateTime end, CancellationToken ct)
     {

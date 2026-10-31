@@ -97,6 +97,14 @@ public class DailyHealthReportDeliveryTests
         var second = new DateTime(2026, 11, 1, 6, 30, 0, DateTimeKind.Utc);
         Assert.True(s.IsDue(first));
         Assert.Equal(s.LocalDate(first), s.LocalDate(second));
+
+        /* The period ends at the FIRST 01:30 (05:30Z), not an hour later at the second. TimeZoneInfo.ConvertTimeToUtc alone takes the
+           second, which put the end in the future and made get_daily_health_report refuse the day as not yet ended. */
+        Assert.Equal(first, s.MostRecentSendAtUtc(first));
+        Assert.Equal(first, s.MostRecentSendAtUtc(first.AddMinutes(10)));
+        var sendAt = new TimeOnly(1, 30);
+        Assert.Equal(first, DailyHealthReportPeriod.EndUtcFor(new DateOnly(2026, 11, 1), sendAt, zone));
+        Assert.Equal(new DateOnly(2026, 11, 1), DailyHealthReportPeriod.LatestEndedDate(first, sendAt, zone));
     }
 
     /* ---------------- the scheduled send ---------------- */
@@ -124,6 +132,13 @@ public class DailyHealthReportDeliveryTests
         public List<AlertOutcome> Outcomes { get; } = new();
         public bool Fail { get; set; }
 
+        /// <summary>Stands in for the per-(server, metric) delivery cooldown: every call after the first reports throttled, unless the
+        /// alert's context asks to bypass the cooldown, as the real email and webhook channels do.</summary>
+        public bool CooldownAfterFirstSend { get; set; }
+
+        /// <summary>Every call reports throttled whatever the context says (a cooldown the context cannot bypass).</summary>
+        public bool AlwaysThrottled { get; set; }
+
         public Task DeliverAsync(AlertOutcome outcome, CancellationToken cancellationToken = default)
         {
             Outcomes.Add(outcome);
@@ -132,10 +147,12 @@ public class DailyHealthReportDeliveryTests
 
         public Task<AlertDelivery?> DeliverAndReportAsync(AlertOutcome outcome, CancellationToken cancellationToken = default)
         {
+            var throttled = AlwaysThrottled
+                || (CooldownAfterFirstSend && Outcomes.Count > 0 && outcome.Context?.EscalationBypassesCooldown != true);
             Outcomes.Add(outcome);
             var fanout = new EmailFanoutResult(
-                EmailOutcome: AlertChannelOutcome.NotAttempted, SendError: null,
-                WebhookOutcome: Fail ? AlertChannelOutcome.Failed : AlertChannelOutcome.Delivered,
+                EmailOutcome: throttled ? AlertChannelOutcome.Throttled : AlertChannelOutcome.NotAttempted, SendError: null,
+                WebhookOutcome: throttled ? AlertChannelOutcome.Throttled : Fail ? AlertChannelOutcome.Failed : AlertChannelOutcome.Delivered,
                 WebhookSendError: Fail ? "Slack: 500" : null, AnyChannelConfigured: true);
             return Task.FromResult<AlertDelivery?>(AlertDelivery.FromFanout(fanout, outcome.Muted, trayChannelPresent: false));
         }
@@ -303,6 +320,59 @@ public class DailyHealthReportDeliveryTests
         await p.TickAsync(Day.AddHours(7).Add(DarlingSelfAlertEvaluator.DailyReportRetryDelay));
         Assert.Equal(2, p.Deliverer.Outcomes.Count);
         Assert.Equal(1, stamps.Writes);
+    }
+
+    [Fact]
+    public async Task AManualSendJustBefore_DoesNotThrottleTheScheduledSend_AndTheScheduledOneStamps()
+    {
+        var stamps = new Stamps();
+        var p = new Process(stamps);
+        p.Deliverer.CooldownAfterFirstSend = true;
+        p.Now = Day.AddHours(6).AddMinutes(50);
+        var manual = await p.Evaluator.SendDailyHealthReportNowAsync(Ct);
+        Assert.Equal("webhook", manual.Delivery);
+
+        await p.TickAsync(Day.AddHours(7));
+
+        Assert.Equal(2, p.Deliverer.Outcomes.Count);
+        Assert.True(p.Deliverer.Outcomes[1].Context!.EscalationBypassesCooldown);
+        Assert.Equal(1, stamps.Writes);
+    }
+
+    [Fact]
+    public async Task AThrottledScheduledSend_WritesNoStamp_AndIsRetriedAfterTheDelay()
+    {
+        var stamps = new Stamps();
+        var p = new Process(stamps);
+        p.Deliverer.AlwaysThrottled = true;
+        await p.TickAsync(Day.AddHours(7));
+        Assert.Equal(0, stamps.Writes);
+        Assert.Empty(stamps.Values);
+
+        p.Deliverer.AlwaysThrottled = false;
+        await p.TickAsync(Day.AddHours(7).AddMinutes(1));
+        Assert.Single(p.Deliverer.Outcomes);
+
+        await p.TickAsync(Day.AddHours(7).Add(DarlingSelfAlertEvaluator.DailyReportRetryDelay));
+        Assert.Equal(2, p.Deliverer.Outcomes.Count);
+        Assert.Equal(1, stamps.Writes);
+    }
+
+    [Fact]
+    public void ACappedReportText_NeverSplitsASurrogatePair_AtTheHardCut()
+    {
+        /* No line break to cut at, and an emoji (two UTF-16 units) straddling the hard cut. */
+        var limit = DarlingSelfAlertEvaluator.DailyReportMaxTextLength;
+        var text = new string('x', limit - 1) + "😀" + new string('y', 50);
+
+        var capped = DarlingSelfAlertEvaluator.CapDailyReportText(text);
+
+        Assert.DoesNotContain('�', System.Text.Json.JsonSerializer.Deserialize<string>(System.Text.Json.JsonSerializer.Serialize(capped))!);
+        Assert.DoesNotContain("😀", capped, StringComparison.Ordinal);
+        for (var i = 0; i < capped.Length; i++)
+        {
+            Assert.False(char.IsHighSurrogate(capped[i]) && (i + 1 >= capped.Length || !char.IsLowSurrogate(capped[i + 1])));
+        }
     }
 
     [Fact]

@@ -49,6 +49,6 @@ public readonly record struct DailyHealthReportSchedule(bool Enabled, TimeOnly S
             slot = slot.AddHours(1);
         }
 
-        return TimeZoneInfo.ConvertTimeToUtc(slot, Zone);
+        return DailyHealthReportPeriod.LocalToUtc(slot, Zone);
     }
 }

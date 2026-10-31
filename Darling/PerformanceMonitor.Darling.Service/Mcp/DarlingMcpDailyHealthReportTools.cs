@@ -61,7 +61,7 @@ public sealed class DarlingMcpDailyHealthReportTools
         "and sends it through the normal alert pipeline now: the notification routes for the metric 'Daily Health Report' choose the channels and recipients, " +
         "and a mute rule on that metric mutes it. It does NOT count as the day's scheduled report: the scheduled one still goes out at its time, so a recipient can get two. " +
         "It works while daily_report.enabled is off, and is refused while the alert master switch is off. The answer says what the alert pipeline reported " +
-        "(sent, muted, unconfigured when no channel is set up, or failed). Needs mcp.allowWrites; never offered to an investigation agent.")]
+        "(the channel that carried it, muted, unconfigured when no channel is set up, failed, or another disposition of the alert log). Needs mcp.allowWrites; never offered to an investigation agent.")]
     public static async Task<string> SendDailyHealthReportNow(
         DailyHealthReportHub? hub = null,
         ILogger? logger = null,

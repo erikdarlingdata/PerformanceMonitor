@@ -3202,7 +3202,9 @@ internal sealed class DarlingSelfAlertEvaluator
             numericCurrentValue: report.ServerCount,
             numericThresholdValue: 0,
             cancellationToken,
-            context: new AlertContext { EmailHtmlBody = report.Html, EmailSubject = report.Subject },
+            /* A once-a-day document has no repeat to throttle: the per-(server, metric) delivery cooldown would otherwise mute the
+               scheduled send for 15 minutes after a manual one and the day's report would never go out (#7041). */
+            context: new AlertContext { EmailHtmlBody = report.Html, EmailSubject = report.Subject, EscalationBypassesCooldown = true },
             scheduledReport: true,
             displayName: title);
 
@@ -3243,7 +3245,8 @@ internal sealed class DarlingSelfAlertEvaluator
         var cut = text.LastIndexOf('\n', DailyReportMaxTextLength - 1);
         if (cut < DailyReportMaxTextLength / 2)
         {
-            cut = DailyReportMaxTextLength;
+            /* A hard cut lands on a whole text element: a split surrogate pair reaches the chat as U+FFFD (#3625). */
+            cut = McpHelpers.TextElementCutLength(text, DailyReportMaxTextLength);
         }
 
         return text[..cut].TrimEnd() + "\n(Shortened for chat. The email and the web page carry the full report.)";
@@ -3286,15 +3289,16 @@ internal sealed class DarlingSelfAlertEvaluator
     }
 
     /// <summary>
-    /// Stamps a delivery, memory first and then the store, unless every channel failed (a failed delivery is not a delivery: nothing reached
-    /// a reader, so the next attempt retries). A failed attempt also waits <see cref="DailyReportRetryDelay"/>.
+    /// Stamps a delivery, memory first and then the store, unless nothing reached a reader because every channel failed, was throttled by
+    /// the delivery cooldown or was folded onto another delivery (the next attempt retries). A muted or unconfigured send is still the
+    /// day's delivery: there is nothing to retry. A not-delivered attempt also waits <see cref="DailyReportRetryDelay"/>.
     /// </summary>
     private async Task RecordDailyReportDeliveredAsync(AlertDelivery? delivery, DateTime now, CancellationToken cancellationToken)
     {
-        if (delivery is { Channel: AlertDelivery.ChannelFailed })
+        if (delivery is { Channel: AlertDelivery.ChannelFailed or AlertDelivery.ChannelThrottled or AlertDelivery.ChannelFolded })
         {
             _nextDailyReportAttemptUtc = now + DailyReportRetryDelay;
-            LogDocumentDeliveryFailure("daily health report", delivery.SendError ?? "no error text", now);
+            LogDocumentDeliveryFailure("daily health report", delivery.SendError ?? $"not delivered ({delivery.Channel})", now);
             return;
         }
 

@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Linq;
 
 namespace PerformanceMonitor.Darling.Service.Reports;
 
@@ -23,8 +24,22 @@ internal static class DailyHealthReportPeriod
         ArgumentNullException.ThrowIfNull(zone);
         var local = DateTime.SpecifyKind(date.ToDateTime(sendAt), DateTimeKind.Unspecified);
         if (zone.IsInvalidTime(local)) local = local.AddHours(1);
-        var utc = TimeZoneInfo.ConvertTimeToUtc(local, zone);
-        return DateTime.SpecifyKind(utc, DateTimeKind.Utc);
+        return LocalToUtc(local, zone);
+    }
+
+    /// <summary>The UTC instant of a local wall-clock time. A time that repeats when the clock falls back is the FIRST occurrence (the
+    /// daylight one, the larger offset), where <see cref="TimeZoneInfo.ConvertTimeToUtc(DateTime, TimeZoneInfo)"/> alone picks the
+    /// second and would put a period end an hour in the future.</summary>
+    internal static DateTime LocalToUtc(DateTime local, TimeZoneInfo zone)
+    {
+        var unspecified = DateTime.SpecifyKind(local, DateTimeKind.Unspecified);
+        if (zone.IsAmbiguousTime(unspecified))
+        {
+            var daylightOffset = zone.GetAmbiguousTimeOffsets(unspecified).Max();
+            return DateTime.SpecifyKind(unspecified - daylightOffset, DateTimeKind.Utc);
+        }
+
+        return DateTime.SpecifyKind(TimeZoneInfo.ConvertTimeToUtc(unspecified, zone), DateTimeKind.Utc);
     }
 
     /// <summary>The local date whose period was the latest to end at or before <paramref name="nowUtc"/>: today's when

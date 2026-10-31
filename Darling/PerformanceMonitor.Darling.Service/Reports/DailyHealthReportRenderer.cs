@@ -12,6 +12,7 @@ using System.Globalization;
 using System.Linq;
 using System.Net;
 using System.Text;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Service.Reports;
 
@@ -51,7 +52,7 @@ internal static class DailyHealthReportRenderer
     {
         if (string.IsNullOrWhiteSpace(text)) return "";
         var flat = text.Replace('\r', ' ').Replace('\n', ' ').Trim();
-        return flat.Length <= max ? flat : flat[..(max - 1)] + "…";
+        return flat.Length <= max ? flat : flat[..McpHelpers.TextElementCutLength(flat, max - 1)] + "…";
     }
 
     private static string Utc(DateTime value) => value.ToString("MM-dd HH:mm", CultureInfo.InvariantCulture) + " UTC";
@@ -90,7 +91,7 @@ internal static class DailyHealthReportRenderer
                 {
                     /* Not even the worst server fits whole: cut it rather than send a header with nothing under it. */
                     var room = Math.Max(0, TextLimit - result.Length - 1 - 40);
-                    result.Append('\n').Append(block.Length <= room ? block : block[..Math.Max(0, room - 1)] + "…");
+                    result.Append('\n').Append(block.Length <= room ? block : block[..McpHelpers.TextElementCutLength(block, Math.Max(0, room - 1))] + "…");
                     shown = 1;
                 }
                 break;

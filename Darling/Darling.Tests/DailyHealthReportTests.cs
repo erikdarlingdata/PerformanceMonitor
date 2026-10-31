@@ -94,6 +94,47 @@ public sealed class DailyHealthReportTests
         Assert.StartsWith("Daily Health Report: 300 servers, 300 warning, 0 critical, 2026-10-31", text, StringComparison.Ordinal);
     }
 
+    private static void AssertNoLoneSurrogate(string text)
+    {
+        for (var i = 0; i < text.Length; i++)
+        {
+            if (char.IsHighSurrogate(text[i]))
+            {
+                Assert.True(i + 1 < text.Length && char.IsLowSurrogate(text[i + 1]), "high surrogate cut off at " + i);
+                i++;
+            }
+            else
+            {
+                Assert.False(char.IsLowSurrogate(text[i]), "low surrogate without its high half at " + i);
+            }
+        }
+    }
+
+    [Fact]
+    public void AClippedReason_NeverSplitsAnEmoji()
+    {
+        /* Reasons are clipped to 200 units; the emoji's two halves sit at 198 and 199, where the cut falls. */
+        var reason = new string('r', 198) + "\U0001F600" + new string('s', 40);
+        var text = DailyHealthReportRenderer.Text(Data(Server("db1", "Warning", reasons: [reason])));
+
+        AssertNoLoneSurrogate(text);
+        Assert.DoesNotContain("\U0001F600", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AFirstServerTooBigToFit_IsCutOnAWholeCharacter_AtEveryOffsetAroundTheCut()
+    {
+        /* One server whose block alone exceeds the limit is cut rather than dropped. Slide an emoji across the cut so one offset lands on it. */
+        for (var lead = 2600; lead < 2760; lead++)
+        {
+            var name = new string('n', lead) + "\U0001F600" + new string('m', 400);
+            var text = DailyHealthReportRenderer.Text(Data(Server(name, "Warning")));
+
+            Assert.True(text.Length <= DailyHealthReportRenderer.TextLimit);
+            AssertNoLoneSurrogate(text);
+        }
+    }
+
     [Fact]
     public void EmptyFleet_RendersAHeaderAndSaysNoServers_InBothForms()
     {
