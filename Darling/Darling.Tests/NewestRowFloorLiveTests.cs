@@ -23,6 +23,7 @@ namespace Darling.Tests;
 /// for days (its last row must still come back), one with no rows, one that comes back after being offline, and one whose rows
 /// were purged under the floor.
 /// </summary>
+[Collection("live-postgres")]
 public sealed class NewestRowFloorLiveTests
 {
     /// <summary>Sentinel server ids, negative so they cannot collide with a registered server.</summary>
