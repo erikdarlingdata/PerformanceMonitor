@@ -145,8 +145,8 @@ public sealed class StoreServerPasswordRulesLiveTests
             await owner.OpenAsync(ct);
             await PgMigrations.MigrateAsync(owner, ct);
             Assert.SkipWhen(
-                await TextAsync(owner, "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'mcp'))", ct) == "True",
-                "A cluster-wide admin/viewer/mcp role already exists on this rig; the managed provisioning batch would adopt it.");
+                await TextAsync(owner, "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'web', 'mcp'))", ct) == "True",
+                "A cluster-wide admin/viewer/web/mcp role already exists on this rig; the managed provisioning batch would adopt it.");
         }
 
         var bodySucceeded = false;
@@ -156,7 +156,7 @@ public sealed class StoreServerPasswordRulesLiveTests
             await owner.OpenAsync(ct);
             var batch = DarlingManagedRoles.BuildProvisioningSql(
                 ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp,
-                15, PasswordReassert.All, ProvisioningTarget.ComposeStore(OwnerRoleOf(owner), scratch.DatabaseName));
+                15, PasswordReassert.All, ProvisioningTarget.ComposeStore(OwnerRoleOf(owner), scratch.DatabaseName), ProvisioningTestSecrets.Web);
             await ExecAsync(owner, batch, ct);
             if (selfManagedText)
             {
@@ -171,7 +171,7 @@ public sealed class StoreServerPasswordRulesLiveTests
         {
             await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
                 await ExecAsync(cleanup,
-                    "DROP OWNED BY admin, viewer, mcp; DROP ROLE IF EXISTS admin; DROP ROLE IF EXISTS viewer; DROP ROLE IF EXISTS mcp", cleanupCt));
+                    $"{LiveCleanupBatch.DropOwnedByExistingProductRolesSql} DROP ROLE IF EXISTS admin; DROP ROLE IF EXISTS viewer; DROP ROLE IF EXISTS web; DROP ROLE IF EXISTS mcp", cleanupCt));
         }
     }
 
@@ -184,7 +184,7 @@ public sealed class StoreServerPasswordRulesLiveTests
     {
         await RunScenarioAsync(selfManagedText, async (ownerString, owner, ct) =>
         {
-            await using var viewer = await ConnectAsync(ownerString, "viewer", ProvisioningTestSecrets.ViewerPassword, ct);
+            await using var viewer = await ConnectAsync(ownerString, "web", ProvisioningTestSecrets.WebPassword, ct);
 
             await RefusedAsync(() => InsertServerAsync(viewer, 7301, "h-env", "env:SOME_SECRET", null, ct), ReferenceState, ReferenceSentence);
             await RefusedAsync(() => InsertServerAsync(viewer, 7302, "h-file", "file:/run/secrets/sql_password", null, ct), ReferenceState, ReferenceSentence);
@@ -292,7 +292,7 @@ public sealed class StoreServerPasswordRulesLiveTests
         await RunScenarioAsync(selfManagedText, async (ownerString, owner, ct) =>
         {
             await InsertServerAsync(owner, 7901, "keep-host", ProtectedBlob, null, ct);
-            await using var viewer = await ConnectAsync(ownerString, "viewer", ProvisioningTestSecrets.ViewerPassword, ct);
+            await using var viewer = await ConnectAsync(ownerString, "web", ProvisioningTestSecrets.WebPassword, ct);
             await using var mcp = await ConnectAsync(ownerString, "mcp", ProvisioningTestSecrets.McpPassword, ct);
 
             static async Task ShadowCatalogAsync(NpgsqlConnection role, CancellationToken token)
@@ -330,7 +330,7 @@ public sealed class StoreServerPasswordRulesLiveTests
         await RunScenarioAsync(selfManagedText, async (ownerString, owner, ct) =>
         {
             var next = 7950;
-            foreach (var (roleName, password) in new[] { ("viewer", ProvisioningTestSecrets.ViewerPassword), ("mcp", ProvisioningTestSecrets.McpPassword) })
+            foreach (var (roleName, password) in new[] { ("web", ProvisioningTestSecrets.WebPassword), ("mcp", ProvisioningTestSecrets.McpPassword) })
             {
                 var serverId = next++;
                 var metric = "shadow-metric-" + roleName;
@@ -391,7 +391,7 @@ public sealed class StoreServerPasswordRulesLiveTests
             await InsertServerAsync(owner, 8002, "plain-viewer", ProtectedBlob, null, ct);
             await InsertServerAsync(owner, 8003, "rem-mcp", ProtectedBlob, RemediationBlob, ct);
             await InsertServerAsync(owner, 8004, "plain-mcp", ProtectedBlob, null, ct);
-            await using var viewer = await ConnectAsync(ownerString, "viewer", ProvisioningTestSecrets.ViewerPassword, ct);
+            await using var viewer = await ConnectAsync(ownerString, "web", ProvisioningTestSecrets.WebPassword, ct);
             await using var mcp = await ConnectAsync(ownerString, "mcp", ProvisioningTestSecrets.McpPassword, ct);
 
             foreach (var (role, remediationId, plainId, host) in new[] { (viewer, 8001, 8002, "rem-viewer"), (mcp, 8003, 8004, "rem-mcp") })
@@ -451,7 +451,7 @@ public sealed class StoreServerPasswordRulesLiveTests
     {
         await RunScenarioAsync(selfManagedText, async (ownerString, owner, ct) =>
         {
-            await using var viewer = await ConnectAsync(ownerString, "viewer", ProvisioningTestSecrets.ViewerPassword, ct);
+            await using var viewer = await ConnectAsync(ownerString, "web", ProvisioningTestSecrets.WebPassword, ct);
             await using var mcp = await ConnectAsync(ownerString, "mcp", ProvisioningTestSecrets.McpPassword, ct);
             await using var admin = await ConnectAsync(ownerString, "admin", ProvisioningTestSecrets.AdminPassword, ct);
 
@@ -494,7 +494,7 @@ public sealed class StoreServerPasswordRulesLiveTests
             await InsertHypotheticalServerAsync(owner, 8202, "plain-viewer", null, null, ct);
             await InsertHypotheticalServerAsync(owner, 8203, "hyp-mcp", "check_login", "env:PM_INDEX_CHECK_PASSWORD", ct);
             await InsertHypotheticalServerAsync(owner, 8204, "plain-mcp", null, null, ct);
-            await using var viewer = await ConnectAsync(ownerString, "viewer", ProvisioningTestSecrets.ViewerPassword, ct);
+            await using var viewer = await ConnectAsync(ownerString, "web", ProvisioningTestSecrets.WebPassword, ct);
             await using var mcp = await ConnectAsync(ownerString, "mcp", ProvisioningTestSecrets.McpPassword, ct);
             await using var admin = await ConnectAsync(ownerString, "admin", ProvisioningTestSecrets.AdminPassword, ct);
 
@@ -541,7 +541,7 @@ public sealed class StoreServerPasswordRulesLiveTests
 
             await InsertHypotheticalServerAsync(owner, 8301, "held-before", "check_login", "env:PM_INDEX_CHECK_PASSWORD", ct);
             await InsertHypotheticalServerAsync(owner, 8302, "held-after", "check_login", "env:PM_INDEX_CHECK_PASSWORD", ct);
-            await using var viewer = await ConnectAsync(ownerString, "viewer", ProvisioningTestSecrets.ViewerPassword, ct);
+            await using var viewer = await ConnectAsync(ownerString, "web", ProvisioningTestSecrets.WebPassword, ct);
 
             /* The older function lets the host change through on a held pair: the store really is in the state the start must fix. */
             Assert.Equal("saved", await EditOutcomeAsync(viewer, 8301, "'host','encrypted_password'", "moved-host", "typed-anything", owner, ct));
@@ -842,8 +842,8 @@ public sealed class StoreServerPasswordRulesLiveTests
             await probe.OpenAsync(ct);
             await PgMigrations.MigrateAsync(probe, ct);
             Assert.SkipWhen(
-                await TextAsync(probe, "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'mcp'))", ct) == "True",
-                "A cluster-wide admin/viewer/mcp role already exists on this rig; the managed provisioning batch would adopt it.");
+                await TextAsync(probe, "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'web', 'mcp'))", ct) == "True",
+                "A cluster-wide admin/viewer/web/mcp role already exists on this rig; the managed provisioning batch would adopt it.");
         }
 
         var bodySucceeded = false;
@@ -858,7 +858,7 @@ public sealed class StoreServerPasswordRulesLiveTests
 
             var batch = DarlingManagedRoles.BuildProvisioningSql(
                 ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp,
-                15, PasswordReassert.All, ProvisioningTarget.ComposeStore(OwnerRoleOf(owner), scratch.DatabaseName));
+                15, PasswordReassert.All, ProvisioningTarget.ComposeStore(OwnerRoleOf(owner), scratch.DatabaseName), ProvisioningTestSecrets.Web);
             await ExecAsync(owner, batch, ct);
             await ExecAsync(owner, batch, ct);
 
@@ -873,7 +873,7 @@ public sealed class StoreServerPasswordRulesLiveTests
         {
             await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
                 await ExecAsync(cleanup,
-                    "DROP OWNED BY admin, viewer, mcp; DROP ROLE IF EXISTS admin; DROP ROLE IF EXISTS viewer; DROP ROLE IF EXISTS mcp", cleanupCt));
+                    $"{LiveCleanupBatch.DropOwnedByExistingProductRolesSql} DROP ROLE IF EXISTS admin; DROP ROLE IF EXISTS viewer; DROP ROLE IF EXISTS web; DROP ROLE IF EXISTS mcp", cleanupCt));
         }
     }
 
@@ -901,7 +901,7 @@ public sealed class StoreServerPasswordRulesLiveTests
         await RunScenarioAsync(selfManagedText, async (ownerString, owner, ct) =>
         {
             await InsertServerAsync(owner, 8401, "replica-row", ProtectedBlob, null, ct);
-            await using var viewer = await ConnectAsync(ownerString, "viewer", ProvisioningTestSecrets.ViewerPassword, ct);
+            await using var viewer = await ConnectAsync(ownerString, "web", ProvisioningTestSecrets.WebPassword, ct);
             const string Replica = "SELECT query_store_replica FROM config_monitored_servers WHERE server_id = 8401";
             const string Secret = "SELECT encrypted_password FROM config_monitored_servers WHERE server_id = 8401";
 
@@ -951,7 +951,7 @@ public sealed class StoreServerPasswordRulesLiveTests
 
             await InsertServerAsync(owner, 8402, "replica-before", ProtectedBlob, null, ct);
             await InsertServerAsync(owner, 8403, "replica-after", ProtectedBlob, null, ct);
-            await using var viewer = await ConnectAsync(ownerString, "viewer", ProvisioningTestSecrets.ViewerPassword, ct);
+            await using var viewer = await ConnectAsync(ownerString, "web", ProvisioningTestSecrets.WebPassword, ct);
 
             Assert.Equal("saved", await ReplicaEditOutcomeAsync(viewer, 8402, "'query_store_replica'", "replica-a", null, owner, ct));
             Assert.Equal("replica-a", await TextAsync(owner, "SELECT query_store_replica FROM config_monitored_servers WHERE server_id = 8402", ct));

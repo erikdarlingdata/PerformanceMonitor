@@ -174,7 +174,7 @@ public sealed class ComposeStatementTimeoutV147MigrationLiveTests
 
         await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
 
-        /* #5602: viewer and mcp are the cluster's FIXED roles, shared with every scratch database. The ones this fact
+        /* #5602: viewer, web and mcp are the cluster's FIXED roles, shared with every scratch database. The ones this fact
            makes it drops again: left behind, they made the later classes that provision the managed roles skip
            ("a cluster-wide admin/viewer/mcp role already exists on this rig"). A role that was already there is not
            ours to drop. */
@@ -204,7 +204,7 @@ public sealed class ComposeStatementTimeoutV147MigrationLiveTests
             await connection.OpenAsync(ct);
             await PgMigrations.MigrateAsync(connection, ct);
 
-            foreach (var role in new[] { "viewer", "mcp" })
+            foreach (var role in new[] { "viewer", "web", "mcp" })
             {
                 using var exists = new NpgsqlCommand("SELECT count(*) FROM pg_roles WHERE rolname = $1", connection);
                 exists.Parameters.AddWithValue(role);
@@ -218,6 +218,7 @@ public sealed class ComposeStatementTimeoutV147MigrationLiveTests
             /* Old shipped value, as if provisioning last ran before this build existed — the state the
                re-assertion must move forward. */
             await ExecAsync(connection, ct, "ALTER ROLE viewer SET statement_timeout = '15s'");
+            await ExecAsync(connection, ct, "ALTER ROLE web SET statement_timeout = '15s'");
             await ExecAsync(connection, ct, "ALTER ROLE mcp SET statement_timeout = '15s'");
         }
 
@@ -229,7 +230,7 @@ public sealed class ComposeStatementTimeoutV147MigrationLiveTests
         await using (var connection = new NpgsqlConnection(scratch.ConnectionString))
         {
             await connection.OpenAsync(ct);
-            foreach (var role in new[] { "viewer", "mcp" })
+            foreach (var role in new[] { "viewer", "web", "mcp" })
             {
                 using var setting = new NpgsqlCommand(
                     @"SELECT s.setting FROM pg_db_role_setting d

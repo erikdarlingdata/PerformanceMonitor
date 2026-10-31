@@ -1506,9 +1506,11 @@ SELECT
     /// The hourly sweep sizes hypertables and aggregates from the compression catalog and one sweep a day is exact
     /// (#5857). On the compressed fixture: the first sweep (empty table) is exact and marked <c>size_estimated = false</c>;
     /// a sweep an hour later writes <c>size_estimated = true</c> rows whose <c>total_bytes</c> equal the estimate computed here
-    /// from the catalogs (root + uncompressed chunks by <c>pg_total_relation_size</c> + <c>after_compression_total_bytes</c> of
+    /// from the catalogs (root + uncompressed chunks by page count, #6971, + <c>after_compression_total_bytes</c> of
     /// the compressed chunks) and whose compression bytes and chunk counts equal the exact rows'; a sweep 24 hours after the
-    /// first is exact again. The byte gap between the two forms is sent as a diagnostic message.
+    /// first is exact again. The two catch-all rows follow the same split (#6971): an exact row on the exact sweeps, a
+    /// <c>size_estimated = true</c> row with the same relation count and a size near the exact one on the hourly sweep.
+    /// The byte gap between the two forms is sent as a diagnostic message.
     /// </summary>
     [Fact]
     public async Task Sweep_HourlyWritesTheCatalogEstimate_AndTheDailySweepWritesExactAgain_AgainstDevPostgres()
@@ -1530,6 +1532,9 @@ SELECT
         await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
         await CreateCompressedHypertableAndAggregateFixtureAsync(connection, Table, Aggregate, ct);
 
+        /* The catch-all estimate reads the page counts the last vacuum recorded, so settle them first. */
+        await ExecAsync(connection, "VACUUM (ANALYZE)", ct);
+
         var first = DateTime.UtcNow;
         await StoreSelfMetrics.SweepAsync(connection, timescaleAvailable: true, first, null, null, null, ct);
         await AssertSweepRowsEqualTheSizeFunctionsAsync(connection, ct);
@@ -1537,6 +1542,9 @@ SELECT
         /* An hour later: the estimate. */
         var hourly = first.AddHours(1);
         await StoreSelfMetrics.SweepAsync(connection, timescaleAvailable: true, hourly, null, null, null, ct);
+
+        /* #6971: the catch-all rows are sized from the catalog on the hourly sweep, with no file call. */
+        await CatchAllEstimateChecks.AssertHourlyRowsAgainstExactAsync(connection, first, hourly, ct);
 
         var exactRows = await ReadSizeRowsAsync(connection, first, ct);
         var estimateRows = await ReadSizeRowsAsync(connection, hourly, ct);
@@ -1565,6 +1573,9 @@ SELECT
         TestContext.Current.SendDiagnosticMessage(
             $"#5857 byte gap on the compressed fixture: estimate is {gap} bytes ({100.0 * gap / exactBytes:F1}%) below the exact {exactBytes} bytes");
 
+        /* #6971: a catch-all relation that is mostly TOAST is counted, TOAST table and indexes included. */
+        await CatchAllEstimateChecks.AssertEstimateCountsTheToastedRelationAsync(connection, timescale: true, hourly, ct);
+
         /* 24 hours after the first sweep: no exact row in the last 23 hours, so exact again. */
         var daily = first.AddHours(24);
         await StoreSelfMetrics.SweepAsync(connection, timescaleAvailable: true, daily, null, null, null, ct);
@@ -1572,6 +1583,7 @@ SELECT
         var dailyRows = await ReadSizeRowsAsync(connection, daily, ct);
         Assert.Equal(exactRows.Count, dailyRows.Count);
         Assert.All(dailyRows, r => Assert.False(r.Value.SizeEstimated, $"{r.Key} 24 hours later is not marked exact"));
+        await CatchAllEstimateChecks.AssertDailyRowsAreExactAsync(connection, daily, ct);
     }
 
     /// <summary>
@@ -1788,8 +1800,9 @@ AND   object_kind IN ('{StoreSelfMetrics.HypertableObjectKind}', '{StoreSelfMetr
 
     /// <summary>
     /// The estimate the way the issue words it, computed here from the catalogs and the public stats function rather than by
-    /// the statement under test: the root, plus every chunk that is NOT compressed, by <c>pg_total_relation_size</c>, plus
-    /// <c>after_compression_total_bytes</c> of the compressed chunks. Keyed like <see cref="ReadSizeRowsAsync"/>.
+    /// the statement under test: the pages (<c>relpages</c> times the block size, #6971) of the root and of every chunk that is
+    /// NOT compressed, each counted with its TOAST table and every index of either, plus <c>after_compression_total_bytes</c>
+    /// of the compressed chunks. Keyed like <see cref="ReadSizeRowsAsync"/>.
     /// </summary>
     private static async Task<Dictionary<string, long?>> ReadCatalogEstimatesAsync(NpgsqlConnection connection, CancellationToken ct)
     {
@@ -1802,14 +1815,27 @@ WITH subjects AS (
     SELECT '{StoreSelfMetrics.ContinuousAggregateObjectKind}/' || ca.view_name,
            format('%I.%I', ca.materialization_hypertable_schema, ca.materialization_hypertable_name)::regclass
     FROM timescaledb_information.continuous_aggregates AS ca
+),
+paged AS (
+    SELECT s.key, s.rel AS r FROM subjects AS s
+    UNION ALL
+    SELECT s.key, c::oid
+    FROM subjects AS s
+    CROSS JOIN LATERAL show_chunks(s.rel) AS c
+    WHERE c NOT IN (SELECT format('%I.%I', st.chunk_schema, st.chunk_name)::regclass
+                      FROM chunk_compression_stats(s.rel) AS st
+                     WHERE st.compression_status = 'Compressed')
 )
 SELECT s.key,
-       pg_total_relation_size(s.rel)
-       + coalesce((SELECT sum(pg_total_relation_size(c))
-                     FROM show_chunks(s.rel) AS c
-                    WHERE c NOT IN (SELECT format('%I.%I', st.chunk_schema, st.chunk_name)::regclass
-                                      FROM chunk_compression_stats(s.rel) AS st
-                                     WHERE st.compression_status = 'Compressed')), 0)
+       coalesce((SELECT sum(greatest(p.relpages, 0))
+                   FROM paged AS g
+                   JOIN pg_class AS p
+                     ON  p.oid = g.r
+                     OR  p.oid = (SELECT t.reltoastrelid FROM pg_class AS t WHERE t.oid = g.r)
+                     OR  p.oid IN (SELECT i.indexrelid FROM pg_index AS i
+                                    WHERE i.indrelid = g.r
+                                       OR i.indrelid = (SELECT t.reltoastrelid FROM pg_class AS t WHERE t.oid = g.r))
+                  WHERE g.key = s.key), 0) * current_setting('block_size')::bigint
        + coalesce((SELECT sum(st.after_compression_total_bytes)
                      FROM chunk_compression_stats(s.rel) AS st
                     WHERE st.compression_status = 'Compressed'), 0)

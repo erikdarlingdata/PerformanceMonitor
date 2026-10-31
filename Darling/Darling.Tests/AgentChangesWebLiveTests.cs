@@ -46,7 +46,7 @@ public sealed class AgentChangesWebLiveTests
     [Fact]
     public async Task AsTheManagedViewerRole_TheListWorks_AndUndoAndTheSwitchAnswer403_ChangingNothing()
     {
-        await WithWebRoutesAsync("viewer", async (owner, Send, ct) =>
+        await WithWebRoutesAsync("web", async (owner, Send, ct) =>
         {
             var list = await Send("GET", "/api/agent-changes", null);
             Assert.Equal(200, list.Status);
@@ -221,7 +221,7 @@ public sealed class AgentChangesWebLiveTests
     [Fact]
     public async Task OnTheManagedStore_ASignedInAdminSeat_UndoesAndSwitchesThroughTheArm_AndCanDecideIsTrue()
     {
-        await WithWebRoutesAsync("viewer", async (owner, Send, ct) =>
+        await WithWebRoutesAsync("web", async (owner, Send, ct) =>
         {
             var list = await Send("GET", "/api/agent-changes", null);
             Assert.Equal(200, list.Status);
@@ -253,7 +253,7 @@ public sealed class AgentChangesWebLiveTests
     [Fact]
     public async Task OnTheManagedStore_AViewerSeat_NeverOpensTheArm_AndAnswersAsToday()
     {
-        await WithWebRoutesAsync("viewer", async (owner, Send, ct) =>
+        await WithWebRoutesAsync("web", async (owner, Send, ct) =>
         {
             var list = await Send("GET", "/api/agent-changes", null);
             Assert.Equal(200, list.Status);
@@ -272,7 +272,7 @@ public sealed class AgentChangesWebLiveTests
     [Fact]
     public async Task OnTheManagedStore_WithTheSwitchOff_TheSignedInAdminStillListsOnly_NamingTheSwitch()
     {
-        await WithWebRoutesAsync("viewer", async (owner, Send, ct) =>
+        await WithWebRoutesAsync("web", async (owner, Send, ct) =>
         {
             Assert.False((bool)(await Send("GET", "/api/agent-changes", null)).Body!["can_decide"]!);
             var off = await Send("PUT", "/api/agent-changes/switch", "application/json", "{\"enabled\":false}");
