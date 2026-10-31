@@ -59,7 +59,7 @@ public sealed class ExternalAlertGrantLiveTests
         RoleUnmarked = "ea_plain_" + RunSuffix;
         RoleSuper = "ea_su_" + RunSuffix;
         RoleTableOwner = "ea_tblown_" + RunSuffix;
-        CleanupRoles = ["admin", "viewer", "mcp", RoleA, RoleB, RoleUnmarked, RoleSuper, RoleTableOwner, DarlingManagedRoles.AlertSourceGroupRoleName];
+        CleanupRoles = ["admin", "viewer", "web", "mcp", RoleA, RoleB, RoleUnmarked, RoleSuper, RoleTableOwner, DarlingManagedRoles.AlertSourceGroupRoleName];
     }
 
     private const string SourcePassword = "ExtAlertSrcPw0123456789abcdef01";

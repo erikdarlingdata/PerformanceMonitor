@@ -70,7 +70,7 @@ public sealed class ExternalAlertSourceGroupLiveTests
         MonitorName = "mon_" + Suffix;
         SourceName = "grp_" + Suffix;
         RoleName = ExternalAlertSourceAdmin.RoleNameFor(SourceName);
-        CleanupRoles = ["admin", "viewer", "mcp", GroupName, RoleName, OtherName, OwnerName, MonitorName, KeywordRoleName];
+        CleanupRoles = ["admin", "viewer", "web", "mcp", GroupName, RoleName, OtherName, OwnerName, MonitorName, KeywordRoleName];
     }
 
     private static async Task<T> ScalarAsync<T>(NpgsqlConnection connection, string sql, CancellationToken ct)

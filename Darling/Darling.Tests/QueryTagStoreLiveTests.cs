@@ -360,7 +360,7 @@ public sealed class QueryTagStoreGrantLiveTests
 {
     /* #1776 own-store: each test mints its own scratch database through ScratchPostgres; the fixed admin/viewer/mcp roles
        are why the class sits in the pg-cluster-roles collection. */
-    private static readonly string[] s_cleanupRoles = ["admin", "viewer", "mcp"];
+    private static readonly string[] s_cleanupRoles = ["admin", "viewer", "web", "mcp"];
 
     private static async Task ExecAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
     {

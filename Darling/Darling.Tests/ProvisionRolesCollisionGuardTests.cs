@@ -268,7 +268,7 @@ public sealed class ProvisionRolesCollisionGuardTests
         var sql = Script();
 
         var passwordLines = Regex.Matches(sql, @"(?m)^ALTER ROLE (?<role>\w+)\s+(?<rest>.*\bPASSWORD\b.*)$");
-        Assert.Equal(3, passwordLines.Count);
+        Assert.Equal(4, passwordLines.Count);
         Assert.All(passwordLines.Cast<Match>(), line =>
             Assert.Matches(@"^LOGIN PASSWORD '[^']+';\s*$", line.Groups["rest"].Value));
         Assert.DoesNotMatch(@"(?m)^ALTER ROLE \w+\s+.*NOSUPERUSER", sql);
@@ -292,7 +292,7 @@ public sealed class ProvisionRolesCollisionGuardTests
         var guard = GuardBlock(Script());
 
         Assert.Contains("FROM pg_auth_members AS membership", guard, StringComparison.Ordinal);
-        Assert.Contains("granted.rolname IN ('admin', 'viewer', 'mcp')", guard, StringComparison.Ordinal);
+        Assert.Contains("granted.rolname IN ('admin', 'viewer', 'web', 'mcp')", guard, StringComparison.Ordinal);
         Assert.Contains("AND membership.admin_option", guard, StringComparison.Ordinal);
         Assert.Contains("AND NOT holder.rolsuper", guard, StringComparison.Ordinal);
         Assert.Contains("AND holder.rolname <> current_user", guard, StringComparison.Ordinal);
@@ -326,7 +326,7 @@ public sealed class ProvisionRolesCollisionGuardTests
         Assert.Contains("format('REVOKE %I FROM %I', item.granted, item.member)", sql, StringComparison.Ordinal);
         Assert.Contains("format(' GRANTED BY %I', item.grantor)", sql, StringComparison.Ordinal);
         Assert.Contains("|| ' CASCADE'", sql, StringComparison.Ordinal);
-        Assert.Contains("WHERE member.rolname IN ('admin', 'viewer', 'mcp')", sql, StringComparison.Ordinal);
+        Assert.Contains("WHERE member.rolname IN ('admin', 'viewer', 'web', 'mcp')", sql, StringComparison.Ordinal);
 
         /* Not a superuser: each attribute the role has is switched off on its own, and a refusal is a WARNING, not an error. */
         foreach (var attribute in new[] { "SUPERUSER", "CREATEROLE", "CREATEDB", "REPLICATION", "BYPASSRLS" })
@@ -352,7 +352,7 @@ public sealed class ProvisionRolesCollisionGuardTests
         var sql = Script();
 
         Assert.Contains("GRANT SET ON PARAMETER pg_stat_statements.track_utility", readme, StringComparison.Ordinal);
-        Assert.Contains("`ADMIN OPTION` on each of the three roles", readme, StringComparison.Ordinal);
+        Assert.Contains("`ADMIN OPTION` on each of the four roles", readme, StringComparison.Ordinal);
         Assert.Contains("only for a role it created itself", readme, StringComparison.Ordinal);
         Assert.Contains("stops at the guard", readme, StringComparison.Ordinal);
         Assert.DoesNotContain("and still gets the roles and every grant it can make", readme, StringComparison.Ordinal);
@@ -424,7 +424,7 @@ public sealed class ProvisionRolesCollisionGuardTests
     {
         var checks = NonSuperuserChecks(Script());
 
-        Assert.Matches(@"(?s)SELECT string_agg\(quote_ident\(rolname\), ', ' ORDER BY rolname\) INTO unchangeable\s+FROM pg_roles\s+WHERE rolname IN \('admin', 'viewer', 'mcp'\) AND rolsuper;", checks);
+        Assert.Matches(@"(?s)SELECT string_agg\(quote_ident\(rolname\), ', ' ORDER BY rolname\) INTO unchangeable\s+FROM pg_roles\s+WHERE rolname IN \('admin', 'viewer', 'web', 'mcp'\) AND rolsuper;", checks);
 
         var line = RaiseLine(checks, "These roles are superusers: %");
         AssertStopExplainsItself(line);
@@ -445,7 +445,7 @@ public sealed class ProvisionRolesCollisionGuardTests
 
         var branch = checks[checks.IndexOf("IF current_setting('server_version_num')::int >= 160000 THEN", StringComparison.Ordinal)..];
         Assert.StartsWith("IF current_setting('server_version_num')::int >= 160000 THEN", branch, StringComparison.Ordinal);
-        Assert.Contains("WHERE rolname IN ('admin', 'viewer', 'mcp') AND NOT pg_has_role(current_user, oid, 'MEMBER WITH ADMIN OPTION');", branch, StringComparison.Ordinal);
+        Assert.Contains("WHERE rolname IN ('admin', 'viewer', 'web', 'mcp') AND NOT pg_has_role(current_user, oid, 'MEMBER WITH ADMIN OPTION');", branch, StringComparison.Ordinal);
         Assert.Contains("string_agg(format('GRANT %I TO %I WITH ADMIN OPTION;', rolname, current_user), ' ' ORDER BY rolname)", branch, StringComparison.Ordinal);
 
         var line = RaiseLine(checks, "The role running this script, %, does not hold ADMIN OPTION on these roles: %");
@@ -467,7 +467,7 @@ public sealed class ProvisionRolesCollisionGuardTests
         var checks = NonSuperuserChecks(Script());
 
         var older = checks[checks.IndexOf("ELSE", StringComparison.Ordinal)..];
-        Assert.Matches(@"(?s)^ELSE\s+SELECT string_agg\(quote_ident\(rolname\), ', ' ORDER BY rolname\) INTO unchangeable\s+FROM pg_roles\s+WHERE rolname IN \('admin', 'viewer', 'mcp'\) AND rolreplication;", older);
+        Assert.Matches(@"(?s)^ELSE\s+SELECT string_agg\(quote_ident\(rolname\), ', ' ORDER BY rolname\) INTO unchangeable\s+FROM pg_roles\s+WHERE rolname IN \('admin', 'viewer', 'web', 'mcp'\) AND rolreplication;", older);
         Assert.DoesNotContain("rolreplication", checks[..checks.IndexOf("ELSE", StringComparison.Ordinal)], StringComparison.Ordinal);
 
         var line = RaiseLine(checks, "These roles have the REPLICATION attribute: %");
@@ -558,7 +558,7 @@ public sealed class ProvisionRolesCollisionGuardTests
         Assert.Contains("Two settings put the passwords in the server log even when the run succeeds: `log_statement` at `ddl`, `mod` or `all`, and `log_min_duration_statement` at `0` or more.", readme, StringComparison.Ordinal);
         Assert.Contains("Step 0 turns those settings off for the session.", readme, StringComparison.Ordinal);
         Assert.Contains("GRANT SET ON PARAMETER <setting> TO <owner>", readme, StringComparison.Ordinal);
-        Assert.Contains("A run that succeeds also writes all three passwords to the log when `log_statement` is `ddl`, `mod` or `all`, or when `log_min_duration_statement` is `0` or more.", readme, StringComparison.Ordinal);
+        Assert.Contains("A run that succeeds also writes all four passwords to the log when `log_statement` is `ddl`, `mod` or `all`, or when `log_min_duration_statement` is `0` or more.", readme, StringComparison.Ordinal);
         Assert.Contains("`log_min_error_statement` to `panic`", readme, StringComparison.Ordinal);
     }
 
@@ -569,7 +569,7 @@ public sealed class ProvisionRolesCollisionGuardTests
         var readme = RepoFile.ReadRepoFile("docs", "darling", "security.md"); // #6416: moved from Darling/README.md
 
         Assert.Contains("The guard checks this before it sends a password.", readme, StringComparison.Ordinal);
-        Assert.Contains("If the owner cannot change one of the three roles, the run stops at the guard with exit code 3. The message names the roles and the `GRANT` statements to run.", readme, StringComparison.Ordinal);
+        Assert.Contains("If the owner cannot change one of the four roles, the run stops at the guard with exit code 3. The message names the roles and the `GRANT` statements to run.", readme, StringComparison.Ordinal);
         Assert.Contains("The same stop happens when one of the roles is a superuser. Before PostgreSQL 16, it also happens when one of the roles has `REPLICATION`.", readme, StringComparison.Ordinal);
         Assert.Contains("A superuser is never stopped by these checks.", readme, StringComparison.Ordinal);
     }
@@ -634,7 +634,7 @@ public sealed class ProvisionRolesCollisionGuardTests
         var membership = checks.IndexOf("FROM pg_auth_members AS membership", StringComparison.Ordinal);
         Assert.True(membership > checks.IndexOf("rolreplication", StringComparison.Ordinal), "the membership check follows the checks for the roles themselves.");
         var query = checks[membership..];
-        Assert.Contains("WHERE member.rolname IN ('admin', 'viewer', 'mcp')", query, StringComparison.Ordinal);
+        Assert.Contains("WHERE member.rolname IN ('admin', 'viewer', 'web', 'mcp')", query, StringComparison.Ordinal);
         Assert.Contains("voiding.rolsuper", query, StringComparison.Ordinal);
         Assert.Contains("voiding.rolbypassrls", query, StringComparison.Ordinal);
         Assert.Contains("rolname = current_user", query, StringComparison.Ordinal);
@@ -661,7 +661,7 @@ public sealed class ProvisionRolesCollisionGuardTests
         Assert.True(sql.IndexOf(line, StringComparison.Ordinal) < Regex.Match(sql, @"(?m)^ALTER ROLE \w+\s+LOGIN PASSWORD").Index);
 
         var readme = RepoFile.ReadRepoFile("docs", "darling", "security.md"); // #6416: moved from Darling/README.md
-        Assert.Contains("when one of the three roles is a member of a role that would outrank the grants", readme, StringComparison.Ordinal);
+        Assert.Contains("when one of the four roles is a member of a role that would outrank the grants", readme, StringComparison.Ordinal);
     }
 
     /// <summary>The attribute take-backs and the membership revokes are two <c>DO</c> blocks under a stop that only a
@@ -712,7 +712,7 @@ public sealed class ProvisionRolesCollisionGuardTests
         var loopEnd = memberships.IndexOf("END LOOP;", StringComparison.Ordinal);
         var after = memberships[loopEnd..];
         Assert.Contains("FROM pg_auth_members AS membership", after, StringComparison.Ordinal);
-        Assert.Contains("WHERE member.rolname IN ('admin', 'viewer', 'mcp')", after, StringComparison.Ordinal);
+        Assert.Contains("WHERE member.rolname IN ('admin', 'viewer', 'web', 'mcp')", after, StringComparison.Ordinal);
         Assert.Contains("pg_has_role(granted.oid, voiding.oid, 'MEMBER')", after, StringComparison.Ordinal);
         Assert.DoesNotContain("MEMBER WITH ADMIN OPTION", after, StringComparison.Ordinal);
         Assert.DoesNotContain("'USAGE'", after, StringComparison.Ordinal);

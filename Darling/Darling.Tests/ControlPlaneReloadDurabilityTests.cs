@@ -69,7 +69,7 @@ public sealed class ControlPlaneReloadDurabilityTests
         /* Positive control FIRST, through the identical regex the negative below uses: a scan that cannot
            see the statements it is asserting the absence of would pass on any input. */
         var grants = s_statementTimeoutGrant.Matches(readable);
-        Assert.Equal(2, grants.Count);
+        Assert.Equal(3, grants.Count);
         Assert.All(grants, m => Assert.Equal("120", m.Groups[1].Value));
 
         Assert.Empty(s_statementTimeoutGrant.Matches(unreadable));

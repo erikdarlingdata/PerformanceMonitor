@@ -758,10 +758,12 @@ public sealed class DarlingStoreLoginsTests
     public void TheManagedBatch_KeepsItsNamesMarkerAndPublicRevoke_AndIsTheDefaultTarget()
     {
         var byDefault = DarlingManagedRoles.BuildProvisioningSql(
-            ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp);
+            ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp,
+            webVerifier: ProvisioningTestSecrets.Web);
         var explicitManaged = DarlingManagedRoles.BuildProvisioningSql(
             ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp,
-            McpCommandDeadlines.ComposedQueryFallbackSeconds, PasswordReassert.All, ProvisioningTarget.Managed);
+            McpCommandDeadlines.ComposedQueryFallbackSeconds, PasswordReassert.All, ProvisioningTarget.Managed,
+            ProvisioningTestSecrets.Web);
 
         Assert.Equal(byDefault, explicitManaged);
         Assert.Contains("REVOKE ALL ON DATABASE darling FROM PUBLIC;", byDefault, StringComparison.Ordinal);
@@ -1032,7 +1034,7 @@ public sealed class DarlingStoreLoginsTests
 
         Assert.Matches(
             @"if \(OperatingSystem\.IsWindows\(\) && config\.Postgres\.Managed\)\s*\{\s*"
-            + @"customAlertViewerConnString = DarlingManagedPostgres\.TryBuildViewerConnectionStringFromStoredCredential\(config\.Postgres\);\s*\}",
+            + @"customAlertViewerConnString = DarlingManagedPostgres\.TryBuildWebConnectionStringFromStoredCredential\(config\.Postgres\);\s*\}",
             gate);
 
         Assert.Matches(

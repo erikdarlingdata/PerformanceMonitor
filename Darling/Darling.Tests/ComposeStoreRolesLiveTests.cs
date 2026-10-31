@@ -851,7 +851,7 @@ public sealed class ComposeStoreRolesLiveTests
             }
 
             /* 2. A carve statement that fails. */
-            await ExecAsync(owner, "DROP OWNED BY admin, viewer, mcp CASCADE; DROP ROLE admin, viewer, mcp;", ct);
+            await ExecAsync(owner, "DROP OWNED BY admin, viewer, web, mcp CASCADE; DROP ROLE admin, viewer, web, mcp;", ct);
             await ExecAsync(owner, "ALTER TABLE config.config_command RENAME COLUMN service_instance TO service_instance_renamed", ct);
             foreach (var extra in new[] { new[] { "-v", "ON_ERROR_STOP=1" }, Array.Empty<string>() })
             {
@@ -867,7 +867,7 @@ public sealed class ComposeStoreRolesLiveTests
                         $"{role} kept USAGE on config from a transaction that did not commit.");
                 }
 
-                await ExecAsync(owner, "DROP OWNED BY admin, viewer, mcp CASCADE; DROP ROLE admin, viewer, mcp;", ct);
+                await ExecAsync(owner, "DROP OWNED BY admin, viewer, web, mcp CASCADE; DROP ROLE admin, viewer, web, mcp;", ct);
             }
         }
         finally
@@ -1030,7 +1030,7 @@ public sealed class ComposeStoreRolesLiveTests
             await Assert.ThrowsAsync<PostgresException>(() => CurrentUserAsync(Login(owner, "viewer", first[1]), ct));
 
             /* 4. Roles the owner made itself: it holds ADMIN OPTION on them, so its re-run is not stopped and rotates them. */
-            await ExecAsync(owner, "DROP OWNED BY admin, viewer, mcp CASCADE; DROP ROLE admin, viewer, mcp;", ct);
+            await ExecAsync(owner, "DROP OWNED BY admin, viewer, web, mcp CASCADE; DROP ROLE admin, viewer, web, mcp;", ct);
             var third = new[] { "AdminPwNoAdminR1c", "ViewerPwNoAdminR1c", "McpPwNoAdminR1c" };
             var created = await RunFilledScriptAsync(runtimeRoot, root.FullName, byo, null, third, ct);
             Assert.True(created.ExitCode == 0, $"psql exited {created.ExitCode} for the owner's own first run.{Environment.NewLine}{created.Error}");
