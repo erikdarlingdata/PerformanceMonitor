@@ -298,14 +298,23 @@ public static class DailySummarySql
     /// through now), bounded the way the gate keeps its rows (<c>&lt;=</c> with <paramref name="endInclusive"/>, else
     /// <c>&lt;</c>). <paramref name="floorSql"/> is the statement's partition-column floor for the
     /// window start (<see cref="EventWindowFloor"/>), which the lookback floor never goes below.
+    /// <paramref name="sourceRelation"/> names a relation the caller already reads the snapshots into (<c>server_id</c>,
+    /// <c>collection_time</c>, <c>wait_time_ms</c>, <c>blocked_spid</c>, <c>blocking_spid</c>, already scoped to the server
+    /// and read from at or before <paramref name="floorSql"/>), so the statement's wait count and this gate share one scan
+    /// of the snapshots instead of reading them twice (#7028: the second scan took the fleet card to 1.7 times the
+    /// buffers of the statement before the gate).
     /// </summary>
     public static string BlockingSnapshotGateSql(
-        string name, string windowStartSql, string? windowEndSql, bool endInclusive, string? serverIdSql, string floorSql) =>
+        string name, string windowStartSql, string? windowEndSql, bool endInclusive, string? serverIdSql, string floorSql,
+        string? sourceRelation = null) =>
         BlockingWaits.GatedSnapshotWaitSql(
             name,
-            @"SELECT server_id, collection_time, wait_time_ms, blocked_spid, blocking_spid FROM v_dmv_blocking_snapshots
+            (sourceRelation is null
+                ? @"SELECT server_id, collection_time, wait_time_ms, blocked_spid, blocking_spid FROM v_dmv_blocking_snapshots
     WHERE collection_time >= " + floorSql + " AND collection_time >= " + BlockingSnapshotFloorSql(windowStartSql, serverIdSql)
-            + (serverIdSql is null ? string.Empty : " AND server_id = " + serverIdSql)
+                    + (serverIdSql is null ? string.Empty : " AND server_id = " + serverIdSql)
+                : "SELECT server_id, collection_time, wait_time_ms, blocked_spid, blocking_spid FROM " + sourceRelation
+                    + " WHERE collection_time >= " + BlockingSnapshotFloorSql(windowStartSql, serverIdSql))
             + (windowEndSql is null ? string.Empty : " AND collection_time " + (endInclusive ? "<=" : "<") + " " + windowEndSql),
             windowStartSql, windowEndSql, endInclusive,
             AlertEngine.BlockingWaitBreachSamples, AlertEngine.BlockingWaitSingleSnapshotMultiplier,

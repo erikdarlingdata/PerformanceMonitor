@@ -167,14 +167,20 @@ FROM newest";
        (DailySummarySql.BlockingSnapshotGateSql): the server's own snapshot cadence, snapshots read from before the window
        start so a streak that began before it counts. */
     public static readonly string ServerSummaryBlockingSql = @"
-WITH " + BlockingWaits.WaitsCteSql(
+WITH dmv_src AS (
+    /* #7028: ONE scan of the snapshots, shared by the wait count and the snapshot gate (reading them once for each
+       took the statement to 1.3 times the buffers of the statement before the gate). */
+    SELECT server_id, blocked_spid, blocking_spid, event_time, collection_time, wait_time_ms FROM v_dmv_blocking_snapshots
+    WHERE server_id = $1 AND collection_time >= $3
+),"
+    + BlockingWaits.WaitsCteSql(
         BlockingWaits.SqlDialect.Postgres, "xe_waits",
         @"SELECT blocked_spid, blocking_spid, event_time, wait_time_ms FROM v_blocked_process_reports
     WHERE server_id = $1 AND event_time >= $2 AND collection_time >= $3") + "," + BlockingWaits.WaitsCteSql(
         BlockingWaits.SqlDialect.Postgres, "dmv_waits",
-        @"SELECT blocked_spid, blocking_spid, event_time, collection_time, wait_time_ms FROM v_dmv_blocking_snapshots
-    WHERE server_id = $1 AND event_time >= $2 AND collection_time >= $3") + ","
-    + DailySummarySql.BlockingSnapshotGateSql("dmv_gated", "$2", null, false, "$1", "$3") + @"
+        @"SELECT blocked_spid, blocking_spid, event_time, collection_time, wait_time_ms FROM dmv_src
+    WHERE event_time >= $2") + ","
+    + DailySummarySql.BlockingSnapshotGateSql("dmv_gated", "$2", null, false, "$1", "$3", "dmv_src") + @"
 SELECT
     (SELECT COUNT(*)          FROM xe_waits),
     (SELECT MAX(wait_time_ms) FROM xe_waits),

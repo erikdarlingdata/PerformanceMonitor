@@ -394,20 +394,26 @@ WITH xe_reports AS (
     AND   collection_time >= $3
     AND   " + BlockingWaits.NotSelfWaitSql + serverWhere + xeWhere + @"
 ),
-dmv_reports AS (
+dmv_src AS (
+    /* #7028: ONE scan of the snapshots, shared by the wait count and the snapshot gate. Reading them once for each took
+       the statement to 1.7 times the buffers of the statement before the gate. */
     SELECT server_id, blocked_spid, blocking_spid, event_time, collection_time, wait_time_ms
     FROM v_dmv_blocking_snapshots
+    WHERE collection_time >= $3" + serverWhere + @"
+),
+dmv_reports AS (
+    SELECT server_id, blocked_spid, blocking_spid, event_time, collection_time, wait_time_ms
+    FROM dmv_src
     WHERE event_time >= $1
     AND   event_time <= $2
-    AND   collection_time >= $3
-    AND   " + BlockingWaits.NotSelfWaitSql + serverWhere + @"
+    AND   " + BlockingWaits.NotSelfWaitSql + @"
 )," + BlockingWaits.WaitsCteSql(
         BlockingWaits.SqlDialect.Postgres, "xe_waits",
         "SELECT * FROM xe_reports", new[] { "server_id" }) + "," + BlockingWaits.WaitsCteSql(
         BlockingWaits.SqlDialect.Postgres, "dmv_waits",
         "SELECT * FROM dmv_reports", new[] { "server_id" }) + "," + BlockingWaits.HourlyChosenWaitsSql(
         "chosen", "xe_waits", "dmv_waits", "$2", singleBucket, new[] { "server_id" }) + ","
-        + DailySummarySql.BlockingSnapshotGateSql("snapshot_gated", "$1", "$2", true, serverIdSql, "$3") + @",
+        + DailySummarySql.BlockingSnapshotGateSql("snapshot_gated", "$1", "$2", true, serverIdSql, "$3", "dmv_src") + @",
 band AS (
     SELECT server_id, COUNT(*) AS band_count, MAX(wait_time_ms) AS band_max_wait
     FROM chosen
