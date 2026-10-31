@@ -1019,7 +1019,7 @@ public sealed class PgIndexBloatCoverageTests
         /* Through getPath, so it is a data lookup rather than a hard-coded key, and rendered as TEXT. */
         Assert.Contains("getPath(res.data, desc.noteKey)", renderer, StringComparison.Ordinal);
 
-        var tabs = ReadSource(
+        var tabs = RepoFile.ReadRepoFile(
             "Darling/PerformanceMonitor.Darling.Service/wwwroot/js/pages/server-tabs.js");
 
         /* The helper forwards it to the descriptor, or the panel below configures something nothing reads. */
