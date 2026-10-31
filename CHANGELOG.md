@@ -21,6 +21,15 @@ Releases before 3.0.0 are not archived: those entries carry no prose to move.
 
 ## [Unreleased]
 
+### Changed
+
+- **Write-latency anomalies and the write latency fact now read log files and tempdb data files only** ([#6959]) - user data-file writes are checkpoint and lazy-writer work no session waits on, so databases with several data files no longer trip the gate. The write latency card now says its figure covers log files and tempdb, and a separate sentence gives the user data files' own write latency.
+
+### Fixed
+
+- **`uninstall-darling.ps1 -PurgeData` now removes the `PerformanceMonitor Darling Operators` group the install created** ([#6953]) - the purge deleted the store but left the local group behind. It now removes the group, with its members, only when its description is the one the installer sets. A group with any other description stays, and the script prints the command to remove it by hand.
+- **Clicking the triage link in a Slack alert no longer shows "This app is not configured to handle interactive responses"** ([#6965]) - the link was a Slack button. Slack sends a request to the app on every button click, even when the button only opens a link. A Slack app set up with only an incoming webhook has nowhere to receive that request, so Slack showed the warning. The link is now plain text in the alert. It opens the triage page and sends nothing to the app.
+
 ## [3.12.0] - 2026-10-30
 
 Full entries: [docs/changelog/3.12.md](docs/changelog/3.12.md)
@@ -6266,3 +6275,6 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#6933]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6933
 [#6945]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6945
 [#6946]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6946
+[#6953]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6953
+[#6959]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6959
+[#6965]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6965

@@ -714,13 +714,14 @@ WITH clean AS (
 
             /* #6696: the write-latency twin of the arm above (Darling's PgBaselineProvider has the long note), for the
                ANOMALY_WRITE_LATENCY gate, which used to be scored against the read series. WHERE delta_writes > 0
-               keeps v non-null, so sample_count counts write-bearing file rows. */
+               keeps v non-null, so sample_count counts write-bearing file rows. #6959: the write side reads log files and tempdb data files only. User data files take background checkpoint and lazy-writer writes that no session waits on, so a multi-file database's data rows (a small high group) were the window peak against a baseline median they sat far above. */
             MetricNames.IoWriteLatency => @"
 WITH clean AS (
     SELECT collection_time, delta_stall_write_ms * 1.0 / NULLIF(delta_writes, 0) AS v
     FROM v_file_io_stats
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
     AND   delta_writes > 0
+    AND   (file_type = 'LOG' OR lower(database_name) = 'tempdb')
 )," + RobustTierScaffold,
 
             // #6645: the baseline counts the same reports the current window does (BlockingWaits.NotSelfWaitSql), so the 3x ratio

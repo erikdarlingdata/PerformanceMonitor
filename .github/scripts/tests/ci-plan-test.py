@@ -175,10 +175,16 @@ check("root build file: all", r["areas"], "all")
 r = run(["deprecated/Installer/X.cs"])
 check("deprecated only: no area", r["areas"], "none")
 check("deprecated only: builds, no legs", (r["build"], r["legs"]), ("true", "0"))
-check("deprecated only: installer tests", r["deprecated_tests"], "true")
-check("deprecated file in an all-area change", run(["deprecated/Installer/X.cs", "Darling/X.cs"])["deprecated_tests"],
-      "true")
-check("no deprecated file, no installer tests", run(["Darling/X.cs"])["deprecated_tests"], "false")
+check("deprecated installer file: installer tests only", (r["installer_tests"], r["dashboard_tests"]), ("true", "false"))
+r = run(["deprecated/Dashboard/X.cs"])
+check("deprecated dashboard file: dashboard tests only", (r["dashboard_tests"], r["installer_tests"]), ("true", "false"))
+check("shared library: dashboard tests, not installer tests", (run(["PerformanceMonitor.Common/X.cs"])["dashboard_tests"],
+                                      run(["PerformanceMonitor.Common/X.cs"])["installer_tests"]), ("true", "false"))
+check("darling file only: neither suite", (run(["Darling/X.cs"])["dashboard_tests"], run(["Darling/X.cs"])["installer_tests"]),
+      ("false", "false"))
+check("docs only: neither suite", (run(["README.md"])["dashboard_tests"], run(["README.md"])["installer_tests"]), ("false", "false"))
+check("unknown path: both suites", (run(["tools/odd.txt"])["dashboard_tests"], run(["tools/odd.txt"])["installer_tests"]),
+      ("true", "true"))
 
 # --- all areas -------------------------------------------------------------------------------------------------
 r = run(["tools/odd.txt"])
