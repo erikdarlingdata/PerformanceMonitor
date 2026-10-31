@@ -208,6 +208,25 @@ internal static class DarlingMcpWindowNotice
         return node.ToJsonString(McpHelpers.JsonOptions);
     }
 
+    /// <summary>
+    /// A data answer already serialized by a shared payload builder (one Lite and Darling both call, so it cannot take the notice as an
+    /// argument), with the three window-floor keys appended at the top level. A notice from a failed probe leaves the payload as it
+    /// was (<see cref="McpWindowNotice.IsUnavailable"/>).
+    /// </summary>
+    internal static string Attach(string json, McpWindowNotice notice)
+    {
+        if (notice.IsUnavailable)
+        {
+            return json;
+        }
+
+        var node = JsonNode.Parse(json)!.AsObject();
+        node["effective_start"] = notice.EffectiveStart;
+        node["window_truncated"] = notice.WindowTruncated;
+        node["truncation_note"] = notice.TruncationNote;
+        return node.ToJsonString(McpHelpers.JsonOptions);
+    }
+
     /// <summary>The reads the web does not list, and the collector table each one windows on (both on <c>collection_time</c>).</summary>
     internal static readonly System.Collections.Generic.IReadOnlyDictionary<string, string> UnlistedTableByRead =
         new System.Collections.Generic.Dictionary<string, string>(StringComparer.Ordinal)
