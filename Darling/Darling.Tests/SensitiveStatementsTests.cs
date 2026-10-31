@@ -68,6 +68,19 @@ public sealed class SensitiveStatementsTests
         }
     }
 
+    /// <summary>
+    /// The settings-set statements the PostgreSQL regex-engine test (<c>StoreStatementStatsLiveTests</c>) lists with
+    /// comments around them: the .NET judge withholds each one too, so the two engines agree on them.
+    /// </summary>
+    [Theory]
+    [InlineData("-- nightly: update settings\nALTER SYSTEM SET ssl_passphrase_command = 'echo s3cr3t'")]
+    [InlineData("--with\nSET app.api_key = 'sk_live_123'")]
+    [InlineData("/* a /* b */ select */ SET app.api_key = 'x'")]
+    public void AKeyNamedSettingSetToALiteralIsNamed_WithCommentsAroundIt(string text)
+    {
+        Assert.True(SensitiveStatements.Names(text, UnboundedJudge));
+    }
+
     [Fact]
     public void NullAndEmptyAreNeverNamed()
     {
