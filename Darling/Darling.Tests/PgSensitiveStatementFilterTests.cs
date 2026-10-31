@@ -107,7 +107,7 @@ public sealed class PgSensitiveStatementFilterTests
     {
         // The pattern is typed out by hand here (never built from the shared constants) so a change to the
         // shared pattern fails this test until the expected text is updated on purpose. A1-A4 are the original
-        // alternatives, byte-identical; T1-T10 are the appended T-SQL alternatives (#4348, #5320).
+        // alternatives, byte-identical; T1-T13 are the appended T-SQL and later alternatives (#4348, #5320).
         const string gap = "([[:space:]]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^[:cntrl:]]*)";
         const string expected =
             "CASE WHEN c ~* '[[:<:]](create|alter)" + gap + "+(role|user|group|subscription|server)[[:>:]]" +
@@ -129,7 +129,12 @@ public sealed class PgSensitiveStatementFilterTests
             "|[[:<:]][a-z0-9_]*(password|passwd|pwd|secret)(]|\")" + gap + "*=" + gap + "*(n?''|e''|u&''|0x)" +
             "|[[:<:]]([a-z0-9_]*(password|passwd|pwd|secret)|key_source)" + gap + "+((as|constant)" + gap + "+)?" +
             "[[]?[a-z_][a-z0-9_.]*]?([[:space:]]*[(][[:space:]0-9a-z,]{0,20}[)])?" + gap +
-            "*(:?=|default[[:>:]])" + gap + "*(n?''|e''|u&''|0x|[$][^0-9])' " +
+            "*(:?=|default[[:>:]])" + gap + "*(n?''|e''|u&''|0x|[$][^0-9])" +
+            "|[[:<:]]sslpassword[[:space:]]*=[[:space:]]*[^$[:space:]]" +
+            "|[[:<:]](crypt|hmac|encrypt|decrypt|encrypt_iv|decrypt_iv|pgp_sym_encrypt|pgp_sym_encrypt_bytea" +
+            "|pgp_sym_decrypt|pgp_sym_decrypt_bytea|pgp_pub_encrypt|pgp_pub_encrypt_bytea|pgp_pub_decrypt" +
+            "|pgp_pub_decrypt_bytea)" + gap + "*[(]([^()]|[(][^()]*[)])*(''|[$][^0-9])" +
+            "|[[:<:]](bcp|sqlcmd|osql|isql)[[:>:]].*[[:space:]]-p[[:space:]]*[^[:space:]-]' " +
             "THEN '-- statement text withheld (#4348)' ELSE c END";
 
         Assert.Equal(expected, PgSensitiveStatementFilter.SqlPredicate("c"));
