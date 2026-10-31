@@ -702,6 +702,29 @@ public sealed class FleetSweepEngineTests
         }
     }
 
+    /// <summary>
+    /// The engine makes no delivery call — the structural half of the master-off contract, beside the
+    /// behavioural pin above. <c>AlertMasterSwitchSurfaceTests</c>' census scans every production file
+    /// for the delivery seams and fails on any un-censused caller, so the strong guarantee lives
+    /// there; this pin is the local statement of intent that makes a future delivery call in this
+    /// file a two-test conversation instead of a census surprise.
+    /// </summary>
+    [Fact]
+    public void TheEngineSource_CallsNoDeliverySeam()
+    {
+        var engine = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "FleetSweepEngine.cs");
+
+        foreach (var seam in new[] { ".DeliverAsync(", ".NotifyAsync(", ".TrySendAsync(", "SendFindingAlertAsync(" })
+        {
+            Assert.DoesNotContain(seam, engine, StringComparison.Ordinal);
+        }
+
+        /* And the worker launches it fire-and-track with the stacking guard — the backlog's shape, so
+           a slow sweep costs its own slots and never the collection loop. */
+        var worker = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs");
+        Assert.Contains("_fleetSweep is null || _fleetSweep.IsCompleted", worker, StringComparison.Ordinal);
+    }
+
     /* ─────────────────────── the post-restart settle window ─────────────────────── */
 
     /// <summary>
