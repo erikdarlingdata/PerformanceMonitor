@@ -13,8 +13,17 @@
                 database on each, and run the 5545 workload (one real error, connection and lock-wait event in its log).
   -Mode Env     print the DARLING_TEST_PG* variables the live classes read, one NAME=VALUE per line, and nothing else.
                 run-ci-leg.ps1 reads them from here so the ports live in one place.
-  -Mode Stop    warn on a worker that died with an exception, then stop every cluster that has a data directory.
+  -Mode Stop    warn on a worker that died with an exception, then stop every cluster that has a data directory
+                (the old-target clusters of -Mode StartTargets too, each with its own pg_ctl).
                 Best-effort and always exits 0, so it can sit in an always() step.
+  -Mode StartTargets
+                #6985: for each major in -Majors, fetch that real old PostgreSQL (Darling/tools/fetch-pg-target.ps1, cached),
+                initdb and start ONE trust-auth loopback cluster on port 5600 + the major (10 -> 5610) with
+                shared_preload_libraries = 'pg_stat_statements', create the `darling` database and the extension in it, and
+                run a small workload so the statement, table and index views have rows. These are monitored TARGETS only:
+                they never hold a store, and the 5541 store and the 5542-5550 clusters are untouched. Needs the 18 runtime
+                extracted too (the store), but starts nothing of it. Env prints DARLING_TEST_PG_TARGET_<major> for the same
+                -Majors.
 
   The superuser is `darling` with trust auth: acceptable only on an ephemeral, loopback-only CI runner with throwaway
   data. The worker settings on 5541 are the product's own derivation (timescaledb.max_background_workers =
@@ -22,7 +31,10 @@
   literal `"$dataDir\postgresql.conf"` line below, so keep that variable name for the store cluster.
 #>
 param(
-    [ValidateSet('Start', 'Env', 'Stop')][string] $Mode = 'Start',
+    [ValidateSet('Start', 'Env', 'Stop', 'StartTargets')][string] $Mode = 'Start',
+    # #6985: the old PostgreSQL majors to start as monitored targets (StartTargets) or to name in Env. Empty: none, which
+    # leaves Env's output exactly what it was.
+    [string[]] $Majors = @(),
     # The repository root (the workspace). Default: the current directory.
     [string] $Root = (Get-Location).Path,
     # Where the data directories and logs go. Default: the runner temp folder, else the system temp folder.
@@ -32,6 +44,9 @@ param(
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
 $bin = Join-Path $Root 'Darling\artifacts\pg-runtime\pgsql\bin'
+$targetsRoot = Join-Path $Root 'Darling\artifacts\pg-targets'
+# One loopback port per old major, clear of the store (5541) and the log-format clusters (5542-5550).
+function Get-TargetPort([string] $major) { return 5600 + [int]$major }
 
 if ($Mode -eq 'Env') {
     $c = { param($port) "Host=127.0.0.1;Port=$port;Username=darling;Database=darling" }
@@ -55,6 +70,8 @@ if ($Mode -eq 'Env') {
         DARLING_TEST_PG_LOGZONE_BERLIN      = & $c 5549
         DARLING_TEST_PG_LOGZONE_LA          = & $c 5550
     }
+    # #6985: the old-target clusters StartTargets starts, named only for the majors the caller asks for.
+    foreach ($m in $Majors) { $vars["DARLING_TEST_PG_TARGET_$m"] = & $c (Get-TargetPort $m) }
     foreach ($k in $vars.Keys) { Write-Output "$k=$($vars[$k])" }
     exit 0
 }
@@ -81,6 +98,44 @@ if ($Mode -eq 'Stop') {
             $dataDir = Join-Path $TempDir $name
             if (Test-Path $dataDir) { & (Join-Path $bin 'pg_ctl.exe') -D $dataDir -m fast -w stop }
         }
+    }
+    # #6985: an old-target cluster is stopped by its own major's pg_ctl, found from the data directory's name.
+    foreach ($dir in @(Get-ChildItem -Path $TempDir -Directory -Filter 'darling-pgtarget-*' -ErrorAction SilentlyContinue)) {
+        $targetCtl = Join-Path $targetsRoot "$($dir.Name.Substring('darling-pgtarget-'.Length))\pgsql\bin\pg_ctl.exe"
+        if (Test-Path $targetCtl) { & $targetCtl -D $dir.FullName -m fast -w stop }
+    }
+    exit 0
+}
+
+if ($Mode -eq 'StartTargets') {
+    foreach ($m in $Majors) {
+        $port = Get-TargetPort $m
+        $treeLines = @(& (Join-Path $Root 'Darling\tools\fetch-pg-target.ps1') -Major $m -OutputDirectory $targetsRoot)
+        $targetBin = Join-Path ($treeLines | Select-Object -Last 1) 'bin'
+        $targetData = Join-Path $TempDir "darling-pgtarget-$m"
+        $targetLog = Join-Path $TempDir "darling-pgtarget-$m.log"
+        & "$targetBin\initdb.exe" -D $targetData -U darling -A trust --encoding=UTF8
+        if ($LASTEXITCODE -ne 0) { throw "initdb failed for the PostgreSQL $m target ($LASTEXITCODE)" }
+        Add-Content -Path "$targetData\postgresql.conf" -Value "port = $port"
+        Add-Content -Path "$targetData\postgresql.conf" -Value "listen_addresses = '127.0.0.1'"
+        Add-Content -Path "$targetData\postgresql.conf" -Value "shared_preload_libraries = 'pg_stat_statements'"
+        # No compute_query_id: the setting exists from 14 and an older server refuses to start on an unknown one.
+        Add-Content -Path "$targetData\postgresql.conf" -Value "track_io_timing = on"
+        & "$targetBin\pg_ctl.exe" -D $targetData -l $targetLog -w start
+        if ($LASTEXITCODE -ne 0) { if (Test-Path $targetLog) { Get-Content $targetLog -Tail 50 }; throw "pg_ctl start failed for the PostgreSQL $m target ($LASTEXITCODE)" }
+        & "$targetBin\createdb.exe" -h 127.0.0.1 -p $port -U darling darling
+        if ($LASTEXITCODE -ne 0) { throw "createdb failed for the PostgreSQL $m target ($LASTEXITCODE)" }
+
+        # The extension, then a small workload: a table with a primary key, rows, an index scan, a sequential scan, an
+        # update and a plain statement or two, so pg_stat_statements, pg_stat_user_tables and pg_stat_user_indexes have
+        # rows the collectors can read. Bounded and loud, like the 5545 workload below.
+        $targetArgs = @("-h", "127.0.0.1", "-p", "$port", "-U", "darling", "-d", "darling", "-v", "ON_ERROR_STOP=1")
+        & "$targetBin\psql.exe" @targetArgs -c "CREATE EXTENSION pg_stat_statements"
+        if ($LASTEXITCODE -ne 0) { throw "CREATE EXTENSION pg_stat_statements failed on the PostgreSQL $m target ($LASTEXITCODE)" }
+        & "$targetBin\psql.exe" @targetArgs -c "CREATE TABLE target_workload (id int PRIMARY KEY, payload text); INSERT INTO target_workload SELECT g, md5(g::text) FROM generate_series(1, 2000) AS g; ANALYZE target_workload"
+        if ($LASTEXITCODE -ne 0) { throw "the PostgreSQL $m target workload (setup) failed ($LASTEXITCODE)" }
+        & "$targetBin\psql.exe" @targetArgs -c "SELECT payload FROM target_workload WHERE id = 42" -c "SELECT count(*) FROM target_workload WHERE payload LIKE 'a%'" -c "UPDATE target_workload SET payload = payload || 'x' WHERE id <= 100" -c "SELECT pg_sleep(0.1)"
+        if ($LASTEXITCODE -ne 0) { throw "the PostgreSQL $m target workload (queries) failed ($LASTEXITCODE)" }
     }
     exit 0
 }
