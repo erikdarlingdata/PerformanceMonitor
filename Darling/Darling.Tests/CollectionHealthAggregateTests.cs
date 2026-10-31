@@ -1062,4 +1062,70 @@ ORDER BY range_start", connection);
         Assert.NotEmpty(raw);
         Assert.NotEmpty(bandedRaw);
     }
+
+    /// <summary>#6969: the hour scan that reads the materialization's bucket index returns exactly the hours the
+    /// scan of the aggregate returns, with no hole and with two (three and four days back).</summary>
+    [Fact]
+    public async Task MissingHours_ReadFromTheMaterialization_EqualTheAggregateScan_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var store = await OpenStoreAsync(ct);
+        Assert.SkipWhen(store is null, "Set DARLING_TEST_PG to a Postgres connection string with TimescaleDB to run the live missing-hours equality test.");
+        var (scratch, connection, jobId) = store!.Value;
+        await using var _s = scratch;
+        await using var _c = connection;
+
+        await PlantEveryArmAsync(connection, 90_000_000, ct);
+        await RunPolicyAsync(connection, jobId, ct);
+
+        string? materialization;
+        await using (var name = new NpgsqlCommand(CollectionHealthRollupSupport.MaterializationNameSql, connection))
+        {
+            materialization = await name.ExecuteScalarAsync(ct) as string;
+        }
+        Assert.NotNull(materialization);
+
+        async Task<List<DateTime>> ScanAsync(string sql, DateTime from, DateTime to)
+        {
+            var hours = new List<DateTime>();
+            await using var scan = new NpgsqlCommand(sql, connection);
+            scan.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = from });
+            scan.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = to });
+            await using var reader = await scan.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                hours.Add(reader.GetDateTime(0));
+            }
+
+            return hours;
+        }
+
+        DateTime mark;
+        await using (var watermark = new NpgsqlCommand(CollectionHealthRollupSupport.WatermarkSql, connection))
+        {
+            mark = (DateTime)(await watermark.ExecuteScalarAsync(ct))!;
+        }
+
+        var now = NaiveUtcNow();
+        var headEnd = CollectionHealthRollupSupport.CeilingHour(now.AddDays(-7));
+        var viaMaterialization = CollectionHealthRollupSupport.MissingHoursFromMaterializationSql(materialization!);
+
+        var clean = await ScanAsync(CollectionHealthRollupSupport.MissingHoursSql, headEnd, mark);
+        Assert.Equal(clean, await ScanAsync(viaMaterialization, headEnd, mark));
+
+        var thisHour = new DateTime(now.Year, now.Month, now.Day, now.Hour, 0, 0, DateTimeKind.Unspecified);
+        var wiped = new[] { thisHour.AddDays(-3), thisHour.AddDays(-4) };
+        foreach (var hour in wiped)
+        {
+            await DeleteOneBucketAsync(connection, hour, ct);
+        }
+
+        var holed = await ScanAsync(CollectionHealthRollupSupport.MissingHoursSql, headEnd, mark);
+        Assert.True(holed.Count >= wiped.Length);
+        Assert.Equal(holed, await ScanAsync(viaMaterialization, headEnd, mark));
+        foreach (var hour in wiped)
+        {
+            Assert.Contains(hour, holed);
+        }
+    }
 }

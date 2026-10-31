@@ -127,6 +127,42 @@ FROM generate_series($1::timestamp, $2::timestamp - INTERVAL '1 hour', INTERVAL 
 WHERE NOT EXISTS (SELECT 1 FROM collect." + TimescaleSupport.CollectionHealthHourlyView + @" h WHERE h.bucket = gs)
 ORDER BY gs";
 
+    /// <summary>The aggregate's materialization hypertable, schema-qualified and quoted, from the same catalog
+    /// <see cref="WatermarkSql"/> reads (#6969). NULL (no row) when the aggregate is not there. The catalog is
+    /// readable by every role, so this needs no grant of its own.</summary>
+    public const string MaterializationNameSql = @"
+SELECT format('%I.%I', h.schema_name, h.table_name)
+FROM _timescaledb_catalog.continuous_agg ca
+JOIN _timescaledb_catalog.hypertable h ON h.id = ca.mat_hypertable_id
+WHERE ca.user_view_schema = 'collect'
+AND   ca.user_view_name = '" + TimescaleSupport.CollectionHealthHourlyView + "'";
+
+    /// <summary>
+    /// <see cref="MissingHoursSql"/> answered from <paramref name="materialization"/> (the name
+    /// <see cref="MaterializationNameSql"/> returned) instead of the aggregate (#6969). The aggregate is a
+    /// <c>UNION ALL</c> of its materialization and a real-time arm over <c>collection_log</c>, so
+    /// <c>h.bucket = gs</c> per hour made PostgreSQL read all of its roughly 68,000 hour-by-collector rows into a
+    /// hash anti join (about 30 ms and 1,400 buffers on a 9-server store, 0 rows returned nearly every call). Below
+    /// the watermark only materialized buckets exist, and every hour asked about is below it, so the
+    /// materialization holds exactly the buckets the aggregate would have answered with. A distinct over its
+    /// <c>bucket</c> index is a TimescaleDB SkipScan: one index probe per hour (about 170) instead of one row per
+    /// hour per collector (1.2 ms on the same store). The hour list is the same as <see cref="MissingHoursSql"/>'s,
+    /// hour for hour. <c>NOT EXISTS</c> rather than <c>NOT IN</c> so a NULL bucket could never hide every hole.
+    /// </summary>
+    public static string MissingHoursFromMaterializationSql(string materialization)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(materialization);
+
+        return @"
+SELECT gs
+FROM generate_series($1::timestamp, $2::timestamp - INTERVAL '1 hour', INTERVAL '1 hour') AS gs
+WHERE NOT EXISTS (SELECT 1
+                  FROM (SELECT DISTINCT bucket FROM " + materialization + @"
+                        WHERE bucket >= $1::timestamp AND bucket < $2::timestamp) AS present
+                  WHERE present.bucket = gs)
+ORDER BY gs";
+    }
+
     /// <summary>The most hole hours the composed read will still serve individually (#4477). Above this, the
     /// per-hole raw slice this composer would add (two extra parameters and one extra UNION ALL branch per
     /// hole) grows large enough that reading the whole window raw is simpler and no slower in the case that
@@ -320,8 +356,18 @@ GROUP BY server_id, collector_name";
                 return RollupPlan.Clean; // nothing whole below the watermark inside the window: all real-time, nothing to hole
             }
 
+            /* #6969: the hour scan reads the materialization's bucket index when the catalog names it, the aggregate
+               itself (the old, slower statement) when it does not. */
+            string? materialization;
+            await using (var find = postgres.CreateCommand(MaterializationNameSql))
+            {
+                find.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
+                materialization = await find.ExecuteScalarAsync(cancellationToken) as string;
+            }
+
             var holes = new List<DateTime>();
-            await using (var missing = postgres.CreateCommand(MissingHoursSql))
+            await using (var missing = postgres.CreateCommand(
+                materialization is null ? MissingHoursSql : MissingHoursFromMaterializationSql(materialization)))
             {
                 missing.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
                 AddTimestamp(missing, headEnd);
