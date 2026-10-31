@@ -12,6 +12,7 @@ using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using Microsoft.Data.SqlClient;
 using PerformanceMonitor.Common;
+using PerformanceMonitorLite.Database;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -187,6 +188,31 @@ SELECT
         return result;
     }
 
+    /// <summary>
+    /// The relation a newest-row lookup reads for the servers in <paramref name="serverIds"/> (#7014): the hot <paramref name="table"/>, plus the
+    /// archive view <paramref name="view"/> restricted to the servers that have no row in the hot table (collection stopped and archival moved
+    /// every row out), so such a server still shows its last values. With no such server the archive is not read at all. The ids are ints from
+    /// this process, never text. <paramref name="columns"/> is a literal column list from this file.
+    /// </summary>
+    private static async Task<string> HotFirstRelationAsync(LockedConnection connection, List<int> serverIds, string table, string view, string columns)
+    {
+        var hotIds = new HashSet<int>();
+        using (var hot = connection.CreateCommand())
+        {
+            hot.CommandText = "SELECT DISTINCT server_id FROM " + table;
+            using var reader = await hot.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+                hotIds.Add(Convert.ToInt32(reader.GetValue(0)));
+        }
+
+        var archiveOnly = serverIds.Where(id => !hotIds.Contains(id)).ToList();
+        if (archiveOnly.Count == 0)
+            return "(SELECT " + columns + " FROM " + table + ")";
+
+        return "(SELECT " + columns + " FROM " + table + " UNION ALL SELECT " + columns + " FROM " + view
+            + " WHERE server_id IN (" + string.Join(", ", archiveOnly) + "))";
+    }
+
     /// <summary>One fleet server's overlay metrics — <see cref="GetServerMetricsAsync"/>'s per-server result.</summary>
     public readonly record struct ServerMetricsRow(
         decimal? AvgCpuPct, decimal? StorageTotalGb, int? IdleDbCount, string? ProvisioningStatus, int? HealthScore = null);
@@ -213,16 +239,47 @@ SELECT
     /// </summary>
     public async Task<Dictionary<int, ServerMetricsRow>> GetServerMetricsAsync()
     {
+        /* The servers that meet the idle-coverage rule, before this read's own connection opens (the statements take their own, in turn,
+           so no read lock is held while another is taken). A fleet with none gets an empty set, which no server is in. */
+        var idleCovered = await IdleCoveredServerIdsAsync(DateTime.UtcNow, serverId: null);
+        var idleCoverageSql = idleCovered.Count == 0
+            ? "SELECT server_id FROM known_servers WHERE false"
+            : "SELECT * FROM (VALUES " + string.Join(", ", idleCovered.Select(id => "(" + id + ")")) + ") AS c(server_id)";
+
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
         var cpuCutoff = DateTime.UtcNow.AddHours(-24);
         var idleCutoff = DateTime.UtcNow.AddDays(-7);
 
+        /* #7014: the newest-row lookups below (memory, size snapshot, properties) have no time bound, so through the v_ views they
+           scanned every archived row of those tables, and database_size_stats holds a row per database per collection. Each reads the
+           hot table for a server that still has rows there and the archive view only for a server whose rows are all archived
+           (collection stopped), which still shows its last values, as the Utilization card does (#7000). The set of servers keeps the
+           view: a server known only from the archive must still be listed, and the properties archive is one narrow row per collection. */
+        var knownIds = new List<int>();
+        using (var known = connection.CreateCommand())
+        {
+            known.CommandText = "SELECT DISTINCT server_id FROM v_server_properties ORDER BY server_id";
+            using var knownReader = await known.ExecuteReaderAsync();
+            while (await knownReader.ReadAsync())
+                knownIds.Add(Convert.ToInt32(knownReader.GetValue(0)));
+        }
+
+        if (knownIds.Count == 0)
+            return [];
+
+        var knownServersSql = "SELECT * FROM (VALUES " + string.Join(", ", knownIds.Select(id => "(" + id + ")")) + ") AS k(server_id)";
+        var memoryRelation = await HotFirstRelationAsync(connection, knownIds, "memory_stats", "v_memory_stats",
+            "server_id, collection_time, max_workers_count, current_workers_count, total_physical_memory_mb, buffer_pool_mb, total_server_memory_mb");
+        var sizeRelation = await HotFirstRelationAsync(connection, knownIds, "database_size_stats", "v_database_size_stats",
+            "server_id, collection_time, database_name, total_size_mb, used_size_mb");
+        var propertiesRelation = await HotFirstRelationAsync(connection, knownIds, "server_properties", "v_server_properties",
+            "server_id, collection_time, engine_edition, edition");
+
         command.CommandText = @"
 WITH known_servers AS (
-    SELECT DISTINCT server_id
-    FROM v_server_properties
+    " + knownServersSql + @"
 ),
 cpu_24h AS (
     SELECT
@@ -250,7 +307,7 @@ mem_latest AS (
     FROM known_servers s
     LEFT JOIN LATERAL (
         SELECT max_workers_count, current_workers_count, total_physical_memory_mb, buffer_pool_mb, total_server_memory_mb, collection_time
-        FROM v_memory_stats
+        FROM " + memoryRelation + @"
         WHERE server_id = s.server_id
         ORDER BY collection_time DESC
         LIMIT 1
@@ -279,7 +336,7 @@ size_latest AS (
     FROM known_servers s
     LEFT JOIN LATERAL (
         SELECT collection_time
-        FROM v_database_size_stats
+        FROM " + sizeRelation + @"
         WHERE server_id = s.server_id
         ORDER BY collection_time DESC
         LIMIT 1
@@ -294,7 +351,7 @@ storage_totals AS (
         COALESCE(SUM(vd.total_size_mb), 0) AS alloc_mb,
         COALESCE(SUM(CASE WHEN vd.total_size_mb IS NOT NULL AND vd.used_size_mb IS NOT NULL THEN vd.total_size_mb - vd.used_size_mb END), 0) AS free_mb
     FROM size_latest sl
-    JOIN v_database_size_stats vd
+    JOIN " + sizeRelation + @" vd
       ON vd.server_id = sl.server_id
      AND vd.collection_time = sl.collection_time
     GROUP BY sl.server_id
@@ -304,7 +361,7 @@ latest_dbs AS (
         sl.server_id,
         vd.database_name
     FROM size_latest sl
-    JOIN v_database_size_stats vd
+    JOIN " + sizeRelation + @" vd
       ON vd.server_id = sl.server_id
      AND vd.collection_time = sl.collection_time
     WHERE vd.database_name NOT IN ('master', 'model', 'msdb', 'tempdb', 'PerformanceMonitor')
@@ -315,16 +372,13 @@ active_dbs AS (
     WHERE collection_time >= $2
     AND   delta_execution_count > 0
 ),
-/* The recommendation row's coverage rule (HasQueryStatsCoverageAsync, IdleCoverageBounds): a database is called idle for 7 days only when
-   the oldest query-stats sample is at or before now minus 7 days ($5) AND each of the 7 complete UTC days from $3 up to (not including)
-   $6 holds a sample; today is not required. A server without that coverage has no idle_dbs row, so its count is NULL (a dash), never a
-   count made from a window nothing watched. Covered servers count 0 when nothing is idle. */
+/* The recommendation row's coverage rule (IdleCoveredServerIdsAsync, shared with HasQueryStatsCoverageAsync): a database is called idle for 7
+   days only when the oldest query-stats sample is at least 7 days old AND each of the 7 complete UTC days before today holds a sample; today
+   is not required. The servers that meet it are worked out before this statement, from a windowed read and a bounded probe instead of a
+   MIN over the whole archive (#7014). A server without that coverage has no idle_dbs row, so its count is NULL (a dash), never a count made
+   from a window nothing watched. Covered servers count 0 when nothing is idle. */
 idle_coverage AS (
-    SELECT server_id
-    FROM v_query_stats
-    GROUP BY server_id
-    HAVING MIN(collection_time) <= $5
-       AND COUNT(DISTINCT CASE WHEN collection_time >= $3 AND collection_time < $6 THEN CAST(collection_time AS DATE) END) >= $4
+    " + idleCoverageSql + @"
 ),
 idle_dbs AS (
     SELECT
@@ -362,7 +416,7 @@ SELECT
 FROM known_servers s
 LEFT JOIN LATERAL (
     SELECT engine_edition, edition
-    FROM v_server_properties
+    FROM " + propertiesRelation + @"
     WHERE server_id = s.server_id
     ORDER BY collection_time DESC
     LIMIT 1
@@ -375,11 +429,6 @@ LEFT JOIN grants g ON g.server_id = s.server_id";
 
         command.Parameters.Add(new DuckDBParameter { Value = cpuCutoff });
         command.Parameters.Add(new DuckDBParameter { Value = idleCutoff });
-        var (coverageStart, coverageEnd, coverageOldestCutoff) = IdleCoverageBounds(DateTime.UtcNow);
-        command.Parameters.Add(new DuckDBParameter { Value = coverageStart });
-        command.Parameters.Add(new DuckDBParameter { Value = (long)IdleCoverageDays });
-        command.Parameters.Add(new DuckDBParameter { Value = coverageOldestCutoff });
-        command.Parameters.Add(new DuckDBParameter { Value = coverageEnd });
 
         var results = new Dictionary<int, ServerMetricsRow>();
         using var reader = await command.ExecuteReaderAsync();

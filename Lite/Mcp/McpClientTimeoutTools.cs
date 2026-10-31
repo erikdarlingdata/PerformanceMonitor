@@ -52,21 +52,27 @@ public sealed class McpClientTimeoutTools
             {
                 /* A collector that recorded a denial or a missing session on its latest run has a specific sentence, which is better
                    evidence than the generic one. */
-                return await McpRuntimePrecondition.StatusAsync(dataService, resolved.ServerId, resolved.DisplayName, Collector)
-                    ?? McpHelpers.Status("unavailable", ClientTimeoutsRead.UnavailableMessage(resolved.DisplayName, window, windowEnd, hours_back));
+                /* #7005: the window notice (an unavailable answer only; a precondition says its own cause). */
+                return await McpQueryTools.WithEmptyWindowNoticeAsync(
+                    await McpRuntimePrecondition.StatusAsync(dataService, resolved.ServerId, resolved.DisplayName, Collector)
+                        ?? McpHelpers.Status("unavailable", ClientTimeoutsRead.UnavailableMessage(resolved.DisplayName, window, windowEnd, hours_back)),
+                    dataService, QueryWindowRelation.AttentionEvents, resolved.ServerId, windowStart, windowEnd, "attention_events");
             }
 
             if (kind == ClientTimeoutsKind.Quiet)
             {
-                return McpHelpers.Status("empty", ClientTimeoutsRead.EmptyMessage(resolved.DisplayName, reading!, hours_back));
+                return await McpQueryTools.WithEmptyWindowNoticeAsync(
+                    McpHelpers.Status("empty", ClientTimeoutsRead.EmptyMessage(resolved.DisplayName, reading!, hours_back)),
+                    dataService, QueryWindowRelation.AttentionEvents, resolved.ServerId, windowStart, windowEnd, "attention_events");
             }
 
-            return JsonSerializer.Serialize(new
+            return await McpQueryTools.WithDataWindowNoticeAsync(JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
                 hours_back,
                 client_timeouts = ClientTimeoutsRead.Payload(reading!, window, samples, limit, 2000),
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions),
+                dataService, QueryWindowRelation.AttentionEvents, resolved.ServerId, windowStart, windowEnd, "attention_events");
         }
         catch (Exception ex)
         {

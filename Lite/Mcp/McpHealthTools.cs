@@ -1445,19 +1445,21 @@ public sealed class McpHealthTools
                         dataService, resolved.ServerId, resolved.DisplayName, "waiting_tasks", "waiting-task samples");
                 if (healthyEmpty != null)
                 {
-                    return McpHelpers.Status("empty", healthyEmpty);
+                    /* #7005: the window notice rides every empty answer of this tool. */
+                    return await McpQueryTools.WithEmptyWindowNoticeAsync(McpHelpers.Status("empty", healthyEmpty), dataService, QueryWindowRelation.WaitingTasks, resolved.ServerId, windowEnd.AddHours(-hours), windowEnd, "waiting_tasks");
                 }
 
-                return everCollected
+                return await McpQueryTools.WithEmptyWindowNoticeAsync(everCollected
                     ? McpHelpers.Status(
                         "empty",
                         $"Nothing was waiting on {resolved.DisplayName} in the last {hours} hour(s). The collector HAS sampled this server, so this is a genuine all-clear for the window rather than missing data.")
                     : McpHelpers.Status(
                         "unavailable",
-                        $"No waiting-task samples have EVER been recorded for {resolved.DisplayName}, so this is NOT an all-clear — there is nothing to read. Check that collection is running for this server before concluding it was quiet.");
+                        $"No waiting-task samples have EVER been recorded for {resolved.DisplayName}, so this is NOT an all-clear — there is nothing to read. Check that collection is running for this server before concluding it was quiet."),
+                    dataService, QueryWindowRelation.WaitingTasks, resolved.ServerId, windowEnd.AddHours(-hours), windowEnd, "waiting_tasks");
             }
 
-            return JsonSerializer.Serialize(new
+            return await McpQueryTools.WithDataWindowNoticeAsync(JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
                 hours_back = hours,
@@ -1474,7 +1476,8 @@ public sealed class McpHealthTools
                     database_name = b.DatabaseName,
                     blocked_count = b.BlockedCount,
                 }),
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions),
+                dataService, QueryWindowRelation.WaitingTasks, resolved.ServerId, windowEnd.AddHours(-hours), windowEnd, "waiting_tasks");
         }
         catch (Exception ex)
         {
