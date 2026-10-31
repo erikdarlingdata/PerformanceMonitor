@@ -160,16 +160,21 @@ FROM newest";
     /// they ask for the newest event in all of history, which a floor would change the answer to.</para>
     /// </summary>
     /* #5644 W1: the two counts are WAITS (BlockingWaits.WaitsCteSql), not report rows, as the fleet tile's are.
-       The last two columns are the raw report / snapshot rows (the CTE's *_marked relation holds every source row):
-       the unit the health band's per-hour count tiers were measured in, so the band reads them (#5644 review). */
+       #7028: the band bands on these waits (the card's window is one hour, so XE-or-DMV for the window is the per-hour
+       choice the blocking alerts make for their rolling hour) and on the last column, the Blocking Wait Time alert's own
+       measure: the largest total blocked wait of one DMV snapshot in the window after the alert's persistence gate,
+       in milliseconds, taken from the DMV snapshots whichever source the count chose. */
     public static readonly string ServerSummaryBlockingSql = @"
 WITH " + BlockingWaits.WaitsCteSql(
         BlockingWaits.SqlDialect.Postgres, "xe_waits",
         @"SELECT blocked_spid, blocking_spid, event_time, wait_time_ms FROM v_blocked_process_reports
     WHERE server_id = $1 AND event_time >= $2 AND collection_time >= $3") + "," + BlockingWaits.WaitsCteSql(
         BlockingWaits.SqlDialect.Postgres, "dmv_waits",
-        @"SELECT blocked_spid, blocking_spid, event_time, wait_time_ms FROM v_dmv_blocking_snapshots
-    WHERE server_id = $1 AND event_time >= $2 AND collection_time >= $3") + @"
+        @"SELECT blocked_spid, blocking_spid, event_time, collection_time, wait_time_ms FROM v_dmv_blocking_snapshots
+    WHERE server_id = $1 AND event_time >= $2 AND collection_time >= $3") + ","
+    + BlockingWaits.SnapshotTotalsSql(
+        "dmv_totals", "SELECT collection_time, wait_time_ms, blocked_spid, blocking_spid FROM dmv_waits_marked") + ","
+    + DailySummarySql.BlockingSnapshotGateSql("dmv_gated", "dmv_totals") + @"
 SELECT
     (SELECT COUNT(*)          FROM xe_waits),
     (SELECT MAX(wait_time_ms) FROM xe_waits),
@@ -177,8 +182,7 @@ SELECT
     (SELECT MAX(wait_time_ms) FROM dmv_waits),
     (SELECT MAX(event_time)   FROM v_blocked_process_reports WHERE server_id = $1),
     (SELECT MAX(event_time)   FROM v_dmv_blocking_snapshots   WHERE server_id = $1),
-    (SELECT COUNT(*)          FROM xe_waits_marked),
-    (SELECT COUNT(*)          FROM dmv_waits_marked)";
+    (SELECT CAST(ROUND(MAX(peak_snapshot_wait_ms)) AS bigint) FROM dmv_gated)";
 
     /// <summary>
     /// Deadlock count in the window plus the newest deadlock ever — the windowed count for the card value,
@@ -308,7 +312,7 @@ LIMIT 1";
         double? memoryMb = null;
         double? bufferPoolMb = null;
         var blockingCount = 0;
-        var blockingReportCount = 0;
+        long peakSnapshotWaitMs = 0;
         long maxBlockingWaitMs = 0;
         int? lastBlockingMinutesAgo = null;
         var deadlockCount = 0;
@@ -425,15 +429,14 @@ LIMIT 1";
             {
                 var xeCount = reader.IsDBNull(0) ? 0 : Convert.ToInt32(reader.GetValue(0));
                 var xeMaxWait = reader.IsDBNull(1) ? 0L : Convert.ToInt64(reader.GetValue(1));
-                var xeReports = reader.IsDBNull(6) ? 0 : Convert.ToInt32(reader.GetValue(6));
-                var dmvReports = reader.IsDBNull(7) ? 0 : Convert.ToInt32(reader.GetValue(7));
+                peakSnapshotWaitMs = reader.IsDBNull(6) ? 0L : Convert.ToInt64(reader.GetValue(6));
                 if (separate.Count > 0)
                 {
                     /* The XE arm without the separately monitored databases' reports; the DMV arm and the
                        XE-then-DMV fallback below are unchanged. */
                     try
                     {
-                        (xeCount, xeMaxWait, xeReports) = await ReadScopedBlockingAsync(serverId, windowStart, scopeEnd, separate, cancellationToken);
+                        (xeCount, xeMaxWait) = await ReadScopedBlockingAsync(serverId, windowStart, scopeEnd, separate, cancellationToken);
                     }
                     catch (Exception ex) when (ex is not OperationCanceledException)
                     {
@@ -450,13 +453,11 @@ LIMIT 1";
                 if (xeCount > 0)
                 {
                     blockingCount = xeCount;
-                    blockingReportCount = xeReports;
                     maxBlockingWaitMs = xeMaxWait;
                 }
                 else
                 {
                     blockingCount = dmvCount;
-                    blockingReportCount = dmvReports;
                     maxBlockingWaitMs = dmvMaxWait;
                 }
 
@@ -574,7 +575,7 @@ LIMIT 1";
             MemoryTimeoutCount = memoryTimeoutCount,
             MemoryForcedCount = memoryForcedCount,
             BlockingCount = blockingCount,
-            BlockingReportCount = blockingReportCount,
+            PeakSnapshotWaitMs = peakSnapshotWaitMs,
             MaxBlockingWaitMs = maxBlockingWaitMs,
             LastBlockingMinutesAgo = lastBlockingMinutesAgo,
             DeadlockCount = deadlockCount,
@@ -1297,15 +1298,18 @@ public sealed class ServerSummaryItem
     /// semaphore to read (every PostgreSQL target).</summary>
     public bool? MemoryPressureForBand => ServerMetricSources.DmvSourced(HasMemoryPressure, IsPostgres);
 
-    /// <summary>Blocking as a BANDABLE reading — null when this card reads no blocking source for this engine.
-    /// It is the REPORT count (<see cref="BlockingReportCount"/>), not the wait count the card shows
-    /// (<see cref="BlockingCount"/>, #5644 W1): the band's per-hour count tiers (5 / 20) were measured in blocked-process
-    /// reports per server-hour, and a long wait is many reports and one wait.</summary>
-    public int? BlockingCountForBand => ServerMetricSources.DmvSourced(BlockingReportCount ?? BlockingCount, IsPostgres);
+    /// <summary>Blocking as a BANDABLE reading - null when this card reads no blocking source for this engine. It is
+    /// the wait count the card shows (<see cref="BlockingCount"/>, #5644 W1 and #7028): the unit the blocking alerts
+    /// count, so a tier set to the alert's number means the same thing on the card.</summary>
+    public int? BlockingCountForBand => ServerMetricSources.DmvSourced(BlockingCount, IsPostgres);
 
-    /// <summary>The winning source's blocked-process report (or DMV snapshot) rows in the window, before they collapse
-    /// to waits (#5644). Set by the read; null on a card built without one, which bands on <see cref="BlockingCount"/>.</summary>
-    public int? BlockingReportCount { get; set; }
+    /// <summary>#7028: the blocking band's snapshot arm in milliseconds, the largest total blocked wait of one DMV
+    /// snapshot in the window after the Blocking Wait Time alert's persistence gate. 0 when the window holds no
+    /// snapshot wait; the arm is off unless a snapshot tier is above 0.</summary>
+    public long PeakSnapshotWaitMs { get; set; }
+
+    /// <summary>The snapshot arm as a BANDABLE reading in seconds - null on a card that reads no blocking source.</summary>
+    public double? PeakSnapshotWaitSecondsForBand => BlockingCountForBand.HasValue ? PeakSnapshotWaitMs / 1000.0 : null;
 
     /// <summary>Deadlocks as a BANDABLE reading (#3539). On a SQL Server card it is the count itself — a
     /// graph count is an observation even at zero (#3272's engine-not-collector rule). On a PostgreSQL card
@@ -1341,7 +1345,7 @@ public sealed class ServerSummaryItem
     /// hour over the window against the store's tiers (#6927, 20/hr Critical, 5/hr Warning by default); a 10 s block
     /// Warning by default; no source Unknown.</summary>
     public HealthSeverity BlockingSeverity =>
-        ServerHealthClassifier.BlockingSeverity(BlockingCountForBand, MaxBlockedSeconds, BlockingWindow, BlockingBandThresholds);
+        ServerHealthClassifier.BlockingSeverity(BlockingCountForBand, MaxBlockedSeconds, BlockingWindow, BlockingBandThresholds, PeakSnapshotWaitSecondsForBand);
 
     /// <summary>
     /// The window <see cref="DeadlockCount"/> and <see cref="BlockingCount"/> cover (#3368) — the
@@ -1432,6 +1436,7 @@ public sealed class ServerSummaryItem
         MaxBlockedSeconds = MaxBlockedSeconds,
         /* #3539 A3: the count's denominator, for the reason the deadlock trio below travels together. */
         BlockingWindow = BlockingWindow,
+        PeakSnapshotWaitSeconds = PeakSnapshotWaitSecondsForBand,
         DeadlockCount = DeadlockCountForBand,
         /* #3368: the three travel together. Without them the card's overall band and its border would
            re-band the same count against no window while the deadlock dot banded a rate — a card

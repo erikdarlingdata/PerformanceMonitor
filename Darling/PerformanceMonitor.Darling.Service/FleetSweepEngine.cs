@@ -1022,7 +1022,8 @@ public static class FleetSweepEngine
                 HighCpuEvents = rows.Sum(r => r.HighCpuEvents),
                 BlockingEvents = rows.Sum(r => r.BlockingEvents),
                 /* #5644: the report rows the band's count tiers were measured in; a hand-built row without them bands its events. */
-                BlockingReports = rows.Sum(r => r.BlockingReports ?? r.BlockingEvents),
+                /* #7028: the snapshot arm is a magnitude, so a MAX across the span's day buckets (part C's minimal read; part A owns this block). */
+                PeakSnapshotWaitMs = rows.Count == 0 ? 0L : rows.Max(r => r.PeakSnapshotWaitMs ?? 0L),
                 /* #3539 A2: the longest block across the span's day buckets — a MAX, not a sum, because it
                    is a magnitude; the blocking band's wait arm reads it. */
                 PeakBlockWaitMs = peakBlock,
