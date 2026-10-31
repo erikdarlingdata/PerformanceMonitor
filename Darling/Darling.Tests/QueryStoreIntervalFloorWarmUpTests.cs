@@ -207,7 +207,13 @@ public sealed class QueryStoreIntervalFloorWarmUpTests
             await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
             var log = new CapturingTestLogger();
 
-            var summary = await DarlingRetention.PurgeAsync(postgres, timescaleAvailable: false, log, ct);
+            /* #7007: the warm-up can only mark an entry dead when its row is dead to every open snapshot. A transient
+               backend in this database (an autovacuum worker analyzing a freshly migrated table is the usual one) that
+               took its snapshot before the drain's last commit holds the horizon for the moment the warm-up runs, and
+               is gone again by the time the holders check below looks. So the test waits for that backend to finish
+               between the last purge and the warm-up, which is the condition the premise depends on. */
+            var summary = await DarlingRetention.PurgeAsync(
+                postgres, timescaleAvailable: false, new WaitForHorizonBeforeWarmUpLogger(log, connection), ct);
 
             Assert.True(summary.RowsDeleted >= ExpiredPerServer * ServerIds.Length, log.Joined);
             Assert.Equal(KeptPerServer * ServerIds.Length, await CountAsync(connection, table.Qualified, ct));
@@ -602,6 +608,47 @@ FROM generate_series(1, $2) AS g;";
         }
 
         throw new System.IO.FileNotFoundException(file + " not found above " + thisFile);
+    }
+
+    /// <summary>
+    /// Forwards to a capturing logger, and the first time the sweep logs its summary line (after every purge, before
+    /// the warm-up) waits until no other backend in this database holds a snapshot, so the warm-up runs on a horizon
+    /// that has passed the drain (#7007). Gives up after <see cref="MaxWait"/>; the holders check in the test then
+    /// reports whatever is still there.
+    /// </summary>
+    private sealed class WaitForHorizonBeforeWarmUpLogger(ILogger inner, NpgsqlConnection probe) : ILogger
+    {
+        private static readonly TimeSpan MaxWait = TimeSpan.FromSeconds(30);
+        private bool waited;
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => inner.BeginScope(state);
+
+        public bool IsEnabled(LogLevel logLevel) => inner.IsEnabled(logLevel);
+
+        public void Log<TState>(
+            LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            inner.Log(logLevel, eventId, state, exception, formatter);
+            if (waited || !formatter(state, exception).Contains("table(s) purged", StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            waited = true;
+            var deadline = DateTime.UtcNow + MaxWait;
+            while (DateTime.UtcNow < deadline)
+            {
+                using var count = new NpgsqlCommand(
+                    "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid() AND backend_xmin IS NOT NULL",
+                    probe);
+                if ((long)count.ExecuteScalar()! == 0)
+                {
+                    return;
+                }
+
+                System.Threading.Thread.Sleep(50);
+            }
+        }
     }
 
     /// <summary>
