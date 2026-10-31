@@ -74,7 +74,21 @@ public enum QueryWindowRelation
     WaitStats,
     /* The Latches & Spinlocks tab's two trend charts (#4966): the cumulative-delta tables the trends read. */
     LatchStats,
-    SpinlockStats
+    SpinlockStats,
+
+    /* #7005: the MCP trend and snapshot reads over the periodic collectors. Each collector stores a row every cycle, so these
+       probe like WaitStats: the collector's runs show the store covered a window's start, and the window's time column is
+       collection_time. */
+    CpuUtilization,
+    CpuScheduler,
+    MemoryStats,
+    MemoryGrantStats,
+    FileIoStats,
+    TempDbStats,
+    PerfmonStats,
+    PlanCacheStats,
+    /* get_client_timeouts: the attention XE events, which hold a row only when a client gave up, so the collector's runs show coverage. */
+    AttentionEvents
 }
 
 public partial class LocalDataService
@@ -105,6 +119,15 @@ public partial class LocalDataService
         QueryWindowRelation.WaitStats => "v_wait_stats",
         QueryWindowRelation.LatchStats => "v_latch_stats",
         QueryWindowRelation.SpinlockStats => "v_spinlock_stats",
+        QueryWindowRelation.CpuUtilization => "v_cpu_utilization_stats",
+        QueryWindowRelation.CpuScheduler => "v_cpu_scheduler_stats",
+        QueryWindowRelation.MemoryStats => "v_memory_stats",
+        QueryWindowRelation.MemoryGrantStats => "v_memory_grant_stats",
+        QueryWindowRelation.FileIoStats => "v_file_io_stats",
+        QueryWindowRelation.TempDbStats => "v_tempdb_stats",
+        QueryWindowRelation.PerfmonStats => "v_perfmon_stats",
+        QueryWindowRelation.PlanCacheStats => "v_plan_cache_stats",
+        QueryWindowRelation.AttentionEvents => "v_attention_events",
         _ => throw new ArgumentOutOfRangeException(nameof(relation), relation, "unknown QueryWindowRelation")
     };
 
@@ -155,6 +178,16 @@ public partial class LocalDataService
            class has no delta, so a collector's runs (not the oldest row) say the store covered the window's start. */
         QueryWindowRelation.LatchStats => "latch_stats",
         QueryWindowRelation.SpinlockStats => "spinlock_stats",
+        /* #7005: the periodic collectors the MCP trends read; a run in the window shows the store covered it. */
+        QueryWindowRelation.CpuUtilization => "cpu_utilization",
+        QueryWindowRelation.CpuScheduler => "cpu_scheduler_stats",
+        QueryWindowRelation.MemoryStats => "memory_stats",
+        QueryWindowRelation.MemoryGrantStats => "memory_grant_stats",
+        QueryWindowRelation.FileIoStats => "file_io_stats",
+        QueryWindowRelation.TempDbStats => "tempdb_stats",
+        QueryWindowRelation.PerfmonStats => "perfmon_stats",
+        QueryWindowRelation.PlanCacheStats => "plan_cache_stats",
+        QueryWindowRelation.AttentionEvents => "attention",
         _ => null
     };
 

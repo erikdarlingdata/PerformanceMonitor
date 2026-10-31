@@ -124,13 +124,14 @@ public sealed class McpMemoryTools
                     return gated;
                 }
 
-                return await dataService.HasAnyMemoryStatAsync(resolved.ServerId)
+                return await McpQueryTools.WithEmptyWindowNoticeAsync(await dataService.HasAnyMemoryStatAsync(resolved.ServerId)
                     ? McpHelpers.Status(
                         "empty",
                         $"No memory samples recorded for {resolved.DisplayName} in the last {hours_back} hour(s). This server HAS collected memory stats before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples.")
                     : McpHelpers.Status(
                         "unavailable",
-                        $"No memory stats have EVER been recorded for {resolved.DisplayName}. This is not an empty window — the memory_stats collector has stored nothing at all for this server. Check that collection is running and that the server is enabled; get_memory_stats will be equally empty until it does.");
+                        $"No memory stats have EVER been recorded for {resolved.DisplayName}. This is not an empty window — the memory_stats collector has stored nothing at all for this server. Check that collection is running and that the server is enabled; get_memory_stats will be equally empty until it does."),
+                    dataService, QueryWindowRelation.MemoryStats, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, "memory_stats");
             }
 
             /* Joined from the memory-grant series (#3548), SUM(granted_memory_mb) across pools per snapshot — the
@@ -143,9 +144,10 @@ public sealed class McpMemoryTools
                both SKUs — see BaselineDiscontinuities; Darling's DarlingMcpTrendTools carries the same block. */
             var discontinuities = await dataService.GetBaselineDiscontinuitiesAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
 
-            return TrendPayloads.MemoryTrend(
+            return await McpQueryTools.WithDataWindowNoticeAsync(TrendPayloads.MemoryTrend(
                 resolved.DisplayName, hours_back, points, grants, bucketMinutes, bucket_minutes is not null,
-                budget.AutoPoints, BaselineDiscontinuities.ToPayload(discontinuities));
+                budget.AutoPoints, BaselineDiscontinuities.ToPayload(discontinuities)),
+                dataService, QueryWindowRelation.MemoryStats, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, "memory_stats");
         }
         catch (Exception ex)
         {
@@ -279,8 +281,11 @@ public sealed class McpMemoryTools
             var rows = await dataService.GetResourceSemaphoreSnapshotAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             if (rows.Count == 0)
             {
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "memory_grant_stats", awsRdsKind: AwsRdsKind.None)
-                    ?? McpHelpers.Status("unavailable", "No memory grant data available.");
+                /* #7005: the window notice, so an empty answer says whether the store holds the window. */
+                return await McpQueryTools.WithEmptyWindowNoticeAsync(
+                    await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "memory_grant_stats", awsRdsKind: AwsRdsKind.None)
+                    ?? McpHelpers.Status("unavailable", "No memory grant data available."),
+                    dataService, QueryWindowRelation.MemoryGrantStats, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, "memory_grant_stats");
             }
 
             /* #3541 A10: the window half, over the SAME window the latest read searched — its last_snapshot_at
@@ -316,7 +321,7 @@ public sealed class McpMemoryTools
                 interval_known = r.SampleIntervalSeconds is > 0
             });
 
-            return JsonSerializer.Serialize(new
+            return await McpQueryTools.WithDataWindowNoticeAsync(JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
                 hours_back,
@@ -327,7 +332,8 @@ public sealed class McpMemoryTools
                 grants = result,
                 window = window.Select(WindowShape),
                 window_note = WindowSamplingNote
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions),
+                dataService, QueryWindowRelation.MemoryGrantStats, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, "memory_grant_stats");
         }
         catch (Exception ex)
         {
@@ -355,8 +361,11 @@ public sealed class McpMemoryTools
             var rows = await dataService.GetMemoryGrantChartDataAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             if (rows.Count == 0)
             {
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "memory_grant_stats", awsRdsKind: AwsRdsKind.None)
-                    ?? McpHelpers.Status("unavailable", "No memory grant data available.");
+                /* #7005: the window notice, so an empty answer says whether the store holds the window. */
+                return await McpQueryTools.WithEmptyWindowNoticeAsync(
+                    await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "memory_grant_stats", awsRdsKind: AwsRdsKind.None)
+                    ?? McpHelpers.Status("unavailable", "No memory grant data available."),
+                    dataService, QueryWindowRelation.MemoryGrantStats, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, "memory_grant_stats");
             }
 
             /* grants[] is the latest snapshot in the window; window[] is the whole window (#3541 A10). */
@@ -377,7 +386,7 @@ public sealed class McpMemoryTools
                 forced_grant_count_delta = r.ForcedGrantCountDelta
             });
 
-            return JsonSerializer.Serialize(new
+            return await McpQueryTools.WithDataWindowNoticeAsync(JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
                 hours_back,
@@ -388,7 +397,8 @@ public sealed class McpMemoryTools
                 grants = result,
                 window = window.Select(WindowShape),
                 window_note = WindowSamplingNote
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions),
+                dataService, QueryWindowRelation.MemoryGrantStats, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, "memory_grant_stats");
         }
         catch (Exception ex)
         {

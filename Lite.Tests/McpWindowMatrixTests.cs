@@ -81,30 +81,14 @@ public sealed class McpWindowMatrixTests : IClassFixture<SharedDuckDbFixture>, I
     /// The tools the window contract does not hold for yet, one row each with the reason. A fix deletes its row.
     /// </summary>
     /// <summary>The tool carries no window_truncated notice at all (only the Queries tools, #4966/#6829, and a few others do), so the "older than the store" rule cannot hold for it. Rolling the notice out to these tools is its own issue; the Queries tools in this group may also be missing from the seed's probe tables (query_stats and friends are not seeded).</summary>
-    private const string NoNotice = "no window_truncated notice over a window that starts before the store's data (#7005: the notice is not rolled out to this tool yet; part 1 moved the Queries, Wait and System Health reads)";
+    private const string NoNotice = "no window_truncated notice over a window that starts before the store's data (#7005: the notice is not rolled out to this tool yet; parts 1 and 2 moved the Queries, Wait, System Health, Blocking, Latch, CPU, Memory, File I/O, TempDB, Perfmon and Plan Cache reads)";
 
     private static readonly Dictionary<string, string> ExemptTools = new(StringComparer.Ordinal)
     {
         ["get_alert_history"] = NoNotice,
         ["get_analysis_facts"] = NoNotice,
         ["get_analysis_findings"] = NoNotice,
-        ["get_blocking_trend"] = NoNotice,
-        ["get_client_timeouts"] = NoNotice,
-        ["get_cpu_scheduler_pressure"] = NoNotice,
-        ["get_cpu_utilization"] = NoNotice,
-        ["get_current_waits_trend"] = NoNotice,
-        ["get_deadlock_trend"] = NoNotice,
-        ["get_file_io_trend"] = NoNotice,
-        ["get_latch_stats"] = NoNotice,
-        ["get_lock_wait_trend"] = NoNotice,
-        ["get_memory_grants"] = NoNotice,
-        ["get_memory_trend"] = NoNotice,
-        ["get_perfmon_trend"] = NoNotice,
-        ["get_plan_cache_bloat"] = NoNotice,
-        ["get_resource_semaphore"] = NoNotice,
         ["get_resource_use_by_tag"] = NoNotice,
-        ["get_spinlock_stats"] = NoNotice,
-        ["get_tempdb_trend"] = NoNotice,
     };
 
     public enum AsOfCase { None, PartlyInside, WhollyBefore }
@@ -350,6 +334,23 @@ INSERT INTO procedure_stats
      delta_execution_count, delta_worker_time, delta_elapsed_time, sample_interval_seconds)
 VALUES ($1, $2, $3, $4, 'TenantDb00', 'dbo', 'p1', 'PROCEDURE', 10, 5000, 5000, 1, 1, 1, 10, 5000, 5000, 60)",
                 _nextId--, Naive(now - back), _serverId, ServerName);
+        }
+
+        /* #7005 part 2: the probe tables of the periodic collectors the trend and snapshot reads use, a row at the raw floor and one 30 minutes
+           back, so a tool that passes did it by saying so over rows, not because its table is empty. Only the columns the schema requires. */
+        foreach (var back in new[] { RawFloorBack, TimeSpan.FromMinutes(30) })
+        {
+            var at = Naive(now - back);
+            await ExecAsync("INSERT INTO cpu_utilization_stats (collection_id, collection_time, server_id, server_name, sample_time) VALUES ($1, $2, $3, $4, $5)", _nextId--, at, _serverId, ServerName, at);
+            foreach (var table in new[] { "memory_stats", "memory_grant_stats", "file_io_stats", "tempdb_stats", "cpu_scheduler_stats" })
+            {
+                await ExecAsync($"INSERT INTO {table} (collection_id, collection_time, server_id, server_name) VALUES ($1, $2, $3, $4)", _nextId--, at, _serverId, ServerName);
+            }
+
+            await ExecAsync("INSERT INTO perfmon_stats (collection_id, collection_time, server_id, server_name, object_name, counter_name) VALUES ($1, $2, $3, $4, 'SQLServer:SQL Statistics', 'Batch Requests/sec')", _nextId--, at, _serverId, ServerName);
+            await ExecAsync("INSERT INTO plan_cache_stats (collection_id, collection_time, server_id, server_name, cacheobjtype, objtype) VALUES ($1, $2, $3, $4, 'Compiled Plan', 'Adhoc')", _nextId--, at, _serverId, ServerName);
+            await ExecAsync("INSERT INTO latch_stats (collection_id, collection_time, server_id, server_name, latch_class) VALUES ($1, $2, $3, $4, 'BUFFER')", _nextId--, at, _serverId, ServerName);
+            await ExecAsync("INSERT INTO spinlock_stats (collection_id, collection_time, server_id, server_name, spinlock_name) VALUES ($1, $2, $3, $4, 'LOCK_HASH')", _nextId--, at, _serverId, ServerName);
         }
 
         var collectors = CollectorCatalog.All.Where(d => d.TargetEngine == CollectorTargetEngine.SqlServer).Select(d => d.Name).ToArray();
