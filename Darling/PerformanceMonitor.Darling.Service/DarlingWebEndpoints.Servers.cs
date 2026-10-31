@@ -35,15 +35,6 @@ namespace PerformanceMonitor.Darling.Service;
 
 public static partial class DarlingWebEndpoints
 {
-    /// <summary>
-    /// <c>GET /api/admin/servers</c> (#5239): the Admin page's Manage Servers grid - every configured server,
-    /// enabled or disabled, with its authentication mode, monthly cost and added time (see
-    /// <see cref="DarlingAdminServersReader"/>). It is a web-only route: <c>list_servers</c> keeps its
-    /// enabled-only answer for every other consumer, and a route here adds nothing to the MCP <c>tools/list</c>.
-    /// The gate is the one every web route sits behind (the sign-in gate, then the seat's method gate, which
-    /// lets a read-only seat make a GET); the read runs on the viewer-role pool, whose column grant on
-    /// <c>config_monitored_servers</c> leaves out the credential columns, and the statement names none of them.
-    /// </summary>
     /// <summary>The most request-body bytes the run-collectors route reads (a list of collector names).</summary>
     internal const int MaxCollectorRunBodyBytes = 16 * 1024;
 
@@ -680,6 +671,15 @@ public static partial class DarlingWebEndpoints
         });
     }
 
+    /// <summary>
+    /// <c>GET /api/admin/servers</c> (#5239): the Admin page's Manage Servers grid - every configured server,
+    /// enabled or disabled, with its authentication mode, monthly cost and added time (see
+    /// <see cref="DarlingAdminServersReader"/>). It is a web-only route: <c>list_servers</c> keeps its
+    /// enabled-only answer for every other consumer, and a route here adds nothing to the MCP <c>tools/list</c>.
+    /// The gate is the one every web route sits behind (the sign-in gate, then the seat's method gate, which
+    /// lets a read-only seat make a GET); the read runs on the viewer-role pool, whose column grant on
+    /// <c>config_monitored_servers</c> leaves out the credential columns, and the statement names none of them.
+    /// </summary>
     internal static void MapAdminServers(WebApplication app, NpgsqlDataSource postgres)
     {
         app.MapGet(DarlingAdminServersReader.Route, async (HttpContext context) =>
