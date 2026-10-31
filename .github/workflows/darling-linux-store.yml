@@ -14,9 +14,10 @@ name: Darling Linux store
 #      name the way out (#6791: it could not measure the store's volume from another host), `--free-space 41G` must dry-run,
 #      run and then find nothing left to do (#6071: the verb refused to run on Linux at all).
 #
-# Triggers: the nightly (as a reusable workflow), a manual dispatch, and a pull request that touches the files this
-# checks. The pull request workflow (pr.yml) is the one per-PR CI system (#6656); this narrow trigger exists because the
-# Linux image job moved to the release workflow, and these are the only paths that can break what this proves.
+# Triggers: the nightly (nightly.yml calls this as a reusable workflow), a manual dispatch, and a pull request that touches
+# the files this checks most directly. The pull request workflow (pr.yml) is the one per-PR CI system (#6656); this narrow
+# trigger exists because the Linux image job moved to the release workflow. Other paths can break it too (any migration
+# rung, the store code the verbs call), so the nightly runs it on every dev change.
 # Never add `pull_request_target`: the job runs the checked-out Dockerfile and must not get a write token or secrets.
 on:
   workflow_call:
@@ -30,6 +31,9 @@ on:
       - 'Darling/PerformanceMonitor.Darling.Service/DarlingLaunchMemorySelfCheck.cs'
       - 'Darling/PerformanceMonitor.Darling.Service/DarlingCliCommands.cs'
       - 'Darling/PerformanceMonitor.Darling.Service/DarlingStoreHostProfile.cs'
+      - 'Darling/PerformanceMonitor.Darling.Storage/PgSchemaGenerator.cs'
+      - 'Darling/PerformanceMonitor.Darling.Storage/PgMigrations.cs'
+      - 'Darling/PerformanceMonitor.Darling.Storage/RollupBackfill.cs'
 
 permissions:
   contents: read

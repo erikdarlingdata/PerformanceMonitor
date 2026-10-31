@@ -1486,6 +1486,16 @@ jobs:
     if: (needs.check.outputs.has_changes == 'true' || inputs.from_schedule != true) && inputs.map_only != true
     uses: ./.github/workflows/darling-ui-smoke.yml
 
+  # #6995: the Darling image on Linux against a store in its own container whose owner is not a superuser
+  # (darling-linux-store.yml, the same workflow a pull request touching its files runs): the launch memory guard under a
+  # cgroup limit, the migrations, and the store verbs from a second container. Gated like the other jobs here and NOT in
+  # publish's needs, for the same reason as the web UI smoke above.
+  darling-linux-store:
+    name: Darling Linux store
+    needs: check
+    if: (needs.check.outputs.has_changes == 'true' || inputs.from_schedule != true) && inputs.map_only != true
+    uses: ./.github/workflows/darling-linux-store.yml
+
   # #5745: the WPF smoke check (wpf-smoke.yml, the same workflow a pull request touching Lite runs): the real Lite exe on a
   # seeded data folder, walked with FlaUI. Gated like the other jobs here and NOT in publish's needs, for the same reason
   # as the web UI smoke above. Its screenshots are the run's `wpf-smoke` artifact.
