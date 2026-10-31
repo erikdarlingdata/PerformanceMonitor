@@ -249,10 +249,12 @@ public static class PgSchemaGenerator
         sb.Append("   Table NAMES are unchanged; search_path = collect, config, public resolves the bare\n");
         sb.Append("   references every SQL site already uses, so no query is re-qualified. */\n\n");
 
+        /* CURRENT_USER, not a fixed role name: the owner of a bring-your-own store may be named anything (app, postgres), and
+           a managed store's owner is darling anyway (#7003). */
         sb.Append("CREATE SCHEMA IF NOT EXISTS ").Append(CollectSchema).Append(" AUTHORIZATION ")
-            .Append(OwnerRole).Append(";\n");
+            .Append("CURRENT_USER;\n");
         sb.Append("CREATE SCHEMA IF NOT EXISTS ").Append(ConfigSchema).Append(" AUTHORIZATION ")
-            .Append(OwnerRole).Append(";\n\n");
+            .Append("CURRENT_USER;\n\n");
 
         sb.Append("/* collect: all collector tables (from the catalog) + registry/metadata + the V4-V6 views */\n");
         foreach (var schema in CollectorCatalog.All)
@@ -278,9 +280,6 @@ public static class PgSchemaGenerator
 
         return sb.ToString();
     }
-
-    /// <summary>The owner role every managed object is authored by (the bootstrap superuser).</summary>
-    private const string OwnerRole = "darling";
 
     private static void AppendSetSchema(StringBuilder sb, string objectKind, string objectName, string targetSchema)
     {
