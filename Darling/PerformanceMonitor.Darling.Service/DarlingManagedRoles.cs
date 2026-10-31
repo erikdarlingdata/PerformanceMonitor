@@ -4629,7 +4629,7 @@ WHERE t.tgrelid = 'config.investigation_journal'::regclass
     /// password (the file was regenerated). Pure, so the decision is pinned without a server.
     /// </summary>
     internal static PasswordReassert PlanPasswordReassert(
-        IReadOnlyDictionary<string, string?> stored, string adminPassword, string viewerPassword, string mcpPassword, string? webPassword = null)
+        IReadOnlyDictionary<string, string?> stored, string adminPassword, string viewerPassword, string mcpPassword, string webPassword)
     {
         ArgumentNullException.ThrowIfNull(stored);
 
@@ -4649,8 +4649,7 @@ WHERE t.tgrelid = 'config.investigation_journal'::regclass
             reassert |= PasswordReassert.Mcp;
         }
 
-        if (webPassword is not null
-            && !ScramSha256Verifier.Verifies(stored.GetValueOrDefault(DarlingManagedPostgres.WebRoleName), webPassword))
+        if (!ScramSha256Verifier.Verifies(stored.GetValueOrDefault(DarlingManagedPostgres.WebRoleName), webPassword))
         {
             reassert |= PasswordReassert.Web;
         }
