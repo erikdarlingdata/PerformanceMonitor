@@ -24,6 +24,7 @@ Releases before 3.0.0 are not archived: those entries carry no prose to move.
 ### Added
 
 - **Named MCP tokens can be read-only, and can ask for less data detail** ([#7023]) - A new `reader` role in `mcp.tokens` serves the read tools only, whatever `mcp.allowWrites`, `mcp.allowServerAdmin` and `mcp.allowInvestigations` say, and a reader is not an agent. Any token entry can also set `dataDetail` (`full`, `maskLiterals` or `metadataOnly`) to narrow `mcp.dataDetail` for that token; it can never widen it.
+- **GitHub Copilot in VS Code is documented as an MCP client** (#7042) - The MCP page has a setup section for Copilot, for Darling and Lite. It shows the `mcp.json` entry, with the token as a prompted input. For Darling it uses the `/core` URL, which serves 75 tools. VS Code allows at most 128 tools per chat request, and the root URL serves 190. It also suggests a `reader` token. Lite has no `/core` URL, and its 113 tools are under the limit.
 
 ### Changed
 
@@ -36,6 +37,7 @@ Releases before 3.0.0 are not archived: those entries carry no prose to move.
 - **Two hourly store upkeep reads no longer read the full index and job catalogs** ([#7016]) - the index check read every index in the database. It needs the indexes of one table only. The aggregate compression check read the job catalog once for each aggregate. On a test store with 8,321 chunks, the index check went from about 1.4 million buffer reads to about 100.
 
 - **The FinOps Server Inventory no longer rereads the whole archive for memory, size and properties** ([#7014]) - the Lite Server Inventory read looked up each server's newest memory row, database-size snapshot and properties row through views that include the Parquet archive, so its cost grew with archived days (807,552 archive rows with 8 archived days on a 40-database store). It now reads the live tables for a server that still has rows there. It reads the archive only for a server whose rows are all archived, so a stopped server still shows its last values. The idle-database coverage check behind the Idle DBs count and the Idle Databases grid no longer scans the whole `query_stats` archive either. It counts days inside its 7-day window. It then asks the live table whether the oldest sample is 7 days old, and runs one early-stopping archive probe per server it cannot decide. The answers are the same as before.
+- **The blocking health band counts waits, not report rows** (#7028) - Darling banded blocking on blocked-process report rows. This covered the fleet card, Overview, fleet sweep and Daily Health Calendar. SQL Server writes about eleven reports for one one-minute wait, so the band did not match the waits the blocking alerts count. The band now counts waits per hour. Each hour uses its blocked-process reports when it has any, and its DMV snapshots when it has none. The card shows the count it bands, as `waits/hr`. The 5 and 20 per hour tiers keep their stored values. A window where some hours have only DMV snapshots can now count more, because those hours are no longer dropped. One wait is still one count, however many reports SQL Server wrote for it. Two new tiers are off by default: `blocking_warn_snapshot_wait_seconds` and `blocking_critical_snapshot_wait_seconds`. They band on the largest total blocked wait in one DMV snapshot, which is the Blocking Wait Time alert's own measure. They apply the alert's consecutive-snapshot gate first. The gate runs on each server's own snapshot cadence, and a streak can cross midnight or the start of the window. The tiers are in `get_alert_settings`, `update_alert_settings`, the Viewer settings window and the web admin page. Store schema version 230. Lite is unchanged and keeps banding on report rows.
 
 ### Fixed
 
@@ -6306,3 +6308,5 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#7016]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7016
 [#7017]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7017
 [#7023]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7023
+[#7028]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7028
+[#7042]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7042
