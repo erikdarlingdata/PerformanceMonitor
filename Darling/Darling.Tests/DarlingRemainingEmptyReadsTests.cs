@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -77,6 +78,7 @@ public sealed class DarlingRemainingEmptyReadsTests
 
             /* ── collected, but outside the window: the opposite next move ── */
             await SeedWaitAsync(connection, ct, HoursAgo(48), "CXPACKET", 5000L);
+            await RecordRunAsync(connection, ct, "wait_stats");
 
             var quiet = JsonDocument.Parse(
                 await DarlingMcpDataTools.GetWaitTypes(postgres, ServerName, 1)).RootElement;
@@ -187,9 +189,21 @@ INSERT INTO memory_clerks
 VALUES ($1, $2, $3, $4, $5, $6)",
             CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(t), ServerId, ServerName, clerkType, memoryMb);
 
+    /// <summary>
+    /// #7010: one clean collector run for the table's collector half an hour ago. A running collector logs a run every cycle, and the window floor counts a
+    /// server in a window when it holds a row there or the collection log records a run there: a sparse table's quiet window has the runs and no rows.
+    /// </summary>
+    private static Task RecordRunAsync(NpgsqlConnection connection, CancellationToken ct, string table) =>
+        DarlingMcpTestData.ExecAsync(connection, ct,
+            @"INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected)
+VALUES ($1,$2,$3,$4,$5,100,'SUCCESS',0)",
+            CollectionIdGenerator.Next(), ServerId, ServerName, CollectorCatalog.All.First(c => c.TargetTable == table).Name,
+            DarlingMcpTestData.Naive(DateTime.UtcNow.AddMinutes(-30)));
+
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM wait_stats WHERE server_id = $1", ServerId);
+        await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM collection_log WHERE server_id = $1", ServerId);
         await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM memory_clerks WHERE server_id = $1", ServerId);
         await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM servers WHERE server_id = $1", ServerId);
         await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM config_monitored_servers WHERE server_id = $1", ServerId);

@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading;
@@ -226,13 +227,7 @@ internal static class DarlingMcpWindowNotice
         node["effective_start"] = notice.EffectiveStart;
         node["window_truncated"] = notice.WindowTruncated;
         node["truncation_note"] = notice.TruncationNote;
-        /* The baseline-discontinuity block is the payload's trailing key (the trend tools' contract, #6334): appending the notice after it would end the payload on truncation_note. */
-        if (node.TryGetPropertyValue(BaselineDiscontinuities.PayloadKey, out var trailing))
-        {
-            node.Remove(BaselineDiscontinuities.PayloadKey);
-            node[BaselineDiscontinuities.PayloadKey] = trailing;
-        }
-
+        KeepTrailingKeysLast(node);
         return node.ToJsonString(McpHelpers.JsonOptions);
     }
 
@@ -258,8 +253,29 @@ internal static class DarlingMcpWindowNotice
         node["effective_start"] = notice.EffectiveStart;
         node["window_truncated"] = notice.WindowTruncated;
         node["truncation_note"] = notice.TruncationNote;
+        KeepTrailingKeysLast(node);
         return node;
     }
+
+    /// <summary>
+    /// The keys a payload promises as its LAST (the trend tools' <c>discontinuities</c>, #6334, and the analysis tools'
+    /// <c>collection_caveats</c>, #3691). The notice keys are appended after whatever the payload had, which would end it
+    /// on <c>truncation_note</c>, so each of these that is present moves back to the end, keeping the order they already had among themselves.
+    /// One helper for every path that adds the notice to a payload someone else built.
+    /// </summary>
+    private static void KeepTrailingKeysLast(JsonObject node)
+    {
+        var trailing = node.Where(p => Array.IndexOf(TrailingKeys, p.Key) >= 0).Select(p => p.Key).ToList();
+        foreach (var key in trailing)
+        {
+            var value = node[key];
+            node.Remove(key);
+            node[key] = value;
+        }
+    }
+
+    /// <summary>The keys a payload ends on when it has them.</summary>
+    private static readonly string[] TrailingKeys = [BaselineDiscontinuities.PayloadKey, "collection_caveats"];
 
     /// <summary>The reads the web does not list, and the collector table each one windows on (both on <c>collection_time</c>).</summary>
     internal static readonly System.Collections.Generic.IReadOnlyDictionary<string, string> UnlistedTableByRead =
