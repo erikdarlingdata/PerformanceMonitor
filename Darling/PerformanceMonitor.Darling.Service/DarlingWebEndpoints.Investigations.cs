@@ -35,8 +35,6 @@ namespace PerformanceMonitor.Darling.Service;
 
 public static partial class DarlingWebEndpoints
 {
-    /* ─────────────────────── #3450 mute rules: the dedicated write endpoints ─────────────────────── */
-
     /// <summary>
     /// The pending agent notes screen's routes (#5903): <c>GET /api/investigation-notes/pending</c> lists the notes an agent
     /// proposed that nobody has decided, and <c>PUT /api/investigation-notes/{id}/approve</c> and <c>.../reject</c> decide
@@ -748,6 +746,8 @@ public static partial class DarlingWebEndpoints
 
         return new JsonObject { ["enabled"] = read.Enabled, ["can_decide"] = canDecide, ["changes"] = calls, ["refusals"] = refusals };
     }
+
+    /* ─────────────────────── #3450 mute rules: the dedicated write endpoints ─────────────────────── */
 
     /// <summary>
     /// The mute-rule WRITE surface (#3450): create / update / set-enabled / delete, the web twins of the four
