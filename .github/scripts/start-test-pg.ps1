@@ -121,6 +121,9 @@ if ($Mode -eq 'StartTargets') {
         Add-Content -Path "$targetData\postgresql.conf" -Value "shared_preload_libraries = 'pg_stat_statements'"
         # No compute_query_id: the setting exists from 14 and an older server refuses to start on an unknown one.
         Add-Content -Path "$targetData\postgresql.conf" -Value "track_io_timing = on"
+        Add-Content -Path "$targetData\postgresql.conf" -Value "fsync = off"
+        Add-Content -Path "$targetData\postgresql.conf" -Value "synchronous_commit = off"
+        Add-Content -Path "$targetData\postgresql.conf" -Value "full_page_writes = off"
         & "$targetBin\pg_ctl.exe" -D $targetData -l $targetLog -w start
         if ($LASTEXITCODE -ne 0) { if (Test-Path $targetLog) { Get-Content $targetLog -Tail 50 }; throw "pg_ctl start failed for the PostgreSQL $m target ($LASTEXITCODE)" }
         & "$targetBin\createdb.exe" -h 127.0.0.1 -p $port -U darling darling
