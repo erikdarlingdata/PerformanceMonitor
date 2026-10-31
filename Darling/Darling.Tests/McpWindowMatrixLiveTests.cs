@@ -18,6 +18,7 @@ using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Analysis;
+using PerformanceMonitor.Darling.Service.Investigations;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -148,10 +149,10 @@ public sealed class McpWindowMatrixLiveTests : IClassFixture<McpWindowMatrixStor
     /// <summary>The tool throws or answers error because the generic binding leaves a required argument null (test binding gap), or reads a store the matrix does not seed.</summary>
     private const string BindFailure = "the generic binding leaves a required argument null, so the call errors (test binding gap)";
 
-    /// <summary>The tools the window contract does not hold for yet, one row each with the reason. A fix deletes its row.</summary>
+    /// <summary>The tools the window contract does not hold for yet, one row each with the reason. A fix deletes its row. The NoNotice and
+    /// NotTrue rows (the product reasons, not the binding gaps) are tracked in #7010.</summary>
     private static readonly Dictionary<string, string> ExemptTools = new(StringComparer.Ordinal)
     {
-        ["backtest_custom_alert_rule"] = NeedsArgument,
         ["get_agent_alerts"] = NoNotice,
         ["get_alert_history"] = NoNotice,
         ["get_analysis_facts"] = NoNotice,
@@ -166,7 +167,7 @@ public sealed class McpWindowMatrixLiveTests : IClassFixture<McpWindowMatrixStor
         ["get_database_protection"] = NoNotice,
         ["get_deadlock_trend"] = NoNotice,
         ["get_file_io_trend"] = NoNotice,
-        ["get_finops"] = NeedsArgument,
+        ["get_finops"] = NoNotice,
         ["get_fleet_overview"] = NoNotice,
         ["get_forced_plans"] = NoNotice,
         ["get_health_parser_cpu_tasks"] = NoNotice,
@@ -179,13 +180,13 @@ public sealed class McpWindowMatrixLiveTests : IClassFixture<McpWindowMatrixStor
         ["get_health_parser_significant_waits"] = NoNotice,
         ["get_health_parser_system_health"] = NoNotice,
         ["get_identity_capacity"] = NoNotice,
-        ["get_investigation_reports"] = BindFailure,
+        ["get_investigation_reports"] = NoNotice,
         ["get_job_history"] = NotTrue,
         ["get_latch_stats"] = NoNotice,
         ["get_lock_wait_trend"] = NoNotice,
         ["get_memory_grants"] = NoNotice,
         ["get_memory_trend"] = NoNotice,
-        ["get_perfmon_trend"] = BindFailure,
+        ["get_perfmon_trend"] = NoNotice,
         ["get_pg_autovacuum_health"] = NoNotice,
         ["get_pg_blocking"] = NoNotice,
         ["get_pg_buffer_usage"] = NoNotice,
@@ -206,7 +207,7 @@ public sealed class McpWindowMatrixLiveTests : IClassFixture<McpWindowMatrixStor
         ["get_pg_wraparound_risk"] = NoNotice,
         ["get_pg_xmin_horizon"] = NoNotice,
         ["get_plan_cache_bloat"] = NoNotice,
-        ["get_plan_force_precheck"] = BindFailure,
+        ["get_plan_force_precheck"] = NoNotice,
         ["get_procedure_duration_trend"] = NotTrue,
         ["get_query_duration_trend"] = NotTrue,
         ["get_query_heatmap"] = NoNotice,
@@ -214,12 +215,11 @@ public sealed class McpWindowMatrixLiveTests : IClassFixture<McpWindowMatrixStor
         ["get_query_store_clutter"] = NoNotice,
         ["get_query_store_duration_trend"] = NotTrue,
         ["get_query_store_hints"] = NoNotice,
-        ["get_query_store_query_history"] = BindFailure,
         ["get_query_store_top"] = NoNotice,
         ["get_query_trend"] = NoNotice,
         ["get_resource_semaphore"] = NoNotice,
         ["get_resource_use_by_tag"] = NoNotice,
-        ["get_server_trend"] = NeedsArgument,
+        ["get_server_trend"] = NoNotice,
         ["get_spinlock_stats"] = NoNotice,
         ["get_store_log"] = NoNotice,
         ["get_store_query_history"] = NoNotice,
@@ -231,6 +231,37 @@ public sealed class McpWindowMatrixLiveTests : IClassFixture<McpWindowMatrixStor
         ["get_wait_trend"] = NoNotice,
         ["get_wait_types"] = NoNotice,
     };
+
+    /// <summary>The arguments a tool needs beyond the window that the generic binding cannot supply: a required view, metric or counter, the
+    /// seeded query and plan, a definition to replay (no saved rule), and the investigation tool's two services (#6984).</summary>
+    private static IEnumerable<KeyValuePair<string, object?>> ToolArguments(string tool, NpgsqlDataSource postgres)
+    {
+        switch (tool)
+        {
+            case "backtest_custom_alert_rule":
+                yield return new("definition",
+                    "{\"metric\":{\"source\":\"cpu_utilization_stats\",\"measure\":\"sqlserver_cpu_utilization\",\"aggregate\":\"avg\",\"hours\":0.25}," +
+                    "\"predicate\":{\"op\":\"ge\",\"warnThreshold\":25},\"hysteresis\":{\"breachSamples\":1,\"clearSamples\":1},\"scope\":{\"mode\":\"all\"}}");
+                break;
+            case "get_finops": yield return new("view", "high_impact"); break;
+            case "get_server_trend": yield return new("metric", "total_waits"); break;
+            case "get_perfmon_trend": yield return new("counter_name", "Batch Requests/sec"); break;
+            case "get_plan_force_precheck":
+                yield return new("database_name", "TenantDb00");
+                yield return new("query_id", 1000L);
+                yield return new("plan_id", 9L);
+                break;
+            case "get_query_store_query_history":
+                yield return new("database_name", "TenantDb00");
+                yield return new("query_id", 1000L);
+                break;
+            case "get_investigation_reports":
+                yield return new("composer", new InvestigationBriefComposer(new PgInvestigationBriefSourceReader(postgres),
+                    new McpDataDetailSetting(McpDataDetail.Full), DarlingInvestigationBriefTools.Tools));
+                yield return new("readPolicy", new InvestigationReadPolicy(false));
+                break;
+        }
+    }
 
     public enum AsOfCase { None, PartlyInside, WhollyBefore }
 
@@ -276,6 +307,7 @@ public sealed class McpWindowMatrixLiveTests : IClassFixture<McpWindowMatrixStor
                     var overrides = new Dictionary<string, object?>();
                     if (hasHours) overrides["hours_back"] = hours;
                     if (hasAsOf && asOfCase != AsOfCase.None) overrides["as_of"] = AsOfText(end);
+                    foreach (var (argName, argValue) in ToolArguments(name, postgres)) overrides[argName] = argValue;
 
                     string json;
                     try
