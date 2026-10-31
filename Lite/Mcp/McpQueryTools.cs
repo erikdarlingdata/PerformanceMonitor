@@ -1604,18 +1604,23 @@ public sealed class McpQueryTools
         }
 
         var notice = await WindowNoticeAsync(floorProbe, requestedStart, windowEnd, table);
-        /* After the tool's own keys, the place Darling's twin writes them: a payload's key order is part of its shape. The one block that stays
-           last is collection_caveats (get_analysis_facts: the caveat block closes the payload), so the notice goes in front of it. */
-        var caveats = node.ContainsKey("collection_caveats") ? node["collection_caveats"] : null;
-        if (caveats is not null)
+        /* After the tool's own keys, the place Darling's twin writes them: a payload's key order is part of its shape. Two blocks stay
+           last when the payload has them: discontinuities (every trend payload on both SKUs ends with it, BaselineDiscontinuities.PayloadKey)
+           and collection_caveats (get_analysis_facts: the caveat block closes the payload), so the notice goes in front of them. */
+        var trailing = new List<KeyValuePair<string, System.Text.Json.Nodes.JsonNode?>>();
+        foreach (var key in new[] { BaselineDiscontinuities.PayloadKey, "collection_caveats" })
         {
-            node.Remove("collection_caveats");
+            if (node.ContainsKey(key))
+            {
+                trailing.Add(new KeyValuePair<string, System.Text.Json.Nodes.JsonNode?>(key, node[key]));
+                node.Remove(key);
+            }
         }
 
         AddNoticeKeys(node, notice);
-        if (caveats is not null)
+        foreach (var pair in trailing)
         {
-            node["collection_caveats"] = caveats;
+            node[pair.Key] = pair.Value;
         }
 
         return node.ToJsonString(McpHelpers.JsonOptions);
