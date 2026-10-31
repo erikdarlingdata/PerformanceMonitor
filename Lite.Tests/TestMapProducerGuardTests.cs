@@ -423,7 +423,8 @@ public sealed class TestMapProducerGuardTests : IDisposable
     }
 
     /// <summary>#7027: a test that reads `pages/server-tabs.js` reads the files in `pages/server-tabs/` too (`RepoFile.ReadRepoFile`
-    /// joins them), so a change to a tab file selects what a change to the main file selects. Any `<name>/x.js` with a tracked `<name>.js` beside it\n    /// counts, by name, with no module list to keep in step: the folder of another module (`other/`) is joined the same way.</summary>
+    /// joins them), so a change to a tab file selects what a change to the main file selects. Any `<name>/x.js` with a tracked `<name>.js` beside it
+    /// counts, by name, with no module list to keep in step: the folder of another module (`other/`) is joined the same way.</summary>
     [Fact]
     public void ATestThatReadsAPageModule_ReadsTheFilesInTheFolderBesideIt()
     {
