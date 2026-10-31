@@ -350,7 +350,9 @@ public sealed class AzureSqlDatabaseMemoryScopeTests : IClassFixture<SharedDuckD
         Assert.True(start > 0, "the mem_latest CTE is missing");
         var memLatest = read[start..read.IndexOf("),", start, StringComparison.Ordinal)];
 
-        Assert.Contains("FROM v_memory_stats", memLatest, StringComparison.Ordinal);
+        /* #7000: the relation is the hot memory_stats table while it holds a row for the server, else the v_memory_stats archive view. */
+        Assert.Contains("FROM \" + memoryRelation", memLatest, StringComparison.Ordinal);
+        Assert.Contains("\"memory_stats\" : \"v_memory_stats\"", read, StringComparison.Ordinal);
         Assert.Contains("total_physical_memory_mb", memLatest, StringComparison.Ordinal);
         Assert.DoesNotContain("server_properties", memLatest, StringComparison.Ordinal);
         /* The one CTE that reads server_properties takes the CPU count and the edition, and nothing about memory. */

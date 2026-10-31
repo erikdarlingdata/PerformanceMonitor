@@ -30,11 +30,12 @@ public sealed class OverviewReadScalingTests : IDisposable
     /* Days of history that stay in DuckDB (past the widest window any read here uses, collection health's 7 days). */
     private const int HotDays = 8;
     /* A read that follows its window scans the same Parquet rows in both stores; the slack is a small constant, not a ratio. */
-    private const long AllowedExtraParquetRows = 2000;
-    /* Reads whose READ_PARQUET scan still grows with the archive on this store shape: both read a "latest row per key" set with no
-       time bound (Top Queries by CPU's procedure_stats module lookup, the utilization card's memory_stats and server_properties
-       lookups), so DuckDB cannot prune their files. Their scan count is not asserted (issue to be filed); their WINDOW rows are. */
-    private static readonly HashSet<string> ParquetScanKnownExceptions = ["top queries by CPU", "utilization card"];
+    private const long AllowedExtraParquetRows = 100;
+    /* A WINDOW operator (the ranking #6096 ran over the archive) may rank only a fraction of the window's rows of the busiest
+       table. Growth between the two stores cannot see a ranking over the WINDOW's rows that should have been only the ranked
+       handles' (#6362: 14,400 procedure_stats rows in the 24 h window against about 2,700 for the handles it ranks), so this
+       absolute ceiling is what fails when that filter goes. */
+    private const long MaxWindowRows = Databases * SnapshotsPerDay / 2;
 
     private readonly string _tempDir;
     private readonly List<DuckDbInitializer> _initializers = [];
@@ -208,12 +209,8 @@ FROM slots, range({2}) b(d) ORDER BY t;
         ("collection health", d => d.GetCollectionHealthAsync(ServerId)),
     ];
 
-    [Fact]
-    public async Task OverviewReadsScanTheirWindowNotTheArchive()
+    private async Task<(List<string> Failures, List<string> Report)> CheckReadsAsync(LocalDataService oneDay, LocalDataService eightDays)
     {
-        var oneDay = await BuildStoreAsync("a1", archivedDays: 1);
-        var eightDays = await BuildStoreAsync("a8", archivedDays: 8);
-
         var failures = new List<string>();
         var report = new List<string>();
         foreach (var (name, read) in OverviewReads())
@@ -225,10 +222,22 @@ FROM slots, range({2}) b(d) ORDER BY t;
             var largeRows = large.Scans.Sum(s => s.RowsScanned);
             var line = $"{name}: READ_PARQUET rows scanned {smallRows:N0} ({small.Scans.Count} nodes) with 1 archived day, {largeRows:N0} ({large.Scans.Count} nodes) with 8; rows out {small.Scans.Sum(x => x.RowsOut):N0} / {large.Scans.Sum(x => x.RowsOut):N0}; WINDOW rows {small.WindowRows:N0} / {large.WindowRows:N0}; nodes [{string.Join(" | ", large.Scans.Select(x => x.Columns))}]";
             report.Add(line);
-            var scanGrew = largeRows > smallRows + AllowedExtraParquetRows && !ParquetScanKnownExceptions.Contains(name);
-            if (scanGrew || large.WindowRows > small.WindowRows + AllowedExtraParquetRows)
+            if (largeRows > smallRows + AllowedExtraParquetRows
+                || large.WindowRows > small.WindowRows + AllowedExtraParquetRows
+                || Math.Max(small.WindowRows, large.WindowRows) > MaxWindowRows)
                 failures.Add(line);
         }
+
+        return (failures, report);
+    }
+
+    [Fact]
+    public async Task OverviewReadsScanTheirWindowNotTheArchive()
+    {
+        var oneDay = await BuildStoreAsync("a1", archivedDays: 1);
+        var eightDays = await BuildStoreAsync("a8", archivedDays: 8);
+
+        var (failures, report) = await CheckReadsAsync(oneDay, eightDays);
 
         Assert.True(failures.Count == 0,
             "an Overview read scans the archive, not its window:" + Environment.NewLine + string.Join(Environment.NewLine, failures)

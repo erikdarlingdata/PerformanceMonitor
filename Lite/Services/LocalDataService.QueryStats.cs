@@ -189,6 +189,15 @@ module AS (
         WHERE server_id = $1
         AND   sql_handle IS NOT NULL
         AND   sql_handle <> ''
+        /* #7000: only the read's own window. This lookup used to take the newest identity per handle from ALL history
+           (#1568), which no time bound pruned: a field-shaped store scanned 72,000 procedure_stats archive rows with one
+           archived day and 576,000 with eight (the Overview read grew with the archive, not the window). A statement that
+           ran in the window ran inside its procedure, and the procedure_stats collector stores every module that ran in an
+           interval (counters moved; only a 5,000 row safety cap per run, about 6 times what a busy primary shows, drops the
+           stalest), so that procedure's row is in the window too. The newest identity of the window is the newest
+           one that matters for statements shown in it. */
+        AND   collection_time >= $2
+        AND   collection_time <= $3
         /* #6096: only the handles of the ranked groups. Without this the window below ranked EVERY procedure_stats row
            the archive holds for the server (432,000 rows from one day of a 344-database server, 3.2 s of the read; it grows
            with the archive, not the window, so a month of history made this read take minutes). The page joins on

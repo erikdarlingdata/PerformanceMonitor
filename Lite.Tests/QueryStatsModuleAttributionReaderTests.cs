@@ -129,6 +129,28 @@ public sealed class QueryStatsModuleAttributionReaderTests : IClassFixture<Share
         Assert.Equal("TestDb.dbo.usp_New", only.ModuleName);
     }
 
+    /// <summary>
+    /// #7000: the module lookup reads the read's own window, not all history. A handle's procedure row from before the
+    /// window does not name a statement shown in it (the collector stores every procedure that ran in an interval, so a
+    /// statement that ran in the window has a procedure row in the window), and the newest row of the window still wins.
+    /// </summary>
+    [Fact]
+    public async Task TopQueries_ModuleLookupReadsTheWindowOnly()
+    {
+        var service = new LocalDataService(_duckDb);
+
+        await SeedQueryStatsAsync("TestDb", "0xOLD", "0xOLDMOD", deltaExec: 4, deltaElapsedUs: 200_000, "SELECT old");
+        await SeedProcedureStatsAsync("TestDb", "dbo", "usp_Before", "PROCEDURE", "0xOLDMOD", collectedOverride: Collected.AddDays(-3));
+        await SeedQueryStatsAsync("TestDb", "0xIN", "0xINMOD", deltaExec: 4, deltaElapsedUs: 200_000, "SELECT in");
+        await SeedProcedureStatsAsync("TestDb", "dbo", "usp_Before", "PROCEDURE", "0xINMOD", collectedOverride: Collected.AddDays(-3));
+        await SeedProcedureStatsAsync("TestDb", "dbo", "usp_InWindow", "PROCEDURE", "0xINMOD", collectedOverride: Collected);
+
+        var rows = await service.GetTopQueriesByCpuAsync(ServerId);
+
+        Assert.Equal("ad hoc", rows.Single(r => r.QueryHash == "0xOLD").ModuleName);
+        Assert.Equal("TestDb.dbo.usp_InWindow", rows.Single(r => r.QueryHash == "0xIN").ModuleName);
+    }
+
     // ── Seeding helpers (column-list INSERT; unset columns default to NULL) ──
 
     private async Task SeedQueryStatsAsync(
