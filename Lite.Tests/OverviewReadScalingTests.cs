@@ -45,6 +45,8 @@ public sealed class OverviewReadScalingTests : IDisposable
     private const string TopQueriesRead = "top queries by CPU";
     private const long MaxTopQueriesWindowRows = Databases * SnapshotsPerDay * (HotDays + 8) / 3;
 
+    private const string InventoryRead = "FinOps server inventory";
+
     private readonly string _tempDir;
     private readonly List<DuckDbInitializer> _initializers = [];
 
@@ -91,6 +93,11 @@ INSERT INTO query_stats (collection_id, collection_time, server_id, server_name,
     delta_execution_count, delta_worker_time, delta_elapsed_time, query_text, sql_handle, sample_interval_seconds)
 SELECT s * {2} + d, t, {1}, 'SRV', 'Db' || d, '0xQ' || d, '0xP' || d, t, 5, 900000 + d, 900000, 'SELECT ' || d, '0xH' || d, 1800
 FROM slots, range({2}) b(d) ORDER BY t;
+
+INSERT INTO database_size_stats (collection_id, collection_time, server_id, server_name, database_name, database_id, file_id, file_type_desc, file_name,
+    physical_name, total_size_mb, used_size_mb)
+SELECT s * 40 + d, t, {1}, 'SRV', 'Db' || d, d + 5, 1, 'ROWS', 'Db' || d || '_data', 'D:\Db' || d || '.mdf', 1000 + d, 400 + d
+FROM slots, range(40) b(d) ORDER BY t;
 
 INSERT INTO procedure_stats (collection_id, collection_time, server_id, server_name, database_name, schema_name, object_name, sql_handle, sample_interval_seconds)
 SELECT s * {2} + d, t, {1}, 'SRV', 'Db' || d, 'dbo', 'usp_' || d, '0xH' || d, 1800
@@ -215,6 +222,8 @@ FROM slots, range({2}) b(d) ORDER BY t;
         ("utilization card", d => d.GetUtilizationEfficiencyAsync(ServerId)),
         (TopQueriesRead, d => d.GetTopQueriesByCpuAsync(ServerId, 24, 50)),
         ("collection health", d => d.GetCollectionHealthAsync(ServerId)),
+        /* #7014: the FinOps Server Inventory read, with 40 databases per size snapshot (the field's shape, not Databases). */
+        (InventoryRead, d => d.GetServerMetricsAsync()),
     ];
 
     private async Task<(List<string> Failures, List<string> Report)> CheckReadsAsync(LocalDataService oneDay, LocalDataService eightDays)
@@ -231,7 +240,15 @@ FROM slots, range({2}) b(d) ORDER BY t;
             var line = $"{name}: READ_PARQUET rows scanned {smallRows:N0} ({small.Scans.Count} nodes) with 1 archived day, {largeRows:N0} ({large.Scans.Count} nodes) with 8; rows out {small.Scans.Sum(x => x.RowsOut):N0} / {large.Scans.Sum(x => x.RowsOut):N0}; WINDOW rows {small.WindowRows:N0} / {large.WindowRows:N0}; nodes [{string.Join(" | ", large.Scans.Select(x => x.Columns))}]";
             report.Add(line);
             var window = Math.Max(small.WindowRows, large.WindowRows);
-            var failed = name == TopQueriesRead
+            /* The inventory read keeps ONE archive scan on purpose: its idle-database coverage asks for the oldest query_stats sample, which
+               with the default 7 hot days only the archive can answer (a query_stats scan, 72,000 rows with one archived day and 576,000
+               with eight here). Every other lookup (memory, size snapshots, properties) must read the hot tables, so the rows outside the
+               largest scan must not grow (#7014: 807,552 rows over 7 nodes with 8 archived days before, one node after). */
+            var otherSmall = smallRows - small.Scans.Select(x => x.RowsScanned).DefaultIfEmpty(0).Max();
+            var otherLarge = largeRows - large.Scans.Select(x => x.RowsScanned).DefaultIfEmpty(0).Max();
+            var failed = name == InventoryRead
+                ? otherLarge > otherSmall + AllowedExtraParquetRows
+                : name == TopQueriesRead
                 ? window > MaxTopQueriesWindowRows
                 : largeRows > smallRows + AllowedExtraParquetRows
                     || large.WindowRows > small.WindowRows + AllowedExtraParquetRows
@@ -307,5 +324,64 @@ VALUES (1, TIMESTAMP '{now}' - INTERVAL 1 HOUR, {ServerId}, 'SRV', TIMESTAMP '{n
         Assert.Equal(65536, row.PhysicalMemoryMb);
         Assert.Equal(40000, row.TotalMemoryMb);
         Assert.Equal(16, row.CpuCount);
+    }
+
+    /// <summary>
+    /// The FinOps server inventory reads the hot memory / size / properties tables for a server that still has rows there and the archive for a
+    /// server whose rows are all archived (#7014). Server 1 is collected now, with an older and a newer size snapshot, and must read its NEWEST
+    /// snapshot; server 2 stopped being collected 10 days ago, so every row of it is in Parquet, and it must still be listed with its last
+    /// storage. Built with the real archive pass.
+    /// </summary>
+    [Fact]
+    public async Task ServerInventory_ServerWhoseRowsAreAllArchived_IsStillListedBesideAHotServer()
+    {
+        var dir = Path.Combine(_tempDir, "inventoryFallback");
+        var archiveDir = Path.Combine(dir, "archive");
+        Directory.CreateDirectory(archiveDir);
+        var dbPath = Path.Combine(dir, "test.duckdb");
+        var initializer = new DuckDbInitializer(dbPath);
+        _initializers.Add(initializer);
+        await initializer.InitializeFromTemplateAsync();
+
+        using (var connection = new DuckDBConnection($"Data Source={dbPath}"))
+        {
+            await connection.OpenAsync(TestContext.Current.CancellationToken);
+            using var cmd = connection.CreateCommand();
+            var now = DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture);
+            cmd.CommandText = $@"
+INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, edition, product_version, product_level, engine_edition)
+VALUES (1, TIMESTAMP '{now}' - INTERVAL 1 HOUR, 1, 'HOT', 'Edition', '15.0.2000.5', 'RTM', 3),
+       (2, TIMESTAMP '{now}' - INTERVAL 10 DAY, 2, 'GONE', 'Edition', '15.0.2000.5', 'RTM', 3);
+INSERT INTO memory_stats (collection_id, collection_time, server_id, server_name, total_physical_memory_mb, available_physical_memory_mb,
+    target_server_memory_mb, total_server_memory_mb, buffer_pool_mb)
+VALUES (1, TIMESTAMP '{now}' - INTERVAL 1 HOUR, 1, 'HOT', 65536, 10000, 50000, 40000, 30000),
+       (2, TIMESTAMP '{now}' - INTERVAL 10 DAY, 2, 'GONE', 65536, 10000, 50000, 40000, 30000);
+INSERT INTO database_size_stats (collection_id, collection_time, server_id, server_name, database_name, database_id, file_id, file_type_desc,
+    file_name, physical_name, total_size_mb, used_size_mb)
+VALUES (1, TIMESTAMP '{now}' - INTERVAL 2 HOUR, 1, 'HOT', 'A', 5, 1, 'ROWS', 'A_data', 'D:\A.mdf', 1, 1),
+       (2, TIMESTAMP '{now}' - INTERVAL 1 HOUR, 1, 'HOT', 'A', 5, 1, 'ROWS', 'A_data', 'D:\A.mdf', 4096, 1024),
+       (3, TIMESTAMP '{now}' - INTERVAL 10 DAY, 2, 'GONE', 'B', 5, 1, 'ROWS', 'B_data', 'D:\B.mdf', 2048, 1024),
+       (4, TIMESTAMP '{now}' - INTERVAL 10 DAY, 2, 'GONE', 'C', 6, 1, 'ROWS', 'C_data', 'D:\C.mdf', 1024, 512);";
+            await cmd.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        }
+
+        var archive = new ArchiveService(initializer, archiveDir);
+        archive.TimestampForTests = DateTime.UtcNow.ToString("yyyyMMdd_HHmm");
+        await archive.ArchiveOldDataAsync(hotDataHours: HotDays * 24);
+
+        using (var connection = new DuckDBConnection($"Data Source={dbPath}"))
+        {
+            await connection.OpenAsync(TestContext.Current.CancellationToken);
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = "SELECT (SELECT COUNT(*) FROM memory_stats WHERE server_id = 2) + (SELECT COUNT(*) FROM server_properties WHERE server_id = 2)"
+                + " + (SELECT COUNT(*) FROM database_size_stats WHERE server_id = 2)";
+            Assert.Equal(0L, Convert.ToInt64(await cmd.ExecuteScalarAsync(TestContext.Current.CancellationToken)));
+        }
+
+        var metrics = await new LocalDataService(initializer).GetServerMetricsAsync();
+
+        Assert.Equal([1, 2], metrics.Keys.OrderBy(k => k).ToArray());
+        Assert.Equal(4m, metrics[1].StorageTotalGb);
+        Assert.Equal(3m, metrics[2].StorageTotalGb);
     }
 }
