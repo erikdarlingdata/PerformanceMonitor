@@ -252,9 +252,9 @@ public static class PgSchemaGenerator
         /* CURRENT_USER, not a fixed role name: the owner of a bring-your-own store may be named anything (app, postgres), and
            a managed store's owner is darling anyway (#7003). */
         sb.Append("CREATE SCHEMA IF NOT EXISTS ").Append(CollectSchema).Append(" AUTHORIZATION ")
-            .Append("CURRENT_USER;\n");
+            .Append("darling;\n");
         sb.Append("CREATE SCHEMA IF NOT EXISTS ").Append(ConfigSchema).Append(" AUTHORIZATION ")
-            .Append("CURRENT_USER;\n\n");
+            .Append("darling;\n\n");
 
         sb.Append("/* collect: all collector tables (from the catalog) + registry/metadata + the V4-V6 views */\n");
         foreach (var schema in CollectorCatalog.All)
