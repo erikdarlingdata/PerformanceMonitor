@@ -205,7 +205,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
             var blockingTask = Task.Run(() => _dataService.GetBlockingTrendAsync(_serverId, hoursBack, fromDate, toDate));
             var deadlockTask = Task.Run(() => _dataService.GetDeadlockTrendAsync(_serverId, hoursBack, fromDate, toDate));
             var memoryTask = Task.Run(() => _dataService.GetMemoryTrendAsync(_serverId, hoursBack, fromDate, toDate));
-            var fileIoTask = Task.Run(() => _dataService.GetFileIoLatencyTrendAsync(_serverId, hoursBack, fromDate, toDate));
+            var fileIoTask = Task.Run(() => _dataService.GetFileIoOverviewLatencyTrendAsync(_serverId, hoursBack, fromDate, toDate));
 
             // Fetch baselines for band rendering — chart-unit-matched metrics. #4320: GetBaselineReferenceTimeUtc
             // hands BaselineLocalClock.LocalKey a UTC instant, which converts it to server-local itself: a custom
@@ -274,10 +274,9 @@ public partial class CorrelatedTimelineLanesControl : UserControl
 
             if (fileIoTask.IsCompletedSuccessfully)
             {
+                /* #6970: the read already returns one weighted point per time, not one per file. */
                 var ioGrouped = fileIoTask.Result
-                    .GroupBy(d => d.CollectionTime)
-                    .OrderBy(g => g.Key)
-                    .Select(g => (g.Key.ToOADate(), IoLatencyWeighting.Weighted(g.Select(x => (x.AvgReadLatencyMs, x.Reads)))))
+                    .Select(d => (d.CollectionTime.ToOADate(), d.ReadLatencyMs))
                     .ToList();
                 UpdateLane(FileIoChart, "I/O ms", ioGrouped, "#81C784", baseline: ioBaseline, minAnomalyValue: 2);
             }
@@ -301,7 +300,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
                 var refWaitTask = Task.Run(() => _dataService.GetTotalWaitTrendAsync(_serverId, 0, refFromUtc, refToUtc));
                 var refBlockingTask = Task.Run(() => _dataService.GetBlockingTrendAsync(_serverId, 0, refFromUtc, refToUtc));
                 var refMemoryTask = Task.Run(() => _dataService.GetMemoryTrendAsync(_serverId, 0, refFromUtc, refToUtc));
-                var refIoTask = Task.Run(() => _dataService.GetFileIoLatencyTrendAsync(_serverId, 0, refFromUtc, refToUtc));
+                var refIoTask = Task.Run(() => _dataService.GetFileIoOverviewLatencyTrendAsync(_serverId, 0, refFromUtc, refToUtc));
 
                 try { await Task.WhenAll(refCpuTask, refWaitTask, refBlockingTask, refMemoryTask, refIoTask); }
                 catch (Exception ex) { AppLogger.Info("CorrelatedLanes", $"Comparison fetch failed: {ex.Message}"); }
@@ -335,9 +334,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
                 if (refIoTask.IsCompletedSuccessfully && refIoTask.Result != null)
                 {
                     var refIo = refIoTask.Result
-                        .GroupBy(d => d.CollectionTime)
-                        .OrderBy(g => g.Key)
-                        .Select(g => (TimeWindows.GhostX(g.Key, days, zone).ToOADate(), IoLatencyWeighting.Weighted(g.Select(x => (x.AvgReadLatencyMs, x.Reads)))))
+                        .Select(d => (TimeWindows.GhostX(d.CollectionTime, days, zone).ToOADate(), d.ReadLatencyMs))
                         .ToList();
                     AddGhostLine(FileIoChart, refIo, "#81C784");
                 }
