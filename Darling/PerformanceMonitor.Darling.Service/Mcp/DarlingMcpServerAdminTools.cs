@@ -1296,8 +1296,8 @@ ON CONFLICT (server_id) DO NOTHING";
     ///
     /// <para>Transaction-scoped on purpose: a session lock would outlive a pooled connection's return. It covers the
     /// re-check and the write only; the connection probe (up to about 45 seconds) runs before the write opens its
-    /// transaction. <c>pg_advisory_xact_lock</c> and <c>hashtext</c> are executable by PUBLIC, so the <c>viewer</c>
-    /// and <c>mcp</c> roles need no grant. The wait for the lock is bounded by the command's own deadline.</para>
+    /// transaction. <c>hashtext</c> is executable by PUBLIC, and the managed and compose batches grant
+    /// <c>pg_advisory_xact_lock</c> to <c>admin</c>, <c>web</c> and <c>mcp</c> only, so <c>viewer</c> is refused here. The wait for the lock is bounded by the command's own deadline.</para>
     /// </summary>
     internal const string IdentityLockSql = "SELECT pg_advisory_xact_lock(hashtext('config_monitored_servers.identity'))";
 

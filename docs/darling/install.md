@@ -219,7 +219,7 @@ Managed Postgres cluster initialized (scram-sha-256, data checksums, UTF8/C loca
 Managed Postgres started
 Creating the 'darling' database
 Postgres store ready (schema v<version>, <count> migration(s) applied)
-Least-privilege roles ready (admin: ...; viewer: ...; mcp: ...)
+Least-privilege roles ready (admin: ...; viewer: ...; web: ...; mcp: ...)
 TimescaleDB detected — hypertables, chunk-based retention, and compression enabled
 TimescaleDB: <n>/<n> collector table(s) are hypertables
 PerformanceMonitor Darling collection loop started
@@ -269,7 +269,7 @@ Each of these has cost somebody real time.
 These gaps are known and current. They are not bugs. Read this list so that you do not file them twice.
 
 - TLS is opt-in on the MCP and the web endpoint (`mcp.network.tls`, `web.network.tls`). Without it, the token travels in clear on the segment. The other control is a TLS-terminating reverse proxy. Both are opt-ins for a trusted LAN.
-- The viewer has no client-side secret store. The `darling.json` of a remote seat holds the store role password in cleartext. Set an ACL on it. This is fine for the read-only `viewer` role. Think about it for `admin`.
+- The viewer has no client-side secret store. The `darling.json` of a remote seat holds the store role password in cleartext. Set an ACL on it. This is fine for the read-only `viewer` role, the login for remote seats. Think about it for `admin`.
 - The web dashboard has no plan analysis and no live-server actions. That is the job of the WPF viewer. The page set of the dashboard is a deliberate subset of the page set of the viewer.
 - `network` blocks need a service restart. There is no hot reload for exposure. The service says so at startup and names the block that it loaded. So a config edit that appears to do nothing is at least explained.
 - PostgreSQL monitored targets collect, and you can read them on both UIs. Plan capture is available for them. Alerts and analysis findings for them cover less than for SQL Server. See [What it does not do yet](postgresql-targets.md#what-it-does-not-do-yet).

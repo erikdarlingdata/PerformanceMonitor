@@ -195,7 +195,7 @@ jobs:
           Add-Content -Path "$dataDir\postgresql.conf" -Value "timescaledb.max_background_workers = 74"
           Add-Content -Path "$dataDir\postgresql.conf" -Value "max_worker_processes = 85"
           Add-Content -Path "$dataDir\postgresql.conf" -Value "fsync = off"
-          Add-Content -Path "$dataDir\postgresql.conf" -Value "synchronous_commit = off"
+          # synchronous_commit stays on (#7012): a commit that returns before its WAL is flushed leaves the committed hint bits unset, so VACUUM cannot mark pages all-visible and an index scan cannot mark dead entries. With fsync off the flush never waits on disk.
           Add-Content -Path "$dataDir\postgresql.conf" -Value "full_page_writes = off"
           Add-Content -Path "$dataDir\postgresql.conf" -Value "timezone = 'UTC'"
           Add-Content -Path "$dataDir\postgresql.conf" -Value "log_timezone = 'UTC'"

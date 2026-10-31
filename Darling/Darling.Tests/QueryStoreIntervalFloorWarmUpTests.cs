@@ -207,6 +207,21 @@ public sealed class QueryStoreIntervalFloorWarmUpTests
             await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
             var log = new CapturingTestLogger();
 
+            /* #7007: the premise of this test needs the drain's DELETEs to commit synchronously. PostgreSQL sets a heap
+               tuple's XMAX_COMMITTED hint bit only once the deleter's commit record is flushed, and an index scan marks an
+               entry dead only when it sees that hint (HeapTupleIsSurelyDead). On a cluster running synchronous_commit = off
+               (the throwaway CI and rig clusters did, #6972) the warm-up runs inside the ~200 ms before the WAL writer
+               flushes the last commit, sets no hint, marks nothing, and the test's own read pays the whole walk. The
+               scratch database sets it on (OpenSeededAsync), and the drain's product connections below inherit that. */
+            await using (var probe = await postgres.OpenConnectionAsync(ct))
+            await using (var show = new NpgsqlCommand("SHOW synchronous_commit", probe))
+            {
+                var setting = (string)(await show.ExecuteScalarAsync(ct))!;
+                Assert.True(
+                    setting == "on",
+                    $"synchronous_commit is '{setting}' on the drain's connections; with it off the warm-up cannot set the deleted rows' commit hint bits, so it marks no index entry dead (#7007)");
+            }
+
             var summary = await DarlingRetention.PurgeAsync(postgres, timescaleAvailable: false, log, ct);
 
             Assert.True(summary.RowsDeleted >= ExpiredPerServer * ServerIds.Length, log.Joined);
@@ -463,6 +478,13 @@ public sealed class QueryStoreIntervalFloorWarmUpTests
     {
         var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
+
+        /* #7007: synchronous commits, whatever the cluster's default is (see the warm-up test). The database setting
+           is what the drain's product connections get; the session setting is this connection's, which seeds, vacuums
+           and deletes, so VACUUM finds each commit flushed and sets the visibility map the premise relies on. */
+        await ExecuteAsync(connection, $"ALTER DATABASE \"{scratch.DatabaseName}\" SET synchronous_commit = on", ct);
+        await ExecuteAsync(connection, "SET synchronous_commit = on", ct);
+
         await PgMigrations.MigrateAsync(connection, ct);
 
         foreach (var serverId in ServerIds)

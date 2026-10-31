@@ -214,7 +214,7 @@ The defaults are opposite on purpose. The local seat belongs to the operator, an
 On connect the viewer runs one probe:
 
 ```sql
-SELECT has_table_privilege('config_mute_rules', 'INSERT')
+SELECT has_table_privilege('config_alert_log', 'UPDATE')
 ```
 
 True means read-write. False means read-only. Any other result also means read-only. The probe fails safe, so a permission quirk or a mis-provisioned store hides the write controls. You do not click one and hit a permission error. A failure to reach the store is not a read-only verdict. The viewer then shows "Can't reach the Darling store — is the Darling service running?" instead.

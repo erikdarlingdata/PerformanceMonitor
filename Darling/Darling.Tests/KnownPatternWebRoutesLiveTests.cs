@@ -75,7 +75,7 @@ public sealed class KnownPatternWebRoutesLiveTests
         try
         {
             await ExecAsync(owner, $"CREATE ROLE {roleName} LOGIN NOSUPERUSER PASSWORD '{RolePassword}'", ct);
-            foreach (var statement in ViewerGrantReplay.StatementsFor(roleName, scratch.DatabaseName, "viewer"))
+            foreach (var statement in ViewerGrantReplay.StatementsFor(roleName, scratch.DatabaseName, "web"))
             {
                 await ExecAsync(owner, statement, ct);
             }

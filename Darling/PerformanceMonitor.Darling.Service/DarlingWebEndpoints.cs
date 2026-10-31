@@ -423,7 +423,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// and the MCP host's analysis fill — so compare_analysis' banding here reads a series the store was already asked
     /// for this analysis hour from memory. Null keeps the analysis service's baselines private to it.</para>
     /// </summary>
-    public static void MapAll(WebApplication app, NpgsqlDataSource postgres, CollectorRuntimeState collector, ILogger logger, BaselineCache? baselineCache = null, PostgresConfig? postgresConfig = null, ReadLatencyAccumulator? readLatency = null, PerformanceMonitor.PlanAnalysis.AnalyzerConfig? analyzerConfig = null, MonitoredServerRegistryState? registryState = null, SlowReadLog? slowReads = null, ReadAdmission? readAdmission = null, StoreOwnerSource? ownerSource = null, McpDataDetail dataDetail = McpDataDetail.MetadataOnly, IPseudonymKeySource? pseudonymKeys = null, InvestigationExportGate? investigationExportGate = null, IPasswordKeyRing? passwordKeys = null, WebAdminArm? adminArm = null, bool allowWindowsAuthOverUnverifiedTls = false)
+    public static void MapAll(WebApplication app, NpgsqlDataSource postgres, CollectorRuntimeState collector, ILogger logger, BaselineCache? baselineCache = null, PostgresConfig? postgresConfig = null, ReadLatencyAccumulator? readLatency = null, PerformanceMonitor.PlanAnalysis.AnalyzerConfig? analyzerConfig = null, MonitoredServerRegistryState? registryState = null, SlowReadLog? slowReads = null, ReadAdmission? readAdmission = null, StoreOwnerSource? ownerSource = null, McpDataDetail dataDetail = McpDataDetail.MetadataOnly, IPseudonymKeySource? pseudonymKeys = null, InvestigationExportGate? investigationExportGate = null, IPasswordKeyRing? passwordKeys = null, WebAdminArm? adminArm = null, bool allowWindowsAuthOverUnverifiedTls = false, NpgsqlDataSource? composeReadPostgres = null)
     {
         /* #4442 scope 2, #4782: the read-latency seat THIS call's routes record into -- the accumulator and
            logger this call was given, held in a per-call object that the two record sites close over: the
@@ -752,7 +752,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             });
         }
 
-        MapCustomViews(app, postgres, logger, readLatencyRecorder, readAdmission, managedStore, adminArm);
+        MapCustomViews(app, postgres, logger, readLatencyRecorder, readAdmission, managedStore, adminArm, composeReadPostgres);
         MapCustomAlerts(app, postgres, logger, readAdmission, readLatencyRecorder);
         MapMuteRules(app, postgres, logger);
         DarlingKnownPatternRoutes.Map(app, postgres, logger);
@@ -810,7 +810,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// duplicate-name conflict detection. Error bodies are always <c>{"error": "..."}</c>, matching the read surface.
     /// </summary>
     internal static void MapCustomViews(WebApplication app, NpgsqlDataSource postgres, ILogger logger, ReadLatencyRecorder readLatencyRecorder,
-        ReadAdmission? readAdmission, bool managedStore = false, WebAdminArm? adminArm = null)
+        ReadAdmission? readAdmission, bool managedStore = false, WebAdminArm? adminArm = null, NpgsqlDataSource? composeReadPostgres = null)
     {
         var store = new CustomViewStore(postgres, McpCommandDeadlines.ReadSeconds);
 
@@ -1051,7 +1051,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                sees. Only THIS web mapping (see ComposeRunFailureResult) stops putting a STORE fault's text on
                the wire (M1's outcome.Fault, checked before outcome.Error is ever read for the 400/500 split). */
             var stopwatch = Stopwatch.StartNew();
-            var outcome = await RunComposedPanelAsync(postgres, body, context.RequestAborted, readLatencyRecorder, ComposeClientDeadlineHeadroomSeconds, remapClientTimeout: true, includeDataStartFields: true,
+            var outcome = await RunComposedPanelAsync(composeReadPostgres ?? postgres, body, context.RequestAborted, readLatencyRecorder, ComposeClientDeadlineHeadroomSeconds, remapClientTimeout: true, includeDataStartFields: true,
                 caller: WebReadCaller(context), cacheHost: ReadSurface.Web);
             if (outcome.PayloadText is { } payloadText)
             {
@@ -7739,6 +7739,13 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// its sentence) answer with the identical fixed shape.</summary>
     internal static IResult ServerErrorResult(string sentence, string route, ILogger logger, long elapsedMs, CancellationToken requestAborted)
     {
+        /* A write the store refused for privilege is an answer, not a fault: the 403 sentence, no failure line. One place for every route
+           whose core caught the store's refusal as text. */
+        if (DarlingWebFailureLog.TryWriteRefusal(sentence, out var refusal))
+        {
+            return ErrorResult(refusal, StatusCodes.Status403Forbidden);
+        }
+
         DarlingWebFailureLog.Report(logger, route, elapsedMs, sentence, requestAborted);
         return Results.Json(DarlingWebFailureLog.Body(sentence), statusCode: DarlingWebFailureLog.StatusCode(sentence));
     }

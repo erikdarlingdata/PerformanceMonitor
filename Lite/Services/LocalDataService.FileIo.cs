@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Collectors;
@@ -84,11 +85,11 @@ ORDER BY (delta_stall_read_ms + delta_stall_write_ms) DESC";
     internal static readonly string FileIoLatencyTrendSql = FileIoLatencyTrendSqlFor("");
 
     /// <summary>
-    /// #5312: the latency statement with the saved database filter's <see cref="BuildDbInClause"/> predicate in the
-    /// top-files ranking, so the top ten are ranked among the chosen databases only (the later join to the ranking
-    /// narrows every other CTE). <paramref name="dbClause"/> "" is the statement as it always read.
+    /// The ranking and rating CTEs (<c>file_totals</c>, <c>ranked_files</c>, <c>top_files</c>, <c>rated</c>) that
+    /// <see cref="FileIoLatencyTrendSqlFor"/> and <see cref="FileIoOverviewLatencyTrendSqlFor"/> share, so both read the
+    /// same ten-plus-ten files and rate the same rows (#6970).
     /// </summary>
-    internal static string FileIoLatencyTrendSqlFor(string dbClause) => $@"
+    private static string FileIoLatencyRatedCtesFor(string dbClause) => $@"
 WITH file_totals AS (
     SELECT
         database_name,
@@ -151,7 +152,14 @@ rated AS (
     WHERE f.server_id = $1
     AND   f.collection_time >= $2
     AND   f.collection_time <= $3
-)
+)";
+
+    /// <summary>
+    /// #5312: the latency statement with the saved database filter's <see cref="BuildDbInClause"/> predicate in the
+    /// top-files ranking, so the top ten are ranked among the chosen databases only (the later join to the ranking
+    /// narrows every other CTE). <paramref name="dbClause"/> "" is the statement as it always read.
+    /// </summary>
+    internal static string FileIoLatencyTrendSqlFor(string dbClause) => $@"{FileIoLatencyRatedCtesFor(dbClause)}
 SELECT
     database_name,
     file_name,
@@ -254,6 +262,87 @@ ORDER BY database_name, file_name, 3";
         }
 
         return items;
+    }
+
+    /// <summary>
+    /// #6970: the Overview timeline's I/O Latency row draws one ops-weighted read-latency line, so it needs one row per
+    /// bucket, not one per file per bucket. This is <see cref="FileIoLatencyTrendSqlFor"/> with its final SELECT folded to
+    /// the line: the same ranking and rating CTEs and the same per-file bucket, then summed stall and reads over the file
+    /// buckets that had reads, which is what <c>IoLatencyWeighting.Weighted</c> does to the per-file points (a file bucket
+    /// with no reads takes no part). A bucket whose files all had no reads still comes back, with 0 stall and 0 reads,
+    /// because the line draws it as 0. Groups are (bucket_start, first_collection_time) so the caller can stamp the line
+    /// the way the per-file read does: at <c>first_collection_time</c> when <c>max_collection_count</c> is 1 on every
+    /// row, otherwise at <c>bucket_start</c>.
+    /// </summary>
+    internal static string FileIoOverviewLatencyTrendSqlFor(string dbClause) => $@"{FileIoLatencyRatedCtesFor(dbClause)},
+file_buckets AS (
+    SELECT
+        GREATEST(time_bucket(to_minutes(CAST($4 AS INTEGER)), collection_time, {TrendBuckets.OriginSql}), $2) AS bucket_start,
+        MIN(collection_time) AS first_collection_time,
+        COUNT(*) AS collection_count,
+        CAST(COALESCE(SUM(rated_reads), 0) AS BIGINT) AS reads,
+        COALESCE(SUM(rated_stall_read_ms), 0) AS stall_read_ms
+    FROM rated
+    GROUP BY database_name, file_name, 1
+    HAVING COUNT(rated_reads) > 0
+)
+SELECT
+    bucket_start,
+    first_collection_time,
+    COALESCE(SUM(stall_read_ms) FILTER (WHERE reads > 0), 0) AS stall_read_ms,
+    CAST(COALESCE(SUM(reads) FILTER (WHERE reads > 0), 0) AS BIGINT) AS reads,
+    MAX(collection_count) AS max_collection_count
+FROM file_buckets
+GROUP BY bucket_start, first_collection_time
+ORDER BY bucket_start, first_collection_time";
+
+    /// <summary>
+    /// The Overview timeline's I/O Latency row (#6970): one point per time, the read latency weighted by reads across the
+    /// ranked files. Returns the same series as grouping <see cref="GetFileIoLatencyTrendAsync"/>'s points by
+    /// <c>CollectionTime</c> and collapsing each group through <c>IoLatencyWeighting.Weighted</c>, without a row per file
+    /// per bucket. Same window, bucket width and singleton-stamping rule as that read. The File I/O tab keeps the per-file read.
+    /// </summary>
+    public async Task<List<FileIoOverviewPoint>> GetFileIoOverviewLatencyTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
+    {
+        using var _q = TimeQuery("GetFileIoOverviewLatencyTrendAsync", "v_file_io_stats top-10 files by reads and by writes, one weighted row per bucket");
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
+
+        var windowMinutes = Math.Max(1, (int)Math.Ceiling((endTime - startTime).TotalMinutes));
+        var bucketMinutes = TrendBuckets.AutoMinutes(windowMinutes, 1, TrendBudget.Chart.AutoPoints);
+
+        command.CommandText = FileIoOverviewLatencyTrendSqlFor("");
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = startTime });
+        command.Parameters.Add(new DuckDBParameter { Value = endTime });
+        command.Parameters.Add(new DuckDBParameter { Value = bucketMinutes });
+
+        var rows = new List<(DateTime BucketStart, DateTime FirstCollectionTime, double Stall, long Reads)>();
+        var everyBucketSingleton = true;
+
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            if (Convert.ToInt64(reader.GetValue(4)) != 1)
+            {
+                everyBucketSingleton = false;
+            }
+
+            rows.Add((reader.GetDateTime(0), reader.GetDateTime(1), ToDouble(reader.GetValue(2)), Convert.ToInt64(reader.GetValue(3))));
+        }
+
+        return rows
+            .GroupBy(r => everyBucketSingleton ? r.FirstCollectionTime : r.BucketStart)
+            .OrderBy(g => g.Key)
+            .Select(g => new FileIoOverviewPoint
+            {
+                CollectionTime = g.Key,
+                ReadLatencyMs = PerformanceMonitor.Ui.IoLatencyWeighting.Weighted(g.Select(r => (r.Reads > 0 ? r.Stall / r.Reads : 0.0, r.Reads)))
+            })
+            .ToList();
     }
 
     /// <summary>
@@ -502,6 +591,12 @@ ORDER BY file_name, 2";
 
         return items;
     }
+}
+
+public class FileIoOverviewPoint
+{
+    public DateTime CollectionTime { get; set; }
+    public double ReadLatencyMs { get; set; }
 }
 
 public class FileIoTrendPoint

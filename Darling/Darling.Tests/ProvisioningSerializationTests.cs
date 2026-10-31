@@ -119,7 +119,7 @@ public sealed class ProvisioningSerializationTests
 
         var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingManagedRoles.cs");
         Assert.Contains("pg_try_advisory_xact_lock(", source, StringComparison.Ordinal);
-        Assert.DoesNotContain("pg_advisory_xact_lock(", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("SELECT pg_advisory_xact_lock(", source, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -715,7 +715,7 @@ public sealed class ProvisioningBatchLockedTransactionLiveTests
             await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
             {
                 await using var drop = new NpgsqlCommand(
-                    "DROP OWNED BY admin, viewer, mcp; DROP ROLE IF EXISTS admin; DROP ROLE IF EXISTS viewer; DROP ROLE IF EXISTS mcp", cleanup);
+                    $"{LiveCleanupBatch.DropOwnedByExistingProductRolesSql} DROP ROLE IF EXISTS admin; DROP ROLE IF EXISTS viewer; DROP ROLE IF EXISTS web; DROP ROLE IF EXISTS mcp", cleanup);
                 await drop.ExecuteNonQueryAsync(cleanupCt);
             });
         }
@@ -795,7 +795,7 @@ public sealed class ProvisioningBatchLockedTransactionLiveTests
             await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
             {
                 await using var drop = new NpgsqlCommand(
-                    $"DROP OWNED BY admin, viewer, mcp, {holderLogin}; DROP ROLE IF EXISTS admin; DROP ROLE IF EXISTS viewer; DROP ROLE IF EXISTS mcp; DROP ROLE IF EXISTS {holderLogin}", cleanup);
+                    $"DROP OWNED BY admin, viewer, web, mcp, {holderLogin}; DROP ROLE IF EXISTS admin; DROP ROLE IF EXISTS viewer; DROP ROLE IF EXISTS web; DROP ROLE IF EXISTS mcp; DROP ROLE IF EXISTS {holderLogin}", cleanup);
                 await drop.ExecuteNonQueryAsync(cleanupCt);
             });
         }

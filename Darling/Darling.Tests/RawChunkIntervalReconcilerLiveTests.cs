@@ -119,6 +119,44 @@ public sealed class RawChunkIntervalReconcilerLiveTests
         Assert.Equal(2L, await ScalarLongAsync(connection, "SELECT COUNT(*) FROM collect.raw_chunk_interval_reconcile_runs", ct));
     }
 
+    /// <summary>
+    /// #6977: the daily purge trims <c>collect.raw_chunk_interval_reconcile_runs</c> past
+    /// <see cref="DarlingRetention.RawChunkIntervalReconcileRunsRetentionDays"/> and keeps newer rows. Runs the real
+    /// <see cref="DarlingRetention.PurgeAsync"/> against a migrated scratch store (no TimescaleDB needed).
+    /// </summary>
+    [Fact]
+    public async Task Retention_PurgesOldReconcileRunRows_AndKeepsRecentOnes()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live reconcile-run retention test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using (var connection = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, ct);
+
+            var tooOld = DarlingRetention.RawChunkIntervalReconcileRunsRetentionDays + 10;
+            await ExecAsync(connection,
+                "INSERT INTO collect.raw_chunk_interval_reconcile_runs (run_at, wal_bytes) VALUES"
+                + $" ((now() at time zone 'utc') - interval '{tooOld + 40} days', 1),"
+                + $" ((now() at time zone 'utc') - interval '{tooOld} days', 2),"
+                + " ((now() at time zone 'utc') - interval '1 days', 3),"
+                + " ((now() at time zone 'utc'), NULL)", ct);
+        }
+
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+        await DarlingRetention.PurgeAsync(dataSource, timescaleAvailable: false, logger: null, ct);
+
+        await using var check = await dataSource.OpenConnectionAsync(ct);
+        Assert.Equal(2L, await ScalarLongAsync(check, "SELECT COUNT(*) FROM collect.raw_chunk_interval_reconcile_runs", ct));
+        Assert.Equal(0L, await ScalarLongAsync(check,
+            "SELECT COUNT(*) FROM collect.raw_chunk_interval_reconcile_runs WHERE wal_bytes IN (1, 2)", ct));
+    }
+
     /// <summary>Plants one row a day before <paramref name="ts"/> and one AT <paramref name="ts"/>, so the chunk
     /// this falls in has a real, closed (not "today's still-open") range once the next day's chunk exists.</summary>
     private static async Task PlantChunkAsync(NpgsqlConnection connection, DateTime ts, CancellationToken ct)

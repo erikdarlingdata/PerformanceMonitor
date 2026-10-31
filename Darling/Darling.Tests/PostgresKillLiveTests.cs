@@ -109,7 +109,7 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
             }
 
             await File.AppendAllTextAsync(Path.Combine(Data, "postgresql.conf"),
-                $"\nport = {Port}\nlisten_addresses = '127.0.0.1'\nssl = on\nmax_connections = 40\nfsync = off\nsynchronous_commit = off\nfull_page_writes = off\ntimezone = 'UTC'\nlog_timezone = 'UTC'\n");
+                $"\nport = {Port}\nlisten_addresses = '127.0.0.1'\nssl = on\nmax_connections = 40\nfsync = off\nfull_page_writes = off\ntimezone = 'UTC'\nlog_timezone = 'UTC'\n");
             await File.WriteAllTextAsync(Path.Combine(Data, "pg_hba.conf"),
                 "hostssl all /^pmk_md5_ 127.0.0.1/32 md5\nhost all all 127.0.0.1/32 scram-sha-256\n");
             /* Not through RunToolAsync: the server inherits a redirected output pipe, which then never closes. Its output goes to the log. */
