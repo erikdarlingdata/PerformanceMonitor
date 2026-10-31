@@ -128,7 +128,7 @@ Tools from every other MCP server enabled in the same chat count toward the 128 
 
 A named token with the `reader` role fits Copilot well. A `reader` token sees the reads and nothing else: no write tool, no server admin tool and no investigation tool.
 
-Give each Copilot user an entry under `mcp.tokens` in `darling.json`, for example `{ "name": "copilot-erik", "token": "file:/run/secrets/darling/mcp-copilot-erik", "role": "reader" }`. That user pastes the token when VS Code prompts. The entry can also set `dataDetail` to `maskLiterals` or `metadataOnly` to narrow what the answers carry. See `tokens` on the [Darling MCP configuration page](darling/configuration-mcp.md#mcp).
+Give each Copilot user an entry under `mcp.tokens` in `darling.json`, for example `{ "name": "copilot-dba1", "token": "file:/run/secrets/darling/mcp-copilot-dba1", "role": "reader" }`. That user pastes the token when VS Code prompts. The entry can also set `dataDetail` to `maskLiterals` or `metadataOnly` to narrow what the answers carry. See `tokens` on the [Darling MCP configuration page](darling/configuration-mcp.md#mcp).
 
 ##### Lite with Copilot
 
