@@ -70,7 +70,7 @@ public sealed class DarlingMcpFleetTools
         "from that counter (deadlock_coverage.postgres_servers is a sub-count of servers_read, not a gap), " +
         "and get_pg_deadlocks has the parsed deadlock reports themselves. Its blocking_severity stays " +
         "Unknown on purpose: PostgreSQL blocking is a once-a-minute SAMPLE of pg_stat_activity, and the " +
-        "blocking band's count tiers were measured in engine-recorded reports per hour, so a sighting count " +
+        "blocking band's count tiers count engine-recorded blocked waits per hour (the unit blocking.count_threshold uses), so a sighting count " +
         "through them would band on a denominator they were never measured against — the PostgreSQL " +
         "Blocking alert speaks for that condition until a sampled-shape band is measured. " +
         "collection_health_age_seconds says how old the COLLECTOR-HEALTH half of the payload is: the per-card " +
