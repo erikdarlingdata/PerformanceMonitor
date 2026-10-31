@@ -758,9 +758,20 @@ public sealed class DarlingMcpCustomAlertTools
             return null;
         }
 
+        return LeastCovered(notices);
+    }
+
+    /// <summary>
+    /// The one notice a backtest answers with, out of one per replayed server: a truncated server beats a covered one, a server with no
+    /// start at all (no coverage anywhere in the span) is the least covered, and otherwise the later start beats the earlier. An ordinal
+    /// descending sort alone would put the null start (read as "") last (#7015).
+    /// </summary>
+    internal static McpWindowNotice LeastCovered(IReadOnlyList<McpWindowNotice> notices)
+    {
         var truncated = notices.Where(n => n.WindowTruncated).ToList();
-        return (truncated.Count > 0 ? truncated : notices)
-            .OrderByDescending(n => n.EffectiveStart ?? "", StringComparer.Ordinal)
+        return (truncated.Count > 0 ? truncated : notices.ToList())
+            .OrderBy(n => n.EffectiveStart is null ? 0 : 1)
+            .ThenByDescending(n => n.EffectiveStart, StringComparer.Ordinal)
             .First();
     }
 

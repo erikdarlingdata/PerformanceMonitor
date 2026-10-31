@@ -41,6 +41,18 @@ public sealed class McpWindowMatrixStore : IAsyncLifetime
     public const int PgServerId = -698402;
     public const string PgServerName = "mcp-window-matrix-pg";
 
+    /// <summary>#7015: the Aurora PostgreSQL target <c>get_pg_cpu_utilization</c> answers for. That read collects Performance Insights, which only
+    /// an Aurora target has, so on a stock PostgreSQL target it answers <c>not_collected</c> (an engine fact, no notice) over an empty window.</summary>
+    public const int PgAuroraServerId = -698403;
+    public const string PgAuroraServerName = "mcp-window-matrix-aurora";
+
+    /// <summary>The server a <c>get_pg_*</c> read in <see cref="PgSeededTables"/> is bound to.</summary>
+    public static string PgServerFor(string tool) => tool == "get_pg_cpu_utilization" ? PgAuroraServerName : PgServerName;
+
+    /// <summary>Collectors whose runs, not table rows, the window probe reads (the read is SPARSE, see WebDataStartNote.CollectorRunsByRead): a
+    /// collection_log run from the log's start on, for the PostgreSQL target.</summary>
+    private static readonly string[] PgLoggedCollectors = ["pg_replication_stats"];
+
     /// <summary>The collector tables the PostgreSQL target is seeded for, by the read that windows on each (#7015). Every other
     /// <c>get_pg_*</c> read keeps answering for the SQL Server target, as before.</summary>
     public static readonly IReadOnlyDictionary<string, string> PgSeededTables = new Dictionary<string, string>(StringComparer.Ordinal)
@@ -133,12 +145,29 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
             await DarlingMcpTestData.ExecAsync(connection, ct,
                 "INSERT INTO collect.servers (server_id, server_name, display_name, is_enabled, engine_kind, postgres_major_version, created_date, modified_date) VALUES ($1, $2, $2, TRUE, 'postgres', 16, $3, $3)",
                 PgServerId, PgServerName, DarlingMcpTestData.Naive(now - LogFloorBack));
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                "INSERT INTO collect.servers (server_id, server_name, display_name, is_enabled, engine_kind, postgres_major_version, created_date, modified_date) VALUES ($1, $2, $2, TRUE, 'aurora-postgres', 16, $3, $3)",
+                PgAuroraServerId, PgAuroraServerName, DarlingMcpTestData.Naive(now - LogFloorBack));
             long pgRowId = 0;
-            foreach (var table in PgSeededTables.Values)
+            foreach (var (tool, table) in PgSeededTables)
+            {
+                var (serverId, serverName) = tool == "get_pg_cpu_utilization" ? (PgAuroraServerId, PgAuroraServerName) : (PgServerId, PgServerName);
+                foreach (var back in new[] { LogFloorBack, TimeSpan.FromDays(2), TimeSpan.FromDays(1), TimeSpan.FromMinutes(40), TimeSpan.FromMinutes(5) })
+                {
+                    await SeedPgRowAsync(connection, table, -698500 - (++pgRowId), DarlingMcpTestData.Naive(now - back), serverId, serverName, ct);
+                }
+            }
+
+            /* The sparse reads probe their collector's logged runs (replication: a row exists only while a standby is attached), so the PostgreSQL
+               target's log carries a run at each of the same times, which is what puts the store's start 84 h back for them. */
+            long pgLogId = 0;
+            foreach (var collector in PgLoggedCollectors)
             {
                 foreach (var back in new[] { LogFloorBack, TimeSpan.FromDays(2), TimeSpan.FromDays(1), TimeSpan.FromMinutes(40), TimeSpan.FromMinutes(5) })
                 {
-                    await SeedPgRowAsync(connection, table, -698500 - (++pgRowId), DarlingMcpTestData.Naive(now - back), ct);
+                    await DarlingMcpTestData.ExecAsync(connection, ct,
+                        "INSERT INTO collect.collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected) VALUES ($1,$2,$3,$4,$5,$6,'SUCCESS',$7)",
+                        -698600 - (++pgLogId), PgServerId, PgServerName, collector, DarlingMcpTestData.Naive(now - back), 100, 10);
                 }
             }
         }
@@ -146,7 +175,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
         DataSource = NpgsqlDataSource.Create(_scratch.ConnectionString);
     }
 
-    private static async Task SeedPgRowAsync(NpgsqlConnection connection, string table, long id, DateTime time, CancellationToken ct)
+    private static async Task SeedPgRowAsync(NpgsqlConnection connection, string table, long id, DateTime time, int serverId, string serverName, CancellationToken ct)
     {
         var columns = new List<(string Name, string Type, bool Required)>();
         await using (var read = new NpgsqlCommand(
@@ -185,7 +214,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
 
         await DarlingMcpTestData.ExecAsync(connection, ct,
             $"INSERT INTO collect.{table} ({string.Join(", ", names)}) VALUES ({string.Join(", ", values)})",
-            id, time, PgServerId, PgServerName);
+            id, time, serverId, serverName);
     }
 
     public async ValueTask DisposeAsync()
@@ -398,7 +427,7 @@ public sealed class McpWindowMatrixLiveTests : IClassFixture<McpWindowMatrixStor
                     if (bindsDoubleHours) overrides["hours"] = (double)hours;
                     if (hasAsOf && asOfCase != AsOfCase.None) overrides["as_of"] = AsOfText(end);
                     foreach (var (argName, argValue) in ToolArguments(name, postgres)) overrides[argName] = argValue;
-                    if (McpWindowMatrixStore.PgSeededTables.ContainsKey(name)) overrides["server_name"] = McpWindowMatrixStore.PgServerName;
+                    if (McpWindowMatrixStore.PgSeededTables.ContainsKey(name)) overrides["server_name"] = McpWindowMatrixStore.PgServerFor(name);
 
                     string json;
                     try
