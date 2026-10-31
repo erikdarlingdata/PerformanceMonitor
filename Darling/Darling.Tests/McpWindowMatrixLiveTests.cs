@@ -36,6 +36,42 @@ public sealed class McpWindowMatrixStore : IAsyncLifetime
     public const int ServerId = -698401;
     public const string ServerName = McpReadToolBudgetLiveTests.ServerName;
 
+    /// <summary>#7015: the PostgreSQL target the <c>get_pg_*</c> reads in <see cref="PgSeededTables"/> answer for, so each reaches the
+    /// window-floor logic instead of the no-collection path an empty table takes.</summary>
+    public const int PgServerId = -698402;
+    public const string PgServerName = "mcp-window-matrix-pg";
+
+    /// <summary>#7015: the Aurora PostgreSQL target <c>get_pg_cpu_utilization</c> answers for. That read collects Performance Insights, which only
+    /// an Aurora target has, so on a stock PostgreSQL target it answers <c>not_collected</c> (an engine fact, no notice) over an empty window.</summary>
+    public const int PgAuroraServerId = -698403;
+    public const string PgAuroraServerName = "mcp-window-matrix-aurora";
+
+    /// <summary>The server a <c>get_pg_*</c> read in <see cref="PgSeededTables"/> is bound to.</summary>
+    public static string PgServerFor(string tool) => tool == "get_pg_cpu_utilization" ? PgAuroraServerName : PgServerName;
+
+    /// <summary>Collectors whose runs, not table rows, the window probe reads (the read is SPARSE, see WebDataStartNote.CollectorRunsByRead): a
+    /// collection_log run from the log's start on, for the PostgreSQL target.</summary>
+    private static readonly string[] PgLoggedCollectors = ["pg_replication_stats"];
+
+    /// <summary>The collector tables the PostgreSQL target is seeded for, by the read that windows on each (#7015). Every other
+    /// <c>get_pg_*</c> read keeps answering for the SQL Server target, as before.</summary>
+    public static readonly IReadOnlyDictionary<string, string> PgSeededTables = new Dictionary<string, string>(StringComparer.Ordinal)
+    {
+        ["get_pg_cpu_utilization"] = "pg_cpu_utilization",
+        ["get_pg_deadlocks"] = "pg_deadlocks",
+        ["get_pg_index_usage"] = "pg_index_usage_stats",
+        ["get_pg_io_stats"] = "pg_io_stats",
+        ["get_pg_kernel_stats"] = "pg_kernel_stats",
+        ["get_pg_lock_stats"] = "pg_lock_stats",
+        ["get_pg_log_events"] = "pg_log_events",
+        ["get_pg_plans"] = "pg_plan_capture",
+        ["get_pg_predicate_stats"] = "pg_predicate_stats",
+        ["get_pg_replication_stats"] = "pg_replication_stats",
+        ["get_pg_server_config_changes"] = "pg_server_config",
+        ["get_pg_wait_sampling"] = "pg_wait_sampling",
+        ["get_pg_write_stats"] = "pg_write_stats",
+    };
+
     /// <summary>Where the store's raw rows start (the Query Store baseline interval), and where the collection log starts, earlier.</summary>
     public static readonly TimeSpan RawFloorBack = TimeSpan.FromDays(3);
     public static readonly TimeSpan LogFloorBack = TimeSpan.FromHours(84);
@@ -102,9 +138,83 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
                         -698400 - (++logId), ServerId, ServerName, collector, DarlingMcpTestData.Naive(now - back), 100, 10);
                 }
             }
+
+            /* #7015: a registered PostgreSQL target with a few rows in each table PgSeededTables names, spread from the log's start
+               (84 h back) to now so the store's data start holds. Only the columns a row cannot do without are filled (collection id, time,
+               server, and any other NOT NULL column with no default, by type): the window-floor probe reads collection_time alone. */
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                "INSERT INTO collect.servers (server_id, server_name, display_name, is_enabled, engine_kind, postgres_major_version, created_date, modified_date) VALUES ($1, $2, $2, TRUE, 'postgres', 16, $3, $3)",
+                PgServerId, PgServerName, DarlingMcpTestData.Naive(now - LogFloorBack));
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                "INSERT INTO collect.servers (server_id, server_name, display_name, is_enabled, engine_kind, postgres_major_version, created_date, modified_date) VALUES ($1, $2, $2, TRUE, 'aurora-postgres', 16, $3, $3)",
+                PgAuroraServerId, PgAuroraServerName, DarlingMcpTestData.Naive(now - LogFloorBack));
+            long pgRowId = 0;
+            foreach (var (tool, table) in PgSeededTables)
+            {
+                var (serverId, serverName) = tool == "get_pg_cpu_utilization" ? (PgAuroraServerId, PgAuroraServerName) : (PgServerId, PgServerName);
+                foreach (var back in new[] { LogFloorBack, TimeSpan.FromDays(2), TimeSpan.FromDays(1), TimeSpan.FromMinutes(40), TimeSpan.FromMinutes(5) })
+                {
+                    await SeedPgRowAsync(connection, table, -698500 - (++pgRowId), DarlingMcpTestData.Naive(now - back), serverId, serverName, ct);
+                }
+            }
+
+            /* The sparse reads probe their collector's logged runs (replication: a row exists only while a standby is attached), so the PostgreSQL
+               target's log carries a run at each of the same times, which is what puts the store's start 84 h back for them. */
+            long pgLogId = 0;
+            foreach (var collector in PgLoggedCollectors)
+            {
+                foreach (var back in new[] { LogFloorBack, TimeSpan.FromDays(2), TimeSpan.FromDays(1), TimeSpan.FromMinutes(40), TimeSpan.FromMinutes(5) })
+                {
+                    await DarlingMcpTestData.ExecAsync(connection, ct,
+                        "INSERT INTO collect.collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected) VALUES ($1,$2,$3,$4,$5,$6,'SUCCESS',$7)",
+                        -698600 - (++pgLogId), PgServerId, PgServerName, collector, DarlingMcpTestData.Naive(now - back), 100, 10);
+                }
+            }
         }
 
         DataSource = NpgsqlDataSource.Create(_scratch.ConnectionString);
+    }
+
+    private static async Task SeedPgRowAsync(NpgsqlConnection connection, string table, long id, DateTime time, int serverId, string serverName, CancellationToken ct)
+    {
+        var columns = new List<(string Name, string Type, bool Required)>();
+        await using (var read = new NpgsqlCommand(
+            "SELECT column_name, data_type, (is_nullable = 'NO' AND column_default IS NULL AND is_generated = 'NEVER' AND is_identity = 'NO') FROM information_schema.columns WHERE table_schema = 'collect' AND table_name = $1", connection))
+        {
+            read.Parameters.AddWithValue(table);
+            await using var reader = await read.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct)) columns.Add((reader.GetString(0), reader.GetString(1), reader.GetBoolean(2)));
+        }
+
+        var names = new List<string>();
+        var values = new List<string>();
+        foreach (var (name, type, required) in columns)
+        {
+            var value = name switch
+            {
+                "collection_id" => "$1",
+                "collection_time" => "$2",
+                "server_id" => "$3",
+                "server_name" => "$4",
+                _ when !required => null,
+                _ => type switch
+                {
+                    "integer" or "bigint" or "smallint" or "numeric" or "double precision" or "real" => "0",
+                    "text" or "character varying" => "'x'",
+                    "boolean" => "FALSE",
+                    "jsonb" or "json" => "'{}'",
+                    var t when t.StartsWith("timestamp", StringComparison.Ordinal) => "$2",
+                    _ => throw new InvalidOperationException($"collect.{table}.{name} is NOT NULL with no default and type {type}: teach SeedPgRowAsync how to fill it."),
+                },
+            };
+            if (value is null) continue;
+            names.Add(name);
+            values.Add(value);
+        }
+
+        await DarlingMcpTestData.ExecAsync(connection, ct,
+            $"INSERT INTO collect.{table} ({string.Join(", ", names)}) VALUES ({string.Join(", ", values)})",
+            id, time, serverId, serverName);
     }
 
     public async ValueTask DisposeAsync()
@@ -239,8 +349,12 @@ public sealed class McpWindowMatrixLiveTests : IClassFixture<McpWindowMatrixStor
         switch (tool)
         {
             case "backtest_custom_alert_rule":
+                /* One server: the replay is 288 steps a server at 168 h, and the PostgreSQL target this fixture seeds has no samples of the source.
+                   The rule reads query_store_stats, the table this fixture already seeds for the SQL Server target (rows at the raw floor and
+                   30 minutes back), so the backtest's coverage probe finds a floor and reaches IsTruncated (#7015). */
+                yield return new("servers", ServerName);
                 yield return new("definition",
-                    "{\"metric\":{\"source\":\"cpu_utilization_stats\",\"measure\":\"sqlserver_cpu_utilization\",\"aggregate\":\"avg\",\"hours\":0.25}," +
+                    "{\"metric\":{\"source\":\"query_store_stats\",\"measure\":\"qs_max_duration_us\",\"aggregate\":\"max\",\"hours\":0.25}," +
                     "\"predicate\":{\"op\":\"ge\",\"warnThreshold\":25},\"hysteresis\":{\"breachSamples\":1,\"clearSamples\":1},\"scope\":{\"mode\":\"all\"}}");
                 break;
             case "get_finops": yield return new("view", "high_impact"); break;
@@ -293,21 +407,27 @@ public sealed class McpWindowMatrixLiveTests : IClassFixture<McpWindowMatrixStor
             var hasHours = hoursParam is not null && (Nullable.GetUnderlyingType(hoursParam.ParameterType) ?? hoursParam.ParameterType) == typeof(int);
             var hasAsOf = method.GetParameters().Any(p => p.Name == "as_of" && p.ParameterType == typeof(string));
             if (!hasHours && !hasAsOf) continue;
+            /* #7015: the backtest's span is the double `hours`, not an int hours_back, so without its own binding the matrix passes it no
+               requested start and CheckContract skips its truncation check. It takes the matrix's two sizes as hours. */
+            var bindsDoubleHours = !hasHours && name == "backtest_custom_alert_rule";
+            var bindsHours = hasHours || bindsDoubleHours;
             windowed++;
 
-            var hourList = hasHours ? new[] { 24, 168 } : new[] { 0 };
+            var hourList = bindsHours ? new[] { 24, 168 } : new[] { 0 };
             var asOfList = hasAsOf ? new[] { AsOfCase.None, AsOfCase.PartlyInside, AsOfCase.WhollyBefore } : new[] { AsOfCase.None };
             foreach (var hours in hourList)
             {
                 foreach (var asOfCase in asOfList)
                 {
-                    if (!hasHours && asOfCase == AsOfCase.None) continue;
-                    var scenario = (hasHours ? $"hours_back {hours}" : "default window") + ", " + asOfCase;
+                    if (!bindsHours && asOfCase == AsOfCase.None) continue;
+                    var scenario = (bindsHours ? $"hours_back {hours}" : "default window") + ", " + asOfCase;
                     var end = DateTime.UtcNow - EndBack(asOfCase);
                     var overrides = new Dictionary<string, object?>();
                     if (hasHours) overrides["hours_back"] = hours;
+                    if (bindsDoubleHours) overrides["hours"] = (double)hours;
                     if (hasAsOf && asOfCase != AsOfCase.None) overrides["as_of"] = AsOfText(end);
                     foreach (var (argName, argValue) in ToolArguments(name, postgres)) overrides[argName] = argValue;
+                    if (McpWindowMatrixStore.PgSeededTables.ContainsKey(name)) overrides["server_name"] = McpWindowMatrixStore.PgServerFor(name);
 
                     string json;
                     try
@@ -322,7 +442,7 @@ public sealed class McpWindowMatrixLiveTests : IClassFixture<McpWindowMatrixStor
                         continue;
                     }
 
-                    var requestedStart = hasHours ? end - TimeSpan.FromHours(hours) : (DateTime?)null;
+                    var requestedStart = bindsHours ? end - TimeSpan.FromHours(hours) : (DateTime?)null;
                     /* The regressions tool compares the 7 days BEFORE the window, so its effective_start is that baseline's start. */
                     var lowerBound = name == "get_query_store_regressions" && requestedStart is DateTime rsStart ? rsStart - TimeSpan.FromDays(7) : requestedStart;
                     var reason = CheckContract(json, requestedStart, lowerBound, end, _store.SeededAt);
