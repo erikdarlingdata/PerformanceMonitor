@@ -826,7 +826,7 @@ public sealed class FleetRollup
             /* #3539 A3: the RATE is what the count arm banded, so the reason names it — the deadlock line's
                rule and the service's wording; an unrateable window prints the count alone. */
             parts.Add(s.BlockingRatePerHour.HasValue
-                ? $"Blocking {s.BlockingCount} ({s.BlockingRatePerHour.Value.ToString("0.0", CultureInfo.InvariantCulture)}/hr)"
+                ? $"Blocking {s.BlockingCount} ({s.BlockingRatePerHour.Value.ToString("0.0", CultureInfo.InvariantCulture)} waits/hr)"
                 : $"Blocking {s.BlockingCount}");
         }
         if (s.DeadlockSeverity >= HealthSeverity.Warning && s.DeadlockCount > 0)

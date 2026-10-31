@@ -113,7 +113,8 @@ public sealed class ViewerNotificationRouteSeveritiesTests
                     new NotificationRouteRow { MetricMatch = "performance", SmtpRecipients = "c@example.invalid", Severities = "major" }, ct));
             }
 
-            /* A store below V229 has no column: the list still reads, and every route is Both. */
+            /* A store below V229 has no column, and the V230 columns go too: the version probe reads newest first and would still answer 230 without them. The list still reads, and every route is Both. */
+            await ExecAsync(connection, "ALTER TABLE config.config_alert_settings DROP COLUMN blocking_warn_snapshot_wait_seconds, DROP COLUMN blocking_critical_snapshot_wait_seconds", ct);
             await ExecAsync(connection, "ALTER TABLE config.config_notification_routes DROP COLUMN severities", ct);
             await using (var older = new ViewerDataService(scratch.ConnectionString))
             {

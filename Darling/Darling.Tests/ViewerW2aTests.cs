@@ -102,8 +102,10 @@ public sealed class ViewerOverviewSqlTests
         /* #3895: every WINDOWED read carries the partition-column floor, and the two "ever" reads none — a
            floor would change what "newest event ever" answers. */
         /* #5644 W1: the two windowed reads are now the two wait CTEs' sources (count and worst wait both come off
-           the CTEs), each closed by the CTE's subquery parenthesis. */
-        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(sql, @"event_time >= \$2 AND collection_time >= \$3\)").Count);
+           the CTEs), each closed by the CTE's subquery parenthesis. #7028: the DMV side reads the snapshots once, into
+           dmv_src (floored there), which the wait count and the snapshot gate then share. */
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(sql, @"event_time >= \$2 AND collection_time >= \$3\)"));
+        Assert.Contains("WHERE server_id = $1 AND collection_time >= $3", sql, StringComparison.Ordinal);
         Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(sql, @"\(SELECT MAX\(event_time\)\s+FROM \w+\s+WHERE server_id = \$1\)").Count);
     }
 
