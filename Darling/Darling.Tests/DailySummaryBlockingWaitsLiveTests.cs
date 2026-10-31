@@ -344,11 +344,12 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ct, ServerId, ServerNa
         }
     }
 
-    /// <summary>#7028: blocking is ONE of the seven sources behind the retention notes' "N of 7". A day that holds DMV
-    /// snapshot waits and no reports reaches both the chosen-waits side and the snapshot side of the day, and counted
-    /// each, so it read 2 sources for one signal. It now reads 1, and a day that holds reports as well still reads 1.</summary>
+    /// <summary>#7028: the blocked-process reports and the DMV snapshots are two of the seven sources behind the retention
+    /// notes' "N of 7", each its own table. A day that holds DMV snapshot waits and no reports reaches both the chosen-waits
+    /// side and the snapshot side of the day, and counted reports it does not hold, so it read 2. It reads 1, and a day
+    /// that holds reports as well reads 2.</summary>
     [Fact]
-    public async Task ABlockingDay_CountsAsOneSource_WhetherItCameFromReportsOrSnapshots()
+    public async Task ABlockingDay_CountsReportsAndSnapshotsAsTwoSources()
     {
         var cs = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live test.");
@@ -368,7 +369,7 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ct, ServerId, ServerNa
             await PlantSnapshotAsync(connection, both.AddHours(3), rows: 2, eachMs: 30_000, ct);
 
             Assert.Equal(1, await SourcesPresentAsync(connection, dmvOnly, ct));
-            Assert.Equal(1, await SourcesPresentAsync(connection, both, ct));
+            Assert.Equal(2, await SourcesPresentAsync(connection, both, ct));
             bodySucceeded = true;
         }
         finally

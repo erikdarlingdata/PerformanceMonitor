@@ -96,8 +96,11 @@ public static class DailySummarySql
                any, else its DMV snapshot waits, so an hour that paged on DMV waits alone still counts in a day that
                holds reports in another hour. c is the count the band bands and every surface shows, max_wait_ms
                the longest of those waits. A wait lands on the day of its representative report (XE: event_time,
-               DMV: collection_time). */
-            SELECT date_trunc('day', event_time) AS d, COUNT(*) AS c, MAX(wait_time_ms) AS max_wait_ms
+               DMV: collection_time). xe_c counts the waits that came from reports: an hour that holds any report
+               waits chooses them, so a day holds blocked-process reports exactly when xe_c > 0, whatever else the
+               hour-choice picked. */
+            SELECT date_trunc('day', event_time) AS d, COUNT(*) AS c, MAX(wait_time_ms) AS max_wait_ms,
+                   COUNT(*) FILTER (WHERE from_xe) AS xe_c
             FROM blk
             GROUP BY 1
         ),
@@ -209,10 +212,13 @@ public static class DailySummarySql
             (CASE WHEN w.d IS NULL THEN 0 ELSE 1 END)
               + (CASE WHEN q.c IS NULL THEN 0 ELSE 1 END)
               + (CASE WHEN dl.d IS NULL THEN 0 ELSE 1 END)
-              /* Blocking is ONE source however the day was read (#7028): a DMV-only day has both b.d (its waits
-                 chose the DMV side) and dm.d (its snapshots), and counting each would put the retention notes' "N of 7"
-                 over what the day holds. */
-              + (CASE WHEN b.d IS NULL AND dm.d IS NULL THEN 0 ELSE 1 END)
+              /* Blocking is TWO sources, as the retention notes' "N of 7" counts them: the blocked-process reports and the
+                 DMV snapshots are separate tables with their own retention (#7028). The chosen waits (b.d) can come from
+                 either side, so the reports arm reads xe_c, the report-sourced waits, and a DMV-only day does not count
+                 as holding reports. dm.d is non-null on every day that holds a snapshot, whatever its gated value (the
+                 gate keeps one row per day with an in-window snapshot, and a low value is 0, not no row). */
+              + (CASE WHEN COALESCE(b.xe_c, 0) = 0 THEN 0 ELSE 1 END)
+              + (CASE WHEN dm.d IS NULL THEN 0 ELSE 1 END)
               + (CASE WHEN cp.d IS NULL THEN 0 ELSE 1 END)
               + (CASE WHEN m.d IS NULL THEN 0 ELSE 1 END) AS signal_sources_present,
             /* #7028: the blocking band's snapshot arm, the Blocking Wait Time alert's own measure: the largest total
