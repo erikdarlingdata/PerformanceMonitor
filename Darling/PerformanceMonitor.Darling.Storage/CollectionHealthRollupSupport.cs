@@ -128,14 +128,19 @@ WHERE NOT EXISTS (SELECT 1 FROM collect." + TimescaleSupport.CollectionHealthHou
 ORDER BY gs";
 
     /// <summary>The aggregate's materialization hypertable, schema-qualified and quoted, from the same catalog
-    /// <see cref="WatermarkSql"/> reads (#6969). NULL (no row) when the aggregate is not there. The catalog is
-    /// readable by every role, so this needs no grant of its own.</summary>
+    /// <see cref="WatermarkSql"/> reads (#6969). NULL (no row) when the aggregate is not there, or when the current
+    /// role cannot SELECT from the materialization: a role reads it only through the grant TimescaleDB copies from
+    /// the aggregate (an aggregate rebuilt after provisioning, an upgraded store or a hand-granted role may lack
+    /// it), and a scan without the grant fails with 42501 and would leave the whole read on the raw scan. No row
+    /// sends the caller to <see cref="MissingHoursSql"/>, which the role can always run. The catalog is readable by
+    /// every role, so the lookup itself needs no grant.</summary>
     public const string MaterializationNameSql = @"
 SELECT format('%I.%I', h.schema_name, h.table_name)
 FROM _timescaledb_catalog.continuous_agg ca
 JOIN _timescaledb_catalog.hypertable h ON h.id = ca.mat_hypertable_id
 WHERE ca.user_view_schema = 'collect'
-AND   ca.user_view_name = '" + TimescaleSupport.CollectionHealthHourlyView + "'";
+AND   ca.user_view_name = '" + TimescaleSupport.CollectionHealthHourlyView + @"'
+AND   has_table_privilege(format('%I.%I', h.schema_name, h.table_name), 'SELECT')";
 
     /// <summary>
     /// <see cref="MissingHoursSql"/> answered from <paramref name="materialization"/> (the name
@@ -356,8 +361,8 @@ GROUP BY server_id, collector_name";
                 return RollupPlan.Clean; // nothing whole below the watermark inside the window: all real-time, nothing to hole
             }
 
-            /* #6969: the hour scan reads the materialization's bucket index when the catalog names it, the aggregate
-               itself (the old, slower statement) when it does not. */
+            /* #6969: the hour scan reads the materialization's bucket index when the catalog names it and this role may
+               read it, the aggregate itself (the old, slower statement) when it does not. */
             string? materialization;
             await using (var find = postgres.CreateCommand(MaterializationNameSql))
             {

@@ -1128,4 +1128,79 @@ ORDER BY range_start", connection);
             Assert.Contains(hour, holed);
         }
     }
+
+    /// <summary>#6969: a role that can read the aggregate and <c>collect</c> but not the materialization (the grant
+    /// TimescaleDB copies onto it is missing: an aggregate rebuilt after provisioning, an upgraded store, a
+    /// hand-granted role) must still get the continuity guard's answer. Without the privilege check in
+    /// <see cref="CollectionHealthRollupSupport.MaterializationNameSql"/> the scan of the materialization failed
+    /// with 42501 and the plan came back unusable, so the fleet read fell to the whole-window raw scan.</summary>
+    [Fact]
+    public async Task MissingHours_AsARoleWithoutTheMaterializationGrant_StillAnswerLikeTheOwner_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var store = await OpenStoreAsync(ct);
+        Assert.SkipWhen(store is null, "Set DARLING_TEST_PG to a Postgres connection string with TimescaleDB to run the live grant-fallback test.");
+        var (scratch, connection, jobId) = store!.Value;
+        await using var _s = scratch;
+        await using var _c = connection;
+        await using var owner = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        await PlantEveryArmAsync(connection, 90_000_000, ct);
+        await RunPolicyAsync(connection, jobId, ct);
+
+        var now = NaiveUtcNow();
+        var thisHour = new DateTime(now.Year, now.Month, now.Day, now.Hour, 0, 0, DateTimeKind.Unspecified);
+        await DeleteOneBucketAsync(connection, thisHour.AddDays(-3), ct);
+        var headEnd = CollectionHealthRollupSupport.CeilingHour(now.AddDays(-7));
+
+        var role = "cha_role_" + Guid.NewGuid().ToString("N")[..12];
+        try
+        {
+            string materialization;
+            await using (var name = new NpgsqlCommand(CollectionHealthRollupSupport.MaterializationNameSql, connection))
+            {
+                materialization = (string)(await name.ExecuteScalarAsync(ct))!;
+            }
+
+            /* The viewer role's shape (DarlingManagedRoles): usage on the schema, select on every table in it, and
+               then no select on the materialization, whatever the extension copied there. */
+            foreach (var sql in new[]
+            {
+                $"CREATE ROLE {role} NOLOGIN",
+                $"GRANT USAGE ON SCHEMA collect TO {role}",
+                $"GRANT SELECT ON ALL TABLES IN SCHEMA collect TO {role}",
+                $"REVOKE ALL ON {materialization} FROM {role}",
+            })
+            {
+                await using var setup = new NpgsqlCommand(sql, connection);
+                await setup.ExecuteNonQueryAsync(ct);
+            }
+
+            await using (var check = new NpgsqlCommand(
+                $"SELECT has_table_privilege('{role}', '{materialization}', 'SELECT')", connection))
+            {
+                Assert.False((bool)(await check.ExecuteScalarAsync(ct))!);
+            }
+
+            var ownerPlan = await CollectionHealthRollupSupport.RollupPlanAsync(owner, headEnd, ct);
+            Assert.True(ownerPlan.Usable);
+            Assert.NotEmpty(ownerPlan.HoleHours);
+
+            var asRole = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { Options = $"-c role={role}" };
+            await using var restricted = NpgsqlDataSource.Create(asRole.ConnectionString);
+            await using (var who = restricted.CreateCommand("SELECT current_user"))
+            {
+                Assert.Equal(role, (string)(await who.ExecuteScalarAsync(ct))!);
+            }
+
+            var rolePlan = await CollectionHealthRollupSupport.RollupPlanAsync(restricted, headEnd, ct);
+            Assert.True(rolePlan.Usable);
+            Assert.Equal(ownerPlan.HoleHours, rolePlan.HoleHours);
+        }
+        finally
+        {
+            await using var drop = new NpgsqlCommand($"DROP OWNED BY {role}; DROP ROLE IF EXISTS {role}", connection);
+            await drop.ExecuteNonQueryAsync(CancellationToken.None);
+        }
+    }
 }
