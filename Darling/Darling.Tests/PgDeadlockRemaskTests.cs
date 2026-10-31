@@ -1753,7 +1753,7 @@ WHERE victim_pid = 10004", ct);
         }
 
         Assert.NotNull(dir);
-        return System.IO.File.ReadAllText(System.IO.Path.Combine(dir!, relativePath));
+        return RepoFile.ReadRepoFile(System.IO.Path.Combine(dir!, relativePath));
     }
 
     private static Microsoft.Extensions.Logging.ILogger NullLoggerFor() => Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance;

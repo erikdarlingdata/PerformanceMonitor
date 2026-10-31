@@ -275,7 +275,7 @@ public sealed class CollectionSweepCommandTimeoutTests
         foreach (var (file, member) in s_sweepMembers)
         {
             var path = SourcePath(file);
-            var text = File.ReadAllText(path);
+            var text = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", file);
             var body = MemberBody(text, member, path);
 
             /* ONE stripped body, for the shape scan AND the value scan. Matching the construction over
@@ -345,7 +345,7 @@ public sealed class CollectionSweepCommandTimeoutTests
         foreach (var (file, member) in s_sweepMembers)
         {
             var path = SourcePath(file);
-            var body = MemberBody(File.ReadAllText(path), member, path);
+            var body = MemberBody(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", file), member, path);
             var code = CSharpSourceWalker.StripCommentsAndStrings(body);
 
             foreach (Match ctor in s_commandCtor.Matches(code))

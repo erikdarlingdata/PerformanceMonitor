@@ -543,11 +543,14 @@ LIMIT 1";
         bool IdentityCapacityEnabled,
         int IdentityCapacityWarningPercent,
         int IdentityCapacityCriticalPercent,
-        /* #6927 (V228): the four blocking band tiers (double precision NOT NULL, 5, 20 reports per hour and 10, 60 seconds). */
+        /* #6927 (V228): the four blocking band tiers (double precision NOT NULL, 5, 20 waits per hour and 10, 60 seconds). */
         double BlockingWarnPerHour,
         double BlockingCriticalPerHour,
         double BlockingWarnWaitSeconds,
         double BlockingCriticalWaitSeconds,
+        /* #7028 (V230): the two blocking band snapshot wait tiers (double precision NOT NULL, 0 means the tier is off). */
+        double BlockingWarnSnapshotWaitSeconds,
+        double BlockingCriticalSnapshotWaitSeconds,
         /* #7041 (V232): the Daily Health Report's switch (boolean NOT NULL, default off), send time (time NOT NULL, 07:00, carried as HH:mm), zone (text, NULL = the service host's zone) and title (text, NULL = the shipped title). */
         bool DailyReportEnabled,
         string DailyReportSendAt,
@@ -594,6 +597,7 @@ SELECT enabled, cpu_enabled, cpu_threshold_percent, cpu_mode, blocking_enabled, 
        agent_alert_gaps_enabled, backup_overdue_enabled, log_backup_overdue_enabled, checkdb_overdue_enabled,
        identity_capacity_enabled, identity_capacity_warning_percent, identity_capacity_critical_percent,
        blocking_warn_per_hour, blocking_critical_per_hour, blocking_warn_wait_seconds, blocking_critical_wait_seconds,
+       blocking_warn_snapshot_wait_seconds, blocking_critical_snapshot_wait_seconds,
        daily_report_enabled, daily_report_send_at, daily_report_time_zone, daily_report_title
 FROM config_alert_settings
 WHERE id = 1";
@@ -668,11 +672,13 @@ WHERE id = 1";
             reader.GetBoolean(83), reader.GetInt32(84), reader.GetInt32(85),
             /* #6927 (V228): the four blocking band tiers at 86-89. */
             reader.GetDouble(86), reader.GetDouble(87), reader.GetDouble(88), reader.GetDouble(89),
-            /* #7041 (V232): the Daily Health Report switch, send time, zone and title at 90-93. */
-            reader.GetBoolean(90),
-            PerformanceMonitor.Darling.Service.Reports.DailyHealthReportSettings.FormatSendAt(TimeOnly.FromTimeSpan(reader.GetTimeSpan(91))),
-            reader.IsDBNull(92) ? null : reader.GetString(92),
-            reader.IsDBNull(93) ? null : reader.GetString(93));
+            /* #7028 (V230): the two blocking band snapshot wait tiers at 90-91. */
+            reader.GetDouble(90), reader.GetDouble(91),
+            /* #7041 (V232): the Daily Health Report switch, send time, zone and title at 92-95. */
+            reader.GetBoolean(92),
+            PerformanceMonitor.Darling.Service.Reports.DailyHealthReportSettings.FormatSendAt(TimeOnly.FromTimeSpan(reader.GetTimeSpan(93))),
+            reader.IsDBNull(94) ? null : reader.GetString(94),
+            reader.IsDBNull(95) ? null : reader.GetString(95));
     }
 
     /* ─────────────────────── delivery cooldown (a SECOND config table) ─────────────────────── */

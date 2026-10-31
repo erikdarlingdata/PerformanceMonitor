@@ -580,6 +580,13 @@ public sealed class StatementCutSourceScanTests
         var perFile = new Dictionary<string, List<Hit>>();
         foreach (var file in files)
         {
+            /* #7024: ReadRepoFile reads DarlingWorker.cs joined with its DarlingWorker.<Area>.cs partials, so the
+               partials are not swept again on their own (the named sites stay keyed on DarlingWorker.cs). */
+            if (file.Contains("/DarlingWorker.", StringComparison.Ordinal) && !file.EndsWith("/DarlingWorker.cs", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
             var hits = Scan(RepoFile.ReadRepoFile(file.Split('/')));
             if (hits.Count > 0) perFile[file] = hits;
         }

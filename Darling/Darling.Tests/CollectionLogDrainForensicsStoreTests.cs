@@ -244,7 +244,7 @@ public class CollectionLogDrainForensicsStoreTests
     [Fact]
     public void TheSessionIdIsResolvedRightAfterTheOpen_BeforeAnyReader()
     {
-        var runner = ReadSource("Darling/PerformanceMonitor.Darling.Service/DarlingCollectorRunner.cs");
+        var runner = RepoFile.ReadRepoFile("Darling/PerformanceMonitor.Darling.Service/DarlingCollectorRunner.cs");
 
         const string openCall = "await targetConnection.OpenAsync(cancellationToken);";
         const string captureCall = "await TargetSessionIdCache.Shared.ResolveAsync(targetConnection";
@@ -375,7 +375,7 @@ public class CollectionLogDrainForensicsStoreTests
         }
 
         Assert.NotNull(dir);
-        return File.ReadAllText(Path.Combine(dir!, relativePath));
+        return RepoFile.ReadRepoFile(Path.Combine(dir!, relativePath));
     }
 
     /// <summary>A minimal one-string-column reader, so the decorator is exercised without a live provider.</summary>

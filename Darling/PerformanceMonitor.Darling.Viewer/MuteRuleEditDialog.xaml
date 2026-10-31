@@ -36,6 +36,7 @@
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
         <TextBlock Grid.Row="0" x:Name="HeaderText" Text="Create Mute Rule" FontSize="18" FontWeight="Bold"
@@ -133,7 +134,37 @@
                      ToolTip="Alerts raised for a client application whose name contains this value (case-insensitive) will be muted, for example Management Studio to mute SSMS cancels."/>
         </Grid>
 
-        <StackPanel Grid.Row="14" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
+        <!-- #7040: the optional repeating schedule. Hidden on a store below V231, which has no columns for it. -->
+        <StackPanel Grid.Row="14" x:Name="ScheduleSection" Margin="0,4,0,0">
+            <Border BorderThickness="0,0,0,1" BorderBrush="{DynamicResource BorderBrush}" Margin="0,0,0,12"/>
+            <TextBlock Text="Repeats (optional)" FontSize="14" FontWeight="SemiBold" HorizontalAlignment="Left" Margin="0,0,0,4"/>
+            <TextBlock Text="Mute only inside a daily window. Leave the times blank for a one-off rule. With no day ticked, every day counts. A window that ends before it starts crosses midnight and belongs to the day it starts."
+                       Foreground="{DynamicResource ForegroundMutedBrush}" TextWrapping="Wrap" HorizontalAlignment="Left" Margin="0,0,0,8"/>
+            <WrapPanel x:Name="DaysPanel" Margin="0,0,0,8"/>
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="90"/>
+                    <ColumnDefinition Width="90"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+                <TextBlock Grid.Column="0" Text="From (HH:mm)" HorizontalAlignment="Left" Margin="0,0,0,4"/>
+                <TextBlock Grid.Column="1" Text="To (HH:mm)" HorizontalAlignment="Left" Margin="8,0,0,4"/>
+                <TextBlock Grid.Column="2" Text="Time zone (IANA id)" HorizontalAlignment="Left" Margin="8,0,0,4"/>
+            </Grid>
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="90"/>
+                    <ColumnDefinition Width="90"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+                <TextBox Grid.Column="0" x:Name="RecurStartBox" ToolTip="The daily time the window opens, for example 22:00."/>
+                <TextBox Grid.Column="1" x:Name="RecurEndBox" Margin="8,0,0,0" ToolTip="The daily time the window closes, for example 02:00."/>
+                <TextBox Grid.Column="2" x:Name="RecurZoneBox" Margin="8,0,0,0"
+                         ToolTip="The zone the times are in, for example America/New_York. It starts as this computer's zone."/>
+            </Grid>
+        </StackPanel>
+
+        <StackPanel Grid.Row="15" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
             <!-- No IsDefault: reason, expiration, server, metric and four pattern boxes make this a
                  multi-field entry form, where Enter-to-submit is a surprise (#1828/#1859). Matches the
                  Lite twin, MuteRuleDialog. -->

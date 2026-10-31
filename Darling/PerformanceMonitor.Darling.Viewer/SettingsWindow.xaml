@@ -449,10 +449,10 @@
                                     <TextBlock x:Name="BandBlockingWarnPerHourLabel" Text="Blocking warn at" VerticalAlignment="Center"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                     <TextBox AutomationProperties.LabeledBy="{Binding ElementName=BandBlockingWarnPerHourLabel}" x:Name="BandBlockingWarnPerHourBox" Width="45" Text="5.0" Margin="6,0,0,0" VerticalAlignment="Center"/>
-                                    <TextBlock Text="reports per hour; critical at" VerticalAlignment="Center" Margin="2,0,0,0"
+                                    <TextBlock Text="waits per hour; critical at" VerticalAlignment="Center" Margin="2,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
-                                    <TextBox AutomationProperties.Name="Blocking critical at, reports per hour" x:Name="BandBlockingCriticalPerHourBox" Width="45" Text="20.0" Margin="6,0,0,0" VerticalAlignment="Center"/>
-                                    <TextBlock Text="per hour (1.0 or above)" VerticalAlignment="Center" Margin="2,0,0,0"
+                                    <TextBox AutomationProperties.Name="Blocking critical at, waits per hour" x:Name="BandBlockingCriticalPerHourBox" Width="45" Text="20.0" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                                    <TextBlock Text="waits per hour, the unit the Blocking Count alert uses (1.0 or above)" VerticalAlignment="Center" Margin="2,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                 </WrapPanel>
                                 <WrapPanel Orientation="Horizontal" Margin="20,4,0,0">
@@ -463,6 +463,16 @@
                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                     <TextBox AutomationProperties.Name="Longest block critical at, seconds" x:Name="BandBlockingCriticalWaitSecondsBox" Width="55" Text="60.0" Margin="6,0,0,0" VerticalAlignment="Center"/>
                                     <TextBlock Text="seconds (1.0 or above; critical not below warn)" VerticalAlignment="Center" Margin="2,0,0,0"
+                                               Foreground="{DynamicResource ForegroundBrush}"/>
+                                </WrapPanel>
+                                <WrapPanel Orientation="Horizontal" Margin="20,4,0,0">
+                                    <TextBlock x:Name="BandBlockingWarnSnapshotWaitSecondsLabel" Text="Total wait in one snapshot warns at" VerticalAlignment="Center"
+                                               Foreground="{DynamicResource ForegroundBrush}"/>
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=BandBlockingWarnSnapshotWaitSecondsLabel}" x:Name="BandBlockingWarnSnapshotWaitSecondsBox" Width="55" Text="0.0" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                                    <TextBlock Text="seconds; critical at" VerticalAlignment="Center" Margin="2,0,0,0"
+                                               Foreground="{DynamicResource ForegroundBrush}"/>
+                                    <TextBox AutomationProperties.Name="Total wait in one snapshot critical at, seconds" x:Name="BandBlockingCriticalSnapshotWaitSecondsBox" Width="55" Text="0.0" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                                    <TextBlock TextWrapping="Wrap" Text="seconds (0 turns a tier off, otherwise 1.0 or above; set to the Blocking Wait Time alert's bar to colour on the same measure)" VerticalAlignment="Center" Margin="2,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                 </WrapPanel>
                                 <TextBlock Text="Normalised over whatever window a surface asks for, so one pair means the same condition on a 1-hour and a 24-hour read."

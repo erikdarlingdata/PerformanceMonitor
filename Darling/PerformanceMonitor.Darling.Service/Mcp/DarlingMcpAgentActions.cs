@@ -204,6 +204,10 @@ internal static class DarlingMcpAgentActions
 
     /* ------------------------------------------------------------------ mute rules */
 
+    /// <summary>#7040: an agent's mute stays a one-off. A repeating schedule is a standing change to what an operator hears about, so it is left to a person.</summary>
+    internal const string RecurrenceRefusal =
+        "A repeat schedule (recur_days, recur_start, recur_end, recur_time_zone) is not available during an investigation: a mute made here is a one-off, and a rule that repeats is left to an operator. Nothing was written.";
+
     /// <summary>What an investigating agent is told when it sends a mute start (#6231): its mute applies at once.</summary>
     internal const string StartsAtRefusal =
         "starts_at is not available during an investigation: a mute made here applies at once, so a window set ahead of planned work is left to an operator. Nothing was written.";
@@ -282,6 +286,8 @@ internal static class DarlingMcpAgentActions
 
         if (body is not null && (body.ContainsKey("starts_at") || body.ContainsKey("starts_at_utc")))
             return DarlingMcpAlertTools.Outcome("invalid", StartsAtRefusal);
+        if (body is not null && body.Any(p => p.Key.StartsWith("recur_", StringComparison.Ordinal)))
+            return DarlingMcpAlertTools.Outcome("invalid", RecurrenceRefusal);
 
         var (before, notFound) = await FindMuteAsync(postgres, rule_id);
         var parsed = InvestigationToolCore.ParseAgentAction(agentAction, out var action);

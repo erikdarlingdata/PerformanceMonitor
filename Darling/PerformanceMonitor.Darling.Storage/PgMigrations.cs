@@ -2978,6 +2978,8 @@ $rung$;";
         new Migration(227, "threshold-override-tag-scope", V227Sql),
         new Migration(228, "blocking-band-tiers", V228Sql),
         new Migration(229, "notification-route-severities", V229Sql),
+        new Migration(230, "blocking-band-snapshot-wait-tiers", V230Sql),
+        new Migration(231, "mute-rule-recurrence", V231Sql),
         new Migration(232, "daily-health-report", V232Sql),
     };
 
@@ -3091,6 +3093,45 @@ BEGIN
         ALTER TABLE config.config_notification_routes
             ADD CONSTRAINT ck_config_notification_routes_severities
             CHECK (severities IN ('both', 'critical', 'warning'));
+    END IF;
+END
+$$;";
+
+    /// <summary>
+    /// V230 (#7028): the two snapshot wait tiers of the blocking health band on the alert settings row, beside the four V228 ones. They are the
+    /// warn and critical bars, in seconds, for the longest total blocked wait in one sampled snapshot, the same measure the Blocking Wait Time
+    /// alert reads. Both default to 0, which means that tier is off, as the alert's own bar does at 0, so a store that never sets them bands
+    /// exactly as before. No CHECK, for the reason V228 gives: the writers hold the 0 or 1 to 86400 range and the order of the pair, and a
+    /// hand-edited row is clamped on read. Idempotent: every column is added with IF NOT EXISTS. Table-level grants already cover new columns
+    /// on this table, so no GRANT is added.
+    /// </summary>
+    private const string V230Sql = @"
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS blocking_warn_snapshot_wait_seconds double precision NOT NULL DEFAULT 0;
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS blocking_critical_snapshot_wait_seconds double precision NOT NULL DEFAULT 0;";
+
+    /// <summary>
+    /// V231 (#7040): the repeat schedule of a mute rule, on <c>config.config_mute_rules</c>. <c>recur_days</c> is a smallint bit mask
+    /// (bit n = day of week n, Sunday = bit 0; NULL = every day), <c>recur_start_time</c> and <c>recur_end_time</c> are the daily window in
+    /// the rule's zone (an end earlier than the start is a window that crosses midnight), and <c>recur_time_zone</c> is the IANA id the
+    /// times are read in. All four are nullable with no default and no backfill: NULL times mean a rule with no schedule, which is every
+    /// stored rule, so each keeps exactly its effect. A CHECK holds the two times to both-null or both-set. Needs no GRANT (the roles'
+    /// table-level grants cover a new column) and no trigger (the V117 reload beacon fires on any change to the table). An older build
+    /// ignores the four columns and would mute a repeating rule at every hour, so a rolled-back build mutes more than the schedule allows.
+    /// </summary>
+    private const string V231Sql = @"
+ALTER TABLE config.config_mute_rules ADD COLUMN IF NOT EXISTS recur_days smallint;
+ALTER TABLE config.config_mute_rules ADD COLUMN IF NOT EXISTS recur_start_time time;
+ALTER TABLE config.config_mute_rules ADD COLUMN IF NOT EXISTS recur_end_time time;
+ALTER TABLE config.config_mute_rules ADD COLUMN IF NOT EXISTS recur_time_zone text;
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_config_mute_rules_recur_times'
+                   AND conrelid = 'config.config_mute_rules'::regclass) THEN
+        ALTER TABLE config.config_mute_rules
+            ADD CONSTRAINT ck_config_mute_rules_recur_times
+            CHECK ((recur_start_time IS NULL) = (recur_end_time IS NULL));
     END IF;
 END
 $$;";

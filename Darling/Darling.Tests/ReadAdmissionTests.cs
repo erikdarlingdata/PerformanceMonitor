@@ -353,7 +353,7 @@ public sealed class ReadAdmissionTests
     [Fact]
     public void TheHourlySweep_RebuildsUnderItsOwnSlice_AndReopensTheConnectionBeforeTheFlush()
     {
-        var source = File.ReadAllText(Path.Combine(RepoFile.Root, "Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"));
+        var source = RepoFile.ReadRepoFile(Path.Combine(RepoFile.Root, "Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"));
         var rebuild = source.IndexOf("ReadAdmission.RunRebuildSliceAsync(", StringComparison.Ordinal);
         var flush = source.IndexOf("await _readLatency.FlushAsync(", StringComparison.Ordinal);
         Assert.True(rebuild > 0 && flush > rebuild, "The rebuild runs in its own slice, before the read-latency flush.");

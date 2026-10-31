@@ -63,7 +63,7 @@ public class OrphanStatePruneTests
     public void BothSkus_CallSitesUseTheWrapper_AndTheWrapperRecordsOnlySuccess()
     {
         var root = FindRoot();
-        var darling = File.ReadAllText(Path.Combine(root, "Darling", "PerformanceMonitor.Darling.Service", "DarlingCollectorRunner.cs"));
+        var darling = RepoFile.ReadRepoFile(Path.Combine(root, "Darling", "PerformanceMonitor.Darling.Service", "DarlingCollectorRunner.cs"));
         var lite = File.ReadAllText(Path.Combine(root, "Lite", "Services", "RemoteCollectorService.DefinitionRunner.cs"));
         var liteImpl = File.ReadAllText(Path.Combine(root, "Lite", "Services", "RemoteCollectorService.QueryStoreBackfill.cs"));
 

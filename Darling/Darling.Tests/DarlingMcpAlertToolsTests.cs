@@ -112,7 +112,7 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
     [InlineData("get_mute_rules", "enabled_only")]
     [InlineData("update_alert_settings", "settings_json")]
     /* #5915: each mute write tool also takes the optional agent_action, last (Level 2: ignored under the writes arm). */
-    [InlineData("create_mute_rule", "server_name,metric_name,database_pattern,query_text_pattern,wait_type_pattern,job_name_pattern,reason,expires_at,server_id,client_app_pattern,external_source,agent_action,starts_at")]
+    [InlineData("create_mute_rule", "server_name,metric_name,database_pattern,query_text_pattern,wait_type_pattern,job_name_pattern,reason,expires_at,server_id,client_app_pattern,external_source,agent_action,starts_at,recur_days,recur_start,recur_end,recur_time_zone")]
     [InlineData("delete_mute_rule", "rule_id,agent_action")]
     [InlineData("set_mute_rule_enabled", "rule_id,enabled,agent_action")]
     [InlineData("update_mute_rule", "rule_id,changes_json,agent_action")]
@@ -572,6 +572,77 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
     private static string ToolDescription(string toolName) =>
         ToolMethods().Single(m => m.GetCustomAttribute<McpServerToolAttribute>()!.Name == toolName)
             .GetCustomAttribute<DescriptionAttribute>()!.Description;
+
+    /// <summary>
+    /// #7028 (V230): the two blocking band snapshot tiers take 0 (that tier is off) or 1 to 86400, refuse anything between, below or above,
+    /// and bind the order of the pair only when both are above 0. The read-only unit label is accepted and writes nothing.
+    /// </summary>
+    [Theory]
+    [InlineData("0", true)]
+    [InlineData("1", true)]
+    [InlineData("86400", true)]
+    [InlineData("45.5", true)]
+    [InlineData("0.5", false)]
+    [InlineData("-1", false)]
+    [InlineData("86400.5", false)]
+    [InlineData("\"30\"", false)]
+    [InlineData("null", false)]
+    public void BlockingSnapshotTiers_AcceptZeroOrTheBandRange_AndRefuseTheRest(string value, bool accepted)
+    {
+        foreach (var key in new[] { "blocking_warn_snapshot_wait_seconds", "blocking_critical_snapshot_wait_seconds" })
+        {
+            var (targets, error) = ParseAsPartialUpdate((JsonObject)JsonNode.Parse("{\"health_bands\":{\"" + key + "\":" + value + "}}")!);
+            if (accepted)
+            {
+                Assert.Null(error);
+                Assert.Equal(new[] { (DarlingMcpAlertTools.AlertSettingsTable, key) }, targets.ToArray());
+            }
+            else
+            {
+                Assert.NotNull(error);
+                Assert.Contains("health_bands." + key, error, StringComparison.Ordinal);
+                Assert.Empty(targets);
+            }
+        }
+    }
+
+    [Theory]
+    [InlineData(30, 120, true)]
+    [InlineData(30, 30, true)]
+    [InlineData(0, 15, true)]
+    [InlineData(30, 0, true)]
+    [InlineData(0, 0, true)]
+    [InlineData(120, 30, false)]
+    public void BlockingSnapshotTiers_InOneBody_MustKeepCriticalAtOrAboveWarn_WhenBothAreOn(double warn, double critical, bool accepted)
+    {
+        var body = (JsonObject)JsonNode.Parse(string.Create(System.Globalization.CultureInfo.InvariantCulture,
+            $"{{\"health_bands\":{{\"blocking_warn_snapshot_wait_seconds\":{warn},\"blocking_critical_snapshot_wait_seconds\":{critical}}}}}"))!;
+        var (targets, error) = ParseAsPartialUpdate(body);
+        if (accepted)
+        {
+            Assert.Null(error);
+            Assert.Equal(2, targets.Count);
+        }
+        else
+        {
+            Assert.NotNull(error);
+            Assert.Contains("blocking_critical_snapshot_wait_seconds", error, StringComparison.Ordinal);
+            /* The parser reports its error and the caller writes nothing, whatever it had collected before the refusal. */
+        }
+    }
+
+    [Fact]
+    public void BlockingBandUnitLabel_ComesHomeFromARoundTrip_AndClaimsNoColumn()
+    {
+        var (targets, error) = ParseAsPartialUpdate((JsonObject)JsonNode.Parse("{\"health_bands\":{\"blocking_band_unit\":\"waits_per_hour\"}}")!);
+        Assert.Null(error);
+        Assert.Empty(targets);
+
+        var payload = SerializedSettingsPayload(SampleSettingsRow());
+        Assert.Equal("waits_per_hour", payload["health_bands"]!["blocking_band_unit"]!.GetValue<string>());
+        Assert.Equal(33.5, payload["health_bands"]!["blocking_warn_snapshot_wait_seconds"]!.GetValue<double>());
+        Assert.Equal(95.5, payload["health_bands"]!["blocking_critical_snapshot_wait_seconds"]!.GetValue<double>());
+    }
 
     /// <summary>
     /// The SELECT's column count and the positional read must agree. Every field on
@@ -1335,6 +1406,8 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         BackupOverdueEnabled: true, LogBackupOverdueEnabled: true, CheckDbOverdueEnabled: true,
         IdentityCapacityEnabled: true, IdentityCapacityWarningPercent: 72, IdentityCapacityCriticalPercent: 92,
         BlockingWarnPerHour: 6.5, BlockingCriticalPerHour: 22.5, BlockingWarnWaitSeconds: 11.5, BlockingCriticalWaitSeconds: 62.5,
+        /* #7028 (V230): deliberately NOT the shipped 0 / 0 (off), so a payload that dropped the columns would not match. */
+        BlockingWarnSnapshotWaitSeconds: 33.5, BlockingCriticalSnapshotWaitSeconds: 95.5,
         DailyReportEnabled: true, DailyReportSendAt: "06:30", DailyReportTimeZone: "America/New_York", DailyReportTitle: "Morning report");
 
     [Fact]
@@ -1521,6 +1594,12 @@ internal sealed class FakeMuteRuleStore : IMuteRuleStore
     /// create verb's write-to-read-back window (#3450). Takes the rule because, unlike the flag/edit verbs, the
     /// caller does not know the generated id before the write.</summary>
     internal Action<MuteRule>? AfterInsert { get; set; }
+
+    /// <summary>The store's own refusal of a rule's repeat schedule (#7040), like the zone check Darling's PostgreSQL store runs; null accepts.</summary>
+    internal Func<MuteRule, string?>? RecurrenceRefusal { get; set; }
+
+    public Task<string?> RecurrenceRefusalAsync(MuteRule rule, CancellationToken cancellationToken = default) =>
+        Task.FromResult(RecurrenceRefusal?.Invoke(rule));
 
     internal FakeMuteRuleStore Seed(MuteRule rule)
     {

@@ -287,7 +287,7 @@ public sealed class ControlPlaneReloadDurabilityTests
 
         Assert.True(File.Exists(path), $"source not found: {path}");
 
-        return File.ReadAllText(path);
+        return RepoFile.ReadRepoFile(path);
     }
 
     private static int LineOf(string text, int index) => text.Take(index).Count(c => c == '\n') + 1;
