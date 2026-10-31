@@ -326,10 +326,10 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 AND {Collectio
             CollectionRuns = CollectionRuns,
             HighCpuEvents = HighCpuEvents,
             BlockingEvents = BlockingEvents,
-            PeakSnapshotWaitMs = PeakSnapshotWaitMs,
             /* #3539 A2: the day bands blocking through the card's BlockingSeverity, whose wait arm reads the
                longest block — so the peak travels in the signals rather than only into the reasons line. */
             PeakBlockWaitMs = MaxBlockDurationMs,
+            PeakSnapshotWaitMs = PeakSnapshotWaitMs,
             MemoryPressureEvents = MemoryPressureEvents,
             MemoryCriticalEvents = MemoryCriticalEvents,
             AlertCount = AlertCount,
