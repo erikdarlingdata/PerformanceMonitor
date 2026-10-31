@@ -61,7 +61,8 @@ FILE_EXT = {"cs", "js", "css", "xaml", "sql", "ps1", "yml", "yaml", "json", "htm
 MAX_BASENAME_MATCHES = 25
 MAX_TOOL_FILES = 6
 MEMBER_REF = re.compile(r"\b([A-Z][A-Za-z0-9_]{2,})\.([A-Z][A-Za-z0-9_]{2,})\b")
-MAX_MEMBER_FILES = 5  # `Type.Member` of a partial type: the files that declare the member, when there are this few
+SPLIT_JS_MODULES = ("server-tabs",)  # #7027: page modules whose tab files sit in a folder of the same name, read joined
+MAX_MEMBER_FILES = 5 # `Type.Member` of a partial type: the files that declare the member, when there are this few
 MAX_NAMED_PARTIALS = 12
 COLLECTION_ATTR = re.compile(r'\[\s*Collection\(\s*"([^"]+)"')
 # A xunit collection shares one fixture (the live-store tests share the store's schema setup). The fixture's set-up
@@ -266,6 +267,13 @@ class Repo:
                 main = f.rsplit("/", 1)[0] + "/" + stem.split(".", 1)[0] + ".cs" if "/" in f else stem.split(".", 1)[0] + ".cs"
                 if main in self.tracked_set:
                     self.partials.setdefault(main, []).append(f)
+        # #7027: a page module split into a folder of the same name (`pages/server-tabs.js` and `pages/server-tabs/*.js`)
+        # reads joined through RepoFile.ReadRepoFile, so the folder's files select what the main file selects.
+        for f in self.tracked:
+            if f.endswith(".js") and f.count("/") >= 2:
+                folder_path = f.rsplit("/", 1)[0]
+                if folder_path.rsplit("/", 1)[-1] in SPLIT_JS_MODULES and folder_path + ".js" in self.tracked_set:
+                    self.partials.setdefault(folder_path + ".js", []).append(f)
         self.by_basename: dict[str, list[str]] = {}
         for f in self.tracked:
             self.by_basename.setdefault(f.rsplit("/", 1)[-1], []).append(f)

@@ -59,7 +59,7 @@ public sealed class WebClampCellBehaviourTests
     }
 
     private static string Wwwroot(params string[] parts) =>
-        System.IO.File.ReadAllText(PathTo(new[] { "Darling", "PerformanceMonitor.Darling.Service", "wwwroot" }.Concat(parts).ToArray()));
+        RepoFile.ReadRepoFile(new[] { "Darling", "PerformanceMonitor.Darling.Service", "wwwroot" }.Concat(parts).ToArray());
 
     [Fact]
     public void AClampColumn_KeepsTheFullText_AndHasTheClampClass()

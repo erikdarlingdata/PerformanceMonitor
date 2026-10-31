@@ -2483,7 +2483,7 @@ public sealed class AlertReadFailureSurfaceTests
            And the subtitle is load-bearing: this panel's figures are NOT the trailing seven days every
            sibling panel on the tab is, so inheriting that subtitle would make the panel assert a window it
            never measured. */
-        var js = ReadSource(Path.Combine(
+        var js = RepoFile.ReadRepoFile(Path.Combine(
             "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js"));
 
         var panelUses = Regex.Matches(js, @"^\s*ALERT_READ_PANEL,\s*$", RegexOptions.Multiline).Count;

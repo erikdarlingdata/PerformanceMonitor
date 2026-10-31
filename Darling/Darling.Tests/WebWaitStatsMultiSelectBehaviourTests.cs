@@ -260,7 +260,7 @@ public sealed class WebWaitStatsMultiSelectBehaviourTests
         Assert.Contains("readToolWithinKeptHistory(\"get_wait_trend\", { server, wait_type: waitType, hours: ctx.hours }, mine.signal)", tabs);
         Assert.Contains("waitTypes.map(", tabs);
         Assert.Contains("const MAX_WAITS_CHARTED = 10;", tabs);
-        Assert.Contains("from \"../multi-picker.js\"", tabs);
+        Assert.Contains("from \"../../multi-picker.js\"", tabs); /* #7027: the import sits in the tab module, two folders down. */
         var panels = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "panels.js");
         Assert.DoesNotContain("multi-picker", panels);
     }

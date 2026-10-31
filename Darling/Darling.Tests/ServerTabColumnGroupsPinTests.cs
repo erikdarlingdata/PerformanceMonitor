@@ -22,7 +22,7 @@ namespace Darling.Tests;
 [Trait("Stage", "Guard")]
 public sealed class ServerTabColumnGroupsPinTests
 {
-    private static string Js() => File.ReadAllText(PathTo("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js"));
+    private static string Js() => RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js");
 
     [Theory]
     [InlineData("Memory Conditions", "MEMORY_CONDITION_COLUMNS", "MEMORY_CONDITION_GROUPS")]

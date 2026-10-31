@@ -155,7 +155,7 @@ public sealed class WebChartAtTimeBehaviourTests
     public void TheGridEachItemScrollsTo_IsAPanelOfTheTabItOpens_AndTheDeadlocksGridSitsBelowItsChart()
     {
         var js = new[] { "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js" };
-        var tabs = File.ReadAllText(PathTo(js.Concat(new[] { "pages", "server-tabs.js" }).ToArray()));
+        var tabs = RepoFile.ReadRepoFile(js.Concat(new[] { "pages", "server-tabs.js" }).ToArray());
         var charts = File.ReadAllText(PathTo(js.Concat(new[] { "charts.js" }).ToArray()));
 
         // A tab's source: from its `id: "<id>",` line to the next tab's. The first match is the SQL Server registry's.
@@ -270,7 +270,7 @@ public sealed class WebChartAtTimeBehaviourTests
     [Fact]
     public void EveryServerTabLineChartHandsItsServerOver_AndNoFinOpsOrCustomViewChartDoes()
     {
-        var tabs = File.ReadAllText(PathTo("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js"));
+        var tabs = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js");
         var calls = Regex.Matches(tabs, @"zoomableLineChart\(\{");
         Assert.NotEmpty(calls);
         var handed = Regex.Matches(tabs, @"zoomableLineChart\(\{\s*atTime: \{ server(, item: ""wait"")? \},");
@@ -325,7 +325,7 @@ public sealed class WebChartAtTimeBehaviourTests
         // Most server-tab charts reach the menu through these two: line() (CPU, Memory, Blocking Events, Deadlocks, Lock Waits,
         // tempdb) and fanout() (Current Waits, Blocking and Deadlock Severity, Query Duration, System Health). The nine direct
         // zoomableLineChart calls are counted above; without this, deleting either hand-off passes every other case.
-        var tabs = File.ReadAllText(PathTo("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js"));
+        var tabs = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js");
         Assert.Single(Regex.Matches(tabs, @"atTime: opts\.atTime === false \|\| !params \|\| !params\.server \? null : \{ server: params\.server, item: opts\.atTimeItem \|\| ""queries"" \}"));
         Assert.Single(Regex.Matches(tabs, @"atTime: spec\.atTime === false \|\| !params \|\| !params\.server \? null : \{ server: params\.server, item: spec\.atTimeItem \|\| ""queries"" \}"));
     }
@@ -335,7 +335,7 @@ public sealed class WebChartAtTimeBehaviourTests
     {
         // The items open the SQL Server Queries and Blocking tabs. The PostgreSQL page has neither, so its one line chart (the
         // Amazon Aurora CPU panel) passes atTime: false, and no PostgreSQL fanout draws a line.
-        var tabs = File.ReadAllText(PathTo("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js"));
+        var tabs = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js");
         var pgStart = tabs.IndexOf("export const POSTGRES_TABS = [", StringComparison.Ordinal);
         Assert.True(pgStart > 0, "the PostgreSQL tab registry moved");
         var pg = tabs[pgStart..tabs.IndexOf("\n];", pgStart, StringComparison.Ordinal)];
@@ -351,7 +351,7 @@ public sealed class WebChartAtTimeBehaviourTests
     {
         // The desktop gives Blocking Events, Lock Waits and the blocking severity chart "Show Blocking at This Time", and the
         // deadlock charts "Show Deadlocks at This Time". Every other server-tab line chart keeps the Active Queries default.
-        var tabs = File.ReadAllText(PathTo("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js"));
+        var tabs = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js");
 
         // line() panels: Blocking Events sits on the Blocking tab only (the Overview strips replaced its copy, #6291); the deadlock chart is "Deadlock trend" on the Blocking tab (it was "Deadlocks" on Overview and
         // (#5644 W16 named it "Deadlock trend" so the Deadlocks grid below it is the only panel with that title; #6291 took the Overview copies out for the strips.)
