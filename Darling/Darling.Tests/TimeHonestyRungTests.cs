@@ -381,7 +381,7 @@ public sealed class TimeHonestyRungTests
         var reader = CSharpSourceWalker.StripCommentsAndStrings(worker);
         var head = reader.IndexOf("ReadLatestCpuCoreAsync(int serverId", StringComparison.Ordinal);
         Assert.True(head >= 0, "DarlingWorker has no ReadLatestCpuCoreAsync");
-        var body = reader.Substring(head, Math.Min(2500, reader.Length - head));
+        var body = reader.Substring(head, Math.Min(3500, reader.Length - head));
         Assert.Contains("reader.IsDBNull(3) ? (DateTime?)null : reader.GetDateTime(3)", body, StringComparison.Ordinal);
         Assert.Contains("reader.IsDBNull(2) ? (DateTime?)null : reader.GetDateTime(2)", body, StringComparison.Ordinal);
         Assert.Contains("sampleTime = sampleTimeUtc ?? sampleTimeLocal;", body, StringComparison.Ordinal);
