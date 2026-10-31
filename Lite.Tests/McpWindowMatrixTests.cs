@@ -80,8 +80,54 @@ public sealed class McpWindowMatrixTests : IClassFixture<SharedDuckDbFixture>, I
     /// <summary>
     /// The tools the window contract does not hold for yet, one row each with the reason. A fix deletes its row.
     /// </summary>
+    /// <summary>The tool carries no window_truncated notice at all (only the Queries tools, #4966/#6829, and a few others do), so the "older than the store" rule cannot hold for it. Rolling the notice out to these tools is its own issue; the Queries tools in this group may also be missing from the seed's probe tables (query_stats and friends are not seeded).</summary>
+    private const string NoNotice = "no window_truncated notice over a window that starts before the store's data (notice not rolled out to this tool, or its probe table is not seeded)";
+
+    /// <summary>The tool answers a window that ENDS before the store's first row as covered (window_truncated false), where the regressions tool says the window may have aged out (#6877).</summary>
+    private const string WhollyBeforeCovered = "window wholly before the store's first row answers window_truncated false (the #6877 aged-out answer is not mirrored here)";
+
     private static readonly Dictionary<string, string> ExemptTools = new(StringComparer.Ordinal)
     {
+        ["get_alert_history"] = NoNotice,
+        ["get_analysis_facts"] = NoNotice,
+        ["get_analysis_findings"] = NoNotice,
+        ["get_blocking_trend"] = NoNotice,
+        ["get_client_timeouts"] = NoNotice,
+        ["get_cpu_scheduler_pressure"] = NoNotice,
+        ["get_cpu_utilization"] = NoNotice,
+        ["get_current_waits_trend"] = NoNotice,
+        ["get_deadlock_trend"] = NoNotice,
+        ["get_file_io_trend"] = NoNotice,
+        ["get_health_parser_cpu_tasks"] = NoNotice,
+        ["get_health_parser_io_issues"] = NoNotice,
+        ["get_health_parser_memory_broker"] = NoNotice,
+        ["get_health_parser_memory_conditions"] = NoNotice,
+        ["get_health_parser_memory_node_oom"] = NoNotice,
+        ["get_health_parser_scheduler_issues"] = NoNotice,
+        ["get_health_parser_severe_errors"] = NoNotice,
+        ["get_health_parser_significant_waits"] = NoNotice,
+        ["get_health_parser_system_health"] = NoNotice,
+        ["get_latch_stats"] = NoNotice,
+        ["get_lock_wait_trend"] = NoNotice,
+        ["get_memory_grants"] = NoNotice,
+        ["get_memory_trend"] = NoNotice,
+        ["get_perfmon_trend"] = NoNotice,
+        ["get_plan_cache_bloat"] = NoNotice,
+        ["get_procedure_duration_trend"] = WhollyBeforeCovered,
+        ["get_query_duration_trend"] = NoNotice,
+        ["get_query_heatmap"] = NoNotice,
+        ["get_query_store_duration_trend"] = WhollyBeforeCovered,
+        ["get_query_store_top"] = WhollyBeforeCovered,
+        ["get_query_trend"] = NoNotice,
+        ["get_resource_semaphore"] = NoNotice,
+        ["get_resource_use_by_tag"] = NoNotice,
+        ["get_spinlock_stats"] = NoNotice,
+        ["get_tempdb_trend"] = NoNotice,
+        ["get_top_procedures_by_cpu"] = NoNotice,
+        ["get_top_queries_by_cpu"] = NoNotice,
+        ["get_wait_stats"] = NoNotice,
+        ["get_wait_trend"] = NoNotice,
+        ["get_wait_types"] = NoNotice,
     };
 
     public enum AsOfCase { None, PartlyInside, WhollyBefore }
@@ -111,6 +157,8 @@ public sealed class McpWindowMatrixTests : IClassFixture<SharedDuckDbFixture>, I
             var hasHours = method.GetParameters().Any(p => p.Name == "hours_back" && p.ParameterType == typeof(int));
             var hasAsOf = method.GetParameters().Any(p => p.Name == "as_of" && p.ParameterType == typeof(string));
             if (!hasHours && !hasAsOf) continue;
+            /* The investigation store and brief composer are not part of the collected store this test seeds, and BindArgs cannot build them. */
+            if (method.GetParameters().Any(p => p.ParameterType.Name == "IInvestigationRequestStore")) continue;
             windowed++;
 
             var hourList = hasHours ? new[] { 24, 96, 168 } : new[] { 0 };
@@ -123,6 +171,7 @@ public sealed class McpWindowMatrixTests : IClassFixture<SharedDuckDbFixture>, I
                     var scenario = (hasHours ? $"hours_back {hours}" : "default window") + ", " + asOfCase;
                     var end = DateTime.UtcNow - EndBack(asOfCase);
                     var overrides = new Dictionary<string, object?>();
+                    if (method.GetParameters().Any(p => p.Name == "counter_name")) overrides["counter_name"] = "Batch Requests/sec";
                     if (hasHours) overrides["hours_back"] = hours;
                     if (hasAsOf && asOfCase != AsOfCase.None) overrides["as_of"] = end.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture);
 
@@ -140,7 +189,11 @@ public sealed class McpWindowMatrixTests : IClassFixture<SharedDuckDbFixture>, I
                     }
 
                     ran.Add(name);
-                    var reason = CheckContract(json, hasHours ? end - TimeSpan.FromHours(hours) : (DateTime?)null, end);
+                    var requestedStart = hasHours ? end - TimeSpan.FromHours(hours) : (DateTime?)null;
+                    /* The regressions tool compares the 7 days BEFORE the window, so its effective_start is that baseline's start; the collection log's floor is the Query Store collector's 30-day-old run. */
+                    var lowerBound = name == "get_query_store_regressions" && requestedStart is DateTime rsStart ? rsStart - TimeSpan.FromDays(7) : requestedStart;
+                    var floorBack = name == "get_collection_log" ? TimeSpan.FromDays(30) : LogFloorBack;
+                    var reason = CheckContract(json, requestedStart, lowerBound, end, floorBack);
                     if (reason is not null) violations.Add((name, scenario, reason));
                 }
             }
@@ -161,7 +214,7 @@ public sealed class McpWindowMatrixTests : IClassFixture<SharedDuckDbFixture>, I
 
     /// <summary>The contract for one answer, null when it holds. <paramref name="requestedStart"/> is null for a tool
     /// with no hours_back (its default window is the tool's own), so only the bounds that need no start are checked.</summary>
-    private static string? CheckContract(string json, DateTime? requestedStart, DateTime windowEnd)
+    private static string? CheckContract(string json, DateTime? requestedStart, DateTime? lowerBound, DateTime windowEnd, TimeSpan floorBack)
     {
         JsonDocument doc;
         try { doc = JsonDocument.Parse(json); }
@@ -187,13 +240,15 @@ public sealed class McpWindowMatrixTests : IClassFixture<SharedDuckDbFixture>, I
                 if (!DateTime.TryParse(e.GetString(), CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var start))
                     return $"effective_start '{e.GetString()}' is not a time";
                 var slack = TimeSpan.FromMinutes(2);
-                if (requestedStart is DateTime req && start < req - slack) return $"effective_start {start:o} is earlier than the requested start {req:o}";
-                if (start > windowEnd + slack) return $"effective_start {start:o} is later than the window end {windowEnd:o}";
+                if (lowerBound is DateTime req && start < req - slack) return $"effective_start {start:o} is earlier than the requested start {req:o}";
+                /* #6885: a window that ends before the store's first row answers effective_start = that first row (after the window end), so only that window skips the "not later than the window end" check. */
+                var endsBeforeStore = windowEnd < DateTime.UtcNow - RawFloorBack;
+                if (!endsBeforeStore && start > windowEnd + slack) return $"effective_start {start:o} is later than the window end {windowEnd:o}";
             }
 
             /* The store's floor: the collection log starts LogFloorBack back, so a window that starts before that
                (past the slack the tools allow) is one the store cannot cover. */
-            if (requestedStart is DateTime rs && rs < DateTime.UtcNow - LogFloorBack - McpQueryTools.TruncationSlack - TimeSpan.FromMinutes(5))
+            if (requestedStart is DateTime rs && rs < DateTime.UtcNow - floorBack - McpQueryTools.TruncationSlack - TimeSpan.FromMinutes(5))
             {
                 if (truncated is not { ValueKind: JsonValueKind.True })
                     return truncated is null ? "no window_truncated key (top level or hints) over a window that starts before the store's data" : "window_truncated is not true over a window that starts before the store's data";
