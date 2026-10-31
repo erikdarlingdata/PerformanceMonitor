@@ -51,25 +51,39 @@ public sealed class McpWindowMatrixStore : IAsyncLifetime
 
     /// <summary>Collectors whose runs, not table rows, the window probe reads (the read is SPARSE, see WebDataStartNote.CollectorRunsByRead): a
     /// collection_log run from the log's start on, for the PostgreSQL target.</summary>
-    private static readonly string[] PgLoggedCollectors = ["pg_replication_stats"];
+    private static readonly string[] PgLoggedCollectors = ["pg_autovacuum_stats", "pg_blocking", "pg_replication_slots", "pg_replication_stats", "pg_session_states", "pg_xmin_horizon"];
 
     /// <summary>The collector tables the PostgreSQL target is seeded for, by the read that windows on each (#7015). Every other
     /// <c>get_pg_*</c> read keeps answering for the SQL Server target, as before.</summary>
     public static readonly IReadOnlyDictionary<string, string> PgSeededTables = new Dictionary<string, string>(StringComparer.Ordinal)
     {
+        ["get_pg_autovacuum_health"] = "pg_autovacuum_stats",
+        ["get_pg_blocking"] = "pg_blocking_edges",
         ["get_pg_cpu_utilization"] = "pg_cpu_utilization",
+        ["get_pg_database_stats"] = "pg_database_stats",
+        ["get_pg_database_trend"] = "pg_database_stats",
         ["get_pg_deadlocks"] = "pg_deadlocks",
+        ["get_pg_extensions"] = "pg_extension_availability",
         ["get_pg_index_usage"] = "pg_index_usage_stats",
         ["get_pg_io_stats"] = "pg_io_stats",
+        ["get_pg_io_trend"] = "pg_io_stats",
         ["get_pg_kernel_stats"] = "pg_kernel_stats",
         ["get_pg_lock_stats"] = "pg_lock_stats",
         ["get_pg_log_events"] = "pg_log_events",
         ["get_pg_plans"] = "pg_plan_capture",
         ["get_pg_predicate_stats"] = "pg_predicate_stats",
+        ["get_pg_query_duration_trend"] = "pg_statement_stats",
+        ["get_pg_replication_slots"] = "pg_replication_slot_stats",
         ["get_pg_replication_stats"] = "pg_replication_stats",
         ["get_pg_server_config_changes"] = "pg_server_config",
+        ["get_pg_session_states"] = "pg_session_states",
+        ["get_pg_table_bloat"] = "pg_table_bloat_stats",
+        ["get_pg_top_queries"] = "pg_statement_stats",
         ["get_pg_wait_sampling"] = "pg_wait_sampling",
+        ["get_pg_wait_trend"] = "pg_wait_sampling",
+        ["get_pg_wraparound_risk"] = "pg_wraparound_stats",
         ["get_pg_write_stats"] = "pg_write_stats",
+        ["get_pg_xmin_horizon"] = "pg_xmin_horizon",
     };
 
     /// <summary>Where the store's raw rows start (the Query Store baseline interval), and where the collection log starts, earlier.</summary>
@@ -243,9 +257,12 @@ VALUES ($1, 3600, 'admin', 7010, 10, 250, 10, 100, 1, 0, 50, false, false, false
                 "INSERT INTO collect.servers (server_id, server_name, display_name, is_enabled, engine_kind, postgres_major_version, created_date, modified_date) VALUES ($1, $2, $2, TRUE, 'aurora-postgres', 16, $3, $3)",
                 PgAuroraServerId, PgAuroraServerName, DarlingMcpTestData.Naive(now - LogFloorBack));
             long pgRowId = 0;
+            /* #7010: several reads window on one table (the trends and their list reads), and a table is seeded once per server. */
+            var pgSeeded = new HashSet<(string Table, int ServerId)>();
             foreach (var (tool, table) in PgSeededTables)
             {
                 var (serverId, serverName) = tool == "get_pg_cpu_utilization" ? (PgAuroraServerId, PgAuroraServerName) : (PgServerId, PgServerName);
+                if (!pgSeeded.Add((table, serverId))) continue;
                 foreach (var back in new[] { LogFloorBack, TimeSpan.FromDays(2), TimeSpan.FromDays(1), TimeSpan.FromMinutes(40), TimeSpan.FromMinutes(5) })
                 {
                     await SeedPgRowAsync(connection, table, -698500 - (++pgRowId), DarlingMcpTestData.Naive(now - back), serverId, serverName, ct);
@@ -290,6 +307,8 @@ VALUES ($1, 3600, 'admin', 7010, 10, 250, 10, 100, 1, 0, 50, false, false, false
                 "collection_time" => "$2",
                 "server_id" => "$3",
                 "server_name" => "$4",
+                /* The wraparound reader reads its database name without a null check. */
+                "database_name" => "'x'",
                 _ when !required => null,
                 _ => type switch
                 {
@@ -348,6 +367,13 @@ public sealed class McpWindowMatrixLiveTests : IClassFixture<McpWindowMatrixStor
     /// answer is one row stamped with captured_at and age_seconds; a coverage notice would describe a window the tool never reads.</summary>
     private const string SnapshotSearch = "newest-snapshot read: hours_back is the span searched for the latest snapshot (captured_at and age_seconds say how old it is), not a data window (#7010)";
 
+    /// <summary>#4966: a newest-per-key read (the newest estimate per key, a latest-state read, not a difference across the window); its own coverage verdict says what the window held.</summary>
+    private const string NewestPerKey = "newest-per-key read: its own coverage verdict (coverage, reach, PgCappedRead) says what the window held, so no window notice by design (#4966)";
+
+    /// <summary>#7010: the tool's data answer and its all-clear carry the notice, but the answer that says no capture was logged in the window at all (the collector did not
+    /// look, so nothing is known about the window) is bare by design; DarlingMcpPgWindowD8bLiveTests.ANoCaptureAnswer_StaysBare pins it.</summary>
+    private const string UnavailableBare = "the no-capture 'unavailable' answer carries no notice by design (the data and empty answers do, #7010)";
+
     /// <summary>The tool answers window_truncated, but false, for a window that starts before the store's data (a window that ends before it, or one the probe judged covered).</summary>
     private const string NotTrue ="window_truncated is not true over a window that starts before the store's data";
 
@@ -367,25 +393,16 @@ public sealed class McpWindowMatrixLiveTests : IClassFixture<McpWindowMatrixStor
         ["get_database_protection"] = SnapshotSearch,
         /* #7010: not a data window by design. The reads are investigation REQUESTS opened in the last hours_back hours (hours_back 1-168, no as_of), the service's own work log of alert-triggered runs, not a span of collected data: a window with no request is a true negative, and the log is not floored by the collector tables. */
         ["get_investigation_reports"] = "investigation request log: hours_back is the age of requests opened, not a collected-data window (#7010)",
-        ["get_pg_autovacuum_health"] = NoNotice,
-        ["get_pg_blocking"] = NoNotice,
-        ["get_pg_buffer_usage"] = NoNotice,
-        ["get_pg_column_stats"] = NoNotice,
-        ["get_pg_database_stats"] = NoNotice,
-        ["get_pg_database_trend"] = NoNotice,
-        ["get_pg_extensions"] = NoNotice,
-        ["get_pg_index_bloat"] = NoNotice,
-        ["get_pg_io_trend"] = NoNotice,
-        ["get_pg_plan_capture_readiness"] = NoNotice,
-        ["get_pg_query_duration_trend"] = NoNotice,
-        ["get_pg_replication_slots"] = NoNotice,
-        ["get_pg_session_states"] = NoNotice,
-        ["get_pg_table_bloat"] = NoNotice,
-        ["get_pg_top_queries"] = NoNotice,
-        ["get_pg_wait_stats"] = NoNotice,
-        ["get_pg_wait_trend"] = NoNotice,
-        ["get_pg_wraparound_risk"] = NoNotice,
-        ["get_pg_xmin_horizon"] = NoNotice,
+        ["get_pg_blocking"] = UnavailableBare,
+        ["get_pg_buffer_usage"] = SnapshotSearch,
+        ["get_pg_column_stats"] = NewestPerKey,
+        ["get_pg_database_stats"] = UnavailableBare,
+        ["get_pg_index_bloat"] = NewestPerKey,
+        ["get_pg_plan_capture_readiness"] = SnapshotSearch,
+        ["get_pg_session_states"] = UnavailableBare,
+        ["get_pg_top_queries"] = UnavailableBare,
+        ["get_pg_wait_stats"] = UnavailableBare,
+        ["get_pg_xmin_horizon"] = UnavailableBare,
         ["get_plan_cache_bloat"] = SnapshotSearch,
         /* #7010: not a data window by design. The window selects captures of the store's own PostgreSQL log, and every answer carries the capture
            denominator (captures against expected, bytes read and unread), which is how a window the store did not capture is told apart from a quiet one. */

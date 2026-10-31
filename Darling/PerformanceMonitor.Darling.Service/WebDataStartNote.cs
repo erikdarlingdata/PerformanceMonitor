@@ -415,8 +415,9 @@ internal static class WebDataStartNote
 
         /* The horizon read answers empty only when the collector captured in the window and recorded none (it answers
            unavailable when no capture is logged), so it is the one of the vacuum, horizon, slot and write reads that says "looked
-           and found nothing". Wraparound answers unavailable, autovacuum and slots empty without asking the log
-           whether the collector ran, and write stats empty for a window too short to difference: none of them is admitted. */
+           and found nothing". Wraparound answers unavailable, autovacuum and slots empty, and write stats empty for a window too short
+           to difference: none of them is admitted, so the web does not use those words for them. (The MCP all-clear for
+           autovacuum and slots does probe the collector's logged runs before it claims a quiet window; the web answer does not.) */
         ["get_pg_xmin_horizon"] = "empty",
 
         /* Index usage (#4966): empty means collection ran and every index is under the size floor, a looked-and-found-nothing answer.
