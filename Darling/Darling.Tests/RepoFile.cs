@@ -68,7 +68,7 @@ internal static class RepoFile
     /// read joined; every other file reads exactly as it sits on disk, because a pin that reads one file at a
     /// time (a per-file scan, a per-file count) must not see the same text twice. A later split adds its type
     /// name here, and to the matching set in <c>Lite.Tests/SplitRepoFile.cs</c>.</summary>
-    private static readonly string[] SplitTypes = ["DarlingCollectorRunner"];
+    private static readonly string[] SplitTypes = ["DarlingCollectorRunner", "DarlingWebEndpoints", "DarlingWorker"];
 
     /// <summary>Reads a repo file exactly as it sits on disk. A <c>.cs</c> file named
     /// <c>&lt;Type&gt;.cs</c> for a type in <see cref="SplitTypes"/> comes back with its

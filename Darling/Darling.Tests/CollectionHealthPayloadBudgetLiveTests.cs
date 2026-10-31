@@ -45,23 +45,10 @@ public sealed class CollectionHealthPayloadBudgetLiveTests
     [Fact]
     public void WebViewerRow_PassesFullDetailTrue()
     {
-        var path = FindRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs");
-        var source = System.IO.File.ReadAllText(path);
+        var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs");
         Assert.Contains(
             "[\"get_collection_health\"] = (c, pg, an) => DarlingMcpDataTools.GetCollectionHealth(pg, Server(c), full_detail: true, collector_name: Str(c, \"collector_name\"), hours_back: Hours(c, 24), cancellationToken: c.RequestAborted)",
             source, StringComparison.Ordinal);
-    }
-
-    private static string FindRepoFile(params string[] relativeParts)
-    {
-        var dir = AppContext.BaseDirectory;
-        for (var i = 0; i < 8; i++)
-        {
-            var candidate = System.IO.Path.Combine(new[] { dir }.Concat(relativeParts).ToArray());
-            if (System.IO.File.Exists(candidate)) return candidate;
-            dir = System.IO.Path.GetDirectoryName(dir) ?? dir;
-        }
-        throw new System.IO.FileNotFoundException(System.IO.Path.Combine(relativeParts));
     }
 
     [Fact]

@@ -78,7 +78,7 @@ public sealed class ObjectLockingWebDefaultTests
 
         Assert.True(File.Exists(path), $"#4258 scan target not found: {path}");
 
-        return File.ReadAllText(path);
+        return RepoFile.ReadRepoFile(relative);
     }
 
     private static string RepoRoot([CallerFilePath] string thisFile = "")
