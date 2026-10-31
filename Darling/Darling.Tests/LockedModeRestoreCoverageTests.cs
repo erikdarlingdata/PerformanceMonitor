@@ -31,21 +31,21 @@ namespace Darling.Tests;
 /// with <c>error NU1004</c> in its own log, and the only job that went red was the one whose restore is a
 /// single-command step.</para>
 ///
-/// <para><b>And one lock file was reached by nothing.</b> <c>deprecated/Installer</c> carries a lock file, is
+/// <para><b>And one lock file was reached by nothing.</b> The deprecated Installer carried a lock file, was
 /// referenced by no project, and was restored by no workflow. Measured rather than reasoned: perturbing that
-/// file left all six restores CI ran green, and failed only a direct restore of that project.</para>
+/// file left all six restores CI ran green, and failed only a direct restore of that project. The project is
+/// now frozen in a zip (#6973), so no lock file is exempt today and the ratchet below holds the set empty.</para>
 ///
 /// <para><b>Coverage is derived, not listed.</b> The requirement comes from the lock files on disk and the
 /// <c>ProjectReference</c> edges between projects, so a tenth lock file arriving makes its restore mandatory
 /// instead of remembered. A referenced project's own lock file IS validated by a locked-mode restore of the
-/// referencing project — verified against NuGet by perturbing <c>Installer.Core</c>'s lock file and watching
-/// a locked-mode restore of <c>Installer.Tests</c> fail <c>NU1004</c> — so the closure arm encodes measured
-/// behaviour rather than an assumption about it.</para>
+/// referencing project — verified against NuGet by perturbing a referenced project's lock file and watching
+/// a locked-mode restore of the project that references it fail <c>NU1004</c> — so the closure arm encodes
+/// measured behaviour rather than an assumption about it.</para>
 ///
 /// <para><b>Where this runs.</b> Its inputs span the whole repository — every lock file, every project
 /// file, <c>global.json</c>, <c>Directory.Packages.props</c>, both workflows — so no area path filter
-/// reaches them, and <c>deprecated/Installer</c> in particular belongs to <c>installer</c> alone while the
-/// step that runs this suite is gated on <c>darling</c>. Coverage therefore rests on
+/// reaches them, and the step that runs this suite is gated on <c>darling</c>. Coverage therefore rests on
 /// <c>darling-tree-guards</c>, which runs the whole suite exactly when the <c>darling</c> filter did not
 /// fire — the backstop <c>CrossAppGuardCiGateTests</c> documents and whose gate it pins. Growing a filter
 /// to name these paths instead would be a hand-maintained copy of a whole-tree input set, and the honest
@@ -74,11 +74,12 @@ public sealed class LockedModeRestoreCoverageTests
 
     /// <summary>
     /// The lock files that cannot be validated in locked mode while the SDK patch floats — held as a ratchet
-    /// on the DERIVED set below, not as the requirement itself. Without the ratchet, a project newly
+    /// on the DERIVED set below, not as the requirement itself. Empty since the deprecated Installer, the one
+    /// project that published single-file, was frozen into a zip (#6973). Without the ratchet, a project newly
     /// publishing single-file would take the exemption silently, which is the same shape of quiet widening
     /// this class exists to stop.
     /// </summary>
-    private static readonly string[] s_sdkCoupledLockFiles = { "deprecated/Installer" };
+    private static readonly string[] s_sdkCoupledLockFiles = Array.Empty<string>();
 
     /// <summary>
     /// The text of a <c>dotnet restore</c> and what it names, deliberately broad: any line carrying the
@@ -232,14 +233,7 @@ public sealed class LockedModeRestoreCoverageTests
            report perfect coverage. */
         var lockFiles = LockFileDirectories();
         Assert.Contains("Darling/Darling.Tests", lockFiles);
-        Assert.Contains("deprecated/Installer", lockFiles);
         Assert.NotEmpty(RestoredProjects(buildYaml));
-
-        /* The closure arm carries real weight in the tree as it stands, rather than being a spare wheel that
-           would never turn: deprecated/Dashboard holds a lock file, is named by no restore line in the
-           workflow, and is covered only because Dashboard.Tests references it. */
-        Assert.DoesNotContain("dotnet restore deprecated/Dashboard/Dashboard.csproj", buildYaml, StringComparison.Ordinal);
-        Assert.DoesNotContain("deprecated/Dashboard", UncoveredLockFiles(buildYaml, globalJson));
 
         var uncovered = UncoveredLockFiles(buildYaml, globalJson);
 
@@ -254,11 +248,10 @@ public sealed class LockedModeRestoreCoverageTests
 
     /// <summary>
     /// The lock files exempt from that requirement are exactly the ones whose contents follow the SDK, and
-    /// there is one.
+    /// there are none.
     ///
-    /// <para><b>Why an exemption exists at all.</b> <c>deprecated/Installer</c> is the only project
-    /// publishing single-file, so the SDK adds an implicit <c>Microsoft.NET.ILLink.Tasks</c> reference at the
-    /// version bundled with whichever SDK ran the restore. <c>global.json</c> rolls forward across patches,
+    /// <para><b>Why an exemption exists at all.</b> A project publishing single-file gets an implicit
+    /// <c>Microsoft.NET.ILLink.Tasks</c> reference at the version bundled with whichever SDK ran the restore. <c>global.json</c> rolls forward across patches,
     /// so a runner on 10.0.303 wants <c>[10.0.11, )</c> where a lock file written under 10.0.302 records
     /// <c>[10.0.10, )</c>. No restore line can make that file right for both, and nothing had restored the
     /// project, so the drift accumulated unseen until #3143 pointed a restore at it.</para>
@@ -277,13 +270,7 @@ public sealed class LockedModeRestoreCoverageTests
 
         Assert.Equal(s_sdkCoupledLockFiles, SdkCoupledLockFiles(globalJson).ToArray());
 
-        /* The reason, read off the tree rather than restated: the exempt project publishes single-file, which
-           is what makes the SDK add the reference, and its lock file is the only one carrying it. */
-        Assert.Contains(
-            "<PublishSingleFile>true</PublishSingleFile>",
-            ReadRepoFileLf("deprecated", "Installer", "PerformanceMonitorInstaller.csproj"),
-            StringComparison.Ordinal);
-
+        /* The reason, read off the tree rather than restated: no lock file carries the SDK-coupled package. */
         Assert.Equal(
             s_sdkCoupledLockFiles,
             LockFileDirectories()

@@ -48,8 +48,6 @@ jobs:
       darling_classes: ${{ steps.plan.outputs.darling_classes }}
       lite_classes: ${{ steps.plan.outputs.lite_classes }}
       build: ${{ steps.plan.outputs.build }}
-      dashboard_tests: ${{ steps.plan.outputs.dashboard_tests }}
-      installer_tests: ${{ steps.plan.outputs.installer_tests }}
       legs: ${{ steps.plan.outputs.legs }}
       legs_json: ${{ steps.plan.outputs.legs_json }}
     steps:
@@ -193,59 +191,6 @@ jobs:
           set -euo pipefail
 
           dotnet build Lite.Tests/Lite.Tests.csproj -c Release --no-restore
-
-      # #6955: the Dashboard and Installer test projects used to run only on a published release, so a shared-code change that
-      # broke one of their test copies was first caught after the tag. They run here, in the build job, because the whole
-      # Dashboard suite takes seconds and the Installer run (the filter build.yml uses) about as long. A red step turns this job red,
-      # and the verdict job turns that into a failed `CI result`. The plan's dashboard_tests and installer_tests come from
-      # ci-select.py's build_dashboard_tests and build_installer_tests, the rule build.yml's own filters follow.
-      - name: Restore the Dashboard test project
-        if: ${{ needs.plan.outputs.dashboard_tests == 'true' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          dotnet restore deprecated/Dashboard.Tests/Dashboard.Tests.csproj --locked-mode
-
-      - name: Build the Dashboard test project
-        if: ${{ needs.plan.outputs.dashboard_tests == 'true' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          dotnet build deprecated/Dashboard.Tests/Dashboard.Tests.csproj -c Release --no-restore
-
-      - name: Run Dashboard tests
-        if: ${{ needs.plan.outputs.dashboard_tests == 'true' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          dotnet run --project deprecated/Dashboard.Tests/Dashboard.Tests.csproj -c Release --no-build
-
-      - name: Restore the Installer test project
-        if: ${{ needs.plan.outputs.installer_tests == 'true' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          dotnet restore deprecated/Installer.Tests/Installer.Tests.csproj --locked-mode
-
-      - name: Build the Installer test project
-        if: ${{ needs.plan.outputs.installer_tests == 'true' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          dotnet build deprecated/Installer.Tests/Installer.Tests.csproj -c Release --no-restore
-
-      - name: Run Installer tests
-        if: ${{ needs.plan.outputs.installer_tests == 'true' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          dotnet run --project deprecated/Installer.Tests/Installer.Tests.csproj -c Release --no-build -- -class- "Installer.Tests.VersionDetectionTests" -class- "Installer.Tests.IdempotencyTests" -class- "Installer.Tests.AdversarialTests"
 
       # Where this build was made and from what, for the legs' check. No dot-prefix (upload-artifact skips hidden files).
       - name: Record where this build was made
