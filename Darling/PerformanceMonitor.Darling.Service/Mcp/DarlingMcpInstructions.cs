@@ -138,6 +138,9 @@ internal static class DarlingMcpInstructions
             if (role.Investigations)
                 off.Add("this token has the agent role: the write tools beyond the actions an agent may take with an `agent_action` are " +
                     "served only to an operator token");
+            else if (!role.Writes)
+                off.Add("this token has the reader role: the write tools, the server registry tools and the investigation tools are never " +
+                    "served to it, whatever the settings say");
             else
             {
                 off.Add("this token has the operator role: the investigation tools are served only to an agent token");

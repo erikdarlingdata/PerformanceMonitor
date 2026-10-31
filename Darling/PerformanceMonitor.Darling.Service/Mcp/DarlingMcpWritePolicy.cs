@@ -449,6 +449,13 @@ internal static class DarlingMcpWritePolicy
                 "ask the operator, do not retry. " + Data;
         }
 
+        if (!policy.Writes)
+        {
+            return "This token has the reader role, so it is served the reads only. The write tools, the server registry tools, the " +
+                "investigation tools and the agent actions are never served to it, whatever the settings say. An unserved tool fails as " +
+                "unknown: ask the operator, do not retry. " + Data;
+        }
+
         var admin = policy.ServerAdmin
             ? "The server registry tools are served too, because mcp.allowWrites and mcp.allowServerAdmin are both on."
             : "The server registry tools are not served: they need mcp.allowWrites and mcp.allowServerAdmin both on (both default off).";

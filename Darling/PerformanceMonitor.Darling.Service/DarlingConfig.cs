@@ -1569,7 +1569,8 @@ public sealed class McpConfig
     /// Null or empty keeps the legacy single token (<see cref="McpNetworkConfig.Token"/> or <see cref="McpNetworkConfig.EncryptedToken"/>)
     /// exactly as before. With entries, the token on each request picks the tool set: <c>operator</c> gets the reads and the write
     /// tools (never the claim or submit tools), <c>agent</c> gets the reads, the investigation tools and the Level 2 action tools
-    /// (never a tool in <c>DarlingMcpWritePolicy.NeverAgentTools</c>), and an agent's identity is the entry's name. A legacy token
+    /// (never a tool in <c>DarlingMcpWritePolicy.NeverAgentTools</c>), an agent's identity is the entry's name, and <c>reader</c> (#7023)
+    /// gets the reads only, whatever <see cref="AllowWrites"/>, <see cref="AllowServerAdmin"/> and <see cref="AllowInvestigations"/> say. A legacy token
     /// set beside them keeps its role from <see cref="AllowWrites"/> and <see cref="AllowInvestigations"/>. File-only and restart-only.
     /// </summary>
     [JsonPropertyName("tokens")]
@@ -1584,7 +1585,8 @@ public sealed class McpConfig
 /// <summary>
 /// One named MCP bearer token (#6542): a <see cref="Name"/> (1 to 64 of <c>A-Za-z0-9._:-</c>), the token itself
 /// (<see cref="EncryptedToken"/> or <see cref="Token"/>, the same rules as <c>mcp.network</c>'s), and a <see cref="Role"/>,
-/// <c>operator</c> or <c>agent</c>. The name is what logs and the journal record; the value is never logged.
+/// <c>operator</c>, <c>agent</c> or <c>reader</c> (#7023), and optionally a <see cref="DataDetail"/> that narrows <c>mcp.dataDetail</c> for
+/// this token. The name is what logs and the journal record; the value is never logged.
 /// </summary>
 public sealed class McpTokenEntry
 {
@@ -1593,6 +1595,10 @@ public sealed class McpTokenEntry
 
     /// <summary>The <c>agent</c> role.</summary>
     public const string AgentRole = "agent";
+
+    /// <summary>The <c>reader</c> role (#7023): the read tools only. It is not an agent: no identity in the journal, no claim, no submit,
+    /// no Level 2 action, and no setting widens it.</summary>
+    public const string ReaderRole = "reader";
 
     [JsonPropertyName("name")]
     public string? Name { get; set; }
@@ -1607,6 +1613,11 @@ public sealed class McpTokenEntry
 
     [JsonPropertyName("role")]
     public string? Role { get; set; }
+
+    /// <summary>Optional (#7023): <c>full</c>, <c>maskLiterals</c> or <c>metadataOnly</c>. It can only narrow <c>mcp.dataDetail</c>: the level this
+    /// token is served is the stricter of the two. Absent, the token is served <c>mcp.dataDetail</c>. An unrecognized value leaves the entry unserved.</summary>
+    [JsonPropertyName("dataDetail")]
+    public string? DataDetail { get; set; }
 
     /// <summary>The token, preferring <see cref="EncryptedToken"/> over <see cref="Token"/>; null when neither is set. Throws when an
     /// encrypted token cannot be read.</summary>

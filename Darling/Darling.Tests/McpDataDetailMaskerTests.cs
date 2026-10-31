@@ -815,7 +815,6 @@ public sealed class McpDataDetailMaskerTests
         int statement = source.IndexOf(".AddCallToolFilter(SensitiveStatementOutputFilter.Instance)", StringComparison.Ordinal);
         int gcf = source.IndexOf(".AddCallToolFilter(GcfCallToolFilter.Instance)", StringComparison.Ordinal);
         Assert.True(gcf > 0 && dataDetail > gcf && statement > dataDetail, "filter order: GCF, then mcp.dataDetail, then the statement filter");
-        Assert.Contains("AddSingleton(new McpDataDetailSetting(ResolveDataDetail(config.Mcp.DataDetail", source, StringComparison.Ordinal);
     }
 
     private static string RepoRoot()

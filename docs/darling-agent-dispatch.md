@@ -51,7 +51,7 @@ With `mcp.tokens` set, it also prints its findings about named tokens, whether o
 
 The service log says the same at start-up. None of these changes the exit code of `--validate-config`, and none stops the service from starting. The first three keep the investigation tools from working. The route note does not stop anything.
 
-## Named tokens: an operator and agents on one service
+## Named tokens: an operator, agents and readers on one service
 
 One bearer token cannot tell a person from an agent. So with `mcp.allowWrites` and `mcp.allowInvestigations` you serve the write tools or the investigation tools, never both. Named tokens remove that limit. Each token has a name and a role, and the token on a request decides which tools that request sees.
 
@@ -62,7 +62,8 @@ Set them in `darling.json`:
   "enabled": true,
   "tokens": [
     { "name": "ops-lead",   "encryptedToken": "...", "role": "operator" },
-    { "name": "triage-bot", "encryptedToken": "...", "role": "agent" }
+    { "name": "triage-bot", "encryptedToken": "...", "role": "agent" },
+    { "name": "dev-a",      "token": "file:/run/secrets/darling/mcp-dev-a", "role": "reader", "dataDetail": "maskLiterals" }
   ]
 }
 ```
@@ -71,7 +72,8 @@ Set them in `darling.json`:
 |---|---|
 | `name` | 1 to 64 characters from `A-Za-z0-9._:-`. Each name is used once. |
 | `encryptedToken` or `token` | The same rules as the `mcp.network` token. At least 16 characters, and at least 6 of them different. Each value is used once. |
-| `role` | `operator` or `agent`. |
+| `role` | `operator`, `agent` or `reader`. |
+| `dataDetail` | Optional: `full`, `maskLiterals` or `metadataOnly`. It can only narrow `mcp.dataDetail`: the token is served the stricter of the two. Without it the token is served `mcp.dataDetail`. An unknown value leaves the token unserved, and the start logs a Critical line that names `mcp.tokens[<name>].dataDetail`. |
 
 What each role sees:
 
@@ -79,12 +81,15 @@ What each role sees:
 |---|---|---|
 | `operator` | The reads and the write tools. The four server admin tools (`add_servers`, `edit_server`, `remove_server` and `set_server_action`) only when `mcp.allowWrites` and `mcp.allowServerAdmin` are both on. | `claim_investigation_request` and `submit_investigation_report`. |
 | `agent` | The reads, the two investigation tools, and the Level 2 action tools through the `agent_action` gate. | Every tool in the never-agent list: the route tools, alert settings, Custom Views, tags, collector and server controls. |
+| `reader` | The read tools only. | Every write tool, the server admin tools, the two investigation tools and the Level 2 action tools. `mcp.allowWrites`, `mcp.allowServerAdmin` and `mcp.allowInvestigations` never widen it. |
+
+A reader is not an agent: it has no identity in the journal and cannot claim or submit. Give each person their own `reader` entry, so the log names who called and one token can be removed without rotating the rest.
 
 `tools/list` shows only that set. A call to a tool outside it fails as an unknown tool. An unknown token gets 401, and so does a request with no token, loopback included.
 
 An agent's name is its identity. `agent_id` must equal the name of the agent token. A different `agent_id` is refused as `agent_id_not_token`, and the refusal is journaled under the token's name. The log names a named token by its name. It never logs a token value. The legacy token still shows as a short fingerprint.
 
-The old single token (`mcp.network.token` or `mcp.network.encryptedToken`) works as before. Its role still comes from `mcp.allowWrites` and `mcp.allowInvestigations`. With no `mcp.tokens`, nothing changes. You can set both, but give the legacy token a name and a role in `mcp.tokens` and remove it from `mcp.network` instead.
+The old single token (`mcp.network.token` or `mcp.network.encryptedToken`) works as before. Its role still comes from `mcp.allowWrites` and `mcp.allowInvestigations`. With no `mcp.tokens`, nothing changes. You can set both, but give the legacy token a name and a role in `mcp.tokens` and remove it from `mcp.network` instead. A read-only legacy token moves to a `reader` entry.
 
 A named token that cannot be served is left out, and the start logs one Critical line that names the token and never its value. This covers a bad name or role, an unreadable value, a value that is too short, and a name or value shared with another token. If you set `mcp.tokens` and none can be served, and no legacy token is set, the MCP server does not start. `--validate-config` prints the same problems as `WARNING:` lines whenever `mcp.tokens` is set. It also warns when an enabled route has an agent level and no agent token can be served.
 
