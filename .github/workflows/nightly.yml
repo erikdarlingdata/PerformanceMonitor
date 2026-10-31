@@ -680,6 +680,115 @@ jobs:
   # is passed, so the cut is the class-name hash (the cut the script falls back to when the gate pins none); no
   # ci-select call is made, so every class runs, the Guard classes too (there is no Guard job here). The release
   # run in build.yml still runs the suite whole, in one log.
+  # #6985: every PostgreSQL collector against a REAL PostgreSQL 10, 13, 14, 16 and 17 (pr.yml runs the same job when a
+  # pull request changes a file it covers). Builds Darling.Tests itself: this workflow has no shared test build.
+  pg-old-targets:
+    name: PostgreSQL collectors on old targets
+    needs: check
+    if: (needs.check.outputs.has_changes == 'true' || inputs.from_schedule != true) && inputs.map_only != true
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.sha || 'dev' }}
+
+      - name: Read the SDK version from global.json
+        id: globaljson_sdk
+        shell: pwsh
+        run: |
+          $version = (Get-Content -Raw (Join-Path $env:GITHUB_WORKSPACE 'global.json') | ConvertFrom-Json).sdk.version
+          if (-not $version) { throw 'global.json names no sdk.version' }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Setup .NET 10.0
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: ${{ steps.globaljson_sdk.outputs.version }}
+
+      # The same key as every other job (the fetch script's own content hash): a warm cache means no ~340MB download.
+      - name: Cache Darling pg-runtime.zip
+        id: cache-pg-runtime
+        uses: actions/cache@v6
+        with:
+          path: Darling/artifacts/pg-runtime.zip
+          key: pg-runtime-${{ runner.os }}-${{ hashFiles('Darling/tools/fetch-pg-runtime.ps1') }}
+
+      - name: Build Darling pg-runtime.zip (cache miss only)
+        if: steps.cache-pg-runtime.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: ./Darling/tools/fetch-pg-runtime.ps1
+
+      - name: Extract pg-runtime
+        shell: pwsh
+        run: |
+          $zip  = "$env:GITHUB_WORKSPACE\Darling\artifacts\pg-runtime.zip"
+          $dest = "$env:GITHUB_WORKSPACE\Darling\artifacts\pg-runtime"
+          if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          [System.IO.Compression.ZipFile]::ExtractToDirectory($zip, $dest)
+          if (-not (Test-Path "$dest\pgsql\bin\pg_ctl.exe")) { throw "pg-runtime missing pgsql\bin\pg_ctl.exe" }
+
+      - name: Restore Darling.Tests
+        run: dotnet restore Darling/Darling.Tests/Darling.Tests.csproj --locked-mode
+
+      - name: Build Darling.Tests
+        run: dotnet build Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-restore
+
+      # Fetch the five old servers (cached on the fetch script's own hash; the shared download cache stays out of it, five
+      # 320 MB zips), start the 5541 store through the shared script, then one trust-auth loopback cluster per major.
+      - name: Cache the old PostgreSQL targets
+        uses: actions/cache@v6
+        with:
+          path: |
+            Darling/artifacts/pg-targets
+            !Darling/artifacts/pg-targets/downloads
+          key: pg-targets-${{ runner.os }}-${{ hashFiles('Darling/tools/fetch-pg-target.ps1') }}
+
+      - name: Start the store and the old PostgreSQL targets
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          ./.github/scripts/start-test-pg.ps1 -Mode Start
+          ./.github/scripts/start-test-pg.ps1 -Mode StartTargets -Majors 10,13,14,16,17
+
+      # DARLING_TEST_PG_TARGETS_REQUIRED turns a missing target variable into a failure instead of a skip. A run that
+      # matched no test exits 0, so the step also fails on a total of zero.
+      - name: Run the collectors against the old targets
+        timeout-minutes: 20
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($line in @(./.github/scripts/start-test-pg.ps1 -Mode Env -Majors 10,13,14,16,17)) {
+            $name, $value = $line -split '=', 2
+            [Environment]::SetEnvironmentVariable($name, $value)
+          }
+          $env:DARLING_TEST_PG_TARGETS_REQUIRED = '1'
+          New-Item -ItemType Directory -Force -Path TestResults | Out-Null
+          dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- -class "*PgCollectorsOnOldTargetsLiveTests*" -longRunning 300 2>&1 | Tee-Object -FilePath TestResults/pg-old-targets.log
+          $exit = $LASTEXITCODE
+          if ($exit -ne 0) { exit $exit }
+          if (-not (Select-String -Path TestResults/pg-old-targets.log -Pattern 'Total:\s+[1-9]' -Quiet)) { throw 'the run reported no tests: the class filter matched nothing' }
+
+      - name: Stop PostgreSQL
+        if: always()
+        shell: pwsh
+        run: ./.github/scripts/start-test-pg.ps1 -Mode Stop
+
+      - name: Upload the logs
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: actions/upload-artifact@v6
+        with:
+          name: pg-old-targets-results
+          path: |
+            TestResults/
+            ${{ runner.temp }}/darling-pg*.log
+          retention-days: 7
+          overwrite: true
+          if-no-files-found: ignore
+
   lite-tests:
     name: Lite tests (shard ${{ matrix.shard }})
     needs: check
