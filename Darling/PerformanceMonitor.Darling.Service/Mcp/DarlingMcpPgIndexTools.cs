@@ -13,6 +13,7 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Collectors;
@@ -47,9 +48,13 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpPgIndexTools
 {
-    /* #4966: no window notice on this read. It is a newest-per-key read (the NEWEST estimate per index, a latest-state read, not a difference across the
-       window), and its own coverage verdict (coverage, reach and the PgCappedRead classification) already says what the window did
-       and did not hold. A second, window-floor verdict beside it would answer a different question than the reader is asking. */
+    /* #7010: the window-floor notice rides on this read. The page is every index the window holds (the newest row per index inside it), so a
+       window that starts before the store's data reads as "nothing older existed" without it. Its coverage verdict (coverage, reach and the
+       PgCappedRead classification) answers a different question: how much of the CENSUS the rows hold, not how much of the WINDOW. */
+    private const string IndexBloatTable = "pg_index_bloat";
+
+    private const string ColumnStatsTable = "pg_column_stats";
+
     [McpServerTool(Name = "get_pg_index_bloat"), Description("Gets ESTIMATED PostgreSQL btree index bloat from catalog stats (no page reads), ranked by reclaimable BYTES, never percentage. measurement_kind: estimated (stats model) or measured (an older pgstatindex reading in retention). skipped_reason present = NO answer, not healthy; remediable (ANALYZE, a grant) vs structurally unmodellable (PARTIAL/DEDUPLICATED) - use exact_measurement_command instead. Answerless rows sort FIRST by design: read coverage before judging reach, and pass answered_only=true to reach real answers - est_tuple_bytes alone looks complete even on skipped rows. <<GUIDE>> Gets ESTIMATED PostgreSQL btree index bloat, computed from catalog statistics with NO page reads: how many bytes a REINDEX could plausibly reclaim, the modelled tuple width and leaf-page count it rests on, and the parent row count and fillfactor those came from. Ranked by reclaimable BYTES and never by percentage - a 64 kB index at 20% tops a percentage-ranked list and is worth 50 kB next to a 10 GB index at 45% worth 5.37 GB. Read measurement_kind: 'estimated' rows come from the statistics model, 'measured' rows are older pgstatindex measurements still inside the retention window. Accuracy against pgstatindex ground truth on a live 2,500-index target: median absolute error 2.79 percentage points, p90 6.63. A row with a skipped_reason has NO answer rather than a healthy one - never read a missing estimate as a clean bill of health - and the reason says whether it is remediable: a never-analyzed parent needs an ANALYZE, invisible column widths need the pg_read_all_data grant, while a PARTIAL index and a DEDUPLICATED one (low-cardinality, non-unique) are structurally unmodellable at any grant or statistics freshness and need the exact function instead. Every row carries exact_measurement_command, which is the pgstatindex call for that index: it walks every page, so run it deliberately on the one index you are about to act on rather than on a schedule - the same relationship SQL Server has between LIMITED and DETAILED index physical stats. This is the COMPLETE btree census with no size floor, so it returns MORE rows than get_pg_index_usage, which floors at 64 kB - 2,500 against 1,517 on one measured target. Neither census is missing objects. ALWAYS read the coverage field before concluding anything about how much of a server this covers, and never infer that from the rows: answerless rows sort FIRST by design, so any limit smaller than the answerless population returns 100% skipped rows structurally rather than by chance, and raising the limit does not fix it while that population is still larger. coverage comes from a separate population-level query that no limit touches - candidate indexes, trusted versus suppressed, and each suppression reason - and every count carries its BYTES because the two rankings disagree: on a live fleet the reason that is second largest by row count is the SMALLEST by footprint at 0.0004% of it, while the fourth largest by rows is second by bytes at 1.4 TB. Judge the gap by bytes. And skipped_reason IS NULL is the ONLY trust predicate here: est_tuple_bytes is populated on 100% of the rows that have no answer and est_bloat_pct on 0% of them, so filtering on est_tuple_bytes returns every row and reads as complete coverage. To READ the answers, pass answered_only: true - the answerless-first sort means that on a big server the answers sort behind more answerless rows than any permitted limit can page past, measured at 1,779 answerless ahead of 726 answers covering 213.8 GB against a 1000-row maximum, so raising the limit cannot reach them and answered_only is the only route. The reach field says which situation you are in and whether a larger limit would help: Unreachable means it would not, at any value, ever. answered_only leaves the default order alone and the coverage census unchanged, so a filtered ranking still carries its denominator - and answered_only over a server where NOTHING has an answer returns status no_answers rather than an empty, because \"nothing measurable\" is not \"nothing to reclaim\". This is what bounds the page - read truncated to know whether the census held more indexes than were returned; it is observed by fetching one row past this cap, never inferred from a full page, and the coverage field is measured independently of it. answered_only defaults to false, which leaves the answerless-first order alone. Set answered_only when you want the RANKING: answerless rows sort first by design, so on a server whose answerless population exceeds the 1000-row maximum the answers cannot be reached at any limit - measured at 1,779 answerless ahead of 726 answers covering 213.8 GB. The coverage census is unaffected by this, so a filtered ranking still carries the same denominator; read the reach field to see which situation you are in.")]
     public static async Task<string> GetPgIndexBloat(
         NpgsqlDataSource postgres,
@@ -58,6 +63,7 @@ public sealed class DarlingMcpPgIndexTools
         [Description("Maximum rows to return. Default 25. See the tool's reading guide.")] int limit = 25,
         [Description("Return ONLY the indexes that have an answer, ranked by reclaimable bytes descending. Default false. See the tool's reading guide.")] bool answered_only = false,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorForAnswerAsync(postgres, server_name, cancellationToken);
@@ -145,16 +151,27 @@ public sealed class DarlingMcpPgIndexTools
                         });
                 }
 
-                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, McpHelpers.Status(
+                /* #7010: the empty answer carries the window floor under hints. */
+                var emptyNotice = await DarlingMcpWindowNotice.ReadAsync(
+                    () => DarlingMcpWindowNotice.Probe(postgres, IndexBloatTable, resolved.ServerName, windowEnd.AddHours(-hours_back), windowEnd, cancellationToken),
+                    windowEnd.AddHours(-hours_back), windowEnd, IndexBloatTable, emptyAnswer: true, logger: logger, cancellationToken: cancellationToken);
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, DarlingMcpWindowNotice.FinishEmpty(McpHelpers.Status(
                     "empty",
                     $"No index bloat rows for {resolved.DisplayName} in the last {hours_back} "
                     + "hour(s). This collector runs DAILY, so a window shorter than a day can be empty "
                     + "on a perfectly healthy server — widen it before concluding anything. "
-                    + coverage.Message), cancellationToken);
+                    + coverage.Message, emptyNotice.AsHints()), emptyNotice), cancellationToken);
             }
 
             coverage = await DarlingPgIndexBloatReader.GetCoverageVerdictAsync(
                 postgres, resolved.ServerId, windowEnd, rows.Count, cancellationToken);
+
+            /* #7010: a failed probe costs the keys, never the rows. */
+            var notice = await DarlingMcpWindowNotice.ReadAsync(
+                () => DarlingMcpWindowNotice.Probe(postgres, IndexBloatTable, resolved.ServerName, windowEnd.AddHours(-hours_back), windowEnd, cancellationToken),
+                windowEnd.AddHours(-hours_back), windowEnd, IndexBloatTable,
+                "The page holds only the indexes the collector recorded from effective_start onward, so an index that existed only before then is absent.",
+                logger: logger, cancellationToken: cancellationToken);
 
             /* WHETHER THE ANSWERS ARE REACHABLE AT ALL, which `truncated` cannot say (#3424). #3278 gave
                this read a denominator and that shipped; it did not give the answers a route, and its own
@@ -253,7 +270,7 @@ public sealed class DarlingMcpPgIndexTools
                 exact_measurement_command = r.ExactMeasurementCommand,
             });
 
-            return JsonSerializer.Serialize(new
+            return DarlingMcpWindowNotice.Attach(JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
                 hours_back,
@@ -380,7 +397,7 @@ public sealed class DarlingMcpPgIndexTools
                         whether this response could ever have contained them. */
                      + " " + reach.Message,
                 indexes,
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions), notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -388,8 +405,7 @@ public sealed class DarlingMcpPgIndexTools
         }
     }
 
-    /* #4966: no window notice on this read, for the reason get_pg_index_bloat has none. It is a newest-per-key read of the column
-       statistics, and its own coverage verdict answers the question the window would raise. */
+    /* #7010: the window-floor notice rides on this read, for the reason get_pg_index_bloat carries it. */
     [McpServerTool(Name = "get_pg_column_stats"), Description("Gets PostgreSQL per-column planner statistics from pg_stats: n_distinct, null fraction, average width, correlation, and top-value frequency. One row per column: the LATEST capture inside the window, not a history; this collector runs DAILY, so a window under a day can be empty on a healthy server. n_distinct is a RATIO of table rows when negative (-1 = every value unique), an absolute count when positive - check the sign. Gated: only columns on tables above a size floor, visible to the monitoring login, are collected; always read the coverage field first. <<GUIDE>> Gets PostgreSQL per-column distribution statistics from pg_stats: n_distinct, null fraction, average width, physical correlation, and the frequency of the single most common value. These are the numbers the PLANNER uses, so they explain plan shapes that otherwise look arbitrary. n_distinct is negative when PostgreSQL expresses it as a RATIO of table rows (-1 means every value is unique) and positive when it is an absolute count - do not compare the two without checking the sign. correlation near 1 or -1 means the column's physical order matches its logical order, which is what makes an index range scan cheap; near 0 makes the same scan expensive. A high top_value_frequency is the classic cause of a plan that is right for the common value and wrong for every other one. Only columns on tables above a size floor are collected, and only where the monitoring login can see the statistics - so ALWAYS read the coverage field before acting on this: it names which of those produced the result, and PartialVisibility or StatisticsNotVisible means the statistics you are looking at are not all of them.")]
     public static async Task<string> GetPgColumnStats(
         NpgsqlDataSource postgres,
@@ -397,6 +413,7 @@ public sealed class DarlingMcpPgIndexTools
         [Description("Hours of history to analyze. Default 168 (7 days) - this collector runs daily.")] int hours_back = 168,
         [Description("Maximum rows to return. Default 25.")] int limit = 25,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorForAnswerAsync(postgres, server_name, cancellationToken);
@@ -446,15 +463,26 @@ public sealed class DarlingMcpPgIndexTools
                    privilege filter and select neither, which is prose about the mechanism rather than a
                    diagnosis of it - measured on a 50-target fleet where the answer was the privilege
                    filter on every one of them and no read said so. */
-                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, McpHelpers.Status(
+                /* #7010: the empty answer carries the window floor under hints. */
+                var emptyNotice = await DarlingMcpWindowNotice.ReadAsync(
+                    () => DarlingMcpWindowNotice.Probe(postgres, ColumnStatsTable, resolved.ServerName, windowStart, windowEnd, cancellationToken),
+                    windowStart, windowEnd, ColumnStatsTable, emptyAnswer: true, logger: logger, cancellationToken: cancellationToken);
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, DarlingMcpWindowNotice.FinishEmpty(McpHelpers.Status(
                     "empty",
                     $"No column statistics for {resolved.DisplayName} in the last {hours_back} hour(s). "
                     + "This collector runs DAILY, so a window shorter than a day can be empty on a "
-                    + "perfectly healthy server - widen it before concluding anything. " + coverage.Message), cancellationToken);
+                    + "perfectly healthy server - widen it before concluding anything. " + coverage.Message, emptyNotice.AsHints()), emptyNotice), cancellationToken);
             }
 
             coverage = await DarlingPgColumnStatsReader.GetCoverageVerdictAsync(
                 postgres, resolved.ServerId, windowEnd, rows.Count, cancellationToken);
+
+            /* #7010: a failed probe costs the keys, never the rows. */
+            var notice = await DarlingMcpWindowNotice.ReadAsync(
+                () => DarlingMcpWindowNotice.Probe(postgres, ColumnStatsTable, resolved.ServerName, windowStart, windowEnd, cancellationToken),
+                windowStart, windowEnd, ColumnStatsTable,
+                "The page holds only the columns the collector recorded from effective_start onward, so a column that existed only before then is absent.",
+                logger: logger, cancellationToken: cancellationToken);
 
             var columns = rows.Select(r => new
             {
@@ -474,7 +502,7 @@ public sealed class DarlingMcpPgIndexTools
                 common_value_count = r.CommonValueCount,
             });
 
-            return JsonSerializer.Serialize(new
+            return DarlingMcpWindowNotice.Attach(JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
                 hours_back,
@@ -489,7 +517,7 @@ public sealed class DarlingMcpPgIndexTools
                      + "has no most-common-value list at all, not that the list is empty. "
                      + coverage.Message,
                 columns,
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions), notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
