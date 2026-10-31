@@ -9921,6 +9921,14 @@ LIMIT 1";
     /// invert east of UTC). An ORDER BY carries no clock frame at all. Internal so the shape and the
     /// same-row-across-offsets behaviour are both pinned by test.</para>
     ///
+    /// <para><b>The one-chunk claim holds only for a server with a recent row (#6968).</b> A server whose newest row is old, or that
+    /// has none, makes the ordered append visit every chunk between that row and now, and each visited chunk costs a run-time plan
+    /// (measured 1,300 buffers for a server five days stale and 4,400 for one with no rows, at 21 daily chunks). So after the first
+    /// read of a server the alert pass reads <see cref="LatestCpuSinceSql"/> instead: the same statement bounded below by a
+    /// <c>collection_time</c> the previous read returned (<see cref="NewestRowFloor"/>). The bound is a value off the column
+    /// itself, so the objections above do not apply: no store clock, no re-framing, and a server that stopped reporting still returns its
+    /// last row. This text and <see cref="LatestCpuSinceSql"/> keep the same ORDER BY.</para>
+    ///
     /// <para><b>Both stamps, and the UTC twin is the identity where the row has one (#3744; V134, #3653
     /// item 13).</b> Since that rung every row carries the same instant in UTC (<c>sample_time_utc</c>) beside
     /// the local stamp, and the windowed CPU reads prefer it. This read projects both, and
@@ -9948,11 +9956,28 @@ LIMIT 1";
     /// <c>TimeHonestyRungTests</c> and <c>LatestCpuReadShapeTests</c>.</para>
     /// </summary>
     internal const string LatestCpuSql = @"
-SELECT sqlserver_cpu_utilization, other_process_cpu_utilization, sample_time, sample_time_utc
+SELECT sqlserver_cpu_utilization, other_process_cpu_utilization, sample_time, sample_time_utc, collection_time
 FROM cpu_utilization_stats
 WHERE server_id = $1
 ORDER BY collection_time DESC, sample_time DESC
 LIMIT 1";
+
+    /// <summary>
+    /// #6968: <see cref="LatestCpuSql"/> bounded below by <c>collection_time</c> $2, a value a previous read of the same server
+    /// returned (<see cref="NewestRowFloor"/>), never a clock. The bound lets the planner exclude every older chunk, so the read
+    /// opens the newest chunk or two instead of every chunk between a stale or empty server's newest row and now. Same ordering,
+    /// same row: the newest row is at or after any row already read.
+    /// </summary>
+    internal const string LatestCpuSinceSql = @"
+SELECT sqlserver_cpu_utilization, other_process_cpu_utilization, sample_time, sample_time_utc, collection_time
+FROM cpu_utilization_stats
+WHERE server_id = $1
+AND   collection_time >= $2
+ORDER BY collection_time DESC, sample_time DESC
+LIMIT 1";
+
+    /// <summary>Where each server's next latest-CPU read starts (#6968).</summary>
+    private readonly NewestRowFloor _latestCpuFloor = new();
 
     /// <summary>
     /// Runs <see cref="LatestCpuSql"/> and shapes it for the snapshot — Lite's overview read
@@ -9991,29 +10016,48 @@ LIMIT 1";
         DateTime? sampleUtcOnly = null;
 
         await using var connection = await _postgres!.OpenConnectionAsync(cancellationToken);
-        using var command = new NpgsqlCommand(
-            LatestCpuSql, connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
-        command.Parameters.AddWithValue(serverId);
-
-        using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        if (await reader.ReadAsync(cancellationToken))
+        var since = _latestCpuFloor.SinceFor(serverId);
+        while (true)
         {
-            sqlCpu = reader.IsDBNull(0) ? null : Convert.ToDouble(reader.GetValue(0), CultureInfo.InvariantCulture);
-            otherCpu = reader.IsDBNull(1) ? null : Convert.ToDouble(reader.GetValue(1), CultureInfo.InvariantCulture);
-            /* #3282: the sample's own instant, which is the persistence gate's observation identity. #3744:
-               the row's UTC twin (V134's sample_time_utc, ordinal 3) where the store has one, the local stamp
-               (ordinal 2) on a pre-rung row — the same `??` Lite's MainWindow.AlertEngine applies to its
-               overview read's two columns, so both SKUs hand the shared gate the same identity for the same
-               row. Left Kind=Unspecified as both come off `timestamp` columns (the twin is naive UTC by the
-               store-wide convention; the local stamp is the server's wall clock on the ring-buffer arm and UTC
-               on Azure's): the value is only ever compared for EQUALITY against the one this same read stored
-               last sweep, so coercing either to Kind=Utc would buy nothing and, through Npgsql's timestamptz
-               inference on the way back into the store, could shift the persisted copy by the host's offset. */
-            var sampleTimeUtc = reader.IsDBNull(3) ? (DateTime?)null : reader.GetDateTime(3);
-            var sampleTimeLocal = reader.IsDBNull(2) ? (DateTime?)null : reader.GetDateTime(2);
-            sampleTime = sampleTimeUtc ?? sampleTimeLocal;
-            /* #5642: only a TRUE UTC instant can give an age; the local fallback above cannot. */
-            sampleUtcOnly = sampleTimeUtc;
+            DateTime? newestCollection = null;
+            using var command = new NpgsqlCommand(
+                since is null ? LatestCpuSql : LatestCpuSinceSql, connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
+            command.Parameters.AddWithValue(serverId);
+            if (since is { } floor)
+            {
+                command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = floor });
+            }
+
+            using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (await reader.ReadAsync(cancellationToken))
+            {
+                sqlCpu = reader.IsDBNull(0) ? null : Convert.ToDouble(reader.GetValue(0), CultureInfo.InvariantCulture);
+                otherCpu = reader.IsDBNull(1) ? null : Convert.ToDouble(reader.GetValue(1), CultureInfo.InvariantCulture);
+                /* #3282: the sample's own instant, which is the persistence gate's observation identity. #3744:
+                   the row's UTC twin (V134's sample_time_utc, ordinal 3) where the store has one, the local stamp
+                   (ordinal 2) on a pre-rung row — the same `??` Lite's MainWindow.AlertEngine applies to its
+                   overview read's two columns, so both SKUs hand the shared gate the same identity for the same
+                   row. Left Kind=Unspecified as both come off `timestamp` columns (the twin is naive UTC by the
+                   store-wide convention; the local stamp is the server's wall clock on the ring-buffer arm and UTC
+                   on Azure's): the value is only ever compared for EQUALITY against the one this same read stored
+                   last sweep, so coercing either to Kind=Utc would buy nothing and, through Npgsql's timestamptz
+                   inference on the way back into the store, could shift the persisted copy by the host's offset. */
+                var sampleTimeUtc = reader.IsDBNull(3) ? (DateTime?)null : reader.GetDateTime(3);
+                var sampleTimeLocal = reader.IsDBNull(2) ? (DateTime?)null : reader.GetDateTime(2);
+                sampleTime = sampleTimeUtc ?? sampleTimeLocal;
+                /* #5642: only a TRUE UTC instant can give an age; the local fallback above cannot. */
+                sampleUtcOnly = sampleTimeUtc;
+                newestCollection = reader.GetDateTime(4);
+            }
+
+            /* #6968: remember where the newest row is; a bounded read that finds nothing means the row the bound came from is
+               gone, so ask again without one (the read that shipped before). */
+            if (!_latestCpuFloor.Settle(serverId, since, newestCollection, DateTime.UtcNow))
+            {
+                break;
+            }
+
+            since = null;
         }
 
         double? totalCpu = sqlCpu.HasValue ? sqlCpu.Value + (otherCpu ?? 0) : null;
