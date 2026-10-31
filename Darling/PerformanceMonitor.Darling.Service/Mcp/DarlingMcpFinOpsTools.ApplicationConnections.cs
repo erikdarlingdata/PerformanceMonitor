@@ -53,21 +53,29 @@ public sealed partial class DarlingMcpFinOpsTools
             postgres, resolved.ServerId, cutoff, McpCommandDeadlines.ReadSeconds, ct);
         if (rows.Count == 0)
         {
-            return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "session_stats", ct)
-                ?? McpHelpers.Status("empty",
-                    $"No session statistics were collected for this server in the last {hoursBack} hours, so there is no per-application connection data to show.");
+            var unmet = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "session_stats", ct);
+            if (unmet is not null) return unmet;
+
+            /* #7010: the window-floor notice of session_stats (the not_collected answer above stays bare). */
+            var noRows = await ViewWindowNoticeAsync(postgres, resolved.ServerName, hoursBack, ["session_stats"], "session_stats", true, ct);
+            return DarlingMcpWindowNotice.FinishEmpty(McpHelpers.Status("empty",
+                $"No session statistics were collected for this server in the last {hoursBack} hours, so there is no per-application connection data to show.", noRows.AsHints()), noRows);
         }
 
         var ordered = OrderApplicationRows(rows);
-        return JsonSerializer.Serialize(new
+        var notice = await ViewWindowNoticeAsync(postgres, resolved.ServerName, hoursBack, ["session_stats"], "session_stats", false, ct);
+        return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new
         {
             server = resolved.DisplayName,
             view = ApplicationConnectionsView,
             hours_back = hoursBack,
+            effective_start = notice.EffectiveStart,
+            window_truncated = notice.WindowTruncated,
+            truncation_note = notice.TruncationNote,
             application_count = ordered.Count,
             truncated = ordered.Count > MaxApplicationRows,
             rows = ordered.Take(MaxApplicationRows).Select(ApplicationConnectionsRow).ToList(),
-        }, McpHelpers.JsonOptions);
+        }, McpHelpers.JsonOptions), notice);
     }
 
     /// <summary>One application-connections row in the wire shape: snake_case keys, UTC times, no cost fields.</summary>

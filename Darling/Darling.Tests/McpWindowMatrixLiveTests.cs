@@ -255,10 +255,6 @@ public sealed class McpWindowMatrixLiveTests : IClassFixture<McpWindowMatrixStor
         ["get_collection_health"] = NoNotice,
         ["get_cpu_scheduler_pressure"] = SnapshotSearch,
         ["get_database_protection"] = SnapshotSearch,
-        /* #7010: not bound. hours_back windows the blocking and deadlock counts of every server's card, so a window past the data under-counts, but
-           the fleet answer needs one coverage start per server (the fleet probe answers the EARLIEST start, which would call a fleet covered when one server
-           is not), a design call left to the coordinator. */
-        ["get_fleet_overview"] = "fleet roll-up with no window notice: the per-server coverage design is open (#7010)",
         /* #7010: not a data window by design. The reads are investigation REQUESTS opened in the last hours_back hours (hours_back 1-168, no as_of), the service's own work log of alert-triggered runs, not a span of collected data: a window with no request is a true negative, and the log is not floored by the collector tables. */
         ["get_investigation_reports"] = "investigation request log: hours_back is the age of requests opened, not a collected-data window (#7010)",
         ["get_pg_autovacuum_health"] = NoNotice,

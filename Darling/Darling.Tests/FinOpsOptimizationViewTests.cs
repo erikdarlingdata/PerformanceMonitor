@@ -454,10 +454,28 @@ public sealed class FinOpsOptimizationViewLiveTests
         await using var scratch = await SeedAsync(Cs()!, ct);
         await using var ds = NpgsqlDataSource.Create(scratch.ConnectionString);
 
+        /* #7010: the empty answer carries the window notice under hints (a server the store holds no collection for is not a true negative). */
         var body = await DarlingMcpFinOpsTools.GetFinOps(ds, "optimization", EmptyServerName, 24, 10, cancellationToken: ct);
-        Assert.Equal(
-            McpHelpers.Status("empty", "No idle-database, tempdb, wait, query or memory-grant data was found for this server in the windows read, so there is no optimization data to show."),
-            body);
+        using var doc = JsonDocument.Parse(body);
+        Assert.Equal("empty", doc.RootElement.GetProperty("status").GetString());
+        Assert.Equal("No idle-database, tempdb, wait, query or memory-grant data was found for this server in the windows read, so there is no optimization data to show.",
+            doc.RootElement.GetProperty("message").GetString());
+        Assert.True(doc.RootElement.GetProperty("hints").GetProperty("window_truncated").GetBoolean());
+    }
+
+    /// <summary>#7010: a window that starts before the first wait or query row says so, and a window the rows cover does not.</summary>
+    [Fact]
+    public async Task WindowPastTheData_SaysWindowTruncated()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await SeedAsync(Cs()!, ct);
+        await using var ds = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        using var doc = JsonDocument.Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "optimization", ServerName, 24, 10, cancellationToken: ct));
+        Assert.True(doc.RootElement.GetProperty("window_truncated").GetBoolean());
+        Assert.StartsWith("The window reaches further back", doc.RootElement.GetProperty("truncation_note").GetString(), StringComparison.Ordinal);
+        Assert.True(DateTime.Parse(doc.RootElement.GetProperty("effective_start").GetString()!, System.Globalization.CultureInfo.InvariantCulture).ToUniversalTime()
+            > DateTime.UtcNow.AddHours(-24).AddMinutes(90));
     }
 
     [Fact]
