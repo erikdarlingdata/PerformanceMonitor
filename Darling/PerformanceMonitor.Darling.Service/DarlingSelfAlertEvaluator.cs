@@ -9209,17 +9209,17 @@ SELECT EXISTS
     internal Task<(DateTime? CollectionTimeUtc, bool? AgentRunning)> ReadLatestAgentStatusAsync(
         NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
         => ReadWithOneRetryAsync(
-            token => ReadLatestAgentStatusCoreAsync(postgres, serverId, token),
+            token => ReadLatestAgentStatusCoreAsync(postgres, serverId, _agentStatusFloor, token),
             serverId, AgentStatusReadName, cancellationToken);
 
     /// <summary>The read itself, byte-identical to what shipped before #3854 routed it through the seam.</summary>
-    private async Task<(DateTime? CollectionTimeUtc, bool? AgentRunning)> ReadLatestAgentStatusCoreAsync(
-        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
+    private static async Task<(DateTime? CollectionTimeUtc, bool? AgentRunning)> ReadLatestAgentStatusCoreAsync(
+        NpgsqlDataSource postgres, int serverId, NewestRowFloor floor, CancellationToken cancellationToken)
     {
         await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
         (DateTime? CollectionTimeUtc, bool? AgentRunning) result = (null, null);
         /* #7017: the shared newest-row floor loop (#6968). collection_time is NOT NULL, so a found row has one. */
-        await _agentStatusFloor.ReadAsync(serverId, async since =>
+        await floor.ReadAsync(serverId, async since =>
         {
             result = (null, null);
             using var command = new NpgsqlCommand(since is null ? LatestAgentStatusSql : LatestAgentStatusSinceSql, connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
@@ -9304,12 +9304,12 @@ LIMIT 1";
     internal Task<(DateTime? CollectionTimeUtc, IReadOnlyList<AgReplicaReading> Replicas)> ReadLatestAgReplicaStatesAsync(
         NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
         => ReadWithOneRetryAsync(
-            token => ReadLatestAgReplicaStatesCoreAsync(postgres, serverId, token),
+            token => ReadLatestAgReplicaStatesCoreAsync(postgres, serverId, _agReplicaFloor, token),
             serverId, AgStateReadName, cancellationToken);
 
     /// <summary>The read itself, byte-identical to what shipped before #3854 routed it through the seam.</summary>
-    private async Task<(DateTime? CollectionTimeUtc, IReadOnlyList<AgReplicaReading> Replicas)> ReadLatestAgReplicaStatesCoreAsync(
-        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
+    private static async Task<(DateTime? CollectionTimeUtc, IReadOnlyList<AgReplicaReading> Replicas)> ReadLatestAgReplicaStatesCoreAsync(
+        NpgsqlDataSource postgres, int serverId, NewestRowFloor floor, CancellationToken cancellationToken)
     {
         var replicas = new List<AgReplicaReading>();
         DateTime? newest = null;
@@ -9318,7 +9318,7 @@ LIMIT 1";
         /* #7017: the shared newest-row floor loop (#6968). The floor is the snapshot's time, so a bounded read that finds no row
            means the snapshot is gone and the loop reads again without a bound. A server with no Availability Group has no rows
            either way and gets the loop's empty-read floor. */
-        await _agReplicaFloor.ReadAsync(serverId, async since =>
+        await floor.ReadAsync(serverId, async since =>
         {
             replicas.Clear();
             newest = null;
@@ -9381,19 +9381,19 @@ ORDER BY ag_name, replica_server_name";
     internal Task<(DateTime? CollectionTimeUtc, IReadOnlyList<AgDatabaseReading> Databases)> ReadLatestAgDatabaseReplicaStatesAsync(
         NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
         => ReadWithOneRetryAsync(
-            token => ReadLatestAgDatabaseReplicaStatesCoreAsync(postgres, serverId, token),
+            token => ReadLatestAgDatabaseReplicaStatesCoreAsync(postgres, serverId, _agDatabaseReplicaFloor, token),
             serverId, AgStateReadName, cancellationToken);
 
     /// <summary>The read itself, byte-identical to what shipped before #3854 routed it through the seam.</summary>
-    private async Task<(DateTime? CollectionTimeUtc, IReadOnlyList<AgDatabaseReading> Databases)> ReadLatestAgDatabaseReplicaStatesCoreAsync(
-        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
+    private static async Task<(DateTime? CollectionTimeUtc, IReadOnlyList<AgDatabaseReading> Databases)> ReadLatestAgDatabaseReplicaStatesCoreAsync(
+        NpgsqlDataSource postgres, int serverId, NewestRowFloor floor, CancellationToken cancellationToken)
     {
         var databases = new List<AgDatabaseReading>();
         DateTime? newest = null;
 
         await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
         /* #7017: the shared newest-row floor loop (#6968), as in the replica read above. */
-        await _agDatabaseReplicaFloor.ReadAsync(serverId, async since =>
+        await floor.ReadAsync(serverId, async since =>
         {
             databases.Clear();
             newest = null;
