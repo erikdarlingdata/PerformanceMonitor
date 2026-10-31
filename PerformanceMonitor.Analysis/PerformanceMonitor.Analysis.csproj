@@ -20,9 +20,7 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="PerformanceMonitorLite" />
-    <InternalsVisibleTo Include="PerformanceMonitorDashboard" />
     <InternalsVisibleTo Include="Lite.Tests" />
-    <InternalsVisibleTo Include="Dashboard.Tests" />
     <!-- Darling's PgFactCollector reconstructs blocking chains through the same internal
          BlockingPairRow/BlockingChainReconstructor/BlockingPairRowMerge seam both apps use. -->
     <InternalsVisibleTo Include="PerformanceMonitor.Darling.Analysis" />

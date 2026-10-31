@@ -21,8 +21,6 @@ changed file list. Outputs, as `key=value` lines (stdout, and $GITHUB_OUTPUT whe
   actionlint       true when a workflow file changed
   check_web_js     true when a dashboard JavaScript file changed
   pg_old_targets   true when a pull request changed a file the old-PostgreSQL-target job covers (#6985, PG_OLD_TARGET_PATHS); never on a push, the nightly runs it
-  dashboard_tests  true when the build job builds and runs deprecated/Dashboard.Tests (#6955): ci-select.py's build_dashboard_tests
-  installer_tests  true when the build job builds and runs deprecated/Installer.Tests (#6955): ci-select.py's build_installer_tests
 
 The pattern sets are NOT copied here. The areas come from ci-select.py's Rules, which reads the docs allowlist and the
 area filters from the same files dorny/paths-filter reads, and the Lite-reads classes from ci-select.py's
@@ -164,7 +162,7 @@ def changed_test_classes(rules, files: "list[str]", catalog: "dict | None") -> "
 
 def classify(rules, event: str, base: str, files: "list[str]", catalog: "dict | None" = None) -> dict:
     """The areas of one change: {areas, darling_scope, lite_scope, why}."""
-    everything = {"areas": "all", "darling_scope": "full", "lite_scope": "full", "dashboard_tests": True, "installer_tests": True}
+    everything = {"areas": "all", "darling_scope": "full", "lite_scope": "full"}
     if event != "pull_request":
         return {**everything, "reason": f"a {event} runs every area."}
     if base != "dev":
@@ -178,10 +176,9 @@ def classify(rules, event: str, base: str, files: "list[str]", catalog: "dict | 
         return {**everything, "reason": f"no area knows {odd[0]}, so every area runs."}
 
     a = rules.areas(files)
-    area_names = ("root", "core", "installer_core", "dashboard", "lite", "installer", "darling")
+    area_names = ("root", "core", "lite", "darling")
     if a["all_count"] == a["docs_count"] and not any(a[n] for n in area_names):
         return {"areas": "docs-only", "darling_scope": "none", "lite_scope": "none",
-                "dashboard_tests": False, "installer_tests": False,
                 "reason": "only documentation changed."}
 
     cs = _CS
@@ -318,7 +315,7 @@ def plan(event: str, base: str, head_ref: str, draft: bool, labels: "list[str]",
     out = {"run": "true" if outcome == "run" else "false", "outcome": outcome, "why": why,
            "areas": "none", "darling_scope": "none", "lite_scope": "none", "build": "false",
            "darling_classes": "", "lite_classes": "", "test_minutes": "0", "legs": "0", "legs_json": "[]",
-           "actionlint": "false", "check_web_js": "false", "pg_old_targets": "false", "dashboard_tests": "false", "installer_tests": "false"}
+           "actionlint": "false", "check_web_js": "false", "pg_old_targets": "false"}
     if outcome != "run":
         return out
 
@@ -331,14 +328,6 @@ def plan(event: str, base: str, head_ref: str, draft: bool, labels: "list[str]",
     out["actionlint"] = _bool(any(f.startswith(".github/workflows/") for f in files))
     out["check_web_js"] = _bool(any(WEB_JS_MARKER in "/" + f for f in files))
     out["pg_old_targets"] = _bool(event == "pull_request" and any(f.startswith(PG_OLD_TARGET_PATHS) for f in files))
-    # A run that does not narrow (a push, another base, an unknown path) builds both; docs-only builds neither. Otherwise
-    # ci-select.py's decide() answers from the same areas the workflow's own filter reads (#6955).
-    if "dashboard_tests" in c:
-        out.update(dashboard_tests=_bool(c["dashboard_tests"]), installer_tests=_bool(c["installer_tests"]))
-    else:
-        d = _CS.decide(files, event, rules)
-        out.update(dashboard_tests=_bool(d["build_dashboard_tests"]), installer_tests=_bool(d["build_installer_tests"]))
-
     if out["build"] == "true":
         catalog = catalog if catalog is not None else load_catalog()
         picks = {"darling": c.get("darling_classes", []), "lite": c.get("lite_classes", [])}

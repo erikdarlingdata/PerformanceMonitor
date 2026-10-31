@@ -37,14 +37,8 @@ jobs:
               - 'global.json'
             core:
               - 'PerformanceMonitor.Common/**/!(*.md)'
-            installer_core:
-              - 'PerformanceMonitor.Installer/**/!(*.md)'
-            dashboard:
-              - 'deprecated/Dashboard/**/!(*.md)'
             lite:
               - 'Lite/**/!(*.md)'
-            installer:
-              - 'deprecated/Installer/**/!(*.md)'
             darling:
               - 'Darling/**/!(*.md)'
               - 'Lite/**/*.xaml'
@@ -171,20 +165,6 @@ check("shared library: all", r["areas"], "all")
 
 r = run(["global.json"])
 check("root build file: all", r["areas"], "all")
-
-r = run(["deprecated/Installer/X.cs"])
-check("deprecated only: no area", r["areas"], "none")
-check("deprecated only: builds, no legs", (r["build"], r["legs"]), ("true", "0"))
-check("deprecated installer file: installer tests only", (r["installer_tests"], r["dashboard_tests"]), ("true", "false"))
-r = run(["deprecated/Dashboard/X.cs"])
-check("deprecated dashboard file: dashboard tests only", (r["dashboard_tests"], r["installer_tests"]), ("true", "false"))
-check("shared library: dashboard tests, not installer tests", (run(["PerformanceMonitor.Common/X.cs"])["dashboard_tests"],
-                                      run(["PerformanceMonitor.Common/X.cs"])["installer_tests"]), ("true", "false"))
-check("darling file only: neither suite", (run(["Darling/X.cs"])["dashboard_tests"], run(["Darling/X.cs"])["installer_tests"]),
-      ("false", "false"))
-check("docs only: neither suite", (run(["README.md"])["dashboard_tests"], run(["README.md"])["installer_tests"]), ("false", "false"))
-check("unknown path: both suites", (run(["tools/odd.txt"])["dashboard_tests"], run(["tools/odd.txt"])["installer_tests"]),
-      ("true", "true"))
 
 # --- all areas -------------------------------------------------------------------------------------------------
 r = run(["tools/odd.txt"])

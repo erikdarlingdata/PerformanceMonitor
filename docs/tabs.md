@@ -76,7 +76,7 @@ Both also share one time range picker with the web pages. It has presets, calend
 
 Lite has Investigations and Manage Query Tags buttons in its sidebar. The Darling viewer opens Investigations from Settings.
 
-The Darling viewer adds a fleet sidebar and per-server tabs, and it shows a PostgreSQL target on its own set of tabs. See [Darling/README.md](../Darling/README.md). The deprecated Dashboard's six-tab-group layout is documented in [deprecated/Dashboard/README.md](../deprecated/Dashboard/README.md).
+The Darling viewer adds a fleet sidebar and per-server tabs, and it shows a PostgreSQL target on its own set of tabs. See [Darling/README.md](../Darling/README.md). The deprecated Dashboard's six-tab-group layout is documented in the Dashboard README inside the [frozen source zip](../deprecated/README.md).
 
 ### The Darling viewer, tab by tab
 

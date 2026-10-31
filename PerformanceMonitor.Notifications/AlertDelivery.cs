@@ -174,7 +174,7 @@ public sealed record AlertDelivery
     /// is not shipped, writes to its own JSON store, and has its own display. Converting those 26 sites
     /// would be churn in dead code and would fix nothing an operator can see. Deliberately
     /// <c>internal</c>, so no live producer can reach it, and
-    /// <c>Darling.Tests.AlertDeliveryChannelTests.TheLegacyHatch_HasExactlyOneProductionCaller</c> pins
+    /// <c>Darling.Tests.AlertDeliveryChannelTests.TheLegacyHatch_HasNoProductionCaller</c> pins
     /// that it stays that way — an <c>internal</c> member is visible to Lite as well as to the deprecated
     /// SKU, so the boundary is asserted rather than assumed.</para>
     /// </summary>
