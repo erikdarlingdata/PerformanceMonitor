@@ -126,6 +126,9 @@ public sealed class McpWindowMatrixTests : IClassFixture<SharedDuckDbFixture>, I
                     var end = DateTime.UtcNow - EndBack(asOfCase);
                     var overrides = new Dictionary<string, object?>();
                     if (method.GetParameters().Any(p => p.Name == "counter_name")) overrides["counter_name"] = "Batch Requests/sec";
+                    /* #7005 part 4: get_wait_trend's wait_type is a required string, so BindArgs passes null, which no MCP client can send; with a wait_stats row in the store its miss path then
+                       throws on waitType.Trim(). The seeded wait type is what a caller would ask for. */
+                    if (method.GetParameters().Any(p => p.Name == "wait_type")) overrides["wait_type"] = "CXPACKET";
                     if (hasHours) overrides["hours_back"] = hours;
                     if (hasAsOf && asOfCase != AsOfCase.None) overrides["as_of"] = end.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture);
 
@@ -235,6 +238,21 @@ public sealed class McpWindowMatrixTests : IClassFixture<SharedDuckDbFixture>, I
         using var doc = JsonDocument.Parse(json);
         Assert.Equal("empty", doc.RootElement.GetProperty("status").GetString());
         Assert.Equal(truncated, Hint(doc.RootElement, "window_truncated")?.GetBoolean());
+    }
+
+    /// <summary>A window wholly before the store's first collected row (#7005 part 4): the empty alert log says truncated and names the first
+    /// row the collectors kept as <c>effective_start</c>, not the no-collection answer (which has no start to name).</summary>
+    [Fact]
+    public async Task GetAlertHistory_WindowWhollyBeforeTheFloor_NamesTheFirstKeptRow()
+    {
+        await SeedAsync();
+        var end = DateTime.UtcNow - EndBack(AsOfCase.WhollyBefore);
+        var json = await McpAlertTools.GetAlertHistory(_dataService, hours_back: 24, as_of: end.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture));
+        using var doc = JsonDocument.Parse(json);
+        Assert.Equal("empty", doc.RootElement.GetProperty("status").GetString());
+        Assert.True(Hint(doc.RootElement, "window_truncated")?.GetBoolean());
+        var start = DateTime.Parse(Hint(doc.RootElement, "effective_start")!.Value.GetString()!, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal);
+        Assert.InRange((DateTime.UtcNow - RawFloorBack - start).Duration(), TimeSpan.Zero, TimeSpan.FromMinutes(5));
     }
 
     /// <summary>The floor of the analysis reads is the oldest analysis run the store holds for the server; a store with no run at all answers
@@ -380,6 +398,8 @@ VALUES ($1, $2, $3, $4, 'TenantDb00', 'dbo', 'p1', 'PROCEDURE', 10, 5000, 5000, 
                 await ExecAsync($"INSERT INTO {table} (collection_id, collection_time, server_id, server_name) VALUES ($1, $2, $3, $4)", _nextId--, at, _serverId, ServerName);
             }
 
+            /* #7005 part 4: a wait_stats row the way the collector writes it (every payload column set, so the deltas and the interval are real), which is what the alert floor reads. */
+            await ExecAsync("INSERT INTO wait_stats (collection_id, collection_time, server_id, server_name, wait_type, waiting_tasks_count, wait_time_ms, signal_wait_time_ms, delta_waiting_tasks, delta_wait_time_ms, delta_signal_wait_time_ms, sample_interval_seconds) VALUES ($1, $2, $3, $4, 'CXPACKET', 10, 100, 10, 5, 50, 5, 60)", _nextId--, at, _serverId, ServerName);
             await ExecAsync("INSERT INTO perfmon_stats (collection_id, collection_time, server_id, server_name, object_name, counter_name) VALUES ($1, $2, $3, $4, 'SQLServer:SQL Statistics', 'Batch Requests/sec')", _nextId--, at, _serverId, ServerName);
             await ExecAsync("INSERT INTO plan_cache_stats (collection_id, collection_time, server_id, server_name, cacheobjtype, objtype) VALUES ($1, $2, $3, $4, 'Compiled Plan', 'Adhoc')", _nextId--, at, _serverId, ServerName);
             await ExecAsync("INSERT INTO latch_stats (collection_id, collection_time, server_id, server_name, latch_class) VALUES ($1, $2, $3, $4, 'BUFFER')", _nextId--, at, _serverId, ServerName);
