@@ -66,7 +66,9 @@ public sealed class McpWindowMatrixStore : IAsyncLifetime
 
             /* Registered when the collection log starts: the first collection the registry knows is not later than the log's first run. */
             await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
-            await DarlingMcpTestData.ExecAsync(connection, ct, "UPDATE collect.servers SET created_date = $2 WHERE server_id = $1",
+            /* SQL Server 2022 (major 16): get_query_store_hints answers not_collected, bare, on an older server (the Query Store hints DMV starts there), so
+               the matrix would never see its window notice on the helper's default of 15. */
+            await DarlingMcpTestData.ExecAsync(connection, ct, "UPDATE collect.servers SET created_date = $2, sql_major_version = 16 WHERE server_id = $1",
                 ServerId, DarlingMcpTestData.Naive(now - LogFloorBack));
 
             /* Query Store: a baseline interval at the raw floor and a regressed one 30 minutes back (the 25.9 s of added CPU clears the

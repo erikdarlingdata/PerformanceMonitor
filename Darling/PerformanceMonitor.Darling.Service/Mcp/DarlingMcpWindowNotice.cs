@@ -14,6 +14,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 
@@ -225,6 +226,13 @@ internal static class DarlingMcpWindowNotice
         node["effective_start"] = notice.EffectiveStart;
         node["window_truncated"] = notice.WindowTruncated;
         node["truncation_note"] = notice.TruncationNote;
+        /* The baseline-discontinuity block is the payload's trailing key (the trend tools' contract, #6334): appending the notice after it would end the payload on truncation_note. */
+        if (node.TryGetPropertyValue(BaselineDiscontinuities.PayloadKey, out var trailing))
+        {
+            node.Remove(BaselineDiscontinuities.PayloadKey);
+            node[BaselineDiscontinuities.PayloadKey] = trailing;
+        }
+
         return node.ToJsonString(McpHelpers.JsonOptions);
     }
 

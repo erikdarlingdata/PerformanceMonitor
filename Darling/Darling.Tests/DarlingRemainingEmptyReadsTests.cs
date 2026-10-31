@@ -58,6 +58,8 @@ public sealed class DarlingRemainingEmptyReadsTests
         try
         {
             await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            /* #7010: the server was registered days ago, so a window of a few hours is inside what the store can cover (the window floor of a server with no collection log runs is its registration time). */
+            await DarlingMcpTestData.ExecAsync(connection, ct, "UPDATE servers SET created_date = $2 WHERE server_id = $1", ServerId, DarlingMcpTestData.Naive(DateTime.UtcNow.AddDays(-3)));
 
             /* ── nothing ever stored: widening the window would never help, and the message must not
                   suggest it ── */

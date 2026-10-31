@@ -55,6 +55,8 @@ public sealed class DarlingCurrentWaitsTrendTests
         try
         {
             await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            /* #7010: the server was registered days ago, so a window of a few hours is inside what the store can cover (the window floor of a server with no collection log runs is its registration time). */
+            await DarlingMcpTestData.ExecAsync(connection, ct, "UPDATE servers SET created_date = $2 WHERE server_id = $1", ServerId, DarlingMcpTestData.Naive(DateTime.UtcNow.AddDays(-3)));
 
             /* ── never sampled: NOT an all-clear, and it must refuse to read as one ── */
             var never = await DarlingMcpDataTools.GetCurrentWaitsTrend(dataSource, ServerName, 4, null);
