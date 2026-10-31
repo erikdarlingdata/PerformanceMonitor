@@ -185,6 +185,27 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ct, ServerId, ServerNa
             var severity = ServerHealthClassifier.BlockingSeverity(
                 metrics.BlockingCount, metrics.MaxBlockedSeconds, metrics.BlockingWindow, tiers, metrics.PeakSnapshotWaitSeconds);
             Assert.Equal(expectedCritical ? HealthSeverity.Critical : HealthSeverity.Healthy, severity);
+
+            /* The same through the store: set the critical snapshot tier to 40 s on the settings row and the
+               card bands itself. The row is restored afterwards. */
+            await ExecAsync(connection, "INSERT INTO config_alert_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING", ct);
+            var saved = await ReadSnapshotTierAsync(connection, ct);
+            try
+            {
+                await ExecAsync(connection, "UPDATE config_alert_settings SET blocking_critical_snapshot_wait_seconds = 40 WHERE id = 1", ct);
+                var banded = await DarlingFleetReader.GetFleetOverviewAsync(
+                    postgres, now.AddHours(-windowHours), now, now, cancellationToken: ct);
+                var bandedCard = banded.Cards.Single(c => c.ServerId == ServerId);
+                Assert.Equal(expectedPeakMs, bandedCard.MaxSnapshotWaitMs);
+                if (expectedCritical)
+                    Assert.Equal(HealthSeverity.Critical, bandedCard.BlockingSeverity);
+                else
+                    Assert.NotEqual(HealthSeverity.Critical, bandedCard.BlockingSeverity);
+            }
+            finally
+            {
+                await ExecAsync(connection, "UPDATE config_alert_settings SET blocking_critical_snapshot_wait_seconds = $1 WHERE id = 1", ct, saved);
+            }
             bodySucceeded = true;
         }
         finally
@@ -192,6 +213,14 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ct, ServerId, ServerNa
             await LiveStoreCleanup.RunAsync(ConnectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
                 await DeleteRowsAsync(cleanup, cleanupCt));
         }
+    }
+
+    private static async Task<double> ReadSnapshotTierAsync(NpgsqlConnection c, CancellationToken ct)
+    {
+        using var cmd = new NpgsqlCommand("SELECT blocking_critical_snapshot_wait_seconds FROM config_alert_settings WHERE id = 1", c);
+        var value = await cmd.ExecuteScalarAsync(ct);
+        Assert.NotNull(value);
+        return Convert.ToDouble(value);
     }
 
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)
