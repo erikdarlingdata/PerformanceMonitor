@@ -115,11 +115,11 @@ public sealed class DarlingStoreLoginsTests
     /// the same derived one a provisioned start builds, and the warning says it is an earlier start's.
     /// </summary>
     [Theory]
-    [InlineData("refusal", "Web", "viewer")]
+    [InlineData("refusal", "Web", "web")]
     [InlineData("refusal", "Mcp", "mcp")]
-    [InlineData("failure", "Web", "viewer")]
+    [InlineData("failure", "Web", "web")]
     [InlineData("failure", "Mcp", "mcp")]
-    [InlineData("stand-down", "Web", "viewer")]
+    [InlineData("stand-down", "Web", "web")]
     [InlineData("stand-down", "Mcp", "mcp")]
     public void ANotProvisionedStart_WithATrustedEarlierCredential_KeepsTheSurfaceOnItsRole(string outcome, string surfaceName, string role)
     {
@@ -188,7 +188,7 @@ public sealed class DarlingStoreLoginsTests
     /// warning from the surface; the worker says it provisioned), an earlier start's credential, and the owner.
     /// </summary>
     [Theory]
-    [InlineData("Web", "The web dashboard", "viewer")]
+    [InlineData("Web", "The web dashboard", "web")]
     [InlineData("Mcp", "The MCP server", "mcp")]
     public void TheThreeCases_ReadDifferently(string surfaceName, string what, string role)
     {
@@ -779,7 +779,7 @@ public sealed class DarlingStoreLoginsTests
 
         Assert.Contains("ALTER DEFAULT PRIVILEGES FOR ROLE \"darling\" IN SCHEMA collect", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("FOR ROLE darling ", sql, StringComparison.Ordinal);
-        Assert.Contains("GRANT CONNECT ON DATABASE \"darling\" TO admin, viewer;", sql, StringComparison.Ordinal);
+        Assert.Contains("GRANT CONNECT ON DATABASE \"darling\" TO admin, viewer, web;", sql, StringComparison.Ordinal);
         Assert.Contains("COMMENT ON ROLE viewer IS 'darling-compose';", sql, StringComparison.Ordinal);
         Assert.Contains("IS DISTINCT FROM 'darling-compose'", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("'darling-managed'", sql, StringComparison.Ordinal);

@@ -68,7 +68,7 @@ public sealed class WebStoreRefusalAndComposePoolTests
         var (status, body) = await SendAsync(method, "/api/store-refusal", managedStore);
 
         Assert.Equal(StatusCodes.Status403Forbidden, status);
-        Assert.Contains(DarlingWebStoreWrites.Refused("make this change", managedStore), body, StringComparison.Ordinal);
+        Assert.Equal(DarlingWebStoreWrites.Refused("make this change", managedStore), System.Text.Json.JsonDocument.Parse(body).RootElement.GetProperty("error").GetString());
         Assert.DoesNotContain("42501", body, StringComparison.Ordinal);
     }
 
