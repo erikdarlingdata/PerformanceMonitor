@@ -166,6 +166,9 @@ public static class DarlingWebEndpoints
         "analyze_now",
         "purge_now",
         "undo_plan_change",
+        /* #7041: the manual send of the Daily Health Report goes through the alert pipeline over MCP; the web has no route for it (its Preview
+           is the read get_daily_health_report, which sends nothing). */
+        "send_daily_health_report_now",
         /* #6401: the global agent switch and the undo of a non-plan agent change over MCP; the web has its own PUT /api/agent-changes/switch and
            PUT /api/agent-changes/{id}/undo, neither a generic read. */
         "set_agent_actions_enabled",
@@ -6136,6 +6139,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             /* ── alerts / mute rules (DarlingMcpAlertTools) ── */
             ["get_alert_history"] = R(CatAlerts, "Recent fired-alert history for a server, newest first and bounded by limit. Excludes operator-dismissed alerts unless include_dismissed is true (dismissed_excluded_count says how many the default hid). include_streak adds streak_days to each row: days in a row this metric fired at this time of day before the alert, muted fires counting.", PServer(), PHours(24), PLimit(50), PAsOf(), PBool("include_dismissed", false), PText("metric_name"), PText("family"), PBool("include_streak", false)),
             ["get_alert_settings"] = R(CatAlerts, "The current alert-settings configuration."),
+            ["get_daily_health_report"] = R(CatAlerts, "The Daily Health Report for one day (#7041), built from the store and sent nowhere. date is a local date in the report's time zone, default the latest finished period.", PText("date")),
             /* #5241: a web-only read (no MCP tool behind it, see WebOnlyReadNames): one alert's advice and fix script,
                fetched when its Analysis row is first expanded. The key is the page's own row identity. */
             ["get_alert_details"] = R(CatAlerts, "One fired alert's advice: the heading, fields, advice text and fix script the desktop's Alert Detail shows (never the Apply payload), found by server_id, metric_name and alert_time exactly as get_alert_history reports them. An alert with no advice, or no match, answers an empty details list.", new CatalogParam("server_id", TypeInt, true, null), PReqText("metric_name"), PReqText("alert_time")),
@@ -7138,6 +7142,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                     ? DarlingMcpAlertTools.GetAlertDetails(pg, detailsServerId, detailsMetric, detailsTime, c.RequestAborted)
                     : DarlingMcpAlertTools.GetAlertDetails(pg, 0, "", detailsTime, c.RequestAborted),
             ["get_alert_settings"] = (c, pg, an) => DarlingMcpAlertTools.GetAlertSettings(pg, Server(c), c.RequestAborted),
+            ["get_daily_health_report"] = (c, pg, an) => DarlingMcpDailyReportTools.GetDailyHealthReport(pg, Str(c, "date"), c.RequestAborted),
             ["get_mute_rules"] = (c, pg, an) => DarlingMcpAlertTools.GetMuteRules(pg, QueryBool(c, "enabled_only", true), c.RequestAborted),
             ["get_notification_routes"] = (c, pg, an) => DarlingMcpAlertTools.GetNotificationRoutes(pg, c.RequestAborted),
             ["list_investigation_requests"] = (c, pg, an) => DarlingMcpInvestigationTools.ListInvestigationRequests(pg, Str(c, "state"), Server(c), Str(c, "family"), QueryInt(c, "limit", null, 20), c.RequestAborted),
