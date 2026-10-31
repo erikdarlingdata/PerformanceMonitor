@@ -248,7 +248,8 @@ public static class BlockingWaits
     FROM ({snapshots}) AS s
     GROUP BY s.server_id, s.collection_time
 ),
-{name}_cad AS (
+{name}_cad AS MATERIALIZED (
+    /* Materialized: inlined, the planner ran the schedule lookup once per snapshot instead of once per server. */
     SELECT sv.server_id, {SnapshotCadenceMinutesSql("sv.server_id", defaultCadenceMinutes)} * interval '{(gapFactor * 60.0).ToString("R", inv)} seconds' AS gap
     FROM (SELECT DISTINCT server_id FROM {name}_totals) AS sv
 ),
