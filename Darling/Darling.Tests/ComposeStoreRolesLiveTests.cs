@@ -199,7 +199,7 @@ public sealed class ComposeStoreRolesLiveTests
             await webHost.StartAsync(ct);
             await mcpHost.StartAsync(ct);
 
-            Assert.Equal("viewer", await HostPoolUserAsync(webHost, webPort, webLog, ct));
+            Assert.Equal("web", await HostPoolUserAsync(webHost, webPort, webLog, ct));
             Assert.Equal("mcp", await HostPoolUserAsync(mcpHost, mcpPort, mcpLog, ct));
             Assert.DoesNotContain("connects to the store as the owner login", webLog.Joined + mcpLog.Joined, StringComparison.Ordinal);
 
@@ -554,7 +554,7 @@ public sealed class ComposeStoreRolesLiveTests
             var postgres = new PostgresConfig
             {
                 ConnectionString = owner,
-                WebConnectionString = Login(owner, "viewer", "ScriptViewer3914"),
+                WebConnectionString = Login(owner, "web", "ScriptWeb6991"),
                 McpConnectionString = "file:" + mcpLoginFile,
             };
 
@@ -588,6 +588,21 @@ public sealed class ComposeStoreRolesLiveTests
                 before.SetEquals(after),
                 $"managed provisioning changed what the script granted. Added: [{string.Join("; ", after.Except(before).Order())}]. "
                 + $"Removed: [{string.Join("; ", before.Except(after).Order())}].");
+
+            /* One thing managed adds that the script leaves to the operator: CONNECT on the maintenance databases. Large
+               objects and TEMP are per database, so a login that can open postgres or template1 still has them there. */
+            await using (var check = await OpenAsync(owner, ct))
+            {
+                foreach (var role in new[] { "admin", "viewer", "web", "mcp" })
+                {
+                    foreach (var database in new[] { "postgres", "template1" })
+                    {
+                        Assert.False(
+                            await ScalarAsync<bool>(check, $"SELECT pg_catalog.has_database_privilege('{role}', '{database}', 'CONNECT')", ct),
+                            $"{role} can still connect to {database} after managed provisioning.");
+                    }
+                }
+            }
         }
         finally
         {
@@ -1862,17 +1877,17 @@ VALUES ($1, (now() AT TIME ZONE 'UTC'), $2, $3, (now() AT TIME ZONE 'UTC'), 60, 
         }
     }
 
-    /// <summary>Every table, column and default privilege, and every role setting, the three roles hold.</summary>
+    /// <summary>Every table, column and default privilege, and every role setting, the four roles hold.</summary>
     private static async Task<HashSet<string>> PrivilegeSnapshotAsync(string owner, CancellationToken ct)
     {
         const string sql = @"
 SELECT 'table ' || grantee || ' ' || privilege_type || ' ' || table_schema || '.' || table_name
 FROM information_schema.role_table_grants
-WHERE grantee IN ('admin', 'viewer', 'mcp')
+WHERE grantee IN ('admin', 'viewer', 'web', 'mcp')
 UNION ALL
 SELECT 'column ' || grantee || ' ' || privilege_type || ' ' || table_schema || '.' || table_name || '.' || column_name
 FROM information_schema.column_privileges
-WHERE grantee IN ('admin', 'viewer', 'mcp')
+WHERE grantee IN ('admin', 'viewer', 'web', 'mcp')
 UNION ALL
 SELECT 'default ' || d.defaclnamespace::regnamespace::text || ' ' || d.defaclobjtype::text || ' ' || a.acl::text
 FROM pg_catalog.pg_default_acl AS d
@@ -1882,11 +1897,11 @@ SELECT 'setting ' || r.rolname || ' ' || c.setting
 FROM pg_catalog.pg_db_role_setting AS s
 JOIN pg_catalog.pg_roles AS r ON r.oid = s.setrole
 CROSS JOIN LATERAL pg_catalog.unnest(s.setconfig) AS c(setting)
-WHERE r.rolname IN ('admin', 'viewer', 'mcp')
+WHERE r.rolname IN ('admin', 'viewer', 'web', 'mcp')
 UNION ALL
 SELECT 'connect ' || r.rolname || ' ' || pg_catalog.has_database_privilege(r.rolname, pg_catalog.current_database(), 'CONNECT')::text
 FROM pg_catalog.pg_roles AS r
-WHERE r.rolname IN ('admin', 'viewer', 'mcp')";
+WHERE r.rolname IN ('admin', 'viewer', 'web', 'mcp')";
 
         var snapshot = new HashSet<string>(StringComparer.Ordinal);
         await using var connection = await OpenAsync(owner, ct);

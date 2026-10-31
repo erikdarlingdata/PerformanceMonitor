@@ -139,8 +139,9 @@ public sealed class WebStoreLoginLiveTests
 
     /// <summary>The batch takes large-object creation and the session advisory lock functions away from every role by default, so a
     /// read-only seat cannot store data in the database through <c>lo_from_bytea</c> or hold the migration lock open. The logins that take
-    /// a session lock (<c>admin</c> and <c>mcp</c>, through the agent-change undo) keep it, and the transaction-level locks the store's own
-    /// functions use stay open to everyone.</summary>
+    /// a session lock (<c>admin</c> and <c>mcp</c>, through the agent-change undo) keep it. The transaction-level forms go only to
+    /// <c>admin</c>, <c>web</c> and <c>mcp</c>, whose own code takes one, so viewer cannot hold the migration key in an open
+    /// transaction either. The store's own functions take theirs as the owner.</summary>
     [Fact]
     public async Task AfterTheBatch_ViewerCannotCreateLargeObjects_OrHoldASessionLock_ButAdminAndMcpCan()
     {
@@ -172,31 +173,41 @@ public sealed class WebStoreLoginLiveTests
                     15, PasswordReassert.All, target, ScramSha256Verifier.Create(webPassword)), ct);
             }
 
-            foreach (var (role, password) in new[] { ("viewer", ProvisioningTestSecrets.ViewerPassword), ("web", webPassword) })
+            /* Large objects and the session lock forms: refused to viewer and web alike. The transaction forms: refused to
+               viewer only, because web's own writes take one (checked below). */
+            var sessionForms = new[]
+            {
+                "SELECT lo_from_bytea(0, 'x'::bytea)",
+                "SELECT lo_create(0)",
+                "SELECT lo_creat(-1)",
+                $"SELECT pg_advisory_lock({MigrationLockKey})",
+                $"SELECT pg_try_advisory_lock({MigrationLockKey})",
+                $"SELECT pg_advisory_lock_shared({MigrationLockKey})",
+                "SELECT pg_advisory_lock(1, 2)",
+            };
+            var transactionForms = new[]
+            {
+                $"SELECT pg_advisory_xact_lock({MigrationLockKey})",
+                $"SELECT pg_try_advisory_xact_lock({MigrationLockKey})",
+                $"SELECT pg_advisory_xact_lock_shared({MigrationLockKey})",
+                $"SELECT pg_try_advisory_xact_lock_shared({MigrationLockKey})",
+                "SELECT pg_advisory_xact_lock(1, 2)",
+                "SELECT pg_try_advisory_xact_lock(1, 2)",
+                "SELECT pg_advisory_xact_lock_shared(1, 2)",
+                "SELECT pg_try_advisory_xact_lock_shared(1, 2)",
+            };
+            foreach (var (role, password, refusedSql) in new[]
+            {
+                ("viewer", ProvisioningTestSecrets.ViewerPassword, sessionForms.Concat(transactionForms).ToArray()),
+                ("web", webPassword, sessionForms),
+            })
             {
                 await using var connection = new NpgsqlConnection(LoginString(scratch.ConnectionString, role, password));
                 await connection.OpenAsync(ct);
-                foreach (var sql in new[]
-                {
-                    "SELECT lo_from_bytea(0, 'x'::bytea)",
-                    "SELECT lo_create(0)",
-                    "SELECT lo_creat(-1)",
-                    $"SELECT pg_advisory_lock({MigrationLockKey})",
-                    $"SELECT pg_try_advisory_lock({MigrationLockKey})",
-                    $"SELECT pg_advisory_lock_shared({MigrationLockKey})",
-                    "SELECT pg_advisory_lock(1, 2)",
-                    $"SELECT pg_advisory_xact_lock({MigrationLockKey})",
-                    $"SELECT pg_try_advisory_xact_lock({MigrationLockKey})",
-                    $"SELECT pg_advisory_xact_lock_shared({MigrationLockKey})",
-                    $"SELECT pg_try_advisory_xact_lock_shared({MigrationLockKey})",
-                    "SELECT pg_advisory_xact_lock(1, 2)",
-                    "SELECT pg_try_advisory_xact_lock(1, 2)",
-                    "SELECT pg_advisory_xact_lock_shared(1, 2)",
-                    "SELECT pg_try_advisory_xact_lock_shared(1, 2)",
-                })
+                foreach (var sql in refusedSql)
                 {
                     var refused = await Record.ExceptionAsync(() => ExecAsync(connection, sql, ct));
-                    Assert.True(refused is PostgresException, $"viewer ran: {sql}");
+                    Assert.True(refused is PostgresException, $"{role} ran: {sql}");
                     Assert.Equal("42501", ((PostgresException)refused!).SqlState);
                 }
             }
