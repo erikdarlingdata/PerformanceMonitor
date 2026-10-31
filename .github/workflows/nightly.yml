@@ -537,7 +537,7 @@ jobs:
           Add-Content -Path "$dataDir\postgresql.conf" -Value "timescaledb.max_background_workers = 74"
           Add-Content -Path "$dataDir\postgresql.conf" -Value "max_worker_processes = 85"
           Add-Content -Path "$dataDir\postgresql.conf" -Value "fsync = off"
-          Add-Content -Path "$dataDir\postgresql.conf" -Value "synchronous_commit = off"
+          # synchronous_commit stays on (#7012): a commit that returns before its WAL is flushed leaves the committed hint bits unset, so VACUUM cannot mark pages all-visible and an index scan cannot mark dead entries. With fsync off the flush never waits on disk.
           Add-Content -Path "$dataDir\postgresql.conf" -Value "full_page_writes = off"
           # #5549: the session id (%c) on every line. A PID alone cannot say whether two lines came from one
           # session (a pooled connection reused by the next test) or from two (Windows reuses a PID quickly).
@@ -980,7 +980,7 @@ jobs:
           Add-Content -Path "$dataDir\postgresql.conf" -Value "timescaledb.max_background_workers = 74"
           Add-Content -Path "$dataDir\postgresql.conf" -Value "max_worker_processes = 85"
           Add-Content -Path "$dataDir\postgresql.conf" -Value "fsync = off"
-          Add-Content -Path "$dataDir\postgresql.conf" -Value "synchronous_commit = off"
+          # synchronous_commit stays on (#7012): a commit that returns before its WAL is flushed leaves the committed hint bits unset, so VACUUM cannot mark pages all-visible and an index scan cannot mark dead entries. With fsync off the flush never waits on disk.
           Add-Content -Path "$dataDir\postgresql.conf" -Value "full_page_writes = off"
           # #5549: the session id (%c) on every line. A PID alone cannot say whether two lines came from one
           # session (a pooled connection reused by the next test) or from two (Windows reuses a PID quickly).
@@ -1410,7 +1410,7 @@ jobs:
           Add-Content -Path "$dataDir\postgresql.conf" -Value "timescaledb.max_background_workers = 74"
           Add-Content -Path "$dataDir\postgresql.conf" -Value "max_worker_processes = 85"
           Add-Content -Path "$dataDir\postgresql.conf" -Value "fsync = off"
-          Add-Content -Path "$dataDir\postgresql.conf" -Value "synchronous_commit = off"
+          # synchronous_commit stays on (#7012): a commit that returns before its WAL is flushed leaves the committed hint bits unset, so VACUUM cannot mark pages all-visible and an index scan cannot mark dead entries. With fsync off the flush never waits on disk.
           Add-Content -Path "$dataDir\postgresql.conf" -Value "full_page_writes = off"
           # #5549: the session id (%c) on every line. A PID alone cannot say whether two lines came from one
           # session (a pooled connection reused by the next test) or from two (Windows reuses a PID quickly).

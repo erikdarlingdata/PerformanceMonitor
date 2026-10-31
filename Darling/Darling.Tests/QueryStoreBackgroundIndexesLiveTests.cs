@@ -286,7 +286,8 @@ ANALYZE collect.query_store_interval_wide;", ct);
         await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
         await using var connection = await OpenStoreAsync(scratch, ct);
 
-        /* #7012: the test clusters run with synchronous_commit = off (#6988). A commit then returns before its WAL is
+        /* #7012: on a cluster with synchronous_commit = off (#6988 set it on every test cluster; part 2 of #7012 removed it, and
+           this line keeps the test right on any rig) a commit returns before its WAL is
            flushed (the WAL writer flushes within about 200 ms), and VACUUM does not mark a page all-visible while a
            committed insert on it is still unflushed. The VACUUM below ran right after the seed, so on the plan CI took
            some runs it left every page not all-visible (relallvisible 0 on a 253-page table; measured), and the planner
