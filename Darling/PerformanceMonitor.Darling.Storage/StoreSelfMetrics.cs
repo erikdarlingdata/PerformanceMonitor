@@ -253,7 +253,8 @@ compression AS (
     /// <c>chunk_compression_stats</c>); on a product store that is about two chunks per hypertable
     /// (<c>TimescaleSupport.CompressAfterDays</c> is 1). #6971: these are summed from <c>pg_class.relpages</c> times the
     /// block size over the relation, its TOAST table and every index of either, the population
-    /// <c>pg_total_relation_size</c> adds up, so the sweep makes no file call at all. The call it replaces cost 3 to 5 ms
+    /// <c>pg_total_relation_size</c> adds up, so this statement makes no file call (the named-table and dimension
+    /// statements of the same sweep still size their files every hour). The call it replaces cost 3 to 5 ms
     /// per chunk on Windows (a stat of every fork of every index), 0.4 to 0.8 s for 120 uncompressed chunks and 111
     /// roots on the rig, and was the one cost of this form that still grew with the chunk and index count. relpages
     /// is what the last VACUUM, ANALYZE or index build recorded, so a chunk still taking inserts reads a little low

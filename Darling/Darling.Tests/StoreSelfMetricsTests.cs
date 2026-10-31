@@ -1544,20 +1544,7 @@ SELECT
         await StoreSelfMetrics.SweepAsync(connection, timescaleAvailable: true, hourly, null, null, null, ct);
 
         /* #6971: the catch-all rows are sized from the catalog on the hourly sweep, with no file call. */
-        var exactCatchAll = await ReadCatchAllRowsAsync(connection, first, ct);
-        var hourlyCatchAll = await ReadCatchAllRowsAsync(connection, hourly, ct);
-        Assert.Equal(
-            new[] { StoreSelfMetrics.OtherObjectKind, StoreSelfMetrics.SystemObjectKind }.OrderBy(k => k).ToList(),
-            hourlyCatchAll.Keys.OrderBy(k => k).ToList());
-        Assert.Equal(exactCatchAll.Keys.OrderBy(k => k).ToList(), hourlyCatchAll.Keys.OrderBy(k => k).ToList());
-        foreach (var (kind, estimate) in hourlyCatchAll)
-        {
-            var exactRow = exactCatchAll[kind];
-            Assert.NotEqual(true, exactRow.SizeEstimated);
-            Assert.True(estimate.SizeEstimated, $"{kind}: the hourly catch-all row is not marked estimated");
-            Assert.Equal(exactRow.ChunkCount, estimate.ChunkCount);
-            Assert.InRange(estimate.TotalBytes!.Value, (long)(exactRow.TotalBytes!.Value * 0.5), (long)(exactRow.TotalBytes.Value * 1.2));
-        }
+        await CatchAllEstimateChecks.AssertHourlyRowsAgainstExactAsync(connection, first, hourly, ct);
 
         var exactRows = await ReadSizeRowsAsync(connection, first, ct);
         var estimateRows = await ReadSizeRowsAsync(connection, hourly, ct);
@@ -1586,6 +1573,9 @@ SELECT
         TestContext.Current.SendDiagnosticMessage(
             $"#5857 byte gap on the compressed fixture: estimate is {gap} bytes ({100.0 * gap / exactBytes:F1}%) below the exact {exactBytes} bytes");
 
+        /* #6971: a catch-all relation that is mostly TOAST is counted, TOAST table and indexes included. */
+        await CatchAllEstimateChecks.AssertEstimateCountsTheToastedRelationAsync(connection, timescale: true, hourly, ct);
+
         /* 24 hours after the first sweep: no exact row in the last 23 hours, so exact again. */
         var daily = first.AddHours(24);
         await StoreSelfMetrics.SweepAsync(connection, timescaleAvailable: true, daily, null, null, null, ct);
@@ -1593,6 +1583,7 @@ SELECT
         var dailyRows = await ReadSizeRowsAsync(connection, daily, ct);
         Assert.Equal(exactRows.Count, dailyRows.Count);
         Assert.All(dailyRows, r => Assert.False(r.Value.SizeEstimated, $"{r.Key} 24 hours later is not marked exact"));
+        await CatchAllEstimateChecks.AssertDailyRowsAreExactAsync(connection, daily, ct);
     }
 
     /// <summary>
@@ -1782,30 +1773,6 @@ INSERT INTO collect.store_metrics (metric_time, object_name, object_kind, total_
     }
 
     private sealed record SizeRow(long? TotalBytes, long? CompressedBefore, long? CompressedAfter, int? ChunkCount, bool? SizeEstimated);
-
-    /// <summary>The two catch-all rows (#6971) one sweep wrote, by kind.</summary>
-    private static async Task<Dictionary<string, SizeRow>> ReadCatchAllRowsAsync(NpgsqlConnection connection, DateTime metricTime, CancellationToken ct)
-    {
-        await using var command = new NpgsqlCommand($@"
-SELECT object_kind, total_bytes, compressed_before_bytes, compressed_after_bytes, chunk_count, size_estimated
-FROM collect.store_metrics
-WHERE metric_time = $1
-AND   object_kind IN ('{StoreSelfMetrics.OtherObjectKind}', '{StoreSelfMetrics.SystemObjectKind}')", connection);
-        command.Parameters.AddWithValue(DateTime.SpecifyKind(metricTime, DateTimeKind.Unspecified));
-        var rows = new Dictionary<string, SizeRow>(StringComparer.Ordinal);
-        await using var reader = await command.ExecuteReaderAsync(ct);
-        while (await reader.ReadAsync(ct))
-        {
-            rows[reader.GetString(0)] = new SizeRow(
-                reader.IsDBNull(1) ? null : reader.GetInt64(1),
-                null,
-                null,
-                reader.IsDBNull(4) ? null : reader.GetInt32(4),
-                reader.IsDBNull(5) ? null : reader.GetBoolean(5));
-        }
-
-        return rows;
-    }
 
     /// <summary>The hypertable and aggregate rows one sweep wrote, by kind and name.</summary>
     private static async Task<Dictionary<string, SizeRow>> ReadSizeRowsAsync(NpgsqlConnection connection, DateTime metricTime, CancellationToken ct)
