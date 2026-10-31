@@ -46,6 +46,7 @@ public sealed class DarlingStoreLoginsTests
 {
     private const string Owner = "Host=store;Port=5432;Username=darling;Password=OwnerSecret1;Database=darling";
     private const string ViewerLogin = "Host=store;Port=5432;Username=viewer;Password=ViewerSecret2;Database=darling";
+    private const string WebLogin = "Host=store;Port=5432;Username=web;Password=WebSecret3;Database=darling";
     private const string McpLogin = "Host=store;Port=5432;Username=mcp;Password=McpSecret3;Database=darling";
 
     /* ─────────────────────────── the decision ─────────────────────────── */
@@ -72,7 +73,7 @@ public sealed class DarlingStoreLoginsTests
 
         var web = DarlingStoreLogins.Resolve(DarlingStoreLogins.Surface.Web, Owner, null, inContainer: true, verdict);
         Assert.Equal(DarlingStoreLogins.LoginSource.ComposeStoreRole, web.Source);
-        Assert.Equal(ViewerLogin, web.ConnectionString);
+        Assert.Equal(WebLogin, web.ConnectionString);
         Assert.Null(web.Warning);
 
         var mcp = DarlingStoreLogins.Resolve(DarlingStoreLogins.Surface.Mcp, Owner, null, inContainer: true, verdict);
@@ -149,7 +150,7 @@ public sealed class DarlingStoreLoginsTests
     public void ANotProvisionedStart_WithNoTrustedEarlierCredential_FallsBackToTheOwner_WithBothReasons(string outcome)
     {
         var verdict = NotProvisioned(outcome);
-        const string missing = "/var/lib/darling/credentials/pg-viewer-credential is not trusted (its mode 0644 gives other users access)";
+        const string missing = "/var/lib/darling/credentials/pg-web-credential is not trusted (its mode 0644 gives other users access)";
 
         var login = DarlingStoreLogins.Resolve(
             DarlingStoreLogins.Surface.Web, Owner, null, inContainer: true, verdict, EarlierComposeCredential.None(missing));
@@ -158,7 +159,7 @@ public sealed class DarlingStoreLoginsTests
         Assert.Equal(Owner, login.ConnectionString);
         Assert.StartsWith(DarlingStoreLogins.OwnerFallbackWarning(DarlingStoreLogins.Surface.Web, null), login.Warning, StringComparison.Ordinal);
         Assert.Contains(verdict.NotProvisionedReason!, login.Warning, StringComparison.Ordinal);
-        Assert.EndsWith($" No viewer credential from an earlier start can stand in: {missing}.", login.Warning, StringComparison.Ordinal);
+        Assert.EndsWith($" No web credential from an earlier start can stand in: {missing}.", login.Warning, StringComparison.Ordinal);
     }
 
     /// <summary>An earlier start's credential is the fallback of a start that did not provision, and nothing more: a
@@ -175,7 +176,7 @@ public sealed class DarlingStoreLoginsTests
 
         var provisioned = DarlingStoreLogins.Resolve(DarlingStoreLogins.Surface.Web, Owner, null, inContainer: true, Provisioned(), earlier);
         Assert.Equal(DarlingStoreLogins.LoginSource.ComposeStoreRole, provisioned.Source);
-        Assert.Equal(ViewerLogin, provisioned.ConnectionString);
+        Assert.Equal(WebLogin, provisioned.ConnectionString);
 
         var outside = DarlingStoreLogins.Resolve(DarlingStoreLogins.Surface.Web, Owner, null, inContainer: false, NotProvisioned("refusal"), earlier);
         Assert.Equal(DarlingStoreLogins.LoginSource.Owner, outside.Source);
@@ -847,14 +848,14 @@ public sealed class DarlingStoreLoginsTests
     }
 
     [Fact]
-    public async Task CustomAlertViewer_WithAProvisionedVerdict_IsItsViewerLogin()
+    public async Task CustomAlertViewer_WithAProvisionedVerdict_IsTheWebLogin()
     {
         DarlingStoreLogins.ResetComposeStoreVerdictForTests();
         try
         {
             DarlingStoreLogins.PublishComposeStoreVerdict(Provisioned());
 
-            Assert.Equal(ViewerLogin, await DarlingStoreLogins.ResolveComposeCustomAlertViewerAsync(
+            Assert.Equal(WebLogin, await DarlingStoreLogins.ResolveComposeCustomAlertViewerAsync(
                 Owner, NullLogger.Instance, CancellationToken.None));
         }
         finally
@@ -1027,7 +1028,7 @@ public sealed class DarlingStoreLoginsTests
     }
 
     private static DarlingStoreLogins.ComposeStoreVerdict Provisioned() =>
-        DarlingStoreLogins.ComposeStoreVerdict.ProvisionedWith(ViewerLogin, McpLogin, 15);
+        DarlingStoreLogins.ComposeStoreVerdict.ProvisionedWith(ViewerLogin, McpLogin, 15, WebLogin);
 
     /// <summary>A not-provisioned verdict worded as each outcome's really is.</summary>
     private static DarlingStoreLogins.ComposeStoreVerdict NotProvisioned(string outcome) => outcome switch

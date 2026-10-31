@@ -2960,7 +2960,7 @@ if (location.pathname.toLowerCase() !== '/auth/login') { document.getElementById
     {
         for (var attempt = 0; attempt < 60; attempt++)
         {
-            var connectionString = DarlingManagedPostgres.TryBuildViewerConnectionStringFromStoredCredential(config);
+            var connectionString = DarlingManagedPostgres.TryBuildWebConnectionStringFromStoredCredential(config);
             if (connectionString is not null)
             {
                 return connectionString;
@@ -2968,7 +2968,7 @@ if (location.pathname.toLowerCase() !== '/auth/login') { document.getElementById
 
             if (attempt == 0)
             {
-                _logger.LogInformation("Waiting for the managed Postgres viewer-role credential (first-run initialization) before starting the web dashboard");
+                _logger.LogInformation("Waiting for the managed Postgres web-role credential (first-run initialization, or the first start after an upgrade) before starting the web dashboard");
             }
 
             try
@@ -2981,7 +2981,17 @@ if (location.pathname.toLowerCase() !== '/auth/login') { document.getElementById
             }
         }
 
-        _logger.LogError("Web dashboard not started: the managed Postgres viewer-role credential never appeared — see the worker log for the bootstrap failure");
+        /* The web login never appeared (a failed role batch, or a credential file the service refused). Reads keep working on the read-only
+           viewer login, which holds no write, so every write the dashboard makes is refused by the store; it never writes as viewer. */
+        var viewer = DarlingManagedPostgres.TryBuildViewerConnectionStringFromStoredCredential(config);
+        if (viewer is not null)
+        {
+            _logger.LogWarning(
+                "The managed Postgres web-role credential never appeared, so the web dashboard starts on the read-only viewer login: it lists, and every write it offers (mute rules, dismissals, custom alerts, server add and edit, run-now requests) is refused until the service provisions the web role (see the worker log for the role batch). Restart the service once it has.");
+            return viewer;
+        }
+
+        _logger.LogError("Web dashboard not started: the managed Postgres web-role and viewer-role credentials never appeared — see the worker log for the bootstrap failure");
         return null;
     }
 

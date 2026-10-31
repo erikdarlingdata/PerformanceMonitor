@@ -42,6 +42,7 @@ public sealed class DarlingSecuritySplitLiveTests
     private static readonly string AdminRole = "sec_admin_" + RunSuffix;
     private static readonly string ViewerRole = "sec_viewer_" + RunSuffix;
     private static readonly string McpRole = "sec_mcp_" + RunSuffix;
+    private static readonly string WebPassword = DarlingManagedPostgres.GeneratePassword();
     private const string RolePassword = "SecSplitTestPw0123456789abcdef01"; // alnum, like the real generator
 
     private static string RequireLivePostgres()
@@ -607,7 +608,7 @@ END $$;";
             /* The managed roles carry fixed names and a role is cluster-wide: never adopt or drop a set that
                belongs to something else on a shared rig. */
             Assert.SkipWhen(
-                await ScalarAsync<bool>(owner, "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'mcp'))", ct),
+                await ScalarAsync<bool>(owner, "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'web', 'mcp'))", ct),
                 "A cluster-wide admin/viewer/mcp role already exists on this rig; the managed provisioning batch would adopt it.");
         }
 
@@ -622,17 +623,20 @@ END $$;";
                    the database-level revoke and the owner's name out of this scratch database. */
                 var batch = DarlingManagedRoles.BuildProvisioningSql(
                     ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp,
-                    15, PasswordReassert.All, ProvisioningTarget.ComposeStore(OwnerRoleOf(owner), scratch.DatabaseName));
+                    15, PasswordReassert.All, ProvisioningTarget.ComposeStore(OwnerRoleOf(owner), scratch.DatabaseName),
+                    ScramSha256Verifier.Create(WebPassword));
                 await ExecAsync(owner, batch, ct);
                 await ExecAsync(owner,
                     "INSERT INTO config_alert_log (alert_time, server_id, server_name, metric_name, current_value, threshold_value) " +
                     "VALUES ('2026-10-04 10:00:00', -7001, 'srv', 'High CPU', 90, 80)", ct);
             }
 
+            /* The web host's own login holds the dismiss write now; viewer is read-only (WebStoreLoginLiveTests). The batch is run
+               with a fixed web verifier so the test knows its password. */
             var viewerString = new NpgsqlConnectionStringBuilder(scratch.ConnectionString)
             {
-                Username = "viewer",
-                Password = ProvisioningTestSecrets.ViewerPassword,
+                Username = "web",
+                Password = WebPassword,
                 SearchPath = "collect,config,public",
                 Pooling = false,
             }.ConnectionString;
@@ -651,7 +655,7 @@ END $$;";
         {
             await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
                 await ExecAsync(cleanup,
-                    "DROP OWNED BY admin, viewer, mcp; DROP ROLE IF EXISTS admin; DROP ROLE IF EXISTS viewer; DROP ROLE IF EXISTS mcp", cleanupCt));
+                    "DROP OWNED BY admin, viewer, web, mcp; DROP ROLE IF EXISTS admin; DROP ROLE IF EXISTS viewer; DROP ROLE IF EXISTS web; DROP ROLE IF EXISTS mcp", cleanupCt));
         }
     }
 

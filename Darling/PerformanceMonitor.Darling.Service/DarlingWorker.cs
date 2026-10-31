@@ -455,7 +455,7 @@ public sealed class DarlingWorker : BackgroundService
             async (connection, logger, ct) => await StoreStatementStats.EnsureAsync(
                 connection,
                 PgSchemaGenerator.ConfigSchema,
-                [DarlingManagedPostgres.AdminRoleName, DarlingManagedPostgres.ViewerRoleName, DarlingManagedPostgres.McpRoleName],
+                [DarlingManagedPostgres.AdminRoleName, DarlingManagedPostgres.ViewerRoleName, DarlingManagedPostgres.WebRoleName, DarlingManagedPostgres.McpRoleName],
                 logger,
                 ct) == StoreStatementStats.SetupOutcome.Ready ? 1 : 0),
 
@@ -3592,7 +3592,8 @@ LIMIT 1";
         string? customAlertViewerConnString = null;
         if (OperatingSystem.IsWindows() && config.Postgres.Managed)
         {
-            customAlertViewerConnString = DarlingManagedPostgres.TryBuildViewerConnectionStringFromStoredCredential(config.Postgres);
+            /* The evaluator runs on the web login: it writes the resolution row through record_custom_alert_resolution, which the read-only viewer login cannot execute. */
+            customAlertViewerConnString = DarlingManagedPostgres.TryBuildWebConnectionStringFromStoredCredential(config.Postgres);
         }
         else if (!config.Postgres.Managed && Hosting.DarlingHostBinding.IsRunningInContainer)
         {

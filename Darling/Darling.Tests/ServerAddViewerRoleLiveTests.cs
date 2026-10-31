@@ -88,7 +88,7 @@ public sealed class ServerAddViewerRoleLiveTests : IDisposable
                 continue;
             }
 
-            if (!statement[(at + marker.Length)..].Split(',').Select(t => t.Trim()).Contains("viewer", StringComparer.Ordinal))
+            if (!statement[(at + marker.Length)..].Split(',').Select(t => t.Trim()).Contains("web", StringComparer.Ordinal))
             {
                 continue;
             }
