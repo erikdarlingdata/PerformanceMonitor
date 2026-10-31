@@ -105,7 +105,8 @@ namespace PerformanceMonitor.Common
 
         /// <summary>Blocking events in the window, counted as WAITS (#5644): one per blocked session, blocker and wait
         /// start, from blocked-process reports and falling back to DMV blocking snapshots. The figure every surface
-        /// DISPLAYS. The band does not read it when <see cref="BlockingReports"/> is set.</summary>
+        /// DISPLAYS. Darling bands on it (#7028): its producers leave <see cref="BlockingReports"/> unset. The band
+        /// does not read it when <see cref="BlockingReports"/> is set (Lite).</summary>
         public long BlockingEvents { get; init; }
 
         /// <summary>The blocked-process REPORT rows (DMV snapshot rows on the fallback) behind
@@ -123,6 +124,12 @@ namespace PerformanceMonitor.Common
         /// whatever the window. Zero when no blocking, or when the blocking source carries no wait time,
         /// which leaves the count arm alone to decide.</summary>
         public long PeakBlockWaitMs { get; init; }
+
+        /// <summary>#7028: the blocking band's snapshot arm value, in milliseconds, or <c>null</c> when the producer
+        /// carries none (Lite never does). The largest total blocked wait of one DMV snapshot in the window, after
+        /// the Blocking Wait Time alert's persistence gate (<see cref="BlockingWaits.GatedSnapshotWaitSql"/>), the
+        /// alert's own measure. The arm reads it only when a snapshot tier is above 0.</summary>
+        public long? PeakSnapshotWaitMs { get; init; }
 
         /// <summary>Memory-pressure events (a process or system indicator ≥ 2) that were not severe. Any is Warning.</summary>
         public long MemoryPressureEvents { get; init; }
@@ -282,7 +289,8 @@ namespace PerformanceMonitor.Common
                undeclared span) is the fallback this classifier wants: a non-zero count reads Warning, a zero
                count (Unknown) stays out of the blocking trigger. */
             var blockingSeverity = ServerHealthClassifier.BlockingSeverity(
-                signals.BlockingReports ?? signals.BlockingEvents, signals.PeakBlockWaitMs / 1000.0, signals.Window, t.BlockingBands);
+                signals.BlockingReports ?? signals.BlockingEvents, signals.PeakBlockWaitMs / 1000.0, signals.Window, t.BlockingBands,
+                signals.PeakSnapshotWaitMs.HasValue ? signals.PeakSnapshotWaitMs.Value / 1000.0 : null);
 
             var cpuSeverity = HighCpuSeverity(signals.HighCpuEvents, signals.Window, t);
             var collectionSeverity = CollectionErrorSeverity(signals.CollectionErrors, signals.CollectionRuns);
@@ -664,6 +672,9 @@ namespace PerformanceMonitor.Common
                     + (signals.BlockingReports.HasValue ? " reports/hr" : "/hr"));
             if (peakBlockMs > 0)
                 qualifiers.Add("peak block " + FormatDurationMs(peakBlockMs));
+            /* #7028: the snapshot arm's value, when the producer carries one. */
+            if (signals.PeakSnapshotWaitMs is > 0)
+                qualifiers.Add("peak snapshot " + FormatDurationMs(signals.PeakSnapshotWaitMs.Value));
             if (qualifiers.Count > 0)
                 line += " (" + string.Join(", ", qualifiers) + ")";
 

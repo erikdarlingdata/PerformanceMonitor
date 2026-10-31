@@ -159,6 +159,142 @@ public static class BlockingWaits
             .ToList();
     }
 
+    /// <summary>
+    /// #7028: ONE DMV snapshot's total blocked wait in milliseconds, the measure the <c>Blocking Wait Time</c> alert
+    /// reads (<c>blocking.wait_threshold_seconds</c>) and the blocking band's snapshot arm reads. An aggregate
+    /// expression over a relation that has <c>wait_time_ms</c>, <c>blocked_spid</c> and <c>blocking_spid</c>
+    /// (PostgreSQL): the summed <c>wait_time_ms</c> of the rows that are real waits (<see cref="NotSelfWaitSql"/>),
+    /// 0 when none, as a bigint. The alert's one-snapshot read and <see cref="SnapshotTotalsSql"/> both aggregate it,
+    /// so there is one SUM expression.
+    /// </summary>
+    public const string SnapshotTotalWaitMsSql =
+        "CAST(COALESCE(SUM(wait_time_ms) FILTER (WHERE " + NotSelfWaitSql + "), 0) AS bigint)";
+
+    /// <summary>
+    /// #7028: a CTE named <paramref name="name"/>, one row per DMV snapshot, with the partition columns, the
+    /// <c>collection_time</c> that identifies the snapshot (the alert's observation identity), and
+    /// <c>total_wait_ms</c> = <see cref="SnapshotTotalWaitMsSql"/> over the snapshot's rows. <paramref name="source"/>
+    /// is a SELECT that returns <c>collection_time</c>, <c>wait_time_ms</c>, <c>blocked_spid</c>, <c>blocking_spid</c>
+    /// and every column in <paramref name="partitionColumns"/>. The text ends with the closing parenthesis, no
+    /// trailing comma. PostgreSQL only.
+    /// </summary>
+    public static string SnapshotTotalsSql(
+        string name, string source, IReadOnlyList<string>? partitionColumns = null)
+    {
+        var cols = PartitionList(partitionColumns, "s.");
+        return $@"
+{name} AS (
+    SELECT {cols}s.collection_time, {SnapshotTotalWaitMsSql} AS total_wait_ms
+    FROM ({source}) AS s
+    GROUP BY {cols}s.collection_time
+)";
+    }
+
+    /// <summary>
+    /// #7028: the blocking band's snapshot arm value, a CTE named <paramref name="name"/> with the partition columns
+    /// and <c>peak_snapshot_wait_ms</c> (double precision, milliseconds), one row per partition that has a snapshot,
+    /// built from a <see cref="SnapshotTotalsSql"/> CTE named <paramref name="totals"/>. It mirrors the gate that
+    /// decides whether <c>Blocking Wait Time</c> pages, so a snapshot that would not page does not colour the band:
+    /// for each snapshot take the larger of (a) the smallest total across that snapshot and the
+    /// <paramref name="breachSamples"/> - 1 snapshots before it, counted only while the snapshots are adjacent
+    /// (a gap of more than <paramref name="episodeGapSeconds"/> starts a new episode, as the alert restarts a
+    /// streak), 0 when fewer than <paramref name="breachSamples"/> adjacent snapshots exist, and (b) the total divided
+    /// by <paramref name="singleSnapshotMultiplier"/> (one snapshot at that multiple of the bar pages alone). The
+    /// value is the largest of those over the rows <paramref name="totals"/> holds. A tier then compares as
+    /// <c>value &gt;= tier</c>. Callers pass the alert's own constants (<c>AlertEngine.BlockingWaitBreachSamples</c>,
+    /// <c>BlockingWaitSingleSnapshotMultiplier</c> and the episode gap factor times the collector cadence). The text
+    /// ends with the closing parenthesis, no trailing comma. PostgreSQL only.
+    /// </summary>
+    public static string GatedSnapshotWaitSql(
+        string name, string totals, int breachSamples, int singleSnapshotMultiplier, double episodeGapSeconds,
+        IReadOnlyList<string>? partitionColumns = null)
+    {
+        var inv = System.Globalization.CultureInfo.InvariantCulture;
+        var cols = PartitionList(partitionColumns, string.Empty);
+        var partition = partitionColumns is { Count: > 0 }
+            ? "PARTITION BY " + string.Join(", ", partitionColumns)
+            : string.Empty;
+        var episodePartition = partitionColumns is { Count: > 0 }
+            ? partition + ", episode"
+            : "PARTITION BY episode";
+        var samples = Math.Max(1, breachSamples);
+        var groupBy = string.IsNullOrEmpty(cols) ? string.Empty : "GROUP BY " + cols.Substring(0, cols.Length - 2);
+        return $@"
+{name}_gaps AS (
+    SELECT t.*, t.collection_time - LAG(t.collection_time) OVER ({partition} ORDER BY t.collection_time) AS since_prev
+    FROM {totals} AS t
+),
+{name}_episodes AS (
+    SELECT g.*,
+        SUM(CASE WHEN g.since_prev IS NULL OR g.since_prev > interval '{episodeGapSeconds.ToString("R", inv)} seconds' THEN 1 ELSE 0 END)
+            OVER ({partition} ORDER BY g.collection_time) AS episode
+    FROM {name}_gaps AS g
+),
+{name}_framed AS (
+    SELECT e.*,
+        MIN(e.total_wait_ms) OVER w AS streak_min,
+        COUNT(*) OVER w AS streak_len
+    FROM {name}_episodes AS e
+    WINDOW w AS ({episodePartition} ORDER BY e.collection_time ROWS BETWEEN {(samples - 1).ToString(inv)} PRECEDING AND CURRENT ROW)
+),
+{name} AS (
+    SELECT {cols}MAX(GREATEST(
+        CASE WHEN f.streak_len >= {samples.ToString(inv)} THEN CAST(f.streak_min AS double precision) ELSE 0 END,
+        CAST(f.total_wait_ms AS double precision) / {Math.Max(1, singleSnapshotMultiplier).ToString(inv)})) AS peak_snapshot_wait_ms
+    FROM {name}_framed AS f
+    {groupBy}
+)";
+    }
+
+    /// <summary>
+    /// #7028: the per-hour source choice the blocking alerts make for their rolling hour, applied to every hour of a
+    /// longer window. A CTE named <paramref name="name"/> with the partition columns, <c>bucket</c> (the hour the
+    /// wait falls in), <c>event_time</c>, <c>wait_time_ms</c> and <c>from_xe</c>: one row per WAIT of the chosen
+    /// source. In each (partition, hour) the XE waits are the chosen rows if the hour has any, else the DMV waits
+    /// (the alert's XE-preferred rule, <c>AlertContextBuilders.BlockingWaitRows</c>). A wait belongs to the hour of
+    /// its representative report (the longest of its reports). <paramref name="xeWaits"/> and
+    /// <paramref name="dmvWaits"/> name two <see cref="WaitsCteSql"/> CTEs (already free of self-waits), each with
+    /// <paramref name="xeTimeColumn"/> / <paramref name="dmvTimeColumn"/> and <c>wait_time_ms</c> and the partition
+    /// columns. Hours are <c>date_bin('1 hour', time, origin)</c>, <paramref name="originSql"/> a SQL timestamp
+    /// expression (the window end for a rolling window, so the newest hour is the alert's own, or the day start for
+    /// a calendar day). With <paramref name="singleBucket"/> (a window of one hour or less) there is one bucket, the
+    /// alert's rolling hour itself. A caller sums or counts this CTE: the window count is the sum of the chosen
+    /// waits, the longest wait is their MAX. The text ends with the closing parenthesis, no trailing comma.
+    /// PostgreSQL only.
+    /// </summary>
+    public static string HourlyChosenWaitsSql(
+        string name, string xeWaits, string dmvWaits, string originSql, bool singleBucket = false,
+        IReadOnlyList<string>? partitionColumns = null, string xeTimeColumn = "event_time", string dmvTimeColumn = "event_time")
+    {
+        var cols = PartitionList(partitionColumns, string.Empty);
+        string Bucket(string alias, string timeColumn) => singleBucket
+            ? $"CAST({originSql} AS timestamp)"
+            : $"date_bin('1 hour', {alias}.{timeColumn}, {originSql})";
+        var match = string.Concat((partitionColumns ?? Array.Empty<string>()).Select(c => $"x.{c} = d.{c} AND "));
+        var dcols = PartitionList(partitionColumns, "d.");
+        return $@"
+{name}_xe AS (
+    SELECT {PartitionList(partitionColumns, "x.")}{Bucket("x", xeTimeColumn)} AS bucket, x.{xeTimeColumn} AS event_time, x.wait_time_ms
+    FROM {xeWaits} AS x
+),
+{name}_dmv AS (
+    SELECT {dcols}{Bucket("d", dmvTimeColumn)} AS bucket, d.{dmvTimeColumn} AS event_time, d.wait_time_ms
+    FROM {dmvWaits} AS d
+),
+{name} AS (
+    SELECT {cols}bucket, event_time, wait_time_ms, TRUE AS from_xe
+    FROM {name}_xe
+    UNION ALL
+    SELECT {dcols}d.bucket, d.event_time, d.wait_time_ms, FALSE
+    FROM {name}_dmv AS d
+    WHERE NOT EXISTS (SELECT 1 FROM {name}_xe AS x WHERE {match}x.bucket = d.bucket)
+)";
+    }
+
+    /// <summary>"a, b, " for the columns with the alias prefix, or empty: a SELECT list prefix.</summary>
+    private static string PartitionList(IReadOnlyList<string>? columns, string alias) =>
+        columns is { Count: > 0 } ? string.Concat(columns.Select(c => alias + c + ", ")) : string.Empty;
+
     /// <summary>Which store's SQL dialect <see cref="WaitsCteSql"/> writes the epoch conversion in.</summary>
     public enum SqlDialect
     {

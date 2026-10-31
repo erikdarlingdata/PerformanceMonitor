@@ -488,7 +488,9 @@ namespace PerformanceMonitor.Common
         double WarnPerHourRaw,
         double CriticalPerHourRaw,
         double WarnWaitSecondsRaw,
-        double CriticalWaitSecondsRaw)
+        double CriticalWaitSecondsRaw,
+        double WarnSnapshotWaitSecondsRaw = 0,
+        double CriticalSnapshotWaitSecondsRaw = 0)
     {
         /// <summary>Warning bar, events per hour, clamped.</summary>
         public double WarnPerHour => Clamp(WarnPerHourRaw, ServerHealthThresholds.BlockingRatePerHourFloor, ServerHealthThresholds.BlockingRatePerHourCeiling);
@@ -502,12 +504,29 @@ namespace PerformanceMonitor.Common
         /// <summary>Critical bar, longest block in seconds, clamped independently of the warning bar.</summary>
         public double CriticalWaitSeconds => Clamp(CriticalWaitSecondsRaw, ServerHealthThresholds.BlockingWaitSecondsFloor, ServerHealthThresholds.BlockingWaitSecondsCeiling);
 
-        /// <summary>Today's constants: what a store at its V228 column defaults hands the band.</summary>
+        /// <summary>#7028: Warning bar, the largest blocked wait summed across one DMV snapshot, seconds (the
+        /// <c>Blocking Wait Time</c> alert's measure). 0 means the tier is off, which is what a bar of 0 means on
+        /// the alert; any other value is clamped to 1 through 86400.</summary>
+        public double WarnSnapshotWaitSeconds => ClampOptional(WarnSnapshotWaitSecondsRaw);
+
+        /// <summary>#7028: Critical bar for the snapshot arm, seconds. 0 means the tier is off. Clamped
+        /// independently of the warning bar.</summary>
+        public double CriticalSnapshotWaitSeconds => ClampOptional(CriticalSnapshotWaitSecondsRaw);
+
+        /// <summary>Today's constants: what a store at its V228 column defaults hands the band. The snapshot arm
+        /// (#7028) is off (0), because the alert's own bar defaults to off.</summary>
         public static BlockingBandThresholds Default => new(
             ServerHealthThresholds.BlockingWarnPerHour,
             ServerHealthThresholds.BlockingCriticalPerHour,
             ServerHealthThresholds.BlockingWarnWaitSeconds,
-            ServerHealthThresholds.BlockingCriticalWaitSeconds);
+            ServerHealthThresholds.BlockingCriticalWaitSeconds,
+            0,
+            0);
+
+        private static double ClampOptional(double value) =>
+            double.IsNaN(value) || value <= 0
+                ? 0
+                : Math.Clamp(value, ServerHealthThresholds.BlockingWaitSecondsFloor, ServerHealthThresholds.BlockingWaitSecondsCeiling);
 
         private static double Clamp(double value, double floor, double ceiling) =>
             double.IsNaN(value) ? floor : Math.Clamp(value, floor, ceiling);
@@ -610,6 +629,12 @@ namespace PerformanceMonitor.Common
         /// production bundle declares both.</para>
         /// </summary>
         public TimeSpan BlockingWindow { get; init; }
+
+        /// <summary>#7028: the blocking band's snapshot arm value, in seconds, or <c>null</c> when this path carries
+        /// none (Lite, and any bundle built before the arm existed). The largest total blocked wait of one DMV
+        /// snapshot in the window, after the Blocking Wait Time alert's persistence gate, the alert's own measure.
+        /// The arm runs only when this is not null and a snapshot tier is above 0.</summary>
+        public double? PeakSnapshotWaitSeconds { get; init; }
 
         /// <summary>Deadlocks in the window, or <c>null</c> when this target has no deadlock source the
         /// card reads (#3272). Same reasoning as <see cref="HasMemoryPressure"/>.</summary>
@@ -950,6 +975,9 @@ namespace PerformanceMonitor.Common
         /// <see cref="MemorySeverity"/> for why the arm exists). A <c>long</c> for the daily classifier's
         /// day-scale roll-ups; every <c>int</c> caller widens implicitly.</param>
         /// <param name="maxBlockedSeconds">The longest single block in the window.</param>
+        /// <param name="peakSnapshotWaitSeconds">#7028: the snapshot arm's value, the largest gated snapshot total
+        /// in the window, in seconds, or null when the caller has none (Lite never passes it). The arm runs only
+        /// when this is not null and a snapshot tier is above 0.</param>
         /// <param name="window">How long the count covers. Required rather than defaulted, for the reason
         /// <see cref="DeadlockSeverity"/>'s is: a caller that kept the old two-argument call would compile
         /// and silently band a bare count again, which is the entire defect.</param>
@@ -957,7 +985,8 @@ namespace PerformanceMonitor.Common
             long? blockingCountOrNullWhenUnmeasured,
             double maxBlockedSeconds,
             TimeSpan window,
-            BlockingBandThresholds? thresholds = null)
+            BlockingBandThresholds? thresholds = null,
+            double? peakSnapshotWaitSeconds = null)
         {
             if (!blockingCountOrNullWhenUnmeasured.HasValue)
             {
@@ -967,7 +996,16 @@ namespace PerformanceMonitor.Common
             var blockingCount = blockingCountOrNullWhenUnmeasured.Value;
             var tiers = thresholds ?? BlockingBandThresholds.Default;
 
-            if (maxBlockedSeconds >= tiers.CriticalWaitSeconds)
+            /* #7028: the snapshot arm reads the Blocking Wait Time alert's measure (the largest blocked wait summed
+               across one DMV snapshot, after the alert's persistence gate). It runs only when the caller carries a
+               value and a tier is above 0 (0 = off). */
+            var snapshotCritical = tiers.CriticalSnapshotWaitSeconds;
+            var snapshotWarn = tiers.WarnSnapshotWaitSeconds;
+            var snapshotSeconds = peakSnapshotWaitSeconds ?? 0;
+            var snapshotArm = peakSnapshotWaitSeconds.HasValue;
+
+            if (maxBlockedSeconds >= tiers.CriticalWaitSeconds
+                || (snapshotArm && snapshotCritical > 0 && snapshotSeconds >= snapshotCritical))
             {
                 return HealthSeverity.Critical;
             }
@@ -978,7 +1016,8 @@ namespace PerformanceMonitor.Common
                 return HealthSeverity.Critical;
             }
 
-            if (maxBlockedSeconds >= tiers.WarnWaitSeconds)
+            if (maxBlockedSeconds >= tiers.WarnWaitSeconds
+                || (snapshotArm && snapshotWarn > 0 && snapshotSeconds >= snapshotWarn))
             {
                 return HealthSeverity.Warning;
             }
@@ -1211,7 +1250,7 @@ namespace PerformanceMonitor.Common
             yield return CpuSeverity(m.CpuPercentForAlert, m.CapacityUtilizationPercent, m.CpuSource);
             yield return ThreadsSeverity(m.TotalThreads, m.AvailableThreads, m.ThreadsWaitingForCpu, m.RequestsWaitingForThreads);
             yield return MemorySeverity(m.HasMemoryPressure);
-            yield return BlockingSeverity(m.BlockingCount, m.MaxBlockedSeconds, m.BlockingWindow, m.BlockingBandThresholds);
+            yield return BlockingSeverity(m.BlockingCount, m.MaxBlockedSeconds, m.BlockingWindow, m.BlockingBandThresholds, m.PeakSnapshotWaitSeconds);
             yield return DeadlockSeverity(
                 m.DeadlockCount,
                 m.DeadlockWindow,
