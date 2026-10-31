@@ -243,60 +243,33 @@ public sealed class DarlingWorkerTests
             w => w.Contains("network.role admits 'admin'", StringComparison.Ordinal) && w.Contains("config_command", StringComparison.Ordinal));
     }
 
-    /// <summary>Managed + no network, and an admin or viewer role that is NOT exposed (loopback listen), produce zero warnings.</summary>
+    /// <summary>The secure defaults are silent: managed + viewer role, managed + no network, and managed +
+    /// admin role that is NOT exposed (loopback listen) all produce zero warnings.</summary>
     [Fact]
-    public void GetNetworkStartupWarnings_ManagedNoNetworkOrLoopback_IsSilent()
+    public void GetNetworkStartupWarnings_ManagedViewerOrLoopback_IsSilent()
     {
-        Assert.Empty(DarlingWorker.GetNetworkStartupWarnings(new DarlingConfig { Postgres = new PostgresConfig { Managed = true } }));
-
-        /* a role but bound to loopback = not exposed => nothing is reachable, nothing to say. */
-        foreach (var role in new[] { "admin", "viewer", null })
-        {
-            var loopback = new DarlingConfig
-            {
-                Postgres = new PostgresConfig
-                {
-                    Managed = true,
-                    Network = new PostgresNetworkConfig { Listen = "127.0.0.1", AllowFrom = "192.168.1.0/24", Role = role },
-                },
-            };
-            Assert.Empty(DarlingWorker.GetNetworkStartupWarnings(loopback));
-        }
-    }
-
-    /// <summary>
-    /// An exposed store whose role list includes viewer (the default list too) says what a seat on it reads and what to set,
-    /// and a list that does not include viewer, or only admin, says nothing about it.
-    /// </summary>
-    [Theory]
-    [InlineData("viewer", true, false)]
-    [InlineData(null, true, false)]
-    [InlineData("  ", true, false)]
-    [InlineData("admin,viewer", true, true)]
-    [InlineData("VIEWER+sources", true, false)]
-    [InlineData("admin", false, true)]
-    [InlineData("sources", false, false)]
-    public void GetNetworkStartupWarnings_ManagedExposed_WarnsAboutViewerWhenTheRoleListHasIt(string? role, bool viewerWarning, bool adminWarning)
-    {
-        var config = new DarlingConfig
+        var viewerExposed = new DarlingConfig
         {
             Postgres = new PostgresConfig
             {
                 Managed = true,
-                Network = new PostgresNetworkConfig { Listen = "192.168.1.205", AllowFrom = "192.168.1.0/24", Role = role },
+                Network = new PostgresNetworkConfig { Listen = "192.168.1.205", AllowFrom = "192.168.1.0/24", Role = "viewer" },
             },
         };
+        Assert.Empty(DarlingWorker.GetNetworkStartupWarnings(viewerExposed));
 
-        var warnings = DarlingWorker.GetNetworkStartupWarnings(config);
+        Assert.Empty(DarlingWorker.GetNetworkStartupWarnings(new DarlingConfig { Postgres = new PostgresConfig { Managed = true } }));
 
-        Assert.Equal(viewerWarning, warnings.Any(w => w.Contains("network.role admits 'viewer'", StringComparison.Ordinal)));
-        Assert.Equal(adminWarning, warnings.Any(w => w.Contains("network.role admits 'admin'", StringComparison.Ordinal)));
-        var viewer = warnings.FirstOrDefault(w => w.Contains("network.role admits 'viewer'", StringComparison.Ordinal));
-        if (viewer is not null)
+        /* admin role but bound to loopback = not exposed => no pivot warning (nothing is reachable). */
+        var adminButLoopback = new DarlingConfig
         {
-            Assert.Contains("Set postgres.network.allowFrom to the machines that need it", viewer, StringComparison.Ordinal);
-            Assert.Contains("cannot write", viewer, StringComparison.Ordinal);
-        }
+            Postgres = new PostgresConfig
+            {
+                Managed = true,
+                Network = new PostgresNetworkConfig { Listen = "127.0.0.1", AllowFrom = "192.168.1.0/24", Role = "admin" },
+            },
+        };
+        Assert.Empty(DarlingWorker.GetNetworkStartupWarnings(adminButLoopback));
     }
 
     /// <summary>A fully-populated server definition the equality tests perturb a single field of.</summary>

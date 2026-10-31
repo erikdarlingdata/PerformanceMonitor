@@ -91,6 +91,28 @@ internal static class DarlingWebFailureLog
     internal static bool IsStatementTimeoutSentence(string sentence) =>
         sentence is not null && s_sentenceTimeoutToken.IsMatch(sentence);
 
+    /// <summary>The same anchored shape for the store's permission-denied SQLSTATE: a tool that caught the store's refusal of a write
+    /// leaves <c>"Error during {op}: 42501: permission denied ..."</c>.</summary>
+    private static readonly Regex s_sentencePermissionToken = new(@"^Error during [^:]+: 42501: ", RegexOptions.Compiled);
+
+    /// <summary>
+    /// The one place a web write the store refuses for privilege becomes the 403 sentence of <see cref="DarlingWebStoreWrites.Refused"/>
+    /// (the web host is on the read-only <c>viewer</c> login when the <c>web</c> login's credential is missing, or the operator's own
+    /// login has no write grant). True only for a write request (<see cref="RequestTracking.IsWrite"/>): a read that the store refuses is
+    /// a fault, not a list-only dashboard, and keeps its 500.
+    /// </summary>
+    internal static bool TryWriteRefusal(string sentence, out string message)
+    {
+        if (s_requestReported.Value is { IsWrite: true } box && sentence is not null && s_sentencePermissionToken.IsMatch(sentence))
+        {
+            message = DarlingWebStoreWrites.Refused("make this change", box.ManagedStore);
+            return true;
+        }
+
+        message = string.Empty;
+        return false;
+    }
+
     /// <summary>The SQLSTATE named in the log line, or "(none)" for anything that isn't a
     /// <see cref="PostgresException"/> — a client-side timeout and a plain bug both carry none.</summary>
     private static string SqlState(Exception exception) =>
@@ -119,6 +141,13 @@ internal static class DarlingWebFailureLog
         /// that point is a signed-in caller's failure. A throw before it can come from a caller nobody has authenticated, and the
         /// observer sends that line through a throttle (L1, round 2).</summary>
         public bool PassedAuth { get; set; }
+
+        /// <summary>True when the request's method changes state (anything but GET, HEAD and OPTIONS), so a store refusal for privilege
+        /// is a write the web login cannot make and not a read that failed.</summary>
+        public bool IsWrite { get; set; }
+
+        /// <summary>True when the host runs on the managed store, which picks the words of the refusal sentence.</summary>
+        public bool ManagedStore { get; set; }
     }
 
     private static readonly System.Threading.AsyncLocal<RequestTracking?> s_requestReported = new();
