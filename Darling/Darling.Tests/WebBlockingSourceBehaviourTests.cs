@@ -138,7 +138,7 @@ public sealed class WebBlockingSourceBehaviourTests
 
         Assert.DoesNotContain("\"Blocking Events\"", tabs);
         Assert.DoesNotContain("\"Blocking Events\"", templates);
-        Assert.Single(System.Text.RegularExpressions.Regex.Matches(tabs, "line\\(\"Blocked process report trend\", \"get_blocking_trend\""));
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(tabs, "linePanel\\(\"Blocked process report trend\", \"get_blocking_trend\""));
         Assert.Contains("const BLOCKING_REPORT_SERIES = [{ key: \"count\", label: \"Reports\" }];", tabs);
         Assert.DoesNotContain("No blocking events in this window — an empty trend", tabs);
         /* The starter dashboard panel has no collector tag to follow, so it words itself for both sources. */
