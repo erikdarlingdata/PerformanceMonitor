@@ -32,8 +32,8 @@ namespace Darling.Tests;
 
 /// <summary>
 /// The web Alert History dismiss (#4843): the pure body parser, the role grant that lets the web host's
-/// <c>viewer</c> identity write it, and the route itself. The live half connects AS a role holding exactly the
-/// managed <c>viewer</c> grant on <c>config_alert_log</c> (the statement is lifted out of the managed
+/// <c>web</c> identity write it, and the route itself. The live half connects AS a role holding exactly the
+/// managed <c>web</c> grant on <c>config_alert_log</c> (the statement is lifted out of the managed
 /// provisioning SQL, so a drift in it changes what these tests run), never as the owner.
 /// </summary>
 [Collection("live-postgres")]
@@ -109,14 +109,14 @@ public sealed class AlertHistoryDismissTests
     /* ═══════════════════════════ the grant text ═══════════════════════════ */
 
     [Fact]
-    public void ManagedProvisioning_GrantsViewerExactlyTheDismissedColumn()
+    public void ManagedProvisioning_GrantsWebExactlyTheDismissedColumn()
     {
         var sql = DarlingManagedRoles.BuildProvisioningSql(
             ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp, 15);
 
-        Assert.Contains("GRANT UPDATE (dismissed) ON config.config_alert_log TO viewer;", sql, StringComparison.Ordinal);
+        Assert.Contains("GRANT UPDATE (dismissed) ON config.config_alert_log TO web;", sql, StringComparison.Ordinal);
 
-        /* No table-level UPDATE, INSERT or DELETE on the alert log for viewer, in any spelling. */
+        /* No table-level UPDATE, INSERT or DELETE on the alert log for viewer, in any spelling (the read-only login; the dismiss column is the web login's). */
         var tableLevel = Regex.Matches(
             Regex.Replace(sql, @"(?m)^\s*--.*$", ""),
             @"GRANT\s+(?<spec>[^;(]*?)\s+ON\s+config\.config_alert_log\s+TO\s+[^;]*viewer[^;]*;");
@@ -302,16 +302,16 @@ CREATE ROLE {DismissRole} LOGIN NOSUPERUSER PASSWORD '{RolePassword}';
 GRANT USAGE ON SCHEMA config TO {DismissRole};
 GRANT SELECT ON config.config_alert_log TO {DismissRole};", ct);
 
-    /// <summary>Gives the role ONLY the managed viewer's alert-log grant, lifted from the managed provisioning SQL
+    /// <summary>Gives the role ONLY the managed web login's alert-log grant, lifted from the managed provisioning SQL
     /// so the test runs the shipped statement.</summary>
     private static async Task GrantDismissedColumnAsync(NpgsqlConnection owner, CancellationToken ct)
     {
         var managed = DarlingManagedRoles.BuildProvisioningSql(
             ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp, 15);
-        var grant = Regex.Match(managed, @"GRANT UPDATE \(dismissed\) ON config\.config_alert_log TO viewer;");
-        Assert.True(grant.Success, "the managed provisioning SQL no longer grants viewer the dismissed column");
+        var grant = Regex.Match(managed, @"GRANT UPDATE \(dismissed\) ON config\.config_alert_log TO web;");
+        Assert.True(grant.Success, "the managed provisioning SQL no longer grants web the dismissed column");
 
-        await Exec(owner, grant.Value.Replace(" TO viewer;", " TO " + DismissRole + ";", StringComparison.Ordinal), ct);
+        await Exec(owner, grant.Value.Replace(" TO web;", " TO " + DismissRole + ";", StringComparison.Ordinal), ct);
     }
 
     private static async Task ProvisionDismissOnlyRoleAsync(NpgsqlConnection owner, CancellationToken ct)

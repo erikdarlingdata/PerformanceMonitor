@@ -121,8 +121,9 @@ ON CONFLICT (server_id) DO NOTHING";
     /// unique index on the key, so nothing in the database stops two writers from each finding an address free and
     /// each taking it. Taken first inside the write's transaction, the lock makes the occupancy check that follows
     /// it a check against a table no other identity write is changing, and the transaction's end (commit or
-    /// rollback) releases it. <c>pg_advisory_xact_lock</c> and <c>hashtext</c> are executable by PUBLIC, so the
-    /// read-only <c>viewer</c> role needs no grant: its INSERT still fails with SQLSTATE 42501, as it always did.</para>
+    /// rollback) releases it. <c>hashtext</c> is executable by PUBLIC, and the managed and compose batches grant
+    /// <c>pg_advisory_xact_lock</c> to <c>admin</c>, <c>web</c> and <c>mcp</c> only: the read-only <c>viewer</c> role is refused at the lock
+    /// with SQLSTATE 42501, the code its INSERT always failed with.</para>
     /// </summary>
     public const string MonitoredServerIdentityLockSql = "SELECT pg_advisory_xact_lock(hashtext('config_monitored_servers.identity'))";
 

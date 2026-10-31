@@ -38,7 +38,7 @@ public sealed class RequestSnapshotNowRoleLiveTests
     private const int ServerId = 41;
 
     [Theory]
-    [InlineData("viewer")]
+    [InlineData("web")]
     [InlineData("mcp")]
     public async Task TheRole_QueuesAFixedTypeCommand_ThroughTheFunction(string managedRole)
     {
@@ -64,7 +64,7 @@ public sealed class RequestSnapshotNowRoleLiveTests
     }
 
     [Theory]
-    [InlineData("viewer")]
+    [InlineData("web")]
     [InlineData("mcp")]
     public async Task TheRole_WithNoListOfNames_QueuesTheRunAllForm(string managedRole)
     {
@@ -82,7 +82,7 @@ public sealed class RequestSnapshotNowRoleLiveTests
     }
 
     [Theory]
-    [InlineData("viewer")]
+    [InlineData("web")]
     [InlineData("mcp")]
     public async Task TheRole_CannotInsertACommandRowDirectly(string managedRole)
     {
@@ -103,13 +103,13 @@ public sealed class RequestSnapshotNowRoleLiveTests
     }
 
     [Theory]
-    [InlineData("viewer", 999, "{\"collectors\":[\"wait_stats\"]}", "DL404")]
+    [InlineData("web", 999, "{\"collectors\":[\"wait_stats\"]}", "DL404")]
     [InlineData("mcp", 999, null, "DL404")]
-    [InlineData("viewer", ServerId, "{\"collectors\":[\"wait_stats\"],\"command_type\":\"test_connect\"}", "DL400")]
+    [InlineData("web", ServerId, "{\"collectors\":[\"wait_stats\"],\"command_type\":\"test_connect\"}", "DL400")]
     [InlineData("mcp", ServerId, "{\"command_type\":\"test_connect\"}", "DL400")]
-    [InlineData("viewer", ServerId, "[\"wait_stats\"]", "DL400")]
+    [InlineData("web", ServerId, "[\"wait_stats\"]", "DL400")]
     [InlineData("mcp", ServerId, "{\"collectors\":\"wait_stats\"}", "DL400")]
-    [InlineData("viewer", ServerId, "{\"collectors\":[\"wait_stats\",7]}", "DL400")]
+    [InlineData("web", ServerId, "{\"collectors\":[\"wait_stats\",7]}", "DL400")]
     public async Task TheFunction_RefusesAnUnknownServer_AndAnythingButAListOfCollectorNames(
         string managedRole, int serverId, string? argsJson, string expectedState)
     {
@@ -130,7 +130,7 @@ public sealed class RequestSnapshotNowRoleLiveTests
     }
 
     [Theory]
-    [InlineData("viewer")]
+    [InlineData("web")]
     [InlineData("mcp")]
     public async Task TheFunction_RefusesASecondRequest_WhileOneIsPending_AndWithin60SecondsOfTheLast_NamingWhenTheNextIsAllowed(string managedRole)
     {
@@ -172,7 +172,7 @@ public sealed class RequestSnapshotNowRoleLiveTests
     /// once, not queued behind it (provisioning never blocks: the function takes the lock with the try form).
     /// </summary>
     [Theory]
-    [InlineData("viewer")]
+    [InlineData("web")]
     public async Task TheFunction_RefusesAtOnce_WhileAnotherRequestForTheSameServerHoldsTheLock(string managedRole)
     {
         await WithRoleAsync(managedRole, async (owner, asRole, ct) =>
@@ -198,7 +198,7 @@ public sealed class RequestSnapshotNowRoleLiveTests
 
     /// <summary>A transaction that keeps one snapshot is refused with DL400 and queues nothing; the same call at READ COMMITTED queues.</summary>
     [Theory]
-    [InlineData("viewer")]
+    [InlineData("web")]
     [InlineData("mcp")]
     public async Task TheFunction_RefusesARepeatableReadTransaction_WithDL400(string managedRole)
     {
