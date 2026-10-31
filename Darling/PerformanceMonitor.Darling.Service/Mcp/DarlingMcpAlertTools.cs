@@ -491,11 +491,16 @@ public sealed partial class DarlingMcpAlertTools
         {
             deadlock_warn_per_hour = s.DeadlockWarnPerHour,
             deadlock_critical_per_hour = s.DeadlockCriticalPerHour,
-            /* #6927 (V228): the blocking band, beside the deadlock one: reports per hour and the longest single block in seconds. */
+            /* #6927 (V228): the blocking band, beside the deadlock one: waits per hour (#7028) and the longest single block in seconds. */
             blocking_warn_per_hour = s.BlockingWarnPerHour,
             blocking_critical_per_hour = s.BlockingCriticalPerHour,
             blocking_warn_wait_seconds = s.BlockingWarnWaitSeconds,
-            blocking_critical_wait_seconds = s.BlockingCriticalWaitSeconds
+            blocking_critical_wait_seconds = s.BlockingCriticalWaitSeconds,
+            /* #7028 (V230): the snapshot arm, the longest total blocked wait in one sampled snapshot, seconds, 0 = that tier is off. */
+            blocking_warn_snapshot_wait_seconds = s.BlockingWarnSnapshotWaitSeconds,
+            blocking_critical_snapshot_wait_seconds = s.BlockingCriticalSnapshotWaitSeconds,
+            /* #7028: the unit of the two count tiers above: blocked waits per hour, the unit blocking.count_threshold counts in. */
+            blocking_band_unit = "waits_per_hour"
         },
         poison_wait = new
         {
@@ -1227,11 +1232,16 @@ public sealed partial class DarlingMcpAlertTools
         "per hour is the tightest setting that is still a rate, so no value here can restore the 'any deadlock " +
         "is Critical' reading these tiers replaced. Setting critical BELOW warn is accepted and means every " +
         "banded rate is Critical. " +
-        "health_bands.blocking_warn_per_hour and health_bands.blocking_critical_per_hour are the blocking band's tiers in blocked-process reports per HOUR " +
-        "(accepting 1 to 10000), and health_bands.blocking_warn_wait_seconds and health_bands.blocking_critical_wait_seconds are its bars on the longest " +
-        "single block in seconds (accepting 1 to 86400). They default to 5 and 20 reports per hour and 10 and 60 seconds, and they decide the colour " +
-        "of the fleet cards, the Overview tab, the Daily Health Calendar and get_fleet_overview, so set them to match the blocking alert's own " +
-        "threshold. Unlike the deadlock tiers, each blocking pair must keep critical at or above warn, and a write that would leave it below is refused. " +
+        "health_bands.blocking_warn_per_hour and health_bands.blocking_critical_per_hour are the blocking band's tiers in blocked WAITS per HOUR, " +
+        "the same unit as blocking.count_threshold (accepting 1 to 10000; one wait is one or more blocked-process report rows, so a count that was read as reports now reads as waits). " +
+        "health_bands.blocking_warn_wait_seconds and health_bands.blocking_critical_wait_seconds are its bars on the longest " +
+        "single block in seconds (accepting 1 to 86400). They default to 5 and 20 waits per hour and 10 and 60 seconds. " +
+        "health_bands.blocking_warn_snapshot_wait_seconds and health_bands.blocking_critical_snapshot_wait_seconds are a third arm: the longest total " +
+        "blocked wait in one sampled snapshot, in seconds, held for the same consecutive samples the Blocking Wait Time alert holds it for, accepting 0 or 1 to 86400. " +
+        "Both default to 0, which turns that tier off, as blocking.wait_threshold_seconds does at 0; set them to blocking.wait_threshold_seconds to colour a card on the same measure that alert fires on. " +
+        "These tiers decide the colour of the fleet cards, the Overview tab, the Daily Health Calendar and get_fleet_overview, so set them to match the blocking alerts' own " +
+        "thresholds (blocking.count_threshold and blocking.wait_threshold_seconds). get_alert_settings reports blocking_band_unit: waits_per_hour, a read-only label that update_alert_settings accepts and ignores. " +
+        "Unlike the deadlock tiers, each blocking pair must keep critical at or above warn (the snapshot pair only when both are above 0), and a write that would leave it below is refused. " +
         "file_growth.rise_mb is megabytes per HOUR averaged over file_growth.lookback_minutes (a rate — the same 10240 is 10 GB/hr on any lookback; the engine scales it to the window), so shortening the lookback does not tighten the rise gate and lengthening it does not loosen it; only the rate does. " +
         "Two keys govern the PostgreSQL versions of the two count alerts and are NOT the same numbers as their SQL Server neighbours: deadlocks.pg_count_threshold and blocking.pg_count_threshold, both accepting 1 upward. They sit inside those groups rather than a section of their own so both engines' figures are visible together, but tuning deadlocks.count_threshold does NOT move the PostgreSQL gate and tuning deadlocks.pg_count_threshold does NOT move the SQL Server one. The enabled switch in each group DOES govern both engines. They are separate because the two engines count with different instruments - SQL Server's figure is captured deadlock graphs, the PostgreSQL one is deadlocks parsed from the server log (get_pg_deadlocks) - and an operator tuning one should not silently move the other. Both engines' fleet cards now band deadlocks through the SAME health_bands.deadlock_warn_per_hour tiers (the PostgreSQL card differences the server's own pg_stat_database.deadlocks counter over the window), so the move - raising a fire gate to meet the band's Warning bar so a page and an amber dot describe the same server - is available on either knob. On the blocking side the SQL Server count is engine-recorded blocked-process reports and the PostgreSQL one is distinct root blockers in a periodic SAMPLE of pg_stat_activity. Both PostgreSQL keys are ignored on a store with no PostgreSQL targets. " +
         "The fleet_sweep group is NOT an alert family and the alerts_enabled master switch does not govern it: " +
@@ -1412,9 +1422,9 @@ public sealed partial class DarlingMcpAlertTools
             }
 
             /* #6927: the same lone-bar rule for the two blocking band pairs. */
-            if (updates.Any(u => u.Column is BlockingWarnPerHourColumn or BlockingCriticalPerHourColumn or BlockingWarnWaitColumn or BlockingCriticalWaitColumn))
+            if (updates.Any(u => u.Column is BlockingWarnPerHourColumn or BlockingCriticalPerHourColumn or BlockingWarnWaitColumn or BlockingCriticalWaitColumn or BlockingWarnSnapshotColumn or BlockingCriticalSnapshotColumn))
             {
-                const string blockingBandSql = "SELECT blocking_warn_per_hour, blocking_critical_per_hour, blocking_warn_wait_seconds, blocking_critical_wait_seconds FROM config_alert_settings WHERE id = 1";
+                const string blockingBandSql = "SELECT blocking_warn_per_hour, blocking_critical_per_hour, blocking_warn_wait_seconds, blocking_critical_wait_seconds, blocking_warn_snapshot_wait_seconds, blocking_critical_snapshot_wait_seconds FROM config_alert_settings WHERE id = 1";
                 await using var blockingBandCommand = new NpgsqlCommand(blockingBandSql, connection) { Transaction = transaction };
                 blockingBandCommand.CommandTimeout = McpCommandDeadlines.ReadSeconds;
                 await using var blockingBandReader = await blockingBandCommand.ExecuteReaderAsync();
@@ -1430,6 +1440,14 @@ public sealed partial class DarlingMcpAlertTools
                     {
                         return Outcome("invalid", BlockingWaitBarsOrderMessage
                             + $" (stored after this write: warn {blockingBandReader.GetDouble(2).ToString("0.###", CultureInfo.InvariantCulture)}, critical {blockingBandReader.GetDouble(3).ToString("0.###", CultureInfo.InvariantCulture)}; nothing was written.)");
+                    }
+
+                    /* #7028: the snapshot pair, where 0 means off, so the order only binds when both are above 0. */
+                    if (blockingBandReader.GetDouble(4) > 0 && blockingBandReader.GetDouble(5) > 0
+                        && blockingBandReader.GetDouble(5) < blockingBandReader.GetDouble(4))
+                    {
+                        return Outcome("invalid", BlockingSnapshotBarsOrderMessage
+                            + $" (stored after this write: warn {blockingBandReader.GetDouble(4).ToString("0.###", CultureInfo.InvariantCulture)}, critical {blockingBandReader.GetDouble(5).ToString("0.###", CultureInfo.InvariantCulture)}; nothing was written.)");
                     }
                 }
             }
@@ -2640,6 +2658,10 @@ public sealed partial class DarlingMcpAlertTools
     private const string BlockingCriticalPerHourColumn = "blocking_critical_per_hour";
     private const string BlockingWarnWaitColumn = "blocking_warn_wait_seconds";
     private const string BlockingCriticalWaitColumn = "blocking_critical_wait_seconds";
+    private const string BlockingWarnSnapshotColumn = "blocking_warn_snapshot_wait_seconds";
+    private const string BlockingCriticalSnapshotColumn = "blocking_critical_snapshot_wait_seconds";
+    private const string BlockingSnapshotBarsOrderMessage =
+        "'health_bands.blocking_critical_snapshot_wait_seconds' must not be lower than 'health_bands.blocking_warn_snapshot_wait_seconds' when both are above 0 (the Critical bar can never sit below the Warning bar; 0 turns a tier off).";
     private const string BlockingRateBarsOrderMessage =
         "'health_bands.blocking_critical_per_hour' must not be lower than 'health_bands.blocking_warn_per_hour' (the Critical bar can never sit below the Warning bar).";
     private const string BlockingWaitBarsOrderMessage =
@@ -2768,6 +2790,21 @@ public sealed partial class DarlingMcpAlertTools
             else
             {
                 error = $"'{field}' must be a number between {min.ToString("0.0", CultureInfo.InvariantCulture)} and {max.ToString("0.0", CultureInfo.InvariantCulture)}.";
+            }
+        }
+
+        /* #7028: a bar where 0 means the tier is off. Anything between 0 and the floor is refused, because the band's clamp would
+           rewrite it to the floor and the setting would not stick. */
+        void AddOptionalDouble(string column, JsonNode? node, string field, double min, double max)
+        {
+            if (error != null) return;
+            if (node is JsonValue v && v.TryGetValue<double>(out var d) && (d == 0 || (d >= min && d <= max)))
+            {
+                updates.Add(new UpdateTarget(AlertSettingsTable, column, field, new NpgsqlParameter<double> { TypedValue = d }));
+            }
+            else
+            {
+                error = $"'{field}' must be 0 (that tier is off) or a number between {min.ToString("0.0", CultureInfo.InvariantCulture)} and {max.ToString("0.0", CultureInfo.InvariantCulture)}.";
             }
         }
 
@@ -3039,6 +3076,19 @@ public sealed partial class DarlingMcpAlertTools
                                 break;
                             case "blocking_critical_wait_seconds":
                                 AddDouble("blocking_critical_wait_seconds", n, "health_bands.blocking_critical_wait_seconds",
+                                    ServerHealthThresholds.BlockingWaitSecondsFloor,
+                                    ServerHealthThresholds.BlockingWaitSecondsCeiling);
+                                break;
+                            /* #7028: the read-only unit label coming home from a get_alert_settings round-trip. Our own text, claims no column, not validated. */
+                            case "blocking_band_unit": break;
+                            /* #7028 (V230): the snapshot arm. 0 turns the tier off, otherwise the bounds the band clamps to. */
+                            case "blocking_warn_snapshot_wait_seconds":
+                                AddOptionalDouble("blocking_warn_snapshot_wait_seconds", n, "health_bands.blocking_warn_snapshot_wait_seconds",
+                                    ServerHealthThresholds.BlockingWaitSecondsFloor,
+                                    ServerHealthThresholds.BlockingWaitSecondsCeiling);
+                                break;
+                            case "blocking_critical_snapshot_wait_seconds":
+                                AddOptionalDouble("blocking_critical_snapshot_wait_seconds", n, "health_bands.blocking_critical_snapshot_wait_seconds",
                                     ServerHealthThresholds.BlockingWaitSecondsFloor,
                                     ServerHealthThresholds.BlockingWaitSecondsCeiling);
                                 break;
@@ -3470,6 +3520,17 @@ public sealed partial class DarlingMcpAlertTools
             && blockCriticalWait.TypedValue < blockWarnWait.TypedValue)
         {
             error = BlockingWaitBarsOrderMessage;
+        }
+
+        /* #7028: the snapshot pair, where 0 means off, so the order only binds when both are above 0. */
+        if (error == null
+            && updates.FirstOrDefault(u => u.Column == BlockingWarnSnapshotColumn) is { Param: NpgsqlParameter<double> blockWarnSnapshot }
+            && updates.FirstOrDefault(u => u.Column == BlockingCriticalSnapshotColumn) is { Param: NpgsqlParameter<double> blockCriticalSnapshot }
+            && blockWarnSnapshot.TypedValue > 0
+            && blockCriticalSnapshot.TypedValue > 0
+            && blockCriticalSnapshot.TypedValue < blockWarnSnapshot.TypedValue)
+        {
+            error = BlockingSnapshotBarsOrderMessage;
         }
 
         /* #5640: both Client Timeouts bars in one body must already be in order; a lone bar is compared with the stored other one. */

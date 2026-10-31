@@ -574,6 +574,77 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
             .GetCustomAttribute<DescriptionAttribute>()!.Description;
 
     /// <summary>
+    /// #7028 (V230): the two blocking band snapshot tiers take 0 (that tier is off) or 1 to 86400, refuse anything between, below or above,
+    /// and bind the order of the pair only when both are above 0. The read-only unit label is accepted and writes nothing.
+    /// </summary>
+    [Theory]
+    [InlineData("0", true)]
+    [InlineData("1", true)]
+    [InlineData("86400", true)]
+    [InlineData("45.5", true)]
+    [InlineData("0.5", false)]
+    [InlineData("-1", false)]
+    [InlineData("86400.5", false)]
+    [InlineData("\"30\"", false)]
+    [InlineData("null", false)]
+    public void BlockingSnapshotTiers_AcceptZeroOrTheBandRange_AndRefuseTheRest(string value, bool accepted)
+    {
+        foreach (var key in new[] { "blocking_warn_snapshot_wait_seconds", "blocking_critical_snapshot_wait_seconds" })
+        {
+            var (targets, error) = ParseAsPartialUpdate((JsonObject)JsonNode.Parse("{\"health_bands\":{\"" + key + "\":" + value + "}}")!);
+            if (accepted)
+            {
+                Assert.Null(error);
+                Assert.Equal(new[] { (DarlingMcpAlertTools.AlertSettingsTable, key) }, targets.ToArray());
+            }
+            else
+            {
+                Assert.NotNull(error);
+                Assert.Contains("health_bands." + key, error, StringComparison.Ordinal);
+                Assert.Empty(targets);
+            }
+        }
+    }
+
+    [Theory]
+    [InlineData(30, 120, true)]
+    [InlineData(30, 30, true)]
+    [InlineData(0, 15, true)]
+    [InlineData(30, 0, true)]
+    [InlineData(0, 0, true)]
+    [InlineData(120, 30, false)]
+    public void BlockingSnapshotTiers_InOneBody_MustKeepCriticalAtOrAboveWarn_WhenBothAreOn(double warn, double critical, bool accepted)
+    {
+        var body = (JsonObject)JsonNode.Parse(string.Create(System.Globalization.CultureInfo.InvariantCulture,
+            $"{{\"health_bands\":{{\"blocking_warn_snapshot_wait_seconds\":{warn},\"blocking_critical_snapshot_wait_seconds\":{critical}}}}}"))!;
+        var (targets, error) = ParseAsPartialUpdate(body);
+        if (accepted)
+        {
+            Assert.Null(error);
+            Assert.Equal(2, targets.Count);
+        }
+        else
+        {
+            Assert.NotNull(error);
+            Assert.Contains("blocking_critical_snapshot_wait_seconds", error, StringComparison.Ordinal);
+            Assert.Empty(targets);
+        }
+    }
+
+    [Fact]
+    public void BlockingBandUnitLabel_ComesHomeFromARoundTrip_AndClaimsNoColumn()
+    {
+        var (targets, error) = ParseAsPartialUpdate((JsonObject)JsonNode.Parse("{\"health_bands\":{\"blocking_band_unit\":\"waits_per_hour\"}}")!);
+        Assert.Null(error);
+        Assert.Empty(targets);
+
+        var payload = SerializedSettingsPayload(SampleSettingsRow());
+        Assert.Equal("waits_per_hour", payload["health_bands"]!["blocking_band_unit"]!.GetValue<string>());
+        Assert.Equal(33.5, payload["health_bands"]!["blocking_warn_snapshot_wait_seconds"]!.GetValue<double>());
+        Assert.Equal(95.5, payload["health_bands"]!["blocking_critical_snapshot_wait_seconds"]!.GetValue<double>());
+    }
+
+    /// <summary>
     /// The SELECT's column count and the positional read must agree. Every field on
     /// <c>AlertSettingsReadRow</c> is read by ORDINAL, so a column inserted anywhere but the end re-maps
     /// every field after it — silently, since the types mostly line up. Derived rather than hand-counted so
@@ -1334,7 +1405,9 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         AgentAlertGapsEnabled: true,
         BackupOverdueEnabled: true, LogBackupOverdueEnabled: true, CheckDbOverdueEnabled: true,
         IdentityCapacityEnabled: true, IdentityCapacityWarningPercent: 72, IdentityCapacityCriticalPercent: 92,
-        BlockingWarnPerHour: 6.5, BlockingCriticalPerHour: 22.5, BlockingWarnWaitSeconds: 11.5, BlockingCriticalWaitSeconds: 62.5);
+        BlockingWarnPerHour: 6.5, BlockingCriticalPerHour: 22.5, BlockingWarnWaitSeconds: 11.5, BlockingCriticalWaitSeconds: 62.5,
+        /* #7028 (V230): deliberately NOT the shipped 0 / 0 (off), so a payload that dropped the columns would not match. */
+        BlockingWarnSnapshotWaitSeconds: 33.5, BlockingCriticalSnapshotWaitSeconds: 95.5);
 
     [Fact]
     public void AlertSettingsSql_ReadsSingleGlobalRow()
