@@ -635,19 +635,16 @@ FROM generate_series(1, $2) AS g;";
             }
 
             waited = true;
-            var deadline = DateTime.UtcNow + MaxWait;
-            while (DateTime.UtcNow < deadline)
-            {
-                using var count = new NpgsqlCommand(
-                    "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid() AND backend_xmin IS NOT NULL",
-                    probe);
-                if ((long)count.ExecuteScalar()! == 0)
+            TestWait.TryWaitUntil(
+                () =>
                 {
-                    return;
-                }
-
-                System.Threading.Thread.Sleep(50);
-            }
+                    using var count = new NpgsqlCommand(
+                        "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid() AND backend_xmin IS NOT NULL",
+                        probe);
+                    return (long)count.ExecuteScalar()! == 0;
+                },
+                MaxWait,
+                TimeSpan.FromMilliseconds(50));
         }
     }
 
