@@ -9376,7 +9376,7 @@ AND   cst.collector_name = ANY($2)", connection) { CommandTimeout = ServiceComma
         }
 
         /* Windows is needed only for a MANAGED store's DPAPI credential (#6071). A bring-your-own store runs here. */
-        if ((!OperatingSystem.IsWindows() ? "--backfill-rollups is Windows-only (SCRATCH #6995 revert proof B)." : (string?)null) is { } platformRefusal)
+        if (ManagedStoreCredentialRefusal("--backfill-rollups", OperatingSystem.IsWindows(), postgres.Managed) is { } platformRefusal)
         {
             error.WriteLine(platformRefusal);
             return 1;
