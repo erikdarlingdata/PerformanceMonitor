@@ -74,7 +74,7 @@
 --      script stops with an error, before any password is set, when any of the four is unchanged: a routine written before
 --      the web role existed replaces only the admin, viewer and mcp placeholders, and the web one makes it stop instead of
 --      setting the web password to the placeholder text. To set the passwords with \password afterwards, replace each
---      placeholder with any text for this run first. Better, keep the passwords out of every statement (#3910): replace each literal with a
+--      placeholder with a long random value for this run first, which \password then replaces (run \password for all four roles). Better, keep the passwords out of every statement (#3910): replace each literal with a
 --      SCRAM-SHA-256 verifier, which PostgreSQL stores as-is, or set the passwords afterwards with psql's
 --      \password admin, \password viewer, \password web and \password mcp, which compute the verifier locally and send
 --      only that. A password literal is kept verbatim by anything that records statement text:
@@ -216,12 +216,14 @@ BEGIN
             WHEN 'log_min_duration_sample' THEN setting::bigint >= 0
                AND (SELECT sample.setting::numeric FROM pg_settings AS sample WHERE sample.name = 'log_statement_sample_rate') > 0
             WHEN 'pgaudit.log' THEN (SELECT statement.setting FROM pg_settings AS statement WHERE statement.name = 'pgaudit.log_statement') = 'on'
-               AND (string_to_array(replace(lower(setting), ' ', ''), ',') && ARRAY['role', 'all'])
-               AND NOT ('-role' = ANY (string_to_array(replace(lower(setting), ' ', ''), ',')))
+               AND ((string_to_array(replace(lower(setting), ' ', ''), ',') && ARRAY['role', 'all']
+                     AND NOT ('-role' = ANY (string_to_array(replace(lower(setting), ' ', ''), ',')))
+                    ) OR (string_to_array(replace(lower(setting), ' ', ''), ',') && ARRAY['function', 'all']
+                     AND NOT ('-function' = ANY (string_to_array(replace(lower(setting), ' ', ''), ',')))))
             ELSE false
          END;
    IF logging_on IS NOT NULL THEN
-      RAISE WARNING 'The server log records the statements of this run (%). The ALTER ROLE ... PASSWORD lines are written to it with their passwords, because step 0 could not turn that logging off for this role. Put a SCRAM-SHA-256 verifier in each ALTER ROLE line in place of the literal, or set the passwords afterwards with the psql password command, or run this script as a superuser.', logging_on;
+      RAISE WARNING 'The server log records the statements of this run (%). The ALTER ROLE ... PASSWORD lines and the placeholder checks (DO blocks, which pgaudit logs under its function class) are written to it with their passwords, because step 0 could not turn that logging off for this role. Put a SCRAM-SHA-256 verifier in each ALTER ROLE line in place of the literal, or set the passwords afterwards with the psql password command, or run this script as a superuser.', logging_on;
    END IF;
 END $$;
 
@@ -367,38 +369,39 @@ END $$;
 -- role has its own statement, so a stop writes only the placeholder that was left, never another role's password, to
 -- the server log. The stop is the one the guard above runs with. The guard has already created any missing role without
 -- a password, which cannot be logged into with one; the ALTER ROLE lines below set the passwords, and none has run.
+-- The four checks use their own dollar-quote tag, so a password that contains two dollar signs in a row cannot end the check's body early.
 -- admin: the placeholder is on the left, so a find-and-replace of it fills in your password here too. The right side is
 -- built from two pieces, so that replace never reaches it.
-DO $$
+DO $darling_placeholder_check$
 BEGIN
    IF 'CHANGE_ME_ADMIN_PASSWORD' = 'CHANGE_ME_' || 'ADMIN_PASSWORD' THEN
       RAISE EXCEPTION 'The password for role admin is still the CHANGE_ME placeholder. The script set no password. Replace the admin placeholder on every line of this script that has it (the check above the ALTER ROLE lines and the ALTER ROLE admin line), then run it again.';
    END IF;
-END $$;
+END $darling_placeholder_check$;
 -- viewer: the placeholder is on the left, so a find-and-replace of it fills in your password here too. The right side is
 -- built from two pieces, so that replace never reaches it.
-DO $$
+DO $darling_placeholder_check$
 BEGIN
    IF 'CHANGE_ME_VIEWER_PASSWORD' = 'CHANGE_ME_' || 'VIEWER_PASSWORD' THEN
       RAISE EXCEPTION 'The password for role viewer is still the CHANGE_ME placeholder. The script set no password. Replace the viewer placeholder on every line of this script that has it (the check above the ALTER ROLE lines and the ALTER ROLE viewer line), then run it again.';
    END IF;
-END $$;
+END $darling_placeholder_check$;
 -- web: the placeholder is on the left, so a find-and-replace of it fills in your password here too. The right side is
 -- built from two pieces, so that replace never reaches it.
-DO $$
+DO $darling_placeholder_check$
 BEGIN
    IF 'CHANGE_ME_WEB_PASSWORD' = 'CHANGE_ME_' || 'WEB_PASSWORD' THEN
       RAISE EXCEPTION 'The password for role web is still the CHANGE_ME placeholder. The script set no password. Replace the web placeholder on every line of this script that has it (the check above the ALTER ROLE lines and the ALTER ROLE web line), then run it again.';
    END IF;
-END $$;
+END $darling_placeholder_check$;
 -- mcp: the placeholder is on the left, so a find-and-replace of it fills in your password here too. The right side is
 -- built from two pieces, so that replace never reaches it.
-DO $$
+DO $darling_placeholder_check$
 BEGIN
    IF 'CHANGE_ME_MCP_PASSWORD' = 'CHANGE_ME_' || 'MCP_PASSWORD' THEN
       RAISE EXCEPTION 'The password for role mcp is still the CHANGE_ME placeholder. The script set no password. Replace the mcp placeholder on every line of this script that has it (the check above the ALTER ROLE lines and the ALTER ROLE mcp line), then run it again.';
    END IF;
-END $$;
+END $darling_placeholder_check$;
 \set ON_ERROR_STOP :darling_saved_stop
 
 -- The passwords. Each ALTER names LOGIN and the password only: NOSUPERUSER here would fail for an owner that is

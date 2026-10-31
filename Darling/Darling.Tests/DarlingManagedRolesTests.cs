@@ -46,11 +46,13 @@ public sealed class DarlingManagedRolesTests
     /// SELECT, so a table-level UPDATE behind a column SELECT, or a table-level SELECT that undoes the
     /// <c>encrypted_password</c> carve, passed the census unseen.
     /// </summary>
-    private static string[] ViewerGrantsOnMonitoredServers(string sql) =>
+    private static string[] GrantsOnMonitoredServers(string sql, string role) =>
         Regex.Matches(
                 Regex.Replace(sql, @"(?m)^\s*--.*$", ""),
-                @"GRANT (?!SELECT \([^)]*\) ON )[^;]*? ON config\.config_monitored_servers TO [^;]*viewer[^;]*;")
+                @"GRANT (?!SELECT \([^)]*\) ON )[^;]*? ON config\.config_monitored_servers TO [^;]*" + Regex.Escape(role) + @"[^;]*;")
             .Select(m => m.Value).ToArray();
+
+    private static string[] ViewerGrantsOnMonitoredServers(string sql) => GrantsOnMonitoredServers(sql, "viewer");
 
     /// <summary>
     /// The census must SEE each statement that is not a pure column-level SELECT. Each line is appended to the real batch as one
@@ -343,9 +345,10 @@ public sealed class DarlingManagedRolesTests
 
         /* #4843: the web add-server route runs the add_servers core as viewer: INSERT on config_monitored_servers and nothing
            else on it: no UPDATE (#5240: the edit's write is the config.edit_monitored_server function, granted EXECUTE below),
-           no DELETE. The census is the whole set of viewer grants on the table. The credential column stays SELECT-carved. */
+           no DELETE. The census is the whole set of grants web holds on the table, and viewer holds none. The credential column stays SELECT-carved. */
         Assert.Contains("GRANT INSERT ON config.config_monitored_servers TO web;", sql, StringComparison.Ordinal);
         Assert.Empty(ViewerGrantsOnMonitoredServers(sql));
+        Assert.Equal(new[] { "GRANT INSERT ON config.config_monitored_servers TO web;" }, GrantsOnMonitoredServers(sql, "web"));
 
         /* The REVOKE takes away any UPDATE an earlier build granted viewer; it is not a GRANT, so the census never sees it. */
         Assert.Single(Regex.Matches(Regex.Replace(sql, @"(?m)^\s*--.*$", ""), @"REVOKE UPDATE ON config\.config_monitored_servers FROM [^;]*viewer[^;]*;"));

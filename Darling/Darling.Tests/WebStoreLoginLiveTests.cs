@@ -185,13 +185,28 @@ public sealed class WebStoreLoginLiveTests
                     $"SELECT pg_try_advisory_lock({MigrationLockKey})",
                     $"SELECT pg_advisory_lock_shared({MigrationLockKey})",
                     "SELECT pg_advisory_lock(1, 2)",
+                    $"SELECT pg_advisory_xact_lock({MigrationLockKey})",
+                    $"SELECT pg_try_advisory_xact_lock({MigrationLockKey})",
+                    $"SELECT pg_advisory_xact_lock_shared({MigrationLockKey})",
+                    $"SELECT pg_try_advisory_xact_lock_shared({MigrationLockKey})",
+                    "SELECT pg_advisory_xact_lock(1, 2)",
+                    "SELECT pg_try_advisory_xact_lock(1, 2)",
+                    "SELECT pg_advisory_xact_lock_shared(1, 2)",
+                    "SELECT pg_try_advisory_xact_lock_shared(1, 2)",
                 })
                 {
                     Assert.Equal("42501", (await Assert.ThrowsAsync<PostgresException>(() => ExecAsync(connection, sql, ct))).SqlState);
                 }
+            }
 
-                /* The transaction-level forms the store's own functions and the stores take are still open to it. */
-                await ExecAsync(connection, $"BEGIN; SELECT pg_advisory_xact_lock({MigrationLockKey}); SELECT pg_try_advisory_xact_lock(1, 2); COMMIT", ct);
+            /* The transaction-level forms go to the three logins whose own code takes one, the same eight signatures. */
+            foreach (var (role, password) in new[] { ("admin", ProvisioningTestSecrets.AdminPassword), ("web", webPassword), ("mcp", ProvisioningTestSecrets.McpPassword) })
+            {
+                await using var connection = new NpgsqlConnection(LoginString(scratch.ConnectionString, role, password));
+                await connection.OpenAsync(ct);
+                await ExecAsync(connection,
+                    $"BEGIN; SELECT pg_advisory_xact_lock({MigrationLockKey}); SELECT pg_try_advisory_xact_lock({MigrationLockKey}); SELECT pg_advisory_xact_lock_shared({MigrationLockKey}); SELECT pg_try_advisory_xact_lock_shared({MigrationLockKey}); "
+                    + "SELECT pg_advisory_xact_lock(1, 2); SELECT pg_try_advisory_xact_lock(1, 2); SELECT pg_advisory_xact_lock_shared(1, 2); SELECT pg_try_advisory_xact_lock_shared(1, 2); COMMIT", ct);
             }
 
             foreach (var (role, password) in new[] { ("admin", ProvisioningTestSecrets.AdminPassword), ("mcp", ProvisioningTestSecrets.McpPassword) })

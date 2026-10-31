@@ -1336,10 +1336,13 @@ ALTER ROLE {mcp}    SET log_parameter_max_length = 0;";
         var marker = target.RoleMarker;
 
         /* #3914: the managed store is loopback-only and nothing but Darling's own logins connects to it, so it
-           takes CONNECT away from PUBLIC. The compose store is one people read directly with roles of their own,
+           takes CONNECT away from PUBLIC, on postgres and template1 as well, because every login's grants stop at the database it connects to. The compose store is one people read directly with roles of their own,
            and the same statement would silently take their CONNECT away, so there it is a comment instead. */
         var publicDatabaseRevoke = target.RevokePublicDatabaseAccess
-            ? $"REVOKE ALL ON DATABASE {database} FROM PUBLIC;"
+            ? $"REVOKE ALL ON DATABASE {database} FROM PUBLIC;{Environment.NewLine}"
+              + "-- The maintenance databases too: the large object revoke below is per database, so a login that could connect to postgres or template1 would"
+              + $"{Environment.NewLine}-- still reach large objects and TEMP there. Only the owner (a superuser, which needs no CONNECT grant) opens them."
+              + $"{Environment.NewLine}REVOKE CONNECT ON DATABASE postgres, template1 FROM PUBLIC;"
             : "--     LEFT AS-IS on the compose store: its other roles are the operator's, and this would revoke their CONNECT.";
         /* #2357: was ComposeLimits.StatementTimeout, a bare "15s". Rendered by the SHARED builder rather
            than inline, because #2918 made the reload path re-assert the same two statements: two renderers
@@ -1482,8 +1485,9 @@ GRANT CONNECT ON DATABASE {database} TO {admin}, {viewer}, {web};
 --     Large objects: lo_create, lo_creat and lo_from_bytea store data in the store database whatever a role's table grants are,
 --     and the service uses none. Session advisory locks: a session lock on the migration key, held open, makes the next upgrade
 --     wait out its budget and stop, so the session forms go to the logins that take one (admin and mcp through the agent-change
---     undo; the superuser needs no grant). The transaction forms the store's own functions use are not touched, and neither are the unlock
---     forms (a session can only release its own locks).
+--     undo; the superuser needs no grant). The transaction forms (a transaction left open holds the same key just as long) go to
+--     the logins whose own code takes one: admin, web and mcp. The store's own functions take them as the owner, and viewer takes none.
+--     The unlock forms are not touched (a session can only release its own locks).
 REVOKE EXECUTE ON FUNCTION pg_catalog.lo_create(oid), pg_catalog.lo_creat(integer), pg_catalog.lo_from_bytea(oid, bytea) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pg_catalog.pg_advisory_lock(bigint), pg_catalog.pg_advisory_lock(integer, integer),
    pg_catalog.pg_try_advisory_lock(bigint), pg_catalog.pg_try_advisory_lock(integer, integer),
@@ -1491,6 +1495,14 @@ REVOKE EXECUTE ON FUNCTION pg_catalog.pg_advisory_lock(bigint), pg_catalog.pg_ad
    pg_catalog.pg_try_advisory_lock_shared(bigint), pg_catalog.pg_try_advisory_lock_shared(integer, integer) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION pg_catalog.pg_advisory_lock(bigint), pg_catalog.pg_advisory_lock(integer, integer),
    pg_catalog.pg_try_advisory_lock(bigint), pg_catalog.pg_try_advisory_lock(integer, integer) TO {admin}, {mcp};
+REVOKE EXECUTE ON FUNCTION pg_catalog.pg_advisory_xact_lock(bigint), pg_catalog.pg_advisory_xact_lock(integer, integer),
+   pg_catalog.pg_try_advisory_xact_lock(bigint), pg_catalog.pg_try_advisory_xact_lock(integer, integer),
+   pg_catalog.pg_advisory_xact_lock_shared(bigint), pg_catalog.pg_advisory_xact_lock_shared(integer, integer),
+   pg_catalog.pg_try_advisory_xact_lock_shared(bigint), pg_catalog.pg_try_advisory_xact_lock_shared(integer, integer) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION pg_catalog.pg_advisory_xact_lock(bigint), pg_catalog.pg_advisory_xact_lock(integer, integer),
+   pg_catalog.pg_try_advisory_xact_lock(bigint), pg_catalog.pg_try_advisory_xact_lock(integer, integer),
+   pg_catalog.pg_advisory_xact_lock_shared(bigint), pg_catalog.pg_advisory_xact_lock_shared(integer, integer),
+   pg_catalog.pg_try_advisory_xact_lock_shared(bigint), pg_catalog.pg_try_advisory_xact_lock_shared(integer, integer) TO {admin}, {web}, {mcp};
 
 -- 6. The mcp role (darling-network-endpoints, D3-role): the ONLY credential reachable (via the bearer
 --    token) from the optional network MCP surface, so it is deliberately NOT admin. It gets viewer's exact
@@ -4806,6 +4818,10 @@ WHERE u.rolname = current_user";
 
         return null;
     }
+
+    /// <summary>True when a refusal from <see cref="RefuseComposeStore"/> names <paramref name="role"/> as a role it found that the service did not create.</summary>
+    internal static bool RefusalNamesForeignRole(string? refusal, string role) =>
+        refusal is not null && refusal.Contains($"'{role}' (", StringComparison.Ordinal);
 
     private static string DescribeForeignRoleMarker(string? marker) => marker switch
     {

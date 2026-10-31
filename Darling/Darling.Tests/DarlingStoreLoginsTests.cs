@@ -163,6 +163,43 @@ public sealed class DarlingStoreLoginsTests
     }
 
     /// <summary>
+    /// A role named <c>web</c> that Darling did not create, and no viewer login saved either: the web host falls back to the
+    /// owner, and the log says in operator terms that the role is not Darling's, that the host is on the owner login until it is
+    /// renamed or dropped, and what to run. A foreign role that is not <c>web</c> adds no such line.
+    /// </summary>
+    [Fact]
+    public void AForeignWebRole_WithNoViewerLoginSaved_LogsOneLineNamingTheRoleAndTheFix()
+    {
+        var facts = new ComposeStoreFacts(
+            "darling", "darling", BootstrapSuperuser: true,
+            new Dictionary<string, string?> { ["web"] = null }, Array.Empty<string>());
+        var verdict = DarlingStoreLogins.ComposeStoreVerdict.NotProvisioned(DarlingManagedRoles.RefuseComposeStore(facts)!);
+        var login = DarlingStoreLogins.Resolve(
+            DarlingStoreLogins.Surface.Web, Owner, null, inContainer: true, verdict,
+            EarlierComposeCredential.None("no web credential file"), EarlierComposeCredential.None("no viewer credential file"));
+        Assert.Equal(DarlingStoreLogins.LoginSource.Owner, login.Source);
+
+        var log = new CapturingTestLogger();
+        DarlingStoreLogins.LogLoginWarnings(DarlingStoreLogins.Surface.Web, login, verdict, log);
+
+        Assert.Equal(2, log.CountAtLevel(Microsoft.Extensions.Logging.LogLevel.Warning));
+        Assert.Contains(log.Lines, line => line.Contains(DarlingStoreLogins.ForeignWebRoleWarning, StringComparison.Ordinal));
+        Assert.Contains("was not created by Darling", DarlingStoreLogins.ForeignWebRoleWarning, StringComparison.Ordinal);
+        Assert.Contains("until that role is renamed or dropped", DarlingStoreLogins.ForeignWebRoleWarning, StringComparison.Ordinal);
+        Assert.Contains("DROP ROLE web", DarlingStoreLogins.ForeignWebRoleWarning, StringComparison.Ordinal);
+
+        // A foreign role that is not web: the owner warning only.
+        var otherFacts = facts with { ExistingRoleMarkers = new Dictionary<string, string?> { ["viewer"] = null } };
+        var otherVerdict = DarlingStoreLogins.ComposeStoreVerdict.NotProvisioned(DarlingManagedRoles.RefuseComposeStore(otherFacts)!);
+        var otherLogin = DarlingStoreLogins.Resolve(
+            DarlingStoreLogins.Surface.Web, Owner, null, inContainer: true, otherVerdict,
+            EarlierComposeCredential.None("no web credential file"), EarlierComposeCredential.None("no viewer credential file"));
+        var otherLog = new CapturingTestLogger();
+        DarlingStoreLogins.LogLoginWarnings(DarlingStoreLogins.Surface.Web, otherLogin, otherVerdict, otherLog);
+        Assert.DoesNotContain(otherLog.Lines, line => line.Contains(DarlingStoreLogins.ForeignWebRoleWarning, StringComparison.Ordinal));
+    }
+
+    /// <summary>
     /// A compose store whose role batch was refused (an operator's own role named <c>web</c>) or failed, with no
     /// <c>web</c> credential from an earlier start: the web host takes the earlier <c>viewer</c> login (reads work, the
     /// store refuses writes) before the owner, as dev did. The owner is only for a store with neither credential.

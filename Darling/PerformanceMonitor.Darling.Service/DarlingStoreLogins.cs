@@ -414,10 +414,7 @@ internal static class DarlingStoreLogins
             RecordMcpLoginSource(login.Source);
         }
 
-        if (login.Warning is { } warning)
-        {
-            WarnOnce(surface, warning, logger);
-        }
+        LogLoginWarnings(surface, login, verdict, logger);
 
         if (login.Source is LoginSource.ComposeStoreRoleFromEarlierStart or LoginSource.ComposeStoreViewerFromEarlierStart
             && !await AcceptsLoginAsync(
@@ -649,6 +646,31 @@ internal static class DarlingStoreLogins
     private static (string What, string Setting, string Role) Describe(Surface surface) => surface == Surface.Web
         ? ("The web dashboard", "postgres.webConnectionString", DarlingManagedPostgres.WebRoleName)
         : ("The MCP server", "postgres.mcpConnectionString", DarlingManagedPostgres.McpRoleName);
+
+    /// <summary>
+    /// The startup warnings for a resolved login. The login's own warning comes first. The web host on the owner
+    /// because the role named <c>web</c> is one Darling did not create (no viewer login was saved either, so there is
+    /// nothing nearer to fall back to) gets one more line that says so in operator terms and what to run.
+    /// </summary>
+    internal static void LogLoginWarnings(Surface surface, StoreLogin login, ComposeStoreVerdict? verdict, ILogger logger)
+    {
+        if (login.Warning is { } warning)
+        {
+            WarnOnce(surface, warning, logger);
+        }
+
+        if (surface == Surface.Web && login.Source == LoginSource.Owner
+            && DarlingManagedRoles.RefusalNamesForeignRole(verdict?.NotProvisionedReason, DarlingManagedPostgres.WebRoleName))
+        {
+            WarnOnce(surface, ForeignWebRoleWarning, logger);
+        }
+    }
+
+    /// <summary>The line for a foreign <c>web</c> role (see <see cref="LogLoginWarnings"/>).</summary>
+    internal const string ForeignWebRoleWarning =
+        "The role named web in this store was not created by Darling, so Darling left it alone and created none of its own roles. "
+        + "The web dashboard is using the store owner login (postgres.connectionString) until that role is renamed or dropped. "
+        + "To fix it, run ALTER ROLE web RENAME TO <another name>; or DROP ROLE web; as the store's superuser, then restart the service so it creates its own web role.";
 
     /// <summary>The warning is stated once per distinct text per surface, not on every supervisor restart.</summary>
     private static void WarnOnce(Surface surface, string warning, ILogger logger)
