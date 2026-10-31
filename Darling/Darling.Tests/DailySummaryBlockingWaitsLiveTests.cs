@@ -67,7 +67,7 @@ public sealed class DailySummaryBlockingWaitsLiveTests
     /// 2 waits, on a quiet UTC day (as DMV snapshots when <paramref name="dmv"/>), then reads that day's
     /// <c>blocking_events</c> through the statement, or the master-scoped one with the sibling list at $5 when
     /// <paramref name="scoped"/>.</summary>
-    private static async Task<(long Events, long Reports)> DayBlockingCountsAsync(bool dmv, bool scoped)
+    private static async Task<(long Events, long PeakBlockWaitMs)> DayBlockingCountsAsync(bool dmv, bool scoped)
     {
         var cs = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live test.");
@@ -89,7 +89,7 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ct, ServerId, ServerNa
             await PlantWaitAsync(connection, day.AddHours(3), blocked: 53, blocker: 51, reports: 6, "GP", dmv, ct);
 
             var sql = scoped ? DailySummaryAzureMasterScope.Scope(DailySummarySql.RangeSql) : DailySummarySql.RangeSql;
-            using var read = new NpgsqlCommand("SELECT blocking_events, blocking_reports FROM (" + sql + ") AS calendar", connection);
+            using var read = new NpgsqlCommand("SELECT blocking_events, peak_block_wait_ms FROM (" + sql + ") AS calendar", connection);
             read.Parameters.Add(new NpgsqlParameter<int> { TypedValue = ServerId });
             read.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = day });
             read.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = day.AddDays(1) });
@@ -113,35 +113,64 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ct, ServerId, ServerNa
     [Fact]
     public async Task TheDay_CountsBlockedProcessWaits_NotReports()
     {
-        var (events, reports) = await DayBlockingCountsAsync(dmv: false, scoped: false);
+        var (events, peak) = await DayBlockingCountsAsync(dmv: false, scoped: false);
         Assert.Equal(2, events);
-        Assert.Equal(15, reports);       // #5644: the band's input stays the report rows
+        Assert.Equal(45_000, peak);      // the longest of the counted waits
     }
 
     [Fact]
     public async Task TheDay_CountsDmvSnapshotWaits_NotSnapshots_WhenThereAreNoReports()
     {
-        var (events, reports) = await DayBlockingCountsAsync(dmv: true, scoped: false);
+        var (events, peak) = await DayBlockingCountsAsync(dmv: true, scoped: false);
         Assert.Equal(2, events);
-        Assert.Equal(15, reports);       // the DMV fallback's rows, as the band counted them before waits
+        Assert.Equal(45_000, peak);
     }
 
     [Fact]
     public async Task TheAzureMasterScope_StillSkipsTheSiblingDatabase_AndCountsWaits()
     {
         /* The GP wait belongs to a database monitored as its own target: the master's day keeps the one master wait. */
-        var (events, reports) = await DayBlockingCountsAsync(dmv: false, scoped: true);
+        var (events, peak) = await DayBlockingCountsAsync(dmv: false, scoped: true);
         Assert.Equal(1, events);
-        Assert.Equal(9, reports);        // the same scope filter reaches the report count
+        Assert.Equal(45_000, peak);
     }
 
-    /// <summary>#5644 review: one long wait written as 130 reports (a report every 50 ms, so the longest block is 6.5 s and
-    /// the wait arm stays out of it) is ONE blocking event, which every display and MCP count shows, but the band's count
-    /// tiers (5 and 20 per server-hour) were measured in reports, so the day bands Warning on 130 / 24 h = 5.4 per hour.
-    /// Read through the reader the calendar and the MCP tools use. On the waits-banded head the day read 1 event over 24 h
-    /// and came out Healthy.</summary>
+    private static async Task SeedServerAsync(NpgsqlConnection connection, CancellationToken ct) =>
+        await ExecAsync(connection, @"
+INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_major_version, created_date, modified_date)
+VALUES ($1, $2, $2, TRUE, 16, now()::timestamp, now()::timestamp)
+ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ct, ServerId, ServerName);
+
+    /* One DMV snapshot: `rows` blocked sessions, each waiting `eachMs`, all stamped with the snapshot's collection_time. */
+    private static async Task PlantSnapshotAsync(
+        NpgsqlConnection c, DateTime at, int rows, long eachMs, CancellationToken ct)
+    {
+        for (var i = 0; i < rows; i++)
+            await ExecAsync(c, "INSERT INTO dmv_blocking_snapshots (collection_id, collection_time, server_id, server_name, event_time, database_name, blocked_spid, blocking_spid, wait_time_ms, blocking_status) VALUES ($1,$2,$3,$4,$2,'db',$5,51,$6,'suspended')",
+                ct, CollectionIdGenerator.Next(), at, ServerId, ServerName, 60 + i, eachMs);
+    }
+
+    private static async Task<(long Events, long PeakBlockWaitMs, long PeakSnapshotWaitMs)> ReadDayAsync(
+        NpgsqlConnection connection, DateTime day, CancellationToken ct)
+    {
+        using var read = new NpgsqlCommand("SELECT blocking_events, peak_block_wait_ms, peak_snapshot_wait_ms FROM (" + DailySummarySql.RangeSql + ") AS calendar WHERE day = $2", connection);
+        read.Parameters.Add(new NpgsqlParameter<int> { TypedValue = ServerId });
+        read.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = day });
+        read.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = day.AddDays(1) });
+        read.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = EventWindowFloor.For(day) });
+        using var reader = await read.ExecuteReaderAsync(ct);
+        Assert.True(await reader.ReadAsync(ct));
+        return (Convert.ToInt64(reader.GetValue(0), CultureInfo.InvariantCulture),
+            Convert.ToInt64(reader.GetValue(1), CultureInfo.InvariantCulture),
+            Convert.ToInt64(reader.GetValue(2), CultureInfo.InvariantCulture));
+    }
+
+    /// <summary>#7028: one long wait written as 130 reports (a report every 50 ms, so the longest block is 6.5 s and the wait
+    /// arm stays out of it) is ONE blocking event. #5644 banded the day on its 130 report rows (5.4 per hour, Warning);
+    /// the band now reads the waits the blocking alerts count, so 1 wait over 24 h is Healthy. Read through the reader the
+    /// calendar and the MCP tools use, and through the fleet sweep.</summary>
     [Fact]
-    public async Task TheBand_ReadsTheReportCount_WhileTheDisplayedCountStaysWaits()
+    public async Task TheBand_ReadsTheWaitCount_NotTheReportRows()
     {
         var cs = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live test.");
@@ -154,10 +183,7 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ct, ServerId, ServerNa
         var bodySucceeded = false;
         try
         {
-            await ExecAsync(connection, @"
-INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_major_version, created_date, modified_date)
-VALUES ($1, $2, $2, TRUE, 16, now()::timestamp, now()::timestamp)
-ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ct, ServerId, ServerName);
+            await SeedServerAsync(connection, ct);
 
             var day = DateTime.SpecifyKind(DateTime.UtcNow.Date.AddDays(-3), DateTimeKind.Unspecified);
             await ExecAsync(connection, "INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, status) VALUES ($1,$2,$3,'wait_stats',$4,'SUCCESS')",
@@ -170,25 +196,106 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ct, ServerId, ServerNa
             var row = Assert.Single(rows);
 
             Assert.Equal(1, row.BlockingEvents);
-            Assert.Equal(130, row.BlockingReports);
             Assert.Equal(6_500, row.MaxBlockDurationMs);
-            Assert.Equal(DailyHealthBand.Warning, row.HealthBand);
+            Assert.Equal(DailyHealthBand.Healthy, row.HealthBand);
             Assert.Equal(1, row.ToSignals().BlockingEvents);
-            Assert.Equal(130, row.ToSignals().BlockingReports);
+            Assert.Null(row.ToSignals().BlockingReports);
 
-            /* The fleet sweep reads the same rows (#5644): its signals carry the report count its blocking band reads,
-               and the wait count it shows. */
             var sweep = await FleetSweepEngine.ReadServerSignalsAsync(postgres, ServerId, ServerName, day, day.AddDays(1), ct);
             Assert.Null(sweep.ReadFault);
             Assert.Equal(1, sweep.Signals.BlockingEvents);
-            Assert.Equal(130, sweep.Signals.BlockingReports);
-            Assert.Equal(HealthSeverity.Warning, ServerHealthClassifier.BlockingSeverity(
-                sweep.Signals.BlockingReports, sweep.Signals.PeakBlockWaitMs / 1000.0, sweep.Signals.Window));
             bodySucceeded = true;
         }
         finally
         {
             DarlingHealthReader.ResetRangeCacheForTests();
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>#7028: the XE-or-DMV choice is made per HOUR, as the blocking alerts make it for their rolling hour. A day
+    /// holds blocked-process reports in hour 2 (with DMV snapshots of another wait beside them) and DMV snapshots alone in
+    /// hour 5. The hour-2 wait counts once, from the reports (the DMV wait beside it is left out). The hour-5 wait counts
+    /// too: chosen by the day it counted only the reports and dropped it, so an hour that paged on DMV waits alone stayed
+    /// out of its day's band.</summary>
+    [Fact]
+    public async Task ADmvOnlyHour_CountsInADayThatAlsoHoldsReportsInAnotherHour()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live test.");
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+        var bodySucceeded = false;
+        try
+        {
+            await SeedServerAsync(connection, ct);
+            var day = DateTime.SpecifyKind(DateTime.UtcNow.Date.AddDays(-3), DateTimeKind.Unspecified);
+            await PlantWaitAsync(connection, day.AddHours(2), blocked: 52, blocker: 51, reports: 9, "master", dmv: false, ct);
+            await PlantWaitAsync(connection, day.AddHours(2).AddMinutes(10), blocked: 53, blocker: 51, reports: 4, "master", dmv: true, ct);
+            await PlantWaitAsync(connection, day.AddHours(5), blocked: 54, blocker: 51, reports: 6, "master", dmv: true, ct);
+
+            var (events, peak, _) = await ReadDayAsync(connection, day, ct);
+
+            /* hour 2: the one report wait, hour 5: the one DMV wait. */
+            Assert.Equal(2, events);
+            Assert.Equal(45_000, peak);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>#7028: the snapshot arm is the Blocking Wait Time alert's own measure after its persistence gate. One
+    /// snapshot that totals 60 s sets the value to a third of that, 20 s (a lone snapshot pages only at three times the
+    /// bar), so a 60 s bar is not reached. Three adjacent snapshots that each total 60 s set it to 60 s, the bar the alert
+    /// would page on. Three snapshots ten minutes apart are not a streak, so they read as lone snapshots.</summary>
+    [Fact]
+    public async Task TheSnapshotArm_DoesNotTakeALoneBlip_AndTakesASustainedRun()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live test.");
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+        var bodySucceeded = false;
+        try
+        {
+            await SeedServerAsync(connection, ct);
+            var blipDay = DateTime.SpecifyKind(DateTime.UtcNow.Date.AddDays(-3), DateTimeKind.Unspecified);
+            var runDay = blipDay.AddDays(1);
+            var gapDay = blipDay.AddDays(-1);
+
+            /* a lone snapshot: two blocked sessions of 30 s, 60 s in total */
+            await PlantSnapshotAsync(connection, blipDay.AddHours(3), rows: 2, eachMs: 30_000, ct);
+
+            /* three snapshots a minute apart, each 60 s in total */
+            for (var i = 0; i < 3; i++)
+                await PlantSnapshotAsync(connection, runDay.AddHours(3).AddMinutes(i), rows: 2, eachMs: 30_000, ct);
+
+            /* three snapshots ten minutes apart, each 60 s in total: never adjacent */
+            for (var i = 0; i < 3; i++)
+                await PlantSnapshotAsync(connection, gapDay.AddHours(3).AddMinutes(10 * i), rows: 2, eachMs: 30_000, ct);
+
+            var blip = await ReadDayAsync(connection, blipDay, ct);
+            var run = await ReadDayAsync(connection, runDay, ct);
+            var gap = await ReadDayAsync(connection, gapDay, ct);
+
+            Assert.Equal(20_000, blip.PeakSnapshotWaitMs);
+            Assert.Equal(60_000, run.PeakSnapshotWaitMs);
+            Assert.Equal(20_000, gap.PeakSnapshotWaitMs);
+            bodySucceeded = true;
+        }
+        finally
+        {
             await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
                 await DeleteRowsAsync(cleanup, cleanupCt));
         }
