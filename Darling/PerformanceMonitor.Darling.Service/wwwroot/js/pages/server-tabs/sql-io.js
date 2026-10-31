@@ -10,7 +10,7 @@ import { routeHash, el, readToolWithinKeptHistory, keptWindowStrip, mount, readE
 import { getPanelSignal } from "../../panels.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS } from "../../charts.js";
 import { READ_FIELDS } from "../../read-fields.js";
-import { panelShell, discontinuityNotes, line } from "./shared.js";
+import { panelShell, discontinuityNotes, linePanel } from "./shared.js";
 
 /**
  * What a File I/O Latency line is, for the subtitle (#5244 PR5): exactly one chosen database draws one line per file ("per

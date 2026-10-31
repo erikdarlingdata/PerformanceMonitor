@@ -40,7 +40,7 @@ export function overviewStripsPanel(server, ctx) {
  * (NOT 0 — the tier did not carry the day; nothing says the server ran no queries) and the read names every
  * such day in `days_missing[]`. The cell renders that null as "not materialized" through DAILY_RANGE_COLUMNS,
  * but one blank in one column of a thirty-row grid is easy to read past, so the read's list is rendered as ONE
- * notice line above the rows. A composite rather than a table() descriptor because table()'s `noteKey` carries
+ * notice line above the rows. A composite rather than a tablePanel() descriptor because tablePanel()'s `noteKey` carries
  * a server-authored STRING (#3278) and this disclosure is a server-authored LIST: the dates are the server's,
  * the sentence around them is the page's, and no figure here is one the page derived (R1). The span is the
  * calendar's month (the fetch reaches 31 days so the current month is whole), deliberately not ctx.hours — the page's
@@ -88,7 +88,7 @@ export function dailySummaryPanels(server) {
 }
 
 /** The Daily Health Calendar's table: one row per collected day, newest first, with the #3653 A6 notice above it for the days whose
- *  unique_queries the rollup tier never carried (a server-authored LIST, so a composite rather than table()'s string `noteKey`). */
+ *  unique_queries the rollup tier never carried (a server-authored LIST, so a composite rather than tablePanel()'s string `noteKey`). */
 function dailyRangeGrid(rows, missing) {
   const grid = VIZ.table(
     { days: rows },

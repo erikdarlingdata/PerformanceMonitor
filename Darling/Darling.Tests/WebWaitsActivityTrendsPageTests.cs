@@ -40,7 +40,7 @@ public sealed class WebWaitsActivityTrendsPageTests
     [Fact]
     public void TheActivityTab_DrawsTheSessionStatsTrend()
     {
-        var activity = Between(Js(), "    id: \"activity\",\n    label: \"Activity\",\n    build:", "      table(\n        \"Running Jobs\"");
+        var activity = Between(Js(), "    id: \"activity\",\n    label: \"Activity\",\n    build:", "      tablePanel(\n        \"Running Jobs\"");
         Assert.Contains("sessionStatsTrendPanel(server, ctx)", activity);
     }
 

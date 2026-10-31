@@ -11,7 +11,7 @@ import { VIZ } from "../../panels.js";
 import { windowParams } from "../../time-slicer.js";
 import { downloadText } from "../../grid-tools.js";
 import { deadlockGraphCell, processRowsInDatabases } from "../deadlock-graph.js";
-import { codeDisclosure, slicedSlot, table } from "./shared.js";
+import { codeDisclosure, slicedSlot, tablePanel } from "./shared.js";
 
 /** XML cell: the same disclosure over a captured payload (blocked-process report, deadlock graph). The desktop
  *  viewer renders these as a graph; the browser has no graph viewer, so it hands over the payload verbatim
@@ -250,7 +250,7 @@ function deadlockProcessesCell(server, row, scope = null) {
    panel says so when the filter hid any (#5244). Its chip is "process-rows". */
 export function deadlockGraphsPanel(server, ctx) {
   const scope = deadlockRowScope();
-  const panel = table(
+  const panel = tablePanel(
     "Deadlock Graphs",
     "get_deadlock_detail",
     windowParams({ server, hours: ctx.hours, limit: 5 }, ctx, true),

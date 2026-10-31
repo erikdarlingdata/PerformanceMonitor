@@ -133,7 +133,7 @@ export function fanout(read, params, specs, intro = null) {
            all pages of a population - the aggregate one beside a capped row list is exactly the pairing
            where only one of them needs saying so. */
         const note = spec.noteKey ? getPath(res.data, spec.noteKey) : null;
-        /* A fanout line chart names its chart-menu "at This Time" item with spec.atTimeItem, as line() does with
+        /* A fanout line chart names its chart-menu "at This Time" item with spec.atTimeItem, as linePanel() does with
            opts.atTimeItem; Active Queries when it names none. */
         const rendered = VIZ[spec.viz](res.data, { ...spec, read, windowHours: res.keptHours || (params && params.hours), atTime: spec.atTime === false || !params || !params.server ? null : { server: params.server, item: spec.atTimeItem || "queries" } });
 
@@ -675,8 +675,8 @@ export function renderInto(body, render) {
  * and its process rows follow the database filter.
  * `control` (#5226) is a node drawn under the title, before the rows: the ranking selector on the Top Queries and Top Procedures cards.
  */
-export function table(title, read, params, rowsKey, columns, subtitle, emptyText, span = 2, noteKey = null, moreNoteKeys = null, columnGroups = null, control = null, dbScope = null, extensionMissingLine = null, emptyWins = false, onRow = null) {
-  if (!emptyText) throw new Error("table(" + title + "): a table panel must explain its own empty state.");
+export function tablePanel(title, read, params, rowsKey, columns, subtitle, emptyText, span = 2, noteKey = null, moreNoteKeys = null, columnGroups = null, control = null, dbScope = null, extensionMissingLine = null, emptyWins = false, onRow = null) {
+  if (!emptyText) throw new Error("tablePanel(" + title + "): a table panel must explain its own empty state.");
   const desc = { title, subtitle, read, params, viz: "table", rowsKey, columns, emptyText, moreNoteKeys, span, noteKey, dbScope, extensionMissingLine, emptyWins };
   if (columnGroups) Object.assign(desc, { groups: columnGroups.groups, defaultGroups: columnGroups.defaultGroups });
   if (control) desc.control = control;
@@ -687,7 +687,7 @@ export function table(title, read, params, rowsKey, columns, subtitle, emptyText
 /**
  * A stat-tile panel over a read's top-level object (dotted keys reach into a nested summary).
  *
- * `emptyText` is OPTIONAL here where table()'s and line()'s are required, and the asymmetry is the honest one:
+ * `emptyText` is OPTIONAL here where tablePanel()'s and linePanel()'s are required, and the asymmetry is the honest one:
  * a read that always returns its summary object cannot reach the empty case, and forcing a sentence onto all
  * thirty of those would be noise around the handful that need it. What needs it is a read whose HEALTHY answer
  * is a data body carrying prose and none of the summary keys — get_pg_xmin_horizon's {status:"no_holder",
@@ -699,15 +699,15 @@ export function stat(title, read, params, stats, subtitle, span = 1, emptyText) 
 }
 
 /**
- * A line panel over a read's row array. `opts.emptyText` is REQUIRED for the same reason table()'s is: without
+ * A line panel over a read's row array. `opts.emptyText` is REQUIRED for the same reason tablePanel()'s is: without
  * a sentence, a read whose empty array means the thing simply did not happen inherits renderLineChart's
  * "Not enough data points to chart yet", which describes a condition it never had. get_blocking_trend and
  * get_deadlock_trend used to be the sharpest example; #2485 gave those two a {status,message} envelope, so they
  * now answer above this layer and their emptyText is the fallback rather than the sentence you see. Every other
  * line read still lands here at zero rows.
  */
-export function line(title, read, params, rowsKey, xKey, series, opts = {}) {
-  if (!opts.emptyText) throw new Error("line(" + title + "): a chart panel must explain its own empty state.");
+export function linePanel(title, read, params, rowsKey, xKey, series, opts = {}) {
+  if (!opts.emptyText) throw new Error("linePanel(" + title + "): a chart panel must explain its own empty state.");
   return renderPanel({
     title,
     subtitle: opts.subtitle,

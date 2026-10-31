@@ -8,7 +8,7 @@
 
 import { el, mount } from "../../util.js";
 import { setPanelSignal, getPanelSignal } from "../../panels.js";
-import { table, COLLECTION_LOG_COLUMNS } from "./shared.js";
+import { tablePanel, COLLECTION_LOG_COLUMNS } from "./shared.js";
 
 /* #5227: the collector picked on the Collectors panel, keyed by server at MODULE scope so the 60 s rebuild of the tab
    keeps the choice. The Collection Log is drawn into a slot that redraws itself, so a pick re-requests only that read. */
@@ -47,7 +47,7 @@ export function collectionLogPanel(server, ctx) {
       : null;
     if (chip) Object.assign(chip.style, { gridColumn: "1 / -1", justifySelf: "start" });
     setPanelSignal(mine.signal);
-    const logPanel = table(
+    const logPanel = tablePanel(
         "Collection Log",
         "get_collection_log",
         params,

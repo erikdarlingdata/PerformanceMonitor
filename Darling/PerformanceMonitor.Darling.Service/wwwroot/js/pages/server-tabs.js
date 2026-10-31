@@ -61,7 +61,7 @@ import { PG_REPLICATION_STATS_COLUMNS, PG_SLOT_COLUMNS } from "./server-tabs/pg-
 import { PG_BLOAT_STATS, PG_INDEX_USAGE_STATS, PG_INDEX_BLOAT_COLUMNS, PG_BLOAT_COLUMNS, PG_INDEX_USAGE_COLUMNS } from "./server-tabs/pg-storage.js";
 import { PG_WRAPAROUND_THRESHOLD_STATS, PG_SESSION_STATE_STATS, PG_AUTOVACUUM_COLUMNS, PG_WRAPAROUND_COLUMNS, PG_XMIN_COLUMNS, PG_SESSION_STATE_COLUMNS } from "./server-tabs/pg-vacuum.js";
 import { PG_WAIT_TREND_COLUMNS, PG_WAIT_SAMPLING_COLUMNS, PG_KERNEL_COLUMNS, PG_WAIT_COLUMNS } from "./server-tabs/pg-waits.js";
-import { fanout, topRankingLabel, rankedParams, withTagPick, rankedCard, table, stat, line, SNAPSHOT, PROPERTY_STATS, ALERT_READ_PANEL, COLLECTION_CAVEATS_PANEL, SWEEP_STATS, SKIPPED_CYCLES_STATS, withWaitLink, TOP_QUERY_COLUMNS, TOP_QUERY_GROUPS, TOP_PROC_COLUMNS, TOP_PROC_GROUPS, serverTrendPanel, seriesTrendPanel, FINDING_COLUMNS, COLLECTION_LOG_COLUMNS, selectionInside, COLLECTOR_COLUMNS, HEAVIEST_COLUMNS, PG_WRAPAROUND_STATS, PG_XMIN_STATS, PG_SLOT_STATS, PG_AUTOVACUUM_STATS } from "./server-tabs/shared.js";
+import { fanout, topRankingLabel, rankedParams, withTagPick, rankedCard, tablePanel, stat, linePanel, SNAPSHOT, PROPERTY_STATS, ALERT_READ_PANEL, COLLECTION_CAVEATS_PANEL, SWEEP_STATS, SKIPPED_CYCLES_STATS, withWaitLink, TOP_QUERY_COLUMNS, TOP_QUERY_GROUPS, TOP_PROC_COLUMNS, TOP_PROC_GROUPS, serverTrendPanel, seriesTrendPanel, FINDING_COLUMNS, COLLECTION_LOG_COLUMNS, selectionInside, COLLECTOR_COLUMNS, HEAVIEST_COLUMNS, PG_WRAPAROUND_STATS, PG_XMIN_STATS, PG_SLOT_STATS, PG_AUTOVACUUM_STATS } from "./server-tabs/shared.js";
 import { perfmonPanel, SESSION_STATS, sessionStatsTrendPanel, APPLICATION_COLUMNS, JOB_COLUMNS, JOB_HISTORY_COLUMNS, INDEX_COLUMNS } from "./server-tabs/sql-activity.js";
 import { slicedPanel, DEADLOCKS_EMPTY_TEXT, COUNT_SERIES, BLOCKING_REPORT_SERIES, BLOCKING_BY_SOURCE, LOCK_WAIT_SERIES, WAITING_TASK_SERIES, BLOCKED_SESSION_SERIES, BLOCKING_SEVERITY_SERIES, DEADLOCK_SEVERITY_SERIES, BLOCKING_GROUPS, BLOCKING_COLUMNS, DEADLOCK_COLUMNS, deadlockGraphsPanel, BPR_COLUMNS, OBJECT_LOCK_COLUMNS } from "./server-tabs/sql-blocking.js";
 import { SERVER_CHANGE_COLUMNS, DB_CHANGE_COLUMNS, TRACE_FLAG_CHANGE_COLUMNS } from "./server-tabs/sql-changes.js";
@@ -99,7 +99,7 @@ export const SERVER_TABS = [
          report and Deadlocks charts that sat here live on the CPU, Memory, Blocking and Deadlocks tabs (and the File I/O tab
          keeps both latency charts), so nothing is unreachable; the strips replace the four separate Overview charts and the File I/O panel. */
       overviewStripsPanel(server, ctx),
-      table(
+      tablePanel(
         "Analysis Findings",
         "get_analysis_findings",
         { server, hours: ctx.hours },
@@ -121,7 +121,7 @@ export const SERVER_TABS = [
     label: "Wait Stats",
     build: (server, ctx) => [
       waitsPanel(server, ctx),
-      table(
+      tablePanel(
         "Waiting Tasks",
         "get_waiting_tasks",
         { server, hours: ctx.hours, limit: 30 },
@@ -130,7 +130,7 @@ export const SERVER_TABS = [
         ctx.label,
         "No waiting tasks were captured in this window."
       ),
-      table(
+      tablePanel(
         "Latch Stats",
         "get_latch_stats",
         { server, hours: ctx.hours, top: 10 },
@@ -140,7 +140,7 @@ export const SERVER_TABS = [
         "No latch classes accumulated waits in this window."
       ),
       namedTrendPanel(server, ctx, "latch"),
-      table(
+      tablePanel(
         "Spinlock Stats",
         "get_spinlock_stats",
         { server, hours: ctx.hours, top: 10 },
@@ -157,7 +157,7 @@ export const SERVER_TABS = [
     id: "cpu",
     label: "CPU",
     build: (server, ctx) => [
-      line("CPU Utilization", "get_cpu_utilization", { server, hours: ctx.hours }, "samples", "sample_time", CPU_SERIES, {
+      linePanel("CPU Utilization", "get_cpu_utilization", { server, hours: ctx.hours }, "samples", "sample_time", CPU_SERIES, {
         subtitle: ctx.label,
         format: "pct",
         unit: "%",
@@ -170,7 +170,7 @@ export const SERVER_TABS = [
          4 days once the rollups are armed, and a window asking further back than that silently served less
          than it asked for. Null when the floor did not bite, the same as every other noteKey panel. */
       rankedCard("queries", (ranking, picker, w, onRow) =>
-        table(
+        tablePanel(
           "Top Queries by " + topRankingLabel(ranking),
           "get_top_queries_by_cpu",
           rankedParams(windowParams({ server, hours: w.hours, top: 20, detail: "full" }, w), ranking, "queries"),
@@ -191,7 +191,7 @@ export const SERVER_TABS = [
         { server, ctx }
       ),
       rankedCard("procedures", (ranking, picker, w, onRow) =>
-        table(
+        tablePanel(
           "Top Procedures by " + topRankingLabel(ranking),
           "get_top_procedures_by_cpu",
           rankedParams(windowParams({ server, hours: w.hours, top: 20, detail: "full" }, w), ranking, "procedures"),
@@ -219,7 +219,7 @@ export const SERVER_TABS = [
     label: "Memory",
     build: (server, ctx) => [
       stat("Memory", "get_memory_stats", { server }, MEMORY_STATS, SNAPSHOT, 2),
-      line("Memory Trend", "get_memory_trend", { server, hours: ctx.hours }, "trend", "time", MEMORY_SERIES, {
+      linePanel("Memory Trend", "get_memory_trend", { server, hours: ctx.hours }, "trend", "time", MEMORY_SERIES, {
         subtitle: ctx.label,
         format: "mb",
         span: 2,
@@ -227,7 +227,7 @@ export const SERVER_TABS = [
       }),
       memoryClerksTrendPanel(server, ctx),
       serverTrendPanel(server, ctx, "plan_cache"),
-      table(
+      tablePanel(
         "Memory Clerks",
         "get_memory_clerks",
         { server },
@@ -323,7 +323,7 @@ export const SERVER_TABS = [
       daysText(widestHours) +
       ". A Custom View can show more blocking and deadlock history.",
     build: (server, ctx) => [
-      line("Blocked process report trend", "get_blocking_trend", { server, hours: ctx.hours }, "trend", "time", BLOCKING_REPORT_SERIES, {
+      linePanel("Blocked process report trend", "get_blocking_trend", { server, hours: ctx.hours }, "trend", "time", BLOCKING_REPORT_SERIES, {
         subtitle: ctx.label,
         format: "int",
         unit: "reports",
@@ -332,7 +332,7 @@ export const SERVER_TABS = [
         bySource: BLOCKING_BY_SOURCE,
         emptyText: "No blocked process reports in this window — an empty trend here means none were captured, not that nothing was collected.",
       }),
-      line("Deadlock trend", "get_deadlock_trend", { server, hours: ctx.hours }, "trend", "time", COUNT_SERIES, {
+      linePanel("Deadlock trend", "get_deadlock_trend", { server, hours: ctx.hours }, "trend", "time", COUNT_SERIES, {
         subtitle: ctx.label,
         format: "int",
         atTimeItem: "deadlocks",
@@ -342,7 +342,7 @@ export const SERVER_TABS = [
       /* #6301 slice 2b: the Blocking and Deadlocks grids sit under a time slicer each (the strips are the two trends' own counts, read once over the
          page range), and a drag on either narrows both grids, the graphs and the report XML for this server together. */
       slicedPanel("blocking", { server, ctx }, (w) =>
-        table(
+        tablePanel(
           "Blocking",
           "get_blocking",
           windowParams({ server, hours: w.hours, limit: 30 }, w, true),
@@ -357,7 +357,7 @@ export const SERVER_TABS = [
         )
       ),
       slicedPanel("deadlocks", { server, ctx }, (w) =>
-        table(
+        tablePanel(
           "Deadlocks",
           "get_deadlocks",
           windowParams({ server, hours: w.hours, limit: 20 }, w, true),
@@ -376,7 +376,7 @@ export const SERVER_TABS = [
         )
       ),
       /* #2484: the Current Waits tab the viewer has and the browser did not. ONE read, two panels --
-         via fanout, not two line() calls, because the tab must not fetch the same read twice (there is
+         via fanout, not two linePanel() calls, because the tab must not fetch the same read twice (there is
          a pin for it, and the reason is real: this read returns both series in one payload precisely so
          they cannot be looked at separately). A wait spike with no blocked sessions is a resource wait;
          the same spike with them is contention. */
@@ -408,7 +408,7 @@ export const SERVER_TABS = [
          numeric key: since #3897 the read returns the whole LCK family as one bucketed series (its wait_types[]
          legend names the types that waited), where it used to return a row per (collection, wait type) that
          this chart drew as one jagged line. get_wait_trend can chart one LCK type; this is the whole family. */
-      line("Lock Waits", "get_lock_wait_trend", { server, hours: ctx.hours }, "trend", "collection_time", LOCK_WAIT_SERIES, {
+      linePanel("Lock Waits", "get_lock_wait_trend", { server, hours: ctx.hours }, "trend", "collection_time", LOCK_WAIT_SERIES, {
         subtitle: ctx.label,
         atTimeItem: "blocking",
         emptyText:
@@ -449,7 +449,7 @@ export const SERVER_TABS = [
         "blocking",
         { server, ctx },
         (w) =>
-          table(
+          tablePanel(
             "Blocked Process Reports",
             "get_blocked_process_xml",
             windowParams({ server, hours: w.hours, limit: 5 }, w, true),
@@ -460,7 +460,7 @@ export const SERVER_TABS = [
           ),
         false
       ),
-      table(
+      tablePanel(
         "Object Contention",
         "get_object_locking",
         { server },
@@ -481,7 +481,7 @@ export const SERVER_TABS = [
     label: "File I/O",
     build: (server, ctx) => [
       fileIoPanel(server, ctx),
-      table(
+      tablePanel(
         "File I/O Stats",
         "get_file_io_stats",
         { server },
@@ -490,7 +490,7 @@ export const SERVER_TABS = [
         SNAPSHOT,
         "No file I/O rows in the latest snapshot."
       ),
-      line("tempdb", "get_tempdb_trend", { server, hours: ctx.hours }, "trend", "time", TEMPDB_SERIES, {
+      linePanel("tempdb", "get_tempdb_trend", { server, hours: ctx.hours }, "trend", "time", TEMPDB_SERIES, {
         subtitle: ctx.label,
         format: "mb",
         span: 2,
@@ -498,7 +498,7 @@ export const SERVER_TABS = [
       }),
       /* `noteKey` carries the read's own note when a Hyperscale log file is in the snapshot: its size is n/a
          (log service) and it is left out of these totals, so the page says so instead of looking short. */
-      table(
+      tablePanel(
         "Database Sizes",
         "get_database_sizes",
         { server },
@@ -509,7 +509,7 @@ export const SERVER_TABS = [
         1,
         "note"
       ),
-      table(
+      tablePanel(
         "Table & Index Sizes",
         "get_table_index_sizes",
         { server },
@@ -518,7 +518,7 @@ export const SERVER_TABS = [
         "daily collection",
         "No object size rows recorded. Index and object stats are collected daily."
       ),
-      table(
+      tablePanel(
         "Persistent Version Store",
         "get_pvs_stats",
         { server },
@@ -550,7 +550,7 @@ export const SERVER_TABS = [
     build: (server, ctx) => [
       activeQueriesPanel(server, ctx),
       /* #2484: the viewer's Performance Trends tab is four charts over three reads. Duration and the
-         execution rate come from ONE payload -- via fanout, not two line() calls, because the tab must not
+         execution rate come from ONE payload -- via fanout, not two linePanel() calls, because the tab must not
          fetch the same read twice. They get separate charts rather than separate series because ms/sec and
          executions/sec are two units, and one y-domain cannot hold both honestly. */
       ...fanout("get_query_duration_trend", { server, hours: ctx.hours }, [
@@ -576,7 +576,7 @@ export const SERVER_TABS = [
           emptyText: "No query executions recorded in this window.",
         },
       ]),
-      line(
+      linePanel(
         "Procedure Duration Trend",
         "get_procedure_duration_trend",
         { server, hours: ctx.hours },
@@ -592,7 +592,7 @@ export const SERVER_TABS = [
             "and the read says which of the two it found.",
         }
       ),
-      line(
+      linePanel(
         "Query Store Duration Trend",
         "get_query_store_duration_trend",
         { server, hours: ctx.hours },
@@ -614,7 +614,7 @@ export const SERVER_TABS = [
       topQueriesPanel(server, ctx),
       /* #4231: same `truncation_note` disclosure as the CPU tab's plain tables. */
       rankedCard("procedures", (ranking, picker, w, onRow) =>
-        table(
+        tablePanel(
           "Top Procedures by " + topRankingLabel(ranking),
           "get_top_procedures_by_cpu",
           rankedParams(windowParams({ server, hours: w.hours, top: 20, detail: "full" }, w), ranking, "procedures"),
@@ -640,7 +640,7 @@ export const SERVER_TABS = [
         "querystore",
         { server, ctx },
         (picker, w, onRow) =>
-          table(
+          tablePanel(
             "Query Store",
             "get_query_store_top",
             withTagPick(windowParams({ server, hours: w.hours, top: 20 }, w), "querystore"),
@@ -663,10 +663,10 @@ export const SERVER_TABS = [
         true
       ),
       /* #2484: the Query Store Regressions tab -- the only tab in the per-server page that was entirely
-         unreachable from a browser rather than merely reduced. Built with table(), not an object literal:
+         unreachable from a browser rather than merely reduced. Built with tablePanel(), not an object literal:
          mount() stringifies anything it cannot consume, so a literal renders as [object Object] and never
          fetches the read at all. */
-      table(
+      tablePanel(
         "Query Store Regressions",
         "get_query_store_regressions",
         { server, hours: ctx.hours, limit: 50 },
@@ -745,7 +745,7 @@ export const SERVER_TABS = [
           "ran, so the read distinguishes a server nobody collected from one that was simply idle.",
       }),
       tagFilteredCard("longqueries", (picker) =>
-        table(
+        tablePanel(
           "Long Query Completions",
           "get_long_query_completions",
           withTagPick({ server, hours: ctx.hours, limit: 30 }, "longqueries"),
@@ -793,7 +793,7 @@ export const SERVER_TABS = [
     label: "Configuration",
     build: (server) => [
       stat("Server Properties", "get_server_properties", { server }, PROPERTY_STATS, SNAPSHOT, 2),
-      table(
+      tablePanel(
         "Configuration Audit",
         "audit_config",
         { server },
@@ -802,7 +802,7 @@ export const SERVER_TABS = [
         SNAPSHOT,
         "The audit found nothing to flag."
       ),
-      table(
+      tablePanel(
         "Server Configuration",
         "get_server_config",
         { server },
@@ -811,7 +811,7 @@ export const SERVER_TABS = [
         SNAPSHOT,
         "No sp_configure snapshot yet."
       ),
-      table(
+      tablePanel(
         "Database Configuration",
         "get_database_config",
         { server },
@@ -821,7 +821,7 @@ export const SERVER_TABS = [
         "No database configuration snapshot yet."
       ),
       scopedConfigPanel(server),
-      table(
+      tablePanel(
         "Query Store Health",
         "get_query_store_health",
         { server },
@@ -830,7 +830,7 @@ export const SERVER_TABS = [
         "hourly collection",
         "No Query Store health rows yet."
       ),
-      table(
+      tablePanel(
         "Trace Flags",
         "get_trace_flags",
         { server },
@@ -856,7 +856,7 @@ export const SERVER_TABS = [
     id: "changes",
     label: "Config Changes",
     build: (server, ctx) => [
-      table(
+      tablePanel(
         "Server Configuration Changes",
         "get_server_config_changes",
         { server, hours: ctx.hours },
@@ -865,7 +865,7 @@ export const SERVER_TABS = [
         ctx.label,
         "No server configuration changed in this window."
       ),
-      table(
+      tablePanel(
         "Database Configuration Changes",
         "get_database_config_changes",
         { server, hours: ctx.hours },
@@ -874,7 +874,7 @@ export const SERVER_TABS = [
         ctx.label,
         "No database configuration changed in this window."
       ),
-      table(
+      tablePanel(
         "Trace Flag Changes",
         "get_trace_flag_changes",
         { server, hours: ctx.hours },
@@ -903,7 +903,7 @@ export const SERVER_TABS = [
           emptyText: "No application rows in the latest session snapshot.",
         },
       ]),
-      table(
+      tablePanel(
         "Running Jobs",
         "get_running_jobs",
         { server },
@@ -920,7 +920,7 @@ export const SERVER_TABS = [
         null,
         ctx.offline === true
       ),
-      table(
+      tablePanel(
         "Job History",
         "get_job_history",
         { server, hours: ctx.hours, limit: 100 },
@@ -929,7 +929,7 @@ export const SERVER_TABS = [
         ctx.label + ", newest 100 runs (steps and job outcomes)",
         "No SQL Agent job runs were retained in this window."
       ),
-      table(
+      tablePanel(
         "Index Usage",
         "get_index_usage",
         { server },
@@ -974,7 +974,7 @@ export const SERVER_TABS = [
           emptyText: "No system_health entries in this window.",
         },
       ]),
-      table(
+      tablePanel(
         "Severe Errors",
         "get_health_parser_severe_errors",
         { server, hours: ctx.hours, limit: 50 },
@@ -983,7 +983,7 @@ export const SERVER_TABS = [
         ctx.label,
         "No severe errors in this window — the healthy state for this read."
       ),
-      table(
+      tablePanel(
         "Scheduler Issues",
         "get_health_parser_scheduler_issues",
         { server, hours: ctx.hours, limit: 50 },
@@ -992,7 +992,7 @@ export const SERVER_TABS = [
         ctx.label,
         "No scheduler issues in this window — the healthy state for this read."
       ),
-      table(
+      tablePanel(
         "I/O Issues",
         "get_health_parser_io_issues",
         { server, hours: ctx.hours, limit: 50 },
@@ -1001,7 +1001,7 @@ export const SERVER_TABS = [
         ctx.label,
         "No I/O issues in this window — the healthy state for this read."
       ),
-      table(
+      tablePanel(
         "CPU Tasks",
         "get_health_parser_cpu_tasks",
         { server, hours: ctx.hours, limit: 50 },
@@ -1010,7 +1010,7 @@ export const SERVER_TABS = [
         ctx.label,
         "No CPU task events in this window."
       ),
-      table(
+      tablePanel(
         "Memory Conditions",
         "get_health_parser_memory_conditions",
         { server, hours: ctx.hours, limit: 50 },
@@ -1020,7 +1020,7 @@ export const SERVER_TABS = [
         "No memory condition events in this window.",
         2, null, null, MEMORY_CONDITION_GROUPS
       ),
-      table(
+      tablePanel(
         "Memory Broker",
         "get_health_parser_memory_broker",
         { server, hours: ctx.hours, limit: 50 },
@@ -1029,7 +1029,7 @@ export const SERVER_TABS = [
         ctx.label,
         "No memory broker events in this window."
       ),
-      table(
+      tablePanel(
         "Memory Node OOM",
         "get_health_parser_memory_node_oom",
         { server, hours: ctx.hours, limit: 50 },
@@ -1039,10 +1039,10 @@ export const SERVER_TABS = [
         "No memory node OOM events in this window — the healthy state for this read.",
         2, null, null, MEMORY_OOM_GROUPS
       ),
-      /* #2484: the ninth member of the get_health_parser_* family. Built with table(), not a bare object
+      /* #2484: the ninth member of the get_health_parser_* family. Built with tablePanel(), not a bare object
          literal -- mount() stringifies anything it cannot consume, so a literal renders as [object Object]
          and never fetches the read at all. */
-      table(
+      tablePanel(
         "Significant Waits",
         "get_health_parser_significant_waits",
         { server, hours: ctx.hours, limit: 50 },
@@ -1051,7 +1051,7 @@ export const SERVER_TABS = [
         ctx.label,
         "No significant waits (a real session waiting 500 ms+ on a non-idle wait type) in this window."
       ),
-      table(
+      tablePanel(
         "Default Trace",
         "get_default_trace_events",
         { server, hours: ctx.hours, limit: 100 },
@@ -1175,7 +1175,7 @@ export const POSTGRES_TABS = [
          or by an extension the way the rest of this tab's panels are, but by the target being Amazon Aurora in
          the first place. On a stock PostgreSQL target the panel is permanently empty and says so in its own
          words, the same treatment the Waits tab gives get_pg_wait_stats. */
-      line(
+      linePanel(
         "Instance CPU",
         "get_pg_cpu_utilization",
         { server, hours: ctx.hours },
@@ -1223,7 +1223,7 @@ export const POSTGRES_TABS = [
         1,
         "This server has no replication slots. A slot is the thing that retains WAL indefinitely, so none is one fewer way to fill a disk."
       ),
-      table(
+      tablePanel(
         "Analysis Findings",
         "get_analysis_findings",
         { server, hours: ctx.hours },
@@ -1269,7 +1269,7 @@ export const POSTGRES_TABS = [
           emptyText: "No per-collector timings recorded yet.",
         },
       ]),
-      table(
+      tablePanel(
         "Collection Log",
         "get_collection_log",
         { server, hours: ctx.hours, limit: 200 },
@@ -1387,7 +1387,7 @@ export const POSTGRES_TABS = [
          replaced - so nothing customer-specific reaches this grid, and the empty text names the usual
          cause rather than implying the server is quiet. The Plan cell shows the row's own redacted JSON;
          no second read. */
-      table(
+      tablePanel(
         "Captured Plans",
         "get_pg_plans",
         { server, hours: ctx.hours, limit: 10 },
@@ -1401,7 +1401,7 @@ export const POSTGRES_TABS = [
          is a different registry with a different shape; here it belongs beside the two reads whose absence
          it explains, and its own empty text is what stops that explanation being circular. Every facet is
          shown, satisfied ones included — a list of only the failures cannot show that capture is working. */
-      table(
+      tablePanel(
         "Plan Capture Readiness",
         "get_pg_plan_capture_readiness",
         { server, hours: ctx.hours, limit: 25 },
@@ -1416,7 +1416,7 @@ export const POSTGRES_TABS = [
          read reports the snapshot time as captured_at. Every setting is shown whatever its
          verdict, for the reason the readiness grid shows satisfied facets: a list of only the failures
          cannot show that a target IS instrumented. */
-      table(
+      tablePanel(
         "Logging Settings Audit",
         "get_pg_logging_audit",
         { server },
@@ -1455,7 +1455,7 @@ export const POSTGRES_TABS = [
          reset, so the ratio above is a lifetime average that barely moves - a database that fell off a
          cliff an hour ago still reads 99% because of the weeks behind it. Differenced per interval, the
          cliff is on screen. Same for spills: a weekly total cannot tell one bad afternoon from a leak. */
-      table(
+      tablePanel(
         "Database Trend",
         "get_pg_database_trend",
         { server, hours: ctx.hours },
@@ -1468,7 +1468,7 @@ export const POSTGRES_TABS = [
          Blocking tab — get_pg_blocking's chains live here too — and because this answers a different
          question from that one: which modes and relations are contended OVER TIME, rather than who is
          blocking whom right now. */
-      table(
+      tablePanel(
         "Lock Activity (sampled)",
         "get_pg_lock_stats",
         { server, hours: ctx.hours, limit: 25 },
@@ -1480,7 +1480,7 @@ export const POSTGRES_TABS = [
       /* #2629: what the queries above actually FILTER on. Placed on Activity rather than Storage because
          it is evidence about the workload, not about the disk — and it belongs beside top queries, since
          a predicate row and a query row are two views of the same execution. */
-      table(
+      tablePanel(
         "Predicate Selectivity",
         "get_pg_predicate_stats",
         { server, hours: ctx.hours, limit: 25 },
@@ -1489,7 +1489,7 @@ export const POSTGRES_TABS = [
         ctx.label + ", sampled counts - scale by 1/sample rate and treat the product as an estimate",
         "No predicate statistics in this window. pg_qualstats samples executions (1% by default) and needs shared_preload_libraries plus a restart, so an empty panel here usually means it is not loaded."
       ),
-      table(
+      tablePanel(
         "Column Statistics",
         "get_pg_column_stats",
         { server, hours: ctx.hours, limit: 25 },
@@ -1501,7 +1501,7 @@ export const POSTGRES_TABS = [
       /* #2661 deadlocks, on Activity beside blocking because they are the same subject at its limit: a
          blocking chain that resolved, and one the server had to break by cancelling somebody. Below
          blocking rather than above it because blocking is the far more common finding. */
-      table(
+      tablePanel(
         "Deadlocks",
         "get_pg_deadlocks",
         { server, hours: ctx.hours },
@@ -1516,7 +1516,7 @@ export const POSTGRES_TABS = [
          The "check the error log" panel. Newest 50 across every family; the MCP read carries the family and
          severity filters, and total_events on its payload is the window's count, so the panel note says
          which of the two this grid is. */
-      table(
+      tablePanel(
         "Log Events",
         "get_pg_log_events",
         { server, hours: ctx.hours, limit: 50 },
@@ -1528,7 +1528,7 @@ export const POSTGRES_TABS = [
       /* #2663 the regression read: what ONE execution of the busiest statement cost, interval by interval.
          The statement grid above ranks by total time across the window, which hides a step change - a query
          that doubled halfway through still ranks where its average puts it. */
-      table(
+      tablePanel(
         "Query Duration Trend",
         "get_pg_query_duration_trend",
         { server, hours: ctx.hours },
@@ -1540,7 +1540,7 @@ export const POSTGRES_TABS = [
       /* The graphs themselves, under the summary - the same pairing the SQL Server Deadlocks tab makes.
          The read takes an optional hash, so this panel needs no drill-down plumbing: without one it
          answers with the most recent graphs. */
-      table(
+      tablePanel(
         "Deadlock Graphs",
         "get_pg_deadlock_detail",
         { server, limit: 5 },
@@ -1678,7 +1678,7 @@ export const POSTGRES_TABS = [
     note: "Wait-event sampling needs Amazon Aurora. On other PostgreSQL targets this tab stays empty.",
     noteInfo: "It comes from aurora_stat_system_waits(), which core PostgreSQL does not have.",
     build: (server, ctx) => [
-      table(
+      tablePanel(
         "Wait Events",
         "get_pg_wait_stats",
         { server, hours: ctx.hours, limit: 20 },
@@ -1692,7 +1692,7 @@ export const POSTGRES_TABS = [
          Aurora grid above on Aurora, this one wherever pg_wait_sampling is loaded — and each explains its
          own emptiness in its own words, which is what makes a permanently-empty panel informative rather
          than a defect. */
-      table(
+      tablePanel(
         "Sampled Waits (pg_wait_sampling)",
         "get_pg_wait_sampling",
         { server, hours: ctx.hours, limit: 20 },
@@ -1701,7 +1701,7 @@ export const POSTGRES_TABS = [
         ctx.label + ", sample counts from a periodic profiler; event type CPU means running, not waiting",
         "No sampled waits in this window."
       ),
-      table(
+      tablePanel(
         "OS CPU by Query (pg_stat_kcache)",
         "get_pg_kernel_stats",
         { server, hours: ctx.hours, limit: 20 },
@@ -1720,7 +1720,7 @@ export const POSTGRES_TABS = [
       /* #2663 the first PostgreSQL time series. The single-window panels above rank what this server waits
          on; this follows ONE of them over time, which is the question they cannot answer. Parameterised by
          event, so it needs one chosen - the toolbar default is the event that dominates the window. */
-      table(
+      tablePanel(
         "Wait Trend",
         "get_pg_wait_trend",
         { server, hours: ctx.hours },
@@ -1760,7 +1760,7 @@ export const POSTGRES_TABS = [
       /* #2629: what the I/O above is reading INTO, and what is writing it back out. Residency and
          checkpoint pressure are the two halves of a page's life either side of the I/O counters this tab
          already shows, so all three belong together. */
-      table(
+      tablePanel(
         "Buffer Pool Residency",
         "get_pg_buffer_usage",
         { server, hours: ctx.hours, limit: 25 },
@@ -1785,7 +1785,7 @@ export const POSTGRES_TABS = [
          buffer pool with a ring buffer, so folding its misses in with the normal context's understates both
          and the two have opposite remedies. No drill-down plumbing: the read chooses the busiest pair when
          the toolbar names none, and says which it chose. */
-      table(
+      tablePanel(
         "I/O Trend",
         "get_pg_io_trend",
         { server, hours: ctx.hours },
@@ -1824,7 +1824,7 @@ export const POSTGRES_TABS = [
       /* #2629: the connected replicas, beside the slots. Two different questions and the DANGEROUS case is
          the disagreement — a slot that persists after its replica stops connecting retains WAL forever,
          and neither panel alone shows that. Slots first because that is the one that fills a disk. */
-      table(
+      tablePanel(
         "Connected Replicas",
         "get_pg_replication_stats",
         { server, hours: ctx.hours, limit: 25 },
@@ -1899,7 +1899,7 @@ export const POSTGRES_TABS = [
          — and because this panel's rows are the one set on the page that cannot be read as a coverage
          claim: answerless rows sort FIRST by design, so a page capped at 25 is 100% of them whenever they
          outnumber 25, structurally rather than by chance. */
-      table(
+      tablePanel(
         "Index Bloat (estimated)",
         "get_pg_index_bloat",
         { server, hours: ctx.hours, limit: 25 },
@@ -1925,7 +1925,7 @@ export const POSTGRES_TABS = [
 
          Not fanout(): that is several panels over ONE fetch, and these two differ in a PARAMETER, so there
          is no shared response to slice. */
-      table(
+      tablePanel(
         "Index Bloat (answered ranking)",
         "get_pg_index_bloat",
         { server, hours: ctx.hours, limit: 25, answered_only: true },
@@ -1951,7 +1951,7 @@ export const POSTGRES_TABS = [
     id: "config",
     label: "Configuration",
     build: (server, ctx) => [
-      table(
+      tablePanel(
         "Configuration Changes",
         "get_pg_server_config_changes",
         { server, hours: ctx.hours },
@@ -1960,7 +1960,7 @@ export const POSTGRES_TABS = [
         ctx.label + ", newest first; the collector runs hourly unless its schedule was changed, so a change happened in the collection interval before it was seen",
         "No configuration parameter changed value in this window. This compares consecutive snapshots, so an unchanged server is legitimately empty here - it is a finding, not missing data."
       ),
-      table(
+      tablePanel(
         "Settings",
         "get_pg_server_config",
         { server },
@@ -2011,7 +2011,7 @@ export function findServerTab(id, tabs) {
 /** What Running Jobs says when nothing is listed. "The normal state for most servers" is a claim about a server that is
  *  collecting; a server whose collection is stale (the fleet card's is_online false, the same signal the page header's
  *  Collectors chip reads) has no current reading, so it says so instead and the panel's sentence replaces the read's own
- *  empty message (table()'s emptyWins). */
+ *  empty message (tablePanel()'s emptyWins). */
 export function runningJobsEmptyText(ctx) {
   return ctx && ctx.offline === true
     ? "No running jobs can be shown: collection for this server is stale, so the last snapshot is not a current reading. See Collection Health."

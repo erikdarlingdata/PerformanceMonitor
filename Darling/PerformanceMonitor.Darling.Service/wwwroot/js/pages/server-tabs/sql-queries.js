@@ -15,7 +15,7 @@ import { statsHistoryColumn } from "../stats-history.js";
 import { windowParams } from "../../time-slicer.js";
 import { activePlanColumns, planColumn } from "../plan-viewer.js";
 import { comparePick, compareControl } from "../top-compare.js";
-import { codeDisclosure, listCell, panelShell, discontinuityNotes, pickerControl, topRankingLabel, rankedParams, withTagPick, tagFilterPicker, tagColumn, compareDrawn, rankedCard, slicedSlot, table, line, TOP_QUERY_COLUMNS, TOP_QUERY_GROUPS } from "./shared.js";
+import { codeDisclosure, listCell, panelShell, discontinuityNotes, pickerControl, topRankingLabel, rankedParams, withTagPick, tagFilterPicker, tagColumn, compareDrawn, rankedCard, slicedSlot, tablePanel, linePanel, TOP_QUERY_COLUMNS, TOP_QUERY_GROUPS } from "./shared.js";
 
 /**
  * Top Queries by CPU, plus that ONE query's per-collection history — the browser's per-query drill-down (#2520).
@@ -78,9 +78,9 @@ function topQueriesCard(server, ctx, ranking, picker, w = ctx, onRow = null) {
           "before it reports non-zero values.",
       }),
     ];
-    /* #4231: this composite calls VIZ.table directly rather than going through table()/renderPanel, so it
+    /* #4231: this composite calls VIZ.table directly rather than going through tablePanel()/renderPanel, so it
        misses loadPanel's automatic noteKey handling (#3278) and has to render `truncation_note` itself —
-       same field, same meaning, as the plain table() panels below it on this page. #5299: a reads ranking past what raw keeps carries
+       same field, same meaning, as the plain tablePanel() panels below it on this page. #5299: a reads ranking past what raw keeps carries
        `retention_notice` as well, and readTool already put that sentence in `truncation_note`'s place (util.js localizeWindowNote), so this
        draws the one window note and the retention notice is not drawn a second time. */
     if (typeof res.data.truncation_note === "string" && res.data.truncation_note.trim()) {
@@ -251,7 +251,7 @@ export function activeQueriesPanel(server, ctx) {
 function activeQueriesGrid(server, ctx, wait, snapshotTime, control) {
   /* The "All snapshots" grid is an event list, cut to the selection; a picked snapshot is one instant and is read as it is. */
   const base = windowParams(wait ? { server, hours: ctx.hours, limit: 500, wait_type: wait } : { server, hours: ctx.hours, limit: 50 }, ctx, !snapshotTime);
-  const panel = table(
+  const panel = tablePanel(
     "Active Queries",
     "get_active_queries",
     snapshotTime

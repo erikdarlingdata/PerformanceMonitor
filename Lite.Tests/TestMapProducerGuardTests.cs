@@ -423,9 +423,9 @@ public sealed class TestMapProducerGuardTests : IDisposable
     }
 
     /// <summary>#7027: a test that reads `pages/server-tabs.js` reads the files in `pages/server-tabs/` too (`RepoFile.ReadRepoFile`
-    /// joins them), so a change to a tab file selects what a change to the main file selects. A folder of another name does not.</summary>
+    /// joins them), so a change to a tab file selects what a change to the main file selects. Any `<name>/x.js` with a tracked `<name>.js` beside it\n    /// counts, by name, with no module list to keep in step: the folder of another module (`other/`) is joined the same way.</summary>
     [Fact]
-    public void ATestThatReadsTheServerTabsModule_ReadsItsTabFiles_ButNotAnotherModulesFolder()
+    public void ATestThatReadsAPageModule_ReadsTheFilesInTheFolderBesideIt()
     {
         const string Pages = "Darling/PerformanceMonitor.Darling.Service/wwwroot/js/pages/";
         Write("tracked.txt", string.Join("\n", new[]
@@ -456,7 +456,7 @@ public sealed class TestMapProducerGuardTests : IDisposable
             Assert.Contains(Pages + "server-tabs/shared.js", patterns);
             Assert.Contains(Pages + "server-tabs/sql-waits.js", patterns);
             Assert.Contains(Pages + "other.js", patterns);
-            Assert.DoesNotContain(Pages + "other/inner.js", patterns);
+            Assert.Contains(Pages + "other/inner.js", patterns);
         }
     }
 
