@@ -253,6 +253,6 @@ public sealed class QueryStoreTextStoreTests
         }
 
         Assert.NotNull(dir);
-        return System.IO.File.ReadAllText(System.IO.Path.Combine(dir!, relative));
+        return RepoFile.ReadRepoFile(System.IO.Path.Combine(dir!, relative));
     }
 }

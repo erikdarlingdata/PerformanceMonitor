@@ -1026,7 +1026,7 @@ public sealed class PayloadDimensionTests
             root!, "Darling", "PerformanceMonitor.Darling.Service", "DarlingCollectorRunner.cs");
         Assert.True(File.Exists(path), $"Expected the collector runner at '{path}'.");
 
-        var source = File.ReadAllText(path);
+        var source = RepoFile.ReadRepoFile(path);
 
         /* Exactly one of each, so comparing positions is unambiguous. If a second COPY or a second commit
            ever appears in this file, this pin must be rescoped to the method body rather than quietly

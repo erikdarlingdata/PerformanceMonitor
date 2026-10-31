@@ -2978,6 +2978,7 @@ $rung$;";
         new Migration(227, "threshold-override-tag-scope", V227Sql),
         new Migration(228, "blocking-band-tiers", V228Sql),
         new Migration(229, "notification-route-severities", V229Sql),
+        new Migration(230, "blocking-band-snapshot-wait-tiers", V230Sql),
         new Migration(231, "mute-rule-recurrence", V231Sql),
     };
 
@@ -3094,6 +3095,20 @@ BEGIN
     END IF;
 END
 $$;";
+
+    /// <summary>
+    /// V230 (#7028): the two snapshot wait tiers of the blocking health band on the alert settings row, beside the four V228 ones. They are the
+    /// warn and critical bars, in seconds, for the longest total blocked wait in one sampled snapshot, the same measure the Blocking Wait Time
+    /// alert reads. Both default to 0, which means that tier is off, as the alert's own bar does at 0, so a store that never sets them bands
+    /// exactly as before. No CHECK, for the reason V228 gives: the writers hold the 0 or 1 to 86400 range and the order of the pair, and a
+    /// hand-edited row is clamped on read. Idempotent: every column is added with IF NOT EXISTS. Table-level grants already cover new columns
+    /// on this table, so no GRANT is added.
+    /// </summary>
+    private const string V230Sql = @"
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS blocking_warn_snapshot_wait_seconds double precision NOT NULL DEFAULT 0;
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS blocking_critical_snapshot_wait_seconds double precision NOT NULL DEFAULT 0;";
 
     /// <summary>
     /// V231 (#7040): the repeat schedule of a mute rule, on <c>config.config_mute_rules</c>. <c>recur_days</c> is a smallint bit mask

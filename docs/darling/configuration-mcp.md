@@ -2,7 +2,7 @@
 
 Audience: operators.
 
-This page covers the `mcp` block of `darling.json`. It moved here from the Darling operator guide. To turn MCP on and connect a client, see [MCP server](../mcp-server.md#darling).
+This page covers the `mcp` block of `darling.json`. It moved here from the Darling operator guide. To turn MCP on and connect a client, see [MCP server](../mcp-server.md#darling). For GitHub Copilot in VS Code, see [GitHub Copilot in VS Code](../mcp-server.md#github-copilot-in-vs-code).
 
 ## mcp
 

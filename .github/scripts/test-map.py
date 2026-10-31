@@ -259,6 +259,13 @@ class Repo:
             for i in range(1, len(parts) + 1):
                 self.dirs.add("/".join(parts[:i]))
         self.memo: dict[tuple[str, bool], list[str]] = {}
+        self.partials: dict[str, list[str]] = {}  # `Dir/Foo.cs` -> the `Dir/Foo.<Area>.cs` files beside it
+        for f in self.tracked:
+            stem = f.rsplit("/", 1)[-1][:-3] if f.endswith(".cs") else ""
+            if "." in stem:
+                main = f.rsplit("/", 1)[0] + "/" + stem.split(".", 1)[0] + ".cs" if "/" in f else stem.split(".", 1)[0] + ".cs"
+                if main in self.tracked_set:
+                    self.partials.setdefault(main, []).append(f)
         self.by_basename: dict[str, list[str]] = {}
         for f in self.tracked:
             self.by_basename.setdefault(f.rsplit("/", 1)[-1], []).append(f)
@@ -292,7 +299,11 @@ class Repo:
         """Patterns for a path-like literal of a test source; empty when it names nothing in the checkout."""
         key = (candidate, reads_text)
         if key not in self.memo:
-            self.memo[key] = self._resolve(candidate, reads_text)
+            hits = self._resolve(candidate, reads_text)
+            # A test that reads `Foo.cs` reads its `Foo.<Area>.cs` partial files too (#7025: RepoFile.ReadRepoFile joins
+            # them), so a change to a partial selects the same classes a change to `Foo.cs` does.
+            more = [p for h in hits for p in self.partials.get(h, ())]
+            self.memo[key] = list(dict.fromkeys(hits + more))
         return self.memo[key]
 
     def _resolve(self, candidate: str, reads_text: bool) -> list[str]:

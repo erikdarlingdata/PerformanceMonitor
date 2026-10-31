@@ -431,7 +431,7 @@ public sealed class QueryStoreWriteFenceNameTests
     [Fact]
     public void TheRunnerNamesItsDatabases_AndTheWorkerHandsTheBackfillTheFence()
     {
-        var runner = File.ReadAllText(Path.Combine(ServiceDirectory(), "DarlingCollectorRunner.cs"));
+        var runner = RepoFile.ReadRepoFile(Path.Combine(ServiceDirectory(), "DarlingCollectorRunner.cs"));
         var worker = File.ReadAllText(Path.Combine(ServiceDirectory(), "DarlingWorker.cs"));
 
         Assert.Contains("_queryStoreWriteFence?.BeginWrite(beginServerId, queryStoreDatabases);", runner, StringComparison.Ordinal);

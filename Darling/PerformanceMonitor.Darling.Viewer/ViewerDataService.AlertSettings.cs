@@ -101,7 +101,9 @@ public sealed partial class ViewerDataService
         /* #6875 (V224): the Identity Capacity alert's switch (off by default) and its two bars, APPENDED for the same reason and under the same gate. */
         "identity_capacity_enabled, identity_capacity_warning_percent, identity_capacity_critical_percent, " +
         /* #6927 (V228): the blocking health band's four tiers, APPENDED for the same reason and under the same connect-time store gate. */
-        "blocking_warn_per_hour, blocking_critical_per_hour, blocking_warn_wait_seconds, blocking_critical_wait_seconds";
+        "blocking_warn_per_hour, blocking_critical_per_hour, blocking_warn_wait_seconds, blocking_critical_wait_seconds, " +
+        /* #7028 (V230): the two snapshot wait tiers, APPENDED under the same connect-time store gate. */
+        "blocking_warn_snapshot_wait_seconds, blocking_critical_snapshot_wait_seconds";
 
     /// <summary>The single global alert-settings row (id=1), for the Settings window prefill + the migrate-in
     /// defaults check. Column order matches <see cref="AlertSettingsColumns"/>.</summary>
@@ -118,7 +120,7 @@ INSERT INTO config_alert_settings (id, " + AlertSettingsColumns + @", modified_a
 VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22,
         $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43,
         $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62,
-        $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81, $82, $83, $84, $85, $86, $87, $88, $89, $90,
+        $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81, $82, $83, $84, $85, $86, $87, $88, $89, $90, $91, $92,
         (now() AT TIME ZONE 'UTC'))
 ON CONFLICT (id) DO UPDATE SET
     enabled = EXCLUDED.enabled,
@@ -211,6 +213,8 @@ ON CONFLICT (id) DO UPDATE SET
     blocking_critical_per_hour = EXCLUDED.blocking_critical_per_hour,
     blocking_warn_wait_seconds = EXCLUDED.blocking_warn_wait_seconds,
     blocking_critical_wait_seconds = EXCLUDED.blocking_critical_wait_seconds,
+    blocking_warn_snapshot_wait_seconds = EXCLUDED.blocking_warn_snapshot_wait_seconds,
+    blocking_critical_snapshot_wait_seconds = EXCLUDED.blocking_critical_snapshot_wait_seconds,
     modified_at = (now() AT TIME ZONE 'UTC')";
 
     /// <summary>The two <c>cpu_mode</c> values the service honors (it compares case-insensitively against
@@ -355,6 +359,8 @@ ON CONFLICT (id) DO UPDATE SET
         command.Parameters.Add(new NpgsqlParameter<double> { TypedValue = r.BlockingCriticalPerHour });     // $88 (#6927, V228)
         command.Parameters.Add(new NpgsqlParameter<double> { TypedValue = r.BlockingWarnWaitSeconds });     // $89 (#6927, V228)
         command.Parameters.Add(new NpgsqlParameter<double> { TypedValue = r.BlockingCriticalWaitSeconds }); // $90 (#6927, V228)
+        command.Parameters.Add(new NpgsqlParameter<double> { TypedValue = r.BlockingWarnSnapshotWaitSeconds });     // $91 (#7028, V230)
+        command.Parameters.Add(new NpgsqlParameter<double> { TypedValue = r.BlockingCriticalSnapshotWaitSeconds }); // $92 (#7028, V230)
     }
 
     private static AlertSettingsRow ReadAlertSettingsRow(NpgsqlDataReader reader) => new()
@@ -473,6 +479,9 @@ ON CONFLICT (id) DO UPDATE SET
         BlockingCriticalPerHour = reader.GetDouble(87),
         BlockingWarnWaitSeconds = reader.GetDouble(88),
         BlockingCriticalWaitSeconds = reader.GetDouble(89),
+        /* #7028 (V230) the two blocking band snapshot wait tiers appended at ordinals 90-91. */
+        BlockingWarnSnapshotWaitSeconds = reader.GetDouble(90),
+        BlockingCriticalSnapshotWaitSeconds = reader.GetDouble(91),
     };
 
     /// <summary>Maps the Settings window's CPU-mode combo tag ("Total"/"SqlOnly") to the store value.</summary>
@@ -635,6 +644,9 @@ public sealed class AlertSettingsRow
     public double BlockingCriticalPerHour { get; set; } = ServerHealthThresholds.BlockingCriticalPerHour;
     public double BlockingWarnWaitSeconds { get; set; } = ServerHealthThresholds.BlockingWarnWaitSeconds;
     public double BlockingCriticalWaitSeconds { get; set; } = ServerHealthThresholds.BlockingCriticalWaitSeconds;
+    /// <summary>#7028 (V230): the snapshot wait tiers of the blocking band, seconds. 0 means the tier is off.</summary>
+    public double BlockingWarnSnapshotWaitSeconds { get; set; }
+    public double BlockingCriticalSnapshotWaitSeconds { get; set; }
     public bool LongRunningQueryEnabled { get; set; } = true;
     public int LongRunningQueryThresholdMinutes { get; set; } = 30;
     public bool TempDbSpaceEnabled { get; set; } = true;
@@ -774,6 +786,8 @@ public sealed class AlertSettingsRow
             && Math.Abs(BlockingCriticalPerHour - other.BlockingCriticalPerHour) < 0.0001
             && Math.Abs(BlockingWarnWaitSeconds - other.BlockingWarnWaitSeconds) < 0.0001
             && Math.Abs(BlockingCriticalWaitSeconds - other.BlockingCriticalWaitSeconds) < 0.0001
+            && Math.Abs(BlockingWarnSnapshotWaitSeconds - other.BlockingWarnSnapshotWaitSeconds) < 0.0001
+            && Math.Abs(BlockingCriticalSnapshotWaitSeconds - other.BlockingCriticalSnapshotWaitSeconds) < 0.0001
             && LongRunningQueryEnabled == other.LongRunningQueryEnabled
             && LongRunningQueryThresholdMinutes == other.LongRunningQueryThresholdMinutes
             && TempDbSpaceEnabled == other.TempDbSpaceEnabled

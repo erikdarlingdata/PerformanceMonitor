@@ -251,10 +251,10 @@ public sealed class ViewerCalendarRetentionPortTests
         /* The viewer reads the aggregate's LAST column for presence, at the ordinal the MCP reader reads. */
         Assert.Contains("SignalSourcesPresent = reader.IsDBNull(13) ? 0 : Convert.ToInt32(reader.GetValue(13)),", viewer, StringComparison.Ordinal);
         Assert.Contains("SignalSourcesPresent = reader.IsDBNull(13) ? 0 : Convert.ToInt32(reader.GetValue(13)),", mcp, StringComparison.Ordinal);
-        /* #5644: blocking_reports (the band's report count) was appended after it, at ordinal 14 and last. */
+        /* #7028: peak_snapshot_wait_ms (the band snapshot arm) sits after it, at ordinal 14 and last. */
         var projection = DailySummarySql.RangeSql.Split("FROM day_spine")[0].TrimEnd();
         Assert.Contains("AS signal_sources_present,", projection, StringComparison.Ordinal);
-        Assert.EndsWith("AS blocking_reports", projection, StringComparison.Ordinal);
+        Assert.EndsWith("AS peak_snapshot_wait_ms", projection, StringComparison.Ordinal);
     }
 
     /// <summary>

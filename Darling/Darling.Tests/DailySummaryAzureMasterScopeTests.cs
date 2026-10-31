@@ -31,20 +31,23 @@ public sealed class DailySummaryAzureMasterScopeTests
     }
 
     [Fact]
-    public void Scope_ChangesOnlyTheDeadlockAndBlockedReportCtes_AndLeavesTheDmvCteByteIdentical()
+    public void Scope_ChangesOnlyTheDeadlockCte_AndTheBlockedReportSource_AndLeavesTheDmvChainByteIdentical()
     {
         var plain = DailySummarySql.RangeSql;
         var scoped = DailySummaryAzureMasterScope.Scope(plain);
 
         Assert.NotEqual(plain, scoped);
         Assert.Equal(Cte(plain, "dmv"), Cte(scoped, "dmv"));
+        Assert.Equal(Cte(plain, "bpr"), Cte(scoped, "bpr"));
         Assert.NotEqual(Cte(plain, "deadlocks"), Cte(scoped, "deadlocks"));
-        Assert.NotEqual(Cte(plain, "bpr"), Cte(scoped, "bpr"));
-
-        /* FILTER, never WHERE: the day spine and the signal-presence count must not move. */
-        Assert.Contains("COUNT(*) FILTER (WHERE", Cte(scoped, "bpr"), StringComparison.Ordinal);
-        Assert.Contains("MAX(wait_time_ms) FILTER (WHERE", Cte(scoped, "bpr"), StringComparison.Ordinal);
         Assert.Contains("COUNT(*) FILTER (WHERE", Cte(scoped, "deadlocks"), StringComparison.Ordinal);
+
+        /* #7028: the keep predicate rides on the blocked-process-report SOURCE, so a sibling's reports never reach the
+           hourly wait chain. The DMV source has no database column and is left alone. */
+        var keep = "(database_name IS NULL OR NOT (lower(database_name) = ANY(SELECT lower(x) FROM unnest($5::text[]) x)))";
+        Assert.Contains(DailySummarySql.BprSourceWhere + " AND " + keep, scoped, StringComparison.Ordinal);
+        Assert.DoesNotContain("unnest($5", plain, StringComparison.Ordinal);
+        Assert.Equal(1, scoped.Split(keep).Length - 1);
     }
 
     [Fact]

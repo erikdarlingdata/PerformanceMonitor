@@ -147,7 +147,9 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE, sql_engine_edition = $3
         Assert.Equal(4, unscoped[0].DeadlockCount);
         Assert.Equal(4, unscoped[0].BlockingEvents);
         Assert.Equal(600_000, unscoped[0].MaxBlockDurationMs);
-        Assert.Equal(2, unscoped[1].BlockingEvents);
+        /* #7028: the source is chosen per hour, so the unscoped day 2 counts its two report waits (hour 12) and its two DMV waits
+           (hour 13, which holds no report). */
+        Assert.Equal(4, unscoped[1].BlockingEvents);
 
         Assert.Equal(2, scoped[0].DeadlockCount);
         Assert.Equal(1, scoped[0].BlockingEvents);
