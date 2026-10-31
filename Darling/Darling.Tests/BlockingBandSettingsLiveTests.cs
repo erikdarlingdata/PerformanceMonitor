@@ -21,7 +21,7 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// The blocking band tiers (#6927, V228) on a real PostgreSQL store: an upgraded store whose settings row already exists keeps
+/// The blocking band tiers (#6927, V228, and the two snapshot wait tiers of #7028, V230) on a real PostgreSQL store: an upgraded store whose settings row already exists keeps
 /// today's defaults and its other values, and the tiers round trip through <c>update_alert_settings</c> and <c>get_alert_settings</c>
 /// with a critical bar below its warn bar refused and nothing written. Each fact mints its own scratch database.
 /// </summary>
@@ -118,6 +118,120 @@ public sealed class BlockingBandSettingsLiveTests
         Assert.Equal((50.0, 100.0, 60.0, 180.0), await ReadTiersAsync(connection, ct));
     }
 
+    [Fact]
+    public async Task AnUpgradedStoreWithASettingsRow_GetsTheTwoSnapshotTiersOff_AndKeepsItsV228Tiers()
+    {
+        var baseConnectionString = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the V230 upgrade test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+
+        await PgMigrations.MigrateAsync(connection, ct);
+        await SeedAsync(scratch.ConnectionString, ct);
+
+        /* Roll the store back to look like V229: the settings row exists with an operator's own V228 tiers, the two columns do not. */
+        await ExecAsync(connection, ct, "UPDATE config.config_alert_settings SET blocking_warn_per_hour = 8.0, blocking_critical_per_hour = 40.0 WHERE id = 1");
+        foreach (var column in new[] { "blocking_warn_snapshot_wait_seconds", "blocking_critical_snapshot_wait_seconds" })
+        {
+            await ExecAsync(connection, ct, "ALTER TABLE config.config_alert_settings DROP COLUMN " + column);
+        }
+
+        await ExecAsync(connection, ct, "DELETE FROM darling_schema_version WHERE version >= 230");
+
+        var applied = await PgMigrations.MigrateAsync(connection, ct);
+        Assert.Equal(PgMigrations.Scripts.Count(m => m.Version >= 230), applied);
+
+        /* Both snapshot tiers are off, the operator's V228 count tiers did not move, and the band reads them. */
+        Assert.Equal((8.0, 40.0, 10.0, 60.0, 0.0, 0.0), await ReadAllSixAsync(connection, ct));
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var band = await BlockingBandStore.ReadAsync(dataSource, 10, ct);
+        Assert.Equal(new BlockingBandThresholds(8, 40, 10, 60), band);
+        Assert.Equal(0.0, band.WarnSnapshotWaitSeconds);
+        Assert.Equal(0.0, band.CriticalSnapshotWaitSeconds);
+
+        /* A re-run is a no-op: the columns are added only when absent, so a second pass leaves a stored value alone. */
+        await ExecAsync(connection, ct, "UPDATE config.config_alert_settings SET blocking_warn_snapshot_wait_seconds = 45.0 WHERE id = 1");
+        await ExecAsync(connection, ct, "DELETE FROM darling_schema_version WHERE version >= 230");
+        await PgMigrations.MigrateAsync(connection, ct);
+        Assert.Equal(45.0, (await ReadAllSixAsync(connection, ct)).Item5);
+    }
+
+    [Fact]
+    public async Task UpdateAlertSettings_SavesTheSnapshotTiers_ZeroTurnsATierOff_AndBadValuesAreRefusedWithNothingWritten()
+    {
+        var baseConnectionString = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the blocking snapshot tier test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await SeedAsync(scratch.ConnectionString, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        /* The seeded row has both tiers off, and the read names the unit of the count tiers. */
+        using (var seeded = JsonDocument.Parse(await DarlingMcpAlertTools.GetAlertSettings(postgres)))
+        {
+            var bands = seeded.RootElement.GetProperty("health_bands");
+            Assert.Equal(0.0, bands.GetProperty("blocking_warn_snapshot_wait_seconds").GetDouble());
+            Assert.Equal(0.0, bands.GetProperty("blocking_critical_snapshot_wait_seconds").GetDouble());
+            Assert.Equal("waits_per_hour", bands.GetProperty("blocking_band_unit").GetString());
+        }
+
+        /* A valid pair saves, and the read and the band carry it. */
+        Assert.Equal("updated", DarlingMcpTestData.StatusOf(await DarlingMcpAlertTools.UpdateAlertSettings(postgres,
+            "{\"health_bands\":{\"blocking_warn_snapshot_wait_seconds\":30,\"blocking_critical_snapshot_wait_seconds\":120}}")));
+        Assert.Equal((5.0, 20.0, 10.0, 60.0, 30.0, 120.0), await ReadAllSixAsync(connection, ct));
+        using (var saved = JsonDocument.Parse(await DarlingMcpAlertTools.GetAlertSettings(postgres)))
+        {
+            var bands = saved.RootElement.GetProperty("health_bands");
+            Assert.Equal(30.0, bands.GetProperty("blocking_warn_snapshot_wait_seconds").GetDouble());
+            Assert.Equal(120.0, bands.GetProperty("blocking_critical_snapshot_wait_seconds").GetDouble());
+        }
+
+        var band = await BlockingBandStore.ReadAsync(postgres, 10, ct);
+        Assert.Equal(30.0, band.WarnSnapshotWaitSeconds);
+        Assert.Equal(120.0, band.CriticalSnapshotWaitSeconds);
+
+        /* Critical below warn is refused when both are above 0, in one body and as a lone value against the stored other one. */
+        foreach (var body in new[]
+        {
+            "{\"health_bands\":{\"blocking_warn_snapshot_wait_seconds\":200,\"blocking_critical_snapshot_wait_seconds\":100}}",
+            "{\"health_bands\":{\"blocking_critical_snapshot_wait_seconds\":10}}",
+            "{\"health_bands\":{\"blocking_warn_snapshot_wait_seconds\":500}}",
+        })
+        {
+            Assert.Equal("invalid", DarlingMcpTestData.StatusOf(await DarlingMcpAlertTools.UpdateAlertSettings(postgres, body)));
+            Assert.Equal((5.0, 20.0, 10.0, 60.0, 30.0, 120.0), await ReadAllSixAsync(connection, ct));
+        }
+
+        /* Out of range is refused: below the floor but not 0 (the band would clamp it up, so it would not stick), negative, and past the ceiling. */
+        foreach (var bad in new[] { "0.5", "-1", "86401", "\"30\"", "null" })
+        {
+            Assert.Equal("invalid", DarlingMcpTestData.StatusOf(await DarlingMcpAlertTools.UpdateAlertSettings(postgres,
+                "{\"health_bands\":{\"blocking_warn_snapshot_wait_seconds\":" + bad + "}}")));
+            Assert.Equal((5.0, 20.0, 10.0, 60.0, 30.0, 120.0), await ReadAllSixAsync(connection, ct));
+        }
+
+        /* 0 turns a tier off. Critical off under a warn that is on is accepted, and so is warn off under a critical that is on. */
+        Assert.Equal("updated", DarlingMcpTestData.StatusOf(await DarlingMcpAlertTools.UpdateAlertSettings(postgres,
+            "{\"health_bands\":{\"blocking_critical_snapshot_wait_seconds\":0}}")));
+        Assert.Equal((5.0, 20.0, 10.0, 60.0, 30.0, 0.0), await ReadAllSixAsync(connection, ct));
+        Assert.Equal("updated", DarlingMcpTestData.StatusOf(await DarlingMcpAlertTools.UpdateAlertSettings(postgres,
+            "{\"health_bands\":{\"blocking_warn_snapshot_wait_seconds\":0,\"blocking_critical_snapshot_wait_seconds\":15}}")));
+        Assert.Equal((5.0, 20.0, 10.0, 60.0, 0.0, 15.0), await ReadAllSixAsync(connection, ct));
+
+        /* The read-only unit label comes home from a round trip without being refused. */
+        Assert.Equal("updated", DarlingMcpTestData.StatusOf(await DarlingMcpAlertTools.UpdateAlertSettings(postgres,
+            "{\"health_bands\":{\"blocking_band_unit\":\"waits_per_hour\",\"blocking_warn_per_hour\":6}}")));
+        Assert.Equal((6.0, 20.0, 10.0, 60.0, 0.0, 15.0), await ReadAllSixAsync(connection, ct));
+    }
+
     private static void AssertBands(string settings, double warnPerHour, double criticalPerHour, double warnWait, double criticalWait)
     {
         Assert.False(McpHelpers.IsErrorEnvelope(settings), settings);
@@ -135,6 +249,17 @@ public sealed class BlockingBandSettingsLiveTests
         using var reader = await command.ExecuteReaderAsync(ct);
         Assert.True(await reader.ReadAsync(ct), "config_alert_settings has no singleton row");
         return (reader.GetDouble(0), reader.GetDouble(1), reader.GetDouble(2), reader.GetDouble(3));
+    }
+
+    private static async Task<(double WarnPerHour, double CriticalPerHour, double WarnWait, double CriticalWait, double WarnSnapshot, double CriticalSnapshot)> ReadAllSixAsync(
+        NpgsqlConnection connection, CancellationToken ct)
+    {
+        using var command = new NpgsqlCommand(
+            "SELECT blocking_warn_per_hour, blocking_critical_per_hour, blocking_warn_wait_seconds, blocking_critical_wait_seconds, "
+            + "blocking_warn_snapshot_wait_seconds, blocking_critical_snapshot_wait_seconds FROM config_alert_settings WHERE id = 1", connection);
+        using var reader = await command.ExecuteReaderAsync(ct);
+        Assert.True(await reader.ReadAsync(ct), "config_alert_settings has no singleton row");
+        return (reader.GetDouble(0), reader.GetDouble(1), reader.GetDouble(2), reader.GetDouble(3), reader.GetDouble(4), reader.GetDouble(5));
     }
 
     private static async Task ExecAsync(NpgsqlConnection connection, CancellationToken ct, string sql)

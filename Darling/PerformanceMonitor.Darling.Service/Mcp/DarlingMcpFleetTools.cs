@@ -51,6 +51,10 @@ public sealed class DarlingMcpFleetTools
         "plus a rollup — counts by band, cross-server blocking and deadlock totals, and a worst-first 'needs " +
         "attention' ranking. Use this first to decide which server to drill into, then call the per-server tools. " +
         "This cross-server view is unique to the central store. " +
+        "Blocking counts are blocked waits, chosen hour by hour between blocked-process reports and DMV snapshots; " +
+        "max_snapshot_wait_ms is the largest total blocked wait of one DMV snapshot after the Blocking Wait Time " +
+        "alert's consecutive-snapshot gate (null when the window holds no snapshot), banded only when the snapshot " +
+        "tiers in get_alert_settings are above 0. " +
         "cpu_source names which collector produced each card's total_cpu_percent, so a missing number is never " +
         "ambiguous: RingBuffer (SQL Server, and the only arm that also fills cpu_percent / " +
         "other_process_cpu_percent with the per-process split), PerformanceInsights (an Aurora PostgreSQL " +
@@ -70,7 +74,7 @@ public sealed class DarlingMcpFleetTools
         "from that counter (deadlock_coverage.postgres_servers is a sub-count of servers_read, not a gap), " +
         "and get_pg_deadlocks has the parsed deadlock reports themselves. Its blocking_severity stays " +
         "Unknown on purpose: PostgreSQL blocking is a once-a-minute SAMPLE of pg_stat_activity, and the " +
-        "blocking band's count tiers were measured in engine-recorded reports per hour, so a sighting count " +
+        "blocking band's count tiers count engine-recorded blocked waits per hour (the unit blocking.count_threshold uses), so a sighting count " +
         "through them would band on a denominator they were never measured against — the PostgreSQL " +
         "Blocking alert speaks for that condition until a sampled-shape band is measured. " +
         "collection_health_age_seconds says how old the COLLECTOR-HEALTH half of the payload is: the per-card " +

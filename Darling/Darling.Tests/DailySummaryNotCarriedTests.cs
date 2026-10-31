@@ -124,7 +124,9 @@ public sealed class DailySummaryNotCarriedTests
                 "probe one sits inside the fenced candidate-day subquery and probe two filters its output");
 
             /* The three members, in order: rollup half, raw tail, not-carried. */
-            Assert.Equal(2, sql.Split("UNION ALL").Length - 1);
+            /* Counted inside the queries CTE only: the blocking waits chain (BlockingWaits.HourlyChosenWaitsSql) holds its own UNION ALL. */
+            var queriesAt = sql.IndexOf("queries AS (", StringComparison.Ordinal);
+            Assert.Equal(2, sql[queriesAt..sql.IndexOf("SELECT b.d, NULL::bigint AS c", StringComparison.Ordinal)].Split("UNION ALL").Length - 1);
             var rollupAt = sql.IndexOf("SELECT DISTINCT date_trunc('day', bucket) AS d, query_hash", StringComparison.Ordinal);
             var rawAt = sql.IndexOf("FROM v_query_stats", StringComparison.Ordinal);
             var notCarriedAt = sql.IndexOf("SELECT b.d, NULL::bigint AS c", StringComparison.Ordinal);
