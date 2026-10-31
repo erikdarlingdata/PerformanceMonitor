@@ -580,7 +580,7 @@ public sealed class FleetSweepEngineTests
             .WouldHavePaged.Single(w => w.AlertFamily == FleetSweepEngine.FamilyBlocking);
         using (var evidence = JsonDocument.Parse(rateRow.EvidenceJson))
         {
-            Assert.Equal("blocking events per hour over the sweep span", evidence.RootElement.GetProperty("trigger").GetString());
+            Assert.Equal("blocking waits per hour over the sweep span", evidence.RootElement.GetProperty("trigger").GetString());
             Assert.Equal(20.0, evidence.RootElement.GetProperty("value").GetDouble());
             Assert.Equal(ServerHealthThresholds.BlockingCriticalPerHour, evidence.RootElement.GetProperty("threshold").GetDouble());
             Assert.Equal(20, evidence.RootElement.GetProperty("blocking_count").GetInt64());
