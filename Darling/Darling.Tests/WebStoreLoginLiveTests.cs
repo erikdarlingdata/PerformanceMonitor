@@ -137,6 +137,82 @@ public sealed class WebStoreLoginLiveTests
         }
     }
 
+    /// <summary>The batch takes large-object creation and the session advisory lock functions away from every role by default, so a
+    /// read-only seat cannot store data in the database through <c>lo_from_bytea</c> or hold the migration lock open. The logins that take
+    /// a session lock (<c>admin</c> and <c>mcp</c>, through the agent-change undo) keep it, and the transaction-level locks the store's own
+    /// functions use stay open to everyone.</summary>
+    [Fact]
+    public async Task AfterTheBatch_ViewerCannotCreateLargeObjects_OrHoldASessionLock_ButAdminAndMcpCan()
+    {
+        const long MigrationLockKey = 0x4441524C_494E47; /* PgMigrations.MigrationLockKey, "DARLING" */
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), "Set DARLING_TEST_PG to run the web store login live tests.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString!, ct);
+
+        await using (var owner = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await owner.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(owner, ct);
+            Assert.SkipWhen(
+                await ScalarAsync<bool>(owner, "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'web', 'mcp'))", ct),
+                "A cluster-wide admin/viewer/web/mcp role already exists on this rig; the managed provisioning batch would adopt it.");
+        }
+
+        var webPassword = DarlingManagedPostgres.GeneratePassword();
+        var bodySucceeded = false;
+        try
+        {
+            await using (var owner = new NpgsqlConnection(scratch.ConnectionString))
+            {
+                await owner.OpenAsync(ct);
+                var target = ProvisioningTarget.ComposeStore(OwnerRoleOf(owner), scratch.DatabaseName);
+                await ExecAsync(owner, DarlingManagedRoles.BuildProvisioningSql(
+                    ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp,
+                    15, PasswordReassert.All, target, ScramSha256Verifier.Create(webPassword)), ct);
+            }
+
+            foreach (var (role, password) in new[] { ("viewer", ProvisioningTestSecrets.ViewerPassword), ("web", webPassword) })
+            {
+                await using var connection = new NpgsqlConnection(LoginString(scratch.ConnectionString, role, password));
+                await connection.OpenAsync(ct);
+                foreach (var sql in new[]
+                {
+                    "SELECT lo_from_bytea(0, 'x'::bytea)",
+                    "SELECT lo_create(0)",
+                    "SELECT lo_creat(-1)",
+                    $"SELECT pg_advisory_lock({MigrationLockKey})",
+                    $"SELECT pg_try_advisory_lock({MigrationLockKey})",
+                    $"SELECT pg_advisory_lock_shared({MigrationLockKey})",
+                    "SELECT pg_advisory_lock(1, 2)",
+                })
+                {
+                    Assert.Equal("42501", (await Assert.ThrowsAsync<PostgresException>(() => ExecAsync(connection, sql, ct))).SqlState);
+                }
+
+                /* The transaction-level forms the store's own functions and the stores take are still open to it. */
+                await ExecAsync(connection, $"BEGIN; SELECT pg_advisory_xact_lock({MigrationLockKey}); SELECT pg_try_advisory_xact_lock(1, 2); COMMIT", ct);
+            }
+
+            foreach (var (role, password) in new[] { ("admin", ProvisioningTestSecrets.AdminPassword), ("mcp", ProvisioningTestSecrets.McpPassword) })
+            {
+                await using var connection = new NpgsqlConnection(LoginString(scratch.ConnectionString, role, password));
+                await connection.OpenAsync(ct);
+                await ExecAsync(connection, $"SELECT pg_advisory_lock({MigrationLockKey}); SELECT pg_advisory_unlock({MigrationLockKey})", ct);
+                Assert.True(await ScalarAsync<bool>(connection, $"SELECT pg_try_advisory_lock({MigrationLockKey})", ct));
+                await ExecAsync(connection, $"SELECT pg_advisory_unlock({MigrationLockKey})", ct);
+            }
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+                await ExecAsync(cleanup,
+                    "DROP OWNED BY admin, viewer, web, mcp; DROP ROLE IF EXISTS admin; DROP ROLE IF EXISTS viewer; DROP ROLE IF EXISTS web; DROP ROLE IF EXISTS mcp", cleanupCt));
+        }
+    }
+
     [Fact]
     public void TheBatch_NamesNoPgHbaLineForWeb_AndTheNetworkRoleFieldRefusesIt()
     {

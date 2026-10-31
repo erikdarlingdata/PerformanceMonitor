@@ -1478,6 +1478,20 @@ REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 {publicDatabaseRevoke}
 GRANT CONNECT ON DATABASE {database} TO {admin}, {viewer}, {web};
 
+-- 5b. Built-in functions every role can run by default, taken from PUBLIC (this batch runs as a superuser, which owns them).
+--     Large objects: lo_create, lo_creat and lo_from_bytea store data in the store database whatever a role's table grants are,
+--     and the service uses none. Session advisory locks: a session lock on the migration key, held open, makes the next upgrade
+--     wait out its budget and stop, so the session forms go to the logins that take one (admin and mcp through the agent-change
+--     undo; the superuser needs no grant). The transaction forms the store's own functions use are not touched, and neither are the unlock
+--     forms (a session can only release its own locks).
+REVOKE EXECUTE ON FUNCTION pg_catalog.lo_create(oid), pg_catalog.lo_creat(integer), pg_catalog.lo_from_bytea(oid, bytea) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pg_catalog.pg_advisory_lock(bigint), pg_catalog.pg_advisory_lock(integer, integer),
+   pg_catalog.pg_try_advisory_lock(bigint), pg_catalog.pg_try_advisory_lock(integer, integer),
+   pg_catalog.pg_advisory_lock_shared(bigint), pg_catalog.pg_advisory_lock_shared(integer, integer),
+   pg_catalog.pg_try_advisory_lock_shared(bigint), pg_catalog.pg_try_advisory_lock_shared(integer, integer) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION pg_catalog.pg_advisory_lock(bigint), pg_catalog.pg_advisory_lock(integer, integer),
+   pg_catalog.pg_try_advisory_lock(bigint), pg_catalog.pg_try_advisory_lock(integer, integer) TO {admin}, {mcp};
+
 -- 6. The mcp role (darling-network-endpoints, D3-role): the ONLY credential reachable (via the bearer
 --    token) from the optional network MCP surface, so it is deliberately NOT admin. It gets viewer's exact
 --    READ surface (SELECT on collect + config-minus-secret-columns) as SEPARATE 'TO mcp' statements -- the

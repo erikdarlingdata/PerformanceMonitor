@@ -68,7 +68,18 @@ public sealed class WebStoreRefusalAndComposePoolTests
         var (status, body) = await SendAsync(method, "/api/store-refusal", managedStore);
 
         Assert.Equal(StatusCodes.Status403Forbidden, status);
-        Assert.Equal(DarlingWebStoreWrites.Refused("make this change", managedStore), System.Text.Json.JsonDocument.Parse(body).RootElement.GetProperty("error").GetString());
+        var error = System.Text.Json.JsonDocument.Parse(body).RootElement.GetProperty("error").GetString();
+        Assert.Equal(DarlingWebStoreWrites.Refused("make this change", managedStore, webLoginWrite: true), error);
+        if (managedStore)
+        {
+            Assert.Contains("lists only", error, StringComparison.Ordinal);
+        }
+        else
+        {
+            // A store you bring: the sentence names the web role, never the admin login.
+            Assert.Contains("postgres.webConnectionString at the web role", error, StringComparison.Ordinal);
+            Assert.DoesNotContain("admin", error, StringComparison.OrdinalIgnoreCase);
+        }
         Assert.DoesNotContain("42501", body, StringComparison.Ordinal);
     }
 

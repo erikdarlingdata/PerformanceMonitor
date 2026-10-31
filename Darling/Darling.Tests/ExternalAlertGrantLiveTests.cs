@@ -857,7 +857,8 @@ SET search_path = pg_temp, config, public", ct);
                 .Replace("ON DATABASE darling", $"ON DATABASE \"{scratch.DatabaseName}\"", StringComparison.Ordinal)
                 .Replace("CHANGE_ME_ADMIN_PASSWORD", "ScriptAdmin5654", StringComparison.Ordinal)
                 .Replace("CHANGE_ME_VIEWER_PASSWORD", "ScriptViewer5654", StringComparison.Ordinal)
-                .Replace("CHANGE_ME_MCP_PASSWORD", "ScriptMcp5654", StringComparison.Ordinal);
+                .Replace("CHANGE_ME_MCP_PASSWORD", "ScriptMcp5654", StringComparison.Ordinal)
+                .Replace("CHANGE_ME_WEB_PASSWORD", "ScriptWeb6991", StringComparison.Ordinal);
             await ExecAsync(owner, script, ct);
 
             Assert.Equal(5, await ScalarAsync<int>(owner, $"SELECT rolconnlimit FROM pg_roles WHERE rolname = '{RoleA}'", ct));
@@ -964,7 +965,8 @@ SET search_path = pg_temp, config, public", ct);
                 .Replace("ON DATABASE darling", $"ON DATABASE \"{scratch.DatabaseName}\"", StringComparison.Ordinal)
                 .Replace("CHANGE_ME_ADMIN_PASSWORD", "ScriptAdmin5654", StringComparison.Ordinal)
                 .Replace("CHANGE_ME_VIEWER_PASSWORD", "ScriptViewer5654", StringComparison.Ordinal)
-                .Replace("CHANGE_ME_MCP_PASSWORD", "ScriptMcp5654", StringComparison.Ordinal);
+                .Replace("CHANGE_ME_MCP_PASSWORD", "ScriptMcp5654", StringComparison.Ordinal)
+                .Replace("CHANGE_ME_WEB_PASSWORD", "ScriptWeb6991", StringComparison.Ordinal);
             await ExecAsync(owner, script, ct);
 
             foreach (var function in new[]
@@ -1021,7 +1023,8 @@ SET search_path = pg_temp, config, public", ct);
                 .Replace("ON DATABASE darling", $"ON DATABASE \"{scratch.DatabaseName}\"", StringComparison.Ordinal)
                 .Replace("CHANGE_ME_ADMIN_PASSWORD", "ScriptAdmin5654", StringComparison.Ordinal)
                 .Replace("CHANGE_ME_VIEWER_PASSWORD", "ScriptViewer5654", StringComparison.Ordinal)
-                .Replace("CHANGE_ME_MCP_PASSWORD", "ScriptMcp5654", StringComparison.Ordinal);
+                .Replace("CHANGE_ME_MCP_PASSWORD", "ScriptMcp5654", StringComparison.Ordinal)
+                .Replace("CHANGE_ME_WEB_PASSWORD", "ScriptWeb6991", StringComparison.Ordinal);
             await ExecAsync(owner, script, ct);
 
             await using (var viewer = await LoginAsync(scratch, "viewer", "ScriptViewer5654", ct))

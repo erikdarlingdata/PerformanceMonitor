@@ -71,6 +71,10 @@ internal static class DarlingStoreLogins
         /// roles.</summary>
         ComposeStoreRoleFromEarlierStart,
 
+        /// <summary>The web host on the <c>viewer</c> credential an earlier start gave that role, because this start did
+        /// not provision the roles and no <c>web</c> credential exists yet: reads work, every write is refused.</summary>
+        ComposeStoreViewerFromEarlierStart,
+
         /// <summary><c>postgres.connectionString</c>: the owner.</summary>
         Owner,
     }
@@ -394,12 +398,17 @@ internal static class DarlingStoreLogins
         }
 
         EarlierComposeCredential? earlier = null;
+        EarlierComposeCredential? earlierViewer = null;
         if (configured is null && inContainer && verdict is { Provisioned: false, CredentialDirectory: { } directory })
         {
             earlier = DarlingManagedRoles.ReadEarlierComposeCredential(directory, ComposeRole(surface), logger);
+            if (surface == Surface.Web && earlier.Password is null)
+            {
+                earlierViewer = DarlingManagedRoles.ReadEarlierComposeCredential(directory, DarlingManagedPostgres.ViewerRoleName, logger);
+            }
         }
 
-        var login = Resolve(surface, postgres.ConnectionString, configured, inContainer, verdict, earlier);
+        var login = Resolve(surface, postgres.ConnectionString, configured, inContainer, verdict, earlier, earlierViewer);
         if (surface == Surface.Mcp)
         {
             RecordMcpLoginSource(login.Source);
@@ -410,8 +419,11 @@ internal static class DarlingStoreLogins
             WarnOnce(surface, warning, logger);
         }
 
-        if (login.Source == LoginSource.ComposeStoreRoleFromEarlierStart
-            && !await AcceptsLoginAsync(login.ConnectionString, what, ComposeRole(surface), logger, cancellationToken))
+        if (login.Source is LoginSource.ComposeStoreRoleFromEarlierStart or LoginSource.ComposeStoreViewerFromEarlierStart
+            && !await AcceptsLoginAsync(
+                login.ConnectionString, what,
+                login.Source == LoginSource.ComposeStoreViewerFromEarlierStart ? DarlingManagedPostgres.ViewerRoleName : ComposeRole(surface),
+                logger, cancellationToken))
         {
             return null;
         }
@@ -427,7 +439,7 @@ internal static class DarlingStoreLogins
     /// </summary>
     internal static StoreLogin Resolve(
         Surface surface, string ownerConnectionString, string? configuredConnectionString, bool inContainer,
-        ComposeStoreVerdict? verdict, EarlierComposeCredential? earlier = null)
+        ComposeStoreVerdict? verdict, EarlierComposeCredential? earlier = null, EarlierComposeCredential? earlierViewer = null)
     {
         if (!string.IsNullOrWhiteSpace(configuredConnectionString))
         {
@@ -450,12 +462,27 @@ internal static class DarlingStoreLogins
                     LoginSource.ComposeStoreRoleFromEarlierStart,
                     EarlierCredentialWarning(surface, verdict.NotProvisionedReason));
             }
+
+            /* The web host with no web credential yet: the viewer login an earlier start gave that role comes before
+               the owner, the way the managed path falls back. Reads work; the store refuses every write, which the web
+               answers as a refused change. The owner stays the last resort, where dev used it. */
+            if (surface == Surface.Web && earlierViewer?.Password is { } viewerPassword)
+            {
+                return new StoreLogin(
+                    BuildComposeStoreRoleConnectionString(ownerConnectionString, DarlingManagedPostgres.ViewerRoleName, viewerPassword),
+                    LoginSource.ComposeStoreViewerFromEarlierStart,
+                    EarlierViewerWarning(verdict.NotProvisionedReason));
+            }
         }
 
         var reason = inContainer ? verdict?.NotProvisionedReason : null;
         if (reason is not null && earlier?.MissingReason is { } missing)
         {
             reason += $" No {ComposeRole(surface)} credential from an earlier start can stand in: {missing}.";
+            if (surface == Surface.Web && earlierViewer?.MissingReason is { } viewerMissing)
+            {
+                reason += $" No viewer credential from an earlier start can stand in either: {viewerMissing}.";
+            }
         }
 
         return new StoreLogin(ownerConnectionString, LoginSource.Owner, OwnerFallbackWarning(surface, reason));
@@ -483,6 +510,24 @@ internal static class DarlingStoreLogins
         return warning
             + $" If the store refuses that login (the {role} role was dropped, or its password changed by hand), {char.ToLowerInvariant(what[0])}{what[1..]} "
             + "stays down with the store's error until a start provisions the roles again; it never falls back to the owner login.";
+    }
+
+    /// <summary>The startup warning for the web host on the read-only viewer login an earlier start provisioned: the store's
+    /// roles were not provisioned this start (<paramref name="reason"/> says why) and no web credential exists, so the
+    /// pages read but every change is refused until the web role exists.</summary>
+    internal static string EarlierViewerWarning(string? reason)
+    {
+        var warning =
+            "The web dashboard connects to the store as the read-only viewer role with the credential an earlier start provisioned, not as the owner: "
+            + "the store's least-privilege roles were not provisioned this start and no web credential exists yet.";
+        if (reason is not null)
+        {
+            warning += " " + reason;
+        }
+
+        return warning
+            + " Pages read, and every change (mute rules, dismissals, custom alerts, server edits) is refused until a start provisions the web role. "
+            + "If the store refuses the viewer login, the web dashboard stays down with the store's error; it never falls back to the owner login.";
     }
 
     /// <summary>

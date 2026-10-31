@@ -543,7 +543,8 @@ public sealed class ComposeStoreRolesLiveTests
             var script = WithoutPsqlMetaCommands(File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", "provision-roles.sql")))
                 .Replace("CHANGE_ME_ADMIN_PASSWORD", "ScriptAdmin3914", StringComparison.Ordinal)
                 .Replace("CHANGE_ME_VIEWER_PASSWORD", "ScriptViewer3914", StringComparison.Ordinal)
-                .Replace("CHANGE_ME_MCP_PASSWORD", "ScriptMcp3914", StringComparison.Ordinal);
+                .Replace("CHANGE_ME_MCP_PASSWORD", "ScriptMcp3914", StringComparison.Ordinal)
+                .Replace("CHANGE_ME_WEB_PASSWORD", "ScriptWeb6991", StringComparison.Ordinal);
             await ExecAsync(owner, script, ct);
 
             /* The two settings through the host's own entry: a literal for the web dashboard, a file: reference for
@@ -644,6 +645,68 @@ public sealed class ComposeStoreRolesLiveTests
     }
 
     /// <summary>
+    /// A password placeholder left unchanged stops the script before any password is set, whichever of the four it is,
+    /// and the stop holds under psql (exit 3) and under the runner these tests use (the meta-command lines dropped, so
+    /// the check is plain SQL). The case that matters: a routine written before the web role existed fills in the admin,
+    /// viewer and mcp placeholders only, which used to leave <c>web</c> with the placeholder text as its password. After
+    /// the stops no role holds a password; with all four filled in the script runs and <c>web</c> logs in.
+    /// </summary>
+    [Fact]
+    public async Task TheBringYourOwnScript_StopsBeforeAnyPassword_WhileAPasswordPlaceholderIsUnchanged_Gated()
+    {
+        var runtimeRoot = RequireRuntime();
+        var root = Directory.CreateTempSubdirectory("darling-6991-placeholder-");
+        var cluster = new DarlingManagedPostgres(
+            new PostgresConfig { Managed = true, Port = DarlingManagedPostgresTests.FindFreeTcpPort(), DataDirectory = Path.Combine(root.FullName, "pg") },
+            NullLogger.Instance, runtimeRoot);
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(10));
+            var ct = timeout.Token;
+            var owner = await BootMigratedAsync(cluster, ct);
+            const string PasswordCountSql =
+                "SELECT count(*) FROM pg_catalog.pg_authid WHERE rolname IN ('admin', 'viewer', 'web', 'mcp') AND rolpassword IS NOT NULL";
+
+            /* The old routine: three placeholders replaced, the web one left, by psql. */
+            var oldRoutine = File.ReadAllText(ShippedScriptPath())
+                .Replace("CHANGE_ME_ADMIN_PASSWORD", "OldAdmin6991", StringComparison.Ordinal)
+                .Replace("CHANGE_ME_VIEWER_PASSWORD", "OldViewer6991", StringComparison.Ordinal)
+                .Replace("CHANGE_ME_MCP_PASSWORD", "OldMcp6991", StringComparison.Ordinal);
+            var oldPath = Path.Combine(root.FullName, "old-routine.sql");
+            File.WriteAllText(oldPath, oldRoutine);
+            var run = await RunPsqlScriptAsync(runtimeRoot, owner, database: null, oldPath, ct);
+            Assert.True(run.ExitCode == 3, $"psql exited {run.ExitCode}, not 3.{Environment.NewLine}{run.Error}");
+            Assert.Contains("The password for role web is still the CHANGE_ME placeholder", run.Error, StringComparison.Ordinal);
+            Assert.Equal(0L, await OwnerScalarAsync<long>(owner, PasswordCountSql, ct));
+
+            /* Each of the four, under the runner the other tests use. */
+            foreach (var unchanged in new[] { "admin", "viewer", "web", "mcp" })
+            {
+                var text = WithoutPsqlMetaCommands(File.ReadAllText(ShippedScriptPath()));
+                foreach (var role in new[] { "admin", "viewer", "web", "mcp" }.Where(role => role != unchanged))
+                {
+                    text = text.Replace($"CHANGE_ME_{role.ToUpperInvariant()}_PASSWORD", "Filled6991", StringComparison.Ordinal);
+                }
+
+                var error = await Assert.ThrowsAsync<PostgresException>(() => ExecAsync(owner, text, ct));
+                Assert.Contains($"The password for role {unchanged} is still the CHANGE_ME placeholder", error.MessageText, StringComparison.Ordinal);
+                Assert.Equal(0L, await OwnerScalarAsync<long>(owner, PasswordCountSql, ct));
+            }
+
+            /* All four filled in: the script runs and web has its password. */
+            var filled = await RunFilledScriptAsync(runtimeRoot, root.FullName, owner, null, new[] { "OkAdmin6991", "OkViewer6991", "OkMcp6991" }, ct);
+            Assert.True(filled.ExitCode == 0, $"psql exited {filled.ExitCode}, not 0.{Environment.NewLine}{filled.Error}");
+            Assert.Equal("web", await CurrentUserAsync(Login(owner, "web", "ScriptWeb6991"), ct));
+        }
+        finally
+        {
+            DarlingStoreLogins.ResetComposeStoreVerdictForTests();
+            await cluster.StopIfStartedByThisProcessAsync();
+            DarlingManagedPostgresTests.TryDeleteRecursive(root.FullName);
+        }
+    }
+
+    /// <summary>
     /// The caller's own <c>ON_ERROR_STOP</c> survives the guard (#4746). Run against the cluster's <c>postgres</c>
     /// database, which has no store schema, the script's grants fail one after another. Left alone, psql goes on
     /// through them and exits 0. Started with <c>-v ON_ERROR_STOP=1</c>, it must stop at the first one and exit 3:
@@ -663,13 +726,13 @@ public sealed class ComposeStoreRolesLiveTests
             var ct = timeout.Token;
             var owner = await BootMigratedAsync(cluster, ct);
 
-            var goesOn = await RunPsqlScriptAsync(runtimeRoot, owner, "postgres", ShippedScriptPath(), ct);
+            var goesOn = await RunFilledScriptAsync(runtimeRoot, root.FullName, owner, "postgres", new[] { "OnA6991", "OnV6991", "OnM6991" }, ct);
             Assert.True(goesOn.ExitCode == 0,
                 $"psql exited {goesOn.ExitCode} on a run that asked for no stop: the script's own errors are meant to be carried on past.{Environment.NewLine}{goesOn.Error}");
             Assert.Contains("ERROR:", goesOn.Error, StringComparison.Ordinal);
             Assert.True(await RoleExistsAsync(owner, "viewer", ct), "the first run did not get through the guard and create the roles.");
 
-            var stops = await RunPsqlScriptAsync(runtimeRoot, owner, "postgres", ShippedScriptPath(), ct, "-v", "ON_ERROR_STOP=1");
+            var stops = await RunFilledScriptAsync(runtimeRoot, root.FullName, owner, "postgres", new[] { "StA6991", "StV6991", "StM6991" }, ct, "-v", "ON_ERROR_STOP=1");
             Assert.True(stops.ExitCode == 3,
                 $"psql exited {stops.ExitCode}, not 3, with -v ON_ERROR_STOP=1: the script switched the caller's stop off.{Environment.NewLine}{stops.Error}");
         }
@@ -1286,7 +1349,8 @@ public sealed class ComposeStoreRolesLiveTests
         var script = File.ReadAllText(ShippedScriptPath())
             .Replace("CHANGE_ME_ADMIN_PASSWORD", passwords[0], StringComparison.Ordinal)
             .Replace("CHANGE_ME_VIEWER_PASSWORD", passwords[1], StringComparison.Ordinal)
-            .Replace("CHANGE_ME_MCP_PASSWORD", passwords[2], StringComparison.Ordinal);
+            .Replace("CHANGE_ME_MCP_PASSWORD", passwords[2], StringComparison.Ordinal)
+            .Replace("CHANGE_ME_WEB_PASSWORD", "ScriptWeb6991", StringComparison.Ordinal);
         var path = Path.Combine(directory, $"provision-{Guid.NewGuid():N}.sql");
         File.WriteAllText(path, script);
         return await RunPsqlScriptAsync(runtimeRoot, login, database, path, ct, extraArguments);

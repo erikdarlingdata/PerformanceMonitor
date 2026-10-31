@@ -105,7 +105,7 @@ internal static class DarlingWebFailureLog
     {
         if (s_requestReported.Value is { IsWrite: true } box && sentence is not null && s_sentencePermissionToken.IsMatch(sentence))
         {
-            message = DarlingWebStoreWrites.Refused("make this change", box.ManagedStore);
+            message = DarlingWebStoreWrites.Refused("make this change", box.ManagedStore, webLoginWrite: true);
             return true;
         }
 

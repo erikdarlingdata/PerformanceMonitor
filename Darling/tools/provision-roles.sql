@@ -50,7 +50,7 @@
 --
 -- MOVING AN EXISTING STORE TO THE web ROLE. A store this script set up before the web role existed has no web role, and
 -- its viewer role still holds the web dashboard's writes. Until you act, the web dashboard keeps working on the login its
--- webConnectionString names. To move it: (1) replace CHANGE_ME_WEB_PASSWORD below with the web password you choose, (2) run
+-- webConnectionString names. To move it: (1) replace every CHANGE_ME_WEB_PASSWORD below with the web password you choose (and the other three placeholders, as before: the script stops, before it sets any password, while any of the four is unchanged), (2) run
 -- this script again, which creates web and takes the writes away from viewer, and (3) set postgres.webConnectionString to the
 -- web login and restart the service. Do steps 2 and 3 together: between them a web dashboard still on viewer reads fine
 -- and its writes are refused. Until step 3, the service warns at startup that the web connection string names viewer.
@@ -70,7 +70,11 @@
 --
 -- BEFORE RUNNING:
 --   1. Replace CHANGE_ME_ADMIN_PASSWORD, CHANGE_ME_VIEWER_PASSWORD, CHANGE_ME_WEB_PASSWORD and CHANGE_ME_MCP_PASSWORD with strong
---      passwords. Better, keep the passwords out of every statement (#3910): replace each literal with a
+--      passwords, every occurrence of each (a find-and-replace does it; each is in a check and in its ALTER ROLE line). The
+--      script stops with an error, before any password is set, when any of the four is unchanged: a routine written before
+--      the web role existed replaces only the admin, viewer and mcp placeholders, and the web one makes it stop instead of
+--      setting the web password to the placeholder text. To set the passwords with \password afterwards, replace each
+--      placeholder with any text for this run first. Better, keep the passwords out of every statement (#3910): replace each literal with a
 --      SCRAM-SHA-256 verifier, which PostgreSQL stores as-is, or set the passwords afterwards with psql's
 --      \password admin, \password viewer, \password web and \password mcp, which compute the verifier locally and send
 --      only that. A password literal is kept verbatim by anything that records statement text:
@@ -354,6 +358,45 @@ BEGIN
       IF unchangeable IS NOT NULL THEN
          RAISE EXCEPTION 'These roles are members of roles whose privileges outrank the grants below: %. The role running this script, %, cannot revoke those memberships. The script created and changed nothing. It stopped here before a password is sent, so that no role keeps privileges the carve does not hold back. Run this script again as a superuser, or have a superuser revoke those memberships first (from PostgreSQL 16 with GRANTED BY the grantor that recorded each one).', unchangeable, quote_ident(current_user);
       END IF;
+   END IF;
+END $$;
+
+-- The placeholder check (before any password is set). Each of the four password placeholders must be replaced, or the
+-- run stops here: left alone, a placeholder would become the role's real password. A routine written before the web
+-- role existed replaces only the three earlier placeholders and would otherwise set web to the placeholder text. Each
+-- role has its own statement, so a stop writes only the placeholder that was left, never another role's password, to
+-- the server log. The stop is the one the guard above runs with. The guard has already created any missing role without
+-- a password, which cannot be logged into with one; the ALTER ROLE lines below set the passwords, and none has run.
+-- admin: the placeholder is on the left, so a find-and-replace of it fills in your password here too. The right side is
+-- built from two pieces, so that replace never reaches it.
+DO $$
+BEGIN
+   IF 'CHANGE_ME_ADMIN_PASSWORD' = 'CHANGE_ME_' || 'ADMIN_PASSWORD' THEN
+      RAISE EXCEPTION 'The password for role admin is still the CHANGE_ME placeholder. The script set no password. Replace the admin placeholder on every line of this script that has it (the check above the ALTER ROLE lines and the ALTER ROLE admin line), then run it again.';
+   END IF;
+END $$;
+-- viewer: the placeholder is on the left, so a find-and-replace of it fills in your password here too. The right side is
+-- built from two pieces, so that replace never reaches it.
+DO $$
+BEGIN
+   IF 'CHANGE_ME_VIEWER_PASSWORD' = 'CHANGE_ME_' || 'VIEWER_PASSWORD' THEN
+      RAISE EXCEPTION 'The password for role viewer is still the CHANGE_ME placeholder. The script set no password. Replace the viewer placeholder on every line of this script that has it (the check above the ALTER ROLE lines and the ALTER ROLE viewer line), then run it again.';
+   END IF;
+END $$;
+-- web: the placeholder is on the left, so a find-and-replace of it fills in your password here too. The right side is
+-- built from two pieces, so that replace never reaches it.
+DO $$
+BEGIN
+   IF 'CHANGE_ME_WEB_PASSWORD' = 'CHANGE_ME_' || 'WEB_PASSWORD' THEN
+      RAISE EXCEPTION 'The password for role web is still the CHANGE_ME placeholder. The script set no password. Replace the web placeholder on every line of this script that has it (the check above the ALTER ROLE lines and the ALTER ROLE web line), then run it again.';
+   END IF;
+END $$;
+-- mcp: the placeholder is on the left, so a find-and-replace of it fills in your password here too. The right side is
+-- built from two pieces, so that replace never reaches it.
+DO $$
+BEGIN
+   IF 'CHANGE_ME_MCP_PASSWORD' = 'CHANGE_ME_' || 'MCP_PASSWORD' THEN
+      RAISE EXCEPTION 'The password for role mcp is still the CHANGE_ME placeholder. The script set no password. Replace the mcp placeholder on every line of this script that has it (the check above the ALTER ROLE lines and the ALTER ROLE mcp line), then run it again.';
    END IF;
 END $$;
 \set ON_ERROR_STOP :darling_saved_stop

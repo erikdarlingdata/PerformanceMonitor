@@ -92,9 +92,13 @@ public sealed class ProvisionRolesCollisionGuardTests
         Assert.True(guardEnd > lastRaise && lastRaise >= 0, "could not find the end of the DO block that holds the role-collision guard.");
         var afterGuard = guardEnd + "END $$;".Length;
         Assert.True(restore.Index >= afterGuard, "the caller's ON_ERROR_STOP must be put back AFTER the last guard DO block.");
+        /* The four unchanged-placeholder checks run inside the stop on purpose: each one has to end the run. Nothing else may. */
+        var between = Regex.Replace(
+            sql[afterGuard..restore.Index],
+            @"(?s)DO \$\$\s*BEGIN\s*IF 'CHANGE_ME_\w+' = 'CHANGE_ME_' \|\| '\w+' THEN.*?END \$\$;", string.Empty);
         Assert.True(
-            string.IsNullOrWhiteSpace(sql[afterGuard..restore.Index]),
-            "the caller's ON_ERROR_STOP must be put back right after the guard: nothing may run between the guard's END and the restore.");
+            string.IsNullOrWhiteSpace(string.Join("\n", between.Split('\n').Where(line => !line.TrimStart().StartsWith("--", StringComparison.Ordinal)))),
+            "the caller's ON_ERROR_STOP must be put back right after the guard and the placeholder checks: nothing else may run between the guard's END and the restore.");
 
         Assert.DoesNotMatch(@"(?mi)^\\set\s+ON_ERROR_STOP\s+(off|0|false|no|f|n)\b", sql);
         Assert.DoesNotContain("\\unset ON_ERROR_STOP", sql, StringComparison.OrdinalIgnoreCase);
@@ -204,8 +208,8 @@ public sealed class ProvisionRolesCollisionGuardTests
     /// <summary>The guard creates each role WITHOUT a password. When it stops the run, the server writes the failed
     /// statement, its whole text, to the log (<c>log_min_error_statement</c> defaults to error), so a guard that carried
     /// the three new passwords put all of them in the log, and the documented remedy re-runs with the same ones. The
-    /// three <c>ALTER ROLE</c> lines after the guard set the passwords, so each placeholder is in exactly one
-    /// statement, after the guard.</summary>
+    /// three <c>ALTER ROLE</c> lines after the guard set the passwords, so each placeholder is in one
+    /// ALTER ROLE statement and in one check statement of its own, both after the guard.</summary>
     [Fact]
     public void TheGuard_CreatesTheRolesWithoutAPassword_SoAGuardThatStopsTheRunLogsNone()
     {
@@ -225,7 +229,9 @@ public sealed class ProvisionRolesCollisionGuardTests
         var guardEnd = sql.IndexOf(guard, StringComparison.Ordinal) + guard.Length;
         foreach (var (role, placeholder) in new[] { ("admin", "CHANGE_ME_ADMIN_PASSWORD"), ("viewer", "CHANGE_ME_VIEWER_PASSWORD"), ("mcp", "CHANGE_ME_MCP_PASSWORD") })
         {
-            Assert.Single(code, line => line.Contains(placeholder, StringComparison.Ordinal));
+            /* Two lines hold each placeholder, both after the guard: its unchanged-placeholder check, then its ALTER ROLE. */
+            Assert.Equal(2, code.Count(line => line.Contains(placeholder, StringComparison.Ordinal)));
+            Assert.True(sql.IndexOf($"IF '{placeholder}' = ", StringComparison.Ordinal) > guardEnd, $"the {role} placeholder check must come after the guard.");
             var statement = Regex.Match(sql, $@"(?m)^ALTER ROLE {role}\s+LOGIN PASSWORD '{placeholder}';");
             Assert.True(statement.Success && statement.Index > guardEnd, $"the {role} password must be set by an ALTER ROLE that comes after the guard.");
         }

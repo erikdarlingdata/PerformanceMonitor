@@ -162,6 +162,48 @@ public sealed class DarlingStoreLoginsTests
         Assert.EndsWith($" No web credential from an earlier start can stand in: {missing}.", login.Warning, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// A compose store whose role batch was refused (an operator's own role named <c>web</c>) or failed, with no
+    /// <c>web</c> credential from an earlier start: the web host takes the earlier <c>viewer</c> login (reads work, the
+    /// store refuses writes) before the owner, as dev did. The owner is only for a store with neither credential.
+    /// </summary>
+    [Theory]
+    [InlineData("refusal")]
+    [InlineData("failure")]
+    [InlineData("stand-down")]
+    public void ANotProvisionedStart_WithNoWebCredential_ResolvesTheWebHostToTheViewerLogin_NotTheOwner(string outcome)
+    {
+        var verdict = NotProvisioned(outcome);
+
+        var login = DarlingStoreLogins.Resolve(
+            DarlingStoreLogins.Surface.Web, Owner, null, inContainer: true, verdict,
+            EarlierComposeCredential.None("no web credential file"), EarlierComposeCredential.Trusted("EarlierViewer1"));
+
+        Assert.Equal(DarlingStoreLogins.LoginSource.ComposeStoreViewerFromEarlierStart, login.Source);
+        Assert.Equal(DarlingStoreLogins.BuildComposeStoreRoleConnectionString(Owner, "viewer", "EarlierViewer1"), login.ConnectionString);
+        Assert.Equal("viewer", new NpgsqlConnectionStringBuilder(login.ConnectionString).Username);
+        Assert.DoesNotContain("OwnerSecret1", login.ConnectionString, StringComparison.Ordinal);
+        Assert.Equal(DarlingStoreLogins.EarlierViewerWarning(verdict.NotProvisionedReason), login.Warning);
+        Assert.Contains(verdict.NotProvisionedReason!, login.Warning, StringComparison.Ordinal);
+
+        // A web credential from an earlier start still wins over the viewer one, and the MCP server never takes the viewer login.
+        var withWeb = DarlingStoreLogins.Resolve(
+            DarlingStoreLogins.Surface.Web, Owner, null, inContainer: true, verdict,
+            EarlierComposeCredential.Trusted("EarlierWeb1"), EarlierComposeCredential.Trusted("EarlierViewer1"));
+        Assert.Equal("web", new NpgsqlConnectionStringBuilder(withWeb.ConnectionString).Username);
+        var mcp = DarlingStoreLogins.Resolve(
+            DarlingStoreLogins.Surface.Mcp, Owner, null, inContainer: true, verdict,
+            EarlierComposeCredential.None("no mcp credential file"), EarlierComposeCredential.Trusted("EarlierViewer1"));
+        Assert.Equal(DarlingStoreLogins.LoginSource.Owner, mcp.Source);
+
+        // Neither credential: the owner, with both reasons in the warning.
+        var neither = DarlingStoreLogins.Resolve(
+            DarlingStoreLogins.Surface.Web, Owner, null, inContainer: true, verdict,
+            EarlierComposeCredential.None("no web file"), EarlierComposeCredential.None("no viewer file"));
+        Assert.Equal(DarlingStoreLogins.LoginSource.Owner, neither.Source);
+        Assert.EndsWith(" No viewer credential from an earlier start can stand in either: no viewer file.", neither.Warning, StringComparison.Ordinal);
+    }
+
     /// <summary>An earlier start's credential is the fallback of a start that did not provision, and nothing more: a
     /// configured login and this start's own provisioning both outrank it, and outside a container it is never
     /// consulted.</summary>
