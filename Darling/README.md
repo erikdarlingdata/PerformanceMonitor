@@ -137,9 +137,9 @@ This section moved to [Configuration Reference](../docs/darling/configuration.md
 
 This section moved to [Configuration Reference](../docs/darling/configuration.md#postgres).
 
-### servers (array, at least one entry)
+### servers (array)
 
-This section moved to [Configuration Reference](../docs/darling/configuration.md#servers-array-at-least-one-entry).
+This section moved to [Configuration Reference](../docs/darling/configuration.md#servers-array).
 
 ### Testing an index on PostgreSQL
 

@@ -60,7 +60,9 @@ The script ends with the dashboard address. To read the web token, run `cat secr
 
 MCP is off in the sample, so compose does not mount `mcp_token`. To turn MCP on, uncomment `mcp_token` in the two places in `docker-compose.yml`, and set `mcp.enabled` to `true` in `darling.json`. To make the secret files by hand instead of with `setup.sh`, follow the list in [`compose/secrets/README.md`](../Darling/compose/secrets/README.md).
 
-The compose file in the compose archive names the image tag of its own release, for example `performancemonitor-darling:<version>`. It pulls the release it came from. The copy in the source tree names `:latest`, which is the newest release. To pin a release in that copy, change the `darling` service's `image:` line to that version's tag, for example `performancemonitor-darling:3.10.0`. The `:nightly` tag is the newest dev build. Use it only to test unreleased changes.
+The compose file in the compose archive names the image tag of its own release, for example `ghcr.io/erikdarlingdata/performancemonitor-darling:<version>`. It pulls the release it came from. The copy in the source tree names `:latest`, which is the newest release. To pin a release in that copy, change the `darling` service's `image:` line to that version's tag, for example `ghcr.io/erikdarlingdata/performancemonitor-darling:3.12.0`. Always write the full `ghcr.io/erikdarlingdata/` name. Without it, Docker looks on Docker Hub and the pull fails.
+
+The `:nightly` tag is the newest dev build. Use it only to test unreleased changes.
 
 Web dashboard on `http://<host>:5153` behind its token, MCP (if enabled) on `:5152` behind its bearer token. The port mappings are the exposure boundary: the container-aware bind gate honors `web.network`/`mcp.network` under `managed = false` **inside a container only**, and the tokens are still mandatory. Five rules worth knowing before they bite:
 
@@ -70,6 +72,14 @@ Web dashboard on `http://<host>:5153` behind its token, MCP (if enabled) on `:51
 - **Start with a fresh store volume per deployment.** The control plane is store-authoritative after the first seed, so a reused volume's enable toggles override darling.json — by design.
 - **File permissions are yours on Linux.** The Windows build locks config/credentials down with ACLs; here the container boundary is the isolation, and the `secrets/` directory should be `chmod 700` with `600` files (the systemd shape should do the same for `darling.json` itself).
 - **The store's preload list is the compose file's.** The store service passes `shared_preload_libraries` on its command line (TimescaleDB plus `pg_stat_statements`, for `get_store_query_stats`, #3899), and a command-line setting outranks both `postgresql.conf` and `ALTER SYSTEM`. To preload another library in the store, add it to that line in `docker-compose.yml`; an `ALTER SYSTEM` or conf edit of the list is ignored while the line is there.
+
+**Reaching the compose store from a Windows Viewer.** The `store` service publishes no port, so a Windows Viewer cannot connect to it as shipped. The supported seat for a compose deployment is the web dashboard. `--export-viewer-config` does not help here, because it is for the managed store on Windows. To connect a Viewer anyway, do these steps:
+
+1. In `docker-compose.yml`, add a `ports:` entry to the `store` service on the LAN address of the host, for example `"<lan-ip>:5432:5432"`. Do not publish the port on every interface.
+2. On the host, run `docker compose exec darling cat /var/lib/darling/credentials/pg-viewer-credential` to read the password of the read-only `viewer` role.
+3. On the Viewer machine, write a `darling.json` like the one in [Manual configuration](darling/viewer.md#manual-configuration-fallback). Use `Host=<lan-ip>;Port=5432;Username=viewer;Database=darling;Search Path=collect,config,public`, with the password from step 2.
+
+The compose file sets no TLS on the store, so this connection is not encrypted. Set up TLS on the store yourself and use `SSL Mode=VerifyFull` with a `Root Certificate`, or keep the link on a network that you trust.
 
 **A container that has stopped collecting reports unhealthy** ([#4733](https://github.com/erikdarlingdata/PerformanceMonitor/issues/4733)). After a startup failure that stops collection for good (a rejected `darling.json`, a step that can never apply, a refused login), the `darling` container stays up on purpose and its healthcheck reports `unhealthy` in `docker compose ps`, rather than restarting it in a loop. `docker compose logs darling` says why, and so does `/api/ping` when the web dashboard is enabled. A failure the service is still retrying does not count as a stop. This needs the current `docker-compose.yml`: the healthcheck and `DARLING_STOPPED_MARKER` are set there, not in the image, so an older compose file has neither.
 

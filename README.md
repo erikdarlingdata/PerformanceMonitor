@@ -26,7 +26,7 @@ Both editions can hand an alert to an AI agent that you run, and Lite lets the a
 
 The Dashboard edition is deprecated. Existing installs keep working, but we recommend Lite or Darling for new deployments. [Choosing an edition](docs/editions.md) compares all three.
 
-Each release ships these downloads. For Lite, a `Setup.exe` and a portable ZIP. For Darling, the service ZIP (with the viewer inside), a Viewer `Setup.exe` for a remote seat, and the Linux and Compose tarballs. The Full Dashboard and its CLI installer ship nothing. Their last builds are in the [v3.2.0 release](https://github.com/erikdarlingdata/PerformanceMonitor/releases/tag/v3.2.0).
+Each release ships these downloads. For Lite, a `Setup.exe` and a portable ZIP. For Darling, the service ZIP (with the viewer inside), an MSI, a Viewer `Setup.exe` for a remote seat, and the Linux and Compose tarballs. The Full Dashboard and its CLI installer ship nothing. Their last builds are in the [v3.2.0 release](https://github.com/erikdarlingdata/PerformanceMonitor/releases/tag/v3.2.0).
 
 Not sure which one? Start with Lite. It is one download, nothing is installed on your server, and data starts to flow in under 5 minutes.
 
@@ -38,20 +38,23 @@ Not sure which one? Start with Lite. It is one download, nothing is installed on
 4. Click **+ Add Server**, enter the connection details, test, and save.
 5. Double-click the server in the sidebar to connect.
 
-Data starts to flow within 1 to 5 minutes. The monitoring login needs `VIEW SERVER STATE` ([Permissions](docs/permissions.md)).
+Data starts to flow within 1 to 5 minutes. The monitoring login needs four server grants: `VIEW SERVER STATE`, `CONNECT ANY DATABASE`, `VIEW ANY DEFINITION` and `ALTER ANY EVENT SESSION`. Without `CONNECT ANY DATABASE`, the per-database collectors skip the databases that the login cannot enter. The full grant block is in [Permissions](docs/permissions.md). If the first connection fails on a certificate error, see [Troubleshooting](docs/troubleshooting.md#lite-symptoms).
 
-Before you upgrade an older install with `Setup.exe`, read the warning in the [Lite guide](docs/lite-guide.md). On versions older than 3.4.0, `Setup.exe` deletes the data in the install directory (see [Upgrading an install older than 3.4.0](docs/lite-guide.md#upgrading-an-install-older-than-340)). The Lite guide also covers the portable ZIP, collectors, storage, and configuration.
+Before you upgrade an older install with `Setup.exe`, read the warning in the [Lite guide](docs/lite-guide.md). On versions older than 3.4.0, `Setup.exe` deletes the data in the install directory (see [Upgrading an install older than 3.4.0](docs/lite-guide.md#upgrading-an-install-older-than-340)). The Lite guide also covers the portable ZIP (`PerformanceMonitorLite-<version>.zip`), collectors, storage, and configuration.
 
 ## Quick start: Darling
 
 1. Download `PerformanceMonitorDarling-<version>.zip` and `SHA256SUMS.txt` from the [latest release](https://github.com/erikdarlingdata/PerformanceMonitor/releases/latest). Check the zip hash against `SHA256SUMS.txt`. The zip carries its own .NET runtime, so there is nothing to install first.
 2. Extract the zip to `C:\Program Files\PerformanceMonitorDarling`. Do not use your Desktop, Downloads, or any folder under `C:\Users\`. The service runs as a virtual account that cannot read a user profile ([why](docs/darling/install.md#step-3-extract-to-a-machine-scoped-path)).
 3. Double-click `Install-Darling.cmd` in the install folder. It asks Windows for administrator rights and runs `install-darling.ps1`. You can also run `.\install-darling.ps1` from an elevated PowerShell. It installs the Windows service and creates a **Darling Viewer** shortcut. With no `darling.json` it writes a minimal one, and the service starts with no monitored servers.
-4. Wait about two minutes for the first start, then open **Darling Viewer**. It opens on the fleet.
+4. Wait for the installer to print `Service is ready`. The first start does real work, and the installer waits for it. Then open **Darling Viewer**. It opens on the fleet.
 5. Add your first server in the viewer. `darling.json` is only a seed. The service reads it on its first start, so a server added to the file later is ignored ([why](docs/darling/install.md#darlingjson-is-only-a-seed)).
 6. The service log is in `%ProgramData%\PerformanceMonitorDarling\logs`.
+7. The web dashboard is off after a script install. To turn it on, follow [Turn it on](docs/darling/web-dashboard.md#turn-it-on). On a first install, `.\install-darling.ps1 -WebDashboard` writes a `darling.json` with the dashboard on and a web token. It does nothing when `darling.json` already exists.
 
-[Install Darling](docs/darling/install.md) gives each step with the log line or screen that proves it worked. To upgrade, run `upgrade-darling.ps1`. To remove the service, run `uninstall-darling.ps1`. Both are in the install folder. For Linux and the web dashboard, read the [Darling quick start](docs/darling-quick-start.md). The [Darling operator guide](Darling/README.md) is the configuration reference.
+[Install Darling](docs/darling/install.md) gives each step with the log line or screen that proves it worked. To upgrade, extract the new zip to a staging folder and run the `upgrade-darling.ps1` in that folder. The script refuses to run from the install folder ([Upgrade](docs/darling/admin.md#upgrade)).
+
+To remove the service, run `uninstall-darling.ps1` from the install folder. The release also has `PerformanceMonitorDarling-<version>.msi`, an alternative to steps 1 to 3 ([Installing with the MSI](docs/darling/install.md#installing-with-the-msi)). For Linux and the web dashboard, read the [Darling quick start](docs/darling-quick-start.md). The [Darling operator guide](Darling/README.md) is the configuration reference.
 
 ## Documentation
 
