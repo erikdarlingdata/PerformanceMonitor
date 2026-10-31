@@ -81,7 +81,7 @@ VALUES (1, $1, $2, 'viewer-6970', $3, $4, $5, $6, 0, 0, $7, $8, 0, 0, $9)", conn
         await SeedAsync(connection, 8, "Db1", "Db1_data", 900, 5, 99_999, 5, intervalSeconds: 0);
     }
 
-    private static async Task AssertSameSeriesAsync(ViewerDataService viewer, DateTime start, DateTime end, Func<int, bool> countOk)
+    private static async Task AssertSameSeriesAsync(ViewerDataService viewer, DateTime start, DateTime end, Func<int, bool> countOk, bool expectZeroPoint)
     {
         var perFile = await viewer.GetFileIoLatencyTrendAsync(ServerId, start, end, cancellationToken: TestContext.Current.CancellationToken);
         var expected = SeriesFromPerFilePoints(perFile);
@@ -89,7 +89,7 @@ VALUES (1, $1, $2, 'viewer-6970', $3, $4, $5, $6, 0, 0, $7, $8, 0, 0, $9)", conn
 
         Assert.True(countOk(expected.Count), $"unexpected point count {expected.Count}");
         Assert.Equal(expected.Count, actual.Count);
-        Assert.Contains(expected, e => e.Value == 0);
+        Assert.Equal(expectZeroPoint, expected.Any(e => e.Value == 0));
         Assert.Contains(expected, e => e.Value > 0);
         for (var i = 0; i < expected.Count; i++)
         {
@@ -120,10 +120,10 @@ VALUES (1, $1, $2, 'viewer-6970', $3, $4, $5, $6, 0, 0, $7, $8, 0, 0, $9)", conn
             await SeedShapesAsync(connection);
 
             /* An hour is a one-minute bucket: every bucket holds one collection, so points sit at their own collection times (37 seconds past the minute). */
-            await AssertSameSeriesAsync(viewer, Anchor.AddMinutes(-60), Anchor.AddMinutes(1), count => count == 6);
+            await AssertSameSeriesAsync(viewer, Anchor.AddMinutes(-60), Anchor.AddMinutes(1), count => count == 6, expectZeroPoint: true);
 
             /* A seven-day window buckets wide, so neighbouring collections merge and points sit at the bucket start. */
-            await AssertSameSeriesAsync(viewer, Anchor.AddDays(-7), Anchor.AddMinutes(1), count => count < 6);
+            await AssertSameSeriesAsync(viewer, Anchor.AddDays(-7), Anchor.AddMinutes(1), count => count < 6, expectZeroPoint: false);
 
             bodySucceeded = true;
         }
