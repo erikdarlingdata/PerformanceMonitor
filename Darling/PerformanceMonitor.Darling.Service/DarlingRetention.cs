@@ -177,7 +177,7 @@ public static class DarlingRetention
     /// fleet-sweep run records. <c>collect.raw_chunk_interval_reconcile_runs</c> is one row per reconcile run, written by
     /// <c>RawChunkIntervalReconciler</c> and never read back: the planner's "days since the last move" input comes from
     /// <c>raw_chunk_interval_rung_history</c>, not from this table. So no decision needs any of its history and the
-    /// base horizon is only an operator-facing look-back. About 8,800 rows a year, so it was never urgent, only unbounded.
+    /// base horizon is only an operator-facing look-back. About one row a day plus one per service start, so it was never urgent, only unbounded.
     /// </summary>
     internal const int RawChunkIntervalReconcileRunsRetentionDays = DataRetentionBaseDays;
 
