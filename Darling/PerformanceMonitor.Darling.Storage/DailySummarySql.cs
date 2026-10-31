@@ -267,11 +267,12 @@ public static class DailySummarySql
     internal const string BprSourceWhere =
         "WHERE server_id = $1 AND event_time >= $2 AND event_time < $3 AND collection_time >= $4";
 
-    private static readonly string[] SnapshotPartition = { "d" };
+    /* Properties, not static readonly fields: RangeSql is initialised above them and would read nulls and zeros. */
+    private static string[] SnapshotPartition => new[] { "d" };
 
     /// <summary>The default collection cadence of the DMV blocking snapshot, in minutes (the cadence a store without an
     /// override row runs).</summary>
-    private static readonly int DefaultSnapshotCadenceMinutes =
+    private static int DefaultSnapshotCadenceMinutes =>
         PerformanceMonitor.Collectors.CollectorScheduleDefaults.All["dmv_blocking_snapshot"].FrequencyMinutes;
 
     /// <summary>The alert's episode gap for the default cadence, seconds (the alert restarts a streak when a snapshot

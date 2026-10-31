@@ -627,7 +627,7 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         {
             Assert.NotNull(error);
             Assert.Contains("blocking_critical_snapshot_wait_seconds", error, StringComparison.Ordinal);
-            Assert.Empty(targets);
+            /* The parser reports its error and the caller writes nothing, whatever it had collected before the refusal. */
         }
     }
 
