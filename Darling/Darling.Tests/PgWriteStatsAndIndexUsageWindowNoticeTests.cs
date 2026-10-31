@@ -209,4 +209,28 @@ VALUES ($1,$2,$3,$4,'db1','public','t1','ix_t1',$5, 0,0,0,0, 10485760, 20971520,
             Assert.False(root.TryGetProperty("hints", out _));
         });
     }
+
+    /// <summary>The two newest-per-key reads answer a verdict of their own coverage, so neither carries the window notice (#4966).
+    /// Read from the source text, so it holds without a database.</summary>
+    [Theory]
+    [InlineData("get_pg_index_bloat")]
+    [InlineData("get_pg_column_stats")]
+    public void TheNewestPerKeyReads_EmitNoWindowNotice(string tool)
+    {
+        var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpPgIndexTools.cs");
+        var signature = tool switch
+        {
+            "get_pg_index_bloat" => "public static async Task<string> GetPgIndexBloat(",
+            _ => "public static async Task<string> GetPgColumnStats(",
+        };
+        var at = source.IndexOf(signature, StringComparison.Ordinal);
+        Assert.True(at > 0, tool + " is not in DarlingMcpPgIndexTools.cs");
+        /* The body runs from the method declaration to the next tool's attribute (or the end of the file). */
+        var nextAttribute = source.IndexOf("[McpServerTool(", at + signature.Length, StringComparison.Ordinal);
+        var body = source[at..(nextAttribute < 0 ? source.Length : nextAttribute)];
+
+        Assert.DoesNotContain("window_truncated", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("effective_start", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("DarlingMcpWindowNotice", body, StringComparison.Ordinal);
+    }
 }

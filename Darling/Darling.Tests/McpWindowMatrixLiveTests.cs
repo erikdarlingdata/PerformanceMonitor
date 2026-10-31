@@ -59,13 +59,11 @@ public sealed class McpWindowMatrixStore : IAsyncLifetime
     {
         ["get_pg_autovacuum_health"] = "pg_autovacuum_stats",
         ["get_pg_blocking"] = "pg_blocking_edges",
-        ["get_pg_column_stats"] = "pg_column_stats",
         ["get_pg_cpu_utilization"] = "pg_cpu_utilization",
         ["get_pg_database_stats"] = "pg_database_stats",
         ["get_pg_database_trend"] = "pg_database_stats",
         ["get_pg_deadlocks"] = "pg_deadlocks",
         ["get_pg_extensions"] = "pg_extension_availability",
-        ["get_pg_index_bloat"] = "pg_index_bloat",
         ["get_pg_index_usage"] = "pg_index_usage_stats",
         ["get_pg_io_stats"] = "pg_io_stats",
         ["get_pg_io_trend"] = "pg_io_stats",
@@ -369,6 +367,9 @@ public sealed class McpWindowMatrixLiveTests : IClassFixture<McpWindowMatrixStor
     /// answer is one row stamped with captured_at and age_seconds; a coverage notice would describe a window the tool never reads.</summary>
     private const string SnapshotSearch = "newest-snapshot read: hours_back is the span searched for the latest snapshot (captured_at and age_seconds say how old it is), not a data window (#7010)";
 
+    /// <summary>#4966: a newest-per-key read (the newest estimate per key, a latest-state read, not a difference across the window); its own coverage verdict says what the window held.</summary>
+    private const string NewestPerKey = "newest-per-key read: its own coverage verdict (coverage, reach, PgCappedRead) says what the window held, so no window notice by design (#4966)";
+
     /// <summary>#7010: the tool's data answer and its all-clear carry the notice, but the answer that says no capture was logged in the window at all (the collector did not
     /// look, so nothing is known about the window) is bare by design; DarlingMcpPgWindowD8bLiveTests.ANoCaptureAnswer_StaysBare pins it.</summary>
     private const string UnavailableBare = "the no-capture 'unavailable' answer carries no notice by design (the data and empty answers do, #7010)";
@@ -394,7 +395,9 @@ public sealed class McpWindowMatrixLiveTests : IClassFixture<McpWindowMatrixStor
         ["get_investigation_reports"] = "investigation request log: hours_back is the age of requests opened, not a collected-data window (#7010)",
         ["get_pg_blocking"] = UnavailableBare,
         ["get_pg_buffer_usage"] = SnapshotSearch,
+        ["get_pg_column_stats"] = NewestPerKey,
         ["get_pg_database_stats"] = UnavailableBare,
+        ["get_pg_index_bloat"] = NewestPerKey,
         ["get_pg_plan_capture_readiness"] = SnapshotSearch,
         ["get_pg_session_states"] = UnavailableBare,
         ["get_pg_top_queries"] = UnavailableBare,
