@@ -22,7 +22,7 @@ namespace PerformanceMonitor.Common;
 /// evaluation, XML and JSON handling) live in their own files and declare only their own members.</para>
 ///
 /// <para><b>Append-only.</b> The four first alternatives (A1-A4, the PostgreSQL forms) are byte-identical to
-/// the pattern before the T-SQL forms were added, and the T-SQL alternatives (T1-T10) follow them. Every
+/// the pattern before the T-SQL forms were added, the T-SQL alternatives (T1-T10) follow them, and T11-T15 follow those. Every
 /// statement the earlier pattern named is therefore still named.</para>
 /// </summary>
 public static partial class SensitiveStatements
@@ -50,6 +50,31 @@ public static partial class SensitiveStatements
     /// <c>x text := '...'</c>): the name, an optional <c>AS</c> or <c>CONSTANT</c>, one type name (plain, dotted
     /// or bracketed) with an optional length of up to 20 characters in parentheses, then <c>=</c>, <c>:=</c> or <c>DEFAULT</c> and a literal.</para>
     ///
+    /// <para>T11: libpq's <c>sslpassword=</c> setting in a connection string, and the <c>SQLCMDPASSWORD=</c>
+    /// setting of <c>sqlcmd</c>, with any value (a bare or quoted value; a value that starts with <c>$</c> and a digit
+    /// is a value too, since a string literal holds no parameter). T12: a pgcrypto function (<c>crypt</c>,
+    /// <c>hmac</c>, <c>encrypt</c>, <c>decrypt</c>, the <c>_iv</c> forms and the <c>pgp_sym_</c> and <c>pgp_pub_</c>
+    /// families) called with a literal among its arguments: at the call's own level, or inside one nested call
+    /// (<c>pgp_sym_decrypt(card, trim('K3y'))</c>). So <c>crypt($1, gen_salt('bf'))</c> is named too, and so is a parameter key with an inline algorithm or option
+    /// literal (<c>hmac(body, $1, 'sha256')</c>). <c>crypt($1, pw)</c> carries no literal and is not named. A
+    /// literal two calls deep is not reached by T12. T13: an armored PGP private key block, wherever it appears
+    /// (so a key passed through any depth of calls is named). T14: a <c>-U</c> switch with a value and then a
+    /// <c>-P</c> switch with a value, anywhere in the text, whatever precedes them (a login written before the tool name, as in
+    /// <c>DECLARE @creds ... = '-U etl -P secret'</c>; <c>-p 5432</c> after <c>-U x</c> is named as well). T15: a
+    /// client tool (<c>bcp</c>, <c>sqlcmd</c>, <c>osql</c>, <c>isql</c>) named earlier in the same text than a
+    /// <c>-P</c> or <c>/P</c> option with a value, as in <c>xp_cmdshell 'bcp ... -P secret'</c>.
+    /// The pattern ignores case, so <c>-p</c> counts too: a lower-case option on such a command line is named as
+    /// well, which only withholds more.</para>
+    ///
+    /// <para>T16 to T18 are spelled before T15, which must stay the last alternative (the .NET judge cuts it off the end).
+    /// T16: <c>SET [SESSION|LOCAL] name = '...'</c> or <c>SET name TO '...'</c> where the setting name (a dotted custom name
+    /// such as <c>app.encryption_key</c> included) contains key, secret, passphrase or token, and the value is a
+    /// literal (a name that ends in password is T3's, and <c>SET password_encryption = 'scram-sha-256'</c>, a mode name,
+    /// stays visible). T17: <c>set_config('name', '...', ...)</c> with such a name and a literal value. T18: a column whose name
+    /// contains pass or pwd compared with <c>=</c> to <c>HASHBYTES('alg', [N]'...')</c> or to <c>digest('...', 'alg')</c>.
+    /// A hash of a literal under any other name (<c>checksum = digest('abc', 'sha256')</c>) and a setting with any other
+    /// name (<c>SET search_path = 'x'</c>) are not named.</para>
+    ///
     /// <para><b>No backslash, on purpose.</b> <c>[[:&lt;:]]</c>, <c>[[:&gt;:]]</c>, <c>[[:space:]]</c>,
     /// <c>[*]</c> and <c>[$]</c> spell what a first version wrote with backslash escapes. A normalized
     /// parameter (<c>password = $1</c>) is not a hit: it carries no value. <c>]</c> and <c>"</c> outside a
@@ -76,7 +101,35 @@ public static partial class SensitiveStatements
             + "*(n?'|e'|u&'|0x)"                                                                              // T9
         + "|[[:<:]]([a-z0-9_]*(password|passwd|pwd|secret)|key_source)" + TokenGap + "+((as|constant)" + TokenGap + "+)?"
             + "[[]?[a-z_][a-z0-9_.]*]?([[:space:]]*[(][[:space:]0-9a-z,]{0,20}[)])?" + TokenGap
-            + "*(:?=|default[[:>:]])" + TokenGap + "*(n?'|e'|u&'|0x|[$][^0-9])";                              // T10
+            + "*(:?=|default[[:>:]])" + TokenGap + "*(n?'|e'|u&'|0x|[$][^0-9])"                               // T10
+        + "|[[:<:]](ssl|sqlcmd)password[[:space:]]*=[[:space:]]*[^[:space:]]"                                  // T11
+        + "|[[:<:]](crypt|hmac|encrypt|decrypt|encrypt_iv|decrypt_iv|pgp_sym_encrypt|pgp_sym_encrypt_bytea"
+            + "|pgp_sym_decrypt|pgp_sym_decrypt_bytea|pgp_pub_encrypt|pgp_pub_encrypt_bytea|pgp_pub_decrypt"
+            + "|pgp_pub_decrypt_bytea)" + TokenGap + "*[(]([^()]|[(][^()]*[)])*([(][^()]*)?('|[$][^0-9])"     // T12
+        + "|-----begin[[:space:]]+pgp[[:space:]]+private[[:space:]]+key[[:space:]]+block"                      // T13
+        + "|[[:space:]]-u[[:space:]]*[^[:space:]-][^[:space:]]*[[:space:]]+-p[[:space:]]*[^[:space:]-]"        // T14
+        + "|[[:<:]]set" + TokenGap + "+((session|local)" + TokenGap + "+)?[a-z0-9_.]*(key|secret|passphrase|token)"
+            + "[a-z0-9_.]*" + TokenGap + "*(=|to)" + TokenGap + "*(e?'|u&'|[$][^0-9])"                         // T16
+        + "|[[:<:]]set_config" + TokenGap + "*[(]" + TokenGap + "*e?'[^']*(key|secret|password|passphrase|token)[^']*'"
+            + TokenGap + "*," + TokenGap + "*(e?'|u&'|[$][^0-9])"                                             // T17
+        + "|[[:<:]][a-z0-9_]*(pass|pwd)[a-z0-9_]*(]|\")?" + TokenGap + "*=" + TokenGap + "*(hashbytes" + TokenGap
+            + "*[(]" + TokenGap + "*n?'[^']*'" + TokenGap + "*," + TokenGap + "*n?'|digest" + TokenGap + "*[(]"
+            + TokenGap + "*(e?'|u&'))"                                                                        // T18
+        + "|" + ToolPasswordAlternative;                                                                       // T15, always last
+
+    /// <summary>The tool names T15 looks for: the command-line clients that take a password in <c>-P</c>.</summary>
+    private const string ToolWord = "[[:<:]](bcp|sqlcmd|osql|isql)[[:>:]]";
+
+    /// <summary>What follows the tool name in T15: a <c>-P</c> or <c>/P</c> switch with a value that does not
+    /// start with <c>-</c> (another switch).</summary>
+    internal const string ToolPasswordTail = "[[:space:]][-/]p[[:space:]]*[^[:space:]-]";
+
+    /// <summary>T15 as <see cref="Pattern"/> spells it, always the last alternative: a tool name, anything, then a
+    /// <c>-P</c> or <c>/P</c> value. The .NET judge runs it apart from the others (see
+    /// <see cref="ToolWord"/> and <see cref="ToolPasswordTail"/>): written this way a backtracking engine rescans the
+    /// rest of the text from every tool name in it, so text with thousands of them took quadratic time.
+    /// PostgreSQL reads it as it stands.</summary>
+    internal const string ToolPasswordAlternative = ToolWord + ".*" + ToolPasswordTail;
 
     /// <summary>
     /// How many top-level alternatives at the head of <see cref="Pattern"/> (A1-A4 and T1-T9: thirteen) the .NET
