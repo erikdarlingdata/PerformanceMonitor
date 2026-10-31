@@ -68,7 +68,7 @@ public sealed class ReadAdmissionCoverageCensusTests
                     continue;
                 }
 
-                var name = Path.GetFileName(file);
+                var name = IsWebEndpointsPartial(file) ? "DarlingWebEndpoints.cs" : Path.GetFileName(file);
                 found[name] = found.GetValueOrDefault(name) + 1;
 
                 /* The admission call comes after the scope and the band, within the next few statements, or (#5506 part 3)
@@ -95,7 +95,7 @@ public sealed class ReadAdmissionCoverageCensusTests
     [InlineData("DarlingWebEndpoints.cs", "private static async Task<ComposeRunOutcome> RunComposedPanelAdmittedAsync(", "token => RunComposedPanelAdmittedAsync(")]
     public void CacheMissPath_RunsTheMethodThatAdmits(string file, string method, string joinCall)
     {
-        var source = File.ReadAllText(Path.Combine(ServiceDir, file));
+        var source = RepoFile.ReadRepoFile(Path.Combine(ServiceDir, file));
         var at = source.IndexOf(method, StringComparison.Ordinal);
         Assert.True(at >= 0, $"{file} no longer declares {method}");
         var body = source.Substring(at, Math.Min(4_000, source.Length - at));
@@ -140,7 +140,7 @@ public sealed class ReadAdmissionCoverageCensusTests
            McpToolLatencyRecordingTests.TheInvestigationWait_IsNeitherTimedNorAdmitted_WhileAnotherRead_IsBoth calls them. */
         Assert.Equal("run_custom_view_panel", McpToolLatencyFilter.SkippedToolName);
 
-        var web = File.ReadAllText(Path.Combine(ServiceDir, "DarlingWebEndpoints.cs"));
+        var web = RepoFile.ReadRepoFile(Path.Combine(ServiceDir, "DarlingWebEndpoints.cs"));
         var runner = web.IndexOf("internal static async Task<ComposeRunOutcome> RunComposedPanelAsync(", StringComparison.Ordinal);
         var core = web.IndexOf("RunComposedPanelCoreAsync(ComposeHost, postgres, body,", runner, StringComparison.Ordinal);
         Assert.True(runner >= 0 && core > runner);
@@ -154,7 +154,7 @@ public sealed class ReadAdmissionCoverageCensusTests
     [Fact]
     public void TheDedicatedWebReadRoutes_Admit()
     {
-        var web = File.ReadAllText(Path.Combine(ServiceDir, "DarlingWebEndpoints.cs"));
+        var web = RepoFile.ReadRepoFile(Path.Combine(ServiceDir, "DarlingWebEndpoints.cs"));
         Assert.Contains("AdmitWebRouteAsync(readAdmission, \"get_fleet_overview\"", web, StringComparison.Ordinal);
         Assert.Contains("AdmitWebRouteAsync(readAdmission, \"test_custom_alert_rule\"", web, StringComparison.Ordinal);
         var triage = File.ReadAllText(Path.Combine(ServiceDir, "DarlingTriageEndpoint.cs"));
@@ -277,8 +277,15 @@ public sealed class ReadAdmissionCoverageCensusTests
     private static IEnumerable<(string File, string Source)> ServiceSources() =>
         Directory.EnumerateFiles(ServiceDir, "*.cs", SearchOption.AllDirectories)
             .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
-                        && !f.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
-            .Select(f => (Path.GetRelativePath(ServiceDir, f).Replace(Path.DirectorySeparatorChar, '/'), File.ReadAllText(f)));
+                        && !f.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
+                        && !IsWebEndpointsPartial(f))
+            .Select(f => (Path.GetRelativePath(ServiceDir, f).Replace(Path.DirectorySeparatorChar, '/'), RepoFile.ReadRepoFile(f)));
+
+    /// <summary>#7026: <c>DarlingWebEndpoints.&lt;Area&gt;.cs</c> is part of <c>DarlingWebEndpoints.cs</c>, so the roster counts
+    /// and reads the pieces as the one file they were.</summary>
+    private static bool IsWebEndpointsPartial(string path) =>
+        Path.GetFileName(path).StartsWith("DarlingWebEndpoints.", StringComparison.Ordinal)
+        && !string.Equals(Path.GetFileName(path), "DarlingWebEndpoints.cs", StringComparison.Ordinal);
 
     [Fact]
     public void EveryMappedRoute_IsAdmittedOrExemptWithAReason()
