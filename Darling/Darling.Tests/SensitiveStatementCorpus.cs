@@ -87,6 +87,25 @@ internal static class SensitiveStatementCorpus
         "CREATE USER MAPPING FOR u SERVER s OPTIONS (user 'u', secret_access_key 'secret-x')",
         "ALTER SERVER s OPTIONS (ADD token 'secret-x')",
         "CREATE SERVER s FOREIGN DATA WRAPPER w OPTIONS (api_key 'secret-x')",
+
+        // a libpq sslpassword in a connection string (bare, spaced, quoted and in a URI), a pgcrypto call that
+        // carries a literal, and a client tool's -P option inside xp_cmdshell
+        "SELECT dblink_connect('c', 'host=db2 dbname=app user=app sslcert=/k/c.crt sslkey=/k/c.key sslpassword=Hunter2')",
+        "SELECT * FROM dblink('host=db2 user=app sslkey=/k/c.key sslpassword = Hunter2', 'select 1') AS t(x int)",
+        "SELECT dblink_connect('c', 'host=db2 sslkey=/k/c.key sslpassword=''Hunter 2''')",
+        "SELECT dblink_connect('postgresql://db2/app?sslkey=/k/c.key&sslpassword=Hunter2')",
+        "SELECT id FROM app.users WHERE pw = crypt('hunter2', pw)",
+        "SELECT pgp_sym_decrypt(card, 'K3y-2026') FROM payments",
+        "SELECT pgp_sym_decrypt_bytea(decode(card, 'hex'), 'K3y-2026') FROM payments",
+        "INSERT INTO t VALUES (pgp_sym_encrypt(note, $k$K3y-2026$k$))",
+        "UPDATE app.users SET pw = crypt ('hunter2', gen_salt('bf'))",
+        "SELECT hmac(body, 'K3y-2026', 'sha256') FROM msgs",
+        "SELECT decrypt_iv(data, 'key12345', 'iv123456', 'aes') FROM t",
+        @"EXEC master..xp_cmdshell 'bcp Sales.dbo.Orders out D:\x.dat -S PROD01 -U etl -P S3cret! -c'",
+        "EXEC master..xp_cmdshell 'sqlcmd -S PROD01 -U etl -P \"S3cret!\" -Q \"select 1; select 2\"'",
+        "EXEC xp_cmdshell 'osql -S PROD01 -U sa -PS3cret! -i x.sql'",
+        "EXEC xp_cmdshell 'isql -S PROD01 -U sa -P S3cret!'",
+        "EXEC xp_cmdshell 'bcp db.dbo.t in x.dat -P S3cret! -U etl -S PROD01'",
     };
 
     /// <summary>Statements the filter must leave alone.</summary>
@@ -127,6 +146,21 @@ internal static class SensitiveStatementCorpus
         "SELECT rolname FROM pg_roles",
         "SELECT 1",
         "CREATE TABLE passwords (id int)",
+
+        // neighbours of the sslpassword, pgcrypto and client tool shapes
+        "SELECT dblink_connect('c', 'host=db2 sslkey=/k/c.key sslpassword=$1')",
+        "SELECT * FROM t WHERE sslpassword_set = $1",
+        "SELECT password_reset_at FROM users",
+        "SELECT crypto_id FROM t",
+        "SELECT encrypt_status FROM jobs",
+        "SELECT encrypted FROM t WHERE state = 'x'",
+        "SELECT id FROM app.users WHERE pw = crypt($1, pw)",
+        "SELECT id FROM app.users WHERE name = 'bob' AND pw = crypt($1, pw)",
+        "SELECT pgp_sym_decrypt(card, $1) FROM payments",
+        @"EXEC master..xp_cmdshell 'bcp Sales.dbo.Orders out D:\x.dat -S PROD01 -T -c'",
+        "EXEC master..xp_cmdshell 'sqlcmd -S PROD01 -E -Q \"select 1\"'",
+        @"EXEC master..xp_cmdshell 'dir D:\'",
+        "SELECT * FROM t WHERE note = 'isql' AND pw = 5",
     };
 
     /// <summary>The strings the plan once expected the .NET judge to time out on: many comment tokens after a
