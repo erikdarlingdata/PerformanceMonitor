@@ -351,6 +351,13 @@ public sealed class DarlingMcpTools
                a family failed, the sentence is appended to the message and collection_caveats to the payload. */
             var collectionCaveat = collection.Describe();
 
+            /* #7010: the window-floor notice, over wait_stats (the data the analysis reads), never the oldest stored fact: a quiet pass stores
+               nothing, so a facts floor would call a quiet week truncated. Both unavailable answers carry it under hints. */
+            var noticeStart = windowEnd.AddHours(-hours_back);
+            Task<McpWindowNotice> NoticeAsync(bool emptyAnswer) => DarlingMcpWindowNotice.ReadAsync(
+                () => DarlingMcpWindowNotice.Probe(postgres, "wait_stats", resolved.ServerName, noticeStart, windowEnd, cancellationToken),
+                noticeStart, windowEnd, "wait_stats", emptyAnswer: emptyAnswer, cancellationToken: cancellationToken);
+
             if (facts.Count == 0)
             {
                 /* No scored facts means the underlying collectors produced nothing for the window —
@@ -362,7 +369,9 @@ public sealed class DarlingMcpTools
                 return McpHelpers.Status(
                     "unavailable",
                     collectionCaveat is null ? noFactsMessage : $"{noFactsMessage} COLLECTION CAVEAT: {collectionCaveat}",
-                    collection.Attach(new { secondary_replica_note = secondaryReplicaNote, coverage = coverage?.ToPayload() }, McpHelpers.JsonOptions));
+                    DarlingMcpWindowNotice.AttachToHints(
+                        collection.Attach(new { secondary_replica_note = secondaryReplicaNote, coverage = coverage?.ToPayload() }, McpHelpers.JsonOptions),
+                        await NoticeAsync(emptyAnswer: true)));
             }
 
             if (coverage is null || !coverage.IsObserved)
@@ -379,7 +388,9 @@ public sealed class DarlingMcpTools
                     $"{facts.Count} point-in-time fact(s) — configuration and current state — could still be read; audit_config reports those. " +
                     "Check get_collection_health to see when each collector last succeeded." +
                     (collectionCaveat is null ? string.Empty : $" COLLECTION CAVEAT: {collectionCaveat}"),
-                    collection.Attach(new { secondary_replica_note = secondaryReplicaNote, coverage = coverage?.ToPayload() }, McpHelpers.JsonOptions));
+                    DarlingMcpWindowNotice.AttachToHints(
+                        collection.Attach(new { secondary_replica_note = secondaryReplicaNote, coverage = coverage?.ToPayload() }, McpHelpers.JsonOptions),
+                        await NoticeAsync(emptyAnswer: true)));
             }
 
             var filtered = facts.AsEnumerable();
@@ -425,7 +436,8 @@ public sealed class DarlingMcpTools
                 }, f, McpHelpers.JsonOptions), f.Ranked, McpHelpers.JsonOptions))
                 .ToList();
 
-            return JsonSerializer.Serialize(collection.Attach(new
+            var dataNotice = await NoticeAsync(emptyAnswer: false);
+            return DarlingMcpWindowNotice.Attach(JsonSerializer.Serialize(collection.Attach(new
             {
                 server = resolved.DisplayName,
                 total_facts = facts.Count,
@@ -443,7 +455,7 @@ public sealed class DarlingMcpTools
                     collectionCaveat),
                 coverage = coverage.ToPayload(),
                 facts = result
-            }, McpHelpers.JsonOptions), McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions), McpHelpers.JsonOptions), dataNotice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -1191,12 +1203,20 @@ public sealed class DarlingMcpTools
                (their per-database findings are the primary's). Null when none; the same sentence on every surface. */
             var secondaryReplicaNote = await PgSecondaryReplicaScope.NoteAsync(postgres, resolved.ServerId, null, cancellationToken, anchor);
 
+            /* #7010: the window-floor notice, over wait_stats (the data the analysis reads), never the oldest stored finding: a quiet analysis
+               pass stores nothing, so a findings floor would call a quiet week truncated. Same floor as get_analysis_facts. */
+            var noticeStart = windowEnd.AddHours(-hours_back);
+            var notice = await DarlingMcpWindowNotice.ReadAsync(
+                () => DarlingMcpWindowNotice.Probe(postgres, "wait_stats", resolved.ServerName, noticeStart, windowEnd, cancellationToken),
+                noticeStart, windowEnd, "wait_stats", emptyAnswer: findings.Count == 0, cancellationToken: cancellationToken);
+
             if (findings.Count == 0)
             {
-                return McpHelpers.Status(
+                return DarlingMcpWindowNotice.FinishEmpty(McpHelpers.Status(
                     "empty",
                     "No findings in the requested time range. Run analyze_server to generate new findings."
-                    + (secondaryReplicaNote is null ? "" : " " + secondaryReplicaNote));
+                    + (secondaryReplicaNote is null ? "" : " " + secondaryReplicaNote),
+                    notice.AsHints()), notice);
             }
 
             /* #2000: collapse to one entry per (story_path_hash, incident_id). Measured 27.9x
@@ -1236,9 +1256,13 @@ public sealed class DarlingMcpTools
             var (forcePlanStates, forcePlanStateNote) =
                 await DarlingForcePlanTargetStateReader.TryReadAsync(postgres, resolved.ServerId, groups.Select(g => g.Latest), logger: logger, cancellationToken: cancellationToken);
 
-            return JsonSerializer.Serialize(new
+            return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
+                /* #7010: the window-floor keys. This payload's own truncation_note is the read-cap sentence below, so the floor's sentence is
+                   appended to it (Lite's twin does the same) and the two stay one key. */
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
                 // finding_count is what's IN THIS RESPONSE (limit may have cut it); total_finding_count is
                 // how many distinct chains the window held before that cut — see findings_truncated.
                 finding_count = groups.Count,
@@ -1250,9 +1274,9 @@ public sealed class DarlingMcpTools
                 // letting first_seen quietly lie. truncated is the #3594 flag (observed above); the note
                 // says what was cut and what to do about it.
                 truncated,
-                truncation_note = truncated
+                truncation_note = DarlingMcpWindowNotice.JoinNotes(truncated
                     ? $"TRUNCATED: the window held more than the {FindingOccurrences.WindowCoveringLimit}-row read cap; the oldest occurrences in the window were dropped, so total_occurrences, occurrences and first_seen may under-report. Use a smaller hours_back for exact stats."
-                    : null,
+                    : null, notice.TruncationNote),
                 // #4198: a DIFFERENT cut from truncated above — this is the group PAGE (limit), not the raw
                 // store read. Independent flag because the two say different things: truncated warns
                 // occurrence stats may under-report, findings_truncated warns other chains exist but are not
@@ -1356,7 +1380,7 @@ public sealed class DarlingMcpTools
                         is_config_fix = FactRemediation.IsConfigFix(f.Remediation)
                     };
                 })
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions), notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

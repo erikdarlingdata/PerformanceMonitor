@@ -138,16 +138,26 @@ public sealed partial class DarlingMcpAlertTools
                 ? 0L
                 : await DarlingAlertReader.CountDismissedAlertsAsync(postgres, since, windowEnd, serverId, filter, cancellationToken);
 
+            /* #7010: the window-floor notice. The floor is the fleet's wait_stats floor (the collector every collecting server runs each cycle,
+               the data the store holds), never the oldest alert: a window that holds no alert is not truncation, a window that starts before
+               the data is. Lite's twin probes the same relation. An empty page carries it under hints, because a window the store does not
+               reach back to is not a true negative. */
+            var waitStats = DataWindowFloor.Source.ForCollectorTable("wait_stats");
+            var notice = await DarlingMcpWindowNotice.ReadAsync(
+                () => DarlingMcpWindowNotice.ProbeScoped(postgres, [waitStats], null, since, windowEnd, cancellationToken),
+                since, windowEnd, "wait_stats", emptyAnswer: page.Count == 0, cancellationToken: cancellationToken);
+
             if (page.Count == 0)
             {
                 /* An empty default page over a window that DOES hold dismissed rows is not "no alerts": it is
                    "every alert here was acknowledged", and the one-sentence quiet-window answer would send
                    the caller off widening a window whose contents they were never shown. */
-                return dismissedExcludedCount > 0
+                return DarlingMcpWindowNotice.FinishEmpty(dismissedExcludedCount > 0
                     ? McpHelpers.Status(
                         "empty",
-                        $"No undismissed alerts found in the specified time range{filterSentence}, but {dismissedExcludedCount} dismissed {(dismissedExcludedCount == 1 ? "alert was" : "alerts were")} excluded by the default filter. Re-run with include_dismissed = true to see them — a dismissed alert still fired.")
-                    : McpHelpers.Status("empty", $"No alerts found in the specified time range{filterSentence}.");
+                        $"No undismissed alerts found in the specified time range{filterSentence}, but {dismissedExcludedCount} dismissed {(dismissedExcludedCount == 1 ? "alert was" : "alerts were")} excluded by the default filter. Re-run with include_dismissed = true to see them — a dismissed alert still fired.",
+                        notice.AsHints())
+                    : McpHelpers.Status("empty", $"No alerts found in the specified time range{filterSentence}.", notice.AsHints()), notice);
             }
 
             /* #6334: the known-pattern entries, loaded ONCE for the page and matched in memory (no query per row). */
@@ -232,10 +242,13 @@ public sealed partial class DarlingMcpAlertTools
                 }).ToList();
             }
 
-            return JsonSerializer.Serialize(new
+            return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new
             {
                 server = scope,
                 hours_back,
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 /* #3541 A3: `total_alerts` is gone — it was the page count under a name that promised the
                    window. What is published is what was measured: the page, whether the window held more,
                    the span the page covers (newest-first, so the oldest stamp IS the reach), and the filter
@@ -250,7 +263,7 @@ public sealed partial class DarlingMcpAlertTools
                 dismissed_excluded = !include_dismissed,
                 dismissed_excluded_count = dismissedExcludedCount,
                 alerts
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions), notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
