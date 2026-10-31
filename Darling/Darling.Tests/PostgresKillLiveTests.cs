@@ -109,7 +109,7 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
             }
 
             await File.AppendAllTextAsync(Path.Combine(Data, "postgresql.conf"),
-                $"\nport = {Port}\nlisten_addresses = '127.0.0.1'\nssl = on\nmax_connections = 40\ntimezone = 'UTC'\nlog_timezone = 'UTC'\n");
+                $"\nport = {Port}\nlisten_addresses = '127.0.0.1'\nssl = on\nmax_connections = 40\nfsync = off\nsynchronous_commit = off\nfull_page_writes = off\ntimezone = 'UTC'\nlog_timezone = 'UTC'\n");
             await File.WriteAllTextAsync(Path.Combine(Data, "pg_hba.conf"),
                 "hostssl all /^pmk_md5_ 127.0.0.1/32 md5\nhost all all 127.0.0.1/32 scram-sha-256\n");
             /* Not through RunToolAsync: the server inherits a redirected output pipe, which then never closes. Its output goes to the log. */
@@ -224,9 +224,14 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
             return (connection, pid, (string)(await read.ExecuteScalarAsync(Ct))!);
         }
 
-        public async Task<bool> AliveAsync(int pid)
+        /// <summary>
+        /// Waits up to <paramref name="polls"/> x 100 ms for the backend to leave pg_stat_activity: false the moment it
+        /// does, true when it is still there at the end. A caller that expects a kill gives it the full 10 s
+        /// (<see cref="AliveAsync"/>); a caller that expects no kill uses <see cref="StillAliveAsync"/>.
+        /// </summary>
+        public async Task<bool> AliveAsync(int pid, int polls = 100)
         {
-            for (var i = 0; i < 100; i++)
+            for (var i = 0; i < polls; i++)
             {
                 if (await Scalar(Admin, $"SELECT count(*) FROM pg_stat_activity WHERE pid = {pid}") is 0L)
                     return false;
@@ -235,6 +240,13 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
 
             return true;
         }
+
+        /// <summary>
+        /// "The backend was not terminated" after a refused or dry-run kill (#6972). pg_terminate_backend takes effect in
+        /// milliseconds on an idle backend, so a wrongly sent kill shows within 1 s (10 polls of 100 ms) and the 10 s
+        /// that <see cref="AliveAsync"/> keeps for the expected kill only added 9 s to each of these checks.
+        /// </summary>
+        public Task<bool> StillAliveAsync(int pid) => AliveAsync(pid, polls: 10);
 
         public async Task<long> JournalAsync(string eventName) =>
             Convert.ToInt64(await Scalar(Store, $"SELECT count(*) FROM config.investigation_journal WHERE event = '{eventName}'"), CultureInfo.InvariantCulture);
@@ -332,7 +344,7 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
             Assert.Equal(id, (string?)json["session"]!["backend_id"]);
             Assert.Equal(c.Roles.Victim, (string?)json["session"]!["login_name"]);
             Assert.Equal("client backend", (string?)json["session"]!["backend_type"]);
-            Assert.True(await c.AliveAsync(pid));
+            Assert.True(await c.StillAliveAsync(pid));
             Assert.Equal(0, await c.JournalAsync("action_called"));
             var parameter = typeof(DarlingMcpPlanForceTools).GetMethod(nameof(DarlingMcpPlanForceTools.KillSession))!.GetParameters().Single(p => p.Name == "dry_run");
             Assert.True((bool)parameter.DefaultValue!);
@@ -383,7 +395,7 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
             var json = Parse(await c.Kill(id, dryRun: false));
             Assert.Equal("refused", (string?)json["status"]);
             Assert.Equal("server_action_off", (string?)json["reason"]);
-            Assert.True(await c.AliveAsync(pid));
+            Assert.True(await c.StillAliveAsync(pid));
         });
     }
 
@@ -408,7 +420,7 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
                 Assert.DoesNotContain(id, answer, StringComparison.Ordinal);
             }
 
-            Assert.True(await c.AliveAsync(pid));
+            Assert.True(await c.StillAliveAsync(pid));
             Assert.Equal(0, await c.JournalAsync("action_called"));
         });
     }
@@ -442,7 +454,7 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
                 Assert.Contains("pg_signal_backend", (string?)json["message"], StringComparison.Ordinal);
             }
 
-            Assert.True(await c.AliveAsync(pid));
+            Assert.True(await c.StillAliveAsync(pid));
             Assert.Equal(0, await c.JournalAsync("action_called"));
         });
     }
@@ -458,7 +470,7 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
             Assert.Equal("refused", (string?)json["status"]);
             Assert.Equal("not_permitted", (string?)json["reason"]);
             Assert.Contains("pg_read_all_stats", (string?)json["message"], StringComparison.Ordinal);
-            Assert.True(await c.AliveAsync(pid));
+            Assert.True(await c.StillAliveAsync(pid));
         });
     }
 
@@ -473,7 +485,7 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
             Assert.Equal("refused", (string?)json["status"]);
             Assert.Equal("not_permitted", (string?)json["reason"]);
             Assert.Contains("superuser", (string?)json["message"], StringComparison.Ordinal);
-            Assert.True(await c.AliveAsync(pid));
+            Assert.True(await c.StillAliveAsync(pid));
         });
     }
 
@@ -502,7 +514,7 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
                     Assert.Equal("refused", (string?)json["status"]);
                     Assert.Equal(RemediationResult.Reasons.ToolLoginSession, (string?)json["reason"]);
                     Assert.Null(json["session"]);
-                    Assert.True(await c.AliveAsync(pid));
+                    Assert.True(await c.StillAliveAsync(pid));
                 }
             }
 
@@ -521,7 +533,7 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
             await using var victimConnection = connection;
             var dry = Parse(await c.Kill(id, dryRun: true));
             Assert.Equal("dry_run", (string?)dry["status"]);
-            Assert.True(await c.AliveAsync(pid));
+            Assert.True(await c.StillAliveAsync(pid));
             var json = Parse(await c.Kill(id, dryRun: false));
             Assert.Equal("done", (string?)json["status"]);
             Assert.False(await c.AliveAsync(pid));
@@ -561,7 +573,7 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
             Assert.Equal("refused", (string?)json["status"]);
             Assert.Equal(RemediationResult.Reasons.ToolLoginSession, (string?)json["reason"]);
             Assert.Null(json["session"]);
-            Assert.True(await c.AliveAsync(pid));
+            Assert.True(await c.StillAliveAsync(pid));
             Assert.Equal(0, await c.JournalAsync("action_done"));
         });
     }
@@ -582,7 +594,7 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
             /* backend_id one off (what a conversion through a double can do): the pid passed with it no longer agrees. */
             var nudged = (long.Parse(id, CultureInfo.InvariantCulture) + 1).ToString(CultureInfo.InvariantCulture);
             Assert.Equal("bad_backend_id", (string?)Parse(await c.Kill(nudged, dryRun: false, session: pid))["reason"]);
-            Assert.True(await c.AliveAsync(pid));
+            Assert.True(await c.StillAliveAsync(pid));
             Assert.Equal(0, await c.JournalAsync("action_called"));
         });
     }
@@ -721,7 +733,7 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
             }
 
             Assert.Equal("failed", (string?)Parse(answer)["status"]);
-            Assert.True(await c.AliveAsync(pid));
+            Assert.True(await c.StillAliveAsync(pid));
             Assert.Equal(1, await c.JournalAsync("action_failed"));
         });
     }
@@ -759,7 +771,7 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
                     Assert.DoesNotContain("reused", (string?)json["message"], StringComparison.Ordinal);
                 }
 
-                Assert.True(await c.AliveAsync(pid));
+                Assert.True(await c.StillAliveAsync(pid));
                 Assert.Equal(0, await c.JournalAsync("action_called"));
                 monitorDone = true;
             }
@@ -873,7 +885,7 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
                 var json = Parse(await c.Kill(id, dryRun: false));
                 Assert.Equal("done", (string?)json["status"]);
                 Assert.False(await c.AliveAsync(pid));
-                Assert.True(await c.AliveAsync(bystanderPid));
+                Assert.True(await c.StillAliveAsync(bystanderPid));
                 Assert.Equal(0, await CallsAsync(c));
                 ownerDone = true;
             }
@@ -1011,7 +1023,7 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
                     PostgresRemediationExecutor.ConnectionStringSeam.Value = null;
                 }
 
-                Assert.True(await c.AliveAsync(pid));
+                Assert.True(await c.StillAliveAsync(pid));
                 Assert.Equal(0, await CallsAsync(c));
                 Assert.Equal(0, await c.JournalAsync("action_called"));
 
@@ -1073,7 +1085,7 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
                 await c.Target.SetSslAsync(on: true, CancellationToken.None);
             }
 
-            Assert.True(await c.AliveAsync(pid));
+            Assert.True(await c.StillAliveAsync(pid));
             Assert.Equal(0, await c.JournalAsync("action_called"));
 
             /* With TLS back, the same call goes through. */
@@ -1103,7 +1115,7 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
                 await c.CleanupAsync(refused, async cleanup => await ExecAsync(cleanup, "GRANT CONNECT ON DATABASE postgres TO PUBLIC", CancellationToken.None));
             }
 
-            Assert.True(await c.AliveAsync(pid));
+            Assert.True(await c.StillAliveAsync(pid));
         });
     }
 
