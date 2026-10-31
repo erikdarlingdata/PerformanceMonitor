@@ -27,7 +27,6 @@
   <ItemGroup>
     <InternalsVisibleTo Include="PerformanceMonitor.PlanAnalysis" />
     <InternalsVisibleTo Include="PerformanceMonitorLite" />
-    <InternalsVisibleTo Include="PerformanceMonitorDashboard" />
     <!-- AN3: the ported PgDrillDownCollector renders plan warnings through McpHelpers.Truncate,
          exactly like both apps' drill-down collectors. -->
     <InternalsVisibleTo Include="PerformanceMonitor.Darling.Analysis" />
@@ -40,7 +39,6 @@
     <InternalsVisibleTo Include="PerformanceMonitor.Darling.Service" />
     <InternalsVisibleTo Include="PerformanceMonitor.Darling.Storage" />
     <InternalsVisibleTo Include="Lite.Tests" />
-    <InternalsVisibleTo Include="Dashboard.Tests" />
     <!-- #2417: Darling.Tests serializes the MCP alert payload through McpHelpers.JsonOptions rather
          than a look-alike, so a naming policy added there can never leave the round-trip invariant
          asserting keys no client ever receives. The two sibling test projects were already here. -->

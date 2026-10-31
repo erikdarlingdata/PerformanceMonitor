@@ -29,9 +29,7 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="PerformanceMonitorLite" />
-    <InternalsVisibleTo Include="PerformanceMonitorDashboard" />
     <InternalsVisibleTo Include="Lite.Tests" />
-    <InternalsVisibleTo Include="Dashboard.Tests" />
     <!-- The Darling service/viewer call the SHARED ActualPlanExecutor + QueryModificationDetector; Darling.Tests
          also pins the executor's internal plan-capture seam (IActualPlanResultReader) with a scripted reader. -->
     <InternalsVisibleTo Include="Darling.Tests" />

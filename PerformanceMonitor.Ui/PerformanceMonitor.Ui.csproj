@@ -30,10 +30,8 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="PerformanceMonitorLite" />
-    <InternalsVisibleTo Include="PerformanceMonitorDashboard" />
     <InternalsVisibleTo Include="PerformanceMonitor.Darling.Viewer" />
     <InternalsVisibleTo Include="Lite.Tests" />
-    <InternalsVisibleTo Include="Dashboard.Tests" />
     <InternalsVisibleTo Include="Darling.Tests" />
   </ItemGroup>
 </Project>
