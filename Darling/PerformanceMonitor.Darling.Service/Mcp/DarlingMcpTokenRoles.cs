@@ -85,6 +85,22 @@ internal sealed class DarlingMcpTokenSet
     internal static McpDataDetail DetailFor(McpDataDetail service, McpCaller? caller) =>
         caller?.DataDetail is { } own && own > service ? own : service;
 
+    /// <summary>The header a front door (and any other client) sends to ask a store for less detail on its connection (#7023): a level
+    /// word, <c>maskLiterals</c> or <c>metadataOnly</c>.</summary>
+    internal const string DataDetailHeader = "X-Darling-Data-Detail";
+
+    /// <summary>The level a call is served when the request also carries <see cref="DataDetailHeader"/> (#7023): the stricter of
+    /// <see cref="DetailFor(McpDataDetail, McpCaller?)"/> and the header's level. The header can only narrow. A missing, blank or
+    /// unrecognized value narrows nothing, so no value can serve a caller more than its own token and the service allow, and nothing about
+    /// the header needs trusting.</summary>
+    internal static McpDataDetail DetailFor(McpDataDetail service, McpCaller? caller, string? narrowingHeader)
+    {
+        var level = DetailFor(service, caller);
+        return !string.IsNullOrWhiteSpace(narrowingHeader) && McpDataDetailModes.TryParse(narrowingHeader, out var asked) && asked > level
+            ? asked
+            : level;
+    }
+
     /// <summary>Every tool any served token may see: the collection the host narrows once at start. Each request is then narrowed again
     /// to its own token's set.</summary>
     internal DarlingMcpWritePolicy.Effective Union

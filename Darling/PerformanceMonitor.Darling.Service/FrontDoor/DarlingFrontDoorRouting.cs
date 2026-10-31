@@ -280,7 +280,7 @@ internal sealed class DarlingFrontDoorRouter
 
     /// <summary>Routes one call and answers it. <paramref name="agentRole"/> is true when the caller holds the agent role, so the store
     /// sees the agent token and not the operator one. A caller cancel (<paramref name="ct"/>) cancels every call in flight.</summary>
-    internal async Task<CallToolResult> CallAsync(string tool, IDictionary<string, JsonElement>? arguments, bool agentRole, CancellationToken ct)
+    internal async Task<CallToolResult> CallAsync(string tool, IDictionary<string, JsonElement>? arguments, bool agentRole, CancellationToken ct, McpDataDetail detail = McpDataDetail.Full)
     {
         var plan = await DarlingFrontDoorRouting.PlanAsync(_directory, tool, arguments, ct).ConfigureAwait(false);
         var forwarded = WithoutStore(arguments);
@@ -292,7 +292,7 @@ internal sealed class DarlingFrontDoorRouter
 
             case DarlingFrontDoorRouting.Plan.ToStore single:
             {
-                var outcome = await CallOneAsync(single.Store, tool, forwarded, agentRole, passProtocolErrors: true, ct).ConfigureAwait(false);
+                var outcome = await CallOneAsync(single.Store, tool, forwarded, agentRole, passProtocolErrors: true, detail, ct).ConfigureAwait(false);
                 return outcome.Result ?? TextResult(Unavailable(outcome.Store, outcome.Message!), isError: true);
             }
 
@@ -306,7 +306,7 @@ internal sealed class DarlingFrontDoorRouter
                 StoreOutcome? last = null;
                 foreach (var store in candidates)
                 {
-                    last = await CallOneAsync(store, tool, forwarded, agentRole, passProtocolErrors: false, ct).ConfigureAwait(false);
+                    last = await CallOneAsync(store, tool, forwarded, agentRole, passProtocolErrors: false, detail, ct).ConfigureAwait(false);
                     if (last.Result is not null)
                     {
                         return last.Result;
@@ -322,7 +322,7 @@ internal sealed class DarlingFrontDoorRouter
 
             default:
                 return await DarlingFrontDoorFanOut.RunAsync(
-                    tool, _directory.Stores, store => CallOneAsync(store, tool, forwarded, agentRole, passProtocolErrors: false, ct), ct).ConfigureAwait(false);
+                    tool, _directory.Stores, store => CallOneAsync(store, tool, forwarded, agentRole, passProtocolErrors: false, detail, ct), ct).ConfigureAwait(false);
         }
     }
 
@@ -350,14 +350,14 @@ internal sealed class DarlingFrontDoorRouter
     /// <see cref="McpProtocolException"/>. On the any-one and fan-out paths every other failure of one store is that store's own entry,
     /// so one store that cannot answer a tool (an older build, say) never costs the other stores' answers.</summary>
     private async Task<StoreOutcome> CallOneAsync(
-        string store, string tool, Dictionary<string, JsonElement> arguments, bool agentRole, bool passProtocolErrors, CancellationToken ct)
+        string store, string tool, Dictionary<string, JsonElement> arguments, bool agentRole, bool passProtocolErrors, McpDataDetail detail, CancellationToken ct)
     {
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct);
         linked.CancelAfter(_peerTimeout);
         try
         {
             var call = new CallToolRequestParams { Name = tool, Arguments = new Dictionary<string, JsonElement>(arguments, StringComparer.Ordinal) };
-            var result = await _peers.CallAsync(store, call, agentRole, linked.Token).ConfigureAwait(false);
+            var result = await _peers.CallAsync(store, call, agentRole, linked.Token, detail).ConfigureAwait(false);
             return new StoreOutcome(store, result, null);
         }
         catch (FrontDoorPeerException ex)

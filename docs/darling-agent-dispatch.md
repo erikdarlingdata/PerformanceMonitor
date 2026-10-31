@@ -83,7 +83,11 @@ What each role sees:
 | `agent` | The reads, the two investigation tools, and the Level 2 action tools through the `agent_action` gate. | Every tool in the never-agent list: the route tools, alert settings, Custom Views, tags, collector and server controls. |
 | `reader` | The read tools only. | Every write tool, the server admin tools, the two investigation tools and the Level 2 action tools. `mcp.allowWrites`, `mcp.allowServerAdmin` and `mcp.allowInvestigations` never widen it. |
 
-A reader is not an agent: it has no identity in the journal and cannot claim or submit. Give each person their own `reader` entry, so the log names who called and one token can be removed without rotating the rest.
+A reader is not an agent: it has no identity in the journal and cannot claim or submit. Give each person their own `reader` entry, so the log names who called and one token can be removed without rotating the rest. One write stays open to a reader. `analyze_server` with no `as_of` saves its findings to the store. It does this for every token, the legacy read-only token included.
+
+Behind a [front door](darling/front-door.md), the front door sends the level it serves its caller to each store with the call. The store serves the stricter of that level and its own. A `maskLiterals` reader gets masked free text (a report's `root_cause`, a known pattern's `note`) even when the store is at `full`. A store from an older build ignores the level.
+
+A key in a token entry that is not a field, such as `data_detail`, is reported at start like any other unknown key in `darling.json`. A web token is refused for web sign-in when it has the value of any served MCP token. A named token counts, as the legacy token always did.
 
 `tools/list` shows only that set. A call to a tool outside it fails as an unknown tool. An unknown token gets 401, and so does a request with no token, loopback included.
 

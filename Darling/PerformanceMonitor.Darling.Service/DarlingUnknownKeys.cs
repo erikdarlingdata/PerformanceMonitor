@@ -46,10 +46,24 @@ internal static class DarlingUnknownKeys
                 // "allowAdminWrite" is named at start rather than silently leaving the default (#6600).
                 Walk(root.Value, typeof(WebConfig), "web", found);
             }
-            else if (sectionType is not null && TryGetIgnoreCase(root.Value, "network", out var network))
+            else if (sectionType is not null)
             {
-                var networkType = sectionType.GetProperty("Network")!.PropertyType;
-                Walk(network, Nullable.GetUnderlyingType(networkType) ?? networkType, sectionType == typeof(WebConfig) ? "web.network" : "mcp.network", found);
+                if (TryGetIgnoreCase(root.Value, "network", out var network))
+                {
+                    var networkType = sectionType.GetProperty("Network")!.PropertyType;
+                    Walk(network, Nullable.GetUnderlyingType(networkType) ?? networkType, "mcp.network", found);
+                }
+
+                // #7023: each mcp.tokens entry is walked too. A mistyped data_detail for dataDetail binds to nothing, and the entry would be
+                // served the service's level, wider than the operator meant; every other entry mistake leaves the entry unserved.
+                if (TryGetIgnoreCase(root.Value, "tokens", out var tokens) && tokens.ValueKind == JsonValueKind.Array)
+                {
+                    var index = 0;
+                    foreach (var entry in tokens.EnumerateArray())
+                    {
+                        Walk(entry, typeof(McpTokenEntry), "mcp.tokens[" + index++ + "]", found);
+                    }
+                }
             }
         }
 

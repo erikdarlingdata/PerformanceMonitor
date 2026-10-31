@@ -1063,8 +1063,8 @@ public sealed class DarlingWebHostService : BackgroundService
 
             /* #6265: a web token with the MCP token's value is refused for web sign-in (the pipeline checks each posted token). The
                service still starts, so an upgrade of such a setup keeps running; this says why the token form answers 403. */
-            var mcpToken = DarlingAgentDispatchChecks.ResolveToken(config.Mcp).Token;
-            if (DarlingAgentDispatchChecks.WebTokenIsMcpToken(accessToken, mcpToken))
+            var mcpTokens = DarlingAgentDispatchChecks.ResolveAllTokens(config.Mcp);
+            if (DarlingAgentDispatchChecks.WebTokenIsMcpToken(accessToken, mcpTokens))
             {
                 _logger.LogWarning("{Message}", DarlingAgentDispatchChecks.WebTokenSameAsMcpMessage);
             }
@@ -1073,7 +1073,7 @@ public sealed class DarlingWebHostService : BackgroundService
                was parsed before any degrade and still holds it afterwards, so it goes through the MCP host's
                ResolveHostGuardListenIp (the one rule both hosts share) with the final mode: a start that fell back to
                loopback-only admits loopback names only, whatever it parsed. */
-            ConfigurePipeline(_app, postgres, networkMode, DarlingMcpHostService.ResolveHostGuardListenIp(networkMode, networkListenIp), allowedCidr, accessToken, oidcClient, publicBaseUrlHost, storeHostPostgresConfig, config.Analyzer, requireTokenWhenLoopbackOnly, trustedProxies: trustedProxies, sendHsts: network?.Hsts ?? false, dataDetail: McpDataDetailModes.Resolve(config.Mcp.DataDetail), mcpToken: mcpToken, sharedTokenReadsOnlyProblem: writeTokenProblem, adminArm: _adminArm, allowWindowsAuthOverUnverifiedTls: web.AllowWindowsAuthOverUnverifiedTls, frontDoorProxy: frontDoorProxy, composeReadPostgres: _composeReadDataSource);
+            ConfigurePipeline(_app, postgres, networkMode, DarlingMcpHostService.ResolveHostGuardListenIp(networkMode, networkListenIp), allowedCidr, accessToken, oidcClient, publicBaseUrlHost, storeHostPostgresConfig, config.Analyzer, requireTokenWhenLoopbackOnly, trustedProxies: trustedProxies, sendHsts: network?.Hsts ?? false, dataDetail: McpDataDetailModes.Resolve(config.Mcp.DataDetail), mcpTokens: mcpTokens, sharedTokenReadsOnlyProblem: writeTokenProblem, adminArm: _adminArm, allowWindowsAuthOverUnverifiedTls: web.AllowWindowsAuthOverUnverifiedTls, frontDoorProxy: frontDoorProxy, composeReadPostgres: _composeReadDataSource);
 
             /* #2389: name the authority for each half of what is being started — enabled/port from whichever
                plane the supervisor resolved, listen/allowFrom/token always from darling.json. */
@@ -1322,7 +1322,7 @@ public sealed class DarlingWebHostService : BackgroundService
         bool sendHsts = false,
         Func<DateTime>? utcNow = null,
         McpDataDetail dataDetail = McpDataDetail.MetadataOnly,
-        string? mcpToken = null,
+        IReadOnlyList<string>? mcpTokens = null,
         string? sharedTokenReadsOnlyProblem = null,
         WebAdminArm? adminArm = null,
         bool allowWindowsAuthOverUnverifiedTls = false,
@@ -1553,7 +1553,7 @@ public sealed class DarlingWebHostService : BackgroundService
                            abort still propagates — that is not a failure to report. */
                         try
                         {
-                            await HandleAuthFlowAsync(context, oidcClient, signingKey, transactionKey, seat, refusals, token, signInThrottle, admittedHostName, clock, mcpToken);
+                            await HandleAuthFlowAsync(context, oidcClient, signingKey, transactionKey, seat, refusals, token, signInThrottle, admittedHostName, clock, mcpTokens);
                         }
                         catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
                         {
@@ -2085,14 +2085,14 @@ public sealed class DarlingWebHostService : BackgroundService
         DarlingSignInThrottle signInThrottle,
         string? publicHostName,
         Func<DateTime> clock,
-        string? mcpToken)
+        IReadOnlyList<string>? mcpTokens)
     {
         var path = context.Request.Path.Value ?? "/";
         var remote = context.Connection.RemoteIpAddress;
 
         if (string.Equals(path, LoginPath, StringComparison.OrdinalIgnoreCase))
         {
-            await HandleTokenSignInAsync(context, accessToken, signingKey, signInThrottle, refusals, oidcClient is not null, publicHostName, clock, mcpToken);
+            await HandleTokenSignInAsync(context, accessToken, signingKey, signInThrottle, refusals, oidcClient is not null, publicHostName, clock, mcpTokens);
             return;
         }
 
@@ -2360,7 +2360,7 @@ public sealed class DarlingWebHostService : BackgroundService
         bool oidcEnabled,
         string? publicHostName,
         Func<DateTime> clock,
-        string? mcpToken)
+        IReadOnlyList<string>? mcpTokens)
     {
         var remote = context.Connection.RemoteIpAddress;
         var now = clock();
@@ -2382,7 +2382,7 @@ public sealed class DarlingWebHostService : BackgroundService
         /* #6265: the web token is the credential for a person's writes (approving a note, closing a request), and an MCP agent holds the
            MCP token. A web token with the same value would let that agent sign in as a person, so the token form refuses to sign in
            at all (before the form is read or counted); OIDC sign-in is unaffected. The service logs a warning at start. */
-        if (DarlingAgentDispatchChecks.WebTokenIsMcpToken(accessToken, mcpToken))
+        if (DarlingAgentDispatchChecks.WebTokenIsMcpToken(accessToken, mcpTokens))
         {
             refusals.Report(
                 _logger, "Web dashboard", DarlingRefusalGate.Token, StatusCodes.Status403Forbidden, remote,

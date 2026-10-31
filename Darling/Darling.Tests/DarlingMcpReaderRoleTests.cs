@@ -79,10 +79,10 @@ public sealed class DarlingMcpReaderRoleTests
         var agent = await ToolNamesAsync(server, AgentToken);
 
         Assert.NotEmpty(reader);
-        Assert.Empty(reader.Where(DarlingMcpWritePolicy.IsWrite));
-        Assert.Empty(reader.Where(DarlingMcpWritePolicy.IsInvestigation));
-        Assert.Empty(reader.Where(DarlingMcpWritePolicy.IsServerAdmin));
-        Assert.Empty(reader.Where(DarlingMcpWritePolicy.AgentActionTools.Contains));
+        Assert.DoesNotContain(reader, DarlingMcpWritePolicy.IsWrite);
+        Assert.DoesNotContain(reader, DarlingMcpWritePolicy.IsInvestigation);
+        Assert.DoesNotContain(reader, DarlingMcpWritePolicy.IsServerAdmin);
+        Assert.DoesNotContain(reader, name => DarlingMcpWritePolicy.AgentActionTools.Contains(name));
 
         /* Controls: the same settings do serve the operator its writes and the agent its investigation tools, so the reader's absence is the role's. */
         Assert.Contains("create_mute_rule", operatorTools);
