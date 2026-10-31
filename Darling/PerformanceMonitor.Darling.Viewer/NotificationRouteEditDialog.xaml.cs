@@ -172,7 +172,7 @@ public partial class NotificationRouteEditDialog : Window
         {
             NotificationRoute.WildcardMatch => "Every alert for this scope that no more specific route of the same scope matches. Offered only with a server or a tag.",
             AlertFamily.SelfMonitor => "Alerts about the monitoring tool itself: its store, collectors, jobs and certificates (Compression Job Stuck, Collection Stopped, Store Disk Pressure, Retention Held, …).",
-            AlertFamily.Reports => "Scheduled prose — the Collector Cost Digest, the Fleet Sweep Rollup and the Analysis Singles Digest. Reports to read, not pages.",
+            AlertFamily.Reports => "Scheduled prose — the Collector Cost Digest, the Fleet Sweep Rollup, the Analysis Singles Digest and the Daily Health Report. Reports to read, not pages.",
             AlertFamily.AgentJobs => "SQL Server Agent: Failed Agent Job, Long-Running Job, Agent Not Running, Agent Alert Gaps.",
             AlertFamily.Performance => "A monitored server's health: blocking, deadlocks, CPU, long-running queries, space, availability groups, connection loss, custom rules and analysis findings — and any alert the taxonomy does not name.",
             _ => "One alert by its exact metric_name (as shown in Alert History). Wins over the family route; a recovery (Server Restored, AG Replica Reconnected) routes as the alert it clears.",
