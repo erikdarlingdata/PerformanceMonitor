@@ -218,7 +218,7 @@ The service is built to restart cleanly, any time:
 - **Alert no-re-fire** — edge-trigger watermarks and the failed-job watermark persist in `config_edge_trigger_watermarks`, and per-alert cooldowns re-seed from `config_alert_log`, so a restart does not replay alerts you already received.
 - **Idempotent store setup** — migrations are versioned and skip what is already applied; TimescaleDB conversion and compression policies re-converge as no-ops.
 - **Per-connect snapshots** — the on-connect config snapshot collectors run once per (re)connect, mirroring Lite's server-open behavior.
-- Mute rules (`config_mute_rules`) load once at service startup — restart the service after adding rows.
+- Mute rules (`config_mute_rules`) reload on their own. A change to the table bumps the store's config version, and the service checks that version every 15 seconds, so a new or changed rule takes effect within about 15 seconds with no restart.
 
 A monitored server that is down is retried every 60 seconds forever; a collector that errors is logged and retried at its next scheduled time; a mid-cycle connection-level failure forces a clean reconnect and re-probe. The loop never dies for one bad cycle.
 
