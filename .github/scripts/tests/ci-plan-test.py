@@ -222,6 +222,14 @@ check("web js: other Service file", run(["Darling/PerformanceMonitor.Darling.Ser
 check("web js: a root-level wwwroot/js path", run(["wwwroot/js/a.js"])["check_web_js"], "true")
 check("web js: not on a skipped run", run([js], draft=True)["check_web_js"], "false")
 check("actionlint: not on a skipped run", run([".github/workflows/pr.yml"], draft=True)["actionlint"], "false")
+check("pg old targets: a collector file", run(["PerformanceMonitor.Collectors/PgVersionSql.cs"])["pg_old_targets"], "true")
+check("pg old targets: the catalog", run(["PerformanceMonitor.Collectors/CollectorCatalog.cs"])["pg_old_targets"], "true")
+check("pg old targets: the fetch script", run(["Darling/tools/fetch-pg-target.ps1"])["pg_old_targets"], "true")
+check("pg old targets: the start script", run([".github/scripts/start-test-pg.ps1"])["pg_old_targets"], "true")
+check("pg old targets: the test class", run(["Darling/Darling.Tests/PgCollectorsOnOldTargetsLiveTests.cs"])["pg_old_targets"], "true")
+check("pg old targets: a SQL Server collector", run(["PerformanceMonitor.Collectors/WaitStatsCollector.cs"])["pg_old_targets"], "false")
+check("pg old targets: not on a push", run(["PerformanceMonitor.Collectors/PgVersionSql.cs"], event="push")["pg_old_targets"], "false")
+check("pg old targets: not on a draft", run(["PerformanceMonitor.Collectors/PgVersionSql.cs"], draft=True)["pg_old_targets"], "false")
 
 # --- parsing ---------------------------------------------------------------------------------------------------
 check("labels: JSON", cp.parse_labels('["ci-next", "bug"]'), ["ci-next", "bug"])
