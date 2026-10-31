@@ -554,12 +554,11 @@ public sealed partial class DarlingMcpInvestigationTools
             if (request.Value.Row.State == "claimed")
             {
                 var holder = Guid.TryParse(claim_id, out var claim) ? await store.ClaimHolderAsync(requestId, claim, cancellationToken) : null;
-                /* A claim_id is the claiming token's: a named token that presents another token's claim_id is refused, and journaled as itself. */
+                /* A claim_id is the claiming token's: a named token that presents another token's claim_id is refused. The read journals
+                   nothing (it is a read, and the write policy serves it as one): a journaled refusal counts toward MaxAgentJournalRows,
+                   and at the cap the claiming agent's next journaled call on the request is refused. */
                 if (ClaimTokenRefusal(tokenName, namedAgentNames, holder) is { } notYours)
-                {
-                    await store.RecordRefusalAsync(requestId, tokenName ?? InvestigationRules.InvalidAgentId, "evidence", notYours.Status, null, cancellationToken);
                     return InvestigationToolCore.Status(notYours.Status, notYours.Message);
-                }
 
                 if (holder is null)
                     return InvestigationToolCore.Status("already_claimed", "Another claim holds a live lease on this request.");

@@ -395,6 +395,14 @@ if (args.Length > 0 && DarlingCliCommands.IsSelfCheckPasswordKeyVerb(args[0]))
     return DarlingPasswordKeySelfCheck.Run(args[1..], Console.Out, Console.Error);
 }
 
+/* CLI verb: --self-check-launch-memory [<expected-limit-mib>] (#6995) - hidden: not in the usage text. Samples the Linux launch guard's
+   memory reader once and exits non-zero unless it reads resident memory against the cgroup limit. The container smoke runs it inside the
+   built image under `docker run --memory`. It reads no configuration and opens no store. */
+if (args.Length > 0 && DarlingCliCommands.IsSelfCheckLaunchMemoryVerb(args[0]))
+{
+    return DarlingLaunchMemorySelfCheck.Run(args[1..], Console.Out, Console.Error);
+}
+
 /* CLI verb: --set-collector-run-at <collector> <HH:MM|none|default> [--server <name>] [--config <path>] (#4938) — set,
    stop or clear the time of day a collector that runs once a day starts, fleet-wide or for one server, and print the
    rows read back from the store. A heavy daily collector otherwise starts whenever the service happened to start, which

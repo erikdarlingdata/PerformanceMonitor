@@ -45,13 +45,18 @@ try {
     $initOut = & (Join-Path $bin 'initdb.exe') -D $data -U darling -A trust --encoding=UTF8 2>&1
     if ($LASTEXITCODE -ne 0) { throw "initdb failed ($LASTEXITCODE): $(($initOut | Select-Object -Last 5) -join ' ')" }
 
-    # The darling-pg job's settings in .github/workflows/build.yml, plus UTC: CI's runners run in UTC.
+    # The darling-pg job's settings in .github/workflows/build.yml, plus UTC (CI's runners run in UTC) and no durability
+    # (fsync, synchronous_commit, full_page_writes off, as .github/scripts/start-test-pg.ps1 does, #6972): a rig holds
+    # throwaway test data and is commit-bound.
     Add-Content -LiteralPath (Join-Path $data 'postgresql.conf') -Encoding utf8NoBOM -Value @(
         "shared_preload_libraries = 'timescaledb,pg_stat_statements'",
         "port = $Port",
         "listen_addresses = '127.0.0.1'",
         "timescaledb.max_background_workers = 74",
         "max_worker_processes = 85",
+        "fsync = off",
+        "synchronous_commit = off",
+        "full_page_writes = off",
         "log_line_prefix = '%m [%p] %c '",
         "timezone = 'UTC'",
         "log_timezone = 'UTC'"
