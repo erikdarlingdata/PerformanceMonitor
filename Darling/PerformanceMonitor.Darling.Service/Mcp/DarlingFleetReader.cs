@@ -1515,7 +1515,7 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
             /* #3539 A3: the deadlock line's rule, one metric over — the count is the countable fact, the
                rate is the banded one, and an unrateable window prints the count alone. */
             parts.Add(c.BlockingRatePerHour.HasValue
-                ? $"Blocking {c.BlockingCount} ({c.BlockingRatePerHour.Value.ToString("0.0", CultureInfo.InvariantCulture)}/hr)"
+                ? $"Blocking {c.BlockingCount} ({c.BlockingRatePerHour.Value.ToString("0.0", CultureInfo.InvariantCulture)} waits/hr)"
                 : $"Blocking {c.BlockingCount}");
         }
 

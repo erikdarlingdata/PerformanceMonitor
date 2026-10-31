@@ -670,7 +670,7 @@ namespace PerformanceMonitor.Common
             var rate = ServerHealthClassifier.BlockingRatePerHour(signals.BlockingReports ?? count, signals.Window);
             if (rate.HasValue)
                 qualifiers.Add(rate.Value.ToString("0.0", CultureInfo.InvariantCulture)
-                    + (signals.BlockingReports.HasValue ? " reports/hr" : "/hr"));
+                    + (signals.BlockingReports.HasValue ? " reports/hr" : " waits/hr"));
             if (peakBlockMs > 0)
                 qualifiers.Add("peak block " + FormatDurationMs(peakBlockMs));
             /* #7028: the snapshot arm's value, when the producer carries one. */

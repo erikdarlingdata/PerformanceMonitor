@@ -344,6 +344,156 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ct, ServerId, ServerNa
         }
     }
 
+    /// <summary>#7028: blocking is ONE of the seven sources behind the retention notes' "N of 7". A day that holds DMV
+    /// snapshot waits and no reports reaches both the chosen-waits side and the snapshot side of the day, and counted
+    /// each, so it read 2 sources for one signal. It now reads 1, and a day that holds reports as well still reads 1.</summary>
+    [Fact]
+    public async Task ABlockingDay_CountsAsOneSource_WhetherItCameFromReportsOrSnapshots()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live test.");
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+        var bodySucceeded = false;
+        try
+        {
+            await SeedServerAsync(connection, ct);
+            var dmvOnly = DateTime.SpecifyKind(DateTime.UtcNow.Date.AddDays(-3), DateTimeKind.Unspecified);
+            var both = dmvOnly.AddDays(1);
+            await PlantSnapshotAsync(connection, dmvOnly.AddHours(3), rows: 2, eachMs: 30_000, ct);
+            await PlantWaitAsync(connection, both.AddHours(2), blocked: 52, blocker: 51, reports: 9, "master", dmv: false, ct);
+            await PlantSnapshotAsync(connection, both.AddHours(3), rows: 2, eachMs: 30_000, ct);
+
+            Assert.Equal(1, await SourcesPresentAsync(connection, dmvOnly, ct));
+            Assert.Equal(1, await SourcesPresentAsync(connection, both, ct));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    private static async Task<long> SourcesPresentAsync(NpgsqlConnection connection, DateTime day, CancellationToken ct)
+    {
+        using var read = new NpgsqlCommand("SELECT signal_sources_present FROM (" + DailySummarySql.RangeSql + ") AS calendar WHERE day = $5", connection);
+        read.Parameters.Add(new NpgsqlParameter<int> { TypedValue = ServerId });
+        read.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = day });
+        read.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = day.AddDays(1) });
+        read.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = EventWindowFloor.For(day) });
+        read.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = day });
+        return Convert.ToInt64(await read.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>#7028: the fleet and Overview snapshot gate reads up to the window end. The gate only looks backwards, so
+    /// a sustained run of snapshots AFTER a past window cannot change the value inside it: a lone 60 s snapshot in the
+    /// window reads 20 s alone, and still 20 s with a three-snapshot run planted three hours after the window.</summary>
+    [Fact]
+    public async Task TheSnapshotGate_IgnoresSnapshotsAfterTheWindowEnd()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live test.");
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+        var bodySucceeded = false;
+        try
+        {
+            await SeedServerAsync(connection, ct);
+            var start = DateTime.SpecifyKind(DateTime.UtcNow.Date.AddDays(-3), DateTimeKind.Unspecified);
+            var end = start.AddHours(24);
+            await PlantSnapshotAsync(connection, start.AddHours(22), rows: 2, eachMs: 30_000, ct);
+
+            var alone = await GatedPeakAsync(connection, start, end, ct);
+            for (var i = 0; i < 3; i++)
+                await PlantSnapshotAsync(connection, end.AddHours(3).AddMinutes(i), rows: 2, eachMs: 30_000, ct);
+            var withLaterRun = await GatedPeakAsync(connection, start, end, ct);
+
+            Assert.Equal(20_000, alone);
+            Assert.Equal(alone, withLaterRun);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    private static async Task<long> GatedPeakAsync(NpgsqlConnection connection, DateTime start, DateTime end, CancellationToken ct)
+    {
+        using var read = new NpgsqlCommand(
+            "WITH " + DailySummarySql.BlockingSnapshotGateSql("g", "$1", "$2", true, "$3", "$4") + " SELECT COALESCE(CAST(MAX(peak_snapshot_wait_ms) AS bigint), 0) FROM g", connection);
+        read.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = start });
+        read.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = end });
+        read.Parameters.Add(new NpgsqlParameter<int> { TypedValue = ServerId });
+        read.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = EventWindowFloor.For(start) });
+        return Convert.ToInt64(await read.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>#7028: the gate's cadence is the one the alert measures adjacency on. A server row wins over the fleet row
+    /// even at 0 (the schedule resolver honours 0 and does not fall through), and a resolved 0 then reads as the shipped
+    /// default, as the alert's cadence read does. A server row with a frequency wins, a fleet row applies when the server
+    /// has none, and neither row reads the default.</summary>
+    [Fact]
+    public async Task TheCadence_ResolvesServerRowThenFleetRow_AndAZeroReadsAsTheDefault()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live test.");
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+        var bodySucceeded = false;
+        try
+        {
+            await SeedServerAsync(connection, ct);
+            const string insert = "INSERT INTO config_collector_schedules (server_id, collector_name, frequency_minutes, retention_days, enabled) VALUES ($1, 'dmv_blocking_snapshot', $2, NULL, TRUE)";
+            const string insertFleet = "INSERT INTO config_collector_schedules (server_id, collector_name, frequency_minutes, retention_days, enabled) VALUES (NULL, 'dmv_blocking_snapshot', $1, NULL, TRUE)";
+            const string clear = "DELETE FROM config_collector_schedules WHERE collector_name = 'dmv_blocking_snapshot' AND (server_id IS NULL OR server_id = $1)";
+            var cadence = "SELECT " + BlockingWaits.SnapshotCadenceMinutesSql("$1", 7);
+
+            async Task<long> ReadAsync()
+            {
+                using var read = new NpgsqlCommand(cadence, connection);
+                read.Parameters.Add(new NpgsqlParameter<int> { TypedValue = ServerId });
+                return Convert.ToInt64(await read.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture);
+            }
+
+            await ExecAsync(connection, clear, ct, ServerId);
+            Assert.Equal(7, await ReadAsync());
+
+            await ExecAsync(connection, insertFleet, ct, 10);
+            Assert.Equal(10, await ReadAsync());
+
+            await ExecAsync(connection, insert, ct, ServerId, 0);
+            Assert.Equal(7, await ReadAsync());
+
+            await ExecAsync(connection, clear, ct, ServerId);
+            await ExecAsync(connection, insert, ct, ServerId, 3);
+            await ExecAsync(connection, insertFleet, ct, 10);
+            Assert.Equal(3, await ReadAsync());
+
+            await ExecAsync(connection, clear, ct, ServerId);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await ExecAsync(cleanup, "DELETE FROM config_collector_schedules WHERE collector_name = 'dmv_blocking_snapshot' AND (server_id IS NULL OR server_id = $1)", cleanupCt, ServerId);
+                await DeleteRowsAsync(cleanup, cleanupCt);
+            });
+        }
+    }
+
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         using var cleanup = new NpgsqlCommand(

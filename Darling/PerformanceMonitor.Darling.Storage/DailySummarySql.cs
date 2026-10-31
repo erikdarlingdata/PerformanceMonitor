@@ -209,8 +209,10 @@ public static class DailySummarySql
             (CASE WHEN w.d IS NULL THEN 0 ELSE 1 END)
               + (CASE WHEN q.c IS NULL THEN 0 ELSE 1 END)
               + (CASE WHEN dl.d IS NULL THEN 0 ELSE 1 END)
-              + (CASE WHEN b.d IS NULL THEN 0 ELSE 1 END)
-              + (CASE WHEN dm.d IS NULL THEN 0 ELSE 1 END)
+              /* Blocking is ONE source however the day was read (#7028): a DMV-only day has both b.d (its waits
+                 chose the DMV side) and dm.d (its snapshots), and counting each would put the retention notes' "N of 7"
+                 over what the day holds. */
+              + (CASE WHEN b.d IS NULL AND dm.d IS NULL THEN 0 ELSE 1 END)
               + (CASE WHEN cp.d IS NULL THEN 0 ELSE 1 END)
               + (CASE WHEN m.d IS NULL THEN 0 ELSE 1 END) AS signal_sources_present,
             /* #7028: the blocking band's snapshot arm, the Blocking Wait Time alert's own measure: the largest total
@@ -291,8 +293,10 @@ public static class DailySummarySql
     /// #7028: the snapshot arm for a window with the alert's own gate constants and the shipped default cadence, one
     /// definition for the fleet reads and the Viewer Overview (<see cref="BlockingWaits.GatedSnapshotWaitSql"/>).
     /// <paramref name="serverIdSql"/> is the one server's id (<c>$1</c>), or null for every server. The snapshots are read
-    /// from the lookback floor with no upper bound (a snapshot after the window end is read and not kept, so a late
-    /// collection is not cut off), and <paramref name="floorSql"/> is the statement's partition-column floor for the
+    /// from the lookback floor up to the window end when one is given (the gate only looks backwards, so a snapshot after
+    /// the window can never change a value inside it, and a window in the past would otherwise read every snapshot
+    /// through now), bounded the way the gate keeps its rows (<c>&lt;=</c> with <paramref name="endInclusive"/>, else
+    /// <c>&lt;</c>). <paramref name="floorSql"/> is the statement's partition-column floor for the
     /// window start (<see cref="EventWindowFloor"/>), which the lookback floor never goes below.
     /// </summary>
     public static string BlockingSnapshotGateSql(
@@ -301,7 +305,8 @@ public static class DailySummarySql
             name,
             @"SELECT server_id, collection_time, wait_time_ms, blocked_spid, blocking_spid FROM v_dmv_blocking_snapshots
     WHERE collection_time >= " + floorSql + " AND collection_time >= " + BlockingSnapshotFloorSql(windowStartSql, serverIdSql)
-            + (serverIdSql is null ? string.Empty : " AND server_id = " + serverIdSql),
+            + (serverIdSql is null ? string.Empty : " AND server_id = " + serverIdSql)
+            + (windowEndSql is null ? string.Empty : " AND collection_time " + (endInclusive ? "<=" : "<") + " " + windowEndSql),
             windowStartSql, windowEndSql, endInclusive,
             AlertEngine.BlockingWaitBreachSamples, AlertEngine.BlockingWaitSingleSnapshotMultiplier,
             AlertEngine.BlockingWaitEpisodeGapFactor, DefaultSnapshotCadenceMinutes);

@@ -172,18 +172,20 @@ public static class BlockingWaits
 
     /// <summary>
     /// #7028: one server's EFFECTIVE <c>dmv_blocking_snapshot</c> cadence in minutes, as a SQL scalar for the server
-    /// named by <paramref name="serverIdSql"/>: the server's own schedule row, else the fleet-wide row (a NULL
-    /// <c>server_id</c>), else <paramref name="defaultCadenceMinutes"/>, a non-positive value counting as no row. This
-    /// is the order the service resolves the schedule the alert reads its cadence from
-    /// (<c>StoreConfigProvider.ResolveSchedule</c>), so the band and the alert measure adjacency on one cadence.
-    /// PostgreSQL only.
+    /// named by <paramref name="serverIdSql"/>, resolved the way the alert resolves the cadence it measures adjacency on.
+    /// The server's own schedule row wins when it carries a frequency, even a 0 (<c>StoreConfigProvider.ResolveSchedule</c>
+    /// honours 0 and does not fall through to the fleet row, via <c>CollectorScheduleDefaults.ResolveFrequencyMinutes</c>
+    /// and its <c>v &gt;= 0</c> test), else the fleet-wide row (a NULL <c>server_id</c>), else the shipped default. A
+    /// resolved 0 (on-load) then becomes <paramref name="defaultCadenceMinutes"/>, as
+    /// <c>DarlingAlertReadAdapter.ResolveCadence</c> does (<c>if (resolved &gt; 0) return resolved;</c> else the
+    /// shipped default), so the band and the alert measure adjacency on one cadence. PostgreSQL only.
     /// </summary>
     public static string SnapshotCadenceMinutesSql(string serverIdSql, int defaultCadenceMinutes) =>
-        "COALESCE("
-        + "NULLIF((SELECT MAX(c.frequency_minutes) FROM config_collector_schedules AS c WHERE c.server_id = " + serverIdSql
-        + " AND c.collector_name = 'dmv_blocking_snapshot'), 0), "
-        + "NULLIF((SELECT MAX(c.frequency_minutes) FROM config_collector_schedules AS c WHERE c.server_id IS NULL"
-        + " AND c.collector_name = 'dmv_blocking_snapshot'), 0), "
+        "COALESCE(NULLIF(COALESCE("
+        + "(SELECT MAX(c.frequency_minutes) FROM config_collector_schedules AS c WHERE c.server_id = " + serverIdSql
+        + " AND c.collector_name = 'dmv_blocking_snapshot'), "
+        + "(SELECT MAX(c.frequency_minutes) FROM config_collector_schedules AS c WHERE c.server_id IS NULL"
+        + " AND c.collector_name = 'dmv_blocking_snapshot')), 0), "
         + Math.Max(1, defaultCadenceMinutes).ToString(System.Globalization.CultureInfo.InvariantCulture) + ")";
 
     /// <summary>
