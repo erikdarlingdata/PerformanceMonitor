@@ -85,6 +85,10 @@ These keys are in the same `alerts` section and are first-run seeds like the tab
 | `retentionHoldCriticalRatio` | `4.0` | The same for the Critical tier |
 | `fleetSweepEnabled` | `true` | Run the scheduled fleet sweep. It has its own switch and keeps running when `enabled` is `false` |
 | `fleetSweepIntervalMinutes` | `60` | How often the fleet sweep runs, 15 to 1440 |
+| `dailyReportEnabled` | `false` | Send the scheduled [Daily Health Report](#daily-health-report) (V232, [#7041](https://github.com/erikdarlingdata/PerformanceMonitor/issues/7041)). Off until you switch it on. Like the fleet sweep it has its own switch and does not depend on `enabled` |
+| `dailyReportSendAt` | `"07:00"` | The time of day the report goes out, written `HH:mm` in the report's time zone |
+| `dailyReportTimeZone` | `null` | The report's time zone, an IANA id such as `America/New_York`. `null` or blank means the service host's own time zone |
+| `dailyReportTitle` | `null` | The report's title. `null` or blank means `Daily Health Report`. At most 100 characters, no control characters |
 | `deadlockWarnPerHour` | `5` | The deadlock health band's Warning tier, in deadlocks per hour |
 | `deadlockCriticalPerHour` | `20` | The deadlock health band's Critical tier |
 | `databaseStateEnabled` | `true` | The database-state alert (a database in a state other than its expected one) |
@@ -134,6 +138,27 @@ Scheduled analysis: the triage engine runs per server on a cadence, persists its
 **Escalation is the corroboration event.** A single that later gains a fact or a matched check pages at that moment as a NEW firing — the digest route cools in its own key namespace and digest rows are excluded from the page cooldown's restart seed, so an earlier digest entry can never be the cooldown that eats the page. An uncorroborated single riding in an incident with a corroborated finding is named on that page as co-fired, exactly as before.
 
 **The Analysis Singles Digest** is the third daily document beside the Collector Cost Digest and the Fleet Sweep Rollup (family `reports`, INFO, one post per trailing day, delivered-today gate in the store, empty day posts nothing): "Anomaly singles: N across M servers", the top movers by severity and a by-family, by-server breakdown, each line carrying the same alert-history key (`Analysis: <category> [<hash>]`) and #1140 dedup fingerprints a page would have carried, so any single can be promoted to a full drill-down without archaeology.
+
+## Daily Health Report
+
+The Daily Health Report ([#7041](https://github.com/erikdarlingdata/PerformanceMonitor/issues/7041)) is one report a day on how every monitored server did in the last 24 hours. It is off by default. It goes out through the same delivery path as every other alert, as the `Daily Health Report` metric in the `reports` family, so the channels you already configured carry it. Email gets an HTML report. Slack, Teams and the generic webhook get a short text version.
+
+**The settings.** The same four settings are edited in the Viewer (Settings, Notifications, Daily Health Report), on the web dashboard (Admin, Settings, for a signed-in admin) and over MCP.
+
+| Setting | `darling.json` (`alerts`) | MCP group (`get_alert_settings`, `update_alert_settings`) | Store column (`config.config_alert_settings`) |
+|---|---|---|---|
+| Send a daily health report | `dailyReportEnabled` | `daily_report.enabled` | `daily_report_enabled` (boolean, default `false`) |
+| Send at | `dailyReportSendAt` | `daily_report.send_at` (`"HH:mm"`) | `daily_report_send_at` (time of day, default `07:00`) |
+| Time zone | `dailyReportTimeZone` | `daily_report.time_zone` (`null` = the host's zone) | `daily_report_time_zone` (text, NULL = the host's zone) |
+| Title | `dailyReportTitle` | `daily_report.title` (`null` = `Daily Health Report`) | `daily_report_title` (text, NULL = the default title) |
+
+The columns arrive with store schema V232. A time that is not `HH:mm`, a zone the machine does not know and a title that is blank, over 100 characters or holds a control character are refused, and nothing is written. A refusal names the field. `update_alert_settings` and the web editor check a zone against the service host. The Viewer checks it against the machine it runs on, and a stored id the service host does not know is read as the host's own zone.
+
+**What it contains.** A fleet header, then each server worst first. For each server it shows the day's health bands, alerts that fired, failed Agent jobs, databases without a recent backup or CHECKDB, low disk space and collection problems. A healthy server takes one line. The report is built only from data the store already holds, so it adds no load on a monitored server. PostgreSQL targets show the sections that apply to them. `get_daily_health_report` previews it for any day, and `send_daily_health_report_now` sends a test copy (see [MCP configuration](configuration-mcp.md)).
+
+**When it is sent.** The service checks on its normal alert pass. The first check at or after the send time, in the report's time zone, sends the report for the 24 hours before that time. It is sent at most once a day, and the day's delivery is recorded in the store, so a service restart does not send it again. A day the service was down at the send time is not backfilled: the report goes out on the first check after the service is back that same day, and a day that has passed entirely is skipped.
+
+**Sending it to chosen recipients.** Add a notification route (see [Notification routes](#notification-routes-sending-alert-families-to-different-channels)) that matches the `reports` family, or the `Daily Health Report` metric by itself, and give it the destinations you want. With a route for the metric the report goes to those destinations only for each channel the route sets. For example, a route for the metric with its own email recipients sends the report to those people, and the other `reports` documents stay on the parent channels.
 
 ## smtp
 
@@ -247,7 +272,7 @@ A route names what it matches and a destination per channel type, and **an empty
 | Family | Owns |
 |---|---|
 | `self-monitor` | The monitor about itself: `Collection Stopped`, `Capture Down`, `Compression Job Stuck`, `Refresh Job Stuck`, `Retention Job Stuck`, `Store Job Failing`, `Store Disk Pressure`, `Store Runtime Upgrade`, `Store Job Over Cadence`, `Retention Held`, `Custom Alert Rules Unhealthy`, `Stale Mute Rules`, `Web TLS Certificate Expiring`, `MCP TLS Certificate Expiring`, `Store Settings Need Attention`, `Collector Cost Regression`, `Collection Falling Behind`, `Collection Gap At Start` (once per start, when the service was not collecting for 15 minutes or more before it started), `Collection Gaps In History` (once a day, after 03:00Z, for the previous UTC day: an hour whose servers, or perfmon collection passes, fell below half of the usual for that hour; changing the perfmon collection schedule can trigger it for a few days) |
-| `reports` | Scheduled prose, never a page: `Collector Cost Digest`, `Fleet Sweep Rollup`, `Analysis Singles Digest` |
+| `reports` | Scheduled prose, never a page: `Collector Cost Digest`, `Fleet Sweep Rollup`, `Analysis Singles Digest`, `Daily Health Report` |
 | `agent-jobs` | `Failed Agent Job`, `Long-Running Job`, `Agent Not Running`, `Agent Alert Gaps` |
 | `performance` | Everything about a monitored server the on-call is paged for: `High CPU`, `Blocking Detected`, `Blocking Wait Time`, `Deadlocks Detected`, `Poison Wait`, `Runnable Queue`, `Client Timeouts`, `Identity Capacity`, `Long-Running Query`, `tempdb Space`, `Volume Free Space`, `Version Store (PVS)`, `Database File Growth`, `Database State`, `Forced Plan Failing`, the three PostgreSQL outage predictors, the five `AG …` alerts, `Server Unreachable` / `Server Restored`, every `Custom:<id>` rule and every `Analysis: …` finding — and any metric the taxonomy does not name, so an unclassified alert lands where every alert landed before routes existed |
 | `external` | Alerts another service raised through its own database login, named `External:<source>:<key>`. With no route they go to the parent channels like any other alert. |

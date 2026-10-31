@@ -1044,6 +1044,37 @@
                                     <TextBlock Text="minutes (15 - 1440)" VerticalAlignment="Center" Margin="4,0,0,0"
                                                Foreground="{DynamicResource ForegroundMutedBrush}"/>
                                 </WrapPanel>
+
+                                <!-- #7041 (V232): the Daily Health Report. Like the fleet sweep it is outside the master alerts toggle; the
+                                     service sends it to the routes for the "reports" family or the "Daily Health Report" metric. -->
+                                <TextBlock Text="Daily Health Report" FontWeight="SemiBold" FontSize="12"
+                                           Foreground="{DynamicResource ForegroundBrush}" Margin="20,14,0,4"/>
+                                <TextBlock Text="One report a day on the last 24 hours across the fleet, sent through your notification channels at the time below. Off by default. To send it to chosen recipients only, add a notification route for the reports family or the Daily Health Report metric."
+                                           FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
+                                           Margin="20,0,0,4" TextWrapping="Wrap"/>
+                                <CheckBox x:Name="DailyReportEnabledCheckBox" Content="Send a daily health report"
+                                          Margin="20,4,0,0" Foreground="{DynamicResource ForegroundBrush}"/>
+                                <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
+                                    <TextBlock x:Name="DailyReportSendAtLabel" Text="Send at" VerticalAlignment="Center" Margin="0,0,8,0"
+                                               Foreground="{DynamicResource ForegroundBrush}"/>
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=DailyReportSendAtLabel}" x:Name="DailyReportSendAtBox" Width="60" TextAlignment="Center" VerticalAlignment="Center"/>
+                                    <TextBlock Text="(HH:mm, 24-hour)" VerticalAlignment="Center" Margin="4,0,0,0"
+                                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                                </WrapPanel>
+                                <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
+                                    <TextBlock x:Name="DailyReportTimeZoneLabel" Text="Time zone" VerticalAlignment="Center" Margin="0,0,8,0"
+                                               Foreground="{DynamicResource ForegroundBrush}"/>
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=DailyReportTimeZoneLabel}" x:Name="DailyReportTimeZoneBox" Width="220" VerticalAlignment="Center"/>
+                                    <TextBlock Text="(an IANA id such as America/New_York; blank uses the service host's zone)" VerticalAlignment="Center" Margin="4,0,0,0"
+                                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                                </WrapPanel>
+                                <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
+                                    <TextBlock x:Name="DailyReportTitleLabel" Text="Title" VerticalAlignment="Center" Margin="0,0,8,0"
+                                               Foreground="{DynamicResource ForegroundBrush}"/>
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=DailyReportTitleLabel}" x:Name="DailyReportTitleBox" Width="260" MaxLength="100" VerticalAlignment="Center"/>
+                                    <TextBlock Text="(optional; blank uses Daily Health Report)" VerticalAlignment="Center" Margin="4,0,0,0"
+                                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                                </WrapPanel>
                             </StackPanel>
                         </Border>
                     </StackPanel>

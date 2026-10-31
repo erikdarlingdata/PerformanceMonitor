@@ -964,6 +964,13 @@ public partial class SettingsWindow : Window
            enable/disable group: sweeps keep running under a fleet-wide mute by contract. */
         FleetSweepEnabledCheckBox.IsChecked = r.FleetSweepEnabled;
         FleetSweepIntervalBox.Text = r.FleetSweepIntervalMinutes.ToString(CultureInfo.InvariantCulture);
+        /* #7041 (V232): the Daily Health Report, outside the master-toggle group like the fleet sweep. A report that is off with no zone yet
+           starts at this machine's zone, the way the web editor starts at the browser's: the person setting it up is most likely in the
+           zone they want. A saved zone, or a blank on a report that is already on, is left as it is. */
+        DailyReportEnabledCheckBox.IsChecked = r.DailyReportEnabled;
+        DailyReportSendAtBox.Text = r.DailyReportSendAt;
+        DailyReportTimeZoneBox.Text = r.DailyReportTimeZone ?? (r.DailyReportEnabled ? "" : ViewerDataService.DefaultKnownPatternTimeZone());
+        DailyReportTitleBox.Text = r.DailyReportTitle ?? "";
         /* #1141/#1236: the delivery mode + per-event cap are now STORE-backed (the service honors them),
            seeded from the row like every other alert-engine control. */
         AlertDeliveryModeBox.SelectedIndex = r.DeliveryMode == "PerEvent" ? 1 : 0;
@@ -1047,6 +1054,7 @@ public partial class SettingsWindow : Window
                the bind normalises the spelling. */
             AnalysisUncorroboratedRoute = SelectedAnalysisUncorroboratedRoute(),
             FleetSweepEnabled = FleetSweepEnabledCheckBox.IsChecked == true,
+            DailyReportEnabled = DailyReportEnabledCheckBox.IsChecked == true,
             ExcludedDatabases = SettingsListText.SplitLines(AlertExcludedDatabasesBox.Text),
             ExcludedVolumes = VolumeExclusions.Normalize(SettingsListText.SplitLinesAndCommas(AlertExcludedVolumesBox.Text)).ToList(),
         };
@@ -1261,6 +1269,27 @@ public partial class SettingsWindow : Window
         else
             errors.Add($"Fleet sweep interval must be between {FleetSweepCadence.IntervalMinutesFloor} and {FleetSweepCadence.IntervalMinutesCeiling} minutes.", FleetSweepIntervalBox);
 
+        /* #7041 (V232): the same rules update_alert_settings enforces (ViewerDailyReportRules mirrors the service's), so the two writers
+           cannot disagree. A blank zone or title is stored as NULL: the host's zone, the default title. */
+        if (ViewerDailyReportRules.TryParseSendAt(DailyReportSendAtBox.Text, out var dailyReportSendAt))
+            row.DailyReportSendAt = ViewerDailyReportRules.FormatSendAt(dailyReportSendAt);
+        else
+            errors.Add("Daily health report send time must be a time of day written HH:mm, for example 07:00.", DailyReportSendAtBox);
+
+        var dailyReportZone = DailyReportTimeZoneBox.Text.Trim();
+        if (ViewerDailyReportRules.IsKnownZone(dailyReportZone))
+            row.DailyReportTimeZone = dailyReportZone.Length == 0 ? null : dailyReportZone;
+        else
+            errors.Add($"Daily health report time zone \"{dailyReportZone}\" is not a time zone this machine knows. Use an IANA id such as America/New_York, or leave it blank for the service host's zone.", DailyReportTimeZoneBox);
+
+        var dailyReportTitle = DailyReportTitleBox.Text.Trim();
+        if (dailyReportTitle.Length == 0)
+            row.DailyReportTitle = null;
+        else if (ViewerDailyReportRules.TryValidateTitle(dailyReportTitle, out var dailyReportTitleError))
+            row.DailyReportTitle = dailyReportTitle;
+        else
+            errors.Add($"Daily health report title {dailyReportTitleError}", DailyReportTitleBox);
+
         /* #1141/#1236: delivery mode + per-event cap (store-backed). */
         row.DeliveryMode = AlertDeliveryModeBox.SelectedIndex == 1 ? "PerEvent" : "Summary";
         if (int.TryParse(AlertPerEventMaxBox.Text, out var perEventMax) && perEventMax is >= 1 and <= 100)
@@ -1376,6 +1405,11 @@ public partial class SettingsWindow : Window
            leave this button writing a cadence nobody chose. The checkbox resets to the shipped ON. */
         FleetSweepEnabledCheckBox.IsChecked = true;
         FleetSweepIntervalBox.Text = FleetSweepCadence.DefaultIntervalMinutes.ToString(CultureInfo.InvariantCulture);
+        /* #7041 (V232): the report ships off, at 07:00, in the host's zone, with the default title. */
+        DailyReportEnabledCheckBox.IsChecked = false;
+        DailyReportSendAtBox.Text = ViewerDailyReportRules.DefaultSendAt;
+        DailyReportTimeZoneBox.Text = "";
+        DailyReportTitleBox.Text = "";
         AlertExcludedDatabasesBox.Text = "";
         AlertExcludedVolumesBox.Text = "";
         MuteRuleDefaultExpirationCombo.SelectedIndex = 1; // 24 hours

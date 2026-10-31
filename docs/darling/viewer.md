@@ -177,6 +177,12 @@ It decrypts the `network.role` credential and prints a paste-ready connection st
 
 **Plaintext at rest on the viewer machine.** However you get there, the connection string holds the role password in cleartext in that machine's `darling.json` (there is no client-side secret store yet). That is acceptable for the read-only `viewer` credential on a single-operator, ACL'd profile; if you use `role: "admin"`, treat that file as a secret and NTFS-ACL it to your account. DPAPI-encrypting the viewer's BYO connection string is future hardening, out of scope today.
 
+## Daily Health Report settings
+
+Settings, Notifications, Daily Health Report ([#7041](https://github.com/erikdarlingdata/PerformanceMonitor/issues/7041), store schema V232) holds the four settings: the "Send a daily health report" checkbox, "Send at" (`HH:mm`, 24-hour), "Time zone" and an optional "Title". A report that is off and has no zone yet starts with this machine's IANA zone filled in. A blank zone means the service host's zone, and a blank title means `Daily Health Report`. Save checks the three with the rules `update_alert_settings` uses and names the field it refused. The zone is checked against this machine, and a stored id the service host does not know is read as the host's own zone. Restore defaults turns the report off and clears the zone and the title.
+
+A read-only seat sees the fields for reference and cannot save them. The Viewer refuses a store below its own schema version, so the fields are always backed by the V232 columns. See [Daily Health Report](alerts-and-notifications.md#daily-health-report) for what the report holds and how to route it.
+
 ## Read-only versus read-write seats
 
 This is the question that people ask most about the viewer. The answer is not what the wording suggests.
