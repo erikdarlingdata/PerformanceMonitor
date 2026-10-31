@@ -365,7 +365,7 @@ internal sealed class LinuxLaunchMemorySampler
             return Fallback("VmRSS could not be read from /proc/self/status");
         }
 
-        return new LaunchMemoryReading(resident.Value, limit.Bytes, "private bytes", limit.Source); // SCRATCH #6995 revert proof
+        return new LaunchMemoryReading(resident.Value, limit.Bytes, "resident memory", limit.Source);
     }
 
     private LaunchMemoryReading Fallback(string reason)
