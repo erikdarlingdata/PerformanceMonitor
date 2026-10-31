@@ -320,8 +320,12 @@ public sealed class McpWindowMatrixLiveTests : IClassFixture<McpWindowMatrixStor
         switch (tool)
         {
             case "backtest_custom_alert_rule":
+                /* One server: the replay is 288 steps a server at 168 h, and the PostgreSQL target this fixture seeds has no samples of the source.
+                   The rule reads query_store_stats, the table this fixture already seeds for the SQL Server target (rows at the raw floor and
+                   30 minutes back), so the backtest's coverage probe finds a floor and reaches IsTruncated (#7015). */
+                yield return new("servers", ServerName);
                 yield return new("definition",
-                    "{\"metric\":{\"source\":\"cpu_utilization_stats\",\"measure\":\"sqlserver_cpu_utilization\",\"aggregate\":\"avg\",\"hours\":0.25}," +
+                    "{\"metric\":{\"source\":\"query_store_stats\",\"measure\":\"qs_max_duration_us\",\"aggregate\":\"max\",\"hours\":0.25}," +
                     "\"predicate\":{\"op\":\"ge\",\"warnThreshold\":25},\"hysteresis\":{\"breachSamples\":1,\"clearSamples\":1},\"scope\":{\"mode\":\"all\"}}");
                 break;
             case "get_finops": yield return new("view", "high_impact"); break;
@@ -374,19 +378,24 @@ public sealed class McpWindowMatrixLiveTests : IClassFixture<McpWindowMatrixStor
             var hasHours = hoursParam is not null && (Nullable.GetUnderlyingType(hoursParam.ParameterType) ?? hoursParam.ParameterType) == typeof(int);
             var hasAsOf = method.GetParameters().Any(p => p.Name == "as_of" && p.ParameterType == typeof(string));
             if (!hasHours && !hasAsOf) continue;
+            /* #7015: the backtest's span is the double `hours`, not an int hours_back, so without its own binding the matrix passes it no
+               requested start and CheckContract skips its truncation check. It takes the matrix's two sizes as hours. */
+            var bindsDoubleHours = !hasHours && name == "backtest_custom_alert_rule";
+            var bindsHours = hasHours || bindsDoubleHours;
             windowed++;
 
-            var hourList = hasHours ? new[] { 24, 168 } : new[] { 0 };
+            var hourList = bindsHours ? new[] { 24, 168 } : new[] { 0 };
             var asOfList = hasAsOf ? new[] { AsOfCase.None, AsOfCase.PartlyInside, AsOfCase.WhollyBefore } : new[] { AsOfCase.None };
             foreach (var hours in hourList)
             {
                 foreach (var asOfCase in asOfList)
                 {
-                    if (!hasHours && asOfCase == AsOfCase.None) continue;
-                    var scenario = (hasHours ? $"hours_back {hours}" : "default window") + ", " + asOfCase;
+                    if (!bindsHours && asOfCase == AsOfCase.None) continue;
+                    var scenario = (bindsHours ? $"hours_back {hours}" : "default window") + ", " + asOfCase;
                     var end = DateTime.UtcNow - EndBack(asOfCase);
                     var overrides = new Dictionary<string, object?>();
                     if (hasHours) overrides["hours_back"] = hours;
+                    if (bindsDoubleHours) overrides["hours"] = (double)hours;
                     if (hasAsOf && asOfCase != AsOfCase.None) overrides["as_of"] = AsOfText(end);
                     foreach (var (argName, argValue) in ToolArguments(name, postgres)) overrides[argName] = argValue;
                     if (McpWindowMatrixStore.PgSeededTables.ContainsKey(name)) overrides["server_name"] = McpWindowMatrixStore.PgServerName;
@@ -404,7 +413,7 @@ public sealed class McpWindowMatrixLiveTests : IClassFixture<McpWindowMatrixStor
                         continue;
                     }
 
-                    var requestedStart = hasHours ? end - TimeSpan.FromHours(hours) : (DateTime?)null;
+                    var requestedStart = bindsHours ? end - TimeSpan.FromHours(hours) : (DateTime?)null;
                     /* The regressions tool compares the 7 days BEFORE the window, so its effective_start is that baseline's start. */
                     var lowerBound = name == "get_query_store_regressions" && requestedStart is DateTime rsStart ? rsStart - TimeSpan.FromDays(7) : requestedStart;
                     var reason = CheckContract(json, requestedStart, lowerBound, end, _store.SeededAt);
