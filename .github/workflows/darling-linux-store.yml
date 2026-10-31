@@ -181,7 +181,8 @@ jobs:
         timeout-minutes: 6
         shell: bash
         run: |
-          set -uo pipefail
+          # The step shell starts with -e; the exit codes are read and judged below, so turn it off here.
+          set +e -uo pipefail
           verb() {
             # docker run --rm of the image on the store's network: the same config, no service running in it.
             docker run --rm --network darling-store-net -e DARLING_STORE_CONNECTION \
