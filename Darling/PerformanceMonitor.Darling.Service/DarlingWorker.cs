@@ -1462,6 +1462,15 @@ LIMIT 1";
     /* #6066: the store's pseudonym key, read over the owner connection the first time a metadataOnly webhook token needs it. */
     private readonly PseudonymKeySource? _pseudonymKeys;
 
+    /* #7041: where the running evaluator is published for send_daily_health_report_now. Null in a test-constructed worker. */
+    private readonly DailyHealthReportHub? _dailyReportHub;
+
+    /// <summary>
+    /// #7041: the Daily Health Report builder the scheduled send and <c>send_daily_health_report_now</c> share. This is the one place the real
+    /// builder is wired in; null means the report is never built (the schedule check returns at once and the tool answers not_available).
+    /// </summary>
+    private static PerformanceMonitor.Darling.Service.Reports.IDailyHealthReportSource? CreateDailyHealthReportSource(Npgsql.NpgsqlDataSource postgres) => null;
+
     /// <summary>
     /// True when another registration in the published registry carries this one's display name (ordinal), so
     /// its dedup key takes the store id. The population is the registry snapshot's enabled servers
@@ -1514,8 +1523,9 @@ LIMIT 1";
        and at each hourly flush); its own reads never go through admission. */
     private readonly ReadAdmission? _readAdmission;
 
-    public DarlingWorker(ILogger<DarlingWorker> logger, ILoggerFactory loggerFactory, McpRuntimeState mcpState, WebRuntimeState webState, MonitoredServerRegistryState registryState, CollectorRuntimeState collectorState, WebTlsCertificateState webTlsCertState, BaselineCache baselineCache, ReadLatencyAccumulator readLatency, SlowReadLog? slowReads = null, McpTlsCertificateState? mcpTlsCertState = null, ReadAdmission? readAdmission = null, StoreOwnerSource? ownerSource = null, PseudonymKeySource? pseudonymKeys = null)
+    public DarlingWorker(ILogger<DarlingWorker> logger, ILoggerFactory loggerFactory, McpRuntimeState mcpState, WebRuntimeState webState, MonitoredServerRegistryState registryState, CollectorRuntimeState collectorState, WebTlsCertificateState webTlsCertState, BaselineCache baselineCache, ReadLatencyAccumulator readLatency, SlowReadLog? slowReads = null, McpTlsCertificateState? mcpTlsCertState = null, ReadAdmission? readAdmission = null, StoreOwnerSource? ownerSource = null, PseudonymKeySource? pseudonymKeys = null, DailyHealthReportHub? dailyReportHub = null)
     {
+        _dailyReportHub = dailyReportHub;
         _ownerSource = ownerSource;
         _pseudonymKeys = pseudonymKeys;
         _slowReads = slowReads;
@@ -3683,6 +3693,16 @@ LIMIT 1";
                only: a webhook error can carry the endpoint URL, and the URL is the credential. */
             webhookChannelFailures: webhookAlertService.GetChannelFailureCounts);
 
+        /* #7041: the Daily Health Report. The settings are read live (a store edit lands on the next 15-second check) and the
+           builder is the one source the scheduled send and send_daily_health_report_now share. */
+        _selfAlerts.DailyReportSchedule = () => new PerformanceMonitor.Darling.Service.Reports.DailyHealthReportSchedule(
+            alertSettings.DailyReportEnabled, alertSettings.DailyReportSendAt, alertSettings.DailyReportTimeZone, alertSettings.DailyReportTitle);
+        _selfAlerts.DailyReportSource = CreateDailyHealthReportSource(postgres);
+        if (_dailyReportHub is not null)
+        {
+            _dailyReportHub.Evaluator = _selfAlerts;
+        }
+
         /* #1706: report this start's store runtime upgrade, now that there IS an alert engine to report it
            through. Fired once, here, and never re-evaluated — the store is down while an upgrade runs, so
            its start could only ever be a log line, and by the time this line is reached both terminal states
@@ -4351,6 +4371,20 @@ LIMIT 1";
             if (_selfAlerts is not null)
             {
                 await _selfAlerts.EvaluateNotificationChannelsAsync(stoppingToken);
+            }
+
+            /* #7041: the Daily Health Report's due check. Every 15-second tick pays one settings read and a clock compare; the report is
+               built only once it is due and not yet delivered today. A throw here must not stop the fleet loop. */
+            if (_selfAlerts is not null)
+            {
+                try
+                {
+                    await _selfAlerts.EvaluateDailyHealthReportAsync(stoppingToken);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger.LogWarning(ex, "Daily health report check failed; it will be tried again on the next tick");
+                }
             }
 
             /* #3514: the web-dashboard TLS certificate expiry self-alert. The web host loads the certificate

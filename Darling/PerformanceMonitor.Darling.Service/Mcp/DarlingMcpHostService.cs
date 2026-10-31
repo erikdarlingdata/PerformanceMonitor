@@ -874,6 +874,12 @@ public sealed class DarlingMcpHostService : BackgroundService
             builder.Logging.SetMinimumLevel(LogLevel.Warning);
 
             RegisterToolServices(builder.Services, postgres, _registryState, config.Postgres, config.Analyzer, planFetcher, _logger, _baselineCache, _ownerSource, _pseudonymKeys);
+            /* #7041: send_daily_health_report_now sends through the worker's alert evaluator, published on this hub. A tool parameter that
+               resolves to null (a test-constructed host) answers not_ready. */
+            if (_processServices?.GetService<DailyHealthReportHub>() is { } dailyReportHub)
+            {
+                builder.Services.AddSingleton(dailyReportHub);
+            }
 
             /* #2339: publish the declared peer stores before the instructions are rendered, so the same
                snapshot feeds the instructions section, list_servers' peer_fleets block, and the
@@ -1764,6 +1770,8 @@ public sealed class DarlingMcpHostService : BackgroundService
             /* The known-pattern writes - create_known_pattern / update_known_pattern / delete_known_pattern (#6398) - admin writes over the same store
                functions the web editor calls; write tools (mcp.allowWrites), never offered to an investigation agent. */
             .WithGeminiCompatibleTools<DarlingMcpKnownPatternWriteTools>()
+            /* The manual Daily Health Report send - send_daily_health_report_now (#7041) - a write tool (mcp.allowWrites), never offered to an investigation agent. */
+            .WithGeminiCompatibleTools<DarlingMcpDailyHealthReportTools>()
             /* The system_health parse-on-read family — get_health_parser_cpu_tasks / _io_issues /
                _memory_broker / _memory_conditions / _memory_node_oom / _scheduler_issues /
                _severe_errors / _significant_waits / _system_health — the same names the Dashboard
