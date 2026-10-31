@@ -87,6 +87,34 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
                 }
             }
 
+            /* #7010: system_health_events and query_stats, the tables the nine get_health_parser_* reads and get_query_heatmap probe. A few
+               rows at the raw floor and 30 minutes back, so the store holds them from three days back. The health rows carry an event type
+               none of the nine reads asks for, so each read answers an empty window (its probe finds the table's coverage) instead of the
+               "nothing ever collected" answer an unseeded table gives, which has no window notice by design. */
+            long healthId = 0;
+            foreach (var back in new[] { RawFloorBack, TimeSpan.FromMinutes(30) })
+            {
+                await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO collect.system_health_events
+    (system_health_event_id, collection_time, server_id, server_name, event_time, event_type, event_xml)
+VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                    -698500 - (++healthId), DarlingMcpTestData.Naive(now - back), ServerId, ServerName, DarlingMcpTestData.Naive(now - back),
+                    "matrix_seed_event", "<event name=\"matrix_seed_event\" />");
+            }
+
+            long statsId = 0;
+            foreach (var back in new[] { RawFloorBack, TimeSpan.FromMinutes(30) })
+            {
+                await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO collect.query_stats
+    (collection_id, collection_time, server_id, server_name, database_name, query_hash,
+     sample_interval_seconds, delta_execution_count, delta_worker_time, delta_elapsed_time,
+     delta_logical_reads, delta_logical_writes, query_text)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+                    -698600 - (++statsId), DarlingMcpTestData.Naive(now - back), ServerId, ServerName, "TenantDb00", "0x00000000000000AB",
+                    60, 5L, 1000L, 5000L, 10L, 0L, "SELECT 1");
+            }
+
             /* The collection log: every SQL Server collector from LogFloorBack on; the Query Store collector also ran 30 days back, long
                before the raw rows that are left (retention dropped them). */
             var collectors = CollectorCatalog.All.Where(d => d.TargetEngine == CollectorTargetEngine.SqlServer).Select(d => d.Name).ToArray();
@@ -170,15 +198,6 @@ public sealed class McpWindowMatrixLiveTests : IClassFixture<McpWindowMatrixStor
         ["get_finops"] = NoNotice,
         ["get_fleet_overview"] = NoNotice,
         ["get_forced_plans"] = NoNotice,
-        ["get_health_parser_cpu_tasks"] = NoNotice,
-        ["get_health_parser_io_issues"] = NoNotice,
-        ["get_health_parser_memory_broker"] = NoNotice,
-        ["get_health_parser_memory_conditions"] = NoNotice,
-        ["get_health_parser_memory_node_oom"] = NoNotice,
-        ["get_health_parser_scheduler_issues"] = NoNotice,
-        ["get_health_parser_severe_errors"] = NoNotice,
-        ["get_health_parser_significant_waits"] = NoNotice,
-        ["get_health_parser_system_health"] = NoNotice,
         ["get_identity_capacity"] = NoNotice,
         ["get_investigation_reports"] = NoNotice,
         ["get_job_history"] = NotTrue,
@@ -210,7 +229,6 @@ public sealed class McpWindowMatrixLiveTests : IClassFixture<McpWindowMatrixStor
         ["get_plan_force_precheck"] = NoNotice,
         ["get_procedure_duration_trend"] = NotTrue,
         ["get_query_duration_trend"] = NotTrue,
-        ["get_query_heatmap"] = NoNotice,
         ["get_query_store_aborts"] = NotTrue,
         ["get_query_store_clutter"] = NoNotice,
         ["get_query_store_duration_trend"] = NotTrue,
