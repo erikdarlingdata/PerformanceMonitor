@@ -107,6 +107,60 @@ public sealed class AlertNotebookTemplateAnalysisFindingsTests
         Assert.Contains("Query regression detected on SalesDb.", text, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// The notebook renders a summary cell as markdown, where [label](https://...) is a clickable link. A database name or story text
+    /// that came from the monitored server must reach the page as literal text: outside a code span or a fenced block the cell
+    /// holds no link syntax, and the text itself is still shown.
+    /// </summary>
+    [Theory]
+    [InlineData("[docs](https://example.invalid/db)", "See [here](https://example.invalid/story) and **bold**.")]
+    [InlineData("[docs](https://example.invalid/`db`)", "```\n[x](https://example.invalid/y)\n````\n[z](https://example.invalid/z)")]
+    public void FoundFinding_SummaryCell_ShowsDatabaseAndStoryAsLiteralText_NeverAsALink(string database, string story)
+    {
+        var finding = SampleFinding();
+        finding.DatabaseName = database;
+        finding.StoryText = story;
+        var cells = InvokeAnalysisFindingTemplate(ContextFor(finding, missing: false));
+
+        var text = (string)cells.OfType<JsonObject>().Single(c => (string?)c["type"] == "markdown")["text"]!;
+
+        Assert.Contains(database, text, StringComparison.Ordinal);
+        Assert.Contains(story, text, StringComparison.Ordinal);
+        var outside = OutsideCode(text);
+        Assert.DoesNotContain("](", outside, StringComparison.Ordinal);
+        Assert.DoesNotContain("example.invalid", outside, StringComparison.Ordinal);
+        Assert.Contains("**Category:** query-regression", outside, StringComparison.Ordinal);
+    }
+
+    /// <summary>The markdown a cell leaves once fenced blocks and code spans are removed, as the notebook's renderer reads them.</summary>
+    private static string OutsideCode(string markdown)
+    {
+        var kept = new System.Text.StringBuilder();
+        var fence = 0;
+        foreach (var line in markdown.Split('\n'))
+        {
+            var trimmed = line.Trim();
+            var ticks = trimmed.Length >= 3 && trimmed.All(ch => ch == '`') ? trimmed.Length : 0;
+            if (fence == 0 && line.TrimStart().StartsWith("```", StringComparison.Ordinal))
+            {
+                fence = line.TrimStart().TakeWhile(ch => ch == '`').Count();
+            }
+            else if (fence > 0)
+            {
+                if (ticks >= fence)
+                {
+                    fence = 0;
+                }
+            }
+            else
+            {
+                kept.AppendLine(System.Text.RegularExpressions.Regex.Replace(line, "`[^`]*`", string.Empty));
+            }
+        }
+
+        return kept.ToString();
+    }
+
     [Fact]
     public void FoundFinding_EvidenceReadCell_CarriesIncludeDrilldownAndFullText()
     {

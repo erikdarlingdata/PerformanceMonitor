@@ -303,6 +303,33 @@ public sealed class DiagnosticsBundleHardeningTests
         }
     }
 
+    /// <summary>On Linux and macOS the alias map is created owner read and write only, whatever the umask, and the move over an existing map keeps that.</summary>
+    [Fact]
+    public void WriteAtomically_Restricted_OnUnix_CreatesAnOwnerOnlyFile()
+    {
+        Assert.SkipUnless(!OperatingSystem.IsWindows(), "Unix file modes are not on Windows.");
+
+        var root = Directory.CreateTempSubdirectory("darling-bundle-map-");
+        try
+        {
+            var plain = Path.Combine(root.FullName, "bundle.json");
+            var map = Path.Combine(root.FullName, "bundle.aliases.txt");
+            Assert.Null(DiagnosticsBundle.WriteAtomically(plain, "bundle", force: false));
+            Assert.Null(DiagnosticsBundle.WriteAtomically(map, "alias-map", force: false, restricted: true));
+
+            Assert.Equal("alias-map", File.ReadAllText(map));
+            Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(map));
+
+            Assert.Null(DiagnosticsBundle.WriteAtomically(map, "second", force: true, restricted: true));
+            Assert.Equal("second", File.ReadAllText(map));
+            Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(map));
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
     /* ── fleet tags, engine keys, alias-then-cut ── */
 
     [Fact]

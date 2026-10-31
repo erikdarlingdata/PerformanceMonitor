@@ -317,6 +317,28 @@ public sealed class McpDataDetailMaskerTests
         Assert.Same(json, McpDataDetailMasker.MaskJson(json, McpDataDetail.MaskLiterals, key: PseudonymTestKey.Key));
     }
 
+    /// <summary>
+    /// The keys that name who made a change (a server action's and a threshold override's set_by, the investigation
+    /// writes' decided_by, closed_by and the like) are logins: metadataOnly replaces the name, maskLiterals keeps it.
+    /// </summary>
+    [Theory]
+    [InlineData("set_by")]
+    [InlineData("closed_by")]
+    [InlineData("decided_by")]
+    [InlineData("opened_by")]
+    [InlineData("saved_by")]
+    [InlineData("modified_by")]
+    [InlineData("author")]
+    public void WhoMadeAChange_IsALogin_MaskedAtMetadataOnly_KeptAtMaskLiterals(string key)
+    {
+        string json = "{\"actions\":[{\"" + key + "\":\"jsmith\",\"status\":\"ok\"}]}";
+        Assert.Same(json, McpDataDetailMasker.MaskJson(json, McpDataDetail.MaskLiterals, key: PseudonymTestKey.Key));
+
+        var row = MaskedKeyed(json)["actions"]!.AsArray()[0]!.AsObject();
+        Assert.Equal(PseudonymTestKey.Login("jsmith"), row[key]!.GetValue<string>());
+        Assert.Equal("ok", row["status"]!.GetValue<string>());
+    }
+
     /* ---- row 6: object and database names, counts, durations, waits, times, program names ---- */
 
     [Theory]
