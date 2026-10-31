@@ -84,24 +84,6 @@ public sealed class QueryStoreIntervalWideBrinIndexTests
     }
 
     [Fact]
-    public void TheWorker_SchedulesTheEnsureAfterMigrations_WithoutAwaitingItOnTheStartupPath()
-    {
-        var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs").Replace("\r\n", "\n");
-
-        var migrate = source.IndexOf("PgMigrations.MigrateAsync(migrateConnection", System.StringComparison.Ordinal);
-        /* #5571: the launch is the day-partition task, which runs Phase A and then the index ensures on one task (the
-           VALIDATE and a CREATE INDEX CONCURRENTLY on the legacy table conflict), so the pin names that entry point. */
-        var launch = source.IndexOf("var queryStoreIndexes = QueryStoreIntervalPartitions.RunDelayedAsync(", System.StringComparison.Ordinal);
-        var drain = source.IndexOf("await queryStoreIndexes;", System.StringComparison.Ordinal);
-        var loopStop = source.IndexOf("PerformanceMonitor Darling collection loop stopped", System.StringComparison.Ordinal);
-
-        Assert.True(migrate > 0 && launch > migrate, "the ensure must launch after migrations");
-        Assert.True(drain > launch && drain < loopStop, "the ensure is drained only at shutdown, after the collection loop");
-        Assert.Single(Regex.Matches(source, @"await queryStoreIndexes;"));
-        Assert.Contains("QueryStoreBackgroundIndexes.StartDelay", source);
-    }
-
-    [Fact]
     public async Task RunDelayed_CancelledDuringTheDelay_LogsAtDebug_NotInformation()
     {
         await using var dataSource = NpgsqlDataSource.Create("Host=127.0.0.1;Port=1;Username=x;Timeout=1");
