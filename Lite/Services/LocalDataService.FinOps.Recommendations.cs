@@ -1012,7 +1012,9 @@ AND   sqlserver_cpu_utilization IS NOT NULL";
     /// table, so a long-running server is often decided there). For the rest, one probe per server over the archive that stops at
     /// the first matching row, so a server whose oldest sample is archived is decided without reading the whole archive.</item>
     /// </list>
-    /// The statements run in turn, each on a connection of its own, so each one's cost is visible to the scaling test. The answer for a
+    /// The statements run in turn. The hot <c>query_stats</c> read and the windowed day count share one connection, and the bounded
+    /// probes over the archive run on a second one; the profile reports only the last statement per connection, which is harmless for
+    /// the hot read because it touches no Parquet and so has nothing to miss. The answer for a
     /// server is the old MIN and COUNT(DISTINCT) over the whole view, unchanged.
     /// </summary>
     internal async Task<HashSet<int>> IdleCoveredServerIdsAsync(DateTime nowUtc, int? serverId)
