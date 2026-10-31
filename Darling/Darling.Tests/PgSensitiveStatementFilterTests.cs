@@ -107,7 +107,7 @@ public sealed class PgSensitiveStatementFilterTests
     {
         // The pattern is typed out by hand here (never built from the shared constants) so a change to the
         // shared pattern fails this test until the expected text is updated on purpose. A1-A4 are the original
-        // alternatives, byte-identical; T1-T13 are the appended T-SQL and later alternatives (#4348, #5320).
+        // alternatives, byte-identical; T1-T18 are the appended T-SQL and later alternatives (#4348, #5320); T15 stays last.
         const string gap = "([[:space:]]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^[:cntrl:]]*)";
         const string expected =
             "CASE WHEN c ~* '[[:<:]](create|alter)" + gap + "+(role|user|group|subscription|server)[[:>:]]" +
@@ -136,6 +136,13 @@ public sealed class PgSensitiveStatementFilterTests
             "|pgp_pub_decrypt_bytea)" + gap + "*[(]([^()]|[(][^()]*[)])*([(][^()]*)?(''|[$][^0-9])" +
             "|-----begin[[:space:]]+pgp[[:space:]]+private[[:space:]]+key[[:space:]]+block" +
             "|[[:space:]]-u[[:space:]]*[^[:space:]-][^[:space:]]*[[:space:]]+-p[[:space:]]*[^[:space:]-]" +
+            "|[[:<:]]set" + gap + "+((session|local)" + gap + "+)?[a-z0-9_.]*(key|secret|passphrase|token)" +
+            "[a-z0-9_.]*" + gap + "*(=|to)" + gap + "*(e?''|u&''|[$][^0-9])" +
+            "|[[:<:]]set_config" + gap + "*[(]" + gap + "*e?''[^'']*(key|secret|password|passphrase|token)[^'']*''" +
+            gap + "*," + gap + "*(e?''|u&''|[$][^0-9])" +
+            "|[[:<:]][a-z0-9_]*(pass|pwd)[a-z0-9_]*(]|\")?" + gap + "*=" + gap + "*(hashbytes" + gap +
+            "*[(]" + gap + "*n?''[^'']*''" + gap + "*," + gap + "*n?''|digest" + gap + "*[(]" +
+            gap + "*(e?''|u&''))" +
             "|[[:<:]](bcp|sqlcmd|osql|isql)[[:>:]].*[[:space:]][-/]p[[:space:]]*[^[:space:]-]' " +
             "THEN '-- statement text withheld (#4348)' ELSE c END";
 

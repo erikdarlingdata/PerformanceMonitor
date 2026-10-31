@@ -121,6 +121,22 @@ internal static class SensitiveStatementCorpus
         "SELECT dblink_connect('c', 'host=db2 sslkey=/k/c.key sslpassword=$9Kite')",
         @"DECLARE @creds varchar(100) = '-S PROD01 -U etl -P S3cret!'; DECLARE @cmd varchar(4000) = 'bcp Sales.dbo.Orders out D:\x.dat -c ' + @creds; EXEC xp_cmdshell @cmd;",
         "EXEC master..xp_cmdshell 'bcp Sales.dbo.Orders out D:\\x.dat\n    -S PROD01 -U etl\n    -P S3cret! -c'",
+
+        // a setting whose name says key, secret, password, passphrase or token set to a literal (SET ... = / TO, and
+        // set_config), and a password-like column compared to a hash of a literal (HASHBYTES, digest)
+        "SET app.encryption_key = 'K3y-2026'",
+        "SET LOCAL app.encryption_key = 'K3y-2026'",
+        "SET SESSION app.api_token TO 'abc123'",
+        "SET app.vault_key TO E'K3y-2026'",
+        "SET app.master_passphrase = $p$K3y 2026$p$",
+        "SELECT set_config('app.encryption_key', 'K3y-2026', false)",
+        "SELECT set_config ( 'app.api_token' , 'abc123' , true )",
+        "SELECT set_config('app.master_passphrase', $q$K3y 2026$q$, false)",
+        "SELECT id FROM app.users WHERE pass_hash = HASHBYTES('SHA2_256', 'hunter2')",
+        "SELECT id FROM dbo.Users u WHERE u.PwdHash = HASHBYTES('SHA2_512', N'hunter2')",
+        "SELECT id FROM dbo.Users WHERE [PassHash] = HASHBYTES ( 'SHA2_256' , N'hunter2' )",
+        "SELECT id FROM app.users WHERE pass_hash = digest('hunter2', 'sha256')",
+        "SELECT id FROM app.users WHERE pwd_digest = digest(E'hunter2', 'sha512')",
     };
 
     /// <summary>Statements the filter must leave alone.</summary>
@@ -179,6 +195,14 @@ internal static class SensitiveStatementCorpus
         @"EXEC master..xp_cmdshell 'dir D:\'",
         @"EXEC xp_cmdshell 'sqlcmd -S PROD01 -E -i D:\load.sql'",
         "SELECT * FROM t WHERE note = 'isql' AND pw = 5",
+        "SET search_path = 'x'",
+        "SET work_mem = '64MB'",
+        "SELECT set_config('application_name', 'x', false)",
+        "SET statement_timeout TO '5s'",
+        "SELECT set_config('app.api_token', $1, false)",
+        "SELECT HASHBYTES('SHA2_256', 'abc')",
+        "SELECT id FROM t WHERE checksum = digest('abc', 'sha256')",
+        "SELECT id FROM app.users WHERE pass_hash = digest($1, 'sha256')",
     };
 
     /// <summary>The strings the plan once expected the .NET judge to time out on: many comment tokens after a

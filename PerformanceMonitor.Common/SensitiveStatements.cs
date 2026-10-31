@@ -66,6 +66,15 @@ public static partial class SensitiveStatements
     /// The pattern ignores case, so <c>-p</c> counts too: a lower-case option on such a command line is named as
     /// well, which only withholds more.</para>
     ///
+    /// <para>T16 to T18 are spelled before T15, which must stay the last alternative (the .NET judge cuts it off the end).
+    /// T16: <c>SET [SESSION|LOCAL] name = '...'</c> or <c>SET name TO '...'</c> where the setting name (a dotted custom name
+    /// such as <c>app.encryption_key</c> included) contains key, secret, passphrase or token, and the value is a
+    /// literal (a name that ends in password is T3's, and <c>SET password_encryption = 'scram-sha-256'</c>, a mode name,
+    /// stays visible). T17: <c>set_config('name', '...', ...)</c> with such a name and a literal value. T18: a column whose name
+    /// contains pass or pwd compared with <c>=</c> to <c>HASHBYTES('alg', [N]'...')</c> or to <c>digest('...', 'alg')</c>.
+    /// A hash of a literal under any other name (<c>checksum = digest('abc', 'sha256')</c>) and a setting with any other
+    /// name (<c>SET search_path = 'x'</c>) are not named.</para>
+    ///
     /// <para><b>No backslash, on purpose.</b> <c>[[:&lt;:]]</c>, <c>[[:&gt;:]]</c>, <c>[[:space:]]</c>,
     /// <c>[*]</c> and <c>[$]</c> spell what a first version wrote with backslash escapes. A normalized
     /// parameter (<c>password = $1</c>) is not a hit: it carries no value. <c>]</c> and <c>"</c> outside a
@@ -99,7 +108,14 @@ public static partial class SensitiveStatements
             + "|pgp_pub_decrypt_bytea)" + TokenGap + "*[(]([^()]|[(][^()]*[)])*([(][^()]*)?('|[$][^0-9])"     // T12
         + "|-----begin[[:space:]]+pgp[[:space:]]+private[[:space:]]+key[[:space:]]+block"                      // T13
         + "|[[:space:]]-u[[:space:]]*[^[:space:]-][^[:space:]]*[[:space:]]+-p[[:space:]]*[^[:space:]-]"        // T14
-        + "|" + ToolPasswordAlternative;                                                                       // T15
+        + "|[[:<:]]set" + TokenGap + "+((session|local)" + TokenGap + "+)?[a-z0-9_.]*(key|secret|passphrase|token)"
+            + "[a-z0-9_.]*" + TokenGap + "*(=|to)" + TokenGap + "*(e?'|u&'|[$][^0-9])"                         // T16
+        + "|[[:<:]]set_config" + TokenGap + "*[(]" + TokenGap + "*e?'[^']*(key|secret|password|passphrase|token)[^']*'"
+            + TokenGap + "*," + TokenGap + "*(e?'|u&'|[$][^0-9])"                                             // T17
+        + "|[[:<:]][a-z0-9_]*(pass|pwd)[a-z0-9_]*(]|\")?" + TokenGap + "*=" + TokenGap + "*(hashbytes" + TokenGap
+            + "*[(]" + TokenGap + "*n?'[^']*'" + TokenGap + "*," + TokenGap + "*n?'|digest" + TokenGap + "*[(]"
+            + TokenGap + "*(e?'|u&'))"                                                                        // T18
+        + "|" + ToolPasswordAlternative;                                                                       // T15, always last
 
     /// <summary>The tool names T15 looks for: the command-line clients that take a password in <c>-P</c>.</summary>
     private const string ToolWord = "[[:<:]](bcp|sqlcmd|osql|isql)[[:>:]]";
