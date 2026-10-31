@@ -76,7 +76,7 @@ public partial class MuteRulesWindow : Window
 
     private async void AddRule_Click(object sender, RoutedEventArgs e)
     {
-        var dialog = new MuteRuleEditDialog { Owner = this };
+        var dialog = new MuteRuleEditDialog((MuteRule?)null,await _dataService.SupportsMuteRecurrenceAsync()) { Owner = this };
         if (dialog.ShowDialog() != true)
         {
             return;
@@ -100,7 +100,7 @@ public partial class MuteRulesWindow : Window
             return;
         }
 
-        var dialog = new MuteRuleEditDialog(selected) { Owner = this };
+        var dialog = new MuteRuleEditDialog(selected, await _dataService.SupportsMuteRecurrenceAsync()) { Owner = this };
         if (dialog.ShowDialog() != true)
         {
             return;
@@ -207,4 +207,26 @@ public partial class MuteRulesWindow : Window
 
     private void ShowError(string what, Exception ex) =>
         MessageBox.Show($"{what}: {ex.Message}", "Mute Rules", MessageBoxButton.OK, MessageBoxImage.Warning);
+}
+
+/// <summary>The Schedule column of the Manage Mute Rules list (#7040): the rule's repeating window, with a note when it is open now.
+/// A one-off rule shows nothing.</summary>
+public sealed class MuteScheduleConverter : System.Windows.Data.IValueConverter
+{
+    internal static string Display(MuteRule rule, DateTime nowUtc)
+    {
+        var text = rule.ScheduleText;
+        if (text is null)
+        {
+            return "";
+        }
+
+        return rule.IsInWindowAt(nowUtc) ? text + " (in window now)" : text;
+    }
+
+    public object Convert(object? value, Type targetType, object? parameter, System.Globalization.CultureInfo culture) =>
+        value is MuteRule rule ? Display(rule, DateTime.UtcNow) : "";
+
+    public object ConvertBack(object? value, Type targetType, object? parameter, System.Globalization.CultureInfo culture) =>
+        throw new NotSupportedException();
 }

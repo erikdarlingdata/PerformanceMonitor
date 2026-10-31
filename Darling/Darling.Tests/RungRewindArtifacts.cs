@@ -601,6 +601,14 @@ ALTER TABLE config.config_threshold_overrides DROP COLUMN IF EXISTS scope_tag_id
             @"ALTER TABLE config.config_notification_routes DROP COLUMN IF EXISTS severities;
 ALTER TABLE IF EXISTS config.external_alert_state DROP COLUMN IF EXISTS fired_severities;
 ALTER TABLE IF EXISTS config.investigation_request_alerts DROP COLUMN IF EXISTS severity;"),
+        // V231 (#7040): the recurring schedule on the mute rules. The start time column is the probe's newest sentinel. The rewind drops all
+        // four columns, so a re-run of V231 adds them again. Safe on a store that never had them.
+        new(231, "hasMuteRecurrence",
+            @"ALTER TABLE config.config_mute_rules
+    DROP COLUMN IF EXISTS recur_days,
+    DROP COLUMN IF EXISTS recur_start_time,
+    DROP COLUMN IF EXISTS recur_end_time,
+    DROP COLUMN IF EXISTS recur_time_zone;"),
     ];
 
     /// <summary>

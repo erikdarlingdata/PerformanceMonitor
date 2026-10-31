@@ -58,6 +58,9 @@ table.data th .sort-ind { display: inline-block; min-width: 1em; font-size: 0.8e
 .mute-field { display: block; margin: 6px 0; }
 .mute-label { display: block; font-size: 12px; opacity: 0.8; }
 .mute-input { width: 100%; max-width: 420px; }
+.mute-schedule { margin: 10px 0; padding: 8px 12px; border: 1px solid var(--border, #444); border-radius: 4px; }
+.mute-days { margin: 6px 0; }
+.mute-day { display: inline-block; margin-right: 12px; }
 .mute-rules-field-error { display: block; color: var(--err); font-size: 12px; }
 .mute-actions .btn { margin-right: 4px; }
 tr.mute-rules-highlight { outline: 2px solid var(--accent); }
