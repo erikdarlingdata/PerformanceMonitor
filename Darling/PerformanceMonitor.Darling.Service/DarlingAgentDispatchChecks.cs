@@ -180,8 +180,8 @@ internal static class DarlingAgentDispatchChecks
     internal static bool WebTokenIsMcpToken(string? webToken, string? mcpToken) =>
         DarlingHostBinding.FixedTimeTokenEquals(webToken, mcpToken);
 
-    /// <summary>True when the web token has the value of any of <paramref name="mcpTokens"/> (#7023: the legacy token and every named token
-    /// that is served). Every value is compared, so the time taken does not say which one matched.</summary>
+    /// <summary>True when the web token has the value of any of <paramref name="mcpTokens"/> (#7023: the legacy token and every named token,
+    /// served or not). Every value is compared, so the time taken does not say which one matched.</summary>
     internal static bool WebTokenIsMcpToken(string? webToken, IReadOnlyList<string>? mcpTokens)
     {
         var same = false;
@@ -193,9 +193,11 @@ internal static class DarlingAgentDispatchChecks
         return same;
     }
 
-    /// <summary>Every MCP token value a client can present (#7023): the legacy token when one is set, then each named <c>mcp.tokens</c> entry
-    /// the host serves (the ones that pass <see cref="DarlingMcpTokenSet.Check"/>), whatever its role. An agent or a reader that
-    /// holds the web token's value could otherwise sign in to the web as a person, as the legacy token could (#6265). Values are never logged.</summary>
+    /// <summary>Every MCP token value an operator has given out (#7023): the legacy token when one is set, then each named <c>mcp.tokens</c>
+    /// entry whose value can be read, whatever its role and even when <see cref="DarlingMcpTokenSet.Check"/> refuses it (a role typo, a bad
+    /// <c>dataDetail</c>, a duplicate name, two entries reading the same secret). Refusing an entry stops the MCP host from serving it; it does
+    /// not take the value back from the person who holds it, and that person could otherwise sign in to the web as a person, as the legacy
+    /// token's holder could not (#6265). Values are never logged.</summary>
     internal static List<string> ResolveAllTokens(McpConfig mcp)
     {
         var values = new List<string>();
@@ -205,8 +207,20 @@ internal static class DarlingAgentDispatchChecks
             values.Add(legacy);
         }
 
-        DarlingMcpTokenSet.Check(mcp, legacy, DarlingMcpTokenSet.ResolveEntry, out var usable);
-        values.AddRange(usable.Select(entry => entry.Token));
+        foreach (var entry in mcp.Tokens ?? new List<McpTokenEntry>())
+        {
+            if (entry is null)
+            {
+                continue;
+            }
+
+            var resolved = DarlingMcpTokenSet.ResolveEntry(entry);
+            if (resolved.Token.Length > 0)
+            {
+                values.Add(resolved.Token);
+            }
+        }
+
         return values;
     }
 

@@ -78,8 +78,21 @@ public sealed class WebTokenSameAsMcpTests
     {
         Assert.Null(DarlingAgentDispatchChecks.WebTokenFinding(ConfigWithEntry(Shared, null, "reader", Shared + "-other")));
         Assert.Null(DarlingAgentDispatchChecks.WebTokenFinding(ConfigWithEntry(null, null, "reader", Shared)));
+    }
 
-        /* An entry that is not served (an unknown role) is not an MCP token anyone can present. */
-        Assert.Null(DarlingAgentDispatchChecks.WebTokenFinding(ConfigWithEntry(Shared, null, "admin", Shared)));
+    [Fact]
+    public async System.Threading.Tasks.Task AnEntryTheMcpHostRefuses_StillCountsForTheWebToken_AndIsNamedByValidateConfig()
+    {
+        /* #7023: a role typo leaves the entry unserved, but the operator already gave its value to a person, who could sign in to the web with it. */
+        var config = ConfigWithEntry(Shared, null, "admin", Shared);
+
+        Assert.Contains(Shared, DarlingAgentDispatchChecks.ResolveAllTokens(config.Mcp));
+        Assert.Equal(DarlingAgentDispatchChecks.WebTokenSameAsMcpMessage, DarlingAgentDispatchChecks.WebTokenFinding(config));
+
+        var output = new System.IO.StringWriter();
+        await DarlingCliCommands.ReportAgentDispatchAsync(config, output, TestContext.Current.CancellationToken);
+        var text = output.ToString();
+        Assert.Contains("who", text, System.StringComparison.Ordinal);
+        Assert.DoesNotContain(Shared, text, System.StringComparison.Ordinal);
     }
 }

@@ -17,7 +17,7 @@ namespace PerformanceMonitor.Darling.Service;
 
 /// <summary>
 /// #5307: finds the keys directly under <c>web</c> and under <c>web.network</c> and <c>mcp.network</c> (including their
-/// <c>tls</c> blocks and <c>web.network.oidc</c>) that no config class declares, so the worker can name each one at start. A mistyped
+/// <c>tls</c> blocks and <c>web.network.oidc</c>), and in each <c>mcp.tokens</c> entry (#7023), that no config class declares, so the worker can name each one at start. A mistyped
 /// key such as <c>ssl</c> for <c>tls</c> is otherwise dropped at load and the block behaves as if the setting had
 /// never been written.
 ///
