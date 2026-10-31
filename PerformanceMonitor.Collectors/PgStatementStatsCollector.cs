@@ -722,7 +722,7 @@ WHERE calls > 0";
                 StorageBlockReadTimeMs: NullableDbl(reader, 20),
                 OrcacheBlockReadTimeMs: NullableDbl(reader, 21),
                 /* #6836: NULL on a target whose pg_stat_statements has no WAL counters. */
-                WalRecords: NullableLong(reader, 22),
+                WalRecords: reader.GetInt64(22),
                 WalFpi: NullableLong(reader, 23),
                 WalBytes: NullableLong(reader, 24),
                 TotalExecPeakMemBytes: NullableLong(reader, 25),
