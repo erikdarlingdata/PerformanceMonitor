@@ -1105,13 +1105,13 @@ public sealed class AlertsConfig
     [JsonPropertyName("deadlockCriticalPerHour")]
     public double DeadlockCriticalPerHour { get; set; } = ServerHealthThresholds.DeadlockCriticalPerHourDefault;
 
-    /// <summary>#6927 (V228): the blocking health band's WARNING tier, blocked-process reports per hour over the window a card
+    /// <summary>#6927 (V228): the blocking health band's WARNING tier, blocked waits per hour (#7028, the unit blocking.count_threshold uses) over the window a card
     /// counted them in. Seeded from <see cref="ServerHealthThresholds.BlockingWarnPerHour"/>, named rather than restated, so a store
     /// that never sets it bands as every earlier build did. <c>BlockingBandThresholds</c> clamps it on read.</summary>
     [JsonPropertyName("blockingWarnPerHour")]
     public double BlockingWarnPerHour { get; set; } = ServerHealthThresholds.BlockingWarnPerHour;
 
-    /// <summary>#6927 (V228): the blocking health band's CRITICAL tier, reports per hour, seeded from
+    /// <summary>#6927 (V228): the blocking health band's CRITICAL tier, waits per hour, seeded from
     /// <see cref="ServerHealthThresholds.BlockingCriticalPerHour"/>.</summary>
     [JsonPropertyName("blockingCriticalPerHour")]
     public double BlockingCriticalPerHour { get; set; } = ServerHealthThresholds.BlockingCriticalPerHour;
@@ -1125,6 +1125,16 @@ public sealed class AlertsConfig
     /// <see cref="ServerHealthThresholds.BlockingCriticalWaitSeconds"/>.</summary>
     [JsonPropertyName("blockingCriticalWaitSeconds")]
     public double BlockingCriticalWaitSeconds { get; set; } = ServerHealthThresholds.BlockingCriticalWaitSeconds;
+
+    /// <summary>#7028 (V230): the blocking band's WARNING bar on the longest total blocked wait in one sampled snapshot, seconds. 0 means the
+    /// tier is off, as the Blocking Wait Time alert's own bar does at 0. Valid values are 0 and 1 to 86400. When both tiers are above 0, critical
+    /// is at least warn. <c>BlockingBandThresholds</c> clamps it on read.</summary>
+    [JsonPropertyName("blockingWarnSnapshotWaitSeconds")]
+    public double BlockingWarnSnapshotWaitSeconds { get; set; }
+
+    /// <summary>#7028 (V230): the blocking band's CRITICAL bar on the longest total blocked wait in one sampled snapshot, seconds. 0 means off.</summary>
+    [JsonPropertyName("blockingCriticalSnapshotWaitSeconds")]
+    public double BlockingCriticalSnapshotWaitSeconds { get; set; }
 
     [JsonPropertyName("longRunningJobEnabled")]
     public bool LongRunningJobEnabled { get; set; } = true;
