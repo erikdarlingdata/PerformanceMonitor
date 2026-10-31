@@ -54,6 +54,9 @@ public sealed class PgCollectorsOnOldTargetsLiveTests(ITestOutputHelper output)
     /// </summary>
     private static readonly Dictionary<string, string> Excluded = new(StringComparer.Ordinal)
     {
+        ["pg_log_events"] = "measured on run 41160666108, every major: throws 'this service has no log-hash key (#4004)', a service setting the test does not load, and the target has no logging_collector. The log readers are covered live on the 5542-5550 clusters.",
+        ["pg_deadlocks"] = "measured on run 41160666108, every major: PgLoggingCollectorOffException, logging_collector is off on the target (the precondition the product reports). Covered live on the 5542-5550 clusters.",
+        ["pg_plan_capture"] = "measured on run 41160666108, every major: PgLoggingCollectorOffException, logging_collector is off on the target. Covered live on 5542/5544.",
         ["pg_kernel_stats"] = "reads pg_stat_kcache, which the EDB zip does not carry: the runner raises the #6888 precondition (42P01, extension not created) on every major. Measured on run 41158907025.",
         ["pg_predicate_stats"] = "reads pg_qualstats, which the EDB zip does not carry: the runner raises the #6888 precondition (42P01, extension not created) on every major. Measured on run 41158907025.",
     };
