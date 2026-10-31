@@ -681,7 +681,8 @@ public sealed class DarlingMcpHostService : BackgroundService
             {
                 _logger.LogWarning(
                     "MCP named tokens are served: {Tokens}. Each request's tools follow its token's role; every MCP request, loopback included, must present a token.",
-                    string.Join(", ", tokenSet.Named.Select(t => t.Name + " (" + t.Role + ")")));
+                    string.Join(", ", tokenSet.Named.Select(t => t.Name + " (" + t.Role + ", " +
+                        McpDataDetailModes.Word(DarlingMcpTokenSet.DetailFor(McpDataDetailModes.Resolve(config.Mcp.DataDetail), new McpCaller(t.Name, default, t.DataDetail))) + ")")));
                 writes = tokenSet.Union;
             }
 
@@ -914,9 +915,10 @@ public sealed class DarlingMcpHostService : BackgroundService
             }
 
             /* #5632: mcp.dataDetail, read once per start (file-only, restart-only). McpDataDetailFilter reads the level
-               from this singleton on every call; an unrecognized value runs as metadataOnly, the strictest level, and
+               from the setting registered here on every call (per request: a named token's dataDetail can narrow it, #7023); an unrecognized value runs as metadataOnly, the strictest level, and
                says so once here. */
-            builder.Services.AddSingleton(new McpDataDetailSetting(ResolveDataDetail(config.Mcp.DataDetail, _logger)));
+            var serviceDataDetail = ResolveDataDetail(config.Mcp.DataDetail, _logger);
+            RegisterDataDetail(builder.Services, serviceDataDetail);
 
             /* Register MCP server with the analysis tool class. */
             ConfigureMcpServices(
@@ -1341,11 +1343,12 @@ public sealed class DarlingMcpHostService : BackgroundService
 
         /* #5632 Phase A: claim_investigation_request composes the brief at claim time through this composer, a service
            parameter, so it must be registered wherever the tools are. The reader reads the store the host registered;
-           the composer masks at the host's mcp.dataDetail level (none registered: full, as the host filter passes
-           through). */
+           the composer masks at the calling token's level (the setting, per request; none registered: full, as the host filter
+           passes through). */
         services.AddSingleton<IInvestigationBriefSourceReader>(sp =>
             new PgInvestigationBriefSourceReader(sp.GetRequiredService<NpgsqlDataSource>(), readLatencyLogger, publicBaseUrl: publicBaseUrl));
-        services.AddSingleton<InvestigationBriefComposer>(sp => new InvestigationBriefComposer(
+        /* #7023: transient, not a singleton: the composer holds the request's setting, and a named token's dataDetail can narrow it per caller. */
+        services.AddTransient<InvestigationBriefComposer>(sp => new InvestigationBriefComposer(
             sp.GetRequiredService<IInvestigationBriefSourceReader>(),
             sp.GetService<McpDataDetailSetting>() ?? new McpDataDetailSetting(McpDataDetail.Full),
             DarlingInvestigationBriefTools.Tools,
@@ -1915,7 +1918,7 @@ public sealed class DarlingMcpHostService : BackgroundService
 
                The mcp.dataDetail filter (#5632, McpDataDetailFilter) sits just outside the statement filter, so it
                reads the statement filter's output as plain JSON before GCF re-encodes it, and masks every tool answer
-               at the level the host registered (a McpDataDetailSetting singleton; none, or full, passes through). */
+               at the level the request is served (the McpDataDetailSetting RegisterDataDetail resolves per request; none, or full, passes through). */
             .WithRequestFilters(filters =>
             {
                 /* #6840: a front door drops the unknown-argument guard (it would refuse the store argument, and the store runs its own guard on
@@ -1932,6 +1935,21 @@ public sealed class DarlingMcpHostService : BackgroundService
                 filters.AddCallToolFilter(SensitiveStatementOutputFilter.Instance);
             });
     }
+
+    /// <summary>
+    /// Registers the data detail setting (#7023): a named token's own <c>dataDetail</c> can narrow <paramref name="serviceLevel"/>, so the
+    /// setting is resolved per request from the matched caller (the bearer gate stored it). The call filter and every tool that takes the
+    /// setting read the caller's level, never a level fixed at start. A request with no matched caller (the legacy token, the start without
+    /// named tokens) gets the service's level, as before. A front door passes its own caller's level in <see cref="DarlingMcpTokenSet.DataDetailHeader"/>,
+    /// and the store serves the stricter of that and the level above (a missing or unrecognized header narrows nothing).
+    /// </summary>
+    internal static void RegisterDataDetail(IServiceCollection services, McpDataDetail serviceLevel) =>
+        services.AddTransient(sp =>
+        {
+            var accessor = sp.GetService<IHttpContextAccessor>();
+            var header = accessor?.HttpContext?.Request.Headers[DarlingMcpTokenSet.DataDetailHeader].ToString();
+            return new McpDataDetailSetting(DarlingMcpTokenSet.DetailFor(serviceLevel, DarlingMcpTokenSet.CallerOf(accessor), header));
+        });
 
     /// <summary>
     /// The <c>mcp.dataDetail</c> level this listener serves (#5632). An unrecognized value runs as
