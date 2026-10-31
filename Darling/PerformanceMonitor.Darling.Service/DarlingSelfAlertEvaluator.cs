@@ -9209,33 +9209,77 @@ SELECT EXISTS
     internal Task<(DateTime? CollectionTimeUtc, bool? AgentRunning)> ReadLatestAgentStatusAsync(
         NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
         => ReadWithOneRetryAsync(
-            token => ReadLatestAgentStatusCoreAsync(postgres, serverId, token),
+            token => ReadLatestAgentStatusCoreAsync(postgres, serverId, _agentStatusFloor, token),
             serverId, AgentStatusReadName, cancellationToken);
 
     /// <summary>The read itself, byte-identical to what shipped before #3854 routed it through the seam.</summary>
     private static async Task<(DateTime? CollectionTimeUtc, bool? AgentRunning)> ReadLatestAgentStatusCoreAsync(
-        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, int serverId, NewestRowFloor floor, CancellationToken cancellationToken)
     {
         await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
-        using var command = new NpgsqlCommand(@"
+        (DateTime? CollectionTimeUtc, bool? AgentRunning) result = (null, null);
+        /* #7017: the shared newest-row floor loop (#6968). collection_time is NOT NULL, so a found row has one. */
+        await floor.ReadAsync(serverId, async since =>
+        {
+            result = (null, null);
+            using var command = new NpgsqlCommand(since is null ? LatestAgentStatusSql : LatestAgentStatusSinceSql, connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
+            command.Parameters.AddWithValue(serverId);
+            AddFloorParameter(command, since);
+
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                return null;
+            }
+
+            bool? running = reader.IsDBNull(0) ? null : reader.GetBoolean(0);
+            DateTime? collectionTime = reader.IsDBNull(1)
+                ? null
+                : DateTime.SpecifyKind(reader.GetDateTime(1), DateTimeKind.Utc);
+            result = (collectionTime, running);
+            return collectionTime;
+        });
+
+        return result;
+    }
+
+    /// <summary>The newest <c>agent_status</c> row of a server (the read before #7017).</summary>
+    internal const string LatestAgentStatusSql = @"
 SELECT agent_running, collection_time
 FROM agent_status
 WHERE server_id = $1
 ORDER BY collection_time DESC
-LIMIT 1", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
-        command.Parameters.AddWithValue(serverId);
+LIMIT 1";
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        if (!await reader.ReadAsync(cancellationToken))
+    /// <summary>
+    /// #7017: <see cref="LatestAgentStatusSql"/> bounded below by <c>collection_time</c> $2, a value a previous read of the same
+    /// server returned (<see cref="NewestRowFloor"/>), never a clock, so a server whose newest row is old (or that has none)
+    /// does not open every chunk between that row and now on each pass. Same ordering, same row.
+    /// </summary>
+    internal const string LatestAgentStatusSinceSql = @"
+SELECT agent_running, collection_time
+FROM agent_status
+WHERE server_id = $1
+AND   collection_time >= $2
+ORDER BY collection_time DESC
+LIMIT 1";
+
+    /// <summary>Where each server's next agent-status read starts (#7017).</summary>
+    private readonly NewestRowFloor _agentStatusFloor = new();
+
+    /// <summary>Where each server's next AG replica-state read starts (#7017).</summary>
+    private readonly NewestRowFloor _agReplicaFloor = new();
+
+    /// <summary>Where each server's next AG database-replica-state read starts (#7017).</summary>
+    private readonly NewestRowFloor _agDatabaseReplicaFloor = new();
+
+    /// <summary>Adds the floor as the statement's $2: a typed naive timestamp, the column's own type.</summary>
+    private static void AddFloorParameter(NpgsqlCommand command, DateTime? since)
+    {
+        if (since is { } floor)
         {
-            return (null, null);
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = floor });
         }
-
-        bool? running = reader.IsDBNull(0) ? null : reader.GetBoolean(0);
-        DateTime? collectionTime = reader.IsDBNull(1)
-            ? null
-            : DateTime.SpecifyKind(reader.GetDateTime(1), DateTimeKind.Utc);
-        return (collectionTime, running);
     }
 
     /// <summary>
@@ -9260,44 +9304,71 @@ LIMIT 1", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassComman
     internal Task<(DateTime? CollectionTimeUtc, IReadOnlyList<AgReplicaReading> Replicas)> ReadLatestAgReplicaStatesAsync(
         NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
         => ReadWithOneRetryAsync(
-            token => ReadLatestAgReplicaStatesCoreAsync(postgres, serverId, token),
+            token => ReadLatestAgReplicaStatesCoreAsync(postgres, serverId, _agReplicaFloor, token),
             serverId, AgStateReadName, cancellationToken);
 
     /// <summary>The read itself, byte-identical to what shipped before #3854 routed it through the seam.</summary>
     private static async Task<(DateTime? CollectionTimeUtc, IReadOnlyList<AgReplicaReading> Replicas)> ReadLatestAgReplicaStatesCoreAsync(
-        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, int serverId, NewestRowFloor floor, CancellationToken cancellationToken)
     {
         var replicas = new List<AgReplicaReading>();
         DateTime? newest = null;
 
         await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
-        using var command = new NpgsqlCommand(@"
+        /* #7017: the shared newest-row floor loop (#6968). The floor is the snapshot's time, so a bounded read that finds no row
+           means the snapshot is gone and the loop reads again without a bound. A server with no Availability Group has no rows
+           either way and gets the loop's empty-read floor. */
+        await floor.ReadAsync(serverId, async since =>
+        {
+            replicas.Clear();
+            newest = null;
+            using var command = new NpgsqlCommand(since is null ? LatestAgReplicaStatesSql : LatestAgReplicaStatesSinceSql, connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
+            command.Parameters.AddWithValue(serverId);
+            AddFloorParameter(command, since);
+
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                newest = Newest(newest, reader, 5);
+                if (reader.IsDBNull(0) || reader.IsDBNull(1))
+                {
+                    continue;
+                }
+
+                replicas.Add(new AgReplicaReading(
+                    AgName: reader.GetString(0),
+                    ReplicaServerName: reader.GetString(1),
+                    RoleDesc: reader.IsDBNull(2) ? null : reader.GetString(2),
+                    ConnectedStateDesc: reader.IsDBNull(3) ? null : reader.GetString(3),
+                    IsLocal: reader.IsDBNull(4) ? null : reader.GetBoolean(4)));
+            }
+
+            return newest;
+        });
+
+        return (newest, replicas);
+    }
+
+    /// <summary>The server's newest <c>ag_replica_states</c> snapshot (the read before #7017).</summary>
+    internal const string LatestAgReplicaStatesSql = @"
 SELECT ag_name, replica_server_name, role_desc, connected_state_desc, is_local, collection_time
 FROM ag_replica_states
 WHERE server_id = $1
 AND   collection_time = (SELECT MAX(collection_time) FROM ag_replica_states WHERE server_id = $1)
-ORDER BY ag_name, replica_server_name", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
-        command.Parameters.AddWithValue(serverId);
+ORDER BY ag_name, replica_server_name";
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
-        {
-            newest = Newest(newest, reader, 5);
-            if (reader.IsDBNull(0) || reader.IsDBNull(1))
-            {
-                continue;
-            }
-
-            replicas.Add(new AgReplicaReading(
-                AgName: reader.GetString(0),
-                ReplicaServerName: reader.GetString(1),
-                RoleDesc: reader.IsDBNull(2) ? null : reader.GetString(2),
-                ConnectedStateDesc: reader.IsDBNull(3) ? null : reader.GetString(3),
-                IsLocal: reader.IsDBNull(4) ? null : reader.GetBoolean(4)));
-        }
-
-        return (newest, replicas);
-    }
+    /// <summary>
+    /// #7017: <see cref="LatestAgReplicaStatesSql"/> bounded below by <c>collection_time</c> $2, a value a previous read of the same
+    /// server returned (<see cref="NewestRowFloor"/>), never a clock. The bound sits on the newest-snapshot subquery AND the outer
+    /// filter. Same rows, same order.
+    /// </summary>
+    internal const string LatestAgReplicaStatesSinceSql = @"
+SELECT ag_name, replica_server_name, role_desc, connected_state_desc, is_local, collection_time
+FROM ag_replica_states
+WHERE server_id = $1
+AND   collection_time >= $2
+AND   collection_time = (SELECT MAX(collection_time) FROM ag_replica_states WHERE server_id = $1 AND collection_time >= $2)
+ORDER BY ag_name, replica_server_name";
 
     /// <summary>
     /// The server's LATEST <c>ag_database_replica_states</c> snapshot (#991), with its OWN
@@ -9310,47 +9381,72 @@ ORDER BY ag_name, replica_server_name", connection) { CommandTimeout = DarlingAl
     internal Task<(DateTime? CollectionTimeUtc, IReadOnlyList<AgDatabaseReading> Databases)> ReadLatestAgDatabaseReplicaStatesAsync(
         NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
         => ReadWithOneRetryAsync(
-            token => ReadLatestAgDatabaseReplicaStatesCoreAsync(postgres, serverId, token),
+            token => ReadLatestAgDatabaseReplicaStatesCoreAsync(postgres, serverId, _agDatabaseReplicaFloor, token),
             serverId, AgStateReadName, cancellationToken);
 
     /// <summary>The read itself, byte-identical to what shipped before #3854 routed it through the seam.</summary>
     private static async Task<(DateTime? CollectionTimeUtc, IReadOnlyList<AgDatabaseReading> Databases)> ReadLatestAgDatabaseReplicaStatesCoreAsync(
-        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, int serverId, NewestRowFloor floor, CancellationToken cancellationToken)
     {
         var databases = new List<AgDatabaseReading>();
         DateTime? newest = null;
 
         await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
-        using var command = new NpgsqlCommand(@"
+        /* #7017: the shared newest-row floor loop (#6968), as in the replica read above. */
+        await floor.ReadAsync(serverId, async since =>
+        {
+            databases.Clear();
+            newest = null;
+            using var command = new NpgsqlCommand(since is null ? LatestAgDatabaseReplicaStatesSql : LatestAgDatabaseReplicaStatesSinceSql, connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
+            command.Parameters.AddWithValue(serverId);
+            AddFloorParameter(command, since);
+
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                newest = Newest(newest, reader, 7);
+                if (reader.IsDBNull(0) || reader.IsDBNull(1) || reader.IsDBNull(2))
+                {
+                    continue;
+                }
+
+                databases.Add(new AgDatabaseReading(
+                    AgName: reader.GetString(0),
+                    DatabaseName: reader.GetString(1),
+                    ReplicaServerName: reader.GetString(2),
+                    SecondaryLagSeconds: reader.IsDBNull(3) ? null : reader.GetInt64(3),
+                    RedoQueueSizeKb: reader.IsDBNull(4) ? null : reader.GetInt64(4),
+                    IsSuspended: reader.IsDBNull(5) ? null : reader.GetBoolean(5),
+                    SuspendReasonDesc: reader.IsDBNull(6) ? null : reader.GetString(6)));
+            }
+
+            return newest;
+        });
+
+        return (newest, databases);
+    }
+
+    /// <summary>The server's newest <c>ag_database_replica_states</c> snapshot (the read before #7017).</summary>
+    internal const string LatestAgDatabaseReplicaStatesSql = @"
 SELECT ag_name, database_name, replica_server_name, secondary_lag_seconds, redo_queue_size,
        is_suspended, suspend_reason_desc, collection_time
 FROM ag_database_replica_states
 WHERE server_id = $1
 AND   collection_time = (SELECT MAX(collection_time) FROM ag_database_replica_states WHERE server_id = $1)
-ORDER BY ag_name, database_name, replica_server_name", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
-        command.Parameters.AddWithValue(serverId);
+ORDER BY ag_name, database_name, replica_server_name";
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
-        {
-            newest = Newest(newest, reader, 7);
-            if (reader.IsDBNull(0) || reader.IsDBNull(1) || reader.IsDBNull(2))
-            {
-                continue;
-            }
-
-            databases.Add(new AgDatabaseReading(
-                AgName: reader.GetString(0),
-                DatabaseName: reader.GetString(1),
-                ReplicaServerName: reader.GetString(2),
-                SecondaryLagSeconds: reader.IsDBNull(3) ? null : reader.GetInt64(3),
-                RedoQueueSizeKb: reader.IsDBNull(4) ? null : reader.GetInt64(4),
-                IsSuspended: reader.IsDBNull(5) ? null : reader.GetBoolean(5),
-                SuspendReasonDesc: reader.IsDBNull(6) ? null : reader.GetString(6)));
-        }
-
-        return (newest, databases);
-    }
+    /// <summary>
+    /// #7017: <see cref="LatestAgDatabaseReplicaStatesSql"/> bounded below by <c>collection_time</c> $2, a value a previous read
+    /// of the same server returned (<see cref="NewestRowFloor"/>), never a clock. Same rows, same order.
+    /// </summary>
+    internal const string LatestAgDatabaseReplicaStatesSinceSql = @"
+SELECT ag_name, database_name, replica_server_name, secondary_lag_seconds, redo_queue_size,
+       is_suspended, suspend_reason_desc, collection_time
+FROM ag_database_replica_states
+WHERE server_id = $1
+AND   collection_time >= $2
+AND   collection_time = (SELECT MAX(collection_time) FROM ag_database_replica_states WHERE server_id = $1 AND collection_time >= $2)
+ORDER BY ag_name, database_name, replica_server_name";
 
     /// <summary>Running maximum of a snapshot's <c>collection_time</c> column, as naive UTC.</summary>
     private static DateTime? Newest(DateTime? running, NpgsqlDataReader reader, int ordinal)
