@@ -75,7 +75,8 @@ public sealed class McpQueryTools
 
             var requestedStart = nowUtc.AddHours(-hours_back);
             var rows = await dataService.GetTopQueriesByCpuAsync(resolved.ServerId, hours_back, top, serverClock: serverClock, databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name }, asOfUtc: windowEnd, minMaxDop: minMaxDop, tags: tagScope);
-            if (rows.Count == 0)
+            /* #7005: every empty answer below also says whether the store holds the window (the notice rides it by WithEmptyWindowNoticeAsync). */
+            async Task<string> EmptyAnswerAsync()
             {
                 if (tagScope.Active)
                 {
@@ -117,6 +118,9 @@ public sealed class McpQueryTools
                         "query_stats", hours_back, "executed statements", database_name)
                     ?? McpHelpers.Status("unavailable", "No query stats available for the specified time range.");
             }
+
+            if (rows.Count == 0)
+                return await WithEmptyWindowNoticeAsync(await EmptyAnswerAsync(), dataService, QueryWindowRelation.QueryStats, resolved.ServerId, requestedStart, nowUtc, "query_stats");
 
             /* #4231: what the window ACTUALLY reached, from the SAME relation (v_query_stats) the ranking read
                above just used — a raw-only table with no rollup fallback, so a lowered retention_days or a
@@ -291,11 +295,12 @@ public sealed class McpQueryTools
 
             if (rows.Count == 0)
             {
-                return McpHelpers.WithDatabasesLeftOut(
+                return await WithEmptyWindowNoticeAsync(McpHelpers.WithDatabasesLeftOut(
                     await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "procedure_stats", awsRdsKind: AwsRdsKind.None)
                     ?? EmptyProcedureStatsStatus(
                         await dataService.GetCollectorRunFactsAsync(resolved.ServerId, "procedure_stats", hours_back, asOfUtc: windowEnd),
-                        hours_back, leftOut?.Count ?? 0), leftOut)!;
+                        hours_back, leftOut?.Count ?? 0), leftOut)!,
+                    dataService, QueryWindowRelation.ProcedureStats, resolved.ServerId, requestedStart, nowUtc, "procedure_stats");
             }
 
             /* #4231: what the window ACTUALLY reached, from the SAME relation (v_procedure_stats) the ranking
@@ -536,8 +541,10 @@ public sealed class McpQueryTools
             }
 
             if (rows.Count == 0)
-                return await McpRuntimePrecondition.WithQueryStoreNotWritingHintAsync(
-                    await EmptyAnswerAsync(), dataService, resolved.ServerId, resolved.DisplayName, database_name);
+                return await WithEmptyWindowNoticeAsync(
+                    await McpRuntimePrecondition.WithQueryStoreNotWritingHintAsync(
+                        await EmptyAnswerAsync(), dataService, resolved.ServerId, resolved.DisplayName, database_name),
+                    dataService, QueryWindowRelation.QueryStoreStats, resolved.ServerId, requestedStart, nowUtc, "query_store_stats");
 
             var result = rows.Select(r => new
             {
@@ -969,7 +976,10 @@ public sealed class McpQueryTools
                 requestedStart, windowEnd, "query_stats", emptyAnswer: rows.Count == 0);
 
             if (rows.Count == 0)
-                return await EmptyHeatmapAsync(dataService, resolved.ServerId, resolved.DisplayName, hours_back, windowEnd, notice, filtered: databases is not null);
+                /* #7005: the never-collected rungs carry the same emptyAnswer notice the in-window rungs carry (WithWindowNotice leaves hints already there). */
+                return WithWindowNotice(
+                    await EmptyHeatmapAsync(dataService, resolved.ServerId, resolved.DisplayName, hours_back, windowEnd, notice, filtered: databases is not null),
+                    notice, requestedStart, windowEnd);
 
             var truncated = rows.Count > limit;
             var cells = rows.Take(limit).ToList();
@@ -1166,7 +1176,8 @@ public sealed class McpQueryTools
             var points = await dataService.GetBucketedQueryDurationTrendAsync(
                 resolved.ServerId, hours_back, asOfUtc: windowEnd, bucketMinutes, database == null ? null : new[] { database });
 
-            if (points.Count == 0)
+            /* #7005: the empty answer says whether the store holds the window, as the other two trends do. */
+            async Task<string> EmptyAnswerAsync()
             {
                 /* Same two states again, same words as Darling's twin. The probe reads v_query_stats
                    because THIS trend does; Darling's probes the base table because ITS trend does. Each
@@ -1200,6 +1211,9 @@ public sealed class McpQueryTools
                         $"No query stats have EVER been recorded for {resolved.DisplayName}. This is not an empty window — the query_stats collector has stored nothing at all for this server. Check that collection is running and that the server is enabled; get_top_queries_by_cpu will be equally empty until it does.",
                         startUtc, windowEnd, grain, database);
             }
+
+            if (points.Count == 0)
+                return await WithEmptyWindowNoticeAsync(await EmptyAnswerAsync(), dataService, QueryWindowRelation.QueryStats, resolved.ServerId, startUtc, windowEnd, "query_stats");
 
             /* The two siblings below serialize through the SAME helper, so the three Performance-Trends
                reads cannot advertise three different field sets for one shape. */
@@ -1248,13 +1262,14 @@ public sealed class McpQueryTools
                     return gated;
                 }
 
-                return await EmptyTrendAsync(
+                return await WithEmptyWindowNoticeAsync(await EmptyTrendAsync(
                     dataService.HasAnyProcedureStatAsync(resolved.ServerId), resolved.DisplayName, database, hours_back,
                     startUtc, windowEnd, grain,
                     "stored-procedure",
                     "Check that collection is running and that the server is enabled. A server that genuinely runs no stored procedures also lands here, and that is a real answer rather than a fault.",
                     healthyEmptyProbe: () => McpRuntimePrecondition.HealthyEmptyMessageAsync(
-                        dataService, resolved.ServerId, resolved.DisplayName, "procedure_stats", "stored-procedure samples"));
+                        dataService, resolved.ServerId, resolved.DisplayName, "procedure_stats", "stored-procedure samples")),
+                    dataService, QueryWindowRelation.ProcedureStats, resolved.ServerId, startUtc, windowEnd, "procedure_stats");
             }
 
             return SerializeTrend(resolved.DisplayName, hours_back, startUtc, windowEnd, points, grain,
@@ -1302,12 +1317,13 @@ public sealed class McpQueryTools
                     return gated;
                 }
 
-                return await EmptyTrendAsync(
+                return await WithEmptyWindowNoticeAsync(await EmptyTrendAsync(
                     dataService.HasAnyQueryStoreStatAsync(resolved.ServerId), resolved.DisplayName, database, hours_back,
                     startUtc, windowEnd, PerInterval,
                     "Query Store",
                     "Query Store may be OFF on this server's databases — that, not an absence of slow queries, is the usual cause. Check QUERY_STORE = ON per database, then that collection is running for this server.",
-                    () => McpRuntimePrecondition.QueryStoreFirstIntervalMessageAsync(dataService, resolved.ServerId, resolved.DisplayName, database));
+                    () => McpRuntimePrecondition.QueryStoreFirstIntervalMessageAsync(dataService, resolved.ServerId, resolved.DisplayName, database)),
+                    dataService, QueryWindowRelation.QueryStoreStats, resolved.ServerId, startUtc, windowEnd, "query_store_stats");
             }
 
             return SerializeTrend(resolved.DisplayName, hours_back, startUtc, windowEnd, points, PerInterval,
@@ -1474,6 +1490,205 @@ public sealed class McpQueryTools
         WindowNoticeAsync(
             async () => LocalDataService.EarlierCoverageFloor(await probe(), oldestEventShown),
             requestedStart, windowEnd, table, emptyAnswer: emptyAnswer);
+
+    /// <summary>
+    /// #7005: the window notice of an EMPTY answer over one window-floor relation, including the aged-out case. The probe's floor
+    /// is the first row or logged run of the relation's collector inside the window; null means the store holds neither there.
+    /// Null is then one of two things: the window ENDS before the first row the store kept and the collector was storing rows
+    /// at or before the window's start (the data aged out: <c>window_truncated</c> true and <c>effective_start</c> the first kept
+    /// row, the #6877 / #6885 answer of get_query_store_regressions), or nothing was collected in the window at all (the #5015
+    /// answer: <c>window_truncated</c> true, no <c>effective_start</c>). A window the collector ran in is covered at its first
+    /// run, as everywhere else.
+    /// </summary>
+    internal static async Task<McpWindowNotice?> EmptyWindowNoticeAsync(
+        LocalDataService dataService, QueryWindowRelation relation, int serverId, DateTime requestedStart, DateTime windowEnd, string table)
+    {
+        /* A server never collected for this relation answers bare, so it stays apart from a quiet window (the rule the never-collected rungs and
+           their tests keep). Never collected is no row ever stored; for a relation that stores a row only when something happens (the event
+           and snapshot tables), a logged run of its collector also counts as collected, since a quiet start is covered by the runs. */
+        var oldest = await dataService.GetOldestWindowRowAsync(relation, serverId);
+        if (oldest is null
+            && (LocalDataService.QueryWindowRelationStoresEveryCycle(relation)
+                || LocalDataService.QueryWindowRelationCollector(relation) is not { } ranCollector
+                || !await dataService.HasCollectorRunAsync(serverId, ranCollector)))
+        {
+            return null;
+        }
+
+        var floor = await dataService.GetQueryWindowFloorAsync(relation, serverId, requestedStart, windowEnd);
+        if (floor is null
+            /* The two Queries relations that store a row every cycle have no collector in the probe's map (it reads their rows only), but the log still names it. */
+            && (LocalDataService.QueryWindowRelationCollector(relation)
+                ?? (relation == QueryWindowRelation.QueryStats ? "query_stats" : relation == QueryWindowRelation.QueryStoreStats ? "query_store" : null)) is { } collector
+            && oldest is DateTime kept
+            && kept + TruncationSlack >= windowEnd
+            && await dataService.CollectorStoredRowsAtOrBeforeAsync(serverId, collector, requestedStart + TruncationSlack))
+        {
+            return WindowNotice(kept, requestedStart, table, "This window ends before the first row this server's store kept, so the data may have aged out.");
+        }
+
+        /* Rows sit before the window's start and none inside it: the store holds the window and nothing happened in it (a quiet window, not a cut one). */
+        if (floor is null && oldest <= requestedStart)
+        {
+            return WindowNotice(requestedStart, requestedStart, table, emptyAnswer: true);
+        }
+
+        return WindowNotice(floor, requestedStart, table, emptyAnswer: true);
+    }
+
+    /// <summary>
+    /// #7005: <paramref name="answer"/>, when it is an empty or unavailable status, with <paramref name="notice"/> written in: a payload
+    /// that already carries the disclosure keys at its top level (the Performance-Trends envelope) gets its <c>effective_start</c>,
+    /// <c>window_truncated</c> and <c>effective_hours_back</c> replaced, any other status carries the three keys under <c>hints</c>
+    /// (merged into hints that are already there). Any other status (<c>not_collected</c>, <c>precondition</c>, an error) is
+    /// returned as it was: those say their own cause.
+    /// </summary>
+    internal static string WithWindowNotice(string answer, McpWindowNotice notice, DateTime requestedStart, DateTime windowEnd)
+    {
+        if (!McpHelpers.IsEmptyOrUnavailableStatus(answer))
+        {
+            return answer;
+        }
+
+        var node = System.Text.Json.Nodes.JsonNode.Parse(answer)!.AsObject();
+        if (node.ContainsKey("window_truncated"))
+        {
+            node["window_truncated"] = notice.WindowTruncated;
+            if (node.ContainsKey("effective_start"))
+            {
+                node["effective_start"] = notice.EffectiveStart ?? DateTime.SpecifyKind(requestedStart, DateTimeKind.Unspecified).ToString("o");
+            }
+
+            /* Written in the block that writes window_truncated (the payload census reads the floor's spelling by block); the instant is read back with the invariant round-trip form FormatEffectiveStart writes. */
+            if (node.ContainsKey("effective_hours_back"))
+                node["effective_hours_back"] = Math.Round((windowEnd - (DateTime.TryParseExact(notice.EffectiveStart, "o", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, out var parsed) ? parsed : requestedStart)).TotalHours, 1);
+
+            return node.ToJsonString(McpHelpers.JsonOptions);
+        }
+
+        var hints = node["hints"] as System.Text.Json.Nodes.JsonObject ?? new System.Text.Json.Nodes.JsonObject();
+        if (hints.ContainsKey("window_truncated"))
+        {
+            /* The tool's own rung already said it, from its own probe and in step with its message. */
+            return answer;
+        }
+
+        hints["effective_start"] = notice.EffectiveStart;
+        hints["window_truncated"] = notice.WindowTruncated;
+        hints["truncation_note"] = notice.TruncationNote;
+        node["hints"] = hints;
+        return node.ToJsonString(McpHelpers.JsonOptions);
+    }
+
+    /// <summary>
+    /// #7005: a DATA answer (no <c>status</c> key) that carries no window notice yet, with the three keys written in after the tool's own keys: the verdict of <see cref="WindowNoticeAsync"/> over the relation's probe,
+    /// the one every windowed tool shares, so a window that starts before the store's data says so. An answer that already
+    /// carries <c>window_truncated</c>, or a status of any word, is returned as it was.
+    /// </summary>
+    internal static Task<string> WithDataWindowNoticeAsync(
+        string answer, LocalDataService dataService, QueryWindowRelation relation, int serverId, DateTime requestedStart, DateTime windowEnd, string table) =>
+        WithDataWindowNoticeAsync(answer, () => dataService.GetQueryWindowFloorAsync(relation, serverId, requestedStart, windowEnd), requestedStart, windowEnd, table);
+
+    /// <summary>
+    /// #7005: the relation form of this method, over a
+    /// floor the caller works out itself: a read that spans servers or tables (<c>get_alert_history</c>, <c>get_resource_use_by_tag</c>) or
+    /// reads a store that is not a collector table (the analysis findings). The probe is not started for a window no longer than the slack.
+    /// </summary>
+    internal static async Task<string> WithDataWindowNoticeAsync(
+        string answer, Func<Task<DateTime?>> floorProbe, DateTime requestedStart, DateTime windowEnd, string table)
+    {
+        if (System.Text.Json.Nodes.JsonNode.Parse(answer) is not System.Text.Json.Nodes.JsonObject node
+            || node.ContainsKey("status") || node.ContainsKey("window_truncated"))
+        {
+            return answer;
+        }
+
+        var notice = await WindowNoticeAsync(floorProbe, requestedStart, windowEnd, table);
+        /* After the tool's own keys, the place Darling's twin writes them: a payload's key order is part of its shape. Two blocks stay
+           last when the payload has them: discontinuities (every trend payload on both SKUs ends with it, BaselineDiscontinuities.PayloadKey)
+           and collection_caveats (get_analysis_facts: the caveat block closes the payload), so the notice goes in front of them. */
+        var trailing = new List<KeyValuePair<string, System.Text.Json.Nodes.JsonNode?>>();
+        foreach (var key in new[] { BaselineDiscontinuities.PayloadKey, "collection_caveats" })
+        {
+            if (node.ContainsKey(key))
+            {
+                trailing.Add(new KeyValuePair<string, System.Text.Json.Nodes.JsonNode?>(key, node[key]));
+                node.Remove(key);
+            }
+        }
+
+        AddNoticeKeys(node, notice);
+        foreach (var pair in trailing)
+        {
+            node[pair.Key] = pair.Value;
+        }
+
+        return node.ToJsonString(McpHelpers.JsonOptions);
+    }
+
+    private static void AddNoticeKeys(System.Text.Json.Nodes.JsonObject node, McpWindowNotice notice)
+    {
+        node["effective_start"] = notice.EffectiveStart;
+        node["window_truncated"] = notice.WindowTruncated;
+        /* A payload that already has its own truncation_note (get_analysis_findings: the read-cap cut) keeps it: the window sentence is
+           appended when the window is truncated, and a covered window leaves the tool's own value (null when nothing was cut) as it was. */
+        if (node.ContainsKey("truncation_note"))
+        {
+            if (notice.TruncationNote is not null)
+            {
+                var own = node["truncation_note"]?.GetValue<string>();
+                node["truncation_note"] = own is null ? notice.TruncationNote : own + " " + notice.TruncationNote;
+            }
+
+            return;
+        }
+
+        node["truncation_note"] = notice.TruncationNote;
+    }
+
+    /// <summary>
+    /// #7005: <see cref="WithEmptyWindowNoticeAsync"/> for an empty or unavailable answer, <see cref="WithDataWindowNoticeAsync"/> for a
+    /// data answer, nothing for any other status: the one call a windowed tool wraps its answer in.
+    /// </summary>
+    internal static async Task<string> WithWindowNoticeAsync(
+        string answer, LocalDataService dataService, QueryWindowRelation relation, int serverId, DateTime requestedStart, DateTime windowEnd, string table) =>
+        McpHelpers.IsEmptyOrUnavailableStatus(answer)
+            ? (await EmptyWindowNoticeAsync(dataService, relation, serverId, requestedStart, windowEnd, table) is { } emptyNotice
+                ? WithWindowNotice(answer, emptyNotice, requestedStart, windowEnd)
+                : answer)
+            : await WithDataWindowNoticeAsync(answer, dataService, relation, serverId, requestedStart, windowEnd, table);
+
+    /// <summary><see cref="WithWindowNotice"/> over <see cref="EmptyWindowNoticeAsync"/>: the probe runs only for an empty or unavailable answer.</summary>
+    internal static async Task<string> WithEmptyWindowNoticeAsync(
+        string answer, LocalDataService dataService, QueryWindowRelation relation, int serverId, DateTime requestedStart, DateTime windowEnd, string table) =>
+        McpHelpers.IsEmptyOrUnavailableStatus(answer)
+            ? (await EmptyWindowNoticeAsync(dataService, relation, serverId, requestedStart, windowEnd, table) is { } emptyNotice
+                ? WithWindowNotice(answer, emptyNotice, requestedStart, windowEnd)
+                : answer)
+            : answer;
+
+    /// <summary>
+    /// #7005: the one call for a windowed read whose floor is not one collector table's (<c>get_alert_history</c> over the whole store,
+    /// the analysis findings, <c>get_resource_use_by_tag</c> over several tables): an empty or unavailable answer gets the #5015 notice
+    /// over <paramref name="floorProbe"/> (null: the store holds nothing in the window), or, when the window ENDS before the oldest
+    /// row the store kept (<paramref name="oldestKeptProbe"/>, within the slack), the aged-out answer: <c>window_truncated</c> true and
+    /// <c>effective_start</c> that oldest row. A data answer gets the three keys from the same probe.
+    /// Any other status is left as it was. When the store holds no row at all, an empty answer says the #5015 no-collection answer.
+    /// </summary>
+    internal static async Task<string> WithProbedWindowNoticeAsync(
+        string answer, Func<Task<DateTime?>> floorProbe, Func<Task<DateTime?>> oldestKeptProbe, DateTime requestedStart, DateTime windowEnd, string table)
+    {
+        if (!McpHelpers.IsEmptyOrUnavailableStatus(answer))
+        {
+            return await WithDataWindowNoticeAsync(answer, floorProbe, requestedStart, windowEnd, table);
+        }
+
+        var floor = await floorProbe();
+        var notice = floor is null && await oldestKeptProbe() is DateTime kept && kept + TruncationSlack >= windowEnd
+            ? WindowNotice(kept, requestedStart, table, "This window ends before the first row this server's store kept, so the data may have aged out.")
+            : WindowNotice(floor, requestedStart, table, emptyAnswer: true);
+        return WithWindowNotice(answer, notice, requestedStart, windowEnd);
+    }
 
     /// <summary>
     /// The three window-floor keys <see cref="WindowNotice"/> answers, as the values a tool writes into its payload.
@@ -1669,8 +1884,11 @@ public sealed class McpQueryTools
             var rows = await dataService.GetQueryStatsHistoryAsync(resolved.ServerId, database_name, query_hash, hours_back, asOfUtc: windowEnd);
             if (rows.Count == 0)
             {
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "query_stats", awsRdsKind: AwsRdsKind.None)
-                    ?? McpHelpers.Status("empty", $"No history found for query_hash '{query_hash}' in database '{database_name}' within the last {hours_back} hours.");
+                /* #7005: the empty answer says whether the store holds the window. */
+                return await WithEmptyWindowNoticeAsync(
+                    await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "query_stats", awsRdsKind: AwsRdsKind.None)
+                        ?? McpHelpers.Status("empty", $"No history found for query_hash '{query_hash}' in database '{database_name}' within the last {hours_back} hours."),
+                    dataService, QueryWindowRelation.QueryStats, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, "query_stats");
             }
 
             var result = rows.Select(r => new

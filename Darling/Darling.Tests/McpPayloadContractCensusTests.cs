@@ -1805,7 +1805,8 @@ public sealed class McpPayloadContractCensusTests
         ("DarlingMcpQueryStoreClutterTools.cs", "initializer", 1),
         ("DarlingMcpTrendTools.cs", "envelope", 1),
         ("DarlingMcpTrendTools.cs", "initializer", 1),
-        ("McpQueryTools.cs", "envelope", 1),
+        /* #7005: the second is WithWindowNotice, which rewrites a trend envelope's window_truncated and effective_hours_back together for an empty answer. */
+        ("McpQueryTools.cs", "envelope", 2),
         /* #4231: Lite's own get_query_store_top initializer (mirroring DarlingMcpDataTools.cs's 2, but Lite's
            get_query_store_top has no module_name-miss hint block of its own, so 1), plus get_top_queries_by_cpu
            and get_top_procedures_by_cpu, newly given the same raw-tier disclosure. */

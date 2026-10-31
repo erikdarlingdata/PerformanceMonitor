@@ -739,6 +739,14 @@ public class AnalysisService
     }
 
     /// <summary>
+    /// #7005: the collector-data probe the MCP analysis reads take their window floor from: the same shared <see cref="LocalDataService"/>
+    /// window-floor read every other windowed tool uses, over the store this service reads. The floor is the data the analysis scores
+    /// (the <c>wait_stats</c> relation, the anchor <c>analyze_server</c> itself requires), not the stored findings, which a quiet
+    /// pass never writes.
+    /// </summary>
+    internal LocalDataService CollectorWindowProbe() => new(_duckDb);
+
+    /// <summary>
     /// Gets the latest findings for a server without running a new analysis.
     /// </summary>
     public async Task<List<AnalysisFinding>> GetLatestFindingsAsync(int serverId)

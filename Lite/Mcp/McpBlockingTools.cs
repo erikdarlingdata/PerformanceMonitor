@@ -528,15 +528,17 @@ public sealed class McpBlockingTools
 
                 var captures = await dataService.GetBlockingCaptureCountsAsync(
                     resolved.ServerId, hours_back, asOfUtc: anchorEnd);
-                return WithNullSource(await EmptyTrend(
+                /* #7005: the window notice (BlockedProcessReports probes the XE collector and the DMV snapshots, the two sources this trend reads). */
+                return await McpQueryTools.WithEmptyWindowNoticeAsync(WithNullSource(await EmptyTrend(
                     "blocking", resolved.DisplayName, hours_back, captures,
                     () => dataService.HasAnyBlockingCollectorRunAsync(resolved.ServerId),
-                    database));
+                    database)),
+                    dataService, QueryWindowRelation.BlockedProcessReports, resolved.ServerId, anchorEnd.AddHours(-hours_back), anchorEnd, "blocked_process_report");
             }
 
             var result = points.Select(p => new { time = p.Time.ToString("o"), count = p.Count });
 
-            return JsonSerializer.Serialize(new
+            return await McpQueryTools.WithDataWindowNoticeAsync(JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
                 hours_back,
@@ -545,7 +547,8 @@ public sealed class McpBlockingTools
                 database_name = database,
                 source = points[0].Source,
                 trend = result
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions),
+                dataService, QueryWindowRelation.BlockedProcessReports, resolved.ServerId, anchorEnd.AddHours(-hours_back), anchorEnd, "blocked_process_report");
         }
         catch (Exception ex)
         {
@@ -584,22 +587,24 @@ public sealed class McpBlockingTools
 
                 var captures = await dataService.GetDeadlockCaptureCountsAsync(
                     resolved.ServerId, hours_back, asOfUtc: windowEnd);
-                return await EmptyTrend(
+                return await McpQueryTools.WithEmptyWindowNoticeAsync(await EmptyTrend(
                     /* SINGULAR: the subject lands in "No {subject} was recorded", and "no deadlocks
                        was recorded" is not a sentence. It also reads correctly in the other two,
                        where it modifies the collector rather than the event. */
                     "deadlock", resolved.DisplayName, hours_back, captures,
-                    () => dataService.HasAnyDeadlockCollectorRunAsync(resolved.ServerId));
+                    () => dataService.HasAnyDeadlockCollectorRunAsync(resolved.ServerId)),
+                    dataService, QueryWindowRelation.Deadlocks, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, "deadlocks");
             }
 
             var result = points.Select(p => new { time = p.Time.ToString("o"), count = p.Count });
 
-            return JsonSerializer.Serialize(new
+            return await McpQueryTools.WithDataWindowNoticeAsync(JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
                 hours_back,
                 trend = result
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions),
+                dataService, QueryWindowRelation.Deadlocks, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, "deadlocks");
         }
         catch (Exception ex)
         {
@@ -653,21 +658,23 @@ public sealed class McpBlockingTools
                     return gated;
                 }
 
-                return await dataService.HasAnyWaitStatAsync(resolved.ServerId)
+                return await McpQueryTools.WithEmptyWindowNoticeAsync(await dataService.HasAnyWaitStatAsync(resolved.ServerId)
                     ? McpHelpers.Status(
                         "empty",
                         $"No lock waits recorded for {resolved.DisplayName} in the last {hours_back} hour(s). This server HAS collected wait stats before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples.")
                     : McpHelpers.Status(
                         "unavailable",
-                        $"No wait stats have EVER been recorded for {resolved.DisplayName}, so this is NOT a report of a server without lock contention — nothing has been stored for it at all. Delta wait stats need a SECOND collection cycle before the first row exists, so on a newly added server this clears itself; otherwise check that collection is running and that the server is enabled.");
+                        $"No wait stats have EVER been recorded for {resolved.DisplayName}, so this is NOT a report of a server without lock contention — nothing has been stored for it at all. Delta wait stats need a SECOND collection cycle before the first row exists, so on a newly added server this clears itself; otherwise check that collection is running and that the server is enabled."),
+                    dataService, QueryWindowRelation.WaitStats, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, "wait_stats");
             }
 
             /* The family as the series, the members as a legend listing EVERY type that waited, so no member is
                dropped to fit a top-N; one builder for both SKUs' envelope (TrendPayloads). */
             var types = await dataService.GetLockWaitTypesAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
 
-            return TrendPayloads.LockWaitTrend(
-                resolved.DisplayName, hours_back, types, points, bucketMinutes, bucket_minutes is not null, budget.AutoPoints);
+            return await McpQueryTools.WithDataWindowNoticeAsync(TrendPayloads.LockWaitTrend(
+                resolved.DisplayName, hours_back, types, points, bucketMinutes, bucket_minutes is not null, budget.AutoPoints),
+                dataService, QueryWindowRelation.WaitStats, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, "wait_stats");
         }
         catch (Exception ex)
         {
