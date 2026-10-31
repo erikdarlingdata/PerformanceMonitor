@@ -10,7 +10,7 @@
     <EnableNETAnalyzers>true</EnableNETAnalyzers>
     <AnalysisLevel>latest-recommended</AnalysisLevel>
     <!-- NU1701: CredentialManagement package has no .NET 10 build (matches Dashboard/Lite suppression). -->
-    <NoWarn>CA1849;CA2007;CA1508;CA1822;CA1805;CA1510;CA1816;CA1861;CA1845;CA2201;CA1848;CA1852;CA1305;CA1860;CA1707;CA1507;CA1806;CA2254;NU1701</NoWarn>
+    <NoWarn>$(NoWarn);NU1701</NoWarn>
     <WarningsAsErrors>CS4014</WarningsAsErrors>
   </PropertyGroup>
 
