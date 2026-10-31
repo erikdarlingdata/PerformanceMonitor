@@ -233,10 +233,6 @@ public sealed class McpWindowMatrixLiveTests : IClassFixture<McpWindowMatrixStor
     /// NotTrue rows (the product reasons, not the binding gaps) are tracked in #7010.</summary>
     private static readonly Dictionary<string, string> ExemptTools = new(StringComparer.Ordinal)
     {
-        ["get_agent_alerts"] = NoNotice,
-        ["get_alert_history"] = NoNotice,
-        ["get_analysis_facts"] = NoNotice,
-        ["get_analysis_findings"] = NoNotice,
         /* #7010: not a data window by design. One server: "always 7 days" of collector health read from the collection log (hours_back is ignored). Fleet mode (server_name "*") takes hours_back, but only to read one collector's liveness per server, not a windowed row set. */
         ["get_collection_health"] = NoNotice,
         ["get_cpu_scheduler_pressure"] = SnapshotSearch,
@@ -244,7 +240,8 @@ public sealed class McpWindowMatrixLiveTests : IClassFixture<McpWindowMatrixStor
         ["get_finops"] = NoNotice,
         ["get_fleet_overview"] = NoNotice,
         ["get_identity_capacity"] = NoNotice,
-        ["get_investigation_reports"] = NoNotice,
+        /* #7010: not a data window by design. The reads are investigation REQUESTS opened in the last hours_back hours (hours_back 1-168, no as_of), the service's own work log of alert-triggered runs, not a span of collected data: a window with no request is a true negative, and the log is not floored by the collector tables. */
+        ["get_investigation_reports"] = "investigation request log: hours_back is the age of requests opened, not a collected-data window (#7010)",
         ["get_pg_autovacuum_health"] = NoNotice,
         ["get_pg_blocking"] = NoNotice,
         ["get_pg_buffer_usage"] = NoNotice,
@@ -267,8 +264,6 @@ public sealed class McpWindowMatrixLiveTests : IClassFixture<McpWindowMatrixStor
         ["get_plan_cache_bloat"] = SnapshotSearch,
         ["get_plan_force_precheck"] = NoNotice,
         ["get_query_store_clutter"] = NoNotice,
-        ["get_resource_use_by_tag"] = NoNotice,
-        ["get_server_trend"] = NoNotice,
         ["get_store_log"] = NoNotice,
         ["get_store_query_history"] = NoNotice,
         ["get_sweep_reports"] = NoNotice,
