@@ -46,6 +46,9 @@ public sealed class QueryStoreReadBudgetLiveTests
     private const string Alpha = "alpha";
     private const string Zeta = "zeta";
     private static readonly TimeSpan Budget = TimeSpan.FromSeconds(1);
+    /* #7130: the two-database test names the held database as the slowest item, which holds only while the sibling's
+       read and write cost less than the budget. 1 s was too tight for a busy runner, so that test alone runs at 5 s. */
+    private static readonly TimeSpan SiblingBudget = TimeSpan.FromSeconds(5);
 
     private static string? BaseConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
@@ -189,7 +192,7 @@ public sealed class QueryStoreReadBudgetLiveTests
         public CapturingLogger Log = new();
         public DarlingCollectorRunner Runner = null!;
 
-        public static async Task<Rig> OpenAsync(CancellationToken ct)
+        public static async Task<Rig> OpenAsync(CancellationToken ct, TimeSpan? budget = null)
         {
             var rig = new Rig();
             rig.Scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
@@ -202,7 +205,7 @@ public sealed class QueryStoreReadBudgetLiveTests
             rig.Source = new NpgsqlDataSourceBuilder(rig.Scratch.ConnectionString).Build();
             rig.Runner = new DarlingCollectorRunner(rig.Source, new CollectorDeltaCalculator(), rig.Log)
             {
-                QueryStoreReadBudgetSpan = Budget,
+                QueryStoreReadBudgetSpan = budget ?? Budget,
             };
             return rig;
         }
@@ -285,7 +288,7 @@ public sealed class QueryStoreReadBudgetLiveTests
     {
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to run the #5813 read-budget pin.");
         var token = TestContext.Current.CancellationToken;
-        await using var rig = await Rig.OpenAsync(token);
+        await using var rig = await Rig.OpenAsync(token, SiblingBudget);
 
         /* Whole seconds, so the store's microseconds compare exactly. Both inside the 15-minute floor the #2111 shrink
            narrows to after two failures, so the resumed cutoff is the stored watermark itself, not a shrunk floor. */
@@ -321,16 +324,16 @@ public sealed class QueryStoreReadBudgetLiveTests
         /* slowest_item names the timed-out database with its marker, and slowest_item_ms is the budget. */
         Assert.NotNull(cut.Fanout);
         Assert.Equal(Alpha, cut.Fanout!.Value.SlowestItem);
-        Assert.Equal((int)Budget.TotalMilliseconds, cut.Fanout.Value.SlowestItemMs);
+        Assert.Equal((int)SiblingBudget.TotalMilliseconds, cut.Fanout.Value.SlowestItemMs);
         Assert.Equal(2, cut.Fanout.Value.ItemCount);
 
         /* #5813 review: the timed-out database's SQL slice is in the run's blended SQL time, as the enumerated driver's
            finally puts it there; before the fix the catch arm never added it and SqlMs held only zeta's instant read. The
            floor is half the budget, not the budget: the budget is a CancelAfter timer, which fires on the system timer's
            tick, so at Windows' default 15.6 ms tick a 1,000 ms budget can cut the read a few milliseconds short of 1,000
-           by the slice's stopwatch (Lite's twin read 999 on CI). Load only lengthens the slice, so half the budget
+           by the slice's stopwatch (Lite's twin read 999 on CI, at its 1 s budget). Load only lengthens the slice, so half the budget
            separates the two shapes with no clock in the test. */
-        Assert.True(cut.SqlMs >= (long)(Budget.TotalMilliseconds / 2), $"SqlMs {cut.SqlMs} holds the timed-out slice");
+        Assert.True(cut.SqlMs >= (long)(SiblingBudget.TotalMilliseconds / 2), $"SqlMs {cut.SqlMs} holds the timed-out slice");
         Assert.Contains("timed out", cut.HostNote ?? string.Empty, StringComparison.Ordinal);
         Assert.Equal(1, rig.Log.TimedOutWarnings(Alpha));
 

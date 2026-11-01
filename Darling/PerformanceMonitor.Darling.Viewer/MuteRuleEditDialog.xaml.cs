@@ -236,6 +236,16 @@ public partial class MuteRuleEditDialog : Window
         }
     }
 
+    /// <summary>#7122: the two explanation lines state what the chosen action does, so a digest rule is not described as a mute.</summary>
+    private void ActionBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        /* Fires while InitializeComponent applies SelectedIndex, before the named blocks exist. */
+        if (IntroText == null || WindowText == null) return;
+        var digest = ActionBox.SelectedIndex == 1;
+        IntroText.Text = MuteRuleDialogText.Intro(digest);
+        WindowText.Text = MuteRuleDialogText.Window(digest);
+    }
+
     private void Save_Click(object sender, RoutedEventArgs e)
     {
         Rule.Reason = string.IsNullOrWhiteSpace(ReasonBox.Text) ? null : ReasonBox.Text.Trim();
@@ -290,8 +300,8 @@ public partial class MuteRuleEditDialog : Window
             && Rule.ClientAppPattern == null)
         {
             var result = MessageBox.Show(
-                "This rule has no filters and will mute ALL alerts. Are you sure?",
-                "Mute All Alerts", MessageBoxButton.YesNo, MessageBoxImage.Warning);
+                MuteRuleDialogText.NoFilterConfirmation(Rule.IsDigestAction), MuteRuleDialogText.NoFilterCaption(Rule.IsDigestAction),
+                MessageBoxButton.YesNo, MessageBoxImage.Warning);
             if (result != MessageBoxResult.Yes) return;
         }
 
@@ -350,4 +360,23 @@ public partial class MuteRuleEditDialog : Window
         PatternFieldsGrid.Visibility = (showDatabase || showWaitType || showQueryText || showJobName || showClientApp)
             ? Visibility.Visible : Visibility.Collapsed;
     }
+}
+
+/// <summary>The dialog's explanation lines for each action (#7122). A mute rule suppresses a matching alert; a digest rule still records it and
+/// sends it to the Daily Digest, so the text that says "suppressed" or "mute" is true for the mute action only.</summary>
+internal static class MuteRuleDialogText
+{
+    public static string Intro(bool digest) => digest
+        ? "Alerts matching all specified fields are recorded and sent to the Daily Digest instead of paging."
+        : "Alerts matching all specified fields will be suppressed from notifications.";
+
+    public static string Window(bool digest) => (digest ? "Send to the daily digest" : "Mute")
+        + " only inside a daily window. Leave the times blank for a one-off rule. With no day ticked, every day counts."
+        + " A window that ends before it starts crosses midnight and belongs to the day it starts.";
+
+    public static string NoFilterConfirmation(bool digest) => digest
+        ? "This rule has no filters and will send ALL alerts to the Daily Digest. Are you sure?"
+        : "This rule has no filters and will mute ALL alerts. Are you sure?";
+
+    public static string NoFilterCaption(bool digest) => digest ? "Send All Alerts to the Digest" : "Mute All Alerts";
 }
