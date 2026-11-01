@@ -156,6 +156,14 @@ $dataDir = Join-Path $TempDir 'darling-pgdata'
 $logFile = Join-Path $TempDir 'darling-pg.log'
 & "$bin\initdb.exe" -D $dataDir -U darling -A trust --encoding=UTF8
 if ($LASTEXITCODE -ne 0) { throw "initdb failed ($LASTEXITCODE)" }
+# #7098: initdb runs once. This is a copy of the new, never-started, never-edited data directory, taken before the 5541
+# block below writes its settings; every log-format cluster starts from a copy of it (initdb took about 2.7 s a cluster).
+# The clusters share a system identifier, which only matters to physical replication between them, and none is set up.
+$pristineDir = Join-Path $TempDir 'darling-pg-initdb-template'
+& robocopy.exe $dataDir $pristineDir /E /NFL /NDL /NJH /NJS /NP /NC /NS | Out-Null
+# robocopy exits 0-7 for success (1 = files copied) and 8 or more for a failure.
+if ($LASTEXITCODE -ge 8) { throw "robocopy of the initdb template failed ($LASTEXITCODE)" }
+$global:LASTEXITCODE = 0
 Add-Content -Path "$dataDir\postgresql.conf" -Value "shared_preload_libraries = 'timescaledb,pg_stat_statements'"
 Add-Content -Path "$dataDir\postgresql.conf" -Value "port = 5541"
 Add-Content -Path "$dataDir\postgresql.conf" -Value "listen_addresses = '127.0.0.1'"
@@ -189,8 +197,10 @@ if ($LASTEXITCODE -ne 0) { throw "createdb failed ($LASTEXITCODE)" }
 # "$dataDir\postgresql.conf" the 5541 cluster's block writes, and these clusters' own worker counts (8/16, not the
 # hypertable-derived 74/85) would fail that guard as drift if this function reused the same variable name.
 function Start-LogFormatCluster($clusterDataDir, $logFile, $port, $extraConfLines) {
-    & "$bin\initdb.exe" -D $clusterDataDir -U darling -A trust --encoding=UTF8
-    if ($LASTEXITCODE -ne 0) { throw "initdb failed for port $port ($LASTEXITCODE)" }
+    # A copy of the one initdb run above (#7098), then this cluster's own port and settings, appended below.
+    & robocopy.exe $pristineDir $clusterDataDir /E /NFL /NDL /NJH /NJS /NP /NC /NS | Out-Null
+    if ($LASTEXITCODE -ge 8) { throw "copying the initdb template failed for port $port ($LASTEXITCODE)" }
+    $global:LASTEXITCODE = 0
     Add-Content -Path "$clusterDataDir\postgresql.conf" -Value "port = $port"
     Add-Content -Path "$clusterDataDir\postgresql.conf" -Value "listen_addresses = '127.0.0.1'"
     Add-Content -Path "$clusterDataDir\postgresql.conf" -Value "timescaledb.max_background_workers = 8"

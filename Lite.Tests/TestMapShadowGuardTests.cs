@@ -471,7 +471,7 @@ public sealed class TestMapShadowGuardTests : IDisposable
         return null;
     }
 
-    /// <summary>Runs one shard script in a scratch folder with a fake `dotnet` that answers the class listing from
+    /// <summary>Runs one shard script in a scratch folder with a fake `dotnet` (and, for Darling, a fake test runner that calls it) that answers the class listing from
     /// <paramref name="classes"/> and prints each chunk's -class arguments. Returns the classes the chunks ran, and the output.
     /// The fake answers the listing the way the real runner does: it prints a `LIST` line with the arguments it was handed,
     /// and exits 3 on anything that is not a `-list`, `-trait` or `-trait-` option with its value. <paramref name="scopeFilter"/>
@@ -492,6 +492,9 @@ public sealed class TestMapShadowGuardTests : IDisposable
             File.WriteAllText(selection, selectionJson);
         }
 
+        // The Darling shard script runs the built Darling.Tests executable (#7098), not `dotnet run`: -TestRunner points it at
+        // a script that hands its arguments to the harness's fake `dotnet` below. run-lite-shard.ps1 still calls `dotnet`.
+        File.WriteAllText(Path.Combine(work, "fake-runner.ps1"), "dotnet @args\nexit $global:LASTEXITCODE\n");
         var harness = Path.Combine(work, "harness.ps1");
         File.WriteAllText(harness, """
             param([string] $Script, [string] $Suite, [string] $Selection, [string] $EventName)
@@ -520,7 +523,7 @@ public sealed class TestMapShadowGuardTests : IDisposable
             $env:SLOW_REPO = ''
             $env:SLOW_PR = ''
             $env:SLOW_BASE_REF = ''
-            if ($Suite -eq 'darling') { & $Script -Shard 0 -ShardCount 1 -EventName $EventName -ScopeFilter $env:DARLING_SCOPE_FILTER -SelectionFile $Selection }
+            if ($Suite -eq 'darling') { & $Script -Shard 0 -ShardCount 1 -EventName $EventName -ScopeFilter $env:DARLING_SCOPE_FILTER -SelectionFile $Selection -TestRunner (Join-Path $PWD 'fake-runner.ps1') }
             else { & $Script -Shard 0 -ShardCount 1 -JobIndex 0 -EventName $EventName -SelectionFile $Selection }
             exit $LASTEXITCODE
             """);

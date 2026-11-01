@@ -1415,7 +1415,11 @@ public class CrossAppGuardCiGateTests
         };
 
         var commandLine = "dotnet " + string.Join(" ", arguments);
-        var (exitCode, stdout, stderr) = RunDotnet(repo, arguments);
+        /* Not run from the repository: the working directory is where the dotnet host looks for global.json, and the CI
+           legs run on the runner image's SDK, an older patch than the one global.json pins (#7098), so a host
+           started in the repository refuses to run at all. The project path is absolute, and MSBuild finds its
+           Directory.Build.props from the project's own folder, so the answer does not depend on the directory. */
+        var (exitCode, stdout, stderr) = RunDotnet(Path.GetTempPath(), arguments);
         var diagnostics = $"exit={exitCode}, stderr={Truncate(stderr)}, stdout={Truncate(stdout)}";
 
         if (exitCode != 0)

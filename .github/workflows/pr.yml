@@ -286,7 +286,7 @@ jobs:
         env:
           THIS_WORKSPACE: ${{ github.workspace }}
           THIS_SHA: ${{ github.sha }}
-          REQUIRED_FILES: Darling/Darling.Tests/bin/Release/net10.0-windows/Darling.Tests.dll;Darling/Darling.Tests/obj/project.assets.json;Lite.Tests/bin/Release/net10.0-windows/Lite.Tests.dll;Lite.Tests/obj/project.assets.json
+          REQUIRED_FILES: Darling/Darling.Tests/bin/Release/net10.0-windows/Darling.Tests.dll;Darling/Darling.Tests/obj/project.assets.json;Lite.Tests/bin/Release/net10.0-windows/Lite.Tests.dll;Darling/Darling.Tests/bin/Release/net10.0-windows/Darling.Tests.exe;Lite.Tests/bin/Release/net10.0-windows/Lite.Tests.exe;Lite.Tests/obj/project.assets.json
         run: |
           $ErrorActionPreference = 'Stop'
           $origin = @{}
@@ -304,21 +304,10 @@ jobs:
             }
           }
 
-      # The exact SDK version from global.json, not its feature band. Given a band, setup-dotnet resolves the newest
-      # patch through aka.ms links, and on 2026-10-25 those links sent every run to a download that failed with HTTP 409.
-      # With an exact version the install script downloads from the release feed and never asks aka.ms.
-      - name: Read the SDK version from global.json
-        id: globaljson_sdk
-        shell: pwsh
-        run: |
-          $version = (Get-Content -Raw (Join-Path $env:GITHUB_WORKSPACE 'global.json') | ConvertFrom-Json).sdk.version
-          if (-not $version) { throw 'global.json names no sdk.version' }
-          "version=$version" >> $env:GITHUB_OUTPUT
-
-      - name: Setup .NET 10.0
-        uses: actions/setup-dotnet@v6
-        with:
-          dotnet-version: ${{ steps.globaljson_sdk.outputs.version }}
+      # No .NET SDK install here (#7098): the legs run the built Darling.Tests.exe and Lite.Tests.exe on the runner image's
+      # own .NET 10, so they do not reinstall the SDK global.json pins (the image's patch is older, and a leg compiles
+      # nothing). The legs therefore run on the image's .NET 10 patch, not the pinned one. The pg-old-targets job below
+      # still runs `dotnet run`, so it keeps its own install.
 
       # Same cache key as build.yml and nightly.yml (the fetch script's own content hash), so a warm cache from any of
       # them means no ~340MB download here. Every leg that runs any Darling class needs the runtime: a 'full' scope runs

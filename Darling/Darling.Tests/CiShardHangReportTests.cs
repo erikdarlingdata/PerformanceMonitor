@@ -42,11 +42,11 @@ public sealed class CiShardHangReportTests
         // #5616: the chunk loop lives in the shard script both workflows call, so the runner's flags are read from it.
         var step = ReadShardScript(stepName);
 
-        var longRunning = Regex.Match(step, @"dotnet\s+run\s+[^\r\n]*@chunkArgs[^\r\n]*\s-longRunning\s+(?<n>\d+)\b");
+        var longRunning = Regex.Match(step, @"(?:dotnet\s+run|&\s+\$TestRunner)\s+[^\r\n]*@chunkArgs[^\r\n]*\s-longRunning\s+(?<n>\d+)\b");
         Assert.True(longRunning.Success, $"'{stepName}' does not pass -longRunning to the chunk's runner, so a hung test is not named.");
         Assert.InRange(int.Parse(longRunning.Groups["n"].Value), MinLongRunningSeconds, MaxLongRunningSeconds);
 
-        Assert.Matches(@"dotnet\s+run\s+[^\r\n]*@chunkArgs[^\r\n]*\|\s*Tee-Object\s+-FilePath\s+TestResults/(darling|lite)-runner-\$\{Shard\}\.log\s+-Append", step);
+        Assert.Matches(@"(?:dotnet\s+run|&\s+\$TestRunner)\s+[^\r\n]*@chunkArgs[^\r\n]*\|\s*Tee-Object\s+-FilePath\s+TestResults/(darling|lite)-runner-\$\{Shard\}\.log\s+-Append", step);
         Assert.Matches(@"New-Item\s+-ItemType\s+Directory\s+-Force\s+-Path\s+TestResults", step);
     }
 
@@ -72,7 +72,7 @@ public sealed class CiShardHangReportTests
         // The hang report and the exit-code propagation live once, in the script: the runner is asked for -longRunning
         // and its output is teed, and a failing chunk fails the script (and so the step).
         var body = ReadShardScript(stepName);
-        var longRunning = Regex.Match(body, @"dotnet\s+run\s+[^\r\n]*@chunkArgs[^\r\n]*\s-longRunning\s+(?<n>\d+)\b");
+        var longRunning = Regex.Match(body, @"(?:dotnet\s+run|&\s+\$TestRunner)\s+[^\r\n]*@chunkArgs[^\r\n]*\s-longRunning\s+(?<n>\d+)\b");
         Assert.True(longRunning.Success, $"{script} does not pass -longRunning to the chunk's runner, so a hung test is not named.");
         Assert.InRange(int.Parse(longRunning.Groups["n"].Value), MinLongRunningSeconds, MaxLongRunningSeconds);
         Assert.Matches(@"\$failedChunks\s+-gt\s+0\)[^\r\n]*exit\s+1", body);
