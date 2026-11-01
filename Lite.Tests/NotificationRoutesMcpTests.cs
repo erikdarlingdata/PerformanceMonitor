@@ -455,6 +455,8 @@ public sealed class NotificationRoutesMcpTests : IDisposable
             "fallback_route_name",
             /* #6928: route severity is Darling-only. */
             "severities",
+            /* #6979: the report notice (Slack and Teams) is Darling-only; Lite has no investigation requests. */
+            "report_notice",
         };
         Assert.All(darlingOnly, f => Assert.Contains(f, darling));
         Assert.Equal(darling.Except(darlingOnly).OrderBy(n => n, StringComparer.Ordinal), lite.OrderBy(n => n, StringComparer.Ordinal));

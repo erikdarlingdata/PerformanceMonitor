@@ -217,6 +217,53 @@ public sealed class DarlingSelfAlertTests
             return Task.CompletedTask;
         }
 
+        /// <summary>#7068: the open fire row the history answers <c>GetOpenFireAsync</c> with (null: none), and the metrics asked.</summary>
+        public AlertHistoryFire? OpenFire { get; set; }
+
+        public List<string> OpenFireAsked { get; } = new();
+
+        /// <summary>#7068: when set, the open fire per (server key, metric) instead of <see cref="OpenFire"/>; a failing read when
+        /// <see cref="OpenFireThrows"/>. Every question is kept in <see cref="OpenFireQuestions"/> with the resolution titles asked.</summary>
+        public Func<string, string, AlertHistoryFire?>? OpenFireFor { get; set; }
+
+        public bool OpenFireThrows { get; set; }
+
+        public List<(string ServerKey, string Metric, string[] Titles)> OpenFireQuestions { get; } = new();
+
+        public Task<AlertHistoryFire?> GetOpenFireAsync(
+            string serverId, string metricName, IReadOnlyList<string> resolutionMetricNames, DateTime? sinceUtc, DateTime? untilUtc, bool countMuted = true)
+        {
+            OpenFireAsked.Add(metricName);
+            OpenFireQuestions.Add((serverId, metricName, resolutionMetricNames.ToArray()));
+            if (OpenFireThrows)
+            {
+                throw new InvalidOperationException("history is down");
+            }
+
+            return Task.FromResult(OpenFireFor is null ? OpenFire : OpenFireFor(serverId, metricName));
+        }
+
+        /// <summary>#7068: every fire and clear the history answers <c>GetStandingAsync</c> with, per (server key, metric); when null the
+        /// standing read is the one open fire above.</summary>
+        public Func<string, string, AlertHistoryStanding>? StandingFor { get; set; }
+
+        public async Task<AlertHistoryStanding> GetStandingAsync(
+            string serverId, string metricName, IReadOnlyList<string> resolutionMetricNames, DateTime? sinceUtc, DateTime? untilUtc, bool countMuted = true)
+        {
+            if (StandingFor is null)
+            {
+                return AlertHistoryStanding.Of(await GetOpenFireAsync(serverId, metricName, resolutionMetricNames, sinceUtc, untilUtc, countMuted));
+            }
+
+            OpenFireQuestions.Add((serverId, metricName, resolutionMetricNames.ToArray()));
+            if (OpenFireThrows)
+            {
+                throw new InvalidOperationException("history is down");
+            }
+
+            return StandingFor(serverId, metricName);
+        }
+
         public Task<DateTime?> GetLastEmailSentUtcAsync(string serverId, string metricName, string? dedupKey = null) =>
             Task.FromResult<DateTime?>(null);
 
@@ -5697,7 +5744,6 @@ public sealed class DarlingSelfAlertTests
         var handler = Regex.Match(source[start..end], @"catch \(Exception ex\) when \(ex is not OperationCanceledException\)\s*\{");
         Assert.True(handler.Success, "TryConnectAsync has no failed-connect handler");
         var handlerCode = source[(start + handler.Index)..end];
-        var handlerRaw = raw[(start + handler.Index)..end];
 
         var cleared = handlerCode.IndexOf("server.Runtime = null;", StringComparison.Ordinal);
         Assert.True(cleared >= 0, "the failed-connect handler no longer clears server.Runtime");
@@ -5707,14 +5753,14 @@ public sealed class DarlingSelfAlertTests
             "the server.Retired return comes before server.Runtime = null, so a removed server keeps a half-built runtime");
         var checkEnd = check.Index + check.Length;
 
-        var firstLog = Regex.Match(handlerCode, @"_logger\.Log\w+\(");
+        /* #7067: the connect-failure log lines (first failure, changed cause, hourly "still failing") moved into
+           LogConnectFailure, which the handler calls once. The ordering rule is unchanged: that call, like the count and
+           the backoff, comes after the Retired return. */
         var after = new (string What, int At)[]
         {
             ("the failure count", handlerCode.IndexOf("ConsecutiveConnectFailures++", StringComparison.Ordinal)),
             ("the backoff", handlerCode.IndexOf("NextConnectAttempt =", StringComparison.Ordinal)),
-            ("the first log call", firstLog.Success ? firstLog.Index : -1),
-            ("the 'Connect failed, retrying' log line", handlerRaw.IndexOf("Connect failed, retrying in", StringComparison.Ordinal)),
-            ("the 'Connect still failing, retrying' log line", handlerRaw.IndexOf("Connect still failing, retrying in", StringComparison.Ordinal)),
+            ("the connect-failure log call", handlerCode.IndexOf("LogConnectFailure(", StringComparison.Ordinal)),
             ("the Offline alert", handlerCode.IndexOf("ApplyConnectionOutcomeAsync(", StringComparison.Ordinal)),
         };
 

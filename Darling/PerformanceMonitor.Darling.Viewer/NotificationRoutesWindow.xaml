@@ -54,6 +54,7 @@
                     <DataGridTextColumn Header="Scope" Binding="{Binding ScopeDisplay}" Width="160"/>
                     <!-- #6928: the severity filter, Both / Critical only / Warning only. -->
                     <DataGridTextColumn Header="Severity" Binding="{Binding SeveritiesDisplay}" Width="100"/>
+                    <DataGridTextColumn Header="Report notice" Binding="{Binding ReportNoticeDisplay}" Width="160"/>
                     <DataGridTextColumn Header="Channels set" Binding="{Binding ChannelsDisplay}" Width="*"/>
                     <!-- #5632: the agent channel, Inherit / Off / Investigate with its hourly and daily limits. -->
                     <DataGridTextColumn Header="Agent" Binding="{Binding AgentDisplay}" Width="150"/>

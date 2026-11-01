@@ -999,6 +999,7 @@ public sealed partial class DarlingMcpAlertTools
             ["enabled"] = route.Enabled,
             ["send_resolutions"] = route.SendResolutions switch { true => "always", false => "never", _ => "inherit" },
             ["severities"] = route.Severities,
+            ["report_notice"] = route.ReportNotice,
         };
         if (route.ScopeServerId.HasValue)
         {
@@ -1065,6 +1066,8 @@ public sealed partial class DarlingMcpAlertTools
         send_resolutions = r.SendResolutions,
         /* #6928 (V229): which alerts the route takes by severity: both, critical or warning. */
         severities = r.Severities,
+        /* #6979 (V233): whether the route posts a chat notice when an agent files a report: off, needs_person_or_change or all. */
+        report_notice = r.ReportNotice,
         /* #6036 (D8 of #5632 Phase C): the route an expired investigation request goes to first. Null = none; the name is the
            fallback route's metric_match. */
         fallback_route_id = r.FallbackRouteId,

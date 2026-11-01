@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using PerformanceMonitor.Analysis;
@@ -694,6 +695,33 @@ public static class AlertContextSerializer
         if (string.IsNullOrEmpty(contextJson) || string.IsNullOrEmpty(dedupKey))
             return false;
         return contextJson.Contains(BuildDedupKeyJsonFragment(dedupKey), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #7068: true when ONE detail item of the persisted <paramref name="contextJson"/> carries every one of
+    /// <paramref name="fields"/> as a field whose label and value EQUAL the given ones (ordinal). Equality, not a substring
+    /// match: a context that names database <c>Sales2</c> does not name <c>Sales</c>, and a card that lists database A's file
+    /// <c>data</c> beside database B's file <c>log</c> does not name database A's <c>log</c>. False on null, blank or unparseable
+    /// JSON and on a context with no details.
+    /// </summary>
+    public static bool ContextJsonHasDetailFields(string? contextJson, params (string Label, string Value)[] fields)
+    {
+        if (string.IsNullOrWhiteSpace(contextJson) || fields.Length == 0)
+            return false;
+
+        try
+        {
+            var dto = JsonSerializer.Deserialize<AlertContextDto>(contextJson);
+            return dto?.Details is { } details
+                && details.Any(item => item.Fields is { } present
+                    && fields.All(want => present.Any(f =>
+                        string.Equals(f.Label, want.Label, StringComparison.Ordinal)
+                        && string.Equals(f.Value, want.Value, StringComparison.Ordinal))));
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
     }
 
     /// <summary>

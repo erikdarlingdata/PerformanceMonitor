@@ -860,6 +860,13 @@ public sealed partial class DarlingWorker : BackgroundService
     /// <summary>#5479: the clock the fleet pass's overrun check reads; a test sets it to age a running pass without waiting.</summary>
     internal Func<DateTime> SelfAlertPassClock { get; set; } = static () => DateTime.UtcNow;
 
+    private RepeatLogGate? _repeatLog;
+
+    /// <summary>#7067: the gate for warnings a collector repeats every cycle, and the clock the connect-failure lines
+    /// are timed on. A test steps <see cref="RepeatLogGate.Clock"/>. Created on first use: a test may build the worker
+    /// without running its constructor.</summary>
+    internal RepeatLogGate RepeatLog => LazyInitializer.EnsureInitialized(ref _repeatLog, static () => new RepeatLogGate());
+
     /// <summary>#5479: lets a live test give the fleet pass the production self-alert evaluator that ExecuteAsync builds.</summary>
     internal DarlingSelfAlertEvaluator? SelfAlertsForTests
     {
@@ -1730,6 +1737,17 @@ LIMIT 1";
            Compared on the message rather than the exception type so a changed cause (credential fixed, server
            now genuinely unreachable) prints in full again. */
         public string? LastConnectFailureLogged { get; set; }
+
+        /* #7067: the connect failures since the server last connected. The retry line used to repeat on every attempt
+           (about every 5 minutes for a server that is switched off); now the "still failing" line is written at most once
+           an hour and carries these figures, and the line logged on reconnect says how long the server was down. Null /
+           zero when the server is connected. */
+        public DateTime? ConnectDownSinceUtc { get; set; }
+
+        public int ConnectAttemptsSinceDown { get; set; }
+
+        /// <summary>When a connect-failure line (the first, a changed cause, or a "still failing" line) was last written.</summary>
+        public DateTime LastConnectFailureLineUtc { get; set; }
 
         /* #2228: the database-mismatch state last reported for this server, so the tripwire fires on the
            TRANSITION rather than once per connect. A mismatch is a standing misconfiguration — it persists
