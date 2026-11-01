@@ -552,9 +552,11 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
+            AppLogger.Error("MainWindow", "Failed to initialize the application", ex);
+            AppLogger.Flush();
             StatusText.Text = $"Error: {ex.Message}";
             MessageBox.Show(
-                $"Failed to initialize the application:\n\n{ex.Message}",
+                $"Failed to initialize the application:\n\n{ex.Message}\n\nSee the log for details: {AppLogger.GetCurrentLogFile()}. If the database is locked, close any other copy of Lite and start it again.",
                 "Initialization Error",
                 MessageBoxButton.OK,
                 MessageBoxImage.Error);

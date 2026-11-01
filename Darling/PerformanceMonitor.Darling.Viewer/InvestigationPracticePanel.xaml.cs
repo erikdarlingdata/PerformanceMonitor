@@ -141,7 +141,7 @@ public partial class InvestigationPracticePanel : UserControl
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            PracticeStatusText.Text = "Could not open the practice request: " + ex.Message;
+            PracticeStatusText.Text = "Could not open the practice request: " + ViewerDataService.InputErrorText(ex);
         }
     }
 
