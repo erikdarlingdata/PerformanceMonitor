@@ -540,49 +540,22 @@ public sealed partial class DarlingMcpPlanForceTools
             var permit = decision.Permit!;
             _ = InvestigationToolCore.ParseAgentAction(agent_action, out var action);
 
-            /* 4: login_time is the engine's own local clock. Without the server's clock Darling cannot say what the UTC value means there, and it does not guess. */
-            var clock = await DarlingServerClockReader.ReadOrNullAsync(postgres, resolved.ServerId, ct);
-            if (clock is null)
-            {
-                await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, ServerClockUnknown, agentTokenName, ct);
-                return Answer("refused", ServerClockUnknown,
-                    $"Darling has not collected {resolved.DisplayName}'s clock yet, so it cannot turn login_time into that server's own time. Nothing was run.");
-            }
+            /* 4 to 5: the prepare step (#7108): the server's clock, its settings row, the Azure database checks, and the one batch that decides, for a
+               dry run and before a write: the engine, own session, gone, reused, not a user session, the grant. */
+            var prepared = await PrepareKillSessionAsync(postgres, owner, logger, permit, resolved.ServerId, resolved.DisplayName, azure, sessionId, loginUtc, targetDatabase, ct);
+            if (prepared.RecordReason is not null)
+                await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, prepared.RecordReason, agentTokenName, ct);
+            if (prepared.FixedAnswer is not null)
+                return prepared.FixedAnswer;
+            if (prepared.NotDone is { } notDone)
+                return KillNotDone(notDone, prepared.Clock!, dry_run);
 
-            var loginLocal = clock.ToServerLocal(loginUtc);
-
-            var row = await ReadServerRowAsync(owner, resolved.ServerId, ct);
-            if (row is null)
-                return Answer("failed", "server_row_missing", $"{resolved.DisplayName} has no row in the monitored-server settings.");
-            var executor = new SqlServerRemediationExecutor(resolved.ServerId, row.Server, row.UserName, row.SecretSlot, logger, row.MonitoringUserName);
-
-            /* 4b: Azure SQL Database. The database is never free-form: it is checked against the registry entry and the collected data. */
-            if (azure)
-            {
-                var refusal = await AzureKillDatabaseAsync(postgres, resolved.ServerId, row, targetDatabase!, ct);
-                if (refusal is not null)
-                {
-                    await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, refusal.Reason, agentTokenName, ct);
-                    return DarlingAgentActionGate.RefusalAnswer(refusal);
-                }
-            }
-
-            /* The Azure kill reads its database from the permit, the one the gate was asked about. */
-            Task<RemediationResult> Kill(bool dryRun, CancellationToken token) => !azure
-                ? executor.KillSessionAsync(permit, sessionId, loginLocal, dryRun, token)
-                : executor.KillAzureSessionAsync(permit, sessionId, loginLocal, dryRun, token);
-
-            /* 5: one batch decides, for a dry run and before a write: the engine, own session, gone, reused, not a user session, the grant. */
-            var dry = await Kill(true, ct);
-            if (dry.Outcome != RemediationOutcome.Done)
-            {
-                if (dry.Outcome == RemediationOutcome.Refused && dry.Reason is not null)
-                    await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, dry.Reason, agentTokenName, ct);
-                return KillNotDone(dry, clock, dry_run);
-            }
-
-            var before = KillSessionImage(dry.Session, clock);
-            var warnings = KillWarnings(dry.Session);
+            var clock = prepared.Clock!;
+            var executor = prepared.Executor!;
+            var binding = prepared.Binding!;
+            var dry = prepared.Dry!;
+            var before = prepared.Before;
+            var warnings = prepared.Warnings;
             if (dry_run)
                 return Answer("dry_run", null, dry.Message + " There is no undo.", new { dry_run = true, session = before, warnings });
 
@@ -601,7 +574,7 @@ public sealed partial class DarlingMcpPlanForceTools
                     ReadBefore = (_, _, _) => Task.FromResult<string?>(JsonSerializer.Serialize(new { session = before }, McpHelpers.JsonOptions)),
                     Write = async (_, _, token) =>
                     {
-                        var written = await Kill(false, token);
+                        var written = await WriteKillSessionAsync(executor, permit, azure, binding, token);
                         if (written.Wrote)
                             changed.MarkServerChanged();
                         if (written.Outcome == RemediationOutcome.Unknown)
@@ -696,22 +669,21 @@ public sealed partial class DarlingMcpPlanForceTools
         var permit = decision.Permit!;
         _ = InvestigationToolCore.ParseAgentAction(agent_action, out var action);
 
-        var row = await ReadServerRowAsync(owner, resolved.ServerId, ct);
-        if (row is null)
-            return Answer("failed", "server_row_missing", $"{resolved.DisplayName} has no row in the monitored-server settings.");
-        var executor = new PostgresRemediationExecutor(resolved.ServerId, row.Server, row.UserName, row.SecretSlot, logger, row.MonitoringUserName);
+        /* 3: the prepare step (#7108): the settings row, then the read that decides, for a dry run and before a write: gone, own session, start time,
+           reused, client session, and what the login may do. */
+        var prepared = await PrepareKillBackendAsync(owner, logger, permit, resolved.ServerId, resolved.DisplayName, pid, startEpoch, ct);
+        if (prepared.RecordReason is not null)
+            await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, prepared.RecordReason, agentTokenName, ct);
+        if (prepared.FixedAnswer is not null)
+            return prepared.FixedAnswer;
+        if (prepared.NotDone is { } notDone)
+            return PgKillNotDone(notDone, dry_run);
 
-        /* 3: the read decides, for a dry run and before a write: gone, own session, start time, reused, client session, and what the login may do. */
-        var dry = await executor.KillBackendAsync(permit, pid, startEpoch, dryRun: true, ct);
-        if (dry.Outcome != RemediationOutcome.Done)
-        {
-            if (dry.Outcome == RemediationOutcome.Refused && dry.Reason is not null)
-                await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, dry.Reason, agentTokenName, ct);
-            return PgKillNotDone(dry, dry_run);
-        }
-
-        var before = PgKillSessionImage(dry.PgSession);
-        var warnings = PgKillWarnings(dry.PgSession);
+        var executor = prepared.Executor!;
+        var binding = prepared.Binding!;
+        var dry = prepared.Dry!;
+        var before = prepared.Before;
+        var warnings = prepared.Warnings;
         if (dry_run)
             return Answer("dry_run", null, dry.Message + " There is no undo.", new { dry_run = true, session = before, warnings });
 
@@ -730,7 +702,7 @@ public sealed partial class DarlingMcpPlanForceTools
                 ReadBefore = (_, _, _) => Task.FromResult<string?>(JsonSerializer.Serialize(new { session = before }, McpHelpers.JsonOptions)),
                 Write = async (_, _, token) =>
                 {
-                    var written = await executor.KillBackendAsync(permit, pid, startEpoch, dryRun: false, token);
+                    var written = await WriteKillBackendAsync(executor, permit, binding, token);
                     /* The server took the signal: from here the store's journal never says failed (#5632, step 13). */
                     if (written.Wrote)
                         changed.MarkServerChanged();
