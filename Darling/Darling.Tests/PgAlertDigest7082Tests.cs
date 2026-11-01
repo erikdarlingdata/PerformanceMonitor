@@ -21,7 +21,7 @@ namespace Darling.Tests;
 /// #7082, the held-back (digest) parts: a PostgreSQL deadlock fire pages on a new statement pair or at 5 reports in the
 /// hour and is held otherwise, capacity at the ceiling with low instance CPU writes a held High CPU row and never
 /// pages, a Poison Wait Warning the two-window hold keeps back writes one held row per episode, and a sample with no
-/// capacity figure (a provisioned instance) breaches High CPU on instance CPU alone.
+/// capacity figure breaches High CPU on instance CPU alone only on a target known to be provisioned.
 /// </summary>
 public sealed class PgAlertDigest7082Tests
 {
@@ -175,18 +175,48 @@ public sealed class PgAlertDigest7082Tests
         for (var i = 0; i < AlertEngine.CpuBreachSamples && outcome != PersistenceOutcome.Fire; i++)
         {
             var evaluation = AlertPersistenceGate.Evaluate(
-                state, DarlingWorker.PgCpuSampleBreaches(null, 97, 90), AlertEngine.CpuBreachSamples, AlertEngine.CpuClearSamples);
+                state, DarlingWorker.PgCpuGateInput(null, 97, 90, knownProvisioned: true) is true,
+                AlertEngine.CpuBreachSamples, AlertEngine.CpuClearSamples);
             state = evaluation.State;
             outcome = evaluation.Outcome;
         }
 
         Assert.Equal(PersistenceOutcome.Fire, outcome);
+        Assert.True(DarlingWorker.PgCpuSampleBreaches(null, 97, 90, knownProvisioned: true));
+    }
+
+    /* #7082 review: a serverless instance has minutes Performance Insights returned a CPU point and no ACU point for. At
+       100% of the allocated capacity such a minute is the routine scale-up trigger, not saturation (#3281), so it must
+       not count toward a page, and it must not count as a clear either. */
+    [Fact]
+    public void AServerlessMinuteWithNoAcuPoint_AtFullInstanceCpu_DoesNotBreach()
+    {
+        Assert.False(DarlingWorker.PgCpuSampleBreaches(null, 100, 90));
+        Assert.False(DarlingWorker.PgCpuSampleBreaches(null, 100, 90, knownProvisioned: false));
+    }
+
+    [Fact]
+    public void ServerlessMinutesWithNoAcuPoint_AtFullInstanceCpu_NeverFillTheGate_AndNeitherBreachNorClear()
+    {
+        for (var i = 0; i < 10; i++)
+        {
+            Assert.Null(DarlingWorker.PgCpuGateInput(null, 100, 90, knownProvisioned: false));
+            Assert.Null(DarlingWorker.PgCpuGateInput(null, 5, 90, knownProvisioned: false));
+        }
+    }
+
+    [Fact]
+    public void AProvisionedInstanceMinuteWithNoFigure_BreachesOrClearsOnInstanceCpu()
+    {
+        Assert.True(DarlingWorker.PgCpuGateInput(null, 95, 90, knownProvisioned: true));
+        Assert.False(DarlingWorker.PgCpuGateInput(null, 20, 90, knownProvisioned: true));
+        Assert.True(DarlingWorker.PgCpuGateInput(92, 100, 90, knownProvisioned: false));
     }
 
     [Fact]
     public void AProvisionedInstanceUnderTheBar_DoesNotBreach()
     {
-        Assert.False(DarlingWorker.PgCpuSampleBreaches(null, 60, 90));
+        Assert.False(DarlingWorker.PgCpuSampleBreaches(null, 60, 90, knownProvisioned: true));
     }
 
     [Fact]

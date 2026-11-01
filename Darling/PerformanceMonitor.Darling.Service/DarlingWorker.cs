@@ -1322,6 +1322,11 @@ public sealed partial class DarlingWorker : BackgroundService
     /// <summary>#7082: per server, the deadlock statement-pair keys that were new (not in the 30-day store) and have not yet
     /// been announced by a page. Held in memory until a page goes out, because the store already counts them.</summary>
     private readonly ConcurrentDictionary<string, HashSet<string>> _pgDeadlockUnannouncedNew = new(StringComparer.Ordinal);
+
+    /// <summary>#6005: the deadlock rollup that is also the investigation agent gate. Set when the alert pipeline is built. The
+    /// PostgreSQL deadlock count tells it which statement pairs are new, as the SQL Server rollup does, so the gate admits the
+    /// investigation request of a page about a first-ever pair.</summary>
+    private PerformanceMonitor.Darling.Service.Investigations.DarlingDeadlockRollup? _deadlockRollup;
     private readonly ConcurrentDictionary<string, DateTime> _lastPgPoisonWaitCollectionTime = new(StringComparer.Ordinal);
     /* #2716's restart-survival shape for the poison cooldown: seeded once per key from
        IAlertHistoryStore.GetLastAlertTimeAsync (the subject IS the #1140 dedup fingerprint the alert

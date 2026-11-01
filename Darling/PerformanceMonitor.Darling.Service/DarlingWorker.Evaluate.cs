@@ -556,10 +556,9 @@ public sealed partial class DarlingWorker
     ///
     /// <para><b>The band's other arms map to Warning.</b> Healthy and Warning both: the operator's
     /// <c>CpuThresholdPercent</c> already decided this fire was asked for, and a delivered alert is never
-    /// rendered as nothing (the <c>GradeDeadlockFire</c> floor). Unknown — no capacity reading — cannot reach
-    /// the fire site at all (<c>breaching</c> requires <c>lastCapacityPercent.HasValue</c>, and the reading
-    /// graded is the one that produced it), and maps to Warning too rather than throwing, for the same reason.
-    /// An operator whose threshold is 97 sees every fire Critical, which is a coherent reading of a knob above
+    /// rendered as nothing (the <c>GradeDeadlockFire</c> floor). Unknown — no capacity reading — reaches
+    /// the fire site only on a target known to be provisioned (see <see cref="EvaluatePgCpuAsync"/>), and maps to
+    /// Warning too rather than throwing, for the same reason. An operator whose threshold is 97 sees every fire Critical, which is a coherent reading of a knob above
     /// the bar.</para>
     /// </summary>
     internal static AlertSeverityLevel GradePgCpuFire(double cpuPercent, double? acuUtilizationPercent) =>
@@ -588,14 +587,23 @@ public sealed partial class DarlingWorker
     /// the instance held 4 of 12 configured ACUs. <c>acu_utilization_percent</c> is percent of the
     /// CONFIGURED ceiling, so the operator's threshold means what it says against it.</para>
     ///
-    /// <para><b>No capacity reading does not fire, and does not fall back to the raw CPU.</b> The fallback
-    /// is the tempting shape and it silently arms a threshold against percent-of-allocated. Not firing matches
-    /// the card, which bands Unknown on the same absence (<c>ServerHealthClassifier.CpuSeverity</c>) — the
-    /// two consumers share the metric, so they have to share the rule. The cost is stated rather than
-    /// hidden: a PROVISIONED Aurora PostgreSQL instance, whose raw reading IS a fraction of fixed capacity,
-    /// would not be alerted on, because an absent ACU sample cannot be told apart from a serverless
-    /// instance Performance Insights had no capacity sample for. The measured fleet has no such
-    /// instance.</para>
+    /// <para><b>A minute with no capacity reading is left out of the gate, unless the target is known to be
+    /// provisioned.</b> The raw-CPU fallback is the tempting shape and it silently arms a threshold against
+    /// percent-of-allocated, so a minute with no <c>acu_utilization_percent</c> neither breaches nor clears (the gate
+    /// skips it, #3282), and the reminder does not count it. That matches the card, which bands Unknown on the same
+    /// absence (<c>ServerHealthClassifier.CpuSeverity</c>). A serverless instance has such minutes (Performance Insights
+    /// returned a CPU point and no ACU point, see <c>RdsCpuIngestor.BuildSamples</c>), and there instance CPU is
+    /// percent of a moving allocation, so counting it would bring the #3281 noise back.</para>
+    ///
+    /// <para><b>The exception is a target known to be provisioned</b> (#7082): a provisioned RDS or Aurora
+    /// PostgreSQL instance publishes no capacity figure at all, so its raw reading IS a fraction of fixed capacity, and
+    /// a minute with no figure breaches or clears on instance CPU alone. The signal is the target's own stored samples:
+    /// <see cref="DarlingPgCpuUtilizationReader.IsKnownProvisionedAsync"/> is true when none of the last 7 days of rows
+    /// carries any of the three capacity columns. The instance class (<c>db.serverless</c>) is read by the RDS describe
+    /// call but has no column, and a column needs a store rung. When the history cannot be read, or the target has
+    /// shown a capacity figure at any point in the week, the target is not known to be provisioned and the minute is
+    /// skipped, which is the behaviour before #7082. The one case this cannot tell apart is a serverless instance whose
+    /// ACU point was missing on every minute of the week.</para>
     ///
     /// <para>The metric NAMES are "High CPU" / "CPU Resolved", the SQL Server strings, for the parity
     /// reason above: a mute rule, history filter or dashboard keyed on them means the same condition on
@@ -603,7 +611,6 @@ public sealed partial class DarlingWorker
     /// reader is never left inferring either.</para>
     /// </summary>
     private async Task EvaluatePgCpuAsync(
-
         ServerRuntime runtime, AlertServerSnapshot snapshot, DarlingConfig config, CancellationToken cancellationToken)
     {
         if (_postgres is null || _alertDeliverer is null)
@@ -693,6 +700,37 @@ public sealed partial class DarlingWorker
                option that cannot drop an edge, which is the property that failed twice. In steady state the
                30-second sweep sees each sample on its own and this never arises. */
             var outcome = PersistenceOutcome.None;
+
+            /* #7082: whether this target is KNOWN to be provisioned, asked at most once a pass and only when a minute with no
+               capacity figure makes it matter. A failed read answers "not known", which leaves the minute out of the gate. */
+            bool? knownProvisionedMemo = null;
+            async Task<bool> KnownProvisionedAsync()
+            {
+                if (knownProvisionedMemo is { } known)
+                {
+                    return known;
+                }
+
+                try
+                {
+                    knownProvisionedMemo = await DarlingPgCpuUtilizationReader.IsKnownProvisionedAsync(
+                        _postgres, runtime.ServerId, now, cancellationToken);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    knownProvisionedMemo = false;
+                    _logger.LogDebug(
+                        "[{Server}] PostgreSQL CPU capacity history unreadable, a minute with no capacity figure is left out of the gate: {Message}",
+                        runtime.Config.DisplayName, ex.Message);
+                }
+
+                return knownProvisionedMemo.Value;
+            }
+
             DarlingPgCpuUtilizationReader.CpuSample? lastCounted = null;
             double? lastCapacityPercent = null;
             DarlingPgCpuUtilizationReader.CpuSample? ceilingLowCpuSample = null;
@@ -709,12 +747,24 @@ public sealed partial class DarlingWorker
                 var capacityPercent = FleetCpuProvenance.CpuBandInputPercent(
                     sample.CpuPercent, sample.AcuUtilizationPercent, FleetCpuSource.PerformanceInsights);
 
-                /* #7082: NO CAPACITY FIGURE no longer freezes the gate. The Performance Insights collector stores a
-                   capacity figure (acu_utilization_percent) only where the instance publishes the Serverless v2 metrics,
-                   so a provisioned (non-serverless) RDS or Aurora PostgreSQL instance never has one, and the old rule
-                   (a missing figure is never a breach) meant High CPU could never page on it. A sample with no capacity
-                   figure now breaches on instance CPU alone: on a provisioned instance percent of allocated IS the
-                   saturation figure. The detail text then says "instance CPU" only. */
+                /* NO CAPACITY FIGURE FREEZES THE GATE for a target not known to be provisioned: never a breach, never a
+                   clear. A serverless instance has minutes Performance Insights returned a CPU point and no ACU point for
+                   (RdsCpuIngestor.BuildSamples), and its instance CPU is percent of a moving allocation, so counting such a
+                   minute as a breach is the #3281 noise and as a clear would resolve an open incident on a reading never
+                   taken. A target KNOWN to be provisioned (#7082, KnownProvisionedAsync) publishes no capacity figure at
+                   all, so there instance CPU alone is the saturation figure and the minute breaches or clears on it.
+
+                   `continue` rather than `break` because this is not an EDGE: ending the pass here would let one
+                   capacity-less minute stall the batch. The skipped sample is not revisited once a later sample in the
+                   batch counts (the watermark advances past it), and nothing is lost: the gate counts breaches of a
+                   capacity threshold, which this minute has no figure for. */
+                var gateInput = PgCpuGateInput(
+                    capacityPercent, sample.CpuPercent, alertSettings.CpuThresholdPercent,
+                    knownProvisioned: !capacityPercent.HasValue && await KnownProvisionedAsync());
+                if (gateInput is not { } breached)
+                {
+                    continue;
+                }
 
                 /* #7082: a sample breaches only when instance CPU is ALSO at or over the bar. Serverless v2 holds
                    capacity for memory, so capacity at the ceiling with the instance at 1% to 14% CPU is not CPU
@@ -729,7 +779,7 @@ public sealed partial class DarlingWorker
 
                 var evaluation = AlertPersistenceGate.Evaluate(
                     record.State,
-                    PgCpuSampleBreaches(capacityPercent, sample.CpuPercent, alertSettings.CpuThresholdPercent),
+                    breached,
                     AlertEngine.CpuBreachSamples,
                     AlertEngine.CpuClearSamples);
 
@@ -829,7 +879,11 @@ public sealed partial class DarlingWorker
             }
 
             bool breaching = lastCounted is not null
-                && PgCpuSampleBreaches(lastCapacityPercent, lastCounted.CpuPercent, alertSettings.CpuThresholdPercent);
+                && PgCpuSampleBreaches(
+                    lastCapacityPercent, lastCounted.CpuPercent, alertSettings.CpuThresholdPercent,
+                    knownProvisioned: !lastCapacityPercent.HasValue
+                        && lastCounted.CpuPercent >= alertSettings.CpuThresholdPercent
+                        && await KnownProvisionedAsync());
 
             if (record.State.Firing && breaching)
             {
@@ -922,9 +976,9 @@ public sealed partial class DarlingWorker
             {
                 /* The falling edge is the gate's, after CpuClearSamples consecutive clears, rather than the
                    first sample under the bar. It still says which of the two happened rather than claiming
-                   a recovery it did not measure — a subject whose capacity readings stopped arriving
-                   altogether never reaches this arm at all now, because a missing reading freezes the gate
-                   instead of clearing it. */
+                   a recovery it did not measure. A minute with no capacity reading reaches this arm only on a
+                   target known to be provisioned (see the loop); on any other target it freezes the gate, so a subject
+                   whose capacity readings stopped arriving never reaches it, and the text then names instance CPU. */
                 await NotifyPgResolutionAsync(key, snapshot.ServerName, metricName, "CPU Resolved",
                     lastCapacityPercent.HasValue
                         ? $"{snapshot.ServerName}: capacity back to {lastCapacityPercent.Value:F0}% "
@@ -1205,7 +1259,25 @@ public sealed partial class DarlingWorker
     /// counts but cannot make a known pair new). A store failure leaves the reports uncounted for the next sweep and
     /// answers <c>StoreOk = false</c>, which pages.
     /// </summary>
-    private async Task<PgDeadlockPatterns> CountPgDeadlockPatternsAsync(
+    private Task<PgDeadlockPatterns> CountPgDeadlockPatternsAsync(
+        string serverKey, int serverId, IReadOnlyList<DarlingPgDeadlockReader.PgDeadlockRow> rows, DateTime now,
+        CancellationToken cancellationToken) =>
+        CountPgDeadlockPatternsAsync(
+            new DeadlockSignatureStore(_postgres!, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds),
+            _pgDeadlockCounted.GetOrAdd(serverKey, _ => new Dictionary<string, DateTime>(StringComparer.Ordinal)),
+            _pgDeadlockUnannouncedNew.GetOrAdd(serverKey, _ => new HashSet<string>(StringComparer.Ordinal)),
+            fresh => _deadlockRollup?.NoteNewSignatures(serverKey, fresh),
+            _logger, serverKey, serverId, rows, now, cancellationToken);
+
+    /// <summary>
+    /// The counting itself, with its state handed in so it runs against a real signature store without a worker. The
+    /// pairs that are new are also handed to <paramref name="noteNewForAgentGate"/> (#6005): the agent gate that decides
+    /// whether a delivered page opens an investigation request reads the same store, and the PostgreSQL path writes
+    /// <c>pg:</c> rows into it, so a first-ever pair would otherwise look like a repeat to the gate and lose its request.
+    /// </summary>
+    internal static async Task<PgDeadlockPatterns> CountPgDeadlockPatternsAsync(
+        DeadlockSignatureStore store, Dictionary<string, DateTime> counted, HashSet<string> unannounced,
+        Action<IReadOnlyCollection<string>>? noteNewForAgentGate, ILogger logger,
         string serverKey, int serverId, IReadOnlyList<DarlingPgDeadlockReader.PgDeadlockRow> rows, DateTime now,
         CancellationToken cancellationToken)
     {
@@ -1215,7 +1287,6 @@ public sealed partial class DarlingWorker
             byReport[row.DeadlockHash] = PgDeadlockSignature.For(row.GraphText, row.ParticipantCount, row.LockModes, row.Resources);
         }
 
-        var counted = _pgDeadlockCounted.GetOrAdd(serverKey, _ => new Dictionary<string, DateTime>(StringComparer.Ordinal));
         var pending = new Dictionary<string, int>(StringComparer.Ordinal);
         List<string> pendingReports;
         lock (counted)
@@ -1239,7 +1310,6 @@ public sealed partial class DarlingWorker
         {
             try
             {
-                var store = new DeadlockSignatureStore(_postgres!, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds);
                 var fresh = await store.AddAsync(serverId, pending, DateOnly.FromDateTime(now), cancellationToken);
                 lock (counted)
                 {
@@ -1251,12 +1321,12 @@ public sealed partial class DarlingWorker
 
                 if (fresh.Count > 0)
                 {
-                    var unannounced = _pgDeadlockUnannouncedNew.GetOrAdd(
-                        serverKey, _ => new HashSet<string>(StringComparer.Ordinal));
                     lock (unannounced)
                     {
                         unannounced.UnionWith(fresh);
                     }
+
+                    noteNewForAgentGate?.Invoke(fresh);
                 }
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -1266,19 +1336,16 @@ public sealed partial class DarlingWorker
             catch (Exception ex)
             {
                 storeOk = false;
-                _logger.LogDebug(
+                logger.LogDebug(
                     "[{Server}] PostgreSQL deadlock pattern count failed, the deadlock alert pages on its count alone: {Message}",
                     serverKey, ex.Message);
             }
         }
 
-        string[] newKeys = Array.Empty<string>();
-        if (_pgDeadlockUnannouncedNew.TryGetValue(serverKey, out var set))
+        string[] newKeys;
+        lock (unannounced)
         {
-            lock (set)
-            {
-                newKeys = set.ToArray();
-            }
+            newKeys = unannounced.ToArray();
         }
 
         var patterns = new PgDeadlockPatterns { NewKeys = newKeys, StoreOk = storeOk };
@@ -1931,12 +1998,28 @@ public sealed partial class DarlingWorker
     }
 
     /// <summary>
-    /// The High CPU breach test for one PostgreSQL sample (#7082): capacity use (percent of the configured ACU
-    /// ceiling) AND instance CPU both at or over the bar, on the same sample. A sample with no capacity figure (a
-    /// provisioned instance publishes none) breaches on instance CPU alone.
+    /// What one stored sample contributes to the High CPU persistence gate (#7082): true is a breach, false a clear, and
+    /// null leaves the minute out (the gate neither counts a breach nor a clear). A minute with no capacity figure is
+    /// left out unless the target is <paramref name="knownProvisioned"/>, because on a serverless instance such a minute
+    /// reads instance CPU as percent of a moving allocation (#3281).
     /// </summary>
-    internal static bool PgCpuSampleBreaches(double? capacityPercent, double instanceCpuPercent, int thresholdPercent) =>
-        instanceCpuPercent >= thresholdPercent && (!capacityPercent.HasValue || capacityPercent.Value >= thresholdPercent);
+    internal static bool? PgCpuGateInput(
+        double? capacityPercent, double instanceCpuPercent, int thresholdPercent, bool knownProvisioned) =>
+        !capacityPercent.HasValue && !knownProvisioned
+            ? null
+            : PgCpuSampleBreaches(capacityPercent, instanceCpuPercent, thresholdPercent, knownProvisioned);
+
+    /// <summary>
+    /// The High CPU breach test for one PostgreSQL sample (#7082): capacity use (percent of the configured ACU
+    /// ceiling) AND instance CPU both at or over the bar, on the same sample. A sample with no capacity figure breaches on
+    /// instance CPU alone only when <paramref name="knownProvisioned"/> (the target's stored samples show no capacity
+    /// figure at all, see <see cref="DarlingPgCpuUtilizationReader.IsKnownProvisionedAsync"/>). Otherwise it does not
+    /// breach: on a serverless instance a minute with no ACU point reads instance CPU as percent of a moving allocation.
+    /// </summary>
+    internal static bool PgCpuSampleBreaches(
+        double? capacityPercent, double instanceCpuPercent, int thresholdPercent, bool knownProvisioned = false) =>
+        instanceCpuPercent >= thresholdPercent
+        && (capacityPercent.HasValue ? capacityPercent.Value >= thresholdPercent : knownProvisioned);
 
     /// <summary>
     /// The Postgres Poison Wait analogue (#2711): fires when a poison wait event — the IPC

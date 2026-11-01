@@ -51,6 +51,48 @@ public static class DarlingPgCpuUtilizationReader
         LIMIT 1
         """;
 
+    /// <summary>
+    /// How far back the "has this target ever published a capacity figure" read looks (#7082). A serverless instance
+    /// publishes ACU on nearly every minute, so a week of stored samples with none of the three capacity columns is a
+    /// provisioned instance. Bounded so the read stays an index range on <c>(server_id, collection_time)</c>.
+    /// </summary>
+    public static readonly TimeSpan CapacityHistoryLookback = TimeSpan.FromDays(7);
+
+    internal const string AnyCapacityFigureSql = """
+        SELECT EXISTS (
+            SELECT 1
+            FROM pg_cpu_utilization
+            WHERE server_id = $1
+            AND   collection_time >= $2
+            AND   (acu_utilization_percent IS NOT NULL
+                   OR serverless_capacity_acu IS NOT NULL
+                   OR max_configured_acu IS NOT NULL)
+        )
+        """;
+
+    /// <summary>
+    /// True when this target's own stored samples of the last <see cref="CapacityHistoryLookback"/> carry no capacity
+    /// figure at all (#7082): no ACU utilisation, no allocated ACU and no configured ceiling on any row. That is how a
+    /// provisioned RDS or Aurora PostgreSQL instance looks, since it publishes none of the Serverless v2 metrics, and it
+    /// is the only signal the store holds for the difference (the instance class is read by the RDS describe call but is
+    /// not stored). A serverless instance that Performance Insights had no ACU point for on one minute is NOT this: its
+    /// other minutes carry the figure, so the answer is false and that minute is left out of the gate. The caller treats
+    /// a target it cannot tell (a failed read) as not provisioned.
+    /// </summary>
+    public static async Task<bool> IsKnownProvisionedAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime nowUtc, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(postgres);
+
+        await using var command = postgres.CreateCommand(AnyCapacityFigureSql);
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(nowUtc - CapacityHistoryLookback, DateTimeKind.Unspecified));
+
+        var anyCapacity = await command.ExecuteScalarAsync(cancellationToken);
+        return anyCapacity is bool seen && !seen;
+    }
+
     /// <param name="CpuPercent"><c>os.cpuUtilization.total.avg</c> — percent of the capacity CURRENTLY
     /// ALLOCATED. Real, and not the saturation figure on a serverless instance class (#3281).</param>
     /// <param name="AcuUtilizationPercent">Percent of the CONFIGURED capacity ceiling in use — the figure
