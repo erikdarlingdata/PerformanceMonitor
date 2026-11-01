@@ -63,7 +63,7 @@ public sealed class AlertThresholdKeyBehaviourTests
             h => h.Settings.CpuEnabled = true, 95,
             Drive: async (engine, _, server) =>
             {
-                for (var i = 1; i <= AlertEngine.CpuBreachSamples; i++)
+                for (var i = 1; i <= AlertEngine.SqlCpuBreachSamples; i++)
                 {
                     await engine.EvaluateServerAsync(SnapshotFor(server, 70, 90, Harness.SampleBase.AddMinutes(i)));
                 }

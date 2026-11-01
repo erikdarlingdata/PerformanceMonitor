@@ -153,6 +153,24 @@ public sealed class AlertEngine
        is keyed per server too). A failed escalation (#4752) backs off like any failed send: EscalationOpensGate holds it for the
        retry delay while the family and key have an open failure streak. */
     private readonly TierEscalation _cpuEscalation = new();
+
+    /* #7085: the sample instant that began the current run of samples under the High CPU bar, per server. In memory only: a restart
+       begins a new run at the next clear sample, which can only hold an open incident longer, never close it early. */
+    private readonly ConcurrentDictionary<string, DateTime> _cpuClearRunStart = new();
+
+    /* #7085: servers whose High CPU incident was already open when this process started (the seeded Firing bit). That page went out
+       before the restart, so the first fire this process judges for the key only records its tier and sends nothing. */
+    private readonly ConcurrentDictionary<string, bool> _cpuRestoredOpen = new();
+
+    /* #7085: the tier and the instant of the open High CPU incident's last MUTED fire. A muted fire is not a page, so it never
+       counts in _cpuEscalation (the tiers actually delivered); it holds back a rise to its own tier for one cooldown only, the way
+       a mute held a fire back before #7085, and then the incident is judged on what was delivered. */
+    private readonly ConcurrentDictionary<string, (AlertSeverityLevel Tier, DateTime At)> _cpuMutedFire = new();
+
+    /* #7085: when the open High CPU incident began, per server, restored from the store after a restart. The alert history cannot say
+       it: an earlier incident that ended while alerts were suppressed leaves a fire row with no clear row behind it, and the restart
+       seed would count that row for the incident now open. */
+    private readonly ConcurrentDictionary<string, DateTime> _cpuIncidentOpenedUtc = new();
     private readonly TierEscalation _deadlockEscalation = new();
     private readonly TierEscalation _poisonWaitEscalation = new();
     private readonly TierEscalation _lowDiskEscalation = new();
@@ -456,7 +474,8 @@ public sealed class AlertEngine
         /* #5715 part B: the six opted-in families, each with the resolution title its history row is stored under. */
         _escalationSeedFamilies = new (string Metric, string ResolutionTitle, bool CountMuted, bool TierlessRowIsWarning, TierEscalation Escalation)[]
         {
-            (CpuPersistenceMetric, EscalationSeed.CpuResolvedTitle, true, false, _cpuEscalation),
+            /* #7085: _cpuEscalation holds the tiers DELIVERED, so a muted High CPU fire is not counted (it holds back a rise for one cooldown in process). */
+            (CpuPersistenceMetric, EscalationSeed.CpuResolvedTitle, false, false, _cpuEscalation),
             (DeadlockWatermarkMetric, EscalationSeed.DeadlocksClearedTitle, true, false, _deadlockEscalation),
             (PostgresAlertEvaluator.PoisonWaitMetric, EscalationSeed.PoisonWaitsClearedTitle, true, false, _poisonWaitEscalation),
             (RunnableQueueEvaluator.MetricName, EscalationSeed.RunnableQueueClearedTitle, true, false, _runnableQueueEscalation),
@@ -526,7 +545,8 @@ public sealed class AlertEngine
 
     /// <summary>#7068: the same read as <see cref="ReadStandingFireAsync"/> with every fire and clear row, for the alerts that judge
     /// each file or plan by its own row (<see cref="AlertHistoryStanding.OpenFor"/>). Null on no reader or a failed read.</summary>
-    private async Task<AlertHistoryStanding?> ReadStandingAsync(string key, string metric, string resolutionTitle, CancellationToken ct)
+    private async Task<AlertHistoryStanding?> ReadStandingAsync(
+        string key, string metric, string resolutionTitle, CancellationToken ct, bool countMuted = true)
     {
         if (_openFireReader is null)
         {
@@ -536,7 +556,7 @@ public sealed class AlertEngine
         var readClock = Stopwatch.StartNew();
         try
         {
-            return await _openFireReader(new OpenFireQuery(key, metric, new[] { resolutionTitle }, _engineStartUtc), ct);
+            return await _openFireReader(new OpenFireQuery(key, metric, new[] { resolutionTitle }, _engineStartUtc, countMuted), ct);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -724,6 +744,14 @@ public sealed class AlertEngine
                 if (cpuPersistence.Value.State.Firing)
                 {
                     _lastCpuAlert[key] = _utcNow();
+                    _cpuRestoredOpen[key] = true;
+
+                    readClock.Restart();
+                    var openedMinutes = await _stateStore.LoadEdgeTriggerWatermarkAsync(key, CpuIncidentOpenedMetric);
+                    if (openedMinutes is > 0)
+                    {
+                        _cpuIncidentOpenedUtc[key] = DateTime.UnixEpoch.AddMinutes(openedMinutes.Value);
+                    }
                 }
             }
 
@@ -815,9 +843,13 @@ public sealed class AlertEngine
                    because Record keeps the higher tier, could only cancel the NEXT incident's Warning-to-Critical one. A
                    repeated Critical after a restart is a plain first fire, which the history-seeded email and webhook
                    cooldowns already hold. The engine drops anything else here, whatever the reader hands back. */
-                if (tier == AlertSeverityLevel.Warning && !escalation.IsTouched(key))
+                /* #7085: High CPU is the exception. It no longer repeats after a cooldown, so an incident whose Critical went out
+                   before the restart must remember it, or a dip to Warning and a return to Critical would page that Critical twice. */
+                if (tier is { } seeded
+                    && (seeded == AlertSeverityLevel.Warning || (seeded == AlertSeverityLevel.Critical && metric == CpuPersistenceMetric))
+                    && !escalation.IsTouched(key))
                 {
-                    escalation.Restore(key, AlertSeverityLevel.Warning);
+                    escalation.Restore(key, seeded);
                 }
 
                 _escalationSeeded[(key, metric)] = true;
@@ -874,11 +906,38 @@ public sealed class AlertEngine
     public const int CpuClearSamples = 2;
 
     /// <summary>
+    /// Consecutive breaching samples that open a SQL Server High CPU incident (#7085): five, which at the
+    /// one-minute CPU sample cadence is five minutes of CPU at or over the bar. Three (<see cref="CpuBreachSamples"/>)
+    /// still paged on isolated spikes of one to six minutes that ended on their own: 19 of the 58 High CPU
+    /// pages in a 14-day field review of one store. <see cref="CpuBreachSamples"/> keeps its 3 for the
+    /// PostgreSQL target gate, which has its own cadence and its own issue.
+    /// </summary>
+    public const int SqlCpuBreachSamples = 5;
+
+    /// <summary>
+    /// How long CPU must stay under the bar, in sample time, before an open SQL Server High CPU incident
+    /// clears and CPU Resolved goes out (#7085). Time, not a sample count, so it does not depend on the
+    /// collector's cadence. Measured from the first sample under the bar to the sample that completes the
+    /// span, so at a one-minute cadence it is sixteen samples in a row. One server paged 22 times in three
+    /// mornings because two clear samples closed the incident and the next three breaching samples
+    /// opened it again. While the incident is held open, a new run over the bar does not page; only a rise to
+    /// a higher tier does (see <c>FireCpuAsync</c>).
+    /// </summary>
+    public static readonly TimeSpan SqlCpuClearHold = TimeSpan.FromMinutes(15);
+
+    /// <summary>
     /// The (server, metric) key the CPU gate's state is persisted under. The SAME string the mute context,
     /// the history row and the resolve all use, so an operator reading <c>config_alert_log</c> and an
     /// operator reading the persistence table are looking at one metric, not two spellings of it.
     /// </summary>
     public const string CpuPersistenceMetric = OpenEngineAlerts.HighCpuMetric;
+
+    /// <summary>
+    /// #7085: the edge-trigger watermark row that holds when the open High CPU incident began, as whole minutes since the Unix epoch
+    /// (an int, so no column or rung is needed). Written at the incident's rising edge and read after a restart, so the restart seed
+    /// counts only the delivered rows of the incident that is open, not an older one that closed without a clear row.
+    /// </summary>
+    public const string CpuIncidentOpenedMetric = "High CPU incident opened";
 
     /// <summary>
     /// Consecutive breaching tempdb Space SAMPLES required before the reserved percentage is an incident
@@ -1076,9 +1135,60 @@ public sealed class AlertEngine
             }
 
             bool breaching = sampleValue.Value >= cpuThreshold;      /* :65-67 */
+
+            /* #7085: the incident clears on TIME under the bar, not a sample count. The gate is handed an unreachable clear bar
+               until the run of clear samples has lasted SqlCpuClearHold by the samples' own instants, then a bar of one so
+               that sample resolves. A breaching sample ends the run; a sample with no value never reaches here. */
+            int clearBar = int.MaxValue;
+            if (breaching)
+            {
+                _cpuClearRunStart.TryRemove(key, out _);
+            }
+            else if (_cpuPersistence.TryGetValue(key, out var cpuPrior) && cpuPrior.State.Firing)
+            {
+                /* UTC instants only: obs.Instant can be the target's LOCAL stamp on a pre-V134 row, and a difference of local stamps
+                   moves with DST (a spring-forward gap shortens the hold by an hour, a fall-back lengthens it). Where the observation has
+                   no UTC instant the hold runs on the sweep's own UTC clock (now) instead: it never mixes frames and no DST shift moves
+                   it, and it differs from the sample-time span only by the collector's lag (about a minute). */
+                var sampleAt = obs.UtcInstant ?? now;
+                var runStart = _cpuClearRunStart.GetOrAdd(key, sampleAt);
+                if (sampleAt - runStart >= SqlCpuClearHold)
+                {
+                    clearBar = 1;
+                }
+            }
+
             var (outcome, incidentOpen) = await ObservePersistenceAsync(
                 _cpuPersistence, CpuPersistenceMetric, key, obs.Instant, breaching,
-                CpuBreachSamples, CpuClearSamples);
+                SqlCpuBreachSamples, clearBar);
+            if (outcome == PersistenceOutcome.Resolve)
+            {
+                _cpuClearRunStart.TryRemove(key, out _);
+            }
+            else if (outcome == PersistenceOutcome.Fire)
+            {
+                /* #7085: the incident begins here, paged or not. The instant is what lets a restart count only this incident's delivered
+                   rows (SeedRestoredCpuIncidentAsync). Whole minutes in the watermark's int, rounded down, which is safe because the
+                   previous incident's last fire row is at least the 15 minute clear hold older than this edge. */
+                var openedAt = now;
+                _cpuIncidentOpenedUtc[key] = openedAt;
+                try
+                {
+                    await _stateStore.SaveEdgeTriggerWatermarkAsync(
+                        key, CpuIncidentOpenedMetric, (int)Math.Floor((openedAt - DateTime.UnixEpoch).TotalMinutes));
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    /* The save sits between the gate's persisted rising edge and the queued fire, so a store write that throws here
+                       would lose the opening page for good: the gate already holds Firing and never produces that edge again. Log and
+                       carry on. With no stored instant a restart seeds this incident unbounded, as for a legacy one. */
+                    _logger?.LogError("Could not save the High CPU incident's opening instant for {ServerKey}; the opening page still goes out, and a restart will read this incident unbounded: {Message}", key, ex.Message);
+                }
+            }
 
             if (incidentOpen && breaching)
             {
@@ -1099,15 +1209,11 @@ public sealed class AlertEngine
             }
         }
 
-        /* A resolve that a fire immediately follows IN THIS BATCH is cancelled with that fire (#5642). Each edge
-           used to land on its own 30 s sweep with its own clock, so the cooldown had run out between them and the
-           sequence arrived in order. Replayed together against one `now`, [fire, resolve, fire] delivered the
-           first fire, then "CPU Resolved", then had the cooldown swallow the second fire: the last word was an
-           all-clear while the gate was firing. So [fire, resolve, fire] sends one fire, the LATER one; [resolve, fire] from a
-           firing start sends nothing (the incident never closed); [fire, resolve] still sends both (a real spike
-           while we were watching). Consecutive fires that remain collapse to the later one. */
-        events = CancelResolveBeforeFire(events);
-
+        /* #7085: events go out in sample order. A resolve is only ever produced by a completed clear hold (SqlCpuClearHold of sample
+           time under the bar), so a fire behind it in the same batch is a NEW incident that took SqlCpuBreachSamples breaching
+           samples to open: the old incident closed (Resolved, tier closed) and the new one pages as an opening page. #5642 cancelled
+           such a pair, which was right when two clear samples closed an incident; with the hold it dropped the resolve, never closed
+           the tier and left the new incident inheriting the old one's. Consecutive fires already collapsed to the later one above. */
         foreach (var (isFire, eventValue, readingUtc) in events)
         {
             if (isFire)
@@ -1118,6 +1224,12 @@ public sealed class AlertEngine
             {
                 /* #5715: the incident is over whether or not anyone is told, so the next one starts from nothing delivered. */
                 _cpuEscalation.Close(key);
+                _cpuRestoredOpen.TryRemove(key, out _);
+                _cpuMutedFire.TryRemove(key, out _);
+                _cpuIncidentOpenedUtc.TryRemove(key, out _);
+                /* The cooldown stamp belongs to the incident that just closed: a new incident in this same batch, or any time after,
+                   is an opening page and must not wait out a cooldown the old incident's last page started. */
+                _lastCpuAlert.TryRemove(key, out _);
                 if (suppressed)
                 {
                     continue;
@@ -1134,40 +1246,6 @@ public sealed class AlertEngine
                     $"{serverName}: {cpuMetricLabel} back to {eventValue:F0}%"), ct); /* :111 */
             }
         }
-    }
-
-    /// <summary>
-    /// The CPU edges one sweep sends, after a resolve that a fire immediately follows is dropped together with
-    /// that fire (#5642): <c>[fire, resolve, fire]</c> becomes the later <c>[fire]</c>, <c>[resolve, fire]</c> becomes
-    /// nothing, <c>[fire, resolve]</c> is unchanged. Two fires left adjacent collapse to the later one.
-    /// </summary>
-    internal static List<(bool IsFire, double Value, DateTime? ReadingUtc)> CancelResolveBeforeFire(List<(bool IsFire, double Value, DateTime? ReadingUtc)> events)
-    {
-        var kept = new List<(bool IsFire, double Value, DateTime? ReadingUtc)>(events.Count);
-        foreach (var edge in events)
-        {
-            if (edge.IsFire && kept.Count > 0 && !kept[^1].IsFire)
-            {
-                /* Drop the resolve; the fire behind it, when there is one, becomes THIS fire, so the delivered
-                   event carries the newest breaching reading and its instant, not the earlier fire's. With no
-                   fire behind it ([resolve, fire]) nothing remains: the incident never closed. */
-                kept.RemoveAt(kept.Count - 1);
-                if (kept.Count > 0 && kept[^1].IsFire)
-                {
-                    kept[^1] = edge;
-                }
-            }
-            else if (edge.IsFire && kept.Count > 0)
-            {
-                kept[^1] = edge;
-            }
-            else
-            {
-                kept.Add(edge);
-            }
-        }
-
-        return kept;
     }
 
     private double? CpuValueFor(CpuObservation obs) =>
@@ -1249,24 +1327,131 @@ public sealed class AlertEngine
         return live.Count == 0 ? single : live;
     }
 
+    /// <summary>
+    /// #7085: decides, from the alert history, whether the High CPU incident that was open when this process started was ever PAGED,
+    /// at the first unsuppressed fire after the restart. "Did I send" is not "was it delivered" (#3633): the persisted Firing bit is set
+    /// under suppression and after an every-channel-failed send, and neither wrote a delivered row. The rows are the ones
+    /// <see cref="IAlertHistoryStore.GetStandingAsync"/> answers (a fire whose every channel failed left out, a muted fire left out because a mute
+    /// is not a page, and nothing older than the instant the open incident began when the store holds one), read the way the standing-incident
+    /// seeds of #7068 read them:
+    /// <list type="bullet">
+    /// <item>An open delivered fire exists: the incident paged. The highest tier among the incident's open fire rows, however old, is
+    /// restored (a tierless legacy row counts as Warning), so only a rise above it pages. The one-cooldown window seed
+    /// (<see cref="EnsureEscalationSeededAsync"/>) misses a Warning older than the cooldown, which lost a later Critical.</item>
+    /// <item>No open delivered fire: nothing paged. The restart's cooldown stamp is dropped, and the fire falls through as an opening page.</item>
+    /// <item>No reader, or the read failed (logged and counted, an annotation never a suppression): unknown. The stamp stays, so the
+    /// opening page comes one cooldown after the restart rather than never.</item>
+    /// </list>
+    /// </summary>
+    private async Task SeedRestoredCpuIncidentAsync(string key, CancellationToken ct)
+    {
+        var standing = await ReadStandingAsync(key, CpuPersistenceMetric, EscalationSeed.CpuResolvedTitle, ct, countMuted: false);
+        if (standing is null)
+        {
+            return;
+        }
+
+        DateTime? newestClear = null;
+        foreach (var clear in standing.Clears)
+        {
+            if (newestClear is null || clear.AtUtc > newestClear)
+            {
+                newestClear = clear.AtUtc;
+            }
+        }
+
+        _cpuIncidentOpenedUtc.TryGetValue(key, out var openedAt);
+        AlertSeverityLevel? highest = null;
+        foreach (var fire in standing.Fires)
+        {
+            /* Only this incident's rows: an earlier incident that ended while alerts were suppressed wrote no clear row, so its fire
+               row would otherwise stand for this one. Without a stored opening instant (an incident that opened before this build)
+               the read is unbounded, as it was. */
+            if (!AlertHistoryEscalationSeed.IsOpen(fire.FireAtUtc, newestClear)
+                || (openedAt != default && fire.FireAtUtc < openedAt))
+            {
+                continue;
+            }
+
+            var tier = AlertContextSerializer.TryReadSeverity(fire.ContextJson) ?? AlertSeverityLevel.Warning;
+            if (highest is null || tier > highest)
+            {
+                highest = tier;
+            }
+        }
+
+        if (highest is null)
+        {
+            _lastCpuAlert.TryRemove(key, out _);
+            return;
+        }
+
+        var current = _cpuEscalation.Highest(key);
+        _cpuEscalation.Restore(key, current is { } seeded && seeded > highest ? seeded : highest);
+    }
+
     private async Task FireCpuAsync(
         string key, string serverName, int? serverId, DateTime now, TimeSpan alertCooldown, bool suppressed,
         double alertCpuValue, string cpuMetricLabel, DateTime? readingUtc, CancellationToken ct)
     {
+        /* #7085: an incident that has already paged is held open until CPU stays under the bar for SqlCpuClearHold, so
+           inside it only an escalation pages: no cooldown reminder, no page for a new run over the bar after a dip. A fire whose
+           every channel failed put its tier back, so the incident has not paged yet and the cooldown path retries it. */
+        if (!suppressed && _cpuRestoredOpen.TryRemove(key, out _))
+        {
+            /* The incident was open when this process started, and the persisted Firing bit says nothing about whether a page
+               REACHED anyone (the gate advances under suppression and after an every-channel-failed send): the alert history does. */
+            await SeedRestoredCpuIncidentAsync(key, ct);
+        }
+
         /* #5715: the tier is graded BEFORE the gate (GradeCpuFire is pure) and that one value is the fire's tier, so the
            escalation test and the card cannot disagree. A Warning incident now graded Critical is delivered past the
            cooldown; the stamp below restarts it, and the context's flag lets the email and webhook cooldowns through. */
         var cpuGrade = GradeCpuFire(alertCpuValue);
         var escalation = _cpuEscalation.IsEscalation(key, cpuGrade);
 
-        if (!suppressed && EscalationOpensGate(CpuPersistenceMetric, key, escalation, _lastCpuAlert, now, alertCooldown)) /* :72 */
+        /* #7085: _cpuEscalation holds what was DELIVERED. A muted fire is not a page, so it counts for one cooldown only: while that
+           cooldown lasts a rise has to beat its tier too (a mute that spans the incident writes at most one muted fire per cooldown,
+           plus one per rise, as before #7085), and once it has run out the incident is judged on what was delivered, so the open
+           incident pages once after the mute is lifted and holds again from there. */
+        var delivered = _cpuEscalation.Highest(key);
+        var held = delivered;
+        if (_cpuMutedFire.TryGetValue(key, out var mutedFire))
+        {
+            if (now - mutedFire.At < alertCooldown)
+            {
+                held = held is { } deliveredTier && deliveredTier >= mutedFire.Tier ? deliveredTier : mutedFire.Tier;
+            }
+            else
+            {
+                _cpuMutedFire.TryRemove(key, out _);
+            }
+        }
+
+        bool rise = held is { } heldTier && cpuGrade > heldTier;
+        bool incidentPaged = delivered is not null;
+        /* An escalation whose every channel failed waits out the back-dated stamp (#5715), the same backoff as any failed send. */
+        bool opensGate = incidentPaged
+            ? rise && EscalationOpensGate(CpuPersistenceMetric, key, rise, _lastCpuAlert, now, alertCooldown)
+            : EscalationOpensGate(CpuPersistenceMetric, key, rise, _lastCpuAlert, now, alertCooldown);
+
+        if (!suppressed && opensGate) /* :72 */
         {
             var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = CpuPersistenceMetric }; /* :74 */
             bool isMuted = _isAlertMuted(muteCtx);                              /* :75 */
             _lastCpuAlert[key] = now;                                           /* :76 — stamped even when muted */
-            /* Recorded before the send (a muted fire's history row must not be late), put back below when every channel failed. */
-            var priorTier = _cpuEscalation.Highest(key);
-            _cpuEscalation.Record(key, cpuGrade);
+            /* Recorded before the send (the history row must not be late), put back below when every channel failed. A muted fire
+               records its tier as muted, not as delivered. */
+            var priorTier = delivered;
+            if (isMuted)
+            {
+                _cpuMutedFire[key] = (cpuGrade, now);
+            }
+            else
+            {
+                _cpuEscalation.Record(key, cpuGrade);
+                _cpuMutedFire.TryRemove(key, out _);
+            }
 
             /* #3495: name the active backup on the card. Everything the annotation needs was knowable
                at fire time from the same active-session surface the operator ended up reading by hand

@@ -36,7 +36,13 @@ public sealed record EscalationSeedQuery(
 /// <see cref="MetricName"/> before <see cref="UntilUtc"/> that no row under <see cref="ResolutionTitles"/> closed. There is
 /// no lower bound: an incident that has stood for days is still the same incident after a restart.
 /// </summary>
-public sealed record OpenFireQuery(string ServerKey, string MetricName, IReadOnlyList<string> ResolutionTitles, DateTime UntilUtc);
+/// <param name="ServerKey">The engine's server key.</param>
+/// <param name="MetricName">The fire's metric name.</param>
+/// <param name="ResolutionTitles">The resolution rows' metric names.</param>
+/// <param name="UntilUtc">EXCLUSIVE upper bound: the engine's start instant.</param>
+/// <param name="CountMuted">False leaves muted fires out, for an alert whose in-process tier is the tier DELIVERED (High CPU, #7085).</param>
+public sealed record OpenFireQuery(
+    string ServerKey, string MetricName, IReadOnlyList<string> ResolutionTitles, DateTime UntilUtc, bool CountMuted = true);
 
 /// <summary>
 /// The resolution titles of the six alerts that opt into <see cref="TierEscalation"/>, as constants so the engine's
@@ -65,7 +71,7 @@ public static class EscalationSeed
             throw new ArgumentNullException(nameof(store));
         }
 
-        return (query, _) => store.GetStandingAsync(query.ServerKey, query.MetricName, query.ResolutionTitles, null, query.UntilUtc);
+        return (query, _) => store.GetStandingAsync(query.ServerKey, query.MetricName, query.ResolutionTitles, null, query.UntilUtc, query.CountMuted);
     }
 
     /// <summary>
