@@ -70,7 +70,9 @@ public sealed record FindingRoutingLens(double NotifySeverity, FindingRoute Unco
         if (finding.Severity < NotifySeverity)
             return null;
 
-        var decision = FindingRouting.ClassifyPersisted(finding.RootFactKey, finding.Confidence, finding.FactCount, UncorroboratedRoute);
+        var decision = FindingRouting.ClassifyPersisted(
+            finding.RootFactKey, finding.Confidence, finding.FactCount, UncorroboratedRoute,
+            finding.Severity, NotifySeverity, RecurrenceLabeler.TryReadLabel(finding.StoryText)?.RecurrenceWeeks);
         return decision.Route == FindingRoute.Digest ? decision.Reason : null;
     }
 }
@@ -103,6 +105,13 @@ public sealed record FindingRoutingLens(double NotifySeverity, FindingRoute Unco
 ///   same-statement pileup, which is a directly observed convoy against its own baseline, not a single
 ///   z-score excursion.</description></item>
 /// </list>
+/// <para><b>#7084: two rules narrow the list above.</b> A story carrying the recurrence label (the same weekday and
+/// hour for three weeks, <see cref="RecurrenceLabeler"/>) goes to the digest whatever else holds, severity and label
+/// unchanged. And a one-fact story whose severity is under the notify bar + <see cref="OneFactPageMargin"/> goes to the
+/// digest even with an amplifier match: one matched check alone no longer pages a finding this close to the bar.
+/// Both follow the same knob as the uncorroborated arm. The absolution and pileup stories are checked first and
+/// are exempt.</para>
+///
 /// <para>Everything else is a lone fact with no corroboration and routes to the digest. The extremity escape
 /// (<c>FactScorer.IsExtremeAnomaly</c>, #3526) keeps its SEVERITY power — an extreme single still clears the
 /// notify floor and still leads its story — but its published intent, extreme AND corroborated, is now the
@@ -123,6 +132,13 @@ public sealed record FindingRoutingLens(double NotifySeverity, FindingRoute Unco
 /// </summary>
 public static class FindingRouting
 {
+    /// <summary>
+    /// #7084: how far above the notify bar a one-fact story's severity must sit before its matched amplifier check
+    /// earns a page. A one-fact story below <c>bar + OneFactPageMargin</c> goes to the digest even with an amplifier
+    /// match (1.5 + 0.25 = 1.75 at the shipped bar). A second fact in the chain still pages at any severity.
+    /// </summary>
+    public const double OneFactPageMargin = 0.25;
+
     /// <summary>The persisted spelling of <see cref="FindingRoute.Page"/>.</summary>
     public const string PageText = "page";
 
@@ -163,24 +179,33 @@ public static class FindingRouting
     /// <param name="finding">The finding, with the write-path components populated.</param>
     /// <param name="uncorroboratedRoute">Where a lone uncorroborated fact goes — the operator's knob. A
     /// corroborated finding pages regardless.</param>
-    public static FindingRouteDecision Classify(AnalysisFinding finding, FindingRoute uncorroboratedRoute)
+    /// <param name="notifySeverity">The notify bar (<c>IAlertSettings.AnalysisNotifySeverity</c>): a one-fact story
+    /// under this plus <see cref="OneFactPageMargin"/> goes to the digest (#7084). The recurrence label (3 weeks in the
+    /// same weekday and hour slot) is read off the finding's story text.</param>
+    public static FindingRouteDecision Classify(AnalysisFinding finding, FindingRoute uncorroboratedRoute, double notifySeverity)
     {
         if (finding is null)
             throw new ArgumentNullException(nameof(finding));
 
         return Classify(
             finding.RootFactKey, finding.FactCount, finding.MatchedAmplifiers, finding.DefinedAmplifiers,
-            uncorroboratedRoute);
+            uncorroboratedRoute, finding.Severity, notifySeverity,
+            RecurrenceLabeler.TryReadLabel(finding.StoryText)?.RecurrenceWeeks);
     }
 
     /// <summary>
-    /// The pure arithmetic behind <see cref="Classify(AnalysisFinding, FindingRoute)"/>, exposed so every arm
+    /// The pure arithmetic behind <see cref="Classify(AnalysisFinding, FindingRoute, double)"/>, exposed so every arm
     /// can be pinned without building a finding. The arms are tested in the order they are listed in the class
     /// remarks; the first that holds names the reason.
     /// </summary>
+    /// <param name="severity">The story's severity. With the default (infinity) the one-fact-at-the-bar rule never fires.</param>
+    /// <param name="notifySeverity">The notify bar the one-fact rule measures <paramref name="severity"/> against.</param>
+    /// <param name="recurringWeeks">The consecutive same-slot weeks the story's recurrence label states, or null when
+    /// unlabelled. A labelled story goes to the digest (#7084), severity and label unchanged.</param>
     public static FindingRouteDecision Classify(
         string? rootFactKey, int factCount, int matchedAmplifiers, int definedAmplifiers,
-        FindingRoute uncorroboratedRoute)
+        FindingRoute uncorroboratedRoute,
+        double severity = double.PositiveInfinity, double notifySeverity = 0.0, int? recurringWeeks = null)
     {
         if (string.Equals(rootFactKey, StoryConfidence.AbsolutionRootKey, StringComparison.Ordinal))
             return new FindingRouteDecision(FindingRoute.Page,
@@ -190,9 +215,15 @@ public static class FindingRouting
             return new FindingRouteDecision(FindingRoute.Page,
                 "detector-measured: the same-statement pileup is a directly observed convoy against its own baseline — 1.0 by construction, not a lone fact.");
 
+        if (recurringWeeks is { } weeks)
+            return HeldBy(uncorroboratedRoute, RecurringReason(weeks));
+
         if (factCount >= 2)
             return new FindingRouteDecision(FindingRoute.Page,
                 $"corroborated: {factCount.ToString(CultureInfo.InvariantCulture)} facts in the chain — each traversed edge is a fired predicate onto a fact that itself scored.");
+
+        if (matchedAmplifiers >= 1 && IsOneFactAtTheBar(severity, notifySeverity))
+            return HeldBy(uncorroboratedRoute, OneFactReason(severity, notifySeverity));
 
         if (matchedAmplifiers >= 1)
             return new FindingRouteDecision(FindingRoute.Page,
@@ -221,18 +252,24 @@ public static class FindingRouting
     /// exactly 1.0 before #3538) is UNCORROBORATED by <see cref="StoryConfidence.DescribeBasis"/>'s own
     /// reading and routes to the digest here for the same reason.
     /// <para>For DISPLAY (Lite's Recommendations grid marking a finding as "not paged — uncorroborated"),
-    /// never for the paging decision itself, which <see cref="Classify(AnalysisFinding, FindingRoute)"/>
+    /// never for the paging decision itself, which <see cref="Classify(AnalysisFinding, FindingRoute, double)"/>
     /// makes on the write path with the components in hand.</para>
     /// </summary>
+    /// <param name="severity">The row's severity (#7084): the one-fact-at-the-bar rule reads it.</param>
+    /// <param name="notifySeverity">The notify bar the write path applied.</param>
+    /// <param name="recurringWeeks">The weeks the row's story text states (<see cref="RecurrenceLabeler.TryReadLabel"/>), or null.</param>
     public static FindingRouteDecision ClassifyPersisted(
-        string? rootFactKey, double confidence, int factCount, FindingRoute uncorroboratedRoute)
+        string? rootFactKey, double confidence, int factCount, FindingRoute uncorroboratedRoute,
+        double severity, double notifySeverity, int? recurringWeeks)
     {
         if (string.Equals(rootFactKey, StoryConfidence.AbsolutionRootKey, StringComparison.Ordinal)
             || string.Equals(rootFactKey, StoryConfidence.PileupRootKey, StringComparison.Ordinal)
+            || recurringWeeks is not null
             || factCount >= 2)
         {
-            /* Three arms the persisted row answers exactly; the components are the same ones Classify reads. */
-            return Classify(rootFactKey, factCount, matchedAmplifiers: 0, definedAmplifiers: 0, uncorroboratedRoute);
+            /* The arms the persisted row answers exactly; the components are the same ones Classify reads. */
+            return Classify(rootFactKey, factCount, matchedAmplifiers: 0, definedAmplifiers: 0, uncorroboratedRoute,
+                severity, notifySeverity, recurringWeeks);
         }
 
         if (StoryConfidence.IsLegacyPathShape(confidence, factCount))
@@ -247,6 +284,9 @@ public static class FindingRouting
            tolerance StoryConfidence uses for its own exact comparisons. */
         if (confidence > StoryConfidence.Floor + 1e-9)
         {
+            if (IsOneFactAtTheBar(severity, notifySeverity))
+                return HeldBy(uncorroboratedRoute, OneFactReason(severity, notifySeverity));
+
             return new FindingRouteDecision(FindingRoute.Page,
                 "corroborated: a co-fire check matched — re-derived from the persisted confidence, which a one-fact story earns above the 0.20 floor only through the amplifier share.");
         }
@@ -255,4 +295,19 @@ public static class FindingRouting
             ? new FindingRouteDecision(FindingRoute.Page, "uncorroborated: a lone fact at the 0.20 floor — no co-fire check matched. Paged because analysis.uncorroborated_route is 'page'.")
             : new FindingRouteDecision(FindingRoute.Digest, "uncorroborated: a lone fact at the 0.20 floor — no co-fire check matched.");
     }
+
+    private static bool IsOneFactAtTheBar(double severity, double notifySeverity)
+        => severity < notifySeverity + OneFactPageMargin;
+
+    private static string RecurringReason(int weeks)
+        => $"recurring: this weekday and hour for {weeks.ToString(CultureInfo.InvariantCulture)} weeks — the story keeps a weekly schedule, so it goes to the digest with its severity and label unchanged.";
+
+    private static string OneFactReason(double severity, double notifySeverity)
+        => $"one fact at the bar: severity {severity.ToString("F2", CultureInfo.InvariantCulture)} is under {(notifySeverity + OneFactPageMargin).ToString("F2", CultureInfo.InvariantCulture)} (notify bar {notifySeverity.ToString("F2", CultureInfo.InvariantCulture)} + {OneFactPageMargin.ToString("F2", CultureInfo.InvariantCulture)}) and no second fact corroborates it — a co-fire check matched, but that alone does not page this close to the bar.";
+
+    /// <summary>A rule that holds a finding off the page: the digest, unless the operator's knob restores paging.</summary>
+    private static FindingRouteDecision HeldBy(FindingRoute uncorroboratedRoute, string reason)
+        => uncorroboratedRoute == FindingRoute.Page
+            ? new FindingRouteDecision(FindingRoute.Page, reason + " Paged because analysis.uncorroborated_route is 'page'.")
+            : new FindingRouteDecision(FindingRoute.Digest, reason);
 }

@@ -435,6 +435,36 @@ Before submitting:
 - [ ] Changes are documented (comments, README if applicable)
 - [ ] New files have copyright headers
 
+### Optional pre-push check
+
+`.github/scripts/pre-push.sh` runs the first checks CI runs on a pull request. You can run it by hand before a push, or install it as a git hook so it runs on every push. The hook is optional. Nothing installs it for you, because it builds and tests on your machine.
+
+What the script does:
+
+1. It builds `Darling.Tests` and `Lite.Tests` in Debug.
+2. It runs all tests with the `Stage=Guard` trait in both projects. CI runs the same tests first.
+3. It runs the test classes that your changes need. It takes them from the newest nightly test map, which it downloads with the `gh` CLI. It adds every class in a test file that names a symbol you changed. If a diff changes only documentation, it selects only the classes that read those files.
+
+The script prints result lines only. Its last line is `GATE GREEN`, `GATE RED` or `GATE STOP`. `GATE STOP` means the selection is the whole suite, which your machine does not run. CI runs it. The hook lets a push with `GATE STOP` go through. It blocks a push with `GATE RED`.
+
+To install the hook, run this from the clone or from any of its worktrees:
+
+```bash
+bash .github/scripts/install-pre-push-hook.sh
+```
+
+One install covers the clone and all its linked worktrees. Running it again changes nothing. If a different `pre-push` hook already exists, the script leaves it alone, says so and exits with an error.
+
+To remove the hook, run:
+
+```bash
+bash .github/scripts/install-pre-push-hook.sh --remove
+```
+
+To skip the hook for one push, add `--no-verify` to `git push`.
+
+The run time depends on your diff. The build runs first. The Guard tests run next. The selected classes run last. The script prints nothing about progress until a stage ends, so a push can look stuck for several minutes.
+
 ### Review Process
 
 1. Submit your PR with a clear description

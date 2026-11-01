@@ -394,7 +394,9 @@ public partial class MainWindow : Window
             var analysisNotificationService = _analysisNotificationService = new AnalysisNotificationService(
                 _emailAlertService, _alertSettings, f => f.ServerId.ToString(), new AppLoggerAdapter<AnalysisNotificationService>(),
                 isStoryMuted: async (serverId, storyPathHash) =>
-                    (await muteReadStore.GetMutedStoryHashesAsync(serverId)).Contains(storyPathHash));
+                    (await muteReadStore.GetMutedStoryHashesAsync(serverId)).Contains(storyPathHash),
+                /* #7084 part 4: a finding that would page attaches to an engine alert still open on its server. */
+                findOpenEngineAlert: _alertHistoryStore.FindOpenEngineAlertAsync);
 
             _backgroundService = new CollectionBackgroundService(
                 _collectorService, _databaseInitializer, archiveService, retentionService, _serverManager,

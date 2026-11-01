@@ -520,6 +520,66 @@ AND   alert_sent"
     }
 
     /// <summary>
+    /// #7084 part 4: the newest engine alert still open on a server, for an analysis finding that would page. One of the
+    /// <see cref="OpenEngineAlerts.Families"/>' metrics with a DELIVERED fire (<c>alert_sent</c>, not muted, not a digest) in the
+    /// <see cref="OpenEngineAlerts.Window"/> before <paramref name="nowUtc"/> and no resolution row after it. Null for none, and
+    /// for a key that is not a server id. A failed read THROWS: the caller pages, because "could not read" must not look like
+    /// "an alert is open". Reads <c>v_config_alert_log</c> (live plus archive, #4887) so a reset cannot hide the fire.
+    /// </summary>
+    public async Task<AlertAttachedToDto?> FindOpenEngineAlertAsync(string serverId, DateTime nowUtc)
+    {
+        var sid = AlertHistoryServerIdentity.SeedScope(serverId);
+        if (sid is null) return null;
+
+        var duckDb = _duckDb;
+        if (duckDb == null)
+        {
+            var dbPath = App.DatabasePath;
+            if (string.IsNullOrEmpty(dbPath)) return null;
+            duckDb = new DuckDbInitializer(dbPath);
+        }
+
+        var since = DateTime.SpecifyKind(AlertHistoryEscalationSeed.TruncateToMicroseconds(nowUtc - OpenEngineAlerts.Window), DateTimeKind.Unspecified);
+        var until = DateTime.SpecifyKind(AlertHistoryEscalationSeed.TruncateToMicroseconds(nowUtc), DateTimeKind.Unspecified);
+        AlertAttachedToDto? newest = null;
+        using var readLock = duckDb.AcquireReadLock();
+        using var connection = duckDb.CreateConnection();
+        await connection.OpenAsync();
+        foreach (var (metric, resolutionTitle) in OpenEngineAlerts.Families)
+        {
+            using var command = connection.CreateCommand();
+            command.CommandText = @"
+SELECT MAX(f.alert_time)
+FROM v_config_alert_log AS f
+WHERE f.server_id = $1
+AND   f.metric_name = $2
+AND   f.alert_sent
+AND   NOT f.muted
+AND   f.notification_type <> '" + AlertDelivery.ChannelDigest + @"'
+AND   f.alert_time > $3
+AND   f.alert_time <= $4
+AND   NOT EXISTS (SELECT 1 FROM v_config_alert_log AS r
+                  WHERE r.server_id = f.server_id AND r.metric_name = $5 AND r.alert_time > f.alert_time)";
+            command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = sid.Value });
+            command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = metric });
+            command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = since });
+            command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = until });
+            command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = resolutionTitle });
+            var result = await command.ExecuteScalarAsync();
+            if (result != null && result != DBNull.Value)
+            {
+                var utc = DateTime.SpecifyKind(Convert.ToDateTime(result), DateTimeKind.Utc);
+                if (newest is null || utc > newest.AlertTimeUtc)
+                {
+                    newest = new AlertAttachedToDto(metric, utc);
+                }
+            }
+        }
+
+        return newest;
+    }
+
+    /// <summary>
     /// Loads all persisted edge-trigger watermarks (#1145), one entry per
     /// (server_id, metric_name). The caller seeds its in-memory watermark dicts
     /// from these at startup, before the first alert sweep, so a restart does not
