@@ -958,6 +958,26 @@ internal static class McpHelpers
     }
 
     /// <summary>
+    /// The sentence a server-name miss opens with, shared by Darling's and Lite's resolvers (#7077). It always begins
+    /// "Could not resolve server." because callers match on those words. Then it says what the caller did wrong: the name
+    /// it sent matched no monitored server, or it sent none and several servers are monitored. The caller appends
+    /// " Available servers:\n" and the list.
+    /// </summary>
+    /// <param name="serverName">The name the caller sent, or null or blank when it sent none.</param>
+    /// <param name="serverCount">How many servers are monitored.</param>
+    public static string ServerMissOpening(string? serverName, int serverCount)
+    {
+        if (!string.IsNullOrWhiteSpace(serverName))
+        {
+            return $"Could not resolve server. No monitored server matches '{serverName.Trim()}'.";
+        }
+
+        return serverCount > 1
+            ? $"Could not resolve server. server_name is required because {serverCount} servers are monitored."
+            : "Could not resolve server.";
+    }
+
+    /// <summary>
     /// The bytes every error envelope begins with. <see cref="Status"/> serializes its anonymous object with
     /// <see cref="JsonOptions"/> (compact) and <c>status</c> first, so <c>{"status":"error",</c> is exact against
     /// the one producer — the closing quote and comma are part of it so a data payload whose first key merely

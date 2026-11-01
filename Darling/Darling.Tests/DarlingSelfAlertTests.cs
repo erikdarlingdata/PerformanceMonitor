@@ -4252,6 +4252,92 @@ public sealed class DarlingSelfAlertTests
         Assert.Equal(2, rearm.Calls.Count);  /* re-stuck after recovery -> re-armed fresh */
     }
 
+    /* ---------------- #7076: the restart seed of a stuck policy job, and the close of an ended episode ---------------- */
+
+    private static Harness HarnessWithOpenJobRow(string? step)
+    {
+        var h = new Harness();
+        h.History.OpenFireFor = (key, metric) => metric == "Compression Job Stuck" && key == "compressjob:1001"
+            ? new AlertHistoryFire(
+                h.Now.AddDays(-2), 0,
+                step is null ? null : AlertContextSerializer.Serialize(new AlertContext { PolicyJobStep = step }))
+            : null;
+        return h;
+    }
+
+    [Fact]
+    public async Task CompressionJobs_FirstPass_SeededReArmed_SendsTheReHungPageOnce_WithoutReArmingAgain()
+    {
+        var h = HarnessWithOpenJobRow(AlertContextSerializer.PolicyJobStepReArmed);
+        var e = h.Build();
+        var rearm = new RearmRecorder();
+
+        await e.ApplyPolicyJobsStuckAsync(Stuck(1001), rearm.Delegate, Ct);
+
+        Assert.Empty(rearm.Calls);
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Contains("re-hung after self-heal", fired.ShortMessage, StringComparison.Ordinal);
+        Assert.Equal(AlertContextSerializer.PolicyJobStepEscalated, fired.Context?.PolicyJobStep);
+
+        /* The re-hang was announced, so the job is now escalated: the next pass sends nothing and still does not re-arm. */
+        await e.ApplyPolicyJobsStuckAsync(Stuck(1001), rearm.Delegate, Ct);
+        Assert.Empty(rearm.Calls);
+        Assert.Single(h.Deliverer.Outcomes);
+    }
+
+    [Theory]
+    [InlineData("Escalated")]
+    [InlineData(null)]
+    public async Task CompressionJobs_FirstPass_SeededEscalated_NeitherReArmsNorPages(string? step)
+    {
+        var h = HarnessWithOpenJobRow(step);
+        var e = h.Build();
+        var rearm = new RearmRecorder();
+
+        await e.ApplyPolicyJobsStuckAsync(Stuck(1001), rearm.Delegate, Ct);
+        await e.ApplyPolicyJobsStuckAsync(Stuck(1001), rearm.Delegate, Ct);
+
+        Assert.Empty(rearm.Calls);
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Contains(h.History.OpenFireQuestions, q => q.ServerKey == "compressjob:1001" && q.Metric == "Compression Job Stuck");
+    }
+
+    [Fact]
+    public async Task CompressionJobs_FirstPass_HealthyJobWithAnOpenRow_WritesItsResolution_SoALaterStickIsANewEpisode()
+    {
+        var h = HarnessWithOpenJobRow(AlertContextSerializer.PolicyJobStepEscalated);
+        var e = h.Build();
+        var rearm = new RearmRecorder();
+        var healthy = Reading(StuckJobs(), new PolicyJobRunReading(
+            1001, TimescaleSupport.StorePolicyJobFamily.Compression, "wait_stats", Held: false, LastRunStatus: null, TotalFailures: 0));
+
+        await e.ApplyPolicyJobsStuckAsync(healthy, rearm.Delegate, Ct);
+
+        var resolved = Assert.Single(h.History.Records);
+        Assert.Equal("Compression Job Recovered", resolved.MetricName);
+        Assert.Equal("compressjob:1001", resolved.AlertKey);
+
+        /* Checked once: the same healthy job on the next pass reads the history no more. */
+        var asked = h.History.OpenFireQuestions.Count;
+        await e.ApplyPolicyJobsStuckAsync(healthy, rearm.Delegate, Ct);
+        Assert.Equal(asked, h.History.OpenFireQuestions.Count);
+        Assert.Single(h.History.Records);
+    }
+
+    [Fact]
+    public async Task CompressionJobs_HealthyJobWithNoOpenRow_WritesNoResolution()
+    {
+        var h = new Harness();
+        var e = h.Build();
+        var healthy = Reading(StuckJobs(), new PolicyJobRunReading(
+            1001, TimescaleSupport.StorePolicyJobFamily.Compression, "wait_stats", Held: false, LastRunStatus: null, TotalFailures: 0));
+
+        await e.ApplyPolicyJobsStuckAsync(healthy, new RearmRecorder().Delegate, Ct);
+
+        Assert.Empty(h.History.Records);
+        Assert.Empty(h.Deliverer.Outcomes);
+    }
+
     [Fact]
     public async Task CompressionJobs_AlertsDisabled_DoesNotFireOrRearm()
     {

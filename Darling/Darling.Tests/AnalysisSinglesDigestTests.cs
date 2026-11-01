@@ -524,8 +524,12 @@ public class AnalysisSinglesDigestTests
 
         /* The structured rows carry both sections too. */
         Assert.Contains(fired.Context!.Details, d => d.Heading == "Held back from paging");
-        var group = Assert.Single(fired.Context.Details, d => d.Heading == "pm-server-1 - Runnable Queue Warning");
-        Assert.Equal("3", group.Fields.Single(f => f.Label == "Held").Value);
+        var groups = Assert.Single(fired.Context.Details, d => d.Heading == "Held groups");
+        var group = Assert.Single(groups.Records);
+        Assert.Equal(1, group.Ordinal);
+        Assert.Equal(
+            "pm-server-1 - Runnable Queue Warning: 3 held, first 2026-09-19 03:00 UTC, last 2026-09-19 10:00 UTC. latest hold",
+            group.Summary);
         Assert.Contains(fired.Context.Details, d => d.Heading == "Singles summary");
     }
 
@@ -611,6 +615,80 @@ public class AnalysisSinglesDigestTests
 
         Assert.Contains("Held back from paging (45 alerts in 45 groups):", detail, StringComparison.Ordinal);
         Assert.Contains("+ 5 more groups, not listed", detail, StringComparison.Ordinal);
+    }
+
+    /// <summary>A full day (#7086): the 40 held groups the digest lists plus a full singles section (the ten top movers
+    /// and four families of three servers). Slack takes 50 blocks per message and 3,000 characters per section text,
+    /// and a Teams card about 28 KB. The held groups ride as one record-shaped detail, so they cost a few blocks and
+    /// the singles are not pushed off the message.</summary>
+    [Fact]
+    public async Task AFullDay_FortyHeldGroupsAndAFullSinglesSection_FitsSlackAndTeamsWhole()
+    {
+        var h = new Harness();
+        var rows = new List<AnalysisSinglesDigestReader.DigestRoutedRow>();
+        for (var i = 1; i <= 45; i++)
+        {
+            rows.Add(Held(Day.AddHours(-2), i, $"pm-server-{i:00}", "Runnable Queue Warning",
+                "Warning: pages at Critical only, so this one waited for a second sample"));
+        }
+
+        var categories = new[] { "anomaly", "memory", "waits", "index" };
+        for (var i = 0; i < 12; i++)
+        {
+            rows.Add(Row(Day.AddHours(-3), 100 + i, $"pm-single-{i:00}", categories[i % 4], $"{i:x8}", 1.2 + i / 20.0,
+                "uncorroborated: a lone fact - 1 fact in the chain and 0 of 5 co-fire checks matched.", $"dedup-{i:00}-a", $"dedup-{i:00}-b"));
+        }
+
+        await ApplyAsync(h, h.Build(), rows.OrderBy(r => r.AlertTime).ToArray());
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        var branding = new AlertBranding("Test Edition", null);
+        var slack = WebhookAlertService.BuildSlackPayload(
+            fired.MetricName, fired.ServerName, fired.CurrentValue, fired.ThresholdValue, branding,
+            context: fired.Context, detailText: fired.DetailText, displayName: fired.DisplayName);
+
+        using var document = System.Text.Json.JsonDocument.Parse(slack);
+        var blocks = document.RootElement.GetProperty("attachments")[0].GetProperty("blocks").EnumerateArray().ToList();
+        Assert.True(blocks.Count <= WebhookAlertService.SlackMessageBlockLimit,
+            $"{blocks.Count} blocks, Slack allows {WebhookAlertService.SlackMessageBlockLimit}");
+
+        var texts = new List<string>();
+        var fieldTexts = new List<string>();
+        foreach (var block in blocks)
+        {
+            if (block.TryGetProperty("text", out var text))
+            {
+                texts.Add(text.GetProperty("text").GetString()!);
+            }
+            if (block.TryGetProperty("fields", out var fields))
+            {
+                foreach (var field in fields.EnumerateArray())
+                {
+                    var fieldText = field.GetProperty("text").GetString()!;
+                    Assert.True(fieldText.Length <= WebhookAlertService.SlackFieldTextLimit);
+                    fieldTexts.Add(fieldText);
+                }
+            }
+        }
+        Assert.All(texts, t => Assert.True(t.Length <= WebhookAlertService.SlackTextObjectLimit, $"section text of {t.Length} characters"));
+
+        /* Nothing was dropped: every held group, the "N more" line, the singles and all four families are in the message. */
+        var all = string.Join("\n", texts.Concat(fieldTexts));
+        Assert.Contains("pm-server-40 - Runnable Queue Warning", all, StringComparison.Ordinal);
+        Assert.Contains("#40", all, StringComparison.Ordinal);
+        Assert.Contains("+5 more held groups, not listed", all, StringComparison.Ordinal);
+        Assert.Contains("#10 ", all, StringComparison.Ordinal);
+        foreach (var category in categories)
+        {
+            Assert.Contains($"Family: {category}", all, StringComparison.Ordinal);
+        }
+        Assert.DoesNotContain("Omitted from this message", all, StringComparison.Ordinal);
+
+        var teams = WebhookAlertService.BuildTeamsPayload(
+            fired.MetricName, fired.ServerName, fired.CurrentValue, fired.ThresholdValue, branding,
+            context: fired.Context, detailText: fired.DetailText, displayName: fired.DisplayName);
+        Assert.True(System.Text.Encoding.UTF8.GetByteCount(teams) < 28_000,
+            $"Teams card of {System.Text.Encoding.UTF8.GetByteCount(teams)} bytes, the connector's ceiling is about 28 KB");
     }
 
     /// <summary>The title changes, the key does not: the generic webhook's metric, the route and mute key and the history

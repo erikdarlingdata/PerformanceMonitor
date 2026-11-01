@@ -556,7 +556,7 @@ public sealed class DarlingPeerDisclosureTests
     /* ───────────────────────── the resolution miss ───────────────────────── */
 
     private const string MissWithoutPeers =
-        "Could not resolve server. Available servers:\nprod-sql-use1-beta-01";
+        "Could not resolve server. No monitored server matches 'prod-sql-use2-beta-01'. Available servers:\nprod-sql-use1-beta-01";
 
     /// <summary>The miss travels as the <c>invalid</c> envelope since #3739 (<c>McpHelpers.Refusal</c>, so the
     /// ~190 tools that <c>return error;</c> put a status word on the wire); these pins are about the SENTENCE,
@@ -570,7 +570,7 @@ public sealed class DarlingPeerDisclosureTests
     }
 
     [Fact]
-    public void ResolutionMiss_IsByteForByteUnchangedWithNothingDeclared()
+    public void ResolutionMiss_HasNoPeerDisclosureWithNothingDeclared()
     {
         var (resolved, error) = DarlingServerResolver.ResolveOrError(
             new[] { Registered("prod-sql-use1-beta-01") },

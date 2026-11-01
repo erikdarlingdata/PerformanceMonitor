@@ -1618,7 +1618,7 @@ public partial class SettingsWindow : Window
             }
             else
             {
-                MessageBox.Show($"Failed to send test email:\n\n{error}", "Test Email Failed", MessageBoxButton.OK, MessageBoxImage.Error);
+                MessageBox.Show($"Failed to send test email:\n\n{error}\n\nCheck the SMTP server, port and login on the Delivery tab in Settings.", "Test Email Failed", MessageBoxButton.OK, MessageBoxImage.Error);
             }
         }
         finally
@@ -1942,12 +1942,12 @@ public partial class SettingsWindow : Window
             }
             else
             {
-                MessageBox.Show($"Failed to send PagerDuty test notification:\n\n{error}", "Test Webhook Failed", MessageBoxButton.OK, MessageBoxImage.Error);
+                MessageBox.Show($"Failed to send PagerDuty test notification:\n\n{error}\n\nCheck the PagerDuty routing key on the Delivery tab in Settings.", "Test Webhook Failed", MessageBoxButton.OK, MessageBoxImage.Error);
             }
         }
         catch (Exception ex)
         {
-            MessageBox.Show($"Failed to send PagerDuty test notification:\n\n{ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show($"Failed to send PagerDuty test notification:\n\n{ex.Message}\n\nCheck the PagerDuty routing key on the Delivery tab in Settings.", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
         }
         finally
         {
@@ -1973,12 +1973,12 @@ public partial class SettingsWindow : Window
             }
             else
             {
-                MessageBox.Show($"Failed to send Teams test notification:\n\n{error}", "Test Webhook Failed", MessageBoxButton.OK, MessageBoxImage.Error);
+                MessageBox.Show($"Failed to send Teams test notification:\n\n{error}\n\nCheck the Teams webhook URL on the Delivery tab in Settings.", "Test Webhook Failed", MessageBoxButton.OK, MessageBoxImage.Error);
             }
         }
         catch (Exception ex)
         {
-            MessageBox.Show($"Failed to send Teams test notification:\n\n{ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show($"Failed to send Teams test notification:\n\n{ex.Message}\n\nCheck the Teams webhook URL on the Delivery tab in Settings.", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
         }
         finally
         {
@@ -2004,12 +2004,12 @@ public partial class SettingsWindow : Window
             }
             else
             {
-                MessageBox.Show($"Failed to send Slack test notification:\n\n{error}", "Test Webhook Failed", MessageBoxButton.OK, MessageBoxImage.Error);
+                MessageBox.Show($"Failed to send Slack test notification:\n\n{error}\n\nCheck the Slack webhook URL on the Delivery tab in Settings.", "Test Webhook Failed", MessageBoxButton.OK, MessageBoxImage.Error);
             }
         }
         catch (Exception ex)
         {
-            MessageBox.Show($"Failed to send Slack test notification:\n\n{ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show($"Failed to send Slack test notification:\n\n{ex.Message}\n\nCheck the Slack webhook URL on the Delivery tab in Settings.", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
         }
         finally
         {
@@ -2071,12 +2071,12 @@ public partial class SettingsWindow : Window
             }
             else
             {
-                MessageBox.Show($"Failed to send generic webhook test notification:\n\n{error}", "Test Webhook Failed", MessageBoxButton.OK, MessageBoxImage.Error);
+                MessageBox.Show($"Failed to send generic webhook test notification:\n\n{error}\n\nCheck the generic webhook URL on the Delivery tab in Settings.", "Test Webhook Failed", MessageBoxButton.OK, MessageBoxImage.Error);
             }
         }
         catch (Exception ex)
         {
-            MessageBox.Show($"Failed to send generic webhook test notification:\n\n{ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show($"Failed to send generic webhook test notification:\n\n{ex.Message}\n\nCheck the generic webhook URL on the Delivery tab in Settings.", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
         }
         finally
         {

@@ -874,6 +874,15 @@ internal sealed class DarlingSelfAlertEvaluator
        that. One dictionary rather than one per family because a job_id is unique within a store. */
     private enum PolicyJobHealth { ReArmed, Escalated, AwaitingSchedulerRetry }
     private readonly ConcurrentDictionary<string, PolicyJobEpisode> _policyJobState = new(StringComparer.Ordinal);
+
+    /// <summary>#7076: true once the first policy job pass of this process has run. Only that pass may seed a stuck job's escalation
+    /// from the alert history: a job that was not stuck on it cleared while the service was down, so its open row is closed by
+    /// <see cref="CloseEndedPolicyJobEpisodesAsync"/> and when it sticks again later it is a new episode and announces.</summary>
+    private bool _policyJobFirstPassDone;
+
+    /// <summary>#7076: the healthy policy jobs this process has already checked the alert history for an open fire row of an ended
+    /// episode, so each is read once.</summary>
+    private readonly HashSet<string> _policyJobEndedChecked = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, DateTime> _lastPolicyJobAlert = new(StringComparer.Ordinal);
 
     /// <summary>The alert metric name every compression-job self-alert fires under (first-detection + escalation
@@ -2919,24 +2928,18 @@ internal sealed class DarlingSelfAlertEvaluator
                     ("Groups", string.Create(CultureInfo.InvariantCulture, $"{facts.HeldGroups.Count:N0}")),
                 }
             });
+            /* One record-shaped detail, one record per group (#7086): 40 groups as 40 field items cost 80 of a Slack
+               message's 50 blocks and pushed the singles off it, while records pack into a few sections under the
+               3,000 character cap (and into one fact per group on a Teams card, the same line an email shows). The line
+               is the one the prose document uses, so the two cannot drift. */
+            var heldRecords = new AlertDetailItem { Heading = "Held groups" };
+            var ordinal = 0;
             foreach (var group in facts.HeldGroups.Take(MaxListedHeldGroups))
             {
-                var held = new AlertDetailItem
-                {
-                    Heading = string.Create(CultureInfo.InvariantCulture, $"{group.Server} - {group.Metric}"),
-                    Fields =
-                    {
-                        ("Held", string.Create(CultureInfo.InvariantCulture, $"{group.Count:N0}")),
-                        ("First (UTC)", string.Create(CultureInfo.InvariantCulture, $"{group.FirstUtc:o}")),
-                        ("Last (UTC)", string.Create(CultureInfo.InvariantCulture, $"{group.LastUtc:o}")),
-                    }
-                };
-                if (!string.IsNullOrEmpty(group.Reason))
-                {
-                    held.Fields.Add(("Reason", group.Reason));
-                }
-                context.Details.Add(held);
+                ordinal++;
+                heldRecords.Records.Add(new AlertDetailRecord(ordinal, HeldGroupLine(group), new List<(string Label, string Text)>()));
             }
+            context.Details.Add(heldRecords);
             if (facts.HeldGroups.Count > MaxListedHeldGroups)
             {
                 context.Details.Add(new AlertDetailItem
@@ -8932,6 +8935,11 @@ WHERE c.is_enabled";
                 continue;
             }
 
+            if (!_policyJobFirstPassDone && !_policyJobState.ContainsKey(key))
+            {
+                await SeedStandingPolicyJobAsync(band, job.Family, key, cancellationToken);
+            }
+
             if (!_policyJobState.TryGetValue(key, out var episode))
             {
                 if (job.SchedulerRetries)
@@ -8974,7 +8982,8 @@ WHERE c.is_enabled";
                            some rows and nothing on others. The minutes stay in the reason text and the detail,
                            where the unit is spelled out. Threshold is the phrase "running on schedule". */
                         numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
-                        cancellationToken);
+                        cancellationToken,
+                        context: new AlertContext { PolicyJobStep = AlertContextSerializer.PolicyJobStepReArmed });
                 }
                 else
                 {
@@ -8991,7 +9000,8 @@ WHERE c.is_enabled";
                         severity: band.Severity,
                         shortMessage: $"{label} stuck — auto-re-arm FAILED",
                         numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
-                        cancellationToken);
+                        cancellationToken,
+                        context: new AlertContext { PolicyJobStep = AlertContextSerializer.PolicyJobStepEscalated });
                     NoteStateSend(band.Metric, key, delivery);
                 }
             }
@@ -9017,7 +9027,8 @@ WHERE c.is_enabled";
                     severity: band.Severity,
                     shortMessage: $"{label} still in crash backoff an hour on — escalated",
                     numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
-                    cancellationToken);
+                    cancellationToken,
+                    context: new AlertContext { PolicyJobStep = AlertContextSerializer.PolicyJobStepEscalated });
                 NoteStateSend(band.Metric, key, delivery);
             }
             else if (episode.State == PolicyJobHealth.ReArmed)
@@ -9037,7 +9048,8 @@ WHERE c.is_enabled";
                     severity: band.Severity,
                     shortMessage: $"{label} re-hung after self-heal — escalated",
                     numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
-                    cancellationToken);
+                    cancellationToken,
+                    context: new AlertContext { PolicyJobStep = AlertContextSerializer.PolicyJobStepEscalated });
                 NoteStateSend(band.Metric, key, delivery);
             }
             else
@@ -9058,11 +9070,14 @@ WHERE c.is_enabled";
                         severity: band.Severity,
                         shortMessage: $"{label} still stuck after escalation",
                         numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
-                        cancellationToken);
+                        cancellationToken,
+                        context: new AlertContext { PolicyJobStep = AlertContextSerializer.PolicyJobStepEscalated });
                     NoteStateSend(band.Metric, key, delivery);
                 }
             }
         }
+
+        await CloseEndedPolicyJobEpisodesAsync(reading, stillStuck, cancellationToken);
 
         /* Recovery: any job we were tracking that is no longer stuck has recovered — drop its state and write
            one resolution row (the sibling conditions' edge shape). ToList() so the removal does not mutate the
@@ -9096,12 +9111,10 @@ WHERE c.is_enabled";
                 continue;
             }
 
-            await RecordResolutionAsync(new AlertResolution(
-                StoreKey(band.KeyPrefix + key), _storeLabel, band.Metric,
-                band.RecoveredMetric,
-                $"TimescaleDB {band.Noun} {key} is running on schedule again"), cancellationToken);
+            await RecordPolicyJobRecoveredAsync(band, key, cancellationToken);
         }
 
+        _policyJobFirstPassDone = true;
         await ApplyPolicyJobFailuresAsync(reading.Jobs, now, cancellationToken);
         LogPolicyJobSummary(census, rearmed, fired, alertsEnabled: true);
     }
@@ -9976,7 +9989,8 @@ ORDER BY ag_name, database_name, replica_server_name";
     /// carries the resolution title, and still reads as resolved.</para>
     /// </summary>
     public static AlertHistoryRecord BuildResolutionRecord(AlertResolution resolution, string? contextJson = null) =>
-        AlertResolutionRecords.BuildResolutionRecord(resolution, contextJson);
+        AlertResolutionRecords.BuildResolutionRecord(resolution, contextJson)
+            with { AlertKey = StoredAlertKey(resolution.ServerKey, resolution.MetricName) };
 
     /// <summary>The member of a resolution row's <c>context_json</c> that names the metric the row resolves (#6003); shared with Lite (#6010).</summary>
     public const string ResolvesMember = AlertResolutionRecords.ResolvesMember;
@@ -10367,8 +10381,8 @@ ORDER BY ag_name, database_name, replica_server_name";
     /// Undelivered, Collection Falling Behind) are read from <c>server_id</c> 0 by their metric name
     /// (<see cref="AlertHistoryServerIdentity.FleetSingleKeyMetrics"/>). The per-job and per-cost-key fleet alerts (Store Job
     /// Over Cadence, Retention Held, Raw Purge Over Horizon, Compose Rollup Hours Stuck, the Policy Job bands) write every key
-    /// under <c>server_id</c> 0 and one server name, so only free text tells their keys apart: the store answers them with no
-    /// row, and their seed does nothing against PostgreSQL or DuckDB.</para>
+    /// under <c>server_id</c> 0 and one server name, so since V234 (#7076) they are told apart by the exact <c>alert_key</c> their rows
+    /// carry (<see cref="KeyedFleetMetrics"/>) and read by it. Rows from before V234 have no key and are not matched.</para>
     /// </summary>
     private static readonly Dictionary<string, string[]> StateAlertResolutionTitles =
         new Dictionary<string, string[]>(StringComparer.Ordinal)
@@ -10389,6 +10403,127 @@ ORDER BY ag_name, database_name, replica_server_name";
             [RawPurgeOverHorizonMetric] = new[] { RawPurgeOverHorizonClearedMetric },
             [ComposeHoursStuckMetric] = new[] { ComposeHoursStuckClearedMetric },
         };
+
+    /// <summary>
+    /// #7076: the store-wide alerts that share one metric name across many keys (a job, a policy) and so write every key under
+    /// <c>server_id</c> 0. Their fire and resolution rows carry the exact key in <c>alert_key</c> (V234), and the restart seed reads
+    /// them by it. The three single-key fleet alerts are not here: their metric name already is their key
+    /// (<see cref="AlertHistoryServerIdentity.FleetSingleKeyMetrics"/>).
+    /// </summary>
+    private static readonly HashSet<string> KeyedFleetMetrics = new(StringComparer.Ordinal)
+    {
+        JobCadenceMetric, RetentionHoldMetric, RawPurgeOverHorizonMetric, ComposeHoursStuckMetric,
+        CompressionJobMetric, RefreshJobStuckMetric, RetentionJobStuckMetric,
+    };
+
+    /// <summary>
+    /// #7076: the <c>alert_key</c> a row is stored with: the same key string the alert is delivered and tracked under
+    /// (<paramref name="serverKey"/>) when <paramref name="firingMetric"/> is one of <see cref="KeyedFleetMetrics"/>, else null. A
+    /// resolution row passes the metric it resolves, so a clear carries its fire's key.
+    /// </summary>
+    internal static string? StoredAlertKey(string serverKey, string firingMetric) =>
+        KeyedFleetMetrics.Contains(firingMetric) && !string.IsNullOrEmpty(serverKey) ? serverKey : null;
+
+    private Task RecordPolicyJobRecoveredAsync(PolicyJobBand band, string key, CancellationToken cancellationToken) =>
+        RecordResolutionAsync(new AlertResolution(
+            StoreKey(band.KeyPrefix + key), _storeLabel, band.Metric,
+            band.RecoveredMetric,
+            $"TimescaleDB {band.Noun} {key} is running on schedule again"), cancellationToken);
+
+    /// <summary>
+    /// #7076: a job that is healthy now but whose last fire row is still open in the alert history ended its episode while no process
+    /// was watching it (it cleared while the service was down, so no in-memory state existed for the recovery loop to resolve). Its
+    /// resolution row is written here, once per job per process, so a later restart cannot seed a new stuck episode from the old row and
+    /// skip the auto-re-arm. A job this process already tracks is left to the recovery loop. A failed read is logged and counted, and the
+    /// jobs not yet checked are tried again on the next pass.
+    /// </summary>
+    private async Task CloseEndedPolicyJobEpisodesAsync(
+        StorePolicyJobHealth reading, HashSet<string> stillStuck, CancellationToken cancellationToken)
+    {
+        foreach (var job in reading.Jobs)
+        {
+            var key = job.JobId.ToString(CultureInfo.InvariantCulture);
+            if (stillStuck.Contains(key) || job.Family == TimescaleSupport.StorePolicyJobFamily.Other || _policyJobEndedChecked.Contains(key))
+            {
+                continue;
+            }
+
+            if (_policyJobState.ContainsKey(key))
+            {
+                _policyJobEndedChecked.Add(key);
+                continue;
+            }
+
+            var band = PolicyJobBand.For(job.Family);
+            var historyKey = StoreKey(band.KeyPrefix + key);
+            bool episodeStillOpen;
+            var readClock = Stopwatch.StartNew();
+            try
+            {
+                var rows = await _historyStore.GetKeyedStandingAsync(
+                    historyKey, band.Metric, new[] { band.RecoveredMetric }, null, _serviceStartUtc);
+                _policyJobEndedChecked.Add(key);
+                episodeStillOpen = rows.OpenFor(_ => true, null) is not null;
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning("Could not read the open {Metric} incident for {Key} from alert history after {ElapsedMs} ms; an ended incident may stay open until the next pass: {Message}", band.Metric, historyKey, readClock.ElapsedMilliseconds, ex.Message);
+                /* The policy job store key is never a server, so it counts under the fleet bucket, the way the seed read does. */
+                var countKey = int.TryParse(historyKey, NumberStyles.Integer, CultureInfo.InvariantCulture, out _) ? historyKey : null;
+                _readFailures?.RecordReadFailure(countKey, "policy job ended-episode close self-alert", readClock.ElapsedMilliseconds);
+                return;
+            }
+
+            if (episodeStillOpen)
+            {
+                await RecordPolicyJobRecoveredAsync(band, key, cancellationToken);
+            }
+        }
+    }
+
+    /// <summary>
+    /// #7076: a stuck policy job found on this process's first pass is seeded at its last announced step when the alert history holds an
+    /// open fire row for its exact key. The row records the step it announced (<see cref="AlertContext.PolicyJobStep"/>). A job whose last
+    /// row was the auto-re-arm page is seeded re-armed, so this pass sends the "re-hung" escalation it was owed. A job whose last row was the
+    /// escalation or a repeat, or whose row carries no step (written before the step existed), is seeded escalated: no second auto-re-arm, no
+    /// second page, and a repeat only per connection_refire_minutes from the fire row's time. No open row (never announced, or a resolution row
+    /// is newer) seeds nothing and the job is handled as a new episode. A failed read is logged and handled the same way.
+    /// </summary>
+    private async Task SeedStandingPolicyJobAsync(
+        PolicyJobBand band, TimescaleSupport.StorePolicyJobFamily family, string key, CancellationToken cancellationToken)
+    {
+        var historyKey = StoreKey(band.KeyPrefix + key);
+        var seedClock = Stopwatch.StartNew();
+        try
+        {
+            var rows = await _historyStore.GetKeyedStandingAsync(
+                historyKey, band.Metric, new[] { band.RecoveredMetric }, null, _serviceStartUtc);
+            if (rows.OpenFor(_ => true, null) is { } standing)
+            {
+                /* The step the row announced: a re-arm page that no escalation has followed leaves the job owed its "re-hung" page, which
+                   the ReArmed state sends on this pass. A row with no step (written before it existed) is seeded escalated. */
+                var step = AlertContextSerializer.TryReadPolicyJobStep(standing.ContextJson);
+                _policyJobState[key] = new PolicyJobEpisode(
+                    step == AlertContextSerializer.PolicyJobStepReArmed ? PolicyJobHealth.ReArmed : PolicyJobHealth.Escalated, family);
+                _lastPolicyJobAlert[key] = standing.FireAtUtc;
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning("Could not read the open {Metric} incident for {Key} from alert history after {ElapsedMs} ms; a stuck job may be announced again after this restart: {Message}", band.Metric, historyKey, seedClock.ElapsedMilliseconds, ex.Message);
+            /* The policy job store key is never a server, so it counts under the fleet bucket, the way the state alerts' seed does. */
+            var countKey = int.TryParse(historyKey, NumberStyles.Integer, CultureInfo.InvariantCulture, out _) ? historyKey : null;
+            _readFailures?.RecordReadFailure(countKey, "policy job standing seed self-alert", seedClock.ElapsedMilliseconds);
+        }
+    }
 
     /// <summary>#7068: the state alerts whose seed has been decided this process, by <see cref="StateRetryKey"/>.</summary>
     private readonly ConcurrentDictionary<string, bool> _standingSeedDone = new(StringComparer.Ordinal);
@@ -10429,7 +10564,11 @@ ORDER BY ag_name, database_name, replica_server_name";
             /* One store read per server and metric per process start, shared by every grain of it. */
             if (!_standingReads.TryGetValue(readKey, out var standingRows))
             {
-                standingRows = await _historyStore.GetStandingAsync(historyKey, metric, titles, null, _serviceStartUtc);
+                /* #7076: a store-wide alert keyed by job is found by its exact key; every other alert by its server id. */
+                var standingRead = KeyedFleetMetrics.Contains(metric)
+                    ? _historyStore.GetKeyedStandingAsync(historyKey, metric, titles, null, _serviceStartUtc)
+                    : _historyStore.GetStandingAsync(historyKey, metric, titles, null, _serviceStartUtc);
+                standingRows = await standingRead;
                 _standingReads[readKey] = standingRows;
             }
 

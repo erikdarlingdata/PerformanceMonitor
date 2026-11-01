@@ -25,7 +25,7 @@
  * el()/textContent.
  */
 
-import { storeHash, storeHeaders, el, mount, readTool, loadingStrip, errorStrip, emptyStrip, localTime, reportSessionExpired } from "../util.js";
+import { storeHash, storeHeaders, el, mount, readTool, loadingStrip, errorStrip, emptyStrip, localTime, reportSessionExpired, networkErrorText } from "../util.js";
 import * as api from "../alerts-api.js";
 
 /** The editable text scope/pattern fields, in form order, with their labels. `reason` and the expiry follow. */
@@ -235,7 +235,7 @@ async function send(method, path, body) {
       body: body === undefined ? undefined : JSON.stringify(body),
     });
   } catch (e) {
-    return { kind: "error", message: "Network error: " + (e && e.message ? e.message : String(e)) };
+    return { kind: "error", message: networkErrorText(e) };
   }
   let parsed = null;
   try {

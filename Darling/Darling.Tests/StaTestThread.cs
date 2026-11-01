@@ -361,10 +361,10 @@ internal sealed class StaHost
             var step = _step;
             var stepAgo = Environment.TickCount64 - Interlocked.Read(ref _stepTick);
             var startedBefore = Interlocked.Read(ref _opsStarted);
-            var cpuBefore = ReadThread(out _);
+            var cpuBefore = ReadThread(out _, out _);
             Darling.Tests.TestWait.Elapse(s_sampleWindow);
             var startedAfter = Interlocked.Read(ref _opsStarted);
-            var cpuAfter = ReadThread(out var threadState);
+            var cpuAfter = ReadThread(out var threadState, out var inWait);
             var running = startedAfter - Interlocked.Read(ref _opsCompleted);
             var last = _lastStarted;
             var lastName = last is null
@@ -373,9 +373,15 @@ internal sealed class StaHost
                     + $"{Environment.TickCount64 - Interlocked.Read(ref _lastStartedTick)} ms ago";
             var cpu = cpuAfter - cpuBefore;
             var ran = startedAfter - startedBefore;
-            var verdict = cpu.TotalMilliseconds >= s_sampleWindow.TotalMilliseconds / 2
-                ? (ran > 0 ? "it is still running dispatcher work that does not end" : "it is spinning inside one call")
-                : (ran > 0 ? "it is mostly waiting while the dispatcher still runs operations" : "it is waiting, and the dispatcher has nothing to run");
+            /* #7081: operations started during the sample are the proof the dispatcher is still working, whatever CPU the thread got. Under load a
+               pumping thread can get well under half of the window's CPU, and the CPU reading alone called that a wait. CPU only tells the
+               two no-progress cases apart: one call burning CPU, or a thread with nothing to do. A spinner the scheduler kept off the CPU for the
+               sample is not in the wait state, so a thread that is not waiting counts as spinning too. */
+            var verdict = ran > 0
+                ? "it is still running dispatcher work that does not end"
+                : (cpu.TotalMilliseconds >= s_sampleWindow.TotalMilliseconds / 2 || !inWait
+                    ? "it is spinning inside one call"
+                    : "it is waiting, and the dispatcher has nothing to run");
             return $"Where it was: the body's last step was \"{step}\", named {stepAgo} ms ago. "
                 + $"The dispatcher started {startedBefore - opsAtStart} operations during the body and {ran} more in the next {s_sampleWindow.TotalMilliseconds:0} ms, "
                 + $"{running} of them still running; the last it started was {lastName}. "
@@ -388,18 +394,20 @@ internal sealed class StaHost
     }
 
     /// <summary>The host thread's CPU time and state, read from the process's thread list by the native id taken when the thread started.</summary>
-    private TimeSpan ReadThread(out string state)
+    private TimeSpan ReadThread(out string state, out bool inWait)
     {
         using var process = System.Diagnostics.Process.GetCurrentProcess();
         foreach (System.Diagnostics.ProcessThread thread in process.Threads)
         {
             if (thread.Id == _nativeThreadId)
             {
-                state = thread.ThreadState == System.Diagnostics.ThreadState.Wait ? $"Wait ({thread.WaitReason})" : thread.ThreadState.ToString();
+                inWait = thread.ThreadState == System.Diagnostics.ThreadState.Wait;
+                state = inWait ? $"Wait ({thread.WaitReason})" : thread.ThreadState.ToString();
                 return thread.TotalProcessorTime;
             }
         }
 
+        inWait = true;
         state = "not in the process's thread list";
         return TimeSpan.Zero;
     }

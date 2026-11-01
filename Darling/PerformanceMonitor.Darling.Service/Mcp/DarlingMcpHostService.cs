@@ -241,7 +241,7 @@ public sealed class DarlingMcpHostService : BackgroundService
                 catch (Exception ex)
                 {
                     _logger.LogWarning(
-                        "MCP server configuration could not be loaded ({Message}) — retrying in {Backoff}s. The worker logs a missing/broken config as critical; a transient read failure self-heals here.",
+                        "MCP server configuration could not be loaded ({Message}). Retrying in {Backoff}s. The service log shows a missing or broken configuration at Critical level. A short read failure clears itself on the next try.",
                         ex.Message, (int)FailedStartBackoff.TotalSeconds);
                     lastFailedStartUtc = DateTime.UtcNow;
                 }
@@ -477,7 +477,7 @@ public sealed class DarlingMcpHostService : BackgroundService
                     if (!namedOnly && string.IsNullOrWhiteSpace(token))
                     {
                         _logger.LogCritical(
-                            "MCP network token resolved to empty after decryption; MCP server not started.");
+                            "MCP network token (mcp.network.encryptedToken) decrypted to an empty value. Re-create it with PerformanceMonitor.Darling.Service.exe --encrypt-password. MCP server not started.");
                         await DisposeFailedStartAsync();
                         return false;
                     }
@@ -513,7 +513,7 @@ public sealed class DarlingMcpHostService : BackgroundService
                 catch (Exception ex)
                 {
                     _logger.LogCritical(
-                        "MCP network token could not be decrypted ({Message}); MCP server not started.",
+                        "MCP network token (mcp.network.encryptedToken) could not be decrypted ({Message}). MCP server not started. A token made on another machine or account cannot be read here. Run PerformanceMonitor.Darling.Service.exe --encrypt-password on this machine and put the new value in mcp.network.encryptedToken. On another OS, remove it and set mcp.network.token to an env: or file: reference.",
                         ex.Message);
                     await DisposeFailedStartAsync();
                     return false;
@@ -2113,7 +2113,7 @@ public sealed class DarlingMcpHostService : BackgroundService
             if (string.IsNullOrWhiteSpace(token))
             {
                 logger.LogCritical(
-                    "MCP network token resolved to empty after decryption — refusing to serve the loopback listener without it; MCP server not started.");
+                    "MCP network token (mcp.network.encryptedToken) decrypted to an empty value. Re-create it with PerformanceMonitor.Darling.Service.exe --encrypt-password. The loopback listener is not served without a token, so the MCP server is not started.");
                 return new LoopbackTokenResolution(true, "");
             }
 
@@ -2135,7 +2135,7 @@ public sealed class DarlingMcpHostService : BackgroundService
         catch (Exception ex)
         {
             logger.LogCritical(
-                "MCP network token could not be decrypted ({Message}) — refusing to serve the loopback listener without it; MCP server not started.",
+                "MCP network token (mcp.network.encryptedToken) could not be decrypted ({Message}). The loopback listener is not served without a token, so the MCP server is not started. A token made on another machine or account cannot be read here. Run PerformanceMonitor.Darling.Service.exe --encrypt-password on this machine and put the new value in mcp.network.encryptedToken. On another OS, remove it and set mcp.network.token to an env: or file: reference.",
                 ex.Message);
             return new LoopbackTokenResolution(true, "");
         }
@@ -2651,9 +2651,9 @@ public sealed class DarlingMcpHostService : BackgroundService
 
             case McpBindReason.ManagedModeRequired:
                 _logger.Log(level.Value,
-                    "mcp.network.* is set but postgres.managed = false — MCP network exposure is managed-mode (or container, #1804) " +
-                    "only, so listen and allowFrom are ignored; your own PostgreSQL/reverse proxy governs uncontained BYO exposure. " +
-                    "Binding loopback-only. A token in the block (mcp.network.encryptedToken / token) still gates the loopback listener.");
+                    "mcp.network.* is set but postgres.managed = false. MCP network exposure is available only with the bundled store " +
+                    "(postgres.managed = true) or the container distribution, so listen and allowFrom are ignored. " +
+                    "Use your own reverse proxy to expose it. Binding loopback-only. A token in the block (mcp.network.encryptedToken / token) still gates the loopback listener.");
                 break;
 
             default:

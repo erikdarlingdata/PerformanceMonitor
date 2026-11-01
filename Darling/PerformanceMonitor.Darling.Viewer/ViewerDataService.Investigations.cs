@@ -526,6 +526,22 @@ VALUES ($1, $2, $3, $4, $5)";
         }
     }
 
+    /// <summary>
+    /// The text a window shows for an exception from an investigation write (#7077). An <see cref="ArgumentException"/>
+    /// carrying a refusal sentence ends its <see cref="Exception.Message"/> with " (Parameter 'login')", a code name the
+    /// person cannot act on, so that suffix is removed. Any other exception's message comes back unchanged.
+    /// </summary>
+    internal static string InputErrorText(Exception ex)
+    {
+        var message = ex.Message;
+        if (ex is ArgumentException { ParamName: { Length: > 0 } name })
+        {
+            message = message.Replace($" (Parameter '{name}')", "", StringComparison.Ordinal);
+        }
+
+        return message;
+    }
+
     /// <summary>The login the actor names: not blank, and the undo path's person shape (1 to 256 characters: letters, digits, single spaces, a few punctuation marks).</summary>
     public static string? ValidateInvestigationLogin(string? login) => InvestigationPersonWrites.ValidateLogin(login);
 

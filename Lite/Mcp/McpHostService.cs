@@ -473,7 +473,7 @@ public sealed class McpHostService : BackgroundService
         }
         catch (Exception ex)
         {
-            AppLogger.Error("MCP", $"MCP server failed: {ex.Message}");
+            AppLogger.Error("MCP", $"The MCP server on port {_port} stopped with an error: {ex.Message}. If another program uses that port, change the MCP port in Settings and restart Lite.");
         }
     }
 

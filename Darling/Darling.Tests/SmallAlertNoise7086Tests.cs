@@ -88,6 +88,58 @@ public sealed class SmallAlertNoise7086Tests
         Assert.Equal("1 deadlock in the last hour", outcome.ShortMessage);
     }
 
+    /* The victim (process1) is the user's session and the monitor's session (process2) survived. */
+    private static DeadlockAlertRow RowWithMonitorSurvivor(string survivorApp = "PerformanceMonitorDarling")
+    {
+        var row = AlertEngineTests.DeadlockRow();
+        row.DeadlockGraphXml = row.DeadlockGraphXml.Replace(
+            "<process id=\"process1\"", "<process id=\"process1\" clientapp=\"MyApp\"", StringComparison.Ordinal)
+            .Replace("<process id=\"process2\"", $"<process id=\"process2\" clientapp=\"{survivorApp}\"", StringComparison.Ordinal);
+        return row;
+    }
+
+    [Theory]
+    [InlineData("PerformanceMonitorDarling")]
+    [InlineData("PerformanceMonitorLite")]
+    public async Task Deadlock_WhereAUserSessionIsTheVictim_AndTheMonitorSurvived_StillAlerts(string survivor)
+    {
+        var h = DeadlockHarness();
+        h.Adapter.Deadlocks.Add(RowWithMonitorSurvivor(survivor));
+
+        await SweepAsync(h, h.Build());
+
+        var outcome = Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == Deadlocks);
+        Assert.Equal("1 deadlock in the last hour", outcome.ShortMessage);
+    }
+
+    [Fact]
+    public async Task Deadlock_WhereTheMonitorIsTheVictim_AndAUserSessionSurvived_StaysLeftOut()
+    {
+        var h = DeadlockHarness();
+        var row = AlertEngineTests.DeadlockRow();
+        row.DeadlockGraphXml = row.DeadlockGraphXml.Replace(
+            "<process id=\"process1\"", "<process id=\"process1\" clientapp=\"PerformanceMonitorLite\"", StringComparison.Ordinal)
+            .Replace("<process id=\"process2\"", "<process id=\"process2\" clientapp=\"MyApp\"", StringComparison.Ordinal);
+        h.Adapter.Deadlocks.Add(row);
+
+        await SweepAsync(h, h.Build());
+
+        Assert.DoesNotContain(h.Deliverer.Outcomes, o => o.MetricName == Deadlocks);
+    }
+
+    [Fact]
+    public void VictimIsMonitorSession_ReadsTheVictimList_WhenTheStoredVictimIdIsBlank()
+    {
+        var monitorVictim = RowFor("PerformanceMonitorDarling").DeadlockGraphXml;
+        var userVictim = RowWithMonitorSurvivor().DeadlockGraphXml;
+
+        Assert.True(MonitorApplicationNames.VictimIsMonitorSession(monitorVictim, ""));
+        Assert.False(MonitorApplicationNames.VictimIsMonitorSession(userVictim, ""));
+        Assert.False(MonitorApplicationNames.VictimIsMonitorSession(userVictim, "process1"));
+        /* No victim can be found in the graph: it is never called the monitor's. */
+        Assert.False(MonitorApplicationNames.VictimIsMonitorSession(monitorVictim.Replace("victimProcess id=\"process1\"", "victimProcess id=\"nope\"", StringComparison.Ordinal), ""));
+    }
+
     [Fact]
     public void MonitorApplicationNames_AreTheOnesTheCollectorsConnectWith()
     {
@@ -95,7 +147,7 @@ public sealed class SmallAlertNoise7086Tests
         Assert.True(MonitorApplicationNames.IsMonitorApplication(MonitorApplicationNames.Lite));
         Assert.False(MonitorApplicationNames.IsMonitorApplication("Microsoft SQL Server Management Studio"));
         Assert.False(MonitorApplicationNames.IsMonitorApplication(null));
-        Assert.False(MonitorApplicationNames.GraphHasMonitorSession("not xml"));
+        Assert.False(MonitorApplicationNames.VictimIsMonitorSession("not xml", "process1"));
     }
 
     [Fact]

@@ -2982,6 +2982,7 @@ $rung$;";
         new Migration(231, "mute-rule-recurrence", V231Sql),
         new Migration(232, "daily-health-report", V232Sql),
         new Migration(233, "notification-route-report-notice", V233Sql),
+        new Migration(234, "alert-log-alert-key", V234Sql),
         new Migration(235, "blocking-pages-on-wait-time-defaults", V235Sql),
         new Migration(236, "mute-rule-action", V236Sql),
     };
@@ -3223,6 +3224,18 @@ BEGIN
     END IF;
 END
 $$;";
+
+    /// <summary>
+    /// V234 (#7076): <c>config.config_alert_log.alert_key</c>, the exact key of a store-wide alert whose rows are written under
+    /// <c>server_id</c> 0 (Store Job Over Cadence, Retention Held, Raw Purge Over Horizon, Compose Rollup Hours Stuck and the Policy Job
+    /// bands, with their resolution rows). Many keys share one metric name there, so only free text told them apart and a restart could
+    /// not find an alert's own open row. Nullable with no default, so it is catalog-only, and every row written before this rung reads
+    /// NULL: those alerts announce once after the upgrade and stay quiet after. No backfill, no view refresh, no GRANT (the alert log
+    /// keeps its table-wide SELECT). Idempotent. An older build ignores the column. <b>No Lite twin</b>: Lite never writes these alerts.
+    /// </summary>
+    private const string V234Sql = @"
+ALTER TABLE config.config_alert_log
+    ADD COLUMN IF NOT EXISTS alert_key text;";
 
     /// <summary>
     /// V189 (#5867): <c>collect.query_store_compose_stamp_failures</c>, the failure record of the Query Store compose builder: one row

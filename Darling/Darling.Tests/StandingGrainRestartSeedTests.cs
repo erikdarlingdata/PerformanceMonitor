@@ -167,6 +167,9 @@ public sealed class StandingGrainRestartSeedTests
 
         var card = Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == ForcePlanTokens.MetricName);
         Assert.Contains("22", card.ShortMessage ?? card.DetailText ?? string.Empty, StringComparison.Ordinal);
+        /* #7086: plan 22 is news again, and the first failure of a plan is held rather than paged. Plan 23's open row still
+           covers it, so only 22 is announced at all. */
+        Assert.NotNull(card.Hold);
     }
 
     [Fact]
@@ -183,7 +186,10 @@ public sealed class StandingGrainRestartSeedTests
         SetPlans(h, 22, 23);
         await SweepAsync(h, engine);
 
-        Assert.Equal(1, Cards(h, ForcePlanTokens.MetricName));
+        /* Plan 22 is news again: its first failure is held (#7086), and plan 23, still covered by its open row, stays quiet. */
+        var card = Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == ForcePlanTokens.MetricName);
+        Assert.NotNull(card.Hold);
+        Assert.Contains("plan 22", card.ShortMessage ?? string.Empty, StringComparison.Ordinal);
     }
 
     // ---- names that start with another name (the match is on the exact field, not a substring) ---------------------
@@ -236,6 +242,77 @@ public sealed class StandingGrainRestartSeedTests
 
         await SweepAsync(h, h.Build());
 
+        Assert.Equal(1, Cards(h, Growth));
+    }
+
+    // ---- a card shows five files, the fire remembers all of them (#7068) ------------------------------------------
+
+    private static string[] Files(int count) => Enumerable.Range(1, count).Select(i => $"tempdev{i}").ToArray();
+
+    /// <summary>Runs one sweep on a fresh engine with no history and returns the context the file growth fire stored.</summary>
+    private static async Task<string> FireOnceAsync(params string[] files)
+    {
+        var h = Armed();
+        SetFiles(h, files);
+        await SweepAsync(h, h.Build());
+        var fire = Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == Growth);
+        return AlertContextSerializer.Serialize(fire.Context!);
+    }
+
+    [Fact]
+    public async Task EightFilesBreachedAtOnce_AfterARestart_FireNothing_ForAnyOfThem()
+    {
+        /* The tempdb layout: eight equal data files growing together. The card lists five, so the stored details name
+           only five, and files six to eight used to be announced again after every restart. */
+        var stored = await FireOnceAsync(Files(8));
+
+        var h = Armed();
+        SetFiles(h, Files(8));
+        h.OpenFireReader = (_, _) => Task.FromResult(AlertHistoryStanding.Of(new AlertHistoryFire(T0.AddDays(-1), 0, stored)));
+        var engine = h.Build();
+
+        await SweepAsync(h, engine);
+        await SweepAsync(h, engine);
+
+        Assert.Equal(0, Cards(h, Growth));
+    }
+
+    [Fact]
+    public async Task AfterARestart_ANinthFile_ThatWasNotBreachedBefore_Fires()
+    {
+        var stored = await FireOnceAsync(Files(8));
+
+        var h = Armed();
+        SetFiles(h, Files(9));
+        h.OpenFireReader = (_, _) => Task.FromResult(AlertHistoryStanding.Of(new AlertHistoryFire(T0.AddDays(-1), 0, stored)));
+
+        await SweepAsync(h, h.Build());
+
+        Assert.Equal(1, Cards(h, Growth));
+    }
+
+    [Fact]
+    public async Task ARowWrittenBeforeTheFileList_StillSeedsThroughItsDetails()
+    {
+        /* The same fire with the file list cleared: what an older build stored. */
+        var h0 = Armed();
+        SetFiles(h0, Files(3));
+        await SweepAsync(h0, h0.Build());
+        var context = Assert.Single(h0.Deliverer.Outcomes, o => o.MetricName == Growth).Context!.ShallowCopy();
+        context.FileGrowthFiles = null;
+        var stored = AlertContextSerializer.Serialize(context);
+
+        var h = Armed();
+        SetFiles(h, Files(3));
+        h.OpenFireReader = (_, _) => Task.FromResult(AlertHistoryStanding.Of(new AlertHistoryFire(T0.AddDays(-1), 0, stored)));
+        var engine = h.Build();
+        await SweepAsync(h, engine);
+        await SweepAsync(h, engine);
+        Assert.Equal(0, Cards(h, Growth));
+
+        /* And a fourth file, which no detail names, is news. */
+        SetFiles(h, Files(4));
+        await SweepAsync(h, engine);
         Assert.Equal(1, Cards(h, Growth));
     }
 

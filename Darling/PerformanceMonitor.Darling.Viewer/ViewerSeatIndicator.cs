@@ -84,7 +84,7 @@ internal static class ViewerSeatIndicator
     };
 
     internal const string LocalDefaultSentence =
-        "A seat on the service host connects as postgres.connectAs, which defaults to \"admin\" — read-write.";
+        "A seat on the service host, on the bundled store, connects as postgres.connectAs. It defaults to \"admin\", which is read-write.";
 
     internal const string NetworkDefaultSentence =
         "A seat reached over the LAN connects as postgres.network.role, which defaults to \"viewer\" — read-only.";
@@ -118,9 +118,7 @@ internal static class ViewerSeatIndicator
             + Environment.NewLine + Environment.NewLine
             + NothingIsWrittenSentence
             + Environment.NewLine + Environment.NewLine
-            + "To change it: set postgres.network.role to \"admin\" on the SERVICE host and restart the "
-            + "service (then re-run --export-viewer-config) for a LAN seat, or set postgres.connectAs to "
-            + "\"admin\" and restart the viewer for a seat on the service host.";
+            + "To change it: " + ViewerReadOnlyException.HowToConnectAsAdmin;
     }
 
     /* static readonly rather than const so the paragraph breaks come from Environment.NewLine, exactly as
