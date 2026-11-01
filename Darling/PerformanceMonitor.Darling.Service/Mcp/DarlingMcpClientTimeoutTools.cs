@@ -159,7 +159,9 @@ public sealed class DarlingMcpClientTimeoutTools
                 r.GetDateTime(0),
                 r.IsDBNull(1) ? null : r.GetString(1),
                 r.IsDBNull(2) ? null : r.GetString(2),
-                r.GetInt64(3)));
+                r.GetInt64(3),
+                r.GetInt64(4),
+                r.GetInt64(5)));
 
         /* No span (fewer than two runs) is "not observed": the answer never shows the detail, so it is not read. */
         var span = ClientTimeoutsRead.DetailSpan(runs);
@@ -189,7 +191,9 @@ public sealed class DarlingMcpClientTimeoutTools
                 r.IsDBNull(5) ? null : r.GetInt32(5),
                 r.IsDBNull(6) ? null : r.GetInt64(6),
                 r.IsDBNull(7) ? null : r.GetString(7),
-                r.IsDBNull(8) ? null : r.GetString(8)));
+                r.IsDBNull(8) ? null : r.GetString(8),
+                r.GetBoolean(9),
+                r.GetBoolean(10)));
 
         return (new AttentionWindow(runs, counts, groups, statements, databases, applications, TopHosts: hosts), samples);
     }

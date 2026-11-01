@@ -784,6 +784,18 @@ public static class AlertContextBuilders
                 $"{finding.ExcludedSamples:N0} of {finding.SampledEvents:N0} sampled events came from {AttentionEvaluator.ExcludedToolNames(finding.ExcludedSsmsSamples > 0, finding.ExcludedVsCodeSamples > 0)} cancelling their own metadata queries; they are left out of the rate judged")));
         }
 
+        if (finding.ShortSamples > 0)
+        {
+            reading.Fields.Add(("Under 1 ms", string.Create(CultureInfo.InvariantCulture,
+                $"{finding.ShortSamples:N0} of {finding.SampledEvents:N0} sampled events lasted under 1 ms (a cancel on a command that had already finished); they are left out of the rate judged")));
+        }
+
+        if (finding.AzdataMetadataSamples > 0)
+        {
+            reading.Fields.Add(("Azure Data Studio", string.Create(CultureInfo.InvariantCulture,
+                $"{finding.AzdataMetadataSamples:N0} of {finding.SampledEvents:N0} sampled events were Azure Data Studio metadata queries; they are left out of the rate judged")));
+        }
+
         if (finding.Bars is not null)
         {
             reading.Fields.Add(("Bar", AttentionEvaluator.BarSentence(finding)));
