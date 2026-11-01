@@ -7,7 +7,7 @@
  */
 
 /* Admin: a window onto what the desktop's Manage Servers, Notification Routes and Settings windows show.
-   Ten tabs (the first three each one existing read):
+   Eleven tabs (the first three each one existing read):
      Servers             GET /api/admin/servers (every configured server, enabled or not)
      Notification Routes get_notification_routes
      Alert Settings      get_alert_settings
@@ -19,6 +19,7 @@
      Agent changes       what agents changed and were refused, with Undo and the switch that turns agent changes off (#5917)
      Server actions      GET /api/server-actions, with the per-server action switches an admin store login can change (#6269)
      Environment Profiles GET /api/environment-profiles, edited as in the Viewer (#6264)
+     People              GET /api/people: people, their sign-ins and grants, kept by a signed-in admin, and the session's own sign-in key (#7107)
    Alert Settings changes nothing; Notification Routes edits the agent channel for a sign-in that can make changes (#6264). The Servers tab also lets a sign-in that can make changes edit one server in place
    (#5240): an Edit button on each row opens a form above the grid, filled from GET /api/admin/servers/{id}.
    The active tab rides in the hash (#/admin/<tab>) and in module scope, so the 60 s repaint keeps it.
@@ -33,6 +34,7 @@ import { writeNote, startPractice, writeAccess, SIGN_IN_SENTENCE, NOTE_MAX_LENGT
 import { dailyReportEditor } from "./admin-daily-report.js";
 import { buildAgentChanges, resetAgentChangesStatus } from "./admin-agent-changes.js";
 import { buildServerActions, resetServerActionsStatus } from "./admin-server-actions.js";
+import { buildPeople, resetPeopleStatus } from "./admin-people.js";
 import { buildProfiles, readAgentSetupAccess, routeColumns, routeEditorNodes, routeListOnlyNodes, routeUseText } from "./admin-agent-setup.js";
 
 export const SERVER_COLUMNS = [
@@ -726,6 +728,7 @@ const TABS = [
   { id: "agent-changes", label: "Agent changes" },
   { id: "server-actions", label: "Server actions" },
   { id: "profiles", label: "Environment Profiles" },
+  { id: "people", label: "People" },
 ];
 
 /* The tab last shown, so a repaint with a bare #/admin returns to it. */
@@ -2054,7 +2057,18 @@ const serverActionsContext = {
 };
 const buildServerActionsTab = (body, generation) => buildServerActions(body, generation, serverActionsContext);
 
-const BUILDERS = { servers: buildServers, routes: buildRoutes, settings: buildSettings, feedback: buildFeedback, practice: buildPractice, pending: buildPending, overrides: buildOverrides, "agent-changes": buildAgentChangesTab, profiles: buildProfilesTab, "server-actions": buildServerActionsTab };
+/* People (#7107) lives in its own file too, with the same helpers and the scope pickers' servers and tags. */
+const peopleContext = {
+  ...agentChangesContext,
+  readScopes,
+  repaint: () => {
+    if (shownTab === "people" && shownBody) return startBuilder("people", shownBody, ++renderGeneration);
+    return null;
+  },
+};
+const buildPeopleTab = (body, generation) => buildPeople(body, generation, peopleContext);
+
+const BUILDERS = { servers: buildServers, routes: buildRoutes, settings: buildSettings, feedback: buildFeedback, practice: buildPractice, pending: buildPending, overrides: buildOverrides, "agent-changes": buildAgentChangesTab, profiles: buildProfilesTab, "server-actions": buildServerActionsTab, people: buildPeopleTab };
 
 /* Run a tab's builder. A builder that throws leaves an error strip: in the Servers tab's table area when its boxes are on the
    page (the form above it is never replaced), else in the body. */
@@ -2101,6 +2115,7 @@ export function renderAdmin(main, tabId) {
     notesStatus = null;
     resetAgentChangesStatus();
     resetServerActionsStatus();
+    resetPeopleStatus();
     notice = tab.id === "servers" ? held : null;
     if (tab.id === "servers") held = null;
   }

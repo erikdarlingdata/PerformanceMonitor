@@ -33,7 +33,7 @@ export const MCP_TOOL_NAMES = [
   "get_health_parser_severe_errors", "get_health_parser_significant_waits", "get_health_parser_system_health",
   "get_identity_capacity", "get_index_usage", "get_investigation_evidence", "get_investigation_reports", "get_job_history", "get_latch_stats", "get_load_by_caller", "get_lock_wait_trend", "get_long_query_completions",
   "get_memory_clerks", "get_memory_grants", "get_memory_pressure_events", "get_memory_stats", "get_memory_trend",
-  "get_mute_rules", "get_notification_routes", "get_object_locking", "get_oversized_plan_backlog",
+  "get_mute_rules", "get_notification_routes", "get_object_locking", "get_oversized_plan_backlog", "get_people",
   "get_perfmon_stats", "get_perfmon_trend", "get_pg_autovacuum_health", "get_pg_blocking", "get_pg_buffer_usage",
   "get_pg_column_stats", "get_pg_cpu_utilization", "get_pg_database_stats", "get_pg_database_trend",
   "get_pg_deadlock_detail", "get_pg_deadlocks", "get_pg_extensions", "get_pg_index_bloat", "get_pg_index_usage",

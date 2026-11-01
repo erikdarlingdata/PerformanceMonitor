@@ -2985,6 +2985,7 @@ $rung$;";
         new Migration(234, "alert-log-alert-key", V234Sql),
         new Migration(235, "blocking-pages-on-wait-time-defaults", V235Sql),
         new Migration(236, "mute-rule-action", V236Sql),
+        new Migration(237, "people-identities-grants", V237Sql),
     };
 
     /// <summary>
@@ -3236,6 +3237,116 @@ $$;";
     private const string V234Sql = @"
 ALTER TABLE config.config_alert_log
     ADD COLUMN IF NOT EXISTS alert_key text;";
+
+    /// <summary>
+    /// V237 (#7107, child (a) of #6980): the people an administrator names, the identities that map a sign-in to one of them, and the
+    /// grants that will narrow what each may ask for, approve, undo or decide. Three new empty tables, so the rung moves no data:
+    /// <c>config.person</c> (a display name and an enabled flag), <c>config.person_identity</c> (a kind and an external id, unique for each
+    /// kind: <c>web</c> is a signed-in web seat's owner key, the 43-character base64url hash of the issuer and <c>sub</c>, never the display
+    /// name; <c>slack</c> is <c>team id:user id</c>) and <c>config.person_grant</c> (a person, a scope copied from a route's, one server, one tag
+    /// or neither for the fleet, and a capability, with a list of server action kinds for <c>request_level_3</c> and <c>approve</c>).
+    /// <para><b>No gate reads a grant yet</b>, so no current path changes. A grant's server and tag carry a foreign key with
+    /// <c>ON DELETE CASCADE</c>: a server id is a hash of its host, database and read-only flag, so a grant left behind by a removed server
+    /// would apply again when the same server is added back. The cascade drops the grant whichever login removes the server or tag (it runs
+    /// as the table's owner), and removing one is never blocked. Three partial unique indexes keep one grant per person, capability and
+    /// scope (a store can run PostgreSQL 14, which has no <c>NULLS NOT DISTINCT</c>).</para>
+    /// <para><b>Owner-only.</b> Only the store owner writes them (<c>PersonDirectory</c>, which journals every change in the same
+    /// transaction). Managed provisioning section 10e3 and <c>provision-roles.sql</c> step 3j3 take every privilege back from the four
+    /// roles, as for <c>config.config_server_actions</c>, and give SELECT back. The rung itself takes the writes back too, as V198 does, so a
+    /// store whose provisioning has not run again since the upgrade does not leave <c>admin</c> the default privileges' INSERT, UPDATE and
+    /// DELETE: every write privilege on the three tables, and every privilege on their identity sequences (a table's <c>REVOKE</c> does not
+    /// reach them, and their names are PostgreSQL's own for an identity column of a table made here), from <c>PUBLIC</c> and each of the four roles that exists. SELECT stays as the default privileges gave it. The journal
+    /// trigger's owner-only list is not in any rung (provisioning writes it), so the eight people events reach it when provisioning next
+    /// runs. Every statement is idempotent. <b>No Lite twin</b>: Lite has
+    /// no people.</para>
+    /// </summary>
+    private const string V237Sql = @"
+CREATE TABLE IF NOT EXISTS config.person
+(
+    person_id bigint GENERATED ALWAYS AS IDENTITY,
+    display_name text NOT NULL,
+    enabled boolean NOT NULL DEFAULT TRUE,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    created_by text NOT NULL,
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    updated_by text NOT NULL,
+    CONSTRAINT pk_person PRIMARY KEY (person_id),
+    CONSTRAINT ck_person_display_name CHECK (btrim(display_name) <> '' AND char_length(display_name) <= 128)
+);
+
+CREATE TABLE IF NOT EXISTS config.person_identity
+(
+    identity_id bigint GENERATED ALWAYS AS IDENTITY,
+    person_id bigint NOT NULL,
+    kind text NOT NULL,
+    external_id text NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    created_by text NOT NULL,
+    CONSTRAINT pk_person_identity PRIMARY KEY (identity_id),
+    CONSTRAINT fk_person_identity_person FOREIGN KEY (person_id) REFERENCES config.person (person_id),
+    CONSTRAINT uq_person_identity_kind_external UNIQUE (kind, external_id),
+    CONSTRAINT ck_person_identity_kind CHECK (kind IN ('slack', 'web')),
+    CONSTRAINT ck_person_identity_external_id CHECK (
+        (kind = 'web' AND external_id ~ '^[A-Za-z0-9_-]{43}$')
+        OR (kind = 'slack' AND external_id ~ '^[A-Z0-9]{1,32}:[A-Z0-9]{1,32}$'))
+);
+
+CREATE INDEX IF NOT EXISTS ix_person_identity_person ON config.person_identity (person_id);
+
+CREATE TABLE IF NOT EXISTS config.person_grant
+(
+    grant_id bigint GENERATED ALWAYS AS IDENTITY,
+    person_id bigint NOT NULL,
+    scope_server_id integer,
+    scope_tag_id integer,
+    capability text NOT NULL,
+    kinds text[] NOT NULL DEFAULT '{}',
+    created_at timestamptz NOT NULL DEFAULT now(),
+    created_by text NOT NULL,
+    CONSTRAINT pk_person_grant PRIMARY KEY (grant_id),
+    CONSTRAINT fk_person_grant_person FOREIGN KEY (person_id) REFERENCES config.person (person_id),
+    CONSTRAINT fk_person_grant_server FOREIGN KEY (scope_server_id) REFERENCES config.config_monitored_servers (server_id) ON DELETE CASCADE,
+    CONSTRAINT fk_person_grant_tag FOREIGN KEY (scope_tag_id) REFERENCES config.server_tags (id) ON DELETE CASCADE,
+    CONSTRAINT ck_person_grant_scope CHECK (scope_server_id IS NULL OR scope_tag_id IS NULL),
+    CONSTRAINT ck_person_grant_capability CHECK (capability IN ('ask', 'request_level_2', 'request_level_3', 'approve', 'undo', 'decide_note', 'feedback')),
+    CONSTRAINT ck_person_grant_kinds CHECK (
+        CASE WHEN capability IN ('request_level_3', 'approve')
+             THEN cardinality(kinds) >= 1
+                  AND kinds <@ ARRAY['force_plan', 'evict_plan', 'kill_session', 'recompile_module', 'create_plan_guide', 'drop_plan_guide']::text[]
+             ELSE cardinality(kinds) = 0
+        END)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_person_grant_server
+    ON config.person_grant (person_id, capability, scope_server_id) WHERE scope_server_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_person_grant_tag
+    ON config.person_grant (person_id, capability, scope_tag_id) WHERE scope_tag_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_person_grant_fleet
+    ON config.person_grant (person_id, capability) WHERE scope_server_id IS NULL AND scope_tag_id IS NULL;
+
+REVOKE ALL ON config.person, config.person_identity, config.person_grant FROM PUBLIC;
+REVOKE ALL ON SEQUENCE config.person_person_id_seq, config.person_identity_identity_id_seq, config.person_grant_grant_id_seq FROM PUBLIC;
+
+DO $do$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles AS r WHERE r.rolname = 'admin') THEN
+        REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON config.person, config.person_identity, config.person_grant FROM admin;
+        REVOKE ALL ON SEQUENCE config.person_person_id_seq, config.person_identity_identity_id_seq, config.person_grant_grant_id_seq FROM admin;
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles AS r WHERE r.rolname = 'viewer') THEN
+        REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON config.person, config.person_identity, config.person_grant FROM viewer;
+        REVOKE ALL ON SEQUENCE config.person_person_id_seq, config.person_identity_identity_id_seq, config.person_grant_grant_id_seq FROM viewer;
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles AS r WHERE r.rolname = 'web') THEN
+        REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON config.person, config.person_identity, config.person_grant FROM web;
+        REVOKE ALL ON SEQUENCE config.person_person_id_seq, config.person_identity_identity_id_seq, config.person_grant_grant_id_seq FROM web;
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles AS r WHERE r.rolname = 'mcp') THEN
+        REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON config.person, config.person_identity, config.person_grant FROM mcp;
+        REVOKE ALL ON SEQUENCE config.person_person_id_seq, config.person_identity_identity_id_seq, config.person_grant_grant_id_seq FROM mcp;
+    END IF;
+END
+$do$;";
 
     /// <summary>
     /// V189 (#5867): <c>collect.query_store_compose_stamp_failures</c>, the failure record of the Query Store compose builder: one row

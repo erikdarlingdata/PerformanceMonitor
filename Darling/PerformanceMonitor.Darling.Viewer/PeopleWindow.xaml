@@ -1,0 +1,110 @@
+<Window x:Class="PerformanceMonitor.Darling.Viewer.PeopleWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="People"
+        Height="620" Width="1080"
+        WindowStartupLocation="CenterOwner"
+        Icon="EDD.ico"
+        ResizeMode="CanResizeWithGrip"
+        Background="{DynamicResource BackgroundLightBrush}"
+        Foreground="{DynamicResource ForegroundBrush}">
+    <!-- #7107: the people the agents' approvals and requests will know: who they are, the identities they sign in with, and what they may do.
+         NotificationRoutesWindow's shape. Every change goes to the service as a command; the lists are read from the store. -->
+    <Window.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="ViewerDarkTheme.xaml"/>
+            </ResourceDictionary.MergedDictionaries>
+        </ResourceDictionary>
+    </Window.Resources>
+
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0" Text="People" FontSize="18" FontWeight="Bold" HorizontalAlignment="Left" Margin="0,0,0,4"/>
+        <TextBlock Grid.Row="1" TextWrapping="Wrap" HorizontalAlignment="Left" Margin="0,0,0,12" Foreground="{DynamicResource ForegroundMutedBrush}"
+                   Text="Name each person who works with the agents, map the identities they sign in with (a web sign-in key, a Slack account), and give them grants. Nothing reads a grant yet, so this changes what no one can do today. Only the store owner writes these lists: each change goes through the service and is journaled."/>
+
+        <Grid Grid.Row="2">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="12"/>
+                <ColumnDefinition Width="1.4*"/>
+            </Grid.ColumnDefinitions>
+
+            <Grid Grid.Column="0">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+                <Grid Grid.Row="0">
+                    <DataGrid x:Name="PeopleGrid" Style="{StaticResource DarkGrid}" CanUserDeleteRows="False" SelectionMode="Single"
+                              AutoGenerateColumns="False" IsReadOnly="True" SelectionChanged="PeopleGrid_SelectionChanged">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="Name" Binding="{Binding DisplayName}" Width="*"/>
+                            <DataGridTextColumn Header="State" Binding="{Binding StateDisplay}" Width="70"/>
+                            <DataGridTextColumn Header="Identities" Binding="{Binding IdentitiesDisplay}" Width="70"/>
+                            <DataGridTextColumn Header="Grants" Binding="{Binding GrantsDisplay}" Width="60"/>
+                            <DataGridTextColumn Header="Changed" Binding="{Binding UpdatedDisplay}" Width="120" SortMemberPath="UpdatedAtUtc"/>
+                        </DataGrid.Columns>
+                    </DataGrid>
+                    <TextBlock x:Name="EmptyMessage" Foreground="{DynamicResource ForegroundMutedBrush}" HorizontalAlignment="Center" VerticalAlignment="Center"
+                               TextWrapping="Wrap" TextAlignment="Center" MaxWidth="320" Visibility="Collapsed"/>
+                </Grid>
+                <StackPanel x:Name="PersonButtons" Grid.Row="1" Orientation="Horizontal" Margin="0,10,0,0">
+                    <Button Content="_Add person..." Width="110" Height="28" Margin="0,0,8,0" Click="AddPerson_Click"/>
+                    <Button Content="_Rename..." Width="90" Height="28" Margin="0,0,8,0" Click="RenamePerson_Click"/>
+                    <Button x:Name="ToggleButton" Content="_Disable" Width="90" Height="28" Click="TogglePerson_Click"/>
+                </StackPanel>
+            </Grid>
+
+            <Grid Grid.Column="2" x:Name="DetailPanel">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+                <TextBlock Grid.Row="0" x:Name="IdentitiesHeader" Text="Identities" FontWeight="Bold" Margin="0,0,0,4"/>
+                <DataGrid Grid.Row="1" x:Name="IdentitiesGrid" Style="{StaticResource DarkGrid}" CanUserDeleteRows="False" SelectionMode="Single"
+                          AutoGenerateColumns="False" IsReadOnly="True">
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="Kind" Binding="{Binding KindDisplay}" Width="100"/>
+                        <DataGridTextColumn Header="Id" Binding="{Binding ExternalId}" Width="*"/>
+                        <DataGridTextColumn Header="Added" Binding="{Binding AddedDisplay}" Width="190"/>
+                    </DataGrid.Columns>
+                </DataGrid>
+                <StackPanel x:Name="IdentityButtons" Grid.Row="2" Orientation="Horizontal" Margin="0,8,0,12">
+                    <Button Content="Map an _identity..." Width="140" Height="28" Margin="0,0,8,0" Click="AddIdentity_Click"/>
+                    <Button Content="Remove i_dentity" Width="120" Height="28" Click="RemoveIdentity_Click"/>
+                </StackPanel>
+                <TextBlock Grid.Row="3" x:Name="GrantsHeader" Text="Grants" FontWeight="Bold" Margin="0,0,0,4"/>
+                <DataGrid Grid.Row="4" x:Name="GrantsGrid" Style="{StaticResource DarkGrid}" CanUserDeleteRows="False" SelectionMode="Single"
+                          AutoGenerateColumns="False" IsReadOnly="True">
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="Capability" Binding="{Binding CapabilityDisplay}" Width="200"/>
+                        <DataGridTextColumn Header="Server actions" Binding="{Binding KindsDisplay}" Width="*"/>
+                        <DataGridTextColumn Header="Applies to" Binding="{Binding ScopeDisplay}" Width="170"/>
+                    </DataGrid.Columns>
+                </DataGrid>
+                <StackPanel x:Name="GrantButtons" Grid.Row="5" Orientation="Horizontal" Margin="0,8,0,0">
+                    <Button Content="Add a _grant..." Width="120" Height="28" Margin="0,0,8,0" Click="AddGrant_Click"/>
+                    <Button Content="Remove g_rant" Width="110" Height="28" Click="RemoveGrant_Click"/>
+                </StackPanel>
+            </Grid>
+        </Grid>
+
+        <Grid Grid.Row="3" Margin="0,12,0,0">
+            <TextBlock x:Name="StatusText" VerticalAlignment="Center" HorizontalAlignment="Left" TextWrapping="Wrap" MaxWidth="820"
+                       Foreground="{DynamicResource ForegroundMutedBrush}"/>
+            <Button Content="_Close" Width="80" Height="28" HorizontalAlignment="Right" Click="Close_Click" IsCancel="True"/>
+        </Grid>
+    </Grid>
+</Window>

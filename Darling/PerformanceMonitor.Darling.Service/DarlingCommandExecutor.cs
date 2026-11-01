@@ -418,6 +418,21 @@ WHERE status = 'in_progress'
                 return new CommandOutcome(result.Succeeded, result.Code ?? result.Status, result.ToJson().ToJsonString());
             }
 
+            case CommandKind.PersonDirectoryWrite:
+            {
+                /* #7107: an administrator's people directory write from the Viewer. The service's own store source is the owner source here
+                   (the only role that can write the people tables); the change is journaled as person:<requested_by>, surface viewer. */
+                if (!PersonDirectoryCommands.TryParse(command.CommandType, command.ArgsJson, out var personWrite, out var personUsage))
+                {
+                    return new CommandOutcome(false, "invalid args_json", ErrorJson(personUsage));
+                }
+
+                var result = await personWrite(_postgres, AgentChangeUndo.PersonActor(command.RequestedBy ?? string.Empty), ServerActionSurfaces.Viewer, cancellationToken);
+                _logger?.LogInformation("Command {Id} ({Type}) => {Status} {Code}", command.CommandId, (command.CommandType ?? string.Empty).Trim().ToLowerInvariant(),
+                    result.Status, result.Code); /* the type matched the fixed list; no caller text is logged */
+                return new CommandOutcome(result.Succeeded, result.Code ?? result.Status, result.ToJson().ToJsonString());
+            }
+
             default:
                 return new CommandOutcome(false, "unknown command_type", ErrorJson("unknown command_type"));
         }
@@ -580,6 +595,24 @@ WHERE status = 'in_progress'
                 return UndoPlanChangeArgs.LoginIsValid(command.RequestedBy)
                     ? new CommandPlan(CommandKind.SetServerAction, null, null, "server action switch set", null)
                     : Fail("set_server_action requires requested_by to be the person's login (1 to 64 letters, digits or . _ : - @ \\)");
+
+            case PersonDirectoryCommands.AddPerson:
+            case PersonDirectoryCommands.RenamePerson:
+            case PersonDirectoryCommands.SetPersonEnabled:
+            case PersonDirectoryCommands.AddIdentity:
+            case PersonDirectoryCommands.RemoveIdentity:
+            case PersonDirectoryCommands.AddGrant:
+            case PersonDirectoryCommands.RemoveGrant:
+                /* #7107: an administrator's people directory write, run in the service as the store owner. The arguments' shape is checked
+                   here and their values when it runs; requested_by is the administrator (a name PersonActor refuses is refused here). */
+                if (!PersonDirectoryCommands.TryParse(command.CommandType, command.ArgsJson, out _, out var personUsage))
+                {
+                    return Fail(personUsage);
+                }
+
+                return UndoPlanChangeArgs.LoginIsValid(command.RequestedBy)
+                    ? new CommandPlan(CommandKind.PersonDirectoryWrite, null, null, "people directory changed", null)
+                    : Fail(command.CommandType!.Trim().ToLowerInvariant() + " requires requested_by to be the person's login (1 to 256 characters: letters, digits, spaces and a few punctuation marks)");
 
             case "fetch_active_queries":
                 /* Worker-delegated like fetch_plan (needs the target's LIVE runtime connection to read what is
@@ -1162,6 +1195,11 @@ public enum CommandKind
     /// <summary><c>set_server_action</c> (#6269): a person turns one server's action switch on or off. Run in the service as the store owner,
     /// because no other role can write <c>config.config_server_actions</c>; the person is <c>requested_by</c>.</summary>
     SetServerAction,
+
+    /// <summary>The people directory writes (#7107, <see cref="PersonDirectoryCommands.Types"/>): an administrator adds, renames, enables or disables a
+    /// person, or adds or removes an identity or a grant. Run in the service as the store owner, because no other role can write the people tables;
+    /// the administrator is <c>requested_by</c>.</summary>
+    PersonDirectoryWrite,
 
     /// <summary><c>fetch_active_queries</c>: read the LIVE running-request DMV snapshot from a server on demand (via
     /// the host, running the shared Active Queries collector's query) and return the rows in result_json. Read-only.</summary>

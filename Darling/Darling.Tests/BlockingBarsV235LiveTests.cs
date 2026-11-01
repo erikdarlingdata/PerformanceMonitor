@@ -68,7 +68,7 @@ public sealed class BlockingBarsV235LiveTests
             Assert.Equal(233, await viewer.GetStoreSchemaVersionAsync(ct));
         }
 
-        Assert.Equal(2, await PgMigrations.MigrateAsync(connection, ct)); /* V235 and V236 */
+        Assert.Equal(StorageVersion.SchemaVersion - 234, await PgMigrations.MigrateAsync(connection, ct)); /* V235 and every rung above it */
 
         Assert.Equal("3/60/3", await BarsAsync(connection, ct));
         await using (var viewer = new ViewerDataService(scratch.ConnectionString))
@@ -86,7 +86,7 @@ public sealed class BlockingBarsV235LiveTests
         await ExecAsync(connection, "DELETE FROM darling_schema_version WHERE version >= 235", ct);
         await ExecAsync(connection,
             "UPDATE config.config_alert_settings SET blocking_count_threshold = 5, blocking_wait_seconds_threshold = 0, pg_blocking_count_threshold = 7 WHERE id = 1", ct);
-        Assert.Equal(2, await PgMigrations.MigrateAsync(connection, ct)); /* V235 and V236 */
+        Assert.Equal(StorageVersion.SchemaVersion - 234, await PgMigrations.MigrateAsync(connection, ct)); /* V235 and every rung above it */
         Assert.Equal("5/60/7", await BarsAsync(connection, ct));
     }
 }
