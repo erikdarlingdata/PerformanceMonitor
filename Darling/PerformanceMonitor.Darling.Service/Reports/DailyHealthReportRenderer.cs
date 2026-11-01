@@ -126,7 +126,7 @@ internal static class DailyHealthReportRenderer
 
         if (server.Alerts.Count > 0)
         {
-            sb.Append("\n  Alerts: ").Append(Capped(server.Alerts.Select(a => a.Metric + " x" + a.Count.ToString(CultureInfo.InvariantCulture))));
+            sb.Append("\n  Alerts: ").Append(Capped(server.Alerts.Select(a => a.Metric + " x" + a.Count.ToString(CultureInfo.InvariantCulture) + HeldNote(a))));
         }
 
         if (server.FailedJobs.Count > 0)
@@ -153,6 +153,10 @@ internal static class DailyHealthReportRenderer
 
         return sb.ToString();
     }
+
+    /// <summary>" (9 held)" after a metric's count when some of its rows were held back from paging (#7086), and nothing when none were.</summary>
+    private static string HeldNote(DailyHealthAlertCount alert) =>
+        alert.Held > 0 ? " (" + alert.Held.ToString(CultureInfo.InvariantCulture) + " held)" : "";
 
     private static string Capped(IEnumerable<string> items)
     {
@@ -216,7 +220,7 @@ internal static class DailyHealthReportRenderer
 
             if (server.Alerts.Count > 0)
             {
-                Row(sb, "Alerts", string.Join("<br/>", server.Alerts.Select(a => E(a.Metric) + " x" + a.Count.ToString(CultureInfo.InvariantCulture))));
+                Row(sb, "Alerts", string.Join("<br/>", server.Alerts.Select(a => E(a.Metric) + " x" + a.Count.ToString(CultureInfo.InvariantCulture) + HeldNote(a))));
             }
 
             if (server.FailedJobs.Count > 0)

@@ -53,6 +53,9 @@ public sealed class DailyHealthReportLiveTests
             await InsertAlertAsync(connection, ct, "High CPU", now.AddHours(-2));
             await InsertAlertAsync(connection, ct, "High CPU", now.AddHours(-5));
             await InsertAlertAsync(connection, ct, "Blocking", now.AddHours(-3));
+            /* #7086: two Blocking rows were held back from paging (the Daily Digest carries them), so Blocking reads 3 with 2 held. */
+            await InsertAlertAsync(connection, ct, "Blocking", now.AddHours(-4), "digest");
+            await InsertAlertAsync(connection, ct, "Blocking", now.AddHours(-6), "digest");
             await InsertAlertAsync(connection, ct, "High CPU", now.AddHours(-30));
             await InsertAlertAsync(connection, ct, "High CPU Cleared", now.AddHours(-1));
             await InsertAlertAsync(connection, ct, DailyHealthReportBuilder.DeliveryMetricName, now.AddHours(-1));
@@ -77,8 +80,8 @@ public sealed class DailyHealthReportLiveTests
             var server = Assert.Single(data.Servers, s => s.ServerId == ServerId);
             Assert.Contains(ServerName, server.Name, StringComparison.Ordinal);
             Assert.Equal(
-                new[] { ("High CPU", 2), ("Blocking", 1) },
-                server.Alerts.Select(a => (a.Metric, a.Count)).ToArray());
+                new[] { ("Blocking", 3, 2), ("High CPU", 2, 0) },
+                server.Alerts.Select(a => (a.Metric, a.Count, a.Held)).ToArray());
             var job = Assert.Single(server.FailedJobs);
             Assert.Equal(("Nightly load", 3), (job.JobName, job.Failures));
             Assert.Equal(now.AddHours(-2), job.LastFailureUtc);
@@ -87,6 +90,8 @@ public sealed class DailyHealthReportLiveTests
             var rendered = DailyHealthReportBuilder.Render(data);
             Assert.Equal(data.Servers.Count, rendered.ServerCount);
             Assert.Contains(ServerName, rendered.Text, StringComparison.Ordinal);
+            Assert.Contains("Blocking x3 (2 held), High CPU x2", rendered.Text, StringComparison.Ordinal);
+            Assert.Contains("Blocking x3 (2 held)", rendered.Html, StringComparison.Ordinal);
             Assert.Contains("Nightly load", rendered.Html, StringComparison.Ordinal);
             Assert.StartsWith(data.Title + ": " + data.Servers.Count, rendered.Subject, StringComparison.Ordinal);
 
@@ -171,13 +176,14 @@ FROM generate_series(1, $4::int) AS g",
         }
     }
 
-    private static Task InsertAlertAsync(NpgsqlConnection connection, CancellationToken ct, string metric, DateTime at) =>
+    private static Task InsertAlertAsync(
+        NpgsqlConnection connection, CancellationToken ct, string metric, DateTime at, string notificationType = "none") =>
         DarlingMcpTestData.ExecAsync(connection, ct, @"
 INSERT INTO config_alert_log
     (alert_time, server_id, server_name, metric_name, current_value, threshold_value,
      alert_sent, notification_type, send_error, muted, dismissed, detail_text, context_json)
-VALUES ($1, $2, $3, $4, 1, 1, FALSE, 'none', NULL, FALSE, FALSE, NULL, NULL)",
-            DarlingMcpTestData.Naive(at), ServerId, ServerName, metric);
+VALUES ($1, $2, $3, $4, 1, 1, FALSE, $5, NULL, FALSE, FALSE, NULL, NULL)",
+            DarlingMcpTestData.Naive(at), ServerId, ServerName, metric, notificationType);
 
     private static Task InsertJobAsync(NpgsqlConnection connection, CancellationToken ct, long id, string job, int runStatus, int stepId, DateTime at) =>
         DarlingMcpTestData.ExecAsync(connection, ct,
