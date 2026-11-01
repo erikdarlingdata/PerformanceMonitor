@@ -37,6 +37,25 @@ FROM mcr.microsoft.com/dotnet/sdk:10.0.403 AS build
 # existed.
 ARG VERSION=
 WORKDIR /src
+
+# #7100: restore from only the files that decide WHAT is restored (the build-wide props, the SDK pin, the feed, and the
+# project files of the service's closure), in a layer of its own, so a source-only change reuses the restored packages
+# instead of downloading them again (darling-linux-store.yml carries the layer cache across runs). Nothing here can break
+# the build: the publish below restores again, so a project the service newly references and this list lacks costs the
+# cached layer for that project, not a failure.
+COPY global.json Directory.Build.props Directory.Packages.props nuget.config ./
+COPY Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj Darling/PerformanceMonitor.Darling.Service/
+COPY Darling/PerformanceMonitor.Darling.Analysis/PerformanceMonitor.Darling.Analysis.csproj Darling/PerformanceMonitor.Darling.Analysis/
+COPY Darling/PerformanceMonitor.Darling.Remediation/PerformanceMonitor.Darling.Remediation.csproj Darling/PerformanceMonitor.Darling.Remediation/
+COPY Darling/PerformanceMonitor.Darling.Storage/PerformanceMonitor.Darling.Storage.csproj Darling/PerformanceMonitor.Darling.Storage/
+COPY PerformanceMonitor.Alerting/PerformanceMonitor.Alerting.csproj PerformanceMonitor.Alerting/
+COPY PerformanceMonitor.Analysis/PerformanceMonitor.Analysis.csproj PerformanceMonitor.Analysis/
+COPY PerformanceMonitor.Collectors/PerformanceMonitor.Collectors.csproj PerformanceMonitor.Collectors/
+COPY PerformanceMonitor.Common/PerformanceMonitor.Common.csproj PerformanceMonitor.Common/
+COPY PerformanceMonitor.Notifications/PerformanceMonitor.Notifications.csproj PerformanceMonitor.Notifications/
+COPY PerformanceMonitor.PlanAnalysis/PerformanceMonitor.PlanAnalysis.csproj PerformanceMonitor.PlanAnalysis/
+RUN dotnet restore Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj
+
 COPY . .
 RUN dotnet publish Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj \
     -c Release -o /app/publish ${VERSION:+-p:Version=$VERSION}
