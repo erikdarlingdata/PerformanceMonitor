@@ -102,4 +102,17 @@
     <NoWarn>$(NoWarn);CA2254</NoWarn>
   </PropertyGroup>
 
+  <!--
+    #7065: a warning fails the build of every project outside deprecated/, product and test alike, so a new one
+    cannot sit unnoticed. Before this the gate lived only in the two test projects, and a product warning
+    (CA1068 in a Darling storage file) reached CI as nothing more than a count in a build log. The suppressions
+    above are the only rules held back. The NuGet audit codes (NU1901 to NU1904) stay warnings: an advisory
+    published against a package we already use would otherwise turn every build red on a day nothing in the
+    repo changed. A project that cannot meet the gate says why in its own project file.
+  -->
+  <PropertyGroup>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <WarningsNotAsErrors>$(WarningsNotAsErrors);NU1901;NU1902;NU1903;NU1904</WarningsNotAsErrors>
+  </PropertyGroup>
+
 </Project>
