@@ -7950,7 +7950,8 @@ WHERE c.is_enabled";
     /// controllable clock.</para>
     ///
     /// <para><b>This check never acts.</b> It cannot arm a policy, and deliberately so: arming a held
-    /// policy drops the only copy of history no rollup has materialized, which is exactly what the gate
+    /// policy drops history its short consumer has not materialized (#7114: the gate checks only the named
+    /// consumers, so another tier may hold a copy, but the named one does not), which is exactly what the gate
     /// exists to prevent. The release is a backfill, which is an operator decision; this makes the need for
     /// one visible instead of silent.</para>
     /// </summary>
@@ -8022,8 +8023,8 @@ WHERE c.is_enabled";
                             RetentionHoldRemedy(OperatingSystem.IsWindows()) + " - and the hold clears by itself within about an " +
                             "hour of the backfill completing. Restart the service only if you want it armed " +
                             "immediately; this alert resolves on the tick after the one that arms it. Do NOT arm " +
-                            "the policy by hand: the history it holds exists nowhere else, so arming drops the only " +
-                            "copy, which is precisely what the gate prevents - and the hourly pass re-holds a " +
+                            "the policy by hand: arming drops history the short consumer named in that log line has " +
+                            "not materialized, which is precisely what the gate prevents - and the hourly pass re-holds a " +
                             "hand-armed policy whose coverage is still short. Check the service log for the " +
                             "'HELD PAUSED' line at startup naming every short consumer and the remedy for each " +
                             "(the service fills a small floor gap itself on the hourly pass, #6081; a larger one needs the verb), and for the hourly " +
@@ -8907,7 +8908,7 @@ WHERE c.is_enabled";
             /* THE SECOND GATE (#3816, guarding #1680/#1877). TimescaleSupport.ClassifyStuckPolicyJobs already
                dropped every HELD row, so this cannot fire today — and it is here because the action on the
                other side of it is DESTRUCTIVE. A held retention policy is paused on purpose until its tier's
-               rollups cover raw, the history it holds exists nowhere else, and alter_job(next_start => now())
+               consumers cover it, its short consumer does not hold that history, and alter_job(next_start => now())
                on one drops exactly the chunks the coverage gate exists to protect. A regression upstream of
                here — a reader that stops projecting j.scheduled, an upstream view that starts reporting a real
                next_start for a paused job — must not be able to reach a re-arm. It gets a WARNING naming the
