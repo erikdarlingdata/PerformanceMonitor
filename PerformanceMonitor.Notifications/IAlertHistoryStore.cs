@@ -166,6 +166,19 @@ public interface IAlertHistoryStore
         string serverId, string metricName, System.Collections.Generic.IReadOnlyList<string> resolutionMetricNames,
         DateTime? sinceUtc, DateTime? untilUtc, bool countMuted = true) =>
         AlertHistoryStanding.Of(await GetOpenFireAsync(serverId, metricName, resolutionMetricNames, sinceUtc, untilUtc, countMuted));
+
+    /// <summary>
+    /// #7076: <see cref="GetStandingAsync"/> for a store-wide alert keyed by job or policy: the fire and resolution rows written under
+    /// <c>server_id</c> 0 whose <c>alert_key</c> is <paramref name="alertKey"/>. Rows from before the column existed carry no key and are
+    /// not matched. The default body wraps <see cref="GetOpenFireAsync"/> with the key as the server key, as
+    /// <see cref="GetStandingAsync"/> does: a store that does not persist the key (Lite never writes these alerts) finds no row for a
+    /// non-numeric key, and a test double that answers only that read yields at most the one row. A failed read THROWS, like
+    /// <see cref="GetStandingAsync"/>.
+    /// </summary>
+    async Task<AlertHistoryStanding> GetKeyedStandingAsync(
+        string alertKey, string metricName, System.Collections.Generic.IReadOnlyList<string> resolutionMetricNames,
+        DateTime? sinceUtc, DateTime? untilUtc, bool countMuted = true) =>
+        AlertHistoryStanding.Of(await GetOpenFireAsync(alertKey, metricName, resolutionMetricNames, sinceUtc, untilUtc, countMuted));
 }
 
 /// <summary>#7068: one fire row read back by <see cref="IAlertHistoryStore.GetOpenFireAsync"/>: when it was written, the
@@ -298,6 +311,13 @@ public sealed record AlertHistoryRecord(
     /// the same instant as the history row it names. Darling's and Lite's stores honor it when set.
     /// </summary>
     public DateTime? AlertTimeUtc { get; init; }
+
+    /// <summary>
+    /// The exact key of a store-wide alert whose rows share <c>server_id</c> 0 and a metric name across many keys (a job, a policy), or
+    /// null (#7076). Darling persists it as <c>alert_key</c> on the alert's fire and resolution rows so a restart can find one key's own
+    /// open row. Every other row leaves it null.
+    /// </summary>
+    public string? AlertKey { get; init; }
 
     /// <summary>When a resolution was delivered to at least one channel (UTC), or null (#5825). Written only by Darling,
     /// on a resolution row, as <c>resolution_sent_at</c>; every other row leaves the three resolution members null.</summary>
