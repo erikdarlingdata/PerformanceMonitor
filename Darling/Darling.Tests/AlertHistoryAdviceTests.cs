@@ -116,13 +116,24 @@ public sealed class AlertHistoryAdviceTests
     }
 
     [Fact]
-    public void ANonAnalysisRow_MakesNoRead_AndKeepsTheDetailTextRendering()
+    public void ANonAnalysisRow_MakesOneRead_AndKeepsTheDetailTextRendering_WhenTheReplyCarriesNoAttachedFindings()
     {
         var r = Run("engineAlert");
-        Assert.Equal(0, r.GetProperty("calls").GetInt32());
+        Assert.Equal(1, r.GetProperty("calls").GetInt32());
         Assert.Equal(0, r.GetProperty("pres").GetInt32());
         Assert.Equal(new[] { "Storyx", "Severity1.20" }, Strings(r.GetProperty("fields")));
         Assert.Equal(new[] { "Diagnosis" }, Strings(r.GetProperty("headings")));
+    }
+
+    /// <summary>#7084 part 4: the page decides from <c>attached_findings</c> in the reply, not from a list of metrics of its own.</summary>
+    [Fact]
+    public void AnEngineAlertRow_ListsTheFindingsTheReplyCarriesInAttachedFindings()
+    {
+        var r = Run("attachedFindings");
+        Assert.Equal(1, r.GetProperty("calls").GetInt32());
+        Assert.Equal("Some Future Engine Alert", r.GetProperty("request").GetProperty("metric_name").GetString());
+        var fields = Strings(r.GetProperty("fields"));
+        Assert.Contains(fields, f => f.Contains("Analysis: wait_profile [aaaa]", StringComparison.Ordinal));
     }
 
     [Fact]

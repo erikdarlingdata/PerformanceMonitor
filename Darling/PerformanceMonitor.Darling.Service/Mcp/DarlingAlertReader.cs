@@ -294,6 +294,46 @@ LIMIT 1";
         return await reader.ReadAsync(cancellationToken) && !reader.IsDBNull(0) ? reader.GetString(0) : null;
     }
 
+    /// <summary>One analysis finding held because an engine alert was open (#7084 part 4): its own row's time and metric,
+    /// and the routing reason it carries.</summary>
+    public sealed record AttachedFindingRead(DateTime AlertTimeUtc, string MetricName, string? Reason);
+
+    /// <summary>
+    /// The findings attached to one engine alert, oldest first (#7084 part 4). Read when the alert's detail opens, by the
+    /// alert's own identity (<paramref name="serverId"/>, <paramref name="metricName"/>, <paramref name="alertTimeUtc"/>): a
+    /// finding is a digest row on the same server inside the window after the fire, whose stored context names that metric
+    /// and time (<see cref="OpenEngineAlerts.Names"/>). Empty for a metric no finding attaches to, with no read.
+    /// </summary>
+    public static async Task<List<AttachedFindingRead>> GetAttachedFindingsAsync(
+        NpgsqlDataSource postgres, int serverId, string metricName, DateTime alertTimeUtc, CancellationToken cancellationToken = default)
+    {
+        var found = new List<AttachedFindingRead>();
+        if (!OpenEngineAlerts.IsAttachable(metricName))
+        {
+            return found;
+        }
+
+        await using var command = postgres.CreateCommand(OpenEngineAlerts.AttachedFindingsSql("config_alert_log"));
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        DarlingMcpReadParameters.AddInt(command, serverId);
+        DarlingMcpReadParameters.AddTimestamp(command, alertTimeUtc);
+        DarlingMcpReadParameters.AddTimestamp(command, OpenEngineAlerts.AttachedUntil(alertTimeUtc));
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var contextJson = reader.IsDBNull(2) ? null : reader.GetString(2);
+            if (OpenEngineAlerts.Names(AlertContextSerializer.TryReadAttachedTo(contextJson), metricName, alertTimeUtc))
+            {
+                found.Add(new AttachedFindingRead(
+                    DateTime.SpecifyKind(reader.GetDateTime(0), DateTimeKind.Utc), reader.GetString(1),
+                    AlertContextSerializer.TryReadRouting(contextJson)?.Reason));
+            }
+        }
+
+        return found;
+    }
+
     /// <summary>One <see cref="AlertHistoryReadRow"/> from a reader positioned on a row of
     /// <see cref="AlertHistorySelectColumns"/> (both the page read and the first-row-after reads use it, so the
     /// two can never disagree about a column).</summary>

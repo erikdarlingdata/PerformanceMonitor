@@ -55,6 +55,15 @@ const RECUR_START = "recur_start";
 const RECUR_END = "recur_end";
 const RECUR_ZONE = "recur_time_zone";
 export const SCHEDULE_KEYS = [RECUR_DAYS, RECUR_START, RECUR_END, RECUR_ZONE];
+/* #7083: what the rule does to a matching alert. "mute" is the default and is not sent on a create; "digest" holds the alert back from
+   paging and records it for the daily digest instead of muting it. */
+const ACTION = "action";
+export const ACTION_MUTE = "mute";
+export const ACTION_DIGEST = "digest";
+/** A rule's or form's action as one of the two words; anything else is the default, a mute. */
+export function actionOf(x) {
+  return x === ACTION_DIGEST ? ACTION_DIGEST : ACTION_MUTE;
+}
 /** The day names the form offers, Monday first, as the write routes accept them. */
 export const DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 /* The only fields a link may fill in: the ones the app's own "Mute this alert" and "Mute similar" links send
@@ -151,12 +160,13 @@ export function formToCreateBody(values) {
   if (schedule) {
     for (const key of SCHEDULE_KEYS) if (schedule[key] !== null) body[key] = schedule[key];
   }
+  if (actionOf(values[ACTION]) === ACTION_DIGEST) body[ACTION] = ACTION_DIGEST;
   return body;
 }
 
 /** True for a create body that names no scope at all: such a rule mutes EVERY alert, so the page confirms first. */
 export function isEmptyCreate(body) {
-  return !body || Object.keys(body).filter((k) => k !== "reason" && k !== EXPIRY && k !== STARTS && !SCHEDULE_KEYS.includes(k)).length === 0;
+  return !body || Object.keys(body).filter((k) => k !== "reason" && k !== EXPIRY && k !== STARTS && k !== ACTION && !SCHEDULE_KEYS.includes(k)).length === 0;
 }
 
 export const EMPTY_CREATE_WARNING =
@@ -183,6 +193,7 @@ export function buildPatch(original, values) {
   if (!sameSchedule(nextSchedule, storedSchedule(original))) {
     for (const key of SCHEDULE_KEYS) patch[key] = nextSchedule ? nextSchedule[key] : null;
   }
+  if (actionOf(values[ACTION]) !== actionOf(original[ACTION])) patch[ACTION] = actionOf(values[ACTION]);
   return patch;
 }
 
@@ -334,7 +345,7 @@ export function scheduleCell(r) {
 
 function ruleRow(r, canEdit) {
   const st = statusOf(r);
-  const scope = r.match_summary || "Every alert";
+  const scope = (r.match_summary || "Every alert") + (actionOf(r.action) === ACTION_DIGEST ? " (to the daily digest)" : "");
   const cells = [
     el("td", {}, [el("span", { class: st === "Enabled" ? "status-cell sev-Healthy" : "paused-badge", text: st })]),
     el("td", { text: scope, title: r.server_id != null ? "server_id " + r.server_id : null }),
@@ -365,6 +376,7 @@ function valuesOf(r) {
   v[RECUR_START] = r.recur_start_time || "";
   v[RECUR_END] = r.recur_end_time || "";
   v[RECUR_ZONE] = r.recur_time_zone || browserZone();
+  v[ACTION] = actionOf(r.action);
   return v;
 }
 
@@ -415,10 +427,11 @@ function formNode() {
   fields.push(fieldRow(STARTS, "Starts (local time; blank = at once)", "datetime-local"));
   fields.push(fieldRow(EXPIRY, "Expires (local time; blank = never)", "datetime-local"));
   fields.push(scheduleNode());
+  fields.push(actionNode());
   const empty = form.mode === "create" && isEmptyCreate(formToCreateBody(form.values));
   return el("div", { class: "card mute-form" }, [
     el("h3", { text: form.mode === "create" ? "New mute rule" : "Edit mute rule" }),
-    el("div", { class: "meta", text: "Alerts matching ALL filled fields are suppressed. Blank fields match anything." }),
+    el("div", { class: "meta", text: "Alerts matching ALL filled fields are handled by the action below. Blank fields match anything." }),
     form.fromLink ? el("div", { class: "strip notice", role: "note", text: LINK_FILLED_NOTICE }) : null,
     form.banner ? el("div", { class: "strip error", text: form.banner }) : null,
     form.exists ? existsNode() : null,
@@ -446,6 +459,24 @@ function goToExisting() {
     row.classList.add("mute-rules-highlight");
     if (row.scrollIntoView) row.scrollIntoView({ block: "center" });
   }
+}
+
+/** #7083: what the rule does with a matching alert: mute it, or hold it back from paging and send it to the daily digest. */
+function actionNode() {
+  const select = el("select", { class: "mute-input", "aria-label": "Action", "data-field": ACTION }, [
+    el("option", { value: ACTION_MUTE, text: "Mute" }),
+    el("option", { value: ACTION_DIGEST, text: "Send to the daily digest" }),
+  ]);
+  select.value = actionOf(form.values[ACTION]);
+  select.addEventListener("change", () => {
+    form.values[ACTION] = select.value;
+    form.confirmEmpty = false;
+  });
+  return el("label", { class: "mute-field" }, [
+    el("span", { class: "mute-label", text: "Action" }),
+    select,
+    el("span", { class: "meta", text: "Mute records a matching alert as muted and sends nothing. The daily digest holds it back from paging, records it, and lists it in the daily digest. Pair the digest action with a repeating window." }),
+  ]);
 }
 
 /** The optional repeating schedule: day boxes, start and end time, and the zone. All four empty is a one-off rule. */

@@ -66,8 +66,8 @@ public sealed class AlertEngine
 {
     /* The persisted-watermark row keys (#1145) — Lite's MainWindow.xaml.cs:111-112 constants,
        shared so Lite's existing config_edge_trigger_watermarks rows seed this engine unchanged. */
-    public const string BlockingWatermarkMetric = "Blocking Detected";
-    public const string DeadlockWatermarkMetric = "Deadlocks Detected";
+    public const string BlockingWatermarkMetric = OpenEngineAlerts.BlockingDetectedMetric;
+    public const string DeadlockWatermarkMetric = OpenEngineAlerts.DeadlocksDetectedMetric;
 
     /* #2362: the remaining fingerprinted alerts. Same names their FireAsync/mute contexts use, so the
        accumulator's per-fingerprint state lives under the metric an operator already knows. Forced Plan
@@ -102,6 +102,7 @@ public sealed class AlertEngine
     private readonly IAlertStateStore _stateStore;
     private readonly IAlertDeliverer _deliverer;
     private readonly Func<AlertMuteContext, bool> _isAlertMuted;
+    private readonly Func<AlertMuteContext, string?>? _digestWindowReason;
     private readonly Func<string, int, CancellationToken, Task<List<FailedJobInfo>>>? _failedJobsFetcher;
     private readonly Func<string, IReadOnlyList<AgentJobStepKey>, CancellationToken, Task<IReadOnlyDictionary<AgentJobStepKey, AgentJobStepNames>>>? _agentJobStepResolver;
     private readonly Func<AlertResolution, CancellationToken, Task>? _resolutionCallback;
@@ -129,6 +130,11 @@ public sealed class AlertEngine
        the deliverer's own email/webhook cooldown seeds, not these). */
     private readonly ConcurrentDictionary<string, DateTime> _lastCpuAlert = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastBlockingAlert = new();
+    /* #7083 part 2: the stamp of the last HELD Blocking Detected row per server, kept apart from _lastBlockingAlert so a held row
+       never delays a real page (BlockingPageRule.TryHold). _lastBlockingHoldObservation is the start of the newest wait that row was written
+       for: the rolling hour keeps one burst in view, and without it every cooldown would re-record the same events. */
+    private readonly ConcurrentDictionary<string, DateTime> _lastBlockingHold = new();
+    private readonly ConcurrentDictionary<string, DateTime> _lastBlockingHoldObservation = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastBlockingWaitAlert = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastDeadlockAlert = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastPoisonWaitAlert = new();
@@ -395,6 +401,11 @@ public sealed class AlertEngine
     /// delivered to the deliverer (flagged <see cref="AlertOutcome.Muted"/>) so the host records
     /// it without sending, exactly Lite's flow.
     /// </param>
+    /// <param name="digestWindowReason">
+    /// #7083: Darling passes <c>MuteRuleService.DigestWindowReason</c>. When a digest rule's window is open for the fire and no
+    /// mute rule matched, the fire is delivered with <see cref="AlertOutcome.Hold"/> set to that reason and recorded as a digest
+    /// row instead of paging. Null (Lite, whose mute rules have no schedule) never holds.
+    /// </param>
     /// <param name="failedJobsFetcher">
     /// The live msdb failed-jobs feed (serverKey, lookbackMinutes, ct) — NOT a collected read, so
     /// it stays host-supplied: hosts run <see cref="FailedJobsQuery"/> on their own connections
@@ -451,8 +462,10 @@ public sealed class AlertEngine
         Func<EscalationSeedQuery, CancellationToken, Task<AlertSeverityLevel?>>? escalationSeedReader = null,
         IAlertThresholdOverrides? overrides = null,
         IDeadlockRollup? deadlockRollup = null,
-        Func<OpenFireQuery, CancellationToken, Task<AlertHistoryStanding>>? openFireReader = null)
+        Func<OpenFireQuery, CancellationToken, Task<AlertHistoryStanding>>? openFireReader = null,
+        Func<AlertMuteContext, string?>? digestWindowReason = null)
     {
+        _digestWindowReason = digestWindowReason;
         _openFireReader = openFireReader;
         _deadlockRollup = deadlockRollup;
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
@@ -846,7 +859,7 @@ public sealed class AlertEngine
                 /* #7085: High CPU is the exception. It no longer repeats after a cooldown, so an incident whose Critical went out
                    before the restart must remember it, or a dip to Warning and a return to Critical would page that Critical twice. */
                 if (tier is { } seeded
-                    && (seeded == AlertSeverityLevel.Warning || (seeded == AlertSeverityLevel.Critical && metric == "High CPU"))
+                    && (seeded == AlertSeverityLevel.Warning || (seeded == AlertSeverityLevel.Critical && metric == CpuPersistenceMetric))
                     && !escalation.IsTouched(key))
                 {
                     escalation.Restore(key, seeded);
@@ -930,7 +943,7 @@ public sealed class AlertEngine
     /// the history row and the resolve all use, so an operator reading <c>config_alert_log</c> and an
     /// operator reading the persistence table are looking at one metric, not two spellings of it.
     /// </summary>
-    public const string CpuPersistenceMetric = "High CPU";
+    public const string CpuPersistenceMetric = OpenEngineAlerts.HighCpuMetric;
 
     /// <summary>
     /// #7085: the edge-trigger watermark row that holds when the open High CPU incident began, as whole minutes since the Unix epoch
@@ -1060,7 +1073,7 @@ public sealed class AlertEngine
     /// <see cref="CpuPersistenceMetric"/> gives. A third metric name is a third row in the existing
     /// persistence table (V118 keyed it <c>(server_id, metric_name)</c>), so the rollout needed no rung.
     /// </summary>
-    public const string BlockingWaitPersistenceMetric = "Blocking Wait Time";
+    public const string BlockingWaitPersistenceMetric = OpenEngineAlerts.BlockingWaitTimeMetric;
 
     /// <summary>
     /// The <c>Fired By</c> detail value when the delivered snapshot alone is at or above
@@ -1241,7 +1254,7 @@ public sealed class AlertEngine
                    operator got both before either meant anything. The gate fires this exactly once, after
                    CpuClearSamples consecutive clears. Still gated on !suppressed, exactly as before. */
                 await NotifyResolutionAsync(new AlertResolution(
-                    key, serverName, "High CPU",
+                    key, serverName, CpuPersistenceMetric,
                     EscalationSeed.CpuResolvedTitle,                                                 /* :110 */
                     $"{serverName}: {cpuMetricLabel} back to {eventValue:F0}%"), ct); /* :111 */
             }
@@ -1326,6 +1339,10 @@ public sealed class AlertEngine
             .ToList();
         return live.Count == 0 ? single : live;
     }
+
+    /// <summary>#7083: the one mute question every fire site asks. A mute rule wins; else a digest rule's window holds the fire back
+    /// for the daily digest (Lite passes no digest delegate, so it never holds). See <see cref="MuteJudgment"/>.</summary>
+    private MuteJudgment JudgeMute(AlertMuteContext context) => MuteJudgment.Judge(_isAlertMuted, _digestWindowReason, context);
 
     /// <summary>
     /// #7085: decides, from the alert history, whether the High CPU incident that was open when this process started was ever PAGED,
@@ -1432,18 +1449,18 @@ public sealed class AlertEngine
         bool incidentPaged = delivered is not null;
         /* An escalation whose every channel failed waits out the back-dated stamp (#5715), the same backoff as any failed send. */
         bool opensGate = incidentPaged
-            ? rise && EscalationOpensGate("High CPU", key, rise, _lastCpuAlert, now, alertCooldown)
-            : EscalationOpensGate("High CPU", key, rise, _lastCpuAlert, now, alertCooldown);
+            ? rise && EscalationOpensGate(CpuPersistenceMetric, key, rise, _lastCpuAlert, now, alertCooldown)
+            : EscalationOpensGate(CpuPersistenceMetric, key, rise, _lastCpuAlert, now, alertCooldown);
 
         if (!suppressed && opensGate) /* :72 */
         {
-            var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = "High CPU" }; /* :74 */
-            bool isMuted = _isAlertMuted(muteCtx);                              /* :75 */
+            var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = CpuPersistenceMetric }; /* :74 */
+            var mute = JudgeMute(muteCtx);                              /* :75 */
             _lastCpuAlert[key] = now;                                           /* :76 — stamped even when muted */
-            /* Recorded before the send (the history row must not be late), put back below when every channel failed. A muted fire
-               records its tier as muted, not as delivered. */
+            /* Recorded before the send (the history row must not be late), put back below when every channel failed. A muted fire,
+               or one held for the digest, records its tier as muted, not as delivered (nothing was sent). */
             var priorTier = delivered;
-            if (isMuted)
+            if (mute.Silenced)
             {
                 _cpuMutedFire[key] = (cpuGrade, now);
             }
@@ -1533,14 +1550,14 @@ public sealed class AlertEngine
                channel renderers print the typed field only when the prose does not already carry it. */
             cpuDetailText = AlertDetailText.WithSampleAge(cpuDetailText, cpuContext) ?? cpuDetailText;
             var delivery = await FireAsync(new AlertOutcome(
-                key, serverName, "High CPU",
+                key, serverName, CpuPersistenceMetric,
                 $"{alertCpuValue:F0}% ({cpuMetricLabel})",
                 $"{cpuThreshold}%",
                 Context: cpuContext, DetailText: cpuDetailText,
                 NumericCurrentValue: alertCpuValue, NumericThresholdValue: cpuThreshold,
-                Muted: isMuted, Severity: cpuGrade,
+                Muted: mute.Muted, Hold: mute.Hold, Severity: cpuGrade,
                 ShortMessage: $"{cpuMetricLabel} at {alertCpuValue:F0}% (threshold: {cpuThreshold}%)"), ct);
-            AfterFire("High CPU", _lastCpuAlert, key, now, alertCooldown, delivery);
+            AfterFire(CpuPersistenceMetric, _lastCpuAlert, key, now, alertCooldown, delivery);
 
             /* A fire nobody received has not delivered this tier: the retry is still the escalation (#5709 round 2). */
             if (EveryChannelFailed(delivery))
@@ -1689,6 +1706,8 @@ public sealed class AlertEngine
     {
         List<BlockedProcessAlertRow>? blockingRows = null;
         int effectiveBlockingCount = 0;
+        long worstBlockingWaitMs = 0;
+        IReadOnlyList<BlockedProcessAlertRow> blockingEvents = Array.Empty<BlockedProcessAlertRow>();
 
         if (_settings.BlockingEnabled)
         {
@@ -1713,7 +1732,11 @@ public sealed class AlertEngine
                    do not fall back to DMV waits. The old shape counted every row, then recounted outside
                    the excluded set only once the raw count reached the threshold; filtering before counting
                    keeps that fire decision and gives a watermark that tracks the filtered count throughout. */
-                effectiveBlockingCount = AlertContextBuilders.BlockingWaitRows(blockingRows, excludedDatabases).Count;
+                var blockingWaits = AlertContextBuilders.BlockingWaitRows(blockingRows, excludedDatabases);
+                effectiveBlockingCount = blockingWaits.Count;
+                blockingEvents = blockingWaits;
+                /* #7083: the page rule needs the longest wait among these events (BlockingPageRule). */
+                worstBlockingWaitMs = blockingWaits.Count == 0 ? 0 : blockingWaits.Max(w => w.WaitTimeMs);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -1733,8 +1756,12 @@ public sealed class AlertEngine
         int blockingWatermark = _lastAlertedBlockingCount.TryGetValue(key, out var labc) ? labc : 0; /* :138 */
         bool blockingCooldownElapsed = CooldownElapsed(_lastBlockingAlert, key, now, alertCooldown); /* :139 */
         int blockingThreshold = Threshold(AlertThresholdKey.BlockingCountThreshold, key);
+        int blockingWaitBarSeconds = Threshold(AlertThresholdKey.BlockingWaitSecondsThreshold, key);
+        bool wasBlockingActiveBefore = _activeBlockingAlert.TryGetValue(key, out var wasBlockingBefore) && wasBlockingBefore;
+        /* #7083: pages on the count arm (threshold events AND a 15 s worst wait) or on one event at the wait bar. */
         var blockingDecision = _settings.BlockingEnabled
-            ? RollingCountAlertGate.Evaluate(effectiveBlockingCount, blockingThreshold, blockingWatermark, blockingCooldownElapsed, suppressed)
+            ? BlockingPageRule.Evaluate(effectiveBlockingCount, blockingThreshold, worstBlockingWaitMs, blockingWaitBarSeconds,
+                blockingWatermark, blockingCooldownElapsed, suppressed, wasBlockingActiveBefore)
             : new RollingCountAlertGate.Decision(false, false, 0);                  /* :140-142 */
         _lastAlertedBlockingCount[key] = blockingDecision.Watermark;                /* :143 */
         if (blockingDecision.Watermark != blockingWatermark)                        /* :147 — persist on change (#1145) */
@@ -1761,8 +1788,8 @@ public sealed class AlertEngine
 
         if (blockingDecision.Fire)                                                  /* :155 */
         {
-            var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = "Blocking Detected" }; /* :157 */
-            bool isMuted = _isAlertMuted(muteCtx);                                  /* :158 */
+            var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = BlockingWatermarkMetric }; /* :157 */
+            var mute = JudgeMute(muteCtx);                                  /* :158 */
             _lastBlockingAlert[key] = now;                                          /* :159 */
 
             /* :172-173 — Lite's BuildBlockingContextAsync refetches the same rows; the engine
@@ -1777,14 +1804,14 @@ public sealed class AlertEngine
                of :167. Numerics carried explicitly (#1830): the count text happens to parse today,
                but the stored value must not depend on parse luck. */
             var delivery = await FireAsync(new AlertOutcome(
-                key, serverName, "Blocking Detected",
+                key, serverName, BlockingWatermarkMetric,
                 effectiveBlockingCount.ToString(),
                 blockingThreshold.ToString(),
                 blockingContext, detailText,
                 NumericCurrentValue: effectiveBlockingCount, NumericThresholdValue: blockingThreshold,
-                Muted: isMuted, Severity: blockingContext?.SeverityOverride,
+                Muted: mute.Muted, Hold: mute.Hold, Severity: blockingContext?.SeverityOverride,
                 ShortMessage: $"{effectiveBlockingCount} blocking {(effectiveBlockingCount == 1 ? "session" : "sessions")}"), ct);
-            AfterFire("Blocking Detected", _lastBlockingAlert, key, now, alertCooldown, delivery);
+            AfterFire(BlockingWatermarkMetric, _lastBlockingAlert, key, now, alertCooldown, delivery);
 
             /* #4752: the gate advanced the watermark to this count, and it was saved, BEFORE delivery. A fire
                whose every channel failed would leave the retry sweep seeing no new blocking, and the alert
@@ -1814,9 +1841,39 @@ public sealed class AlertEngine
             if (!suppressed && _settings.BlockingEnabled)                           /* :187 */
             {
                 await NotifyResolutionAsync(new AlertResolution(
+                    key, serverName, BlockingWatermarkMetric,
+                    OpenEngineAlerts.BlockingClearedTitle,                                            /* :190 */
+                    BlockingPageRule.ClearedMessage(serverName, blockingThreshold, blockingWaitBarSeconds)), ct);  /* :191, #7083 */
+            }
+        }
+        else if (_settings.BlockingEnabled && blockingRows is not null
+            && BlockingPageRule.IsHeldBack(effectiveBlockingCount, blockingThreshold, worstBlockingWaitMs, blockingWaitBarSeconds,
+                wasBlockingActive, suppressed))
+        {
+            /* #7083 part 2: the count reached the bar and nothing pages (every wait under the 15 s floor, none at the one-event
+               bar, no Blocking Detected incident open). Record one held row for the digest per cooldown, and only when the window holds a
+               wait newer than the last held row's (one burst is one row, not one per cooldown for the hour it stays in the window). It stamps
+               _lastBlockingHold, never _lastBlockingAlert, and records no escalation tier, so a real page right after goes out at once.
+               A mute rule still wins: a muted server gets no digest line. */
+            var holdMute = JudgeMute(new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = BlockingWatermarkMetric });
+            if (!holdMute.Muted
+                && BlockingPageRule.TryHold(_lastBlockingHold, _lastBlockingHoldObservation, key, now, alertCooldown,
+                    BlockingPageRule.NewestWaitStart(blockingEvents), effectiveBlockingCount, blockingThreshold,
+                    worstBlockingWaitMs, blockingWaitBarSeconds, wasBlockingActive, suppressed))
+            {
+                var holdContext = AlertContextBuilders.BuildBlockingContext(
+                    fingerprintServer, blockingRows, excludedDatabases, blockingOccurrences.Decorate);
+                holdContext = AlertSampleAge.Stamp(holdContext, "blocked process", AlertSampleAge.Newest(blockingRows.Select(r => r.EventTime)), now);
+                var chain = BlockingPageRule.LongestChain(blockingEvents.Select(e => (e.BlockedSpid, e.BlockingSpid)));
+                var holdReason = BlockingPageRule.HoldReason(effectiveBlockingCount, worstBlockingWaitMs, chain);
+                await FireAsync(new AlertOutcome(
                     key, serverName, "Blocking Detected",
-                    "Blocking Cleared",                                             /* :190 */
-                    $"{serverName}: No active blocking"), ct);                      /* :191 */
+                    effectiveBlockingCount.ToString(),
+                    blockingThreshold.ToString(),
+                    holdContext, AlertContextBuilders.ContextToDetailText(holdContext),
+                    NumericCurrentValue: effectiveBlockingCount, NumericThresholdValue: blockingThreshold,
+                    Muted: false, Hold: new AlertHold(holdReason), Severity: holdContext?.SeverityOverride,
+                    ShortMessage: holdReason), ct);
             }
         }
 
@@ -2061,8 +2118,8 @@ public sealed class AlertEngine
             if (staleOutcome == PersistenceOutcome.Resolve && !suppressed)
             {
                 await NotifyResolutionAsync(new AlertResolution(
-                    key, serverName, "Blocking Wait Time",
-                    "Blocking Wait Cleared",
+                    key, serverName, BlockingWaitPersistenceMetric,
+                    OpenEngineAlerts.BlockingWaitClearedTitle,
                     $"{serverName}: Total blocked wait back under {thresholdSeconds}s"), ct);
             }
 
@@ -2109,8 +2166,8 @@ public sealed class AlertEngine
         {
             if (!suppressed && CooldownElapsed(_lastBlockingWaitAlert, key, now, alertCooldown))
             {
-                var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = "Blocking Wait Time" };
-                bool isMuted = _isAlertMuted(muteCtx);
+                var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = BlockingWaitPersistenceMetric };
+                var mute = JudgeMute(muteCtx);
                 _lastBlockingWaitAlert[key] = now;                                  /* stamped even when muted */
 
                 /* Same incident content the count gate ships, built from the rows this sweep already
@@ -2131,14 +2188,14 @@ public sealed class AlertEngine
                    as a number or every history row lands at 0, which is the defect #1830 just fixed. */
                 double totalWaitSeconds = current.TotalWaitSeconds;
                 var delivery = await FireAsync(new AlertOutcome(
-                    key, serverName, "Blocking Wait Time",
+                    key, serverName, BlockingWaitPersistenceMetric,
                     $"{totalWaitSeconds:F0}s across {current.BlockedSessionCount} blocked {(current.BlockedSessionCount == 1 ? "session" : "sessions")}",
                     $"{thresholdSeconds}s",
                     blockingContext, detailText,
                     NumericCurrentValue: totalWaitSeconds, NumericThresholdValue: thresholdSeconds,
-                    Muted: isMuted, Severity: blockingContext.SeverityOverride,
+                    Muted: mute.Muted, Hold: mute.Hold, Severity: blockingContext.SeverityOverride,
                     ShortMessage: $"{totalWaitSeconds:F0}s total blocked wait across {current.BlockedSessionCount} {(current.BlockedSessionCount == 1 ? "session" : "sessions")} (threshold: {thresholdSeconds}s)"), ct);
-                AfterFire("Blocking Wait Time", _lastBlockingWaitAlert, key, now, alertCooldown, delivery);
+                AfterFire(BlockingWaitPersistenceMetric, _lastBlockingWaitAlert, key, now, alertCooldown, delivery);
             }
         }
         else if (outcome == PersistenceOutcome.Resolve)
@@ -2149,8 +2206,8 @@ public sealed class AlertEngine
             if (!suppressed)
             {
                 await NotifyResolutionAsync(new AlertResolution(
-                    key, serverName, "Blocking Wait Time",
-                    "Blocking Wait Cleared",
+                    key, serverName, BlockingWaitPersistenceMetric,
+                    OpenEngineAlerts.BlockingWaitClearedTitle,
                     $"{serverName}: Total blocked wait back under {thresholdSeconds}s"), ct);
             }
         }
@@ -2235,7 +2292,7 @@ public sealed class AlertEngine
            the watermark the Warning fire left is below it. */
         var deadlockTier = GradeDeadlockFire(effectiveDeadlockCount, _settings.DeadlockRateThresholds);
         var deadlockEscalation = _settings.DeadlockEnabled && _deadlockEscalation.IsEscalation(key, deadlockTier);
-        bool deadlockCooldownElapsed = EscalationOpensGate("Deadlocks Detected", key, deadlockEscalation, _lastDeadlockAlert, now, alertCooldown); /* :217 */
+        bool deadlockCooldownElapsed = EscalationOpensGate(DeadlockWatermarkMetric, key, deadlockEscalation, _lastDeadlockAlert, now, alertCooldown); /* :217 */
         var deadlockDecision = _settings.DeadlockEnabled
             ? RollingCountAlertGate.Evaluate(effectiveDeadlockCount, deadlockThreshold, deadlockWatermark, deadlockCooldownElapsed, suppressed)
             : new RollingCountAlertGate.Decision(false, false, 0);                  /* :218-220 */
@@ -2273,8 +2330,8 @@ public sealed class AlertEngine
 
         if (deadlockDecision.Fire)                                                  /* :232 */
         {
-            var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = "Deadlocks Detected" }; /* :234 */
-            bool isMuted = _isAlertMuted(muteCtx);                                  /* :235 */
+            var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = DeadlockWatermarkMetric }; /* :234 */
+            var mute = JudgeMute(muteCtx);                                  /* :235 */
             _lastDeadlockAlert[key] = now;                                          /* :236 */
             var priorDeadlockTier = _deadlockEscalation.Highest(key);
             _deadlockEscalation.Record(key, deadlockTier);
@@ -2307,14 +2364,14 @@ public sealed class AlertEngine
             /* :252-260 — ShortMessage = the toast body of :244. Numerics carried explicitly (#1830):
                the count text happens to parse today, but the stored value must not depend on parse luck. */
             var delivery = await FireAsync(new AlertOutcome(
-                key, serverName, "Deadlocks Detected",
+                key, serverName, DeadlockWatermarkMetric,
                 effectiveDeadlockCount.ToString(),
                 deadlockThreshold.ToString(),
                 deadlockContext, detailText,
                 NumericCurrentValue: effectiveDeadlockCount, NumericThresholdValue: deadlockThreshold,
-                Muted: isMuted, Severity: deadlockContext.SeverityOverride,
+                Muted: mute.Muted, Hold: mute.Hold, Severity: deadlockContext.SeverityOverride,
                 ShortMessage: $"{effectiveDeadlockCount} {(effectiveDeadlockCount == 1 ? "deadlock" : "deadlocks")} in the last hour"), ct);
-            AfterFire("Deadlocks Detected", _lastDeadlockAlert, key, now, alertCooldown, delivery);
+            AfterFire(DeadlockWatermarkMetric, _lastDeadlockAlert, key, now, alertCooldown, delivery);
 
             /* #4752: the blocking twin above explains it — the watermark moved to this count, and was saved,
                before delivery, so a fire whose every channel failed goes back to the decayed pre-fire value
@@ -2340,7 +2397,7 @@ public sealed class AlertEngine
             if (!suppressed && _settings.DeadlockEnabled)                           /* :264 */
             {
                 await NotifyResolutionAsync(new AlertResolution(
-                    key, serverName, "Deadlocks Detected",
+                    key, serverName, DeadlockWatermarkMetric,
                     EscalationSeed.DeadlocksClearedTitle,                                            /* :267 */
                     $"{serverName}: No deadlocks in the last hour"), ct);           /* :268 */
             }
@@ -2417,7 +2474,7 @@ public sealed class AlertEngine
                     /* :288-293 — mute keys on the worst (highest severity, then most accumulated wait)
                        firing wait type; same documented limitation as Lite. */
                     var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = "Poison Wait", WaitType = worst.WaitType };
-                    bool isMuted = _isAlertMuted(muteCtx);
+                    var mute = JudgeMute(muteCtx);
                     _lastPoisonWaitAlert[key] = now;                                /* :294 */
                     _lastPoisonWaitCollectionTime[key] = newestCollectionTime;
                     var priorTier = _poisonWaitEscalation.Highest(key);
@@ -2463,7 +2520,7 @@ public sealed class AlertEngine
                         poisonContext, detailText,
                         NumericCurrentValue: worst.AccumulatedWaitMs,
                         NumericThresholdValue: worst.NumericThresholdValue,
-                        Muted: isMuted, Severity: worst.Severity,
+                        Muted: mute.Muted, Hold: mute.Hold, Severity: worst.Severity,
                         ShortMessage: worst.ShortMessage), ct);
                     AfterFire("Poison Wait", _lastPoisonWaitAlert, key, now, alertCooldown, delivery);
 
@@ -2601,7 +2658,7 @@ public sealed class AlertEngine
                     && EscalationOpensGate(RunnableQueueEvaluator.MetricName, key, escalation, _lastRunnableQueueAlert, now, alertCooldown))
                 {
                     var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = RunnableQueueEvaluator.MetricName };
-                    bool isMuted = _isAlertMuted(muteCtx);
+                    var mute = JudgeMute(muteCtx);
                     _lastRunnableQueueAlert[key] = now;
                     _lastRunnableQueueCollectionTime[key] = finding.NewestCollectionTime;
 
@@ -2651,7 +2708,7 @@ public sealed class AlertEngine
                         queueContext, detailText,
                         NumericCurrentValue: finding.AveragePerScheduler,
                         NumericThresholdValue: finding.BarCrossed,
-                        Muted: isMuted, Severity: finding.Severity,
+                        Muted: mute.Muted, Hold: mute.Hold, Severity: finding.Severity,
                         ShortMessage: finding.Summary), ct);
                     AfterFire(RunnableQueueEvaluator.MetricName, _lastRunnableQueueAlert, key, now, alertCooldown, delivery);
 
@@ -2815,16 +2872,27 @@ public sealed class AlertEngine
                 readClock.Restart();
             }
 
+            /* #7083: a group a digest window covers counts as silenced, the way a mute does, so the count and the stamps agree. Whether
+               the silence came from a mute rule or only from a window decides the row: a mute rule anywhere wins and records Muted,
+               else the fire is a digest row. */
+            var attentionMuteSeen = false;
+            AlertHold? attentionWindowHold = null;
             var finding = AttentionEvaluator.Evaluate(
                 reading, warningFloor, criticalFloor,
-                (database, app) => _isAlertMuted(new AlertMuteContext
+                (database, app) =>
                 {
-                    ServerName = serverName,
-                    ServerId = serverId,
-                    MetricName = AttentionEvaluator.MetricName,
-                    DatabaseName = database,
-                    ClientAppName = app,
-                }),
+                    var groupJudgment = JudgeMute(new AlertMuteContext
+                    {
+                        ServerName = serverName,
+                        ServerId = serverId,
+                        MetricName = AttentionEvaluator.MetricName,
+                        DatabaseName = database,
+                        ClientAppName = app,
+                    });
+                    attentionMuteSeen |= groupJudgment.Muted;
+                    attentionWindowHold ??= groupJudgment.Hold;
+                    return groupJudgment.Silenced;
+                },
                 new AttentionRelativeBars(baseline?.P999ThreeMinuteAverage, multiples.Warning, multiples.Critical));
 
             if (finding is not null)
@@ -2880,7 +2948,9 @@ public sealed class AlertEngine
                         attentionContext, detailText,
                         NumericCurrentValue: finding.RatePerMinute,
                         NumericThresholdValue: finding.BarCrossed,
-                        Muted: finding.Muted, Severity: finding.Severity,
+                        Muted: finding.Muted && (attentionMuteSeen || attentionWindowHold is null),
+                        Hold: finding.Muted && !attentionMuteSeen ? attentionWindowHold : null,
+                        Severity: finding.Severity,
                         ShortMessage: finding.Summary), ct);
                     /* Final round of #5714 (L1): a Muted fire has no channel to back off, so it neither resets nor advances the
                        unmuted path's failed-send streak (same family and key). Its own stamp was set above. */
@@ -3083,7 +3153,7 @@ public sealed class AlertEngine
                         DatabaseName = worst.DatabaseName,
                         QueryText = worst.QueryText
                     };
-                    bool isMuted = _isAlertMuted(muteCtx);                          /* :365 */
+                    var mute = JudgeMute(muteCtx);                          /* :365 */
                     _lastLongRunningQueryAlert[key] = now;                          /* :366 */
 
                     /* #3497: name the Agent job on the card. FIRE-time resolution, deliberately, over
@@ -3192,7 +3262,7 @@ public sealed class AlertEngine
                         lrqContext, detailText,
                         NumericCurrentValue: elapsedMinutes,
                         NumericThresholdValue: lrqThresholdMinutes,
-                        Muted: isMuted, Severity: lrqContext?.SeverityOverride,
+                        Muted: mute.Muted, Hold: mute.Hold, Severity: lrqContext?.SeverityOverride,
                         ShortMessage: $"Session #{worst.SessionId} running {elapsedMinutes}m{previewSuffix}"), ct);
                     AfterFire("Long-Running Query", _lastLongRunningQueryAlert, key, now, alertCooldown, delivery);
                     readClock.Restart();
@@ -3273,7 +3343,7 @@ public sealed class AlertEngine
                 if (!suppressed && CooldownElapsed(_lastTempDbSpaceAlert, key, now, alertCooldown)) /* :423 */
                 {
                     var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = "tempdb Space" }; /* :425 */
-                    bool isMuted = _isAlertMuted(muteCtx);                          /* :426 */
+                    var mute = JudgeMute(muteCtx);                          /* :426 */
                     _lastTempDbSpaceAlert[key] = now;                               /* :427 */
 
                     var tempDbContext = AlertContextBuilders.BuildTempDbSpaceContext(tempDb); /* :440 */
@@ -3304,7 +3374,7 @@ public sealed class AlertEngine
                         tempDbContext, detailText,
                         NumericCurrentValue: tempDb.ReservedPercent,
                         NumericThresholdValue: tempDbThreshold,
-                        Muted: isMuted, Severity: tempDbContext.SeverityOverride,
+                        Muted: mute.Muted, Hold: mute.Hold, Severity: tempDbContext.SeverityOverride,
                         ShortMessage: $"tempdb {tempDb.ReservedPercent:F0}% reserved"), ct);
                     AfterFire("tempdb Space", _lastTempDbSpaceAlert, key, now, alertCooldown, delivery);
                     readClock.Restart();
@@ -3414,7 +3484,7 @@ public sealed class AlertEngine
                     && (escalation || LowDiskAlertGate.ShouldAlert(worst.FreePercent, lastLowDiskPercent)))
                 {
                     var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = "Volume Free Space" }; /* :499 */
-                    bool isMuted = _isAlertMuted(muteCtx);                          /* :500 */
+                    var mute = JudgeMute(muteCtx);                          /* :500 */
                     _lastLowDiskAlert[key] = now;                                   /* :501 */
                     _lastAlertedLowDiskPercent[key] = worst.FreePercent;            /* :502 */
                     var priorTier = _lowDiskEscalation.Highest(key);
@@ -3442,7 +3512,7 @@ public sealed class AlertEngine
                         lowDiskContext, detailText,
                         NumericCurrentValue: worst.FreePercent,
                         NumericThresholdValue: lowDiskPercent,
-                        Muted: isMuted, Severity: lowDiskContext?.SeverityOverride,
+                        Muted: mute.Muted, Hold: mute.Hold, Severity: lowDiskContext?.SeverityOverride,
                         ShortMessage: $"{worst.MountPoint} {worst.FreePercent:F0}% free ({worst.FreeGb:F1} GB)"), ct);
                     AfterFire("Volume Free Space", _lastLowDiskAlert, key, now, alertCooldown, delivery);
 
@@ -3554,7 +3624,7 @@ public sealed class AlertEngine
                     && CooldownElapsed(_lastPvsAlert, key, now, alertCooldown))
                 {
                     var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = "Version Store (PVS)" };
-                    bool isMuted = _isAlertMuted(muteCtx);
+                    var mute = JudgeMute(muteCtx);
                     _lastPvsAlert[key] = now;
                     _lastAlertedPvsPercent[key] = worst.PvsPercent;
 
@@ -3572,7 +3642,7 @@ public sealed class AlertEngine
                         pvsContext, detailText,
                         NumericCurrentValue: worst.PvsPercent,
                         NumericThresholdValue: worstPvsPercent,
-                        Muted: isMuted, Severity: null,
+                        Muted: mute.Muted, Hold: mute.Hold, Severity: null,
                         ShortMessage: $"{worst.DatabaseName} PVS {worst.PvsPercent:F0}% of database ({worst.PvsGb:F1} GB)"), ct);
                     AfterFire("Version Store (PVS)", _lastPvsAlert, key, now, alertCooldown, delivery);
 
@@ -3741,7 +3811,7 @@ public sealed class AlertEngine
                 if (!suppressed && anyNewObservation && CooldownElapsed(_lastFileGrowthAlert, key, now, alertCooldown))
                 {
                     var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = "Database File Growth" };
-                    bool isMuted = _isAlertMuted(muteCtx);
+                    var mute = JudgeMute(muteCtx);
                     _lastFileGrowthAlert[key] = now;
 
                     /* #4752: what each file's memory held before this fire (or that it held none), so a fire
@@ -3791,7 +3861,7 @@ public sealed class AlertEngine
                         context, detailText,
                         NumericCurrentValue: worst.VolumePercent,
                         NumericThresholdValue: worstBars.VolumePercent,
-                        Muted: isMuted, Severity: null,
+                        Muted: mute.Muted, Hold: mute.Hold, Severity: null,
                         ShortMessage: headline), ct);
                     AfterFire("Database File Growth", _lastFileGrowthAlert, key, now, alertCooldown, delivery);
 
@@ -3909,7 +3979,7 @@ public sealed class AlertEngine
                 {
                     var currentMinutes = worst.CurrentDurationSeconds / 60;         /* :583 — feeds ShortMessage (the toast body) */
                     var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = "Long-Running Job", JobName = worst.JobName }; /* :585 */
-                    bool isMuted = _isAlertMuted(muteCtx);                          /* :586 */
+                    var mute = JudgeMute(muteCtx);                          /* :586 */
                     _lastLongRunningJobAlert[jobKey] = now;                         /* :587 */
 
                     var jobContext = AlertContextBuilders.BuildAnomalousJobContext(fingerprintServer, anomalousJobs, jobOccurrences.Decorate); /* :600 */
@@ -3924,7 +3994,7 @@ public sealed class AlertEngine
                         jobContext, detailText,
                         NumericCurrentValue: (double)(worst.PercentOfAverage ?? 0),
                         NumericThresholdValue: jobMultiplier * 100,
-                        Muted: isMuted, Severity: jobContext?.SeverityOverride,
+                        Muted: mute.Muted, Hold: mute.Hold, Severity: jobContext?.SeverityOverride,
                         ShortMessage: $"{worst.JobName} at {worst.PercentOfAverage:F0}% of avg ({currentMinutes}m)"), ct);
 
                     /* #4752: the cooldown is per RUN and there is no second marker to put back. The back-dated
@@ -4017,7 +4087,7 @@ public sealed class AlertEngine
                     var jobNames = string.Join(", ", failedJobs.Select(j => j.JobName).Distinct().Take(3)); /* :673 */
 
                     var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = "Failed Agent Job", JobName = mostRecent.JobName }; /* :675 */
-                    bool isMuted = _isAlertMuted(muteCtx);                          /* :676 */
+                    var mute = JudgeMute(muteCtx);                          /* :676 */
                     DateTime? priorWatermark = hasWatermark ? lastFailure : null;   /* #4752: what a fire nobody received puts back in memory */
                     _lastFailedJobAlert[key] = now;                                 /* :677 */
                     _lastAlertedFailedJobTime[key] = newestFailure;                 /* :678 */
@@ -4035,7 +4105,7 @@ public sealed class AlertEngine
                         failedJobContext, detailText,
                         NumericCurrentValue: failedJobs.Count,
                         NumericThresholdValue: 0,
-                        Muted: isMuted, Severity: failedJobContext?.SeverityOverride,
+                        Muted: mute.Muted, Hold: mute.Hold, Severity: failedJobContext?.SeverityOverride,
                         ShortMessage: $"{failedJobs.Count} job {(failedJobs.Count == 1 ? "failure" : "failures")} — {jobNames}"), ct);
                     AfterFire("Failed Agent Job", _lastFailedJobAlert, key, now, alertCooldown, delivery);
 
@@ -4207,7 +4277,7 @@ public sealed class AlertEngine
                     MetricName = DatabaseStateTokens.MetricName,
                     DatabaseName = dbName
                 };
-                bool isMuted = _isAlertMuted(muteCtx);
+                var mute = JudgeMute(muteCtx);
                 _lastDatabaseStateAlert[cooldownKey] = now; /* stamped even when muted, like the others */
 
                 var shortMessage = pending
@@ -4241,7 +4311,7 @@ public sealed class AlertEngine
                     expectedText,
                     Context: stateContext, DetailText: detailText,
                     NumericCurrentValue: null, NumericThresholdValue: null,
-                    Muted: isMuted, Severity: severity,
+                    Muted: mute.Muted, Hold: mute.Hold, Severity: severity,
                     ShortMessage: shortMessage), ct);
                 AfterFire(DatabaseStateTokens.MetricName, _lastDatabaseStateAlert, cooldownKey, now, alertCooldown, delivery);
 
@@ -4259,7 +4329,7 @@ public sealed class AlertEngine
                    operator's mute silently became irreversible for as long as the state held. Skipping the
                    stamp costs a repeat inside the mute (invisible by definition, and exactly the pre-#2166
                    cooldown behavior) and keeps unmuting meaningful. */
-                if (!isMuted && !FailedSendBackoff.EveryChannelFailed(delivery))
+                if (!mute.Silenced && !FailedSendBackoff.EveryChannelFailed(delivery))
                 {
                     await _stateStore.SaveDatabaseStateAlertedAsync(key, dbName, db.StateDesc);
                 }
@@ -4541,7 +4611,7 @@ public sealed class AlertEngine
                     MetricName = ForcePlanTokens.MetricName,
                     DatabaseName = failure.DatabaseName
                 };
-                bool isMuted = _isAlertMuted(muteCtx);
+                var mute = JudgeMute(muteCtx);
                 var priorObservedAtUtc = plan.LastAlertedObservedAtUtc; /* #4752: what a fire nobody received puts back */
                 var priorPaged = plan.Paged;
                 plan.Paged = true;
@@ -4580,7 +4650,7 @@ public sealed class AlertEngine
                     reasonText,
                     Context: context, DetailText: detailText,
                     NumericCurrentValue: failure.FailureDelta, NumericThresholdValue: null,
-                    Muted: isMuted, Severity: ForcePlanTokens.SeverityFor(failure),
+                    Muted: mute.Muted, Hold: mute.Hold, Severity: ForcePlanTokens.SeverityFor(failure),
                     ShortMessage: $"{failure.DatabaseName} plan {failure.PlanId} failed to force {failure.FailureDelta}x ({reasonText})"), ct);
                 AfterFire(ForcePlanTokens.MetricName, _lastForcePlanAlert, cooldownKey, now, alertCooldown, delivery);
 

@@ -140,6 +140,7 @@ public sealed class McpAlertTools
             {
                 var (severity, severitySource) = AlertHistoryRowSeverity.Describe(r.MetricName, r.ContextJson);
                 var routing = AlertContextSerializer.TryReadRouting(r.ContextJson);
+                var attachedTo = AlertContextSerializer.TryReadAttachedTo(r.ContextJson);
                 return new
                 {
                     alert_time = r.AlertTime.ToString("o"),
@@ -185,6 +186,9 @@ public sealed class McpAlertTools
                        is. Null on every engine alert and on analysis rows written before the gate existed. */
                     routing = routing?.Route,
                     routing_reason = routing?.Reason,
+                    /* #7084 part 4: the open engine alert an analysis finding was attached to instead of paging (metric and
+                       fire time, UTC). Null on every other row and on every row written before the member existed. */
+                    attached_to = attachedTo is null ? null : new { metric_name = attachedTo.Metric, alert_time = McpHelpers.FormatEffectiveStart(attachedTo.AlertTimeUtc) },
                     detail_text = r.DetailText,
                     /* #5642: the newest sample the alert judged and how old it was when the alert fired, read off the
                        persisted context (computed once at fire time, never from the clock now). Null on a row with

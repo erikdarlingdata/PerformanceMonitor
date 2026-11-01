@@ -35,7 +35,10 @@ public partial class AlertDetailWindow : Window
     /// <param name="openFullChain">The link to the server's Blocking or Deadlocks view, or the tab the alert belongs on, at the alert's
     /// time (#5847): its text names where it opens, since the shell, which knows the engine, chose both; null hides the link.</param>
     /// <param name="sizeStore">Where the window's last size is kept (#5847); null keeps no size.</param>
-    public AlertDetailWindow(ViewerAlertRow item, AlertChainOpener? openFullChain = null, ISizeStore? sizeStore = null)
+    /// <param name="attachedFindings">The findings held back from paging because this engine alert was open (#7084 part 4), one
+    /// display line each, read by the caller when the window opens; null or empty hides the row.</param>
+    public AlertDetailWindow(ViewerAlertRow item, AlertChainOpener? openFullChain = null, ISizeStore? sizeStore = null,
+        IReadOnlyList<string>? attachedFindings = null)
     {
         InitializeComponent();
         _item = item;
@@ -76,6 +79,13 @@ public partial class AlertDetailWindow : Window
         if (item.Muted)
         {
             MutedBanner.Visibility = Visibility.Visible;
+        }
+
+        if (attachedFindings is { Count: > 0 })
+        {
+            AttachedFindingsText.Text = string.Join(Environment.NewLine, attachedFindings);
+            AttachedFindingsLabel.Visibility = Visibility.Visible;
+            AttachedFindingsText.Visibility = Visibility.Visible;
         }
 
         /* Prefer the structured context (advice / remediation T-SQL / drill-down) persisted as
