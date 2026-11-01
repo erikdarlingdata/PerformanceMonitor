@@ -124,7 +124,9 @@ public static class BlockingPageRule
 
     /// <summary>
     /// The start of the newest wait among <paramref name="events"/> (event time minus wait time), the observation a held row
-    /// is written against. A row with no event time is left out. <see cref="DateTime.MinValue"/> when none has one.
+    /// is written against. A row with no event time is left out. <see cref="DateTime.MinValue"/> when none has one. None is expected to
+    /// lack one: the blocked-process-report collector keeps only events that carry a timestamp (its ring-buffer filter on <c>@timestamp</c>)
+    /// and the DMV snapshot collector stamps <c>event_time</c> with the collection time, so real rows never reach that fallback (#7083).
     /// </summary>
     public static DateTime NewestWaitStart(IEnumerable<BlockedProcessAlertRow> events)
     {

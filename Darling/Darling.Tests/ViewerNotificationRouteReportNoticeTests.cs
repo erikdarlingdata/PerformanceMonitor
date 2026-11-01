@@ -175,9 +175,8 @@ public sealed class ViewerNotificationRouteReportNoticeTests
 
             /* A store below V233 has no column. The list reads the older statement, and every route is Off. The severity column stays, so
                this also proves the V229 statement is still the one used below V233. */
-            await ExecAsync(connection, "ALTER TABLE config.config_notification_routes DROP COLUMN report_notice", ct);
-            /* The probe reads newest first, so the alert key column (V234, #7076) goes too, or the store would still read as V234. */
-            await ExecAsync(connection, "ALTER TABLE config.config_alert_log DROP COLUMN alert_key", ct);
+            /* The probe reads newest first, so every later sentinel goes too, or the store would still read as the newest one left on disk. */
+            await RungRewindArtifacts.DropSentinelsAboveAsync(connection, 232, ct);
             await using (var older = new ViewerDataService(scratch.ConnectionString))
             {
                 Assert.True(await older.GetStoreSchemaVersionAsync(ct) < 233);
