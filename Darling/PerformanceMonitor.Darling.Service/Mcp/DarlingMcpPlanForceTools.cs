@@ -284,7 +284,7 @@ public sealed partial class DarlingMcpPlanForceTools
             if (proposing && prepared.Facts is { } proposed)
                 return await ProposeAsync(owner, utcNow, decision, action!, tool, ServerActionNames.ForcePlan, resolved.ServerId, resolved.DisplayName,
                     new { database = proposed.Database, query_id = proposed.QueryId, plan_id = proposed.PlanId },
-                    new { statement = proposed.Statement, forced_plan_id = proposed.ForcedPlanId, is_forced = proposed.IsForced },
+                    ForcePlanBinding(proposed),
                     new { statement = proposed.Statement, before = proposed.Before }, ct);
             if (prepared.Answer is { } preparedAnswer)
                 return preparedAnswer;
@@ -445,7 +445,7 @@ public sealed partial class DarlingMcpPlanForceTools
             /* #7109: the action needs a person's approval: store a proposal, write nothing. */
             if (proposing && prepared.Facts is { } proposed)
                 return await ProposeAsync(owner, utcNow, decision, action!, tool, ServerActionNames.EvictPlan, resolved.ServerId, resolved.DisplayName,
-                    new { plan_handle = proposed.Handle }, new { statement = proposed.Statement },
+                    new { plan_handle = proposed.Handle }, EvictPlanBinding(proposed),
                     new { statement = proposed.Statement, before = proposed.Before, warnings = proposed.Warnings }, ct);
             if (prepared.Answer is { } preparedAnswer)
                 return preparedAnswer;
@@ -578,16 +578,7 @@ public sealed partial class DarlingMcpPlanForceTools
             if (decision.NeedsApproval)
                 return await ProposeAsync(owner, null, decision, action!, tool, ServerActionNames.KillSession, resolved.ServerId, resolved.DisplayName,
                     new { session_id = sessionId, login_time = loginUtc, database = targetDatabase, azure },
-                    new
-                    {
-                        session_id = binding.SessionId,
-                        login_time = binding.LoginTimeUtc,
-                        login_time_server_local = binding.LoginTimeServerLocal,
-                        last_request_end_time = binding.LastRequestEndTimeUtc,
-                        last_request_end_time_server_local = binding.LastRequestEndTimeServerLocal,
-                        status = binding.Status,
-                        open_transaction_count = binding.OpenTransactionCount,
-                    },
+                    SqlKillBindingObject(binding),
                     new { session = before, warnings }, ct);
 
             RemediationResult? killed = null;
@@ -722,7 +713,7 @@ public sealed partial class DarlingMcpPlanForceTools
         if (decision.NeedsApproval)
             return await ProposeAsync(owner, null, decision, action!, tool, ServerActionNames.KillSession, resolved.ServerId, resolved.DisplayName,
                 new { pid, backend_start_epoch = startEpoch },
-                PgKillBindingImage(binding),
+                PgKillBindingObject(binding),
                 new { session = before, warnings }, ct);
 
         RemediationResult? killed = null;
@@ -876,7 +867,7 @@ public sealed partial class DarlingMcpPlanForceTools
         log_bytes_used = facts.LogBytesUsed,
     };
 
-    private static object? KillRollbackImage(KillRollback? rollback) =>
+    internal static object? KillRollbackImage(KillRollback? rollback) =>
         rollback is null ? null : new { in_progress = rollback.InProgress, percent_complete = rollback.PercentComplete };
 
     /// <summary>What a kill will cost, with no threshold: any log used means a rollback. A warning, never a refusal.</summary>

@@ -91,7 +91,7 @@ public sealed partial class DarlingMcpPlanForceTools
             /* #7109: the action needs a person's approval: store a proposal, write nothing. */
             if (proposing && prepared.Facts is { } proposed)
                 return await ProposeAsync(owner, null, decision, action!, tool, ServerActionNames.RecompileModule, resolved.ServerId, resolved.DisplayName,
-                    new { database = proposed.Database, module = proposed.Module }, new { statement = proposed.Statement, object_type = proposed.ObjectType },
+                    new { database = proposed.Database, module = proposed.Module }, RecompileModuleBinding(proposed),
                     new { statement = proposed.Statement, before = proposed.Before }, ct);
             if (prepared.Answer is { } preparedAnswer)
                 return preparedAnswer;

@@ -71,5 +71,5 @@ public sealed partial class DarlingMcpPlanForceTools
     private static object GuideImage(PerformanceMonitor.Darling.Remediation.PlanGuideDefinition guide) =>
         new { name = guide.Name, type = guide.Type, statement = guide.Statement, module_or_batch = guide.ModuleOrBatch, @params = guide.Params, hints = guide.Hints };
 
-    private static JsonObject ToObject(object value) => JsonSerializer.SerializeToNode(value, McpHelpers.JsonOptions)!.AsObject();
+    internal static JsonObject ToObject(object value) => JsonSerializer.SerializeToNode(value, McpHelpers.JsonOptions)!.AsObject();
 }

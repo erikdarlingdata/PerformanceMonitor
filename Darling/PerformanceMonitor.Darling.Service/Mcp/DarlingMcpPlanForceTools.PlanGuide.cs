@@ -106,7 +106,7 @@ public sealed partial class DarlingMcpPlanForceTools
             /* #7109: the action needs a person's approval: store a proposal, write nothing. */
             if (proposing && prepared.Facts is { } proposed)
                 return await ProposeAsync(owner, null, decision, action!, tool, ServerActionNames.CreatePlanGuide, resolved.ServerId, resolved.DisplayName,
-                    new { database = proposed.Database, definition = GuideImage(proposed.Definition) }, new { statement = proposed.Statement },
+                    new { database = proposed.Database, definition = GuideImage(proposed.Definition) }, CreatePlanGuideBinding(proposed),
                     new { statement = proposed.Statement, before = proposed.Before }, ct);
             if (prepared.Answer is { } preparedAnswer)
                 return preparedAnswer;
@@ -350,7 +350,7 @@ public sealed partial class DarlingMcpPlanForceTools
             if (proposing && prepared.Facts is { } proposed)
                 return await ProposeAsync(owner, null, decision, action!, tool, ServerActionNames.DropPlanGuide, resolved.ServerId, resolved.DisplayName,
                     new { database = proposed.Database, guide_name = proposed.GuideName },
-                    new { guide = GuideImage(proposed.Guide), disabled = proposed.Disabled, statement = proposed.Statement },
+                    DropPlanGuideBinding(proposed),
                     new { statement = proposed.Statement, before = proposed.Before }, ct);
             if (prepared.Answer is { } preparedAnswer)
                 return preparedAnswer;

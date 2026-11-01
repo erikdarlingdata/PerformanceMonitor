@@ -194,6 +194,10 @@ FOR SHARE OF p";
             "kill_session" => Text(target["pid"] ?? target["session_id"]),
             "force_query_store_plan" or "unforce_query_store_plan" => Text(target["plan_id"]),
             "evict_cached_plan" => Text(target["plan_handle"]),
+            /* The executors check the permit's id against the module in its normal form and the guide's name (#7109, slice 4c). */
+            "recompile_module" => Text(target["module"]),
+            "create_plan_guide" => Text(target["definition"]?["name"]),
+            "drop_plan_guide" => Text(target["guide_name"]),
             _ => null,
         };
         return (id, Text(target["database"]));
@@ -293,9 +297,17 @@ FOR SHARE OF p";
     /// The confirming press's first transaction (#7109): the shared conditions, the approver's grant and open rule 1, the proposal's state, its
     /// expiry and the person of the first press, then pending to approved and <c>action_called</c> (the agent as the actor, the approver in the
     /// detail). The permit is built here and nowhere else. A refusal changes nothing: the proposal stays pending and the answer says why.
+    /// <para><paramref name="beforeJson"/> is the journal's before image, in the shape the agent's own call journals it (the plan state of a force,
+    /// the guide definition of a drop), so the person's undo and the post-force checks read an approved change as they read the agent's. Null
+    /// journals the binding.</para>
     /// </summary>
+    public Task<ProposalApproval> ApproveProposalForRunAsync(Guid proposalId, ProposalApprover approver, ApprovedActionHooks hooks,
+        CancellationToken cancellationToken = default) =>
+        ApproveProposalForRunAsync(proposalId, approver, hooks, null, cancellationToken);
+
+    /// <inheritdoc cref="ApproveProposalForRunAsync(Guid, ProposalApprover, ApprovedActionHooks, CancellationToken)"/>
     public async Task<ProposalApproval> ApproveProposalForRunAsync(Guid proposalId, ProposalApprover approver, ApprovedActionHooks hooks,
-        CancellationToken cancellationToken = default)
+        string? beforeJson, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(approver);
         ArgumentNullException.ThrowIfNull(hooks);
@@ -332,7 +344,7 @@ FOR SHARE OF p";
             ["claim_no"] = proposal.ClaimNo,
             ["proposal_id"] = proposal.ProposalId.ToString(),
             ["approved_by"] = approver.ToJson(),
-            ["before"] = JsonNode.Parse(proposal.BindingJson),
+            ["before"] = JsonNode.Parse(beforeJson ?? proposal.BindingJson),
         };
         var calledId = await JournalReturningAsync(connection, transaction, now, proposal.RequestId, proposal.ServerId, "action_called",
             "agent:" + proposal.Agent, proposal.Reason, called.ToJsonString(), cancellationToken);
