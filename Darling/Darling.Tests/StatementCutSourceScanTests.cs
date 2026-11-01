@@ -141,6 +141,8 @@ public sealed class StatementCutSourceScanTests
             "the desktop heatmap hover (GetQueryHeatmapAsync); the get_query_heatmap tool reads LocalDataService.QueryHeatmap.cs, which fetches whole text and cuts after the filter"),
         new("Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs", "row.victimstatement!", 1,
             "BuildPgDeadlockIncident cuts a PostgreSQL victim statement the collector already judged whole: PgDeadlockLogParser redacts the whole report (PgLogTextRedactor.RedactDetail) before it takes the victim's statement out of it, and PgDeadlockLogParser.NormalizeStatement re-reads a stored one. Nothing here sees raw text"),
+        new("Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs", "statement", 1,
+            "PgDeadlockPairText (#7082) cuts the statements of a PostgreSQL deadlock pair the collector already judged whole: PgDeadlockLogParser redacts the whole report and normalizes the graph (NormalizeGraph, which DarlingPgDeadlockReader runs again on every read) before ParseStatements takes the statements out of it, the same order as the victim statement BuildPgDeadlockIncident cuts"),
         new("Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs", "row.rootquery!", 2,
             "BuildPgBlockingIncident cuts a PostgreSQL root query (in the root line, and again in the Blocking Query field, #7083) the target already judged whole: PgBlockingCollector wraps blocker.query in PgSensitiveStatementFilter.SqlPredicate on the target before the row leaves it (PgSensitiveStatementFilterTests), and PgStatementTextScrub covers rows stored before that. Nothing here sees raw text"),
         new("Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs", "row.worstvictimquery!", 1,

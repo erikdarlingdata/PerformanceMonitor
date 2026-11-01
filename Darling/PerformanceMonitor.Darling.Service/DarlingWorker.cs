@@ -1318,6 +1318,27 @@ public sealed partial class DarlingWorker : BackgroundService
        different remedies, so one must not consume the other's cooldown (#1140). */
     private readonly ConcurrentDictionary<string, DateTime> _lastPgPoisonWaitAlert = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, bool> _activePgPoisonWaitAlert = new(StringComparer.Ordinal);
+
+    /// <summary>#7082: Poison Wait subjects (server|metric|subject) whose current Warning episode already wrote its one held
+    /// digest row. Cleared when the subject pages or drops under the Warning bar, so the next episode writes its own.</summary>
+    private readonly ConcurrentDictionary<string, bool> _heldPgPoisonWaitEpisode = new(StringComparer.Ordinal);
+
+    /// <summary>#7082: per server, when a held "capacity at the ceiling, low instance CPU" High CPU row was last written, so
+    /// the digest gets at most one such row per cooldown per server.</summary>
+    private readonly ConcurrentDictionary<string, DateTime> _lastPgCpuHeldRow = new(StringComparer.Ordinal);
+
+    /// <summary>#7082: per server, the deadlock reports (identity to first-seen time) already counted into the signature
+    /// store, so a report the window re-reads every sweep is counted once.</summary>
+    private readonly ConcurrentDictionary<string, Dictionary<string, DateTime>> _pgDeadlockCounted = new(StringComparer.Ordinal);
+
+    /// <summary>#7082: per server, the deadlock statement-pair keys that were new (not in the 30-day store) and have not yet
+    /// been announced by a page. Held in memory until a page goes out, because the store already counts them.</summary>
+    private readonly ConcurrentDictionary<string, HashSet<string>> _pgDeadlockUnannouncedNew = new(StringComparer.Ordinal);
+
+    /// <summary>#6005: the deadlock rollup that is also the investigation agent gate. Set when the alert pipeline is built. The
+    /// PostgreSQL deadlock count tells it which statement pairs are new, as the SQL Server rollup does, so the gate admits the
+    /// investigation request of a page about a first-ever pair.</summary>
+    private PerformanceMonitor.Darling.Service.Investigations.DarlingDeadlockRollup? _deadlockRollup;
     private readonly ConcurrentDictionary<string, DateTime> _lastPgPoisonWaitCollectionTime = new(StringComparer.Ordinal);
     /* #2716's restart-survival shape for the poison cooldown: seeded once per key from
        IAlertHistoryStore.GetLastAlertTimeAsync (the subject IS the #1140 dedup fingerprint the alert

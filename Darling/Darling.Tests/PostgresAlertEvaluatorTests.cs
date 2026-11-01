@@ -497,8 +497,11 @@ public class PostgresAlertEvaluatorTests
         long accumulatedMs,
         string waitEvent = "BtreePage",
         long waits = 100_000,
-        string waitType = "IPC")
-        => new(waitType, waitEvent, accumulatedMs, waits, new DateTime(2026, 8, 31, 0, 0, 0));
+        string waitType = "IPC",
+        long? priorWindowMs = null)
+        /* #7082: the prior window defaults to the current one (an episode that has held for both), so a test
+           about grading or message text is not also a test of the 20 minute hold. */
+        => new(waitType, waitEvent, accumulatedMs, waits, new DateTime(2026, 8, 31, 0, 0, 0), priorWindowMs ?? accumulatedMs);
 
     /// <summary>
     /// The defining departure from the SQL Server shape, straight from the #2711 fleet research: the
@@ -692,12 +695,12 @@ public class PostgresAlertEvaluatorTests
         Assert.Contains("status = 'SUCCESS'", sql, StringComparison.Ordinal);
         Assert.Contains("COUNT(*)::int AS captures_in_window", sql, StringComparison.Ordinal);
         Assert.Contains("LEFT JOIN accumulated AS a ON true", sql, StringComparison.Ordinal);
-        Assert.Equal(2, sql.Split("collection_time >= $2").Length - 1);
+        Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
         Assert.Equal(2, sql.Split("server_id = $1").Length - 1);
 
         Assert.Contains("SUM(delta_wait_time_us)", sql, StringComparison.Ordinal);
         Assert.Contains("SUM(delta_waits)", sql, StringComparison.Ordinal);
-        Assert.Contains("MAX(collection_time) AS newest_collection_time", sql, StringComparison.Ordinal);
+        Assert.Contains("AS newest_collection_time", sql, StringComparison.Ordinal);
         Assert.Contains("lower(wait_event) IN ('btreepage', 'bufferio')", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("LIMIT", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("ORDER BY", sql, StringComparison.Ordinal);

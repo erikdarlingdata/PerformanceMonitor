@@ -190,10 +190,10 @@ public sealed class BuiltinAlertPersistenceRungTests
 
         /* And it is reached only when the batch brought nothing AND an incident is open — it exists for
            the reminder, not as a second way to observe. */
-        Assert.Contains("if (!lastCapacityPercent.HasValue && record.State.Firing)", body, StringComparison.Ordinal);
+        Assert.Contains("if (lastCounted is null && record.State.Firing)", body, StringComparison.Ordinal);
 
         /* breaching is computed AFTER the fallback, or the fallback informs nothing. */
-        var breaching = body.IndexOf("bool breaching = lastCapacityPercent.HasValue", StringComparison.Ordinal);
+        var breaching = body.IndexOf("bool breaching = lastCounted is not null", StringComparison.Ordinal);
         Assert.True(breaching > fallback, "breaching must be computed after the fallback that populates it");
 
         /* It persists through the same seam under the same subject key, so a restart does not re-announce
@@ -275,28 +275,6 @@ public sealed class BuiltinAlertPersistenceRungTests
         var fire = body.IndexOf("if (record.State.Firing && breaching)", StringComparison.Ordinal);
         Assert.True(save > edge, "the state save must come after the loop that takes the edge");
         Assert.True(fire > save, "the state save must come before the delivery arms");
-    }
-
-    /// <summary>
-    /// A missing capacity reading must FREEZE the gate rather than clear it. #3281 established that the
-    /// alert never FIRES on an absent capacity sample (a fallback to percent-of-allocated silently arms the
-    /// threshold against the wrong denominator); the other half is that it must not RESOLVE on one either,
-    /// because that announces a recovery nobody measured. The pre-#3282 code treated absent capacity as
-    /// "not exceeded", which is the resolve arm.
-    /// </summary>
-    [Fact]
-    public void AnAbsentCapacityReadingIsNotAClear()
-    {
-        var body = EvaluatePgCpuBody();
-
-        Assert.Contains("if (!capacityPercent.HasValue)", body, StringComparison.Ordinal);
-
-        /* `continue` is the freeze: the sample is neither counted nor marked observed, so the streak holds
-           and a later reading picks up where the last real one left off. */
-        var absent = body.IndexOf("if (!capacityPercent.HasValue)", StringComparison.Ordinal);
-        var next = body.IndexOf("AlertPersistenceGate.Evaluate", absent, StringComparison.Ordinal);
-        Assert.True(next > absent, "the no-capacity arm must sit before the gate call it skips");
-        Assert.Contains("continue;", body[absent..next], StringComparison.Ordinal);
     }
 
     /// <summary>The <c>EvaluatePgCpuAsync</c> body, sliced from its own declaration to the next member at

@@ -768,6 +768,7 @@ public sealed partial class DarlingWorker
         /* #6005: the deadlock rollup (written by the alert pass), the agent gate it feeds and the 4-hour digest. */
         var deadlockRollup = new PerformanceMonitor.Darling.Service.Investigations.DarlingDeadlockRollup(
             new DeadlockSignatureStore(investigationPostgres, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds));
+        _deadlockRollup = deadlockRollup;
         var investigationDispatcher = new InvestigationDispatcher(
             investigationStore, alertSettings, _logger,
             McpDataDetailModes.TryParse(config.Mcp.DataDetail, out McpDataDetail dataDetail)

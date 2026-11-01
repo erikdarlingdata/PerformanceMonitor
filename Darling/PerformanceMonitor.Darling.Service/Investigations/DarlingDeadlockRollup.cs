@@ -139,6 +139,30 @@ public sealed class DarlingDeadlockRollup : IDeadlockRollup
     }
 
     /// <summary>
+    /// Tells the gate which signatures are new for a server (not in the 30-day store), for a counter that is not
+    /// <see cref="RecordAsync"/>: the PostgreSQL deadlock count (#7082) writes <c>pg:</c> signatures into the same store, and
+    /// without this a first-ever pair would look like a repeat to <see cref="AllowsAgentRequestAsync"/> and lose its request.
+    /// </summary>
+    public void NoteNewSignatures(string serverKey, IReadOnlyCollection<string> fresh)
+    {
+        var serverId = AlertHistoryServerIdentity.StorageId(serverKey);
+        if (serverId == 0 || fresh.Count == 0)
+        {
+            return;
+        }
+
+        lock (_gate)
+        {
+            if (!_newSignatures.TryGetValue(serverId, out var set))
+            {
+                _newSignatures[serverId] = set = new HashSet<string>(StringComparer.Ordinal);
+            }
+
+            set.UnionWith(fresh);
+        }
+    }
+
+    /// <summary>
     /// The agent gate (see the class remarks). True admits the agent request. A store failure admits it too: a gate that cannot
     /// read its counts must not silence the agent.
     /// </summary>

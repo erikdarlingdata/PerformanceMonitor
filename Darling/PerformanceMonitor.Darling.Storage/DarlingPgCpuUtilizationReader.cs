@@ -51,6 +51,68 @@ public static class DarlingPgCpuUtilizationReader
         LIMIT 1
         """;
 
+    /// <summary>
+    /// How far back the "has this target ever published a capacity figure" read looks (#7082). A serverless instance
+    /// publishes ACU on nearly every minute, so a week of stored samples with none of the three capacity columns is a
+    /// provisioned instance. Bounded so the read stays an index range on <c>(server_id, collection_time)</c>.
+    /// </summary>
+    public static readonly TimeSpan CapacityHistoryLookback = TimeSpan.FromDays(7);
+
+    /// <summary>
+    /// How much stored history a target needs before "no capacity figure in it" means anything (#7082). A serverless
+    /// target added an hour ago has no ACU point yet, and without this floor it would read as provisioned and page on
+    /// percent of allocated CPU, the #3281 noise.
+    /// </summary>
+    public static readonly TimeSpan MinimumHistoryForProvisioned = TimeSpan.FromMinutes(60);
+
+    /// <summary>The target's oldest stored row in the lookback, and whether any row in it carries a capacity figure.</summary>
+    internal const string CapacityHistorySql = """
+        SELECT (SELECT MIN(collection_time)
+                FROM pg_cpu_utilization
+                WHERE server_id = $1
+                AND   collection_time >= $2),
+               EXISTS (
+                SELECT 1
+                FROM pg_cpu_utilization
+                WHERE server_id = $1
+                AND   collection_time >= $2
+                AND   (acu_utilization_percent IS NOT NULL
+                       OR serverless_capacity_acu IS NOT NULL
+                       OR max_configured_acu IS NOT NULL))
+        """;
+
+    /// <summary>
+    /// True when this target's own stored samples of the last <see cref="CapacityHistoryLookback"/> carry no capacity
+    /// figure at all (#7082): no ACU utilisation, no allocated ACU and no configured ceiling on any row. That is how a
+    /// provisioned RDS or Aurora PostgreSQL instance looks, since it publishes none of the Serverless v2 metrics, and it
+    /// is the only signal the store holds for the difference (the instance class is read by the RDS describe call but is
+    /// not stored). A serverless instance that Performance Insights had no ACU point for on one minute is NOT this: its
+    /// other minutes carry the figure, so the answer is false and that minute is left out of the gate. So is a target
+    /// whose oldest row in the window is under <see cref="MinimumHistoryForProvisioned"/> old: a serverless target added
+    /// an hour ago has not yet had a chance to publish its first ACU point, so too little history is unknown, not
+    /// provisioned.
+    /// </summary>
+    public static async Task<bool> IsKnownProvisionedAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime nowUtc, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(postgres);
+
+        await using var command = postgres.CreateCommand(CapacityHistorySql);
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(nowUtc - CapacityHistoryLookback, DateTimeKind.Unspecified));
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken) || reader.IsDBNull(0))
+        {
+            return false;
+        }
+
+        /* The column is the naive-UTC `timestamp` the writers stamp, so the comparison is in the same clock as nowUtc. */
+        var oldest = DateTime.SpecifyKind(reader.GetDateTime(0), DateTimeKind.Utc);
+        return nowUtc - oldest >= MinimumHistoryForProvisioned && !reader.GetBoolean(1);
+    }
+
     /// <param name="CpuPercent"><c>os.cpuUtilization.total.avg</c> — percent of the capacity CURRENTLY
     /// ALLOCATED. Real, and not the saturation figure on a serverless instance class (#3281).</param>
     /// <param name="AcuUtilizationPercent">Percent of the CONFIGURED capacity ceiling in use — the figure
