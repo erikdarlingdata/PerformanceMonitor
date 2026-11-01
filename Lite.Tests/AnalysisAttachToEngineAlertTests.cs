@@ -82,7 +82,9 @@ public class AnalysisAttachToEngineAlertTests
         Category = "anomaly",
         StoryPath = "ROOT_ONE",
         StoryPathHash = hash,
-        Severity = 1.6,
+        // Over the bar + 0.25 so the one-fact rule (#7084 part 3) keeps this finding on the page route; the part 4 seam is
+        // only asked for a finding that would page.
+        Severity = 1.8,
         FactCount = 1,
         MatchedAmplifiers = 1,
         DefinedAmplifiers = 4,
