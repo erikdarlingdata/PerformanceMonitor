@@ -371,7 +371,18 @@ public sealed class DarlingSelfAlertTests
         /// can be asserted rather than assumed.</summary>
         public CapturingLogger Log { get; } = new();
 
-        public DarlingSelfAlertEvaluator Build() => new(
+        public DarlingSelfAlertEvaluator Build()
+        {
+            var e = BuildCore();
+            e.HoldSelfHealth = HoldSelfHealth;
+            return e;
+        }
+
+        /// <summary>#7086: false (the default here) lets the self-health conditions page on a first breach, as the older tests
+        /// in this file assume. The hold tests set it true.</summary>
+        public bool HoldSelfHealth { get; set; }
+
+        private DarlingSelfAlertEvaluator BuildCore() => new(
             Settings, Deliverer, History,
             _ => MuteThrows ? throw new InvalidOperationException("mute check boom") : Muted,
             logger: Log, utcNow: () => Now,

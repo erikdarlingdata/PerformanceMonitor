@@ -167,6 +167,9 @@ public sealed class StandingGrainRestartSeedTests
 
         var card = Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == ForcePlanTokens.MetricName);
         Assert.Contains("22", card.ShortMessage ?? card.DetailText ?? string.Empty, StringComparison.Ordinal);
+        /* #7086: plan 22 is news again, and the first failure of a plan is held rather than paged. Plan 23's open row still
+           covers it, so only 22 is announced at all. */
+        Assert.NotNull(card.Hold);
     }
 
     [Fact]
@@ -183,7 +186,10 @@ public sealed class StandingGrainRestartSeedTests
         SetPlans(h, 22, 23);
         await SweepAsync(h, engine);
 
-        Assert.Equal(1, Cards(h, ForcePlanTokens.MetricName));
+        /* Plan 22 is news again: its first failure is held (#7086), and plan 23, still covered by its open row, stays quiet. */
+        var card = Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == ForcePlanTokens.MetricName);
+        Assert.NotNull(card.Hold);
+        Assert.Contains("plan 22", card.ShortMessage ?? string.Empty, StringComparison.Ordinal);
     }
 
     // ---- names that start with another name (the match is on the exact field, not a substring) ---------------------

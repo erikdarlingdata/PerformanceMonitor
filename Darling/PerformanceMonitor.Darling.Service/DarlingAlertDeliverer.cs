@@ -157,7 +157,9 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
             /* #1236/#1141: a per-server override wins over the global mode; Per-event splits an
                incident-carrying alert into one send+row per distinct incident (capped, "+N more"). */
             var mode = AlertDeliveryModeResolver.Resolve(_resolveServerOverride(outcome.ServerKey), _settings.DeliveryMode);
-            if (mode == AlertNotificationMode.PerEvent && outcome.Context?.Incidents is { Count: > 0 })
+            /* #7086: a held fire is one digest row, whatever the mode: the Per-event split is a paging mechanism. */
+            if (mode == AlertNotificationMode.PerEvent && outcome.Context?.Incidents is { Count: > 0 }
+                && !(outcome.Hold is not null && !outcome.Muted))
             {
                 var deliveries = new List<AlertDelivery?>();
                 foreach (var message in PerEventNotification.Split(outcome.Context, _settings.PerEventMax))
@@ -240,6 +242,27 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
         /* #5642: the sample-age line rides the history row's detail_text and every channel's prose exactly
            once, whichever way the engine built the text; the context JSON below carries the typed field. */
         detailText = AlertDetailText.WithSampleAge(detailText, context);
+
+        /* #7086: the evaluator held this fire back from paging. Nothing is sent, no investigation request is opened,
+           and NoteDeliveredFire is not called: a held fire is not a delivered page, so its clear owes no close. The row
+           is the digest disposition with the reason on its routing record. A mute rule wins: a muted and held fire
+           falls through and records as muted. */
+        if (outcome.Hold is { } hold && !outcome.Muted)
+        {
+            context ??= new AlertContext();
+            context.Routing = hold.ToRouting();
+            var held = AlertDelivery.RoutedToDigest();
+            await _historyStore.RecordAlertAsync(new AlertHistoryRecord(
+                outcome.ServerKey, outcome.ServerName, outcome.MetricName,
+                currentValue, outcome.ThresholdValue,
+                numericCurrentValue, numericThresholdValue,
+                held,
+                false, detailText, AlertContextSerializer.Serialize(context))
+            {
+                AlertTimeUtc = AlertHistoryEscalationSeed.TruncateToMicroseconds(DateTime.UtcNow),
+            });
+            return held;
+        }
 
         /* #5632 Phase A: the row's time is stamped once, here, so the investigation link names this exact row.
            #5821: the request is opened or joined BEFORE the channels post, so the generic webhook's {{investigation_json}}
