@@ -82,22 +82,10 @@ public sealed class ScramVerifierLiveTests
                 Assert.Equal("scram_client_made", await ScalarAsync<string>(c, "SELECT current_user::text", ct));
             }
 
-            /* A refusal reaches the client in one of two forms. Usually it is the server's FATAL 28P01 reply. On
-               Windows the server's close can arrive as a reset that drops that reply before it is read, so the
-               client sees the connection reset instead (#7116). The right password signed in on this same server
-               just above, so a server that is down cannot pass here. */
-            var refused = await Assert.ThrowsAnyAsync<NpgsqlException>(async () =>
+            await AssertSignInRefusedAsync(async () =>
             {
                 await using var wrong = await OpenAsync(Login(ownerCs, "scram_client_made", "NotThePassword"), ct);
             });
-            if (refused is PostgresException postgres)
-            {
-                Assert.Equal("28P01", postgres.SqlState);
-            }
-            else
-            {
-                Assert.IsAssignableFrom<IOException>(refused.InnerException);
-            }
 
             /* Provisioning needs the migrated schema (its grants name tables by qualified name). */
             await using (var c = await OpenAsync(ownerCs.ConnectionString, ct))
@@ -282,7 +270,7 @@ public sealed class ScramVerifierLiveTests
                 Assert.Equal("mcp", await ScalarAsync<string>(login, "SELECT current_user::text", ct));
             }
 
-            await Assert.ThrowsAsync<PostgresException>(async () =>
+            await AssertSignInRefusedAsync(async () =>
             {
                 await using var wrong = await OpenAsync(Login(ownerCs, "viewer", oldPassword), ct);
             });
@@ -362,6 +350,23 @@ public sealed class ScramVerifierLiveTests
         await using var command = new NpgsqlCommand("SELECT rolpassword FROM pg_catalog.pg_authid WHERE rolname = $1", connection);
         command.Parameters.AddWithValue(role);
         return await command.ExecuteScalarAsync(ct) as string;
+    }
+
+    /* A refused sign-in reaches the client in one of two forms. Usually it is the server's FATAL 28P01 reply. On
+       Windows the server's close can arrive as a reset that drops that reply before it is read, so the client
+       sees the connection reset instead (#7116). Each caller signs in with the right password on the same server
+       just before, so a server that is down cannot pass here. */
+    private static async Task AssertSignInRefusedAsync(Func<Task> signIn)
+    {
+        var refused = await Assert.ThrowsAnyAsync<NpgsqlException>(signIn);
+        if (refused is PostgresException postgres)
+        {
+            Assert.Equal("28P01", postgres.SqlState);
+        }
+        else
+        {
+            Assert.IsAssignableFrom<IOException>(refused.InnerException);
+        }
     }
 
     private static async Task<NpgsqlConnection> OpenAsync(string connectionString, CancellationToken ct)
