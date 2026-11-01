@@ -172,6 +172,7 @@ LEFT JOIN LATERAL (
       AND x.detail->>'called_id' = c.journal_id::text
     ORDER BY x.journal_id DESC LIMIT 1) AS u ON true
 WHERE c.event = 'action_called' AND c.event_time >= $1 AND ($3::bigint IS NULL OR c.journal_id = $3)
+  AND ($4::uuid IS NULL OR c.request_id = $4)
 ORDER BY c.event_time DESC, c.journal_id DESC
 LIMIT $2";
 
@@ -182,6 +183,7 @@ SELECT j.journal_id, j.event_time, j.request_id, j.server_id, j.actor, j.reason,
 FROM config.investigation_journal AS j
 LEFT JOIN collect.servers AS sv ON sv.server_id = j.server_id
 WHERE j.event = 'refused' AND j.actor LIKE 'agent:%' AND j.detail->>'tool' IS NOT NULL AND j.event_time >= $1
+  AND ($3::uuid IS NULL OR j.request_id = $3)
 ORDER BY j.event_time DESC, j.journal_id DESC
 LIMIT $2";
 
@@ -253,14 +255,17 @@ WHERE c.journal_id = $1 AND c.event = 'action_called'";
         return new ForceReviewMark((int)reader.GetInt64(1), (int)reader.GetInt64(2), running);
     }
 
-    /// <summary>The list: the calls and the refusals newest first, with the switch's state.</summary>
-    public async Task<AgentChangesRead> ReadAsync(int limit = 200, CancellationToken cancellationToken = default)
+    /// <summary>The list: the calls and the refusals newest first, with the switch's state. With <paramref name="requestId"/> (#6979)
+    /// only that request's calls and refusals, read by <c>request_id</c> in SQL (<c>ix_investigation_journal_request</c>) rather than
+    /// out of the newest <paramref name="limit"/>, and with no window: one request's own rows are few, and the undo's window is
+    /// <see cref="AgentChangeRow.CanTryUndo"/>'s call.</summary>
+    public async Task<AgentChangesRead> ReadAsync(int limit = 200, Guid? requestId = null, CancellationToken cancellationToken = default)
     {
         limit = Math.Clamp(limit, 1, 1000);
-        var since = Now() - Window;
+        var since = requestId is null ? Now() - Window : DateTime.UnixEpoch;
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
         var enabled = await ReadEnabledAsync(connection, null, cancellationToken);
-        var changes = await ReadChangesAsync(connection, since, limit, null, cancellationToken);
+        var changes = await ReadChangesAsync(connection, since, limit, null, requestId, cancellationToken);
 
         for (var i = 0; i < changes.Count; i++)
         {
@@ -271,7 +276,8 @@ WHERE c.journal_id = $1 AND c.event = 'action_called'";
         }
 
         var refusals = new List<AgentRefusalRow>();
-        await using (var command = Command(connection, null, RefusalsSql, P(since), P(limit)))
+        await using (var command = Command(connection, null, RefusalsSql, P(since), P(limit),
+            new NpgsqlParameter<Guid?> { TypedValue = requestId, NpgsqlDbType = NpgsqlDbType.Uuid }))
         await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
         {
             while (await reader.ReadAsync(cancellationToken))
@@ -286,11 +292,12 @@ WHERE c.journal_id = $1 AND c.event = 'action_called'";
         return new AgentChangesRead(enabled, changes, refusals);
     }
 
-    private async Task<List<AgentChangeRow>> ReadChangesAsync(NpgsqlConnection connection, DateTime since, int limit, long? calledId, CancellationToken cancellationToken)
+    private async Task<List<AgentChangeRow>> ReadChangesAsync(NpgsqlConnection connection, DateTime since, int limit, long? calledId, Guid? requestId, CancellationToken cancellationToken)
     {
         var changes = new List<AgentChangeRow>();
         await using var command = Command(connection, null, ListSql, P(since), P(limit),
-            new NpgsqlParameter<long?> { TypedValue = calledId, NpgsqlDbType = NpgsqlDbType.Bigint });
+            new NpgsqlParameter<long?> { TypedValue = calledId, NpgsqlDbType = NpgsqlDbType.Bigint },
+            new NpgsqlParameter<Guid?> { TypedValue = requestId, NpgsqlDbType = NpgsqlDbType.Uuid });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -358,7 +365,16 @@ WHERE c.journal_id = $1 AND c.event = 'action_called'";
     }
 
     private async Task<AgentChangeRow?> ReadAsync(NpgsqlConnection connection, long calledId, CancellationToken cancellationToken) =>
-        (await ReadChangesAsync(connection, DateTime.UnixEpoch, 1, calledId, cancellationToken)).SingleOrDefault();
+        (await ReadChangesAsync(connection, DateTime.UnixEpoch, 1, calledId, null, cancellationToken)).SingleOrDefault();
+
+    /// <summary>#6979: the calls of one request, oldest first, in the list's own row shape and by the list's own SQL (<see cref="ListSql"/>). Writes nothing.</summary>
+    public async Task<IReadOnlyList<AgentChangeRow>> ChangesOfRequestAsync(Guid requestId, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        var rows = await ReadChangesAsync(connection, DateTime.UnixEpoch, 1000, null, requestId, cancellationToken);
+        rows.Reverse();
+        return rows;
+    }
 
     /// <summary>True when this store login may undo and switch (it can write the journal and the service row: the admin role). The viewer
     /// role on a managed or compose store cannot, so the web lists only.</summary>
@@ -574,7 +590,7 @@ WHERE journal_id = $1 AND event = 'action_called'", P(calledId)))
     /// rule tool answers the rule itself, the override tool journals its image as is, and a delete answers <c>{status: "deleted"}</c>
     /// (null: nothing is left).
     /// </summary>
-    private static JsonNode? AfterImageNode(string kind, JsonNode? answer)
+    internal static JsonNode? AfterImageNode(string kind, JsonNode? answer)
     {
         if (answer is JsonObject o && o["status"] is JsonValue s && s.TryGetValue(out string? word) && word == "deleted")
             return null;

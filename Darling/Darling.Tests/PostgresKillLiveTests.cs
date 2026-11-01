@@ -630,7 +630,7 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
             Assert.Equal(1, await c.JournalAsync("action_called"));
             Assert.Equal(0, await c.JournalAsync("action_failed"));
             Assert.Equal(0, await c.JournalAsync("action_done"));
-            var change = Assert.Single((await new AgentChangeUndo(c.Source, 30).ReadAsync(50, c.Ct)).Changes);
+            var change = Assert.Single((await new AgentChangeUndo(c.Source, 30).ReadAsync(50, cancellationToken: c.Ct)).Changes);
             Assert.Equal(AgentChangeResult.Unknown, change.Result);
         });
     }

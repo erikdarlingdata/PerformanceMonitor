@@ -65,6 +65,9 @@ public sealed class NotificationRouteDraft
     /// <summary>The severity filter (V229, #6928): <c>both</c>, <c>critical</c> or <c>warning</c>.</summary>
     public string Severities { get; set; } = NotificationRouteKinds.SeveritiesBoth;
 
+    /// <summary>Whether the route posts a chat notice when an agent files a report (V233, #6979): <c>off</c>, <c>needs_person_or_change</c> or <c>all</c>.</summary>
+    public string ReportNotice { get; set; } = NotificationRouteKinds.ReportNoticeOff;
+
     /// <summary>When the route was last saved, as the writer's screen read it (the store's <c>modified_at</c>, UTC). On a <c>stored</c> draft
     /// handed to <see cref="NotificationRouteWriter.SaveAsync"/> it is the version the save expects: a route saved by anyone since is refused
     /// as a conflict instead of overwritten (#6274). Null or <c>default</c> skips the check.</summary>
@@ -96,8 +99,8 @@ public static class NotificationRouteWriter
     /// <summary>Inserts one route. <c>route_id</c> is <c>GENERATED ALWAYS AS IDENTITY</c>, so it is never in the column list.</summary>
     public const string InsertSql = @"
 INSERT INTO config_notification_routes
-    (metric_match, " + DestinationColumns + @", enabled, scope_server_id, scope_tag_id, " + AgentColumns + @", send_resolutions, fallback_route_id, severities, modified_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, (now() AT TIME ZONE 'UTC'))
+    (metric_match, " + DestinationColumns + @", enabled, scope_server_id, scope_tag_id, " + AgentColumns + @", send_resolutions, fallback_route_id, severities, report_notice, modified_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, (now() AT TIME ZONE 'UTC'))
 RETURNING route_id";
 
     public const string UpdateSql = @"
@@ -119,6 +122,7 @@ UPDATE config_notification_routes SET
     send_resolutions = $16,
     fallback_route_id = $17,
     severities = $18,
+    report_notice = $19,
     modified_at = (now() AT TIME ZONE 'UTC')
 WHERE route_id = $1";
 
@@ -219,7 +223,7 @@ WHERE route_id = $1";
     /// plaintext) and the address list. Only a writer with the service's login reads them.</summary>
     public const string SelectStoredSql =
         "SELECT route_id, metric_match, teams_url, slack_url, generic_url, pagerduty_routing_key, smtp_recipients, enabled, "
-        + "scope_server_id, scope_tag_id, " + AgentColumns + ", send_resolutions, fallback_route_id, modified_at, severities "
+        + "scope_server_id, scope_tag_id, " + AgentColumns + ", send_resolutions, fallback_route_id, modified_at, severities, report_notice "
         + "FROM config_notification_routes WHERE route_id = $1";
 
     /// <summary>The proxy of each webhook channel on the settings row (the row id 1 the Viewer reads).</summary>
@@ -279,6 +283,11 @@ WHERE route_id = $1";
         if (SeveritiesRefusal(row.Severities) is { } severities)
         {
             return severities;
+        }
+
+        if (ReportNoticeRefusal(row.ReportNotice) is { } reportNotice)
+        {
+            return reportNotice;
         }
 
         if (row.AgentLevel is { } level && level is not (NotificationRoute.AgentLevelOff or NotificationRoute.AgentLevelInvestigate or NotificationRoute.AgentLevelAct or NotificationRoute.AgentLevelServerAct))
@@ -408,6 +417,13 @@ WHERE route_id = $1";
             ? null
             : "severities is critical, warning or both.";
 
+    /// <summary>The sentence for a report notice setting that is not <c>off</c>, <c>needs_person_or_change</c> or <c>all</c> (case-insensitive), else null (#6979).</summary>
+    public static string? ReportNoticeRefusal(string? reportNotice) =>
+        reportNotice?.Trim().ToLowerInvariant() is null or "" or NotificationRouteKinds.ReportNoticeOff
+            or NotificationRouteKinds.ReportNoticeNeedsPersonOrChange or NotificationRouteKinds.ReportNoticeAll
+            ? null
+            : "report_notice is off, needs_person_or_change or all.";
+
     /// <summary>Binds the agent columns, the resolution override and the fallback, in the order every insert and update takes them.</summary>
     public static void AddAgentColumns(NpgsqlCommand command, NotificationRouteDraft row)
     {
@@ -428,6 +444,8 @@ WHERE route_id = $1";
         AddNullableInt(command, row.FallbackRouteId);
         /* #6928 (V229): the severity filter, bound after the fallback. */
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = NotificationRouteKinds.NormalizeSeverities(row.Severities) });
+        /* #6979 (V233): the report notice setting, bound after the severity filter. */
+        command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = NotificationRouteKinds.NormalizeReportNotice(row.ReportNotice) });
     }
 
     /// <summary>Binds an <c>integer</c> that may be SQL NULL.</summary>
@@ -652,6 +670,7 @@ WHERE route_id = $1";
             FallbackRouteId = reader.IsDBNull(16) ? null : reader.GetInt32(16),
             ModifiedAtUtc = reader.IsDBNull(17) ? null : DateTime.SpecifyKind(reader.GetDateTime(17), DateTimeKind.Utc),
             Severities = reader.GetString(18),
+            ReportNotice = reader.GetString(19),
         };
     }
 
@@ -820,6 +839,8 @@ WHERE route_id = $1";
         if (before?.AgentLevel is not null || after?.AgentLevel is not null)
         {
             Compare("severities", NotificationRouteKinds.NormalizeSeverities(before?.Severities), NotificationRouteKinds.NormalizeSeverities(after?.Severities));
+            /* #6979: the report notice setting decides whether the route's requests post a notice. */
+            Compare("report_notice", NotificationRouteKinds.NormalizeReportNotice(before?.ReportNotice), NotificationRouteKinds.NormalizeReportNotice(after?.ReportNotice));
         }
 
         Compare("agent_level", before?.AgentLevel, after?.AgentLevel);
@@ -849,6 +870,7 @@ WHERE route_id = $1";
             ["agent_expiry_minutes"] = row.AgentExpiryMinutes,
             ["enabled"] = row.Enabled,
             ["severities"] = NotificationRouteKinds.NormalizeSeverities(row.Severities),
+            ["report_notice"] = NotificationRouteKinds.NormalizeReportNotice(row.ReportNotice),
         };
 
         var detail = new System.Text.Json.Nodes.JsonObject { ["before"] = Describe(before), ["after"] = Describe(after) };

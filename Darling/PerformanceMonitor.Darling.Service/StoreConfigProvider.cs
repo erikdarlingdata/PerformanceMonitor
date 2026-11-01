@@ -2810,7 +2810,7 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
     public const string NotificationRoutesSelectSql =
         "SELECT route_id, metric_match, teams_url, slack_url, generic_url, pagerduty_routing_key, smtp_recipients, enabled, scope_server_id, scope_tag_id, "
         + "agent_level, agent_max_per_hour, agent_max_per_day, agent_lease_minutes, agent_expiry_minutes, send_resolutions, "
-        + NotificationRouteSigningColumns + ", fallback_route_id, severities "
+        + NotificationRouteSigningColumns + ", fallback_route_id, severities, report_notice "
         + "FROM config_notification_routes ORDER BY route_id";
 
     /// <summary>A route's signing key columns (V193, #5998), last in both the service's and the viewer's route SELECT.</summary>
@@ -2935,6 +2935,8 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
                     FallbackRouteId = reader.IsDBNull(19) ? null : reader.GetInt32(19),
                     /* V229 (#6928): the severity filter; a word this build does not know reads as both. */
                     Severities = NotificationRouteKinds.NormalizeSeverities(reader.GetString(20)),
+                    /* V233 (#6979): the report notice setting; a word this build does not know reads as off. */
+                    ReportNotice = NotificationRouteKinds.NormalizeReportNotice(reader.GetString(21)),
                 });
             }
         }

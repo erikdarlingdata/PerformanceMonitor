@@ -1043,7 +1043,11 @@ public sealed partial class DarlingWorker
             investigationStore, () => alertSettings.NotificationRoutes,
             new PerformanceMonitor.Darling.Service.Investigations.ServiceInvestigationEventSends(
                 webhookAlertService, deliverer, () => _selfAlerts),
-            PerformanceMonitor.Darling.Service.Investigations.InvestigationOpenSignal.Shared, _logger);
+            PerformanceMonitor.Darling.Service.Investigations.InvestigationOpenSignal.Shared, _logger,
+            /* #6979: the report notice goes to the route's Slack and Teams destinations (the settings' channel when the route has none),
+               masked at the level the MCP tools serve, with links only while the web dashboard serves (TriageBaseUrl is empty otherwise). */
+            reportNotices: webhookAlertService, defaults: alertSettings, dataDetail: dataDetail,
+            baseUrl: () => alertSettings.TriageBaseUrl);
         /* #6234: the change watch rides the sweep's tick; its first pass runs at start, so a watch whose window ended while the service was down is evaluated then. */
         var changeWatchPass = new PerformanceMonitor.Darling.Service.ChangeWatch.ChangeWatchPass(
             postgres,

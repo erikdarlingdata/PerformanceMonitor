@@ -197,7 +197,7 @@ public sealed partial class PlanForceToolLiveTests
             Assert.Equal((long)json["journal_id"]!, (long)done["called_id"]!);
             Assert.NotNull(done["after"]!["rollback"]);
 
-            var list = await new AgentChangeUndo(c.Source, 30).ReadAsync(50, c.Ct);
+            var list = await new AgentChangeUndo(c.Source, 30).ReadAsync(50, cancellationToken: c.Ct);
             var change = Assert.Single(list.Changes);
             Assert.Equal(KillKind, change.Kind);
             Assert.False(change.CanTryUndo(DateTime.UtcNow), "a kill has no undo");
@@ -272,7 +272,7 @@ public sealed partial class PlanForceToolLiveTests
             Assert.Single(await RowsAsync(c, "action_called"));
             Assert.Empty(await RowsAsync(c, "action_failed"));
             Assert.Empty(await RowsAsync(c, "action_done"));
-            var change = Assert.Single((await new AgentChangeUndo(c.Source, 30).ReadAsync(50, c.Ct)).Changes);
+            var change = Assert.Single((await new AgentChangeUndo(c.Source, 30).ReadAsync(50, cancellationToken: c.Ct)).Changes);
             Assert.Equal(AgentChangeResult.Unknown, change.Result);
             AssertNoSecret(c, answer, await JournalTextAsync(c));
         });

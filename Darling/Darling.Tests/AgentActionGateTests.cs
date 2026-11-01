@@ -572,7 +572,7 @@ CREATE TRIGGER test_fail_every_done BEFORE INSERT ON config.investigation_journa
     private async Task<AgentChangeRow> ListedAsync(NpgsqlConnection connection, long calledId, CancellationToken ct)
     {
         await using var dataSource = NpgsqlDataSource.Create(connection.ConnectionString);
-        return (await new AgentChangeUndo(dataSource, 30, () => _now).ReadAsync(50, ct)).Changes.Single(c => c.CalledId == calledId);
+        return (await new AgentChangeUndo(dataSource, 30, () => _now).ReadAsync(50, cancellationToken: ct)).Changes.Single(c => c.CalledId == calledId);
     }
 
     [Fact]

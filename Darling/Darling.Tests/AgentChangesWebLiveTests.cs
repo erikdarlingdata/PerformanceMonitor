@@ -250,6 +250,49 @@ public sealed class AgentChangesWebLiveTests
 
     /* #6600: an OIDC viewer seat never opens the arm (its login is refused here, so opening it would fail): the list says it cannot decide and the
        writes answer with the sign-in sentence, as they do today. */
+    /* #6979: ?request=<id> reads one request's changes by request_id in SQL. A change older than the newest 200 calls is still listed
+       for its own request, another request's changes are not, and an id that is not a GUID is refused with the endpoint's error shape. */
+    [Fact]
+    public async Task TheRequestFilter_ListsAnOldChangeBeyondTheNewest200_OnlyForItsOwnRequest_AndRefusesABadId()
+    {
+        await WithWebRoutesAsync("web", async (owner, Send, ct) =>
+        {
+            var old = Guid.NewGuid();
+            var other = Guid.NewGuid();
+            await ExecAsync(owner, $@"INSERT INTO config.investigation_journal (request_id, server_id, event, event_time, actor, detail)
+VALUES ('{old}', 7, 'action_called', now() - interval '30 days', 'agent:a', '{{""tool"":""old_tool"",""kind"":""mute"",""target"":{{""id"":""old-mute"",""server_id"":7,""database"":null}},""before"":null}}')", ct);
+            await ExecAsync(owner, $@"INSERT INTO config.investigation_journal (request_id, server_id, event, event_time, actor, detail)
+VALUES ('{other}', 7, 'action_called', now() - interval '29 days', 'agent:a', '{{""tool"":""other_tool"",""kind"":""mute"",""target"":{{""id"":""other-mute"",""server_id"":7,""database"":null}},""before"":null}}')", ct);
+            /* 205 newer calls from other requests push the old one out of the newest 200. */
+            await ExecAsync(owner, @"INSERT INTO config.investigation_journal (request_id, server_id, event, event_time, actor, detail)
+SELECT gen_random_uuid(), 7, 'action_called', now() - make_interval(secs => g), 'agent:a', '{""tool"":""filler"",""kind"":""mute"",""target"":{""id"":""f"",""server_id"":7,""database"":null},""before"":null}'::jsonb
+FROM generate_series(1, 205) AS g", ct);
+
+            var all = await Send("GET", "/api/agent-changes", null);
+            Assert.Equal(200, all.Status);
+            Assert.DoesNotContain(all.Body!["changes"]!.AsArray(), c => (string?)c!["tool"] == "old_tool");
+
+            var mine = await Send("GET", "/api/agent-changes?request=" + old.ToString().ToUpperInvariant(), null);
+            Assert.Equal(200, mine.Status);
+            var row = Assert.Single(mine.Body!["changes"]!.AsArray());
+            Assert.Equal("old_tool", (string)row!["tool"]!);
+            Assert.Equal(old.ToString(), (string)row["request_id"]!, ignoreCase: true);
+            Assert.Equal("unknown", (string)row["result"]!);
+            Assert.True(mine.Body.AsObject().ContainsKey("can_decide"));
+
+            var none = await Send("GET", "/api/agent-changes?request=" + Guid.NewGuid(), null);
+            Assert.Equal(200, none.Status);
+            Assert.Empty(none.Body!["changes"]!.AsArray());
+
+            foreach (var bad in new[] { "not-a-guid", "", "%20" })
+            {
+                var refused = await Send("GET", "/api/agent-changes?request=" + bad, null);
+                Assert.Equal(400, refused.Status);
+                Assert.Equal("The request must be a request id (a GUID).", (string)refused.Body!["error"]!);
+            }
+        });
+    }
+
     [Fact]
     public async Task OnTheManagedStore_AViewerSeat_NeverOpensTheArm_AndAnswersAsToday()
     {
@@ -375,7 +418,13 @@ VALUES ('{Guid.NewGuid()}', 7, 'action_called', 'agent:a', '{{""tool"":""force_q
                 var context = await server.SendAsync(request =>
                 {
                     request.Request.Method = method;
-                    request.Request.Path = path;
+                    var query = path.IndexOf('?', StringComparison.Ordinal);
+                    request.Request.Path = query < 0 ? path : path[..query];
+                    if (query >= 0)
+                    {
+                        request.Request.QueryString = new Microsoft.AspNetCore.Http.QueryString(path[query..]);
+                    }
+
                     request.Request.Headers.Host = "localhost";
                     if (contentType is not null)
                     {
