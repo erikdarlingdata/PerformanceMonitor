@@ -159,7 +159,7 @@ public sealed class NotificationRoutesRungTests
         var parent = DarlingManagedRoles.ViewerRestrictedConfigTables.Single(a => a.Table == "config_notification");
 
         Assert.Equal(new[] { "teams_url", "slack_url", "generic_url", "pagerduty_routing_key", "signing_key", "previous_signing_key" }, acl.SecretColumns);
-        Assert.Equal(new[] { "route_id", "metric_match", "smtp_recipients", "configured_channels", "enabled", "modified_at", "scope_server_id", "scope_tag_id" }.Concat(AgentColumns).Concat(new[] { "fallback_route_id", "previous_signing_key_until", "severities", "report_notice" }), acl.NonSecretColumns);
+        Assert.Equal(new[] { "route_id", "metric_match", "smtp_recipients", "configured_channels", "enabled", "modified_at", "scope_server_id", "scope_tag_id" }.Concat(AgentColumns).Concat(new[] { "fallback_route_id", "previous_signing_key_until", "severities", "report_notice", "action_approval", "approval_single_person" }), acl.NonSecretColumns);
 
         foreach (var column in DestinationColumns)
         {
@@ -243,7 +243,7 @@ public sealed class NotificationRoutesRungTests
            below is unchanged. */
         /* V193 (#5998): the signing key columns come last on the service read; the viewer reads them by their own statements. */
         /* #6003 (D8): fallback_route_id follows them, set by init like the agent columns; the viewer reads and writes it since #6036. */
-        Assert.Equal(new[] { "route_id", "metric_match" }.Concat(DestinationColumns).Concat(new[] { "enabled", "scope_server_id", "scope_tag_id" }).Concat(AgentColumns).Concat(new[] { "signing_key", "previous_signing_key", "previous_signing_key_until", "fallback_route_id", "severities", "report_notice" }), serviceSelect);
+        Assert.Equal(new[] { "route_id", "metric_match" }.Concat(DestinationColumns).Concat(new[] { "enabled", "scope_server_id", "scope_tag_id" }).Concat(AgentColumns).Concat(new[] { "signing_key", "previous_signing_key", "previous_signing_key_until", "fallback_route_id", "severities", "report_notice", "action_approval", "approval_single_person" }), serviceSelect);
         Assert.EndsWith("ORDER BY route_id", StoreConfigProvider.NotificationRoutesSelectSql, StringComparison.Ordinal);
 
         /* The constructor's parameter order IS the SELECT's order, so a reader ordinal cannot re-map a column. */
