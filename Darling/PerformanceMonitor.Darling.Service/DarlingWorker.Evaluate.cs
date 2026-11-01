@@ -1261,6 +1261,7 @@ public sealed partial class DarlingWorker
             {
                 await NotifyPgResolutionAsync(key, snapshot.ServerName, metricName, "Blocking Cleared",
                     BlockingPageRule.ClearedMessage(snapshot.ServerName, threshold, waitBarSeconds));
+                readClock.Restart();
             }
             else if (BlockingPageRule.IsHeldBack(count, threshold, worstWaitMs, waitBarSeconds, wasActive, suppressed: false))
             {
