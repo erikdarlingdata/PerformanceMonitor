@@ -189,8 +189,9 @@ public sealed partial class PlanForceToolLiveTests
             DarlingMcpPlanForceTools.RunAsync(Source, Source, Log, force, server, Sql.Database, queryId, planId, Arg, dryRun, Ct);
     }
 
+    /// <param name="approval">The routes' <c>action_approval</c>: off by default, so an action runs; a test of the approval path passes <c>required</c> (#7109).</param>
     /// <param name="storeOnly">A test whose tool refuses before it reaches the monitored server needs only the store: no SQL Server database is made, and the server row's host is a closed local port.</param>
-    private static async Task RunAsync(Without without, Func<Ctx, Task> body, bool storeOnly = false)
+    private static async Task RunAsync(Without without, Func<Ctx, Task> body, bool storeOnly = false, string approval = "off")
     {
         Assert.SkipWhen(string.IsNullOrEmpty(StoreConnectionString), "Set DARLING_TEST_PG to run the plan force tool live tests.");
         Assert.SkipWhen(!storeOnly && string.IsNullOrEmpty(SqlHost), "Set DARLING_TEST_SQL (and DARLING_TEST_SQL_USER / DARLING_TEST_SQL_PASSWORD) to run the plan force tool live tests.");
@@ -219,7 +220,7 @@ public sealed partial class PlanForceToolLiveTests
             if (without == Without.ActionsEnabled)
                 await PgExecAsync(connection, "UPDATE config.config_service SET agent_actions_enabled = false", ct);
             var level = without == Without.Level ? 2 : 3;
-            await PgExecAsync(connection, $"INSERT INTO config.config_notification_routes (metric_match, agent_level, action_approval) VALUES ('Blocking', {level}, 'off')", ct);
+            await PgExecAsync(connection, $"INSERT INTO config.config_notification_routes (metric_match, agent_level, action_approval) VALUES ('Blocking', {level}, '{approval}')", ct);
             if (without != Without.Switch)
                 await PgExecAsync(connection, "INSERT INTO config.config_server_actions (server_id, action, enabled, set_by) VALUES (7, 'force_plan', true, 'test')", ct);
             if (without is not (Without.Switch or Without.KillSwitch))
