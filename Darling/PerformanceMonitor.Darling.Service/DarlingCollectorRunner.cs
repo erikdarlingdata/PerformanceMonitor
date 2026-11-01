@@ -1178,6 +1178,33 @@ public sealed partial class DarlingCollectorRunner
     /// every cycle and therefore the pre-#2862 collector. Every existing caller and test keeps the
     /// collector it already had without naming the knob.
     /// </param>
+    private RepeatLogGate? _repeatLog;
+
+    /// <summary>#7067: the gate for warnings repeated every cycle. The worker gives the runner its own, so both share one
+    /// clock and one memory of what was logged; created on first use otherwise.</summary>
+    internal RepeatLogGate RepeatLog
+    {
+        get => LazyInitializer.EnsureInitialized(ref _repeatLog, static () => new RepeatLogGate());
+        set => _repeatLog = value;
+    }
+
+    /// <summary>
+    /// #7067: the "failed in all N database(s)" line that precedes the surfaced first failure. It repeated every cycle for a
+    /// precondition that never changes (an extension that is not created), so it follows the same rule as the worker's
+    /// warning for that failure: logged when first seen and when it changes, then a reminder once a day. The worker clears
+    /// the gate when the collector succeeds.
+    /// </summary>
+    internal void LogFailedInAllDatabases(string collector, int count, string server)
+    {
+        if (_logger is null || !RepeatLog.ShouldLog(server, collector, $"failed in all {count} database(s)"))
+        {
+            return;
+        }
+
+        _logger.LogWarning("{Collector} failed in all {Count} database(s) on '{Server}'; surfacing the first failure",
+            collector, count, server);
+    }
+
     public DarlingCollectorRunner(NpgsqlDataSource postgres, CollectorDeltaCalculator deltas, ILogger? logger = null, Func<bool>? capturePlans = null, Func<bool>? collectSchemaChanges = null, Func<int>? textBudgetMb = null, Func<bool>? compressPlanContent = null, Func<int>? procedureStatsPlanCycleInterval = null, Func<string, int, IReadOnlyList<string>>? databaseScope = null, PgLogHashKey? logHashKey = null, QueryStoreWriteFence? queryStoreWriteFence = null, Func<ServerRuntime, IReadOnlyList<string>>? separatelyMonitoredDatabases = null, Func<string?>? installId = null, Func<bool>? queryStatsDeferredPlanFetch = null, Func<string?>? procedureStatsDeferredPlanFetch = null, Func<int>? queryStoreFetchTopN = null)
     {
         _queryStoreFetchTopN = queryStoreFetchTopN ?? (() => 0);
