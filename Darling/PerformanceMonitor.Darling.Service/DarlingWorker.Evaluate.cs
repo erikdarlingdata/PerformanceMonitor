@@ -1419,6 +1419,18 @@ public sealed partial class DarlingWorker
 
             if (rows.Count > 0)
             {
+                /* #7086: the page must come from a capture the collector took within the last two of its cycles. The table
+                   is an exception table and the read's recency bound is the fleet's staleness bound (30 minutes), so a
+                   16-minute-old capture used to page again for a query that had long since ended. The cadence is the
+                   effective schedule's (an override applies), never a constant. A stale sample leaves the cooldown stamp
+                   alone, so the first fresh capture that still shows the query pages. */
+                var collectorMinutes = CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(
+                    StoreConfigProvider.ResolveSchedule("pg_session_states", runtime.ServerId, _scheduleOverrides).FrequencyMinutes);
+                if (IsPgLongRunningSampleStale(rows[0].NewestSampleUtc, now, collectorMinutes))
+                {
+                    return;
+                }
+
                 var cooldownElapsed = !LastFiredStamp.TryGet(_lastPgLongRunningQueryAlert, key, now, out var last) || now - last >= cooldown;
                 if (!cooldownElapsed)
                 {
@@ -1429,6 +1441,54 @@ public sealed partial class DarlingWorker
 
                 var worst = rows[0];
                 var elapsedMinutes = worst.QueryDurationMs / 60_000;
+
+                /* #7086: the longest query's statement rides the detail text, at the level mcp.dataDetail serves (an
+                   unrecognized value runs at the strictest, as the MCP host does). */
+                var dataDetailMode = McpDataDetailModes.TryParse(config.Mcp.DataDetail, out McpDataDetail dataDetail)
+                    ? dataDetail
+                    : McpDataDetail.MetadataOnly;
+                if (dataDetailMode != McpDataDetail.MetadataOnly && worst.QueryId is { } worstQueryId)
+                {
+                    /* The statement annotates the page and never decides it: a failed lookup costs the card its
+                       statement line and nothing else. */
+                    try
+                    {
+                        worst = worst with
+                        {
+                            StatementText = await DarlingPgSessionStatesReader.GetStatementTextAsync(
+                                _postgres, runtime.ServerId, worstQueryId, cancellationToken),
+                        };
+                    }
+                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                    {
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning("[{Server}] Long-Running Query statement lookup failed, the page goes without it: {Message}",
+                            runtime.Config.DisplayName, ex.Message);
+                    }
+                }
+
+                var longRunningContext = AlertSampleAge.Stamp(
+                    new AlertContext
+                    {
+                        Incidents = rows.Select(BuildPgLongRunningQueryIncident).ToList(),
+                        /* #3743: the knob's receipt, the SQL Server twin's item verbatim (same builder, same
+                           labels) and under the same rule — only when the knob is SET; a cleared knob has no
+                           footnote. #3742: the database list's receipt beside it, the twin's second item, only
+                           when the list is SET. See the method summary. */
+                        Details = BuildPgLongRunningQueryExclusionDetails(
+                            exclusions, read.ExcludedByProgramPrefix, read.ExcludedByLogin,
+                            alertSettings.ExcludedDatabases, read.ExcludedByDatabase),
+                    },
+                    /* #5642, ruling 6: the capture these rows were read from, counted once at fire time. The
+                       same label the SQL Server twin uses for its snapshot. */
+                    "query snapshot", AlertSampleAge.Newest(rows.Select(r => r.NewestSampleUtc ?? default)), now);
+                if (BuildPgLongRunningStatementItem(worst, dataDetailMode) is { } statementDetail)
+                {
+                    longRunningContext.Details.Insert(0, statementDetail);
+                }
 
                 var muted = _isAlertMuted?.Invoke(new AlertMuteContext
                 {
@@ -1448,22 +1508,8 @@ public sealed partial class DarlingWorker
                         metricName,
                         $"{rows.Count} {(rows.Count == 1 ? "query" : "queries")}, longest {elapsedMinutes}m",
                         $"{thresholdMinutes}m",
-                        Context: AlertSampleAge.Stamp(
-                            new AlertContext
-                            {
-                                Incidents = rows.Select(BuildPgLongRunningQueryIncident).ToList(),
-                                /* #3743: the knob's receipt, the SQL Server twin's item verbatim (same builder, same
-                                   labels) and under the same rule — only when the knob is SET; a cleared knob has no
-                                   footnote. #3742: the database list's receipt beside it, the twin's second item, only
-                                   when the list is SET. See the method summary. */
-                                Details = BuildPgLongRunningQueryExclusionDetails(
-                                    exclusions, read.ExcludedByProgramPrefix, read.ExcludedByLogin,
-                                    alertSettings.ExcludedDatabases, read.ExcludedByDatabase),
-                            },
-                            /* #5642, ruling 6: the capture these rows were read from, counted once at fire time. The
-                               same label the SQL Server twin uses for its snapshot. */
-                            "query snapshot", AlertSampleAge.Newest(rows.Select(r => r.NewestSampleUtc ?? default)), now),
-                        DetailText: null,
+                        Context: longRunningContext,
+                        DetailText: AlertContextBuilders.ContextToDetailText(longRunningContext),
                         NumericCurrentValue: elapsedMinutes,
                         NumericThresholdValue: thresholdMinutes,
                         Muted: muted,
@@ -1511,6 +1557,45 @@ public sealed partial class DarlingWorker
                 $"pid {row.Pid} running {row.QueryDurationMs / 60_000}m ({row.CommandTag ?? "(unknown)"})",
             },
             Database: row.DatabaseName);
+
+    /// <summary>How many of the collector's own cycles old a <c>pg_session_states</c> capture may be and still page the
+    /// Long-Running Query alert (#7086).</summary>
+    internal const int PgLongRunningSampleMaxCycles = 2;
+
+    /// <summary>
+    /// True when the capture a Long-Running Query page would be built from is older than
+    /// <see cref="PgLongRunningSampleMaxCycles"/> cycles of the collector's effective cadence (#7086). A row with no
+    /// capture time is not stale: nothing says how old it is, and the read's own recency bound already held it.
+    /// </summary>
+    internal static bool IsPgLongRunningSampleStale(DateTime? newestSampleUtc, DateTime nowUtc, int collectorIntervalMinutes) =>
+        newestSampleUtc is { } sample
+        && nowUtc - sample > TimeSpan.FromMinutes((double)PgLongRunningSampleMaxCycles * Math.Max(1, collectorIntervalMinutes));
+
+    /// <summary>
+    /// The Long-Running Query card's statement item (#7086): the longest session and the statement its query_id
+    /// resolves to. <c>full</c> prints the stored text, <c>maskLiterals</c> prints it through
+    /// <see cref="McpDataDetailMasker.MaskLiterals"/>, <c>metadataOnly</c> leaves the statement out. Null when
+    /// there is nothing to show: no text captured for the query_id, or the level withholds it.
+    /// </summary>
+    internal static AlertDetailItem? BuildPgLongRunningStatementItem(
+        DarlingPgSessionStatesReader.LongRunningSessionRow worst, McpDataDetail mode)
+    {
+        if (mode == McpDataDetail.MetadataOnly || string.IsNullOrWhiteSpace(worst.StatementText))
+        {
+            return null;
+        }
+
+        var text = mode == McpDataDetail.MaskLiterals ? McpDataDetailMasker.MaskLiterals(worst.StatementText) : worst.StatementText;
+        return new AlertDetailItem
+        {
+            Heading = "Longest query",
+            Fields = new()
+            {
+                ("Session", $"pid {worst.Pid} running {worst.QueryDurationMs / 60_000}m ({worst.CommandTag ?? "(unknown)"})"),
+                ("Statement", AlertContextBuilders.TruncateStatement(text)),
+            },
+        };
+    }
 
     /// <summary>
     /// The PostgreSQL Long-Running Query card's exclusion receipts (#3743, #3742), pulled out of

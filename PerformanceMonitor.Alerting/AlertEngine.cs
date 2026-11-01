@@ -1962,6 +1962,13 @@ public sealed class AlertEngine
                 /* ONE fetch serves the rolling count, the excluded-database recount (:198-211),
                    and the fired alert's context (:249) — class remarks adaptation (1). */
                 deadlockRows = await _readAdapter.GetRecentDeadlocksAsync(key, hoursBack: RollingCountWindowHours, ct);
+
+                /* #7086: a deadlock with the monitor's own session in it (its collectors connect as the Darling or
+                   Lite application name) is stored and shown but is not the operator's to act on. It leaves the
+                   count, the rollup, the occurrence tally and the card. */
+                deadlockRows = deadlockRows
+                    .Where(r => !PerformanceMonitor.Common.MonitorApplicationNames.GraphHasMonitorSession(r.DeadlockGraphXml))
+                    .ToList();
                 effectiveDeadlockCount = deadlockRows.Count;
 
                 /* :198-205 — recount excluding deadlocks whose processes ALL ran in excluded
@@ -2019,6 +2026,14 @@ public sealed class AlertEngine
         var deadlockDecision = _settings.DeadlockEnabled
             ? RollingCountAlertGate.Evaluate(effectiveDeadlockCount, deadlockThreshold, deadlockWatermark, deadlockCooldownElapsed, suppressed)
             : new RollingCountAlertGate.Decision(false, false, 0);                  /* :218-220 */
+        /* #7086: one page per episode. A watermark above zero means this episode already took its page (the gate
+           moves it only on a fire and resets it to zero when the count falls below the threshold, the "Cleared"
+           below), so a further count increase inside the episode is not a page. A tier escalation still is. The
+           watermark follows the count so the rise is consumed. */
+        if (deadlockDecision.Fire && deadlockWatermark > 0 && !deadlockEscalation)
+        {
+            deadlockDecision = deadlockDecision with { Fire = false, Watermark = effectiveDeadlockCount };
+        }
         _lastAlertedDeadlockCount[key] = deadlockDecision.Watermark;                /* :221 */
         if (deadlockDecision.Watermark != deadlockWatermark)                        /* :224 — persist on change (#1145) */
         {
