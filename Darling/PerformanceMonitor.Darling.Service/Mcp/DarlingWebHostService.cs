@@ -621,7 +621,7 @@ public sealed class DarlingWebHostService : BackgroundService
                     if (string.IsNullOrWhiteSpace(token))
                     {
                         _logger.LogCritical(
-                            "Web dashboard token (web.network.encryptedToken) decrypted to an empty value. Re-create it with PerformanceMonitor.Darling.Service.exe --encrypt-password. Web dashboard not started.");
+                            "Web dashboard token (web.network.encryptedToken) decrypted to an empty value. Re-create it with PerformanceMonitor.Darling.Service.exe --encrypt-password. The web dashboard is not started.");
                         await DisposeFailedStartAsync();
                         return false;
                     }
@@ -656,7 +656,7 @@ public sealed class DarlingWebHostService : BackgroundService
                 catch (Exception ex)
                 {
                     _logger.LogCritical(
-                        "Web dashboard token (web.network.encryptedToken) could not be decrypted ({Message}). Web dashboard not started. A token made on another machine or account cannot be read here. Run PerformanceMonitor.Darling.Service.exe --encrypt-password on this machine and put the new value in web.network.encryptedToken. On another OS, remove it and set web.network.token to an env: or file: reference.",
+                        "Web dashboard token (web.network.encryptedToken) could not be decrypted ({Message}). The web dashboard is not started. A token made on another machine or account cannot be read here. Run PerformanceMonitor.Darling.Service.exe --encrypt-password on this machine and put the new value in web.network.encryptedToken. On another OS, remove it and set web.network.token to an env: or file: reference.",
                         ex.Message);
                     await DisposeFailedStartAsync();
                     return false;

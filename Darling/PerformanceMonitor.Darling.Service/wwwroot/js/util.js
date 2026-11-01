@@ -1330,8 +1330,12 @@ export async function retryOnceWhenBusy(read, onBusy, signal) {
 /** The one sentence for a 401 or a signed-out page, wherever the transport finds it. */
 const SESSION_EXPIRED_TEXT = "Your session has expired. Sign in again.";
 
+/** The start of the sentence noMessageText builds. A caller that tests whether a message is that fallback (alerts.js)
+    matches on this constant, so the two cannot drift apart. */
+export const NO_MESSAGE_TEXT_PREFIX = "The Darling service answered HTTP";
+
 /** A failed answer that carried no sentence of its own: say which status it was and for which address. The address is
-    the path only, never the query string. A caller that tests for this text (alerts.js) matches its start. */
+    the path only, never the query string. */
 function noMessageText(resp) {
   let path = "";
   try {
@@ -1339,7 +1343,7 @@ function noMessageText(resp) {
   } catch {
     path = "";
   }
-  return "The Darling service answered HTTP " + resp.status + (path ? " for " + path : "") + " with no message. Check the service log.";
+  return NO_MESSAGE_TEXT_PREFIX + " " + resp.status + (path ? " for " + path : "") + " with no message. Check the service log.";
 }
 
 async function classifyResponse(resp) {
