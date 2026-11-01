@@ -137,6 +137,14 @@ Scheduled analysis: the triage engine runs per server on a cadence, persists its
 
 **Escalation is the corroboration event.** A single that later gains a fact or a matched check pages at that moment as a NEW firing — the digest route cools in its own key namespace and digest rows are excluded from the page cooldown's restart seed, so an earlier digest entry can never be the cooldown that eats the page. An uncorroborated single riding in an incident with a corroborated finding is named on that page as co-fired, exactly as before.
 
+**A corroborated finding still has to cost something to page** (#7084). Three families paged on a statistical move alone, so each now needs a measured figure over a floor. A finding under its floor is still a finding: it is saved and shown on every surface as before, and it sends nothing. It also spends no cooldown, so the same story pages the day it clears the floor.
+
+| Finding | Pages only when | Where the figure comes from |
+|---|---|---|
+| Write latency (`ANOMALY_WRITE_LATENCY`) | The window's average write latency is 20 ms or more. | The finding's `avg_latency_ms`. 20 ms is the write bar the detector already used on the window's peak, now applied to the average too. |
+| Plan-regression chain (any story with `PLAN_REGRESSION` on its path) | The server's average CPU in the window is 50% or more, or queries' timeouts rose. | `avg_total_cpu` of the CPU fact, and `timeout_offender_count` on the `PLAN_REGRESSION` fact (Query Store Aborted runs, which a client timeout produces). No CPU fact counts as 0%. |
+| PostgreSQL wait profile (`ANOMALY_PG_WAIT_PROFILE`, `ANOMALY_PG_SAMPLED_WAIT_PROFILE`) | The window's mean wait rate is 1.0 or more waiting backends, and no page for the same story went out on that server in the last 24 hours. | `mean_ms_per_sec` divided by 1000. 1.0 is Poison Wait's Warning bar. The 24-hour clock is kept in memory and, after a restart, read back from the alert history's last delivered page of that story, so a restart does not open a second page. |
+
 **The Analysis Singles Digest** is the third daily document beside the Collector Cost Digest and the Fleet Sweep Rollup (family `reports`, INFO, one post per trailing day, delivered-today gate in the store, empty day posts nothing): "Anomaly singles: N across M servers", the top movers by severity and a by-family, by-server breakdown, each line carrying the same alert-history key (`Analysis: <category> [<hash>]`) and #1140 dedup fingerprints a page would have carried, so any single can be promoted to a full drill-down without archaeology.
 
 ## Daily Health Report

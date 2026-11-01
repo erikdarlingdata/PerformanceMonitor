@@ -264,8 +264,32 @@ public sealed class AnalysisNotificationService : IDisposable
            stable. The severity floor stays UPSTREAM of the routing gate: a finding below it is not
            notify-worthy on any channel, and the gate only ever decides between the channels a
            notify-worthy finding may reach. */
-        var incidents = findings
-            .Where(f => f is not null && f.Severity >= threshold)
+        /* #7084: the measured-cost floors. A finding under its floor is a finding still (persisted, shown on every read
+           surface) but not a page candidate, so it neither pages nor spends a bucket. The wait-profile cap is the one stateful
+           floor: one page per server per story per 24 hours, read from this process's own stamp or, after a restart, from the
+           alert log's last delivered page of that story (the seed read the page buckets use). */
+        var eligible = new List<AnalysisFinding>();
+        foreach (var f in findings)
+        {
+            if (f is null || f.Severity < threshold)
+                continue;
+
+            if (FindingPageFloor.HoldReason(f) is { } heldFor)
+            {
+                _logger.LogDebug($"AnalysisNotificationService: {f.RootFactKey} on {f.ServerName} not paged: {heldFor}");
+                continue;
+            }
+
+            if (FindingPageFloor.IsCappedWaitProfile(f) && await IsCappedAsync(f, now))
+            {
+                _logger.LogDebug($"AnalysisNotificationService: {f.RootFactKey} on {f.ServerName} not paged: a page for this story went out in the last 24 hours.");
+                continue;
+            }
+
+            eligible.Add(f);
+        }
+
+        var incidents = eligible
             .GroupBy(f => $"{f.ServerId}:{IncidentToken(f)}");
 
         foreach (var incident in incidents)
@@ -418,6 +442,10 @@ public sealed class AnalysisNotificationService : IDisposable
                 continue;
             }
 
+            /* #7084: the page is going out (or onto the hold-back queue), so a capped wait-profile story's 24 hours start now. */
+            if (route == FindingRoute.Page && FindingPageFloor.IsCappedWaitProfile(lead))
+                _waitProfilePagedAt[CapKey(lead)] = now;
+
             try
             {
                 var context = FindingMessageFormatter.BuildContext(lead, threshold);
@@ -533,6 +561,33 @@ public sealed class AnalysisNotificationService : IDisposable
                     $"AnalysisNotificationService: failed to notify on incident {incident.Key}: {ex.GetType().Name}: {ex.Message}");
             }
         }
+    }
+
+    /// <summary>#7084: when each capped wait-profile story (server and story hash) last paged, in this process. Seeded lazily
+    /// from the alert log, so a restart does not open a second page inside the 24 hours.</summary>
+    private readonly ConcurrentDictionary<string, DateTime> _waitProfilePagedAt = new();
+
+    private string CapKey(AnalysisFinding f) => $"{_resolveServerId(f)}|{f.StoryPathHash}";
+
+    /// <summary>#7084: true when this capped story paged inside <see cref="FindingPageFloor.WaitProfileCap"/>. A first
+    /// lookup in this process reads the last DELIVERED page from the alert log (digest rows excluded, as for the page buckets).</summary>
+    private async Task<bool> IsCappedAsync(AnalysisFinding f, DateTime now)
+    {
+        var key = CapKey(f);
+        if (!_waitProfilePagedAt.TryGetValue(key, out var last))
+        {
+            var persisted = await _sender.GetLastDeliveredPageUtcAsync(_resolveServerId(f), FindingMessageFormatter.MetricName(f));
+            if (persisted is not { } p)
+                return false;
+            last = p > now ? now : p;
+            _waitProfilePagedAt[key] = last;
+        }
+
+        if (now - last < FindingPageFloor.WaitProfileCap)
+            return true;
+
+        _waitProfilePagedAt.TryRemove(key, out _);
+        return false;
     }
 
     /// <summary>Queues one page for the hold-back window (#3916); the first enqueue of a window arms the
