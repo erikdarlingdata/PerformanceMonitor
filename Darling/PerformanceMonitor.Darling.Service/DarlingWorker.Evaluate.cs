@@ -1419,7 +1419,7 @@ public sealed partial class DarlingWorker
 
             if (rows.Count > 0)
             {
-                /* #7086: the page must come from a capture the collector took within the last two of its cycles. The table
+                /* #7086: the page must come from a capture the collector took within the larger of its last two cycles and 10 minutes. The table
                    is an exception table and the read's recency bound is the fleet's staleness bound (30 minutes), so a
                    16-minute-old capture used to page again for a query that had long since ended. The cadence is the
                    effective schedule's (an override applies), never a constant. A stale sample leaves the cooldown stamp
@@ -1562,14 +1562,22 @@ public sealed partial class DarlingWorker
     /// Long-Running Query alert (#7086).</summary>
     internal const int PgLongRunningSampleMaxCycles = 2;
 
+    /// <summary>The least age, in minutes, a capture must reach before it counts as stale (#7086). At the default 1-minute
+    /// cadence two cycles is 2 minutes, which a sweep running a few minutes behind under load would cross on a query that is
+    /// still running. The bar is the larger of two cycles and this floor, so that sweep still pages and the field case (a
+    /// 16-minute-old capture) does not.</summary>
+    internal const int PgLongRunningSampleFloorMinutes = 10;
+
     /// <summary>
-    /// True when the capture a Long-Running Query page would be built from is older than
-    /// <see cref="PgLongRunningSampleMaxCycles"/> cycles of the collector's effective cadence (#7086). A row with no
+    /// True when the capture a Long-Running Query page would be built from is older than the larger of
+    /// <see cref="PgLongRunningSampleMaxCycles"/> cycles of the collector's effective cadence and
+    /// <see cref="PgLongRunningSampleFloorMinutes"/> minutes (#7086). A row with no
     /// capture time is not stale: nothing says how old it is, and the read's own recency bound already held it.
     /// </summary>
     internal static bool IsPgLongRunningSampleStale(DateTime? newestSampleUtc, DateTime nowUtc, int collectorIntervalMinutes) =>
         newestSampleUtc is { } sample
-        && nowUtc - sample > TimeSpan.FromMinutes((double)PgLongRunningSampleMaxCycles * Math.Max(1, collectorIntervalMinutes));
+        && nowUtc - sample > TimeSpan.FromMinutes(Math.Max(
+            (double)PgLongRunningSampleMaxCycles * Math.Max(1, collectorIntervalMinutes), PgLongRunningSampleFloorMinutes));
 
     /// <summary>
     /// The Long-Running Query card's statement item (#7086): the longest session and the statement its query_id

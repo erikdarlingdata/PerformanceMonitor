@@ -147,14 +147,21 @@ public sealed class SmallAlertNoise7086Tests
     private static DarlingPgSessionStatesReader.LongRunningSessionRow Session(string? statement) =>
         new(1001, 100, "sales", "appuser", "myapp", "SELECT", 2_100_000, DateTime.UtcNow, statement);
 
+    /* The bar is the larger of two cycles of the collector's cadence and 10 minutes: the field case (a 16-minute-old sample at
+       the default 1-minute cadence) is stale, a sweep running a few minutes behind under load is not. */
     [Theory]
+    [InlineData(16, 1, true)]
+    [InlineData(11, 1, true)]
+    [InlineData(10, 1, false)]
+    [InlineData(5, 1, false)]
+    [InlineData(3, 1, false)]
     [InlineData(16, 5, true)]
-    [InlineData(11, 5, true)]
     [InlineData(10, 5, false)]
-    [InlineData(9, 5, false)]
-    [InlineData(3, 1, true)]
-    [InlineData(2, 1, false)]
-    public void PgLongRunning_ASampleOlderThanTwoCycles_IsStale(int ageMinutes, int cadenceMinutes, bool stale)
+    [InlineData(20, 10, false)]
+    [InlineData(21, 10, true)]
+    [InlineData(30, 15, false)]
+    [InlineData(31, 15, true)]
+    public void PgLongRunning_ASampleOlderThanTheLargerOfTwoCyclesAndTenMinutes_IsStale(int ageMinutes, int cadenceMinutes, bool stale)
     {
         var now = new DateTime(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);
 
@@ -229,11 +236,19 @@ public sealed class SmallAlertNoise7086Tests
     {
         var h = RunnableHarness(10);
         h.Settings.CpuEnabled = true;
+        h.Settings.RunnableQueueEnabled = false;
         var engine = h.Build();
+
+        /* The High CPU incident opens first (its gate needs several fresh samples at or over the bar). */
         for (var i = 0; i < 4; i++)
         {
             await engine.EvaluateServerAsync(AlertEngineTests.Harness.Snapshot(sqlCpu: 99, totalCpu: 99));
         }
+
+        /* Then the Warning-level queue shows up inside it. */
+        h.Settings.RunnableQueueEnabled = true;
+        h.Deliverer.Outcomes.Clear();
+        await engine.EvaluateServerAsync(AlertEngineTests.Harness.Snapshot(sqlCpu: 99, totalCpu: 99));
 
         var held = h.Deliverer.Outcomes.Single(o => o.MetricName == RunnableQueueEvaluator.MetricName);
         Assert.Equal("inside a High CPU incident", held.Hold!.Reason);
