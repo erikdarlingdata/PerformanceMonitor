@@ -246,13 +246,6 @@ export function requestIdFromQuery(query) {
   return id ? id.trim() : "";
 }
 
-/** The agent changes of one request, #6979: the rows of GET /api/agent-changes (the newest calls) whose request_id is this one. */
-export function changesOfRequest(data, requestId) {
-  const wanted = String(requestId).toLowerCase();
-  const rows = data && Array.isArray(data.changes) ? data.changes : [];
-  return rows.filter((c) => c && c.request_id != null && String(c.request_id).toLowerCase() === wanted);
-}
-
 /** The agent changes columns of the one-request page. */
 export const REQUEST_CHANGE_COLUMNS = [
   { key: "called_at_utc", label: "Called" },
@@ -262,12 +255,13 @@ export const REQUEST_CHANGE_COLUMNS = [
   { key: "undone_by", label: "Undone by" },
 ];
 
-function changesSection(res, requestId) {
+/* The rows are GET /api/agent-changes?request=<id>: the service filters by request_id, so an old request is listed whole (#6979). */
+function changesSection(res) {
   const link = el("a", { href: "#/admin/agent-changes", text: "Open the Agent changes tab" });
   if (res.kind === "error") return section("Agent changes", [errorStrip("Could not read the agent changes: " + res.message), link]);
   if (res.kind !== "data") return section("Agent changes", [emptyStrip(res.message || "The agent changes are not available."), link]);
-  const changes = changesOfRequest(res.data, requestId);
-  if (!changes.length) return section("Agent changes", [emptyStrip("No agent change on this request in the newest calls the service lists."), link]);
+  const changes = res.data && Array.isArray(res.data.changes) ? res.data.changes : [];
+  if (!changes.length) return section("Agent changes", [emptyStrip("No agent change on this request."), link]);
   return section("Agent changes (" + changes.length + ")", [
     VIZ.table({ changes }, { id: "request-agent-changes", rowsKey: "changes", columns: REQUEST_CHANGE_COLUMNS, emptyText: "No agent changes." }),
     el("div", { class: "muted", text: "Undo is a person's action, on the Agent changes tab." }),
@@ -297,7 +291,7 @@ function renderOneRequest(main, requestId) {
     const [res, session, changes] = await Promise.all([
       readTool("get_investigation_reports", { request_id: requestId }, signal),
       getSession(),
-      apiGet("/api/agent-changes", signal),
+      apiGet("/api/agent-changes?request=" + encodeURIComponent(requestId), signal),
     ]);
     if (mine !== pageSeq || res.kind === "aborted" || res.kind === "auth") return;
     if (res.kind === "error") return mount(slot, [readErrorStrip(res.message)]);
@@ -308,7 +302,7 @@ function renderOneRequest(main, requestId) {
     if (!row) return mount(slot, [emptyStrip("No investigation request has the id " + requestId + ".")]);
     if (changes.kind === "aborted" || changes.kind === "auth") return;
     try {
-      mount(slot, [...detailPane(row, data, writeAccess(session), true), changesSection(changes, requestId)]);
+      mount(slot, [...detailPane(row, data, writeAccess(session), true), changesSection(changes)]);
     } catch (e) {
       mount(slot, [errorStrip("Could not draw this request: " + (e && e.message ? e.message : String(e)))]);
     }

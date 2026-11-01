@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
 using PerformanceMonitor.Common;
@@ -55,20 +56,6 @@ WHERE j.event = 'reported'
 ORDER BY j.journal_id
 LIMIT $2";
 
-    /* #6979: the agent changes of one request, oldest first, each with how it ended. The same call-and-result join as
-       AgentChangeUndo.ListSql, filtered by request_id (ix_investigation_journal_request) instead of reading the newest N. */
-    internal const string RequestChangesSql = @"
-SELECT c.journal_id, c.detail->>'tool', c.detail->'target'->>'id', c.detail->'target'->>'database', r.event
-FROM config.investigation_journal AS c
-LEFT JOIN LATERAL (
-    SELECT x.event FROM config.investigation_journal AS x
-    WHERE x.request_id = c.request_id
-      AND x.event IN ('action_done', 'action_failed')
-      AND x.detail->>'called_id' = c.journal_id::text
-    ORDER BY x.journal_id DESC LIMIT 1) AS r ON true
-WHERE c.request_id = $1 AND c.event = 'action_called'
-ORDER BY c.journal_id";
-
     /// <summary>
     /// #6979: up to <paramref name="limit"/> reports made after <paramref name="sinceUtc"/> whose route's <c>report_notice</c> is
     /// not <c>off</c> and that have no notice mark (<see cref="InvestigationEvents.ReportNoticeOnceKey"/>), oldest first. Writes nothing.
@@ -99,24 +86,18 @@ ORDER BY c.journal_id";
     /// </summary>
     public async Task<IReadOnlyList<RequestChangeRow>> ChangesForRequestAsync(Guid requestId, CancellationToken cancellationToken = default)
     {
-        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
-        await using var command = Command(connection, null, RequestChangesSql, P(requestId));
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        var rows = new List<RequestChangeRow>();
-        while (await reader.ReadAsync(cancellationToken))
+        /* One filtered read: AgentChangeUndo.ListSql by request_id, the same rows the web page lists (#6979). */
+        var rows = await new AgentChangeUndo(_dataSource, _commandTimeoutSeconds).ChangesOfRequestAsync(requestId, cancellationToken);
+        var result = new List<RequestChangeRow>(rows.Count);
+        foreach (var row in rows)
         {
-            var database = reader.IsDBNull(3) ? null : reader.GetString(3);
-            var id = reader.IsDBNull(2) ? "" : reader.GetString(2);
-            var result = reader.IsDBNull(4) ? null : reader.GetString(4);
-            rows.Add(new RequestChangeRow(
-                reader.GetInt64(0),
-                reader.IsDBNull(1) ? "" : reader.GetString(1),
-                id,
-                string.IsNullOrWhiteSpace(database) ? null : database,
-                result switch { "action_done" => AgentChangeResult.Done, "action_failed" => AgentChangeResult.Failed, _ => AgentChangeResult.Unknown }));
+            var target = JsonNode.Parse(row.DetailJson) is JsonObject o ? o["target"] as JsonObject : null;
+            var id = target?["id"] is JsonValue i && i.TryGetValue(out string? idText) ? idText : "";
+            var database = target?["database"] is JsonValue d && d.TryGetValue(out string? dbText) ? dbText : null;
+            result.Add(new RequestChangeRow(row.CalledId, row.Tool ?? "", id, string.IsNullOrWhiteSpace(database) ? null : database, row.Result));
         }
 
-        return rows;
+        return result;
     }
 
     /// <summary>

@@ -384,6 +384,14 @@ public sealed class MigrationDataMovingRungCensusPins
             + "no default, so they are catalog-only. The CHECK reads the table once to validate it, and the table is a hand-edited registry "
             + "of mute rules (a store holds a handful, a very large one a few hundred), so the scan takes milliseconds. It reads no collected "
             + "data and spends none of the lock-wait budget, so the multiple stays 5."),
+        new(
+            233,
+            SetsTheFloor: false,
+            "ADD COLUMN IF NOT EXISTS report_notice text NOT NULL DEFAULT 'off' plus ADD CONSTRAINT ... CHECK on config.config_notification_routes "
+            + "(created V131), the notification routes registry (#6979). The ADD COLUMN with a constant default is catalog-only. The CHECK "
+            + "reads the table once to validate it, and the table is a hand-edited registry of at most a few hundred rows (one per route "
+            + "an operator made), so the scan takes milliseconds. It reads no collected data and spends none of the lock-wait budget, so "
+            + "the multiple stays 5."),
     ];
 
     /// <summary>

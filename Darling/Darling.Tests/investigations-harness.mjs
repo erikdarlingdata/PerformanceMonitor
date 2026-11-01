@@ -83,7 +83,13 @@ globalThis.fetch = async (url, init) => {
   fetches.push(u);
   /* The seat the page learns from /api/session: can edit, but not signed in as an admin (#6265). */
   if (u.split("?")[0].endsWith("/api/session")) return { status: 200, ok: true, text: async () => JSON.stringify(bodies.session) };
-  if (u.split("?")[0] === "/api/agent-changes") return { status: 200, ok: true, text: async () => JSON.stringify(bodies.agentChanges) };
+  if (u.split("?")[0] === "/api/agent-changes") {
+    /* The service filters by ?request=<id> in SQL (#6979), so the stand-in returns only that request's rows and the page does no filtering. */
+    const wanted = new URLSearchParams(u.split("?")[1] || "").get("request");
+    const all = bodies.agentChanges;
+    const body = wanted && all ? { ...all, changes: all.changes.filter((c) => String(c.request_id).toLowerCase() === wanted.toLowerCase()) } : all;
+    return { status: 200, ok: true, text: async () => JSON.stringify(body) };
+  }
   const tool = u.split("/api/read/")[1].split("?")[0];
   const b = bodies[tool];
   if (b && b.fail) return { status: 500, ok: false, text: async () => JSON.stringify({ error: "the store is down" }) };
@@ -235,6 +241,7 @@ try {
     listCalls: calls("list_investigation_requests"),
     reportCalls: calls("get_investigation_reports"),
     agentChangeReads: fetches.filter((f) => f.split("?")[0] === "/api/agent-changes").length,
+    agentChangeUrls: fetches.filter((f) => f.split("?")[0] === "/api/agent-changes"),
     text: slotText(),
     links: all(main, "a").map((a) => a.attrs.href),
     closeButtons: all(main, "button").filter((b) => b.textContent === "Close").length,
@@ -244,7 +251,7 @@ try {
   renderInvestigations(main, "99999999-9999-9999-9999-999999999999");
   await settle();
   out.oneMissing = slotText();
-  // A request with no change in the newest calls says so, and still links to the tab.
+  // A request with no change says so, and still links to the tab.
   bodies.get_investigation_reports = { ...reportsA, requests: [list(false).requests[1]] };
   renderInvestigations(main, B);
   await settle();

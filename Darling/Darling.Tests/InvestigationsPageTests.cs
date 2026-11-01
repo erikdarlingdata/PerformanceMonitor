@@ -153,6 +153,8 @@ public sealed class InvestigationsPageTests
         var read = Assert.Single(one.GetProperty("reportCalls").EnumerateArray());
         Assert.Equal("11111111-1111-1111-1111-111111111111", read.GetProperty("request_id").GetString());
         Assert.Equal(1, one.GetProperty("agentChangeReads").GetInt32());
+        /* The page asks the service for this request's changes by id: it does not filter the newest 200 in the browser (#6979). */
+        Assert.Equal("/api/agent-changes?request=11111111-1111-1111-1111-111111111111", Assert.Single(Strings(one.GetProperty("agentChangeUrls"))));
         var text = one.GetProperty("text").GetString()!;
         Assert.Contains("Request on srv-new", text);
         Assert.Contains("Verdict: needs_person", text);

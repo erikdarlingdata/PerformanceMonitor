@@ -488,7 +488,16 @@ public static partial class DarlingWebEndpoints
             var stopwatch = Stopwatch.StartNew();
             try
             {
-                var read = await changes.ReadAsync(AgentChangesLimit, context.RequestAborted);
+                /* #6979: ?request=<id> reads one request's changes by request_id in SQL, so an old request is not cut off by the newest-200 limit. */
+                Guid? requestId = null;
+                if (context.Request.Query.TryGetValue("request", out var requestText) && requestText.Count > 0)
+                {
+                    if (!Guid.TryParse(requestText[0], out var parsed))
+                        return ErrorResult("The request must be a request id (a GUID).", StatusCodes.Status400BadRequest);
+                    requestId = parsed;
+                }
+
+                var read = await changes.ReadAsync(AgentChangesLimit, context.RequestAborted, requestId);
                 var canDecide = await AdminChanges(context).CanDecideAsync(context.RequestAborted);
                 return DarlingWebStatementSweep.JsonText(
                     AgentChangesBody(read, canDecide, DateTime.UtcNow), "/api/agent-changes", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
