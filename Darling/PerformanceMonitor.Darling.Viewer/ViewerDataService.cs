@@ -3719,11 +3719,21 @@ LIMIT 1";
 /// </summary>
 public sealed class ViewerReadOnlyException : Exception
 {
+    /// <summary>
+    /// How to get a write-capable login, for each way a Viewer reaches its store (#7077). The text is shared by
+    /// every write the exception is thrown from, so it names no single operation. <c>postgres.connectAs</c> is
+    /// ignored on a bring-your-own store, so that case is sent to <c>postgres.connectionString</c> instead.
+    /// </summary>
+    internal const string HowToConnectAsAdmin =
+        "On the bundled store, set postgres.connectAs to \"admin\" in darling.json and restart the viewer. " +
+        "On a viewer that reaches the service over the network, set postgres.network.role to \"admin\" on the " +
+        "service host. Then restart the service and export the viewer config again. " +
+        "On your own PostgreSQL, put an admin login in postgres.connectionString and restart the viewer.";
+
     public ViewerReadOnlyException(Exception innerException)
         : base(
-            "This viewer is connected with a read-only role, so it can't change mute rules, dismiss alerts, " +
-            "or mute findings. Set postgres.connectAs to \"admin\" in darling.json and restart the viewer to " +
-            "enable these actions.",
+            "This viewer is connected with a read-only store login, so it cannot save this change. " +
+            HowToConnectAsAdmin,
             innerException)
     {
     }

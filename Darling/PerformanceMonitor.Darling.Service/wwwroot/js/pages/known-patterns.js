@@ -20,7 +20,7 @@
  * KnownPatternsPageBehaviourTests. All entry text, the note above all, reaches the DOM through el()/textContent.
  */
 
-import { storeHeaders, el, mount, apiGet, readTool, loadingStrip, errorStrip, emptyStrip, localTime, reportSessionExpired } from "../util.js";
+import { storeHeaders, el, mount, apiGet, readTool, loadingStrip, errorStrip, emptyStrip, localTime, reportSessionExpired, networkErrorText } from "../util.js";
 import * as api from "../alerts-api.js";
 
 /** The most characters a note holds (KnownPatternMatcher.MaxNoteLength). The server refuses more; the counter only warns early. */
@@ -135,7 +135,7 @@ async function send(method, path, body) {
       body: body === undefined ? undefined : JSON.stringify(body),
     });
   } catch (e) {
-    return { kind: "error", message: "Network error: " + (e && e.message ? e.message : String(e)) };
+    return { kind: "error", message: networkErrorText(e) };
   }
   let parsed = null;
   try {

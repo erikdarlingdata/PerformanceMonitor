@@ -53,7 +53,7 @@ if (args.Length > 0 && DarlingCliCommands.IsEncryptPasswordVerb(args[0]))
 {
     if (!OperatingSystem.IsWindows())
     {
-        Console.Error.WriteLine("--encrypt-password requires Windows (DPAPI).");
+        Console.Error.WriteLine("--encrypt-password requires Windows (DPAPI). On another OS, put the secret in darling.json as an env:NAME or file:/path reference instead.");
         return 1;
     }
 
@@ -581,7 +581,7 @@ if (OperatingSystem.IsWindows())
     if (!instanceGuard.Owns)
     {
         startupLogger.LogCritical(
-            "Another PerformanceMonitor Darling service instance already holds the single-instance lock ({Mutex}) — exiting without starting a second instance (a second instance would fight the first over the bundled PostgreSQL and the MCP/web ports).",
+            "Another PerformanceMonitor Darling service instance already holds the single-instance lock ({Mutex}). Exiting without starting a second instance, because a second instance would fight the first over the bundled PostgreSQL and the MCP and web ports. Stop the other instance (Services, or Task Manager) and start this one again.",
             SingleInstanceGuard.ServiceMutexName);
         instanceGuard.Dispose();
         /* Run() disposes the host on the normal path; we are skipping Run(), so dispose it ourselves. */

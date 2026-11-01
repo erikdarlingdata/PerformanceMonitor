@@ -3767,7 +3767,7 @@ LIMIT 1";
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            ReadScope.Warn($"#6254 collection health could not read the Query Store read source for server {serverId}; it is shown without one", ex);
+            ReadScope.Warn($"Collection health could not read the Query Store read source for server {serverId}, so it is shown without one. The cause is logged with this entry.", ex);
             return new Dictionary<string, string>(StringComparer.Ordinal);
         }
 
@@ -3898,7 +3898,7 @@ FROM config.config_collector_schedules";
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            ReadScope.Warn($"#4999 collection health could not read the collector schedule overrides for server {serverId}; its collectors are judged by their shipped cadences", ex);
+            ReadScope.Warn($"Collection health could not read the collector schedule overrides for server {serverId}, so its collectors are judged by their shipped cadences. The cause is logged with this entry.", ex);
             return Array.Empty<ScheduleOverride>();
         }
 

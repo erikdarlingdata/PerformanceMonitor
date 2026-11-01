@@ -72,7 +72,7 @@ public partial class ServerTab : UserControl
         }
         catch (Exception ex)
         {
-            MessageBox.Show($"Failed to retrieve plan: {DuckDbMemoryLimitSetting.Describe(ex)}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show($"Could not get the plan for server {_server.DisplayName} from the collected data or the live plan cache: {DuckDbMemoryLimitSetting.Describe(ex)}. A plan that has left the plan cache can no longer be fetched.", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
         }
         finally
         {
@@ -127,7 +127,7 @@ public partial class ServerTab : UserControl
         }
         catch (Exception ex)
         {
-            MessageBox.Show($"Failed to retrieve plan: {DuckDbMemoryLimitSetting.Describe(ex)}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show($"Could not get the plan for server {_server.DisplayName} from the collected data or the live plan cache: {DuckDbMemoryLimitSetting.Describe(ex)}. A plan that has left the plan cache can no longer be fetched.", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
         }
         finally
         {
@@ -578,7 +578,7 @@ public partial class ServerTab : UserControl
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"Failed to get actual plan:\n\n{ex.Message}",
+                MessageBox.Show($"Could not get the actual plan from server {_server.DisplayName}:\n\n{ex.Message}\n\nCheck that the query still runs on that server, then try Get Actual Plan again.",
                     "Error", MessageBoxButton.OK, MessageBoxImage.Error);
             }
             finally
