@@ -6,6 +6,8 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System.Linq;
+
 namespace PerformanceMonitor.Common;
 
 /// <summary>
@@ -52,6 +54,37 @@ public static class AttentionWindowSql
     /// <see cref="AzdataMetadataPredicate"/>.</summary>
     public const string AzdataClientApp = "azdata";
 
+    /// <summary>What an SSMS IntelliSense client application name starts with (#6552, #7061). The C# rule
+    /// (<c>AttentionEvaluator.IsSsmsIntelliSense</c>) and the SQL rule (<see cref="ExcludedAppPredicate"/>) both read this, so they cannot drift.</summary>
+    public const string SsmsIntelliSensePrefix = "Microsoft SQL Server Management Studio";
+
+    /// <summary>What an SSMS IntelliSense client application name ends with, ignoring trailing whitespace (#6552, #7061).</summary>
+    public const string SsmsIntelliSenseSuffix = "IntelliSense";
+
+    /// <summary>The VS Code mssql extension's metadata connections (#6856). The SQL Tools Service it runs appends the connection purpose to
+    /// the application name "vscode-mssql" (ConnectionService.GetApplicationNameWithFeature), and the language service adds "-languageService".
+    /// Metadata work is the General connection and Object Explorer, each with or without that suffix, plus the language service alone.
+    /// Four of the five names were seen in the field, in the client application names a production store recorded (the report in #6856),
+    /// the two double-suffix names among them. Only "vscode-mssql-languageService" rests on the extension's source alone. No source line
+    /// names the query editor's application, so the rule is a closed list: any name not on it, "vscode-mssql" included, stays counted,
+    /// the way SSMS "- Query" does, and shows in the alert's top client apps. Matched ignoring case and surrounding whitespace, in C# and in
+    /// <see cref="ExcludedAppPredicate"/>.</summary>
+    public static readonly string[] VsCodeMetadataApps =
+    {
+        "vscode-mssql-GeneralConnection",
+        "vscode-mssql-GeneralConnection-languageService",
+        "vscode-mssql-ObjectExplorer",
+        "vscode-mssql-ObjectExplorer-languageService",
+        "vscode-mssql-languageService",
+    };
+
+    /// <summary>A string as a SQL literal body: every quote doubled.</summary>
+    private static string SqlQuote(string value) => value.Replace("'", "''");
+
+    /// <summary>A string as a LIKE pattern body: the backslash escape character, <c>%</c> and <c>_</c> made literal. Used with <c>ESCAPE '\'</c>.</summary>
+    private static string LikeEscape(string value) =>
+        SqlQuote(value.Replace("\\", "\\\\").Replace("%", "\\%").Replace("_", "\\_"));
+
     /// <summary>True for a sample whose recorded duration is under <see cref="MinInterruptDurationUs"/>. NULL when the duration is NULL, so
     /// it is never true for a missing duration. Written once for both stores (PostgreSQL and DuckDB run it as is).</summary>
     public static readonly string ShortDurationPredicate = $"interrupt_duration_us < {MinInterruptDurationUs}";
@@ -66,6 +99,19 @@ public static class AttentionWindowSql
     /// </summary>
     public static readonly string AzdataMetadataPredicate =
         $"(lower(trim(client_app_name)) = '{AzdataClientApp}' AND (ltrim(statement_text) ILIKE 'create table #sver%' OR statement_text ILIKE '% as clmns%'))";
+
+    /// <summary>
+    /// True for a sample whose client application is SSMS IntelliSense or one of the VS Code mssql metadata connections (#6552, #6856), the
+    /// SQL twin of <c>AttentionEvaluator.IsExcludedApp</c>, generated from the same names (<see cref="SsmsIntelliSensePrefix"/>,
+    /// <see cref="SsmsIntelliSenseSuffix"/>, <see cref="VsCodeMetadataApps"/>). SSMS: starts with the prefix and, trailing whitespace ignored, ends with
+    /// the suffix, ignoring case. VS Code: the name, trimmed, equals one name on the list, ignoring case. Only the BASELINE read uses it
+    /// (<see cref="BaselineMinutes"/>), so the baseline is scaled by the same events the evaluator leaves out of the rate; the rate path leaves
+    /// those groups out in C# and does not run it. ILIKE with an explicit ESCAPE, lower, trim and rtrim behave alike in PostgreSQL and DuckDB.
+    /// NULL when the application is NULL.
+    /// </summary>
+    public static readonly string ExcludedAppPredicate =
+        $"((client_app_name ILIKE '{LikeEscape(SsmsIntelliSensePrefix)}%' ESCAPE '\\' AND rtrim(client_app_name) ILIKE '%{LikeEscape(SsmsIntelliSenseSuffix)}' ESCAPE '\\')"
+        + $" OR lower(trim(client_app_name)) IN ({string.Join(", ", VsCodeMetadataApps.Select(a => $"'{SqlQuote(a.ToLowerInvariant())}'"))}))";
 
     /// <summary>The read-surface ceiling (#5640, get_client_timeouts): <c>$3</c> = the naive-UTC end of the window, so an <c>as_of</c> read
     /// does not count what happened after it. The alert's counts and sample groups pass <c>bounded: false</c> and have no ceiling; its top lists pass <c>true</c> since the final round of #5714 (L2).</summary>
@@ -104,7 +150,7 @@ ORDER BY collection_time DESC
     /// attentions (bigint), oldest first. <c>$1</c> = server_id, <c>$2</c> = the inclusive naive-UTC start, <c>$3</c> = the exclusive end.
     /// It is the bucket definition of <c>tools/attention-rate-measure.sql</c> (Darling and Lite twins): a minute with no successful run is no
     /// bucket, a count row in such a minute is not read, the sample rows are never the total. #7061: the exact count of a minute is scaled by the
-    /// share of that minute's sampled events that are not left out (under the duration floor, or Azure Data Studio metadata work), the proportion the
+    /// share of that minute's sampled events that are not left out (under the duration floor, Azure Data Studio metadata work, or SSMS IntelliSense and VS Code mssql metadata applications), the proportion the
     /// alert applies to the judged rate, so the baseline is made of the same events; a minute with no samples keeps its full count. Both reads lean on the existing
     /// <c>(server_id, collection_time)</c> indexes of <c>collection_log</c> and <c>attention_events</c>, so the 7-day read is a bounded range scan
     /// of this one server.
@@ -135,7 +181,7 @@ samples AS (
     SELECT
         date_trunc('minute', collection_time) AS minute,
         CAST(COUNT(*) AS BIGINT) AS kept,
-        CAST(COUNT(*) FILTER (WHERE COALESCE({ShortDurationPredicate}, FALSE) OR COALESCE({AzdataMetadataPredicate}, FALSE)) AS BIGINT) AS left_out
+        CAST(COUNT(*) FILTER (WHERE COALESCE({ShortDurationPredicate}, FALSE) OR COALESCE({AzdataMetadataPredicate}, FALSE) OR COALESCE({ExcludedAppPredicate}, FALSE)) AS BIGINT) AS left_out
     FROM {eventsRelation}
     WHERE server_id = $1
     AND   collection_time >= $2

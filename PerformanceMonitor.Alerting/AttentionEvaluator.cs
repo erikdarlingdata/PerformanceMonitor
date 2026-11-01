@@ -192,8 +192,8 @@ public static class AttentionEvaluator
     /// <summary>True for the SSMS IntelliSense application name (#6552).</summary>
     public static bool IsSsmsIntelliSense(string? clientAppName) =>
         clientAppName is not null
-        && clientAppName.StartsWith("Microsoft SQL Server Management Studio", StringComparison.OrdinalIgnoreCase)
-        && clientAppName.TrimEnd().EndsWith("IntelliSense", StringComparison.OrdinalIgnoreCase);
+        && clientAppName.StartsWith(AttentionWindowSql.SsmsIntelliSensePrefix, StringComparison.OrdinalIgnoreCase)
+        && clientAppName.TrimEnd().EndsWith(AttentionWindowSql.SsmsIntelliSenseSuffix, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// The tool-naming part of every sentence that says where the left-out cancels came from (#6856): the alert summary, the alert context
@@ -212,23 +212,7 @@ public static class AttentionEvaluator
             (false, false) => throw new ArgumentException("At least one excluded tool must be set.", nameof(ssmsIntelliSense)),
         };
 
-    /// <summary>The VS Code mssql extension's metadata connections (#6856). The SQL Tools Service it runs appends the connection purpose to
-    /// the application name "vscode-mssql" (ConnectionService.GetApplicationNameWithFeature), and the language service adds "-languageService".
-    /// Metadata work is the General connection and Object Explorer, each with or without that suffix, plus the language service alone.
-    /// Four of the five names were seen in the field, in the client application names a production store recorded (the report in #6856),
-    /// the two double-suffix names among them. Only "vscode-mssql-languageService" rests on the extension's source alone. No source line
-    /// names the query editor's application, so the rule is a closed list: any name not on it, "vscode-mssql" included, stays counted,
-    /// the way SSMS "- Query" does, and shows in the alert's top client apps.</summary>
-    private static readonly string[] VsCodeMetadataApps =
-    {
-        "vscode-mssql-GeneralConnection",
-        "vscode-mssql-GeneralConnection-languageService",
-        "vscode-mssql-ObjectExplorer",
-        "vscode-mssql-ObjectExplorer-languageService",
-        "vscode-mssql-languageService",
-    };
-
-    /// <summary>True for one of the VS Code mssql extension's metadata application names (#6856).</summary>
+    /// <summary>True for one of the VS Code mssql extension's metadata application names (#6856). The closed list lives in <see cref="AttentionWindowSql.VsCodeMetadataApps"/>, with the reasons, so the baseline's SQL rule reads the same names.</summary>
     public static bool IsVsCodeMssqlMetadata(string? clientAppName)
     {
         if (clientAppName is null)
@@ -237,7 +221,7 @@ public static class AttentionEvaluator
         }
 
         var name = clientAppName.Trim();
-        foreach (var known in VsCodeMetadataApps)
+        foreach (var known in AttentionWindowSql.VsCodeMetadataApps)
         {
             if (string.Equals(name, known, StringComparison.OrdinalIgnoreCase))
             {

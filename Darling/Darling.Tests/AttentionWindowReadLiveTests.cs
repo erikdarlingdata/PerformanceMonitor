@@ -150,6 +150,63 @@ public sealed class AttentionWindowReadLiveTests
         });
     }
 
+    /// <summary>The names the C# rule decides on: excluded and counted, edge shapes included (trailing and leading spaces, mixed case, a name that
+    /// only starts with the SSMS prefix, the VS Code names without their suffix, a quote and LIKE wildcards).</summary>
+    public static readonly string?[] ExcludedAppNames =
+    {
+        AttentionEvaluator.IntelliSenseClientApp,
+        AttentionEvaluator.IntelliSenseClientApp + "   ",
+        AttentionEvaluator.IntelliSenseClientApp.ToUpperInvariant(),
+        AttentionEvaluator.IntelliSenseClientApp.ToLowerInvariant(),
+        "Microsoft SQL Server Management Studio 21 - Transact-SQL IntelliSense",
+        "Microsoft SQL Server Management Studio IntelliSense",
+        "Microsoft SQL Server Management Studio - Query",
+        "Microsoft SQL Server Management Studio",
+        "Microsoft SQL Server Management Studio - Transact-SQL IntelliSense - Query",
+        "Contoso Management Studio - Transact-SQL IntelliSense",
+        "IntelliSense",
+        "Microsoft_SQL Server Management Studio - Transact-SQL IntelliSense",
+        "Microsoft%SQL Server Management Studio - Transact-SQL IntelliSense",
+        "vscode-mssql-GeneralConnection",
+        "VSCODE-MSSQL-GENERALCONNECTION-LANGUAGESERVICE",
+        "  vscode-mssql-ObjectExplorer  ",
+        "vscode-mssql-ObjectExplorer-languageService",
+        "vscode-mssql-languageService",
+        "vscode-mssql",
+        "vscode-mssql-Query",
+        "vscode-mssql-ObjectExplorer-x",
+        "vscode_mssql-ObjectExplorer",
+        "vscode-mssql-%",
+        "O'Brien",
+        "azdata",
+        "SQLAgent - Job Manager",
+        "",
+        " ",
+        null,
+    };
+
+    [Fact]
+    public async Task TheExcludedAppPredicate_GivesTheSameAnswerAsTheCSharpRule_ForEveryName()
+    {
+        await RunAsync(async (adapter, connection, ct) =>
+        {
+            var names = ExcludedAppNames.Concat(AttentionWindowSql.VsCodeMetadataApps).ToArray();
+            for (var i = 0; i < names.Length; i++)
+            {
+                using var command = new NpgsqlCommand(
+                    $"SELECT COALESCE({AttentionWindowSql.ExcludedAppPredicate}, FALSE) FROM (SELECT $1::text AS client_app_name) AS t", connection);
+                command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)names[i] ?? DBNull.Value });
+                var sql = (bool)(await command.ExecuteScalarAsync(ct))!;
+                Assert.True(
+                    AttentionEvaluator.IsExcludedApp(names[i]) == sql,
+                    $"'{names[i]}': C# says {AttentionEvaluator.IsExcludedApp(names[i])}, SQL says {sql}");
+            }
+
+            Assert.Contains(names, n => AttentionEvaluator.IsExcludedApp(n));
+            Assert.Contains(names, n => !AttentionEvaluator.IsExcludedApp(n));
+        });
+    }
+
     [Fact]
     public async Task TheBaseline_IsMadeOfTheSameEvents_TheSampledShareThatPassesScalesEachMinute()
     {
@@ -158,7 +215,7 @@ public sealed class AttentionWindowReadLiveTests
             var server = ServerId;
             var t0 = DateTime.UtcNow.Date.AddDays(-2).AddHours(12);
             long id = 800;
-            for (var m = 0; m < 5; m++)
+            for (var m = 0; m < 6; m++)
             {
                 await LogAsync(connection, id++, server, t0.AddMinutes(m), "SUCCESS", ct);
             }
@@ -186,6 +243,15 @@ public sealed class AttentionWindowReadLiveTests
                 }
             }
 
+            /* Minute 5: the applications the evaluator leaves out by name (SSMS IntelliSense, a VS Code metadata connection) are left out of the
+               baseline too, with a long duration so only the name tells them apart: 60 x 1/4 = 15. */
+            var namedAt = t0.AddMinutes(5).AddSeconds(2);
+            await RowAsync(connection, id++, server, namedAt, "count", 60, null, null, null, null, ct);
+            await RowAsync(connection, id++, server, namedAt, "sample", 0, "db1", AttentionWindowSql.SsmsIntelliSensePrefix + " - Transact-SQL IntelliSense", "fp", "SELECT 1", ct, durationUs: 30_000_000);
+            await RowAsync(connection, id++, server, namedAt, "sample", 0, "db1", AttentionWindowSql.SsmsIntelliSensePrefix + " - Transact-SQL IntelliSense ", "fp", "SELECT 1", ct, durationUs: 30_000_000);
+            await RowAsync(connection, id++, server, namedAt, "sample", 0, "db1", "VSCODE-mssql-ObjectExplorer", "fp", "SELECT 1", ct, durationUs: 30_000_000);
+            await RowAsync(connection, id++, server, namedAt, "sample", 0, "db1", "app", "fp", "SELECT 1", ct, durationUs: 30_000_000);
+
             using var command = new NpgsqlCommand(AttentionWindowSql.BaselineMinutes("collection_log", "attention_events"), connection);
             command.Parameters.AddWithValue(NpgsqlDbType.Integer, server);
             command.Parameters.AddWithValue(NpgsqlDbType.Timestamp, DateTime.SpecifyKind(t0, DateTimeKind.Unspecified));
@@ -199,7 +265,7 @@ public sealed class AttentionWindowReadLiveTests
                 }
             }
 
-            Assert.Equal(new long[] { 25, 50, 80, 0, 10 }, got.ToArray());
+            Assert.Equal(new long[] { 25, 50, 80, 0, 10, 15 }, got.ToArray());
         });
     }
 
