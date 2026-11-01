@@ -590,7 +590,7 @@ WHERE journal_id = $1 AND event = 'action_called'", P(calledId)))
     /// rule tool answers the rule itself, the override tool journals its image as is, and a delete answers <c>{status: "deleted"}</c>
     /// (null: nothing is left).
     /// </summary>
-    private static JsonNode? AfterImageNode(string kind, JsonNode? answer)
+    internal static JsonNode? AfterImageNode(string kind, JsonNode? answer)
     {
         if (answer is JsonObject o && o["status"] is JsonValue s && s.TryGetValue(out string? word) && word == "deleted")
             return null;

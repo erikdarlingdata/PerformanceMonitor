@@ -136,9 +136,12 @@ public sealed class ReportNoticeDeliveryLiveTests
     }
 
     /// <summary>Journals one agent change the way the gate does (the call, then its result), as the store owner.</summary>
-    private static async Task AddChangeAsync(NpgsqlConnection connection, Guid request, int routeId, string tool, string targetId, string? database, string result, CancellationToken ct)
+    private static async Task AddChangeAsync(NpgsqlConnection connection, Guid request, int routeId, string tool, string? targetId, string? database, string result, CancellationToken ct,
+        string? afterJson = null)
     {
-        var target = database is null ? $"{{\"id\":\"{targetId}\"}}" : $"{{\"id\":\"{targetId}\",\"database\":\"{database}\"}}";
+        /* A create tool journals a null target id: the created object is only in the action_done row's after image (#6979). */
+        var idJson = targetId is null ? "null" : $"\"{targetId}\"";
+        var target = database is null ? $"{{\"id\":{idJson}}}" : $"{{\"id\":{idJson},\"database\":\"{database}\"}}";
         var detail = $"{{\"tool\":\"{tool}\",\"kind\":\"mute\",\"target\":{target}}}".Replace("'", "''", StringComparison.Ordinal);
         var called = await ScalarAsync(connection,
             "INSERT INTO config.investigation_journal (event_time, request_id, route_id, server_id, event, actor, reason, detail) "
@@ -147,7 +150,7 @@ public sealed class ReportNoticeDeliveryLiveTests
         {
             await ExecAsync(connection,
                 "INSERT INTO config.investigation_journal (event_time, request_id, route_id, server_id, event, actor, detail) "
-                + $"VALUES (now(), '{request}', {routeId}, {100 + routeId}, '{result}', 'agent:agent-a', '{{\"called_id\":{called}}}'::jsonb)", ct);
+                + $"VALUES (now(), '{request}', {routeId}, {100 + routeId}, '{result}', 'agent:agent-a', '{{\"called_id\":{called}{(afterJson is null ? "" : ",\"after\":" + afterJson)}}}'::jsonb)", ct);
         }
     }
 
@@ -204,7 +207,9 @@ public sealed class ReportNoticeDeliveryLiveTests
         await RunAsync(async (store, connection, ct) =>
         {
             var request = await ReportedAsync(store, connection, 1, "needs_person_or_change", "real", "cause", ct);
-            await AddChangeAsync(connection, request, 1, "create_mute_rule", "dbo.MyProc", "Sales", "action_done", ct);
+            /* The create tools' real shape (#6979): a null target id, and the new rule's id in the done row's after image. */
+            await AddChangeAsync(connection, request, 1, "create_mute_rule", null, null, "action_done", ct,
+                "{\"status\":\"created\",\"mute_rule\":{\"id\":\"mr-4242\",\"metric_name\":\"High CPU\"}}");
             await AddChangeAsync(connection, request, 1, "set_threshold_override", "77", null, "action_failed", ct);
             await AddChangeAsync(connection, request, 1, "force_plan", "9", "Sales", "unknown", ct);
             var notices = new FakeNotices();
@@ -213,8 +218,34 @@ public sealed class ReportNoticeDeliveryLiveTests
 
             var content = Assert.Single(notices.Sent).Content;
             Assert.Equal(
-                [("create_mute_rule", "dbo.MyProc in Sales", "done"), ("set_threshold_override", "77", "failed"), ("force_plan", "9 in Sales", "result unknown")],
+                [("create_mute_rule", "mr-4242", "done"), ("set_threshold_override", "77", "failed"), ("force_plan", "9 in Sales", "result unknown")],
                 content.Changes.Select(c => (c.Tool, c.Object, c.Result)).ToArray());
+        });
+    }
+
+    [Fact]
+    public async Task ANeedsPersonReport_IsNotPushedOutOfThePage_ByMoreThanAPageOfReportsThatSendNothing()
+    {
+        await RunAsync(async (store, connection, ct) =>
+        {
+            /* A report that does not qualify, or one on a disabled route, writes no mark and holds its place for the whole window.
+               More than a page of them, all older, must not hide the needs_person report reported after them (#6979). */
+            var routes = new List<NotificationRoute>();
+            var start = _now;
+            for (var i = 1; i <= InvestigationEventDelivery.BatchSize + 1; i++)
+            {
+                await ReportedAsync(store, connection, i, "needs_person_or_change", "real", "cause", ct);
+                _now = start;
+                routes.Add(Route(i, slack: RouteSlack, enabled: i % 2 == 0));
+            }
+
+            var late = InvestigationEventDelivery.BatchSize + 2;
+            var request = await ReportedAsync(store, connection, late, "needs_person_or_change", "needs_person", "A person must look.", ct);
+            routes.Add(Route(late, slack: RouteSlack));
+            var notices = new FakeNotices();
+
+            Assert.Equal(1, (await Delivery(store, notices, routes).RunOnceAsync(ct)).Notices);
+            Assert.Equal(request, Assert.Single(notices.Sent).Content.RequestId);
         });
     }
 

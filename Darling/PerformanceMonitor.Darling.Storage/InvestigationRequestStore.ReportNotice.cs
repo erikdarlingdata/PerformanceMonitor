@@ -35,7 +35,10 @@ public sealed partial class InvestigationRequestStore
        only writer of it): config.investigation_requests has no index on reported_at, and ix_investigation_journal_time bounds the
        read to the last 30 minutes of journal rows whatever the table holds. The request, its report and its route are then
        primary-key or unique-key lookups, and the mark test is the unique once_key index. r.reported_at > $1 is repeated so the
-       window is the one the setting names. A practice request is a drill and sends no notice, as it sends no fallback. */
+       window is the one the setting names. A practice request is a drill and sends no notice, as it sends no fallback. A report that
+       does not qualify under its route's setting (the same test as InvestigationEventDelivery.ReportNoticeQualifies) and a report
+       on a disabled route write no mark, so they are filtered here, before the LIMIT: left to the caller, over a batch of them
+       would hold the page for the whole window and push a later needs_person report out of it with no notice. */
     internal const string PendingReportNoticesSql = @"
 SELECT r.request_id, r.route_id, r.server_id, COALESCE(sv.display_name, sv.server_name, r.server_name),
        p.verdict, COALESCE(p.metric_name, r.first_metric), p.root_cause, rt.report_notice, r.reported_at,
@@ -51,6 +54,11 @@ WHERE j.event = 'reported'
   AND r.reported_at > $1
   AND r.practice_of IS NULL
   AND rt.report_notice <> 'off'
+  AND rt.enabled
+  AND (rt.report_notice = 'all'
+       OR p.verdict = 'needs_person'
+       OR EXISTS (SELECT 1 FROM config.investigation_journal AS c
+                  WHERE c.request_id = r.request_id AND c.event = 'action_called'))
   AND NOT EXISTS (SELECT 1 FROM config.investigation_journal AS m
                   WHERE m.once_key = 'report_notice:' || r.request_id::text)
 ORDER BY j.journal_id
@@ -58,8 +66,9 @@ LIMIT $2";
 
     /// <summary>
     /// #6979: up to <paramref name="limit"/> reports made after <paramref name="sinceUtc"/> whose route's <c>report_notice</c> is
-    /// not <c>off</c> and that have no notice mark (<see cref="InvestigationEvents.ReportNoticeOnceKey"/>), oldest first. Writes nothing.
-    /// The caller decides which of them qualify under the route's setting.
+    /// not <c>off</c>, that is enabled and that qualifies under it (<c>all</c>, a <c>needs_person</c> verdict, or at least one agent change),
+    /// and that have no notice mark (<see cref="InvestigationEvents.ReportNoticeOnceKey"/>), oldest first. Writes nothing.
+    /// The filter is in the SQL so a run of reports that never qualify cannot fill the page (the caller still checks).
     /// </summary>
     public async Task<IReadOnlyList<ReportNoticeCandidate>> PendingReportNoticesAsync(
         DateTime sinceUtc, int limit, CancellationToken cancellationToken = default)
@@ -93,6 +102,14 @@ LIMIT $2";
         {
             var target = JsonNode.Parse(row.DetailJson) is JsonObject o ? o["target"] as JsonObject : null;
             var id = target?["id"] is JsonValue i && i.TryGetValue(out string? idText) ? idText : "";
+            /* The create tools journal a null target id: the created rule's id is in the action_done row's after image, as
+               AgentChangeUndo reads it. */
+            if (string.IsNullOrWhiteSpace(id))
+            {
+                var after = AgentChangeUndo.AfterImageNode(row.Kind ?? "", (row.ResultJson is null ? null : JsonNode.Parse(row.ResultJson)) is JsonObject done ? done["after"] : null);
+                id = after is JsonObject a && a["id"] is JsonNode idNode ? idNode.ToString() : "";
+            }
+
             var database = target?["database"] is JsonValue d && d.TryGetValue(out string? dbText) ? dbText : null;
             result.Add(new RequestChangeRow(row.CalledId, row.Tool ?? "", id, string.IsNullOrWhiteSpace(database) ? null : database, row.Result));
         }
