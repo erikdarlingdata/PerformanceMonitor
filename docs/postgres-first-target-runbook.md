@@ -499,7 +499,7 @@ Two different waits, and conflating them is the most likely way to mistake a wor
 one. A row exists after the first cycle. A **reader** — the MCP tool — needs two samples before it can
 difference a cumulative counter, so the first read after startup legitimately shows zero activity.
 
-All 28, from `CollectorScheduleDefaults` — the shared table both SKUs schedule by:
+All 29, from `CollectorScheduleDefaults` — the shared table both SKUs schedule by:
 
 | Collector | Cadence | First row | First meaningful read |
 |---|---|---|---|
@@ -527,6 +527,7 @@ All 28, from `CollectorScheduleDefaults` — the shared table both SKUs schedule
 | `pg_kernel_stats` | 60 min | 60 min | 2 h (counters) |
 | `pg_predicate_stats` | 60 min | 60 min | 2 h (counters) |
 | `pg_buffer_usage` | 60 min | 60 min | 60 min (residency is a level) |
+| `pg_database_size_stats` | 60 min | 60 min | 2 h (growth needs two samples) |
 | `pg_index_usage_stats` | 24 h | **24 h** | 48 h (a scan count is a difference) |
 | `pg_index_bloat` | 24 h | **24 h** | 24 h, complete (see below) |
 | `pg_column_stats` | 24 h | **24 h** | 24 h (levels; "it moved" needs two) |
@@ -892,9 +893,9 @@ What genuinely remains, re-checked against `dev` at the time of this revision:
 
 - **Scheduled analysis findings.** The analysis pass now runs for a PostgreSQL target: the service
   routes by the registry's `engine_kind`, measures the 24-hour data-span gate on `pg_database_stats`
-  and scores the PostgreSQL-target vocabulary (`PG_*` / `CONFIG_PG_*` / `ANOMALY_PG_*`). Until the #3542
-  v1 detector families land, a pass over a target with a day of history returns an honest all-clear over
-  the facts it has; `analysis_state` clears on the first real pass (no more "does not apply" tombstone).
+  and scores the PostgreSQL-target vocabulary (`PG_*` / `CONFIG_PG_*` / `ANOMALY_PG_*`). The #3542
+  v1 detector families have landed, so a pass over a target with a day of history can return findings;
+  `analysis_state` clears on the first real pass (no more "does not apply" tombstone).
   A target whose registry row has no engine stamp yet says so in its insufficient-data message and is
   measured correctly from its next connect.
 - **Knobs on the three Tier 0 predictors.** Not a gap in the sense the rest of this list is — see above
