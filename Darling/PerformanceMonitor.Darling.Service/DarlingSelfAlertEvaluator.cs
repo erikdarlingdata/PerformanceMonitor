@@ -8774,7 +8774,8 @@ WHERE c.is_enabled";
                            some rows and nothing on others. The minutes stay in the reason text and the detail,
                            where the unit is spelled out. Threshold is the phrase "running on schedule". */
                         numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
-                        cancellationToken);
+                        cancellationToken,
+                        context: new AlertContext { PolicyJobStep = AlertContextSerializer.PolicyJobStepReArmed });
                 }
                 else
                 {
@@ -8791,7 +8792,8 @@ WHERE c.is_enabled";
                         severity: band.Severity,
                         shortMessage: $"{label} stuck — auto-re-arm FAILED",
                         numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
-                        cancellationToken);
+                        cancellationToken,
+                        context: new AlertContext { PolicyJobStep = AlertContextSerializer.PolicyJobStepEscalated });
                     NoteStateSend(band.Metric, key, delivery);
                 }
             }
@@ -8817,7 +8819,8 @@ WHERE c.is_enabled";
                     severity: band.Severity,
                     shortMessage: $"{label} still in crash backoff an hour on — escalated",
                     numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
-                    cancellationToken);
+                    cancellationToken,
+                    context: new AlertContext { PolicyJobStep = AlertContextSerializer.PolicyJobStepEscalated });
                 NoteStateSend(band.Metric, key, delivery);
             }
             else if (episode.State == PolicyJobHealth.ReArmed)
@@ -8837,7 +8840,8 @@ WHERE c.is_enabled";
                     severity: band.Severity,
                     shortMessage: $"{label} re-hung after self-heal — escalated",
                     numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
-                    cancellationToken);
+                    cancellationToken,
+                    context: new AlertContext { PolicyJobStep = AlertContextSerializer.PolicyJobStepEscalated });
                 NoteStateSend(band.Metric, key, delivery);
             }
             else
@@ -8858,7 +8862,8 @@ WHERE c.is_enabled";
                         severity: band.Severity,
                         shortMessage: $"{label} still stuck after escalation",
                         numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
-                        cancellationToken);
+                        cancellationToken,
+                        context: new AlertContext { PolicyJobStep = AlertContextSerializer.PolicyJobStepEscalated });
                     NoteStateSend(band.Metric, key, delivery);
                 }
             }
@@ -10118,10 +10123,11 @@ ORDER BY ag_name, database_name, replica_server_name";
 
     /// <summary>
     /// #7076: a stuck policy job found on this process's first pass is seeded at its last announced step when the alert history holds an
-    /// open fire row for its exact key. The row can only have been written once the job was escalated or re-armed and announced, and the job
-    /// is still stuck after a whole restart, so it is seeded as escalated: no second auto-re-arm, no second page, and a repeat only per
-    /// connection_refire_minutes from the fire row's time. No open row (never announced, or a resolution row is newer) seeds nothing and the
-    /// job is handled as a new episode. A failed read is logged and handled the same way.
+    /// open fire row for its exact key. The row records the step it announced (<see cref="AlertContext.PolicyJobStep"/>). A job whose last
+    /// row was the auto-re-arm page is seeded re-armed, so this pass sends the "re-hung" escalation it was owed. A job whose last row was the
+    /// escalation or a repeat, or whose row carries no step (written before the step existed), is seeded escalated: no second auto-re-arm, no
+    /// second page, and a repeat only per connection_refire_minutes from the fire row's time. No open row (never announced, or a resolution row
+    /// is newer) seeds nothing and the job is handled as a new episode. A failed read is logged and handled the same way.
     /// </summary>
     private async Task SeedStandingPolicyJobAsync(
         PolicyJobBand band, TimescaleSupport.StorePolicyJobFamily family, string key, CancellationToken cancellationToken)
@@ -10134,7 +10140,11 @@ ORDER BY ag_name, database_name, replica_server_name";
                 historyKey, band.Metric, new[] { band.RecoveredMetric }, null, _serviceStartUtc);
             if (rows.OpenFor(_ => true, null) is { } standing)
             {
-                _policyJobState[key] = new PolicyJobEpisode(PolicyJobHealth.Escalated, family);
+                /* The step the row announced: a re-arm page that no escalation has followed leaves the job owed its "re-hung" page, which
+                   the ReArmed state sends on this pass. A row with no step (written before it existed) is seeded escalated. */
+                var step = AlertContextSerializer.TryReadPolicyJobStep(standing.ContextJson);
+                _policyJobState[key] = new PolicyJobEpisode(
+                    step == AlertContextSerializer.PolicyJobStepReArmed ? PolicyJobHealth.ReArmed : PolicyJobHealth.Escalated, family);
                 _lastPolicyJobAlert[key] = standing.FireAtUtc;
             }
         }
@@ -10145,7 +10155,9 @@ ORDER BY ag_name, database_name, replica_server_name";
         catch (Exception ex)
         {
             _logger?.LogWarning("Could not read the open {Metric} incident for {Key} from alert history after {ElapsedMs} ms; a stuck job may be announced again after this restart: {Message}", band.Metric, historyKey, seedClock.ElapsedMilliseconds, ex.Message);
-            _readFailures?.RecordReadFailure(null, "standing incident seed self-alert", seedClock.ElapsedMilliseconds);
+            /* The policy job store key is never a server, so it counts under the fleet bucket, the way the state alerts' seed does. */
+            var countKey = int.TryParse(historyKey, NumberStyles.Integer, CultureInfo.InvariantCulture, out _) ? historyKey : null;
+            _readFailures?.RecordReadFailure(countKey, "policy job standing seed self-alert", seedClock.ElapsedMilliseconds);
         }
     }
 
@@ -10189,9 +10201,10 @@ ORDER BY ag_name, database_name, replica_server_name";
             if (!_standingReads.TryGetValue(readKey, out var standingRows))
             {
                 /* #7076: a store-wide alert keyed by job is found by its exact key; every other alert by its server id. */
-                standingRows = KeyedFleetMetrics.Contains(metric)
-                    ? await _historyStore.GetKeyedStandingAsync(historyKey, metric, titles, null, _serviceStartUtc)
-                    : await _historyStore.GetStandingAsync(historyKey, metric, titles, null, _serviceStartUtc);
+                var standingRead = KeyedFleetMetrics.Contains(metric)
+                    ? _historyStore.GetKeyedStandingAsync(historyKey, metric, titles, null, _serviceStartUtc)
+                    : _historyStore.GetStandingAsync(historyKey, metric, titles, null, _serviceStartUtc);
+                standingRows = await standingRead;
                 _standingReads[readKey] = standingRows;
             }
 
