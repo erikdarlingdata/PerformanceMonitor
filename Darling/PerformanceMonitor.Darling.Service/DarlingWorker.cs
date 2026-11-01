@@ -1269,6 +1269,15 @@ public sealed partial class DarlingWorker : BackgroundService
        and emails through a mute rule that says not to. */
     private Func<AlertMuteContext, bool>? _isAlertMuted;
 
+    /// <summary>#7083: the digest rules' window check (<c>MuteRuleService.DigestWindowReason</c>), bound with <see cref="_isAlertMuted"/>.
+    /// Null before the engine is built, which reads as no window.</summary>
+    private Func<AlertMuteContext, string?>? _digestWindowReason;
+
+    /// <summary>#7083: the one mute question the PostgreSQL fire sites ask. A mute rule wins, then a digest rule's open window holds the
+    /// fire for the daily digest; the fire stamps its cooldown either way. See <see cref="MuteJudgment"/>.</summary>
+    private MuteJudgment JudgeMute(AlertMuteContext context) =>
+        MuteJudgment.Judge(_isAlertMuted ?? (_ => false), _digestWindowReason, context);
+
     /* #3285: the user-authored custom-alert evaluator. Null when the deployment cannot supply a viewer-role
        pool for it (BYO / non-Windows in this first slice); custom alerts are simply not evaluated there. */
     private CustomAlertEvaluator? _customAlertEvaluator;

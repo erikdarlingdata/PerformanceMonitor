@@ -1138,7 +1138,7 @@ public sealed partial class DarlingMcpAlertTools
                 "Turn it off or delete it in the Viewer's Settings window (Notifications, routes) or on the web dashboard's admin notification routes page. Turning it on can still be done here.")
             : null;
 
-    [McpServerTool(Name = "get_mute_rules"), Description("Gets the configured alert mute rules. Mute rules suppress specific recurring alerts (by server, metric, database, query text, wait type, or job name) while still logging them — so an agent can tell a genuinely healthy-quiet server from one whose alerts are being suppressed. A rule that repeats on a schedule (#7040) also carries its recur_days (day names; null is every day), recur_start_time, recur_end_time and recur_time_zone, plus schedule (one line), in_window_now (true when the rule is inside a window right now, so it is muting) and next_window_start_utc (when the next window opens); a repeating rule that is active but outside its window mutes nothing at this moment.")]
+    [McpServerTool(Name = "get_mute_rules"), Description("Gets the configured alert mute rules. Mute rules suppress specific recurring alerts (by server, metric, database, query text, wait type, or job name) while still logging them — so an agent can tell a genuinely healthy-quiet server from one whose alerts are being suppressed. A rule that repeats on a schedule (#7040) also carries its recur_days (day names; null is every day), recur_start_time, recur_end_time and recur_time_zone, plus schedule (one line), in_window_now (true when the rule is inside a window right now, so it is muting) and next_window_start_utc (when the next window opens); a repeating rule that is active but outside its window mutes nothing at this moment. Each rule carries action (#7083): 'mute', or 'digest' for a rule that holds matching alerts back from paging and records them as digest rows for the daily digest instead of muting them.")]
     public static async Task<string> GetMuteRules(
         NpgsqlDataSource postgres,
         [Description("Include only enabled, non-expired rules. Default true.")] bool enabled_only = true,
@@ -1192,7 +1192,7 @@ public sealed partial class DarlingMcpAlertTools
         r.IsRecurring && r.RecurDays is not null ? MuteRecurrence.DayNames(r.RecurDays).ToArray() : null,
         r.RecurStartTime is { } recurStart ? MuteRecurrence.FormatTime(recurStart) : null,
         r.RecurEndTime is { } recurEnd ? MuteRecurrence.FormatTime(recurEnd) : null,
-        r.RecurTimeZone, r.Summary);
+        r.RecurTimeZone, MuteRuleActions.Normalize(r.Action), r.Summary);
 
     /// <summary>The rule's wire shape plus its <c>state</c> as of <paramref name="nowUtc"/> (#6231): <c>active</c>, <c>upcoming</c> (its
     /// <c>starts_at_utc</c> is ahead, so it mutes nothing yet), <c>expired</c> or <c>disabled</c>. The state is a reading of the clock, not
@@ -1563,7 +1563,10 @@ public sealed partial class DarlingMcpAlertTools
         "scope matches. Times are wall-clock times in the zone, so the window follows daylight saving. Days or a zone without times are refused. " +
         "Both shapes work: one metric on one or more servers (one rule per server, with server_name or server_id), or every alert on one server " +
         "(server_name or server_id alone). get_mute_rules shows the schedule, in_window_now and the next window's start. During an investigation (Level 2) " +
-        "a mute is a one-off: the schedule is refused.")]
+        "a mute is a one-off: the schedule and the action are refused. " +
+        "ACTION (#7083, optional): 'mute' (the default) records a matching alert as muted and sends nothing. 'digest' holds a matching alert back from " +
+        "paging inside the rule's window and records it as a digest row for the daily digest, such as blocking from a nightly delete job; outside the " +
+        "window it pages as usual, and a mute rule that also matches wins.")]
     public static Task<string> CreateMuteRule(
         NpgsqlDataSource postgres,
         [Description("Scope the rule to this server (its display name, as get_alert_history reports). Omit for all servers.")] string? server_name = null,
@@ -1584,14 +1587,15 @@ public sealed partial class DarlingMcpAlertTools
         [Description("Optional repeat schedule (#7040): the days of the week the rule applies on, as day names (Mon..Sun or Monday..Sunday, any case). Omit for every day. Needs recur_start and recur_end.")] string[]? recur_days = null,
         [Description("Optional daily start time of the repeating window, 24-hour HH:mm in recur_time_zone (e.g. 22:00). Set with recur_end. A window may cross midnight (22:00 to 02:00).")] string? recur_start = null,
         [Description("Optional daily end time of the repeating window, 24-hour HH:mm in recur_time_zone (exclusive). Set with recur_start; it must differ from recur_start.")] string? recur_end = null,
-        [Description("Optional time zone for recur_start and recur_end: an IANA id (America/New_York) or a Windows id. Omit for the service host's own zone.")] string? recur_time_zone = null) =>
+        [Description("Optional time zone for recur_start and recur_end: an IANA id (America/New_York) or a Windows id. Omit for the service host's own zone.")] string? recur_time_zone = null,
+        [Description("Optional action (#7083): 'mute' (the default) mutes a matching alert, 'digest' sends it to the daily digest instead of paging.")] string? action = null) =>
         DarlingAgentActionSeat.IsGated(agentSeat)
-            ? (recur_days is not null || recur_start is not null || recur_end is not null || recur_time_zone is not null)
+            ? (recur_days is not null || recur_start is not null || recur_end is not null || recur_time_zone is not null || action is not null)
                 ? Task.FromResult(Outcome("invalid", DarlingMcpAgentActions.RecurrenceRefusal))
                 : DarlingMcpAgentActions.CreateMuteAsync(agentSeat!, postgres, logger, agent_action, server_name, metric_name, database_pattern,
                 query_text_pattern, wait_type_pattern, job_name_pattern, reason, expires_at, server_id, client_app_pattern, external_source, starts_at)
             : CreateMuteRuleOver(new PgMuteRuleStore(postgres), server_name, metric_name, database_pattern, query_text_pattern,
-            wait_type_pattern, job_name_pattern, reason, expires_at, server_id, id => MonitoredServerDisplayNameAsync(postgres, id), client_app_pattern, external_source, starts_at, recur_days: recur_days, recur_start: recur_start, recur_end: recur_end, recur_time_zone: recur_time_zone);
+            wait_type_pattern, job_name_pattern, reason, expires_at, server_id, id => MonitoredServerDisplayNameAsync(postgres, id), client_app_pattern, external_source, starts_at, recur_days: recur_days, recur_start: recur_start, recur_end: recur_end, recur_time_zone: recur_time_zone, action: action);
 
     /// <summary>The refusal for a <c>server_id</c> no registered server has: a rule keyed on it would mute
     /// nothing while reading as if it muted something.</summary>
@@ -1641,10 +1645,16 @@ public sealed partial class DarlingMcpAlertTools
         string[]? recur_days = null,
         string? recur_start = null,
         string? recur_end = null,
-        string? recur_time_zone = null)
+        string? recur_time_zone = null,
+        string? action = null)
     {
         try
         {
+            if (!MuteRuleActions.IsValid(action))
+            {
+                return Outcome("invalid", MuteRuleActions.InvalidActionMessage + " Nothing was written.");
+            }
+
             /* #6465: the one clock this create reads, taken once. A caller that tests against a fixed instant (the quiet-window
                tool's core) passes it, so CreatedAtUtc and the duplicate check agree with its own scope check; the service passes
                none and gets the real clock. */
@@ -1765,7 +1775,8 @@ public sealed partial class DarlingMcpAlertTools
                 RecurDays = recurDays,
                 RecurStartTime = recurStartTime,
                 RecurEndTime = recurEndTime,
-                RecurTimeZone = Trimmed(recur_time_zone)
+                RecurTimeZone = Trimmed(recur_time_zone),
+                Action = MuteRuleActions.Normalize(action)
             };
 
             if (!rule.TryNormalizeRecurrence(out var recurrenceProblem))
@@ -2155,7 +2166,7 @@ public sealed partial class DarlingMcpAlertTools
         "metric_name, external_source, database_pattern, query_text_pattern, wait_type_pattern, job_name_pattern, client_app_pattern, reason, " +
         "starts_at_utc (null clears it; it must stay before expires_at_utc), expires_at_utc (create_mute_rule's expires_at spelling is accepted as a write-only alias; send only " +
         "one), and the repeat schedule: recur_days (a list of day names such as [\"Mon\",\"Fri\"]; null means every day), recur_start and recur_end " +
-        "(24-hour HH:mm; the read spells them recur_start_time and recur_end_time, accepted too) and recur_time_zone (IANA or Windows id). The schedule is " +
+        "(24-hour HH:mm; the read spells them recur_start_time and recur_end_time, accepted too) and recur_time_zone (IANA or Windows id), and action ('mute' or 'digest', #7083; null resets it to mute). The schedule is " +
         "checked as a whole after your changes: start and end go together and differ, and days or a zone need times. " +
         "{\"recur_start\":null,\"recur_end\":null} clears the whole schedule (days and zone with it); the rule then applies at all times again. " +
         "Changing a schedule moves the rule to a different window, so a rule that repeated on weekdays stops muting on weekends. During an investigation (Level 2) " +
@@ -2436,6 +2447,11 @@ public sealed partial class DarlingMcpAlertTools
         Add("reason", rule.Reason);
         Add("starts_at", rule.StartsAtUtc?.ToString("o"));
         Add("expires_at", rule.ExpiresAtUtc?.ToString("o"));
+        if (rule.IsDigestAction)
+        {
+            Add("action", MuteRuleActions.Digest);
+        }
+
         if (rule.IsRecurring)
         {
             Add("recur_days", rule.RecurDays is null ? null : MuteRecurrence.DayNames(rule.RecurDays).ToArray());
@@ -2504,6 +2520,25 @@ public sealed partial class DarlingMcpAlertTools
             else
             {
                 error = $"'{field}' must be a string, or null to clear it.";
+            }
+        }
+
+        /* #7083: the action is one of 'mute' and 'digest'. Null resets it to the default, a mute; any other text is refused. */
+        void AddAction(JsonNode? node)
+        {
+            if (error != null) return;
+            if (node is null)
+            {
+                changes.Add(new MuteRuleFieldChange("action", r => r.Action = MuteRuleActions.Mute));
+            }
+            else if (node is JsonValue v && v.TryGetValue<string>(out var s) && !string.IsNullOrWhiteSpace(s) && MuteRuleActions.IsValid(s))
+            {
+                var word = MuteRuleActions.Normalize(s);
+                changes.Add(new MuteRuleFieldChange("action", r => r.Action = word));
+            }
+            else
+            {
+                error = $"'action' must be 'mute' or 'digest' (or null for the default, a mute).";
             }
         }
 
@@ -2673,6 +2708,7 @@ public sealed partial class DarlingMcpAlertTools
                 case "recur_end": AddRecurTime("recur_end", "recur_end_time", prop.Value, (r, t) => r.RecurEndTime = t); break;
                 case "recur_end_time": AddRecurTime("recur_end_time", "recur_end_time", prop.Value, (r, t) => r.RecurEndTime = t); break;
                 case "recur_time_zone": AddText("recur_time_zone", prop.Value, (r, v) => r.RecurTimeZone = v); break;
+                case "action": AddAction(prop.Value); break;
                 case "starts_at_utc": AddStart("starts_at_utc", prop.Value); break;
                 case "starts_at": AddStart("starts_at", prop.Value); break;
                 case "server_name": AddText("server_name", prop.Value, (r, v) => r.ServerName = v); break;
@@ -2704,7 +2740,7 @@ public sealed partial class DarlingMcpAlertTools
                     error = "'summary' is derived from the scope fields and is not stored — edit the fields it summarizes instead.";
                     break;
                 default:
-                    error = $"Unknown field '{prop.Key}'. Editable fields: server_name, server_id, metric_name, external_source, database_pattern, query_text_pattern, wait_type_pattern, job_name_pattern, client_app_pattern, reason, expires_at_utc, recur_days, recur_start, recur_end, recur_time_zone.";
+                    error = $"Unknown field '{prop.Key}'. Editable fields: server_name, server_id, metric_name, external_source, database_pattern, query_text_pattern, wait_type_pattern, job_name_pattern, client_app_pattern, reason, expires_at_utc, recur_days, recur_start, recur_end, recur_time_zone, action.";
                     break;
             }
         }
@@ -2760,6 +2796,7 @@ public sealed partial class DarlingMcpAlertTools
         && string.Equals(a.JobNamePattern, b.JobNamePattern, StringComparison.Ordinal)
         && string.Equals(a.ClientAppPattern, b.ClientAppPattern, StringComparison.Ordinal)
         && string.Equals(a.Reason, b.Reason, StringComparison.Ordinal)
+        && string.Equals(MuteRuleActions.Normalize(a.Action), MuteRuleActions.Normalize(b.Action), StringComparison.Ordinal)
         && a.ExpiresAtUtc == b.ExpiresAtUtc
         && a.StartsAtUtc == b.StartsAtUtc
         && a.HasSameSchedule(b);
@@ -2834,6 +2871,7 @@ public sealed partial class DarlingMcpAlertTools
         && string.Equals(a.ClientAppPattern, b.ClientAppPattern, StringComparison.Ordinal)
         && SameExpiry(a.ExpiresAtUtc, b.ExpiresAtUtc)
         && SameExpiry(a.StartsAtUtc, b.StartsAtUtc)
+        && string.Equals(MuteRuleActions.Normalize(a.Action), MuteRuleActions.Normalize(b.Action), StringComparison.Ordinal)
         && a.HasSameSchedule(b);
 
     /// <summary>Two expiries are the same instant to the store's precision. Postgres keeps microseconds and a .NET

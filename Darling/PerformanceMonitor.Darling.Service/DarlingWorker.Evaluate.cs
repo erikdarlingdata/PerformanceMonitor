@@ -86,6 +86,7 @@ public sealed partial class DarlingWorker
             stateStore,
             deliverer,
             muteRuleService.IsAlertMuted,
+            digestWindowReason: muteRuleService.DigestWindowReason,
             /* #5642: served from the cache the collection body fills, so the alert pass reads the store and nothing
                else. The live read itself is FetchFailedJobsAsync, called by RefreshMsdbCacheAsync. */
             failedJobsFetcher: (serverKey, lookbackMinutes, ct) =>
@@ -454,7 +455,7 @@ public sealed partial class DarlingWorker
                    so unmuting does not produce a backlog. */
                 _lastPostgresAlert[cooldownKey] = now;
 
-                var muted = _isAlertMuted?.Invoke(new AlertMuteContext
+                var mute = JudgeMute(new AlertMuteContext
                 {
                     ServerName = snapshot.ServerName,
                     ServerId = snapshot.ServerId,
@@ -462,7 +463,7 @@ public sealed partial class DarlingWorker
                     /* The subject is the database for wraparound and the slot/holder for the others, which is
                        what a DatabaseName mute rule is written against. */
                     DatabaseName = finding.Subject,
-                }) ?? false;
+                });
 
                 var delivery = await _alertDeliverer.DeliverAndReportAsync(
                     new AlertOutcome(
@@ -494,9 +495,10 @@ public sealed partial class DarlingWorker
                         DetailText: null,
                         finding.NumericCurrentValue,
                         finding.NumericThresholdValue,
-                        Muted: muted,
-                        finding.Severity,
-                        finding.ShortMessage),
+                        Muted: mute.Muted,
+                        Severity: finding.Severity,
+                        ShortMessage: finding.ShortMessage,
+                        Hold: mute.Hold),
                     cancellationToken);
                 readClock.Restart();
 
@@ -812,12 +814,12 @@ public sealed partial class DarlingWorker
 
                 _lastPgCpuAlert[key] = now;
 
-                var muted = _isAlertMuted?.Invoke(new AlertMuteContext
+                var mute = JudgeMute(new AlertMuteContext
                 {
                     ServerName = snapshot.ServerName,
                     ServerId = snapshot.ServerId,
                     MetricName = metricName,
-                }) ?? false;
+                });
 
                 /* The ACU line only when both halves were sampled: "N of M ACU" with either missing
                    would be a fabricated pair, and the percentage above already carries the answer. */
@@ -862,7 +864,7 @@ public sealed partial class DarlingWorker
                             + $"  Sustained: {AlertEngine.CpuBreachSamples} consecutive samples",
                         NumericCurrentValue: lastCapacityPercent.Value,
                         NumericThresholdValue: alertSettings.CpuThresholdPercent,
-                        Muted: muted,
+                        Muted: mute.Muted, Hold: mute.Hold,
                         Severity: grade,
                         ShortMessage:
                             $"Capacity at {lastCapacityPercent.Value:F0}% {FleetCpuProvenance.CapacityDenominator} "
@@ -998,12 +1000,12 @@ public sealed partial class DarlingWorker
             {
                 _lastPgDeadlockAlert[key] = now;
 
-                var muted = _isAlertMuted?.Invoke(new AlertMuteContext
+                var mute = JudgeMute(new AlertMuteContext
                 {
                     ServerName = snapshot.ServerName,
                     ServerId = snapshot.ServerId,
                     MetricName = metricName,
-                }) ?? false;
+                });
 
                 /* #3653 (A8e, the PostgreSQL host): GRADE the fire the gate already decided on, exactly as
                    #3660 graded the SQL Server twin — the same AlertEngine.GradeDeadlockFire, on the same
@@ -1052,7 +1054,7 @@ public sealed partial class DarlingWorker
                         DetailText: null,
                         NumericCurrentValue: count,
                         NumericThresholdValue: threshold,
-                        Muted: muted,
+                        Muted: mute.Muted, Hold: mute.Hold,
                         Severity: AlertEngine.GradeDeadlockFire(count, rateTiers),
                         ShortMessage: $"{count} {(count == 1 ? "deadlock" : "deadlocks")} in the last hour"),
                     cancellationToken);
@@ -1209,12 +1211,12 @@ public sealed partial class DarlingWorker
             {
                 _lastPgBlockingAlert[key] = now;
 
-                var muted = _isAlertMuted?.Invoke(new AlertMuteContext
+                var mute = JudgeMute(new AlertMuteContext
                 {
                     ServerName = snapshot.ServerName,
                     ServerId = snapshot.ServerId,
                     MetricName = metricName,
-                }) ?? false;
+                });
 
                 /* #3653 (A8e, the PostgreSQL host): an explicit tier in place of Severity: null, so the row
                    carries what it fired at (through the deliverer's #2090 fold, as the deadlock arm above
@@ -1235,7 +1237,7 @@ public sealed partial class DarlingWorker
                         DetailText: AlertContextBuilders.ContextToDetailText(pgBlockingContext),
                         NumericCurrentValue: count,
                         NumericThresholdValue: threshold,
-                        Muted: muted,
+                        Muted: mute.Muted, Hold: mute.Hold,
                         Severity: PgBlockingFireSeverity,
                         ShortMessage: $"{count} blocking {(count == 1 ? "session" : "sessions")}"),
                     cancellationToken);
@@ -1434,13 +1436,13 @@ public sealed partial class DarlingWorker
                 var worst = rows[0];
                 var elapsedMinutes = worst.QueryDurationMs / 60_000;
 
-                var muted = _isAlertMuted?.Invoke(new AlertMuteContext
+                var mute = JudgeMute(new AlertMuteContext
                 {
                     ServerName = snapshot.ServerName,
                     ServerId = snapshot.ServerId,
                     MetricName = metricName,
                     DatabaseName = worst.DatabaseName,
-                }) ?? false;
+                });
 
                 /* #3653 (A8e, the PostgreSQL host): an explicit tier in place of Severity: null, for the
                    reason the blocking arm above gives. Warning, and only Warning —
@@ -1470,7 +1472,7 @@ public sealed partial class DarlingWorker
                         DetailText: null,
                         NumericCurrentValue: elapsedMinutes,
                         NumericThresholdValue: thresholdMinutes,
-                        Muted: muted,
+                        Muted: mute.Muted, Hold: mute.Hold,
                         Severity: PgLongRunningQueryFireSeverity,
                         ShortMessage: $"pid {worst.Pid} running {elapsedMinutes}m — {worst.CommandTag ?? "(unknown)"}"
                             + (worst.DatabaseName is null ? "" : $" on {worst.DatabaseName}")),
@@ -1692,7 +1694,7 @@ public sealed partial class DarlingWorker
                 _lastPgPoisonWaitAlert[cooldownKey] = now;
                 _lastPgPoisonWaitCollectionTime[cooldownKey] = newestCollection;
 
-                var muted = _isAlertMuted?.Invoke(new AlertMuteContext
+                var mute = JudgeMute(new AlertMuteContext
                 {
                     ServerName = snapshot.ServerName,
                     ServerId = snapshot.ServerId,
@@ -1701,7 +1703,7 @@ public sealed partial class DarlingWorker
                        mute rules key on the wait type — the parity metric name only helps if the mute
                        dimension matches too. */
                     WaitType = finding.Subject,
-                }) ?? false;
+                });
 
                 var delivery = await _alertDeliverer.DeliverAndReportAsync(
                     new AlertOutcome(
@@ -1730,9 +1732,10 @@ public sealed partial class DarlingWorker
                         DetailText: null,
                         finding.NumericCurrentValue,
                         finding.NumericThresholdValue,
-                        Muted: muted,
-                        finding.Severity,
-                        finding.ShortMessage),
+                        Muted: mute.Muted,
+                        Severity: finding.Severity,
+                        ShortMessage: finding.ShortMessage,
+                        Hold: mute.Hold),
                     cancellationToken);
                 readClock.Restart();
 

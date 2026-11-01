@@ -2983,6 +2983,7 @@ $rung$;";
         new Migration(232, "daily-health-report", V232Sql),
         new Migration(233, "notification-route-report-notice", V233Sql),
         new Migration(235, "blocking-pages-on-wait-time-defaults", V235Sql),
+        new Migration(236, "mute-rule-action", V236Sql),
     };
 
     /// <summary>
@@ -3138,6 +3139,26 @@ ALTER TABLE config.config_alert_settings
     ADD COLUMN IF NOT EXISTS blocking_warn_snapshot_wait_seconds double precision NOT NULL DEFAULT 0;
 ALTER TABLE config.config_alert_settings
     ADD COLUMN IF NOT EXISTS blocking_critical_snapshot_wait_seconds double precision NOT NULL DEFAULT 0;";
+
+    /// <summary>
+    /// V236 (#7083): what a mute rule does, on <c>config.config_mute_rules</c>. <c>action</c> is <c>mute</c> (the default, and the value every
+    /// stored rule takes, so each keeps exactly its effect) or <c>digest</c>, which holds a matching alert back from paging and records it as a
+    /// digest row for the daily digest. The ADD COLUMN with a constant default is catalog-only, and a CHECK holds the two words. Needs no GRANT
+    /// (the roles' table-level grants cover a new column) and no trigger (the V117 reload beacon fires on any change to the table). An older
+    /// build ignores the column and would MUTE a digest rule's matches, so a rolled-back build silences what the operator meant to see in the digest.
+    /// </summary>
+    private const string V236Sql = @"
+ALTER TABLE config.config_mute_rules ADD COLUMN IF NOT EXISTS action text NOT NULL DEFAULT 'mute';
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_config_mute_rules_action'
+                   AND conrelid = 'config.config_mute_rules'::regclass) THEN
+        ALTER TABLE config.config_mute_rules
+            ADD CONSTRAINT ck_config_mute_rules_action
+            CHECK (action IN ('mute', 'digest'));
+    END IF;
+END
+$$;";
 
     /// <summary>
     /// V231 (#7040): the repeat schedule of a mute rule, on <c>config.config_mute_rules</c>. <c>recur_days</c> is a smallint bit mask

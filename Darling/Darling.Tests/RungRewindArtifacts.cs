@@ -640,6 +640,10 @@ DO $$ BEGIN
             ALTER COLUMN pg_blocking_count_threshold SET DEFAULT 1;
     END IF;
 END $$;"),
+        // V236 (#7083): the action on the mute rules. The column is the probe's newest sentinel. The rewind drops it (its CHECK goes with it), so a
+        // re-run of V236 adds it again. Safe on a store that never had it.
+        new(236, "hasMuteRuleAction",
+            @"ALTER TABLE IF EXISTS config.config_mute_rules DROP COLUMN IF EXISTS action;"),
     ];
 
     /// <summary>

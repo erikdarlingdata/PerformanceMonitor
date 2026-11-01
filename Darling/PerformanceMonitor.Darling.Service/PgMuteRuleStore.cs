@@ -66,7 +66,7 @@ public sealed class PgMuteRuleStore : IMuteRuleStore
 SELECT id, enabled, created_at_utc, expires_at_utc, reason,
        server_name, metric_name, database_pattern,
        query_text_pattern, wait_type_pattern, job_name_pattern, server_id, client_app_pattern, external_source, starts_at_utc,
-       recur_days, recur_start_time, recur_end_time, recur_time_zone
+       recur_days, recur_start_time, recur_end_time, recur_time_zone, action
 FROM config_mute_rules
 ORDER BY created_at_utc DESC", scope.Connection, scope.Transaction) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
 
@@ -93,7 +93,8 @@ ORDER BY created_at_utc DESC", scope.Connection, scope.Transaction) { CommandTim
                 RecurDays = reader.IsDBNull(15) ? null : reader.GetInt16(15),
                 RecurStartTime = reader.IsDBNull(16) ? null : reader.GetFieldValue<TimeOnly>(16),
                 RecurEndTime = reader.IsDBNull(17) ? null : reader.GetFieldValue<TimeOnly>(17),
-                RecurTimeZone = reader.IsDBNull(18) ? null : reader.GetString(18)
+                RecurTimeZone = reader.IsDBNull(18) ? null : reader.GetString(18),
+                Action = MuteRuleActions.Normalize(reader.GetString(19))
             });
         }
 
@@ -135,8 +136,8 @@ INSERT INTO config_mute_rules
     (id, enabled, created_at_utc, expires_at_utc, reason,
      server_name, metric_name, database_pattern,
      query_text_pattern, wait_type_pattern, job_name_pattern, server_id, client_app_pattern, external_source, starts_at_utc,
-     recur_days, recur_start_time, recur_end_time, recur_time_zone)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)", scope.Connection, scope.Transaction) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
+     recur_days, recur_start_time, recur_end_time, recur_time_zone, action)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)", scope.Connection, scope.Transaction) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(rule.Id);
         command.Parameters.AddWithValue(rule.Enabled);
         command.Parameters.AddWithValue(Naive(rule.CreatedAtUtc));
@@ -153,6 +154,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         AddNullableText(command, rule.ExternalSource);
         AddNullable(command, rule.StartsAtUtc);
         AddRecurrence(command, rule);
+        command.Parameters.AddWithValue(MuteRuleActions.Normalize(rule.Action));
         await command.ExecuteNonQueryAsync();
     }
 
@@ -171,7 +173,7 @@ UPDATE config_mute_rules SET
     server_name = $5, metric_name = $6, database_pattern = $7,
     query_text_pattern = $8, wait_type_pattern = $9, job_name_pattern = $10, server_id = $11, client_app_pattern = $12,
     external_source = $13, starts_at_utc = $14,
-    recur_days = $15, recur_start_time = $16, recur_end_time = $17, recur_time_zone = $18
+    recur_days = $15, recur_start_time = $16, recur_end_time = $17, recur_time_zone = $18, action = $19
 WHERE id = $1", scope.Connection, scope.Transaction) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(rule.Id);
         command.Parameters.AddWithValue(rule.Enabled);
@@ -188,6 +190,7 @@ WHERE id = $1", scope.Connection, scope.Transaction) { CommandTimeout = DarlingA
         AddNullableText(command, rule.ExternalSource);
         AddNullable(command, rule.StartsAtUtc);
         AddRecurrence(command, rule);
+        command.Parameters.AddWithValue(MuteRuleActions.Normalize(rule.Action));
         await command.ExecuteNonQueryAsync();
     }
 

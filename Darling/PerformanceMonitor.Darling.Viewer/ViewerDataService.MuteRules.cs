@@ -101,6 +101,36 @@ UPDATE config_mute_rules SET
     recur_days = $15, recur_start_time = $16, recur_end_time = $17, recur_time_zone = $18
 WHERE id = $1";
 
+    /// <summary>The store version that added the rule's action on <c>config_mute_rules</c> (V236, #7083). A store below it has no action column,
+    /// so the viewer reads and writes the older statements and every rule is a mute.</summary>
+    internal const int MuteActionStoreSchemaVersion = 236;
+
+    /// <summary>The list read for a store that has the action (V236, #7083): the recurrence read plus the action column.</summary>
+    public const string MuteRulesSelectWithActionSql = @"
+SELECT id, enabled, created_at_utc, expires_at_utc, reason,
+       server_name, metric_name, database_pattern,
+       query_text_pattern, wait_type_pattern, job_name_pattern, server_id, client_app_pattern, external_source, starts_at_utc,
+       recur_days, recur_start_time, recur_end_time, recur_time_zone, action
+FROM config_mute_rules
+ORDER BY created_at_utc DESC";
+
+    public const string MuteRuleInsertWithActionSql = @"
+INSERT INTO config_mute_rules
+    (id, enabled, created_at_utc, expires_at_utc, reason,
+     server_name, metric_name, database_pattern,
+     query_text_pattern, wait_type_pattern, job_name_pattern, server_id, client_app_pattern, external_source, starts_at_utc,
+     recur_days, recur_start_time, recur_end_time, recur_time_zone, action)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)";
+
+    public const string MuteRuleUpdateWithActionSql = @"
+UPDATE config_mute_rules SET
+    enabled = $2, expires_at_utc = $3, reason = $4,
+    server_name = $5, metric_name = $6, database_pattern = $7,
+    query_text_pattern = $8, wait_type_pattern = $9, job_name_pattern = $10, server_id = $11, client_app_pattern = $12,
+    external_source = $13, starts_at_utc = $14,
+    recur_days = $15, recur_start_time = $16, recur_end_time = $17, recur_time_zone = $18, action = $19
+WHERE id = $1";
+
     public const string MuteRuleSetEnabledSql = "UPDATE config_mute_rules SET enabled = $2 WHERE id = $1";
 
     public const string MuteRuleDeleteSql = MuteRulePurge.DeleteByIdSql;
@@ -190,7 +220,9 @@ WHERE id = $1";
         && rule.ClientAppPattern is null
         && rule.ExternalSource is null
         /* A rule that repeats on a schedule mutes only inside its windows, so it is not a whole-server silence (#7040). */
-        && !rule.IsRecurring;
+        && !rule.IsRecurring
+        /* A digest rule holds alerts for the daily digest and mutes none, so it is not a silence either (#7083). */
+        && !rule.IsDigestAction;
 
     /// <summary>What "Unsilence" does for one server: the silence rules to delete, and the id-keyed silences to
     /// create BEFORE deleting, for the other servers a deleted legacy rule used to cover.
@@ -272,7 +304,8 @@ WHERE id = $1";
 
         /* V231 (#7040): a store below it has no schedule columns, so the list reads the older statement and every rule is a one-off. */
         var hasRecurrence = await SupportsMuteRecurrenceAsync(cancellationToken);
-        await using var command = _dataSource.CreateCommand(hasRecurrence ? MuteRulesSelectWithRecurrenceSql : MuteRulesSelectSql);
+        var hasAction = await SupportsMuteActionAsync(cancellationToken);
+        await using var command = _dataSource.CreateCommand(hasAction ? MuteRulesSelectWithActionSql : hasRecurrence ? MuteRulesSelectWithRecurrenceSql : MuteRulesSelectSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -298,6 +331,7 @@ WHERE id = $1";
                 RecurStartTime = hasRecurrence && !reader.IsDBNull(16) ? reader.GetFieldValue<TimeOnly>(16) : null,
                 RecurEndTime = hasRecurrence && !reader.IsDBNull(17) ? reader.GetFieldValue<TimeOnly>(17) : null,
                 RecurTimeZone = hasRecurrence && !reader.IsDBNull(18) ? reader.GetString(18) : null,
+                Action = hasAction ? MuteRuleActions.Normalize(reader.GetString(19)) : MuteRuleActions.Mute,
             });
         }
 
@@ -310,6 +344,33 @@ WHERE id = $1";
     {
         var version = _cachedStoreSchemaVersion ??= await GetStoreSchemaVersionAsync(cancellationToken);
         return version is int known && known >= RecurringMuteStoreSchemaVersion;
+    }
+
+    /// <summary>Whether the store has the rule action (V236, #7083). The dialog hides the Action choice when it does not. A probe that cannot
+    /// tell reads as "no", so an unreachable probe never makes the viewer write a column an older store lacks.</summary>
+    public async Task<bool> SupportsMuteActionAsync(CancellationToken cancellationToken = default)
+    {
+        var version = _cachedStoreSchemaVersion ??= await GetStoreSchemaVersionAsync(cancellationToken);
+        return version is int known && known >= MuteActionStoreSchemaVersion;
+    }
+
+    private const string ActionNeedsNewerStore = "This store is below the version that keeps a mute rule's action. Upgrade the Darling service first.";
+
+    /// <summary>The check every write runs: the action is one of the two words, and a digest rule needs a store that keeps it.</summary>
+    private async Task<bool> ResolveActionSupportAsync(MuteRule rule, CancellationToken cancellationToken)
+    {
+        if (!MuteRuleActions.IsValid(rule.Action))
+        {
+            throw new ArgumentException(MuteRuleActions.InvalidActionMessage, nameof(rule));
+        }
+
+        var hasAction = await SupportsMuteActionAsync(cancellationToken);
+        if (!hasAction && rule.IsDigestAction)
+        {
+            throw new InvalidOperationException(ActionNeedsNewerStore);
+        }
+
+        return hasAction;
     }
 
     /// <summary>The check every write runs (the dialog runs it first to show the text): the schedule is whole and the zone is an IANA id.</summary>
@@ -373,9 +434,10 @@ WHERE id = $1";
             throw new InvalidOperationException(RecurrenceNeedsNewerStore);
         }
 
+        var hasAction = await ResolveActionSupportAsync(rule, cancellationToken);
         await ThrowIfZoneUnknownAsync(rule, cancellationToken);
 
-        await using var command = _dataSource.CreateCommand(hasRecurrence ? MuteRuleInsertWithRecurrenceSql : MuteRuleInsertSql);
+        await using var command = _dataSource.CreateCommand(hasAction ? MuteRuleInsertWithActionSql : hasRecurrence ? MuteRuleInsertWithRecurrenceSql : MuteRuleInsertSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = rule.Id });
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = rule.Enabled });
@@ -397,6 +459,11 @@ WHERE id = $1";
             AddRecurrence(command, rule);
         }
 
+        if (hasAction)
+        {
+            AddNullableText(command, MuteRuleActions.Normalize(rule.Action));
+        }
+
         await ExecuteWriteAsync(command, cancellationToken);
         await SignalConfigReloadAsync(cancellationToken);
     }
@@ -416,9 +483,10 @@ WHERE id = $1";
             throw new InvalidOperationException(RecurrenceNeedsNewerStore);
         }
 
+        var hasAction = await ResolveActionSupportAsync(rule, cancellationToken);
         await ThrowIfZoneUnknownAsync(rule, cancellationToken);
 
-        await using var command = _dataSource.CreateCommand(hasRecurrence ? MuteRuleUpdateWithRecurrenceSql : MuteRuleUpdateSql);
+        await using var command = _dataSource.CreateCommand(hasAction ? MuteRuleUpdateWithActionSql : hasRecurrence ? MuteRuleUpdateWithRecurrenceSql : MuteRuleUpdateSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = rule.Id });
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = rule.Enabled });
@@ -437,6 +505,11 @@ WHERE id = $1";
         if (hasRecurrence)
         {
             AddRecurrence(command, rule);
+        }
+
+        if (hasAction)
+        {
+            AddNullableText(command, MuteRuleActions.Normalize(rule.Action));
         }
 
         await ExecuteWriteAsync(command, cancellationToken);
