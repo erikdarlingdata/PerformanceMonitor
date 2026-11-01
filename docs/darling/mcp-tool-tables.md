@@ -14,7 +14,7 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 
 ## Limits
 
-- The page matches the `dev` branch at the commit that added it, with the store at schema version 221. The `tools/list` call on a running server gives the full list for that build.
+- The page matches the `dev` branch at the commit that last changed it, with the store at schema version 232. The `tools/list` call on a running server gives the full list for that build.
 - A tool that has no row here was added after this page. A changed tool can read other tables than the ones shown here.
 - Which tools a server serves depends on the `mcp` switches. See [MCP configuration](configuration-mcp.md#mcp).
 - The page was made by reading each tool's code down to the SQL that runs. It was not made from a store trace.
