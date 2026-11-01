@@ -339,7 +339,7 @@ public partial class LiteAlertForwardingTests : IDisposable
         DatabaseName = "StackOverflow",
         BlockedSpid = blockedSpid,
         BlockingSpid = blockedSpid + 100,
-        WaitTimeMs = 12000,
+        WaitTimeMs = 20000,
         LockMode = "X",
         BlockedSqlText = "UPDATE Users SET x = 1",
         BlockingSqlText = "BEGIN TRAN UPDATE Users",

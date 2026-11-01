@@ -780,7 +780,7 @@ the running service picks the change up on its next sweep, no restart:
 
 | Alert | Reads | Enabled by | Threshold |
 |---|---|---|---|
-| `Deadlocks Detected` | `pg_deadlocks` | `deadlockEnabled` — shared with SQL Server | **`pgDeadlockCountThreshold`** (`deadlocks.pg_count_threshold` on the MCP surface): distinct deadlocks inside the rolling one-hour window; default 1, floor 1 (#3444, V122) |
+| `Deadlocks Detected` | `pg_deadlocks` | `deadlockEnabled` — shared with SQL Server | **`pgDeadlockCountThreshold`** (`deadlocks.pg_count_threshold` on the MCP surface): distinct deadlocks inside the rolling one-hour window; default 3 since #7083 (V235 moves a store still at 1), floor 1 (#3444, V122). Pages when that many roots exist and the worst victim wait is 15 seconds or more, or when one root's worst victim waited `blockingWaitSecondsThreshold` (60 s by default; 0 turns that route off) |
 | `Blocking Detected` | `pg_blocking` | `blockingEnabled` — shared | **`pgBlockingCountThreshold`** (`blocking.pg_count_threshold`): distinct ROOT blockers inside the rolling one-hour window; default 1, floor 1 (#3444, V122) |
 | `Long-Running Query` | `pg_session_states` | `longRunningQueryEnabled` — shared | `longRunningQueryThresholdMinutes` — the shared value, judged against the most recent capture |
 | `Poison Wait` | `pg_wait_stats` (Aurora only — the IPC pair `BtreePage` / `BufferIo`) | `poisonWaitEnabled` — shared | the shared accumulation bars: one backend continuously stuck across the ten-minute window warns, ten is critical; no per-engine knob, by the same reasoning as the trio |

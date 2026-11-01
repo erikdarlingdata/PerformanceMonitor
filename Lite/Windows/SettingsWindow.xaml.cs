@@ -1204,7 +1204,7 @@ public partial class SettingsWindow : Window
         root["alert_blocking_enabled"] = App.AlertBlockingEnabled;
         root["alert_blocking_threshold"] = App.AlertBlockingThreshold;
         root["alert_blocking_wait_seconds_threshold"] = App.AlertBlockingWaitSecondsThreshold;
-        root["alert_blocking_defaults_applied"] = true;  /* #7083: see the loader's marker note */
+        root["alert_blocking_defaults_applied"] = true;  /* #7083: the marker that makes a saved 1 / 0 count as a choice, see the loader in App.xaml.cs */
         root["alert_deadlock_enabled"] = App.AlertDeadlockEnabled;
         root["alert_deadlock_threshold"] = App.AlertDeadlockThreshold;
         root["alert_database_state_enabled"] = App.AlertDatabaseStateEnabled;

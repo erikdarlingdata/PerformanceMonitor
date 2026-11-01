@@ -552,7 +552,7 @@ public sealed class AlertEngineTests
         DatabaseName = database,
         BlockedSpid = blockedSpid,
         BlockingSpid = blockedSpid + 100,
-        WaitTimeMs = 12000,
+        WaitTimeMs = 20000, /* #7083: over the count arm's 15 s worst-wait floor */
         LockMode = "X",
         BlockedSqlText = "UPDATE Users SET x = 1",
         BlockingSqlText = "BEGIN TRAN UPDATE Users",
@@ -1240,7 +1240,86 @@ public sealed class AlertEngineTests
         Assert.Contains((Key, AlertEngine.BlockingWatermarkMetric, 0), h.StateStore.SavedEdge);
         var resolution = Assert.Single(h.Resolutions);
         Assert.Equal("Blocking Cleared", resolution.Title);                   /* :190 */
-        Assert.Equal("SRV-A: No active blocking", resolution.Message);        /* :191 */
+        /* #7083: the text names the window and what clears the alert. */
+        Assert.Equal(BlockingPageRule.ClearedMessage("SRV-A", 1, 0), resolution.Message);
+        Assert.Contains("last 60 minutes", resolution.Message);
+    }
+
+    private static BlockedProcessAlertRow TimedBlockingRow(int blockedSpid, long waitMs)
+    {
+        var row = BlockingRow(blockedSpid);
+        row.WaitTimeMs = waitMs;
+        /* One wait start (11:54:00), reports written as the wait ran on: the reports of one wait differ in EventTime and WaitTimeMs. */
+        row.EventTime = new DateTime(2026, 7, 1, 11, 54, 0).AddMilliseconds(waitMs);
+        return row;
+    }
+
+    private static Harness NewDefaultsHarness()
+    {
+        var h = new Harness();
+        h.Settings.BlockingEnabled = true;
+        h.Settings.BlockingCountThreshold = BlockingPageRule.CountThresholdDefault;
+        h.Settings.BlockingWaitSecondsThreshold = BlockingPageRule.WaitSecondsThresholdDefault;
+        return h;
+    }
+
+    [Fact]
+    public async Task Blocking_OneShortEvent_DoesNotPage_WithTheNewDefaults()
+    {
+        /* #7083: one blocked event of 2 seconds paged under count = 1. Defaults now: count 3, wait bar 60 s. */
+        var h = NewDefaultsHarness();
+        h.Adapter.Blocking.Add(TimedBlockingRow(55, 2000));
+        await h.Build().EvaluateServerAsync(Harness.Snapshot());
+        Assert.DoesNotContain(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Detected");
+    }
+
+    [Fact]
+    public async Task Blocking_OneVictimWhoseReportsReach90Seconds_PagesAtOnce_And25SecondsDoesNot()
+    {
+        var h = NewDefaultsHarness();
+        /* Three reports of the SAME blocked process collapse to one event at its largest wait. */
+        h.Adapter.Blocking.Add(TimedBlockingRow(55, 30000));
+        h.Adapter.Blocking.Add(TimedBlockingRow(55, 60000));
+        h.Adapter.Blocking.Add(TimedBlockingRow(55, 90000));
+        await h.Build().EvaluateServerAsync(Harness.Snapshot());
+        var fired = Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Detected");
+        Assert.Equal("1", fired.CurrentValue);
+
+        var quiet = NewDefaultsHarness();
+        quiet.Adapter.Blocking.Add(TimedBlockingRow(55, 10000));
+        quiet.Adapter.Blocking.Add(TimedBlockingRow(55, 25000));
+        await quiet.Build().EvaluateServerAsync(Harness.Snapshot());
+        Assert.DoesNotContain(quiet.Deliverer.Outcomes, o => o.MetricName == "Blocking Detected");
+    }
+
+    [Fact]
+    public async Task Blocking_ThreeEventsWorstWait20Seconds_Page_ButSixEventsWorst5SecondsDoNot()
+    {
+        var h = NewDefaultsHarness();
+        h.Adapter.Blocking.Add(TimedBlockingRow(55, 20000));
+        h.Adapter.Blocking.Add(TimedBlockingRow(56, 3000));
+        h.Adapter.Blocking.Add(TimedBlockingRow(57, 3000));
+        await h.Build().EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal("3", Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Detected").CurrentValue);
+
+        /* Six events of 5 s each: 30 s of total wait, worst 5 s. No page. */
+        var quiet = NewDefaultsHarness();
+        for (var spid = 60; spid < 66; spid++)
+        {
+            quiet.Adapter.Blocking.Add(TimedBlockingRow(spid, 5000));
+        }
+        await quiet.Build().EvaluateServerAsync(Harness.Snapshot());
+        Assert.DoesNotContain(quiet.Deliverer.Outcomes, o => o.MetricName == "Blocking Detected");
+    }
+
+    [Fact]
+    public async Task Blocking_WaitBarOff_TurnsTheSingleEventRouteOff()
+    {
+        var h = NewDefaultsHarness();
+        h.Settings.BlockingWaitSecondsThreshold = 0;
+        h.Adapter.Blocking.Add(TimedBlockingRow(55, 90000));
+        await h.Build().EvaluateServerAsync(Harness.Snapshot());
+        Assert.DoesNotContain(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Detected");
     }
 
     [Fact]

@@ -627,6 +627,19 @@ ALTER TABLE IF EXISTS config.investigation_request_alerts DROP COLUMN IF EXISTS 
         // column (its CHECK goes with it), so a re-run of V233 does everything again. Safe on a store that never had it.
         new(233, "hasReportNotice",
             @"ALTER TABLE config.config_notification_routes DROP COLUMN IF EXISTS report_notice;"),
+        // V235 (#7083): the blocking bars' column defaults are 3, 60 and 3, the probe's newest sentinel (the count bar's default). The rewind sets the
+        // defaults back to V1's 1, V40's 0 and V122's 1, so a re-run of V235 sets them again. The row's values are left as they are. Guarded, so it is
+        // safe on a store whose V122 column is already gone.
+        new(235, "hasBlockingBarsOnWaitTime",
+            @"
+DO $$ BEGIN
+    IF EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('config.config_alert_settings') AND attname = 'pg_blocking_count_threshold' AND NOT attisdropped) THEN
+        ALTER TABLE config.config_alert_settings
+            ALTER COLUMN blocking_count_threshold SET DEFAULT 1,
+            ALTER COLUMN blocking_wait_seconds_threshold SET DEFAULT 0,
+            ALTER COLUMN pg_blocking_count_threshold SET DEFAULT 1;
+    END IF;
+END $$;"),
     ];
 
     /// <summary>

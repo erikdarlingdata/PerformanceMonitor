@@ -1,3 +1,5 @@
+using System;
+
 namespace PerformanceMonitor.Alerting;
 
 /// <summary>
