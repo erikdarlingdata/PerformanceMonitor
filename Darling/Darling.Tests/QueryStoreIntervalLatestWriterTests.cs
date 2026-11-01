@@ -173,7 +173,7 @@ GROUP BY database_name, query_id, plan_id, replica_role, runtime_stats_interval_
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #3953 writer test.");
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, emptyStore: true);
         await using var connection = await OpenMigratedAsync(scratch, ct);
         await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
         var runner = new DarlingCollectorRunner(postgres, new CollectorDeltaCalculator());
@@ -218,7 +218,7 @@ GROUP BY database_name, query_id, plan_id, replica_role, runtime_stats_interval_
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #3953 writer test.");
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, emptyStore: true);
         await using var connection = await OpenMigratedAsync(scratch, ct);
         await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
         var runner = new DarlingCollectorRunner(postgres, new CollectorDeltaCalculator());
@@ -260,7 +260,7 @@ GROUP BY database_name, query_id, plan_id, replica_role, runtime_stats_interval_
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #3953 writer test.");
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, emptyStore: true);
         await using var connection = await OpenMigratedAsync(scratch, ct);
         await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
         var runner = new DarlingCollectorRunner(postgres, new CollectorDeltaCalculator());
@@ -294,7 +294,7 @@ GROUP BY database_name, query_id, plan_id, replica_role, runtime_stats_interval_
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #3953 writer test.");
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, emptyStore: true);
         await using var connection = await OpenMigratedAsync(scratch, ct);
         await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
         var context = NewContext();
@@ -329,7 +329,7 @@ GROUP BY database_name, query_id, plan_id, replica_role, runtime_stats_interval_
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #3953 retention test.");
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, emptyStore: true);
         await using var connection = await OpenMigratedAsync(scratch, ct);
         await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
         var runner = new DarlingCollectorRunner(postgres, new CollectorDeltaCalculator());
@@ -411,7 +411,7 @@ GROUP BY database_name, query_id, plan_id, replica_role, runtime_stats_interval_
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #5448 writer test.");
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, emptyStore: true);
         await using var connection = await OpenMigratedAsync(scratch, ct);
         await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
         var runner = new DarlingCollectorRunner(postgres, new CollectorDeltaCalculator());
@@ -461,7 +461,7 @@ GROUP BY database_name, query_id, plan_id, replica_role, runtime_stats_interval_
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #5812 trigger-bound test.");
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, emptyStore: true);
         await using var connection = await OpenMigratedAsync(scratch, ct);
         var predicate = await ShippedTriggerPredicateAsync(connection, ct);
         Task<bool> FiresAsync(DateTime first, DateTime clock) => TriggerFiresAsync(connection, predicate, first, clock, ct);
@@ -496,7 +496,7 @@ GROUP BY database_name, query_id, plan_id, replica_role, runtime_stats_interval_
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #5812 trigger-margin test.");
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, emptyStore: true);
         await using var connection = await OpenMigratedAsync(scratch, ct);
         var predicate = await ShippedTriggerPredicateAsync(connection, ct);
         Task<bool> FiresAsync(DateTime first, DateTime clock) => TriggerFiresAsync(connection, predicate, first, clock, ct);
@@ -534,7 +534,7 @@ GROUP BY database_name, query_id, plan_id, replica_role, runtime_stats_interval_
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #5448 writer test.");
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, emptyStore: true);
         await using var connection = await OpenMigratedAsync(scratch, ct);
         await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
         var runner = new DarlingCollectorRunner(postgres, new CollectorDeltaCalculator());

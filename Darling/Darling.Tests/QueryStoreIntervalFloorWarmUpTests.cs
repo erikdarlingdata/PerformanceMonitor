@@ -159,7 +159,7 @@ public sealed class QueryStoreIntervalFloorWarmUpTests
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct, emptyStore: true);
         var bodySucceeded = false;
         try
         {
@@ -199,7 +199,7 @@ public sealed class QueryStoreIntervalFloorWarmUpTests
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct, emptyStore: true);
         var bodySucceeded = false;
         try
         {
@@ -285,7 +285,7 @@ public sealed class QueryStoreIntervalFloorWarmUpTests
         var ct = TestContext.Current.CancellationToken;
         var table = WideTable;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct, emptyStore: true);
         var bodySucceeded = false;
         try
         {
@@ -339,7 +339,7 @@ public sealed class QueryStoreIntervalFloorWarmUpTests
         var ct = TestContext.Current.CancellationToken;
         var table = WideTable;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct, emptyStore: true);
         var bodySucceeded = false;
         try
         {
@@ -369,7 +369,7 @@ public sealed class QueryStoreIntervalFloorWarmUpTests
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct, emptyStore: true);
         var bodySucceeded = false;
         try
         {
@@ -408,7 +408,7 @@ public sealed class QueryStoreIntervalFloorWarmUpTests
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct, emptyStore: true);
         var bodySucceeded = false;
         try
         {
@@ -458,7 +458,7 @@ public sealed class QueryStoreIntervalFloorWarmUpTests
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct, emptyStore: true);
         var bodySucceeded = false;
         try
         {

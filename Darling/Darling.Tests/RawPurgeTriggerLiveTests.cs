@@ -39,7 +39,7 @@ public sealed class RawPurgeTriggerLiveTests
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
             "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #4299 trigger pins.");
 
-        var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, default);
+        var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, default, emptyStore: true);
         NpgsqlConnection? connection = null;
         /* A skip (no TimescaleDB) or a failed setup throws before the caller owns the store, so the opener drops it
            here. Left alone it would survive to the process-exit drain, which the test runner waits only 10 s for. */
@@ -695,7 +695,7 @@ FROM generate_series(24, 240) AS n", connection) { CommandTimeout = SetupTimeout
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
             "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #4299 two-service pin.");
 
-        var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, default);
+        var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, default, emptyStore: true);
         var bodySucceeded = false;
 
         var connectionString = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { MaxAutoPrepare = 0 }.ConnectionString;

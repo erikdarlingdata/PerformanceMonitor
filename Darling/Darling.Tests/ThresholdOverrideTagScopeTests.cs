@@ -297,7 +297,7 @@ public sealed class ThresholdOverrideTagScopeTests
         var baseConnectionString = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the threshold override live tests.");
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         await using var store = new NpgsqlConnection(scratch.ConnectionString);
         await store.OpenAsync(ct);
         await PgMigrations.MigrateAsync(store, ct);
@@ -342,7 +342,7 @@ public sealed class ThresholdOverrideTagScopeTests
             "Set DARLING_TEST_PG to a Postgres connection string to run the threshold override live tests.");
 
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);

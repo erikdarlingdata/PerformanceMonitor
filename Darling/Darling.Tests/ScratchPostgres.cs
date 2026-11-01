@@ -88,7 +88,7 @@ internal sealed class ScratchPostgres : IAsyncDisposable
     ///
     /// <para>The extension goes in right after <c>CREATE DATABASE</c>, into <c>public</c> (the database has no <c>collect</c>
     /// schema yet, and creating one first makes <c>MigrateAsync</c> take the store for an already-moved one), and BEFORE the
-    /// test's own <c>MigrateAsync</c>. That is the order of a
+    /// first <c>MigrateAsync</c>: the template's for a default store, the test's own for an <paramref name="emptyStore"/>. That is the order of a
     /// restarted service (extension from the last start, then migrate), not of a brand-new store (migrate, then extension,
     /// which the shared live-postgres store keeps: see <see cref="LivePostgresStoreFixture"/>). The only migration that
     /// branches on the extension is V23, and with the extension present it converts <c>collection_log</c> to a hypertable a
@@ -99,24 +99,106 @@ internal sealed class ScratchPostgres : IAsyncDisposable
     /// connection, because a failed <c>CREATE EXTENSION</c> terminates the backend, and returns false, and the database is
     /// then plain PostgreSQL, which is what those tests ran on before.</para>
     /// </summary>
-    /// <param name="plainPostgres">Leave TimescaleDB off. Only for a test whose subject is the store WITHOUT the extension.</param>
-    public static async Task<ScratchPostgres> CreateAsync(string baseConnectionString, CancellationToken cancellationToken, bool plainPostgres = false)
+    /// <param name="plainPostgres">Leave TimescaleDB off. Only for a test whose subject is the store WITHOUT the extension.
+    /// Such a database is also empty, as <paramref name="emptyStore"/> describes.</param>
+    /// <param name="emptyStore">Leave the database unmigrated (#7097). By default the database is a clone of a template
+    /// this process migrated once (see <see cref="GetTemplateAsync"/>), so the test's own <c>MigrateAsync</c> is a no-op:
+    /// the same schema, journal and jobs at about half the cost. Pass this when the test applies part of the ladder,
+    /// stages a store shape before migrating, asserts what <c>MigrateAsync</c> applied or never migrates at all.</param>
+    public static async Task<ScratchPostgres> CreateAsync(
+        string baseConnectionString, CancellationToken cancellationToken, bool plainPostgres = false, bool emptyStore = false)
     {
         HookExitDrain();
         await SweepOncePerClusterAsync(baseConnectionString, cancellationToken);
 
+        if (plainPostgres || emptyStore)
+        {
+            return await CreateEmptyAsync(baseConnectionString, plainPostgres, CurrentTestName(), cancellationToken);
+        }
+
+        var template = await GetTemplateAsync(baseConnectionString, cancellationToken);
+        ScratchPostgres clone;
+        try
+        {
+            clone = await MintAsync(baseConnectionString, template.Name, CurrentTestName(), cancellationToken);
+        }
+        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.InvalidCatalogName)
+        {
+            /* Another process's start-of-run sweep dropped the template: to the sweep it is an idle factory-named database
+               past AbandonedAfter, which is what a killed run's template must look like for the sweep to remove it. Only a
+               process that outlives AbandonedAfter next to a younger one gets here, and one more build answers it. */
+            ForgetTemplate(baseConnectionString, template.Name);
+            template = await GetTemplateAsync(baseConnectionString, cancellationToken);
+            clone = await MintAsync(baseConnectionString, template.Name, CurrentTestName(), cancellationToken);
+        }
+
+        clone.TimescaleEnabled = template.TimescaleEnabled;
+        if (template.TimescaleEnabled)
+        {
+            try
+            {
+                /* CREATE EXTENSION is what tells TimescaleDB's launcher to start a database's scheduler, and a clone never
+                   runs it: its scheduler would otherwise not start, so its jobs would never run. */
+                await using var connection = new NpgsqlConnection(clone.ConnectionString);
+                await connection.OpenAsync(cancellationToken);
+                await using var start = new NpgsqlCommand("SELECT _timescaledb_functions.start_background_workers()", connection);
+                await start.ExecuteNonQueryAsync(cancellationToken);
+            }
+            catch
+            {
+                await TryDropAsync(baseConnectionString, clone.DatabaseName);
+                throw;
+            }
+        }
+
+        return clone;
+    }
+
+    /// <summary>An empty database: <c>CREATE DATABASE</c>, then the extension unless <paramref name="plainPostgres"/>.</summary>
+    private static async Task<ScratchPostgres> CreateEmptyAsync(
+        string baseConnectionString, bool plainPostgres, string creator, CancellationToken cancellationToken)
+    {
+        var scratch = await MintAsync(baseConnectionString, template: null, creator, cancellationToken);
+        var clusterKey = ClusterKey(baseConnectionString);
+        if (!plainPostgres && !ClustersWithoutTimescale.ContainsKey(clusterKey))
+        {
+            try
+            {
+                scratch.TimescaleEnabled = await LiveTimescaleProbe.TryEnableAsync(scratch.ConnectionString, cancellationToken);
+                if (!scratch.TimescaleEnabled)
+                {
+                    /* The cluster cannot load the library: do not pay a failed CREATE EXTENSION (it ends the backend) per database. */
+                    ClustersWithoutTimescale[clusterKey] = true;
+                }
+            }
+            catch
+            {
+                await TryDropAsync(baseConnectionString, scratch.DatabaseName);
+                throw;
+            }
+        }
+
+        return scratch;
+    }
+
+    /// <summary>Runs <c>CREATE DATABASE</c>, from <paramref name="template"/> when one is named, and returns its handle.</summary>
+    private static async Task<ScratchPostgres> MintAsync(
+        string baseConnectionString, string? template, string creator, CancellationToken cancellationToken)
+    {
         /* The factory's pattern (prefix, creation stamp, 12 hex): safe to interpolate as a quoted identifier. */
         var databaseName = ScratchDatabaseSweep.NewName(DateTime.UtcNow);
 
         /* Remembered BEFORE the create, so a failure or cancellation anywhere after it still has a drop queued; the
            exit drain uses IF EXISTS, so a name whose create never ran costs nothing. */
-        Remembered[databaseName] = (baseConnectionString, CurrentTestName());
+        Remembered[databaseName] = (baseConnectionString, creator);
 
         try
         {
             await using var admin = new NpgsqlConnection(UnpooledAdminConnectionString(baseConnectionString));
             await admin.OpenAsync(cancellationToken);
-            await using var create = new NpgsqlCommand($"CREATE DATABASE \"{databaseName}\"", admin);
+            await using var create = new NpgsqlCommand(
+                template is null ? $"CREATE DATABASE \"{databaseName}\"" : $"CREATE DATABASE \"{databaseName}\" TEMPLATE \"{template}\"",
+                admin);
             await create.ExecuteNonQueryAsync(cancellationToken);
         }
         catch
@@ -137,34 +219,111 @@ internal sealed class ScratchPostgres : IAsyncDisposable
 
         /* Pinned to UTC the way every product store connection is, so a cluster whose default zone is behind UTC
            cannot skew timestamp round trips (a chunk's range_end read back through a ::timestamp cast). */
-        var scratch = new ScratchPostgres(
+        return new ScratchPostgres(
             baseConnectionString,
             databaseName,
             PerformanceMonitor.Darling.Storage.DarlingStoreConnection.PinSessionTimeZoneUtc(builder.ConnectionString),
             builder.ConnectionString);
-
-        var clusterKey = builder.Host + ":" + builder.Port;
-        if (!plainPostgres && !ClustersWithoutTimescale.ContainsKey(clusterKey))
-        {
-            try
-            {
-                scratch.TimescaleEnabled = await LiveTimescaleProbe.TryEnableAsync(scratch.ConnectionString, cancellationToken);
-                if (!scratch.TimescaleEnabled)
-                {
-                    /* The cluster cannot load the library: do not pay a failed CREATE EXTENSION (it ends the backend) per database. */
-                    ClustersWithoutTimescale[clusterKey] = true;
-                }
-            }
-            catch
-            {
-                await TryDropAsync(baseConnectionString, databaseName);
-                throw;
-            }
-        }
-
-        return scratch;
     }
 
+    /// <summary>The migrated database a process clones, and whether it has TimescaleDB. See <see cref="GetTemplateAsync"/>.</summary>
+    internal sealed record StoreTemplate(string Name, bool TimescaleEnabled);
+
+    /// <summary>
+    /// The creator the exit drain sees for a template. A template is meant to live until the process exits, so unlike a
+    /// test's database, its drop there is not a leak to report.
+    /// </summary>
+    private const string TemplateCreator = "this process's store template";
+
+    /// <summary>
+    /// One template per cluster, role and base database in this process. Evicted when its build fails or the database goes.
+    /// Only a test ever passes a second base database, to get a template no parallel test clones.
+    /// </summary>
+    private static readonly ConcurrentDictionary<string, Lazy<Task<StoreTemplate>>> Templates = new();
+
+    private static string TemplateKey(string baseConnectionString) =>
+        ClusterKey(baseConnectionString) + ":" + new NpgsqlConnectionStringBuilder(baseConnectionString).Username
+        + ":" + new NpgsqlConnectionStringBuilder(baseConnectionString).Database;
+
+    /// <summary>
+    /// The template this process clones for this cluster and role, built on first use (#7097). Migrating every store
+    /// was the largest part of a store's cost: a clone with its no-op <c>MigrateAsync</c> took 2.4 s where the build took
+    /// 5.6 s, and 1.3 s against 2.7 s with four running at once.
+    ///
+    /// <para><b>Per process, not per cluster.</b> Test processes that share a cluster can be different builds with
+    /// different ladders, so a shared template would need a build key and a lock across processes, to save about 5 s
+    /// per process. A process drops its own template at exit, and the start-of-run sweep removes a killed run's.</para>
+    ///
+    /// <para><b>Closed, not marked a template.</b> A clone fails if any session is in the source, and TimescaleDB keeps a
+    /// scheduler in every database with the extension. So the build stops the scheduler and sets
+    /// <c>ALLOW_CONNECTIONS false</c>: the launcher skips such a database, and nothing can connect later. It does not set
+    /// <c>IS_TEMPLATE</c>: the role that clones is the owner, which does not need it, and <c>DROP DATABASE</c> and the
+    /// sweep refuse or skip a database that has it, so a killed run's template would stay.</para>
+    ///
+    /// <para><b>What a clone does not inherit.</b> <c>CREATE DATABASE</c> copies neither the database's own settings nor
+    /// its grants, so the database-default <c>search_path</c> arrives with the test's <c>MigrateAsync</c>, just as it does
+    /// on a fresh store. Rows a rung stamps with <c>now()</c> carry the template's time, and a rung's random row is the
+    /// same in every clone (<c>config.pseudonym_key</c>). A test that depends on either passes <c>emptyStore</c>.</para>
+    /// </summary>
+    internal static async Task<StoreTemplate> GetTemplateAsync(string baseConnectionString, CancellationToken cancellationToken)
+    {
+        var key = TemplateKey(baseConnectionString);
+
+        /* The build runs on no caller's token: the test that happens to start it being cancelled must not fail the
+           others waiting on it. */
+        var build = Templates.GetOrAdd(key, _ => new Lazy<Task<StoreTemplate>>(() => BuildTemplateAsync(baseConnectionString)));
+        try
+        {
+            return await build.Value.WaitAsync(cancellationToken);
+        }
+        catch when (build.Value.IsFaulted)
+        {
+            /* Not cached: a refused connection would otherwise fail every test left in the process. */
+            Templates.TryRemove(new KeyValuePair<string, Lazy<Task<StoreTemplate>>>(key, build));
+            throw;
+        }
+    }
+
+    private static void ForgetTemplate(string baseConnectionString, string templateName)
+    {
+        var key = TemplateKey(baseConnectionString);
+        if (Templates.TryGetValue(key, out var build)
+            && build.Value.IsCompletedSuccessfully
+            && build.Value.Result.Name == templateName)
+        {
+            Templates.TryRemove(new KeyValuePair<string, Lazy<Task<StoreTemplate>>>(key, build));
+        }
+    }
+
+    private static async Task<StoreTemplate> BuildTemplateAsync(string baseConnectionString)
+    {
+        var template = await CreateEmptyAsync(baseConnectionString, plainPostgres: false, TemplateCreator, CancellationToken.None);
+        try
+        {
+            await using (var connection = new NpgsqlConnection(template.ConnectionString))
+            {
+                await connection.OpenAsync();
+                await PerformanceMonitor.Darling.Storage.PgMigrations.MigrateAsync(connection);
+                if (template.TimescaleEnabled)
+                {
+                    await using var stop = new NpgsqlCommand("SELECT _timescaledb_functions.stop_background_workers()", connection);
+                    await stop.ExecuteNonQueryAsync();
+                }
+            }
+
+            await using var admin = new NpgsqlConnection(UnpooledAdminConnectionString(baseConnectionString));
+            await admin.OpenAsync();
+            await using var close = new NpgsqlCommand($"ALTER DATABASE \"{template.DatabaseName}\" WITH ALLOW_CONNECTIONS false", admin);
+            await close.ExecuteNonQueryAsync();
+        }
+        catch
+        {
+            await TryDropAsync(baseConnectionString, template.DatabaseName);
+            throw;
+        }
+
+        return new StoreTemplate(template.DatabaseName, template.TimescaleEnabled);
+    }
 
     /// <summary>
     /// Drops the database, retrying a transient refusal. A drop that still fails is reported and the database stays
@@ -274,6 +433,10 @@ internal sealed class ScratchPostgres : IAsyncDisposable
         catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.InvalidCatalogName)
         {
             /* The database is already gone: nothing to quiesce, and the drop below is IF EXISTS. */
+        }
+        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.ObjectNotInPrerequisiteState)
+        {
+            /* ALLOW_CONNECTIONS false, which only a store template has (#7097): no scheduler, and so no job worker, runs there. */
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -539,7 +702,11 @@ internal sealed class ScratchPostgres : IAsyncDisposable
             await drop.ExecuteNonQueryAsync(CancellationToken.None);
             Remembered.TryRemove(db.Name, out _);
             drain.Settle(index, ExitDrain.Dropped);
-            Console.Error.WriteLine($"Scratch database {db.Name} outlived its test ({db.Creator}); dropped at process exit.");
+            if (db.Creator != TemplateCreator)
+            {
+                Console.Error.WriteLine($"Scratch database {db.Name} outlived its test ({db.Creator}); dropped at process exit.");
+            }
+
             return ExitDrop.Done;
         }
         catch (Exception ex)

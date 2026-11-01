@@ -39,7 +39,7 @@ public sealed class QueryTagStoreLiveTests
     {
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the query-tag store pins.");
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
         var connectionString = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { SearchPath = PgSchemaGenerator.SearchPath }.ConnectionString;
         await using var store = new NpgsqlConnection(connectionString);
         await store.OpenAsync(ct);
@@ -397,7 +397,7 @@ public sealed class QueryTagStoreGrantLiveTests
         var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(connectionString), "Set DARLING_TEST_PG to a Postgres connection string, owner/superuser, to run the query-tag grant live tests.");
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(connectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString!, ct, emptyStore: true);
         var bodySucceeded = false;
         try
         {

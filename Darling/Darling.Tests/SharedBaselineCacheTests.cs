@@ -298,7 +298,7 @@ public sealed class SharedBaselineCacheLiveTests
         if (store is null) return;
         var (h, ct) = (store.Hour, TestContext.Current.CancellationToken);
 
-        await using var empty = await ScratchPostgres.CreateAsync(store.BaseConnectionString, ct);
+        await using var empty = await ScratchPostgres.CreateAsync(store.BaseConnectionString, ct, emptyStore: true);
         await using var unreadable = NpgsqlDataSource.Create(empty.ConnectionString);
 
         var shared = new BaselineCache();

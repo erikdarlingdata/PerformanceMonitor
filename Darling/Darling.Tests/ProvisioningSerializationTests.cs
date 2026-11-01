@@ -149,7 +149,7 @@ public sealed class ProvisioningSerializationTests
         var ct = TestContext.Current.CancellationToken;
         var role = "replay_ro_" + Guid.NewGuid().ToString("N")[..8];
 
-        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
 
@@ -192,7 +192,7 @@ public sealed class ProvisioningSerializationTests
         var siblingRole = "prov_a_" + suffix;
         var ourRole = "prov_b_" + suffix;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
         await using var sibling = new NpgsqlConnection(scratch.ConnectionString);
         await using var service = new NpgsqlConnection(scratch.ConnectionString);
         await sibling.OpenAsync(ct);
@@ -259,7 +259,7 @@ public sealed class ProvisioningSerializationTests
         var ct = TestContext.Current.CancellationToken;
         var role = "prov_c_" + Guid.NewGuid().ToString("N")[..8];
 
-        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
 
@@ -325,7 +325,7 @@ public sealed class ProvisioningSerializationTests
         var ourRole = "prov_free_" + suffix;
         var application = "prov_held_" + suffix;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
         await using var service = new NpgsqlConnection(scratch.ConnectionString);
         await service.OpenAsync(ct);
         var database = "\"" + scratch.DatabaseName.Replace("\"", "\"\"", StringComparison.Ordinal) + "\"";
@@ -393,7 +393,7 @@ public sealed class ProvisioningSerializationTests
         var holderLogin = "prov_hold_" + suffix;
         var role = "prov_retry_" + suffix;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
 
         /* The product's connection comes from a data source, so this one does too. Npgsql closes the connection on an
            XX-class error, so the retry only works if the helper opens it again. */
@@ -478,7 +478,7 @@ public sealed class ProvisioningSerializationTests
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the live provisioning-serialization pins (each mints its own scratch database and role).");
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
         await using var service = new NpgsqlConnection(scratch.ConnectionString);
         await service.OpenAsync(ct);
 
@@ -526,7 +526,7 @@ public sealed class ProvisioningSerializationTests
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the live provisioning-serialization pins (each mints its own scratch database and role).");
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
         await using var sibling = new NpgsqlConnection(scratch.ConnectionString);
         await using var service = new NpgsqlConnection(scratch.ConnectionString);
         await sibling.OpenAsync(ct);
@@ -590,7 +590,7 @@ public sealed class ProvisioningSerializationTests
         var suffix = Guid.NewGuid().ToString("N")[..8];
         var login = "prov_reader_" + suffix;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
         await using var owner = new NpgsqlConnection(scratch.ConnectionString);
         await owner.OpenAsync(ct);
 

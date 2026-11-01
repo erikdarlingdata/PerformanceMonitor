@@ -43,7 +43,7 @@ public sealed class InstallIdScratchStore : IAsyncLifetime
             return;
         }
 
-        _scratch = await ScratchPostgres.CreateAsync(baseConnectionString, CancellationToken.None);
+        _scratch = await ScratchPostgres.CreateAsync(baseConnectionString, CancellationToken.None, emptyStore: true);
         await using var connection = new NpgsqlConnection(_scratch.ConnectionString);
         await connection.OpenAsync(CancellationToken.None);
         await PgMigrations.MigrateAsync(connection, CancellationToken.None);

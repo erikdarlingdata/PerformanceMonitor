@@ -85,7 +85,7 @@ public sealed class BoundedCompressionDdlTests
 
         /* A scratch database with no TimescaleDB extension: the settings read fails (no timescaledb_information
            schema), which is the failed-read case without a mock. */
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
 

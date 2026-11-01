@@ -43,7 +43,7 @@ public sealed class RollupFloorCacheLiveTests
 
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
@@ -210,8 +210,8 @@ public sealed class RollupFloorCacheLiveTests
         var ct = TestContext.Current.CancellationToken;
         var now = SeedEnd();
 
-        await using var storeA = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
-        await using var storeB = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var storeA = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct, emptyStore: true);
+        await using var storeB = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct, emptyStore: true);
         await PopulateStoreAsync(storeA.ConnectionString, SeedStart(now), now, deleteRawBefore: null, oneDayChunks: false, ct);
         await PopulateStoreAsync(storeB.ConnectionString, SeedStart(now), now, deleteRawBefore: SeedStart(now).AddHours(7), oneDayChunks: false, ct);
 
@@ -254,7 +254,7 @@ public sealed class RollupFloorCacheLiveTests
         var ct = TestContext.Current.CancellationToken;
         var now = SeedEnd();
 
-        await using var store = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var store = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct, emptyStore: true);
         await PopulateStoreAsync(store.ConnectionString, SeedStart(now), now, deleteRawBefore: null, oneDayChunks: false, ct);
         var truthBefore = await TruthAsync(store.ConnectionString, ct);
         var oldestChunkBefore = await OldestChunkAsync(store.ConnectionString, ct);
@@ -301,7 +301,7 @@ public sealed class RollupFloorCacheLiveTests
         var ct = TestContext.Current.CancellationToken;
         var now = SeedEnd();
 
-        await using var store = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var store = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct, emptyStore: true);
         await PopulateStoreAsync(store.ConnectionString, SeedStart(now), now, deleteRawBefore: null, oneDayChunks: true, ct);
 
         var factory = new CommandCountingLoggerFactory();
@@ -391,7 +391,7 @@ public sealed class RollupFloorCacheLiveTests
         var ct = TestContext.Current.CancellationToken;
         var now = SeedEnd();
 
-        await using var store = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var store = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct, emptyStore: true);
         await PopulateStoreAsync(store.ConnectionString, SeedStart(now), now, deleteRawBefore: null, oneDayChunks: true, ct);
 
         var factory = new CommandCountingLoggerFactory();
@@ -450,7 +450,7 @@ public sealed class RollupFloorCacheLiveTests
         var ct = TestContext.Current.CancellationToken;
         var now = SeedEnd();
 
-        await using var store = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var store = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct, emptyStore: true);
         await PopulateStoreAsync(store.ConnectionString, SeedStart(now), now, deleteRawBefore: null, oneDayChunks: true, ct);
 
         var factory = new CommandCountingLoggerFactory();
@@ -500,7 +500,7 @@ public sealed class RollupFloorCacheLiveTests
         var from = DateTime.SpecifyKind(now.Date.AddDays(-3), DateTimeKind.Unspecified);
         var planted = TimescaleSupport.QueryStatsIoHourlyView;
 
-        await using var store = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var store = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct, emptyStore: true);
         await PopulateStoreAsync(store.ConnectionString, from, now, deleteRawBefore: null, oneDayChunks: true, ct);
         await using (var connection = new NpgsqlConnection(store.ConnectionString))
         {
@@ -574,7 +574,7 @@ public sealed class RollupFloorCacheLiveTests
         var now = SeedEnd();
         var from = DateTime.SpecifyKind(now.Date.AddDays(-3), DateTimeKind.Unspecified);
 
-        await using var store = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var store = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct, emptyStore: true);
         await PopulateStoreAsync(store.ConnectionString, from, now, deleteRawBefore: null, oneDayChunks: true, ct);
         await using var connection = new NpgsqlConnection(store.ConnectionString);
         await connection.OpenAsync(ct);
@@ -638,7 +638,7 @@ public sealed class RollupFloorCacheLiveTests
         var now = SeedEnd();
         var planted = TimescaleSupport.QueryStatsIoHourlyView;
 
-        await using var store = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var store = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct, emptyStore: true);
         await PopulateStoreAsync(store.ConnectionString, SeedStart(now), now, deleteRawBefore: null, oneDayChunks: false, ct);
         await using (var connection = new NpgsqlConnection(store.ConnectionString))
         {
@@ -684,7 +684,7 @@ public sealed class RollupFloorCacheLiveTests
         var ct = TestContext.Current.CancellationToken;
         var now = SeedEnd();
 
-        await using var store = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var store = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct, emptyStore: true);
         await PopulateStoreAsync(store.ConnectionString, SeedStart(now), now, deleteRawBefore: null, oneDayChunks: false, ct);
         var truth = await TruthAsync(store.ConnectionString, ct);
 

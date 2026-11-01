@@ -151,7 +151,7 @@ ORDER BY
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #3953 wide writer test.");
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, emptyStore: true);
         await using var connection = await OpenMigratedAsync(scratch, ct);
         await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
         var runner = new DarlingCollectorRunner(postgres, new CollectorDeltaCalculator());
@@ -201,7 +201,7 @@ ORDER BY
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #3953 wide writer test.");
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, emptyStore: true);
         await using var connection = await OpenMigratedAsync(scratch, ct);
         await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
         var runner = new DarlingCollectorRunner(postgres, new CollectorDeltaCalculator());
@@ -244,7 +244,7 @@ ORDER BY
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #3953 wide writer test.");
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, emptyStore: true);
         await using var connection = await OpenMigratedAsync(scratch, ct);
         await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
         var context = NewContext();
@@ -303,7 +303,7 @@ ORDER BY
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #3953 wide retention test.");
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, emptyStore: true);
         await using var connection = await OpenMigratedAsync(scratch, ct);
         await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
         var runner = new DarlingCollectorRunner(postgres, new CollectorDeltaCalculator());

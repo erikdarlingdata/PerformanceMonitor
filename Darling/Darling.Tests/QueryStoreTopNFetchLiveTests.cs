@@ -183,7 +183,7 @@ public sealed class QueryStoreTopNFetchLiveTests
         Assert.SkipWhen(string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DARLING_TEST_SQL")), "Set DARLING_TEST_SQL (with DARLING_TEST_SQL_USER and DARLING_TEST_SQL_PASSWORD) to run the Query Store top-N fetch live tests.");
         var ct = TestContext.Current.CancellationToken;
         var database = "pm_6211_" + Guid.NewGuid().ToString("N")[..12];
-        await using var scratch = await ScratchPostgres.CreateAsync(StoreConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(StoreConnectionString!, ct, emptyStore: true);
         var bodySucceeded = false;
         try
         {

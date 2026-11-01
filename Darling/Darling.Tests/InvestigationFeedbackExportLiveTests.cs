@@ -116,7 +116,7 @@ public sealed class InvestigationFeedbackExportLiveTests
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the investigation export live tests.");
 
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         await using var owner = await InvestigationFeedbackLiveTests.MigratedAsync(scratch, ct);
         await using (var connection = new NpgsqlConnection(scratch.ConnectionString))
         {
@@ -176,7 +176,7 @@ public sealed class InvestigationFeedbackExportLiveTests
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the investigation export live tests.");
 
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         await using var owner = await InvestigationFeedbackLiveTests.MigratedAsync(scratch, ct);
         var store = new InvestigationRequestStore(owner, 30, () => DateTime.UtcNow);
         var feedback = new InvestigationFeedbackStore(owner, 30);
@@ -220,7 +220,7 @@ public sealed class InvestigationFeedbackExportLiveTests
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the investigation export live tests.");
 
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         await using var owner = await InvestigationFeedbackLiveTests.MigratedAsync(scratch, ct);
         var store = new InvestigationRequestStore(owner, 30, () => DateTime.UtcNow);
         var feedback = new InvestigationFeedbackStore(owner, 30);
@@ -256,7 +256,7 @@ public sealed class InvestigationFeedbackExportLiveTests
 
         var mode = McpDataDetailModes.Resolve(level);
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         await using var owner = await InvestigationFeedbackLiveTests.MigratedAsync(scratch, ct);
         var store = new InvestigationRequestStore(owner, 30, () => DateTime.UtcNow);
         var feedback = new InvestigationFeedbackStore(owner, 30);
@@ -288,7 +288,7 @@ public sealed class InvestigationFeedbackExportLiveTests
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the investigation export live tests.");
 
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         await using var owner = await InvestigationFeedbackLiveTests.MigratedAsync(scratch, ct);
         var store = new InvestigationRequestStore(owner, 30, () => DateTime.UtcNow);
         var feedback = new InvestigationFeedbackStore(owner, 30);
@@ -351,7 +351,7 @@ public sealed class InvestigationFeedbackExportLiveTests
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the investigation export live tests.");
 
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         await using var owner = await InvestigationFeedbackLiveTests.MigratedAsync(scratch, ct);
         await using (var connection = new NpgsqlConnection(scratch.ConnectionString))
         {
@@ -407,7 +407,7 @@ public sealed class InvestigationFeedbackExportLiveTests
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the investigation export live tests.");
 
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         await using var owner = await InvestigationFeedbackLiveTests.MigratedAsync(scratch, ct);
         var store = new InvestigationRequestStore(owner, 30, () => DateTime.UtcNow);
         var feedback = new InvestigationFeedbackStore(owner, 30);
@@ -451,7 +451,7 @@ public sealed class InvestigationFeedbackExportLiveTests
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the investigation export live tests.");
 
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         await using var owner = await InvestigationFeedbackLiveTests.MigratedAsync(scratch, ct);
         var store = new InvestigationRequestStore(owner, 30, () => DateTime.UtcNow);
         var feedback = new InvestigationFeedbackStore(owner, 30);

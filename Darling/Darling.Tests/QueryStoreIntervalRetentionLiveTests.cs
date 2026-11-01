@@ -44,7 +44,7 @@ public sealed class QueryStoreIntervalRetentionLiveTests
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipText);
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, emptyStore: true);
         await using var connection = await OpenStoreAsync(scratch, ct);
         await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
         var logger = new ListLogger();
@@ -85,7 +85,7 @@ public sealed class QueryStoreIntervalRetentionLiveTests
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipText);
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, emptyStore: true);
         await using var connection = await OpenStoreAsync(scratch, ct);
         await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
         var logger = new ListLogger();
@@ -135,7 +135,7 @@ public sealed class QueryStoreIntervalRetentionLiveTests
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipText);
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, emptyStore: true);
         await using var connection = await OpenStoreAsync(scratch, ct);
         await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
         var logger = new ListLogger();
@@ -170,7 +170,7 @@ public sealed class QueryStoreIntervalRetentionLiveTests
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipText);
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, emptyStore: true);
         await using var connection = await OpenStoreAsync(scratch, ct);
         await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
         var logger = new ListLogger();
@@ -202,7 +202,7 @@ public sealed class QueryStoreIntervalRetentionLiveTests
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipText);
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, emptyStore: true);
         await using var connection = await OpenStoreAsync(scratch, ct);
         await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
         var logger = new ListLogger();
@@ -240,7 +240,7 @@ public sealed class QueryStoreIntervalRetentionLiveTests
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipText);
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, emptyStore: true);
         await using var connection = await OpenStoreAsync(scratch, ct);
         await using var blocker = await OpenStoreAsync(scratch, ct);
         await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
@@ -278,7 +278,7 @@ public sealed class QueryStoreIntervalRetentionLiveTests
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipText);
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, emptyStore: true);
         await using var connection = await OpenStoreAsync(scratch, ct);
         await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
         var logger = new ListLogger();
@@ -317,7 +317,7 @@ public sealed class QueryStoreIntervalRetentionLiveTests
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipText);
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, emptyStore: true);
         await using var connection = await OpenStoreAsync(scratch, ct);
         await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
         var logger = new ListLogger();
@@ -363,7 +363,7 @@ public sealed class QueryStoreIntervalRetentionLiveTests
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipText);
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, emptyStore: true);
         await using var connection = await OpenStoreAsync(scratch, ct);
         await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
         var logger = new ListLogger();

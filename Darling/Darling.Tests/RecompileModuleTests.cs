@@ -144,7 +144,7 @@ public sealed class RecompileModuleTests
     {
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the recompile switch store fact.");
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
         await using var store = new NpgsqlConnection(scratch.ConnectionString);
         await store.OpenAsync(ct);
         var bodySucceeded = false;

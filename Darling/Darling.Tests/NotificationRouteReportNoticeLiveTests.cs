@@ -72,7 +72,7 @@ public sealed class NotificationRouteReportNoticeLiveTests
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the V233 live pin (it mints its own scratch database).");
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
@@ -131,7 +131,7 @@ public sealed class NotificationRouteReportNoticeLiveTests
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the route report notice writer pin (it mints its own scratch database).");
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
         await using (var connection = new NpgsqlConnection(scratch.ConnectionString))
         {
             await connection.OpenAsync(ct);
@@ -273,7 +273,7 @@ public sealed class NotificationRouteReportNoticeLiveTests
 
         var ct = TestContext.Current.CancellationToken;
         var roleName = "route_rn_" + Guid.NewGuid().ToString("N")[..8];
-        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
         await using (var connection = new NpgsqlConnection(scratch.ConnectionString))
         {
             await connection.OpenAsync(ct);

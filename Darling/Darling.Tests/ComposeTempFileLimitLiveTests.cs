@@ -38,7 +38,7 @@ public sealed class ComposeTempFileLimitLiveTests
         var ct = TestContext.Current.CancellationToken;
         var bodySucceeded = false;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
 
         /* A throwaway login role, provisioned with the SAME shape the product's renderer emits for viewer/mcp
            -- but with the ceiling lowered to 1MB so a normal test-sized spill trips it without needing to

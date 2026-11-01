@@ -194,7 +194,7 @@ public sealed class DarlingStartWithNoServersLiveTests
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the live stop-during-a-pass test.");
 
         var ct = TestContext.Current.CancellationToken;
-        var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         var configFolder = Directory.CreateTempSubdirectory("darling-stop-pass-").FullName;
         var previousConfig = Environment.GetEnvironmentVariable("DARLING_CONFIG");
         var bodySucceeded = false;

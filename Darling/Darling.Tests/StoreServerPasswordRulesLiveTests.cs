@@ -138,7 +138,7 @@ public sealed class StoreServerPasswordRulesLiveTests
     {
         var connectionString = RequireLivePostgres();
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct, emptyStore: true);
 
         await using (var owner = new NpgsqlConnection(scratch.ConnectionString))
         {
@@ -572,7 +572,7 @@ public sealed class StoreServerPasswordRulesLiveTests
     {
         var connectionString = RequireLivePostgres();
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct, emptyStore: true);
         var login = "rules_probe_" + Guid.NewGuid().ToString("N")[..8];
         const string triggerCount = "SELECT count(*) FROM pg_trigger WHERE tgrelid = 'config.config_monitored_servers'::regclass AND tgname = 'trg_monitored_server_password_rules'";
         const string functionCount = "SELECT count(*) FROM pg_proc WHERE oid = 'config.monitored_server_password_rules()'::regprocedure";
@@ -658,7 +658,7 @@ public sealed class StoreServerPasswordRulesLiveTests
     {
         var connectionString = RequireLivePostgres();
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct, emptyStore: true);
         var suffix = Guid.NewGuid().ToString("N")[..8];
         var writer = "journal_writer_" + suffix;
         var restrictedLogin = "journal_probe_" + suffix;
@@ -836,7 +836,7 @@ public sealed class StoreServerPasswordRulesLiveTests
     {
         var connectionString = RequireLivePostgres();
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct, emptyStore: true);
         await using (var probe = new NpgsqlConnection(scratch.ConnectionString))
         {
             await probe.OpenAsync(ct);
