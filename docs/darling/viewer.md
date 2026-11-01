@@ -183,6 +183,12 @@ Settings, Notifications, Daily Health Report ([#7041](https://github.com/erikdar
 
 A read-only seat sees the fields for reference and cannot save them. The Viewer refuses a store below its own schema version, so the fields are always backed by the V232 columns. See [Daily Health Report](alerts-and-notifications.md#daily-health-report) for what the report holds and how to route it.
 
+## People
+
+Settings, Muting and triage, Manage People ([#7107](https://github.com/erikdarlingdata/PerformanceMonitor/issues/7107), store schema V237) lists the people who work with the agents. Add, rename, disable or enable a person, then map identities and give grants to the selected one. A `web` identity is the 43-character sign-in key the person copies from the web page after they sign in. A `slack` identity is a Slack team id and user id. A grant is a capability plus a scope picked as a notification route picks one: the whole fleet, a tag or one server. The Level 3 request and approve capabilities also list the server actions they cover.
+
+Every change goes through the service, which writes it and journals it. A refusal shows the service's own sentence. A read-only seat sees the lists and no buttons. Nothing reads a grant yet, so this screen changes what no one can do today.
+
 ## Read-only versus read-write seats
 
 This is the question that people ask most about the viewer. The answer is not what the wording suggests.

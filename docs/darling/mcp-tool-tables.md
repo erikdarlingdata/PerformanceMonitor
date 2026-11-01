@@ -200,6 +200,7 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 | `get_mute_rules` | `config.config_mute_rules` |
 | `get_notification_routes` | `config.config_notification_routes`<br>`config.investigation_requests`<br>`config.config_monitored_servers`<br>`config.server_tags`<br>`config.server_tag_map` |
 | `get_oversized_plan_backlog` | `collect.oversized_plan_backlog`<br>`collect.servers` |
+| `get_people` | `config.person`<br>`config.person_identity`<br>`config.person_grant`<br>`config.config_monitored_servers`<br>`config.server_tags` |
 | `get_read_latency` | `collect.read_latency` |
 | `get_server_actions` | `config.config_monitored_servers`<br>`config.config_server_actions`<br>`collect.servers` |
 | `get_server_settings` | `config.config_monitored_servers` |

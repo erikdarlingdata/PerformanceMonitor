@@ -648,6 +648,12 @@ END $$;"),
         // re-run of V236 adds it again. Safe on a store that never had it.
         new(236, "hasMuteRuleAction",
             @"ALTER TABLE IF EXISTS config.config_mute_rules DROP COLUMN IF EXISTS action;"),
+        // V237 (#7107): the people, identity and grant tables. The grant table is the probe's newest sentinel. The rewind drops all three
+        // (the two child tables first), so a re-run of V237 creates them again. Safe on a store that never had them.
+        new(237, "hasPeopleGrants",
+            @"DROP TABLE IF EXISTS config.person_grant;
+DROP TABLE IF EXISTS config.person_identity;
+DROP TABLE IF EXISTS config.person;"),
     ];
 
     /// <summary>

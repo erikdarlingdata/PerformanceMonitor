@@ -2091,6 +2091,28 @@ REVOKE ALL ON {config}.config_server_actions FROM PUBLIC, {admin}, {viewer}, {we
 GRANT SELECT ON {config}.config_server_actions TO {admin}, {viewer}, {web};
 GRANT SELECT ON {config}.config_server_actions TO {mcp};
 
+-- 10e3. The people directory (V237, #7107): the people, their identities and their grants. Every role reads them and NO role but the store
+--     owner (the service, through PersonDirectory, which journals each change) writes them: the default privileges would give admin
+--     INSERT/UPDATE/DELETE on a table made after them, so REVOKE ALL ... CASCADE takes every privilege from PUBLIC and the four roles,
+--     and SELECT goes back to all four. A table's REVOKE does not reach its identity sequences, which the default privileges give admin
+--     USAGE and SELECT on (so admin could call nextval and spend ids), so each sequence is revoked by name too. No MCP tool, web login or
+--     chat message writes a person. provision-roles.sql step 3j3 mirrors it. It runs after every blanket grant above, and before 10a.
+REVOKE ALL ON {config}.person, {config}.person_identity, {config}.person_grant FROM PUBLIC, {admin}, {viewer}, {web}, {mcp} CASCADE;
+GRANT SELECT ON {config}.person, {config}.person_identity, {config}.person_grant TO {admin}, {viewer}, {web};
+GRANT SELECT ON {config}.person, {config}.person_identity, {config}.person_grant TO {mcp};
+DO $people_seq$
+DECLARE
+   sequence_name text;
+BEGIN
+   FOREACH sequence_name IN ARRAY ARRAY[
+      pg_catalog.pg_get_serial_sequence('{config}.person', 'person_id'),
+      pg_catalog.pg_get_serial_sequence('{config}.person_identity', 'identity_id'),
+      pg_catalog.pg_get_serial_sequence('{config}.person_grant', 'grant_id')]
+   LOOP
+      EXECUTE pg_catalog.format('REVOKE ALL ON SEQUENCE %s FROM PUBLIC, %I, %I, %I, %I', sequence_name, '{admin}', '{viewer}', '{web}', '{mcp}');
+   END LOOP;
+END $people_seq$;
+
 -- 10f. Phase C tables (V193, #5997): the evidence of a request, the daily deadlock signature counts and the signature
 --     merges. Only the store owner (the service) writes them. The default privileges would give admin INSERT/UPDATE/DELETE
 --     on a table made after them, so REVOKE ALL ... CASCADE (which also takes TRIGGER and REFERENCES) takes every privilege
@@ -4216,10 +4238,13 @@ CREATE OR REPLACE TRIGGER trg_investigation_request_alerts_owner_rows
     /// <summary>The journal events only the owner writes (<see cref="BuildJournalEventRulesSql"/>), as a SQL list. <c>server_action_switched</c>
     /// is the owner's alone (#6269): only the switch writer, on the owner connection, journals it, so no other login can write who changed a switch.
     /// So are the three rows of an agent action (<see cref="AgentActionEvents.OwnerOnly"/>, #6569): the Agent changes list offers Undo on an
-    /// <c>action_called</c> row, so only the service, which runs the action and checks the request, journals it and its result.</summary>
+    /// <c>action_called</c> row, so only the service, which runs the action and checks the request, journals it and its result.
+    /// So are the people directory's events (<see cref="PersonEvents.OwnerOnly"/>, #7107): only <see cref="PersonDirectory"/>, on the owner connection, journals
+    /// who mapped or granted a person.</summary>
     internal static string JournalOwnerEventList => string.Join(", ",
         InvestigationEvents.Kinds.Append(InvestigationEvents.Delivered).Append(InvestigationEvents.FallbackSent).Append(ServerActionSwitches.JournalEvent)
             .Concat(AgentActionEvents.OwnerOnly)
+            .Concat(PersonEvents.OwnerOnly)
             .Select(k => "'" + k + "'"));
 
     /// <summary>

@@ -1870,6 +1870,8 @@ public sealed class DarlingMcpHostService : BackgroundService
             .WithGeminiCompatibleTools<DarlingMcpServerAdminTools>()
             /* #6269: set_server_action (a server-admin write, never offered to an agent) turns one server's agent action switch on or off; get_server_actions reads them. */
             .WithGeminiCompatibleTools<DarlingMcpServerActionTools>()
+            /* #7107: get_people reads the people directory (people, identities, grants). A read only: no MCP tool writes a person. */
+            .WithGeminiCompatibleTools<DarlingMcpPeopleTools>()
             /* #3898 D1: get_tool_guide serves the reading guides tools/list leaves out (the tails split off
                at McpToolGuide.Marker in WithGeminiCompatibleTools) and the cross-tool topics. Lite twin:
                McpToolGuideTools. */
