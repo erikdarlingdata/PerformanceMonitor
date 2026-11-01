@@ -222,9 +222,9 @@ public sealed class PeopleViewerTests
 /// The Viewer's people read and command round trip on a real store (#7107). A loop plays the service: it claims each pending people command, runs the
 /// same parse and write the service executor runs, and writes the answer back, so the Viewer's enqueue, poll and delete are the real ones. Gated on DARLING_TEST_PG.
 /// </summary>
+/* #1776 own-store: each test mints its own scratch database through ScratchPostgres. */
 public sealed class PeopleViewerLiveTests
 {
-    /* #1776 own-store: each test mints its own scratch database through ScratchPostgres. */
     private static string RequireLivePostgres()
     {
         var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");

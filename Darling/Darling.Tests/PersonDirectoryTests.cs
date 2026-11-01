@@ -123,9 +123,9 @@ public sealed class PersonDirectoryCommandTests
 /// #7107 on a live store: every write lands with its journal row naming the administrator, identities are unique for each kind, a web identity
 /// is an owner key, the MCP read shows all of it, and the rung rewinds and re-runs.
 /// </summary>
+/* #1776 own-store: each test mints its own scratch database through ScratchPostgres. */
 public sealed class PersonDirectoryLiveTests
 {
-    /* #1776 own-store: each test mints its own scratch database through ScratchPostgres. */
     private static string RequireLivePostgres()
     {
         var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
