@@ -270,6 +270,8 @@ public static partial class DarlingWebEndpoints
         /* #6269: the server action switches have their own web routes (GET /api/server-actions and PUT /api/servers/{id}/actions/{action}, admin role); the MCP write is under mcp.allowServerAdmin. */
         "set_server_action",
         "get_server_actions",
+        /* #7107: the people directory read. The admin web pages that keep people get their own read in a later step. */
+        "get_people",
         /* #6402: the read of the fields edit_server changes; the web edit form has its own read (GET /api/admin/servers/{id}), so no /api/read page mirrors it. */
         "get_server_settings",
         "get_tool_guide",

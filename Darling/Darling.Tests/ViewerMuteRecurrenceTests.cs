@@ -177,6 +177,8 @@ public sealed class ViewerMuteRecurrenceTests
             await ExecAsync(connection, "ALTER TABLE config.config_notification_routes DROP COLUMN report_notice", ct);
             /* And the alert key column on the alert log (V234, #7076), the newest sentinel. */
             await ExecAsync(connection, "ALTER TABLE config.config_alert_log DROP COLUMN alert_key", ct);
+            /* And the people tables (V237, #7107), the newest sentinel. */
+            await ExecAsync(connection, "DROP TABLE config.person_grant, config.person_identity, config.person", ct);
             await ExecAsync(connection,
                 "ALTER TABLE config.config_alert_settings DROP COLUMN daily_report_enabled, DROP COLUMN daily_report_send_at, DROP COLUMN daily_report_time_zone, DROP COLUMN daily_report_title", ct);
             await using (var older = new ViewerDataService(scratch.ConnectionString))

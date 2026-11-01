@@ -631,6 +631,12 @@ ALTER TABLE IF EXISTS config.investigation_request_alerts DROP COLUMN IF EXISTS 
         // V234 adds it again. Safe on a store that never had it.
         new(234, "hasAlertLogKey",
             @"ALTER TABLE IF EXISTS config.config_alert_log DROP COLUMN IF EXISTS alert_key;"),
+        // V237 (#7107): the people, identity and grant tables. The grant table is the probe's newest sentinel. The rewind drops all three
+        // (the two child tables first), so a re-run of V237 creates them again. Safe on a store that never had them.
+        new(237, "hasPeopleGrants",
+            @"DROP TABLE IF EXISTS config.person_grant;
+DROP TABLE IF EXISTS config.person_identity;
+DROP TABLE IF EXISTS config.person;"),
     ];
 
     /// <summary>

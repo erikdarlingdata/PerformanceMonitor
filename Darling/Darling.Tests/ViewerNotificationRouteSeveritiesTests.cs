@@ -118,6 +118,8 @@ public sealed class ViewerNotificationRouteSeveritiesTests
             await ExecAsync(connection, "ALTER TABLE config.config_notification_routes DROP COLUMN severities, DROP COLUMN report_notice", ct);
             /* The probe reads newest first, so the alert key column (V234, #7076) goes too. */
             await ExecAsync(connection, "ALTER TABLE config.config_alert_log DROP COLUMN alert_key", ct);
+            /* And the people tables (V237, #7107), the newest sentinel. */
+            await ExecAsync(connection, "DROP TABLE config.person_grant, config.person_identity, config.person", ct);
             /* The probe reads newest first, so the mute schedule columns (V231, #7040) go too, or the store would still read as V231. */
             await ExecAsync(connection, "ALTER TABLE config.config_mute_rules DROP COLUMN IF EXISTS recur_days, DROP COLUMN IF EXISTS recur_start_time, DROP COLUMN IF EXISTS recur_end_time, DROP COLUMN IF EXISTS recur_time_zone", ct);
             await using (var older = new ViewerDataService(scratch.ConnectionString))

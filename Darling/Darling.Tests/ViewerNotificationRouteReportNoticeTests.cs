@@ -178,6 +178,8 @@ public sealed class ViewerNotificationRouteReportNoticeTests
             await ExecAsync(connection, "ALTER TABLE config.config_notification_routes DROP COLUMN report_notice", ct);
             /* The probe reads newest first, so the alert key column (V234, #7076) goes too, or the store would still read as V234. */
             await ExecAsync(connection, "ALTER TABLE config.config_alert_log DROP COLUMN alert_key", ct);
+            /* And the people tables (V237, #7107), the newest sentinel. */
+            await ExecAsync(connection, "DROP TABLE config.person_grant, config.person_identity, config.person", ct);
             await using (var older = new ViewerDataService(scratch.ConnectionString))
             {
                 Assert.True(await older.GetStoreSchemaVersionAsync(ct) < 233);
