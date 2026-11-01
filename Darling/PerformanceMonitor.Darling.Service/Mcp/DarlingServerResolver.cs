@@ -346,7 +346,7 @@ ORDER BY server_name";
         string? serverName,
         DarlingPeerDirectory.Snapshot peers)
     {
-        var message = $"Could not resolve server. Available servers:\n{ListAvailableServers(servers)}";
+        var message = $"{McpHelpers.ServerMissOpening(serverName, servers.Count)} Available servers:\n{ListAvailableServers(servers)}";
         var disclosure = DarlingPeerDirectory.ResolutionMissDisclosure(peers, serverName);
 
         return disclosure.Length == 0 ? message : $"{message}\n\n{disclosure}";

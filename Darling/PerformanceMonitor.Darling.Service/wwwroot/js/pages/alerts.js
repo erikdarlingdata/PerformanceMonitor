@@ -617,7 +617,7 @@ async function dismissRows(state, rows) {
     if (res.kind === "data" && res.data && typeof res.data === "object") {
       for (const k of Object.keys(totals)) totals[k] += Number(res.data[k]) || 0;
     } else if (res.status === 403) {
-      failure = res.message && !/^Request failed/.test(res.message) ? res.message : "This session is read-only, so nothing was dismissed.";
+      failure = res.message && !/^The Darling service answered HTTP/.test(res.message) ? res.message : "This session is read-only, so nothing was dismissed.";
     } else if (res.kind === "auth") {
       failure = res.message || "Your session has expired. Sign in again.";
     } else {

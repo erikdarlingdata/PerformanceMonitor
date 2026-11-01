@@ -72,7 +72,7 @@ public sealed class WebStoreRefusalAndComposePoolTests
         Assert.Equal(DarlingWebStoreWrites.Refused("make this change", managedStore, webLoginWrite: true), error);
         if (managedStore)
         {
-            Assert.Contains("lists only", error, StringComparison.Ordinal);
+            Assert.Contains("read-only access to the bundled store", error, StringComparison.Ordinal);
         }
         else
         {
@@ -89,7 +89,7 @@ public sealed class WebStoreRefusalAndComposePoolTests
         var (status, body) = await SendAsync("GET", "/api/store-refusal", managedStore: true);
 
         Assert.Equal(StatusCodes.Status500InternalServerError, status);
-        Assert.DoesNotContain("lists only", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("read-only access to the bundled store", body, StringComparison.Ordinal);
     }
 
     private sealed class CountingListener : IDisposable
