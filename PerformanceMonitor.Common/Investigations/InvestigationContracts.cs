@@ -61,6 +61,10 @@ public static class InvestigationTriggerKinds
     /// <summary>A change watch window ended with a measure moved.</summary>
     public const string ChangeWatch = "change_watch";
 
+    /// <summary>A person asked in a chat (#6980, not opened by any code yet). Its Level 3 actions always need a person's approval, whatever
+    /// the route says (<c>ActionApprovalRules.ForRequest</c>).</summary>
+    public const string Chat = "chat";
+
     /// <summary>The metric name a change-watch request carries as its first alert (the route match and the brief's alert row).</summary>
     public const string ChangeWatchMetric = "Change Watch";
 }
@@ -443,6 +447,11 @@ public static class AgentActionCodes
 
     /// <summary>The server-action gate: the remediation slot holds a stored password, not an <c>env:</c> or <c>file:</c> reference.</summary>
     public const string CredentialNotReference = "credential_not_reference";
+
+    /// <summary>The write's re-check of a server action (#7109): the request needs a person's approval (a route set to <c>required</c>, or a
+    /// chat request), so the agent's own write never runs it. The gate never refuses with it: it reports the approval to the tool, which
+    /// stores a proposal instead of writing.</summary>
+    public const string ApprovalRequired = "approval_required";
 
     /// <summary>The server-action gate: the action is not one of the fixed list.</summary>
     public const string UnknownServerAction = "unknown_server_action";

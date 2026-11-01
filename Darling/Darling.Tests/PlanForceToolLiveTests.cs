@@ -219,7 +219,7 @@ public sealed partial class PlanForceToolLiveTests
             if (without == Without.ActionsEnabled)
                 await PgExecAsync(connection, "UPDATE config.config_service SET agent_actions_enabled = false", ct);
             var level = without == Without.Level ? 2 : 3;
-            await PgExecAsync(connection, $"INSERT INTO config.config_notification_routes (metric_match, agent_level) VALUES ('Blocking', {level})", ct);
+            await PgExecAsync(connection, $"INSERT INTO config.config_notification_routes (metric_match, agent_level, action_approval) VALUES ('Blocking', {level}, 'off')", ct);
             if (without != Without.Switch)
                 await PgExecAsync(connection, "INSERT INTO config.config_server_actions (server_id, action, enabled, set_by) VALUES (7, 'force_plan', true, 'test')", ct);
             if (without is not (Without.Switch or Without.KillSwitch))

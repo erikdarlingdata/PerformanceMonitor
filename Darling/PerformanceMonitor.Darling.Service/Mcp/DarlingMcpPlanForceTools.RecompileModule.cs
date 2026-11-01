@@ -85,8 +85,14 @@ public sealed partial class DarlingMcpPlanForceTools
             _ = InvestigationToolCore.ParseAgentAction(agent_action, out var action);
 
             /* 4: the prepare step: the server row, the excluded database and the executor's own checks (the name resolves, it is a procedure, function or trigger, the grant). */
-            var prepared = await PrepareRecompileModuleAsync(owner, logger, permit, resolved.ServerId, resolved.DisplayName, database, module, dry_run,
+            var proposing = decision.NeedsApproval && !dry_run;
+            var prepared = await PrepareRecompileModuleAsync(owner, logger, permit, resolved.ServerId, resolved.DisplayName, database, module, dry_run || proposing,
                 (reason, token) => store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, reason, agentTokenName, token), ct);
+            /* #7109: the action needs a person's approval: store a proposal, write nothing. */
+            if (proposing && prepared.Facts is { } proposed)
+                return await ProposeAsync(owner, null, decision, action!, tool, ServerActionNames.RecompileModule, resolved.ServerId, resolved.DisplayName,
+                    new { database = proposed.Database, module = proposed.Module }, new { statement = proposed.Statement, object_type = proposed.ObjectType },
+                    new { statement = proposed.Statement, before = proposed.Before }, ct);
             if (prepared.Answer is { } preparedAnswer)
                 return preparedAnswer;
             var facts = prepared.Facts!;
@@ -101,7 +107,7 @@ public sealed partial class DarlingMcpPlanForceTools
                 var hooks = new AgentActionHooks
                 {
                     ServerChange = changed,
-                    LoadLevels = (connection, _, token) => DarlingAgentActionGate.LoadLevelsAsync(connection, logger, token),
+                    LoadRoutes = (connection, _, token) => DarlingAgentActionGate.LoadRoutesAsync(connection, logger, token),
                     ReadBefore = (_, _, _) => Task.FromResult<string?>(JsonSerializer.Serialize(before, McpHelpers.JsonOptions)),
                     Write = async (_, _, token) =>
                     {

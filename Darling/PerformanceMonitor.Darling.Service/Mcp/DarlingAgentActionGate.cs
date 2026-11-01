@@ -95,7 +95,7 @@ internal static class DarlingAgentActionGate
 
         var hooks = new AgentActionHooks
         {
-            LoadLevels = (connection, _, ct) => LoadLevelsAsync(connection, logger, ct),
+            LoadRoutes = (connection, _, ct) => LoadRoutesAsync(connection, logger, ct),
             KindRule = kindRule,
             ReadBefore = readBefore,
             Write = write,
@@ -112,15 +112,16 @@ internal static class DarlingAgentActionGate
 
     /// <summary>
     /// Reads the routes as stored now, once, on the gate's own connection (inside its transaction), and answers the resolver
-    /// of the level they send a metric on a server at (#5912, check 5): <see cref="NotificationRouter.ResolveAgent"/> over
-    /// that one list, so a route an operator lowered refuses the next change, not the next reload. A failed tag read logs
+    /// of the route that sends a metric on a server to an agent (#5912, check 5): <see cref="NotificationRouter.ResolveAgent"/> over
+    /// that one list, so a route an operator lowered refuses the next change, not the next reload. The route, not only its level, so the
+    /// gate and the write read its <c>action_approval</c> too (#7109). A failed tag read logs
     /// through <paramref name="logger"/> and leaves a tag-scoped route unexpanded, so it matches nothing: fail closed.
     /// </summary>
-    internal static async Task<Func<string, int, AlertSeverityLevel?, int?>> LoadLevelsAsync(NpgsqlConnection connection, ILogger logger,
+    internal static async Task<Func<string, int, AlertSeverityLevel?, NotificationRoute?>> LoadRoutesAsync(NpgsqlConnection connection, ILogger logger,
         CancellationToken cancellationToken)
     {
         var routes = await StoreConfigProvider.ReadNotificationRoutesAsync(connection, logger, cancellationToken);
-        return (metric, serverId, severity) => NotificationRouter.ResolveAgent(metric, routes, serverId, severity)?.AgentLevel;
+        return (metric, serverId, severity) => NotificationRouter.ResolveAgent(metric, routes, serverId, severity);
     }
 
     /// <summary>The request id of a refused argument, when one parses, so its refusal is journaled with its request.</summary>

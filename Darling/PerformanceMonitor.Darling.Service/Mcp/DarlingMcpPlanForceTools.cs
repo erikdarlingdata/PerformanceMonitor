@@ -274,9 +274,18 @@ public sealed partial class DarlingMcpPlanForceTools
             var permit = decision.Permit!;
             _ = InvestigationToolCore.ParseAgentAction(agent_action, out var action);
 
+            /* #7109: the gate passed and the action needs a person's approval. A real call runs the prepare step with a dry run, stores a proposal
+               with the binding facts and writes nothing to the server. */
+            var proposing = decision.NeedsApproval && !dry_run;
+
             /* 3: the prepare step: the server row, the excluded database, the before state, the block reason and, on a dry run, the executor's own checks. */
-            var prepared = await PrepareForcePlanAsync(owner, logger, permit, resolved.ServerId, resolved.DisplayName, force, database_name.Trim(), query_id, plan_id, dry_run,
+            var prepared = await PrepareForcePlanAsync(owner, logger, permit, resolved.ServerId, resolved.DisplayName, force, database_name.Trim(), query_id, plan_id, dry_run || proposing,
                 (reason, token) => store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, reason, agentTokenName, token), ct);
+            if (proposing && prepared.Facts is { } proposed)
+                return await ProposeAsync(owner, utcNow, decision, action!, tool, ServerActionNames.ForcePlan, resolved.ServerId, resolved.DisplayName,
+                    new { database = proposed.Database, query_id = proposed.QueryId, plan_id = proposed.PlanId },
+                    new { statement = proposed.Statement, forced_plan_id = proposed.ForcedPlanId, is_forced = proposed.IsForced },
+                    new { statement = proposed.Statement, before = proposed.Before }, ct);
             if (prepared.Answer is { } preparedAnswer)
                 return preparedAnswer;
             var facts = prepared.Facts!;
@@ -294,7 +303,7 @@ public sealed partial class DarlingMcpPlanForceTools
                 var hooks = new AgentActionHooks
                 {
                     ServerChange = changed,
-                    LoadLevels = (connection, _, token) => DarlingAgentActionGate.LoadLevelsAsync(connection, logger, token),
+                    LoadRoutes = (connection, _, token) => DarlingAgentActionGate.LoadRoutesAsync(connection, logger, token),
                     ReadBefore = (_, _, _) => Task.FromResult<string?>(JsonSerializer.Serialize(beforeState)),
                     Write = async (_, _, token) =>
                     {
@@ -430,8 +439,14 @@ public sealed partial class DarlingMcpPlanForceTools
 
             /* 4: the prepare step: the server row, the before image from the store (what Darling collected for this handle in the last 24 hours), and the executor's own checks
                (edition, the grant, and that the handle is cached now). */
-            var prepared = await PrepareEvictPlanAsync(postgres, owner, logger, permit, resolved.ServerId, resolved.DisplayName, handle, dry_run,
+            var proposing = decision.NeedsApproval && !dry_run;
+            var prepared = await PrepareEvictPlanAsync(postgres, owner, logger, permit, resolved.ServerId, resolved.DisplayName, handle, dry_run || proposing,
                 (reason, token) => store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, reason, agentTokenName, token), ct);
+            /* #7109: the action needs a person's approval: store a proposal, write nothing. */
+            if (proposing && prepared.Facts is { } proposed)
+                return await ProposeAsync(owner, utcNow, decision, action!, tool, ServerActionNames.EvictPlan, resolved.ServerId, resolved.DisplayName,
+                    new { plan_handle = proposed.Handle }, new { statement = proposed.Statement },
+                    new { statement = proposed.Statement, before = proposed.Before, warnings = proposed.Warnings }, ct);
             if (prepared.Answer is { } preparedAnswer)
                 return preparedAnswer;
             var facts = prepared.Facts!;
@@ -447,7 +462,7 @@ public sealed partial class DarlingMcpPlanForceTools
                 var hooks = new AgentActionHooks
                 {
                     ServerChange = changed,
-                    LoadLevels = (connection, _, token) => DarlingAgentActionGate.LoadLevelsAsync(connection, logger, token),
+                    LoadRoutes = (connection, _, token) => DarlingAgentActionGate.LoadRoutesAsync(connection, logger, token),
                     ReadBefore = (_, _, _) => Task.FromResult<string?>(JsonSerializer.Serialize(before, McpHelpers.JsonOptions)),
                     Write = async (_, _, token) =>
                     {
@@ -559,6 +574,22 @@ public sealed partial class DarlingMcpPlanForceTools
             if (dry_run)
                 return Answer("dry_run", null, dry.Message + " There is no undo.", new { dry_run = true, session = before, warnings });
 
+            /* #7109: the action needs a person's approval. The prepare step ran the dry batch; store a proposal with its facts and kill nothing. */
+            if (decision.NeedsApproval)
+                return await ProposeAsync(owner, null, decision, action!, tool, ServerActionNames.KillSession, resolved.ServerId, resolved.DisplayName,
+                    new { session_id = sessionId, login_time = loginUtc, database = targetDatabase, azure },
+                    new
+                    {
+                        session_id = binding.SessionId,
+                        login_time = binding.LoginTimeUtc,
+                        login_time_server_local = binding.LoginTimeServerLocal,
+                        last_request_end_time = binding.LastRequestEndTimeUtc,
+                        last_request_end_time_server_local = binding.LastRequestEndTimeServerLocal,
+                        status = binding.Status,
+                        open_transaction_count = binding.OpenTransactionCount,
+                    },
+                    new { session = before, warnings }, ct);
+
             RemediationResult? killed = null;
             RemediationResult? unknown = null;
 
@@ -570,7 +601,7 @@ public sealed partial class DarlingMcpPlanForceTools
                 var hooks = new AgentActionHooks
                 {
                     ServerChange = changed,
-                    LoadLevels = (connection, _, token) => DarlingAgentActionGate.LoadLevelsAsync(connection, logger, token),
+                    LoadRoutes = (connection, _, token) => DarlingAgentActionGate.LoadRoutesAsync(connection, logger, token),
                     ReadBefore = (_, _, _) => Task.FromResult<string?>(JsonSerializer.Serialize(new { session = before }, McpHelpers.JsonOptions)),
                     Write = async (_, _, token) =>
                     {
@@ -687,6 +718,21 @@ public sealed partial class DarlingMcpPlanForceTools
         if (dry_run)
             return Answer("dry_run", null, dry.Message + " There is no undo.", new { dry_run = true, session = before, warnings });
 
+        /* #7109: the action needs a person's approval. The prepare step ran the dry read; store a proposal with its facts and end nothing. */
+        if (decision.NeedsApproval)
+            return await ProposeAsync(owner, null, decision, action!, tool, ServerActionNames.KillSession, resolved.ServerId, resolved.DisplayName,
+                new { pid, backend_start_epoch = startEpoch },
+                new
+                {
+                    pid = binding.Pid,
+                    backend_id = binding.BackendId,
+                    backend_start_epoch = binding.BackendStartEpoch,
+                    xact_start = binding.XactStartUtc,
+                    state_change = binding.StateChangeUtc,
+                    state = binding.State,
+                },
+                new { session = before, warnings }, ct);
+
         RemediationResult? killed = null;
         RemediationResult? unknown = null;
 
@@ -698,7 +744,7 @@ public sealed partial class DarlingMcpPlanForceTools
             var hooks = new AgentActionHooks
             {
                 ServerChange = changed,
-                LoadLevels = (connection, _, token) => DarlingAgentActionGate.LoadLevelsAsync(connection, logger, token),
+                LoadRoutes = (connection, _, token) => DarlingAgentActionGate.LoadRoutesAsync(connection, logger, token),
                 ReadBefore = (_, _, _) => Task.FromResult<string?>(JsonSerializer.Serialize(new { session = before }, McpHelpers.JsonOptions)),
                 Write = async (_, _, token) =>
                 {
