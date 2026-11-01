@@ -115,7 +115,7 @@ export async function buildList(body, isCurrent = () => true) {
     el("td", { text: localTime(p.expires_at_utc) }),
     el("td", { text: pressedByText(p) }),
   ]));
-  return mount(body, nodes.concat([el("table", { class: "grid" }, [el("thead", {}, [head]), el("tbody", {}, lines)])]));
+  return mount(body, nodes.concat([el("div", { class: "table-wrap" }, [el("table", { class: "data proposals" }, [el("thead", {}, [head]), el("tbody", {}, lines)])])]));
 }
 
 /** What a press answer shows: its message, what changed for a superseded proposal, and the facts the press read. */
@@ -175,7 +175,7 @@ export async function buildProposal(body, id, isCurrent = () => true) {
     };
     const buttons = [el("button", { class: "btn", type: "button", "data-action": "first-press", text: p.first_press_by ? "Read the facts again" : "First press: read the facts", onClick: press("first-press") })];
     if (p.first_press_by) buttons.push(el("button", { class: "btn", type: "button", "data-action": "confirm", text: "Confirm and run", onClick: press("confirm") }));
-    nodes.push(el("div", { class: "row-actions" }, buttons));
+    nodes.push(el("div", { class: "row-actions proposal-actions" }, buttons));
   }
   return mount(body, nodes);
 }

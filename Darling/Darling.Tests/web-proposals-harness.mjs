@@ -86,6 +86,8 @@ try {
       const request = role("request");
       out.requestLink = request ? request.every((n) => n.tag === "a")[0].getAttribute("href") : null;
       out.buttonsBefore = buttons().map((b) => b.getAttribute("data-action"));
+      /* The two presses sit in one gapped, wrapping row, not touching (the page's .proposal-actions rule). */
+      out.actionsClass = body.every((n) => n.tag === "button")[0].parent.className;
       await click(button("first-press"));
       out.afterFirst = strips().map((s) => s.text);
       out.pressFacts = role("press-facts") ? role("press-facts").textContent : null;
@@ -119,6 +121,10 @@ try {
       await draw("");
       out.listRows = body.every((n) => n.getAttribute("data-role") === "proposal-row").length;
       out.listLink = body.every((n) => n.tag === "a").map((a) => a.getAttribute("href"))[0];
+      /* The list is the shared data-table look, inside the scrolling wrapper that keeps a narrow screen from clipping its columns. */
+      const table = body.every((n) => n.tag === "table")[0];
+      out.tableClass = table.className;
+      out.tableWrapClass = table.parent.className;
     },
     /* The route page: one strip for each route the check names, and none for a failed read. */
     async routeSentence() {

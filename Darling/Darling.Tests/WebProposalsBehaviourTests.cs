@@ -67,6 +67,7 @@ public sealed class WebProposalsBehaviourTests
         Assert.Contains("application_name: <img src=x onerror=alert(1)>", r.GetProperty("binding").GetString());
         Assert.Equal("#/investigations?request=aa000000-0000-4000-8000-000000000001", r.GetProperty("requestLink").GetString());
         Assert.Equal(["first-press"], r.GetProperty("buttonsBefore").EnumerateArray().Select(e => e.GetString()));
+        Assert.Contains("proposal-actions", r.GetProperty("actionsClass").GetString());
         Assert.Contains("These are the facts now.", r.GetProperty("afterFirst").EnumerateArray().Select(e => e.GetString()));
         Assert.Contains("pid: 87", r.GetProperty("pressFacts").GetString());
         Assert.Equal(["first-press", "confirm"], r.GetProperty("buttonsAfter").EnumerateArray().Select(e => e.GetString()));
@@ -106,6 +107,8 @@ public sealed class WebProposalsBehaviourTests
         Assert.Equal(0, r.GetProperty("buttons").GetInt32());
         Assert.Equal(1, r.GetProperty("listRows").GetInt32());
         Assert.Equal("#/proposals?proposal=0b9a3f4e-1111-4222-8333-444455556666", r.GetProperty("listLink").GetString());
+        Assert.Equal("data proposals", r.GetProperty("tableClass").GetString());
+        Assert.Equal("table-wrap", r.GetProperty("tableWrapClass").GetString());
     }
 
     [Fact]

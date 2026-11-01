@@ -1641,3 +1641,5 @@ table.data tr[aria-pressed]:focus-visible { outline: 2px solid var(--accent); ou
 .fleet-store-head { display: flex; align-items: center; gap: 0.5rem; }
 .fleet-store-health { font-size: 0.78rem; font-weight: 400; color: var(--muted); }
 .store-ambiguous-choices { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; margin-top: 0.5rem; }
+/* #7109: the two proposal presses sit side by side with a gap, and wrap on a narrow screen instead of touching. */
+.proposal-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; margin: 0.75rem 0; }
