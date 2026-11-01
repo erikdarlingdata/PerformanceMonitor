@@ -821,7 +821,7 @@ public sealed partial class DarlingWorker : BackgroundService
             if (config.Mcp.Network?.IsConfigured == true && !Hosting.DarlingHostBinding.IsRunningInContainer)
             {
                 warnings.Add(
-                    "mcp.network.* is set but postgres.managed is false — the MCP network endpoint is managed-mode (or container, #1804) only, so it is IGNORED; the MCP server stays loopback-only.");
+                    "mcp.network.* is set but postgres.managed is false. The MCP network endpoint is available only with the bundled store (postgres.managed = true) or the container distribution, so it is ignored and the MCP server stays on loopback.");
             }
 
             return warnings;

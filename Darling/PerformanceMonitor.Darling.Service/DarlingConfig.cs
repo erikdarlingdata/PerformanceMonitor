@@ -481,7 +481,7 @@ public sealed class DarlingConfig
         var config = JsonSerializer.Deserialize<DarlingConfig>(json, s_jsonOptions);
         if (config is null)
         {
-            throw new InvalidDataException("Configuration file parsed to null.");
+            throw new InvalidDataException("darling.json is empty or contains only 'null'. Copy darling.sample.json to darling.json and edit it.");
         }
 
         /* #6468: a file with no "servers" key, or "servers": null, is the same as an empty list (a start with no servers yet). */

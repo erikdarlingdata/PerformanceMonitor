@@ -5272,7 +5272,7 @@ WHERE u.rolname = current_user";
         if (removed.Count > 0)
         {
             logger.LogError(
-                "The credentials directory {Directory} was open to other users until now ({Reason}), so its files could have been planted: {Files} discarded (#4004). Every role password removed is generated again and re-asserted on its role, and a removed log-hash key is generated again, which gives every log event stored from now on a new identity. Keep the directory owner-only (on Kubernetes, an fsGroup re-applied on every mount opens it again) so this does not repeat, and run one service per credentials volume (on Kubernetes, one replica with strategy: Recreate): a second one starting beside this one could read the directory between this start's chmod and this removal.",
+                "The credentials directory {Directory} was open to other users until now ({Reason}), so its files could have been planted: {Files} discarded. Every role password removed is generated again and re-asserted on its role, and a removed log-hash key is generated again, which gives every log event stored from now on a new identity. Keep the directory owner-only (on Kubernetes, an fsGroup re-applied on every mount opens it again) so this does not repeat, and run one service per credentials volume (on Kubernetes, one replica with strategy: Recreate): a second one starting beside this one could read the directory between this start's chmod and this removal.",
                 directory, wasOpen, string.Join(", ", removed));
         }
 
@@ -5280,7 +5280,7 @@ WHERE u.rolname = current_user";
         {
             var reason = $"{wasOpen}, and {(left.Count == 1 ? "this entry at a credential's name" : "these entries at credentials' names")} could not be removed, so nothing in it is used this start: "
                 + $"{string.Join("; ", left)}. Every other credential file there is removed and the directory stays owner-only, so remove {(left.Count == 1 ? "it" : "each of them")} and restart";
-            logger.LogError("The credentials directory {Directory} is not trusted ({Reason}) (#4004).", directory, reason);
+            logger.LogError("The credentials directory {Directory} is not trusted ({Reason}).", directory, reason);
             guard.RecordLeftBehind(directory, reason);
             return new ComposeCredentialDirectoryTrust(reason, MayWrite: false);
         }

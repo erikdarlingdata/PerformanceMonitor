@@ -2443,14 +2443,14 @@ elseif ($existing) {
     }
 
     $scExit = Invoke-ScWithQuotedBinPath 'config' ''
-    if ($scExit -ne 0) { Fail "sc config failed ($scExit)." }
+    if ($scExit -ne 0) { Fail "sc.exe could not update the service '$serviceName' (exit $scExit). The service was stopped first and is not started again. Run 'sc.exe qc `"$serviceName`"' to see how it is registered, fix the cause, and re-run this script." }
 }
 else {
     # The space after binPath=/start=/obj= is sc.exe syntax. The virtual service account is
     # password-less, per-service, unprivileged - and mandatory-in-practice for the bundled
     # PostgreSQL, which refuses to run with administrative privileges (LocalSystem bricks it).
     $scExit = Invoke-ScWithQuotedBinPath 'create' "start= auto obj= `"NT SERVICE\$serviceName`""
-    if ($scExit -ne 0) { Fail "sc create failed ($scExit)." }
+    if ($scExit -ne 0) { Fail "sc.exe could not create the service '$serviceName' (exit $scExit). Run 'sc.exe query `"$serviceName`"' to see whether anything was registered, fix the cause, and re-run this script." }
     Write-Host "Created service '$serviceName' (NT SERVICE virtual account, automatic start)."
 }
 

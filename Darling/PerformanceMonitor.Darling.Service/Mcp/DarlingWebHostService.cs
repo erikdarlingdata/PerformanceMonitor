@@ -248,7 +248,7 @@ public sealed class DarlingWebHostService : BackgroundService
                 catch (Exception ex)
                 {
                     _logger.LogWarning(
-                        "Web dashboard configuration could not be loaded ({Message}) — retrying in {Backoff}s. The worker logs a missing/broken config as critical; a transient read failure self-heals here.",
+                        "Web dashboard configuration could not be loaded ({Message}). Retrying in {Backoff}s. The service log shows a missing or broken configuration at Critical level. A short read failure clears itself on the next try.",
                         ex.Message, (int)FailedStartBackoff.TotalSeconds);
                     lastFailedStartUtc = DateTime.UtcNow;
                 }
@@ -546,7 +546,7 @@ public sealed class DarlingWebHostService : BackgroundService
             if (string.IsNullOrWhiteSpace(token))
             {
                 logger.LogCritical(
-                    "Web dashboard token resolved to empty after decryption — refusing to serve the loopback listener without it; web dashboard not started.");
+                    "Web dashboard token (web.network.encryptedToken) decrypted to an empty value. Re-create it with PerformanceMonitor.Darling.Service.exe --encrypt-password. The loopback listener is not served without a token, so the web dashboard is not started.");
                 return new LoopbackTokenResolution(true, "");
             }
 
@@ -568,7 +568,7 @@ public sealed class DarlingWebHostService : BackgroundService
         catch (Exception ex)
         {
             logger.LogCritical(
-                "Web dashboard token could not be decrypted ({Message}) — refusing to serve the loopback listener without it; web dashboard not started.",
+                "Web dashboard token (web.network.encryptedToken) could not be decrypted ({Message}). The loopback listener is not served without a token, so the web dashboard is not started. A token made on another machine or account cannot be read here. Run PerformanceMonitor.Darling.Service.exe --encrypt-password on this machine and put the new value in web.network.encryptedToken. On another OS, remove it and set web.network.token to an env: or file: reference.",
                 ex.Message);
             return new LoopbackTokenResolution(true, "");
         }
@@ -621,7 +621,7 @@ public sealed class DarlingWebHostService : BackgroundService
                     if (string.IsNullOrWhiteSpace(token))
                     {
                         _logger.LogCritical(
-                            "Web dashboard token resolved to empty after decryption; web dashboard not started.");
+                            "Web dashboard token (web.network.encryptedToken) decrypted to an empty value. Re-create it with PerformanceMonitor.Darling.Service.exe --encrypt-password. Web dashboard not started.");
                         await DisposeFailedStartAsync();
                         return false;
                     }
@@ -656,7 +656,7 @@ public sealed class DarlingWebHostService : BackgroundService
                 catch (Exception ex)
                 {
                     _logger.LogCritical(
-                        "Web dashboard token could not be decrypted ({Message}); web dashboard not started.",
+                        "Web dashboard token (web.network.encryptedToken) could not be decrypted ({Message}). Web dashboard not started. A token made on another machine or account cannot be read here. Run PerformanceMonitor.Darling.Service.exe --encrypt-password on this machine and put the new value in web.network.encryptedToken. On another OS, remove it and set web.network.token to an env: or file: reference.",
                         ex.Message);
                     await DisposeFailedStartAsync();
                     return false;
@@ -1088,10 +1088,10 @@ public sealed class DarlingWebHostService : BackgroundService
                    listen there is ONE listener, HTTPS for loopback too, and saying otherwise sends a local
                    client to the wrong scheme. With no TLS the text is unchanged. Text only: no listener
                    decision moves. */
-                // install-darling.ps1 waits for this text (#6470): reword both together.
+                // install-darling.ps1 waits for the start of this text, "Starting web dashboard on <scheme>://<host>:<port>" (#6470): keep those words.
                 _logger.LogInformation(
                     "Starting web dashboard on {Scheme}://{Listen}:{Port} (LAN-exposed to {Cidr} behind a token->cookie gate + in-app CIDR; "
-                    + "{Loopback}, and since #1649 it authenticates too) — "
+                    + "{Loopback}, which also requires the token) — "
                     + "enabled/port from {Origin}; listen/allowFrom/token/tls from darling.json web.network (file-only, restart-only)",
                     serverCertificate is null ? "http" : "https", DarlingListenUrl.FormatHost(primaryBind), effectivePort, allowedCidr,
                     DarlingListenerTls.DescribeLoopbackListener(
@@ -1100,7 +1100,7 @@ public sealed class DarlingWebHostService : BackgroundService
             }
             else
             {
-                // install-darling.ps1 waits for this text (#6470): reword both together.
+                // install-darling.ps1 waits for the start of this text, "Starting web dashboard on <scheme>://<host>:<port>" (#6470): keep those words.
                 _logger.LogInformation(
                     "Starting web dashboard on http://localhost:{Port} (loopback only){TokenNote} — enabled/port from {Origin}",
                     effectivePort, requireTokenWhenLoopbackOnly ? ", token required" : "", origin);
@@ -2947,9 +2947,9 @@ if (location.pathname.toLowerCase() !== '/auth/login') { document.getElementById
 
             case DarlingHostBinding.BindReason.ManagedModeRequired:
                 _logger.Log(level.Value,
-                    "web.network.* is set but postgres.managed = false — web dashboard network exposure is managed-mode (or container, " +
-                    "#1804) only, so listen and allowFrom are ignored; your own reverse proxy governs uncontained BYO exposure. " +
-                    "Binding loopback-only. A token in the block (web.network.encryptedToken / token) still gates the loopback dashboard.");
+                    "web.network.* is set but postgres.managed = false. Web dashboard network exposure is available only with the bundled store " +
+                    "(postgres.managed = true) or the container distribution, so listen and allowFrom are ignored. " +
+                    "Use your own reverse proxy to expose it. Binding loopback-only. A token in the block (web.network.encryptedToken / token) still gates the loopback dashboard.");
                 break;
 
             default:
