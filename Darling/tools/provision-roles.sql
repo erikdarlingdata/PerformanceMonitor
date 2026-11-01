@@ -675,6 +675,15 @@ $v187$;
 GRANT SELECT (severities) ON config.config_notification_routes TO viewer;
 $v229$;
       END IF;
+      -- V233 (#6979): a route's report notice setting. Non-secret. Granted on its own column inside the routes table's guard, so a
+      -- store below V233 still commits.
+      IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+                 WHERE attrelid = 'config.config_notification_routes'::regclass
+                   AND attname = 'report_notice' AND NOT attisdropped) THEN
+         EXECUTE $v233$
+GRANT SELECT (report_notice) ON config.config_notification_routes TO viewer;
+$v233$;
+      END IF;
    END IF;
 END $$;
 -- V187 (#5825): the four per-channel "send resolutions" flags. Non-secret (behaviour toggles, like
@@ -812,6 +821,15 @@ $v187$;
 GRANT SELECT (severities) ON config.config_notification_routes TO web;
 $v229$;
       END IF;
+      -- V233 (#6979): a route's report notice setting. Non-secret. Granted on its own column inside the routes table's guard, so a
+      -- store below V233 still commits.
+      IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+                 WHERE attrelid = 'config.config_notification_routes'::regclass
+                   AND attname = 'report_notice' AND NOT attisdropped) THEN
+         EXECUTE $v233$
+GRANT SELECT (report_notice) ON config.config_notification_routes TO web;
+$v233$;
+      END IF;
    END IF;
 END $$;
 -- V187 (#5825): the four per-channel "send resolutions" flags. Non-secret (behaviour toggles, like
@@ -936,6 +954,15 @@ $v187$;
          EXECUTE $v229$
 GRANT SELECT (severities) ON config.config_notification_routes TO mcp;
 $v229$;
+      END IF;
+      -- V233 (#6979): a route's report notice setting. Non-secret. Granted on its own column inside the routes table's guard, so a
+      -- store below V233 still commits.
+      IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+                 WHERE attrelid = 'config.config_notification_routes'::regclass
+                   AND attname = 'report_notice' AND NOT attisdropped) THEN
+         EXECUTE $v233$
+GRANT SELECT (report_notice) ON config.config_notification_routes TO mcp;
+$v233$;
       END IF;
    END IF;
 END $$;

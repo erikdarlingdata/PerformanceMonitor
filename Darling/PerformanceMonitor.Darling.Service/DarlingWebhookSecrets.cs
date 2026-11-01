@@ -352,6 +352,9 @@ internal static class DarlingWebhookSecrets
 
             /* #6928: the severity filter. Delivery reads it from the cached route, so an edit of only this member must reopen the cache. */
             Add(r.Severities);
+
+            /* #6979: the report notice setting. Notice delivery reads it from the cached route, so an edit of only this member must reopen the cache. */
+            Add(r.ReportNotice);
         }
 
         return text.ToString();

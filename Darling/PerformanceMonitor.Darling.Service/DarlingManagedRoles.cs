@@ -275,6 +275,8 @@ public static class DarlingManagedRoles
                 "fallback_route_id", "previous_signing_key_until",
                 /* V229 (#6928): the route's severity filter (both, critical or warning). Non-secret. */
                 "severities",
+                /* V233 (#6979): the route's report notice setting (off, needs_person_or_change or all). Non-secret. */
+                "report_notice",
             },
             SecretColumns: new[] { "teams_url", "slack_url", "generic_url", "pagerduty_routing_key", "signing_key", "previous_signing_key" }),
     };
