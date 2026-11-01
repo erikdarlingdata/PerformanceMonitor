@@ -181,6 +181,37 @@ LIMIT $3";
     }
 
     /// <summary>
+    /// The findings attached to an engine alert, one display line each, oldest first (#7084 part 4; the Viewer's
+    /// <c>GetAttachedFindingsAsync</c> twin): read when the alert's detail opens, by the alert's own identity (server, metric,
+    /// time) through <c>v_config_alert_log</c> so a finding that ordinary archival moved to Parquet still lists. Empty for a metric
+    /// no finding attaches to, with no read. A line is the finding's time on the alert's clock, then its metric name (its story).
+    /// </summary>
+    public async Task<IReadOnlyList<string>> GetAttachedFindingsAsync(AlertHistoryRow alert)
+    {
+        var lines = new List<string>();
+        if (!OpenEngineAlerts.IsAttachable(alert.MetricName)) return lines;
+
+        var alertUtc = DateTime.SpecifyKind(alert.AlertTime, DateTimeKind.Utc);
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+        command.CommandText = OpenEngineAlerts.AttachedFindingsSql("v_config_alert_log");
+        command.Parameters.Add(new DuckDBParameter { Value = alert.ServerId });
+        command.Parameters.Add(new DuckDBParameter { Value = DateTime.SpecifyKind(alert.AlertTime, DateTimeKind.Unspecified) });
+        command.Parameters.Add(new DuckDBParameter { Value = DateTime.SpecifyKind(OpenEngineAlerts.AttachedUntil(alertUtc), DateTimeKind.Unspecified) });
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            if (OpenEngineAlerts.Names(
+                    AlertContextSerializer.TryReadAttachedTo(reader.IsDBNull(2) ? null : reader.GetString(2)), alert.MetricName, alertUtc))
+            {
+                lines.Add(alert.FormatSameZone(reader.GetDateTime(0)) + "  " + reader.GetString(1));
+            }
+        }
+
+        return lines;
+    }
+
+    /// <summary>
     /// #6261: the streak of each row of <paramref name="page"/>, aligned with it, from one read of the alert log for the whole
     /// page (Darling's <c>GetAlertStreaksAsync</c> twin; the rule is <see cref="InvestigationAlertStreak"/>). Muted and dismissed
     /// rows are in: they fired. The history is read through <c>v_config_alert_log</c>, so rows ordinary archival moved to Parquet
@@ -710,6 +741,14 @@ public class AlertHistoryRow
     /// </summary>
     public string TimeLocal => ServerTimeHelper.FormatInstant(
         AlertTime, ServerTimeHelper.DisplayZoneFor(
+            PerformanceMonitor.Ui.MultiServerTime.EffectiveMode(ServerTimeHelper.CurrentDisplayMode, MixedServers),
+            Clock ?? ServerTimeHelper.ActiveServerClock),
+        "yyyy-MM-dd HH:mm:ss");
+
+    /// <summary>A stored naive-UTC instant of another row on this row's server, in the same display zone as <see cref="TimeLocal"/>
+    /// (#7084 part 4: the attached findings of an engine alert read on the alert's own clock).</summary>
+    public string FormatSameZone(DateTime storedUtc) => ServerTimeHelper.FormatInstant(
+        storedUtc, ServerTimeHelper.DisplayZoneFor(
             PerformanceMonitor.Ui.MultiServerTime.EffectiveMode(ServerTimeHelper.CurrentDisplayMode, MixedServers),
             Clock ?? ServerTimeHelper.ActiveServerClock),
         "yyyy-MM-dd HH:mm:ss");

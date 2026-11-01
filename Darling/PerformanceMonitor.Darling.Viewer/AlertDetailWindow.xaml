@@ -53,6 +53,7 @@
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
             </Grid.RowDefinitions>
 
             <TextBlock Grid.Row="0" Grid.Column="0" Text="Time:" FontWeight="SemiBold"
@@ -112,6 +113,13 @@
                        Foreground="{DynamicResource ForegroundBrush}" Margin="0,4"/>
             <TextBox Grid.Row="10" Grid.Column="1" x:Name="ResolutionOutcomeText"
                      Style="{StaticResource SelectableValueText}" Margin="0,4"/>
+
+            <!-- #7084 part 4: the analysis findings held back from paging because this engine alert was open, read when the
+                 window opens; collapsed when there are none or the metric is not one findings attach to. -->
+            <TextBlock Grid.Row="11" Grid.Column="0" x:Name="AttachedFindingsLabel" Text="Attached findings:" FontWeight="SemiBold"
+                       Foreground="{DynamicResource ForegroundBrush}" Margin="0,4" Visibility="Collapsed"/>
+            <TextBox Grid.Row="11" Grid.Column="1" x:Name="AttachedFindingsText"
+                     Style="{StaticResource SelectableValueText}" Margin="0,4" Visibility="Collapsed"/>
         </Grid>
 
         <!-- Muted indicator -->
