@@ -861,6 +861,11 @@ internal sealed class DarlingSelfAlertEvaluator
        that. One dictionary rather than one per family because a job_id is unique within a store. */
     private enum PolicyJobHealth { ReArmed, Escalated, AwaitingSchedulerRetry }
     private readonly ConcurrentDictionary<string, PolicyJobEpisode> _policyJobState = new(StringComparer.Ordinal);
+
+    /// <summary>#7076: true once the first policy job pass of this process has run. Only that pass may seed a stuck job's escalation
+    /// from the alert history: a job that was not stuck on it cleared while the service was down (nothing wrote the resolution), so
+    /// when it sticks again later it is a new episode and announces.</summary>
+    private bool _policyJobFirstPassDone;
     private readonly ConcurrentDictionary<string, DateTime> _lastPolicyJobAlert = new(StringComparer.Ordinal);
 
     /// <summary>The alert metric name every compression-job self-alert fires under (first-detection + escalation
@@ -8722,6 +8727,11 @@ WHERE c.is_enabled";
                 continue;
             }
 
+            if (!_policyJobFirstPassDone && !_policyJobState.ContainsKey(key))
+            {
+                await SeedStandingPolicyJobAsync(band, job.Family, key, cancellationToken);
+            }
+
             if (!_policyJobState.TryGetValue(key, out var episode))
             {
                 if (job.SchedulerRetries)
@@ -8892,6 +8902,7 @@ WHERE c.is_enabled";
                 $"TimescaleDB {band.Noun} {key} is running on schedule again"), cancellationToken);
         }
 
+        _policyJobFirstPassDone = true;
         await ApplyPolicyJobFailuresAsync(reading.Jobs, now, cancellationToken);
         LogPolicyJobSummary(census, rearmed, fired, alertsEnabled: true);
     }
@@ -9766,7 +9777,8 @@ ORDER BY ag_name, database_name, replica_server_name";
     /// carries the resolution title, and still reads as resolved.</para>
     /// </summary>
     public static AlertHistoryRecord BuildResolutionRecord(AlertResolution resolution, string? contextJson = null) =>
-        AlertResolutionRecords.BuildResolutionRecord(resolution, contextJson);
+        AlertResolutionRecords.BuildResolutionRecord(resolution, contextJson)
+            with { AlertKey = StoredAlertKey(resolution.ServerKey, resolution.MetricName) };
 
     /// <summary>The member of a resolution row's <c>context_json</c> that names the metric the row resolves (#6003); shared with Lite (#6010).</summary>
     public const string ResolvesMember = AlertResolutionRecords.ResolvesMember;
@@ -10061,8 +10073,8 @@ ORDER BY ag_name, database_name, replica_server_name";
     /// Undelivered, Collection Falling Behind) are read from <c>server_id</c> 0 by their metric name
     /// (<see cref="AlertHistoryServerIdentity.FleetSingleKeyMetrics"/>). The per-job and per-cost-key fleet alerts (Store Job
     /// Over Cadence, Retention Held, Raw Purge Over Horizon, Compose Rollup Hours Stuck, the Policy Job bands) write every key
-    /// under <c>server_id</c> 0 and one server name, so only free text tells their keys apart: the store answers them with no
-    /// row, and their seed does nothing against PostgreSQL or DuckDB.</para>
+    /// under <c>server_id</c> 0 and one server name, so since V234 (#7076) they are told apart by the exact <c>alert_key</c> their rows
+    /// carry (<see cref="KeyedFleetMetrics"/>) and read by it. Rows from before V234 have no key and are not matched.</para>
     /// </summary>
     private static readonly Dictionary<string, string[]> StateAlertResolutionTitles =
         new Dictionary<string, string[]>(StringComparer.Ordinal)
@@ -10083,6 +10095,59 @@ ORDER BY ag_name, database_name, replica_server_name";
             [RawPurgeOverHorizonMetric] = new[] { RawPurgeOverHorizonClearedMetric },
             [ComposeHoursStuckMetric] = new[] { ComposeHoursStuckClearedMetric },
         };
+
+    /// <summary>
+    /// #7076: the store-wide alerts that share one metric name across many keys (a job, a policy) and so write every key under
+    /// <c>server_id</c> 0. Their fire and resolution rows carry the exact key in <c>alert_key</c> (V234), and the restart seed reads
+    /// them by it. The three single-key fleet alerts are not here: their metric name already is their key
+    /// (<see cref="AlertHistoryServerIdentity.FleetSingleKeyMetrics"/>).
+    /// </summary>
+    private static readonly HashSet<string> KeyedFleetMetrics = new(StringComparer.Ordinal)
+    {
+        JobCadenceMetric, RetentionHoldMetric, RawPurgeOverHorizonMetric, ComposeHoursStuckMetric,
+        CompressionJobMetric, RefreshJobStuckMetric, RetentionJobStuckMetric,
+    };
+
+    /// <summary>
+    /// #7076: the <c>alert_key</c> a row is stored with: the same key string the alert is delivered and tracked under
+    /// (<paramref name="serverKey"/>) when <paramref name="firingMetric"/> is one of <see cref="KeyedFleetMetrics"/>, else null. A
+    /// resolution row passes the metric it resolves, so a clear carries its fire's key.
+    /// </summary>
+    internal static string? StoredAlertKey(string serverKey, string firingMetric) =>
+        KeyedFleetMetrics.Contains(firingMetric) && !string.IsNullOrEmpty(serverKey) ? serverKey : null;
+
+    /// <summary>
+    /// #7076: a stuck policy job found on this process's first pass is seeded at its last announced step when the alert history holds an
+    /// open fire row for its exact key. The row can only have been written once the job was escalated or re-armed and announced, and the job
+    /// is still stuck after a whole restart, so it is seeded as escalated: no second auto-re-arm, no second page, and a repeat only per
+    /// connection_refire_minutes from the fire row's time. No open row (never announced, or a resolution row is newer) seeds nothing and the
+    /// job is handled as a new episode. A failed read is logged and handled the same way.
+    /// </summary>
+    private async Task SeedStandingPolicyJobAsync(
+        PolicyJobBand band, TimescaleSupport.StorePolicyJobFamily family, string key, CancellationToken cancellationToken)
+    {
+        var historyKey = StoreKey(band.KeyPrefix + key);
+        var seedClock = Stopwatch.StartNew();
+        try
+        {
+            var rows = await _historyStore.GetKeyedStandingAsync(
+                historyKey, band.Metric, new[] { band.RecoveredMetric }, null, _serviceStartUtc);
+            if (rows.OpenFor(_ => true, null) is { } standing)
+            {
+                _policyJobState[key] = new PolicyJobEpisode(PolicyJobHealth.Escalated, family);
+                _lastPolicyJobAlert[key] = standing.FireAtUtc;
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning("Could not read the open {Metric} incident for {Key} from alert history after {ElapsedMs} ms; a stuck job may be announced again after this restart: {Message}", band.Metric, historyKey, seedClock.ElapsedMilliseconds, ex.Message);
+            _readFailures?.RecordReadFailure(null, "standing incident seed self-alert", seedClock.ElapsedMilliseconds);
+        }
+    }
 
     /// <summary>#7068: the state alerts whose seed has been decided this process, by <see cref="StateRetryKey"/>.</summary>
     private readonly ConcurrentDictionary<string, bool> _standingSeedDone = new(StringComparer.Ordinal);
@@ -10123,7 +10188,10 @@ ORDER BY ag_name, database_name, replica_server_name";
             /* One store read per server and metric per process start, shared by every grain of it. */
             if (!_standingReads.TryGetValue(readKey, out var standingRows))
             {
-                standingRows = await _historyStore.GetStandingAsync(historyKey, metric, titles, null, _serviceStartUtc);
+                /* #7076: a store-wide alert keyed by job is found by its exact key; every other alert by its server id. */
+                standingRows = KeyedFleetMetrics.Contains(metric)
+                    ? await _historyStore.GetKeyedStandingAsync(historyKey, metric, titles, null, _serviceStartUtc)
+                    : await _historyStore.GetStandingAsync(historyKey, metric, titles, null, _serviceStartUtc);
                 _standingReads[readKey] = standingRows;
             }
 

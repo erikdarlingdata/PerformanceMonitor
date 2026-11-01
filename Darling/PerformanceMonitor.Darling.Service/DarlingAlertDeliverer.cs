@@ -309,6 +309,8 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
             outcome.Muted, detailText, contextJson)
         {
             AlertTimeUtc = alertTimeUtc,
+            /* #7076: a store-wide alert keyed by job or policy stores its exact key, so a restart finds its own open row. */
+            AlertKey = DarlingSelfAlertEvaluator.StoredAlertKey(outcome.ServerKey, outcome.MetricName),
         };
         await _historyStore.RecordAlertAsync(record);
 

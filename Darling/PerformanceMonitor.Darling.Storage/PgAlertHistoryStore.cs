@@ -49,6 +49,17 @@ public sealed class PgAlertHistoryStore : IAlertHistoryStore, IDeliveredFireRead
 INSERT INTO config_alert_log (alert_time, server_id, server_name, metric_name, current_value, threshold_value, alert_sent, notification_type, send_error, muted, detail_text, context_json)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)";
 
+    /// <summary>#7076: <see cref="InsertSql"/> plus the V234 <c>alert_key</c>, for a row of a store-wide alert keyed by job or policy.
+    /// Every other row keeps the statement it always had, so a store below V234 still records them.</summary>
+    private const string InsertKeyedSql = @"
+INSERT INTO config_alert_log (alert_time, server_id, server_name, metric_name, current_value, threshold_value, alert_sent, notification_type, send_error, muted, detail_text, context_json, alert_key)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)";
+
+    /// <summary>#7076: <see cref="InsertResolutionSql"/> plus <c>alert_key</c>.</summary>
+    private const string InsertResolutionKeyedSql = @"
+INSERT INTO config_alert_log (alert_time, server_id, server_name, metric_name, current_value, threshold_value, alert_sent, notification_type, send_error, muted, detail_text, context_json, resolution_sent_at, resolution_channels, resolution_outcome, alert_key)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)";
+
     /// <summary>#5825: <see cref="InsertSql"/> plus the three resolution columns (V187), for a resolution row whose send
     /// had an outcome.</summary>
     private const string InsertResolutionSql = @"
@@ -83,7 +94,9 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)";
             /* #5825: a resolution that was sent, failed or muted also writes its three V187 columns. Every other row keeps
                the twelve-column insert it always had. */
             var resolution = record.ResolutionOutcome is not null;
-            using var command = new NpgsqlCommand(resolution ? InsertResolutionSql : InsertSql, connection)
+            var keyed = record.AlertKey is not null && serverId == 0;
+            using var command = new NpgsqlCommand(
+                resolution ? (keyed ? InsertResolutionKeyedSql : InsertResolutionSql) : (keyed ? InsertKeyedSql : InsertSql), connection)
                 { CommandTimeout = _commandTimeoutSeconds };
 
             /* #5632 Phase A: a stamped AlertTimeUtc is written as is, so the investigation link row that names this alert
@@ -114,6 +127,11 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)";
                 });
                 command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)record.ResolutionChannels ?? DBNull.Value });
                 command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = record.ResolutionOutcome! });
+            }
+
+            if (keyed)
+            {
+                command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = record.AlertKey! });
             }
 
             await command.ExecuteNonQueryAsync();
@@ -240,6 +258,26 @@ AND   notification_type IN ('webhook', 'email+webhook')", "WebhookAlert");
             return AlertHistoryStanding.Empty;
         }
 
+        return await ReadStandingAsync(sid.Value, null, metricName, resolutionMetricNames, sinceUtc, untilUtc, countMuted);
+    }
+
+    /// <summary>
+    /// #7076: <see cref="IAlertHistoryStore.GetKeyedStandingAsync"/> over the <c>server_id</c> 0 bucket, narrowed to one exact
+    /// <c>alert_key</c>. The bucket holds every store-wide key, so the key is what makes the rows one alert's own. A row written before
+    /// V234 has a NULL key and never matches. A store below V234 has no column, so the read throws and the caller logs it and
+    /// announces as it did before.
+    /// </summary>
+    public async Task<AlertHistoryStanding> GetKeyedStandingAsync(
+        string alertKey, string metricName, System.Collections.Generic.IReadOnlyList<string> resolutionMetricNames,
+        DateTime? sinceUtc, DateTime? untilUtc, bool countMuted = true) =>
+        string.IsNullOrEmpty(alertKey)
+            ? AlertHistoryStanding.Empty
+            : await ReadStandingAsync(0, alertKey, metricName, resolutionMetricNames, sinceUtc, untilUtc, countMuted);
+
+    private async Task<AlertHistoryStanding> ReadStandingAsync(
+        int sidValue, string? alertKey, string metricName, System.Collections.Generic.IReadOnlyList<string> resolutionMetricNames,
+        DateTime? sinceUtc, DateTime? untilUtc, bool countMuted)
+    {
         await using var connection = await _postgres.OpenConnectionAsync();
 
         var fires = new System.Collections.Generic.List<AlertHistoryFire>();
@@ -250,17 +288,23 @@ WHERE server_id = $1
 AND   metric_name = $2
 AND   alert_time >= COALESCE($3, '-infinity'::timestamp)
 AND   alert_time < COALESCE($4, 'infinity'::timestamp)"
+            + (alertKey is null ? "" : "\nAND   alert_key = $5")
             + AlertHistoryEscalationSeed.KeepUnlessEveryChannelFailedFilter
             + (countMuted ? "" : AlertHistoryEscalationSeed.ExcludeMutedFilter)
             + "\nORDER BY alert_time DESC\nLIMIT " + StandingRowCap.ToString(CultureInfo.InvariantCulture), connection) { CommandTimeout = _commandTimeoutSeconds })
         {
-            fireCommand.Parameters.AddWithValue(sid.Value);
+            fireCommand.Parameters.AddWithValue(sidValue);
             fireCommand.Parameters.AddWithValue(metricName);
             fireCommand.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = sinceUtc is { } since
                 ? DateTime.SpecifyKind(AlertHistoryEscalationSeed.TruncateToMicroseconds(since), DateTimeKind.Unspecified) : DBNull.Value });
             /* #5715 round 1: exclusive, microsecond like the column; a row at or after the engine start is this process's own. */
             fireCommand.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = untilUtc is { } until
                 ? DateTime.SpecifyKind(AlertHistoryEscalationSeed.TruncateToMicroseconds(until), DateTimeKind.Unspecified) : DBNull.Value });
+            if (alertKey is not null)
+            {
+                fireCommand.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = alertKey });
+            }
+
             await using var reader = await fireCommand.ExecuteReaderAsync();
             while (await reader.ReadAsync())
             {
@@ -282,12 +326,17 @@ SELECT alert_time, context_json, detail_text
 FROM config_alert_log
 WHERE server_id = $1
 AND   metric_name = ANY($2)
-AND   alert_time >= $3
+AND   alert_time >= $3" + (alertKey is null ? "" : "\nAND   alert_key = $4") + @"
 ORDER BY alert_time DESC
 LIMIT " + StandingRowCap.ToString(CultureInfo.InvariantCulture), connection) { CommandTimeout = _commandTimeoutSeconds };
-        clearCommand.Parameters.AddWithValue(sid.Value);
+        clearCommand.Parameters.AddWithValue(sidValue);
         clearCommand.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = System.Linq.Enumerable.ToArray(resolutionMetricNames) });
         clearCommand.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(fires[^1].FireAtUtc, DateTimeKind.Unspecified) });
+        if (alertKey is not null)
+        {
+            clearCommand.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = alertKey });
+        }
+
         await using (var clearReader = await clearCommand.ExecuteReaderAsync())
         {
             while (await clearReader.ReadAsync())
