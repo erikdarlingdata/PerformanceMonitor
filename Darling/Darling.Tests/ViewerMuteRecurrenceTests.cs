@@ -175,6 +175,8 @@ public sealed class ViewerMuteRecurrenceTests
                 "ALTER TABLE config.config_mute_rules DROP COLUMN recur_days, DROP COLUMN recur_start_time, DROP COLUMN recur_end_time, DROP COLUMN recur_time_zone", ct);
             /* The probe reads newest first, so the report notice column (V233, #6979) and the Daily Health Report columns (V232, #7041) go too, or the store would still read as V233. */
             await ExecAsync(connection, "ALTER TABLE config.config_notification_routes DROP COLUMN report_notice", ct);
+            /* And the alert key column on the alert log (V234, #7076), the newest sentinel. */
+            await ExecAsync(connection, "ALTER TABLE config.config_alert_log DROP COLUMN alert_key", ct);
             await ExecAsync(connection,
                 "ALTER TABLE config.config_alert_settings DROP COLUMN daily_report_enabled, DROP COLUMN daily_report_send_at, DROP COLUMN daily_report_time_zone, DROP COLUMN daily_report_title", ct);
             await using (var older = new ViewerDataService(scratch.ConnectionString))

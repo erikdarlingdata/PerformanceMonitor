@@ -627,6 +627,10 @@ ALTER TABLE IF EXISTS config.investigation_request_alerts DROP COLUMN IF EXISTS 
         // column (its CHECK goes with it), so a re-run of V233 does everything again. Safe on a store that never had it.
         new(233, "hasReportNotice",
             @"ALTER TABLE config.config_notification_routes DROP COLUMN IF EXISTS report_notice;"),
+        // V234 (#7076): the exact alert key on the alert log. The column is the probe's newest sentinel. The rewind drops it, so a re-run of
+        // V234 adds it again. Safe on a store that never had it.
+        new(234, "hasAlertLogKey",
+            @"ALTER TABLE IF EXISTS config.config_alert_log DROP COLUMN IF EXISTS alert_key;"),
     ];
 
     /// <summary>
