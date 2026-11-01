@@ -340,7 +340,9 @@ public static class DarlingPgSessionStatesReader
         string? ApplicationName,
         string? CommandTag,
         long QueryDurationMs,
-        DateTime? NewestSampleUtc = null);
+        DateTime? NewestSampleUtc = null,
+        string? StatementText = null,
+        long? QueryId = null);
 
     /// <summary>
     /// The single most recent <c>pg_session_states</c> capture for this server, filtered to sessions whose
@@ -499,6 +501,7 @@ public static class DarlingPgSessionStatesReader
                 s.application_name,
                 s.command_tag,
                 s.query_duration_ms,
+                s.query_id,
                 r.latest_capture AS capture_time,
                 {1} AS excluded_by_program_prefix,
                 {2} AS excluded_by_login,
@@ -524,6 +527,7 @@ public static class DarlingPgSessionStatesReader
             CAST((SELECT count(*) FROM candidates AS x WHERE x.excluded_by_program_prefix) AS integer) AS excluded_by_program_prefix_count,
             CAST((SELECT count(*) FROM candidates AS x WHERE x.excluded_by_login AND NOT x.excluded_by_program_prefix) AS integer) AS excluded_by_login_count,
             CAST((SELECT count(*) FROM candidates AS x WHERE x.excluded_by_database AND NOT (x.excluded_by_program_prefix OR x.excluded_by_login)) AS integer) AS excluded_by_database_count,
+            s.query_id,
             s.capture_time AS newest_sample_utc
         FROM candidates AS s
         WHERE NOT (s.excluded_by_program_prefix OR s.excluded_by_login OR s.excluded_by_database)
@@ -678,8 +682,11 @@ public static class DarlingPgSessionStatesReader
                 reader.IsDBNull(4) ? null : reader.GetString(4),
                 reader.IsDBNull(5) ? null : reader.GetString(5),
                 reader.IsDBNull(6) ? -1 : reader.GetInt64(6),
-                /* ordinal 10: the capture the rows were read from (#5642), stamped UTC (the store keeps naive UTC). */
-                reader.IsDBNull(10) ? null : DateTime.SpecifyKind(reader.GetDateTime(10), DateTimeKind.Utc)));
+                /* ordinal 11: the capture the rows were read from (#5642), stamped UTC (the store keeps naive UTC). */
+                reader.IsDBNull(11) ? null : DateTime.SpecifyKind(reader.GetDateTime(11), DateTimeKind.Utc),
+                StatementText: null,
+                /* ordinal 10 (#7086): the collector's query_id, the key the statement text is looked up by. */
+                QueryId: reader.IsDBNull(10) ? null : reader.GetInt64(10)));
             /* The same three scalars on every row — read once is enough; a read with no rows has nothing to
                fire and therefore nothing to render the counts beside (the SQL Server read's rule). */
             excludedByProgramPrefix = reader.IsDBNull(7) ? 0 : reader.GetInt32(7);
@@ -692,6 +699,23 @@ public static class DarlingPgSessionStatesReader
            evaluates. The C# FilterExcludedDatabases helper that used to run here (and could leave the page
            short or empty while matches existed) is gone, not disabled. */
         return new LongRunningSessionsReadResult(rows, excludedByProgramPrefix, excludedByLogin, excludedByDatabase);
+    }
+
+    /// <summary>
+    /// The stored statement text for one <c>query_id</c> (#7086), from the store's own <c>pg_statement_text</c> lookup,
+    /// or null when none has been captured. A separate read on purpose: the session table and the long-running read
+    /// above store and project no statement text, and that stays true.
+    /// </summary>
+    public static async Task<string?> GetStatementTextAsync(
+        NpgsqlDataSource postgres, int serverId, long queryId, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(postgres);
+        await using var command = postgres.CreateCommand(
+            "SELECT query_text FROM pg_statement_text WHERE server_id = $1 AND queryid = $2");
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(queryId);
+        return await command.ExecuteScalarAsync(cancellationToken) as string;
     }
 
     public static async Task<PgSessionStatesCaptureCounts> GetPgSessionStatesCaptureCountsAsync(

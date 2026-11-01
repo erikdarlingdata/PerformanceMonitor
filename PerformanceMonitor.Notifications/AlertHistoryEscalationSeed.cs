@@ -24,6 +24,13 @@ public static class AlertHistoryEscalationSeed
     /// </summary>
     public const string KeepUnlessEveryChannelFailedFilter = "\nAND   (alert_sent OR send_error IS NULL)";
 
+    /// <summary>
+    /// #7086: SQL that drops digest rows from the standing-fire read. A fire an evaluator held back from paging
+    /// (<see cref="AlertHold"/>) is written with the <c>digest</c> disposition and paged nobody, so after a restart it must
+    /// seed neither an escalation tier nor an open fire. <c>notification_type</c> is NOT NULL in both stores.
+    /// </summary>
+    public const string ExcludeDigestFilter = "\nAND   notification_type <> '" + AlertDelivery.ChannelDigest + "'";
+
     /// <summary>SQL that drops muted rows, for a family whose engine fire site does not record a muted fire's tier.</summary>
     public const string ExcludeMutedFilter = "\nAND   NOT muted";
 

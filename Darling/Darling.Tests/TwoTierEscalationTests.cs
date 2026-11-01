@@ -212,6 +212,14 @@ public sealed class TwoTierEscalationTests
             return;
         }
 
+        /* #7086: Deadlocks Detected pages once per episode, so a Critical that only repeats inside the same episode, cooldown
+           or not, is not a second page. The others repeat on the cooldown. */
+        if (metric == "Deadlocks Detected")
+        {
+            Assert.Equal(0, await StepAsync(metric, h, engine, due, Level.Critical, 3));
+            return;
+        }
+
         Assert.Equal(1, await StepAsync(metric, h, engine, due, Level.Critical, 3));
         Assert.False(Flag(metric, h));
     }
