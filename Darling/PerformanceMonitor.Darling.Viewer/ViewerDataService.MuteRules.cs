@@ -346,7 +346,7 @@ WHERE id = $1";
         return version is int known && known >= RecurringMuteStoreSchemaVersion;
     }
 
-    /// <summary>Whether the store has the rule action (V236, #7083). The dialog hides the Action choice when it does not. A probe that cannot
+    /// <summary>Whether the store has the rule action (V236, #7083). The dialog still offers the Action choice (it sits with the schedule fields), and a digest rule on a store without it is refused at save with an upgrade message. A probe that cannot
     /// tell reads as "no", so an unreachable probe never makes the viewer write a column an older store lacks.</summary>
     public async Task<bool> SupportsMuteActionAsync(CancellationToken cancellationToken = default)
     {
