@@ -98,16 +98,20 @@ public class BlockingPageRuleTests
     }
 
     [Fact]
-    public void TryHold_WritesOnePerCooldown_AndNeverTouchesThePageCooldown()
+    public void TryHold_WritesOneRowPerBurst_AtMostOnePerCooldown_AndNeverTouchesThePageCooldown()
     {
         var stamps = new ConcurrentDictionary<string, DateTime>();
+        var seen = new ConcurrentDictionary<string, DateTime>();
         var t0 = new DateTime(2026, 8, 31, 12, 0, 0, DateTimeKind.Utc);
+        var burst = t0.AddMinutes(-3);
         var cooldown = TimeSpan.FromMinutes(5);
 
-        Assert.True(BlockingPageRule.TryHold(stamps, "pg-a", t0, cooldown, 14, 3, 9_000, 60, false, false));
-        Assert.False(BlockingPageRule.TryHold(stamps, "pg-a", t0.AddMinutes(4), cooldown, 14, 3, 9_000, 60, false, false));
-        Assert.True(BlockingPageRule.TryHold(stamps, "pg-b", t0.AddMinutes(4), cooldown, 14, 3, 9_000, 60, false, false), "another server");
-        Assert.True(BlockingPageRule.TryHold(stamps, "pg-a", t0.AddMinutes(5), cooldown, 14, 3, 9_000, 60, false, false));
+        Assert.True(BlockingPageRule.TryHold(stamps, seen, "pg-a", t0, cooldown, burst, 14, 3, 9_000, 60, false, false));
+        Assert.False(BlockingPageRule.TryHold(stamps, seen, "pg-a", t0.AddMinutes(4), cooldown, burst.AddMinutes(3), 14, 3, 9_000, 60, false, false), "inside the cooldown, even with a newer event");
+        Assert.True(BlockingPageRule.TryHold(stamps, seen, "pg-b", t0.AddMinutes(4), cooldown, burst, 14, 3, 9_000, 60, false, false), "another server");
+        Assert.False(BlockingPageRule.TryHold(stamps, seen, "pg-a", t0.AddMinutes(5), cooldown, burst, 14, 3, 9_000, 60, false, false), "cooldown over, same events");
+        Assert.False(BlockingPageRule.TryHold(stamps, seen, "pg-a", t0.AddMinutes(6), cooldown, burst.AddMilliseconds(1500), 14, 3, 9_000, 60, false, false), "a wait within the jitter of the last one is the same event");
+        Assert.True(BlockingPageRule.TryHold(stamps, seen, "pg-a", t0.AddMinutes(10), cooldown, t0.AddMinutes(6), 14, 3, 9_000, 60, false, false), "cooldown over and a newer event");
 
         /* A held row followed by one event over the bar: the page rule has no memory of the hold. */
         var page = BlockingPageRule.Evaluate(15, 3, 90_000, 60, watermark: 0, cooldownElapsed: true, suppressed: false, wasActive: false);

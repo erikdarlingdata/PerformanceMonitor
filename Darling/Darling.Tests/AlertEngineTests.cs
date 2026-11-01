@@ -1591,7 +1591,7 @@ public sealed class AlertEngineTests
     }
 
     [Fact]
-    public async Task Blocking_FourteenEventsWorstWait9Seconds_WriteOneHeldRow_SendNothing_AndOnlyOnePerCooldown()
+    public async Task Blocking_FourteenEventsWorstWait9Seconds_WriteOneHeldRow_SendNothing_AndAnUnchangedWindowWritesNoSecondRow()
     {
         var h = NewDefaultsHarness();
         AddFourteenShortEvents(h);
@@ -1611,12 +1611,42 @@ public sealed class AlertEngineTests
         await engine.EvaluateServerAsync(Harness.Snapshot());
         Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Detected");
 
-        /* One cooldown later the sustained pattern writes its next row, still held. */
+        /* One cooldown later the rolling hour still holds the same 14 events and none is newer: no second row (#7083 review). */
         h.Now = h.Now.AddMinutes(4);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Detected");
+
+        /* A newer wait arrives in the window, still short: past the cooldown it earns the next held row. */
+        var later = TimedBlockingRow(200, 9000);
+        later.EventTime = later.EventTime!.Value.AddMinutes(8);
+        h.Adapter.Blocking.Add(later);
+        h.Now = h.Now.AddMinutes(1);
         await engine.EvaluateServerAsync(Harness.Snapshot());
         var rows = h.Deliverer.Outcomes.Where(o => o.MetricName == "Blocking Detected").ToList();
         Assert.Equal(2, rows.Count);
         Assert.All(rows, o => Assert.NotNull(o.Hold));
+        Assert.Equal("15", rows[1].CurrentValue);
+    }
+
+    [Fact]
+    public async Task Blocking_OneBurstOfShortWaits_AnHourOfSweeps_WritesExactlyOneHeldRow()
+    {
+        var h = NewDefaultsHarness();
+        h.Adapter.Blocking.Add(TimedBlockingRow(60, 2000));
+        h.Adapter.Blocking.Add(TimedBlockingRow(61, 2000));
+        h.Adapter.Blocking.Add(TimedBlockingRow(62, 2000));
+        var engine = h.Build();
+
+        /* The adapter hands back the same three events at every sweep, as the rolling hour does until they age out. */
+        for (var i = 0; i < 121; i++)
+        {
+            await engine.EvaluateServerAsync(Harness.Snapshot());
+            h.Now = h.Now.AddSeconds(30);
+        }
+
+        var held = Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Detected");
+        Assert.NotNull(held.Hold);
+        Assert.Equal("3 blocking events, worst wait 2 s, longest chain 1", held.Hold!.Reason);
     }
 
     [Fact]

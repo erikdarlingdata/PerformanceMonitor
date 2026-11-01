@@ -1591,7 +1591,9 @@ public sealed partial class DarlingMcpAlertTools
         [Description("Optional action (#7083): 'mute' (the default) mutes a matching alert, 'digest' sends it to the daily digest instead of paging.")] string? action = null) =>
         DarlingAgentActionSeat.IsGated(agentSeat)
             ? (recur_days is not null || recur_start is not null || recur_end is not null || recur_time_zone is not null || action is not null)
-                ? Task.FromResult(Outcome("invalid", DarlingMcpAgentActions.RecurrenceRefusal))
+                ? Task.FromResult(Outcome("invalid", recur_days is not null || recur_start is not null || recur_end is not null || recur_time_zone is not null
+                    ? DarlingMcpAgentActions.RecurrenceRefusal
+                    : DarlingMcpAgentActions.ActionRefusal))
                 : DarlingMcpAgentActions.CreateMuteAsync(agentSeat!, postgres, logger, agent_action, server_name, metric_name, database_pattern,
                 query_text_pattern, wait_type_pattern, job_name_pattern, reason, expires_at, server_id, client_app_pattern, external_source, starts_at)
             : CreateMuteRuleOver(new PgMuteRuleStore(postgres), server_name, metric_name, database_pattern, query_text_pattern,

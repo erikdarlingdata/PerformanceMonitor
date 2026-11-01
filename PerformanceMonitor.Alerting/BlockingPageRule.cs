@@ -81,13 +81,25 @@ public static class BlockingPageRule
     }
 
     /// <summary>
-    /// The held-fire gate for one server: true, and the stamp written, when <see cref="IsHeldBack"/> holds and no held
-    /// row was written for <paramref name="key"/> inside <paramref name="cooldown"/>. A sustained low-wait pattern
-    /// therefore writes one row per cooldown. The stamp is the hold's own: it is never the page cooldown, so a real
-    /// page right after a held row goes out at once.
+    /// How much newer than the last held row's observation an event must be to count as a new one: the same two seconds
+    /// <see cref="BlockingWaits.WaitStartToleranceMs"/> uses to tell one wait from the next, so a continuing wait whose
+    /// derived start wobbles by report jitter is not a new event.
+    /// </summary>
+    public static readonly TimeSpan NewEventAdvance = TimeSpan.FromMilliseconds(BlockingWaits.WaitStartToleranceMs);
+
+    /// <summary>
+    /// The held-fire gate for one server: true, and both stamps written, when <see cref="IsHeldBack"/> holds, no held
+    /// row was written for <paramref name="key"/> inside <paramref name="cooldown"/>, and the window holds an event newer
+    /// than the one the last held row was written for. The count and the worst wait come from the rolling hour, so
+    /// without the observation one burst would be re-recorded every cooldown until it aged out (#7083). One burst
+    /// therefore gives one row, and a pattern that keeps producing events gives at most one row per cooldown. Both
+    /// stamps are the hold's own: neither is the page cooldown, so a real page right after a held row goes out at once.
+    /// <paramref name="newestEventUtc"/> is the start of the newest wait in the window (the newest capture on the
+    /// PostgreSQL path). A restart forgets both stamps, which costs at most one repeat row.
     /// </summary>
     public static bool TryHold(
-        ConcurrentDictionary<string, DateTime> lastHold, string key, DateTime now, TimeSpan cooldown,
+        ConcurrentDictionary<string, DateTime> lastHold, ConcurrentDictionary<string, DateTime> lastHoldObservation,
+        string key, DateTime now, TimeSpan cooldown, DateTime newestEventUtc,
         int count, int countThreshold, long worstWaitMs, int waitBarSeconds, bool wasActive, bool suppressed)
     {
         if (!IsHeldBack(count, countThreshold, worstWaitMs, waitBarSeconds, wasActive, suppressed))
@@ -100,8 +112,36 @@ public static class BlockingPageRule
             return false;
         }
 
+        if (lastHoldObservation.TryGetValue(key, out var observed) && newestEventUtc <= observed + NewEventAdvance)
+        {
+            return false;
+        }
+
         lastHold[key] = now;
+        lastHoldObservation[key] = newestEventUtc;
         return true;
+    }
+
+    /// <summary>
+    /// The start of the newest wait among <paramref name="events"/> (event time minus wait time), the observation a held row
+    /// is written against. A row with no event time is left out. <see cref="DateTime.MinValue"/> when none has one.
+    /// </summary>
+    public static DateTime NewestWaitStart(IEnumerable<BlockedProcessAlertRow> events)
+    {
+        var newest = DateTime.MinValue;
+        foreach (var e in events)
+        {
+            if (e.EventTime is { } time)
+            {
+                var start = time.AddMilliseconds(-Math.Max(0, e.WaitTimeMs));
+                if (start > newest)
+                {
+                    newest = start;
+                }
+            }
+        }
+
+        return newest;
     }
 
     /// <summary>

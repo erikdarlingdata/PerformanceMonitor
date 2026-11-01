@@ -222,9 +222,9 @@ public partial class App : Application
     public static int AlertBlockingThreshold { get; set; } = BlockingPageRule.CountThresholdDefault;
     /// <summary>
     /// #1839: fire when the latest blocking snapshot's TOTAL blocked wait reaches this many seconds.
-    /// 0 = off, and off ships by default — a count threshold can't tell one session blocked for an hour
-    /// from one blocked for a second, but turning this on for everyone would change what existing
-    /// installs alert about.
+    /// 0 = off. It ships at <see cref="BlockingPageRule.WaitSecondsThresholdDefault"/> (60, since #7083), which is also the bar for one
+    /// blocked event to page at once. A count threshold can't tell one session blocked for an hour
+    /// from one blocked for a second, and this bar can.
     /// </summary>
     public static int AlertBlockingWaitSecondsThreshold { get; set; } = BlockingPageRule.WaitSecondsThresholdDefault;
     public static bool AlertDeadlockEnabled { get; set; } = true;

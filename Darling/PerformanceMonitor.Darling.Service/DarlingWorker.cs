@@ -1299,8 +1299,9 @@ public sealed partial class DarlingWorker : BackgroundService
     private readonly ConcurrentDictionary<string, int> _lastAlertedPgDeadlockCount = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, DateTime> _lastPgBlockingAlert = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, bool> _activePgBlockingAlert = new(StringComparer.Ordinal);
-    /* #7083 part 2: the last HELD Blocking Detected row per server, apart from _lastPgBlockingAlert so it never delays a real page. */
+    /* #7083 part 2: the last HELD Blocking Detected row per server, apart from _lastPgBlockingAlert so it never delays a real page. The observation is the newest capture that row was written for (one burst is one row). */
     private readonly ConcurrentDictionary<string, DateTime> _lastPgBlockingHold = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, DateTime> _lastPgBlockingHoldObservation = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, int> _lastAlertedPgBlockingCount = new(StringComparer.Ordinal);
     /* Long-Running Query is a LIVE-STATE check ("is one running right now"), not a rolling event count like
        Deadlocks/Blocking above — so it needs only a cooldown timestamp and an active flag, the same shape

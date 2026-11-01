@@ -131,8 +131,10 @@ public sealed class AlertEngine
     private readonly ConcurrentDictionary<string, DateTime> _lastCpuAlert = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastBlockingAlert = new();
     /* #7083 part 2: the stamp of the last HELD Blocking Detected row per server, kept apart from _lastBlockingAlert so a held row
-       never delays a real page (BlockingPageRule.TryHold). */
+       never delays a real page (BlockingPageRule.TryHold). _lastBlockingHoldObservation is the start of the newest wait that row was written
+       for: the rolling hour keeps one burst in view, and without it every cooldown would re-record the same events. */
     private readonly ConcurrentDictionary<string, DateTime> _lastBlockingHold = new();
+    private readonly ConcurrentDictionary<string, DateTime> _lastBlockingHoldObservation = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastBlockingWaitAlert = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastDeadlockAlert = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastPoisonWaitAlert = new();
@@ -1455,10 +1457,10 @@ public sealed class AlertEngine
             var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = "High CPU" }; /* :74 */
             var mute = JudgeMute(muteCtx);                              /* :75 */
             _lastCpuAlert[key] = now;                                           /* :76 — stamped even when muted */
-            /* Recorded before the send (the history row must not be late), put back below when every channel failed. A muted fire
-               records its tier as muted, not as delivered. */
+            /* Recorded before the send (the history row must not be late), put back below when every channel failed. A muted fire,
+               or one held for the digest, records its tier as muted, not as delivered (nothing was sent). */
             var priorTier = delivered;
-            if (isMuted)
+            if (mute.Silenced)
             {
                 _cpuMutedFire[key] = (cpuGrade, now);
             }
@@ -1849,12 +1851,14 @@ public sealed class AlertEngine
                 wasBlockingActive, suppressed))
         {
             /* #7083 part 2: the count reached the bar and nothing pages (every wait under the 15 s floor, none at the one-event
-               bar, no Blocking Detected incident open). Record one held row for the digest per cooldown. It stamps
-               _lastBlockingHold, never _lastBlockingAlert, and records no tier, so a real page right after goes out at once.
+               bar, no Blocking Detected incident open). Record one held row for the digest per cooldown, and only when the window holds a
+               wait newer than the last held row's (one burst is one row, not one per cooldown for the hour it stays in the window). It stamps
+               _lastBlockingHold, never _lastBlockingAlert, and records no escalation tier, so a real page right after goes out at once.
                A mute rule still wins: a muted server gets no digest line. */
             var holdMute = JudgeMute(new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = "Blocking Detected" });
             if (!holdMute.Muted
-                && BlockingPageRule.TryHold(_lastBlockingHold, key, now, alertCooldown, effectiveBlockingCount, blockingThreshold,
+                && BlockingPageRule.TryHold(_lastBlockingHold, _lastBlockingHoldObservation, key, now, alertCooldown,
+                    BlockingPageRule.NewestWaitStart(blockingEvents), effectiveBlockingCount, blockingThreshold,
                     worstBlockingWaitMs, blockingWaitBarSeconds, wasBlockingActive, suppressed))
             {
                 var holdContext = AlertContextBuilders.BuildBlockingContext(

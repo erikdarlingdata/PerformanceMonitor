@@ -167,7 +167,7 @@ public sealed class MuteRuleDigestActionTests
     private static async Task DriveCpuAsync(AlertEngine engine)
     {
         var at = AlertEngineTests.Harness.SampleBase;
-        for (var i = 0; i < AlertEngine.CpuBreachSamples; i++)
+        for (var i = 0; i < AlertEngine.SqlCpuBreachSamples; i++)
         {
             at = at.AddMinutes(1);
             await engine.EvaluateServerAsync(AlertEngineTests.Harness.Snapshot(sqlCpu: 70, totalCpu: 90, cpuSampleTime: at));

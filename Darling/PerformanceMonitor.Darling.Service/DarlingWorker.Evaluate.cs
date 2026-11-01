@@ -1265,8 +1265,8 @@ public sealed partial class DarlingWorker
             }
             else if (BlockingPageRule.IsHeldBack(count, threshold, worstWaitMs, waitBarSeconds, wasActive, suppressed: false))
             {
-                /* #7083 part 2: the count reached the bar and nothing pages. One held row for the digest per cooldown, on its own
-                   stamp (never _lastPgBlockingAlert), with no tier, so a real page right after goes out at once. A mute rule
+                /* #7083 part 2: the count reached the bar and nothing pages. One held row for the digest per cooldown, and only when the window holds a
+                   capture newer than the last held row's (one burst is one row), on its own stamp (never _lastPgBlockingAlert), with no escalation tier, so a real page right after goes out at once. A mute rule
                    still wins: a muted server gets no digest line. */
                 var holdMute = JudgeMute(new AlertMuteContext
                 {
@@ -1275,8 +1275,8 @@ public sealed partial class DarlingWorker
                     MetricName = metricName,
                 });
                 if (!holdMute.Muted
-                    && BlockingPageRule.TryHold(_lastPgBlockingHold, key, now, cooldown, count, threshold, worstWaitMs,
-                        waitBarSeconds, wasActive, suppressed: false))
+                    && BlockingPageRule.TryHold(_lastPgBlockingHold, _lastPgBlockingHoldObservation, key, now, cooldown,
+                        worstPerRoot.Max(r => r.CapturedAt), count, threshold, worstWaitMs, waitBarSeconds, wasActive, suppressed: false))
                 {
                     await _alertDeliverer.DeliverAndReportAsync(
                         PgBlockingHoldOutcome(key, snapshot.ServerName, worstPerRoot, threshold, now), cancellationToken);
