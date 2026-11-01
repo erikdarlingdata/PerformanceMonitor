@@ -76,8 +76,7 @@ public static class DarlingPgCpuUtilizationReader
     /// provisioned RDS or Aurora PostgreSQL instance looks, since it publishes none of the Serverless v2 metrics, and it
     /// is the only signal the store holds for the difference (the instance class is read by the RDS describe call but is
     /// not stored). A serverless instance that Performance Insights had no ACU point for on one minute is NOT this: its
-    /// other minutes carry the figure, so the answer is false and that minute is left out of the gate. The caller treats
-    /// a target it cannot tell (a failed read) as not provisioned.
+    /// other minutes carry the figure, so the answer is false and that minute is left out of the gate.
     /// </summary>
     public static async Task<bool> IsKnownProvisionedAsync(
         NpgsqlDataSource postgres, int serverId, DateTime nowUtc, CancellationToken cancellationToken = default)

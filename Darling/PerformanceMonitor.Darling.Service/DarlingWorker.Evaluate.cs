@@ -600,9 +600,10 @@ public sealed partial class DarlingWorker
     /// a minute with no figure breaches or clears on instance CPU alone. The signal is the target's own stored samples:
     /// <see cref="DarlingPgCpuUtilizationReader.IsKnownProvisionedAsync"/> is true when none of the last 7 days of rows
     /// carries any of the three capacity columns. The instance class (<c>db.serverless</c>) is read by the RDS describe
-    /// call but has no column, and a column needs a store rung. When the history cannot be read, or the target has
-    /// shown a capacity figure at any point in the week, the target is not known to be provisioned and the minute is
-    /// skipped, which is the behaviour before #7082. The one case this cannot tell apart is a serverless instance whose
+    /// call but has no column, and a column needs a store rung. When the target has shown a capacity figure at any point
+    /// in the week it is not known to be provisioned and the minute is skipped, which is the behaviour before #7082. A
+    /// history read that fails fails the pass, counted like the samples read. The one case this cannot tell apart is a
+    /// serverless instance whose
     /// ACU point was missing on every minute of the week.</para>
     ///
     /// <para>The metric NAMES are "High CPU" / "CPU Resolved", the SQL Server strings, for the parity
@@ -702,7 +703,8 @@ public sealed partial class DarlingWorker
             var outcome = PersistenceOutcome.None;
 
             /* #7082: whether this target is KNOWN to be provisioned, asked at most once a pass and only when a minute with no
-               capacity figure makes it matter. A failed read answers "not known", which leaves the minute out of the gate. */
+               capacity figure makes it matter. A failed read fails the pass like the samples read does (counted below, the
+               batch retried next sweep), so it never turns a minute into a breach. */
             bool? knownProvisionedMemo = null;
             async Task<bool> KnownProvisionedAsync()
             {
@@ -711,24 +713,11 @@ public sealed partial class DarlingWorker
                     return known;
                 }
 
-                try
-                {
-                    knownProvisionedMemo = await DarlingPgCpuUtilizationReader.IsKnownProvisionedAsync(
-                        _postgres, runtime.ServerId, now, cancellationToken);
-                }
-                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-                {
-                    throw;
-                }
-                catch (Exception ex)
-                {
-                    knownProvisionedMemo = false;
-                    _logger.LogDebug(
-                        "[{Server}] PostgreSQL CPU capacity history unreadable, a minute with no capacity figure is left out of the gate: {Message}",
-                        runtime.Config.DisplayName, ex.Message);
-                }
-
-                return knownProvisionedMemo.Value;
+                var provisioned = await DarlingPgCpuUtilizationReader.IsKnownProvisionedAsync(
+                    _postgres, runtime.ServerId, now, cancellationToken);
+                readClock.Restart();
+                knownProvisionedMemo = provisioned;
+                return provisioned;
             }
 
             DarlingPgCpuUtilizationReader.CpuSample? lastCounted = null;
@@ -761,6 +750,7 @@ public sealed partial class DarlingWorker
                 var gateInput = PgCpuGateInput(
                     capacityPercent, sample.CpuPercent, alertSettings.CpuThresholdPercent,
                     knownProvisioned: !capacityPercent.HasValue && await KnownProvisionedAsync());
+                readClock.Restart();
                 if (gateInput is not { } breached)
                 {
                     continue;
@@ -884,6 +874,7 @@ public sealed partial class DarlingWorker
                     knownProvisioned: !lastCapacityPercent.HasValue
                         && lastCounted.CpuPercent >= alertSettings.CpuThresholdPercent
                         && await KnownProvisionedAsync());
+            readClock.Restart();
 
             if (record.State.Firing && breaching)
             {
