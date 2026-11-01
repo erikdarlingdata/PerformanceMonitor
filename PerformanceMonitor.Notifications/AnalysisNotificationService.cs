@@ -38,7 +38,7 @@ namespace PerformanceMonitor.Notifications;
 ///
 /// <para><b>#3712: confidence chooses the channel.</b> Crossing the severity floor makes a finding
 /// notify-worthy; it does not by itself earn a PAGE. Each notify-worthy incident is routed by
-/// <see cref="FindingRouting.Classify(AnalysisFinding, FindingRoute)"/> on its members' corroboration
+/// <see cref="FindingRouting.Classify(AnalysisFinding, FindingRoute, double)"/> on its members' corroboration
 /// components: an incident with a corroborated member takes the page road (the channels, Lite's tray),
 /// an incident of uncorroborated singles takes the digest road — persisted as a finding, recorded in the
 /// ledger with the <see cref="AlertContext.Routing"/> decision and <see cref="AlertDelivery.RoutedToDigest"/>,
@@ -332,7 +332,7 @@ public sealed class AnalysisNotificationService : IDisposable
                redundant" shape the live batch was made of. */
             var decisions = new Dictionary<AnalysisFinding, FindingRouteDecision>(ReferenceEqualityComparer.Instance);
             foreach (var m in members)
-                decisions[m] = FindingRouting.Classify(m, uncorroboratedRoute);
+                decisions[m] = FindingRouting.Classify(m, uncorroboratedRoute, threshold);
 
             var anyPage = members.Any(m => decisions[m].Route == FindingRoute.Page);
             var route = anyPage ? FindingRoute.Page : FindingRoute.Digest;

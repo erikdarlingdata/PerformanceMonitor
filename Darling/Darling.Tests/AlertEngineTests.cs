@@ -2189,9 +2189,14 @@ public sealed class AlertEngineTests
         Assert.Equal(1L, firstIncident.TotalOccurrences);
         Assert.Equal(h.Now, firstIncident.IncidentStartedUtc);
 
-        /* Same fingerprint (identical graphs), so this is the same incident continuing. */
-        h.Adapter.Deadlocks.Add(DeadlockRow());
-        h.Adapter.Deadlocks.Add(DeadlockRow());
+        /* Same fingerprint (identical graphs), so this is the same incident continuing. #7086: a count rise inside an
+           open episode no longer pages, so the second delivery is the rise to the Critical rate (20 an hour), the
+           one rise that still does. */
+        for (var i = 0; i < 20; i++)
+        {
+            h.Adapter.Deadlocks.Add(DeadlockRow());
+        }
+
         var openedAt = h.Now;
         h.Now = h.Now.AddMinutes(6);
         await engine.EvaluateServerAsync(Harness.Snapshot());
@@ -2199,15 +2204,15 @@ public sealed class AlertEngineTests
         Assert.Equal(2, h.Deliverer.Outcomes.Count);
         var second = h.Deliverer.Outcomes[1];
         var secondIncident = Assert.Single(second.Context!.Incidents!);
-        Assert.Equal(3, secondIncident.OccurrenceCount);
-        Assert.Equal(3L, secondIncident.TotalOccurrences);
+        Assert.Equal(21, secondIncident.OccurrenceCount);
+        Assert.Equal(21L, secondIncident.TotalOccurrences);
 
         /* The start time did NOT move — that is how the consumer tells a continuation from a new incident
            that happens to read 3. */
         Assert.Equal(openedAt, secondIncident.IncidentStartedUtc);
 
         var persisted = h.StateStore.Occurrences[(Key, AlertEngine.DeadlockWatermarkMetric)];
-        Assert.Equal(3L, persisted[secondIncident.DedupKey].TotalOccurrences);
+        Assert.Equal(21L, persisted[secondIncident.DedupKey].TotalOccurrences);
     }
 
     [Fact]

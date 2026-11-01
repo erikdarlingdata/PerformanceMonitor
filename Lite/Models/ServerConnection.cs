@@ -536,7 +536,7 @@ public class ServerConnection : INotifyPropertyChanged
             /* tcp: so SqlClient never falls back to a named pipe over SMB with this process's Windows credentials (#6352). */
             DataSource = ServerHostSetting.TcpDataSource(ServerName),
             InitialCatalog = string.IsNullOrWhiteSpace(DatabaseName) ? "master" : DatabaseName,
-            ApplicationName = "PerformanceMonitorLite",
+            ApplicationName = PerformanceMonitor.Common.MonitorApplicationNames.Lite,
             ConnectTimeout = 15,
             CommandTimeout = 60,
             TrustServerCertificate = TrustServerCertificate,

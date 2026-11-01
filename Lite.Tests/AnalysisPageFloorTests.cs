@@ -87,7 +87,7 @@ public class AnalysisPageFloorTests
 
     private static AnalysisFinding Finding(
         string hash, string rootKey, Dictionary<string, double>? rootMetadata = null, IEnumerable<string>? path = null,
-        Dictionary<string, double>? evidence = null, double severity = 1.6)
+        Dictionary<string, double>? evidence = null, double severity = 1.9)
     {
         var keys = (path ?? [rootKey]).ToList();
         return new AnalysisFinding
@@ -221,7 +221,7 @@ public class AnalysisPageFloorTests
 
     /* ---------------- part 4: PostgreSQL wait profile ---------------- */
 
-    private static AnalysisFinding WaitProfile(double meanMsPerSec, string hash = "g000000000000001", double severity = 1.6, string root = "ANOMALY_PG_WAIT_PROFILE")
+    private static AnalysisFinding WaitProfile(double meanMsPerSec, string hash = "g000000000000001", double severity = 1.75, string root = "ANOMALY_PG_WAIT_PROFILE")
         => Finding(hash, root, new Dictionary<string, double> { ["mean_ms_per_sec"] = meanMsPerSec, ["current_ms_per_sec"] = meanMsPerSec * 3 }, severity: severity);
 
     [Fact]
@@ -244,7 +244,7 @@ public class AnalysisPageFloorTests
         Assert.Single(sender.Sent);
 
         /* The story worsens by more than the steady-severity step with no cooldown, so only the 24-hour cap holds it. */
-        await notifier.NotifyAsync([WaitProfile(2500, severity: 1.95)]);
+        await notifier.NotifyAsync([WaitProfile(2500, severity: 2.0)]);
         await notifier.FlushPendingAsync();
         Assert.Single(sender.Sent);
     }
