@@ -2916,24 +2916,18 @@ internal sealed class DarlingSelfAlertEvaluator
                     ("Groups", string.Create(CultureInfo.InvariantCulture, $"{facts.HeldGroups.Count:N0}")),
                 }
             });
+            /* One record-shaped detail, one record per group (#7086): 40 groups as 40 field items cost 80 of a Slack
+               message's 50 blocks and pushed the singles off it, while records pack into a few sections under the
+               3,000 character cap (and into one fact per group on a Teams card, the same line an email shows). The line
+               is the one the prose document uses, so the two cannot drift. */
+            var heldRecords = new AlertDetailItem { Heading = "Held groups" };
+            var ordinal = 0;
             foreach (var group in facts.HeldGroups.Take(MaxListedHeldGroups))
             {
-                var held = new AlertDetailItem
-                {
-                    Heading = string.Create(CultureInfo.InvariantCulture, $"{group.Server} - {group.Metric}"),
-                    Fields =
-                    {
-                        ("Held", string.Create(CultureInfo.InvariantCulture, $"{group.Count:N0}")),
-                        ("First (UTC)", string.Create(CultureInfo.InvariantCulture, $"{group.FirstUtc:o}")),
-                        ("Last (UTC)", string.Create(CultureInfo.InvariantCulture, $"{group.LastUtc:o}")),
-                    }
-                };
-                if (!string.IsNullOrEmpty(group.Reason))
-                {
-                    held.Fields.Add(("Reason", group.Reason));
-                }
-                context.Details.Add(held);
+                ordinal++;
+                heldRecords.Records.Add(new AlertDetailRecord(ordinal, HeldGroupLine(group), new List<(string Label, string Text)>()));
             }
+            context.Details.Add(heldRecords);
             if (facts.HeldGroups.Count > MaxListedHeldGroups)
             {
                 context.Details.Add(new AlertDetailItem

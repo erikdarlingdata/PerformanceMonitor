@@ -198,6 +198,15 @@ public sealed class TwoTierEscalationTests
         /* The cooldown counts from the Critical (T0 + 1 minute), not from the Warning. */
         var due = T0.AddMinutes(1).Add(TimeSpan.FromMinutes(h.Settings.CooldownMinutes));
         Assert.Equal(0, await StepAsync(metric, h, engine, due.AddSeconds(-30), Level.Critical, 2));
+
+        /* #7086: Deadlocks Detected pages once per episode, so a Critical that only repeats inside the same episode, cooldown
+           or not, is not a second page. The others repeat on the cooldown. */
+        if (metric == "Deadlocks Detected")
+        {
+            Assert.Equal(0, await StepAsync(metric, h, engine, due, Level.Critical, 3));
+            return;
+        }
+
         Assert.Equal(1, await StepAsync(metric, h, engine, due, Level.Critical, 3));
         Assert.False(Flag(metric, h));
     }
