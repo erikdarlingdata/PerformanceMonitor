@@ -53,6 +53,12 @@ namespace PerformanceMonitor.Alerting;
 /// render site falls back to <paramref name="MetricName"/> whenever this is null or empty; the metric name
 /// stays the severity / cooldown / dedup key everywhere.
 /// </param>
+/// <param name="Hold">
+/// #7086: the evaluator held this fire back from paging. The deliverer records it as a digest row
+/// (<see cref="AlertDelivery.RoutedToDigest"/>, <see cref="AlertContext.Routing"/> set to <c>("digest", Reason)</c>)
+/// and sends nothing: no email, no webhook, no investigation request, no tray toast. Null (the default) is an
+/// ordinary fire. <paramref name="Muted"/> wins: a muted and held fire is recorded as muted.
+/// </param>
 public sealed record AlertOutcome(
     string ServerKey,
     string ServerName,
@@ -66,7 +72,8 @@ public sealed record AlertOutcome(
     bool Muted,
     AlertSeverityLevel? Severity,
     string? ShortMessage = null,
-    string? DisplayName = null);
+    string? DisplayName = null,
+    AlertHold? Hold = null);
 
 /// <summary>
 /// The record-and-send seam for the Phase-5 shared alert engine: the engine evaluates conditions

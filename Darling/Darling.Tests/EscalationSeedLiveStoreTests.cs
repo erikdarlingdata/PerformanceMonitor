@@ -94,6 +94,21 @@ VALUES ($1, $2, 'Srv', $3, 0, 0, $4, $5, $6, $7, $8)", connection);
             serverId, Fire, Resolution, Now - (window ?? TimeSpan.FromMinutes(15)), countMuted, fallback, until);
 
     [Fact]
+    public Task DigestRows_NeverSeedATier_OrAnOpenFire() => RunLiveAsync(async (store, c) =>
+    {
+        // #7086: a fire an evaluator held back from paging is a digest row. It paged nobody, so after a restart it must seed
+        // neither a tier nor an open fire, and an older delivered Warning stays the standing tier under a newer held Critical.
+        await InsertAsync(c, Now.AddMinutes(-2), Fire, Critical, sent: false, type: "digest");
+        Assert.Null(await ReadAsync(store));
+        Assert.Null(await store.GetOpenFireAsync("-571510", Fire, new[] { Resolution }, null, Now));
+        Assert.Empty((await store.GetStandingAsync("-571510", Fire, new[] { Resolution }, null, Now)).Fires);
+
+        await InsertAsync(c, Now.AddMinutes(-6), Fire, Warning);
+        Assert.Equal(AlertSeverityLevel.Warning, await ReadAsync(store));
+        Assert.Equal(Warning, (await store.GetOpenFireAsync("-571510", Fire, new[] { Resolution }, null, Now))!.ContextJson);
+    });
+
+    [Fact]
     public Task NewestFireWins() => RunLiveAsync(async (store, c) =>
     {
         await InsertAsync(c, Now.AddMinutes(-5), Fire, Warning);

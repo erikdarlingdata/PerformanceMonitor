@@ -7158,6 +7158,7 @@ WHERE c.is_enabled";
             _activeFleetGate.TryRemove(FleetGateKey, out _);
             _fleetGateQuietSince.TryRemove(FleetGateKey, out _);
             EndStateAlert(_lastFleetGateAlert, FleetGateKey, FleetGateMetric, FleetGateKey);
+            EndSelfHoldEpisode(FleetGateMetric, FleetGateKey);
             await RecordResolutionAsync(new AlertResolution(
                 StoreKey(FleetGateKey), _storeLabel, FleetGateMetric, FleetGateClearedMetric,
                 $"Collection has kept up with its schedule: under {FleetGateQuietPercent}% of the slots that came due were skipped for the last hour"),
@@ -7177,26 +7178,49 @@ WHERE c.is_enabled";
 
         /* #5493: a state alert (see ApplyCaptureDownAsync): one alert on entry, a repeat only per
            connection_refire_minutes. */
-        var decision = DecideStateAlert(_lastFleetGateAlert, FleetGateKey, FleetGateMetric, FleetGateKey, now, out var refire);
-        if (decision is not (ConnectionAlertDecision.Lost or ConnectionAlertDecision.StillDown))
+        /* #7086 part 4: the condition pages once it has stood 30 minutes. The episode's first breach writes one held row (no page,
+           no stamp, no retry state); the evaluations after it, up to the 30th minute, write nothing. An episode already paged
+           (a stamp in memory, or seeded above from a delivered fire in history after a restart) is not held again. */
+        var pagedAlready = LastFiredStamp.TryGet(_lastFleetGateAlert, FleetGateKey, now, out _);
+        var hold = JudgeSelfHold(FleetGateMetric, FleetGateKey, now, pagedAlready, byEvaluations: false, out var firstOfEpisode);
+        /* One send serves both roads: a held fire (the episode's first breach) records the digest row and stamps nothing;
+           a page decides on the repeat policy as before and hands its answer to NoteStateSend. */
+        var decision = ConnectionAlertDecision.Lost;
+        var refire = 0;
+        if (hold is not null)
         {
-            return;
+            if (!firstOfEpisode)
+            {
+                return;
+            }
         }
+        else
+        {
+            decision = DecideStateAlert(_lastFleetGateAlert, FleetGateKey, FleetGateMetric, FleetGateKey, now, out refire);
+            if (decision is not (ConnectionAlertDecision.Lost or ConnectionAlertDecision.StillDown))
+            {
+                return;
+            }
 
-        _lastFleetGateAlert[FleetGateKey] = now;
+            _lastFleetGateAlert[FleetGateKey] = now;
+        }
 
         var (shortMessage, detail, currentValue) = RenderFleetGate(report);
         var delivery = await FireAsync(
             StoreKey(FleetGateKey), _storeLabel, FleetGateMetric,
             currentValue: currentValue,
             thresholdValue: string.Create(CultureInfo.InvariantCulture, $"{FleetGateBehindPercent}% and at least {FleetGateBehindMinSkipped} slots"),
-            detail: StateRepeatNote(decision, refire) + detail,
+            detail: (hold is null ? StateRepeatNote(decision, refire) : string.Empty) + detail,
             severity: AlertSeverityLevel.Warning,
             shortMessage: shortMessage,
             /* A real measurement: the share of due slots skipped, against the share that fires. */
             numericCurrentValue: Math.Round(report.SkippedPercent, 1), numericThresholdValue: FleetGateBehindPercent,
-            cancellationToken);
-        NoteStateSend(FleetGateMetric, FleetGateKey, delivery);
+            cancellationToken,
+            hold: hold);
+        if (hold is null)
+        {
+            NoteStateSend(FleetGateMetric, FleetGateKey, delivery);
+        }
     }
 
     /// <summary>Renders the (shortMessage, detail, currentValue) for the "Collection Falling Behind" alert: the counts,
@@ -8462,9 +8486,19 @@ WHERE c.is_enabled";
         if (reading.IsPressure)
         {
             _activeCheckpointerPressure[CheckpointerKey] = true;
-            if (CooldownElapsed(_lastCheckpointerPressureAlert, CheckpointerKey, now))
+
+            /* #7086 part 4: the check rides the hourly tick, so the hold is 3 evaluations in a row, not 30 minutes. The first
+               breach of an episode writes one held row (no page, no cooldown stamp); the later held evaluations write nothing;
+               the third pages, and after that the shared cooldown re-fires as it always did. */
+            var hold = JudgeSelfHold(
+                CheckpointerPressureMetric, CheckpointerKey, now, alreadyPaged: false, byEvaluations: true, out var firstOfEpisode);
+            if (hold is null ? CooldownElapsed(_lastCheckpointerPressureAlert, CheckpointerKey, now) : firstOfEpisode)
             {
-                _lastCheckpointerPressureAlert[CheckpointerKey] = now;
+                if (hold is null)
+                {
+                    _lastCheckpointerPressureAlert[CheckpointerKey] = now;
+                }
+
                 var writeSeconds = (writeMs / 1000.0).ToString("0.0", CultureInfo.InvariantCulture);
                 var averageOverBar = averageSyncMs is double avg && avg > CheckpointSyncBarMs;
                 var averageSecondsText = averageSyncMs is double a ? (a / 1000.0).ToString("0.0", CultureInfo.InvariantCulture) : "unmeasured";
@@ -8543,12 +8577,17 @@ WHERE c.is_enabled";
                     shortMessage: $"store checkpointer: {arms} over {checkpointCount} {(checkpointCount == 1 ? "checkpoint" : "checkpoints")} in the last {intervalMinutes} min",
                     numericCurrentValue: currentValue,
                     numericThresholdValue: CheckpointSyncBarMs,
-                    cancellationToken);
-                AfterSelfFire(CheckpointerPressureMetric, _lastCheckpointerPressureAlert, CheckpointerKey, now, SharedCooldown, delivery);
+                    cancellationToken,
+                    hold: hold);
+                if (hold is null)
+                {
+                    AfterSelfFire(CheckpointerPressureMetric, _lastCheckpointerPressureAlert, CheckpointerKey, now, SharedCooldown, delivery);
+                }
             }
         }
         else if (_activeCheckpointerPressure.TryRemove(CheckpointerKey, out var was) && was)
         {
+            EndSelfHoldEpisode(CheckpointerPressureMetric, CheckpointerKey);
             var recoveredAverageText = averageSyncMs is double recoveredAvg
                 ? (recoveredAvg / 1000.0).ToString("0.0", CultureInfo.InvariantCulture) + "s average sync per checkpoint"
                 : "an unmeasured average sync per checkpoint";
@@ -9824,7 +9863,8 @@ ORDER BY ag_name, database_name, replica_server_name";
         string serverKey, string serverName, string metricName, string currentValue, string thresholdValue,
         string detail, AlertSeverityLevel? severity, string shortMessage,
         double? numericCurrentValue, double? numericThresholdValue, CancellationToken cancellationToken,
-        AlertContext? context = null, bool? muted = null, bool scheduledReport = false, string? displayName = null)
+        AlertContext? context = null, bool? muted = null, bool scheduledReport = false, string? displayName = null,
+        AlertHold? hold = null)
     {
         /* Same mute treatment as the engine: a muted self-alert is still recorded (flagged muted) but its
            channels are skipped — the deliverer honors AlertOutcome.Muted. A caller that brought its own
@@ -9860,14 +9900,15 @@ ORDER BY ag_name, database_name, replica_server_name";
             _logger?.LogWarning(
                 "{Line}",
                 AlertFiringLog.Fired(
-                    serverName, metricName, severity?.ToString() ?? "Warning", shortMessage, isMuted));
+                    serverName, metricName, severity?.ToString() ?? "Warning", shortMessage, isMuted, hold is not null));
         }
 
         return await _deliverer.DeliverAndReportAsync(new AlertOutcome(
             serverKey, serverName, metricName, currentValue, thresholdValue,
             Context: context, DetailText: detail,
             NumericCurrentValue: numericCurrentValue, NumericThresholdValue: numericThresholdValue,
-            Muted: isMuted, Severity: severity, ShortMessage: shortMessage, DisplayName: displayName), cancellationToken);
+            Muted: isMuted, Severity: severity, ShortMessage: shortMessage, DisplayName: displayName,
+            Hold: hold), cancellationToken);
     }
 
     private async Task RecordResolutionAsync(AlertResolution resolution, CancellationToken cancellationToken)
@@ -9906,6 +9947,89 @@ ORDER BY ag_name, database_name, replica_server_name";
     /// compares against it and the arms that report a send's answer to <see cref="AfterSelfFire"/> pass it, so the
     /// gate and the back-dated stamp cannot disagree about how long the cooldown is.</summary>
     private TimeSpan SharedCooldown => TimeSpan.FromMinutes(_settings.CooldownMinutes);
+
+    /* ---------------- self-health hold (#7086 part 4) ---------------- */
+
+    /// <summary>How long a store self-health condition (Store Checkpointer Pressure, Collection Falling Behind) must have
+    /// stood before it pages (#7086). Until then the episode's first breach writes one held (digest) row and nothing pages.</summary>
+    internal static readonly TimeSpan SelfHealthHold = TimeSpan.FromMinutes(30);
+
+    /// <summary>The same bar for a check that is evaluated less often than every 10 minutes (Store Checkpointer Pressure
+    /// rides the hourly store self-metrics tick): the condition must breach this many evaluations in a row. Three hourly
+    /// evaluations is longer than 30 minutes by design, because one evaluation cannot tell a blip from a standing condition.</summary>
+    internal const int SelfHealthHoldEvaluations = 3;
+
+    /// <summary>Test seam: false lets a first breach page at once, the behavior before #7086, so a test that pins something other
+    /// than the hold does not have to run the evaluator through a held episode first. Always true in the service.</summary>
+    internal bool HoldSelfHealth { get; set; } = true;
+
+    private sealed class HoldEpisode
+    {
+        public HoldEpisode(DateTime startedUtc) => StartedUtc = startedUtc;
+
+        public DateTime StartedUtc { get; }
+
+        public int Evaluations { get; set; }
+
+        /// <summary>True once the episode earned its page (or was already paged before this process started): later breaches
+        /// in the same episode follow the family's own cooldown, unheld.</summary>
+        public bool Released { get; set; }
+    }
+
+    /// <summary>The open self-health episodes by metric and key, in memory only. A service restart forgets them: an episode
+    /// that was still held starts again (one more held row, a fresh 30 minutes or 3 evaluations), and one that had already
+    /// paged is seeded from the delivered fire in history where its family seeds, and is not held again.</summary>
+    private readonly ConcurrentDictionary<string, HoldEpisode> _holdEpisodes = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Judges one breaching evaluation of a self-health condition against the hold (#7086). Returns null when the page may go
+    /// out (the episode has stood long enough, or was already paged), else the <see cref="AlertHold"/> to fire under.
+    /// <paramref name="firstOfEpisode"/> is true on the breach that opens the episode: the only held evaluation that writes a
+    /// row, so an episode is one held row however long it is held. Call it once per breaching evaluation.
+    /// </summary>
+    private AlertHold? JudgeSelfHold(
+        string metric, string key, DateTime now, bool alreadyPaged, bool byEvaluations, out bool firstOfEpisode)
+    {
+        firstOfEpisode = false;
+        if (!HoldSelfHealth)
+        {
+            return null;
+        }
+
+        var holdKey = StateRetryKey(metric, key);
+        if (!_holdEpisodes.TryGetValue(holdKey, out var episode))
+        {
+            episode = new HoldEpisode(now);
+            _holdEpisodes[holdKey] = episode;
+            firstOfEpisode = true;
+        }
+
+        episode.Evaluations++;
+        if (episode.Released || alreadyPaged)
+        {
+            episode.Released = true;
+            return null;
+        }
+
+        var stood = byEvaluations
+            ? episode.Evaluations >= SelfHealthHoldEvaluations
+            : now - episode.StartedUtc >= SelfHealthHold;
+        if (stood)
+        {
+            episode.Released = true;
+            return null;
+        }
+
+        return new AlertHold(byEvaluations
+            ? string.Create(CultureInfo.InvariantCulture,
+                $"Held for the digest: {metric} breached {episode.Evaluations} of {SelfHealthHoldEvaluations} evaluations in a row. It pages once it breaches {SelfHealthHoldEvaluations} in a row.")
+            : string.Create(CultureInfo.InvariantCulture,
+                $"Held for the digest: {metric} has stood {(int)(now - episode.StartedUtc).TotalMinutes} of {(int)SelfHealthHold.TotalMinutes} minutes. It pages once it has stood {(int)SelfHealthHold.TotalMinutes} minutes."));
+    }
+
+    /// <summary>Forgets an episode when its condition clears.</summary>
+    private void EndSelfHoldEpisode(string metric, string key) =>
+        _holdEpisodes.TryRemove(StateRetryKey(metric, key), out _);
 
     /// <summary>
     /// The shared cooldown gate: no prior fire, or <see cref="SharedCooldown"/> has elapsed. #4732: a stamp AHEAD of

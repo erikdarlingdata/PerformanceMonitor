@@ -883,6 +883,51 @@ public sealed class StoreToastAndCheckpointerTests
     }
 
     [Fact]
+    public async Task CheckpointerPressure_HoldsTheFirstTwoHourlyBreaches_WritesOneHeldRow_AndPagesOnTheThird()
+    {
+        /* #7086 part 4: the check runs once an hour, so the hold is 3 breaching evaluations in a row (the 30-minute bar does not
+           fit a check that runs less often than every 10 minutes). Two hours in: one held row and no page. The third pages. */
+        var h = new Harness();
+        h.HoldSelfHealth = true;
+        var e = h.Build();
+
+        await e.ApplyCheckpointerPressureAsync(Interval(syncMs: 25_200, requested: 0, timed: 1), Ct);
+        h.Clock = h.Clock.AddHours(1);
+        await e.ApplyCheckpointerPressureAsync(Interval(syncMs: 25_200, requested: 0, timed: 1), Ct);
+
+        var held = Assert.Single(h.Deliverer.Outcomes);
+        Assert.NotNull(held.Hold);
+        Assert.Equal(DarlingSelfAlertEvaluator.CheckpointerPressureMetric, held.MetricName);
+
+        h.Clock = h.Clock.AddHours(1);
+        await e.ApplyCheckpointerPressureAsync(Interval(syncMs: 25_200, requested: 0, timed: 1), Ct);
+
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.Null(h.Deliverer.Outcomes[1].Hold);
+        Assert.Equal(DarlingSelfAlertEvaluator.CheckpointerPressureMetric, h.Deliverer.Outcomes[1].MetricName);
+    }
+
+    [Fact]
+    public async Task CheckpointerPressure_ACleanIntervalEndsTheEpisode_SoTheNextBreachIsHeldAgain()
+    {
+        var h = new Harness();
+        h.HoldSelfHealth = true;
+        var e = h.Build();
+
+        await e.ApplyCheckpointerPressureAsync(Interval(syncMs: 25_200, requested: 0, timed: 1), Ct);
+        h.Clock = h.Clock.AddHours(1);
+        await e.ApplyCheckpointerPressureAsync(Interval(syncMs: 1_200, requested: 0), Ct);
+        h.Clock = h.Clock.AddHours(1);
+        await e.ApplyCheckpointerPressureAsync(Interval(syncMs: 25_200, requested: 0, timed: 1), Ct);
+        h.Clock = h.Clock.AddHours(1);
+        await e.ApplyCheckpointerPressureAsync(Interval(syncMs: 25_200, requested: 0, timed: 1), Ct);
+
+        // Two held episodes (a row each) and no page: neither episode reached 3 breaches in a row.
+        Assert.Equal(2, h.Deliverer.Outcomes.Count(o => o.MetricName == DarlingSelfAlertEvaluator.CheckpointerPressureMetric && o.Hold is not null));
+        Assert.DoesNotContain(h.Deliverer.Outcomes, o => o.MetricName == DarlingSelfAlertEvaluator.CheckpointerPressureMetric && o.Hold is null);
+    }
+
+    [Fact]
     public async Task CheckpointerPressure_FiresInfoOnEitherArm_AndNotUnderBothLines()
     {
         var h = new Harness();
@@ -1424,7 +1469,18 @@ public sealed class StoreToastAndCheckpointerTests
         public FakeHistoryStore History { get; } = new();
         public DateTime Clock { get; set; } = new(2026, 9, 20, 13, 0, 0, DateTimeKind.Utc);
 
-        public DarlingSelfAlertEvaluator Build() =>
+        public DarlingSelfAlertEvaluator Build()
+        {
+            var e = BuildCore();
+            e.HoldSelfHealth = HoldSelfHealth;
+            return e;
+        }
+
+        /// <summary>#7086: false (the default here) lets the self-health conditions page on a first breach, as the older tests
+        /// in this file assume. The hold tests set it true.</summary>
+        public bool HoldSelfHealth { get; set; }
+
+        private DarlingSelfAlertEvaluator BuildCore() =>
             new(Settings, Deliverer, History, _ => false, logger: null, utcNow: () => Clock);
     }
 

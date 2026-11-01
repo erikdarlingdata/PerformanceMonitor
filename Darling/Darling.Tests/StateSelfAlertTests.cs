@@ -127,6 +127,8 @@ public sealed class StateSelfAlertTests
                 Settings, Deliverer, History, _ => false,
                 logger: new DarlingSelfAlertTests.CapturingLogger(), utcNow: () => Now,
                 connectionRefireMinutes: () => ConnectionRefireMinutes);
+            /* #7086: these tests pin the state-alert policy, not the self-health hold. */
+            Evaluator.HoldSelfHealth = false;
         }
 
         public State State { get; }
