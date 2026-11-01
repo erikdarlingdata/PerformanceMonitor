@@ -3355,8 +3355,9 @@ $do$;";
     /// person's approval, and <c>approval_single_person</c> (default false) whether the person who asked may approve it. The column defaults to
     /// <c>required</c>, so a route a person later raises to Level 3 gets approval, and the backfill sets <c>off</c> only on the rows at
     /// <c>agent_level = 3</c> today, so no route that acts now starts to wait. The backfill runs only in the statement that adds the column: a
-    /// re-run of the rung (a rewind) must not turn approval off on a Level 3 route a person has since set to <c>required</c>. No path reads
-    /// either column yet, so no current path changes.</para>
+    /// re-run of the rung (a rewind) must not turn approval off on a Level 3 route a person has since set to <c>required</c>. The agent-action
+    /// gate reports approval from both columns, the agent's write refuses with <c>approval_required</c> when they say so, and the press
+    /// checks who may approve from them.</para>
     /// <para><c>config.agent_action_proposals</c> holds one proposed Level 3 action: the request, its claim number and agent, the tool, the
     /// server, the parsed target (canonical JSON, with its SHA-256 in <c>target_key</c>), the binding, the agent's reason, the times, the state,
     /// the first of a person's two presses (who, when and the facts it showed, so the confirming press can be checked against it on any

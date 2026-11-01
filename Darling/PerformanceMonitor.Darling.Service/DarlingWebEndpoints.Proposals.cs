@@ -36,7 +36,7 @@ public static partial class DarlingWebEndpoints
     internal const string NobodyCanApproveRoutesRoute = "/api/notification-routes/nobody-can-approve";
 
     /// <summary>The sentence the route page, the proposal notice and the agent's answer share (#7109).</summary>
-    internal const string NobodyCanApproveSentence = "Nobody can approve this. Map a person, or turn on single-person approval.";
+    internal const string NobodyCanApproveSentence = ActionApprovalRules.NobodyCanApproveMessage;
 
     /// <summary>What the proposal page says to a session that presses as an administrator, before the press (#7109).</summary>
     internal const string AdministratorPressNote =

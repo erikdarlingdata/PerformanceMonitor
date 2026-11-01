@@ -420,6 +420,55 @@ public sealed class RemediationLiveSqlTests
     }
 
     /// <summary>
+    /// #7109: a kill that carries the session's <c>last_request_end_time</c> from the dry run is refused <c>session_changed</c> when the session has
+    /// finished another batch since, and the session stays alive, dry run and write alike. With the current value the same kill goes through.
+    /// </summary>
+    [Fact]
+    public async Task AKillWithAStaleLastRequestEnd_IsRefusedSessionChanged_AndTheSessionLives_ButTheCurrentValueKills()
+    {
+        NeedServer();
+        var ct = TestContext.Current.CancellationToken;
+        var scratch = new Scratch();
+        SqlConnection? victim = null;
+        try
+        {
+            await scratch.CreateAsync(ct);
+            int sessionId;
+            DateTime loginTime;
+            (victim, sessionId, loginTime) = await OpenVictimAsync(scratch, ct);
+            var executor = scratch.Executor(new CapturingLogger());
+            var permit = Permit(ServerActionNames.KillSession, sessionId.ToString(CultureInfo.InvariantCulture), null);
+            await using var admin = await OpenAsync(Admin(), ct);
+            var lastEndSql = $"SELECT last_request_end_time FROM sys.dm_exec_sessions WHERE session_id = {sessionId};";
+
+            var before = (DateTime)(await ScalarAsync(admin, lastEndSql, ct))!;
+            /* The session finishes a new batch: its last_request_end_time moves on (datetime resolution is about 3 ms). */
+            await Task.Delay(50, ct);
+            Assert.Equal(1, Convert.ToInt32(await ScalarAsync(victim, "SELECT 1;", ct), CultureInfo.InvariantCulture));
+            var after = (DateTime)(await ScalarAsync(admin, lastEndSql, ct))!;
+            Assert.NotEqual(before, after);
+
+            foreach (var dry in new[] { true, false })
+            {
+                var refused = await executor.KillSessionAsync(permit, sessionId, loginTime, dry, ct, new KillExpectedActivity(before));
+                Assert.Equal(RemediationOutcome.Refused, refused.Outcome);
+                Assert.Equal(RemediationResult.Reasons.SessionChanged, refused.Reason);
+                Assert.False(refused.Wrote);
+                Assert.True(await SessionExistsAsync(sessionId, loginTime, ct));
+            }
+
+            /* The refusals did not touch the victim, so its last_request_end_time is still the value read after its second batch. */
+            var killed = await executor.KillSessionAsync(permit, sessionId, loginTime, dryRun: false, ct, new KillExpectedActivity(after));
+            Assert.True(killed is { Outcome: RemediationOutcome.Done, Wrote: true }, killed.Message);
+        }
+        finally
+        {
+            victim?.Dispose();
+            await scratch.DropAsync();
+        }
+    }
+
+    /// <summary>
     /// A session of a given login and program name on the test server, opened by the test: the administrator login or the scratch (remediation)
     /// login. <see cref="OpenVictimAsync"/> is the ordinary one.
     /// </summary>
@@ -502,6 +551,7 @@ public sealed class RemediationLiveSqlTests
             command.Parameters.Add(new SqlParameter("@login_time", SqlDbType.DateTime) { Value = new DateTime(2000, 1, 1) });
             command.Parameters.Add(new SqlParameter("@dry", SqlDbType.Bit) { Value = dry });
             command.Parameters.Add(new SqlParameter("@monitoring_login", SqlDbType.NVarChar, 128) { Value = DBNull.Value });
+            SqlServerRemediationExecutor.AddKillActivityParameters(command, null);
             await using var reader = await command.ExecuteReaderAsync(ct);
             Assert.True(await reader.ReadAsync(ct));
             Assert.Equal("own_session", reader.GetString(0));

@@ -327,16 +327,22 @@ FROM config.agent_action_proposals";
     }
 
     /// <summary>
-    /// Proposals, newest first: of one request when <paramref name="requestId"/> is set, in one state when <paramref name="state"/> is set.
+    /// Proposals, newest first: of one request when <paramref name="requestId"/> is set, in one state when <paramref name="state"/> is set, on one
+    /// server when <paramref name="serverId"/> is set. All three filters are part of the query, so the limit counts the matching rows only.
     /// </summary>
-    public async Task<IReadOnlyList<ActionProposalRow>> ListProposalsAsync(Guid? requestId, string? state, int limit,
+    public Task<IReadOnlyList<ActionProposalRow>> ListProposalsAsync(Guid? requestId, string? state, int limit, CancellationToken cancellationToken = default) =>
+        ListProposalsAsync(requestId, state, limit, null, cancellationToken);
+
+    /// <inheritdoc cref="ListProposalsAsync(Guid?, string?, int, CancellationToken)"/>
+    public async Task<IReadOnlyList<ActionProposalRow>> ListProposalsAsync(Guid? requestId, string? state, int limit, int? serverId,
         CancellationToken cancellationToken = default)
     {
         var rows = new List<ActionProposalRow>();
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
         await using var command = Command(connection, null,
-            ProposalSelect + " WHERE ($1::uuid IS NULL OR request_id = $1) AND ($2::text IS NULL OR state = $2) ORDER BY proposed_at DESC, proposal_id LIMIT $3",
-            new NpgsqlParameter<Guid?> { TypedValue = requestId, NpgsqlDbType = NpgsqlDbType.Uuid }, PNullable(state), P(Math.Clamp(limit, 1, 500)));
+            ProposalSelect + " WHERE ($1::uuid IS NULL OR request_id = $1) AND ($2::text IS NULL OR state = $2) AND ($4::int IS NULL OR server_id = $4) ORDER BY proposed_at DESC, proposal_id LIMIT $3",
+            new NpgsqlParameter<Guid?> { TypedValue = requestId, NpgsqlDbType = NpgsqlDbType.Uuid }, PNullable(state), P(Math.Clamp(limit, 1, 500)),
+            new NpgsqlParameter<int?> { TypedValue = serverId, NpgsqlDbType = NpgsqlDbType.Integer });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {

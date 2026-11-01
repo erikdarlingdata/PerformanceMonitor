@@ -96,7 +96,7 @@ internal static class ProposalCommands
             ["status"] = result.Status,
             ["code"] = result.Code,
             ["message"] = result.Message,
-            ["facts"] = result.Facts is null ? null : MaskStatements(result.Facts.DeepClone(), dataDetail),
+            ["facts"] = MaskedJson(result.Facts, McpDataDetailMasker.ForAnswer(dataDetail)),
             ["changed"] = result.Changed is null ? null : new JsonArray(result.Changed.Select(c => (JsonNode?)JsonValue.Create(c)).ToArray()),
         };
         return new CommandOutcome(result.Status is "first_pressed" or ProposalStates.Run, result.Code ?? result.Status, answer.ToJsonString());
@@ -112,9 +112,8 @@ internal static class ProposalCommands
     {
         var effectiveLogger = logger ?? NullLogger.Instance;
         var store = new InvestigationRequestStore(owner, ServiceCommandDeadlines.SerialLoopSeconds);
-        var rows = (await store.ListProposalsAsync(requestId, null, 200, cancellationToken))
-            .Where(r => serverId is null || r.ServerId == serverId)
-            .ToList();
+        var rows = await store.ListProposalsAsync(requestId, null, 200, serverId, cancellationToken);
+        var masker = McpDataDetailMasker.ForAnswer(dataDetail);
         var names = await ServerNamesAsync(owner, rows.Select(r => r.ServerId).Distinct().ToArray(), cancellationToken);
         var approvals = new Dictionary<Guid, ActionApprovalState?>();
         var list = new JsonArray();
@@ -139,10 +138,10 @@ internal static class ProposalCommands
                 ["kind"] = ProposalNotice.KindOf(row.Tool),
                 ["server_id"] = row.ServerId,
                 ["server_name"] = names.TryGetValue(row.ServerId, out var name) ? name : row.ServerId.ToString(CultureInfo.InvariantCulture),
-                ["target"] = MaskStatements(JsonNode.Parse(row.TargetJson), dataDetail),
+                ["target"] = MaskedJson(JsonNode.Parse(row.TargetJson), masker),
                 ["state"] = row.State,
                 ["agent"] = row.Agent,
-                ["reason"] = row.Reason,
+                ["reason"] = masker.FreeText(row.Reason),
                 ["proposed_at"] = DateTime.SpecifyKind(row.ProposedAt, DateTimeKind.Utc).ToString("O", CultureInfo.InvariantCulture),
                 ["expires_at"] = DateTime.SpecifyKind(row.ExpiresAt, DateTimeKind.Utc).ToString("O", CultureInfo.InvariantCulture),
                 ["first_press_by"] = row.FirstPressBy,
@@ -170,36 +169,10 @@ internal static class ProposalCommands
     }
 
     /// <summary>
-    /// Applies <c>mcp.dataDetail</c> to every <c>statement</c> text in a proposal's target or facts: shown at <c>full</c>, with its literals
-    /// masked at <c>maskLiterals</c>, left out at <c>metadataOnly</c>. The Viewer's answers follow the level the MCP tools serve.
+    /// Applies <c>mcp.dataDetail</c> to a proposal's target or facts through the same masker the web page uses: every statement-class value
+    /// (<see cref="McpDataDetailKeys"/>: <c>statement</c>, <c>module_or_batch</c>, <c>hints</c>, <c>definition</c> and the rest) is shown at
+    /// <c>full</c>, has its literals masked at <c>maskLiterals</c>, and is left out at <c>metadataOnly</c>.
     /// </summary>
-    internal static JsonNode? MaskStatements(JsonNode? node, McpDataDetail mode)
-    {
-        if (mode == McpDataDetail.Full || node is null)
-            return node;
-        if (node is JsonObject o)
-        {
-            foreach (var key in o.Select(p => p.Key).ToList())
-            {
-                if (string.Equals(key, "statement", StringComparison.Ordinal))
-                {
-                    if (mode == McpDataDetail.MetadataOnly)
-                        o.Remove(key);
-                    else if (o[key] is JsonValue v && v.TryGetValue(out string? text) && text is not null)
-                        o[key] = McpDataDetailMasker.MaskLiterals(text);
-                }
-                else
-                {
-                    MaskStatements(o[key], mode);
-                }
-            }
-        }
-        else if (node is JsonArray a)
-        {
-            foreach (var item in a)
-                MaskStatements(item, mode);
-        }
-
-        return node;
-    }
+    internal static JsonNode? MaskedJson(JsonNode? node, McpDataDetailMasker masker) =>
+        node is null ? null : JsonNode.Parse(masker.Json(node.ToJsonString()));
 }

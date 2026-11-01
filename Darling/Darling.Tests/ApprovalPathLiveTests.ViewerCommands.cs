@@ -44,6 +44,21 @@ public sealed partial class ApprovalPathLiveTests
             Assert.True((bool)row["can_approve_here"]!);
             Assert.False((bool)row["nobody_can_approve"]!);
 
+            /* The server filter is part of the store query: another server's id lists nothing, this one's lists the proposal. */
+            var serverId = (int)row["server_id"]!;
+            var otherServer = await ProposalCommands.ReadAsync(c.Source, NullLogger.Instance, null, serverId + 1, McpDataDetail.Full, null, c.Ct);
+            Assert.Empty(JsonNode.Parse(otherServer.ResultJson!)!["proposals"]!.AsArray());
+            var sameServer = await ProposalCommands.ReadAsync(c.Source, NullLogger.Instance, null, serverId, McpDataDetail.Full, null, c.Ct);
+            Assert.Single(JsonNode.Parse(sameServer.ResultJson!)!["proposals"]!.AsArray());
+
+            /* The agent's reason is free text under the same masker the web page uses, at each mcp.dataDetail level. */
+            foreach (var mode in new[] { McpDataDetail.Full, McpDataDetail.MaskLiterals, McpDataDetail.MetadataOnly })
+            {
+                var masked = await ProposalCommands.ReadAsync(c.Source, NullLogger.Instance, null, null, mode, null, c.Ct);
+                var maskedRow = Assert.Single(JsonNode.Parse(masked.ResultJson!)!["proposals"]!.AsArray())!;
+                Assert.Equal(McpDataDetailMasker.ForAnswer(mode).FreeText("the blocker holds a transaction open"), (string?)maskedRow["reason"]);
+            }
+
             var first = await ProposalCommands.PressAsync(c.Source, NullLogger.Instance, ProposalCommands.FirstPressType, proposalId, McpDataDetail.Full, c.Ct);
             Assert.True(first.Success);
             Assert.Equal("first_pressed", (string?)JsonNode.Parse(first.ResultJson!)!["status"]);
@@ -91,13 +106,29 @@ public sealed partial class ApprovalPathLiveTests
     }
 
     [Fact]
-    public void AStatementInAProposalsTarget_FollowsMcpDataDetail()
+    public void EveryStatementClassValueInAProposalsTarget_FollowsMcpDataDetail()
     {
-        static JsonNode Target() => JsonNode.Parse("{\"statement\":\"SELECT 'alice'\",\"plan_id\":5}")!;
-        Assert.Equal("SELECT 'alice'", (string?)ProposalCommands.MaskStatements(Target(), McpDataDetail.Full)!["statement"]);
-        Assert.Equal("SELECT '?'", (string?)ProposalCommands.MaskStatements(Target(), McpDataDetail.MaskLiterals)!["statement"]);
-        var withheld = ProposalCommands.MaskStatements(Target(), McpDataDetail.MetadataOnly)!.AsObject();
-        Assert.False(withheld.ContainsKey("statement"));
+        static JsonNode Target() => JsonNode.Parse("{\"statement\":\"SELECT 'alice'\",\"module_or_batch\":\"SELECT 'alice'\",\"hints\":\"OPTION (OPTIMIZE FOR (@a = 'alice'))\",\"definition\":\"SELECT 'alice'\",\"plan_id\":5}")!;
+        string[] statementKeys = ["statement", "module_or_batch", "hints", "definition"];
+
+        var full = ProposalCommands.MaskedJson(Target(), McpDataDetailMasker.ForAnswer(McpDataDetail.Full))!.AsObject();
+        foreach (var key in statementKeys)
+            Assert.Contains("alice", (string?)full[key], StringComparison.Ordinal);
+
+        /* maskLiterals: every statement-class value is still there but its literal is replaced. */
+        var literals = ProposalCommands.MaskedJson(Target(), McpDataDetailMasker.ForAnswer(McpDataDetail.MaskLiterals))!.AsObject();
+        foreach (var key in statementKeys)
+        {
+            Assert.True(literals.ContainsKey(key), key);
+            Assert.DoesNotContain("alice", (string?)literals[key], StringComparison.Ordinal);
+        }
+
+        Assert.Equal("SELECT '?'", (string?)literals["statement"]);
+        Assert.Equal(5, (int?)literals["plan_id"]);
+
+        /* metadataOnly: no statement-class value carries the literal, and the plan id stays. */
+        var withheld = ProposalCommands.MaskedJson(Target(), McpDataDetailMasker.ForAnswer(McpDataDetail.MetadataOnly))!.AsObject();
+        Assert.DoesNotContain("alice", withheld.ToJsonString(), StringComparison.Ordinal);
         Assert.Equal(5, (int?)withheld["plan_id"]);
     }
 }
