@@ -83,7 +83,9 @@ public sealed class ManagedConfFileTests
 
         /* No timestamp anywhere: two renders of the same inputs must be byte-identical, which a wall-clock
            field would break on every single start. */
-        Assert.DoesNotContain(DateTime.UtcNow.Year.ToString(System.Globalization.CultureInfo.InvariantCulture), text, StringComparison.Ordinal);
+        /* #7062: a date or time of day, not the current year as a bare number: a bare year can also
+           appear as a setting value, which would fail the test in that year with no timestamp in the file. */
+        Assert.DoesNotMatch(@"\d{4}-\d{2}-\d{2}|\d{1,2}:\d{2}:\d{2}", text);
     }
 
     [Fact]
