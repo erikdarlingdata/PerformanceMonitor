@@ -110,7 +110,8 @@ public sealed class RetentionConsumerHorizonLiveTests
             await using var connection = new NpgsqlConnection(scratch.ConnectionString);
             await connection.OpenAsync(ct);
             await PgMigrations.MigrateAsync(connection, ct);
-            Assert.SkipWhen(!await TimescaleSupport.TryEnableAsync(connection, null, ct), "The live #7114 consumer-horizon tests need TimescaleDB.");
+            var timescaleEnabled = await TimescaleSupport.TryEnableAsync(connection, null, ct);
+            Assert.SkipWhen(!timescaleEnabled, "The live #7114 consumer-horizon tests need TimescaleDB.");
             await ExecuteAsync(connection, "SELECT _timescaledb_functions.stop_background_workers()");
             await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
             await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
@@ -270,7 +271,8 @@ WHERE j.proc_name = 'policy_retention' AND j.hypertable_schema = 'collect' AND j
         {
             await using var connection = new NpgsqlConnection(scratch.ConnectionString);
             await connection.OpenAsync();
-            Assert.SkipWhen(!await TimescaleSupport.TryEnableAsync(connection, null, default), "The live #7114 consumer-horizon tests need TimescaleDB.");
+            var timescaleEnabled = await TimescaleSupport.TryEnableAsync(connection, null, default);
+            Assert.SkipWhen(!timescaleEnabled, "The live #7114 consumer-horizon tests need TimescaleDB.");
             await ExecuteAsync(connection, "SELECT _timescaledb_functions.stop_background_workers()");
             await ExecuteAsync(connection, "CREATE SCHEMA IF NOT EXISTS collect");
 
