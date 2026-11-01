@@ -64,7 +64,9 @@ public static partial class DarlingWebEndpoints
         {
             /* #6214: can_own is whether this session can own a personal view (it holds an owner key: an OIDC sign-in made after owner keys
                existed). The page decides the Personal checkbox from it, and "My views" and read-only from each view's own `mine`. Neither the
-               subject nor the key is returned: a name decides nothing, and a key is never shown. */
+               subject nor the key is returned here: a name decides nothing. A sign-in key is shown only to its own session and to administrators:
+               GET /api/people answers every session its own key, and only an administrator (a signed-in admin or the shared web token) the list
+               of people with their keys and Slack ids (#7107). MCP get_people shows identity kinds, never the ids. */
             var seat = DarlingWebSeat.FromContext(context);
             return JsonNodeResult(new JsonObject { ["can_edit"] = seat.CanEdit, ["can_own"] = seat.OwnerKey is not null, ["signed_in_admin"] = DarlingWebSeat.IsSignedInAdmin(context), ["managed_store"] = managedStore, ["admin_writes_off"] = DarlingWebStoreWrites.AdminWritesOff(managedStore, adminArm) });
         });

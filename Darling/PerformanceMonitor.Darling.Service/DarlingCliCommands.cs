@@ -9732,11 +9732,11 @@ AND   cst.collector_name = ANY($2)", connection) { CommandTimeout = ServiceComma
         output.WriteLine("the Retention Held alert resolves on the hour after that. To arm immediately instead, restart the");
         output.WriteLine("PerformanceMonitor Darling service: the same gate runs on the start path.");
         output.WriteLine();
-        output.WriteLine($"Do not let it wait a day. The hourly rollups carry their OWN retention policy ({TimescaleSupport.HourlyRetentionInterval}), already");
-        output.WriteLine("armed on these stores, which will trim the coverage this run just built when it next fires");
-        output.WriteLine("(roughly daily). The hourly re-evaluation, or a restart now, is what lets the raw policies arm off");
-        output.WriteLine("that coverage first. If the trim wins the race nothing is lost — raw is still held — and re-running");
-        output.WriteLine("this verb rebuilds it.");
+        /* #7114: this used to warn that a rollup's own retention could trim the coverage this run built before
+           the hourly re-evaluation armed off it, putting the hold back. The gate now checks a rollup whose own
+           retention is armed only as far back as that retention keeps, so that trim cannot re-hold anything. */
+        output.WriteLine("A rollup's own retention may trim the older days this run built before then. That does not undo it:");
+        output.WriteLine("the gate checks a rollup whose own retention is armed only as far back as that retention keeps.");
         return 0;
     }
 
