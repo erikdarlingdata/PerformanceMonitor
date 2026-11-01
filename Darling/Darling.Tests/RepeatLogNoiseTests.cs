@@ -362,6 +362,55 @@ public sealed class RepeatLogNoiseTests
     }
 
     [Fact]
+    public async Task AnAbandonedRun_ThroughRunOneAsync_LeavesTheGate_SoTheSameFailureStaysQuiet()
+    {
+        var (worker, log, _) = NewRealWorker();
+        var runtime = RuntimeFor("pg-a", CollectorTargetEngine.PostgreSql);
+        var server = new DarlingWorker.ServerLoopState { Config = runtime.Config, Runtime = runtime };
+        var runner = NewRunner(new CapturingTestLogger(), worker.RepeatLog);
+        const string Collector = "pg_buffer_usage";
+
+        /* The whole-server budget abandoned the cycle: it returns normally, but it read nothing. */
+        worker.DispatchOverrideForTests = (_, _, _) => Task.FromResult(new CollectorRunResult(0, 5, 7, [], Abandoned: true));
+
+        worker.LogPostgresFault("pg-a", Collector, "EXTENSION_MISSING", "42P01", "x");
+
+        var runOne = typeof(DarlingWorker).GetMethod("RunOneAsync", BindingFlags.NonPublic | BindingFlags.Instance)!;
+        await (Task<int>)runOne.Invoke(
+            worker, [server, runner, Collector, null, TestContext.Current.CancellationToken, false, null, null])!;
+
+        worker.LogPostgresFault("pg-a", Collector, "EXTENSION_MISSING", "42P01", "x");
+        Assert.Equal(1, log.Count("EXTENSION_MISSING"));
+    }
+
+    [Fact]
+    public void TheSurfacingLine_IsLoggedAgain_WhenTheCauseChangesAtTheSameCount_AndStaysQuietWhenItDoesNot()
+    {
+        var logger = new CapturingTestLogger();
+        var gate = new RepeatLogGate();
+        var now = T0;
+        gate.Clock = () => now;
+        var runner = NewRunner(logger, gate);
+        var server = RuntimeFor("pg-a", CollectorTargetEngine.PostgreSql);
+        /* Two different gated causes, the same number of databases failing. */
+        var undefinedTable = new PostgresException("relation does not exist", "ERROR", "ERROR", "42P01");
+        var denied = new PostgresException("permission denied for table x", "ERROR", "ERROR", "42501");
+
+        runner.LogFailedInAllDatabases(server, "pg_predicate_stats", 3, undefinedTable);
+        now = T0.AddHours(1);
+        runner.LogFailedInAllDatabases(server, "pg_predicate_stats", 3, undefinedTable);
+        Assert.Equal(1, Surfaced(logger));
+
+        now = T0.AddHours(2);
+        runner.LogFailedInAllDatabases(server, "pg_predicate_stats", 3, denied);
+        Assert.Equal(2, Surfaced(logger));
+
+        now = T0.AddHours(3);
+        runner.LogFailedInAllDatabases(server, "pg_predicate_stats", 3, denied);
+        Assert.Equal(2, Surfaced(logger));
+    }
+
+    [Fact]
     public async Task TheConnectPath_CountsFailedAttempts_AndASuccessfulConnectTakesTheRecoveryBookkeeping()
     {
         var (worker, log, clock) = NewRealWorker();

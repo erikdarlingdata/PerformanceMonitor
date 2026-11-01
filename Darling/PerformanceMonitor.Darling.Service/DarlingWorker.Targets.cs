@@ -3154,8 +3154,12 @@ LIMIT 1";
                 runOutcome.Succeeded = true;
             }
 
-            /* #7067: the precondition cleared, so the next failure of this collector is a new sighting and is logged at once. */
-            RepeatLog.Clear(server.Config.DisplayName, collectorName);
+            /* #7067: the precondition cleared, so the next failure of this collector is a new sighting and is logged at once.
+               An abandoned cycle is not a success (it read nothing), so it leaves the memory alone. */
+            if (!result.Abandoned)
+            {
+                RepeatLog.Clear(server.Config.DisplayName, collectorName);
+            }
 
             return result.Rows;
         }

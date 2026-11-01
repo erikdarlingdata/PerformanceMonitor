@@ -1174,19 +1174,21 @@ public sealed partial class DarlingCollectorRunner
     }
 
     /// <summary>
-    /// #7067: the "failed in all N database(s)" line that precedes the surfaced first failure. It follows the same decision as
-    /// the line it explains. When the surfaced fault is one of the PostgreSQL faults the worker's warning gates (an extension
-    /// that is not created, a grant that is not given), this line is gated too, on its own channel of the shared gate so the two
-    /// lines never overwrite each other's memory: logged when first seen and when it changes, then a reminder once a day, and
-    /// the worker clears the gate when the collector succeeds. Any other fault
-    /// (every SQL Server fault, and a PostgreSQL fault that lands in the general ERROR arm) is logged by the worker on every
-    /// cycle, so this line is too and keeps the "every database failed" context beside it.
+    /// #7067: the "failed in all N database(s)" line that precedes the surfaced first failure. When the surfaced fault is one of
+    /// the PostgreSQL faults the worker's warning gates (an extension that is not created, a grant that is not given), this
+    /// line is gated too, on its own channel of the shared gate so the two lines never overwrite each other's memory. Its key
+    /// is the worker's fault identity (status, SqlState and explanation) plus the database count, so a changed cause or a
+    /// changed count is logged at once and an unchanged one is repeated as a reminder once a day. The worker clears the
+    /// gate when the collector succeeds. Any other fault (every SQL Server fault, and a PostgreSQL fault that lands in the
+    /// general ERROR arm) is logged by the worker on every cycle, so this line is too and keeps the "every database failed"
+    /// context beside it.
     /// </summary>
     internal void LogFailedInAllDatabases(ServerRuntime server, string collector, int count, Exception? firstFailure)
     {
         var name = server.Config.DisplayName;
         if (_logger is null
-            || (IsGatedPostgresFault(server, collector, firstFailure) && !RepeatLog.ShouldLog(name, collector, RepeatLogChannel.FailedInAllDatabases, $"failed in all {count} database(s)")))
+            || (GatedPostgresFaultKey(server, collector, firstFailure) is { } faultKey
+                && !RepeatLog.ShouldLog(name, collector, RepeatLogChannel.FailedInAllDatabases, $"{faultKey}|failed in all {count} database(s)")))
         {
             return;
         }
@@ -1195,13 +1197,20 @@ public sealed partial class DarlingCollectorRunner
             collector, count, name);
     }
 
-    /// <summary>True when the worker logs this fault through <see cref="DarlingWorker.LogPostgresFault"/> (a classified
-    /// PostgreSQL fault other than a lock-timeout yield), the one warning that repeats only once a day.</summary>
-    private static bool IsGatedPostgresFault(ServerRuntime server, string collector, Exception? fault) =>
-        fault is PostgresException pg
-        && DarlingWorker.PostgresFaultOutcome(
-            pg, collector, CollectorFaultDatabase.For(pg, server.ConnectedDatabase), server.PgStatStatementsExtension, server.Target.IsAurora)
-            .Status is not ("ERROR" or "YIELDED");
+    /// <summary>The worker's gate key for this fault (<c>status|sqlState|explanation</c>, as <see cref="DarlingWorker.LogPostgresFault"/>
+    /// builds it) when the worker logs it through that method (a classified PostgreSQL fault other than a lock-timeout yield),
+    /// the one warning that repeats only once a day. Null for every other fault.</summary>
+    private static string? GatedPostgresFaultKey(ServerRuntime server, string collector, Exception? fault)
+    {
+        if (fault is not PostgresException pg)
+        {
+            return null;
+        }
+
+        var (status, explanation) = DarlingWorker.PostgresFaultOutcome(
+            pg, collector, CollectorFaultDatabase.For(pg, server.ConnectedDatabase), server.PgStatStatementsExtension, server.Target.IsAurora);
+        return status is "ERROR" or "YIELDED" ? null : $"{status}|{pg.SqlState}|{explanation}";
+    }
 
     /// <param name="capturePlans">
     /// Live provider for the plan-capture flag; null defaults to always-on (Darling's SKU default).
