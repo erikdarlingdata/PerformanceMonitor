@@ -173,7 +173,7 @@ The columns arrive with store schema V232. A time that is not `HH:mm`, a zone th
 
 **Sending it now.** `send_daily_health_report_now` builds the report for the 24 hours that ended at the most recent send time and sends it through the same path. It does not read or write the once-a-day record, so the scheduled report still goes out at its time and a recipient can get two. It works while `dailyReportEnabled` is off, and it is refused while the alert master switch is off. The tool needs `mcp.allowWrites`.
 
-**Sending it to chosen recipients.** Add a notification route (see [Notification routes](#notification-routes-sending-alert-families-to-different-channels)) that matches the `reports` family, or the `Daily Health Report` metric by itself, and give it the destinations you want. With a route for the metric the report goes to those destinations only for each channel the route sets. For example, a route for the metric with its own email recipients sends the report to those people, and the other `reports` documents stay on the parent channels.
+**Sending it to chosen recipients.** Add a notification route (see [Notification routes](#notification-routes--sending-alert-families-to-different-channels)) that matches the `reports` family, or the `Daily Health Report` metric by itself, and give it the destinations you want. With a route for the metric the report goes to those destinations only for each channel the route sets. For example, a route for the metric with its own email recipients sends the report to those people, and the other `reports` documents stay on the parent channels.
 
 ## smtp
 
