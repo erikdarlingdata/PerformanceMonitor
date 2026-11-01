@@ -62,6 +62,14 @@
                            Foreground="{DynamicResource ForegroundMutedBrush}"
                            Text="Needs an agent level above Off."/>
             </StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,4,0,4">
+                <TextBlock Text="Action approval" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                <ComboBox x:Name="ActionApprovalCombo" Width="260"
+                          ToolTip="At Act on servers (Level 3): Required makes each server action wait for a person to approve it (the default). Off lets the agent run it without approval."/>
+                <CheckBox x:Name="ApprovalSinglePersonCheck" Margin="12,0,0,0" VerticalAlignment="Center"
+                          Content="The person who asked may approve"
+                          ToolTip="Off (the default): a second person approves an action that a person asked for. On: the person who asked may approve it too."/>
+            </StackPanel>
             <TextBlock x:Name="ScopeNoteText" Foreground="{DynamicResource ForegroundMutedBrush}"
                        TextWrapping="Wrap" HorizontalAlignment="Left"
                        Text="Generic webhook headers and the body template stay app-wide: set them in Notifications. A route changes only where the post goes."/>

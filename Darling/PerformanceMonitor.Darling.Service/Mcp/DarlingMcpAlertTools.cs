@@ -1086,6 +1086,9 @@ public sealed partial class DarlingMcpAlertTools
         severities = r.Severities,
         /* #6979 (V233): whether the route posts a chat notice when an agent files a report: off, needs_person_or_change or all. */
         report_notice = r.ReportNotice,
+        /* #7109 (V238): whether a Level 3 action on the route waits for a person's approval (required or off), and whether the asker may approve it. */
+        action_approval = r.ActionApproval,
+        approval_single_person = r.ApprovalSinglePerson,
         /* #6036 (D8 of #5632 Phase C): the route an expired investigation request goes to first. Null = none; the name is the
            fallback route's metric_match. */
         fallback_route_id = r.FallbackRouteId,
@@ -1155,6 +1158,81 @@ public sealed partial class DarlingMcpAlertTools
                 $"Route {route.RouteId} has an agent setting (Off): {tool} does not turn it off or delete it over MCP, because that widens which servers an agent route covers. " +
                 "Turn it off or delete it in the Viewer's Settings window (Notifications, routes) or on the web dashboard's admin notification routes page. Turning it on can still be done here.")
             : null;
+
+    /// <summary>
+    /// The tighten-only rule for action approval over MCP (#7109; Erik, 2026-11-01: MCP can turn approval on but never off). It extends
+    /// <see cref="OffRouteRefusal"/>'s rule: that one keeps an Off route from being removed from force, because that widens an agent route,
+    /// and this one keeps an alert from moving from a route whose Level 3 actions wait for a person to one whose actions do not.
+    /// <list type="bullet">
+    /// <item><c>action_approval</c> goes only to required, and <c>approval_single_person</c> only to false.</item>
+    /// <item>A Level 3 route with approval required cannot be disabled, put back to Inherit (null passes the metric on to a less specific route),
+    /// or have its match, scope or severities changed. Each of those lets an alert fall through to a route with approval off. Its level can
+    /// still go down to 0, 1 or 2.</item>
+    /// <item>A route with approval off cannot be raised to Level 3 (unless the same call sets required), and at Level 3 it cannot be enabled or
+    /// have its match, scope or severities changed. Each of those lets it take a metric from a route with approval required.</item>
+    /// </list>
+    /// Checked on the stored row, before anything is written. Only an operator token reaches a Level 3 route over MCP (<see cref="AgentRouteRefusal"/>
+    /// and the store function refuse every other caller), so this runs on the operator path. Null when the change may go on.
+    /// </summary>
+    internal static string? ApprovalRouteRefusal(
+        PgNotificationRouteStore.RouteSummary route, DarlingMcpAlertTools.RouteAgentRequest agent, IReadOnlyCollection<string> columns, bool enabledNow, string tool)
+    {
+        const string person = "A person can make this change in the Viewer's Settings window (Notifications, routes) or on the web dashboard's admin notification routes page.";
+        var storedApproval = NotificationRouteKinds.NormalizeActionApproval(route.ActionApproval);
+        if (agent.ActionApproval is { } wanted && NotificationRouteKinds.NormalizeActionApproval(wanted) == NotificationRouteKinds.ActionApprovalOff)
+        {
+            return Outcome("refused", $"Route {route.RouteId}: {tool} turns action approval on (required) over MCP, never off. " + person);
+        }
+
+        if (agent.SinglePerson == true)
+        {
+            return Outcome("refused", $"Route {route.RouteId}: {tool} sets approval_single_person to false over MCP, never to true, so an asker never approves their own request's action through MCP. " + person);
+        }
+
+        var reshapes = columns.Any(c => c is "metric_match" or "scope" or "severities");
+        if (route.AgentLevel == NotificationRoute.AgentLevelServerAct && storedApproval == NotificationRouteKinds.ActionApprovalRequired)
+        {
+            const string why = "because an alert would then fall through to a route whose Level 3 actions run without a person's approval. Lowering its level to 0, 1 or 2 can still be done here. ";
+            if (columns.Contains("enabled") && !enabledNow)
+            {
+                return Outcome("refused", $"Route {route.RouteId} is a Level 3 route with action approval required: {tool} does not disable it over MCP, " + why + person);
+            }
+
+            if (agent.ClearLevel)
+            {
+                return Outcome("refused", $"Route {route.RouteId} is a Level 3 route with action approval required: {tool} does not put its level back to Inherit over MCP, " + why + person);
+            }
+
+            if (reshapes)
+            {
+                return Outcome("refused", $"Route {route.RouteId} is a Level 3 route with action approval required: {tool} does not change its match, scope or severities over MCP, " + why + person);
+            }
+        }
+
+        if (storedApproval == NotificationRouteKinds.ActionApprovalOff)
+        {
+            const string why = "because it would then take alerts from a route whose Level 3 actions wait for a person's approval. Setting action_approval to required can still be done here. ";
+            var approvalAfter = agent.ActionApproval is null ? storedApproval : NotificationRouteKinds.NormalizeActionApproval(agent.ActionApproval);
+            var levelAfter = agent.ClearLevel ? null : agent.Level ?? route.AgentLevel;
+            if (levelAfter == NotificationRoute.AgentLevelServerAct && route.AgentLevel != NotificationRoute.AgentLevelServerAct
+                && approvalAfter == NotificationRouteKinds.ActionApprovalOff)
+            {
+                return Outcome("refused", $"Route {route.RouteId} has action approval off: {tool} does not raise it to Level 3 over MCP, " + why + person);
+            }
+
+            if (route.AgentLevel == NotificationRoute.AgentLevelServerAct && columns.Contains("enabled") && enabledNow)
+            {
+                return Outcome("refused", $"Route {route.RouteId} is a Level 3 route with action approval off: {tool} does not enable it over MCP, " + why + person);
+            }
+
+            if (route.AgentLevel == NotificationRoute.AgentLevelServerAct && reshapes)
+            {
+                return Outcome("refused", $"Route {route.RouteId} is a Level 3 route with action approval off: {tool} does not change its match, scope or severities over MCP, " + why + person);
+            }
+        }
+
+        return null;
+    }
 
     [McpServerTool(Name = "get_mute_rules"), Description("Gets the configured alert mute rules. Mute rules suppress specific recurring alerts (by server, metric, database, query text, wait type, or job name) while still logging them — so an agent can tell a genuinely healthy-quiet server from one whose alerts are being suppressed. A rule that repeats on a schedule (#7040) also carries its recur_days (day names; null is every day), recur_start_time, recur_end_time and recur_time_zone, plus schedule (one line), in_window_now (true when the rule is inside a window right now, so it is muting) and next_window_start_utc (when the next window opens); a repeating rule that is active but outside its window mutes nothing at this moment. Each rule carries action (#7083): 'mute', or 'digest' for a rule that holds matching alerts back from paging and records them as digest rows for the daily digest instead of muting them.")]
     public static async Task<string> GetMuteRules(

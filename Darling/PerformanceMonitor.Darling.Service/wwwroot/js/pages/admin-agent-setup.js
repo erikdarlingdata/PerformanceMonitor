@@ -66,6 +66,7 @@ export function entriesFromRoute(r) {
     return {
       id: null, match: "", scope: "", enabled: true, level: "", perHour: AGENT_LIMIT_DEFAULTS.perHour, perDay: AGENT_LIMIT_DEFAULTS.perDay,
       lease: AGENT_LIMIT_DEFAULTS.lease, expiry: AGENT_LIMIT_DEFAULTS.expiry, resolutions: "", fallback: "", severities: "both", reportNotice: "off",
+      approval: "required", singlePerson: "false",
       saved: [], hooks: {}, removes: {}, recipients: "", recipientsWas: "", modifiedAt: null,
     };
   }
@@ -87,6 +88,9 @@ export function entriesFromRoute(r) {
     severities: r.severities === "critical" || r.severities === "warning" ? r.severities : "both",
     /* #6979: a route read without the field, or with a word this page does not know, edits as Off. */
     reportNotice: r.report_notice === "needs_person_or_change" || r.report_notice === "all" ? r.report_notice : "off",
+    /* #7109: a route read without the field, or with a word this page does not know, edits as Required, the safe side. */
+    approval: r.action_approval === "off" ? "off" : "required",
+    singlePerson: r.approval_single_person === true ? "true" : "false",
     saved: Array.isArray(r.configured_channels) ? r.configured_channels : [],
     hooks: {},
     removes: {},
@@ -151,6 +155,8 @@ export function routePayload(entries) {
       fallback_route_id: fallback,
       severities: entries.severities === "critical" || entries.severities === "warning" ? entries.severities : "both",
       report_notice: entries.reportNotice === "needs_person_or_change" || entries.reportNotice === "all" ? entries.reportNotice : "off",
+      action_approval: entries.approval === "off" ? "off" : "required",
+      approval_single_person: entries.singlePerson === "true",
       ...(entries.id != null ? { expected_modified_at: entries.modifiedAt } : {}),
     },
   };
@@ -221,6 +227,9 @@ function routeForm(options) {
     scope: select("scope", scopeChoices, entries.scope),
     severities: select("severities", [{ value: "both", label: "Both (Warning and Critical)" }, { value: "critical", label: "Critical only" }, { value: "warning", label: "Warning only" }], entries.severities || "both"),
     reportNotice: select("reportNotice", REPORT_NOTICE_CHOICES, entries.reportNotice || "off"),
+    /* #7109: whether a Level 3 action waits for a person's approval, and whether the person who asked may approve it. An admin seat sets any value. */
+    approval: select("approval", [{ value: "required", label: "Required (a person approves each Level 3 action)" }, { value: "off", label: "Off (Level 3 actions run without approval)" }], entries.approval || "required"),
+    singlePerson: select("singlePerson", [{ value: "false", label: "No (a second person approves)" }, { value: "true", label: "Yes (the person who asked may approve)" }], entries.singlePerson || "false"),
     level: select("level", AGENT_LEVEL_CHOICES, entries.level),
     perHour: text("perHour", entries.perHour, { inputmode: "numeric" }),
     perDay: text("perDay", entries.perDay, { inputmode: "numeric" }),
@@ -286,6 +295,7 @@ function routeForm(options) {
   });
   const parts = [
     field("Match:", controls.match), field("Applies to:", controls.scope), field("Severity:", controls.severities), field("Agent:", controls.level), el("label", { class: "tag-field" }, [el("span", { class: "mute-label", text: "Report notice:" }), controls.reportNotice, noticeHint]),
+    field("Action approval:", controls.approval), field("Single-person approval:", controls.singlePerson),
     field("Requests per hour:", controls.perHour), field("Requests per day:", controls.perDay),
     field("Lease minutes:", controls.lease), field("Expiry minutes:", controls.expiry),
     field("Send resolutions:", controls.resolutions), field("Fallback route:", controls.fallback),

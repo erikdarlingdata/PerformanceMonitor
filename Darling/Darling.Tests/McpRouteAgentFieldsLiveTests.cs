@@ -127,22 +127,23 @@ public sealed class McpRouteAgentFieldsLiveTests
         });
     }
 
-    /// <summary>#6395 and M2 of the #6593 review: MCP is full admin, so an operator token changes send_resolutions and enabled on a level 3 route
+    /// <summary>#6395 and M2 of the #6593 review: MCP is full admin, so an operator token changes send_resolutions and enabled on an agent route
     /// (each answers updated, and the enabled change is journaled as the Viewer's toggle journals it). The store's update function refuses the
-    /// same change for any actor that is not operator:, so a caller the service does not pass as an operator gets DL403.</summary>
+    /// same change for any actor that is not operator:, so a caller the service does not pass as an operator gets DL403. The route is at level 2:
+    /// a level 3 route with action approval required cannot be disabled over MCP (#7109, <see cref="ALevel3RouteWithApprovalRequired_CannotBeDisabledClearedOrReshaped_ButCanBeLowered"/>).</summary>
     [Fact]
-    public async Task AnOperatorToken_ChangesSendResolutionsAndEnabled_OnALevel3Route_AndTheStoreRefusesAnyOtherActor()
+    public async Task AnOperatorToken_ChangesSendResolutionsAndEnabled_OnAnAgentRoute_AndTheStoreRefusesAnyOtherActor()
     {
         await WithMcpRoleAsync(async (owner, asMcp, ct) =>
         {
             var routeId = RouteIdOf(await DarlingMcpAlertTools.CreateNotificationRoute(
-                asMcp, "Deadlocks", agent_level: 3, served: OperatorPolicy(), cancellationToken: ct));
+                asMcp, "Deadlocks", agent_level: 2, served: OperatorPolicy(), cancellationToken: ct));
 
             Assert.Equal("updated", Status(await DarlingMcpAlertTools.UpdateNotificationRoute(
                 asMcp, routeId, send_resolutions: "always", served: OperatorPolicy(), cancellationToken: ct)));
             Assert.Equal("updated", Status(await DarlingMcpAlertTools.UpdateNotificationRoute(
                 asMcp, routeId, enabled: false, served: OperatorPolicy(), cancellationToken: ct)));
-            Assert.Equal("true|false|3", await ScalarAsync(owner,
+            Assert.Equal("true|false|2", await ScalarAsync(owner,
                 $"SELECT send_resolutions::text || '|' || enabled::text || '|' || agent_level::text FROM config.config_notification_routes WHERE route_id = {routeId}", ct));
             Assert.Equal("1", await ScalarAsync(owner,
                 $"SELECT count(*) FROM config.investigation_journal WHERE route_id = {routeId} AND event = 'route_agent_changed' " +
@@ -378,6 +379,161 @@ public sealed class McpRouteAgentFieldsLiveTests
             Assert.Equal("0", await ScalarAsync(owner, $"SELECT agent_level::text FROM config.config_notification_routes WHERE route_id = {plainId}", ct));
             Assert.Equal("0", await ScalarAsync(owner,
                 $"SELECT count(*) FROM config.investigation_journal WHERE route_id IN ({routeId}, {plainId}) AND reason = 'changed agent_level'", ct));
+        });
+    }
+
+    private const string Approval = "SELECT action_approval || '|' || approval_single_person::text FROM config.config_notification_routes WHERE route_id = ";
+
+    private static string Message(string answer) => JsonDocument.Parse(answer).RootElement.GetProperty("message").GetString()!;
+
+    /// <summary>#7109: a route created over MCP gets the column defaults (approval required, no single-person approval), so MCP cannot create a
+    /// Level 3 route whose actions run without approval: create_notification_route takes neither column.</summary>
+    [Fact]
+    public async Task ARouteCreatedOverMcp_AtLevel3_GetsApprovalRequired()
+    {
+        await WithMcpRoleAsync(async (owner, asMcp, ct) =>
+        {
+            var created = await DarlingMcpAlertTools.CreateNotificationRoute(asMcp, "Deadlocks", agent_level: 3, served: OperatorPolicy(), cancellationToken: ct);
+            Assert.Equal("created", Status(created));
+            var routeId = RouteIdOf(created);
+            Assert.Equal("required|false", await ScalarAsync(owner, Approval + routeId, ct));
+            var route = JsonDocument.Parse(created).RootElement.GetProperty("route");
+            Assert.Equal("required", route.GetProperty("action_approval").GetString());
+            Assert.False(route.GetProperty("approval_single_person").GetBoolean());
+            Assert.Equal("required|false", await ScalarAsync(owner,
+                $"SELECT (detail -> 'after' ->> 'action_approval') || '|' || (detail -> 'after' ->> 'approval_single_person') FROM config.investigation_journal " +
+                $"WHERE route_id = {routeId} AND event = 'route_agent_changed'", ct));
+        });
+    }
+
+    /// <summary>#7109: MCP turns approval on but never off. action_approval goes to required and approval_single_person to false, each journaled with
+    /// its before and after; off and true are refused by the tool and by the store function. The undo leaves both columns out and says a person
+    /// undoes them in the Viewer or on the web dashboard.</summary>
+    [Fact]
+    public async Task ApprovalGoesOnlyToRequired_SinglePersonOnlyToFalse_EachJournaled_AndTheUndoLeavesThemOut()
+    {
+        await WithMcpRoleAsync(async (owner, asMcp, ct) =>
+        {
+            var routeId = RouteIdOf(await DarlingMcpAlertTools.CreateNotificationRoute(asMcp, "Blocking", agent_level: 2, served: OperatorPolicy(), cancellationToken: ct));
+            await ExecAsync(owner, $"UPDATE config.config_notification_routes SET action_approval = 'off', approval_single_person = true WHERE route_id = {routeId}", ct);
+
+            var on = await DarlingMcpAlertTools.UpdateNotificationRoute(
+                asMcp, routeId, action_approval: "required", approval_single_person: false, served: OperatorPolicy(), cancellationToken: ct);
+            Assert.Equal("updated", Status(on));
+            Assert.Equal("required|false", await ScalarAsync(owner, Approval + routeId, ct));
+            Assert.Equal("1", await ScalarAsync(owner,
+                $"SELECT count(*) FROM config.investigation_journal WHERE route_id = {routeId} AND event = 'route_agent_changed' " +
+                $"AND actor = 'operator:{Operator}' AND reason = 'changed action_approval, approval_single_person' " +
+                "AND (detail -> 'before' ->> 'action_approval') = 'off' AND (detail -> 'after' ->> 'action_approval') = 'required' " +
+                "AND (detail -> 'before' ->> 'approval_single_person') = 'true' AND (detail -> 'after' ->> 'approval_single_person') = 'false'", ct));
+
+            var undo = JsonDocument.Parse(on).RootElement.GetProperty("undo");
+            Assert.False(undo.GetProperty("arguments").TryGetProperty("action_approval", out _));
+            Assert.False(undo.GetProperty("arguments").TryGetProperty("approval_single_person", out _));
+            Assert.Contains("Viewer", undo.GetProperty("approval").GetString(), StringComparison.Ordinal);
+
+            var off = await DarlingMcpAlertTools.UpdateNotificationRoute(asMcp, routeId, action_approval: "off", served: OperatorPolicy(), cancellationToken: ct);
+            Assert.Equal("refused", Status(off));
+            Assert.Contains("never off", Message(off), StringComparison.Ordinal);
+            var single = await DarlingMcpAlertTools.UpdateNotificationRoute(asMcp, routeId, approval_single_person: true, served: OperatorPolicy(), cancellationToken: ct);
+            Assert.Equal("refused", Status(single));
+            Assert.Contains("web dashboard", Message(single), StringComparison.Ordinal);
+
+            /* The store function holds the same rule under the row's lock, for any caller of the mcp login. */
+            foreach (var call in new[]
+            {
+                $"SELECT config.set_notification_route_agent({routeId}, 'operator:{Operator}', ARRAY['action_approval'], NULL, NULL, NULL, NULL, NULL, NULL, false, NULL, 'off', NULL)",
+                $"SELECT config.set_notification_route_agent({routeId}, 'operator:{Operator}', ARRAY['approval_single_person'], NULL, NULL, NULL, NULL, NULL, NULL, false, NULL, NULL, true)",
+            })
+            {
+                var refused = await Assert.ThrowsAsync<PostgresException>(async () =>
+                {
+                    await using var command = asMcp.CreateCommand(call);
+                    await command.ExecuteNonQueryAsync(ct);
+                });
+                Assert.Equal("DL403", refused.SqlState);
+            }
+
+            Assert.Equal("required|false", await ScalarAsync(owner, Approval + routeId, ct));
+        });
+    }
+
+    /// <summary>#7109: a Level 3 route with action approval required cannot be disabled (by either tool), put back to Inherit, or have its match,
+    /// scope or severities changed over MCP, so no alert falls through to a route whose actions run without approval. Its level can go down,
+    /// and once it is below Level 3 it can be disabled.</summary>
+    [Fact]
+    public async Task ALevel3RouteWithApprovalRequired_CannotBeDisabledClearedOrReshaped_ButCanBeLowered()
+    {
+        await WithMcpRoleAsync(async (owner, asMcp, ct) =>
+        {
+            var routeId = RouteIdOf(await DarlingMcpAlertTools.CreateNotificationRoute(asMcp, "Deadlocks", agent_level: 3, served: OperatorPolicy(), cancellationToken: ct));
+            const string Shape = "SELECT enabled::text || '|' || coalesce(agent_level::text, 'null') || '|' || metric_match || '|' || severities || '|' || coalesce(scope_server_id::text, 'fleet') " +
+                "FROM config.config_notification_routes WHERE route_id = ";
+            Assert.Equal("true|3|Deadlocks|both|fleet", await ScalarAsync(owner, Shape + routeId, ct));
+
+            var refusals = new[]
+            {
+                await DarlingMcpAlertTools.UpdateNotificationRoute(asMcp, routeId, enabled: false, served: OperatorPolicy(), cancellationToken: ct),
+                await DarlingMcpAlertTools.SetNotificationRouteEnabled(asMcp, routeId, false, served: OperatorPolicy(), cancellationToken: ct),
+                await DarlingMcpAlertTools.UpdateNotificationRoute(asMcp, routeId, clear_agent_level: true, served: OperatorPolicy(), cancellationToken: ct),
+                await DarlingMcpAlertTools.UpdateNotificationRoute(asMcp, routeId, metric_match: "Blocking", served: OperatorPolicy(), cancellationToken: ct),
+                await DarlingMcpAlertTools.UpdateNotificationRoute(asMcp, routeId, severities: "critical", served: OperatorPolicy(), cancellationToken: ct),
+                await DarlingMcpAlertTools.UpdateNotificationRoute(asMcp, routeId, scope_server_id: 999, served: OperatorPolicy(), cancellationToken: ct),
+            };
+            foreach (var answer in refusals)
+            {
+                Assert.Equal("refused", Status(answer));
+                Assert.Contains("action approval required", Message(answer), StringComparison.Ordinal);
+                Assert.Contains("Viewer", Message(answer), StringComparison.Ordinal);
+            }
+
+            Assert.Equal("true|3|Deadlocks|both|fleet", await ScalarAsync(owner, Shape + routeId, ct));
+
+            Assert.Equal("updated", Status(await DarlingMcpAlertTools.UpdateNotificationRoute(asMcp, routeId, agent_level: 2, served: OperatorPolicy(), cancellationToken: ct)));
+            Assert.Equal("updated", Status(await DarlingMcpAlertTools.SetNotificationRouteEnabled(asMcp, routeId, false, served: OperatorPolicy(), cancellationToken: ct)));
+            Assert.Equal("false|2|Deadlocks|both|fleet", await ScalarAsync(owner, Shape + routeId, ct));
+        });
+    }
+
+    /// <summary>#7109: a route with action approval off cannot be raised to Level 3 over MCP (unless the same call sets required), and at Level 3
+    /// it cannot be enabled or have its match or severities changed, so it never takes an alert from a route whose actions wait for a person.</summary>
+    [Fact]
+    public async Task ARouteWithApprovalOff_CannotBeRaisedToLevel3_NorAtLevel3_EnabledOrWidened()
+    {
+        await WithMcpRoleAsync(async (owner, asMcp, ct) =>
+        {
+            var lowId = RouteIdOf(await DarlingMcpAlertTools.CreateNotificationRoute(asMcp, "Blocking", agent_level: 2, served: OperatorPolicy(), cancellationToken: ct));
+            var highId = RouteIdOf(await DarlingMcpAlertTools.CreateNotificationRoute(asMcp, "Deadlocks", agent_level: 3, served: OperatorPolicy(), cancellationToken: ct));
+            await ExecAsync(owner, $"UPDATE config.config_notification_routes SET action_approval = 'off' WHERE route_id IN ({lowId}, {highId})", ct);
+            await ExecAsync(owner, $"UPDATE config.config_notification_routes SET enabled = false WHERE route_id = {highId}", ct);
+
+            var raise = await DarlingMcpAlertTools.UpdateNotificationRoute(asMcp, lowId, agent_level: 3, served: OperatorPolicy(), cancellationToken: ct);
+            Assert.Equal("refused", Status(raise));
+            Assert.Contains("raise it to Level 3", Message(raise), StringComparison.Ordinal);
+            Assert.Equal("2|off", await ScalarAsync(owner, $"SELECT agent_level::text || '|' || action_approval FROM config.config_notification_routes WHERE route_id = {lowId}", ct));
+
+            foreach (var answer in new[]
+            {
+                await DarlingMcpAlertTools.UpdateNotificationRoute(asMcp, highId, enabled: true, served: OperatorPolicy(), cancellationToken: ct),
+                await DarlingMcpAlertTools.SetNotificationRouteEnabled(asMcp, highId, true, served: OperatorPolicy(), cancellationToken: ct),
+                await DarlingMcpAlertTools.UpdateNotificationRoute(asMcp, highId, metric_match: "performance", served: OperatorPolicy(), cancellationToken: ct),
+                await DarlingMcpAlertTools.UpdateNotificationRoute(asMcp, highId, severities: "warning", served: OperatorPolicy(), cancellationToken: ct),
+            })
+            {
+                Assert.Equal("refused", Status(answer));
+                Assert.Contains("action approval off", Message(answer), StringComparison.Ordinal);
+                Assert.Contains("web dashboard", Message(answer), StringComparison.Ordinal);
+            }
+
+            Assert.Equal("false|Deadlocks|both", await ScalarAsync(owner,
+                $"SELECT enabled::text || '|' || metric_match || '|' || severities FROM config.config_notification_routes WHERE route_id = {highId}", ct));
+
+            /* Raising together with required, and turning required on first, both go through. */
+            Assert.Equal("updated", Status(await DarlingMcpAlertTools.UpdateNotificationRoute(
+                asMcp, lowId, agent_level: 3, action_approval: "required", served: OperatorPolicy(), cancellationToken: ct)));
+            Assert.Equal("3|required", await ScalarAsync(owner, $"SELECT agent_level::text || '|' || action_approval FROM config.config_notification_routes WHERE route_id = {lowId}", ct));
+            Assert.Equal("updated", Status(await DarlingMcpAlertTools.UpdateNotificationRoute(asMcp, highId, action_approval: "required", served: OperatorPolicy(), cancellationToken: ct)));
+            Assert.Equal("updated", Status(await DarlingMcpAlertTools.UpdateNotificationRoute(asMcp, highId, enabled: true, served: OperatorPolicy(), cancellationToken: ct)));
         });
     }
 

@@ -684,6 +684,15 @@ $v229$;
 GRANT SELECT (report_notice) ON config.config_notification_routes TO viewer;
 $v233$;
       END IF;
+      -- V238 (#7109): whether a Level 3 action waits for a person's approval, and whether the asker may approve it. Non-secret.
+      -- Granted on their own columns inside the routes table's guard, so a store below V238 still commits.
+      IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+                 WHERE attrelid = 'config.config_notification_routes'::regclass
+                   AND attname = 'action_approval' AND NOT attisdropped) THEN
+         EXECUTE $v238$
+GRANT SELECT (action_approval, approval_single_person) ON config.config_notification_routes TO viewer;
+$v238$;
+      END IF;
    END IF;
 END $$;
 -- V187 (#5825): the four per-channel "send resolutions" flags. Non-secret (behaviour toggles, like
@@ -830,6 +839,14 @@ $v229$;
 GRANT SELECT (report_notice) ON config.config_notification_routes TO web;
 $v233$;
       END IF;
+      -- V238 (#7109): the two approval columns. Non-secret. Guarded on the column, so a store below V238 still commits.
+      IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+                 WHERE attrelid = 'config.config_notification_routes'::regclass
+                   AND attname = 'action_approval' AND NOT attisdropped) THEN
+         EXECUTE $v238$
+GRANT SELECT (action_approval, approval_single_person) ON config.config_notification_routes TO web;
+$v238$;
+      END IF;
    END IF;
 END $$;
 -- V187 (#5825): the four per-channel "send resolutions" flags. Non-secret (behaviour toggles, like
@@ -963,6 +980,14 @@ $v229$;
          EXECUTE $v233$
 GRANT SELECT (report_notice) ON config.config_notification_routes TO mcp;
 $v233$;
+      END IF;
+      -- V238 (#7109): the two approval columns. Non-secret. Guarded on the column, so a store below V238 still commits.
+      IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+                 WHERE attrelid = 'config.config_notification_routes'::regclass
+                   AND attname = 'action_approval' AND NOT attisdropped) THEN
+         EXECUTE $v238$
+GRANT SELECT (action_approval, approval_single_person) ON config.config_notification_routes TO mcp;
+$v238$;
       END IF;
    END IF;
 END $$;
@@ -1983,7 +2008,8 @@ BEGIN
       'metric_match', btrim(v_row.metric_match), 'scope_server_id', v_row.scope_server_id, 'scope_tag_id', v_row.scope_tag_id,
       'agent_level', v_row.agent_level, 'agent_max_per_hour', v_row.agent_max_per_hour, 'agent_max_per_day', v_row.agent_max_per_day,
       'agent_lease_minutes', v_row.agent_lease_minutes, 'agent_expiry_minutes', v_row.agent_expiry_minutes, 'enabled', v_row.enabled,
-      'severities', v_row.severities, 'report_notice', v_row.report_notice);
+      'severities', v_row.severities, 'report_notice', v_row.report_notice,
+      'action_approval', v_row.action_approval, 'approval_single_person', v_row.approval_single_person);
 END
 $fn$;
 REVOKE ALL ON FUNCTION config.update_notification_route(integer, text, text[], text, boolean, integer, integer, boolean, integer, text, text) FROM PUBLIC;
@@ -1993,6 +2019,9 @@ REVOKE ALL ON FUNCTION config.update_notification_route(integer, text, text[], t
 -- p_before is the row update_notification_route returned in the same transaction, so the journal row names a match, scope or enabled change
 -- made in the same call. The old signature is dropped and stays uncallable.
 DROP FUNCTION IF EXISTS config.set_notification_route_agent(integer, text, text[], integer, integer, integer, integer, integer, integer, boolean);
+-- #7109 (V238): p_action_approval and p_approval_single_person join the argument list, so the eleven-argument function is dropped and
+-- stays uncallable. MCP can turn approval on but never off: action_approval goes only to required, approval_single_person only to false.
+DROP FUNCTION IF EXISTS config.set_notification_route_agent(integer, text, text[], integer, integer, integer, integer, integer, integer, boolean, jsonb);
 CREATE OR REPLACE FUNCTION config.set_notification_route_agent(
    p_route_id integer,
    p_actor text,
@@ -2004,7 +2033,9 @@ CREATE OR REPLACE FUNCTION config.set_notification_route_agent(
    p_agent_expiry_minutes integer,
    p_fallback_route_id integer,
    p_created boolean,
-   p_before jsonb)
+   p_before jsonb,
+   p_action_approval text DEFAULT NULL,
+   p_approval_single_person boolean DEFAULT NULL)
 RETURNS void
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -2018,6 +2049,8 @@ DECLARE
    v_lease integer;
    v_expiry integer;
    v_fallback integer;
+   v_approval text;
+   v_single boolean;
    v_changed text[] := ARRAY[]::text[];
    v_before jsonb;
    v_after jsonb;
@@ -2028,8 +2061,9 @@ BEGIN
    -- No column is allowed only with p_before: a match, scope or enabled change to a route with an agent setting is journaled on its own.
    IF p_columns IS NULL OR (cardinality(p_columns) = 0 AND p_before IS NULL)
       OR EXISTS (SELECT 1 FROM unnest(p_columns) AS c(name)
-                 WHERE c.name IS NULL OR c.name NOT IN ('agent_level', 'agent_max_per_hour', 'agent_max_per_day', 'agent_lease_minutes', 'agent_expiry_minutes', 'fallback_route_id')) THEN
-      RAISE EXCEPTION 'The columns to change are agent_level, agent_max_per_hour, agent_max_per_day, agent_lease_minutes, agent_expiry_minutes and fallback_route_id.' USING ERRCODE = 'DL400';
+                 WHERE c.name IS NULL OR c.name NOT IN ('agent_level', 'agent_max_per_hour', 'agent_max_per_day', 'agent_lease_minutes', 'agent_expiry_minutes', 'fallback_route_id',
+                                                        'action_approval', 'approval_single_person')) THEN
+      RAISE EXCEPTION 'The columns to change are agent_level, agent_max_per_hour, agent_max_per_day, agent_lease_minutes, agent_expiry_minutes, fallback_route_id, action_approval and approval_single_person.' USING ERRCODE = 'DL400';
    END IF;
    SELECT * INTO v_row FROM config.config_notification_routes WHERE route_id = p_route_id FOR UPDATE;
    IF NOT FOUND THEN
@@ -2041,6 +2075,16 @@ BEGIN
    v_lease := CASE WHEN 'agent_lease_minutes' = ANY (p_columns) THEN p_agent_lease_minutes ELSE v_row.agent_lease_minutes END;
    v_expiry := CASE WHEN 'agent_expiry_minutes' = ANY (p_columns) THEN p_agent_expiry_minutes ELSE v_row.agent_expiry_minutes END;
    v_fallback := CASE WHEN 'fallback_route_id' = ANY (p_columns) THEN p_fallback_route_id ELSE v_row.fallback_route_id END;
+   v_approval := CASE WHEN 'action_approval' = ANY (p_columns) THEN lower(btrim(COALESCE(p_action_approval, ''))) ELSE v_row.action_approval END;
+   v_single := CASE WHEN 'approval_single_person' = ANY (p_columns) THEN COALESCE(p_approval_single_person, v_row.approval_single_person) ELSE v_row.approval_single_person END;
+   -- #7109: this function is the MCP path only (the Viewer and the web write the table on their own logins), and MCP turns approval
+   -- on but never off, so an alert never reaches a Level 3 route that runs an action without a person's approval through it.
+   IF v_approval IS DISTINCT FROM v_row.action_approval AND v_approval IS DISTINCT FROM 'required' THEN
+      RAISE EXCEPTION 'MCP sets action_approval only to required, never to off. A person turns approval off in the Viewer or on the web dashboard.' USING ERRCODE = 'DL403';
+   END IF;
+   IF v_single AND NOT v_row.approval_single_person THEN
+      RAISE EXCEPTION 'MCP sets approval_single_person only to false, never to true. A person turns it on in the Viewer or on the web dashboard.' USING ERRCODE = 'DL403';
+   END IF;
    IF v_level IS NOT NULL AND v_level NOT IN (0, 1, 2, 3) THEN
       RAISE EXCEPTION 'The agent level is Off (0), Investigate (1), Act (2) or Act on servers (3).' USING ERRCODE = 'DL400';
    END IF;
@@ -2077,6 +2121,13 @@ BEGIN
          v_changed := array_append(v_changed, 'report_notice');
       END IF;
    END IF;
+   -- #7109: the approval setting and single-person approval, named like the report notice. Only a route with an agent setting.
+   IF v_approval IS DISTINCT FROM v_row.action_approval AND (v_row.agent_level IS NOT NULL OR v_level IS NOT NULL) THEN
+      v_changed := array_append(v_changed, 'action_approval');
+   END IF;
+   IF v_single IS DISTINCT FROM v_row.approval_single_person AND (v_row.agent_level IS NOT NULL OR v_level IS NOT NULL) THEN
+      v_changed := array_append(v_changed, 'approval_single_person');
+   END IF;
    IF v_level IS DISTINCT FROM v_row.agent_level THEN v_changed := array_append(v_changed, 'agent_level'); END IF;
    IF v_hour IS DISTINCT FROM v_row.agent_max_per_hour THEN v_changed := array_append(v_changed, 'agent_max_per_hour'); END IF;
    IF v_day IS DISTINCT FROM v_row.agent_max_per_day THEN v_changed := array_append(v_changed, 'agent_max_per_day'); END IF;
@@ -2093,6 +2144,8 @@ BEGIN
           agent_lease_minutes = v_lease,
           agent_expiry_minutes = v_expiry,
           fallback_route_id = v_fallback,
+          action_approval = v_approval,
+          approval_single_person = v_single,
           modified_at = (now() AT TIME ZONE 'UTC')
     WHERE route_id = p_route_id;
    -- The journal row the Viewer's save writes (NotificationRouteWriter.AgentChange): a new route journals only when it sets a level,
@@ -2102,12 +2155,14 @@ BEGIN
          'metric_match', btrim(v_row.metric_match), 'scope_server_id', v_row.scope_server_id, 'scope_tag_id', v_row.scope_tag_id,
          'agent_level', v_row.agent_level, 'agent_max_per_hour', v_row.agent_max_per_hour, 'agent_max_per_day', v_row.agent_max_per_day,
          'agent_lease_minutes', v_row.agent_lease_minutes, 'agent_expiry_minutes', v_row.agent_expiry_minutes, 'enabled', v_row.enabled,
-         'severities', v_row.severities, 'report_notice', v_row.report_notice) END;
+         'severities', v_row.severities, 'report_notice', v_row.report_notice,
+         'action_approval', v_row.action_approval, 'approval_single_person', v_row.approval_single_person) END;
       v_after := jsonb_build_object(
          'metric_match', btrim(v_row.metric_match), 'scope_server_id', v_row.scope_server_id, 'scope_tag_id', v_row.scope_tag_id,
          'agent_level', v_level, 'agent_max_per_hour', v_hour, 'agent_max_per_day', v_day,
          'agent_lease_minutes', v_lease, 'agent_expiry_minutes', v_expiry, 'enabled', v_row.enabled,
-         'severities', v_row.severities, 'report_notice', v_row.report_notice);
+         'severities', v_row.severities, 'report_notice', v_row.report_notice,
+         'action_approval', v_approval, 'approval_single_person', v_single);
       INSERT INTO config.investigation_journal (event_time, request_id, route_id, server_id, event, actor, reason, detail)
       VALUES (now(), NULL, p_route_id, v_row.scope_server_id, 'route_agent_changed', p_actor,
               CASE WHEN COALESCE(p_created, false) THEN 'created route' ELSE 'changed ' || array_to_string(v_changed, ', ') END,
@@ -2115,7 +2170,7 @@ BEGIN
    END IF;
 END
 $fn$;
-REVOKE ALL ON FUNCTION config.set_notification_route_agent(integer, text, text[], integer, integer, integer, integer, integer, integer, boolean, jsonb) FROM PUBLIC;
+REVOKE ALL ON FUNCTION config.set_notification_route_agent(integer, text, text[], integer, integer, integer, integer, integer, integer, boolean, jsonb, text, boolean) FROM PUBLIC;
 -- The return type changed (a previous value is now only a flag for whether one was saved), which CREATE OR REPLACE cannot do on its own.
 -- #6542 part 2: the actor is an argument too, so the old signature is dropped and stays uncallable.
 DROP FUNCTION IF EXISTS config.set_notification_route_destinations(integer, text[], text, text, text, text, text);
@@ -2209,7 +2264,7 @@ REVOKE ALL ON FUNCTION config.set_notification_route_destinations(integer, text,
 GRANT EXECUTE ON FUNCTION config.create_notification_route(text, boolean, integer, integer, boolean, integer, text, text) TO mcp;
 GRANT EXECUTE ON FUNCTION config.update_notification_route(integer, text, text[], text, boolean, integer, integer, boolean, integer, text, text) TO mcp;
 GRANT EXECUTE ON FUNCTION config.set_notification_route_destinations(integer, text, text[], text, text, text, text, text) TO mcp;
-GRANT EXECUTE ON FUNCTION config.set_notification_route_agent(integer, text, text[], integer, integer, integer, integer, integer, integer, boolean, jsonb) TO mcp;
+GRANT EXECUTE ON FUNCTION config.set_notification_route_agent(integer, text, text[], integer, integer, integer, integer, integer, integer, boolean, jsonb, text, boolean) TO mcp;
 -- #6394: the MCP generate_webhook_signing_key and remove_webhook_signing_key tools. mcp holds no UPDATE on a signing key column of config.config_notification
 --     or config.config_notification_routes (they are secret columns) and no SELECT on them, and gets none here. The service reads the saved (sealed) URL
 --     and proxy a new key is sealed for through its own store connection, so there is no function that returns them to mcp (an earlier build of this
@@ -3752,7 +3807,7 @@ BEGIN
    'config.request_analyze_now(integer, text)',
    'config.create_notification_route(text, boolean, integer, integer, boolean, integer, text, text)',
    'config.update_notification_route(integer, text, text[], text, boolean, integer, integer, boolean, integer, text, text)',
-   'config.set_notification_route_agent(integer, text, text[], integer, integer, integer, integer, integer, integer, boolean, jsonb)',
+   'config.set_notification_route_agent(integer, text, text[], integer, integer, integer, integer, integer, integer, boolean, jsonb, text, boolean)',
    'config.set_notification_route_destinations(integer, text, text[], text, text, text, text, text)',
    'config.request_mcp_command(text, integer, integer, text)',
    'config.read_mcp_command_result(bigint)',

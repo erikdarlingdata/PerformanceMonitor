@@ -87,6 +87,17 @@ public static class NotificationRouteKinds
             _ => ReportNoticeOff,
         };
 
+    /// <summary><c>action_approval</c> value (#7109): a Level 3 action on this route waits for a person to approve it. The column default.</summary>
+    public const string ActionApprovalRequired = "required";
+
+    /// <summary><c>action_approval</c> value (#7109): a Level 3 action on this route runs without a person's approval.</summary>
+    public const string ActionApprovalOff = "off";
+
+    /// <summary>The stored word for a route's action approval setting: <c>required</c> or <c>off</c>. Blank, null or anything unknown reads
+    /// as <c>required</c>, so a value this build does not know never lets an action run without approval.</summary>
+    public static string NormalizeActionApproval(string? value) =>
+        string.Equals(value?.Trim(), ActionApprovalOff, StringComparison.OrdinalIgnoreCase) ? ActionApprovalOff : ActionApprovalRequired;
+
     /// <summary>Whether a route with severity filter <paramref name="severities"/> takes an alert of <paramref name="severity"/>.
     /// A null severity (a caller that does not know the alert's tier) is taken by every route.</summary>
     public static bool SeveritiesAccept(string? severities, AlertSeverityLevel? severity) =>

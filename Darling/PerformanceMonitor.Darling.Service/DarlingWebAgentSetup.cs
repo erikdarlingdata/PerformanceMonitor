@@ -57,6 +57,7 @@ internal static class DarlingWebAgentSetup
     [
         "metric_match", "enabled", "scope_server_id", "scope_tag_id", "agent_level", "agent_max_per_hour", "agent_max_per_day",
         "agent_lease_minutes", "agent_expiry_minutes", "send_resolutions", "fallback_route_id", "severities", "report_notice",
+        "action_approval", "approval_single_person",
         "teams_webhook_url", "slack_webhook_url", "generic_webhook_url", "pagerduty_routing_key", "email_recipients",
         "expected_modified_at",
     ];
@@ -340,6 +341,28 @@ SELECT has_table_privilege(current_user, 'config_notification_routes', 'INSERT')
             }
 
             draft.ReportNotice = reportNotice.GetValue<string>();
+        }
+
+        /* #7109: the approval setting and single-person approval. An admin seat sets any value; a word other than required or off is refused
+           by the writer's validation with its sentence. */
+        if (body.ContainsKey("action_approval"))
+        {
+            if (body["action_approval"] is not JsonValue actionApproval || actionApproval.GetValueKind() != JsonValueKind.String)
+            {
+                return "action_approval must be text.";
+            }
+
+            draft.ActionApproval = actionApproval.GetValue<string>();
+        }
+
+        if (body.ContainsKey("approval_single_person"))
+        {
+            if (body["approval_single_person"] is not JsonValue singlePerson || singlePerson.GetValueKind() is not (JsonValueKind.True or JsonValueKind.False))
+            {
+                return "approval_single_person must be true or false.";
+            }
+
+            draft.ApprovalSinglePerson = singlePerson.GetValue<bool>();
         }
 
         if (!TryInt(body, "scope_server_id", out var hasServer, out var server, out var error)

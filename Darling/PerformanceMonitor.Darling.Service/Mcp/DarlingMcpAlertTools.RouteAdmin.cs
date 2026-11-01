@@ -211,6 +211,10 @@ public sealed partial class DarlingMcpAlertTools
         "Use set_notification_route_enabled to turn a route off and on without the rest. " +
         "The answer's previous is the route before the change and undo is the update_notification_route call that puts the match, scope, enabled flag, resolution override and fallback back. " +
         "For an operator token undo puts the agent fields back too: agent_level and the four limits, or clear_agent_level true when the level was Inherit. " +
+        "An operator token can turn approval on but never off (#7109): action_approval only to required, approval_single_person only to false. " +
+        "A Level 3 route with action_approval required cannot be disabled, put back to Inherit, or have its match, scope or severities changed (its level can go down to 0, 1 or 2), " +
+        "and a route with action_approval off cannot be raised to Level 3, nor, at Level 3, be enabled or have its match, scope or severities changed. A person makes those changes in the Viewer or on the web dashboard. " +
+        "undo never carries action_approval or approval_single_person: a person undoes a change to them in the Viewer or on the web dashboard. " +
         "A webhook URL or key is never shown, so to put one back pass its earlier value again in its field; destinations.previous says whether one was saved (the host for Teams and Slack). The earlier recipient list is shown, and undo.arguments carries it as email_recipients. " +
         "Returns {status:\"updated\", route, previous, destinations:{changed, now, previous}, undo}, or {status:\"unchanged\", route, previous, undo} when nothing differs.")]
     public static Task<string> UpdateNotificationRoute(
@@ -236,6 +240,8 @@ public sealed partial class DarlingMcpAlertTools
         [Description("Operator token only: lease minutes, 5 to 120. Omit to keep.")] int? agent_lease_minutes = null,
         [Description("Operator token only: expiry minutes, 15 to 1440. Omit to keep.")] int? agent_expiry_minutes = null,
         [Description("Operator token only: true puts agent_level back to Inherit (null), so the next level decides. The limits are kept. Not with agent_level.")] bool? clear_agent_level = null,
+        [Description("Operator token only: required makes a Level 3 action on this route wait for a person's approval. MCP sets only required, never off. Omit to keep.")] string? action_approval = null,
+        [Description("Operator token only: false stops an asker from approving their own request's action on this route. MCP sets only false, never true. Omit to keep.")] bool? approval_single_person = null,
         [Description("Whether the route posts a chat notice when an agent files a report: off, needs_person_or_change or all (case-insensitive). Omit to keep.")] string? report_notice = null,
         DarlingMcpServedPolicy? served = null,
         ILogger? logger = null,
@@ -245,7 +251,8 @@ public sealed partial class DarlingMcpAlertTools
             postgres, route_id, metric_match, enabled, scope_server_id, scope_tag_id, fleet_wide, send_resolutions, fallback_route_id, clear_fallback,
             new RouteDestinationRequest(teams_webhook_url, slack_webhook_url, generic_webhook_url, pagerduty_routing_key, email_recipients),
             DarlingPasswordKey.Current, logger, cancellationToken,
-            new RouteAgentRequest(agent_level, agent_max_per_hour, agent_max_per_day, agent_lease_minutes, agent_expiry_minutes, clear_agent_level == true),
+            new RouteAgentRequest(agent_level, agent_max_per_hour, agent_max_per_day, agent_lease_minutes, agent_expiry_minutes, clear_agent_level == true,
+                action_approval, approval_single_person),
             served?.Policy.OperatorActor, StoreRolesAreRunByOperator(postgresConfig), severities, report_notice);
 
     /// <summary>The edit: the match, scope and flag columns and the destinations in one transaction.</summary>
@@ -278,6 +285,12 @@ public sealed partial class DarlingMcpAlertTools
             if (agent.ClearLevel && agent.Level.HasValue)
             {
                 return Outcome("invalid", "Pass agent_level to set a level, or clear_agent_level true to put it back to Inherit, not both.");
+            }
+
+            if (agent.ActionApproval is { } approvalWord
+                && approvalWord.Trim().ToLowerInvariant() is not (NotificationRouteKinds.ActionApprovalRequired or NotificationRouteKinds.ActionApprovalOff))
+            {
+                return Outcome("invalid", "action_approval is required or off.");
             }
 
             /* Only the agent fields that differ from the stored row are written, so an undo that carries all five (L5 of the #6593 review)
@@ -395,6 +408,11 @@ public sealed partial class DarlingMcpAlertTools
             var journalsMatchOrFlag = operatorActor is not null && existing.AgentLevel is not null
                 && columns.Any(c => c is "metric_match" or "scope" or "enabled" or "severities" or "report_notice");
 
+            if (ApprovalRouteRefusal(existing, agent, columns, enabledNow, "update_notification_route") is { } approvalRefusal)
+            {
+                return approvalRefusal;
+            }
+
             if (agent.Any)
             {
                 var draft = new NotificationRouteDraft
@@ -495,6 +513,9 @@ public sealed partial class DarlingMcpAlertTools
                 {
                     tool = "update_notification_route",
                     arguments = UndoArguments(existing, change, operatorActor is not null),
+                    approval = agent.ActionApproval is not null || agent.SinglePerson is not null
+                        ? "undo leaves out action_approval and approval_single_person: MCP turns approval on but never off, so a person undoes a change to them in the Viewer or on the web dashboard."
+                        : null,
                     destinations = change is { Fields.Count: > 0 }
                         ? "A webhook URL or key is never shown. To put one back, pass its earlier value again in the same field (destinations.previous says whether one was saved). The earlier recipient list is in the arguments as email_recipients."
                         : null,
@@ -510,11 +531,15 @@ public sealed partial class DarlingMcpAlertTools
     /// <summary>The agent fields a route write carries (#6542 part 2): each null keeps the stored value. The fallback goes through
     /// config.update_notification_route with the match, scope and flags. <paramref name="ClearLevel"/> (L5 of the #6593 review) puts the
     /// level back to Inherit (NULL) and keeps the limits, as the Viewer's route window saves an Inherit.</summary>
-    internal sealed record RouteAgentRequest(int? Level, int? PerHour, int? PerDay, int? LeaseMinutes, int? ExpiryMinutes, bool ClearLevel = false)
+    /// <para><paramref name="ActionApproval"/> and <paramref name="SinglePerson"/> (#7109) are the route's approval columns: MCP sets the first only
+    /// to required and the second only to false (<see cref="ApprovalRouteRefusal"/>, and the agent function again under the row's lock).</para>
+    internal sealed record RouteAgentRequest(int? Level, int? PerHour, int? PerDay, int? LeaseMinutes, int? ExpiryMinutes, bool ClearLevel = false,
+        string? ActionApproval = null, bool? SinglePerson = null)
     {
         internal static readonly RouteAgentRequest None = new(null, null, null, null, null);
 
-        internal bool HasAgentField => Level.HasValue || ClearLevel || PerHour.HasValue || PerDay.HasValue || LeaseMinutes.HasValue || ExpiryMinutes.HasValue;
+        internal bool HasAgentField => Level.HasValue || ClearLevel || PerHour.HasValue || PerDay.HasValue || LeaseMinutes.HasValue || ExpiryMinutes.HasValue
+            || ActionApproval is not null || SinglePerson.HasValue;
 
         /// <summary>This request without the fields that already hold the stored value.</summary>
         internal RouteAgentRequest Narrowed(PgNotificationRouteStore.RouteSummary stored) => new(
@@ -523,7 +548,10 @@ public sealed partial class DarlingMcpAlertTools
             PerDay == stored.AgentMaxPerDay ? null : PerDay,
             LeaseMinutes == stored.AgentLeaseMinutes ? null : LeaseMinutes,
             ExpiryMinutes == stored.AgentExpiryMinutes ? null : ExpiryMinutes,
-            ClearLevel && stored.AgentLevel is not null);
+            ClearLevel && stored.AgentLevel is not null,
+            ActionApproval is null || NotificationRouteKinds.NormalizeActionApproval(ActionApproval) == stored.ActionApproval
+                ? null : NotificationRouteKinds.NormalizeActionApproval(ActionApproval),
+            SinglePerson == stored.ApprovalSinglePerson ? null : SinglePerson);
 
         internal bool Any => HasAgentField;
 
@@ -538,6 +566,8 @@ public sealed partial class DarlingMcpAlertTools
                 if (PerDay.HasValue) names.Add("agent_max_per_day");
                 if (LeaseMinutes.HasValue) names.Add("agent_lease_minutes");
                 if (ExpiryMinutes.HasValue) names.Add("agent_expiry_minutes");
+                if (ActionApproval is not null) names.Add("action_approval");
+                if (SinglePerson.HasValue) names.Add("approval_single_person");
                 return names;
             }
         }
@@ -579,7 +609,7 @@ public sealed partial class DarlingMcpAlertTools
     private static async Task SetRouteAgentAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, int routeId, string operatorActor,
         RouteAgentRequest agent, int? fallback, bool created, CancellationToken cancellationToken, string? before = null)
     {
-        const string sql = "SELECT config.set_notification_route_agent($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)";
+        const string sql = "SELECT config.set_notification_route_agent($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12, $13)";
         await using var command = new NpgsqlCommand(sql, connection) { Transaction = transaction };
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = routeId });
@@ -595,6 +625,12 @@ public sealed partial class DarlingMcpAlertTools
         command.Parameters.Add(before is null
             ? new NpgsqlParameter { Value = DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text }
             : new NpgsqlParameter<string> { TypedValue = before });
+        command.Parameters.Add(agent.ActionApproval is null
+            ? new NpgsqlParameter { Value = DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text }
+            : new NpgsqlParameter<string> { TypedValue = agent.ActionApproval });
+        command.Parameters.Add(agent.SinglePerson is { } single
+            ? new NpgsqlParameter<bool> { TypedValue = single }
+            : new NpgsqlParameter { Value = DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Boolean });
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
