@@ -1535,7 +1535,7 @@ public sealed class DarlingWebHostService : BackgroundService
                                 DateTime.UtcNow);
                             context.Response.StatusCode = StatusCodes.Status403Forbidden;
                             context.Response.ContentType = "application/json; charset=utf-8";
-                            await context.Response.WriteAsync("{\"error\": \"This account has read-only access.\"}");
+                            await context.Response.WriteAsync(System.Text.Json.JsonSerializer.Serialize(new { error = DarlingWebEndpoints.ReadOnlyAccountText }));
                             return;
                         }
 
