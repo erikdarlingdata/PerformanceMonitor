@@ -143,7 +143,7 @@ public sealed class AgentSetupWebLiveTests
                     {
                         context.Response.StatusCode = StatusCodes.Status403Forbidden;
                         context.Response.ContentType = "application/json; charset=utf-8";
-                        await context.Response.WriteAsync("{\"error\": \"This account has read-only access.\"}");
+                        await context.Response.WriteAsync(JsonSerializer.Serialize(new { error = DarlingWebEndpoints.ReadOnlyAccountText }));
                         return;
                     }
                 }
@@ -672,7 +672,7 @@ public sealed class AgentSetupWebLiveTests
             {
                 var answer = await Send(method, path, method == "DELETE" ? null : Json, json);
                 Assert.Equal(403, answer.Status);
-                Assert.Equal("This account has read-only access.", (string)answer.Body!["error"]!);
+                Assert.Equal(DarlingWebEndpoints.ReadOnlyAccountText, (string)answer.Body!["error"]!);
             }
 
             Assert.Equal("1", await ScalarAsync(owner, "SELECT count(*) FROM config_notification_routes WHERE agent_level IS NULL", ct));

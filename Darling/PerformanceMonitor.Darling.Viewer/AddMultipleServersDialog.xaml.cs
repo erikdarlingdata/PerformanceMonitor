@@ -125,7 +125,7 @@ public partial class AddMultipleServersDialog : Window
             AddButton.IsEnabled = false;
             TestAllButton.IsEnabled = false;
             StatusText.Text = "This viewer is connected read-only, so servers can't be added or changed. " +
-                "Set postgres.connectAs to \"admin\" in darling.json and restart.";
+                ViewerReadOnlyException.HowToConnectAsAdmin;
         }
     }
 

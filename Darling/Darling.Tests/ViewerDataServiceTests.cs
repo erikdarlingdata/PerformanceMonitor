@@ -422,7 +422,26 @@ public sealed class ViewerReadOnlyTests
 
         Assert.Contains("read-only", ex.Message, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("connectAs", ex.Message, StringComparison.Ordinal);
+        /* connectAs is ignored on a bring-your-own store, so that case is told where its login lives (#7077). */
+        Assert.Contains("postgres.connectionString", ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("mute rules", ex.Message, StringComparison.Ordinal);
         Assert.Equal("42501", ex.InnerException?.Message);
+    }
+
+    [Fact]
+    public async System.Threading.Tasks.Task InvestigationInputRefusal_ShownWithoutTheParameterName()
+    {
+        /* The refusal is thrown before any connection is opened, so no store is needed. The window shows
+           InputErrorText(ex), not ex.Message, which ends " (Parameter 'reason')" (#7077). */
+        await using var service = new ViewerDataService("Host=localhost;Port=1;Database=darling;Timeout=1");
+        var ex = await Assert.ThrowsAsync<ArgumentException>(
+            () => service.CloseInvestigationRequestAsync(Guid.NewGuid(), "tester", ""));
+
+        Assert.Contains("(Parameter 'reason')", ex.Message, StringComparison.Ordinal);
+        var shown = ViewerDataService.InputErrorText(ex);
+        Assert.DoesNotContain("Parameter", shown, StringComparison.Ordinal);
+        Assert.StartsWith(ex.Message[..20], shown, StringComparison.Ordinal);
+        Assert.Equal("plain failure", ViewerDataService.InputErrorText(new InvalidOperationException("plain failure")));
     }
 }
 

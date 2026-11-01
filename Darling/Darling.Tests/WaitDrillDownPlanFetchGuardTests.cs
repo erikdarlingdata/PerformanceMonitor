@@ -93,7 +93,7 @@ public sealed class WaitDrillDownPlanFetchGuardTests
         var catchRawBody = rawBody[catchOpen..(catchOpen + catchStrippedBody.Length)];
 
         Assert.Contains("MessageBox.Show", catchRawBody, StringComparison.Ordinal);
-        Assert.Contains("Failed to retrieve plan:", catchRawBody, StringComparison.Ordinal);
+        Assert.Contains("Could not read the plan for this query from server", catchRawBody, StringComparison.Ordinal);
         Assert.Contains("return;", catchStrippedBody, StringComparison.Ordinal);
     }
 }

@@ -63,7 +63,7 @@ globalThis.fetch = async (url, init) => {
     const req = JSON.parse(init.body);
     posts.push({ url: u, contentType: init.headers["Content-Type"], req });
     const r = postReply(req);
-    return { status: r.status, ok: r.status < 300, text: async () => JSON.stringify(r.body) };
+    return { status: r.status, ok: r.status < 300, text: async () => (r.text !== undefined ? r.text : JSON.stringify(r.body)) };
   }
   urls.push(u);
   if (readFails && u.includes("/get_alert_history")) return { status: 500, ok: false, text: async () => JSON.stringify({ error: "read failed" }) };
@@ -196,6 +196,13 @@ try {
       postReply = () => ({ status: 401, body: { error: "Session expired" } });
       button(main, "Dismiss Selected").fire("click"); await tick();
       out.status401 = statusOf(main).textContent;
+      // a 403 that carries no message of its own (a JSON object with no error field, then an empty body) reads as the read-only fallback
+      postReply = () => ({ status: 403, body: {} });
+      button(main, "Dismiss Selected").fire("click"); await tick();
+      out.status403NoError = statusOf(main).textContent;
+      postReply = () => ({ status: 403, text: "" });
+      button(main, "Dismiss Selected").fire("click"); await tick();
+      out.status403NoBody = statusOf(main).textContent;
     },
     async truncatedPrompt() {
       alertsReply = { alerts: [row(1), row(2)], truncated: true };

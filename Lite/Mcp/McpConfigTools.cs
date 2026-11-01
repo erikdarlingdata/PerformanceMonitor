@@ -27,7 +27,7 @@ public sealed class McpConfigTools
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "server_config", awsRdsKind: AwsRdsKind.None)
                     ?? McpHelpers.Status(
                         "unavailable",
-                        "No server configuration data available. The config collector may not have run yet.");
+                        $"No server configuration data available for {resolved.DisplayName}. The config collector may not have run yet. Check get_collection_health for {resolved.DisplayName} to see if the collector is failing or still waiting for its first run.");
 
             return JsonSerializer.Serialize(new
             {

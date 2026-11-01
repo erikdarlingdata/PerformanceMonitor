@@ -20,6 +20,7 @@ using System.Windows.Interop;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Notifications;
 using System.Windows.Threading;
+using PerformanceMonitorLite.Helpers;
 using PerformanceMonitorLite.Services;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Ui;
@@ -1769,9 +1770,8 @@ public partial class App : Application
         AppLogger.Error("AppDomain", "Unhandled exception (terminating=" + e.IsTerminating + ")", exception);
         AppLogger.Flush();
 
-        var details = FormatExceptionDetails(exception);
         MessageBox.Show(
-            $"A fatal error occurred and the application must close.\n\n{details}",
+            ErrorDialogText.Fatal(exception, AppLogger.GetCurrentLogFile()),
             "Fatal Error",
             MessageBoxButton.OK,
             MessageBoxImage.Error);
@@ -1792,9 +1792,8 @@ public partial class App : Application
         AppLogger.Error("Dispatcher", "Unhandled exception", e.Exception);
         AppLogger.Flush();
 
-        var details = FormatExceptionDetails(e.Exception);
         MessageBox.Show(
-            $"An error occurred:\n\n{details}\n\nThe application will attempt to continue.",
+            ErrorDialogText.Recoverable(e.Exception, AppLogger.GetCurrentLogFile()),
             "Error",
             MessageBoxButton.OK,
             MessageBoxImage.Error);
@@ -1817,33 +1816,5 @@ public partial class App : Application
         return ex is System.ArgumentException
             && ex.Message.Contains("VisualTarget")
             && ex.StackTrace?.Contains("TaskbarIcon") == true;
-    }
-
-    private static string FormatExceptionDetails(Exception? ex)
-    {
-        if (ex == null) return "Unknown error";
-
-        var sb = new System.Text.StringBuilder();
-        sb.AppendLine($"Type: {ex.GetType().FullName}");
-        sb.AppendLine($"Message: {ex.Message}");
-        sb.AppendLine();
-        sb.AppendLine("Stack trace:");
-        sb.AppendLine(ex.StackTrace);
-
-        var inner = ex.InnerException;
-        var depth = 1;
-        while (inner != null)
-        {
-            sb.AppendLine();
-            sb.AppendLine($"--- Inner Exception [{depth}] ---");
-            sb.AppendLine($"Type: {inner.GetType().FullName}");
-            sb.AppendLine($"Message: {inner.Message}");
-            sb.AppendLine("Stack trace:");
-            sb.AppendLine(inner.StackTrace);
-            inner = inner.InnerException;
-            depth++;
-        }
-
-        return sb.ToString();
     }
 }

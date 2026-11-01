@@ -121,7 +121,8 @@ public sealed partial class DarlingMcpServerAdminTools
     /// <summary>The fixed answer when the store has no edit function the calling role may run (#5240): a self-managed store
     /// whose roles were provisioned before the function existed. Never PostgreSQL's own text.</summary>
     internal const string EditStoreNeedsRolesText =
-        "This store's roles predate server edits: re-run provision-roles.sql against the store, then try again.";
+        "This store's roles predate server edits. On your own PostgreSQL, run " + DarlingManagedRoles.ProvisionRolesScriptPath
+        + " on the store as a superuser, then try again. On the bundled store, restart the Darling service so it provisions the roles again.";
 
     /// <summary>The refusal when a role is set or changed and darling.json lists no role the web and MCP may set (#5452).</summary>
     internal const string EditAwsRoleNoListText =

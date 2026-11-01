@@ -135,6 +135,9 @@ public sealed class AlertHistoryDismissBehaviourTests
         var expired = r.GetProperty("status401").GetString()!;
         Assert.DoesNotContain("Dismissed", expired);
         Assert.Contains("Session expired", expired);
+        // A 403 with no message of its own reads as the read-only fallback, not the "answered HTTP" text.
+        Assert.Equal("This session is read-only, so nothing was dismissed.", r.GetProperty("status403NoError").GetString());
+        Assert.Equal("This session is read-only, so nothing was dismissed.", r.GetProperty("status403NoBody").GetString());
     }
 
     [Fact]

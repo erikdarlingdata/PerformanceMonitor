@@ -206,7 +206,7 @@ public static class DarlingLogHashKeyFile
         Key: null,
         Path: path,
         Generated: false,
-        Refusal: $"PostgreSQL log events will not be collected: the store's log-hash key {path} cannot be used because {reason} (#4004). "
+        Refusal: $"PostgreSQL log events will not be collected: the store's log-hash key {path} cannot be used because {reason}. "
             + "The service does not replace this key on its own, because a new key gives every stored log event a new identity. "
             + "If only this service could have written or read it, restrict it to the service account (on Windows, --harden-files run elevated does that) and restart; otherwise, or to start a new key, delete it and restart, and the service generates a new one.");
 
@@ -220,7 +220,7 @@ public static class DarlingLogHashKeyFile
         Key: null,
         Path: path,
         Generated: false,
-        Refusal: $"PostgreSQL log events will not be collected: the store's log-hash key {path} cannot be used because {reason} (#4004). "
+        Refusal: $"PostgreSQL log events will not be collected: the store's log-hash key {path} cannot be used because {reason}. "
             + "Nothing in that directory is read or written while it is not trusted; fix what the reason names and restart.");
 }
 
