@@ -115,7 +115,7 @@ public sealed class PersonDirectoryCommandTests
         var all = Enumerable.Repeat((object)true, parameters.Length).ToArray();
         Assert.Equal(237, (int)method.Invoke(null, all)!);
         all[own] = false;
-        Assert.Equal(234, (int)method.Invoke(null, all)!);
+        Assert.Equal(236, (int)method.Invoke(null, all)!);
     }
 }
 
@@ -265,7 +265,10 @@ public sealed class PersonDirectoryLiveTests
             Assert.Equal(2, (int)json["people_returned"]!);
             var first = json["people"]![0]!;
             Assert.Equal("Ann", (string)first["display_name"]!);
-            Assert.Equal("T01:U02", (string)first["identities"]![0]!["external_id"]!);
+            /* MCP tokens, agent tokens included, see the kind and never the Slack ids or a web sign-in key (#7107). */
+            Assert.Equal("slack", (string)first["identities"]![0]!["kind"]!);
+            Assert.False(first["identities"]![0]!.AsObject().ContainsKey("external_id"));
+            Assert.DoesNotContain("T01:U02", json.ToJsonString(), StringComparison.Ordinal);
             var grant = first["grants"]![0]!;
             Assert.Equal("request_level_3", (string)grant["capability"]!);
             Assert.Equal("server", (string)grant["scope"]!);
@@ -281,7 +284,7 @@ public sealed class PersonDirectoryLiveTests
     {
         await WithStoreAsync(async (connection, owner, ct) =>
         {
-            await RungRewindArtifacts.DropSentinelsAboveAsync(connection, 234, ct);
+            await RungRewindArtifacts.DropSentinelsAboveAsync(connection, 236, ct);
             Assert.Equal("False", await ScalarAsync(connection, "SELECT to_regclass('config.person') IS NOT NULL", ct));
             await ExecAsync(connection, "DELETE FROM darling_schema_version WHERE version >= 237", ct);
             await PgMigrations.MigrateAsync(connection, ct);
@@ -304,6 +307,8 @@ public sealed class PersonDirectoryGrantLiveTests
        sits in the pg-cluster-roles collection. */
     private static readonly string[] s_cleanupRoles = ["admin", "viewer", "web", "mcp"];
     private static readonly string[] s_tables = ["config.person", "config.person_identity", "config.person_grant"];
+    private static readonly (string Table, string Column)[] s_sequences =
+        [("config.person", "person_id"), ("config.person_identity", "identity_id"), ("config.person_grant", "grant_id")];
 
     private static string RequireLivePostgres()
     {
@@ -348,6 +353,13 @@ public sealed class PersonDirectoryGrantLiveTests
                     .Where(verb => ScalarAsync(owner, $"SELECT has_table_privilege('{role}', '{table}', '{verb}')", ct).GetAwaiter().GetResult() == "True"));
                 Assert.Equal("SELECT", held);
             }
+
+            /* A table's REVOKE does not reach its identity sequence: no role keeps USAGE (nextval), SELECT or UPDATE on one. */
+            foreach (var sequence in s_sequences)
+            {
+                foreach (var verb in new[] { "USAGE", "SELECT", "UPDATE" })
+                    Assert.Equal("False", await ScalarAsync(owner, $"SELECT has_sequence_privilege('{role}', pg_get_serial_sequence('{sequence.Table}', '{sequence.Column}'), '{verb}')", ct));
+            }
         }
 
         var ann = (await PersonDirectory.AddPersonAsync(NpgsqlDataSource.Create(scratch.ConnectionString), "Ann", "person:alice", ServerActionSurfaces.Viewer, ct)).PersonId!.Value;
@@ -359,9 +371,13 @@ public sealed class PersonDirectoryGrantLiveTests
             await AssertDeniedAsync(login, "UPDATE config.person SET enabled = false", ct);
             await AssertDeniedAsync(login, "DELETE FROM config.person", ct);
             await AssertDeniedAsync(login, $"INSERT INTO config.person_identity (person_id, kind, external_id, created_by) VALUES ({ann}, 'slack', 'T1:U1', 'x')", ct);
+            await AssertDeniedAsync(login, "UPDATE config.person_identity SET kind = kind", ct);
             await AssertDeniedAsync(login, "DELETE FROM config.person_identity", ct);
             await AssertDeniedAsync(login, $"INSERT INTO config.person_grant (person_id, capability, created_by) VALUES ({ann}, 'undo', 'x')", ct);
+            await AssertDeniedAsync(login, "UPDATE config.person_grant SET capability = capability", ct);
             await AssertDeniedAsync(login, "DELETE FROM config.person_grant", ct);
+            foreach (var sequence in s_sequences)
+                await AssertDeniedAsync(login, $"SELECT nextval(pg_get_serial_sequence('{sequence.Table}', '{sequence.Column}'))", ct);
 
             /* The journal trigger keeps every people event to the owner, so neither login can write a false record of who mapped or granted somebody. */
             foreach (var kind in PersonEvents.OwnerOnly)
@@ -444,7 +460,7 @@ public sealed class PersonDirectoryGrantLiveTests
                 .Replace("CHANGE_ME_MCP_PASSWORD", McpPassword, StringComparison.Ordinal);
 
             /* Behind the rung the script warns, skips step 3j3 and still runs to the end. */
-            await RungRewindArtifacts.DropSentinelsAboveAsync(owner, 234, ct);
+            await RungRewindArtifacts.DropSentinelsAboveAsync(owner, 236, ct);
             await ExecAsync(owner, script, ct);
             Assert.Equal("4", await ScalarAsync(owner, "SELECT count(*) FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'web', 'mcp')", ct));
 
@@ -452,6 +468,96 @@ public sealed class PersonDirectoryGrantLiveTests
             await PgMigrations.MigrateAsync(owner, ct);
             await ExecAsync(owner, script, ct);
             await AssertOwnerOnlyAsync(owner, scratch, AdminPassword, McpPassword, ct);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await CleanUpAsync(scratch, bodySucceeded);
+        }
+    }
+
+    /// <summary>
+    /// The rung takes the writes back itself (#7107): on a store whose roles and default privileges exist but whose provisioning has not run
+    /// again since V237, <c>admin</c> holds SELECT only on the three tables and nothing on their sequences, and every write as <c>admin</c>
+    /// or <c>mcp</c> is refused. A grant on a server goes when <c>admin</c> removes the server, so adding the same server back (the same id)
+    /// does not bring it back. The same for a tag.
+    /// </summary>
+    [Fact]
+    public async Task TheRung_TakesTheWritesBack_BeforeProvisioningRunsAgain_AndARemovedServerTakesItsGrants()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(RequireLivePostgres(), ct);
+        var bodySucceeded = false;
+        try
+        {
+            await using var owner = new NpgsqlConnection(scratch.ConnectionString);
+            await owner.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(owner, ct);
+            await SkipIfRolesExistAsync(owner, ct);
+            var ownerRole = new NpgsqlConnectionStringBuilder(owner.ConnectionString).Username ?? "darling";
+            await ExecAsync(owner,
+                DarlingManagedRoles.BuildProvisioningSql(
+                    ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp,
+                    15, PasswordReassert.All, ProvisioningTarget.ComposeStore(ownerRole, scratch.DatabaseName)), ct);
+
+            /* Back behind the rung, then the upgrade runs V237 alone, with the default privileges in place and no provisioning after it. */
+            await RungRewindArtifacts.DropSentinelsAboveAsync(owner, 236, ct);
+            await ExecAsync(owner, "DELETE FROM darling_schema_version WHERE version >= 237", ct);
+            Assert.Equal("True", await ScalarAsync(owner,
+                "SELECT EXISTS (SELECT 1 FROM pg_default_acl AS d JOIN pg_namespace AS n ON n.oid = d.defaclnamespace WHERE n.nspname = 'config' AND d.defaclobjtype = 'r' AND array_to_string(d.defaclacl, ',') LIKE '%admin=a%')", ct));
+            await PgMigrations.MigrateAsync(owner, ct);
+
+            /* No role holds more than SELECT on a table (mcp holds nothing until provisioning grants its read), and none holds anything on a
+               sequence. As admin, an INSERT, UPDATE and DELETE on each table and a nextval on each sequence are refused. */
+            foreach (var role in s_cleanupRoles)
+            {
+                foreach (var table in s_tables)
+                {
+                    foreach (var verb in new[] { "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER" })
+                        Assert.Equal("False", await ScalarAsync(owner, $"SELECT has_table_privilege('{role}', '{table}', '{verb}')", ct));
+                }
+
+                foreach (var sequence in s_sequences)
+                {
+                    foreach (var verb in new[] { "USAGE", "SELECT", "UPDATE" })
+                        Assert.Equal("False", await ScalarAsync(owner, $"SELECT has_sequence_privilege('{role}', pg_get_serial_sequence('{sequence.Table}', '{sequence.Column}'), '{verb}')", ct));
+                }
+            }
+
+            await using var source = NpgsqlDataSource.Create(scratch.ConnectionString);
+            var ann = (await PersonDirectory.AddPersonAsync(source, "Ann", "person:alice", ServerActionSurfaces.Viewer, ct)).PersonId!.Value;
+            await using (var admin = await LoginAsync(scratch, "admin", ProvisioningTestSecrets.AdminPassword, ct))
+            {
+                Assert.Equal("1", await ScalarAsync(admin, "SELECT count(*) FROM config.person", ct));
+                await AssertDeniedAsync(admin, "INSERT INTO config.person (display_name, created_by, updated_by) VALUES ('Eve', 'x', 'x')", ct);
+                await AssertDeniedAsync(admin, "UPDATE config.person SET enabled = false", ct);
+                await AssertDeniedAsync(admin, "DELETE FROM config.person", ct);
+                await AssertDeniedAsync(admin, $"INSERT INTO config.person_identity (person_id, kind, external_id, created_by) VALUES ({ann}, 'slack', 'T1:U1', 'x')", ct);
+                await AssertDeniedAsync(admin, "UPDATE config.person_identity SET kind = kind", ct);
+                await AssertDeniedAsync(admin, "DELETE FROM config.person_identity", ct);
+                await AssertDeniedAsync(admin, $"INSERT INTO config.person_grant (person_id, capability, created_by) VALUES ({ann}, 'undo', 'x')", ct);
+                await AssertDeniedAsync(admin, "UPDATE config.person_grant SET capability = capability", ct);
+                await AssertDeniedAsync(admin, "DELETE FROM config.person_grant", ct);
+                foreach (var sequence in s_sequences)
+                    await AssertDeniedAsync(admin, $"SELECT nextval(pg_get_serial_sequence('{sequence.Table}', '{sequence.Column}'))", ct);
+            }
+
+            await ExecAsync(owner, "INSERT INTO config.config_monitored_servers (server_id, name, host) VALUES (7, 'srv-7', 'host-7')", ct);
+            var tagId = int.Parse(await ScalarAsync(owner, "INSERT INTO config.server_tags (name) VALUES ('prod') RETURNING id", ct), CultureInfo.InvariantCulture);
+            Assert.Equal("added", (await PersonDirectory.AddGrantAsync(source, ann, 7, null, "undo", [], "person:alice", ServerActionSurfaces.Viewer, ct)).Status);
+            Assert.Equal("added", (await PersonDirectory.AddGrantAsync(source, ann, null, tagId, "undo", [], "person:alice", ServerActionSurfaces.Viewer, ct)).Status);
+
+            /* admin removes the server and the tag as the Viewer's Remove does. The cascade runs as the grant table's owner. */
+            await using (var admin = await LoginAsync(scratch, "admin", ProvisioningTestSecrets.AdminPassword, ct))
+            {
+                await ExecAsync(admin, "SET search_path = config, public", ct);
+                await ExecAsync(admin, ViewerDataService.MonitoredServerDeleteSql.Replace("$1", "7", StringComparison.Ordinal), ct);
+                await ExecAsync(admin, $"DELETE FROM config.server_tags WHERE id = {tagId}", ct);
+            }
+
+            await ExecAsync(owner, "INSERT INTO config.config_monitored_servers (server_id, name, host) VALUES (7, 'srv-7', 'host-7')", ct);
+            Assert.Equal("0", await ScalarAsync(owner, "SELECT count(*) FROM config.person_grant", ct));
+            Assert.Empty((await PersonDirectory.ListAsync(source, ct)).Single().Grants);
             bodySucceeded = true;
         }
         finally

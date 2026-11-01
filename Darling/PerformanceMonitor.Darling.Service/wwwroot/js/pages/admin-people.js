@@ -7,7 +7,8 @@
  */
 
 /* Admin > People (#7107): the people the service knows, the sign-ins that map to each one, and the grants each one holds.
-     GET /api/people             {can_decide, signed_in_admin, sign_in_key, people: [{person_id, display_name, enabled, identities: [...], grants: [...]}]}
+     GET /api/people             {can_decide, signed_in_admin, sign_in_key, people?: [{person_id, display_name, enabled, identities: [...], grants: [...]}]}
+                                 people comes only to an administrator. Any other session gets its own key and no list.
      PUT /api/people/{command}   the command's args  ->  200 {status: added|renamed|removed|unchanged, message}; 400; 403; 404; 409; 503
    The commands: add_person, rename_person, set_person_enabled, add_person_identity, remove_person_identity, add_person_grant, remove_person_grant.
    Every signed-in person sees their own sign-in key here, with a copy button, so they can hand it to an administrator, who pastes it into the
@@ -133,9 +134,6 @@ export function peopleOutcome(res) {
 }
 
 const listOnly = (managed, adminWritesOff) => listOnlyNote(managed, "this page lists people only", "To add or change a person", adminWritesOff);
-const NOT_SIGNED_IN =
-  "Sign in to the dashboard as an admin to add or change people; this page lists them only. A dashboard with no sign-in configured " +
-  "never changes them. Or use the Viewer app.";
 const CAN_DECIDE =
   "The people the service knows, the sign-ins that map to each one, and what each one may do. A grant names what the person may do and where: " +
   "one server, one tag, or all servers. Nothing reads a grant yet, and administrators keep every power they have. Every change is recorded with your name.";
@@ -188,7 +186,7 @@ function select(field, choices, value, onChange) {
 
 const field = (text, control) => el("label", { class: "tag-field" }, [el("span", { class: "mute-label", text }), control]);
 
-/** The sign-in key panel every session sees: its own key with a copy button, or why it has none. */
+/** The sign-in key panel every session sees: its own key with a copy button, or why it has none. A session that is not an administrator sees only this. */
 function keyPanel(key) {
   if (!key) return noticeStrip(NO_KEY);
   const copy = el("button", { class: "btn", type: "button", text: "Copy", "aria-label": "Copy your sign-in key" });
@@ -216,16 +214,18 @@ export async function buildPeople(body, generation, ctx) {
   const bad = ctx.failure(res);
   if (bad) return mount(body, nodes.concat([bad]));
   const data = res.data || {};
+  const key = typeof data.sign_in_key === "string" && data.sign_in_key ? data.sign_in_key : null;
+  /* Only an administrator gets the list (#7107). Any other session sees its own sign-in key and its Copy button, and nothing else. */
+  if (!Array.isArray(data.people)) return mount(body, nodes.concat([keyPanel(key)]));
   const canDecide = data.can_decide === true;
-  let notice = canDecide ? CAN_DECIDE : data.signed_in_admin === false ? NOT_SIGNED_IN : null;
-  if (notice === null) {
+  let notice = CAN_DECIDE;
+  if (!canDecide) {
     const session = await ctx.getSession();
     notice = listOnly(session.managed_store === true, session.admin_writes_off === true);
   }
   nodes.push(noticeStrip(notice));
-  const key = typeof data.sign_in_key === "string" && data.sign_in_key ? data.sign_in_key : null;
   nodes.push(keyPanel(key));
-  const people = Array.isArray(data.people) ? data.people : [];
+  const people = data.people;
   if (canDecide) {
     nodes.push(el("div", { class: "row-actions", "data-role": "add-person" }, [
       field("New person:", input("newName", form.newName, { maxlength: "128", placeholder: "Display name" })),

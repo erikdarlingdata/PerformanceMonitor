@@ -33,13 +33,13 @@ public sealed class DarlingMcpPeopleTools
     internal const string ToolName = "get_people";
 
     [McpServerTool(Name = "get_people"), Description(
-        "Lists the people an administrator has named, with each person's identities and grants. A person has a display name and is enabled or disabled; a disabled person's grants do not count. An identity maps a sign-in to the person: kind web is a signed-in web seat's owner key (a hash of the identity provider's issuer and subject, never the user name), kind slack is the Slack team id and user id. A grant names a capability (ask, request_level_2, request_level_3, approve, undo, decide_note, feedback), a scope (one server, one tag, or the fleet) and, for request_level_3 and approve, the server action kinds it covers. A grant whose server or tag was removed shows a null name and grants nothing. Grants are not yet checked by any gate. Read-only: only an administrator changes people, in the Viewer or the web dashboard.")]
+        "Lists the people an administrator has named, with each person's identities and grants. A person has a display name and is enabled or disabled; a disabled person's grants do not count. An identity maps a sign-in to the person: kind web is a signed-in web sign-in, kind slack is a Slack user. Only the kind is shown here, never the sign-in key or the Slack ids. A grant names a capability (ask, request_level_2, request_level_3, approve, undo, decide_note, feedback), a scope (one server, one tag, or the fleet) and, for request_level_3 and approve, the server action kinds it covers. Removing a server or tag removes its grants. Grants are not yet checked by any gate. Read-only: only an administrator changes people, in the Viewer or the web dashboard.")]
     public static async Task<string> GetPeople(NpgsqlDataSource postgres, CancellationToken cancellationToken = default)
     {
         try
         {
             var people = await PersonDirectory.ListAsync(postgres, cancellationToken);
-            return ToJson(people).ToJsonString();
+            return ToJson(people, includeExternalIds: false).ToJsonString();
         }
         catch (System.Exception ex) when (ex is not System.OperationCanceledException)
         {
@@ -47,9 +47,11 @@ public sealed class DarlingMcpPeopleTools
         }
     }
 
-    /// <summary>The list as the MCP read answers it, and as a web page's read can: <c>{people_returned, people: [{person_id, display_name, enabled,
-    /// created_by, created_at_utc, updated_by, updated_at_utc, identities: [...], grants: [...]}]}</c>.</summary>
-    internal static JsonObject ToJson(IReadOnlyList<PersonRow> people) => new()
+    /// <summary>The list as the MCP read and the web page's admin read answer it: <c>{people_returned, people: [{person_id, display_name, enabled,
+    /// created_by, created_at_utc, updated_by, updated_at_utc, identities: [...], grants: [...]}]}</c>. An identity's <c>external_id</c> (a web
+    /// sign-in key, or Slack ids) is included only when <paramref name="includeExternalIds"/> is set, which only an administrator's read does:
+    /// MCP tokens, agent tokens included, see the kind and never the id (#7107).</summary>
+    internal static JsonObject ToJson(IReadOnlyList<PersonRow> people, bool includeExternalIds) => new()
     {
         ["people_returned"] = people.Count,
         ["people"] = new JsonArray(people.Select(p => (JsonNode)new JsonObject
@@ -61,14 +63,7 @@ public sealed class DarlingMcpPeopleTools
             ["created_at_utc"] = Utc(p.CreatedAt),
             ["updated_by"] = p.UpdatedBy,
             ["updated_at_utc"] = Utc(p.UpdatedAt),
-            ["identities"] = new JsonArray(p.Identities.Select(i => (JsonNode)new JsonObject
-            {
-                ["identity_id"] = i.IdentityId,
-                ["kind"] = i.Kind,
-                ["external_id"] = i.ExternalId,
-                ["created_by"] = i.CreatedBy,
-                ["created_at_utc"] = Utc(i.CreatedAt),
-            }).ToArray()),
+            ["identities"] = new JsonArray(p.Identities.Select(i => (JsonNode)Identity(i, includeExternalIds)).ToArray()),
             ["grants"] = new JsonArray(p.Grants.Select(g => (JsonNode)new JsonObject
             {
                 ["grant_id"] = g.GrantId,
@@ -84,6 +79,16 @@ public sealed class DarlingMcpPeopleTools
             }).ToArray()),
         }).ToArray()),
     };
+
+    private static JsonObject Identity(PersonIdentityRow i, bool includeExternalId)
+    {
+        var o = new JsonObject { ["identity_id"] = i.IdentityId, ["kind"] = i.Kind };
+        if (includeExternalId)
+            o["external_id"] = i.ExternalId;
+        o["created_by"] = i.CreatedBy;
+        o["created_at_utc"] = Utc(i.CreatedAt);
+        return o;
+    }
 
     private static string Utc(System.DateTime value) =>
         System.DateTime.SpecifyKind(value, System.DateTimeKind.Utc).ToString("yyyy-MM-ddTHH:mm:ss.ffffffZ", CultureInfo.InvariantCulture);

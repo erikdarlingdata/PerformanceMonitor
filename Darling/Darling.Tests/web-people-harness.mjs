@@ -42,6 +42,8 @@ globalThis.fetch = async (url, init) => {
     puts.push({ path: u, body: JSON.parse(init.body) });
     return reply(200, { status: "added", message: "Added." });
   }
+  /* As GET /api/people answers (#7107): the list only to an administrator, and any other session its own key alone. */
+  if (session.signed_in_admin !== true) return reply(200, { ...session });
   return reply(200, {
     ...session,
     people_returned: 1,
@@ -107,17 +109,17 @@ try {
       out.addOwnPresent = !!button("Add my own sign-in");
       out.addSignInPresent = !!button("Add sign-in");
     },
-    /* A viewer sign-in: the list and its own key show, but no control that changes anything. */
+    /* A viewer sign-in: the route sends it no list, so the tab shows its own key and the Copy button, and nothing else. */
     async viewer() {
       session.can_decide = false;
       session.signed_in_admin = false;
       await draw();
       out.keyShown = fieldNode("sign-in-key") ? fieldNode("sign-in-key").textContent : null;
-      out.listShown = text().includes("Ann | Slack T1:U1 | Approve server actions (Kill sessions), Server: SRV1");
+      out.listShown = text().includes("Ann");
       out.addPersonPresent = !!button("Add person");
-      await click(button("Open Ann"));
-      out.changeButtons = buttons().map((b) => b.textContent).filter((t) => t !== "Close" && t !== "Copy");
-      out.signInSentence = strips().some((s) => s.startsWith("Sign in to the dashboard as an admin"));
+      out.otherButtons = buttons().map((b) => b.textContent).filter((t) => t !== "Copy");
+      out.copyPresent = !!button("Copy your sign-in key");
+      out.strips = strips().length;
     },
     /* The admin's forms: add a person, a Slack sign-in (upper-cased, team and user joined) and an approve grant with its kinds on a tag. */
     async forms() {

@@ -2094,11 +2094,24 @@ GRANT SELECT ON {config}.config_server_actions TO {mcp};
 -- 10e3. The people directory (V237, #7107): the people, their identities and their grants. Every role reads them and NO role but the store
 --     owner (the service, through PersonDirectory, which journals each change) writes them: the default privileges would give admin
 --     INSERT/UPDATE/DELETE on a table made after them, so REVOKE ALL ... CASCADE takes every privilege from PUBLIC and the four roles,
---     and SELECT goes back to all four. No MCP tool, web login or chat message writes a person. provision-roles.sql step 3j3 mirrors it.
---     It runs after every blanket grant above, and before 10a.
+--     and SELECT goes back to all four. A table's REVOKE does not reach its identity sequences, which the default privileges give admin
+--     USAGE and SELECT on (so admin could call nextval and spend ids), so each sequence is revoked by name too. No MCP tool, web login or
+--     chat message writes a person. provision-roles.sql step 3j3 mirrors it. It runs after every blanket grant above, and before 10a.
 REVOKE ALL ON {config}.person, {config}.person_identity, {config}.person_grant FROM PUBLIC, {admin}, {viewer}, {web}, {mcp} CASCADE;
 GRANT SELECT ON {config}.person, {config}.person_identity, {config}.person_grant TO {admin}, {viewer}, {web};
 GRANT SELECT ON {config}.person, {config}.person_identity, {config}.person_grant TO {mcp};
+DO $people_seq$
+DECLARE
+   sequence_name text;
+BEGIN
+   FOREACH sequence_name IN ARRAY ARRAY[
+      pg_catalog.pg_get_serial_sequence('{config}.person', 'person_id'),
+      pg_catalog.pg_get_serial_sequence('{config}.person_identity', 'identity_id'),
+      pg_catalog.pg_get_serial_sequence('{config}.person_grant', 'grant_id')]
+   LOOP
+      EXECUTE pg_catalog.format('REVOKE ALL ON SEQUENCE %s FROM PUBLIC, %I, %I, %I, %I', sequence_name, '{admin}', '{viewer}', '{web}', '{mcp}');
+   END LOOP;
+END $people_seq$;
 
 -- 10f. Phase C tables (V193, #5997): the evidence of a request, the daily deadlock signature counts and the signature
 --     merges. Only the store owner (the service) writes them. The default privileges would give admin INSERT/UPDATE/DELETE

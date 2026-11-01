@@ -30,10 +30,12 @@ public static partial class DarlingWebEndpoints
         DarlingWebStoreWrites.Refused("change people, sign-ins or grants", managedStore, adminWritesOff: adminWritesOff);
 
     /// <summary>
-    /// The people directory routes (#7107). <c>GET /api/people</c> answers <c>{can_decide, signed_in_admin, sign_in_key, people_returned,
-    /// people: [...]}</c>, where <c>people</c> is the same shape the MCP <c>get_people</c> read answers. <c>sign_in_key</c> is the requesting
-    /// session's own owner key (<see cref="PersonDirectoryCommands.WebIdentityOf"/>), or null for the shared web token, a reads-only session or an
-    /// older cookie. It is only ever the caller's own: it comes from the request's seat, never from the store, and knowing it signs nobody in.
+    /// The people directory routes (#7107). <c>GET /api/people</c> answers <c>{can_decide, signed_in_admin, sign_in_key}</c> to every session,
+    /// and adds <c>people_returned</c> and <c>people: [...]</c>, the people with each identity's external id (a web sign-in key or Slack ids),
+    /// only to an administrator: a signed-in admin or the shared web token (<see cref="DarlingWebSeat.IsSignedInAdmin"/>). Any other session
+    /// never reads the store here and sees no list. <c>sign_in_key</c> is the requesting session's own owner key
+    /// (<see cref="PersonDirectoryCommands.WebIdentityOf"/>), or null for the shared web token, a reads-only session or an older cookie. It is
+    /// only ever the caller's own: it comes from the request's seat, never from the store.
     /// <c>PUT /api/people/{command}</c>, with the command's args as the JSON body, runs one of the seven people writes through
     /// <see cref="PersonDirectoryCommands.RunForWebSeatAsync"/>. It runs the checks of <c>PUT /api/servers/{id}/actions/{action}</c> in the same
     /// order before the store is touched: 415 without <c>application/json</c>, 400 for a body that is not a JSON object, 403 unless the request is a
@@ -55,9 +57,12 @@ public static partial class DarlingWebEndpoints
             var stopwatch = Stopwatch.StartNew();
             try
             {
-                var rows = await PersonDirectory.ListAsync(postgres, context.RequestAborted);
-                var body = DarlingMcpPeopleTools.ToJson(rows);
                 var signedInAdmin = DarlingWebSeat.IsSignedInAdmin(context);
+                /* A sign-in key is shown only to its own session and to administrators (#7107): the list, with every person's keys and Slack ids,
+                   goes only to an administrator, and the store is not read for anyone else. */
+                var body = signedInAdmin
+                    ? DarlingMcpPeopleTools.ToJson(await PersonDirectory.ListAsync(postgres, context.RequestAborted), includeExternalIds: true)
+                    : new JsonObject();
                 body["can_decide"] = signedInAdmin && await DecideProbe(context).CanDecideAsync(context.RequestAborted);
                 body["signed_in_admin"] = signedInAdmin;
                 body["sign_in_key"] = PersonDirectoryCommands.WebIdentityOf(DarlingWebSeat.FromContext(context));

@@ -17,7 +17,7 @@ namespace Darling.Tests;
 
 /// <summary>
 /// The Admin "People" tab (#7107), run under Node (<c>web-people-harness.mjs</c>) on a fake DOM and a scripted fetch: the session's own sign-in
-/// key with its copy button, "Add my own sign-in", the shared web token's missing key, a viewer's list with no controls, and the args each form
+/// key with its copy button, "Add my own sign-in", the shared web token's missing key, a viewer's own key with no list, and the args each form
 /// sends. Node is skipped when it is not installed.
 /// </summary>
 public sealed class WebPeopleBehaviourTests
@@ -85,15 +85,16 @@ public sealed class WebPeopleBehaviourTests
     }
 
     [Fact]
-    public void AViewerSignIn_SeesTheListAndItsOwnKey_ButNoControlThatChangesAnything()
+    public void AViewerSignIn_SeesOnlyItsOwnKeyAndTheCopyButton_AndNoList()
     {
         var r = Run("viewer");
 
         Assert.Equal(Key, r.GetProperty("keyShown").GetString());
-        Assert.True(r.GetProperty("listShown").GetBoolean());
+        Assert.True(r.GetProperty("copyPresent").GetBoolean());
+        Assert.False(r.GetProperty("listShown").GetBoolean());
         Assert.False(r.GetProperty("addPersonPresent").GetBoolean());
-        Assert.Empty(r.GetProperty("changeButtons").EnumerateArray());
-        Assert.True(r.GetProperty("signInSentence").GetBoolean());
+        Assert.Empty(r.GetProperty("otherButtons").EnumerateArray());
+        Assert.Equal(0, r.GetProperty("strips").GetInt32());
     }
 
     [Fact]

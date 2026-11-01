@@ -111,6 +111,7 @@ public sealed class PersonDirectoryWebRouteLiveTests
             Assert.False((bool)list.Body!["can_decide"]!);
             Assert.False((bool)list.Body["signed_in_admin"]!);
             Assert.Null((string?)list.Body["sign_in_key"]);
+            Assert.False(list.Body.AsObject().ContainsKey("people"));
             await AssertNothingWrittenAsync(owner, ct);
         }, signedIn: false, publishOwner: false);
     }
@@ -120,9 +121,12 @@ public sealed class PersonDirectoryWebRouteLiveTests
     {
         await WithWebAsync("admin", async (owner, Send, ct) =>
         {
+            /* A viewer session gets no list at all, only its own key (#7107). The old answer carried an empty list here. */
             var list = await Send("GET", "/api/people", null);
             Assert.False((bool)list.Body!["can_decide"]!);
             Assert.Equal(ViewerKey, (string?)list.Body["sign_in_key"]);
+            Assert.False(list.Body.AsObject().ContainsKey("people"));
+            Assert.False(list.Body.AsObject().ContainsKey("people_returned"));
 
             foreach (var command in new[] { "add_person", "rename_person", "set_person_enabled", "add_person_identity", "remove_person_identity", "add_person_grant", "remove_person_grant" })
             {

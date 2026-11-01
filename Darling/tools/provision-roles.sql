@@ -3528,9 +3528,11 @@ END $do$;
 -- 3j3. The people directory (V237, #7107), mirroring managed provisioning's section 10e3: the people, their identities and their grants.
 --     Every role reads them and NO role but the store owner (the service, which journals each change) writes them: REVOKE ALL ... CASCADE
 --     takes every privilege (the default privileges would give admin INSERT/UPDATE/DELETE on a table made after them), and SELECT goes
---     back to all four. The tables are created by V237: on a store below it the block warns and skips, so the rest of the script still
---     runs; re-run the script once the service has migrated the store to V237.
+--     back to all four. Each identity sequence is revoked by name too. The tables are created by V237: on a store below it the block warns
+--     and skips, so the rest of the script still runs; re-run the script once the service has migrated the store to V237.
 DO $do$
+DECLARE
+   sequence_name text;
 BEGIN
    IF pg_catalog.to_regclass('config.person_grant') IS NULL THEN
       RAISE WARNING 'The people directory tables were not found, so their grants were skipped. Run this script again after the service has upgraded the store.';
@@ -3540,6 +3542,15 @@ BEGIN
    REVOKE ALL ON config.person, config.person_identity, config.person_grant FROM PUBLIC, admin, viewer, web, mcp CASCADE;
    GRANT SELECT ON config.person, config.person_identity, config.person_grant TO admin, viewer, web;
    GRANT SELECT ON config.person, config.person_identity, config.person_grant TO mcp;
+
+   -- A table's REVOKE does not reach its identity sequences, which the default privileges give admin USAGE and SELECT on.
+   FOREACH sequence_name IN ARRAY ARRAY[
+      pg_catalog.pg_get_serial_sequence('config.person', 'person_id'),
+      pg_catalog.pg_get_serial_sequence('config.person_identity', 'identity_id'),
+      pg_catalog.pg_get_serial_sequence('config.person_grant', 'grant_id')]
+   LOOP
+      EXECUTE pg_catalog.format('REVOKE ALL ON SEQUENCE %s FROM PUBLIC, admin, viewer, web, mcp', sequence_name);
+   END LOOP;
 END $do$;
 
 -- 3k. Query-tag tables (V192, #5977), mirroring managed provisioning's grants for them. mcp writes the three tables a person

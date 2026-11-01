@@ -91,7 +91,7 @@ The token is a secret in `darling.json`. The `web.network` and `mcp.network` blo
 
 ## People, sign-ins and grants
 
-Darling keeps a list of people. Each person has a name, the sign-ins that belong to them, and grants that say what they can do and where. Nothing reads a grant yet, so adding one changes no power today. Administrators keep every power they have. For who can write the list and what is recorded, see [People, identities and grants](security.md).
+Darling keeps a list of people. Each person has a name, the sign-ins that belong to them, and grants that say what they can do and where. Removing a server or a tag removes the grants on it, so adding the same server back does not bring them back. Nothing reads a grant yet, so adding one changes no power today. Administrators keep every power they have. For who can write the list and what is recorded, see [People, identities and grants](security.md).
 
 A sign-in is one of two kinds:
 
@@ -110,9 +110,9 @@ A grant names what the person can do and where. Where is one server, one tag, or
 
 ### On the web dashboard
 
-Open the **Admin** page, then the **People** tab. The tab lists every person with their sign-ins and grants. Click **Open** on a row to see one person.
+Open the **Admin** page, then the **People** tab. For an admin, the tab lists every person with their sign-ins and grants. Click **Open** on a row to see one person.
 
-Only an admin who is signed in to the dashboard can make changes, and only when the web's store login can make them. That includes a session signed in with the shared web token. Everyone else sees the list and a sentence that says why they cannot change it.
+Only an admin who is signed in to the dashboard sees the list, and that includes a session signed in with the shared web token. The list shows each person's sign-in keys and Slack ids, so any other session sees only its own sign-in key and its **Copy** button. An admin can make changes only when the web's store login can make them. Otherwise the admin sees the list and a sentence that says why it cannot be changed.
 
 To add a person, type the name and click **Add person**. In a person's details you can rename them, disable or enable them, add or remove a sign-in, and add or remove a grant. A grant cannot be edited. Remove it and add it again instead.
 
@@ -121,7 +121,7 @@ To add a person, type the name and click **Add person**. In a person's details y
 Darling keeps no list of who signs in. So a person gives their sign-in key to an administrator:
 
 1. The person signs in to the web dashboard through the identity provider and opens **Admin**, then **People**.
-2. The tab shows **Your sign-in key** at the top. The person clicks **Copy** and sends the key to an administrator.
+2. The tab shows **Your sign-in key** at the top. A person who is not an admin sees only that. The person clicks **Copy** and sends the key to an administrator.
 3. The administrator opens the person's details, picks **Web sign-in**, pastes the key and clicks **Add sign-in**.
 
 An administrator who links their own sign-in can click **Add my own sign-in** in the person's details instead.
