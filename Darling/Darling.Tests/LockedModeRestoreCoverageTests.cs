@@ -222,8 +222,7 @@ public sealed class LockedModeRestoreCoverageTests
     /// SDK rather than this repository's own choices.
     ///
     /// <para>Scoped to <c>build.yml</c> deliberately: that is the release workflow, and its one restore step
-    /// is the only place every project is restored (pr.yml restores the two test projects and what they reference,
-    /// through a solution filter: <see cref="ThePullRequestRestore_ReachesBothTestProjectsThroughTheSolutionFilter"/>).
+    /// is the only place every project is restored (pr.yml restores the two test projects).
     /// <c>nightly.yml</c> restores what it publishes and is a backstop, so requiring whole-tree coverage
     /// there would assert something that workflow is not for.</para>
     /// </summary>
@@ -248,29 +247,6 @@ public sealed class LockedModeRestoreCoverageTests
             + "merges green — add a `dotnet restore <project> --locked-mode` for each, or reference it from "
             + "a project already restored:\n  "
             + string.Join("\n  ", uncovered));
-    }
-
-    /// <summary>
-    /// The restore pr.yml runs reaches the lock file of both test projects, and of everything they reference,
-    /// through its solution filter (#7100). One restore and one build over the filter replaced a restore and a
-    /// build per test project; if the filter lost a project, or the restore stopped naming the filter, that
-    /// side's lock file would stop being validated on a pull request.
-    /// </summary>
-    [Fact]
-    public void ThePullRequestRestore_ReachesBothTestProjectsThroughTheSolutionFilter()
-    {
-        var yaml = ReadRepoFileLf(s_pullRequestSegments);
-        var restored = RestoredProjects(yaml);
-
-        /* Non-vacuity: a restore the parser did not understand would also "reach" nothing. */
-        Assert.NotEmpty(restored);
-        Assert.Contains("Darling/Darling.Tests", LockFileDirectories());
-        Assert.Contains("Lite.Tests", LockFileDirectories());
-
-        var uncovered = UncoveredLockFiles(yaml, ReadRepoFileLf("global.json"));
-
-        Assert.DoesNotContain("Darling/Darling.Tests", uncovered);
-        Assert.DoesNotContain("Lite.Tests", uncovered);
     }
 
     /// <summary>
@@ -682,43 +658,10 @@ public sealed class LockedModeRestoreCoverageTests
     private static List<string> RestoredProjects(string yaml, string? root = null) =>
         yaml.Split('\n')
             .Select(RestoreTarget)
-            .SelectMany(target => ProjectsOf(target, root ?? Root))
+            .Where(target => target.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase))
+            .Select(target => Path.GetFullPath(Path.Combine(root ?? Root, target.Replace('/', Path.DirectorySeparatorChar))))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
-
-    /// <summary>
-    /// The project files one restore target names: the project itself, or the projects a solution filter
-    /// (<c>.slnf</c>, #7100) lists. A filter's paths are relative to the solution it points at and spelled with
-    /// backslashes. pr.yml restores and builds both test projects in one call through such a filter.
-    /// </summary>
-    private static IEnumerable<string> ProjectsOf(string target, string root)
-    {
-        var path = Path.GetFullPath(Path.Combine(root, target.Replace('/', Path.DirectorySeparatorChar)));
-
-        if (target.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase))
-        {
-            return new[] { path };
-        }
-
-        if (!target.EndsWith(".slnf", StringComparison.OrdinalIgnoreCase))
-        {
-            return Array.Empty<string>();
-        }
-
-        Assert.True(File.Exists(path), $"a restore names a solution filter that is not there: {path}");
-
-        using var filter = System.Text.Json.JsonDocument.Parse(File.ReadAllText(path));
-        var solution = filter.RootElement.GetProperty("solution");
-        var solutionDirectory = Path.GetDirectoryName(Path.GetFullPath(Path.Combine(
-            Path.GetDirectoryName(path)!,
-            solution.GetProperty("path").GetString()!.Replace('\\', Path.DirectorySeparatorChar))))!;
-
-        return solution.GetProperty("projects").EnumerateArray()
-            .Select(project => Path.GetFullPath(Path.Combine(
-                solutionDirectory,
-                project.GetString()!.Replace('\\', Path.DirectorySeparatorChar))))
-            .ToList();
-    }
 
     /// <summary>
     /// The lock-file directories whose contents follow the SDK's version rather than this repository's

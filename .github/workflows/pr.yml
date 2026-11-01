@@ -171,18 +171,27 @@ jobs:
 
       # Locked mode and `set -euo pipefail`: a multi-line run block under the default shell reports only its last
       # command's exit code, so the first restore could fail unseen (LockedModeRestoreCoverageTests enforces both).
-      # #7100: one restore and one build over a solution filter naming both test projects and every project they
-      # reference. One MSBuild invocation builds the projects the two test projects share (Common, Analysis, Notifications,
-      # Collectors, Alerting, PlanAnalysis, Ui) once, and builds the Darling and Lite sides side by side instead of one
-      # after the other. Output paths are each project's own bin/Release, unchanged, so the artifact below holds the same
-      # files. This job runs the same way on every plan that builds at all (the plan has no Darling-only or Lite-only build).
-      - name: Restore and build the test projects
+      - name: Restore the test projects
         shell: bash
         run: |
           set -euo pipefail
 
-          dotnet restore PerformanceMonitor.CiTests.slnf --locked-mode
-          dotnet build PerformanceMonitor.CiTests.slnf -c Release --no-restore
+          dotnet restore Darling/Darling.Tests/Darling.Tests.csproj --locked-mode
+          dotnet restore Lite.Tests/Lite.Tests.csproj --locked-mode
+
+      - name: Build the Darling test project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          dotnet build Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-restore
+
+      - name: Build the Lite test project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          dotnet build Lite.Tests/Lite.Tests.csproj -c Release --no-restore
 
       # Where this build was made and from what, for the legs' check. No dot-prefix (upload-artifact skips hidden files).
       - name: Record where this build was made
