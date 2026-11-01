@@ -1318,8 +1318,9 @@ public sealed class AlertReadFailureSurfaceTests
            failure. 44th since #6912: the capture-down engine facts catch, whose read goes through the retry adapter that
            already records the failure. 45th since #7041: the daily health report's delivery-stamp write, which costs one re-send
            at the next restart and never a delivery. 46th since #7085: the High CPU incident's opened-at save, a write whose
-           loss costs the restart bound and never the opening page. */
-        Assert.Equal(46, totalExempt);
+           loss costs the restart bound and never the opening page. 47th since #7082: the Poison Wait detail read, the text of a page whose
+           condition was already read and counted. */
+        Assert.Equal(47, totalExempt);
 
         /* Every exemption in the table is actually used. An exemption for a message that no longer exists
            is a hole this pin would otherwise keep open indefinitely — the shape that lets a real new catch
