@@ -314,8 +314,11 @@ public sealed class TwoTierEscalationTests
     }
 
     [Fact]
-    public async Task AMutedWarning_StillRecordsItsTier_SoTheCriticalIsDeliveredAtOnce()
+    public async Task AMutedWarning_HoldsARiseForTheCooldown_SoTheMutedCriticalIsWrittenAtOnce()
     {
+        /* #7085: a muted High CPU fire is not a page, so it is not "delivered" and the muted Critical is not flagged as an escalation
+           over it (the flag only lets a cooldown-held email through, and a muted row sends nothing). It still counts for one cooldown:
+           the Critical rise is judged against it and is written at once. */
         var h = Armed("High CPU");
         h.Muted = true;
         var engine = h.Build();
@@ -323,7 +326,8 @@ public sealed class TwoTierEscalationTests
         Assert.Equal(1, await StepAsync("High CPU", h, engine, T0, Level.Warning, 0));
         Assert.True(Last("High CPU", h).Muted);
         Assert.Equal(1, await StepAsync("High CPU", h, engine, T0.AddMinutes(1), Level.Critical, 1));
-        Assert.True(Flag("High CPU", h));
+        Assert.True(Last("High CPU", h).Muted);
+        Assert.False(Flag("High CPU", h));
     }
 
     [Fact]

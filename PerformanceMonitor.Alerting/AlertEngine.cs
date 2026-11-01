@@ -156,6 +156,16 @@ public sealed class AlertEngine
     /* #7085: servers whose High CPU incident was already open when this process started (the seeded Firing bit). That page went out
        before the restart, so the first fire this process judges for the key only records its tier and sends nothing. */
     private readonly ConcurrentDictionary<string, bool> _cpuRestoredOpen = new();
+
+    /* #7085: the tier and the instant of the open High CPU incident's last MUTED fire. A muted fire is not a page, so it never
+       counts in _cpuEscalation (the tiers actually delivered); it holds back a rise to its own tier for one cooldown only, the way
+       a mute held a fire back before #7085, and then the incident is judged on what was delivered. */
+    private readonly ConcurrentDictionary<string, (AlertSeverityLevel Tier, DateTime At)> _cpuMutedFire = new();
+
+    /* #7085: when the open High CPU incident began, per server, restored from the store after a restart. The alert history cannot say
+       it: an earlier incident that ended while alerts were suppressed leaves a fire row with no clear row behind it, and the restart
+       seed would count that row for the incident now open. */
+    private readonly ConcurrentDictionary<string, DateTime> _cpuIncidentOpenedUtc = new();
     private readonly TierEscalation _deadlockEscalation = new();
     private readonly TierEscalation _poisonWaitEscalation = new();
     private readonly TierEscalation _lowDiskEscalation = new();
@@ -437,7 +447,8 @@ public sealed class AlertEngine
         /* #5715 part B: the six opted-in families, each with the resolution title its history row is stored under. */
         _escalationSeedFamilies = new (string Metric, string ResolutionTitle, bool CountMuted, bool TierlessRowIsWarning, TierEscalation Escalation)[]
         {
-            (CpuPersistenceMetric, EscalationSeed.CpuResolvedTitle, true, false, _cpuEscalation),
+            /* #7085: _cpuEscalation holds the tiers DELIVERED, so a muted High CPU fire is not counted (it holds back a rise for one cooldown in process). */
+            (CpuPersistenceMetric, EscalationSeed.CpuResolvedTitle, false, false, _cpuEscalation),
             (DeadlockWatermarkMetric, EscalationSeed.DeadlocksClearedTitle, true, false, _deadlockEscalation),
             (PostgresAlertEvaluator.PoisonWaitMetric, EscalationSeed.PoisonWaitsClearedTitle, true, false, _poisonWaitEscalation),
             (RunnableQueueEvaluator.MetricName, EscalationSeed.RunnableQueueClearedTitle, true, false, _runnableQueueEscalation),
@@ -507,7 +518,8 @@ public sealed class AlertEngine
 
     /// <summary>#7068: the same read as <see cref="ReadStandingFireAsync"/> with every fire and clear row, for the alerts that judge
     /// each file or plan by its own row (<see cref="AlertHistoryStanding.OpenFor"/>). Null on no reader or a failed read.</summary>
-    private async Task<AlertHistoryStanding?> ReadStandingAsync(string key, string metric, string resolutionTitle, CancellationToken ct)
+    private async Task<AlertHistoryStanding?> ReadStandingAsync(
+        string key, string metric, string resolutionTitle, CancellationToken ct, bool countMuted = true)
     {
         if (_openFireReader is null)
         {
@@ -517,7 +529,7 @@ public sealed class AlertEngine
         var readClock = Stopwatch.StartNew();
         try
         {
-            return await _openFireReader(new OpenFireQuery(key, metric, new[] { resolutionTitle }, _engineStartUtc), ct);
+            return await _openFireReader(new OpenFireQuery(key, metric, new[] { resolutionTitle }, _engineStartUtc, countMuted), ct);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -706,6 +718,13 @@ public sealed class AlertEngine
                 {
                     _lastCpuAlert[key] = _utcNow();
                     _cpuRestoredOpen[key] = true;
+
+                    var openedMinutes = await _stateStore.LoadEdgeTriggerWatermarkAsync(key, CpuIncidentOpenedMetric);
+                    readClock.Restart();
+                    if (openedMinutes is > 0)
+                    {
+                        _cpuIncidentOpenedUtc[key] = DateTime.UnixEpoch.AddMinutes(openedMinutes.Value);
+                    }
                 }
             }
 
@@ -885,6 +904,13 @@ public sealed class AlertEngine
     /// operator reading the persistence table are looking at one metric, not two spellings of it.
     /// </summary>
     public const string CpuPersistenceMetric = "High CPU";
+
+    /// <summary>
+    /// #7085: the edge-trigger watermark row that holds when the open High CPU incident began, as whole minutes since the Unix epoch
+    /// (an int, so no column or rung is needed). Written at the incident's rising edge and read after a restart, so the restart seed
+    /// counts only the delivered rows of the incident that is open, not an older one that closed without a clear row.
+    /// </summary>
+    public const string CpuIncidentOpenedMetric = "High CPU incident opened";
 
     /// <summary>
     /// Consecutive breaching tempdb Space SAMPLES required before the reserved percentage is an incident
@@ -1112,6 +1138,16 @@ public sealed class AlertEngine
             {
                 _cpuClearRunStart.TryRemove(key, out _);
             }
+            else if (outcome == PersistenceOutcome.Fire)
+            {
+                /* #7085: the incident begins here, paged or not. The instant is what lets a restart count only this incident's delivered
+                   rows (SeedRestoredCpuIncidentAsync). Whole minutes in the watermark's int, rounded down, which is safe because the
+                   previous incident's last fire row is at least the 15 minute clear hold older than this edge. */
+                var openedAt = now;
+                _cpuIncidentOpenedUtc[key] = openedAt;
+                await _stateStore.SaveEdgeTriggerWatermarkAsync(
+                    key, CpuIncidentOpenedMetric, (int)Math.Floor((openedAt - DateTime.UnixEpoch).TotalMinutes));
+            }
 
             if (incidentOpen && breaching)
             {
@@ -1148,6 +1184,8 @@ public sealed class AlertEngine
                 /* #5715: the incident is over whether or not anyone is told, so the next one starts from nothing delivered. */
                 _cpuEscalation.Close(key);
                 _cpuRestoredOpen.TryRemove(key, out _);
+                _cpuMutedFire.TryRemove(key, out _);
+                _cpuIncidentOpenedUtc.TryRemove(key, out _);
                 /* The cooldown stamp belongs to the incident that just closed: a new incident in this same batch, or any time after,
                    is an opening page and must not wait out a cooldown the old incident's last page started. */
                 _lastCpuAlert.TryRemove(key, out _);
@@ -1252,8 +1290,9 @@ public sealed class AlertEngine
     /// #7085: decides, from the alert history, whether the High CPU incident that was open when this process started was ever PAGED,
     /// at the first unsuppressed fire after the restart. "Did I send" is not "was it delivered" (#3633): the persisted Firing bit is set
     /// under suppression and after an every-channel-failed send, and neither wrote a delivered row. The rows are the ones
-    /// <see cref="IAlertHistoryStore.GetStandingAsync"/> answers (no lower bound, a fire whose every channel failed left out, a muted fire
-    /// counted as the in-process tier counts it), read the way the standing-incident seeds of #7068 read them:
+    /// <see cref="IAlertHistoryStore.GetStandingAsync"/> answers (a fire whose every channel failed left out, a muted fire left out because a mute
+    /// is not a page, and nothing older than the instant the open incident began when the store holds one), read the way the standing-incident
+    /// seeds of #7068 read them:
     /// <list type="bullet">
     /// <item>An open delivered fire exists: the incident paged. The highest tier among the incident's open fire rows, however old, is
     /// restored (a tierless legacy row counts as Warning), so only a rise above it pages. The one-cooldown window seed
@@ -1265,7 +1304,7 @@ public sealed class AlertEngine
     /// </summary>
     private async Task SeedRestoredCpuIncidentAsync(string key, CancellationToken ct)
     {
-        var standing = await ReadStandingAsync(key, CpuPersistenceMetric, EscalationSeed.CpuResolvedTitle, ct);
+        var standing = await ReadStandingAsync(key, CpuPersistenceMetric, EscalationSeed.CpuResolvedTitle, ct, countMuted: false);
         if (standing is null)
         {
             return;
@@ -1280,10 +1319,15 @@ public sealed class AlertEngine
             }
         }
 
+        _cpuIncidentOpenedUtc.TryGetValue(key, out var openedAt);
         AlertSeverityLevel? highest = null;
         foreach (var fire in standing.Fires)
         {
-            if (!AlertHistoryEscalationSeed.IsOpen(fire.FireAtUtc, newestClear))
+            /* Only this incident's rows: an earlier incident that ended while alerts were suppressed wrote no clear row, so its fire
+               row would otherwise stand for this one. Without a stored opening instant (an incident that opened before this build)
+               the read is unbounded, as it was. */
+            if (!AlertHistoryEscalationSeed.IsOpen(fire.FireAtUtc, newestClear)
+                || (openedAt != default && fire.FireAtUtc < openedAt))
             {
                 continue;
             }
@@ -1325,20 +1369,48 @@ public sealed class AlertEngine
         var cpuGrade = GradeCpuFire(alertCpuValue);
         var escalation = _cpuEscalation.IsEscalation(key, cpuGrade);
 
-        bool incidentPaged = _cpuEscalation.Highest(key) is not null;
+        /* #7085: _cpuEscalation holds what was DELIVERED. A muted fire is not a page, so it counts for one cooldown only: while that
+           cooldown lasts a rise has to beat its tier too (a mute that spans the incident writes at most one muted fire per cooldown,
+           plus one per rise, as before #7085), and once it has run out the incident is judged on what was delivered, so the open
+           incident pages once after the mute is lifted and holds again from there. */
+        var delivered = _cpuEscalation.Highest(key);
+        var held = delivered;
+        if (_cpuMutedFire.TryGetValue(key, out var mutedFire))
+        {
+            if (now - mutedFire.At < alertCooldown)
+            {
+                held = held is { } deliveredTier && deliveredTier >= mutedFire.Tier ? deliveredTier : mutedFire.Tier;
+            }
+            else
+            {
+                _cpuMutedFire.TryRemove(key, out _);
+            }
+        }
+
+        bool rise = held is { } heldTier && cpuGrade > heldTier;
+        bool incidentPaged = delivered is not null;
         /* An escalation whose every channel failed waits out the back-dated stamp (#5715), the same backoff as any failed send. */
         bool opensGate = incidentPaged
-            ? escalation && EscalationOpensGate("High CPU", key, escalation, _lastCpuAlert, now, alertCooldown)
-            : EscalationOpensGate("High CPU", key, escalation, _lastCpuAlert, now, alertCooldown);
+            ? rise && EscalationOpensGate("High CPU", key, rise, _lastCpuAlert, now, alertCooldown)
+            : EscalationOpensGate("High CPU", key, rise, _lastCpuAlert, now, alertCooldown);
 
         if (!suppressed && opensGate) /* :72 */
         {
             var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = "High CPU" }; /* :74 */
             bool isMuted = _isAlertMuted(muteCtx);                              /* :75 */
             _lastCpuAlert[key] = now;                                           /* :76 — stamped even when muted */
-            /* Recorded before the send (a muted fire's history row must not be late), put back below when every channel failed. */
-            var priorTier = _cpuEscalation.Highest(key);
-            _cpuEscalation.Record(key, cpuGrade);
+            /* Recorded before the send (the history row must not be late), put back below when every channel failed. A muted fire
+               records its tier as muted, not as delivered. */
+            var priorTier = delivered;
+            if (isMuted)
+            {
+                _cpuMutedFire[key] = (cpuGrade, now);
+            }
+            else
+            {
+                _cpuEscalation.Record(key, cpuGrade);
+                _cpuMutedFire.TryRemove(key, out _);
+            }
 
             /* #3495: name the active backup on the card. Everything the annotation needs was knowable
                at fire time from the same active-session surface the operator ended up reading by hand

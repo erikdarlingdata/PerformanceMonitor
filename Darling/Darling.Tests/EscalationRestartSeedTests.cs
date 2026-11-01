@@ -200,8 +200,9 @@ public sealed class EscalationRestartSeedTests
             /* Round 1: only Volume Free Space's Warning rows are tierless by design. */
             Assert.Equal(q.MetricName == "Volume Free Space", q.TierlessRowIsWarning);
             Assert.Equal(AlertEngineTests.Harness.Snapshot().ServerKey, q.ServerKey);
-            /* Only a muted Client Timeouts fire leaves the tier unrecorded in process. */
-            Assert.Equal(q.MetricName != "Client Timeouts", q.CountMuted);
+            /* A muted Client Timeouts fire leaves the tier unrecorded in process, and since #7085 so does a muted High CPU fire (it
+               holds back a rise for one cooldown, and is not a page). */
+            Assert.Equal(q.MetricName != "Client Timeouts" && q.MetricName != "High CPU", q.CountMuted);
         }
     }
 

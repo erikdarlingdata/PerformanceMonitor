@@ -1345,6 +1345,27 @@ public sealed class AlertEngineTests
     }
 
     [Fact]
+    public async Task Cpu_AnOlderUnresolvedCriticalRow_DoesNotStandForAnIncidentOpenedUnderSuppression()
+    {
+        /* #7085: Monday's incident paged Critical and its clear completed under suppression, which writes no CPU Resolved row, so its
+           fire row still looks open. Friday's incident opens under suppression, the service restarts and suppression ends while it
+           still breaches. The seed counts only the rows of the incident that is open now: the old Critical is not its page, so the
+           first unsuppressed breaching sample pages once. */
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+        h.OpenFireReader = HistoryOfPages((Harness.SampleBase.AddDays(-4), AlertSeverityLevel.Critical));
+
+        var at = await DriveCpuTimedAsync(h, h.Build(), 90, 5, Harness.SampleBase, suppressed: true);
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        var restarted = h.Build();
+        at = await DriveCpuTimedAsync(h, restarted, 90, 20, at);
+
+        var page = Assert.Single(h.Deliverer.Outcomes);
+        Assert.False(page.Context!.EscalationBypassesCooldown);
+    }
+
+    [Fact]
     public async Task Cpu_AWarningPagedLongBeforeARestart_StillPagesTheCriticalThatFollows()
     {
         /* #7085 review: the Warning page is 90 minutes old, older than the one-cooldown window the tier seed reads, so only the open
@@ -6008,7 +6029,9 @@ public sealed class AlertEngineTests
     [Fact]
     public async Task Cpu_AMutedFire_StillWaitsTheFullCooldown()
     {
-        /* A muted fire attempts no channel, so there is no failure to retry: it behaves as it always did. */
+        /* A muted fire attempts no channel, so there is no failure to retry: it behaves as it always did. #7085: and a mute that lasts
+           the whole incident does not make the incident "paged". The muted fire comes again once the cooldown runs out, so its history
+           row comes at most once per cooldown. */
         var h = new Harness();
         h.Settings.CpuEnabled = true;
         h.Settings.CooldownMinutes = 5;
@@ -6023,10 +6046,112 @@ public sealed class AlertEngineTests
         at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: 1, from: at);
         Assert.Single(h.Deliverer.Outcomes);
 
-        /* Past the cooldown too: the delivered incident is held open and sends no reminder (#7085). */
+        /* Past the cooldown: the next muted fire, and nothing else. */
         h.Now = h.Now.AddMinutes(4);
         await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: 1, from: at);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.All(h.Deliverer.Outcomes, o => Assert.True(o.Muted));
+    }
+
+    [Fact]
+    public async Task Cpu_AMuteThatSpansTheWholeIncident_SendsNothing_AndWritesAtMostOneMutedRowPerCooldown()
+    {
+        /* #7085: 45 minutes over the bar under a mute, cooldown 5. Every fire is muted, and they come at most once per cooldown
+           (minutes 5, 10 ... 45), the way a mute behaved before #7085. */
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Muted = true;
+        h.Deliverer.Report = _ => MutedNothingAttempted();
+
+        await DriveCpuTimedAsync(h, h.Build(), 90, 45, Harness.SampleBase);
+
+        Assert.All(h.Deliverer.Outcomes, o => Assert.True(o.Muted));
+        Assert.Equal(9, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public async Task Cpu_AMuteLiftedMidIncident_PagesOnceWithinACooldown_ThenHoldsTheIncident()
+    {
+        /* #7085: the incident opened while muted (one muted row), the mute ends, and CPU stays over the bar. Before, the muted fire
+           counted as the incident's page for its whole life, so nothing paged until the 15 minute clear or an escalation. Now the muted
+           fire counts for one cooldown: the page goes out once the cooldown after it has run out, and then the incident is held. */
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Muted = true;
+        h.Deliverer.Report = _ => MutedNothingAttempted();
+        var engine = h.Build();
+
+        var at = await DriveCpuTimedAsync(h, engine, 90, 5, Harness.SampleBase);
+        Assert.True(Assert.Single(h.Deliverer.Outcomes).Muted);
+
+        h.Muted = false;
+        h.Deliverer.Report = null;
+        at = await DriveCpuTimedAsync(h, engine, 90, 5, at);
+        var page = Assert.Single(h.Deliverer.Outcomes, o => !o.Muted);
+        Assert.False(page.Context!.EscalationBypassesCooldown);
+
+        at = await DriveCpuTimedAsync(h, engine, 90, 40, at);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.Single(h.Deliverer.Outcomes, o => !o.Muted);
+    }
+
+    [Fact]
+    public async Task Cpu_ACriticalThatArrivesWhileMuted_IsMuted_AndTheLiftedPageCarriesTheCurrentTier()
+    {
+        /* #7085: Warning opens the incident under a mute, then Critical arrives: both are muted rows. After the lift the one page
+           carries the tier CPU is at then. It is not an escalation: nothing was delivered before it. */
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Muted = true;
+        h.Deliverer.Report = _ => MutedNothingAttempted();
+        var engine = h.Build();
+
+        var at = await DriveCpuTimedAsync(h, engine, 90, 5, Harness.SampleBase);
+        at = await DriveCpuTimedAsync(h, engine, 97, 1, at);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.All(h.Deliverer.Outcomes, o => Assert.True(o.Muted));
+        Assert.Equal(AlertSeverityLevel.Critical, h.Deliverer.Outcomes[1].Severity);
+
+        h.Muted = false;
+        h.Deliverer.Report = null;
+        at = await DriveCpuTimedAsync(h, engine, 97, 10, at);
+
+        var page = Assert.Single(h.Deliverer.Outcomes, o => !o.Muted);
+        Assert.Equal(AlertSeverityLevel.Critical, page.Severity);
+        Assert.False(page.Context!.EscalationBypassesCooldown);
+    }
+
+    [Fact]
+    public async Task Cpu_AWarningPaged_ThenACriticalWhileMuted_PagesTheCriticalAfterTheLift_AsAnEscalation()
+    {
+        /* #7085: the Warning went out, then a mute began and Critical arrived (one muted row, held for the cooldown). A muted Critical
+           was never delivered, so once the mute is lifted and the cooldown has run out the Critical pages once, flagged as the
+           escalation it is. */
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        var engine = h.Build();
+
+        var at = await DriveCpuTimedAsync(h, engine, 90, 5, Harness.SampleBase);
         Assert.Single(h.Deliverer.Outcomes);
+
+        h.Muted = true;
+        h.Deliverer.Report = o => o.Muted ? MutedNothingAttempted() : null;
+        at = await DriveCpuTimedAsync(h, engine, 97, 3, at);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.True(h.Deliverer.Outcomes[1].Muted);
+
+        h.Muted = false;
+        at = await DriveCpuTimedAsync(h, engine, 97, 10, at);
+
+        Assert.Equal(3, h.Deliverer.Outcomes.Count);
+        var page = h.Deliverer.Outcomes[2];
+        Assert.False(page.Muted);
+        Assert.Equal(AlertSeverityLevel.Critical, page.Severity);
+        Assert.True(page.Context!.EscalationBypassesCooldown);
     }
 
     [Fact]

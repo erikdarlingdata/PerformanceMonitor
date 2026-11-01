@@ -286,6 +286,8 @@ public partial class LiteAlertForwardingTests : IDisposable
         public List<FailedJobInfo> FailedJobs { get; } = new();
         public bool Muted { get; set; }
         public DateTime Now { get; set; } = new(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);
+        /// <summary>#7085: the alert-history reader the High CPU restart seed uses; null (the default) leaves the engine memory-only.</summary>
+        public Func<OpenFireQuery, CancellationToken, Task<AlertHistoryStanding>>? OpenFireReader { get; set; }
 
         public AlertEngine Build() => Build(Deliverer);
 
@@ -298,7 +300,8 @@ public partial class LiteAlertForwardingTests : IDisposable
             failedJobsFetcher: (_, _, _) => Task.FromResult(new List<FailedJobInfo>(FailedJobs)),
             resolutionCallback: (r, ct) => { Resolutions.Add(r); return ResolutionHook?.Invoke(r, ct) ?? Task.CompletedTask; },
             logger: null,
-            utcNow: () => Now);
+            utcNow: () => Now,
+            openFireReader: OpenFireReader);
 
         public DateTime? FailedJobWatermark() =>
             StateStore.FailedJobWatermarks.TryGetValue(Key, out var w) ? w : (DateTime?)null;
@@ -435,6 +438,64 @@ public partial class LiteAlertForwardingTests : IDisposable
         Assert.Equal(AlertEngine.SqlCpuBreachSamples - 1, persisted.Value.State.ConsecutiveBreaches);
         Assert.False(persisted.Value.State.Firing);
         Assert.NotNull(persisted.Value.LastObservedSampleUtc);
+    }
+
+    [Fact]
+    public async Task Cpu_AnOlderUnresolvedCriticalRow_DoesNotStandForAnIncidentOpenedUnderSuppression_OnLiteEither()
+    {
+        /* #7085: the incident's opening instant rides the Lite state store's edge watermark row, so a restart counts only this
+           incident's delivered rows. An older Critical row whose clear was suppressed (no CPU Resolved row) is not this incident's
+           page: the first unsuppressed breaching sample after the restart pages once. */
+        DisableAllChecks();
+        App.AlertCpuEnabled = true;
+        var h = new Harness();
+        h.OpenFireReader = (_, _) => Task.FromResult(new AlertHistoryStanding(
+            new List<AlertHistoryFire>
+            {
+                new(Harness.SampleBase.AddDays(-4), 97, AlertContextSerializer.Serialize(new AlertContext { SeverityOverride = AlertSeverityLevel.Critical })),
+            },
+            Array.Empty<AlertHistoryClear>()));
+
+        var at = await DriveCpuSuppressedAsync(h.Build(), sqlCpu: 70, totalCpu: 90, samples: AlertEngine.SqlCpuBreachSamples, from: Harness.SampleBase);
+        Assert.Empty(h.Deliverer.Outcomes);
+        var opened = Assert.Single(h.StateStore.EdgeWatermarks, w => w.Key.Metric == AlertEngine.CpuIncidentOpenedMetric);
+        Assert.Equal((int)(h.Now - DateTime.UnixEpoch).TotalMinutes, opened.Value);
+
+        await DriveCpuAsync(h.Build(), sqlCpu: 70, totalCpu: 90, samples: 20, from: at);
+
+        Assert.Single(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task Cpu_AMuteLiftedMidIncident_PagesOnceWithinACooldown_OnLiteEither()
+    {
+        /* #7085: a muted fire is a history row, not a page, and counts for one cooldown. The mute ends while CPU is still over the
+           bar: one page goes out once the cooldown after the muted fire has run out, then the incident is held. */
+        DisableAllChecks();
+        App.AlertCpuEnabled = true;
+        var h = new Harness { Muted = true };
+        var engine = h.Build();
+
+        var at = Harness.SampleBase;
+        async Task DriveAsync(int samples)
+        {
+            for (var i = 0; i < samples; i++)
+            {
+                at = at.AddMinutes(1);
+                h.Now = at;
+                await engine.EvaluateServerAsync(Harness.Snapshot(sqlCpu: 70, totalCpu: 90, cpuSampleTime: at));
+            }
+        }
+
+        await DriveAsync(AlertEngine.SqlCpuBreachSamples);
+        Assert.True(Assert.Single(h.Deliverer.Outcomes).Muted);
+
+        h.Muted = false;
+        await DriveAsync(10);
+        Assert.Single(h.Deliverer.Outcomes, o => !o.Muted);
+
+        await DriveAsync(40);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
     }
 
     /* ---------------- CPU: the #3744 identity rule, on the Lite path ---------------- */
@@ -721,7 +782,9 @@ public partial class LiteAlertForwardingTests : IDisposable
         Assert.Empty(h.Resolutions);
         /* :143 — the gate is told about suppression, so the watermark stays 0 and nothing was
            persisted; when the user un-acknowledges, the same lingering report still alerts. */
-        Assert.Empty(h.StateStore.SavedEdge);
+        Assert.DoesNotContain(h.StateStore.SavedEdge, e => e.Metric == AlertEngine.BlockingWatermarkMetric);
+        /* #7085: the High CPU incident's opening instant is persisted when the gate opens, paged or not. */
+        Assert.Single(h.StateStore.SavedEdge, e => e.Metric == AlertEngine.CpuIncidentOpenedMetric);
 
         /* One UNsuppressed sample is enough for CPU now: the gate is already firing from the suppressed
            streak above, so this is the standing-condition delivery rather than a fresh rising edge — which
