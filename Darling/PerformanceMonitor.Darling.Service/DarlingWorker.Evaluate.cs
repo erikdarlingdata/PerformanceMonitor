@@ -1487,7 +1487,7 @@ public sealed partial class DarlingWorker
                     "query snapshot", AlertSampleAge.Newest(rows.Select(r => r.NewestSampleUtc ?? default)), now);
                 if (BuildPgLongRunningStatementItem(worst, dataDetailMode) is { } statementDetail)
                 {
-                    longRunningContext.Details.Insert(0, statementDetail);
+                    longRunningContext!.Details.Insert(0, statementDetail);
                 }
 
                 var muted = _isAlertMuted?.Invoke(new AlertMuteContext

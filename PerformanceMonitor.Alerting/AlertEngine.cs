@@ -135,6 +135,11 @@ public sealed class AlertEngine
     private readonly ConcurrentDictionary<string, DateTime> _lastRunnableQueueAlert = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastRunnableQueueCollectionTime = new();
     private readonly ConcurrentDictionary<string, bool> _activeRunnableQueueAlert = new();
+    /* #7086: a Runnable Queue Warning is held, not paged. Its own stamp and collection marker keep a held row to one per
+       cooldown and per new collection, and leave the page cooldown (_lastRunnableQueueAlert) and the escalation tier alone,
+       so a Critical right after a held Warning pages at once. */
+    private readonly ConcurrentDictionary<string, DateTime> _lastRunnableQueueHeld = new();
+    private readonly ConcurrentDictionary<string, DateTime> _heldRunnableQueueCollectionTime = new();
     /* The sweep time of the last EVALUATED Runnable Queue reading per server (round 1 of #5709): a standing alert
        with no evaluation for RunnableQueueEvaluator.StaleIncidentMinutes is resolved, with the reason stated. */
     private readonly ConcurrentDictionary<string, DateTime> _lastRunnableQueueEvaluation = new();
@@ -318,6 +323,15 @@ public sealed class AlertEngine
     private readonly ConcurrentDictionary<string, Dictionary<string, ForcePlanActivePlan>> _activeForcePlanAlerts = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastForcePlanAlert = new();
 
+    /// <summary>#7086: how long after a plan's FIRST failure a second failure of the same plan counts as a repeat and pages.</summary>
+    public static readonly TimeSpan ForcePlanRepeatWindow = TimeSpan.FromHours(24);
+
+    /* #7086: the observation each plan first failed on, keyed like _lastForcePlanAlert. It outlives the plan's active
+       entry on purpose: "failed once, recovered, failed again the next day" is a repeat only if the first failure is
+       remembered across the recovery. In memory like the rest of this family, so a restart forgets it and the first
+       failure after a restart is held again. */
+    private readonly ConcurrentDictionary<string, DateTime> _forcePlanFirstFailure = new();
+
     /// <summary>
     /// One forced plan the engine currently holds active (#2157), with the #3579 observation memory. Mutable
     /// by design: the pass updates it in place under the per-server evaluation gate, the same way the
@@ -339,6 +353,19 @@ public sealed class AlertEngine
         /// stamp. Set on fire only — including a muted fire, which stamps it exactly as it stamps the
         /// cooldown — never on a pass that merely saw the plan.</summary>
         public DateTime? LastAlertedObservedAtUtc { get; set; }
+
+        /// <summary>#7086: true once a page went out for this plan (a muted fire counts, as it stamps the cooldown).
+        /// A recovery is announced only for a plan somebody was told about.</summary>
+        public bool Paged { get; set; }
+
+        /// <summary>#7086: the observation this plan was last held on, so one held row is written per collection.</summary>
+        public DateTime? LastHeldObservedAtUtc { get; set; }
+
+        /// <summary>#7086: the newest observation judged for repetition, and the verdict, so a re-read of the same
+        /// collection keeps the verdict instead of counting itself as a second failure.</summary>
+        public DateTime? LastJudgedObservedAtUtc { get; set; }
+
+        public bool IsRepeat { get; set; }
     }
 
     /// <param name="settings">Live threshold surface — read every sweep, never cached.</param>
@@ -2379,7 +2406,12 @@ public sealed class AlertEngine
                    escalation must rest on a reading newer than the one the Warning was delivered on. */
                 var escalation = _runnableQueueEscalation.IsEscalation(key, finding.Severity);
 
-                if (!suppressed && hasFreshCollection
+                /* #7086: only Critical pages. All 23 field rows sat inside High CPU incidents, 8 of the 14 pages were Warnings
+                   repeating a CPU incident that had already paged, and the 4 real pages were all Critical. A Warning is held:
+                   recorded as a digest row with the reason, sent nowhere. */
+                bool holdWarning = finding.Severity != AlertSeverityLevel.Critical;
+
+                if (!suppressed && !holdWarning && hasFreshCollection
                     && EscalationOpensGate(RunnableQueueEvaluator.MetricName, key, escalation, _lastRunnableQueueAlert, now, alertCooldown))
                 {
                     var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = RunnableQueueEvaluator.MetricName };
@@ -2448,6 +2480,42 @@ public sealed class AlertEngine
                            Warning stamped would hold the Critical for the rest of their window. */
                         _runnableQueueEscalation.Restore(key, priorTier);
                     }
+                    readClock.Restart();
+                }
+                else if (!suppressed && holdWarning
+                    && (!_heldRunnableQueueCollectionTime.TryGetValue(key, out var lastHeldCollection)
+                        || finding.NewestCollectionTime > lastHeldCollection)
+                    && CooldownElapsed(_lastRunnableQueueHeld, key, now, alertCooldown))
+                {
+                    _lastRunnableQueueHeld[key] = now;
+                    _heldRunnableQueueCollectionTime[key] = finding.NewestCollectionTime;
+
+                    var heldContext = new AlertContext { SeverityOverride = finding.Severity };
+                    AlertSampleAge.Stamp(heldContext, "scheduler stats", finding.NewestCollectionTime, now);
+                    var heldCpuItem = AlertContextBuilders.BuildRunnableQueueCpuItem(
+                        snapshot.RecentCpuSamples, snapshot.SqlCpuPercent, snapshot.TotalCpuPercent,
+                        now, Math.Max(RunnableQueueEvaluator.WindowMinutes, finding.SpanMinutes));
+                    if (heldCpuItem is not null)
+                    {
+                        heldContext.Details.Add(heldCpuItem);
+                    }
+
+                    var inCpuIncident = _cpuPersistence.TryGetValue(key, out var cpuRecord) && cpuRecord.State.Firing;
+                    var heldReason = inCpuIncident
+                        ? "inside a High CPU incident"
+                        : "Warning: pages at Critical only";
+                    var isHeldMuted = _isAlertMuted(new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = RunnableQueueEvaluator.MetricName });
+
+                    await FireAsync(new AlertOutcome(
+                        key, serverName, RunnableQueueEvaluator.MetricName,
+                        finding.CurrentValueText,
+                        finding.ThresholdText,
+                        heldContext, AlertContextBuilders.ContextToDetailText(heldContext),
+                        NumericCurrentValue: finding.AveragePerScheduler,
+                        NumericThresholdValue: finding.BarCrossed,
+                        Muted: isHeldMuted, Severity: finding.Severity,
+                        ShortMessage: finding.Summary,
+                        Hold: new AlertHold(heldReason)), ct);
                     readClock.Restart();
                 }
             }
@@ -4186,6 +4254,7 @@ public sealed class AlertEngine
                         clear => clear.DetailText is { } text && text.Contains($": {planName} no longer failing to force", StringComparison.Ordinal)) is { } standingFire)
                 {
                     plan.LastAlertedObservedAtUtc = standingFire.FireAtUtc;
+                    plan.Paged = true;
                     _lastForcePlanAlert.TryAdd(key + "|" + planKey, standingFire.FireAtUtc);
                 }
             }
@@ -4203,7 +4272,75 @@ public sealed class AlertEngine
                 && observedAt <= lastAlertedAt;
 
             var cooldownKey = key + "|" + planKey;
-            if (!suppressed && !sameObservation && CooldownElapsed(_lastForcePlanAlert, cooldownKey, now, alertCooldown))
+
+            /* #7086: a plan pages when it fails AGAIN. All 5 field pages were automatically forced plans that failed once and
+               recovered on their own. The first failure of a plan is held (a digest row, nothing sent); a second observation
+               that shows a rise within 24 hours of the first (the next collection, or the same plan failing again after
+               it recovered) pages. Judged once per collection. A row with no collection stamp cannot be judged and pages as
+               it did before. */
+            if (failure.ObservedAtUtc is { } judgedAt)
+            {
+                if (plan.LastJudgedObservedAtUtc is not { } judgedBefore || judgedAt > judgedBefore)
+                {
+                    plan.LastJudgedObservedAtUtc = judgedAt;
+                    var firstFailureKey = key + "|" + planKey;
+                    if (_forcePlanFirstFailure.TryGetValue(firstFailureKey, out var firstFailureAt)
+                        && judgedAt > firstFailureAt && judgedAt - firstFailureAt <= ForcePlanRepeatWindow)
+                    {
+                        plan.IsRepeat = true;
+                    }
+                    else
+                    {
+                        plan.IsRepeat = false;
+                        _forcePlanFirstFailure[firstFailureKey] = judgedAt;
+                    }
+                }
+            }
+            else
+            {
+                plan.IsRepeat = true;
+            }
+
+            if (!suppressed && !plan.IsRepeat
+                && (plan.LastHeldObservedAtUtc is not { } lastHeld || failure.ObservedAtUtc > lastHeld))
+            {
+                plan.LastHeldObservedAtUtc = failure.ObservedAtUtc;
+                var heldReasonText = ForcePlanTokens.HumanizeReason(failure.FailureReason);
+                var heldContext = new AlertContext();
+                heldContext.Details.Add(new AlertDetailItem
+                {
+                    Heading = $"{failure.DatabaseName} query {failure.QueryId} plan {failure.PlanId}",
+                    Fields = new()
+                    {
+                        ("Database", failure.DatabaseName),
+                        ("Query ID", failure.QueryId.ToString(CultureInfo.InvariantCulture)),
+                        ("Plan ID", failure.PlanId.ToString(CultureInfo.InvariantCulture)),
+                        ("Forcing Type", string.IsNullOrWhiteSpace(failure.ForcingType) ? "unknown" : failure.ForcingType.Trim()),
+                        ("Failure Reason", heldReasonText),
+                        ("New Failures", failure.FailureDelta.ToString(CultureInfo.InvariantCulture)),
+                        ("Total Failures", failure.TotalFailures.ToString(CultureInfo.InvariantCulture)),
+                    }
+                });
+                AlertSampleAge.Stamp(heldContext, "query store", failure.ObservedAtUtc, now);
+
+                await FireAsync(new AlertOutcome(
+                    key, serverName, ForcePlanTokens.MetricName,
+                    $"{failure.DatabaseName}: plan {failure.PlanId} failing to force ({heldReasonText})",
+                    heldReasonText,
+                    Context: heldContext, DetailText: AlertContextBuilders.ContextToDetailText(heldContext),
+                    NumericCurrentValue: failure.FailureDelta, NumericThresholdValue: null,
+                    Muted: _isAlertMuted(new AlertMuteContext
+                    {
+                        ServerName = serverName,
+                        ServerId = serverId,
+                        MetricName = ForcePlanTokens.MetricName,
+                        DatabaseName = failure.DatabaseName
+                    }),
+                    Severity: ForcePlanTokens.SeverityFor(failure),
+                    ShortMessage: $"{failure.DatabaseName} plan {failure.PlanId} failed to force {failure.FailureDelta}x ({heldReasonText})",
+                    Hold: new AlertHold("failed once, pages if it fails again within 24 hours")), ct);
+            }
+            else if (!suppressed && !sameObservation && plan.IsRepeat && CooldownElapsed(_lastForcePlanAlert, cooldownKey, now, alertCooldown))
             {
                 var reasonText = ForcePlanTokens.HumanizeReason(failure.FailureReason);
                 var forcingText = string.IsNullOrWhiteSpace(failure.ForcingType) ? "unknown" : failure.ForcingType.Trim();
@@ -4216,6 +4353,8 @@ public sealed class AlertEngine
                 };
                 bool isMuted = _isAlertMuted(muteCtx);
                 var priorObservedAtUtc = plan.LastAlertedObservedAtUtc; /* #4752: what a fire nobody received puts back */
+                var priorPaged = plan.Paged;
+                plan.Paged = true;
                 _lastForcePlanAlert[cooldownKey] = now; /* stamped even when muted, like the others */
                 plan.LastAlertedObservedAtUtc = failure.ObservedAtUtc; /* #3579: and so is the observation */
 
@@ -4261,6 +4400,7 @@ public sealed class AlertEngine
                 if (EveryChannelFailed(delivery))
                 {
                     plan.LastAlertedObservedAtUtc = priorObservedAtUtc;
+                    plan.Paged = priorPaged;
                 }
             }
         }
@@ -4279,7 +4419,8 @@ public sealed class AlertEngine
                    cooldown clock beside it does. */
                 active.Remove(planKey);
                 _lastForcePlanAlert.TryRemove(key + "|" + planKey, out _);
-                if (!suppressed)
+                /* #7086: the first-failure memory stays (see its field); a plan only ever held has no page to resolve. */
+                if (!suppressed && recoveredPlan.Paged)
                 {
                     /* Named from the identity we stored when it fired, never from the internal key: an
                        operator reads this in a toast, an email and a history row. */

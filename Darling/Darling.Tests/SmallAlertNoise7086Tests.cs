@@ -197,4 +197,164 @@ public sealed class SmallAlertNoise7086Tests
         Assert.Null(DarlingWorker.BuildPgLongRunningStatementItem(Session(null), McpDataDetail.Full));
         Assert.Null(DarlingWorker.BuildPgLongRunningStatementItem(Session("  "), McpDataDetail.Full));
     }
+
+    /* ---------------- Runnable Queue: only Critical pages ---------------- */
+
+    private static AlertEngineTests.Harness RunnableHarness(double average)
+    {
+        var h = new AlertEngineTests.Harness();
+        h.Settings.RunnableQueueEnabled = true;
+        for (var i = 0; i < 5; i++)
+        {
+            h.Adapter.RunnableQueue.Add(new RunnableQueueSample(h.Now.AddSeconds(-10).AddMinutes(-i), average, (long)Math.Round(average * 4), 4));
+        }
+
+        return h;
+    }
+
+    [Fact]
+    public async Task RunnableQueue_AWarning_IsHeld_NotPaged()
+    {
+        var h = RunnableHarness(10);
+
+        await h.Build().EvaluateServerAsync(AlertEngineTests.Harness.Snapshot());
+
+        var outcome = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(AlertSeverityLevel.Warning, outcome.Severity);
+        Assert.Equal("Warning: pages at Critical only", outcome.Hold!.Reason);
+    }
+
+    [Fact]
+    public async Task RunnableQueue_AWarning_InsideAHighCpuIncident_IsHeldWithThatReason()
+    {
+        var h = RunnableHarness(10);
+        h.Settings.CpuEnabled = true;
+        var engine = h.Build();
+        for (var i = 0; i < 4; i++)
+        {
+            await engine.EvaluateServerAsync(AlertEngineTests.Harness.Snapshot(sqlCpu: 99, totalCpu: 99));
+        }
+
+        var held = h.Deliverer.Outcomes.Single(o => o.MetricName == RunnableQueueEvaluator.MetricName);
+        Assert.Equal("inside a High CPU incident", held.Hold!.Reason);
+    }
+
+    [Fact]
+    public async Task RunnableQueue_ACritical_Pages_AndIsNotHeld()
+    {
+        var h = RunnableHarness(20);
+
+        await h.Build().EvaluateServerAsync(AlertEngineTests.Harness.Snapshot());
+
+        var outcome = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(AlertSeverityLevel.Critical, outcome.Severity);
+        Assert.Null(outcome.Hold);
+    }
+
+    [Fact]
+    public async Task RunnableQueue_ACriticalRightAfterAHeldWarning_PagesAtOnce()
+    {
+        var h = RunnableHarness(10);
+        var engine = h.Build();
+        await engine.EvaluateServerAsync(AlertEngineTests.Harness.Snapshot());
+
+        h.Now = h.Now.AddMinutes(1);
+        h.Adapter.RunnableQueue.Clear();
+        for (var i = 0; i < 5; i++)
+        {
+            h.Adapter.RunnableQueue.Add(new RunnableQueueSample(h.Now.AddSeconds(-10).AddMinutes(-i), 20, 80, 4));
+        }
+
+        await engine.EvaluateServerAsync(AlertEngineTests.Harness.Snapshot());
+
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.NotNull(h.Deliverer.Outcomes[0].Hold);
+        Assert.Null(h.Deliverer.Outcomes[1].Hold);
+    }
+
+    /* ---------------- Forced Plan Failing: pages when it fails again ---------------- */
+
+    private static ForcePlanFailureInfo Failure(DateTime observed, long planId = 22) => new()
+    {
+        DatabaseName = "Sales", QueryId = 11, PlanId = planId, ForcingType = "AUTO", FailureReason = "NO_PLAN",
+        FailureDelta = 1, TotalFailures = 1, ObservedAtUtc = observed,
+    };
+
+    [Fact]
+    public async Task ForcePlan_AFailureThatHappensOnce_IsHeld_AndItsRecoveryIsNotAnnounced()
+    {
+        var h = new AlertEngineTests.Harness();
+        var engine = h.Build();
+        h.Adapter.ForcePlanFailures.Add(Failure(h.Now.AddMinutes(-1)));
+        await engine.EvaluateServerAsync(AlertEngineTests.Harness.Snapshot());
+
+        /* The same collection re-read: still one held row. Then the plan stops failing. */
+        h.Now = h.Now.AddMinutes(1);
+        await engine.EvaluateServerAsync(AlertEngineTests.Harness.Snapshot());
+        h.Adapter.ForcePlanFailures.Clear();
+        h.Now = h.Now.AddMinutes(10);
+        await engine.EvaluateServerAsync(AlertEngineTests.Harness.Snapshot());
+
+        var outcome = Assert.Single(h.Deliverer.Outcomes);
+        Assert.NotNull(outcome.Hold);
+        Assert.DoesNotContain(h.Resolutions, r => r.MetricName == "Forced Plan Failing");
+    }
+
+    [Fact]
+    public async Task ForcePlan_FailingTwiceInADay_PagesOnce()
+    {
+        var h = new AlertEngineTests.Harness();
+        var engine = h.Build();
+        h.Adapter.ForcePlanFailures.Add(Failure(h.Now.AddMinutes(-1)));
+        await engine.EvaluateServerAsync(AlertEngineTests.Harness.Snapshot());
+
+        /* It recovers, then fails again 3 hours later. */
+        h.Adapter.ForcePlanFailures.Clear();
+        h.Now = h.Now.AddMinutes(10);
+        await engine.EvaluateServerAsync(AlertEngineTests.Harness.Snapshot());
+        h.Now = h.Now.AddHours(3);
+        h.Adapter.ForcePlanFailures.Add(Failure(h.Now.AddMinutes(-1)));
+        await engine.EvaluateServerAsync(AlertEngineTests.Harness.Snapshot());
+        await engine.EvaluateServerAsync(AlertEngineTests.Harness.Snapshot());
+
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.NotNull(h.Deliverer.Outcomes[0].Hold);
+        Assert.Null(h.Deliverer.Outcomes[1].Hold);
+    }
+
+    [Fact]
+    public async Task ForcePlan_TwoRisesOnConsecutiveCollections_Page()
+    {
+        var h = new AlertEngineTests.Harness();
+        var engine = h.Build();
+        h.Adapter.ForcePlanFailures.Add(Failure(h.Now.AddMinutes(-1)));
+        await engine.EvaluateServerAsync(AlertEngineTests.Harness.Snapshot());
+
+        h.Now = h.Now.AddMinutes(6);
+        h.Adapter.ForcePlanFailures.Clear();
+        h.Adapter.ForcePlanFailures.Add(Failure(h.Now.AddMinutes(-1)));
+        await engine.EvaluateServerAsync(AlertEngineTests.Harness.Snapshot());
+
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.Null(h.Deliverer.Outcomes[1].Hold);
+    }
+
+    [Fact]
+    public async Task ForcePlan_ASecondFailureMoreThanADayAfterTheFirst_IsHeldAgain()
+    {
+        var h = new AlertEngineTests.Harness();
+        var engine = h.Build();
+        h.Adapter.ForcePlanFailures.Add(Failure(h.Now.AddMinutes(-1)));
+        await engine.EvaluateServerAsync(AlertEngineTests.Harness.Snapshot());
+        h.Adapter.ForcePlanFailures.Clear();
+        h.Now = h.Now.AddMinutes(10);
+        await engine.EvaluateServerAsync(AlertEngineTests.Harness.Snapshot());
+
+        h.Now = h.Now.AddHours(25);
+        h.Adapter.ForcePlanFailures.Add(Failure(h.Now.AddMinutes(-1)));
+        await engine.EvaluateServerAsync(AlertEngineTests.Harness.Snapshot());
+
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.All(h.Deliverer.Outcomes, o => Assert.NotNull(o.Hold));
+    }
 }
