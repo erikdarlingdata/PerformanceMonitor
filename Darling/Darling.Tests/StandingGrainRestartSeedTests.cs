@@ -31,9 +31,18 @@ public sealed class StandingGrainRestartSeedTests
 
     private static string PlanName(int plan) => $"Sales query 11 plan {plan}";
 
-    private static string FileContext(string file) => $"{{\"files\":[\"tempdb\",\"{file}\"]}}";
+    /* The context the engine writes for a file card: one detail item per file with the database and file as fields. */
+    private static string FileContext(string file) => ContextOf(("Database", "tempdb"), ("File", file));
 
-    private static string PlanContext(int plan) => $"{{\"plans\":[\"{PlanName(plan)}\"]}}";
+    private static string PlanContext(int plan) =>
+        ContextOf(("Database", "Sales"), ("Query ID", "11"), ("Plan ID", plan.ToString(System.Globalization.CultureInfo.InvariantCulture)));
+
+    private static string ContextOf(params (string, string)[] fields)
+    {
+        var context = new AlertContext();
+        context.Details.Add(new AlertDetailItem { Heading = fields[0].Item2, Fields = fields.ToList() });
+        return AlertContextSerializer.Serialize(context);
+    }
 
     private static AlertEngineTests.Harness Armed()
     {
@@ -177,6 +186,59 @@ public sealed class StandingGrainRestartSeedTests
         Assert.Equal(1, Cards(h, ForcePlanTokens.MetricName));
     }
 
+    // ---- names that start with another name (the match is on the exact field, not a substring) ---------------------
+
+    [Fact]
+    public async Task PlanTwo_AfterARestart_IsNews_WhenOnlyPlanTwentyTwoHasAnOpenRow()
+    {
+        var h = Armed();
+        SetPlans(h, 2);
+        h.OpenFireReader = (_, _) => Task.FromResult(AlertHistoryStanding.Of(new AlertHistoryFire(T0.AddDays(-1), 0, PlanContext(22))));
+
+        await SweepAsync(h, h.Build());
+
+        Assert.Equal(1, Cards(h, ForcePlanTokens.MetricName));
+    }
+
+    [Fact]
+    public async Task AClearOfPlanTwentyTwo_DoesNotCloseThePlanTwoRow()
+    {
+        var h = Armed();
+        SetPlans(h, 2);
+        var clear = new AlertHistoryClear(T0.AddHours(-12), null, $"SRV: {PlanName(22)} no longer failing to force");
+        h.OpenFireReader = History(ForcePlanTokens.MetricName, PlanContext(2), PlanContext(22), clear);
+
+        await SweepAsync(h, h.Build());
+
+        /* Plan 22's fire is newer than its clear, but the sweep sees only plan 2: its own row stays open, so nothing is announced. */
+        Assert.Equal(0, Cards(h, ForcePlanTokens.MetricName));
+    }
+
+    [Fact]
+    public async Task AFileWithTheSameNameInAnotherDatabase_IsNews()
+    {
+        var h = Armed();
+        SetFiles(h, "data");
+        h.OpenFireReader = (_, _) => Task.FromResult(AlertHistoryStanding.Of(
+            new AlertHistoryFire(T0.AddDays(-1), 0, ContextOf(("Database", "Other"), ("File", "data")))));
+
+        await SweepAsync(h, h.Build());
+
+        Assert.Equal(1, Cards(h, Growth));
+    }
+
+    [Fact]
+    public async Task FileTemp1_AfterARestart_IsNews_WhenOnlyTemp10HasAnOpenRow()
+    {
+        var h = Armed();
+        SetFiles(h, "temp1");
+        h.OpenFireReader = (_, _) => Task.FromResult(AlertHistoryStanding.Of(new AlertHistoryFire(T0.AddDays(-1), 0, FileContext("temp10"))));
+
+        await SweepAsync(h, h.Build());
+
+        Assert.Equal(1, Cards(h, Growth));
+    }
+
     // ---- evaluator seam: AG Sync Fell Behind -----------------------------------------------------------------------
 
     private const int ServerId = 424242;
@@ -240,6 +302,43 @@ public sealed class StandingGrainRestartSeedTests
 
         Assert.Equal(1, rig.Fires);
         Assert.Contains("SalesA", rig.Deliverer.Outcomes.Single(o => o.MetricName == "AG Sync Fell Behind").DetailText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task DatabaseSales_AfterARestart_IsAnnounced_WhenOnlySales2HasAnOpenRow()
+    {
+        var rig = new Rig();
+        Standing(rig, new[] { AgFire("Sales2", T0.AddHours(-10)) });
+
+        await SweepAgAsync(rig, Behind("Sales"), Behind("Sales2"));
+
+        Assert.Equal(1, rig.Fires);
+        Assert.DoesNotContain("Sales2", rig.Deliverer.Outcomes.Single(o => o.MetricName == "AG Sync Fell Behind").DetailText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AClearOfSales2_DoesNotCloseSales()
+    {
+        var rig = new Rig();
+        Standing(rig, new[] { AgFire("Sales", T0.AddHours(-20)), AgFire("Sales2", T0.AddHours(-10)) }, AgClear("Sales2", T0.AddHours(-5)));
+
+        await SweepAgAsync(rig, Behind("Sales"), Behind("Sales2"));
+
+        /* Sales stays quiet from its own open row, and Sales2 (cleared) is announced. */
+        Assert.Equal(1, rig.Fires);
+        Assert.Contains("Sales2", rig.Deliverer.Outcomes.Single(o => o.MetricName == "AG Sync Fell Behind").DetailText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AClearOfALongerReplicaName_DoesNotCloseIt()
+    {
+        var rig = new Rig();
+        Standing(rig, new[] { AgFire("Sales", T0.AddHours(-20)) },
+            new AlertHistoryClear(T0.AddHours(-5), null, $"SRV: database Sales in AG {Ag} on replica {Replica}2 has caught up with the primary"));
+
+        await SweepAgAsync(rig, Behind("Sales"));
+
+        Assert.Equal(0, rig.Fires);
     }
 
     [Fact]

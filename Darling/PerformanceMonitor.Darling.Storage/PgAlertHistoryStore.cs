@@ -299,7 +299,10 @@ LIMIT " + StandingRowCap.ToString(CultureInfo.InvariantCulture), connection) { C
             }
         }
 
-        return new AlertHistoryStanding(fires, clears);
+        /* A read that stopped at the cap holds only the newest clears: a fire older than the oldest of them may have been closed
+           by a row left out. Those fires are not trusted as open (see FromCappedRead). */
+        return AlertHistoryStanding.FromCappedRead(
+            fires, clears, clears.Count >= StandingRowCap ? clears[^1].AtUtc : null);
     }
 
     /// <summary>#5825: the most delivered fire rows <see cref="GetOpenDeliveredFiresAsync"/> returns. An alert that

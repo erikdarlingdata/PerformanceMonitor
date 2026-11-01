@@ -8,7 +8,6 @@
 
 using System;
 using System.Collections.Generic;
-using System.Linq;
 
 namespace PerformanceMonitor.Notifications;
 
@@ -40,18 +39,19 @@ public static class AgAlertContexts
         return context;
     }
 
-    /// <summary>#7068: true when a "AG Sync Fell Behind" fire row's context names this availability group, database and replica
-    /// (the three facts <see cref="ForDatabase"/> wrote, JSON-encoded as the serializer writes them).</summary>
+    /// <summary>#7068: true when a "AG Sync Fell Behind" fire row's context carries this availability group, database and replica
+    /// as the exact field values <see cref="ForDatabase"/> wrote. Equality on each field, so database <c>Sales</c> does not
+    /// own a row written for <c>Sales2</c>.</summary>
     public static bool OwnsSyncFire(string? contextJson, string agName, string database, string replica) =>
-        contextJson is { } json
-        && new[] { agName, database, replica }
-            .All(name => json.Contains(System.Text.Json.JsonEncodedText.Encode(name).ToString(), StringComparison.Ordinal));
+        AlertContextSerializer.ContextJsonHasDetailFields(
+            contextJson, ("Database", database), ("Availability Group", agName), ("Replica", replica));
 
     /// <summary>#7068: true when an "AG Sync Recovered" row's message is this grain's. Both apps word it "database D in AG G on
-    /// replica R" (Darling in lower case, Lite with a capital), so the match ignores case.</summary>
+    /// replica R has caught up with the primary" (Darling in lower case, Lite with a capital), so the match ignores case. The
+    /// closing words end the replica name, so replica <c>R</c> does not own a clear written for <c>R2</c>.</summary>
     public static bool OwnsSyncClear(string? detailText, string agName, string database, string replica) =>
         detailText is { } text
-        && text.Contains($"database {database} in AG {agName} on replica {replica}", StringComparison.OrdinalIgnoreCase);
+        && text.Contains($"database {database} in AG {agName} on replica {replica} has caught up with the primary", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// The incident identity for the AG disconnect/reconnect pair: one replica within one group. A single

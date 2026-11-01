@@ -546,11 +546,6 @@ public sealed class AlertEngine
         return true;
     }
 
-    /// <summary>#7068: true when the fire row's context carries every one of <paramref name="names"/> (JSON-encoded as the serializer writes them).</summary>
-    private static bool FireNames(AlertHistoryFire fire, params string[] names) =>
-        fire.ContextJson is { } json
-        && names.All(n => json.Contains(System.Text.Json.JsonEncodedText.Encode(n).ToString(), StringComparison.Ordinal));
-
     /// <summary>#7068: true when the fire row's context carries the dedup key of the volume or database now being judged.</summary>
     private static bool FireNamesIncident(AlertHistoryFire fire, IReadOnlyList<AlertIncident> incidents) =>
         incidents.Count > 0 && AlertContextSerializer.ContextJsonContainsDedupKey(fire.ContextJson, incidents[0].DedupKey);
@@ -3434,14 +3429,17 @@ public sealed class AlertEngine
                 /* #7068: a fire left open in the history from before this process is the same incident: the files it names
                    count as already reported at its time, and its time is the cooldown stamp, so only a rise observed after it
                    (or a file it does not name) is news. */
-                if (await ReadFirstStandingAsync(key, FileGrowthWatermarkMetric, "Database File Growth Resolved", ct) is { } standing)
+                var standingRead = await ReadFirstStandingAsync(key, FileGrowthWatermarkMetric, "Database File Growth Resolved", ct);
+                readClock.Restart();
+                if (standingRead is { } standing)
                 {
                     /* Each file is judged by the newest open row that names it, not by the newest row alone: two files standing
                        on one server were written by different rows. The resolution ends the whole alert (it names no file). */
                     DateTime? newestSeed = null;
                     foreach (var f in breached)
                     {
-                        if (standing.OpenFor(fire => FireNames(fire, f.DatabaseName, f.FileName)) is { } standingFire)
+                        if (standing.OpenFor(fire => AlertContextSerializer.ContextJsonHasDetailFields(
+                            fire.ContextJson, ("Database", f.DatabaseName), ("File", f.FileName))) is { } standingFire)
                         {
                             alertedObservations.TryAdd(FileGrowthObservationKey(f), standingFire.FireAtUtc);
                             if (newestSeed is not { } seen || standingFire.FireAtUtc > seen)
@@ -4161,11 +4159,16 @@ public sealed class AlertEngine
                 /* #7068: a plan the open fire names was announced before the restart: its observation is that fire's time and its
                    cooldown clock starts there, so only an observation made after it is news. */
                 var planName = $"{failure.DatabaseName} query {failure.QueryId} plan {failure.PlanId}";
-                /* Judged by the newest open row that names THIS plan: its clear names it too ("... no longer failing to force"), so
-                   another plan's clear leaves this one's fire open. */
+                /* Judged by the newest open row that names THIS plan (database, query and plan id each equal): its clear names it
+                   too ("...: db query Q plan P no longer failing to force", the plan id ended by the words that follow it), so
+                   another plan's clear, plan 22's for plan 2, leaves this one's fire open. */
                 if (standing?.OpenFor(
-                        fire => FireNames(fire, planName),
-                        clear => clear.DetailText is { } text && text.Contains(planName, StringComparison.Ordinal)) is { } standingFire)
+                        fire => AlertContextSerializer.ContextJsonHasDetailFields(
+                            fire.ContextJson,
+                            ("Database", failure.DatabaseName),
+                            ("Query ID", failure.QueryId.ToString(CultureInfo.InvariantCulture)),
+                            ("Plan ID", failure.PlanId.ToString(CultureInfo.InvariantCulture))),
+                        clear => clear.DetailText is { } text && text.Contains($": {planName} no longer failing to force", StringComparison.Ordinal)) is { } standingFire)
                 {
                     plan.LastAlertedObservedAtUtc = standingFire.FireAtUtc;
                     _lastForcePlanAlert.TryAdd(key + "|" + planKey, standingFire.FireAtUtc);

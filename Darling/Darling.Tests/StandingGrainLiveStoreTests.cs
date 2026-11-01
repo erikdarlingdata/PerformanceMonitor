@@ -102,6 +102,33 @@ VALUES ($1, $2, 'Srv', $3, 0, 0, true, 'email', NULL, false, $4, $5)", connectio
     });
 
     [Fact]
+    public Task WhenTheResolutionReadHitsItsCap_AnOlderFireIsNotReadAsOpen() => RunLiveAsync(async (store, c) =>
+    {
+        /* SalesA's fire was closed by a resolution that fell outside the newest StandingRowCap resolution rows (other databases
+           wrote the rest). Read without that row, SalesA's fire would look open and the grain would be silenced. */
+        var ctxA = AlertContextSerializer.Serialize(AgAlertContexts.ForDatabase("SalesA", Ag, Replica));
+        await InsertAsync(c, Now.AddDays(-40), "AG Sync Fell Behind", ctxA, "a");
+        await InsertAsync(c, Now.AddDays(-39), "AG Sync Recovered", null, $"SRV: database SalesA in AG {Ag} on replica {Replica} has caught up with the primary");
+        for (var i = 0; i < PgAlertHistoryStore.StandingRowCap; i++)
+        {
+            await InsertAsync(c, Now.AddDays(-30).AddMinutes(i), "AG Sync Recovered", null, $"SRV: database Other{i} in AG {Ag} on replica {Replica} has caught up with the primary");
+        }
+
+        var titles = new[] { "AG Sync Recovered" };
+        var key = Server.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        bool OwnsA(AlertHistoryFire f) => AgAlertContexts.OwnsSyncFire(f.ContextJson, Ag, "SalesA", Replica);
+        bool ClearsA(AlertHistoryClear x) => AgAlertContexts.OwnsSyncClear(x.DetailText, Ag, "SalesA", Replica);
+
+        var standing = await store.GetStandingAsync(key, "AG Sync Fell Behind", titles, null, Now);
+        Assert.Null(standing.OpenFor(OwnsA, ClearsA));
+
+        /* A fire newer than every resolution row read is still open. */
+        await InsertAsync(c, Now.AddHours(-1), "AG Sync Fell Behind", ctxA, "a again");
+        standing = await store.GetStandingAsync(key, "AG Sync Fell Behind", titles, null, Now);
+        Assert.Equal(Now.AddHours(-1), standing.OpenFor(OwnsA, ClearsA)!.FireAtUtc);
+    });
+
+    [Fact]
     public Task ASingleKeyFleetMetricIsReadFromTheZeroBucket_AndAPerJobMetricIsNot() => RunLiveAsync(async (store, c) =>
     {
         await InsertAsync(c, Now.AddDays(-2), "Collection Falling Behind", null, "fleet", serverId: 0);

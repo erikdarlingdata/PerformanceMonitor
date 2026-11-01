@@ -111,6 +111,41 @@ public sealed class StandingAgSyncRestartSeedTests : IClassFixture<SharedDuckDbF
     }
 
     [Fact]
+    public async Task DatabaseSales_IsAnnounced_WhenOnlySales2HasAnOpenRow()
+    {
+        var history = new FakeHistory { Standing = new AlertHistoryStanding(new[] { Fire("Sales2", Start.AddHours(-5)) }, Array.Empty<AlertHistoryClear>()) };
+
+        Assert.Equal(1, await SweepAsync(Build(history), Reading("Sales", true), Reading("Sales2", true)));
+    }
+
+    [Fact]
+    public async Task AClearOfSales2_DoesNotCloseSales()
+    {
+        var history = new FakeHistory
+        {
+            Standing = new AlertHistoryStanding(
+                new[] { Fire("Sales2", Start.AddHours(-5)), Fire("Sales", Start.AddHours(-9)) },
+                new[] { Clear("Sales2", Start.AddHours(-3)) })
+        };
+
+        /* Sales stays quiet from its own open row; Sales2 was cleared and is announced. */
+        Assert.Equal(1, await SweepAsync(Build(history), Reading("Sales", true), Reading("Sales2", true)));
+    }
+
+    [Fact]
+    public async Task AClearOfALongerReplicaName_DoesNotCloseTheShorterOne()
+    {
+        var history = new FakeHistory
+        {
+            Standing = new AlertHistoryStanding(
+                new[] { Fire("Sales", Start.AddHours(-9)) },
+                new[] { new AlertHistoryClear(Start.AddHours(-3), null, $"Database Sales in AG {Ag} on replica {Replica}2 has caught up with the primary.") })
+        };
+
+        Assert.Equal(0, await SweepAsync(Build(history), Reading("Sales", true)));
+    }
+
+    [Fact]
     public async Task ADatabaseSeenCaughtUpFirst_ThenBehind_Fires()
     {
         var history = new FakeHistory { Standing = new AlertHistoryStanding(new[] { Fire("SalesA", Start.AddHours(-9)) }, Array.Empty<AlertHistoryClear>()) };

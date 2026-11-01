@@ -202,6 +202,36 @@ public sealed class AlertHistoryStanding
     public static AlertHistoryStanding Of(AlertHistoryFire? fire) =>
         fire is null ? Empty : new(new[] { fire }, System.Array.Empty<AlertHistoryClear>());
 
+    /// <summary>
+    /// The standing a store read when its resolution read may have stopped at its row cap. The clears are the NEWEST
+    /// <paramref name="clears"/> the cap allowed, so a clear older than the oldest one read may exist and was not read: a fire
+    /// at or before that instant could have been closed by it, and reads as open only because the closing row fell outside the
+    /// window. Those fires are dropped (not open, so the alert fires: the safe direction, never a silence). When the read did
+    /// not reach the cap (<paramref name="oldestClearReadUtc"/> null: the caller passes the oldest read only when the read hit its cap) every clear after the oldest fire is in hand and nothing is
+    /// dropped. Strictly newer, because a cap can cut a run of rows that share the oldest read instant.
+    /// </summary>
+    public static AlertHistoryStanding FromCappedRead(
+        System.Collections.Generic.IReadOnlyList<AlertHistoryFire> fires,
+        System.Collections.Generic.IReadOnlyList<AlertHistoryClear> clears,
+        DateTime? oldestClearReadUtc)
+    {
+        if (oldestClearReadUtc is not { } cutoff)
+        {
+            return new AlertHistoryStanding(fires, clears);
+        }
+
+        var known = new System.Collections.Generic.List<AlertHistoryFire>(fires.Count);
+        foreach (var fire in fires)
+        {
+            if (fire.FireAtUtc > cutoff)
+            {
+                known.Add(fire);
+            }
+        }
+
+        return new AlertHistoryStanding(known, clears);
+    }
+
     /// <summary>The newest fire no clear closed, whatever grain: the answer of <see cref="IAlertHistoryStore.GetOpenFireAsync"/>.</summary>
     public AlertHistoryFire? NewestOpen() => OpenFor(_ => true);
 

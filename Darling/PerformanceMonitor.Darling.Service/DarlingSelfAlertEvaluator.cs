@@ -1965,6 +1965,7 @@ internal sealed class DarlingSelfAlertEvaluator
                have without the restart. A failed read, or a clear this process already saw, seeds nothing. */
             if (_captureDownSeedDone.TryAdd(key, true) && !_activeCaptureDown.ContainsKey(key))
             {
+                var seedClock = Stopwatch.StartNew();
                 try
                 {
                     var standing = await _historyStore.GetOpenFireAsync(
@@ -1981,7 +1982,8 @@ internal sealed class DarlingSelfAlertEvaluator
                 catch (Exception ex)
                 {
                     _captureDownSeedDone.TryRemove(key, out _);
-                    _logger?.LogWarning("Could not read the open Capture Down incident from alert history for server {ServerId}; a standing capture-down may be announced again after this restart: {Message}", serverId, ex.Message);
+                    _logger?.LogWarning("Could not read the open Capture Down incident from alert history for server {ServerId} after {ElapsedMs} ms; a standing capture-down may be announced again after this restart: {Message}", serverId, seedClock.ElapsedMilliseconds, ex.Message);
+                    _readFailures?.RecordReadFailure(Key(serverId), "capture-down standing seed self-alert", seedClock.ElapsedMilliseconds);
                 }
             }
 
@@ -10112,25 +10114,16 @@ ORDER BY ag_name, database_name, replica_server_name";
             return false;
         }
 
+        var readKey = StateRetryKey(metric, historyKey);
+        var seedClock = Stopwatch.StartNew();
         try
         {
             /* The newest open row THIS grain owns: with several grains standing on one server (two AG databases behind) the newest
                row of the metric names only one of them. A clear that names another grain does not close this one. */
             /* One store read per server and metric per process start, shared by every grain of it. */
-            var readKey = StateRetryKey(metric, historyKey);
             if (!_standingReads.TryGetValue(readKey, out var standingRows))
             {
-                try
-                {
-                    standingRows = await _historyStore.GetStandingAsync(historyKey, metric, titles, null, _serviceStartUtc);
-                }
-                catch (Exception) when (!cancellationToken.IsCancellationRequested)
-                {
-                    /* Kept as empty so the other grains do not read a store that is down again: they announce, as before this seed. */
-                    _standingReads[readKey] = AlertHistoryStanding.Empty;
-                    throw;
-                }
-
+                standingRows = await _historyStore.GetStandingAsync(historyKey, metric, titles, null, _serviceStartUtc);
                 _standingReads[readKey] = standingRows;
             }
 
@@ -10154,7 +10147,12 @@ ORDER BY ag_name, database_name, replica_server_name";
         }
         catch (Exception ex)
         {
-            _logger?.LogWarning("Could not read the open {Metric} incident for {Key} from alert history; a standing condition may be announced again after this restart: {Message}", metric, historyKey, ex.Message);
+            /* Kept as empty so the other grains do not read a store that is down again: they announce, as before this seed. */
+            _standingReads.TryAdd(readKey, AlertHistoryStanding.Empty);
+            _logger?.LogWarning("Could not read the open {Metric} incident for {Key} from alert history after {ElapsedMs} ms; a standing condition may be announced again after this restart: {Message}", metric, historyKey, seedClock.ElapsedMilliseconds, ex.Message);
+            /* A server's key keeps its own count; a fleet-level family's store key is not a server, so it counts under the fleet bucket. */
+            var countKey = int.TryParse(historyKey, NumberStyles.Integer, CultureInfo.InvariantCulture, out _) ? historyKey : null;
+            _readFailures?.RecordReadFailure(countKey, "standing incident seed self-alert", seedClock.ElapsedMilliseconds);
             return false;
         }
     }

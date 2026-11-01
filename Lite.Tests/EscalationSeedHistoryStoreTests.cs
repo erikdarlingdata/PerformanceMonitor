@@ -105,6 +105,27 @@ VALUES ($1, $2, 'Srv', $3, 0, 0, $4, $5, $6, $7, $8)";
     }
 
     [Fact]
+    public async Task GetStanding_WhenTheResolutionReadHitsItsCap_DoesNotReadAnOlderFireAsOpen()
+    {
+        // #7068: grain A's fire was closed by a resolution that fell outside the newest StandingRowCap resolution rows (grain B
+        // wrote the rest). Read without that row, grain A's fire would look open and the grain would be silenced.
+        await InsertAsync(Now.AddDays(-40), Fire, "grainA");
+        await InsertAsync(Now.AddDays(-39), Resolution, "grainA", sent: false, type: "none");
+        for (var i = 0; i < DuckDbAlertHistoryStore.StandingRowCap; i++)
+        {
+            await InsertAsync(Now.AddDays(-30).AddMinutes(i), Resolution, "grainB", sent: false, type: "none");
+        }
+
+        var standing = await _store.GetStandingAsync("7", Fire, new[] { Resolution }, null, Now);
+        Assert.Null(standing.OpenFor(f => f.ContextJson == "grainA", c => c.ContextJson == "grainA"));
+
+        // A fire newer than every resolution row read is still open.
+        await InsertAsync(Now.AddHours(-1), Fire, "grainA");
+        standing = await _store.GetStandingAsync("7", Fire, new[] { Resolution }, null, Now);
+        Assert.Equal(Now.AddHours(-1), standing.OpenFor(f => f.ContextJson == "grainA", c => c.ContextJson == "grainA")!.FireAtUtc);
+    }
+
+    [Fact]
     public async Task NewestFireWins()
     {
         await InsertAsync(Now.AddMinutes(-5), Fire, Warning);

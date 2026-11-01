@@ -428,8 +428,11 @@ AND   alert_time < $4"
         if (fires.Count == 0) return AlertHistoryStanding.Empty;
 
         var clears = new List<AlertHistoryClear>();
+        DateTime? cappedAtUtc = null;
         foreach (var resolutionName in resolutionMetricNames)
         {
+            var titleRows = 0;
+            DateTime titleOldest = default;
             using var clearCommand = connection.CreateCommand();
             clearCommand.CommandText = @"
 SELECT alert_time, context_json, detail_text
@@ -445,14 +448,23 @@ LIMIT " + StandingRowCap.ToString(System.Globalization.CultureInfo.InvariantCult
             using var clearReader = await clearCommand.ExecuteReaderAsync();
             while (await clearReader.ReadAsync())
             {
+                titleOldest = DateTime.SpecifyKind(clearReader.GetDateTime(0), DateTimeKind.Utc);
+                titleRows++;
                 clears.Add(new AlertHistoryClear(
-                    DateTime.SpecifyKind(clearReader.GetDateTime(0), DateTimeKind.Utc),
+                    titleOldest,
                     clearReader.IsDBNull(1) ? null : clearReader.GetString(1),
                     clearReader.IsDBNull(2) ? null : clearReader.GetString(2)));
             }
+
+            /* A title that stopped at the cap holds only its newest clears; the newest such boundary is the instant before which
+               no title is fully read (see FromCappedRead). */
+            if (titleRows >= StandingRowCap && (cappedAtUtc is not { } seen || titleOldest > seen))
+            {
+                cappedAtUtc = titleOldest;
+            }
         }
 
-        return new AlertHistoryStanding(fires, clears);
+        return AlertHistoryStanding.FromCappedRead(fires, clears, cappedAtUtc);
     }
 
     /// <summary>
