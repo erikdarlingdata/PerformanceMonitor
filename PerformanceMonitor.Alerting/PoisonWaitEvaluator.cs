@@ -71,8 +71,10 @@ public static class PoisonWaitEvaluator
     /// bucket on that population. Nothing measured on either engine would have fired it, which is the
     /// point: these waits are near-zero when healthy, and a full task pinned for ten straight minutes is
     /// categorically not that.</para>
+    /// <para>The value is defined once, as <c>FindingPageFloor.WaitProfileAvgWaitersFloor</c> (PerformanceMonitor.Analysis), because
+    /// the analysis findings' page floor must be this same bar and Analysis cannot reference this assembly (#7084).</para>
     /// </summary>
-    public const double WarningAvgWaiters = 1.0;
+    public const double WarningAvgWaiters = PerformanceMonitor.Analysis.FindingPageFloor.WaitProfileAvgWaitersFloor;
 
     /// <summary>
     /// Critical at ten tasks/backends continuously stuck on average — an active contention collapse,

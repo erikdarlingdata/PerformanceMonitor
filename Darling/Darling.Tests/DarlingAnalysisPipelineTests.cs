@@ -508,7 +508,7 @@ public sealed class DarlingAnalysisPipelineTests
             {
                 Assert.Equal(5, anomaly.DefinedAmplifiers);
             }
-            var expectedDecision = FindingRouting.Classify(anomaly, FindingRoute.Digest);
+            var expectedDecision = FindingRouting.Classify(anomaly, FindingRoute.Digest, 0.3);
             Assert.Equal(expectedDecision.Route, sentAnomaly.Route);
             Assert.NotNull(sentAnomaly.Context.Routing);
             Assert.Equal(expectedDecision.RouteText, sentAnomaly.Context.Routing!.Route);

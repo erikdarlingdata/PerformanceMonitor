@@ -461,7 +461,9 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
                 /* #5654: Darling's external-alert source for the row; always null in Lite. */
                 "external_source", "current_value", "threshold_value", "alert_sent",
                 "notification_type", "send_error", "muted", "dismissed", "severity", "severity_source", "route", "routing",
-                "routing_reason", "detail_text",
+                "routing_reason",
+                /* #7084 part 4: the engine alert an analysis finding was attached to; null on every other row. */
+                "attached_to", "detail_text",
                 /* #5642: the newest sample the alert judged and its age at fire time, read from the persisted context. */
                 "newest_sample",
             },

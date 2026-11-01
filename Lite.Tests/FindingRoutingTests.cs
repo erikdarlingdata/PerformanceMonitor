@@ -22,7 +22,7 @@ namespace PerformanceMonitorLite.Tests;
 /// ledger record it writes, and the notification service's two roads — pinned without a store so the
 /// whole set runs anywhere the Notifications assembly does.
 ///
-/// <para><b>What the pins hold.</b> (1) Every <see cref="FindingRouting.Classify(AnalysisFinding, FindingRoute)"/>
+/// <para><b>What the pins hold.</b> (1) Every <see cref="FindingRouting.Classify(AnalysisFinding, FindingRoute, double)"/>
 /// arm, in the order the class remarks list them, each naming its reason from the corroboration COMPONENTS
 /// and never from the confidence scalar. (2) <see cref="FindingRouting.ClassifyPersisted"/> agrees with the
 /// write-side decision over the whole small-integer catalogue domain, which is the property that lets Lite's
@@ -125,13 +125,13 @@ public class FindingRoutingTests
     [Fact]
     public void TheFindingOverload_ReadsTheFourComponentsOffTheFinding()
     {
-        var finding = new AnalysisFinding { RootFactKey = "ANOMALY_CPU_SPIKE", FactCount = 1, MatchedAmplifiers = 1, DefinedAmplifiers = 5 };
-        Assert.Equal(FindingRoute.Page, FindingRouting.Classify(finding, FindingRoute.Digest).Route);
+        var finding = new AnalysisFinding { RootFactKey = "ANOMALY_CPU_SPIKE", FactCount = 1, MatchedAmplifiers = 1, DefinedAmplifiers = 5, Severity = 1.9 };
+        Assert.Equal(FindingRoute.Page, FindingRouting.Classify(finding, FindingRoute.Digest, 1.5).Route);
 
         finding.MatchedAmplifiers = 0;
-        Assert.Equal(FindingRoute.Digest, FindingRouting.Classify(finding, FindingRoute.Digest).Route);
+        Assert.Equal(FindingRoute.Digest, FindingRouting.Classify(finding, FindingRoute.Digest, 1.5).Route);
 
-        Assert.Throws<ArgumentNullException>(() => FindingRouting.Classify(null!, FindingRoute.Digest));
+        Assert.Throws<ArgumentNullException>(() => FindingRouting.Classify(null!, FindingRoute.Digest, 1.5));
     }
 
     /* ---------------- spelling ---------------- */
@@ -186,11 +186,13 @@ public class FindingRoutingTests
                 {
                     var confidence = StoryConfidence.Compute(matched, defined, pathLength);
                     foreach (var knob in new[] { FindingRoute.Digest, FindingRoute.Page })
+                    foreach (var severity in new[] { 1.5, 1.55, 1.74, 1.75, 1.80, 2.0 })
+                    foreach (var weeks in new int?[] { null, 3 })
                     {
-                        var written = FindingRouting.Classify("ANOMALY_CPU_SPIKE", pathLength, matched, defined, knob);
-                        var read = FindingRouting.ClassifyPersisted("ANOMALY_CPU_SPIKE", confidence, pathLength, knob);
+                        var written = FindingRouting.Classify("ANOMALY_CPU_SPIKE", pathLength, matched, defined, knob, severity, 1.5, weeks);
+                        var read = FindingRouting.ClassifyPersisted("ANOMALY_CPU_SPIKE", confidence, pathLength, knob, severity, 1.5, weeks);
                         Assert.True(written.Route == read.Route,
-                            $"path {pathLength}, {matched}/{defined} matched, knob {knob}: wrote {written.Route}, read {read.Route} (confidence {confidence})");
+                            $"path {pathLength}, {matched}/{defined} matched, knob {knob}, severity {severity}, recurring {weeks}: wrote {written.Route}, read {read.Route} (confidence {confidence})");
                     }
                 }
             }
@@ -202,19 +204,19 @@ public class FindingRoutingTests
     {
         /* A lone symptom persisted at exactly 1.0 before #3538 — StoryConfidence.DescribeBasis's own reading:
            a path-length statistic, not an evidence score, and a lone-symptom 1.0 means UNCORROBORATED. */
-        var decision = FindingRouting.ClassifyPersisted("PAGEIOLATCH_SH", 1.0, 1, FindingRoute.Digest);
+        var decision = FindingRouting.ClassifyPersisted("PAGEIOLATCH_SH", 1.0, 1, FindingRoute.Digest, 1.9, 1.5, null);
         Assert.Equal(FindingRoute.Digest, decision.Route);
         Assert.Contains("pre-#3538", decision.Reason, StringComparison.Ordinal);
 
         /* The two by-construction 1.0s are named first and never read as legacy. */
-        Assert.Equal(FindingRoute.Page, FindingRouting.ClassifyPersisted(StoryConfidence.PileupRootKey, 1.0, 1, FindingRoute.Digest).Route);
-        Assert.Equal(FindingRoute.Page, FindingRouting.ClassifyPersisted(StoryConfidence.AbsolutionRootKey, 1.0, 1, FindingRoute.Digest).Route);
+        Assert.Equal(FindingRoute.Page, FindingRouting.ClassifyPersisted(StoryConfidence.PileupRootKey, 1.0, 1, FindingRoute.Digest, 1.5, 1.5, null).Route);
+        Assert.Equal(FindingRoute.Page, FindingRouting.ClassifyPersisted(StoryConfidence.AbsolutionRootKey, 1.0, 1, FindingRoute.Digest, 1.5, 1.5, null).Route);
     }
 
     [Fact]
     public void ClassifyPersisted_SaysWhenTheMatchedCheckArm_WasReDerived()
     {
-        var decision = FindingRouting.ClassifyPersisted("ANOMALY_CPU_SPIKE", StoryConfidence.Compute(1, 5, 1), 1, FindingRoute.Digest);
+        var decision = FindingRouting.ClassifyPersisted("ANOMALY_CPU_SPIKE", StoryConfidence.Compute(1, 5, 1), 1, FindingRoute.Digest, 1.9, 1.5, null);
         Assert.Equal(FindingRoute.Page, decision.Route);
         Assert.Contains("re-derived from the persisted confidence", decision.Reason, StringComparison.Ordinal);
     }
@@ -237,6 +239,87 @@ public class FindingRoutingTests
 
         /* Under the page knob nothing is ever marked — everything notify-worthy was delivered. */
         Assert.Null(new FindingRoutingLens(1.5, FindingRoute.Page).NotPagedReason(single));
+    }
+
+    /* ---------------- #7084: recurring stories and one-fact stories at the bar ---------------- */
+
+    private static string RecurringStoryText()
+    {
+        var story = new AnalysisStory
+        {
+            RootFactKey = "ANOMALY_WRITE_LATENCY",
+            StoryPathHash = "aaaa000000000001",
+            Severity = 1.9,
+            Path = ["ANOMALY_WRITE_LATENCY"],
+            StoryText = FactAdvice.SerializeForStoryText(new AdviceBlock("Write latency", "Storage writes ran slower.", "Look at the job.")),
+        };
+        RecurrenceLabeler.Label([story], facts: null, new PriorOccurrenceRead(0, new DateTime(2026, 10, 23, 1, 30, 0),
+        [
+            new PriorOccurrence("aaaa000000000001", "ANOMALY_WRITE_LATENCY", new DateTime(2026, 10, 16, 1, 0, 0), null),
+            new PriorOccurrence("aaaa000000000001", "ANOMALY_WRITE_LATENCY", new DateTime(2026, 10, 9, 1, 0, 0), null),
+        ]));
+        Assert.True(RecurrenceLabeler.TryReadLabel(story.StoryText)?.RecurringAtThisHour);
+        return story.StoryText;
+    }
+
+    [Fact]
+    public void ARecurringStory_GoesToTheDigest_EvenCorroborated_WithItsSeverityAndLabelKept()
+    {
+        var finding = new AnalysisFinding
+        {
+            RootFactKey = "ANOMALY_WRITE_LATENCY", Severity = 1.9, FactCount = 3, MatchedAmplifiers = 2, DefinedAmplifiers = 4,
+            StoryText = RecurringStoryText(),
+        };
+
+        var decision = FindingRouting.Classify(finding, FindingRoute.Digest, 1.5);
+        Assert.Equal(FindingRoute.Digest, decision.Route);
+        Assert.Contains("recurring: this weekday and hour for 3 weeks", decision.Reason, StringComparison.Ordinal);
+        Assert.Equal(1.9, finding.Severity);
+        Assert.True(RecurrenceLabeler.TryReadLabel(finding.StoryText)?.RecurringAtThisHour);
+
+        /* The same finding without the label pages: two facts corroborate it. */
+        finding.StoryText = FactAdvice.SerializeForStoryText(new AdviceBlock("Write latency", "Storage writes ran slower.", "Look at the job."));
+        Assert.Equal(FindingRoute.Page, FindingRouting.Classify(finding, FindingRoute.Digest, 1.5).Route);
+
+        /* The two by-construction stories are exempt, and the knob restores the page. */
+        Assert.Equal(FindingRoute.Page, FindingRouting.Classify(StoryConfidence.PileupRootKey, 1, 0, 0, FindingRoute.Digest, 1.9, 1.5, 3).Route);
+        Assert.Equal(FindingRoute.Page, FindingRouting.Classify("X", 3, 0, 0, FindingRoute.Page, 1.9, 1.5, 3).Route);
+    }
+
+    [Theory]
+    [InlineData(1.55, 0, FindingRoute.Digest)]   // one fact, matched check, 0.05 over the bar: held
+    [InlineData(1.74, 0, FindingRoute.Digest)]   // just under bar + 0.25: held
+    [InlineData(1.75, 0, FindingRoute.Page)]     // at bar + 0.25: pages
+    [InlineData(1.80, 0, FindingRoute.Page)]     // clear of the margin: pages
+    [InlineData(1.55, 1, FindingRoute.Page)]     // a second fact corroborates: pages at any severity
+    public void AOneFactStoryAtTheBar_IsHeldUnlessAnotherFactCorroborates(double severity, int extraFacts, FindingRoute expected)
+    {
+        var finding = new AnalysisFinding
+        {
+            RootFactKey = "ANOMALY_CPU_SPIKE", Severity = severity, FactCount = 1 + extraFacts, MatchedAmplifiers = 2, DefinedAmplifiers = 4,
+        };
+        var written = FindingRouting.Classify(finding, FindingRoute.Digest, 1.5);
+        Assert.Equal(expected, written.Route);
+        if (expected == FindingRoute.Digest)
+            Assert.Contains("one fact at the bar", written.Reason, StringComparison.Ordinal);
+
+        /* The read surface agrees: the lens marks exactly the findings the sender held. */
+        finding.Confidence = StoryConfidence.Compute(2, 4, finding.FactCount);
+        var lens = new FindingRoutingLens(1.5, FindingRoute.Digest);
+        Assert.Equal(expected == FindingRoute.Digest, lens.NotPagedReason(finding) is not null);
+    }
+
+    [Fact]
+    public void TheLens_MarksARecurringStory_FromItsStoryText()
+    {
+        var finding = new AnalysisFinding
+        {
+            RootFactKey = "ANOMALY_WRITE_LATENCY", Severity = 1.9, FactCount = 2, Confidence = 0.6, StoryText = RecurringStoryText(),
+        };
+        var lens = new FindingRoutingLens(1.5, FindingRoute.Digest);
+        Assert.Contains("recurring: this weekday and hour for 3 weeks", lens.NotPagedReason(finding), StringComparison.Ordinal);
+
+        Assert.Null(new FindingRoutingLens(1.5, FindingRoute.Page).NotPagedReason(finding));
     }
 
     /* ---------------- the ledger record ---------------- */

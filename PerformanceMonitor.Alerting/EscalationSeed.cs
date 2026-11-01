@@ -52,8 +52,8 @@ public sealed record OpenFireQuery(
 /// </summary>
 public static class EscalationSeed
 {
-    public const string CpuResolvedTitle = "CPU Resolved";
-    public const string DeadlocksClearedTitle = "Deadlocks Cleared";
+    public const string CpuResolvedTitle = OpenEngineAlerts.CpuResolvedTitle;
+    public const string DeadlocksClearedTitle = OpenEngineAlerts.DeadlocksClearedTitle;
     public const string PoisonWaitsClearedTitle = "Poison Waits Cleared";
     public const string RunnableQueueClearedTitle = "Runnable Queue Cleared";
     public const string ClientTimeoutsClearedTitle = "Client Timeouts Cleared";
