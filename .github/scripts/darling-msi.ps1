@@ -420,6 +420,9 @@ if ($Leg -eq 'M4-M6') {
     if (Get-Service -Name $svc -ErrorAction SilentlyContinue) { Fail-Leg 'M6: the service is still registered after the uninstall' }
     if (Test-Path -LiteralPath $storeFolder) { Fail-Leg "M6: PURGEDATA=1 left $storeFolder behind" }
     if (-not (Test-LogHas 'm6-purge' 'Store, credentials, and logs deleted.')) { Fail-Leg 'M6: the MSI log has no purge line from uninstall-darling.ps1' }
+    # The install made the operator group, so the purge removes it (#6953).
+    $grp = try { (New-Object System.Security.Principal.NTAccount($groupName)).Translate([System.Security.Principal.SecurityIdentifier]).Value } catch { $null }
+    if ($grp) { Fail-Leg "M6: PURGEDATA=1 left the operator group '$groupName' behind ($grp)" }
     Write-Host 'M6: PASS'
 }
 

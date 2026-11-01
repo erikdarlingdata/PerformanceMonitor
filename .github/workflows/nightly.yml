@@ -536,6 +536,9 @@ jobs:
           Add-Content -Path "$dataDir\postgresql.conf" -Value "listen_addresses = '127.0.0.1'"
           Add-Content -Path "$dataDir\postgresql.conf" -Value "timescaledb.max_background_workers = 74"
           Add-Content -Path "$dataDir\postgresql.conf" -Value "max_worker_processes = 85"
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "fsync = off"
+          # synchronous_commit stays on (#7012): a commit that returns before its WAL is flushed leaves the committed hint bits unset, so VACUUM cannot mark pages all-visible and an index scan cannot mark dead entries. With fsync off the flush never waits on disk.
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "full_page_writes = off"
           # #5549: the session id (%c) on every line. A PID alone cannot say whether two lines came from one
           # session (a pooled connection reused by the next test) or from two (Windows reuses a PID quickly).
           Add-Content -Path "$dataDir\postgresql.conf" -Value "log_line_prefix = '%m [%p] %c '"
@@ -677,6 +680,115 @@ jobs:
   # is passed, so the cut is the class-name hash (the cut the script falls back to when the gate pins none); no
   # ci-select call is made, so every class runs, the Guard classes too (there is no Guard job here). The release
   # run in build.yml still runs the suite whole, in one log.
+  # #6985: every PostgreSQL collector against a REAL PostgreSQL 10, 13, 14, 16 and 17 (pr.yml runs the same job when a
+  # pull request changes a file it covers). Builds Darling.Tests itself: this workflow has no shared test build.
+  pg-old-targets:
+    name: PostgreSQL collectors on old targets
+    needs: check
+    if: (needs.check.outputs.has_changes == 'true' || inputs.from_schedule != true) && inputs.map_only != true
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.sha || 'dev' }}
+
+      - name: Read the SDK version from global.json
+        id: globaljson_sdk
+        shell: pwsh
+        run: |
+          $version = (Get-Content -Raw (Join-Path $env:GITHUB_WORKSPACE 'global.json') | ConvertFrom-Json).sdk.version
+          if (-not $version) { throw 'global.json names no sdk.version' }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Setup .NET 10.0
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: ${{ steps.globaljson_sdk.outputs.version }}
+
+      # The same key as every other job (the fetch script's own content hash): a warm cache means no ~340MB download.
+      - name: Cache Darling pg-runtime.zip
+        id: cache-pg-runtime
+        uses: actions/cache@v6
+        with:
+          path: Darling/artifacts/pg-runtime.zip
+          key: pg-runtime-${{ runner.os }}-${{ hashFiles('Darling/tools/fetch-pg-runtime.ps1') }}
+
+      - name: Build Darling pg-runtime.zip (cache miss only)
+        if: steps.cache-pg-runtime.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: ./Darling/tools/fetch-pg-runtime.ps1
+
+      - name: Extract pg-runtime
+        shell: pwsh
+        run: |
+          $zip  = "$env:GITHUB_WORKSPACE\Darling\artifacts\pg-runtime.zip"
+          $dest = "$env:GITHUB_WORKSPACE\Darling\artifacts\pg-runtime"
+          if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          [System.IO.Compression.ZipFile]::ExtractToDirectory($zip, $dest)
+          if (-not (Test-Path "$dest\pgsql\bin\pg_ctl.exe")) { throw "pg-runtime missing pgsql\bin\pg_ctl.exe" }
+
+      - name: Restore Darling.Tests
+        run: dotnet restore Darling/Darling.Tests/Darling.Tests.csproj --locked-mode
+
+      - name: Build Darling.Tests
+        run: dotnet build Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-restore
+
+      # Fetch the five old servers (cached on the fetch script's own hash; the shared download cache stays out of it, five
+      # 320 MB zips), start the 5541 store through the shared script, then one trust-auth loopback cluster per major.
+      - name: Cache the old PostgreSQL targets
+        uses: actions/cache@v6
+        with:
+          path: |
+            Darling/artifacts/pg-targets
+            !Darling/artifacts/pg-targets/downloads
+          key: pg-targets-${{ runner.os }}-${{ hashFiles('Darling/tools/fetch-pg-target.ps1') }}
+
+      - name: Start the store and the old PostgreSQL targets
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          ./.github/scripts/start-test-pg.ps1 -Mode Start
+          ./.github/scripts/start-test-pg.ps1 -Mode StartTargets -Majors 10,13,14,16,17
+
+      # DARLING_TEST_PG_TARGETS_REQUIRED turns a missing target variable into a failure instead of a skip. A run that
+      # matched no test exits 0, so the step also fails on a total of zero.
+      - name: Run the collectors against the old targets
+        timeout-minutes: 20
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($line in @(./.github/scripts/start-test-pg.ps1 -Mode Env -Majors 10,13,14,16,17)) {
+            $name, $value = $line -split '=', 2
+            [Environment]::SetEnvironmentVariable($name, $value)
+          }
+          $env:DARLING_TEST_PG_TARGETS_REQUIRED = '1'
+          New-Item -ItemType Directory -Force -Path TestResults | Out-Null
+          dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- -class "*PgCollectorsOnOldTargetsLiveTests*" -longRunning 300 2>&1 | Tee-Object -FilePath TestResults/pg-old-targets.log
+          $exit = $LASTEXITCODE
+          if ($exit -ne 0) { exit $exit }
+          if (-not (Select-String -Path TestResults/pg-old-targets.log -Pattern 'Total:\s+[1-9]' -Quiet)) { throw 'the run reported no tests: the class filter matched nothing' }
+
+      - name: Stop PostgreSQL
+        if: always()
+        shell: pwsh
+        run: ./.github/scripts/start-test-pg.ps1 -Mode Stop
+
+      - name: Upload the logs
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: actions/upload-artifact@v6
+        with:
+          name: pg-old-targets-results
+          path: |
+            TestResults/
+            ${{ runner.temp }}/darling-pg*.log
+          retention-days: 7
+          overwrite: true
+          if-no-files-found: ignore
+
   lite-tests:
     name: Lite tests (shard ${{ matrix.shard }})
     needs: check
@@ -867,6 +979,9 @@ jobs:
           Add-Content -Path "$dataDir\postgresql.conf" -Value "listen_addresses = '127.0.0.1'"
           Add-Content -Path "$dataDir\postgresql.conf" -Value "timescaledb.max_background_workers = 74"
           Add-Content -Path "$dataDir\postgresql.conf" -Value "max_worker_processes = 85"
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "fsync = off"
+          # synchronous_commit stays on (#7012): a commit that returns before its WAL is flushed leaves the committed hint bits unset, so VACUUM cannot mark pages all-visible and an index scan cannot mark dead entries. With fsync off the flush never waits on disk.
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "full_page_writes = off"
           # #5549: the session id (%c) on every line. A PID alone cannot say whether two lines came from one
           # session (a pooled connection reused by the next test) or from two (Windows reuses a PID quickly).
           Add-Content -Path "$dataDir\postgresql.conf" -Value "log_line_prefix = '%m [%p] %c '"
@@ -1294,6 +1409,9 @@ jobs:
           Add-Content -Path "$dataDir\postgresql.conf" -Value "listen_addresses = '127.0.0.1'"
           Add-Content -Path "$dataDir\postgresql.conf" -Value "timescaledb.max_background_workers = 74"
           Add-Content -Path "$dataDir\postgresql.conf" -Value "max_worker_processes = 85"
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "fsync = off"
+          # synchronous_commit stays on (#7012): a commit that returns before its WAL is flushed leaves the committed hint bits unset, so VACUUM cannot mark pages all-visible and an index scan cannot mark dead entries. With fsync off the flush never waits on disk.
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "full_page_writes = off"
           # #5549: the session id (%c) on every line. A PID alone cannot say whether two lines came from one
           # session (a pooled connection reused by the next test) or from two (Windows reuses a PID quickly).
           Add-Content -Path "$dataDir\postgresql.conf" -Value "log_line_prefix = '%m [%p] %c '"
@@ -1476,6 +1594,16 @@ jobs:
     needs: check
     if: (needs.check.outputs.has_changes == 'true' || inputs.from_schedule != true) && inputs.map_only != true
     uses: ./.github/workflows/darling-ui-smoke.yml
+
+  # #6995: the Darling image on Linux against a store in its own container whose owner is not a superuser
+  # (darling-linux-store.yml, the same workflow a pull request touching its files runs): the launch memory guard under a
+  # cgroup limit, the migrations, and the store verbs from a second container. Gated like the other jobs here and NOT in
+  # publish's needs, for the same reason as the web UI smoke above.
+  darling-linux-store:
+    name: Darling Linux store
+    needs: check
+    if: (needs.check.outputs.has_changes == 'true' || inputs.from_schedule != true) && inputs.map_only != true
+    uses: ./.github/workflows/darling-linux-store.yml
 
   # #5745: the WPF smoke check (wpf-smoke.yml, the same workflow a pull request touching Lite runs): the real Lite exe on a
   # seeded data folder, walked with FlaUI. Gated like the other jobs here and NOT in publish's needs, for the same reason
@@ -1765,8 +1893,10 @@ jobs:
       #   cosign verify ghcr.io/erikdarlingdata/performancemonitor-darling:nightly \
       #     --certificate-identity-regexp 'github.com/erikdarlingdata/PerformanceMonitor' \
       #     --certificate-oidc-issuer https://token.actions.githubusercontent.com
+      # The v4 action installs cosign v3, which stores the signature as a Sigstore bundle referrer (#7037).
+      # Checked: cosign 2.6.5 and 3.0.6 both verify it with the command above.
       - name: Install cosign
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@v4
 
       - name: Sign container image (keyless, Sigstore)
         shell: bash

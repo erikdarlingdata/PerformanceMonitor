@@ -6,6 +6,7 @@ Uninstalls the PerformanceMonitor Darling service and removes the viewer shortcu
 Run from an ELEVATED PowerShell. Stops and deletes the Windows service, removes the scoped Windows
 Firewall rules it installed, removes the Desktop / Start Menu 'Darling Viewer' shortcuts, and removes any account's direct
 grant that install-darling.ps1 gave when it was asked to add someone to the operator group (#6478; see below).
+With -PurgeData it also removes the operator group itself when the install made it (#6953).
 DELIBERATELY LEFT IN PLACE: the extracted program folder,
 darling.json, and everything under %ProgramData%\PerformanceMonitorDarling (the PostgreSQL store
 with all collected history, the DPAPI credential files, and the service logs) - so an uninstall
@@ -17,7 +18,8 @@ or with msiexec /x, so Windows Installer stays the one owner (#6480). Only -MsiU
 
 .PARAMETER PurgeData
 ALSO delete %ProgramData%\PerformanceMonitorDarling - the entire PostgreSQL store (all collected
-history), the generated store credentials, and the service logs. Irreversible; prompts.
+history), the generated store credentials, and the service logs. Irreversible, and it prompts. Once the store is deleted it also removes the local
+operator group, but only when the install made it. A group an administrator made is left (#6953).
 
 .PARAMETER MsiUninstall
 For the MSI package's uninstall custom action only (#6480), which runs this before Windows Installer stops and removes the service.
@@ -162,7 +164,7 @@ $dataRoot = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'P
 # next rewrites those permissions at a start, but these files are left in place by this uninstall and no service is left to
 # rewrite them, so the entry would stay. Each of those four paths is protected and holds only SYSTEM, Administrators, the
 # service account and the operator group, so any other entry written directly on it (not inherited) is removed, and nothing else
-# is changed. The group itself and its members are left alone: the group is the administrator's, as the installer says.
+# is changed. The group itself and its members are left alone here. -PurgeData removes the group later, when the install made it (#6953).
 function Remove-DarlingDirectOperatorGrants([string]$configPath, [string]$storeFolder, [string]$groupName) {
     $ErrorActionPreference = 'Continue'
     $keep = @('S-1-5-18', 'S-1-5-32-544')
@@ -196,6 +198,67 @@ function Remove-DarlingDirectOperatorGrants([string]$configPath, [string]$storeF
     }
 }
 
+# The operator group itself (#6953). The installer and the upgrade script make the group when it is missing and give it this
+# exact comment (install-darling.ps1, Initialize-DarlingOperatorGroup), so a group that still carries the comment was made by
+# the install, and a group with any other comment is the administrator's own and stays. Only -PurgeData removes it: a plain
+# uninstall keeps it so a reinstall gets back the same members. It is removed with its members still in it, because it only
+# exists for this install. The next three functions are kept byte-identical in install-darling.ps1 and upgrade-darling.ps1.
+function Get-DarlingNativeText($output) {
+    (@($output) | ForEach-Object { if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.Exception.Message } else { "$_" } } | Where-Object { $_ -and $_.Trim() }) -join ' '
+}
+
+# The Windows product type: 1 workstation, 2 domain controller, 3 server (Win32_OperatingSystem.ProductType), or 0 when it
+# cannot be read. Its own function so a test can stand in for the machine. Kept byte-identical in install-darling.ps1 and
+# upgrade-darling.ps1.
+function Get-DarlingProductType {
+    try { return [int](Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).ProductType }
+    catch { return 0 }
+}
+
+# True on a domain controller. A domain controller has no local account database: a group made there with net localgroup
+# is a domain group, which the machine-qualified lookup cannot find and which would exist for the whole domain. Nothing
+# here creates or grants a local group on one. Kept byte-identical in install-darling.ps1 and upgrade-darling.ps1.
+function Test-DarlingDomainController {
+    return ((Get-DarlingProductType) -eq 2)
+}
+
+# The comment (description) of a local group, as the machine stores it, or $null when it has none. Read from Win32_Group, not
+# from the text of net localgroup, which is translated. Its own function so a test can stand in for the machine.
+function Get-DarlingLocalGroupComment([string]$groupName) {
+    $group = Get-CimInstance -ClassName Win32_Group -Filter "LocalAccount=True AND Domain='$env:COMPUTERNAME' AND Name='$groupName'" -ErrorAction Stop
+    if ($null -eq $group) { return $null }
+    return [string]@($group)[0].Description
+}
+
+# Removes the local operator group when the install made it. Says what it did in one line and never throws, so a failure here
+# does not stop the rest of the purge. net.exe, as the installer makes the group, judged by its exit code with the error
+# preference local to this function (see Initialize-DarlingOperatorGroup in install-darling.ps1 for why).
+function Remove-DarlingOperatorGroup([string]$groupName) {
+    $ErrorActionPreference = 'Continue'
+    # Must equal the comment Initialize-DarlingOperatorGroup in install-darling.ps1 gives the group it makes.
+    $installComment = 'Members can run the PerformanceMonitor Darling Viewer and CLI without elevation (read access to darling.json and the store role credentials).'
+    try {
+        if (Test-DarlingDomainController) {
+            Write-Host "This machine is a domain controller, which has no local groups, so the group '$groupName' was not looked up or removed."
+            return
+        }
+        # Machine-qualified, so only this machine's own account database answers: an unqualified name is also looked up in the
+        # domain, and a group of that name made there must never be the one removed.
+        $account = New-Object System.Security.Principal.NTAccount($env:COMPUTERNAME, $groupName)
+        try { $null = $account.Translate([System.Security.Principal.SecurityIdentifier]) }
+        catch [System.Security.Principal.IdentityNotMappedException] { return }
+        $comment = Get-DarlingLocalGroupComment $groupName
+        if ($comment -cne $installComment) {
+            Write-Host "Left the local group '$groupName' in place because the install did not create it. To remove it, run: net localgroup `"$groupName`" /delete"
+            return
+        }
+        $output = & net.exe localgroup $groupName /delete 2>&1
+        if ($LASTEXITCODE -eq 0) { Write-Host "Removed the local group '$groupName', which the install created." }
+        else { Write-Host "Could not remove the local group '$groupName' (net exit $LASTEXITCODE`: $(Get-DarlingNativeText $output)). Run: net localgroup `"$groupName`" /delete" -ForegroundColor Yellow }
+    }
+    catch { Write-Host "Could not remove the local group '$groupName' ($($_.Exception.Message)). Run: net localgroup `"$groupName`" /delete" -ForegroundColor Yellow }
+}
+
 # The store folder: the parent of postgres.dataDirectory in darling.json (the default is under %ProgramData%), or none when the
 # store is not managed. Read with a regex, not ConvertFrom-Json, which Windows PowerShell 5.1 fails on darling.json's comments.
 $operatorConfigPath = Join-Path $PSScriptRoot 'darling.json'
@@ -213,7 +276,8 @@ if (Test-Path -LiteralPath $operatorConfigPath -PathType Leaf) {
     }
     catch { }
 }
-try { Remove-DarlingDirectOperatorGrants $operatorConfigPath $operatorStoreFolder 'PerformanceMonitor Darling Operators' }
+$operatorGroupName = 'PerformanceMonitor Darling Operators'
+try { Remove-DarlingDirectOperatorGrants $operatorConfigPath $operatorStoreFolder $operatorGroupName }
 catch { Write-Host "Could not check for direct operator grants ($($_.Exception.Message))." -ForegroundColor Yellow }
 
 # Whether the store may be deleted. -ConfirmPurge is the answer already given; a caller that cannot be asked (-MsiUninstall) and gave
@@ -226,6 +290,7 @@ function Test-DarlingPurgeConfirmed([bool]$ConfirmPurge, [bool]$CannotAsk, [scri
 }
 
 if ($PurgeData) {
+    $purgeDone = $true
     if (Test-Path $dataRoot) {
         Write-Host ''
         Write-Host "-PurgeData will DELETE $dataRoot - the ENTIRE PostgreSQL store (all collected history)," -ForegroundColor Yellow
@@ -235,9 +300,13 @@ if ($PurgeData) {
             Write-Host 'Store, credentials, and logs deleted.'
         }
         else {
+            $purgeDone = $false
             Write-Host 'Purge NOT confirmed - data left in place.'
         }
     }
+    # The operator group goes with a purge that went ahead (#6953), after the grants above are removed. A purge that was not
+    # confirmed leaves the store, so it leaves the group too.
+    if ($purgeDone) { Remove-DarlingOperatorGroup $operatorGroupName }
 }
 elseif ($MsiUninstall) {
     Write-Host ''

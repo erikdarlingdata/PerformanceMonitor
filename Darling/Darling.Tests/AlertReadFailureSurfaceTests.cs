@@ -914,7 +914,7 @@ public sealed class AlertReadFailureSurfaceTests
     /// </summary>
     private static readonly (string Path, int Counted, int Exempt)[] s_wholeFileScopes =
     {
-        (Path.Combine("PerformanceMonitor.Alerting", "AlertEngine.cs"), 18, 8),
+        (Path.Combine("PerformanceMonitor.Alerting", "AlertEngine.cs"), 19, 8),
         /* 7th AlertEngine exempt since #5910: the threshold-override fallback in Threshold(), an in-memory lookup and
            not a read; the check it serves still reads, and counts, exactly as before. 8th since #6005: the deadlock
            rollup's catch, a write after the deadlock read, which counts its own failure. */
@@ -929,8 +929,12 @@ public sealed class AlertReadFailureSurfaceTests
            #5867: EvaluateComposeHoursStuckAsync's wrapper catch - the compose rollup self-alert's failure record is a parameter,
            with the read exempt in DarlingWorker (it holds the alert on a failed read). */
         /* 21st exempt since #6912: the capture-down engine facts catch, whose read goes through the retry adapter that already records the failure. */
+        /* 17th and 18th counted since #7041: the daily health report's build read ("daily-health-report self-alert") and its delivery-stamp read ("daily-health-report delivery-stamp self-alert"). */
+        /* 19th counted since #7068: the standing-incident seed read ("standing incident seed"), the history read that tells a standing alert it was already announced before a restart. */
+        /* 19th and 20th counted in DarlingSelfAlertEvaluator since #7068: the same seed for the state alerts ("standing incident seed self-alert") and for Capture Down ("capture-down standing seed self-alert"). */
         /* 16th counted since #6875: the identity-capacity self-alert read in the per-server sweep, counted as "identity-capacity self-alert". */
-        (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 16, 21),
+        /* 22nd exempt since #7041: the daily health report's delivery-stamp WRITE, a write whose loss costs one re-send at the next restart and never a missed delivery, like the other daily documents' stamp write. */
+        (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 20, 22),
     };
 
     /// <summary>
@@ -1047,8 +1051,11 @@ public sealed class AlertReadFailureSurfaceTests
     /// And a FORTY-FIFTH since #6874: the Agent Alert Gaps read ("agent-alert-setup self-alert"), counted because a swallowed read leaves the standing alert unjudged and a nonzero count says the setup check is not running.
     /// And a FORTY-SIXTH since #6873: the database-protection read ("database-protection self-alert"), counted because a swallowed read leaves the Backup Overdue, Log Backup Overdue and CHECKDB Overdue alerts unjudged.
     /// And a FORTY-SEVENTH since #6875: the Identity Capacity window read ("identity-capacity self-alert"), counted because a swallowed read neither fires nor clears the alert, so a population of them would leave a nearly exhausted identity column unreported for as long as the store stayed unreadable.
+    /// And a FORTY-EIGHTH and FORTY-NINTH since #7041: the scheduled daily health report's build read ("daily-health-report self-alert") and its delivery-stamp read ("daily-health-report delivery-stamp self-alert"), counted because a swallowed failure leaves the report unsent until the next attempt and a nonzero count says the report is not being produced.
+    /// And a FIFTIETH since #7068: the standing-incident seed read ("standing incident seed"), counted because a swallowed read leaves a standing alert unannounced-to-history, so it is announced again after a restart, and a nonzero count says the restart seed is not working.
+    /// And a FIFTY-FIRST and FIFTY-SECOND since #7068: the same seed read in the self-alert evaluator ("standing incident seed self-alert" for the state alerts, "capture-down standing seed self-alert" for Capture Down), counted for the same reason.
     /// </summary>
-    private const int CountedSites = 47;
+    private const int CountedSites = 52;
 
     /// <summary>
     /// Log-message fragments that identify a catch block DELIBERATELY not counted, each paired with the
@@ -1097,6 +1104,7 @@ public sealed class AlertReadFailureSurfaceTests
         ["Failed to check failed jobs"] = "the fetcher reads the monitored server's msdb; the block's only store op is a write both stores swallow",
         ["CONVERTS the fault into the unreadable count"] = "a parse arm, not a read: the fleet-sweep rollup's store read is counted above it, and a document that does not parse becomes the rollup's own reportable unreadable count - the fault is evidence, not a swallow",
         ["Could not resolve Agent job names"] = "reads the monitored server's msdb through the host resolver, not the store - the Recently-failed-job precedent one seam over; the card degrades to the unresolved form whose raw marker keeps the gap visible, and the page still delivers",
+        ["its stamp could not be persisted"] = "a write (#7041): the daily health report was already delivered and process memory already gates it; the dropped stamp costs one re-send at the next restart and never a missed delivery.",
         ["delivery stamp could not be written"] = "a write (#3580): the daily document was already delivered and process memory already gates it; the dropped stamp costs one re-announcement at the next restart and never a delivery - the stamp READ beside it is the read, and it is counted",
         ["Store statement history is still failing"] = "the Debug repeat of a telemetry write sweep (#5097); the first failure warns, no alert is judged on its result",
         ["Collection log hourly rollup failed"] = "a maintenance write (#5810): the pass upserts the hourly rollup and no alert is judged on its result; a failed pass is redone by the next, and get_collection_health reads the hours after the newest rolled hour from the raw log",
@@ -1298,8 +1306,9 @@ public sealed class AlertReadFailureSurfaceTests
            record, which holds the standing alert on a failure. 42nd since #5910: the engine's threshold-override
            fallback, an in-memory lookup and not a read. 43rd since #6005: the deadlock rollup's catch, a write after the deadlock read, which counts its own
            failure. 44th since #6912: the capture-down engine facts catch, whose read goes through the retry adapter that
-           already records the failure. */
-        Assert.Equal(44, totalExempt);
+           already records the failure. 45th since #7041: the daily health report's delivery-stamp write, which costs one re-send
+           at the next restart and never a delivery. */
+        Assert.Equal(45, totalExempt);
 
         /* Every exemption in the table is actually used. An exemption for a message that no longer exists
            is a hole this pin would otherwise keep open indefinitely — the shape that lets a real new catch
@@ -2483,7 +2492,7 @@ public sealed class AlertReadFailureSurfaceTests
            And the subtitle is load-bearing: this panel's figures are NOT the trailing seven days every
            sibling panel on the tab is, so inheriting that subtitle would make the panel assert a window it
            never measured. */
-        var js = ReadSource(Path.Combine(
+        var js = RepoFile.ReadRepoFile(Path.Combine(
             "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js"));
 
         var panelUses = Regex.Matches(js, @"^\s*ALERT_READ_PANEL,\s*$", RegexOptions.Multiline).Count;
@@ -2757,7 +2766,7 @@ public sealed class AlertReadFailureSurfaceTests
 
         Assert.True(File.Exists(path), $"#3013 scan target not found: {path}");
 
-        return File.ReadAllText(path);
+        return RepoFile.ReadRepoFile(path);
     }
 
     private static string RepoRoot([CallerFilePath] string thisFile = "")

@@ -27,8 +27,8 @@ namespace Darling.Tests;
 
 /// <summary>
 /// A claim's later calls must come from the token that claimed it (#6542). With named agent tokens served, a second named token that
-/// presents the first token's claim_id is refused on submit, renew and evidence, and the refusal is journaled under the second token's
-/// name. The holder still can, and the legacy single token (no token name) behaves as before. A legacy claim whose agent_id is a served
+/// presents the first token's claim_id is refused on submit, renew and evidence; the submit and renew refusals are journaled under the
+/// second token's name, the evidence read (a read) journals nothing. The holder still can, and the legacy single token (no token name) behaves as before. A legacy claim whose agent_id is a served
 /// named agent token's name is refused; any other name claims.
 /// </summary>
 public sealed class InvestigationClaimTokenLiveTests
@@ -181,7 +181,8 @@ public sealed class InvestigationClaimTokenLiveTests
             var refused = await DarlingMcpInvestigationTools.EvidenceAsync(c.Store, McpDataDetail.Full, c.RequestId.ToString(), null,
                 c.ClaimId.ToString(), c.Ct, tokenName: Second);
             Assert.Equal(DarlingMcpInvestigationTools.ClaimNotToken, StatusOf(refused));
-            Assert.Equal("0|1|0", await RefusedAsync(c, "evidence:" + DarlingMcpInvestigationTools.ClaimNotToken));
+            /* The evidence read is a read: its refusal is not journaled. */
+            Assert.Equal("0|0|0", await RefusedAsync(c, "evidence:" + DarlingMcpInvestigationTools.ClaimNotToken));
 
             Assert.NotEqual(DarlingMcpInvestigationTools.ClaimNotToken, StatusOf(await DarlingMcpInvestigationTools.EvidenceAsync(
                 c.Store, McpDataDetail.Full, c.RequestId.ToString(), null, c.ClaimId.ToString(), c.Ct, tokenName: Holder)));
@@ -191,6 +192,30 @@ public sealed class InvestigationClaimTokenLiveTests
             /* The legacy token (no name) keeps today's rule: the claim_id opens the read. */
             Assert.NotEqual("already_claimed", StatusOf(await DarlingMcpInvestigationTools.EvidenceAsync(
                 c.Store, McpDataDetail.Full, c.RequestId.ToString(), null, c.ClaimId.ToString(), c.Ct)));
+        });
+    }
+
+    /// <summary>
+    /// A refused evidence read writes nothing: repeated reads under a token that does not hold the claim, and under the legacy
+    /// token against a named token's claim, leave the journal as it was, so they cannot fill the request's agent journal.
+    /// </summary>
+    [Fact]
+    public async Task RefusedEvidenceReads_AddNoJournalRows()
+    {
+        await RunAsync(async c =>
+        {
+            const string CountSql = "SELECT count(*) FROM config.investigation_journal";
+            var before = await ScalarAsync(c.Connection, CountSql, c.Ct);
+            for (var i = 0; i < 3; i++)
+            {
+                Assert.Equal(DarlingMcpInvestigationTools.ClaimNotToken, StatusOf(await DarlingMcpInvestigationTools.EvidenceAsync(
+                    c.Store, McpDataDetail.Full, c.RequestId.ToString(), null, c.ClaimId.ToString(), c.Ct, tokenName: Second)));
+                Assert.Equal(DarlingMcpInvestigationTools.AgentIdIsNamedToken, StatusOf(await DarlingMcpInvestigationTools.EvidenceAsync(
+                    c.Store, McpDataDetail.Full, c.RequestId.ToString(), null, c.ClaimId.ToString(), c.Ct, tokenName: null,
+                    namedAgentNames: BothNames)));
+            }
+
+            Assert.Equal(before, await ScalarAsync(c.Connection, CountSql, c.Ct));
         });
     }
 
@@ -239,10 +264,10 @@ public sealed class InvestigationClaimTokenLiveTests
                 c.ClaimId.ToString(), c.Ct, tokenName: null, namedAgentNames: BothNames);
             Assert.Equal(DarlingMcpInvestigationTools.AgentIdIsNamedToken, StatusOf(evidence));
 
-            /* Each refusal is journaled as the placeholder, never as the named agent whose claim it was. */
+            /* The claim and submit refusals are journaled as the placeholder, never as the named agent whose claim it was. */
             Assert.Equal("0|0|1", await RefusedAsync(c, "claim:" + DarlingMcpInvestigationTools.AgentIdIsNamedToken));
             Assert.Equal("0|0|1", await RefusedAsync(c, "submit:" + DarlingMcpInvestigationTools.AgentIdIsNamedToken));
-            Assert.Equal("0|0|1", await RefusedAsync(c, "evidence:" + DarlingMcpInvestigationTools.AgentIdIsNamedToken));
+            Assert.Equal("0|0|0", await RefusedAsync(c, "evidence:" + DarlingMcpInvestigationTools.AgentIdIsNamedToken));
         });
     }
 

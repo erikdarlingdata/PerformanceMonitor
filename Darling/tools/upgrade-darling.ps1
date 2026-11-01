@@ -30,6 +30,9 @@ What it does, in order:
      PostgreSQL lives under pg-runtime and a blanket kill takes the store down with it; the last time this
      guard fired, what it caught was an operator's own psql.exe sitting in the install directory from a
      diagnostic query.
+  4b. Tries the backup-folder step on a throwaway folder under the install root, in the shell running this
+     script, and refuses if it fails - the service is still running at that point (#6982). The same step runs
+     again for the real backup after the stop, so a failure there is the less likely one.
   5. Stops the service and waits for it to actually be Stopped.
   6. Copies the install root's FILES (not its subdirectories) to _rollback_manual_<stamp>. A re-run of an
      INTERRUPTED upgrade inside -BackupWindowMinutes reuses the existing backup instead of taking a second one,
@@ -100,6 +103,13 @@ delete that runs inside a monitoring host's install directory should spend a few
 its answer before it starts acting on it. Flip the default once boxes have been reporting it and the lists
 have been the ones people expected.
 
+.PARAMETER Check
+Run every check this script makes before it stops the service, plus a pre-flight of the backup-folder step, then exit
+without changing anything (#6982). It prints the PowerShell edition and version it runs under, names the check that
+failed, and exits 0 when the upgrade can run and 1 when it cannot. The pre-flight creates a throwaway folder under the
+install root, restricts it to SYSTEM and Administrators exactly as the real backup folder is, and removes it. Nothing is
+stopped, copied or left behind, and the service keeps running. It cannot be combined with -PruneOnly or -ListRollbacks.
+
 .PARAMETER SkipHashCheck
 Proceed with a source zip whose SHA256 could not be verified.
 
@@ -136,7 +146,8 @@ param(
     [switch]$RemoveStaleFiles,
     [switch]$SkipHashCheck,
     [switch]$SkipStopGuard,
-    [switch]$AcceptWritableExtraction
+    [switch]$AcceptWritableExtraction,
+    [switch]$Check
 )
 
 $ErrorActionPreference = 'Stop'
@@ -1044,6 +1055,26 @@ function Protect-DarlingRollbackBackupFolder([string]$path, [switch]$ResetChildr
     catch {
         return "The rollback backup '$path' could not be limited to SYSTEM and Administrators ($($_.Exception.Message)). Run from an elevated prompt: $fix"
     }
+}
+
+# #6982: the part of the upgrade that runs after the service is stopped and can fail because of the shell or the folder's
+# permissions is tried here first, BEFORE the stop: the backup folder is created under the install root and restricted to SYSTEM
+# and Administrators, as the real one is, and removed again. #6920 failed in that step under PowerShell 7 with the service already
+# stopped. Returns $null when the step ran to the end and the folder was removed, or the reason it did not. The folder's name
+# matches no rollback backup name, so nothing that lists backups can take it for one.
+function Test-DarlingUpgradePreflight([string]$installRoot) {
+    $probe = Join-Path $installRoot ('.upgrade-preflight-' + [guid]::NewGuid().ToString('N'))
+    $problem = $null
+    try {
+        New-Item -ItemType Directory -Path $probe -ErrorAction Stop | Out-Null
+        $problem = Protect-DarlingRollbackBackupFolder $probe
+    }
+    catch { $problem = "The throwaway folder '$probe' could not be created ($($_.Exception.Message))." }
+    if (Test-Path -LiteralPath $probe) {
+        try { [System.IO.Directory]::Delete($probe) }
+        catch { if (-not $problem) { $problem = "The throwaway folder '$probe' could not be removed after it was restricted ($($_.Exception.Message)). Delete it by hand." } }
+    }
+    return $problem
 }
 
 # Where the new zip goes (#5627). Under C:\Program Files already, the folder to use is a different one.
@@ -2656,6 +2687,24 @@ function Test-DarlingManifestPathIsPreserved([string]$relativePath) {
 # Returns an Ok/Files/Reason object rather than a bare array on purpose. PowerShell unrolls an empty array
 # returned from a function into $null, so "read nothing" and "failed to read" would arrive at the caller
 # looking identical - and those two have to be told apart here more than anywhere else in this script.
+# Does a build carry its own .NET runtime? A self-contained build has hostfxr.dll in its root, next to the exe. A
+# framework-dependent one (a plain dotnet publish) has none. Returns $true or $false, or throws when a zip cannot be read.
+# Only the root counts: the viewer\ folder carries a runtime of its own, and says nothing about the service.
+function Test-DarlingBuildShipsRuntime([string]$source, [bool]$sourceIsZip) {
+    if ($sourceIsZip) {
+        Add-Type -AssemblyName 'System.IO.Compression.FileSystem' -ErrorAction SilentlyContinue
+        $archive = [IO.Compression.ZipFile]::OpenRead($source)
+        try {
+            foreach ($entry in $archive.Entries) {
+                if ((ConvertTo-DarlingManifestPath $entry.FullName) -ieq 'hostfxr.dll') { return $true }
+            }
+            return $false
+        }
+        finally { $archive.Dispose() }
+    }
+    return (Test-Path -LiteralPath (Join-Path $source 'hostfxr.dll') -PathType Leaf)
+}
+
 function Get-DarlingPayloadFiles([string]$source, [bool]$sourceIsZip) {
     if ([string]::IsNullOrWhiteSpace($source)) {
         return [pscustomobject]@{ Ok = $false; Files = @(); Reason = 'no source path was given' }
@@ -3047,6 +3096,14 @@ function Remove-DarlingStaleFiles([string]$installRoot, $relativePaths, $shipped
 
 # ============================ preamble ============================
 
+$powerShellText = "PowerShell $($PSVersionTable.PSVersion) ($($PSVersionTable.PSEdition) edition)"
+if ($Check) {
+    Note "-Check: ${powerShellText}. This run changes nothing and never stops the service."
+    if ($PruneOnly -or $ListRollbacks) {
+        Fail "-Check changes nothing, so it cannot be combined with -PruneOnly or -ListRollbacks. Nothing was stopped, copied or pruned."
+    }
+}
+
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     Fail "Run this from an ELEVATED PowerShell. Stopping the service, writing to the install directory, and starting it again all need it."
 }
@@ -3404,6 +3461,20 @@ If this folder is deliberately writable (a dev loop) and you accept the risk, re
     }
 }
 
+# ============================ the runtime shape (#7063) ============================
+#
+# A release zip is self-contained: hostfxr.dll and the rest of the .NET runtime sit beside the exe. A plain dotnet
+# publish is framework-dependent and ships none. Laying a framework-dependent build over a self-contained install
+# leaves the old hostfxr.dll in the folder. The new exe finds it, takes the folder as its .NET location, finds no
+# framework there, and the service does not start. Refused here, before the service is stopped, so a refused
+# upgrade changes nothing. The other direction (a self-contained build over a framework-dependent install) is
+# allowed: the exe finds the hostfxr.dll that arrives with it.
+try { $sourceShipsRuntime = Test-DarlingBuildShipsRuntime $Source $sourceIsZip }
+catch { Fail "The source '$Source' could not be read to check whether it carries a .NET runtime: $($_.Exception.Message) NOTHING has been stopped or copied." }
+if (-not $sourceShipsRuntime -and (Test-Path -LiteralPath (Join-Path $InstallRoot 'hostfxr.dll') -PathType Leaf)) {
+    Fail "The source is a framework-dependent build (it has no hostfxr.dll, so it ships no .NET runtime) and '$InstallRoot' is a self-contained install (it has hostfxr.dll). Laying the first over the second leaves the old runtime files in place, the new exe takes that folder as its .NET location, finds no framework there, and the service does not start. Use the release zip, or publish with --runtime win-x64 --self-contained. NOTHING has been stopped or copied."
+}
+
 # ============================ the service has to exist ============================
 #
 # The auto-resolve path cannot reach here without a registered service - it reads the install root out of
@@ -3463,6 +3534,21 @@ if ($holders.Count -gt 0 -and -not $SkipStopGuard) {
     Note "Processes are running out of the install tree that stopping the service will not close:"
     foreach ($name in $names) { Note "  $name" }
     Fail "Close them and re-run. NOTHING has been stopped or copied - the service is still running and the install is untouched. Do NOT kill them blindly. If these are your own psql.exe or a shell sitting in the install directory, or a Darling Viewer you left open, just exit them. Use -SkipStopGuard only if you are certain the copy will not hit a locked file."
+}
+
+# ============================ the pre-flight (#6982) ============================
+#
+# The step after the stop that depends on the shell and on the folder's permissions is run on a throwaway folder first, while the
+# service is still running. A failure here costs nothing: nothing has been stopped, copied or changed.
+$preflightProblem = Test-DarlingUpgradePreflight $InstallRoot
+if ($preflightProblem) {
+    Fail "The pre-flight failed under $powerShellText, before anything was stopped: $preflightProblem NOTHING has been stopped or copied - the service is still running and the install is untouched."
+}
+Good "Pre-flight passed under ${powerShellText}: a backup folder under '$InstallRoot' can be created, restricted to SYSTEM and Administrators, and removed."
+
+if ($Check) {
+    Good "-Check passed: every check this script makes before it stops the service passed, so the upgrade can run. Nothing was changed, and the service was not stopped."
+    exit 0
 }
 
 # ============================ stop, back up, prune, copy, start ============================

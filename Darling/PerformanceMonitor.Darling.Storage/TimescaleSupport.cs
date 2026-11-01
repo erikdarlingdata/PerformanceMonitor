@@ -9188,9 +9188,28 @@ AND   j.hypertable_name = '{relation}'";
     /// every one of the registered aggregates, and that read grows with the chunk count — to feed a staging
     /// decision that only an aggregate with no policy yet ever makes. <see cref="AggregateCompressionSizeSql"/>
     /// reads them, for those aggregates only; a converged store makes no second read at all.</para>
+    ///
+    /// <para><b>Each information view is read ONCE (#7016).</b> The join's <c>OR</c> between the two identities
+    /// cannot be a hash or merge join, so the planner ran it as a nested loop and re-evaluated the whole
+    /// <c>timescaledb_information.jobs</c> view (itself a join of the job catalog, the job stats and the
+    /// hypertable and aggregate catalogs) once per aggregate row: 29 evaluations for one answer, every hour.
+    /// The two views are now <c>MATERIALIZED</c> CTEs, the jobs one already narrowed to compression jobs, so the
+    /// <c>OR</c> only compares small in-memory sets. The rows are the same.</para>
     /// </summary>
     public static string AggregateCompressionStateSql =>
         $@"
+WITH ca AS MATERIALIZED (
+    SELECT c.view_schema, c.view_name, c.compression_enabled,
+           c.materialization_hypertable_schema, c.materialization_hypertable_name
+    FROM timescaledb_information.continuous_aggregates AS c
+    WHERE c.view_schema = 'collect'
+),
+j AS MATERIALIZED (
+    SELECT jb.job_id, jb.config, jb.schedule_interval, jb.fixed_schedule, jb.initial_start,
+           jb.hypertable_schema, jb.hypertable_name
+    FROM timescaledb_information.jobs AS jb
+    WHERE jb.proc_name LIKE '%compression%' OR jb.proc_name LIKE '%columnstore%'
+)
 SELECT
     ca.view_name,
     ca.compression_enabled,
@@ -9200,14 +9219,10 @@ SELECT
     j.fixed_schedule,
     CASE WHEN j.initial_start IS NULL THEN NULL ELSE EXTRACT(HOUR FROM j.initial_start AT TIME ZONE 'UTC')::int END AS phase_hour,
     CASE WHEN j.initial_start IS NULL THEN NULL ELSE EXTRACT(MINUTE FROM j.initial_start AT TIME ZONE 'UTC')::int END AS phase_minute
-FROM timescaledb_information.continuous_aggregates AS ca
-LEFT JOIN timescaledb_information.jobs AS j
-  ON  (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')
-  AND (
-        (j.hypertable_schema = ca.view_schema AND j.hypertable_name = ca.view_name)
-     OR (j.hypertable_schema = ca.materialization_hypertable_schema AND j.hypertable_name = ca.materialization_hypertable_name)
-      )
-WHERE ca.view_schema = 'collect'";
+FROM ca
+LEFT JOIN j
+  ON  (j.hypertable_schema = ca.view_schema AND j.hypertable_name = ca.view_name)
+   OR (j.hypertable_schema = ca.materialization_hypertable_schema AND j.hypertable_name = ca.materialization_hypertable_name)";
 
     /// <summary>
     /// How large each named materialization is, and how many of its chunks would compress on a policy's first
@@ -9610,30 +9625,50 @@ WHERE ca.view_schema = 'collect' AND ca.view_name = '{view}'";
     /// its parent index): a copy is named <c>&lt;chunk&gt;_&lt;parent index&gt;</c> truncated to 63 characters.
     /// A copy TimescaleDB had to suffix to keep unique after truncation is missed by that join, which
     /// understates the logged figure and changes nothing else.
+    ///
+    /// <para><b>The one relation is resolved BEFORE any index is deparsed (#7016).</b> This runs in every hourly
+    /// upkeep pass and finds nothing on a settled store, so its cost is all overhead. The <c>pg_indexes</c> view's
+    /// <c>indexdef</c> column IS <c>pg_get_indexdef()</c>, and the shape filter on it could run for every index in
+    /// the database, chunk indexes included, before the join narrowed the rows to one table: a read that grew with
+    /// the chunk count and found nothing. The index list is now read from <c>pg_index</c> by the materialization's
+    /// own <c>indrelid</c>, so the definition is deparsed for that relation's indexes alone, and the chunk copies
+    /// are sized only for an index that matched.</para>
     /// </summary>
     public static string IntervalDedupMaterializationGroupIndexesSql =>
         $@"
+WITH mat AS MATERIALIZED (
+    SELECT ca.materialization_hypertable_schema AS schema_name,
+           ca.materialization_hypertable_name AS table_name,
+           to_regclass(format('%I.%I', ca.materialization_hypertable_schema, ca.materialization_hypertable_name)) AS relid
+    FROM timescaledb_information.continuous_aggregates AS ca
+    WHERE ca.view_schema = 'collect'
+    AND   ca.view_name = '{QueryStoreStatsIntervalHourlyView}'
+),
+idx AS MATERIALIZED (
+    SELECT mat.schema_name,
+           mat.table_name,
+           ic.relname::text AS index_name,
+           pg_get_indexdef(x.indexrelid) AS index_def
+    FROM mat
+    JOIN pg_index AS x ON x.indrelid = mat.relid
+    JOIN pg_class AS ic ON ic.oid = x.indexrelid
+)
 SELECT
-    i.schemaname,
-    i.indexname,
-    i.indexdef,
-    pg_relation_size(format('%I.%I', i.schemaname, i.indexname)::regclass)
+    i.schema_name AS schemaname,
+    i.index_name AS indexname,
+    i.index_def AS indexdef,
+    pg_relation_size(format('%I.%I', i.schema_name, i.index_name)::regclass)
       + COALESCE((SELECT sum(pg_relation_size(format('%I.%I', ci.schemaname, ci.indexname)::regclass))
                   FROM timescaledb_information.chunks AS ch
                   JOIN pg_indexes AS ci
                     ON  ci.schemaname = ch.chunk_schema
                     AND ci.tablename = ch.chunk_name
-                    AND ci.indexname = left(ch.chunk_name || '_' || i.indexname, 63)
-                  WHERE ch.hypertable_schema = ca.materialization_hypertable_schema
-                  AND   ch.hypertable_name = ca.materialization_hypertable_name), 0) AS bytes
-FROM timescaledb_information.continuous_aggregates AS ca
-JOIN pg_indexes AS i
-  ON  i.schemaname = ca.materialization_hypertable_schema
-  AND i.tablename = ca.materialization_hypertable_name
-WHERE ca.view_schema = 'collect'
-AND   ca.view_name = '{QueryStoreStatsIntervalHourlyView}'
-AND   i.indexdef ~ 'USING btree \([a-z_]+, bucket DESC\)$'
-ORDER BY i.indexname";
+                    AND ci.indexname = left(ch.chunk_name || '_' || i.index_name, 63)
+                  WHERE ch.hypertable_schema = i.schema_name
+                  AND   ch.hypertable_name = i.table_name), 0) AS bytes
+FROM idx AS i
+WHERE i.index_def ~ 'USING btree \([a-z_]+, bucket DESC\)$'
+ORDER BY i.index_name";
 
     /// <summary>
     /// The lock wait the index drops below will tolerate before giving the start back, as a PostgreSQL

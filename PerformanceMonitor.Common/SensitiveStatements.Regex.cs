@@ -440,6 +440,27 @@ public static partial class SensitiveStatements
         Lazy<Regex?>? sharedPrefilter = null)
     {
         var now = clock ?? (static () => Stopwatch.GetElapsedTime(0));
+        var fullSource = source;
+
+        // T15 runs as a regex of its own, anchored at the first tool name (see ToolPasswordAlternative).
+        string? toolTranslated = null;
+        var toolSuffix = "|" + ToolPasswordAlternative;
+        if (source.EndsWith(toolSuffix, StringComparison.Ordinal))
+        {
+            if (!TryTranslate(ToolWord, factor: false, dropAssertions: false, out var toolWord)
+                || !TryTranslate(ToolPasswordTail, factor: false, dropAssertions: false, out var toolTail))
+            {
+                return static _ => Verdict.Named;
+            }
+
+            source = source[..^toolSuffix.Length];
+
+            // The tail of the text after the first tool name holds every later tool name, so a match from any tool name
+            // is a match from the first one: start there (an anchor and a lookahead that skips every other position) and run
+            // the rest once.
+            toolTranslated = "\\A(?:(?!" + toolWord + ").)*" + toolWord + ".*" + toolTail;
+        }
+
         var headSource = source;
         string? tailSource = null;
         if (TrySplitAlternatives(source, headAlternatives, out var splitHead, out var splitTail))
@@ -457,12 +478,18 @@ public static partial class SensitiveStatements
 
         Regex head;
         BudgetedRegex? tail = null;
+        BudgetedRegex? tool = null;
         try
         {
             head = NewRegex(headTranslated, timeout);
             if (tailTranslated is not null)
             {
                 tail = new BudgetedRegex(tailTranslated, timeout);
+            }
+
+            if (toolTranslated is not null)
+            {
+                tool = new BudgetedRegex(toolTranslated, timeout);
             }
         }
         catch (ArgumentException)
@@ -472,7 +499,7 @@ public static partial class SensitiveStatements
 
         // The pre-check is always built from the whole source: one linear-time pass over the superset, however
         // many regexes follow it.
-        var precheck = prefilter ? (sharedPrefilter is not null ? sharedPrefilter.Value : CreatePrefilter(source, timeout)) : null;
+        var precheck = prefilter ? (sharedPrefilter is not null ? sharedPrefilter.Value : CreatePrefilter(fullSource, timeout)) : null;
 
         // #5320 L3: the build stays outside any budget. The regexes are compiled above, and the first match still
         // pays the one-time JIT of the compiled code (inside the match timeout and the caller's clock), so run
@@ -482,6 +509,7 @@ public static partial class SensitiveStatements
             precheck?.IsMatch(WarmUpText);
             head.IsMatch(WarmUpText);
             tail?.WarmUp(WarmUpText);
+            tool?.WarmUp(WarmUpText);
         }
 #pragma warning disable CA1031 // a failed warm-up only costs the first caller its time
         catch (Exception)
@@ -505,12 +533,12 @@ public static partial class SensitiveStatements
                     return Verdict.Named;
                 }
 
-                if (tail is null)
+                if (tail is not null && tail.IsMatch(text, timeout - (now() - started)))
                 {
-                    return Verdict.Clean;
+                    return Verdict.Named;
                 }
 
-                return tail.IsMatch(text, timeout - (now() - started)) ? Verdict.Named : Verdict.Clean;
+                return tool is not null && tool.IsMatch(text, timeout - (now() - started)) ? Verdict.Named : Verdict.Clean;
             }
             catch (RegexMatchTimeoutException)
             {

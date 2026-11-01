@@ -481,7 +481,7 @@ public sealed class PgIndexBloatGridReachTests
         /* AND THE DEFAULT PANEL IS UNTOUCHED. Reach, not order: the panel that leads with the gaps must not
            have acquired the filter, or this change hid what #3278 exists to show.
 
-           Scoped to that panel's OWN descriptor - its title through the close of its table() call - and not
+           Scoped to that panel's OWN descriptor - its title through the close of its tablePanel() call - and not
            to the text between the two titles, which contains the design comment explaining the filter and
            would satisfy this assertion by accident. */
         var estimated = tabs.IndexOf("\"Index Bloat (estimated)\"", StringComparison.Ordinal);

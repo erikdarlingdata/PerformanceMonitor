@@ -5,15 +5,18 @@
 -- In managed mode the service provisions these roles automatically on every start (see
 -- DarlingManagedRoles) and generates their DPAPI credentials. The Linux compose distribution does the
 -- same on the store its compose file creates (#3914): there the service logs in as the store's
--- bootstrap superuser and provisions all three roles itself, so do NOT run this script against the
+-- bootstrap superuser and provisions all four roles itself, so do NOT run this script against the
 -- compose store. On any other store YOU run this script once, as the database OWNER (the role that
 -- owns the Darling store — the one your postgres.connectionString connects as for collection). It
--- creates three least-privilege login roles:
+-- creates four least-privilege login roles:
 --
 --   admin   -- reads both schemas + writes the operator-config tables (mute rules, alert
 --              dismissals, analysis mutes). The Viewer's default identity (darling.json
 --              postgres.connectAs = "admin").
---   viewer  -- reads both schemas; its writes are the narrow, enumerated web-surface set: INSERT/UPDATE/DELETE
+--   viewer  -- reads both schemas, minus the secret columns carved in step 2b, and writes nothing. It is the login for remote
+--              and locked-down Viewer seats (postgres.connectAs = "viewer"), which show "Seat: read-only". An earlier version of
+--              this script also gave it the web dashboard's writes; running the script again takes them away from it.
+--   web     -- the web dashboard host's login (postgres.webConnectionString): viewer's reads, plus the narrow, enumerated web-surface writes: INSERT/UPDATE/DELETE
 --              on config.custom_views (the user-authored view definitions, #1563), on
 --              config.custom_alert_rules (the user-authored alert rules, #3285), on
 --              config.database_state_expected (the per-database override editor, #1986), and on
@@ -26,7 +29,7 @@
 --              (#6386) and Generate now (#6389) buttons queue their command rows through config.request_snapshot_now,
 --              config.request_active_queries_live and config.request_analyze_now, functions it may execute (mcp may execute request_snapshot_now too). Every table is non-secret-keyed; over the web every write is gated server-side by the host's auth + seat model -- these
 --              grants are only the floor beneath that gate. All other write actions degrade gracefully. The
---              web dashboard's identity, and a locked-down Viewer's (postgres.connectAs = "viewer").
+--              web dashboard's identity only. It never gets a network (pg_hba) line, and it is not a seat login.
 --   mcp     -- the MCP server's identity: viewer's reads (the same secret-column carve), plus the MCP tools'
 --              narrow writes -- analyze_server's findings, finding mutes, custom views, custom alert rules, database state expectations (#6397),
 --              alert tuning (mute rules, the alert settings row, the delivery cooldown column, a notification
@@ -36,14 +39,21 @@
 --
 -- WHO CONNECTS AS WHAT (#3914). The service collects as the owner. The web dashboard and the MCP server
 -- connect with postgres.webConnectionString and postgres.mcpConnectionString in darling.json: point
--- them at the viewer and mcp roles this script creates, for example
+-- them at the web and mcp roles this script creates, for example
 --
---     "webConnectionString": "Host=db.example.com;Port=5432;Username=viewer;Password=<viewer password>;Database=darling"
+--     "webConnectionString": "Host=db.example.com;Port=5432;Username=web;Password=<web password>;Database=darling"
 --
 -- or as "file:/path" / "env:NAME" references, like connectionString, to keep the password out of
 -- darling.json. Left unset, that surface connects as the OWNER, and nothing this script sets up applies
 -- to it: not the secret-column carve (steps 2b and 2c), not the narrow write grants (steps 3b-3f), not
 -- the statement_timeout backstop (step 1a). The service says so in a warning at startup.
+--
+-- MOVING AN EXISTING STORE TO THE web ROLE. A store this script set up before the web role existed has no web role, and
+-- its viewer role still holds the web dashboard's writes. Until you act, the web dashboard keeps working on the login its
+-- webConnectionString names. To move it: (1) replace every CHANGE_ME_WEB_PASSWORD below with the web password you choose (and the other three placeholders, as before: the script stops, before it sets any password, while any of the four is unchanged), (2) run
+-- this script again, which creates web and takes the writes away from viewer, and (3) set postgres.webConnectionString to the
+-- web login and restart the service. Do steps 2 and 3 together: between them a web dashboard still on viewer reads fine
+-- and its writes are refused. Until step 3, the service warns at startup that the web connection string names viewer.
 --
 -- PREREQUISITE: the V8 migration (which the service applies on startup) must already have created
 -- the collect and config schemas and moved the tables into them. Run this AFTER the service has
@@ -52,17 +62,21 @@
 -- (including the V17 control-plane tables config_monitored_servers / config_alert_settings /
 -- config_notification / config_collector_schedules / config_service / config_command), and the
 -- ALTER DEFAULT PRIVILEGES already auto-grant any table the owner creates after this runs (config
--- tables to admin and viewer; collect tables to all three). The writes that are NOT covered by
+-- tables to admin, viewer and web; collect tables to all four). The writes that are NOT covered by
 -- re-running blindly are the single-table grants in steps 3b-3f: each names a table (or, for the
 -- beacon columns, a trigger dependency) a specific migration creates -- custom_views is V31,
 -- database_state_expected is V49, custom_alert_rules is V116, the mute-rule reload-beacon trigger is
 -- V117, the query-tag tables (step 3k, #5977) are V192, config_notification_routes is V131 (its scope_server_id and scope_tag_id columns are V181, #5750: run this script only after the store has migrated to V181, since the route column grants name them; the agent_* route columns are V184, #5632, and are granted only once they exist) and config_collector_run_times is V160 and the password key tables (step 3g) are V165 and the Level 2 tables (step 3j: config_threshold_overrides and investigation_feedback, #5909) are V191 and the Phase C tables (step 3l: investigation_evidence, investigation_signature_days and investigation_signature_merges, #5997) are V193, as are the signing key and fallback route columns the read carve above names -- so re-run this script after upgrading past each.
 --
 -- BEFORE RUNNING:
---   1. Replace CHANGE_ME_ADMIN_PASSWORD, CHANGE_ME_VIEWER_PASSWORD and CHANGE_ME_MCP_PASSWORD with strong
---      passwords. Better, keep the passwords out of every statement (#3910): replace each literal with a
+--   1. Replace CHANGE_ME_ADMIN_PASSWORD, CHANGE_ME_VIEWER_PASSWORD, CHANGE_ME_WEB_PASSWORD and CHANGE_ME_MCP_PASSWORD with strong
+--      passwords, every occurrence of each (a find-and-replace does it; each is in a check and in its ALTER ROLE line). The
+--      script stops with an error, before any password is set, when any of the four is unchanged: a routine written before
+--      the web role existed replaces only the admin, viewer and mcp placeholders, and the web one makes it stop instead of
+--      setting the web password to the placeholder text. To set the passwords with \password afterwards, replace each
+--      placeholder with a long random value for this run first, which \password then replaces (run \password for all four roles). Better, keep the passwords out of every statement (#3910): replace each literal with a
 --      SCRAM-SHA-256 verifier, which PostgreSQL stores as-is, or set the passwords afterwards with psql's
---      \password admin, \password viewer and \password mcp, which compute the verifier locally and send
+--      \password admin, \password viewer, \password web and \password mcp, which compute the verifier locally and send
 --      only that. A password literal is kept verbatim by anything that records statement text:
 --      log_statement set to ddl, mod or all, log_min_duration_statement set to 0 or more, a failed statement's
 --      STATEMENT line in the server log, auto_explain, pg_stat_statements with utility tracking on, and
@@ -85,7 +99,7 @@
 --   ON_ERROR_STOP in it would change where the run stops. The roles, the passwords, the read grants, the
 --   secret-column carve and the password key table revoke (step 2d) commit at the script's own COMMIT.
 --
--- NAME-COLLISION SAFETY: the roles are the bare, un-prefixed names "admin", "viewer" and "mcp". If your
+-- NAME-COLLISION SAFETY: the roles are the bare, un-prefixed names "admin", "viewer", "web" and "mcp". If your
 -- cluster ALREADY has a role by any of those names that this script did not create, it will NOT be
 -- silently repurposed: fresh roles are stamped with a marker comment ('darling-managed'), and an existing
 -- same-named role without that marker makes this script FAIL LOUD (rename or drop the other role first,
@@ -101,14 +115,14 @@
 -- some_analyst) is not refused.
 --
 -- AN OWNER WHO IS NOT A SUPERUSER can run this script, with these limits:
---   * It needs CREATEROLE. From PostgreSQL 16 it also needs ADMIN OPTION on each of the three roles to set a
+--   * It needs CREATEROLE. From PostgreSQL 16 it also needs ADMIN OPTION on each of the four roles to set a
 --     password or take back an attribute, and it holds that option only on a role it created itself. A role a
 --     superuser made needs GRANT <role> TO <owner> WITH ADMIN OPTION from a superuser first. The guard in step 1
---     checks this before any password is sent, and stops the run when the owner cannot change one of the three
+--     checks this before any password is sent, and stops the run when the owner cannot change one of the four
 --     roles that already exist: it has no CREATEROLE, the role is a superuser, from PostgreSQL 16 it lacks ADMIN
 --     OPTION on the role, or before 16 the role has REPLICATION (only a superuser can change such a role). The
 --     stop names the role and the remedy: a superuser runs GRANT <role> TO <owner> WITH ADMIN OPTION, or runs
---     this script. The guard also stops the run when one of the three roles is a member of a role that would
+--     this script. The guard also stops the run when one of the four roles is a member of a role that would
 --     outrank the grants below (the owner, a superuser or BYPASSRLS role, pg_read_all_data, pg_write_all_data,
 --     pg_read_server_files, pg_write_server_files or pg_execute_server_program) and the owner cannot revoke that
 --     membership: from PostgreSQL 16 revoking needs ADMIN OPTION on the role the membership is in, and no role
@@ -202,12 +216,14 @@ BEGIN
             WHEN 'log_min_duration_sample' THEN setting::bigint >= 0
                AND (SELECT sample.setting::numeric FROM pg_settings AS sample WHERE sample.name = 'log_statement_sample_rate') > 0
             WHEN 'pgaudit.log' THEN (SELECT statement.setting FROM pg_settings AS statement WHERE statement.name = 'pgaudit.log_statement') = 'on'
-               AND (string_to_array(replace(lower(setting), ' ', ''), ',') && ARRAY['role', 'all'])
-               AND NOT ('-role' = ANY (string_to_array(replace(lower(setting), ' ', ''), ',')))
+               AND ((string_to_array(replace(lower(setting), ' ', ''), ',') && ARRAY['role', 'all']
+                     AND NOT ('-role' = ANY (string_to_array(replace(lower(setting), ' ', ''), ',')))
+                    ) OR (string_to_array(replace(lower(setting), ' ', ''), ',') && ARRAY['function', 'all']
+                     AND NOT ('-function' = ANY (string_to_array(replace(lower(setting), ' ', ''), ',')))))
             ELSE false
          END;
    IF logging_on IS NOT NULL THEN
-      RAISE WARNING 'The server log records the statements of this run (%). The ALTER ROLE ... PASSWORD lines are written to it with their passwords, because step 0 could not turn that logging off for this role. Put a SCRAM-SHA-256 verifier in each ALTER ROLE line in place of the literal, or set the passwords afterwards with the psql password command, or run this script as a superuser.', logging_on;
+      RAISE WARNING 'The server log records the statements of this run (%). The ALTER ROLE ... PASSWORD lines and the placeholder checks (DO blocks, which pgaudit logs under its function class) are written to it with their passwords, because step 0 could not turn that logging off for this role. Put a SCRAM-SHA-256 verifier in each ALTER ROLE line in place of the literal, or set the passwords afterwards with the psql password command, or run this script as a superuser.', logging_on;
    END IF;
 END $$;
 
@@ -258,6 +274,12 @@ BEGIN
    ELSIF shobj_description((SELECT oid FROM pg_roles WHERE rolname = 'mcp'), 'pg_authid') IS DISTINCT FROM 'darling-managed' THEN
       RAISE EXCEPTION 'Role "mcp" already exists and was not created by Darling (missing the ''darling-managed'' marker comment). Rename or drop it before provisioning so Darling does not repurpose an unrelated login.';
    END IF;
+   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'web') THEN
+      CREATE ROLE web LOGIN NOSUPERUSER;
+      COMMENT ON ROLE web IS 'darling-managed';
+   ELSIF shobj_description((SELECT oid FROM pg_roles WHERE rolname = 'web'), 'pg_authid') IS DISTINCT FROM 'darling-managed' THEN
+      RAISE EXCEPTION 'Role "web" already exists and was not created by Darling (missing the ''darling-managed'' marker comment). Rename or drop it before provisioning so Darling does not repurpose an unrelated login.';
+   END IF;
    -- The marker does not show who made a role, so a marked role is also refused while a role that is not a
    -- superuser, not the role running this script and not the database owner holds ADMIN OPTION on it: that role
    -- could reset its password and grant it onward. (A role this run created has no holder but the one running it.)
@@ -267,7 +289,7 @@ BEGIN
       FROM pg_auth_members AS membership
       JOIN pg_roles AS granted ON granted.oid = membership.roleid
       JOIN pg_roles AS holder ON holder.oid = membership.member
-      WHERE granted.rolname IN ('admin', 'viewer', 'mcp')
+      WHERE granted.rolname IN ('admin', 'viewer', 'web', 'mcp')
         AND membership.admin_option
         AND NOT holder.rolsuper
         AND holder.rolname <> current_user
@@ -277,7 +299,7 @@ BEGIN
    LOOP
       RAISE EXCEPTION 'Role "%" carries the ''darling-managed'' marker, but another login holds ADMIN OPTION on it: %. That login is not a superuser, not the database owner and not the role running this script. It can reset the password of the role or grant the role to other roles, and the marker does not show who made the role. To go on, run this script as that login, which this check leaves out. If more than one login is listed, run the script as one of them after the others lose the option. Or, as a superuser, revoke that ADMIN OPTION (a login that created the role cannot revoke it itself), or drop the role.', other_holder.role_name, other_holder.holders;
    END LOOP;
-   -- A role that is not a superuser must also be able to change the three roles. If it cannot, each ALTER ROLE ... PASSWORD
+   -- A role that is not a superuser must also be able to change the four roles. If it cannot, each ALTER ROLE ... PASSWORD
    -- below fails, the server writes the failed statement to its log WITH the password, and psql exits 0 unless the caller
    -- set ON_ERROR_STOP. So a run by such a role stops here, before any password is sent. The ALTER ROLE lines need:
    -- the CREATEROLE attribute; roles that are not superusers; from PostgreSQL 16, ADMIN OPTION on each role (pg_has_role
@@ -285,11 +307,11 @@ BEGIN
    -- before 16, roles without REPLICATION. Every role exists at this point, and a superuser is never stopped here.
    IF NOT (SELECT rolsuper FROM pg_roles WHERE rolname = current_user) THEN
       IF NOT (SELECT rolcreaterole FROM pg_roles WHERE rolname = current_user) THEN
-         RAISE EXCEPTION 'The role running this script, %, is not a superuser and does not have CREATEROLE. It cannot change the passwords of the roles admin, viewer and mcp. The script created and changed nothing. It stopped here so that a failed ALTER ROLE line does not write a password to the server log. Run this script again as a superuser, or as a role that has CREATEROLE.', quote_ident(current_user);
+         RAISE EXCEPTION 'The role running this script, %, is not a superuser and does not have CREATEROLE. It cannot change the passwords of the roles admin, viewer, web and mcp. The script created and changed nothing. It stopped here so that a failed ALTER ROLE line does not write a password to the server log. Run this script again as a superuser, or as a role that has CREATEROLE.', quote_ident(current_user);
       END IF;
       SELECT string_agg(quote_ident(rolname), ', ' ORDER BY rolname) INTO unchangeable
       FROM pg_roles
-      WHERE rolname IN ('admin', 'viewer', 'mcp') AND rolsuper;
+      WHERE rolname IN ('admin', 'viewer', 'web', 'mcp') AND rolsuper;
       IF unchangeable IS NOT NULL THEN
          RAISE EXCEPTION 'These roles are superusers: %. The role running this script, %, is not a superuser, so it cannot change them. The script created and changed nothing. It stopped here so that a failed ALTER ROLE line does not write a password to the server log. Run this script again as a superuser.', unchangeable, quote_ident(current_user);
       END IF;
@@ -297,19 +319,19 @@ BEGIN
          SELECT string_agg(quote_ident(rolname), ', ' ORDER BY rolname), string_agg(format('GRANT %I TO %I WITH ADMIN OPTION;', rolname, current_user), ' ' ORDER BY rolname)
          INTO unchangeable, remedy
          FROM pg_roles
-         WHERE rolname IN ('admin', 'viewer', 'mcp') AND NOT pg_has_role(current_user, oid, 'MEMBER WITH ADMIN OPTION');
+         WHERE rolname IN ('admin', 'viewer', 'web', 'mcp') AND NOT pg_has_role(current_user, oid, 'MEMBER WITH ADMIN OPTION');
          IF unchangeable IS NOT NULL THEN
             RAISE EXCEPTION 'The role running this script, %, does not hold ADMIN OPTION on these roles: %. From PostgreSQL 16 a role needs that option to change the password of another role. The script created and changed nothing. It stopped here so that a failed ALTER ROLE line does not write a password to the server log. Run this script as a superuser. Or, as a superuser, run these statements and then run this script again: %', quote_ident(current_user), unchangeable, remedy;
          END IF;
       ELSE
          SELECT string_agg(quote_ident(rolname), ', ' ORDER BY rolname) INTO unchangeable
          FROM pg_roles
-         WHERE rolname IN ('admin', 'viewer', 'mcp') AND rolreplication;
+         WHERE rolname IN ('admin', 'viewer', 'web', 'mcp') AND rolreplication;
          IF unchangeable IS NOT NULL THEN
             RAISE EXCEPTION 'These roles have the REPLICATION attribute: %. Before PostgreSQL 16 only a superuser can change a role that has it, and the role running this script, %, is not a superuser. The script created and changed nothing. It stopped here so that a failed ALTER ROLE line does not write a password to the server log. Run this script again as a superuser.', unchangeable, quote_ident(current_user);
          END IF;
       END IF;
-      -- A membership of one of the three roles that outranks every grant below (a role that is, or is a member of, the
+      -- A membership of one of the four roles that outranks every grant below (a role that is, or is a member of, the
       -- owner, a superuser or BYPASSRLS role, or a predefined role that reads or writes every table or the server's files
       -- or programs) is revoked after the passwords, and the block that revokes it can only warn when the role running
       -- this script lacks the right to. So the run stops here, before a password is sent, as it does when it cannot change
@@ -322,7 +344,7 @@ BEGIN
       FROM pg_auth_members AS membership
       JOIN pg_roles AS granted ON granted.oid = membership.roleid
       JOIN pg_roles AS member ON member.oid = membership.member
-      WHERE member.rolname IN ('admin', 'viewer', 'mcp')
+      WHERE member.rolname IN ('admin', 'viewer', 'web', 'mcp')
         AND EXISTS (
            SELECT 1
            FROM pg_roles AS voiding
@@ -340,6 +362,46 @@ BEGIN
       END IF;
    END IF;
 END $$;
+
+-- The placeholder check (before any password is set). Each of the four password placeholders must be replaced, or the
+-- run stops here: left alone, a placeholder would become the role's real password. A routine written before the web
+-- role existed replaces only the three earlier placeholders and would otherwise set web to the placeholder text. Each
+-- role has its own statement, so a stop writes only the placeholder that was left, never another role's password, to
+-- the server log. The stop is the one the guard above runs with. The guard has already created any missing role without
+-- a password, which cannot be logged into with one; the ALTER ROLE lines below set the passwords, and none has run.
+-- The four checks use their own dollar-quote tag, so a password that contains two dollar signs in a row cannot end the check's body early.
+-- admin: the placeholder is on the left, so a find-and-replace of it fills in your password here too. The right side is
+-- built from two pieces, so that replace never reaches it.
+DO $darling_placeholder_check$
+BEGIN
+   IF 'CHANGE_ME_ADMIN_PASSWORD' = 'CHANGE_ME_' || 'ADMIN_PASSWORD' THEN
+      RAISE EXCEPTION 'The password for role admin is still the CHANGE_ME placeholder. The script set no password. Replace the admin placeholder on every line of this script that has it (the check above the ALTER ROLE lines and the ALTER ROLE admin line), then run it again.';
+   END IF;
+END $darling_placeholder_check$;
+-- viewer: the placeholder is on the left, so a find-and-replace of it fills in your password here too. The right side is
+-- built from two pieces, so that replace never reaches it.
+DO $darling_placeholder_check$
+BEGIN
+   IF 'CHANGE_ME_VIEWER_PASSWORD' = 'CHANGE_ME_' || 'VIEWER_PASSWORD' THEN
+      RAISE EXCEPTION 'The password for role viewer is still the CHANGE_ME placeholder. The script set no password. Replace the viewer placeholder on every line of this script that has it (the check above the ALTER ROLE lines and the ALTER ROLE viewer line), then run it again.';
+   END IF;
+END $darling_placeholder_check$;
+-- web: the placeholder is on the left, so a find-and-replace of it fills in your password here too. The right side is
+-- built from two pieces, so that replace never reaches it.
+DO $darling_placeholder_check$
+BEGIN
+   IF 'CHANGE_ME_WEB_PASSWORD' = 'CHANGE_ME_' || 'WEB_PASSWORD' THEN
+      RAISE EXCEPTION 'The password for role web is still the CHANGE_ME placeholder. The script set no password. Replace the web placeholder on every line of this script that has it (the check above the ALTER ROLE lines and the ALTER ROLE web line), then run it again.';
+   END IF;
+END $darling_placeholder_check$;
+-- mcp: the placeholder is on the left, so a find-and-replace of it fills in your password here too. The right side is
+-- built from two pieces, so that replace never reaches it.
+DO $darling_placeholder_check$
+BEGIN
+   IF 'CHANGE_ME_MCP_PASSWORD' = 'CHANGE_ME_' || 'MCP_PASSWORD' THEN
+      RAISE EXCEPTION 'The password for role mcp is still the CHANGE_ME placeholder. The script set no password. Replace the mcp placeholder on every line of this script that has it (the check above the ALTER ROLE lines and the ALTER ROLE mcp line), then run it again.';
+   END IF;
+END $darling_placeholder_check$;
 \set ON_ERROR_STOP :darling_saved_stop
 
 -- The passwords. Each ALTER names LOGIN and the password only: NOSUPERUSER here would fail for an owner that is
@@ -347,11 +409,12 @@ END $$;
 -- nothing while psql still exits 0. The roles were created NOSUPERUSER; the next block takes the attributes back.
 ALTER ROLE admin  LOGIN PASSWORD 'CHANGE_ME_ADMIN_PASSWORD';
 ALTER ROLE viewer LOGIN PASSWORD 'CHANGE_ME_VIEWER_PASSWORD';
+ALTER ROLE web    LOGIN PASSWORD 'CHANGE_ME_WEB_PASSWORD';
 ALTER ROLE mcp    LOGIN PASSWORD 'CHANGE_ME_MCP_PASSWORD';
 
 -- Attributes and memberships (managed mode's step 1b and section 11). A role this script ADOPTS (it already
 -- carries the marker) keeps whatever was granted to it since: CREATEROLE, CREATEDB, REPLICATION or BYPASSRLS on
--- viewer or mcp would outrank every grant below, and so would a membership (pg_read_all_data undoes the
+-- viewer, web or mcp would outrank every grant below, and so would a membership (pg_read_all_data undoes the
 -- secret-column carve, and a membership in the owner is every privilege the owner has). So every one is taken
 -- back, every run.
 --   As a superuser these are managed mode's statements exactly: every attribute off by name, and every membership
@@ -375,7 +438,7 @@ BEGIN
    FOR item IN
       SELECT rolname, rolsuper, rolcreaterole, rolcreatedb, rolreplication, rolbypassrls
       FROM pg_roles
-      WHERE rolname IN ('admin', 'viewer', 'mcp')
+      WHERE rolname IN ('admin', 'viewer', 'web', 'mcp')
       ORDER BY rolname
    LOOP
       IF as_superuser THEN
@@ -410,7 +473,7 @@ BEGIN
       JOIN pg_roles AS granted ON granted.oid = membership.roleid
       JOIN pg_roles AS member ON member.oid = membership.member
       LEFT JOIN pg_roles AS grantor ON grantor.oid = membership.grantor
-      WHERE member.rolname IN ('admin', 'viewer', 'mcp')
+      WHERE member.rolname IN ('admin', 'viewer', 'web', 'mcp')
    LOOP
       BEGIN
          EXECUTE format('REVOKE %I FROM %I', item.granted, item.member)
@@ -429,7 +492,7 @@ BEGIN
    FROM pg_auth_members AS membership
    JOIN pg_roles AS granted ON granted.oid = membership.roleid
    JOIN pg_roles AS member ON member.oid = membership.member
-   WHERE member.rolname IN ('admin', 'viewer', 'mcp')
+   WHERE member.rolname IN ('admin', 'viewer', 'web', 'mcp')
      AND EXISTS (
         SELECT 1
         FROM pg_roles AS voiding
@@ -451,6 +514,7 @@ END $$;
 --     postgres.webConnectionString / postgres.mcpConnectionString name these roles (#3914); a surface left on
 --     the owner login has no backstop at all.
 ALTER ROLE viewer SET statement_timeout = '60s';
+ALTER ROLE web    SET statement_timeout = '60s';
 ALTER ROLE mcp    SET statement_timeout = '60s';
 
 --     temp_file_limit backstop on viewer and mcp (#4605): the on-disk-spill half of the same DoS control --
@@ -463,6 +527,7 @@ ALTER ROLE mcp    SET statement_timeout = '60s';
 --     and mcp are left without this limit; grant the owner SET on it and run the script again (it is idempotent),
 --     or run these two lines as a superuser.
 ALTER ROLE viewer SET temp_file_limit = '1GB';
+ALTER ROLE web    SET temp_file_limit = '1GB';
 ALTER ROLE mcp    SET temp_file_limit = '1GB';
 
 -- 1b. Slow-statement logging on viewer and mcp (#3899): a statement from either that runs past a third of its
@@ -496,8 +561,10 @@ ALTER ROLE mcp    SET temp_file_limit = '1GB';
 --          mcpConnectionString) connects as it. On a cluster shared with other applications, leave it out.
 --     The service builds its reader functions at its next start, and then within the hour.
 ALTER ROLE viewer SET log_min_duration_statement = '5000ms';
+ALTER ROLE web    SET log_min_duration_statement = '5000ms';
 ALTER ROLE mcp    SET log_min_duration_statement = '5000ms';
 ALTER ROLE viewer SET log_parameter_max_length = 0;
+ALTER ROLE web    SET log_parameter_max_length = 0;
 ALTER ROLE mcp    SET log_parameter_max_length = 0;
 
 -- 2. Schema usage + SELECT on everything that exists now (ALL TABLES covers tables AND views). collect
@@ -505,16 +572,16 @@ ALTER ROLE mcp    SET log_parameter_max_length = 0;
 --    window's identity) reads every column; viewer reads all config tables too -- MINUS the secret columns
 --    carved in step 2b. mcp gets viewer's read surface in its own statements, carved the same way.
 --    Steps 2 to 2d are ONE transaction (managed mode sends the same statements as one batch, which is one
---    implicit transaction): the blanket config grants below give viewer and mcp table-wide SELECT on the secret
+--    implicit transaction): the blanket config grants below give viewer, web and mcp table-wide SELECT on the secret
 --    columns, and on the password key tables (step 2d), until the carve and the revoke take it back, and committed on
 --    their own they would leave that window open on every run, and for good if a statement in them failed. Now they
 --    commit together or not at all, so an error anywhere in them leaves the read roles with no read access, never a
 --    blanket grant. psql rolls the
 --    transaction back at the COMMIT after an error, with ON_ERROR_STOP off, and at exit with it on.
 BEGIN;
-GRANT USAGE ON SCHEMA collect, config TO admin, viewer;
-GRANT SELECT ON ALL TABLES IN SCHEMA collect TO admin, viewer;
-GRANT SELECT ON ALL TABLES IN SCHEMA config  TO admin, viewer;
+GRANT USAGE ON SCHEMA collect, config TO admin, viewer, web;
+GRANT SELECT ON ALL TABLES IN SCHEMA collect TO admin, viewer, web;
+GRANT SELECT ON ALL TABLES IN SCHEMA config  TO admin, viewer, web;
 GRANT USAGE ON SCHEMA collect, config TO mcp;
 GRANT SELECT ON ALL TABLES IN SCHEMA collect TO mcp;
 GRANT SELECT ON ALL TABLES IN SCHEMA config  TO mcp;
@@ -608,6 +675,15 @@ $v187$;
 GRANT SELECT (severities) ON config.config_notification_routes TO viewer;
 $v229$;
       END IF;
+      -- V233 (#6979): a route's report notice setting. Non-secret. Granted on its own column inside the routes table's guard, so a
+      -- store below V233 still commits.
+      IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+                 WHERE attrelid = 'config.config_notification_routes'::regclass
+                   AND attname = 'report_notice' AND NOT attisdropped) THEN
+         EXECUTE $v233$
+GRANT SELECT (report_notice) ON config.config_notification_routes TO viewer;
+$v233$;
+      END IF;
    END IF;
 END $$;
 -- V187 (#5825): the four per-channel "send resolutions" flags. Non-secret (behaviour toggles, like
@@ -672,6 +748,152 @@ $v211r$;
    END IF;
 END $$;
 
+-- 2b-2. The SAME carve for web: it reads exactly what viewer reads (the web host connects as it, not as viewer), so the column
+--     lists are the 2b lists with the role swapped, and a column added to one is added to the other.
+REVOKE SELECT ON config.config_monitored_servers FROM web;
+GRANT SELECT (server_id, name, host, database, auth, username, encrypt_mode, trust_server_certificate,
+              read_only_intent, multi_subnet_failover, excluded_databases, monthly_cost_usd, capture_plans,
+              is_enabled, created_at, modified_at, alert_delivery_mode_override,
+              -- V68: engine + port. Non-secret, exactly like host.
+              engine, port,
+              -- V107 (#2138): the force-plan bot's per-server arm state. Non-secret, exactly like is_enabled.
+              plan_force_bot_enabled,
+              -- V113 (#2138 phase 1): the remediation credential's login name. Non-secret, exactly like
+              -- username; remediation_encrypted_password is deliberately NOT granted.
+              remediation_username,
+              -- V169 (#5452): the AWS role a target uses, and whether an external ID is stored with it.
+              -- Non-secret; the external ID itself (aws_external_id) is deliberately NOT granted.
+              aws_role_arn, aws_external_id_set)
+    ON config.config_monitored_servers TO web;
+REVOKE SELECT ON config.config_command FROM web;
+GRANT SELECT (command_id, created_at, requested_by, command_type, target_server_id, status, claimed_at,
+              completed_at, result_status, result_json, service_instance)
+    ON config.config_command TO web;
+REVOKE SELECT ON config.config_notification FROM web;
+GRANT SELECT (id, smtp_host, smtp_port, smtp_use_ssl, smtp_from_address, smtp_recipients,
+              email_cooldown_minutes, teams_proxy, slack_proxy, modified_at,
+              generic_body_template, generic_proxy, pagerduty_use_eu_region, pagerduty_proxy,
+              -- V166: pagerduty_auto_resolve. Non-secret (a behaviour toggle, like the EU-region flag
+              -- beside it), so it stays granted.
+              pagerduty_auto_resolve)
+    ON config.config_notification TO web;
+-- V131 (#3598): the sparse notification-routes table mirrors the parent row's destination columns under the
+-- same names, so the same carve applies: the webhook URLs and the PagerDuty routing key are bearer secrets and
+-- are deliberately NOT granted. configured_channels is a GENERATED presence column (which channels a route
+-- sets, never their values) that exists so this carve can still answer "what does route 3 configure".
+-- Created by V131, so re-run this script AFTER the service has migrated your store to V131. On a store below V131
+-- the pair below is skipped (the table does not exist yet), so the rest of the carve still commits; unguarded, its
+-- error would abort the transaction and roll back the grants above with it. It runs as EXECUTE of a dollar-quoted
+-- string, so the statements are sent only when the table exists. If they fail on a store that has the table, the
+-- whole transaction rolls back and the read roles keep no access. The five agent_* route columns are V184 (#5632):
+-- their grant runs only when agent_level exists, so on a V181-V183 store the carve still commits without them.
+DO $$
+BEGIN
+   IF to_regclass('config.config_notification_routes') IS NOT NULL THEN
+      EXECUTE $v131$
+REVOKE SELECT ON config.config_notification_routes FROM web;
+GRANT SELECT (route_id, metric_match, smtp_recipients, configured_channels, enabled, modified_at, scope_server_id, scope_tag_id)
+    ON config.config_notification_routes TO web;
+$v131$;
+      IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+                 WHERE attrelid = 'config.config_notification_routes'::regclass
+                   AND attname = 'agent_level' AND NOT attisdropped) THEN
+         EXECUTE $v184$
+GRANT SELECT (agent_level, agent_max_per_hour, agent_max_per_day, agent_lease_minutes, agent_expiry_minutes)
+    ON config.config_notification_routes TO web;
+$v184$;
+      END IF;
+      -- V187 (#5825): a route's override of the channels' "send resolutions" flags. Non-secret. Granted here, inside
+      -- the routes table's guard and on its own column, so a store without the table or below V187 still commits.
+      IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+                 WHERE attrelid = 'config.config_notification_routes'::regclass
+                   AND attname = 'send_resolutions' AND NOT attisdropped) THEN
+         EXECUTE $v187$
+GRANT SELECT (send_resolutions) ON config.config_notification_routes TO web;
+$v187$;
+      END IF;
+      -- V229 (#6928): a route's severity filter. Non-secret. Granted on its own column inside the routes table's guard, so a
+      -- store below V229 still commits.
+      IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+                 WHERE attrelid = 'config.config_notification_routes'::regclass
+                   AND attname = 'severities' AND NOT attisdropped) THEN
+         EXECUTE $v229$
+GRANT SELECT (severities) ON config.config_notification_routes TO web;
+$v229$;
+      END IF;
+      -- V233 (#6979): a route's report notice setting. Non-secret. Granted on its own column inside the routes table's guard, so a
+      -- store below V233 still commits.
+      IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+                 WHERE attrelid = 'config.config_notification_routes'::regclass
+                   AND attname = 'report_notice' AND NOT attisdropped) THEN
+         EXECUTE $v233$
+GRANT SELECT (report_notice) ON config.config_notification_routes TO web;
+$v233$;
+      END IF;
+   END IF;
+END $$;
+-- V187 (#5825): the four per-channel "send resolutions" flags. Non-secret (behaviour toggles, like
+-- pagerduty_auto_resolve), so they are granted. Guarded on the column, so a store below V187 still commits the rest
+-- of the carve. This block names config_notification only: a grant on the routes table here, outside that table's
+-- guard, failed on a store without it and rolled the whole carve back.
+DO $$
+BEGIN
+   IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+              WHERE attrelid = 'config.config_notification'::regclass
+                AND attname = 'slack_send_resolutions' AND NOT attisdropped) THEN
+      EXECUTE $v187$
+GRANT SELECT (slack_send_resolutions, teams_send_resolutions, generic_send_resolutions, email_send_resolutions)
+    ON config.config_notification TO web;
+$v187$;
+   END IF;
+END $$;
+-- V193 (#5997): when the previous webhook signing key stops being sent, on the settings row, and on a route that and the
+-- fallback route. Non-secret. The signing keys (signing_key, previous_signing_key) are deliberately NOT granted: whoever
+-- holds one can sign a send as that route. Guarded on the column, so a store below V193 (or without the routes table) still
+-- commits the rest of the carve.
+DO $$
+BEGIN
+   IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+              WHERE attrelid = pg_catalog.to_regclass('config.config_notification')
+                AND attname = 'previous_signing_key_until' AND NOT attisdropped) THEN
+      EXECUTE $v193$
+GRANT SELECT (previous_signing_key_until) ON config.config_notification TO web;
+$v193$;
+   END IF;
+   IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+              WHERE attrelid = pg_catalog.to_regclass('config.config_notification_routes')
+                AND attname = 'fallback_route_id' AND NOT attisdropped) THEN
+      EXECUTE $v193r$
+GRANT SELECT (fallback_route_id, previous_signing_key_until) ON config.config_notification_routes TO web;
+$v193r$;
+   END IF;
+END $$;
+-- V203 (#6170): the hypothetical-index login's NAME, on the registry. Non-secret, like remediation_username; the password
+-- column (hypothetical_index_encrypted_password) is deliberately NOT granted. Guarded on the column, so a store below V203
+-- still commits the rest of the carve instead of failing on a column it does not have yet.
+DO $$
+BEGIN
+   IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+              WHERE attrelid = pg_catalog.to_regclass('config.config_monitored_servers')
+                AND attname = 'hypothetical_index_username' AND NOT attisdropped) THEN
+      EXECUTE $v203$
+GRANT SELECT (hypothetical_index_username) ON config.config_monitored_servers TO web;
+$v203$;
+   END IF;
+END $$;
+-- V213 (#6254): the Query Store replica HOST, on the registry. Non-secret, like host. Guarded on the column, so a store below V213
+-- still commits the rest of the carve instead of failing on a column it does not have yet.
+DO $$
+BEGIN
+   IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+              WHERE attrelid = pg_catalog.to_regclass('config.config_monitored_servers')
+                AND attname = 'query_store_replica' AND NOT attisdropped) THEN
+      EXECUTE $v211r$
+GRANT SELECT (query_store_replica) ON config.config_monitored_servers TO web;
+$v211r$;
+   END IF;
+END $$;
+
 -- 2c. The SAME carve for mcp (#3914): it reads exactly what viewer reads, so it is denied exactly the same
 --     secret columns -- the column lists are identical to 2b's, and the drift test holds both to the C# list.
 REVOKE SELECT ON config.config_monitored_servers FROM mcp;
@@ -732,6 +954,15 @@ $v187$;
          EXECUTE $v229$
 GRANT SELECT (severities) ON config.config_notification_routes TO mcp;
 $v229$;
+      END IF;
+      -- V233 (#6979): a route's report notice setting. Non-secret. Granted on its own column inside the routes table's guard, so a
+      -- store below V233 still commits.
+      IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+                 WHERE attrelid = 'config.config_notification_routes'::regclass
+                   AND attname = 'report_notice' AND NOT attisdropped) THEN
+         EXECUTE $v233$
+GRANT SELECT (report_notice) ON config.config_notification_routes TO mcp;
+$v233$;
       END IF;
    END IF;
 END $$;
@@ -811,11 +1042,11 @@ $v160$;
 END $$;
 
 -- 2d. The password key tables (V165 and V167, #5366), still inside the transaction. The blanket config grants above gave
---     SELECT on them to admin, viewer and mcp, and the COMMIT below makes whatever is granted by then durable, so the
+--     SELECT on them to admin, viewer, web and mcp, and the COMMIT below makes whatever is granted by then durable, so the
 --     revoke is in effect at the COMMIT: every privilege on each of these tables that exists is taken from PUBLIC and
---     the three roles, and SELECT on the key and service-state tables goes back to admin alone, the same result as
+--     the four roles, and SELECT on the key and service-state tables goes back to admin alone, the same result as
 --     managed mode's batch. Step 3g repeats it after the grants of step 3, which give admin write access, and also
---     removes triggers and foreign keys, so a stop anywhere between here and 3g never leaves viewer or mcp able to read
+--     removes triggers and foreign keys, so a stop anywhere between here and 3g never leaves viewer, web or mcp able to read
 --     them. The tables are looked up one at a time: a store below V165 has none, a store at V165 or V166 has no
 --     candidate table.
 DO $do$
@@ -825,7 +1056,7 @@ BEGIN
     FOREACH key_table IN ARRAY ARRAY['password_key', 'password_key_service', 'legacy_secret_pin', 'legacy_secret_pin_marker', 'legacy_secret_pin_candidate', 'pseudonym_key']
     LOOP
         IF pg_catalog.to_regclass(pg_catalog.format('config.%I', key_table)) IS NOT NULL THEN
-            EXECUTE pg_catalog.format('REVOKE ALL ON config.%I FROM PUBLIC, admin, viewer, mcp CASCADE', key_table);
+            EXECUTE pg_catalog.format('REVOKE ALL ON config.%I FROM PUBLIC, admin, viewer, web, mcp CASCADE', key_table);
             IF key_table IN ('password_key', 'password_key_service') THEN
                 EXECUTE pg_catalog.format('GRANT SELECT ON config.%I TO admin', key_table);
             END IF;
@@ -839,25 +1070,27 @@ COMMIT;
 GRANT INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA config TO admin;
 
 -- 3b. Custom views (#1563): the web dashboard's custom-view composer writes exactly this one config table
---     (non-secret dashboard JSON) as viewer, and the MCP custom-view tools as mcp. Editing is any
+--     (non-secret dashboard JSON) as web, and the MCP custom-view tools as mcp. Editing is any
 --     authenticated seat -- the web surface's normal networked mode, gated server-side by the host's
 --     token+CIDR auth (not loopback-only); this narrow grant is only the floor beneath that gate. EXPLICIT
 --     single-table statements, NO ALTER DEFAULT PRIVILEGES (ADP has no per-table
 --     form -> it would broaden the role to ALL of config). config.custom_views is created by the V31 migration,
 --     so re-run this script AFTER the service has migrated your store to V31 (else this line errors: no table).
-GRANT INSERT, UPDATE, DELETE ON config.custom_views TO viewer;
+REVOKE INSERT, UPDATE, DELETE ON config.custom_views FROM viewer;
+GRANT INSERT, UPDATE, DELETE ON config.custom_views TO web;
 GRANT INSERT, UPDATE, DELETE ON config.custom_views TO mcp;
 
--- 3c. Database-state expected states (#1986): the viewer's per-database override editor writes this one
+-- 3c. Database-state expected states (#1986): the web dashboard's per-database override editor writes this one
 --     config table (non-secret; the expected/(ignore) state per database). SELECT is already covered by
 --     the blanket config grant in step 2; this is the write floor for the editor, gated server-side by the
 --     same token+CIDR auth as the custom-view composer. EXPLICIT single-table statement (no ALTER DEFAULT
 --     PRIVILEGES, which would broaden viewer to ALL of config). config.database_state_expected is created by
 --     the V49 migration, so re-run this script AFTER the service has migrated your store to V49.
-GRANT INSERT, UPDATE, DELETE ON config.database_state_expected TO viewer;
+REVOKE INSERT, UPDATE, DELETE ON config.database_state_expected FROM viewer;
+GRANT INSERT, UPDATE, DELETE ON config.database_state_expected TO web;
 
 -- 3d. Mute rules (#3450): the web dashboard's dedicated mute-rule endpoints (create / update / set-enabled /
---     delete under /api/mute-rules) run as viewer, and the MCP mute-rule tools as mcp, so both get the same
+--     delete under /api/mute-rules) run as web, and the MCP mute-rule tools as mcp, so both get the same
 --     single-table write shape as 3b. The table exists from V3, but its reload-beacon trigger
 --     (trg_bump_mute_rules, V117) is SECURITY INVOKER and UPDATEs config_service.config_version AS the caller
 --     on every mute-rule write -- so the COLUMN-level config_service grants below are load-bearing, not
@@ -867,8 +1100,10 @@ GRANT INSERT, UPDATE, DELETE ON config.database_state_expected TO viewer;
 --     config_monitored_servers) rides the same mcp grant. Re-run this script after upgrading to V117+.
 --     (The WPF Viewer's read-only probe discriminates on config_alert_log UPDATE -- a write viewer never
 --     gets -- so a connectAs = "viewer" Viewer stays read-only in its UI despite this grant.)
-GRANT INSERT, UPDATE, DELETE ON config.config_mute_rules TO viewer;
-GRANT UPDATE (config_version, updated_at) ON config.config_service TO viewer;
+REVOKE INSERT, UPDATE, DELETE ON config.config_mute_rules FROM viewer;
+GRANT INSERT, UPDATE, DELETE ON config.config_mute_rules TO web;
+REVOKE UPDATE ON config.config_service FROM viewer;
+GRANT UPDATE (config_version, updated_at) ON config.config_service TO web;
 GRANT INSERT, UPDATE, DELETE ON config.config_mute_rules TO mcp;
 GRANT UPDATE (config_version, updated_at) ON config.config_service TO mcp;
 -- #6230: pause_collection / resume_collection queue a pause or resume command through config.request_mcp_command, so mcp holds no
@@ -920,28 +1155,32 @@ BEGIN
    END IF;
 END $do$;
 
--- 3d-2. Alert History dismiss (#4843): the web dashboard's POST /api/alert-history/dismiss runs as viewer and
---     writes `UPDATE config_alert_log SET dismissed = TRUE`. Column-level on exactly that one column, so viewer
+-- 3d-2. Alert History dismiss (#4843): the web dashboard's POST /api/alert-history/dismiss runs as web and
+--     writes `UPDATE config_alert_log SET dismissed = TRUE`. Column-level on exactly that one column, so web
 --     can flip the dismissed flag and cannot rewrite what an alert said or reach INSERT/DELETE. config_alert_log
 --     carries no trigger. The WPF read-only probe (has_table_privilege ... 'UPDATE') answers for the table-level
---     privilege only, so it stays false for viewer. mcp gets the same one-column grant just below (#6231).
-GRANT UPDATE (dismissed) ON config.config_alert_log TO viewer;
+--     privilege only, so it stays false for web and viewer. mcp gets the same one-column grant just below (#6231).
+REVOKE UPDATE ON config.config_alert_log FROM viewer;
+GRANT UPDATE (dismissed) ON config.config_alert_log TO web;
 -- #6231: the MCP dismiss_alert_history / restore_alert_history tools run as mcp and set the same one column, so mcp
 --     gets the same column-level grant (revoke first, so no table-level UPDATE lingers). No other column, no INSERT/DELETE.
 REVOKE UPDATE ON config.config_alert_log FROM mcp;
 GRANT UPDATE (dismissed) ON config.config_alert_log TO mcp;
 
--- #5085: the web dashboard's /api/server-tags endpoints run as viewer, so viewer gets the same two single-table
+-- #5085: the web dashboard's /api/server-tags endpoints run as web, so web gets the same two single-table
 --     writes (the seat model decides who may call them; these grants are only the floor). The WPF Viewer's read-only
 --     probe still discriminates on config_alert_log UPDATE, so a connectAs = "viewer" Viewer stays read-only.
-GRANT INSERT, UPDATE, DELETE ON config.server_tags TO viewer;
-GRANT INSERT, UPDATE, DELETE ON config.server_tag_map TO viewer;
+REVOKE INSERT, UPDATE, DELETE ON config.server_tags FROM viewer;
+GRANT INSERT, UPDATE, DELETE ON config.server_tags TO web;
+REVOKE INSERT, UPDATE, DELETE ON config.server_tag_map FROM viewer;
+GRANT INSERT, UPDATE, DELETE ON config.server_tag_map TO web;
 
--- #4843: the web dashboard's add-server route runs the add_servers core as viewer, so viewer gets INSERT on
+-- #4843: the web dashboard's add-server route runs the add_servers core as web, so web gets INSERT on
 --     config_monitored_servers (never DELETE: no web route removes a server). The
 --     credential column stays SELECT-carved from viewer, so it can write a password blob and never read one back;
 --     the write's bump trigger is served by the two config_service beacon columns granted above.
-GRANT INSERT ON config.config_monitored_servers TO viewer;
+REVOKE INSERT ON config.config_monitored_servers FROM viewer;
+GRANT INSERT ON config.config_monitored_servers TO web;
 
 -- #5240: the web dashboard's edit route (PATCH /api/servers/{id}) and the MCP edit_server tool change a monitored
 --     server through config.edit_monitored_server, created right below. Viewer holds NO UPDATE on the table: the
@@ -954,7 +1193,7 @@ GRANT INSERT ON config.config_monitored_servers TO viewer;
 --     revoking the table privilege also revokes every column privilege on it. A plain REVOKE removes only the privileges
 --     recorded as granted by the role that issues it (a superuser or the owner counts as the owner), so run this script
 --     as the same owner every time, as above.
-REVOKE UPDATE ON config.config_monitored_servers FROM viewer;
+REVOKE UPDATE ON config.config_monitored_servers FROM viewer, web;
 
 CREATE OR REPLACE FUNCTION config.edit_monitored_server(
    p_server_id integer,
@@ -1198,7 +1437,8 @@ BEGIN
 END;
 $fn$;
 REVOKE ALL ON FUNCTION config.edit_monitored_server(integer, timestamp, text[], text, text, integer, text, boolean, text, text, text, text, boolean, boolean, numeric, text, text, text) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION config.edit_monitored_server(integer, timestamp, text[], text, text, integer, text, boolean, text, text, text, text, boolean, boolean, numeric, text, text, text) TO viewer, mcp;
+REVOKE EXECUTE ON FUNCTION config.edit_monitored_server(integer, timestamp, text[], text, text, integer, text, boolean, text, text, text, text, boolean, boolean, numeric, text, text, text) FROM viewer;
+GRANT EXECUTE ON FUNCTION config.edit_monitored_server(integer, timestamp, text[], text, text, integer, text, boolean, text, text, text, text, boolean, boolean, numeric, text, text, text) TO web, mcp;
 
 -- #6254: the 17-argument edit function stays as a permanent wrapper over the 18-argument one, for a caller built before the Query
 --     Store replica column. It passes NULL for the replica and strips the column name from p_columns, so a caller of the older
@@ -1234,7 +1474,8 @@ AS $fn$
       p_trust_server_certificate, p_multi_subnet_failover, p_monthly_cost_usd, p_aws_role_arn, p_aws_external_id, NULL::text) AS e;
 $fn$;
 REVOKE ALL ON FUNCTION config.edit_monitored_server(integer, timestamp, text[], text, text, integer, text, boolean, text, text, text, text, boolean, boolean, numeric, text, text) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION config.edit_monitored_server(integer, timestamp, text[], text, text, integer, text, boolean, text, text, text, text, boolean, boolean, numeric, text, text) TO viewer, mcp;
+REVOKE EXECUTE ON FUNCTION config.edit_monitored_server(integer, timestamp, text[], text, text, integer, text, boolean, text, text, text, text, boolean, boolean, numeric, text, text) FROM viewer;
+GRANT EXECUTE ON FUNCTION config.edit_monitored_server(integer, timestamp, text[], text, text, integer, text, boolean, text, text, text, text, boolean, boolean, numeric, text, text) TO web, mcp;
 
 -- #5452: the 15-argument edit function stays as a permanent wrapper over the 17-argument one, for a caller that
 --     was built before the AWS role columns. It passes NULL for both and strips the two AWS column names from
@@ -1268,9 +1509,10 @@ AS $fn$
       p_trust_server_certificate, p_multi_subnet_failover, p_monthly_cost_usd, NULL::text, NULL::text) AS e;
 $fn$;
 REVOKE ALL ON FUNCTION config.edit_monitored_server(integer, timestamp, text[], text, text, integer, text, boolean, text, text, text, text, boolean, boolean, numeric) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION config.edit_monitored_server(integer, timestamp, text[], text, text, integer, text, boolean, text, text, text, text, boolean, boolean, numeric) TO viewer, mcp;
+REVOKE EXECUTE ON FUNCTION config.edit_monitored_server(integer, timestamp, text[], text, text, integer, text, boolean, text, text, text, text, boolean, boolean, numeric) FROM viewer;
+GRANT EXECUTE ON FUNCTION config.edit_monitored_server(integer, timestamp, text[], text, text, integer, text, boolean, text, text, text, text, boolean, boolean, numeric) TO web, mcp;
 
--- #6334: the known-pattern entries' writes. The web editor (viewer) and the Viewer (admin) write config.config_known_patterns only
+-- #6334: the known-pattern entries' writes. The web editor (web) and the Viewer (admin) write config.config_known_patterns only
 --     through these three functions, and the MCP create_known_pattern / update_known_pattern / delete_known_pattern tools (#6398) call the same
 --     functions as mcp; no role holds a direct INSERT/UPDATE/DELETE on the table. Same functions, same text, as managed provisioning rebuilds on every
 --     start. The reads need no grant: the schema-wide SELECT covers the table. The table exists from V214, so re-run this script after upgrading. All three bodies are plpgsql (late-bound) so the script also runs on a store that has not reached V214 yet; a LANGUAGE sql body would fail the CREATE there.
@@ -1355,14 +1597,17 @@ BEGIN
 END;
 $fn$;
 REVOKE ALL ON FUNCTION config.delete_known_pattern(bigint) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION config.insert_known_pattern(integer, text, time, text, integer, text, text, timestamp) TO admin, viewer;
+REVOKE EXECUTE ON FUNCTION config.insert_known_pattern(integer, text, time, text, integer, text, text, timestamp) FROM viewer;
+GRANT EXECUTE ON FUNCTION config.insert_known_pattern(integer, text, time, text, integer, text, text, timestamp) TO admin, web;
 GRANT EXECUTE ON FUNCTION config.insert_known_pattern(integer, text, time, text, integer, text, text, timestamp) TO mcp;
-GRANT EXECUTE ON FUNCTION config.update_known_pattern(bigint, integer, text, time, text, integer, text, timestamp, text) TO admin, viewer;
+REVOKE EXECUTE ON FUNCTION config.update_known_pattern(bigint, integer, text, time, text, integer, text, timestamp, text) FROM viewer;
+GRANT EXECUTE ON FUNCTION config.update_known_pattern(bigint, integer, text, time, text, integer, text, timestamp, text) TO admin, web;
 GRANT EXECUTE ON FUNCTION config.update_known_pattern(bigint, integer, text, time, text, integer, text, timestamp, text) TO mcp;
-GRANT EXECUTE ON FUNCTION config.delete_known_pattern(bigint) TO admin, viewer;
+REVOKE EXECUTE ON FUNCTION config.delete_known_pattern(bigint) FROM viewer;
+GRANT EXECUTE ON FUNCTION config.delete_known_pattern(bigint) TO admin, web;
 GRANT EXECUTE ON FUNCTION config.delete_known_pattern(bigint) TO mcp;
 
--- #5941: the run-collectors-now request. The web route (viewer) and the MCP run_collectors_now tool (mcp) queue a
+-- #5941: the run-collectors-now request. The web route (web) and the MCP run_collectors_now tool (mcp) queue a
 --     snapshot_now command through config.request_snapshot_now, the only way those two roles write a command row.
 --     The command type is fixed in the body; the caller supplies a server id and an optional list of collector names
 --     and nothing else. Same function, same text, as managed provisioning rebuilds on every start.
@@ -1401,7 +1646,7 @@ BEGIN
       END IF;
    END IF;
    -- The same guard the service applies (#5941 review): one run at a time per server, and not within 60 seconds of the last
-   -- request for it, so a holder of the viewer or mcp login cannot queue rows without limit. One lock per server makes the
+   -- request for it, so a holder of the web or mcp login cannot queue rows without limit. One lock per server makes the
    -- check and the insert one step.
    -- Never blocks (provisioning rule): a request that holds the lock for this server is a concurrent request, which is the
    -- same conflict as a pending row, so this refuses with the same DL409 instead of waiting.
@@ -1428,10 +1673,11 @@ BEGIN
 END
 $fn$;
 REVOKE ALL ON FUNCTION config.request_snapshot_now(integer, text, text) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION config.request_snapshot_now(integer, text, text) TO viewer, mcp;
+REVOKE EXECUTE ON FUNCTION config.request_snapshot_now(integer, text, text) FROM viewer;
+GRANT EXECUTE ON FUNCTION config.request_snapshot_now(integer, text, text) TO web, mcp;
 
--- #6386: the web Run live now button on the Active Queries panel. The web route (viewer) queues a fetch_active_queries command
---     through config.request_active_queries_live, the only way viewer writes that command row. The command type is fixed in the
+-- #6386: the web Run live now button on the Active Queries panel. The web route (web) queues a fetch_active_queries command
+--     through config.request_active_queries_live, the only way web writes that command row. The command type is fixed in the
 --     body and the caller supplies a server id and nothing else. Same function, same text, as managed provisioning rebuilds on every start.
 CREATE OR REPLACE FUNCTION config.request_active_queries_live(
    p_server_id integer,
@@ -1487,11 +1733,11 @@ BEGIN
 END
 $fn$;
 REVOKE ALL ON FUNCTION config.request_active_queries_live(integer, text) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION config.request_active_queries_live(integer, text) TO viewer;
--- #6389: the web's Generate now button on the Recommendations tab. The web route (viewer) queues an analyze_now command through
---     config.request_analyze_now, the only way viewer writes that command row. The command type is fixed in the body and the
---     caller supplies a server id and a requested_by label (the label is not checked: the web host and a locked-down Viewer share the
---     viewer login, and the web's log line is the record of who asked). One request per server at a time, not within 15 seconds of
+REVOKE EXECUTE ON FUNCTION config.request_active_queries_live(integer, text) FROM viewer;
+GRANT EXECUTE ON FUNCTION config.request_active_queries_live(integer, text) TO web;
+-- #6389: the web's Generate now button on the Recommendations tab. The web route (web) queues an analyze_now command through
+--     config.request_analyze_now, the only way web writes that command row. The command type is fixed in the body and the
+--     caller supplies a server id and a requested_by label (the label is not checked, and the web's log line is the record of who asked). One request per server at a time, not within 15 seconds of
 --     the last, under the same advisory lock key the MCP analyze_now takes. Same function, same text, as managed provisioning
 --     rebuilds on every start.
 CREATE OR REPLACE FUNCTION config.request_analyze_now(
@@ -1541,7 +1787,8 @@ BEGIN
 END
 $fn$;
 REVOKE ALL ON FUNCTION config.request_analyze_now(integer, text) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION config.request_analyze_now(integer, text) TO viewer;
+REVOKE EXECUTE ON FUNCTION config.request_analyze_now(integer, text) FROM viewer;
+GRANT EXECUTE ON FUNCTION config.request_analyze_now(integer, text) TO web;
 -- #6231: the MCP route tools. mcp holds no INSERT on config.config_notification_routes and no SELECT or UPDATE on its
 --     destination columns, and gets none here: create_notification_route and update_notification_route reach the table only
 --     through these functions. create leaves every channel empty and update writes the match, scope, enabled flag, resolution
@@ -1553,6 +1800,8 @@ GRANT EXECUTE ON FUNCTION config.request_analyze_now(integer, text) TO viewer;
 BEGIN;
 -- #6928 (V229): p_severities joins the argument list, so the six-argument function is dropped and stays uncallable. NULL is both.
 DROP FUNCTION IF EXISTS config.create_notification_route(text, boolean, integer, integer, boolean, integer);
+-- #6979 (V233): p_report_notice joins the argument list, so the seven-argument function is dropped and stays uncallable. NULL is off.
+DROP FUNCTION IF EXISTS config.create_notification_route(text, boolean, integer, integer, boolean, integer, text);
 CREATE OR REPLACE FUNCTION config.create_notification_route(
    p_metric_match text,
    p_enabled boolean,
@@ -1560,7 +1809,8 @@ CREATE OR REPLACE FUNCTION config.create_notification_route(
    p_scope_tag_id integer,
    p_send_resolutions boolean,
    p_fallback_route_id integer,
-   p_severities text DEFAULT NULL)
+   p_severities text DEFAULT NULL,
+   p_report_notice text DEFAULT NULL)
 RETURNS integer
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -1569,10 +1819,14 @@ AS $fn$
 DECLARE
    v_match text := btrim(COALESCE(p_metric_match, ''));
    v_severities text := lower(btrim(COALESCE(p_severities, 'both')));
+   v_report_notice text := lower(btrim(COALESCE(p_report_notice, 'off')));
    v_id integer;
 BEGIN
    IF v_severities NOT IN ('both', 'critical', 'warning') THEN
       RAISE EXCEPTION 'severities is critical, warning or both.' USING ERRCODE = 'DL400';
+   END IF;
+   IF v_report_notice NOT IN ('off', 'needs_person_or_change', 'all') THEN
+      RAISE EXCEPTION 'report_notice is off, needs_person_or_change or all.' USING ERRCODE = 'DL400';
    END IF;
    IF v_match = '' THEN
       RAISE EXCEPTION 'Choose a family or enter an exact metric name.' USING ERRCODE = 'DL400';
@@ -1599,20 +1853,23 @@ BEGIN
    -- goes where it went before (the next matching route, else the Settings channels), and no caller of this function can name a URL, a key or an address list.
    -- The agent columns keep their defaults too: this function never makes an agent route.
    INSERT INTO config.config_notification_routes
-      (metric_match, enabled, scope_server_id, scope_tag_id, send_resolutions, fallback_route_id, severities, modified_at)
+      (metric_match, enabled, scope_server_id, scope_tag_id, send_resolutions, fallback_route_id, severities, report_notice, modified_at)
    VALUES
-      (v_match, COALESCE(p_enabled, true), p_scope_server_id, p_scope_tag_id, p_send_resolutions, p_fallback_route_id, v_severities,
+      (v_match, COALESCE(p_enabled, true), p_scope_server_id, p_scope_tag_id, p_send_resolutions, p_fallback_route_id, v_severities, v_report_notice,
        (now() AT TIME ZONE 'UTC'))
    RETURNING route_id INTO v_id;
    RETURN v_id;
 END
 $fn$;
-REVOKE ALL ON FUNCTION config.create_notification_route(text, boolean, integer, integer, boolean, integer, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION config.create_notification_route(text, boolean, integer, integer, boolean, integer, text, text) FROM PUBLIC;
 -- #6542 part 2: the actor is an argument now and the before row comes back, so the old signature is dropped and stays uncallable.
 DROP FUNCTION IF EXISTS config.update_notification_route(integer, text[], text, boolean, integer, integer, boolean, integer);
 -- #6928 (V229): p_severities joins the argument list, so the nine-argument function is dropped and stays uncallable. It is read only when
 -- p_columns names severities.
 DROP FUNCTION IF EXISTS config.update_notification_route(integer, text, text[], text, boolean, integer, integer, boolean, integer);
+-- #6979 (V233): p_report_notice joins the argument list, so the ten-argument function is dropped and stays uncallable. It is read only when
+-- p_columns names report_notice.
+DROP FUNCTION IF EXISTS config.update_notification_route(integer, text, text[], text, boolean, integer, integer, boolean, integer, text);
 CREATE OR REPLACE FUNCTION config.update_notification_route(
    p_route_id integer,
    p_actor text,
@@ -1623,7 +1880,8 @@ CREATE OR REPLACE FUNCTION config.update_notification_route(
    p_scope_tag_id integer,
    p_send_resolutions boolean,
    p_fallback_route_id integer,
-   p_severities text DEFAULT NULL)
+   p_severities text DEFAULT NULL,
+   p_report_notice text DEFAULT NULL)
 RETURNS jsonb
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -1641,11 +1899,12 @@ DECLARE
    v_resolutions boolean;
    v_fallback integer;
    v_severities text;
+   v_report_notice text;
 BEGIN
    IF p_columns IS NULL OR cardinality(p_columns) = 0
       OR EXISTS (SELECT 1 FROM unnest(p_columns) AS c(name)
-                 WHERE c.name IS NULL OR c.name NOT IN ('metric_match', 'enabled', 'scope', 'send_resolutions', 'fallback_route_id', 'severities')) THEN
-      RAISE EXCEPTION 'The columns to change are metric_match, enabled, scope, send_resolutions, fallback_route_id and severities.' USING ERRCODE = 'DL400';
+                 WHERE c.name IS NULL OR c.name NOT IN ('metric_match', 'enabled', 'scope', 'send_resolutions', 'fallback_route_id', 'severities', 'report_notice')) THEN
+      RAISE EXCEPTION 'The columns to change are metric_match, enabled, scope, send_resolutions, fallback_route_id, severities and report_notice.' USING ERRCODE = 'DL400';
    END IF;
    -- The row is read again here, under its lock, so the agent-route refusal and every check below are on what is stored now
    -- and not on what the caller read a moment ago.
@@ -1676,6 +1935,10 @@ BEGIN
    v_severities := CASE WHEN 'severities' = ANY (p_columns) THEN lower(btrim(COALESCE(p_severities, ''))) ELSE v_row.severities END;
    IF v_severities NOT IN ('both', 'critical', 'warning') THEN
       RAISE EXCEPTION 'severities is critical, warning or both.' USING ERRCODE = 'DL400';
+   END IF;
+   v_report_notice := CASE WHEN 'report_notice' = ANY (p_columns) THEN lower(btrim(COALESCE(p_report_notice, ''))) ELSE v_row.report_notice END;
+   IF v_report_notice NOT IN ('off', 'needs_person_or_change', 'all') THEN
+      RAISE EXCEPTION 'report_notice is off, needs_person_or_change or all.' USING ERRCODE = 'DL400';
    END IF;
    IF v_match = '' THEN
       RAISE EXCEPTION 'Choose a family or enter an exact metric name.' USING ERRCODE = 'DL400';
@@ -1711,6 +1974,7 @@ BEGIN
           send_resolutions = v_resolutions,
           fallback_route_id = v_fallback,
           severities = v_severities,
+          report_notice = v_report_notice,
           modified_at = (now() AT TIME ZONE 'UTC')
     WHERE route_id = p_route_id;
    -- The row as it was before this change, in the journal's words: set_notification_route_agent journals it as the before of a
@@ -1719,10 +1983,10 @@ BEGIN
       'metric_match', btrim(v_row.metric_match), 'scope_server_id', v_row.scope_server_id, 'scope_tag_id', v_row.scope_tag_id,
       'agent_level', v_row.agent_level, 'agent_max_per_hour', v_row.agent_max_per_hour, 'agent_max_per_day', v_row.agent_max_per_day,
       'agent_lease_minutes', v_row.agent_lease_minutes, 'agent_expiry_minutes', v_row.agent_expiry_minutes, 'enabled', v_row.enabled,
-      'severities', v_row.severities);
+      'severities', v_row.severities, 'report_notice', v_row.report_notice);
 END
 $fn$;
-REVOKE ALL ON FUNCTION config.update_notification_route(integer, text, text[], text, boolean, integer, integer, boolean, integer, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION config.update_notification_route(integer, text, text[], text, boolean, integer, integer, boolean, integer, text, text) FROM PUBLIC;
 -- #6542: a named operator token sets a route's agent level, its four limits and its fallback over MCP through this function, and
 -- the change is journaled as route_agent_changed under the token's name (operator:<name>), in the same transaction. Levels 0 to 3 are
 -- set here (MCP is full admin). A level 3 server action still needs that server's switch (config_server_actions) and its remediation login.
@@ -1808,6 +2072,10 @@ BEGIN
       IF (p_before ->> 'severities') IS DISTINCT FROM v_row.severities AND ((p_before ->> 'agent_level') IS NOT NULL OR v_level IS NOT NULL) THEN
          v_changed := array_append(v_changed, 'severities');
       END IF;
+      -- #6979: the report notice setting decides whether the route's requests post a notice. Only a route with an agent setting.
+      IF (p_before ->> 'report_notice') IS DISTINCT FROM v_row.report_notice AND ((p_before ->> 'agent_level') IS NOT NULL OR v_level IS NOT NULL) THEN
+         v_changed := array_append(v_changed, 'report_notice');
+      END IF;
    END IF;
    IF v_level IS DISTINCT FROM v_row.agent_level THEN v_changed := array_append(v_changed, 'agent_level'); END IF;
    IF v_hour IS DISTINCT FROM v_row.agent_max_per_hour THEN v_changed := array_append(v_changed, 'agent_max_per_hour'); END IF;
@@ -1834,12 +2102,12 @@ BEGIN
          'metric_match', btrim(v_row.metric_match), 'scope_server_id', v_row.scope_server_id, 'scope_tag_id', v_row.scope_tag_id,
          'agent_level', v_row.agent_level, 'agent_max_per_hour', v_row.agent_max_per_hour, 'agent_max_per_day', v_row.agent_max_per_day,
          'agent_lease_minutes', v_row.agent_lease_minutes, 'agent_expiry_minutes', v_row.agent_expiry_minutes, 'enabled', v_row.enabled,
-         'severities', v_row.severities) END;
+         'severities', v_row.severities, 'report_notice', v_row.report_notice) END;
       v_after := jsonb_build_object(
          'metric_match', btrim(v_row.metric_match), 'scope_server_id', v_row.scope_server_id, 'scope_tag_id', v_row.scope_tag_id,
          'agent_level', v_level, 'agent_max_per_hour', v_hour, 'agent_max_per_day', v_day,
          'agent_lease_minutes', v_lease, 'agent_expiry_minutes', v_expiry, 'enabled', v_row.enabled,
-         'severities', v_row.severities);
+         'severities', v_row.severities, 'report_notice', v_row.report_notice);
       INSERT INTO config.investigation_journal (event_time, request_id, route_id, server_id, event, actor, reason, detail)
       VALUES (now(), NULL, p_route_id, v_row.scope_server_id, 'route_agent_changed', p_actor,
               CASE WHEN COALESCE(p_created, false) THEN 'created route' ELSE 'changed ' || array_to_string(v_changed, ', ') END,
@@ -1938,8 +2206,8 @@ BEGIN
 END
 $fn$;
 REVOKE ALL ON FUNCTION config.set_notification_route_destinations(integer, text, text[], text, text, text, text, text) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION config.create_notification_route(text, boolean, integer, integer, boolean, integer, text) TO mcp;
-GRANT EXECUTE ON FUNCTION config.update_notification_route(integer, text, text[], text, boolean, integer, integer, boolean, integer, text) TO mcp;
+GRANT EXECUTE ON FUNCTION config.create_notification_route(text, boolean, integer, integer, boolean, integer, text, text) TO mcp;
+GRANT EXECUTE ON FUNCTION config.update_notification_route(integer, text, text[], text, boolean, integer, integer, boolean, integer, text, text) TO mcp;
 GRANT EXECUTE ON FUNCTION config.set_notification_route_destinations(integer, text, text[], text, text, text, text, text) TO mcp;
 GRANT EXECUTE ON FUNCTION config.set_notification_route_agent(integer, text, text[], integer, integer, integer, integer, integer, integer, boolean, jsonb) TO mcp;
 -- #6394: the MCP generate_webhook_signing_key and remove_webhook_signing_key tools. mcp holds no UPDATE on a signing key column of config.config_notification
@@ -2477,14 +2745,15 @@ CREATE OR REPLACE TRIGGER trg_monitored_server_password_rules
    BEFORE INSERT OR UPDATE ON config.config_monitored_servers
    FOR EACH ROW EXECUTE FUNCTION config.monitored_server_password_rules();
 
--- 3e. Custom alert rules (#3285): the web dashboard's rule editor (/api/alerts, as viewer) and the MCP rule
+-- 3e. Custom alert rules (#3285): the web dashboard's rule editor (/api/alerts, as web) and the MCP rule
 --     tools (as mcp) create, edit and delete config.custom_alert_rules -- non-secret rule JSON, the same
 --     single-table floor as 3b. Created by V116, so re-run this script after upgrading past it.
-GRANT INSERT, UPDATE, DELETE ON config.custom_alert_rules TO viewer;
+REVOKE INSERT, UPDATE, DELETE ON config.custom_alert_rules FROM viewer;
+GRANT INSERT, UPDATE, DELETE ON config.custom_alert_rules TO web;
 GRANT INSERT, UPDATE, DELETE ON config.custom_alert_rules TO mcp;
 
 -- 3e2. Database state expectations (#6397): the MCP set_database_state_expected tool upserts (INSERT, UPDATE) and clears
---      (DELETE) one config.database_state_expected row, the same narrow single-table floor viewer holds in 3c. Its read,
+--      (DELETE) one config.database_state_expected row, the same narrow single-table floor web holds in 3c. Its read,
 --      get_database_state_expectations, runs on mcp's SELECT on all of config (step 2). The table is V49. BRING-YOUR-OWN
 --      STORES: an existing store must RE-RUN this script to add the grant; until then the tool answers a permission error.
 GRANT INSERT, UPDATE, DELETE ON config.database_state_expected TO mcp;
@@ -2638,7 +2907,7 @@ BEGIN
 END;
 $fn$;
 REVOKE ALL ON FUNCTION config.submit_external_alert(text, text, text, text, text, text, double precision) FROM PUBLIC;
-REVOKE ALL ON FUNCTION config.submit_external_alert(text, text, text, text, text, text, double precision) FROM admin, viewer, mcp;
+REVOKE ALL ON FUNCTION config.submit_external_alert(text, text, text, text, text, text, double precision) FROM admin, viewer, web, mcp;
 -- The two trigger functions need no EXECUTE to fire, so PUBLIC (and with it a source login) gets none.
 REVOKE EXECUTE ON FUNCTION config.config_bump_version(), config.config_service_bump() FROM PUBLIC;
 -- pg_stat_statements gives PUBLIC its views and functions; Darling reads them through its own SECURITY DEFINER functions.
@@ -2848,9 +3117,9 @@ BEGIN
    END IF;
 
    REVOKE ALL ON config.external_alert_source, config.external_alert_pending, config.external_alert_state
-      FROM PUBLIC, admin, viewer, mcp CASCADE;
+      FROM PUBLIC, admin, viewer, web, mcp CASCADE;
    GRANT SELECT ON config.external_alert_source, config.external_alert_pending, config.external_alert_state
-      TO admin, viewer;
+      TO admin, viewer, web;
    GRANT SELECT ON config.external_alert_source, config.external_alert_pending, config.external_alert_state
       TO mcp;
 
@@ -2865,7 +3134,7 @@ BEGIN
          FROM config.external_alert_source AS s
          JOIN pg_catalog.pg_roles AS r ON r.rolname = s.role_name
          WHERE pg_catalog.shobj_description(r.oid, 'pg_authid') IS NOT DISTINCT FROM 'darling-alert-source'
-           AND r.rolname NOT IN ('admin', 'viewer', 'mcp')
+           AND r.rolname NOT IN ('admin', 'viewer', 'web', 'mcp')
            AND r.rolname <> current_user
            AND NOT r.rolsuper
            AND r.oid <> (SELECT d.datdba FROM pg_catalog.pg_database AS d WHERE d.datname = pg_catalog.current_database())
@@ -2899,7 +3168,7 @@ BEGIN
    FOR source_login IN
       SELECT s.role_name, r.oid AS role_oid, r.rolsuper, r.rolcreaterole, r.rolcreatedb, r.rolreplication, r.rolbypassrls,
              (pg_catalog.shobj_description(r.oid, 'pg_authid') IS NOT DISTINCT FROM 'darling-alert-source') AS marked,
-             (r.rolname IN ('admin', 'viewer', 'mcp')
+             (r.rolname IN ('admin', 'viewer', 'web', 'mcp')
               OR r.rolname = current_user
               OR r.rolsuper
               OR r.oid = (SELECT d.datdba FROM pg_catalog.pg_database AS d WHERE d.datname = pg_catalog.current_database())) AS reserved
@@ -3005,7 +3274,7 @@ BEGIN
       JOIN pg_catalog.pg_roles AS r ON r.oid = c.oid
       WHERE NOT (EXISTS (SELECT 1 FROM config.external_alert_source AS s WHERE s.role_name = r.rolname)
                  AND pg_catalog.shobj_description(r.oid, 'pg_authid') IS NOT DISTINCT FROM 'darling-alert-source'
-                 AND r.rolname NOT IN ('admin', 'viewer', 'mcp')
+                 AND r.rolname NOT IN ('admin', 'viewer', 'web', 'mcp')
                  AND NOT r.rolsuper
                  AND r.oid <> (SELECT d.datdba FROM pg_catalog.pg_database AS d WHERE d.datname = pg_catalog.current_database()))
       ORDER BY r.rolname
@@ -3028,7 +3297,7 @@ END $do$;
 
 -- 3i. Investigation tables (V184, #5632), mirroring managed provisioning's section 10d grant for grant. Step 3 and the
 --     default privileges gave admin INSERT/UPDATE/DELETE on all six, so REVOKE ALL ... CASCADE takes every privilege
---     from PUBLIC and the three roles, and SELECT goes back to all three. mcp (the claim and submit tools) updates only
+--     from PUBLIC and the four roles, and SELECT goes back to all four. mcp (the claim and submit tools) updates only
 --     the claim and report columns of a request, inserts a report and a journal row, and proposes a note. The agent
 --     tools (claim, submit) leave the note's state column to its default, pending, but the database does not hold mcp to
 --     that: since #6400 mcp also holds INSERT on state, because the person-only investigation tools (write, approve and reject a
@@ -3051,10 +3320,10 @@ BEGIN
 
    REVOKE ALL ON config.investigation_requests, config.investigation_request_alerts, config.investigation_reports,
       config.investigation_journal, config.investigation_notes, config.agent_environment_profiles
-      FROM PUBLIC, admin, viewer, mcp CASCADE;
+      FROM PUBLIC, admin, viewer, web, mcp CASCADE;
    GRANT SELECT ON config.investigation_requests, config.investigation_request_alerts, config.investigation_reports,
       config.investigation_journal, config.investigation_notes, config.agent_environment_profiles
-      TO admin, viewer;
+      TO admin, viewer, web;
    GRANT SELECT ON config.investigation_requests, config.investigation_request_alerts, config.investigation_reports,
       config.investigation_journal, config.investigation_notes, config.agent_environment_profiles
       TO mcp;
@@ -3214,8 +3483,8 @@ BEGIN
       RETURN;
    END IF;
 
-   REVOKE ALL ON config.config_threshold_overrides, config.investigation_feedback FROM PUBLIC, admin, viewer, mcp CASCADE;
-   GRANT SELECT ON config.config_threshold_overrides, config.investigation_feedback TO admin, viewer;
+   REVOKE ALL ON config.config_threshold_overrides, config.investigation_feedback FROM PUBLIC, admin, viewer, web, mcp CASCADE;
+   GRANT SELECT ON config.config_threshold_overrides, config.investigation_feedback TO admin, viewer, web;
    GRANT SELECT ON config.config_threshold_overrides, config.investigation_feedback TO mcp;
    GRANT INSERT, UPDATE, DELETE ON config.config_threshold_overrides TO admin;
    GRANT INSERT, UPDATE, DELETE ON config.investigation_feedback TO admin;
@@ -3241,7 +3510,7 @@ END $do$;
 
 -- 3j2. The per-server action switches (V196, #5632 step 5), mirroring managed provisioning's section 10e2. Every role reads them and
 --     NO role but the store owner (the service) writes them: REVOKE ALL ... CASCADE takes every privilege (the default privileges
---     would give admin INSERT/UPDATE/DELETE on a table made after them), and SELECT goes back to all three. No MCP tool, web route or
+--     would give admin INSERT/UPDATE/DELETE on a table made after them), and SELECT goes back to all four. No MCP tool, web route or
 --     darling.json key can turn a switch on. The table is created by V196: on a store below it the block warns and skips, so the
 --     rest of the script still runs; re-run the script once the service has migrated the store to V196.
 DO $do$
@@ -3251,16 +3520,16 @@ BEGIN
       RETURN;
    END IF;
 
-   REVOKE ALL ON config.config_server_actions FROM PUBLIC, admin, viewer, mcp CASCADE;
-   GRANT SELECT ON config.config_server_actions TO admin, viewer;
+   REVOKE ALL ON config.config_server_actions FROM PUBLIC, admin, viewer, web, mcp CASCADE;
+   GRANT SELECT ON config.config_server_actions TO admin, viewer, web;
    GRANT SELECT ON config.config_server_actions TO mcp;
 END $do$;
 
 -- 3k. Query-tag tables (V192, #5977), mirroring managed provisioning's grants for them. mcp writes the three tables a person
 --     edits: the tags, the hand assignments and the rules. The map and the sightings are the service's (the owner writes
 --     them), so mcp holds only DELETE on the map, which remove_server runs to clear a removed server's map rows (a server_id is
---     a hash, so orphaned rows would come back when the server is re-added). viewer gets the same three writes (#5986: the web page that manages
---     query tags runs the MCP cores as viewer; the read-only seat gate decides who may call it) and DELETE on the map for server
+--     a hash, so orphaned rows would come back when the server is re-added). web gets the same three writes (#5986: the web page that manages
+--     query tags runs the MCP cores as web; the read-only seat gate decides who may call it) and DELETE on the map for server
 --     removal, and nothing else on the query-tag tables. admin (the desktop Viewer's default identity) already holds the config writes
 --     through the blanket grant of step 3. No role holds a write on the sightings in collect: like every other collect table,
 --     a removed server's sightings are left to the owner's retention pass. The identity
@@ -3282,15 +3551,19 @@ BEGIN
    GRANT INSERT, UPDATE, DELETE ON config.query_tag_assignments TO mcp;
    GRANT INSERT, UPDATE, DELETE ON config.query_tag_rules TO mcp;
    GRANT DELETE ON config.query_tag_map TO mcp;
-   GRANT INSERT, UPDATE, DELETE ON config.query_tags TO viewer;
-   GRANT INSERT, UPDATE, DELETE ON config.query_tag_assignments TO viewer;
-   GRANT INSERT, UPDATE, DELETE ON config.query_tag_rules TO viewer;
-   GRANT DELETE ON config.query_tag_map TO viewer;
+   REVOKE INSERT, UPDATE, DELETE ON config.query_tags FROM viewer;
+   GRANT INSERT, UPDATE, DELETE ON config.query_tags TO web;
+   REVOKE INSERT, UPDATE, DELETE ON config.query_tag_assignments FROM viewer;
+   GRANT INSERT, UPDATE, DELETE ON config.query_tag_assignments TO web;
+   REVOKE INSERT, UPDATE, DELETE ON config.query_tag_rules FROM viewer;
+   GRANT INSERT, UPDATE, DELETE ON config.query_tag_rules TO web;
+   REVOKE DELETE ON config.query_tag_map FROM viewer;
+   GRANT DELETE ON config.query_tag_map TO web;
 END $do$;
 
 -- 3l. Phase C tables (V193, #5997), mirroring managed provisioning's section 10f grant for grant. Only the store owner (the
 --     service) writes them. REVOKE ALL ... CASCADE (which also takes TRIGGER and REFERENCES) takes every privilege from PUBLIC
---     and the three roles, and SELECT goes back to all three: the web dashboard and the MCP tools read them. The merge table's two
+--     and the four roles, and SELECT goes back to all four: the web dashboard and the MCP tools read them. The merge table's two
 --     grants (#6006) are the first such writes. A later slice that lets a role write one adds that single grant here and in
 --     managed section 10f.
 --     The three tables are created by V193: on a store below it the block warns and skips, so the rest of the script still
@@ -3304,8 +3577,8 @@ BEGIN
       RETURN;
    END IF;
 
-   REVOKE ALL ON config.investigation_evidence, config.investigation_signature_days, config.investigation_signature_merges FROM PUBLIC, admin, viewer, mcp CASCADE;
-   GRANT SELECT ON config.investigation_evidence, config.investigation_signature_days, config.investigation_signature_merges TO admin, viewer;
+   REVOKE ALL ON config.investigation_evidence, config.investigation_signature_days, config.investigation_signature_merges FROM PUBLIC, admin, viewer, web, mcp CASCADE;
+   GRANT SELECT ON config.investigation_evidence, config.investigation_signature_days, config.investigation_signature_merges TO admin, viewer, web;
    GRANT SELECT ON config.investigation_evidence, config.investigation_signature_days, config.investigation_signature_merges TO mcp;
    -- #6006: the one write a role gets here. The gated merge tool runs as mcp and adds a merge row, naming only the columns an
    -- agent supplies (merge_id and merged_at are the table's own); a person's undo runs as admin and stamps undone_at and undone_by.
@@ -3318,7 +3591,7 @@ END $do$;
 -- 3g. The password key tables (V165, #5366): written only by the store owner (the service, its command line and the
 --     migration runner); a trigger on each table refuses every other writer. This is the grant side of the same rule,
 --     and it comes after EVERY grant above, so none of them can put a privilege back. REVOKE ALL ... CASCADE takes every
---     privilege on the four tables from PUBLIC and the three roles, TRIGGER and REFERENCES included, so no role can add
+--     privilege on the four tables from PUBLIC and the four roles, TRIGGER and REFERENCES included, so no role can add
 --     a new trigger or foreign key. A trigger or foreign key already there (made while a role held the privilege) is
 --     dropped by the loops below, with a WARNING, because it would outlast the REVOKE. Then SELECT on the key and
 --     service-state tables is granted back to admin only (the desktop Viewer reads them as admin), and the DO block
@@ -3336,14 +3609,14 @@ BEGIN
        AND pg_catalog.to_regclass('config.legacy_secret_pin') IS NOT NULL
        AND pg_catalog.to_regclass('config.legacy_secret_pin_marker') IS NOT NULL THEN
         REVOKE ALL ON config.password_key, config.password_key_service,
-           config.legacy_secret_pin, config.legacy_secret_pin_marker FROM PUBLIC, admin, viewer, mcp CASCADE;
+           config.legacy_secret_pin, config.legacy_secret_pin_marker FROM PUBLIC, admin, viewer, web, mcp CASCADE;
         GRANT SELECT ON config.password_key, config.password_key_service TO admin;
         IF pg_catalog.to_regclass('config.legacy_secret_pin_candidate') IS NOT NULL THEN
-            REVOKE ALL ON config.legacy_secret_pin_candidate FROM PUBLIC, admin, viewer, mcp CASCADE;
+            REVOKE ALL ON config.legacy_secret_pin_candidate FROM PUBLIC, admin, viewer, web, mcp CASCADE;
         END IF;
         -- V198 (#6066): the pseudonym key table. No role but the store owner reads it, so nothing is granted back.
         IF pg_catalog.to_regclass('config.pseudonym_key') IS NOT NULL THEN
-            REVOKE ALL ON config.pseudonym_key FROM PUBLIC, admin, viewer, mcp CASCADE;
+            REVOKE ALL ON config.pseudonym_key FROM PUBLIC, admin, viewer, web, mcp CASCADE;
         END IF;
 
         FOR stray IN
@@ -3373,7 +3646,7 @@ BEGIN
            CROSS JOIN LATERAL pg_catalog.aclexplode(c.relacl) AS a
            LEFT JOIN pg_catalog.pg_roles AS r ON r.oid = a.grantee
            WHERE c.oid IN (pg_catalog.to_regclass('config.password_key'), pg_catalog.to_regclass('config.password_key_service'), pg_catalog.to_regclass('config.legacy_secret_pin'), pg_catalog.to_regclass('config.legacy_secret_pin_marker'), pg_catalog.to_regclass('config.legacy_secret_pin_candidate'), pg_catalog.to_regclass('config.pseudonym_key'))
-             AND (a.grantee = 0 OR r.rolname IN ('admin', 'viewer', 'mcp'))
+             AND (a.grantee = 0 OR r.rolname IN ('admin', 'viewer', 'web', 'mcp'))
              AND NOT (COALESCE(r.rolname = 'admin', false) AND a.privilege_type = 'SELECT'
                       AND c.oid IN (pg_catalog.to_regclass('config.password_key'), pg_catalog.to_regclass('config.password_key_service')))
         ) THEN
@@ -3388,9 +3661,9 @@ $do$;
 -- 4. Default privileges so NEW tables/views (future collectors, created bare into collect via
 --    search_path) auto-inherit SELECT. FOR ROLE <owner> must name the role that creates them.
 ALTER DEFAULT PRIVILEGES FOR ROLE darling IN SCHEMA collect
-   GRANT SELECT ON TABLES TO admin, viewer;
+   GRANT SELECT ON TABLES TO admin, viewer, web;
 ALTER DEFAULT PRIVILEGES FOR ROLE darling IN SCHEMA config
-   GRANT SELECT ON TABLES TO admin, viewer;
+   GRANT SELECT ON TABLES TO admin, viewer, web;
 ALTER DEFAULT PRIVILEGES FOR ROLE darling IN SCHEMA config
    GRANT INSERT, UPDATE, DELETE ON TABLES TO admin;
 -- Sequence USAGE for admin: config_command (V17) is GENERATED ALWAYS AS IDENTITY, which needs NO
@@ -3406,11 +3679,11 @@ ALTER DEFAULT PRIVILEGES FOR ROLE darling IN SCHEMA collect
    GRANT SELECT ON TABLES TO mcp;
 
 -- 5. Public hardening: no world-writable public schema, no anonymous connect. REVOKE ALL drops
---    PUBLIC's implicit CONNECT, so the three roles are re-granted CONNECT explicitly. (Any other login
+--    PUBLIC's implicit CONNECT, so the four roles are re-granted CONNECT explicitly. (Any other login
 --    that reads this store directly needs its own GRANT CONNECT ON DATABASE darling after this.)
 REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 REVOKE ALL ON DATABASE darling FROM PUBLIC;
-GRANT CONNECT ON DATABASE darling TO admin, viewer;
+GRANT CONNECT ON DATABASE darling TO admin, viewer, web;
 GRANT CONNECT ON DATABASE darling TO mcp;
 
 -- 6. Search path. The service best-effort runs this on every start, but if your collection login
@@ -3420,7 +3693,7 @@ GRANT CONNECT ON DATABASE darling TO mcp;
 --       ALTER DATABASE darling SET search_path = collect, config, public;
 --
 -- 7. Not mirrored from managed mode, deliberately: the config.record_custom_alert_resolution function
---    (#3334) the managed batch creates for viewer and mcp. It exists for the custom-alert evaluator, which
+--    (#3334) the managed batch creates for web and mcp. It exists for the custom-alert evaluator, which
 --    runs on a managed store only; with no evaluator there is never a firing rule for a rule delete to
 --    resolve.
 
@@ -3449,8 +3722,8 @@ BEGIN
    'config.request_snapshot_now(integer, text, text)',
    'config.request_active_queries_live(integer, text)',
    'config.request_analyze_now(integer, text)',
-   'config.create_notification_route(text, boolean, integer, integer, boolean, integer, text)',
-   'config.update_notification_route(integer, text, text[], text, boolean, integer, integer, boolean, integer, text)',
+   'config.create_notification_route(text, boolean, integer, integer, boolean, integer, text, text)',
+   'config.update_notification_route(integer, text, text[], text, boolean, integer, integer, boolean, integer, text, text)',
    'config.set_notification_route_agent(integer, text, text[], integer, integer, integer, integer, integer, integer, boolean, jsonb)',
    'config.set_notification_route_destinations(integer, text, text[], text, text, text, text, text)',
    'config.request_mcp_command(text, integer, integer, text)',

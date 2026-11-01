@@ -155,7 +155,7 @@ public sealed class WebChartAtTimeBehaviourTests
     public void TheGridEachItemScrollsTo_IsAPanelOfTheTabItOpens_AndTheDeadlocksGridSitsBelowItsChart()
     {
         var js = new[] { "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js" };
-        var tabs = File.ReadAllText(PathTo(js.Concat(new[] { "pages", "server-tabs.js" }).ToArray()));
+        var tabs = RepoFile.ReadRepoFile(js.Concat(new[] { "pages", "server-tabs.js" }).ToArray());
         var charts = File.ReadAllText(PathTo(js.Concat(new[] { "charts.js" }).ToArray()));
 
         // A tab's source: from its `id: "<id>",` line to the next tab's. The first match is the SQL Server registry's.
@@ -169,17 +169,17 @@ public sealed class WebChartAtTimeBehaviourTests
 
         // The panel titles charts.js names are the grids the tabs really have: a rename would leave the scroll finding nothing.
         Assert.Contains("panel: \"Active Queries\"", charts);
-        // The Queries tab builds the grid through activeQueriesPanel (#5235), which holds the table().
+        // The Queries tab builds the grid through activeQueriesPanel (#5235), which holds the tablePanel().
         Assert.Contains("activeQueriesPanel(server, ctx)", Tab("queries"));
-        Assert.Matches(@"table\(\s*""Active Queries"",", tabs);
+        Assert.Matches(@"tablePanel\(\s*""Active Queries"",", tabs);
         var blocking = Tab("blocking");
         Assert.Contains("panel: \"Blocking\"", charts);
-        Assert.Matches(@"table\(\s*""Blocking"",", blocking);
+        Assert.Matches(@"tablePanel\(\s*""Blocking"",", blocking);
         Assert.Contains("panel: \"Deadlocks\"", charts);
         // The Blocking tab's chart is "Deadlock trend" (#5644 W16), so the scroll to "Deadlocks" finds the grid; it still sits below its chart.
-        var chart = blocking.IndexOf("line(\"Deadlock trend\",", StringComparison.Ordinal);
-        var grid = Regex.Match(blocking, @"table\(\s*""Deadlocks"",");
-        Assert.DoesNotContain("line(\"Deadlocks\",", blocking, StringComparison.Ordinal);
+        var chart = blocking.IndexOf("linePanel(\"Deadlock trend\",", StringComparison.Ordinal);
+        var grid = Regex.Match(blocking, @"tablePanel\(\s*""Deadlocks"",");
+        Assert.DoesNotContain("linePanel(\"Deadlocks\",", blocking, StringComparison.Ordinal);
         Assert.True(chart >= 0 && grid.Success && grid.Index > chart, "the Deadlocks grid must come after the Deadlock trend chart on the Blocking tab");
     }
 
@@ -270,7 +270,7 @@ public sealed class WebChartAtTimeBehaviourTests
     [Fact]
     public void EveryServerTabLineChartHandsItsServerOver_AndNoFinOpsOrCustomViewChartDoes()
     {
-        var tabs = File.ReadAllText(PathTo("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js"));
+        var tabs = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js");
         var calls = Regex.Matches(tabs, @"zoomableLineChart\(\{");
         Assert.NotEmpty(calls);
         var handed = Regex.Matches(tabs, @"zoomableLineChart\(\{\s*atTime: \{ server(, item: ""wait"")? \},");
@@ -322,10 +322,10 @@ public sealed class WebChartAtTimeBehaviourTests
     [Fact]
     public void LineAndFanout_HandTheServerAndTheChartsItemOver_UnlessAPanelOptsOut()
     {
-        // Most server-tab charts reach the menu through these two: line() (CPU, Memory, Blocking Events, Deadlocks, Lock Waits,
+        // Most server-tab charts reach the menu through these two: linePanel() (CPU, Memory, Blocking Events, Deadlocks, Lock Waits,
         // tempdb) and fanout() (Current Waits, Blocking and Deadlock Severity, Query Duration, System Health). The nine direct
         // zoomableLineChart calls are counted above; without this, deleting either hand-off passes every other case.
-        var tabs = File.ReadAllText(PathTo("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js"));
+        var tabs = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js");
         Assert.Single(Regex.Matches(tabs, @"atTime: opts\.atTime === false \|\| !params \|\| !params\.server \? null : \{ server: params\.server, item: opts\.atTimeItem \|\| ""queries"" \}"));
         Assert.Single(Regex.Matches(tabs, @"atTime: spec\.atTime === false \|\| !params \|\| !params\.server \? null : \{ server: params\.server, item: spec\.atTimeItem \|\| ""queries"" \}"));
     }
@@ -335,12 +335,12 @@ public sealed class WebChartAtTimeBehaviourTests
     {
         // The items open the SQL Server Queries and Blocking tabs. The PostgreSQL page has neither, so its one line chart (the
         // Amazon Aurora CPU panel) passes atTime: false, and no PostgreSQL fanout draws a line.
-        var tabs = File.ReadAllText(PathTo("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js"));
+        var tabs = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js");
         var pgStart = tabs.IndexOf("export const POSTGRES_TABS = [", StringComparison.Ordinal);
         Assert.True(pgStart > 0, "the PostgreSQL tab registry moved");
         var pg = tabs[pgStart..tabs.IndexOf("\n];", pgStart, StringComparison.Ordinal)];
-        var calls = Regex.Matches(pg, @"(?<![\w.])line\(");
-        Assert.True(calls.Count > 0, "the PostgreSQL registry draws no line() chart any more, so this pin has nothing to check");
+        var calls = Regex.Matches(pg, @"(?<![\w.])linePanel\(");
+        Assert.True(calls.Count > 0, "the PostgreSQL registry draws no linePanel() chart any more, so this pin has nothing to check");
         foreach (Match call in calls)
             Assert.Contains("atTime: false,", Balanced(pg, call.Index + "line".Length));
         Assert.DoesNotContain("viz: \"line\"", pg);
@@ -351,13 +351,13 @@ public sealed class WebChartAtTimeBehaviourTests
     {
         // The desktop gives Blocking Events, Lock Waits and the blocking severity chart "Show Blocking at This Time", and the
         // deadlock charts "Show Deadlocks at This Time". Every other server-tab line chart keeps the Active Queries default.
-        var tabs = File.ReadAllText(PathTo("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js"));
+        var tabs = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js");
 
-        // line() panels: Blocking Events sits on the Blocking tab only (the Overview strips replaced its copy, #6291); the deadlock chart is "Deadlock trend" on the Blocking tab (it was "Deadlocks" on Overview and
+        // linePanel() panels: Blocking Events sits on the Blocking tab only (the Overview strips replaced its copy, #6291); the deadlock chart is "Deadlock trend" on the Blocking tab (it was "Deadlocks" on Overview and
         // (#5644 W16 named it "Deadlock trend" so the Deadlocks grid below it is the only panel with that title; #6291 took the Overview copies out for the strips.)
         foreach (var (title, item, count) in new[] { ("Blocked process report trend", "blocking", 1), ("Deadlocks", "deadlocks", 0), ("Deadlock trend", "deadlocks", 1), ("Lock Waits", "blocking", 1) })
         {
-            var calls = Regex.Matches(tabs, @"line\(""" + title + @""",");
+            var calls = Regex.Matches(tabs, @"linePanel\(""" + title + @""",");
             Assert.Equal(count, calls.Count);
             foreach (Match call in calls)
                 Assert.Contains($"atTimeItem: \"{item}\",", Balanced(tabs, call.Index + "line".Length));

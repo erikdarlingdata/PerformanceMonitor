@@ -12,6 +12,7 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
@@ -82,6 +83,7 @@ public sealed class DarlingMcpPgWraparoundTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to analyze, used for the peak comparison. Default 24.")] int hours_back = 24,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorForAnswerAsync(postgres, server_name, cancellationToken);
@@ -102,15 +104,25 @@ public sealed class DarlingMcpPgWraparoundTools
                    every engine the store can classify (#2532). What is left is a PostgreSQL target that has
                    not collected yet, or a row whose engine_kind is NULL — naming "the server is SQL Server"
                    here would repeat a branch that can no longer reach this line. */
-                return await DarlingEngineCapability.NotCollectedStatusAsync(
-                    postgres, resolved.ServerId, resolved.DisplayName, "pg_wraparound_stats", cancellationToken)
-                    ?? await DarlingServerOfflineNote.UnavailableAsync(
+                var notCollected = await DarlingEngineCapability.NotCollectedStatusAsync(
+                    postgres, resolved.ServerId, resolved.DisplayName, "pg_wraparound_stats", cancellationToken);
+                if (notCollected != null)
+                {
+                    return notCollected;
+                }
+
+                /* #7010: this table gets a row per database every collection, so nothing in the window is the store not reaching it
+                   (or the collector not having run), never a quiet window: the window floor rides under hints so the answer says which
+                   part of the window the store holds. */
+                var emptyNotice = await DarlingMcpWindowNotice.ReadForToolAsync(
+                    postgres, "get_pg_wraparound_risk", resolved.ServerName, now.AddHours(-hours_back), now, emptyAnswer: true, logger, cancellationToken);
+                return await DarlingServerOfflineNote.UnavailableAsync(
                         postgres, resolved.ServerId, resolved.DisplayName,
                         /* W6 (release walk): said in plain words, offline first. An offline server collects nothing, so an
                            empty window is the likeliest reason; the store-internal engine wording is gone. */
                         "No PostgreSQL freeze-headroom data for this server and window. If the server is offline, "
                         + "nothing is being collected from it. Otherwise this collector has not run on it yet, or the "
-                        + "store has not yet learned that it is a PostgreSQL server. Check list_servers.", cancellationToken);
+                        + "store has not yet learned that it is a PostgreSQL server. Check list_servers.", emptyNotice.AsHints(), cancellationToken);
             }
 
             var databases = rows
@@ -146,10 +158,18 @@ public sealed class DarlingMcpPgWraparoundTools
 
             var worst = databases[0];
 
-            return JsonSerializer.Serialize(new
+            /* #7010: window_peak_frozen_xid_age and freezing_is_keeping_up are read over the window, so the answer names where the
+               store's coverage of it starts. The table gets a row per database every collection, so the table's own start is the probe. */
+            var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
+                postgres, "get_pg_wraparound_risk", resolved.ServerName, now.AddHours(-hours_back), now, emptyAnswer: false, logger, cancellationToken);
+            return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
                 hours_back,
+                /* #7010: the window floor, right after hours_back. */
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 /* Fleet-triage summary first: the worst database is the server's real state, since one
                    database hitting the wall stops writes for the whole instance. */
                 worst_database = worst.database_name,
@@ -163,7 +183,7 @@ public sealed class DarlingMcpPgWraparoundTools
                     writes_stop_at_pct = 99.86,
                 },
                 databases,
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions), notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

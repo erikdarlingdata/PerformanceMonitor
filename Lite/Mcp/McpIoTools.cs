@@ -140,16 +140,20 @@ public sealed class McpIoTools
                 /* A scoped read that found nothing is first a question about the NAME — Darling's twin's rule. */
                 if (scope is not null && everCollected)
                 {
-                    return McpHelpers.StatusForDatabase("empty", TrendPayloads.FileIoScopeEmptyMessage(resolved.DisplayName, scope, hours_back), scope);
+                    /* #7005: the window notice rides every empty answer below. */
+                    return await McpQueryTools.WithEmptyWindowNoticeAsync(
+                        McpHelpers.StatusForDatabase("empty", TrendPayloads.FileIoScopeEmptyMessage(resolved.DisplayName, scope, hours_back), scope),
+                        dataService, QueryWindowRelation.FileIoStats, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, "file_io_stats");
                 }
 
-                return everCollected
+                return await McpQueryTools.WithEmptyWindowNoticeAsync(everCollected
                     ? McpHelpers.StatusForDatabase(
                         "empty",
                         $"No file I/O samples recorded for {resolved.DisplayName} in the last {hours_back} hour(s). This server HAS collected file I/O stats before, so this window is genuinely quiet rather than broken — widen hours_back, or read it as no measurable read or write activity on any file in this window.", scope)
                     : McpHelpers.StatusForDatabase(
                         "unavailable",
-                        $"No file I/O stats have EVER been recorded for {resolved.DisplayName}. This is not an empty window — the file_io_stats collector has stored nothing at all for this server. Check that collection is running and that the server is enabled; get_file_io_stats will be equally empty until it does.", scope);
+                        $"No file I/O stats have EVER been recorded for {resolved.DisplayName}. This is not an empty window — the file_io_stats collector has stored nothing at all for this server. Check that collection is running and that the server is enabled; get_file_io_stats will be equally empty until it does.", scope),
+                    dataService, QueryWindowRelation.FileIoStats, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, "file_io_stats");
             }
 
             var budget = TrendBudget.Mcp(TrendBuckets.FileIoMaxPoints);
@@ -162,9 +166,10 @@ public sealed class McpIoTools
             var discontinuities = await dataService.GetBaselineDiscontinuitiesAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
 
             /* One builder for both SKUs' envelope (TrendPayloads), so the keys and sentences cannot drift. */
-            return TrendPayloads.FileIoTrend(
+            return await McpQueryTools.WithDataWindowNoticeAsync(TrendPayloads.FileIoTrend(
                 resolved.DisplayName, hours_back, scope, series, points, bucketMinutes, bucket_minutes is not null,
-                budget.AutoPoints, BaselineDiscontinuities.ToPayload(discontinuities));
+                budget.AutoPoints, BaselineDiscontinuities.ToPayload(discontinuities)),
+                dataService, QueryWindowRelation.FileIoStats, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, "file_io_stats");
         }
         catch (Exception ex)
         {

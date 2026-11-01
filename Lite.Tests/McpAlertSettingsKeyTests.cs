@@ -181,6 +181,9 @@ public sealed class McpAlertSettingsKeyTests
     /// <summary>#6875: the Identity Capacity alert is Darling-only (the collector behind it has no Lite twin), so Lite reports no such group.</summary>
     private const string IdentityCapacityGroup = "identity_capacity";
 
+    /// <summary>#7041: the Daily Health Report is Darling-only (Lite has no report scheduler or report builder), so Lite reports no such group.</summary>
+    private const string DailyReportGroup = "daily_report";
+
     /// <summary>#3368: the other group Darling reports and Lite does not. The health-band tiers decide what
     /// colour a server's card reads and how the worst-first ranking and <c>get_fleet_overview</c> count bands
     /// — and Lite has NO health band at all: it never constructs <c>ServerHealthMetrics</c>, never calls
@@ -349,7 +352,7 @@ public sealed class McpAlertSettingsKeyTests
         foreach (var (group, darlingKeys) in darling)
         {
             if (group == SelfAlertsGroup || group == HealthBandsGroup || group == FleetSweepGroup || group == AgentAlertGapsGroup
-                || DatabaseProtectionGroups.Contains(group, StringComparer.Ordinal) || group == IdentityCapacityGroup) continue;
+                || DatabaseProtectionGroups.Contains(group, StringComparer.Ordinal) || group == IdentityCapacityGroup || group == DailyReportGroup) continue;
 
             if (!root.TryGetProperty(group, out var element))
             {

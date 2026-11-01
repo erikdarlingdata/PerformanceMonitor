@@ -219,6 +219,84 @@ public sealed class AttentionAlertTests
         Assert.DoesNotContain("IntelliSense", finding.Summary, StringComparison.Ordinal);
     }
 
+    /* ---------------- #7061: the duration floor and Azure Data Studio's metadata statements ---------------- */
+
+    private static AttentionWindow GroupsWindow(long exactCount, params AttentionSampleGroup[] groups)
+    {
+        var runs = Runs(T0.AddSeconds(-5), 6);
+        return Window(runs, new[] { Count(runs[0], exactCount) }, groups.Select(g => g with { CollectionTime = runs[0].AddSeconds(2) }));
+    }
+
+    [Fact]
+    public void EventsUnderOneMillisecond_AreLeftOutOfTheJudgedRate_AndTheFireIsRecordedMuted()
+    {
+        /* 540 over 3 minutes = 180 per minute exact. 998 of 1000 sampled events lasted 20 to 40 us (a cancel on a command that had finished), 2 are real: 540 x 2/1000 = 1.08 judged, under the bar. */
+        var window = GroupsWindow(540,
+            new AttentionSampleGroup(T0, "sales", "Core Microsoft SqlClient Data Provider", 998, ShortSamples: 998),
+            new AttentionSampleGroup(T0, "sales", "web", 2));
+        var finding = AttentionEvaluator.Evaluate(AttentionEvaluator.Read(window, T0), 10, 60);
+
+        Assert.NotNull(finding);
+        Assert.True(finding!.Muted);
+        Assert.Equal(180.0, finding.RatePerMinute);
+        Assert.Equal(998, finding.ShortSamples);
+        Assert.Equal(1.08, finding.JudgedCount, 2);
+        Assert.Contains("998 of the 1,000 sampled events lasted under 1 ms", finding.Summary, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ARealTimeoutNearThirtySeconds_StillCounts()
+    {
+        /* The sample groups carry no short events: a statement that ran 30 s before the client gave up is judged in full. */
+        var window = GroupsWindow(540, new AttentionSampleGroup(T0, "sales", "web", 40));
+        var finding = AttentionEvaluator.Evaluate(AttentionEvaluator.Read(window, T0), 10, 60);
+
+        Assert.NotNull(finding);
+        Assert.False(finding!.Muted);
+        Assert.False(finding.Estimated);
+        Assert.Equal(180.0, finding.RatePerMinute);
+        Assert.Equal(0, finding.ShortSamples);
+        Assert.DoesNotContain("under 1 ms", finding.Summary, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ShortEventsFromAnExcludedApp_AreNotCountedTwice()
+    {
+        /* 100 IntelliSense samples, all of them also short, and 100 real ones: the short share is read only from applications not already left out by name. */
+        var window = GroupsWindow(600,
+            new AttentionSampleGroup(T0, "master", AttentionEvaluator.IntelliSenseClientApp, 100, ShortSamples: 100),
+            new AttentionSampleGroup(T0, "sales", "web", 100));
+        var finding = AttentionEvaluator.Evaluate(AttentionEvaluator.Read(window, T0), 10, 60);
+
+        Assert.NotNull(finding);
+        Assert.Equal(100, finding!.ExcludedSamples);
+        Assert.Equal(0, finding.ShortSamples);
+        Assert.Equal(300, finding.JudgedCount, 3);
+    }
+
+    [Fact]
+    public void AzdataMetadataCancels_AreLeftOut_ButItsQueryEditorTimeoutsStillCount()
+    {
+        /* 540 over 3 minutes. 120 azdata metadata statements are left out by shape, 60 azdata statements that are not SMO metadata (the query editor) stay: 540 x 60/180 = 180 judged = 60 per minute. */
+        var window = GroupsWindow(540,
+            new AttentionSampleGroup(T0, "master", "azdata", 150, AzdataMetadataSamples: 120),
+            new AttentionSampleGroup(T0, "sales", "azdata", 30));
+        var finding = AttentionEvaluator.Evaluate(AttentionEvaluator.Read(window, T0), 10, 60);
+
+        Assert.NotNull(finding);
+        Assert.False(finding!.Muted);
+        Assert.Equal(120, finding.AzdataMetadataSamples);
+        Assert.Equal(540 * 60d / 180, finding.JudgedCount, 3);
+        Assert.Contains("120 of the 180 sampled events were Azure Data Studio metadata queries", finding.Summary, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AzdataItself_IsNotAnExcludedApp_BecauseItsQueryEditorUsesTheSameName()
+    {
+        Assert.False(AttentionEvaluator.IsExcludedApp("azdata"));
+        Assert.False(AttentionEvaluator.IsExcludedApp("azdata-Query"));
+    }
+
     [Fact]
     public void GetClientTimeouts_StillShowsTheIntelliSenseEvents_MarkedExcluded()
     {

@@ -57,25 +57,31 @@ public sealed partial class DarlingMcpFinOpsTools
                 return gated;
             }
 
-            return McpHelpers.Status("empty",
-                    $"No query statistics or file I/O were collected for this server in the last {hoursBack} hours, so there is no per-database usage to show.");
+            /* #7010: the window-floor notice of the two tables the view windows (the not_collected answer above stays bare). */
+            var noRows = await ViewWindowNoticeAsync(postgres, resolved.ServerName, hoursBack, ["query_stats", "file_io_stats"], "query_stats and file_io_stats", true, ct);
+            return DarlingMcpWindowNotice.FinishEmpty(McpHelpers.Status("empty",
+                    $"No query statistics or file I/O were collected for this server in the last {hoursBack} hours, so there is no per-database usage to show.", noRows.AsHints()), noRows);
         }
 
         var ordered = OrderDatabaseRows(rows);
         var (byTotal, byAvg) = await DarlingFinOpsDatabaseResourcesReader.GetTopResourceConsumersAsync(
             postgres, resolved.ServerId, rollups, coverage, cutoff, McpCommandDeadlines.ReadSeconds, limit, ct);
 
-        return JsonSerializer.Serialize(new
+        var notice = await ViewWindowNoticeAsync(postgres, resolved.ServerName, hoursBack, ["query_stats", "file_io_stats"], "query_stats and file_io_stats", false, ct);
+        return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new
         {
             server = resolved.DisplayName,
             view = DatabaseResourcesView,
             hours_back = hoursBack,
+            effective_start = notice.EffectiveStart,
+            window_truncated = notice.WindowTruncated,
+            truncation_note = notice.TruncationNote,
             database_count = ordered.Count,
             truncated = ordered.Count > MaxDatabaseRows,
             rows = ordered.Take(MaxDatabaseRows).Select(DatabaseResourcesRow).ToList(),
             top_by_total = byTotal.Select(TopByTotalRow).ToList(),
             top_by_avg = byAvg.Select(TopByAvgRow).ToList(),
-        }, McpHelpers.JsonOptions);
+        }, McpHelpers.JsonOptions), notice);
     }
 
     /// <summary>One database-resources row in the wire shape: snake_case keys, no cost fields.</summary>

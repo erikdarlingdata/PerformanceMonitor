@@ -414,9 +414,9 @@ public sealed class WaitsDatabaseFilterLiveTests
 
             /* N1: get_blocking_trend's own JSON, by exact tag for both filters, so a trend tool that hard-codes one source fails here
                even though the readers above are right. */
-            var trendJsonA = JsonDocument.Parse(await DarlingMcpBlockingTools.GetBlockingTrend(postgres, MixedServerName, 1, seed.End.ToString("o"), DatabaseFilter.Of([DbA]), ct)).RootElement;
+            var trendJsonA = JsonDocument.Parse(await DarlingMcpBlockingTools.GetBlockingTrend(postgres, MixedServerName, 1, seed.End.ToString("o"), DatabaseFilter.Of([DbA]), cancellationToken: ct)).RootElement;
             Assert.Equal("DMV snapshot", trendJsonA.GetProperty("source").GetString());
-            var trendJsonAb = JsonDocument.Parse(await DarlingMcpBlockingTools.GetBlockingTrend(postgres, MixedServerName, 1, seed.End.ToString("o"), DatabaseFilter.Of([DbA, DbB]), ct)).RootElement;
+            var trendJsonAb = JsonDocument.Parse(await DarlingMcpBlockingTools.GetBlockingTrend(postgres, MixedServerName, 1, seed.End.ToString("o"), DatabaseFilter.Of([DbA, DbB]), cancellationToken: ct)).RootElement;
             Assert.Equal("blocked-process-report", trendJsonAb.GetProperty("source").GetString());
 
             var b = await AskAsync(DatabaseFilter.One(DbB));

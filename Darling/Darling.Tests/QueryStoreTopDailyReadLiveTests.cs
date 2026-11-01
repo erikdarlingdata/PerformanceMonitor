@@ -525,7 +525,12 @@ FROM generate_series(0, 9) AS i", ct);
             {
                 Assert.False(module.GetProperty("hints").TryGetProperty("approximate", out _));
                 Assert.False(module.GetProperty("hints").TryGetProperty("approximation_note", out _));
-                Assert.False(outcome.TryGetProperty("hints", out _));
+                /* #7010: the empty answer carries the window notice under hints, but not the approximation flag. */
+                if (outcome.TryGetProperty("hints", out var outcomeHints))
+                {
+                    Assert.False(outcomeHints.TryGetProperty("approximate", out _));
+                    Assert.False(outcomeHints.TryGetProperty("approximation_note", out _));
+                }
             }
             await Task.CompletedTask;
         });

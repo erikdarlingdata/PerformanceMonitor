@@ -516,6 +516,8 @@ public sealed class NotificationRoutingTests
             AgAlertPolicy.SyncFellBehindMetric, AgAlertPolicy.DatabaseSuspendedMetric,
             DarlingSelfAlertEvaluator.CollectorCostDigestMetric, DarlingSelfAlertEvaluator.FleetSweepRollupMetric,
             DarlingSelfAlertEvaluator.AnalysisSinglesDigestMetric,
+            /* #7041: the scheduled Daily Health Report, fired through the constant. */
+            DarlingSelfAlertEvaluator.DailyHealthReportMetric,
             DarlingSelfAlertEvaluator.DiskPressureMetric, DarlingSelfAlertEvaluator.CustomRuleHealthMetric,
             DarlingSelfAlertEvaluator.StaleMuteMetric, DarlingSelfAlertEvaluator.WebTlsCertExpiryMetric,
             /* #5288: the MCP endpoint's twin of the web certificate alert, fired through the descriptor's

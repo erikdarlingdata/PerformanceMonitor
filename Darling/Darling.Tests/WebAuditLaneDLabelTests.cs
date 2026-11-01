@@ -45,7 +45,7 @@ public sealed class WebAuditLaneDLabelTests
     public void W16_TheDeadlockTrendChartAndTheDeadlocksTableAreNamedApartAndEmptyTheSameWay()
     {
         var tabs = Js("pages", "server-tabs.js");
-        Assert.Contains("line(\"Deadlock trend\", \"get_deadlock_trend\", { server, hours: ctx.hours }, \"trend\", \"time\", COUNT_SERIES, {\n        subtitle: ctx.label,\n        format: \"int\",\n        atTimeItem: \"deadlocks\",\n        emptyText: DEADLOCKS_EMPTY_TEXT,", tabs, StringComparison.Ordinal);
+        Assert.Contains("linePanel(\"Deadlock trend\", \"get_deadlock_trend\", { server, hours: ctx.hours }, \"trend\", \"time\", COUNT_SERIES, {\n        subtitle: ctx.label,\n        format: \"int\",\n        atTimeItem: \"deadlocks\",\n        emptyText: DEADLOCKS_EMPTY_TEXT,", tabs, StringComparison.Ordinal);
         Assert.Contains("const DEADLOCKS_EMPTY_TEXT = \"No deadlocks in this window.\";", tabs, StringComparison.Ordinal);
         Assert.DoesNotContain("an empty trend here means none happened", tabs, StringComparison.Ordinal);
     }

@@ -362,7 +362,7 @@ public sealed class WebDataStartNoteTests
     }
 
     /// <summary>
-    /// #4966: the query heatmap and the Query Store regressions panels are grids (<c>table()</c> descriptors, no
+    /// #4966: the query heatmap and the Query Store regressions panels are grids (<c>tablePanel()</c> descriptors, no
     /// <c>noteKey</c>) and neither read is in <see cref="WebDataStartNote.TableByRead"/>, so the page draws the tool's own
     /// <c>truncation_note</c> above each, through <c>windowFloorStrip</c>, when the answer says <c>window_truncated: true</c>.
     /// It is the MCP sentence as sent: it names no instant (the regressions tail says "effective_start" and "baseline_end"
@@ -389,8 +389,8 @@ public sealed class WebDataStartNoteTests
         }
         else
         {
-            var open = tabs.IndexOf("table(\n        \"" + title + "\",\n        \"" + read + "\",", StringComparison.Ordinal);
-            Assert.True(open >= 0, read + " is no longer a table() panel on a server tab");
+            var open = tabs.IndexOf("tablePanel(\n        \"" + title + "\",\n        \"" + read + "\",", StringComparison.Ordinal);
+            Assert.True(open >= 0, read + " is no longer a tablePanel() panel on a server tab");
             call = tabs[open..tabs.IndexOf("\n      ),", open, StringComparison.Ordinal)];
         }
         Assert.DoesNotContain("truncation_note", call, StringComparison.Ordinal);
@@ -712,7 +712,7 @@ public sealed class WebDataStartNoteTests
 
     /// <summary>The same decision in the source text, so it holds without Node: none of the eleven PostgreSQL window reads
     /// opts a panel out of the note, because each one shows the window's own figures. The check reads only the spec block of
-    /// each listed read (its <c>fanout(</c> or <c>table(</c> call), so another PostgreSQL panel can opt out on its own.</summary>
+    /// each listed read (its <c>fanout(</c> or <c>tablePanel(</c> call), so another PostgreSQL panel can opt out on its own.</summary>
     [Fact]
     public void NoPostgresWindowPanel_OptsOutOfTheNote()
     {
@@ -730,7 +730,7 @@ public sealed class WebDataStartNoteTests
             Assert.Equal(at, postgres.LastIndexOf("\"" + read + "\"", StringComparison.Ordinal));
 
             /* The block: from the line naming the read to the first later line indented six spaces or fewer, the close of the
-               call (a fanout( opens at six, its panels sit deeper; a table( opens at six and names its read at eight). */
+               call (a fanout( opens at six, its panels sit deeper; a tablePanel( opens at six and names its read at eight). */
             var lines = postgres[at..].Split('\n');
             var block = new List<string> { lines[0] };
             foreach (var line in lines.Skip(1))

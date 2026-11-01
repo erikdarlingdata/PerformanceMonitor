@@ -35,12 +35,17 @@ public sealed class McpTempDbTools
             var points = await dataService.GetTempDbBucketsAsync(resolved.ServerId, hours_back, windowEnd, bucketMinutes);
             if (points.Count == 0)
             {
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "tempdb_stats", awsRdsKind: AwsRdsKind.None)
-                    ?? await McpRuntimePrecondition.StatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "tempdb_stats")
-                    ?? McpHelpers.Status("unavailable", "No TempDB data available.");
+                /* #7005: the window notice (an empty answer only; not_collected and precondition say their own cause). */
+                return await McpQueryTools.WithEmptyWindowNoticeAsync(
+                    await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "tempdb_stats", awsRdsKind: AwsRdsKind.None)
+                        ?? await McpRuntimePrecondition.StatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "tempdb_stats")
+                        ?? McpHelpers.Status("unavailable", "No TempDB data available."),
+                    dataService, QueryWindowRelation.TempDbStats, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, "tempdb_stats");
             }
 
-            return TrendPayloads.TempDbTrend(resolved.DisplayName, hours_back, points, bucketMinutes, bucket_minutes is not null, budget.AutoPoints);
+            return await McpQueryTools.WithDataWindowNoticeAsync(
+                TrendPayloads.TempDbTrend(resolved.DisplayName, hours_back, points, bucketMinutes, bucket_minutes is not null, budget.AutoPoints),
+                dataService, QueryWindowRelation.TempDbStats, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, "tempdb_stats");
         }
         catch (Exception ex)
         {

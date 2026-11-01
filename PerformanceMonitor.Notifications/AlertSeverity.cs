@@ -152,6 +152,8 @@ internal static class AlertSeverity
                once-a-day copy of findings that were kept OFF the paging channels must not itself render as a
                page; the declaration keeps the next fall-through sweep from promoting it. */
             "Analysis Singles Digest" => ("#2eaef1", "INFO", "\U0001F535"),
+            /* #7041: the Daily Health Report is the fourth deliberate INFO arm, for the same reason as the digests above. */
+            "Daily Health Report" => ("#2eaef1", "INFO", "\U0001F535"),
             /* #3783: the store's two physical-health conditions are INFO by design, and the first CONDITIONS
                (entered and left, with a resolution row) rather than reports to take the tier. A dimension's
                TOAST file holding slack is disk the maintainer may reclaim in a maintenance window with a verb

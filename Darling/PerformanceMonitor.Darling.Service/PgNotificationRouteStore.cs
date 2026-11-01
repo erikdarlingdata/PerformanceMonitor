@@ -92,6 +92,9 @@ public sealed class PgNotificationRouteStore
         /// <summary>The severity filter (V229, #6928): both, critical or warning.</summary>
         public string Severities { get; init; } = NotificationRouteKinds.SeveritiesBoth;
 
+        /// <summary>Whether the route posts a chat notice when an agent files a report (V233, #6979): off, needs_person_or_change or all.</summary>
+        public string ReportNotice { get; init; } = NotificationRouteKinds.ReportNoticeOff;
+
         /// <summary>The fallback route's name (its <c>metric_match</c>), or null when there is no fallback.</summary>
         public string? FallbackRouteName { get; init; }
 
@@ -106,7 +109,7 @@ public sealed class PgNotificationRouteStore
     /// the one a superuser-run test never notices.</summary>
     public const string SelectSummariesSql = @"
 SELECT route_id, metric_match, configured_channels, smtp_recipients, enabled, modified_at, scope_server_id, scope_tag_id,
-       agent_level, agent_max_per_hour, agent_max_per_day, agent_lease_minutes, agent_expiry_minutes, send_resolutions, fallback_route_id, severities
+       agent_level, agent_max_per_hour, agent_max_per_day, agent_lease_minutes, agent_expiry_minutes, send_resolutions, fallback_route_id, severities, report_notice
 FROM config_notification_routes
 ORDER BY route_id";
 
@@ -174,6 +177,7 @@ UPDATE config_notification_routes
                 SendResolutions = reader.IsDBNull(13) ? null : reader.GetBoolean(13),
                 FallbackRouteId = reader.IsDBNull(14) ? null : reader.GetInt32(14),
                 Severities = NotificationRouteKinds.NormalizeSeverities(reader.GetString(15)),
+                ReportNotice = NotificationRouteKinds.NormalizeReportNotice(reader.GetString(16)),
             });
         }
 

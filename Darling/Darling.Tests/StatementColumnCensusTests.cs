@@ -725,7 +725,7 @@ public sealed class StatementColumnCensusTests
     private static string? ReadSiteFile(string relative)
     {
         var path = RepoFile.PathTo(relative);
-        return File.Exists(path) ? File.ReadAllText(path) : null;
+        return File.Exists(path) ? RepoFile.ReadRepoFile(relative) : null;
     }
 
     [Fact]

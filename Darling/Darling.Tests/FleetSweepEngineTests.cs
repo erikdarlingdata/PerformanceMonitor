@@ -580,7 +580,7 @@ public sealed class FleetSweepEngineTests
             .WouldHavePaged.Single(w => w.AlertFamily == FleetSweepEngine.FamilyBlocking);
         using (var evidence = JsonDocument.Parse(rateRow.EvidenceJson))
         {
-            Assert.Equal("blocking events per hour over the sweep span", evidence.RootElement.GetProperty("trigger").GetString());
+            Assert.Equal("blocking waits per hour over the sweep span", evidence.RootElement.GetProperty("trigger").GetString());
             Assert.Equal(20.0, evidence.RootElement.GetProperty("value").GetDouble());
             Assert.Equal(ServerHealthThresholds.BlockingCriticalPerHour, evidence.RootElement.GetProperty("threshold").GetDouble());
             Assert.Equal(20, evidence.RootElement.GetProperty("blocking_count").GetInt64());
@@ -614,35 +614,62 @@ public sealed class FleetSweepEngineTests
     }
 
     /// <summary>
-    /// #5644 review: the blocking family bands on the span's blocked-process REPORT count (the unit its 20/hr tier was
-    /// measured in), while the evidence's <c>blocking_count</c> stays the count of WAITS. One long wait written as 20
-    /// reports in an hour pages as it did before waits were counted; the same wait with no report count, as 1 event,
-    /// does not.
+    /// #7028: the blocking family bands on the span's blocking WAITS, the unit the blocking alerts count, and the
+    /// evidence's <c>blocking_count</c> is that same count. Twenty waits in an hour page on the shipped 20 per hour tier.
+    /// One wait does not, however many report rows SQL Server wrote for it.
     /// </summary>
     [Fact]
-    public void TheBlockingFamily_BandsOnReports_AndShowsWaits()
+    public void TheBlockingFamily_BandsOnWaits()
     {
-        var oneLongWait = new FleetSweepServerReading(1, "server-a", new DailyHealthSignals
+        var twentyWaits = new FleetSweepServerReading(1, "server-a", new DailyHealthSignals
         {
             HasData = true,
-            BlockingEvents = 1,
-            BlockingReports = 20,
+            BlockingEvents = 20,
             Window = FixtureSpan,
         }, 0, null);
-        var row = ComposeSimple(new[] { oneLongWait }, alertsEnabled: false)
+        var row = ComposeSimple(new[] { twentyWaits }, alertsEnabled: false)
             .WouldHavePaged.Single(w => w.AlertFamily == FleetSweepEngine.FamilyBlocking);
         using var evidence = JsonDocument.Parse(row.EvidenceJson);
-        Assert.Equal("blocked-process reports per hour over the sweep span", evidence.RootElement.GetProperty("trigger").GetString());
+        Assert.Equal("blocking waits per hour over the sweep span", evidence.RootElement.GetProperty("trigger").GetString());
         Assert.Equal(20.0, evidence.RootElement.GetProperty("value").GetDouble());
-        Assert.Equal(1, evidence.RootElement.GetProperty("blocking_count").GetInt64());
+        Assert.Equal(20, evidence.RootElement.GetProperty("blocking_count").GetInt64());
 
-        var withoutReports = new FleetSweepServerReading(1, "server-a", new DailyHealthSignals
+        var oneWait = new FleetSweepServerReading(1, "server-a", new DailyHealthSignals
         {
             HasData = true,
             BlockingEvents = 1,
             Window = FixtureSpan,
         }, 0, null);
-        Assert.Empty(ComposeSimple(new[] { withoutReports }, alertsEnabled: false).WouldHavePaged);
+        Assert.Empty(ComposeSimple(new[] { oneWait }, alertsEnabled: false).WouldHavePaged);
+    }
+
+    /// <summary>
+    /// #7028: the snapshot arm (the Blocking Wait Time alert's measure) pages the blocking family when its Critical tier is
+    /// set and the span's peak snapshot value is at it, and names itself in the evidence. With the arm off (the default,
+    /// 0) the same peak pages nothing.
+    /// </summary>
+    [Fact]
+    public void TheBlockingFamily_BandsOnTheSnapshotArm_OnlyWhenItsTierIsSet()
+    {
+        var reading = new FleetSweepServerReading(1, "server-a", new DailyHealthSignals
+        {
+            HasData = true,
+            BlockingEvents = 1,
+            PeakSnapshotWaitMs = 200_000,
+            Window = FixtureSpan,
+        }, 0, null);
+
+        Assert.Empty(ComposeSimple(new[] { reading }, alertsEnabled: false).WouldHavePaged);
+
+        var tiers = new BlockingBandThresholds(5, 20, 30, 60, WarnSnapshotWaitSecondsRaw: 90, CriticalSnapshotWaitSecondsRaw: 180);
+        var composition = FleetSweepEngine.Compose(
+            Now, Now.AddHours(-1), false, 1, new[] { reading }, null, Array.Empty<FleetSweepServerVerdict>(),
+            Array.Empty<FleetSweepWatchItem>(), SteadyInstruments(), DeadlockRateThresholds.Default, blockingBandTiers: tiers);
+        var row = composition.WouldHavePaged.Single(w => w.AlertFamily == FleetSweepEngine.FamilyBlocking);
+        using var evidence = JsonDocument.Parse(row.EvidenceJson);
+        Assert.Contains("DMV snapshot", evidence.RootElement.GetProperty("trigger").GetString());
+        Assert.Equal(200.0, evidence.RootElement.GetProperty("value").GetDouble());
+        Assert.Equal(180.0, evidence.RootElement.GetProperty("threshold").GetDouble());
     }
 
     /// <summary>

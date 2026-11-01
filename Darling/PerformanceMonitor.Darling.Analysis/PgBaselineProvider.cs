@@ -1497,13 +1497,16 @@ WITH clean AS (
                source, same DOUBLE PRECISION cast (the STDDEV_SAMP-overflows-System.Decimal note above applies verbatim)
                and same scaffold, over the rows that wrote. WHERE delta_writes > 0 keeps v non-null here, so sample_count
                is the count of write-bearing file rows: the detector's write tiles count the same rows
-               (write_sample_count). */
+               (write_sample_count).
+
+               #6959: the write side reads log files and tempdb data files only. User data files take background checkpoint and lazy-writer writes that no session waits on, so a multi-file database's data rows (a small high group) were the window peak against a baseline median they sat far above. The baseline reads the raw table at each recompute, so history is re-read through the filter with no migration. */
             MetricNames.IoWriteLatency => @"
 WITH clean AS (
     SELECT collection_time, delta_stall_write_ms::DOUBLE PRECISION / NULLIF(delta_writes, 0) AS v
     FROM file_io_stats
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
     AND   delta_writes > 0
+    AND   (file_type = 'LOG' OR lower(database_name) = 'tempdb')
 )," + RobustTierScaffold,
 
             // Event-based (#4731) — mean = events per COVERED day for this bucket, sample_count = covered days: the days

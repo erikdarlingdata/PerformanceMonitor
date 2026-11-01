@@ -507,7 +507,10 @@ public sealed class WebRouteStatementCensusTests
         {
             string rel = Path.GetRelativePath(serviceDir, path).Replace('\\', '/');
             if (rel.StartsWith("obj/", StringComparison.Ordinal) || rel.StartsWith("bin/", StringComparison.Ordinal)) continue;
-            string src = File.ReadAllText(path);
+
+            /* #7026: DarlingWebEndpoints.<Area>.cs is part of DarlingWebEndpoints.cs; the one entry holds all the pieces. */
+            if (rel.StartsWith("DarlingWebEndpoints.", StringComparison.Ordinal) && rel != "DarlingWebEndpoints.cs") continue;
+            string src = rel == "DarlingWebEndpoints.cs" ? RepoFile.ReadRepoFile(path) : File.ReadAllText(path);
             files.Add((rel, src, Code(src)));
         }
 
@@ -581,7 +584,7 @@ public sealed class WebRouteStatementCensusTests
     [Fact]
     public void TheSharedWriters_CallTheSweepBeforeAnythingElse()
     {
-        string endpoints = File.ReadAllText(Path.Combine(ServiceDir(), "DarlingWebEndpoints.cs"));
+        string endpoints = RepoFile.ReadRepoFile(Path.Combine(ServiceDir(), "DarlingWebEndpoints.cs"));
         foreach (string method in new[] { "ToHttpResult", "MuteRuleToolResult", "QueryTagToolResult" })
         {
             var bodies = StatementColumnCensusTests.BodiesOf(endpoints, "DarlingWebEndpoints", method);

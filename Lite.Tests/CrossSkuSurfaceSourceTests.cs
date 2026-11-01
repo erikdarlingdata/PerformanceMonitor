@@ -189,6 +189,14 @@ public sealed class CrossSkuSurfaceSourceTests
         })
         {
             var src = File.ReadAllText(Path.Combine(root, relative));
+            if (relative.EndsWith("DarlingWorker.cs", StringComparison.Ordinal))
+            {
+                /* DarlingWorker is split into DarlingWorker.<Area>.cs partials (#7024): read them as one. */
+                foreach (var part in Directory.GetFiles(Path.GetDirectoryName(Path.Combine(root, relative))!, "DarlingWorker.*.cs"))
+                {
+                    src += "\n" + File.ReadAllText(part);
+                }
+            }
 
             /* Singleline, because both of these calls are wrapped across lines — a line-bound pattern found
                one of the two and would have "proved" a single fleet-scoped site. */
@@ -209,8 +217,10 @@ public sealed class CrossSkuSurfaceSourceTests
            Darling-only like the other store self-alerts. Thirteenth since #5450: the daily
            collection-history audit's rollup read, Darling-only for the same reason. Fourteenth since #5654: the
            external-alert delivery self-alert's undelivered-row count, Darling-only like the other store self-alerts. Fifteenth since #5916: the
-           threshold-override reload, Darling-only (Lite has no override path). */
-        Assert.Equal(15, nullKeyReads.Count);
+           threshold-override reload, Darling-only (Lite has no override path). Sixteenth and seventeenth since #7041: the
+           scheduled Daily Health Report's build read and its own delivery-stamp read, named apart from
+           the other daily documents' shared delivery-stamp read because the report keeps its own stamp. Both Darling-only. */
+        Assert.Equal(17, nullKeyReads.Count);
 
         var inventory = AlertReadFailureCounter.FleetScopedReads;
 
@@ -234,6 +244,8 @@ public sealed class CrossSkuSurfaceSourceTests
         Assert.Contains(nullKeyReads, r => r.Contains("collection-history audit", StringComparison.Ordinal));
         Assert.Contains(nullKeyReads, r => r.Contains("external alert self-alert", StringComparison.Ordinal));
         Assert.Contains(nullKeyReads, r => r.Contains("threshold-override reload", StringComparison.Ordinal));
+        Assert.Contains(nullKeyReads, r => r.Contains("daily-health-report", StringComparison.Ordinal));
+        Assert.Equal(2, nullKeyReads.Count(r => r.Contains("daily-health-report", StringComparison.Ordinal)));
         /* #3354: config_mute_rules belongs to the store, not to any monitored server, so its failed read
            lands in the instance total and in no server's count — exactly the case a per-server-only
            surface would have given no home. Recorded TWICE across the tree, once per SKU, and that is the
@@ -258,6 +270,7 @@ public sealed class CrossSkuSurfaceSourceTests
         Assert.Contains("collection-history audit", inventory, StringComparison.Ordinal);
         Assert.Contains("external-alert delivery", inventory, StringComparison.Ordinal);
         Assert.Contains("threshold-override reload", inventory, StringComparison.Ordinal);
+        Assert.Contains("daily report (#7041)", inventory, StringComparison.Ordinal);
 
         /* And the phantom stays gone. Disk pressure's feed reads are exempt — a local filesystem read and a
            recorded-store-size lookup that is context for the alert text — so naming it here would send an

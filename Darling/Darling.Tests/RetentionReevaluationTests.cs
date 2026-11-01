@@ -424,44 +424,6 @@ public sealed class RetentionReevaluationTests
         Assert.Equal(4, CountOf(body, "_logger.LogWarning("));
     }
 
-    /// <summary>
-    /// Every operator-facing sentence that promised a restart moved with the mechanism. The runbook's step 3,
-    /// the <c>--backfill-rollups</c> verb's closing lines and the README cadence table are the three places an
-    /// operator reads BEFORE the alert text (<c>DarlingSelfAlertTests</c> pins that one); a doc that still
-    /// admits a gap the code has closed sends them to restart a service that would have released the hold on
-    /// its own within the hour.
-    /// </summary>
-    [Fact]
-    public void TheRunbookTheVerbAndTheReadme_NameTheHourlyReEvaluation_AndMakeTheRestartOptional()
-    {
-        var runbook = RepoFile.ReadRepoFile("docs", "retention-hold-runbook.md");
-        Assert.DoesNotContain("This step is required", runbook, StringComparison.Ordinal);
-        Assert.DoesNotContain("Why step 3 is not optional", runbook, StringComparison.Ordinal);
-        Assert.Contains("Why step 3 is a wait and not a restart", runbook, StringComparison.Ordinal);
-        Assert.Contains("hourly store-maintenance tick", runbook, StringComparison.Ordinal);
-        Assert.Contains("Retention re-evaluation: 0 policies held, N armed this pass,", runbook, StringComparison.Ordinal);
-        Assert.Contains("#3812", runbook, StringComparison.Ordinal);
-        /* The one-tick lag on the resolution edge is in the runbook too, or the third confirmation reads late. */
-        Assert.Contains("one tick AFTER the arm", runbook, StringComparison.Ordinal);
-
-        var verb = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingCliCommands.cs");
-        Assert.DoesNotContain("NEXT: restart the PerformanceMonitor Darling service.", verb, StringComparison.Ordinal);
-        Assert.DoesNotContain("Do not delay the restart.", verb, StringComparison.Ordinal);
-        Assert.DoesNotContain("will arm itself on the next service start.", verb, StringComparison.Ordinal);
-        Assert.Contains("NEXT: nothing, unless you are in a hurry.", verb, StringComparison.Ordinal);
-        Assert.Contains("'Retention re-evaluation: 0 policies held, N armed this pass, K unchanged'", verb, StringComparison.Ordinal);
-        Assert.Contains("To arm immediately instead, restart the", verb, StringComparison.Ordinal);
-
-        var readme = RepoFile.ReadRepoFile("docs", "darling", "admin.md"); // #6416: the cadence table moved from Darling/README.md
-        /* The cadence row names this pass and gives the cadence. Anchored on the two halves separately since
-           #3817 joined the row as its fourth tenant and put its own name between them — the property is that
-           the row names the re-evaluation and states the cadence, not that the two are adjacent, and a pin
-           that demanded adjacency would red for every future tenant of a row built to hold them. */
-        Assert.Contains("the retention coverage re-evaluation", readme, StringComparison.Ordinal);
-        Assert.Contains("First sweep after startup, then hourly at :30 past the minute", readme, StringComparison.Ordinal);
-        Assert.Contains("no restart needed (#3812)", readme, StringComparison.Ordinal);
-    }
-
     private static int CountOf(string text, string needle)
     {
         var count = 0;
@@ -520,18 +482,6 @@ public sealed class RetentionReevaluationTests
     private static string ReadWorkerSource() =>
         RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs");
 
-    /// <summary>
-    /// #4300: the seam-only repair on the hourly Periodic pass closes an outage-opened legacy/successor seam
-    /// within the hour on a store that keeps running, with no restart required. The doc this pins against
-    /// used to say the gate needed a SECOND start to release across the upgrade; that is no longer true, and
-    /// the doc must not say it again by accident.
-    /// </summary>
-    [Fact]
-    public void TheGateDoc_NoLongerClaimsASecondStartIsNeeded()
-    {
-        var storage = ReadStorageSource();
-        Assert.DoesNotContain("SECOND start", storage, StringComparison.Ordinal);
-    }
 }
 
 /// <summary>

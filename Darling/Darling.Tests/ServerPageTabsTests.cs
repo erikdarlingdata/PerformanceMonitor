@@ -399,8 +399,11 @@ public sealed class ServerPageTabsTests
         /* The composite spans from its own definition to pickerControl's doc comment, which follows it. */
         var at = js.IndexOf("export function topQueriesPanel", StringComparison.Ordinal);
         Assert.True(at > 0, "topQueriesPanel is gone — remap this test before editing it");
-        var end = js.IndexOf("/**\n * A labelled <select>", at, StringComparison.Ordinal);
-        Assert.True(end > at, "pickerControl no longer follows the composite — remap this test before editing it");
+        /* #7027: the composite now ends where drawQueryTrend ends, because pickerControl sits in another file. */
+        var drawAt = js.IndexOf("async function drawQueryTrend(", at, StringComparison.Ordinal);
+        Assert.True(drawAt > at, "drawQueryTrend no longer follows the composite — remap this test before editing it");
+        var end = js.IndexOf("\n}\n", drawAt, StringComparison.Ordinal);
+        Assert.True(end > at, "drawQueryTrend has no closing brace — remap this test before editing it");
         var region = js[at..end];
 
         Assert.Equal(
@@ -931,13 +934,13 @@ public sealed class ServerPageTabsTests
            into false confidence. The helper THROWS without an emptyText, and every tab is built during the
            DOM-shim run, so a table panel that forgot one cannot reach a browser. */
         Assert.Contains(
-            "if (!emptyText) throw new Error(\"table(\" + title + \"): a table panel must explain its own empty state.\");",
+            "if (!emptyText) throw new Error(\"tablePanel(\" + title + \"): a table panel must explain its own empty state.\");",
             js,
             StringComparison.Ordinal);
 
-        Assert.Contains("function line(title, read, params, rowsKey, xKey, series, opts = {})", js, StringComparison.Ordinal);
+        Assert.Contains("function linePanel(title, read, params, rowsKey, xKey, series, opts = {})", js, StringComparison.Ordinal);
         Assert.Contains(
-            "if (!opts.emptyText) throw new Error(\"line(\" + title + \"): a chart panel must explain its own empty state.\");",
+            "if (!opts.emptyText) throw new Error(\"linePanel(\" + title + \"): a chart panel must explain its own empty state.\");",
             js,
             StringComparison.Ordinal);
 
@@ -1047,8 +1050,8 @@ public sealed class ServerPageTabsTests
             var fn = "function " + call.TrimEnd('(');
             var at = js.IndexOf(fn, StringComparison.Ordinal);
             Assert.True(at > 0, "composite " + call + " is gone — remap it before editing this test");
-            /* Its reads and its helpers' reads: take everything from the definition to the descriptor section. */
-            var region = js[at..js.IndexOf("/* ─────────────────────────── descriptor helpers", StringComparison.Ordinal)];
+            /* Its reads and its helpers' reads: take everything from the definition on. #7027: to the end of the joined text, because the descriptor section it used to stop at now sits in another file. */
+            var region = js[at..];
             foreach (var read in reads) Assert.Contains("\"" + read + "\"", region, StringComparison.Ordinal);
         }
 
@@ -1162,7 +1165,7 @@ public sealed class ServerPageTabsTests
 
     /// <summary>
     /// The (read, param-keys) pairs the module sends. Both descriptor forms are covered: the positional helpers
-    /// (<c>table("T", "read", { ... })</c>) and the direct <c>readTool("read", { ... })</c> calls in the
+    /// (<c>tablePanel("T", "read", { ... })</c>) and the direct <c>readTool("read", { ... })</c> calls in the
     /// composites. The params object is matched non-greedily up to its closing brace, which is exact here because
     /// no params object in this file nests another.
     /// </summary>
@@ -1183,13 +1186,13 @@ public sealed class ServerPageTabsTests
     /// the body is the text between the brackets, comments included.</summary>
     private static Dictionary<string, string> DescriptorArraysIn(string js)
     {
-        var arrays = Regex.Matches(js, @"^const ([A-Z][A-Z0-9_]+) = \[(.*?)^\];", RegexOptions.Multiline | RegexOptions.Singleline)
+        var arrays = Regex.Matches(js, @"^(?:export )?const ([A-Z][A-Z0-9_]+) = \[(.*?)^\];", RegexOptions.Multiline | RegexOptions.Singleline)
             .ToDictionary(m => m.Groups[1].Value, m => m.Groups[2].Value, StringComparer.Ordinal);
 
         /* A set that lives in the read catalog is a top-level const that points into it; its text is the catalog
            entry for that read. */
         var catalog = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "read-fields.js");
-        foreach (Match m in Regex.Matches(js, @"^const ([A-Z][A-Z0-9_]+) = READ_FIELDS\.(\w+)\.", RegexOptions.Multiline))
+        foreach (Match m in Regex.Matches(js, @"^(?:export )?const ([A-Z][A-Z0-9_]+) = READ_FIELDS\.(\w+)\.", RegexOptions.Multiline))
         {
             var entry = Regex.Match(catalog, @"^  " + m.Groups[2].Value + @": \{.*?^  \},?\r?$", RegexOptions.Multiline | RegexOptions.Singleline);
             Assert.True(entry.Success, $"{m.Groups[2].Value} has no READ_FIELDS entry");
@@ -1201,7 +1204,7 @@ public sealed class ServerPageTabsTests
 
     /// <summary>
     /// The (read, descriptor-array names) pairs the module's panel helpers bind: <c>stat("T", "read", {...},
-    /// NAME, ...)</c>, <c>table("T", "read", {...}, "rows", NAME, ...)</c> and <c>fanout("read", {...}, [{ stats:
+    /// NAME, ...)</c>, <c>tablePanel("T", "read", {...}, "rows", NAME, ...)</c> and <c>fanout("read", {...}, [{ stats:
     /// NAME }, { columns: NAME }])</c>. Each call is sliced by bracket balance rather than by regex because a
     /// fanout's spec array nests objects inside an array inside the call; the read is the first read-shaped
     /// literal in the call, and the arrays are every <c>*_COLUMNS</c> / <c>*_STATS</c> token in it. The
@@ -1212,7 +1215,7 @@ public sealed class ServerPageTabsTests
     /// </summary>
     private static IEnumerable<(string Read, string[] Arrays)> DescriptorArraysBoundIn(string js)
     {
-        foreach (Match open in Regex.Matches(js, @"(?<![A-Za-z0-9_])(?:stat|momentStat|table|fanout)\("))
+        foreach (Match open in Regex.Matches(js, @"(?<![A-Za-z0-9_])(?:stat|momentStat|tablePanel|fanout)\("))
         {
             var depth = 1;
             var i = open.Index + open.Length;

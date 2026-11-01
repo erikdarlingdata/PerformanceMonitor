@@ -197,7 +197,8 @@ public sealed class WebDeadlockGraphShapeTests
     [Fact]
     public void TheGraphColumn_IsLeftOutOfTheFilterAndTheCopy()
     {
-        var tabs = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js");
+        /* #7027: the SQL Server Blocking tab's module, not the joined text, whose first "graph" column is the PostgreSQL one. */
+        var tabs = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs", "sql-blocking.js");
         var line = tabs.Split('\n').First(l => l.Contains("{ key: \"graph\"", StringComparison.Ordinal));
         Assert.Contains("filter: false", line, StringComparison.Ordinal);
         Assert.Contains("copy: false", line, StringComparison.Ordinal);
@@ -291,7 +292,8 @@ public sealed class WebDeadlockGraphShapeTests
         Assert.DoesNotContain("from \"../charts.js\"", js, StringComparison.Ordinal);
 
         var tabs = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js");
-        Assert.Contains("from \"./deadlock-graph.js\"", tabs, StringComparison.Ordinal);
+        /* #7027: the import sits in the tab module, one folder down. */
+        Assert.Contains("from \"../deadlock-graph.js\"", tabs, StringComparison.Ordinal);
         Assert.Contains("{ key: \"graph\"", tabs, StringComparison.Ordinal);
     }
 }

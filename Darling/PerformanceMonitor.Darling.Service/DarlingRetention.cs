@@ -173,6 +173,15 @@ public static class DarlingRetention
     internal const int OversizedPlanBacklogRetentionDays = DataRetentionBaseDays;
 
     /// <summary>
+    /// #6977: the reconcile-run log's horizon, <see cref="DataRetentionBaseDays"/> like the oversized-plan backlog and the
+    /// fleet-sweep run records. <c>collect.raw_chunk_interval_reconcile_runs</c> is one row per reconcile run, written by
+    /// <c>RawChunkIntervalReconciler</c> and never read back: the planner's "days since the last move" input comes from
+    /// <c>raw_chunk_interval_rung_history</c>, not from this table. So no decision needs any of its history and the
+    /// base horizon is only an operator-facing look-back. About one row a day plus one per service start, so it was never urgent, only unbounded.
+    /// </summary>
+    internal const int RawChunkIntervalReconcileRunsRetentionDays = DataRetentionBaseDays;
+
+    /// <summary>
     /// #3953: the latest-snapshot interval table's horizon, on <c>first_execution_time</c>: the ruled 15 days, the
     /// detector's 14-day window plus a day. A named constant, not a knob, and in no collector schedule: the table's
     /// horizon is the detector's, not the store's, so a held purge (#1759) does not hold it. It is deliberately NOT a
@@ -1322,6 +1331,25 @@ public static class DarlingRetention
             {
                 tablesPurged++;
                 totalRowsDeleted += backlogDeleted.Value;
+            }
+            else
+            {
+                tablesFailed++;
+            }
+
+            /* collect.raw_chunk_interval_reconcile_runs (#6977, V144): one row per reconcile run, pruned on run_at at
+               RawChunkIntervalReconcileRunsRetentionDays. NOT in CollectorCatalog.All (the chunk-interval reconciler
+               writes it, not a collector), so the loop above skips it and nothing else prunes it. A plain table with
+               an index on run_at, so the one-day slice seeks. Failure-isolated like every sibling. */
+            var reconcileRunsDeleted = await PurgeOneAsync(
+                postgres, "collect.raw_chunk_interval_reconcile_runs",
+                TimeSlicedDeleteSql("collect.raw_chunk_interval_reconcile_runs", "run_at"),
+                utcNow.AddDays(-RawChunkIntervalReconcileRunsRetentionDays), logger, cancellationToken,
+                pacer: walPacer);
+            if (reconcileRunsDeleted is not null)
+            {
+                tablesPurged++;
+                totalRowsDeleted += reconcileRunsDeleted.Value;
             }
             else
             {

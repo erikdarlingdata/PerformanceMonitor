@@ -49,6 +49,9 @@ internal static class DarlingProcessServices
     /* #5632 step 7: the worker's store owner data source, published for the one MCP tool that reads a remediation slot. */
     services.AddSingleton<StoreOwnerSource>();
 
+    /* #7041: the worker publishes its alert evaluator here for the MCP host's send_daily_health_report_now. */
+    services.AddSingleton<DailyHealthReportHub>();
+
     /* #6066: the store's pseudonym key, read once over the owner connection the worker publishes above and kept in memory. Taken by the MCP
        host (its data-detail filter and the brief composer) and the worker (the webhook dispatcher); no MCP tool method takes it. */
     services.AddSingleton<PseudonymKeySource>(provider => new PseudonymKeySource(

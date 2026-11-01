@@ -240,13 +240,17 @@ VALUES ($1, $2, $3, $4, 1, 1, FALSE, 'none', NULL, FALSE, FALSE, $5, $6)",
         var bodySucceeded = false;
         try
         {
-            await SeedAsync(connection, DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow), ct);
+            var now = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
+            await SeedAsync(connection, now, ct);
             await using var postgres = OpenDataSource(cs);
 
-            var tool = await DarlingMcpAlertTools.GetAlertHistory(postgres, null, 1, 50, cancellationToken: ct);
-            var web = await WebReadAsync(postgres, "get_alert_history", "?hours_back=1&limit=50");
+            /* #7010: a relative window carries its own request time as effective_start (a covered window starts where it was asked to), so two calls
+               a few hundred milliseconds apart differ there by design. Every call here ends the window at the same instant, and the bytes still must match. */
+            var asOf = now.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture);
+            var tool = await DarlingMcpAlertTools.GetAlertHistory(postgres, null, 1, 50, as_of: asOf, cancellationToken: ct);
+            var web = await WebReadAsync(postgres, "get_alert_history", $"?hours_back=1&limit=50&as_of={Uri.EscapeDataString(asOf)}");
             /* The old flag is gone: sending it changes nothing. */
-            var withOldFlag = await WebReadAsync(postgres, "get_alert_history", "?hours_back=1&limit=50&include_details=true");
+            var withOldFlag = await WebReadAsync(postgres, "get_alert_history", $"?hours_back=1&limit=50&include_details=true&as_of={Uri.EscapeDataString(asOf)}");
 
             Assert.Equal(tool, web);
             Assert.Equal(tool, withOldFlag);

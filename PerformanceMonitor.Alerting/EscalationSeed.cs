@@ -3,6 +3,7 @@
 // Licensed under the MIT License. See LICENSE file in the project root for full license information.
 
 using System;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using PerformanceMonitor.Notifications;
@@ -30,6 +31,14 @@ public sealed record EscalationSeedQuery(
     bool TierlessRowIsWarning);
 
 /// <summary>
+/// #7068: one question the engine asks the alert history once per server key per process, when a worsening-gated alert
+/// (Volume Free Space, Version Store (PVS)) first sees its condition: what is the newest fire of
+/// <see cref="MetricName"/> before <see cref="UntilUtc"/> that no row under <see cref="ResolutionTitles"/> closed. There is
+/// no lower bound: an incident that has stood for days is still the same incident after a restart.
+/// </summary>
+public sealed record OpenFireQuery(string ServerKey, string MetricName, IReadOnlyList<string> ResolutionTitles, DateTime UntilUtc);
+
+/// <summary>
 /// The resolution titles of the six alerts that opt into <see cref="TierEscalation"/>, as constants so the engine's
 /// <c>AlertResolution</c> sites and the history read below name the same string (a resolution row is stored under its
 /// title), and the host-side reader that answers an <see cref="EscalationSeedQuery"/> from an
@@ -43,6 +52,21 @@ public static class EscalationSeed
     public const string RunnableQueueClearedTitle = "Runnable Queue Cleared";
     public const string ClientTimeoutsClearedTitle = "Client Timeouts Cleared";
     public const string VolumeFreeSpaceResolvedTitle = "Volume Free Space Resolved";
+    public const string PvsResolvedTitle = "Version Store (PVS) Resolved";
+
+    /// <summary>
+    /// #7068: answers an <see cref="OpenFireQuery"/> from <paramref name="store"/>, the standing-incident seed's reader for
+    /// Lite and Darling alike. A failed read throws and the engine logs and counts it.
+    /// </summary>
+    public static Func<OpenFireQuery, CancellationToken, Task<AlertHistoryStanding>> OpenFireReaderFor(IAlertHistoryStore store)
+    {
+        if (store is null)
+        {
+            throw new ArgumentNullException(nameof(store));
+        }
+
+        return (query, _) => store.GetStandingAsync(query.ServerKey, query.MetricName, query.ResolutionTitles, null, query.UntilUtc);
+    }
 
     /// <summary>
     /// Answers an <see cref="EscalationSeedQuery"/> from <paramref name="store"/>. The store's read throws on a failure,

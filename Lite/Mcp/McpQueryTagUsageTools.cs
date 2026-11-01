@@ -32,6 +32,86 @@ public sealed class McpQueryTagUsageTools
         [Description("Maximum tag rows per section (per server in the all-servers view). Default 25. Read truncated to know whether a section held more.")] int limit = DefaultLimit,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
+        var answer = await GetResourceUseByTagCore(dataService, serverManager, server_name, hours_back, tag, limit, as_of);
+        /* #7005: the window is fully covered only when every table the roll-up reads is, so the floor is the LATEST of the six sections' floors
+           (each the earliest any scoped server answers), and the one notice sits at the top level, not per section. */
+        if (McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd) != null)
+        {
+            return answer;
+        }
+
+        try
+        {
+            List<int> ids;
+            if (string.IsNullOrWhiteSpace(server_name))
+            {
+                ids = serverManager.GetEnabledServers().Select(RemoteCollectorService.GetServerId).ToList();
+            }
+            else
+            {
+                var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
+                if (error != null) return answer;
+                ids = [resolved.ServerId];
+            }
+
+            if (ids.Count == 0)
+            {
+                return answer;
+            }
+
+            var windowStart = windowEnd.AddHours(-hours_back);
+            /* One fleet-form probe per section relation, scoped to the servers the roll-up reads (six at most, whatever the server count), not one per relation per server. */
+            return await McpQueryTools.WithProbedWindowNoticeAsync(
+                answer,
+                () => LatestSectionFloorAsync(relation => dataService.GetFleetWindowFloorAsync(relation, windowStart, windowEnd, ids)),
+                () => LatestSectionFloorAsync(relation => dataService.GetOldestFleetWindowRowAsync(relation, ids)),
+                windowStart, windowEnd, "query tag roll-up tables");
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return McpHelpers.FormatError("get_resource_use_by_tag", ex);
+        }
+    }
+
+    /// <summary>The six relations the roll-up reads, one per section (plan_cache, query_store, procedures, blocking_reports, blocking_snapshots, deadlocks).</summary>
+    private static readonly QueryWindowRelation[] SectionRelations =
+    [
+        QueryWindowRelation.QueryStats, QueryWindowRelation.QueryStoreStats, QueryWindowRelation.ProcedureStats,
+        QueryWindowRelation.BlockedProcessReports, QueryWindowRelation.DmvBlockingSnapshots, QueryWindowRelation.Deadlocks,
+    ];
+
+    /// <summary>The LATEST of the sections' answers: a section that answers null (nothing in the window) gives way to the others.</summary>
+    private static async Task<DateTime?> LatestSectionFloorAsync(Func<QueryWindowRelation, Task<DateTime?>> perRelation)
+    {
+        DateTime? latest = null;
+        foreach (var relation in SectionRelations)
+        {
+            /* A section whose table is missing is already answered "unavailable" by the roll-up itself; it has no floor, so it gives way to the others. */
+            DateTime? floor;
+            try
+            {
+                floor = await perRelation(relation);
+            }
+            catch (DuckDB.NET.Data.DuckDBException)
+            {
+                floor = null;
+            }
+
+            latest = LocalDataService.LaterCoverageFloor(latest, floor);
+        }
+
+        return latest;
+    }
+
+    private static async Task<string> GetResourceUseByTagCore(
+        LocalDataService dataService,
+        ServerManager serverManager,
+        [Description("Server name or display name. Omit for all servers.")] string? server_name = null,
+        [Description("Hours of history. Default 24.")] int hours_back = 24,
+        [Description("A tag name or id: shows only that tag's subtree (the tag and its children), with no untagged row.")] string? tag = null,
+        [Description("Maximum tag rows per section (per server in the all-servers view). Default 25. Read truncated to know whether a section held more.")] int limit = DefaultLimit,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+    {
         var windowError = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
         if (windowError != null) return windowError;
         var limitError = McpHelpers.ValidateTop(limit);

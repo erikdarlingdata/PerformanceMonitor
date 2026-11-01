@@ -150,7 +150,7 @@ WHERE s.is_enabled
     /// The master's windowed XE blocking count and worst wait without the separately monitored databases'
     /// events (<see cref="PgFactCollector.BlockingSqlSkippingSeparate"/>, the read the service's analysis uses).
     /// </summary>
-    private async Task<(int Count, long MaxWaitMs, int Reports)> ReadScopedBlockingAsync(
+    private async Task<(int Count, long MaxWaitMs)> ReadScopedBlockingAsync(
         int serverId, DateTime start, DateTime end, IReadOnlyList<string> separate, CancellationToken cancellationToken)
     {
         await ScopeReadStageAsync("blocking");
@@ -164,13 +164,12 @@ WHERE s.is_enabled
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
         {
-            return (0, 0, 0);
+            return (0, 0);
         }
 
         return (
             reader.IsDBNull(0) ? 0 : Convert.ToInt32(reader.GetValue(0)),
-            reader.IsDBNull(2) ? 0L : Convert.ToInt64(reader.GetValue(2)),
-            reader.IsDBNull(6) ? 0 : Convert.ToInt32(reader.GetValue(6)));
+            reader.IsDBNull(2) ? 0L : Convert.ToInt64(reader.GetValue(2)));
     }
 
     /// <summary>The master's windowed deadlock count without the deadlocks wholly in the separately monitored databases.</summary>

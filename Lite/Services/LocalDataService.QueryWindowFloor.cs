@@ -7,6 +7,8 @@
  */
 
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
@@ -74,7 +76,21 @@ public enum QueryWindowRelation
     WaitStats,
     /* The Latches & Spinlocks tab's two trend charts (#4966): the cumulative-delta tables the trends read. */
     LatchStats,
-    SpinlockStats
+    SpinlockStats,
+
+    /* #7005: the MCP trend and snapshot reads over the periodic collectors. Each collector stores a row every cycle, so these
+       probe like WaitStats: the collector's runs show the store covered a window's start, and the window's time column is
+       collection_time. */
+    CpuUtilization,
+    CpuScheduler,
+    MemoryStats,
+    MemoryGrantStats,
+    FileIoStats,
+    TempDbStats,
+    PerfmonStats,
+    PlanCacheStats,
+    /* get_client_timeouts: the attention XE events, which hold a row only when a client gave up, so the collector's runs show coverage. */
+    AttentionEvents
 }
 
 public partial class LocalDataService
@@ -105,8 +121,82 @@ public partial class LocalDataService
         QueryWindowRelation.WaitStats => "v_wait_stats",
         QueryWindowRelation.LatchStats => "v_latch_stats",
         QueryWindowRelation.SpinlockStats => "v_spinlock_stats",
+        QueryWindowRelation.CpuUtilization => "v_cpu_utilization_stats",
+        QueryWindowRelation.CpuScheduler => "v_cpu_scheduler_stats",
+        QueryWindowRelation.MemoryStats => "v_memory_stats",
+        QueryWindowRelation.MemoryGrantStats => "v_memory_grant_stats",
+        QueryWindowRelation.FileIoStats => "v_file_io_stats",
+        QueryWindowRelation.TempDbStats => "v_tempdb_stats",
+        QueryWindowRelation.PerfmonStats => "v_perfmon_stats",
+        QueryWindowRelation.PlanCacheStats => "v_plan_cache_stats",
+        QueryWindowRelation.AttentionEvents => "v_attention_events",
         _ => throw new ArgumentOutOfRangeException(nameof(relation), relation, "unknown QueryWindowRelation")
     };
+
+    /// <summary>
+    /// #7005: <see cref="GetQueryWindowFloorAsync"/> over every server that holds a row of <paramref name="relation"/> in the window, for a read
+    /// that spans servers (<c>get_alert_history</c> has no server argument): the EARLIEST floor any of those servers answers, because the store
+    /// holds data as far back as its oldest-reaching server. Null when no server holds a row in the window. UTC relations only.
+    /// </summary>
+    public async Task<DateTime?> GetFleetWindowFloorAsync(QueryWindowRelation relation, DateTime startUtc, DateTime endUtc, IReadOnlyCollection<int>? serverIds = null)
+    {
+        var timeColumn = QueryWindowRelationTimeColumn(relation);
+        var scope = ServerScopeSql(serverIds);
+        var ids = new System.Collections.Generic.List<int>();
+        using (var connection = await OpenConnectionAsync())
+        using (var command = connection.CreateCommand())
+        {
+            /* A server with a logged run of the relation's collector in the window counts as well as one with a row (a quiet collector stores none); the collector name is from the closed map. */
+            var runs = QueryWindowRelationCollector(relation) is { } collector
+                ? $" UNION SELECT server_id FROM v_collection_log WHERE collector_name = '{collector}' AND collection_time >= $1 AND collection_time <= $2{scope}"
+                : "";
+            command.CommandText = $"SELECT server_id FROM (SELECT server_id FROM {QueryWindowRelationView(relation)} WHERE {timeColumn} >= $1 AND {timeColumn} <= $2{scope}{runs}) AS u GROUP BY server_id ORDER BY server_id";
+            command.Parameters.Add(new DuckDBParameter { Value = startUtc });
+            command.Parameters.Add(new DuckDBParameter { Value = endUtc });
+            using var reader = await command.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                ids.Add((int)ToInt64(reader.GetValue(0)));
+            }
+        }
+
+        return await EarliestCoverageAsync(ids, id => GetQueryWindowFloorAsync(relation, id, startUtc, endUtc, includeAlsoCovered: false), startUtc);
+    }
+
+    /// <summary>
+    /// #7005: whether a relation's collector stores a row every cycle, so a server with no row of it was never collected (the periodic
+    /// collectors the MCP trends read), as against the event and snapshot tables, which hold a row only when something happened and whose
+    /// collector runs are what show the store covered a window.
+    /// </summary>
+    internal static bool QueryWindowRelationStoresEveryCycle(QueryWindowRelation relation) => relation is
+        QueryWindowRelation.WaitStats or QueryWindowRelation.LatchStats or QueryWindowRelation.SpinlockStats
+        or QueryWindowRelation.CpuUtilization or QueryWindowRelation.CpuScheduler or QueryWindowRelation.MemoryStats
+        or QueryWindowRelation.MemoryGrantStats or QueryWindowRelation.FileIoStats or QueryWindowRelation.TempDbStats
+        or QueryWindowRelation.PerfmonStats or QueryWindowRelation.PlanCacheStats;
+
+    /// <summary>#7005: whether the collector has any logged run for the server (any status, any time the log still holds).</summary>
+    public async Task<bool> HasCollectorRunAsync(int serverId, string collectorName)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT 1 FROM v_collection_log WHERE server_id = $1 AND collector_name = $2 LIMIT 1";
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = collectorName });
+        return await command.ExecuteScalarAsync() is not null and not DBNull;
+    }
+
+    /// <summary>The scope a fleet-form probe adds for a read over some servers (<c>get_resource_use_by_tag</c> with a server, or with the enabled ones): an AND clause over the ids, which are ints, so nothing a caller passes reaches the SQL as text. Empty for no scope (every server).</summary>
+    private static string ServerScopeSql(IReadOnlyCollection<int>? serverIds) =>
+        serverIds is null ? "" : $" AND server_id IN ({(serverIds.Count == 0 ? "NULL" : string.Join(",", serverIds.Select(id => id.ToString(System.Globalization.CultureInfo.InvariantCulture))))})";
+
+    /// <summary>#7005: the oldest row of <paramref name="relation"/> any server holds (the aged-out answer of a read that spans servers). Null when the relation is empty. UTC relations only.</summary>
+    public async Task<DateTime?> GetOldestFleetWindowRowAsync(QueryWindowRelation relation, IReadOnlyCollection<int>? serverIds = null)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+        command.CommandText = $"SELECT min({QueryWindowRelationTimeColumn(relation)}) FROM {QueryWindowRelationView(relation)}{(serverIds is null ? "" : " WHERE 1 = 1" + ServerScopeSql(serverIds))}";
+        return await command.ExecuteScalarAsync() is DateTime first ? first : null;
+    }
 
     /// <summary>
     /// The collector whose runs <c>collection_log</c> records for a relation the probe reads by coverage
@@ -155,6 +245,16 @@ public partial class LocalDataService
            class has no delta, so a collector's runs (not the oldest row) say the store covered the window's start. */
         QueryWindowRelation.LatchStats => "latch_stats",
         QueryWindowRelation.SpinlockStats => "spinlock_stats",
+        /* #7005: the periodic collectors the MCP trends read; a run in the window shows the store covered it. */
+        QueryWindowRelation.CpuUtilization => "cpu_utilization",
+        QueryWindowRelation.CpuScheduler => "cpu_scheduler_stats",
+        QueryWindowRelation.MemoryStats => "memory_stats",
+        QueryWindowRelation.MemoryGrantStats => "memory_grant_stats",
+        QueryWindowRelation.FileIoStats => "file_io_stats",
+        QueryWindowRelation.TempDbStats => "tempdb_stats",
+        QueryWindowRelation.PerfmonStats => "perfmon_stats",
+        QueryWindowRelation.PlanCacheStats => "plan_cache_stats",
+        QueryWindowRelation.AttentionEvents => "attention",
         _ => null
     };
 

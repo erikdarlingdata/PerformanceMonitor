@@ -210,7 +210,19 @@ public sealed class WebDataStartNoteLiveTests
 
         await store.SeedTableAsync("memory_grant_stats", -496631, "web-data-start-memory-grants-covered", store.End.AddDays(-30), firstRow: store.End.AddDays(-8), ct);
         var covered = await DarlingMcpMemoryGrantTools.GetMemoryGrants(store.DataSource, "web-data-start-memory-grants-covered", 168, null, cancellationToken: ct);
-        Assert.Same(covered, await WebDataStartNote.AddAsync(store.DataSource, "get_memory_grants", "web-data-start-memory-grants-covered", 168, null, covered, null, ct));
+        /* #7010: the tool now writes the three MCP window-floor keys itself (UTC). A covered range gets no web note, and the page never reads
+           the tool's own verdict (#4966), so the answer is the tool's body without those keys: not the same string, but no note, no second
+           note and every other key as the tool wrote it. */
+        var coveredAnswer = Assert.IsType<JsonObject>(JsonNode.Parse(await WebDataStartNote.AddAsync(store.DataSource, "get_memory_grants", "web-data-start-memory-grants-covered", 168, null, covered, null, ct)));
+        var coveredOwn = Assert.IsType<JsonObject>(JsonNode.Parse(covered));
+        Assert.False(coveredOwn["window_truncated"]?.GetValue<bool>(), "the tool's own answer over a covered range says not truncated");
+        foreach (var key in new[] { "window_truncated", "effective_start", "truncation_note", "data_start_utc", "window_start_utc", "window_end_utc" })
+        {
+            Assert.False(coveredAnswer.ContainsKey(key), $"a covered range carries no `{key}` on the web route");
+            coveredOwn.Remove(key);
+        }
+
+        Assert.Equal(coveredOwn.ToJsonString(), coveredAnswer.ToJsonString());
     }
 
     /// <summary>What a PostgreSQL grid's answer looks like to the note: rows, with no status, error or floor of its
