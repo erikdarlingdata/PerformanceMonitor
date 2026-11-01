@@ -196,6 +196,8 @@ public sealed class PgAlertNoise7082LiveTests
             const int serverless = 2;
             const int ceilingOnly = 3;
             const int oldFigureOnly = 4;
+            const int newTarget = 5;
+            const int twoHourTarget = 6;
 
             for (var minute = 1; minute <= 5; minute++)
             {
@@ -208,6 +210,20 @@ public sealed class PgAlertNoise7082LiveTests
                 await SeedCpuAsync(h.Connection, ct, oldFigureOnly, at, null, null, null);
             }
 
+            /* A target with no capacity figure is known provisioned only once it has an hour of history: a serverless
+               target added 30 minutes ago has not published its first ACU point yet. */
+            await SeedCpuAsync(h.Connection, ct, provisioned, now.AddHours(-3), null, null, null);
+            await SeedCpuAsync(h.Connection, ct, oldFigureOnly, now.AddHours(-3), null, null, null);
+            for (var minute = 5; minute <= 30; minute += 5)
+            {
+                await SeedCpuAsync(h.Connection, ct, newTarget, now.AddMinutes(-minute), null, null, null);
+            }
+
+            for (var minute = 5; minute <= 120; minute += 5)
+            {
+                await SeedCpuAsync(h.Connection, ct, twoHourTarget, now.AddMinutes(-minute), null, null, null);
+            }
+
             /* A figure older than the lookback does not count against the target. */
             await SeedCpuAsync(h.Connection, ct, oldFigureOnly, now.AddDays(-30), 40, 4, 12);
 
@@ -216,6 +232,9 @@ public sealed class PgAlertNoise7082LiveTests
             Assert.False(await DarlingPgCpuUtilizationReader.IsKnownProvisionedAsync(source, serverless, now, ct));
             Assert.False(await DarlingPgCpuUtilizationReader.IsKnownProvisionedAsync(source, ceilingOnly, now, ct));
             Assert.True(await DarlingPgCpuUtilizationReader.IsKnownProvisionedAsync(source, oldFigureOnly, now, ct));
+            Assert.False(await DarlingPgCpuUtilizationReader.IsKnownProvisionedAsync(source, newTarget, now, ct));
+            Assert.True(await DarlingPgCpuUtilizationReader.IsKnownProvisionedAsync(source, twoHourTarget, now, ct));
+            Assert.False(await DarlingPgCpuUtilizationReader.IsKnownProvisionedAsync(source, 99, now, ct));
         });
     }
 }

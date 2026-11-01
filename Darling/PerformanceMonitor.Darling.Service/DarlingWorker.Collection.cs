@@ -981,7 +981,9 @@ public sealed partial class DarlingWorker
             finding => finding.ServerId.ToString(CultureInfo.InvariantCulture),
             _loggerFactory.CreateLogger<AnalysisNotificationService>(),
             isStoryMuted: async (serverId, storyPathHash) =>
-                (await muteReadStore.GetMutedStoryHashesAsync(serverId)).Contains(storyPathHash));
+                (await muteReadStore.GetMutedStoryHashesAsync(serverId)).Contains(storyPathHash),
+            /* #7084 part 4: a finding that would page attaches to an engine alert still open on its server. */
+            findOpenEngineAlert: historyStore.FindOpenEngineAlertAsync);
 
         /* #2138 phase 1: the auto force-plan bot, hooked onto the SCHEDULED analysis pass only (the
            interactive analyze_now command deliberately does not trigger it — an operator poking a

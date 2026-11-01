@@ -598,7 +598,7 @@ public sealed partial class DarlingWorker
     /// <para><b>The exception is a target known to be provisioned</b> (#7082): a provisioned RDS or Aurora
     /// PostgreSQL instance publishes no capacity figure at all, so its raw reading IS a fraction of fixed capacity, and
     /// a minute with no figure breaches or clears on instance CPU alone. The signal is the target's own stored samples:
-    /// <see cref="DarlingPgCpuUtilizationReader.IsKnownProvisionedAsync"/> is true when none of the last 7 days of rows
+    /// <see cref="DarlingPgCpuUtilizationReader.IsKnownProvisionedAsync"/> is true when the oldest of the last 7 days of rows is at least an hour old and none of them
     /// carries any of the three capacity columns. The instance class (<c>db.serverless</c>) is read by the RDS describe
     /// call but has no column, and a column needs a store rung. When the target has shown a capacity figure at any point
     /// in the week it is not known to be provisioned and the minute is skipped, which is the behaviour before #7082. A
@@ -703,9 +703,13 @@ public sealed partial class DarlingWorker
             var outcome = PersistenceOutcome.None;
 
             /* #7082: whether this target is KNOWN to be provisioned, asked at most once a pass and only when a minute with no
-               capacity figure makes it matter. A failed read fails the pass like the samples read does (counted below, the
-               batch retried next sweep), so it never turns a minute into a breach. */
-            bool? knownProvisionedMemo = null;
+               capacity figure makes it matter. It is read HERE, before the loop, so a failed read fails the pass (counted
+               below, the batch retried next sweep) before any sample has moved the gate, and never turns a minute into a
+               breach. The standing-condition arm further down reads it lazily when only the latest reading lacks a figure. */
+            var knownProvisionedMemo = await PgCpuBatchKnownProvisionedAsync(
+                samples,
+                () => DarlingPgCpuUtilizationReader.IsKnownProvisionedAsync(_postgres, runtime.ServerId, now, cancellationToken));
+            readClock.Restart();
             async Task<bool> KnownProvisionedAsync()
             {
                 if (knownProvisionedMemo is { } known)
@@ -749,8 +753,7 @@ public sealed partial class DarlingWorker
                    capacity threshold, which this minute has no figure for. */
                 var gateInput = PgCpuGateInput(
                     capacityPercent, sample.CpuPercent, alertSettings.CpuThresholdPercent,
-                    knownProvisioned: !capacityPercent.HasValue && await KnownProvisionedAsync());
-                readClock.Restart();
+                    knownProvisioned: !capacityPercent.HasValue && knownProvisionedMemo == true);
                 if (gateInput is not { } breached)
                 {
                     continue;
@@ -970,7 +973,7 @@ public sealed partial class DarlingWorker
                    a recovery it did not measure. A minute with no capacity reading reaches this arm only on a
                    target known to be provisioned (see the loop); on any other target it freezes the gate, so a subject
                    whose capacity readings stopped arriving never reaches it, and the text then names instance CPU. */
-                await NotifyPgResolutionAsync(key, snapshot.ServerName, metricName, "CPU Resolved",
+                await NotifyPgResolutionAsync(key, snapshot.ServerName, metricName, OpenEngineAlerts.CpuResolvedTitle,
                     lastCapacityPercent.HasValue
                         ? $"{snapshot.ServerName}: capacity back to {lastCapacityPercent.Value:F0}% "
                             + FleetCpuProvenance.CapacityDenominator
@@ -1023,7 +1026,7 @@ public sealed partial class DarlingWorker
             return;
         }
 
-        const string metricName = "Deadlocks Detected";
+        const string metricName = OpenEngineAlerts.DeadlocksDetectedMetric;
         var key = snapshot.ServerKey;
         var stateStore = new PgAlertStateStore(_postgres, _logger);
 
@@ -1201,7 +1204,7 @@ public sealed partial class DarlingWorker
             }
             else if (!decision.Active && wasActive)
             {
-                await NotifyPgResolutionAsync(key, snapshot.ServerName, metricName, "Deadlocks Cleared",
+                await NotifyPgResolutionAsync(key, snapshot.ServerName, metricName, OpenEngineAlerts.DeadlocksClearedTitle,
                     $"{snapshot.ServerName}: No deadlocks in the last hour");
             }
         }
@@ -1491,7 +1494,7 @@ public sealed partial class DarlingWorker
             return;
         }
 
-        const string metricName = "Blocking Detected";
+        const string metricName = OpenEngineAlerts.BlockingDetectedMetric;
         var key = snapshot.ServerKey;
         var stateStore = new PgAlertStateStore(_postgres, _logger);
 
@@ -1599,7 +1602,7 @@ public sealed partial class DarlingWorker
             }
             else if (!decision.Active && wasActive)
             {
-                await NotifyPgResolutionAsync(key, snapshot.ServerName, metricName, "Blocking Cleared",
+                await NotifyPgResolutionAsync(key, snapshot.ServerName, metricName, OpenEngineAlerts.BlockingClearedTitle,
                     $"{snapshot.ServerName}: No active blocking");
             }
         }
@@ -1986,6 +1989,30 @@ public sealed partial class DarlingWorker
         }
 
         return details;
+    }
+
+    /// <summary>
+    /// The one history read a High CPU pass makes for the provisioned-instance signal (#7082), taken before the loop over
+    /// the batch: null, with no read, when every sample carries a capacity figure (nothing then depends on the answer),
+    /// otherwise the answer of <paramref name="isKnownProvisionedAsync"/>. A read that throws throws here, ahead of any
+    /// sample moving the gate, so a failed read fails the whole pass instead of part of it.
+    /// </summary>
+    internal static async Task<bool?> PgCpuBatchKnownProvisionedAsync(
+        IReadOnlyList<DarlingPgCpuUtilizationReader.CpuSample> samples, Func<Task<bool>> isKnownProvisionedAsync)
+    {
+        ArgumentNullException.ThrowIfNull(samples);
+        ArgumentNullException.ThrowIfNull(isKnownProvisionedAsync);
+
+        foreach (var sample in samples)
+        {
+            if (!FleetCpuProvenance.CpuBandInputPercent(
+                    sample.CpuPercent, sample.AcuUtilizationPercent, FleetCpuSource.PerformanceInsights).HasValue)
+            {
+                return await isKnownProvisionedAsync();
+            }
+        }
+
+        return null;
     }
 
     /// <summary>

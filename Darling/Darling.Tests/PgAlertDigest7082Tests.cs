@@ -10,6 +10,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading.Tasks;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
@@ -217,6 +218,44 @@ public sealed class PgAlertDigest7082Tests
     public void AProvisionedInstanceUnderTheBar_DoesNotBreach()
     {
         Assert.False(DarlingWorker.PgCpuSampleBreaches(null, 60, 90, knownProvisioned: true));
+    }
+
+    private static DarlingPgCpuUtilizationReader.CpuSample CpuSampleAt(double? acuPercent) =>
+        new(new DateTime(2026, 11, 1, 2, 0, 0, DateTimeKind.Utc), 97, acuPercent, acuPercent.HasValue ? 4 : null, acuPercent.HasValue ? 12 : null, Memory: null);
+
+    /* Review follow-up: the provisioned-instance history read happens once, ahead of the loop over the batch, and only when
+       a sample in it has no capacity figure. A read that throws throws there, before any sample has moved the gate. */
+    [Fact]
+    public async Task TheHistoryRead_IsMadeOnce_OnlyWhenASampleHasNoCapacityFigure()
+    {
+        var reads = 0;
+        Task<bool> Read() { reads++; return Task.FromResult(true); }
+
+        Assert.Null(await DarlingWorker.PgCpuBatchKnownProvisionedAsync([CpuSampleAt(40), CpuSampleAt(95)], Read));
+        Assert.Equal(0, reads);
+
+        Assert.Null(await DarlingWorker.PgCpuBatchKnownProvisionedAsync([], Read));
+        Assert.Equal(0, reads);
+
+        Assert.True(await DarlingWorker.PgCpuBatchKnownProvisionedAsync([CpuSampleAt(40), CpuSampleAt(null), CpuSampleAt(null)], Read));
+        Assert.Equal(1, reads);
+    }
+
+    [Fact]
+    public async Task AFailedHistoryRead_Throws_BeforeAnySampleIsHandedToTheGate()
+    {
+        var gateInputs = 0;
+        var batch = new List<DarlingPgCpuUtilizationReader.CpuSample> { CpuSampleAt(95), CpuSampleAt(95), CpuSampleAt(null) };
+
+        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+        {
+            /* The worker awaits this ahead of its loop, so a throw here leaves no sample counted. */
+            await DarlingWorker.PgCpuBatchKnownProvisionedAsync(
+                batch, () => throw new InvalidOperationException("history read failed"));
+            gateInputs++;
+        });
+
+        Assert.Equal(0, gateInputs);
     }
 
     [Fact]
