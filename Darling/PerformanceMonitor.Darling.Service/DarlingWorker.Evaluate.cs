@@ -1221,6 +1221,9 @@ public sealed partial class DarlingWorker
                    explains) rather than leaving #3635's by-name replay arm to imply it. Warning, and only
                    Warning — PgBlockingFireSeverity's doc says which bars were considered and why none
                    qualifies as a Critical tier tonight. */
+                var pgBlockingContext = AlertSampleAge.Stamp(
+                    BuildPgBlockingContext(worstPerRoot),
+                    "blocking capture", AlertSampleAge.Newest(worstPerRoot.Select(r => r.CapturedAt)), now);
                 var delivery = await _alertDeliverer.DeliverAndReportAsync(
                     new AlertOutcome(
                         key,
@@ -1228,13 +1231,8 @@ public sealed partial class DarlingWorker
                         metricName,
                         count.ToString(CultureInfo.InvariantCulture),
                         threshold.ToString(CultureInfo.InvariantCulture),
-                        Context: AlertSampleAge.Stamp(
-                            new AlertContext
-                            {
-                                Incidents = worstPerRoot.Select(BuildPgBlockingIncident).ToList(),
-                            },
-                            "blocking capture", AlertSampleAge.Newest(worstPerRoot.Select(r => r.CapturedAt)), now),
-                        DetailText: null,
+                        Context: pgBlockingContext,
+                        DetailText: AlertContextBuilders.ContextToDetailText(pgBlockingContext),
                         NumericCurrentValue: count,
                         NumericThresholdValue: threshold,
                         Muted: muted,
@@ -1972,7 +1970,68 @@ public sealed partial class DarlingWorker
                         ? string.Empty
                         : $": {AlertContextBuilders.TruncateText(row.RootQuery!)}"),
             },
+            WaitRange: row.WorstVictimWaitMs > 0
+                ? (row.WorstVictimWaitMs / 1000.0).ToString("F1", CultureInfo.InvariantCulture) + "s"
+                : null,
+            /* #7083: the blocker's statement, the worst victim's statement and (above) the victim's wait, under the
+               labels the SQL Server blocking incident uses, so the per-event card, the history row, the sensitive
+               statement filter (it judges DetailFields) and the MCP dataDetail masker (it keys on these labels) treat
+               them the same way. The root line in InvolvedObjects is kept as it was. */
+            DetailFields: BuildPgBlockingDetailFields(row),
             Database: row.Databases.Length > 0 ? row.Databases[0] : null);
+
+    private static List<AlertIncidentField> BuildPgBlockingDetailFields(DarlingPgBlockingReader.PgBlockingChainRow row)
+    {
+        var fields = new List<AlertIncidentField>();
+        if (row.Databases.Length > 0)
+        {
+            fields.Add(new AlertIncidentField("Database", row.Databases[0]));
+        }
+
+        if (!string.IsNullOrWhiteSpace(row.WorstVictimQuery))
+        {
+            fields.Add(new AlertIncidentField("Blocked Query", AlertContextBuilders.TruncateText(row.WorstVictimQuery!)));
+        }
+
+        if (!string.IsNullOrWhiteSpace(row.RootQuery))
+        {
+            fields.Add(new AlertIncidentField("Blocking Query", AlertContextBuilders.TruncateText(row.RootQuery!)));
+        }
+
+        return fields;
+    }
+
+    /// <summary>
+    /// The PostgreSQL "Blocking Detected" context (#7083): one self-contained detail item per root blocker (the first
+    /// ten, like the SQL Server builder, then a "+N more" line), each carrying the database, the worst victim's
+    /// statement, the blocker's statement and the victim's wait, so the detail text names them. <c>Incidents</c> keeps
+    /// every root, which is what the per-fingerprint cooldown and the delivery filter key on.
+    /// </summary>
+    internal static AlertContext BuildPgBlockingContext(IReadOnlyList<DarlingPgBlockingReader.PgBlockingChainRow> worstPerRoot)
+    {
+        const int maxShown = 10;
+        var incidents = worstPerRoot.Select(BuildPgBlockingIncident).ToList();
+        var context = new AlertContext { Incidents = incidents };
+        for (var n = 0; n < incidents.Count && n < maxShown; n++)
+        {
+            context.Details.Add(AlertIncidentRenderer.BuildItem(
+                incidents[n],
+                incidents.Count == 1 ? "Blocking chain" : $"Blocking chain {n + 1} of {incidents.Count}",
+                includeDetailFields: true));
+        }
+
+        if (incidents.Count > maxShown)
+        {
+            var more = incidents.Count - maxShown;
+            context.Details.Add(new AlertDetailItem
+            {
+                Heading = $"+{more} more distinct blocking {(more == 1 ? "chain" : "chains")}",
+                Fields = new(),
+            });
+        }
+
+        return context;
+    }
 
     /// <summary>
     /// The newest collected CPU sample for one server, the read that gates CPU alerting. $1 server_id.
