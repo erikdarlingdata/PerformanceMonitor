@@ -146,6 +146,10 @@ public sealed class ViewerAlertRow
 
     /* #5642: how old the newest sample was when the alert FIRED, the Newest Sample column. Read off the persisted context
        (the carrier the engine stamped), never measured against the clock now; empty on a row without one, as Lite's row. */
+    /* #7124: why the alert was held for the digest or paged, the status cell's tooltip (the web's alerts.js does the same).
+       Parsed only when WPF asks for a tooltip, never while the grid binds its rows. */
+    public string? RoutingReason => AlertDetailText.RoutingReasonFromJson(ContextJson);
+
     public AlertNewestSample? NewestSample => AlertContextSerializer.TryReadNewestSample(ContextJson);
 
     public string NewestSampleDisplay =>

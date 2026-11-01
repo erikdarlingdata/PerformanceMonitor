@@ -83,6 +83,15 @@ public partial class AlertDetailWindow : Window
             DetailPanel.Visibility = Visibility.Visible;
         }
 
+        /* #7124: why the alert was held or paged, from the persisted routing decision; collapsed when the row has none. */
+        var routingReason = AlertDetailText.RoutingReasonFromJson(item.ContextJson);
+        if (routingReason is not null)
+        {
+            RoutingReasonText.Text = routingReason;
+            RoutingReasonLabel.Visibility = Visibility.Visible;
+            RoutingReasonText.Visibility = Visibility.Visible;
+        }
+
         /* #5642: the age the alert recorded when it fired, from the persisted context; no row when it has none. Placed after
            the branches above so the flat-text fallback can say whether its own text already ends in the line (the engine
            stamps it into detail_text): then the text shows it and the row stays hidden, so it prints once. */

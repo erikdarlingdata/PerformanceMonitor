@@ -103,6 +103,15 @@ public partial class AlertDetailWindow : Window
             DetailPanel.Visibility = Visibility.Visible;
         }
 
+        /* #7124: why the alert was held or paged, from the persisted routing decision; collapsed when the row has none. */
+        var routingReason = AlertDetailText.RoutingReasonFromJson(item.ContextJson);
+        if (routingReason is not null)
+        {
+            RoutingReasonText.Text = routingReason;
+            RoutingReasonLabel.Visibility = Visibility.Visible;
+            RoutingReasonText.Visibility = Visibility.Visible;
+        }
+
         /* #5642: the fire-time sample-age line, read from the persisted context and never measured against
            this window's clock. The flat detail_text already carries it for rows persisted with the line, so it
            is shown here only when the structured view (which does not print detail_text) is up or the text
