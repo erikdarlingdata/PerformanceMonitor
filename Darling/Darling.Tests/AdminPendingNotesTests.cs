@@ -195,6 +195,28 @@ public sealed class AdminPendingNotesTests
         Assert.Equal("all", write.GetProperty("body").GetProperty("report_notice").GetString());
     }
 
+    /* #6979: the report notice box is disabled with its hint showing while the route's agent level is Inherit or Off, and enabled with the
+       hint gone once a level is chosen. The hint must be hidden by display as well as by the hidden attribute, because the .mute-label
+       rule would otherwise keep it on screen next to an enabled box. */
+    [Fact]
+    public void TheReportNoticeBox_IsDisabledWithItsHintUntilTheRouteHasAnAgentLevel()
+    {
+        var result = AdminServerEditBehaviourTests.Run("routeEdit:warning");
+
+        foreach (var name in new[] { "noticeAtInherit", "noticeAtOff" })
+        {
+            var state = result.GetProperty(name);
+            Assert.True(state.GetProperty("disabled").GetBoolean(), name);
+            Assert.False(state.GetProperty("hidden").GetBoolean(), name);
+            Assert.Equal("", state.GetProperty("display").GetString());
+        }
+
+        var investigate = result.GetProperty("noticeAtInvestigate");
+        Assert.False(investigate.GetProperty("disabled").GetBoolean());
+        Assert.True(investigate.GetProperty("hidden").GetBoolean());
+        Assert.Equal("none", investigate.GetProperty("display").GetString());
+    }
+
     /* #6936: Edit then Save on the Routes tab sends the version the form read (expected_modified_at), because the service refuses an edit
        without it with a 400. The test drives the page itself: it opens the editor on a stored Critical only route, picks Warning only,
        presses Save and reads the write the page made. */

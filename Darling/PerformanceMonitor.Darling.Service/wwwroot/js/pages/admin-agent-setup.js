@@ -237,7 +237,10 @@ function routeForm(options) {
   const syncNoticeEnabled = () => {
     const owns = controls.level.value === "1" || controls.level.value === "2" || controls.level.value === "3";
     controls.reportNotice.disabled = !owns;
+    /* The author rule `.mute-label { display: block }` outranks the browser's [hidden] rule, so the attribute alone leaves the hint on screen
+       (as setShown in admin.js notes); the inline display is what hides it. */
     noticeHint.hidden = owns;
+    noticeHint.style.display = owns ? "none" : "";
   };
   syncNoticeEnabled();
   controls.level.addEventListener("input", syncNoticeEnabled);

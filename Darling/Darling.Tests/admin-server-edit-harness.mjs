@@ -1268,11 +1268,21 @@ try {
       await fire(byAttr(main, "data-action", "edit-route")[0], "click");
       await settle(30);
       const reportNoticeShown = field("reportNotice").value;
+      /* The hint under the notice box shows while the route has no agent level of its own and is gone (hidden and display none, because the
+         author .mute-label rule outranks [hidden]) once a level is chosen. The level goes back before Save so the write is unchanged. */
+      const hintNode = all(main, (n) => n.tag === "span" && (n.textContent || "").startsWith(" Applies once the Agent level"))[0];
+      const hintState = () => ({ hidden: hintNode.hidden, display: hintNode.style.display || "", disabled: field("reportNotice").disabled });
+      const noticeAtInherit = hintState();
+      await typeInto(field("level"), "1");
+      const noticeAtInvestigate = hintState();
+      await typeInto(field("level"), "0");
+      const noticeAtOff = hintState();
+      await typeInto(field("level"), "");
       await typeInto(field("severities"), severity);
       if (notice) await typeInto(field("reportNotice"), notice);
       await fire(byAttr(main, "data-action", "save-route")[0], "click");
       await settle(30);
-      return { reportNoticeShown, writes: requests.filter((r) => r.method === "PUT").map((r) => ({ method: r.method, url: r.url, body: r.body })) };
+      return { reportNoticeShown, noticeAtInherit, noticeAtInvestigate, noticeAtOff, writes: requests.filter((r) => r.method === "PUT").map((r) => ({ method: r.method, url: r.url, body: r.body })) };
     },
     /* One call of an admin.js export, {"fn": "buildEditBody", "args": [...]} on stdin, printed as {"result": ...}; or
        {"calls": [{"fn": ..., "args": [...]}, ...]} for a table of calls in one process, printed as {"results": [...]}.
