@@ -403,6 +403,7 @@ AND   metric_name = $2
 AND   alert_time >= $3
 AND   alert_time < $4"
             + AlertHistoryEscalationSeed.KeepUnlessEveryChannelFailedFilter
+            + AlertHistoryEscalationSeed.ExcludeDigestFilter
             + (countMuted ? "" : AlertHistoryEscalationSeed.ExcludeMutedFilter)
             + "\nORDER BY alert_time DESC\nLIMIT " + StandingRowCap.ToString(System.Globalization.CultureInfo.InvariantCulture);
         fireCommand.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = sid.Value });
