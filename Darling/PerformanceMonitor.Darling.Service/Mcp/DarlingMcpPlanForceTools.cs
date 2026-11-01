@@ -369,7 +369,7 @@ public sealed partial class DarlingMcpPlanForceTools
     private static readonly TimeSpan UnknownForceReadTimeout = TimeSpan.FromSeconds(30);
 
     /// <summary>What the journal and the answer say when a force's reply was lost and the plan was then read forced.</summary>
-    internal const string LostForceFoundForcedMessage = "The reply to the force was lost; the plan was found forced when the server was read again.";
+    internal const string LostForceFoundForcedMessage = "The reply to the force was lost, and the plan was found forced when the server was read again.";
 
     /// <summary>
     /// A forward force was sent and its reply was lost (#5632): the plan may be forced, and a force with no <c>action_done</c> gets no post-force
