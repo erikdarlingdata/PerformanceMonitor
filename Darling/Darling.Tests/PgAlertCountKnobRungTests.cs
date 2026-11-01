@@ -104,9 +104,9 @@ public sealed class PgAlertCountKnobRungTests
             $"ADD COLUMN IF NOT EXISTS {DeadlockColumn} integer NOT NULL DEFAULT "
             + PostgresAlertEvaluator.DeadlockCountThresholdDefault.ToString(CultureInfo.InvariantCulture) + ";",
             rung, StringComparison.Ordinal);
+        /* The blocking default moved to 3 in #7083 (V235 moves the stored value). This rung's text is frozen at the 1 it shipped. */
         Assert.Contains(
-            $"ADD COLUMN IF NOT EXISTS {BlockingColumn} integer NOT NULL DEFAULT "
-            + PostgresAlertEvaluator.BlockingCountThresholdDefault.ToString(CultureInfo.InvariantCulture) + ";",
+            $"ADD COLUMN IF NOT EXISTS {BlockingColumn} integer NOT NULL DEFAULT 1;",
             rung, StringComparison.Ordinal);
 
         /* And the constants equal the replaced consts' value. 1 is written here and in the issue's own
@@ -114,7 +114,8 @@ public sealed class PgAlertCountKnobRungTests
            upgrade that changes behaviour on every untouched store, which is the one outcome #3444's
            acceptance forbids. */
         Assert.Equal(1, PostgresAlertEvaluator.DeadlockCountThresholdDefault);
-        Assert.Equal(1, PostgresAlertEvaluator.BlockingCountThresholdDefault);
+        /* #7083: the PostgreSQL blocking bar moved to 3, and V235 moves a store still at this rung's 1. */
+        Assert.Equal(3, PostgresAlertEvaluator.BlockingCountThresholdDefault);
 
         /* No reload beacon of its own: config_alert_settings already carries V17's statement-level
            trg_bump_alert_settings, so a second trigger here would be a duplicate bump per write. */
@@ -357,13 +358,19 @@ public sealed class PgAlertCountKnobRungTests
     {
         var settings = new DarlingAlertSettings(new DarlingConfig());
 
-        foreach (var threshold in new[] { settings.PgDeadlockCountThreshold, settings.PgBlockingCountThreshold })
-        {
-            Assert.False(RollingCountAlertGate.Evaluate(
-                0, threshold, watermark: 0, cooldownElapsed: true, suppressed: false).Fire);
-            Assert.True(RollingCountAlertGate.Evaluate(
-                1, threshold, watermark: 0, cooldownElapsed: true, suppressed: false).Fire);
-        }
+        var threshold = settings.PgDeadlockCountThreshold;
+        Assert.False(RollingCountAlertGate.Evaluate(
+            0, threshold, watermark: 0, cooldownElapsed: true, suppressed: false).Fire);
+        Assert.True(RollingCountAlertGate.Evaluate(
+            1, threshold, watermark: 0, cooldownElapsed: true, suppressed: false).Fire);
+
+        /* #7083: the PostgreSQL blocking bar ships at 3, so one root no longer pages on the count alone. */
+        var blocking = settings.PgBlockingCountThreshold;
+        Assert.Equal(3, blocking);
+        Assert.False(RollingCountAlertGate.Evaluate(
+            1, blocking, watermark: 0, cooldownElapsed: true, suppressed: false).Fire);
+        Assert.True(RollingCountAlertGate.Evaluate(
+            3, blocking, watermark: 0, cooldownElapsed: true, suppressed: false).Fire);
     }
 
     /// <summary>

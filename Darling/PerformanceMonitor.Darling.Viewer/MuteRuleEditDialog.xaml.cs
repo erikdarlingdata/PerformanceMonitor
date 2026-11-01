@@ -128,6 +128,8 @@ public partial class MuteRuleEditDialog : Window
 
     private void PopulateSchedule(MuteRule rule)
     {
+        ActionBox.SelectedIndex = rule.IsDigestAction ? 1 : 0;
+
         if (!_scheduleSupported || !rule.RecurStartTime.HasValue || !rule.RecurEndTime.HasValue)
         {
             return;
@@ -237,6 +239,7 @@ public partial class MuteRuleEditDialog : Window
     private void Save_Click(object sender, RoutedEventArgs e)
     {
         Rule.Reason = string.IsNullOrWhiteSpace(ReasonBox.Text) ? null : ReasonBox.Text.Trim();
+        Rule.Action = ActionBox.SelectedIndex == 1 ? MuteRuleActions.Digest : MuteRuleActions.Mute;
         Rule.ServerName = string.IsNullOrWhiteSpace(ServerNameBox.Text) ? null : ServerNameBox.Text.Trim();
 
         Rule.DatabasePattern = DatabasePatternBox.Visibility == Visibility.Visible && !string.IsNullOrWhiteSpace(DatabasePatternBox.Text)
