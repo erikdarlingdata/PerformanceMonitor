@@ -213,7 +213,7 @@ public class AnalysisSinglesDigestTests
         var facts = DarlingSelfAlertEvaluator.ExtractSinglesDigestFacts(ThreeSinglesOnTwoServers());
         var (shortMessage, detail) = DarlingSelfAlertEvaluator.RenderAnalysisSinglesDigest(facts, Day.AddDays(-1), Day);
 
-        Assert.Equal("Anomaly singles: 3 across 2 servers — uncorroborated findings routed to this digest, not paged", shortMessage);
+        Assert.Equal("3 analysis singles across 2 servers", shortMessage);
         Assert.StartsWith(shortMessage, detail, StringComparison.Ordinal);
 
         /* The span, in the round-trip format the rollup uses. */
@@ -273,7 +273,7 @@ public class AnalysisSinglesDigestTests
         var facts = DarlingSelfAlertEvaluator.ExtractSinglesDigestFacts(rows);
         var (shortMessage, detail) = DarlingSelfAlertEvaluator.RenderAnalysisSinglesDigest(facts, Day.AddDays(-1), Day);
 
-        Assert.StartsWith("Anomaly singles: 14 across 14 servers", shortMessage, StringComparison.Ordinal);
+        Assert.StartsWith("14 analysis singles across 14 servers", shortMessage, StringComparison.Ordinal);
         Assert.Contains("Top movers by severity (10 of 14):", detail, StringComparison.Ordinal);
         Assert.Contains("+ 4 more singles below the top 10", detail, StringComparison.Ordinal);
         Assert.Contains("- anomaly: 14 singles across 14 servers", detail, StringComparison.Ordinal);
@@ -300,7 +300,7 @@ public class AnalysisSinglesDigestTests
         Assert.Equal(3, fired.NumericCurrentValue);
         Assert.Equal(0, fired.NumericThresholdValue);
         Assert.Contains("no threshold", fired.ThresholdValue, StringComparison.Ordinal);
-        Assert.StartsWith("Anomaly singles: 3 across 2 servers", fired.ShortMessage, StringComparison.Ordinal);
+        Assert.StartsWith("3 analysis singles across 2 servers", fired.ShortMessage, StringComparison.Ordinal);
         Assert.False(fired.Muted);
     }
 
@@ -483,5 +483,167 @@ public class AnalysisSinglesDigestTests
             fired.DetailText);
         Assert.NotEqual(AlertDetailText.Flatten(context), fired.DetailText);
         Assert.Equal(fired.DetailText, AlertDetailText.ProseForDelivery(fired.DetailText, context));
+    }
+
+    /* ---------------- #7086: the held-alert section and the Daily Digest title ---------------- */
+
+    private static AnalysisSinglesDigestReader.DigestRoutedRow Held(
+        DateTime at, int serverId, string server, string metric, string reason)
+        => new(at, serverId, server, metric, 5, ContextJson(reason));
+
+    [Fact]
+    public async Task ADayWithHeldRowsAndSingles_SendsOneDailyDigest_WithBothSections_AndTheCombinedShortMessage()
+    {
+        var h = new Harness();
+        var rows = new[]
+        {
+            Held(Day.AddHours(-9), 1, "pm-server-1", "Runnable Queue Warning", "first breach, held for one more sample"),
+            Held(Day.AddHours(-6), 1, "pm-server-1", "Runnable Queue Warning", "second hold"),
+            Held(Day.AddHours(-2), 1, "pm-server-1", "Runnable Queue Warning", "latest hold"),
+            Row(Day.AddHours(-5), 1, "pm-server-1", "anomaly", "aaaaaaaa", 1.62),
+            Row(Day.AddHours(-3), 2, "pm-server-2", "anomaly", "bbbbbbbb", 1.91),
+        }.OrderBy(r => r.AlertTime).ToArray();
+
+        await ApplyAsync(h, h.Build(), rows);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("3 held alerts and 2 analysis singles across 2 servers", fired.ShortMessage);
+        Assert.Equal(5, fired.NumericCurrentValue);
+
+        var detail = fired.DetailText!;
+        Assert.Contains("Held back from paging (3 alerts in 1 group):", detail, StringComparison.Ordinal);
+        Assert.Contains(
+            "- pm-server-1 - Runnable Queue Warning: 3 held, first 2026-09-19 03:00 UTC, last 2026-09-19 10:00 UTC. latest hold",
+            detail, StringComparison.Ordinal);
+        Assert.DoesNotContain("second hold", detail, StringComparison.Ordinal);
+        Assert.Contains("Analysis singles (2 across 2 servers).", detail, StringComparison.Ordinal);
+        Assert.Contains("Top movers by severity (2 of 2):", detail, StringComparison.Ordinal);
+        /* The held section comes first: it is the part nobody has been told about. */
+        Assert.True(detail.IndexOf("Held back from paging", StringComparison.Ordinal)
+                    < detail.IndexOf("Analysis singles (", StringComparison.Ordinal));
+
+        /* The structured rows carry both sections too. */
+        Assert.Contains(fired.Context!.Details, d => d.Heading == "Held back from paging");
+        var group = Assert.Single(fired.Context.Details, d => d.Heading == "pm-server-1 - Runnable Queue Warning");
+        Assert.Equal("3", group.Fields.Single(f => f.Label == "Held").Value);
+        Assert.Contains(fired.Context.Details, d => d.Heading == "Singles summary");
+    }
+
+    [Fact]
+    public async Task ADayWithOnlyHeldRows_SendsTheDigest_WithoutASinglesSection()
+    {
+        var h = new Harness();
+        var rows = new[]
+        {
+            Held(Day.AddHours(-4), 1, "pm-server-1", "Forced Plan Failing", "first failure"),
+            Held(Day.AddHours(-1), 1, "pm-server-1", "Forced Plan Failing", "first failure"),
+        };
+
+        await ApplyAsync(h, h.Build(), rows);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("2 held alerts across 1 server", fired.ShortMessage);
+        Assert.Equal(2, fired.NumericCurrentValue);
+        Assert.Contains("Held back from paging (2 alerts in 1 group):", fired.DetailText, StringComparison.Ordinal);
+        Assert.DoesNotContain("Analysis singles", fired.DetailText, StringComparison.Ordinal);
+        Assert.DoesNotContain("Top movers", fired.DetailText, StringComparison.Ordinal);
+        Assert.DoesNotContain(fired.Context!.Details, d => d.Heading == "Singles summary");
+        Assert.Equal(Day, h.Stamps.Stamps[PgSelfAlertDeliveryStampStore.AnalysisSinglesDigestStateKey]);
+    }
+
+    [Fact]
+    public async Task ADayWithNoRowsAtAll_SendsNothing_AndDoesNotConsumeTheInterval()
+    {
+        var h = new Harness();
+
+        await ApplyAsync(h, h.Build(), Array.Empty<AnalysisSinglesDigestReader.DigestRoutedRow>());
+
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.Stamps.Stamps);
+    }
+
+    [Fact]
+    public void HeldRows_GroupByServerAndMetric_MostHeldFirst_WithTheNewestReason()
+    {
+        var rows = new[]
+        {
+            Held(Day.AddHours(-10), 1, "pm-server-1", "Poison Wait", "old reason"),
+            Held(Day.AddHours(-9), 2, "pm-server-2", "Poison Wait", "other server"),
+            Held(Day.AddHours(-8), 1, "pm-server-1", "Poison Wait", "new reason"),
+            Held(Day.AddHours(-7), 1, "pm-server-1", "Blocking Detected", "blocking reason"),
+            Held(Day.AddHours(-6), 1, "pm-server-1", "Poison Wait", "newest reason"),
+        };
+
+        var facts = DarlingSelfAlertEvaluator.ExtractSinglesDigestFacts(rows);
+
+        Assert.Equal(5, facts.Held);
+        Assert.Equal(0, facts.Singles);
+        Assert.Equal(2, facts.Servers);
+        Assert.Equal(3, facts.HeldGroups.Count);
+        var first = facts.HeldGroups[0];
+        Assert.Equal(("pm-server-1", "Poison Wait", 3), (first.Server, first.Metric, first.Count));
+        Assert.Equal(Day.AddHours(-10), first.FirstUtc);
+        Assert.Equal(Day.AddHours(-6), first.LastUtc);
+        Assert.Equal("newest reason", first.Reason);
+        /* The ties (one each) sort by server then metric. */
+        Assert.Equal("Blocking Detected", facts.HeldGroups[1].Metric);
+        Assert.Equal("pm-server-2", facts.HeldGroups[2].Server);
+    }
+
+    [Fact]
+    public void AGroupOfOne_ReadsAsOneTime_AndAnEmptyReasonAddsNothing()
+    {
+        var group = new DarlingSelfAlertEvaluator.HeldAlertGroup(
+            "pm-server-1", "Poison Wait", 1, Day, Day, "");
+
+        Assert.Equal("pm-server-1 - Poison Wait: 1 held, at 2026-09-19 12:00 UTC", DarlingSelfAlertEvaluator.HeldGroupLine(group));
+    }
+
+    [Fact]
+    public void TheHeldList_StatesTheGroupsItsCapLeavesOut()
+    {
+        var rows = Enumerable.Range(1, 45)
+            .Select(i => Held(Day.AddHours(-1), i, $"pm-server-{i:00}", "Poison Wait", "held"))
+            .ToArray();
+
+        var facts = DarlingSelfAlertEvaluator.ExtractSinglesDigestFacts(rows);
+        var (_, detail) = DarlingSelfAlertEvaluator.RenderAnalysisSinglesDigest(facts, Day.AddDays(-1), Day);
+
+        Assert.Contains("Held back from paging (45 alerts in 45 groups):", detail, StringComparison.Ordinal);
+        Assert.Contains("+ 5 more groups, not listed", detail, StringComparison.Ordinal);
+    }
+
+    /// <summary>The title changes, the key does not: the generic webhook's metric, the route and mute key and the history
+    /// grids all still read "Analysis Singles Digest", while email, Slack and Teams show "Daily Digest".</summary>
+    [Fact]
+    public async Task TheDigest_ShowsTheDailyDigestTitle_AndKeepsTheMetricNameInTheWebhookPayload()
+    {
+        var h = new Harness();
+        await ApplyAsync(h, h.Build(), new[] { Held(Day.AddHours(-1), 1, "pm-server-1", "Poison Wait", "held") });
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("Analysis Singles Digest", fired.MetricName);
+        Assert.Equal("Daily Digest", fired.DisplayName);
+
+        var branding = new AlertBranding("Test Edition", null);
+        var webhook = WebhookAlertService.BuildGenericPayload(
+            fired.MetricName, fired.ServerName, fired.CurrentValue, fired.ThresholdValue, branding,
+            context: fired.Context, detailText: fired.DetailText);
+        using (var document = System.Text.Json.JsonDocument.Parse(webhook))
+        {
+            Assert.Equal("Analysis Singles Digest", document.RootElement.GetProperty("metric").GetString());
+        }
+
+        var slack = WebhookAlertService.BuildSlackPayload(
+            fired.MetricName, fired.ServerName, fired.CurrentValue, fired.ThresholdValue, branding,
+            context: fired.Context, detailText: fired.DetailText, displayName: fired.DisplayName);
+        Assert.Contains("Daily Digest", slack, StringComparison.Ordinal);
+        Assert.DoesNotContain("Analysis Singles Digest", slack, StringComparison.Ordinal);
+
+        var (html, _) = EmailTemplateBuilder.BuildAlertEmail(
+            fired.MetricName, fired.ServerName, fired.CurrentValue, fired.ThresholdValue, 15, branding,
+            fired.Context, fired.DetailText, fired.DisplayName, null);
+        Assert.Contains("Daily Digest", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("Analysis Singles Digest", html, StringComparison.Ordinal);
     }
 }
