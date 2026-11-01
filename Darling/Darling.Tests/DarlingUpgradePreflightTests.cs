@@ -389,6 +389,27 @@ public sealed class DarlingUpgradePreflightTests
     }
 
     [Theory]
+    [InlineData("pwsh")]
+    [InlineData("powershell.exe")]
+    public void AnUnreadableZip_FailsBeforeTheServiceStop_WithItsOwnMessage(string host)
+    {
+        if (SkipUnlessRunnable(host, needsElevation: true))
+        {
+            return;
+        }
+
+        // #7063: the file has a .zip name, but its bytes are not a zip, so the runtime check cannot open it.
+        // It must refuse with its own message, before the service stop.
+        var setup = InstallWithRuntime + "; " + "$zip = Join-Path $base 'PerformanceMonitorDarling-9.9.9.zip'; Set-Content -LiteralPath $zip -Value 'not a zip'";
+        var all = string.Join("\n", RunScript(host, "ok", "-Check", setup, "$zip"));
+
+        Assert.Contains("could not be read to check whether it carries a .NET runtime", all, StringComparison.Ordinal);
+        Assert.Contains("exit=1", all, StringComparison.Ordinal);
+        Assert.Contains("unchanged=True", all, StringComparison.Ordinal);
+        Assert.Contains("stopCalled=False", all, StringComparison.Ordinal);
+    }
+
+    [Theory]
     [InlineData("pwsh", true)]
     [InlineData("powershell.exe", true)]
     [InlineData("pwsh", false)]
