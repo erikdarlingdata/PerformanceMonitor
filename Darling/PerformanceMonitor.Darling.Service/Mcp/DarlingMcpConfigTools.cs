@@ -51,7 +51,7 @@ public sealed class DarlingMcpConfigTools
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "server_config", cancellationToken)
                     ?? McpHelpers.Status(
                         "unavailable",
-                        "No server configuration data available. The config collector may not have run yet.");
+                        $"No server configuration data available for {resolved.DisplayName}. The config collector may not have run yet. Check get_collection_health for {resolved.DisplayName} to see if the collector is failing or still waiting for its first run.");
 
             return JsonSerializer.Serialize(new
             {

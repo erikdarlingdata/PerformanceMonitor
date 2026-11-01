@@ -2840,7 +2840,7 @@ ORDER BY server_name";
             var row = await DarlingDataReader.GetLatestServerPropertiesAsync(postgres, resolved.ServerId, cancellationToken);
             if (row == null)
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "server_properties", cancellationToken)
-                    ?? McpHelpers.Status("unavailable", "No server properties available. The properties collector may not have run yet.");
+                    ?? McpHelpers.Status("unavailable", $"No server properties available for {resolved.DisplayName}. The properties collector may not have run yet. Check get_collection_health for {resolved.DisplayName} to see if the collector is failing or still waiting for its first run.");
 
             return ServerPropertiesPayload(resolved.DisplayName, row);
         }

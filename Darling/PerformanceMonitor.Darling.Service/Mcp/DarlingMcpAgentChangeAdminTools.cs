@@ -102,7 +102,7 @@ public sealed class DarlingMcpAgentChangeAdminTools
         }
         catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.InsufficientPrivilege)
         {
-            refusal = Refuse("no_privilege", "The MCP store login may not write the agent switch. Re-run the role provisioning (tools/provision-roles.sql). Nothing was changed.");
+            refusal = Refuse("no_privilege", "The MCP store login may not write the agent switch. Re-run the role provisioning with " + DarlingManagedRoles.ProvisionRolesScriptPath + ". Nothing was changed.");
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -169,7 +169,7 @@ public sealed class DarlingMcpAgentChangeAdminTools
         }
         catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.InsufficientPrivilege)
         {
-            refusal = Refuse("no_privilege", "The MCP store login may not write what this undo restores. Re-run the role provisioning (tools/provision-roles.sql). Nothing was changed.");
+            refusal = Refuse("no_privilege", "The MCP store login may not write what this undo restores. Re-run the role provisioning with " + DarlingManagedRoles.ProvisionRolesScriptPath + ". Nothing was changed.");
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

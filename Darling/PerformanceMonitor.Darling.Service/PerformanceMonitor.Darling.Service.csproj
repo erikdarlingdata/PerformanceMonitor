@@ -103,6 +103,11 @@
     <!-- #6469: the double-click launcher for install-darling.ps1. A .cmd is not Authenticode-signed with the scripts; it only
          starts PowerShell elevated with the execution policy bypassed for that one process. -->
     <None Include="..\tools\Install-Darling.cmd" Link="Install-Darling.cmd" CopyToOutputDirectory="PreserveNewest" Condition="$(DarlingShipsWindowsScripts)" />
+    <!-- #7077: the role-provisioning script the service's refusals and log lines tell the operator of a store they run
+         themselves to re-run. It is plain SQL for psql, so it is not signed, and it ships on every publish (the Windows zip,
+         the MSI payload, the Linux tarball and the container image), not only where the Windows scripts do, because a
+         bring-your-own store runs on any of them. The messages name it "in the install folder". -->
+    <None Include="..\tools\provision-roles.sql" Link="provision-roles.sql" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>

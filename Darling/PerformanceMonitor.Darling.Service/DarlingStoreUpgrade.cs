@@ -1819,7 +1819,7 @@ internal sealed class DarlingStoreUpgrade
         if (actualDataMajor is not null && actualDataMajor != expectedDataMajor)
         {
             _logger.LogCritical(
-                "REFUSING to revert the store runtime: the data directory {DataDirectory} is PostgreSQL {Actual}, not the PostgreSQL {Expected} this revert assumes. Restoring the older binaries now would leave them in front of a newer cluster and the store would not start. The current runtime is left in place. This is a bug in the caller — a revert was requested after the data directory had already moved forward.",
+                "REFUSING to revert the store runtime: the data directory {DataDirectory} is PostgreSQL {Actual}, not the PostgreSQL {Expected} this revert assumes. Restoring the older binaries now would leave them in front of a newer cluster and the store would not start. The current runtime is left in place. The data directory was upgraded after this revert was planned, so the store cannot be reverted. Restore a backup taken before the upgrade if you need the old version, and report this with the service log if you did not expect an upgrade.",
                 dataDirectory, actualDataMajor, expectedDataMajor);
             return false;
         }
