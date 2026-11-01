@@ -29,6 +29,26 @@ public sealed partial class PlanForceToolLiveTests
         return decision.Permit!;
     }
 
+    /// <summary>
+    /// #7108: the before read of a force is refused by the remediation code itself (the slot resolves to nothing), after the gate passed. The prepare step hands the reason to
+    /// the refusal sink, which here is the agent's journal. The store is enough: the refusal comes before any connection.
+    /// </summary>
+    [Fact]
+    public async Task AForceWhoseBeforeReadIsRefused_IsJournaledAsARefusalWithItsReason()
+    {
+        await RunAsync(Without.Nothing, async c =>
+        {
+            Environment.SetEnvironmentVariable(c.Sql.EnvName, null);
+
+            var json = Parse(await c.Tool(force: true, queryId: 11, planId: 22, dryRun: true));
+            Assert.Equal("refused", (string?)json["status"]);
+            Assert.Equal("secret_empty", (string?)json["reason"]);
+            Assert.Equal(0, await JournalActionRowsAsync(c));
+            Assert.Equal("1", await PgScalarAsync(c.Connection, "SELECT count(*) FROM config.investigation_journal WHERE event = 'refused' AND reason = 'secret_empty' AND actor = 'agent:agent-a' "
+                + "AND request_id = (SELECT request_id FROM config.investigation_requests LIMIT 1)", c.Ct));
+        }, storeOnly: true);
+    }
+
     [Fact]
     public async Task APrepareOfAForce_ReturnsTheBindingFacts_AndTheWriteWithThoseFactsForcesThePlan()
     {

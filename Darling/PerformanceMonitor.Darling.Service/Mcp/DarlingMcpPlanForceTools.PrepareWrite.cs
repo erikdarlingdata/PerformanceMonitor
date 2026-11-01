@@ -125,13 +125,27 @@ public sealed partial class DarlingMcpPlanForceTools
         var dry = force
             ? await executor.ForcePlanAsync(permit, queryId, planId, dryRun: true, ct)
             : await executor.UnforcePlanAsync(permit, queryId, planId, dryRun: true, ct);
-        var answer = dry.Outcome == RemediationOutcome.Done
-            ? Answer("dry_run", null, dry.Message, new { dry_run = true, statement = dry.Statement ?? statement, before = beforeState })
-            : Answer(dry.Outcome == RemediationOutcome.Refused ? "refused" : "failed", dry.Reason, dry.Message, new { dry_run = true, statement, before = beforeState });
-        return new PlanPrepared<ForcePlanFacts>(facts, executor, answer);
+        return ForceDryRunPrepared(dry, facts, executor);
     }
 
-    /// <summary>Makes the change. Checks the statement: the one the permit's database gives must be the one prepared.</summary>
+    /// <summary>
+    /// The prepare result after a force or unforce dry run. A dry run that does not pass ends with its answer and no facts or executor, as the other prepares
+    /// do, so a caller cannot key on facts of a change that was refused or failed.
+    /// </summary>
+    internal static PlanPrepared<ForcePlanFacts> ForceDryRunPrepared(RemediationResult dry, ForcePlanFacts facts, SqlServerRemediationExecutor executor)
+    {
+        var state = facts.Before;
+        if (dry.Outcome != RemediationOutcome.Done)
+            return PlanPrepared<ForcePlanFacts>.End(Answer(dry.Outcome == RemediationOutcome.Refused ? "refused" : "failed", dry.Reason, dry.Message,
+                new { dry_run = true, statement = facts.Statement, before = state }));
+        return new PlanPrepared<ForcePlanFacts>(facts, executor,
+            Answer("dry_run", null, dry.Message, new { dry_run = true, statement = dry.Statement ?? facts.Statement, before = state }));
+    }
+
+    /// <summary>
+    /// Makes the change. Checks the statement: the one the permit's database gives must be the one prepared. The statement is built from the permit's database
+    /// and the facts' own ids, so this check catches a different database only. A caller that approves a stored change compares the fresh prepare facts with the stored binding.
+    /// </summary>
     internal static Task<RemediationResult> WriteForcePlanAsync(SqlServerRemediationExecutor executor, ServerActionPermit permit, ForcePlanFacts facts, CancellationToken ct)
     {
         if (permit.Database is { Length: > 0 } database)
@@ -179,6 +193,7 @@ public sealed partial class DarlingMcpPlanForceTools
 
     internal static Task<RemediationResult> WriteEvictPlanAsync(SqlServerRemediationExecutor executor, ServerActionPermit permit, EvictPlanFacts facts, CancellationToken ct)
     {
+        /* The statement is rebuilt from the permit's own handle, so this check catches a permit for another handle only (#7108). */
         if (PlanEvictStatement.TryNormalize(permit.Id, out var normal) && PlanEvictStatement.For(normal) is { } now
             && !string.Equals(now, facts.Statement, StringComparison.Ordinal))
             return Task.FromResult(StatementChangedResult("evict_plan", facts.Statement, now));
@@ -213,6 +228,7 @@ public sealed partial class DarlingMcpPlanForceTools
 
     internal static Task<RemediationResult> WriteRecompileModuleAsync(SqlServerRemediationExecutor executor, ServerActionPermit permit, RecompileModuleFacts facts, CancellationToken ct)
     {
+        /* The statement is rebuilt from the permit's own database and module, so this check catches a permit for another target only (#7108). */
         if (permit.Database is { Length: > 0 } database && permit.Id is { Length: > 0 } module)
         {
             var now = ModuleRecompileStatement.For(database, module);
@@ -253,6 +269,7 @@ public sealed partial class DarlingMcpPlanForceTools
 
     internal static Task<RemediationResult> WriteCreatePlanGuideAsync(SqlServerRemediationExecutor executor, ServerActionPermit permit, CreatePlanGuideFacts facts, CancellationToken ct)
     {
+        /* The statement is rebuilt from the permit's own target plus the facts' ids, so this check catches a different database only (#7108). */
         if (permit.Database is { Length: > 0 } database)
         {
             var now = PlanGuideStatement.Create(database, facts.Definition);

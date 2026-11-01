@@ -1066,15 +1066,6 @@ public sealed partial class DarlingMcpPlanForceTools
         return null;
     }
 
-    /// <summary>The before read could not finish: a refusal of the remediation code (no login, a slot that cannot be read) is journaled once an hour; a failure is only answered.</summary>
-    private static async Task<string> NotRunAsync(InvestigationRequestStore store, AgentAction action, string tool, RemediationOutcome outcome,
-        string? reason, string message, string? agentTokenName, CancellationToken ct)
-    {
-        if (outcome == RemediationOutcome.Refused && reason is not null)
-            await store.RecordAgentActionRefusalAsync(action.RequestId, action.AgentId, tool, reason, agentTokenName, ct);
-        return Answer(outcome == RemediationOutcome.Refused ? "refused" : "failed", reason, message);
-    }
-
     private sealed record ServerRow(RemediationServer Server, string? UserName, string? SecretSlot, string? MonitoringUserName = null,
         string[]? ExcludedDatabases = null);
 

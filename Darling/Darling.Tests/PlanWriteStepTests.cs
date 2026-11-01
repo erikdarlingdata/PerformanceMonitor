@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Text.Json.Nodes;
 using System.Threading.Tasks;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Remediation;
@@ -81,5 +82,39 @@ public sealed class PlanWriteStepTests
 
         var passed = await DarlingMcpPlanForceTools.WriteCreatePlanGuideAsync(Executor(), Permit(ServerActionNames.CreatePlanGuide, "g1", "db1"), stale, TestContext.Current.CancellationToken);
         Assert.NotEqual(DarlingMcpPlanForceTools.StatementChanged, passed.Reason);
+    }
+
+    /// <summary>#7108: a force or unforce dry run that is refused or fails returns its answer and nothing a caller could key on, like the other prepares.</summary>
+    [Theory]
+    [InlineData(RemediationOutcome.Refused, "refused")]
+    [InlineData(RemediationOutcome.Failed, "failed")]
+    public void AForceDryRun_ThatIsRefusedOrFails_ReturnsTheAnswerWithNoFactsAndNoExecutor(RemediationOutcome outcome, string status)
+    {
+        var state = new PlanForceState("db1", 5, 9, new RequestedPlanState(9, false, null, null), null);
+        var facts = new DarlingMcpPlanForceTools.ForcePlanFacts(true, "db1", 5, 9, PlanForceStatement.For("db1", 5, 9, true), null, false, state);
+        var dry = outcome == RemediationOutcome.Refused
+            ? RemediationResult.Refused("force_plan", true, RemediationResult.Reasons.AlreadyForced, "Plan 9 is already forced for query 5.")
+            : RemediationResult.Failed("force_plan", true, "The connection was lost.");
+
+        var prepared = DarlingMcpPlanForceTools.ForceDryRunPrepared(dry, facts, Executor());
+
+        Assert.Null(prepared.Facts);
+        Assert.Null(prepared.Executor);
+        Assert.NotNull(prepared.Answer);
+        Assert.Equal(status, (string?)JsonNode.Parse(prepared.Answer)!["status"]);
+    }
+
+    [Fact]
+    public void AForceDryRun_ThatPasses_ReturnsTheFactsTheExecutorAndTheDryRunAnswer()
+    {
+        var state = new PlanForceState("db1", 5, 9, new RequestedPlanState(9, false, null, null), null);
+        var facts = new DarlingMcpPlanForceTools.ForcePlanFacts(true, "db1", 5, 9, PlanForceStatement.For("db1", 5, 9, true), null, false, state);
+        var executor = Executor();
+
+        var prepared = DarlingMcpPlanForceTools.ForceDryRunPrepared(RemediationResult.Done("force_plan", true, wrote: false, "Dry run: plan 9 could be forced."), facts, executor);
+
+        Assert.Same(facts, prepared.Facts);
+        Assert.Same(executor, prepared.Executor);
+        Assert.Equal("dry_run", (string?)JsonNode.Parse(prepared.Answer!)!["status"]);
     }
 }

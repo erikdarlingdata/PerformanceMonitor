@@ -399,6 +399,24 @@ public sealed partial class PlanForceToolLiveTests
         });
     }
 
+    /// <summary>
+    /// #7108: the refusal for a server whose clock was never collected comes from the prepare step, after the gate passed. The tool journals it as a refusal with its
+    /// reason on the agent's request. The store is enough: nothing reaches the monitored server.
+    /// </summary>
+    [Fact]
+    public async Task WithoutAServerClock_TheRefusalIsJournaledOnTheRequestWithItsReason()
+    {
+        await RunAsync(Without.Nothing, async c =>
+        {
+            var json = Parse(await KillAsync(c, 55, "2026-10-19T12:00:00Z", dryRun: false));
+            Assert.Equal("refused", (string?)json["status"]);
+            Assert.Equal("server_clock_unknown", (string?)json["reason"]);
+            Assert.Equal(0, await JournalActionRowsAsync(c));
+            Assert.Equal("1", await PgScalarAsync(c.Connection, "SELECT count(*) FROM config.investigation_journal WHERE event = 'refused' AND reason = 'server_clock_unknown' AND actor = 'agent:agent-a' "
+                + "AND request_id = (SELECT request_id FROM config.investigation_requests LIMIT 1)", c.Ct));
+        }, storeOnly: true);
+    }
+
     [Fact]
     public async Task ALoginTimeThatIsNotATime_AndABadSessionId_AreRefusedBeforeTheGate()
     {
