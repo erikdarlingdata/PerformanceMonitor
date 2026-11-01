@@ -30,7 +30,7 @@
         </Grid.RowDefinitions>
 
         <TextBlock Grid.Row="0" Text="Mute Rules" FontSize="18" FontWeight="Bold" HorizontalAlignment="Left" Margin="0,0,0,4"/>
-        <TextBlock Grid.Row="1" Text="Muted alerts are still collected and logged, but suppressed from alert delivery (email and webhooks). Changes are written to the shared store and take effect on the service's next mute-rule load."
+        <TextBlock Grid.Row="1" Text="Matching alerts are still collected and logged. A mute rule suppresses them from notifications (email and webhooks); a daily digest rule records them and sends them to the Daily Digest instead of paging. Changes are written to the shared store and take effect on the service's next mute-rule load."
                    Foreground="{DynamicResource ForegroundMutedBrush}" TextWrapping="Wrap" HorizontalAlignment="Left" Margin="0,0,0,12"/>
 
         <Grid Grid.Row="2">

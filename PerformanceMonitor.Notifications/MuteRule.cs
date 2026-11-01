@@ -224,7 +224,7 @@ public class MuteRule
         ClientAppPattern = ClientAppPattern
     };
 
-    /// <summary>The Action column (#7122): what the rule does with a matching alert, in the words the web list uses.</summary>
+    /// <summary>The Action column (#7122): what the rule does with a matching alert, in the Viewer's own label. (The web list has no Action column: it marks a digest rule with "(to the daily digest)" on its scope cell and shows nothing for a mute rule.)</summary>
     public string ActionDisplay => IsDigestAction ? "Daily digest" : "Mute";
 
     /// <summary>The Starts column (#6231): "At once" for a rule with no start, the local start time otherwise, marked while it is still ahead.</summary>
