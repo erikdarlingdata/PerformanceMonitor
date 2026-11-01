@@ -376,7 +376,7 @@ public sealed class WebRouteStatementCensusTests
 
             // ErrorResult is a fixed writer only for a literal message or the route's own request-parse error.
             if (m.Success && text.StartsWith("ErrorResult", StringComparison.Ordinal)
-                && !Regex.IsMatch(source[s..e], @"^ErrorResult\s*\(\s*(?:\$?@?""|bodyError\b)")) continue;
+                && !Regex.IsMatch(source[s..e], @"^ErrorResult\s*\(\s*(?:\$?@?""|bodyError\b|ReadOnlyAccountText\b|RequestIdNotGuidText\b|BodyTooLargeText\s*\(\s*Max\w+Bytes\s*\))")) continue;
             if (m.Success && (pattern.ToString().EndsWith('$') || Close(code, s + text.IndexOf('(')) == e - 1)) return Verdict.Fixed;
         }
 

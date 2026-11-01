@@ -428,7 +428,7 @@ public partial class InvestigationsWindow : Window
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            ShowStatus("Could not close the request: " + ex.Message);
+            ShowStatus("Could not close the request: " + ViewerDataService.InputErrorText(ex));
         }
     }
 
@@ -467,7 +467,7 @@ public partial class InvestigationsWindow : Window
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            ShowStatus("Could not record the feedback: " + ex.Message);
+            ShowStatus("Could not record the feedback: " + ViewerDataService.InputErrorText(ex));
         }
     }
 
@@ -489,7 +489,7 @@ public partial class InvestigationsWindow : Window
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            ShowStatus("Could not decide the note: " + ex.Message);
+            ShowStatus("Could not decide the note: " + ViewerDataService.InputErrorText(ex));
         }
     }
 
@@ -512,7 +512,7 @@ public partial class InvestigationsWindow : Window
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            ShowStatus("Could not write the note: " + ex.Message);
+            ShowStatus("Could not write the note: " + ViewerDataService.InputErrorText(ex));
         }
     }
 
@@ -543,7 +543,7 @@ public partial class InvestigationsWindow : Window
         catch (ArgumentException ex)
         {
             /* The store's refusal sentence (#6400: a tag that no longer exists), without the parameter name the exception adds. */
-            ShowStatus(ex.Message.Split('\n')[0].Replace(" (Parameter 'profileText')", "", StringComparison.Ordinal));
+            ShowStatus(ViewerDataService.InputErrorText(ex).Split('\n')[0]);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

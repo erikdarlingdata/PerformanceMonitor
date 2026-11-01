@@ -72,7 +72,7 @@ public static partial class DarlingWebEndpoints
             }
             catch (InvalidDataException)
             {
-                return ErrorResult("Request body is too large.", StatusCodes.Status400BadRequest);
+                return ErrorResult(BodyTooLargeText(MaxDismissBodyBytes), StatusCodes.Status400BadRequest);
             }
 
             var parsed = ParseDismissBody(body, out var keys, out var refusal);
@@ -211,7 +211,7 @@ public static partial class DarlingWebEndpoints
             var stopwatch = Stopwatch.StartNew();
             if (!Guid.TryParse(requestId, out var request))
             {
-                return ErrorResult("The request id is not a request id.", StatusCodes.Status400BadRequest);
+                return ErrorResult(RequestIdNotGuidText, StatusCodes.Status400BadRequest);
             }
 
             var (body, bodyRefusal) = await ReadInvestigationWriteBodyAsync(context);
@@ -341,7 +341,7 @@ public static partial class DarlingWebEndpoints
             var stopwatch = Stopwatch.StartNew();
             if (!Guid.TryParse(requestId, out var source))
             {
-                return ErrorResult("The request id is not a request id.", StatusCodes.Status400BadRequest);
+                return ErrorResult(RequestIdNotGuidText, StatusCodes.Status400BadRequest);
             }
 
             if (PersonWriteActor(context) is not { } actor)
@@ -401,7 +401,7 @@ public static partial class DarlingWebEndpoints
         }
         catch (InvalidDataException)
         {
-            return (null, "Request body is too large.");
+            return (null, BodyTooLargeText(MaxInvestigationWriteBodyBytes));
         }
 
         try
@@ -524,7 +524,7 @@ public static partial class DarlingWebEndpoints
             var stopwatch = Stopwatch.StartNew();
             if (!Guid.TryParse(requestId, out var request))
             {
-                return ErrorResult("The request id is not a request id.", StatusCodes.Status400BadRequest);
+                return ErrorResult(RequestIdNotGuidText, StatusCodes.Status400BadRequest);
             }
 
             string text;
@@ -534,7 +534,7 @@ public static partial class DarlingWebEndpoints
             }
             catch (InvalidDataException)
             {
-                return ErrorResult("Request body is too large.", StatusCodes.Status400BadRequest);
+                return ErrorResult(BodyTooLargeText(MaxFeedbackBodyBytes), StatusCodes.Status400BadRequest);
             }
 
             if (!TryParseFeedbackBody(text, request, DarlingWebSeat.FromContext(context).EditorPrincipal, out var submission, out var refusal))
@@ -974,6 +974,17 @@ public static partial class DarlingWebEndpoints
         return false;
     }
 
+    /// <summary>The 400 text for a body over an endpoint's limit. It names the limit, which each endpoint passes in.</summary>
+    internal static string BodyTooLargeText(int maxBytes) =>
+        $"The request is larger than the {maxBytes / 1024} KB this endpoint accepts. Send less data.";
+
+    /// <summary>The 403 text when a read-only account tries a change.</summary>
+    internal const string ReadOnlyAccountText =
+        "This account has read-only access, so it cannot make this change. Ask an admin, or sign in with an admin account.";
+
+    /// <summary>The 400 text when a request id is not a GUID.</summary>
+    internal const string RequestIdNotGuidText = "The request id must be a GUID such as 3f2504e0-4f89-11d3-9a0c-0305e82c3301.";
+
     /// <summary>Reads the request body, refusing (<see cref="InvalidDataException"/>) past <paramref name="maxBytes"/>.</summary>
     private static async Task<string> ReadBoundedBodyAsync(HttpContext context, int maxBytes)
     {
@@ -984,7 +995,7 @@ public static partial class DarlingWebEndpoints
         {
             if (buffer.Length + read > maxBytes)
             {
-                throw new InvalidDataException("Request body is too large.");
+                throw new InvalidDataException(BodyTooLargeText(maxBytes));
             }
 
             buffer.Write(chunk, 0, read);

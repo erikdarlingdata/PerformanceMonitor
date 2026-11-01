@@ -58,7 +58,7 @@ public static partial class DarlingWebEndpoints
             var seat = DarlingWebSeat.FromContext(context);
             if (!seat.CanEdit)
             {
-                return ErrorResult("This account has read-only access.", StatusCodes.Status403Forbidden);
+                return ErrorResult(ReadOnlyAccountText, StatusCodes.Status403Forbidden);
             }
 
             if (!IsJsonContentType(context.Request.ContentType))
@@ -73,7 +73,7 @@ public static partial class DarlingWebEndpoints
             }
             catch (InvalidDataException)
             {
-                return ErrorResult("Request body is too large.", StatusCodes.Status400BadRequest);
+                return ErrorResult(BodyTooLargeText(MaxCollectorRunBodyBytes), StatusCodes.Status400BadRequest);
             }
 
             string? serverName;
@@ -162,7 +162,7 @@ public static partial class DarlingWebEndpoints
 
             if (state is null)
             {
-                return ErrorResult("No such collector run.", StatusCodes.Status404NotFound);
+                return ErrorResult("No collector run has that id. Start a new run.", StatusCodes.Status404NotFound);
             }
 
             context.Response.Headers.CacheControl = "no-store";
@@ -227,7 +227,7 @@ public static partial class DarlingWebEndpoints
             var seat = DarlingWebSeat.FromContext(context);
             if (!seat.CanEdit)
             {
-                return ErrorResult("This account has read-only access.", StatusCodes.Status403Forbidden);
+                return ErrorResult(ReadOnlyAccountText, StatusCodes.Status403Forbidden);
             }
 
             if (!IsJsonContentType(context.Request.ContentType))
@@ -242,7 +242,7 @@ public static partial class DarlingWebEndpoints
             }
             catch (InvalidDataException)
             {
-                return ErrorResult("Request body is too large.", StatusCodes.Status400BadRequest);
+                return ErrorResult(BodyTooLargeText(MaxActiveQueriesLiveBodyBytes), StatusCodes.Status400BadRequest);
             }
 
             string? serverName;
@@ -328,7 +328,7 @@ public static partial class DarlingWebEndpoints
             if (state is null)
             {
                 run.Complete(ReadOutcome.Ok);
-                return ErrorResult("No such live read.", StatusCodes.Status404NotFound);
+                return ErrorResult("No live read has that id. Start a new one.", StatusCodes.Status404NotFound);
             }
 
             context.Response.Headers.CacheControl = "no-store";
@@ -396,7 +396,7 @@ public static partial class DarlingWebEndpoints
             var seat = DarlingWebSeat.FromContext(context);
             if (!seat.CanEdit)
             {
-                return ErrorResult("This account has read-only access.", StatusCodes.Status403Forbidden);
+                return ErrorResult(ReadOnlyAccountText, StatusCodes.Status403Forbidden);
             }
 
             if (!IsJsonContentType(context.Request.ContentType))
@@ -411,7 +411,7 @@ public static partial class DarlingWebEndpoints
             }
             catch (InvalidDataException)
             {
-                return ErrorResult("Request body is too large.", StatusCodes.Status400BadRequest);
+                return ErrorResult(BodyTooLargeText(MaxAnalyzeNowBodyBytes), StatusCodes.Status400BadRequest);
             }
 
             string? serverName;
@@ -487,7 +487,7 @@ public static partial class DarlingWebEndpoints
 
             if (state is null)
             {
-                return ErrorResult("No such analysis run.", StatusCodes.Status404NotFound);
+                return ErrorResult("No analysis run has that id. Start a new one.", StatusCodes.Status404NotFound);
             }
 
             context.Response.Headers.CacheControl = "no-store";
@@ -750,7 +750,7 @@ public static partial class DarlingWebEndpoints
             }
             catch (InvalidDataException)
             {
-                return ErrorResult("Request body is too large.", StatusCodes.Status400BadRequest);
+                return ErrorResult(BodyTooLargeText(MaxServerTagBodyBytes), StatusCodes.Status400BadRequest);
             }
 
             var stopwatch = Stopwatch.StartNew();
@@ -891,7 +891,7 @@ public static partial class DarlingWebEndpoints
             }
             catch (InvalidDataException)
             {
-                return ErrorResult("Request body is too large.", StatusCodes.Status400BadRequest);
+                return ErrorResult(BodyTooLargeText(MaxServerTagBodyBytes), StatusCodes.Status400BadRequest);
             }
 
             var stopwatch = Stopwatch.StartNew();
@@ -1035,7 +1035,7 @@ public static partial class DarlingWebEndpoints
             }
             catch (InvalidDataException)
             {
-                return ErrorResult("Request body is too large.", StatusCodes.Status400BadRequest);
+                return ErrorResult(BodyTooLargeText(MaxServerTagBodyBytes), StatusCodes.Status400BadRequest);
             }
 
             var stopwatch = Stopwatch.StartNew();
@@ -1167,7 +1167,7 @@ public static partial class DarlingWebEndpoints
         }
         catch (InvalidDataException)
         {
-            return (null, "Request body is too large.");
+            return (null, BodyTooLargeText(MaxServerTagBodyBytes));
         }
 
         try

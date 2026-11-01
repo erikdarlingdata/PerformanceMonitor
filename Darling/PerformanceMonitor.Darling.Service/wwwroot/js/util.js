@@ -1006,6 +1006,13 @@ export function storeHeaders(headers, store) {
   return { ...headers, [STORE_HEADER]: s };
 }
 
+/** The text for a request that got no answer at all (the service is down, the address is wrong, the network dropped).
+    The browser's own words ("Failed to fetch") go in parentheses, since they say nothing about what to do next. */
+export function networkErrorText(e) {
+  const reason = e && e.message ? e.message : String(e);
+  return "Could not reach the Darling service (" + reason + "). Check that the service is running and that you can open this address, then reload.";
+}
+
 /**
  * GET a same-origin API path and classify the response into one of four kinds, mirroring the service's
  * response shapes (DarlingWebEndpoints):
@@ -1026,7 +1033,7 @@ export async function apiGet(path, signal) {
       resp = await fetch(path, { headers: storeHeaders({ Accept: "application/json" }), signal });
     } catch (e) {
       if (e && e.name === "AbortError") return { kind: "aborted" };
-      return { kind: "error", message: "Network error: " + (e && e.message ? e.message : String(e)) };
+      return { kind: "error", message: networkErrorText(e) };
     }
     return await classifyResponse(resp);
   } finally {
@@ -1139,7 +1146,7 @@ async function fetchBody(path, signal, store) {
     return { ok: resp.ok, status: resp.status, raw: await resp.text(), retryAfter: retryAfterOf(resp) };
   } catch (e) {
     if (e && e.name === "AbortError") return { aborted: true };
-    return { transportError: "Network error: " + (e && e.message ? e.message : String(e)) };
+    return { transportError: networkErrorText(e) };
   }
 }
 
@@ -1162,7 +1169,7 @@ export async function apiSend(method, path, body) {
       body: hasBody ? JSON.stringify(body) : undefined,
     });
   } catch (e) {
-    return { kind: "error", message: "Network error: " + (e && e.message ? e.message : String(e)) };
+    return { kind: "error", message: networkErrorText(e) };
   }
   return classifyResponse(resp);
 }
@@ -1174,7 +1181,7 @@ export async function apiSend(method, path, body) {
  * It is the transport Manage Tags' write always had, lifted here with its behaviour unchanged:
  *   { status, body }                    - the answer. `body` is the parsed JSON, or null when the text is not JSON (an
  *                                         empty body included). A 400, 404, 409, 429, 500 and the rest come back this way.
- *   { status: 0, body: null, message }  - no answer at all (a network error); `message` is "Network error: ..."
+ *   { status: 0, body: null, message }  - no answer at all (a network error); `message` is networkErrorText(e)
  *   { status, body, expired: true }     - the session is gone: a 401, or a 2xx whose text is not JSON at all (a sign-in
  *                                         page in front of the API, or an empty body). The shell has been told once
  *                                         (reportSessionExpired, with the house message and "/", never the body's own
@@ -1197,7 +1204,7 @@ export async function apiWrite(method, path, body) {
       body: body === undefined ? undefined : JSON.stringify(body),
     });
   } catch (e) {
-    return { status: 0, body: null, message: "Network error: " + (e && e.message ? e.message : String(e)) };
+    return { status: 0, body: null, message: networkErrorText(e) };
   }
   let parsed = null;
   let isJson = false;
@@ -1209,7 +1216,7 @@ export async function apiWrite(method, path, body) {
   }
   const succeeded = resp.status >= 200 && resp.status < 300;
   if (resp.status === 401 || (succeeded && !isJson)) {
-    reportSessionExpired("Your session has expired. Sign in again.", "/");
+    reportSessionExpired(SESSION_EXPIRED_TEXT, "/");
     return { status: resp.status, body: parsed, expired: true };
   }
   if (succeeded && (parsed === null || typeof parsed !== "object" || Array.isArray(parsed))) return { status: resp.status, body: parsed, unexpected: true };
@@ -1320,6 +1327,21 @@ export async function retryOnceWhenBusy(read, onBusy, signal) {
   return waited ? read() : { kind: "aborted" };
 }
 
+/** The one sentence for a 401 or a signed-out page, wherever the transport finds it. */
+const SESSION_EXPIRED_TEXT = "Your session has expired. Sign in again.";
+
+/** A failed answer that carried no sentence of its own: say which status it was and for which address. The address is
+    the path only, never the query string. A caller that tests for this text (alerts.js) matches its start. */
+function noMessageText(resp) {
+  let path = "";
+  try {
+    path = new URL(resp.url).pathname;
+  } catch {
+    path = "";
+  }
+  return "The Darling service answered HTTP " + resp.status + (path ? " for " + path : "") + " with no message. Check the service log.";
+}
+
 async function classifyResponse(resp) {
   const raw = await resp.text();
   let body = null;
@@ -1332,7 +1354,7 @@ async function classifyResponse(resp) {
   }
 
   if (resp.status === 401) {
-    const message = body && typeof body.error === "string" ? body.error : "Session expired";
+    const message = body && typeof body.error === "string" ? body.error : SESSION_EXPIRED_TEXT;
     const login = body && typeof body.login === "string" ? body.login : "/";
     reportSessionExpired(message, login);
     return { kind: "auth", message, login };
@@ -1343,7 +1365,7 @@ async function classifyResponse(resp) {
   if (!resp.ok) {
     const msg = body && typeof body.error === "string" ? body.error
       : isEnvelope ? plainText(body.message)
-      : "Request failed (HTTP " + resp.status + ")";
+      : noMessageText(resp);
     /* #6800: a read refused busy (429) carries the seconds its Retry-After names, for retryOnceWhenBusy. */
     const retryAfterSeconds = resp.status === 429 ? retryAfterSecondsOf(resp.retryAfter !== undefined ? resp.retryAfter : retryAfterOf(resp)) : null;
     return retryAfterSeconds === null ? { kind: "error", message: msg, status: resp.status } : { kind: "error", message: msg, status: resp.status, retryAfterSeconds };
@@ -1361,7 +1383,7 @@ async function classifyResponse(resp) {
   }
 
   if (resp.ok && raw && body === null) {
-    const message = "Session expired";
+    const message = SESSION_EXPIRED_TEXT;
     reportSessionExpired(message, "/");
     return { kind: "auth", message, login: "/" };
   }
