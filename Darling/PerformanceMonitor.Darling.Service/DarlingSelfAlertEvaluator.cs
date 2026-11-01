@@ -10172,7 +10172,9 @@ ORDER BY ag_name, database_name, replica_server_name";
             catch (Exception ex)
             {
                 _logger?.LogWarning("Could not read the open {Metric} incident for {Key} from alert history after {ElapsedMs} ms; an ended incident may stay open until the next pass: {Message}", band.Metric, historyKey, readClock.ElapsedMilliseconds, ex.Message);
-                _readFailures?.RecordReadFailure(null, "policy job ended-episode close self-alert", readClock.ElapsedMilliseconds);
+                /* The policy job store key is never a server, so it counts under the fleet bucket, the way the seed read does. */
+                var countKey = int.TryParse(historyKey, NumberStyles.Integer, CultureInfo.InvariantCulture, out _) ? historyKey : null;
+                _readFailures?.RecordReadFailure(countKey, "policy job ended-episode close self-alert", readClock.ElapsedMilliseconds);
                 return;
             }
 
