@@ -48,7 +48,7 @@ public static class FindingPageFloor
     public const double PlanRegressionCpuFloorPercent = 50.0;
 
     /// <summary>Average waiting backends a PostgreSQL wait-profile finding needs to page. Poison Wait's Warning bar
-    /// (<c>PoisonWaitEvaluator.WarningAvgWaiters</c>, 1.0); a test pins the two equal.</summary>
+    /// (<c>PoisonWaitEvaluator.WarningAvgWaiters</c> aliases this constant, so there is one definition).</summary>
     public const double WaitProfileAvgWaitersFloor = 1.0;
 
     /// <summary>One page per server per story per this long for a PostgreSQL wait-profile finding.</summary>

@@ -64,7 +64,7 @@ public sealed class AlertHistoryLazyRenderTests
            open (the event also fires on close), built at most once. */
         Assert.Contains("addEventListener(\"toggle\"", detailCell, StringComparison.Ordinal);
         Assert.Contains("if (built || !node.open) return;", detailCell, StringComparison.Ordinal);
-        Assert.Contains("mount(placeholder, detailBody(a));", detailCell, StringComparison.Ordinal);
+        Assert.Contains("mount(placeholder, detailBody(a, null, read?.attached_findings));", detailCell, StringComparison.Ordinal);
 
         /* #5241: an Analysis row's advice is fetched here, in the toggle handler, once per opened row - never by the
            list read, and never for a row nobody opened. */

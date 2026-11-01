@@ -66,8 +66,8 @@ public sealed class AlertEngine
 {
     /* The persisted-watermark row keys (#1145) — Lite's MainWindow.xaml.cs:111-112 constants,
        shared so Lite's existing config_edge_trigger_watermarks rows seed this engine unchanged. */
-    public const string BlockingWatermarkMetric = "Blocking Detected";
-    public const string DeadlockWatermarkMetric = "Deadlocks Detected";
+    public const string BlockingWatermarkMetric = OpenEngineAlerts.BlockingDetectedMetric;
+    public const string DeadlockWatermarkMetric = OpenEngineAlerts.DeadlocksDetectedMetric;
 
     /* #2362: the remaining fingerprinted alerts. Same names their FireAsync/mute contexts use, so the
        accumulator's per-fingerprint state lives under the metric an operator already knows. Forced Plan
@@ -878,7 +878,7 @@ public sealed class AlertEngine
     /// the history row and the resolve all use, so an operator reading <c>config_alert_log</c> and an
     /// operator reading the persistence table are looking at one metric, not two spellings of it.
     /// </summary>
-    public const string CpuPersistenceMetric = "High CPU";
+    public const string CpuPersistenceMetric = OpenEngineAlerts.HighCpuMetric;
 
     /// <summary>
     /// Consecutive breaching tempdb Space SAMPLES required before the reserved percentage is an incident
@@ -1001,7 +1001,7 @@ public sealed class AlertEngine
     /// <see cref="CpuPersistenceMetric"/> gives. A third metric name is a third row in the existing
     /// persistence table (V118 keyed it <c>(server_id, metric_name)</c>), so the rollout needed no rung.
     /// </summary>
-    public const string BlockingWaitPersistenceMetric = "Blocking Wait Time";
+    public const string BlockingWaitPersistenceMetric = OpenEngineAlerts.BlockingWaitTimeMetric;
 
     /// <summary>
     /// The <c>Fired By</c> detail value when the delivered snapshot alone is at or above
@@ -1129,7 +1129,7 @@ public sealed class AlertEngine
                    operator got both before either meant anything. The gate fires this exactly once, after
                    CpuClearSamples consecutive clears. Still gated on !suppressed, exactly as before. */
                 await NotifyResolutionAsync(new AlertResolution(
-                    key, serverName, "High CPU",
+                    key, serverName, CpuPersistenceMetric,
                     EscalationSeed.CpuResolvedTitle,                                                 /* :110 */
                     $"{serverName}: {cpuMetricLabel} back to {eventValue:F0}%"), ct); /* :111 */
             }
@@ -1259,9 +1259,9 @@ public sealed class AlertEngine
         var cpuGrade = GradeCpuFire(alertCpuValue);
         var escalation = _cpuEscalation.IsEscalation(key, cpuGrade);
 
-        if (!suppressed && EscalationOpensGate("High CPU", key, escalation, _lastCpuAlert, now, alertCooldown)) /* :72 */
+        if (!suppressed && EscalationOpensGate(CpuPersistenceMetric, key, escalation, _lastCpuAlert, now, alertCooldown)) /* :72 */
         {
-            var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = "High CPU" }; /* :74 */
+            var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = CpuPersistenceMetric }; /* :74 */
             bool isMuted = _isAlertMuted(muteCtx);                              /* :75 */
             _lastCpuAlert[key] = now;                                           /* :76 — stamped even when muted */
             /* Recorded before the send (a muted fire's history row must not be late), put back below when every channel failed. */
@@ -1348,14 +1348,14 @@ public sealed class AlertEngine
                channel renderers print the typed field only when the prose does not already carry it. */
             cpuDetailText = AlertDetailText.WithSampleAge(cpuDetailText, cpuContext) ?? cpuDetailText;
             var delivery = await FireAsync(new AlertOutcome(
-                key, serverName, "High CPU",
+                key, serverName, CpuPersistenceMetric,
                 $"{alertCpuValue:F0}% ({cpuMetricLabel})",
                 $"{cpuThreshold}%",
                 Context: cpuContext, DetailText: cpuDetailText,
                 NumericCurrentValue: alertCpuValue, NumericThresholdValue: cpuThreshold,
                 Muted: isMuted, Severity: cpuGrade,
                 ShortMessage: $"{cpuMetricLabel} at {alertCpuValue:F0}% (threshold: {cpuThreshold}%)"), ct);
-            AfterFire("High CPU", _lastCpuAlert, key, now, alertCooldown, delivery);
+            AfterFire(CpuPersistenceMetric, _lastCpuAlert, key, now, alertCooldown, delivery);
 
             /* A fire nobody received has not delivered this tier: the retry is still the escalation (#5709 round 2). */
             if (EveryChannelFailed(delivery))
@@ -1576,7 +1576,7 @@ public sealed class AlertEngine
 
         if (blockingDecision.Fire)                                                  /* :155 */
         {
-            var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = "Blocking Detected" }; /* :157 */
+            var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = BlockingWatermarkMetric }; /* :157 */
             bool isMuted = _isAlertMuted(muteCtx);                                  /* :158 */
             _lastBlockingAlert[key] = now;                                          /* :159 */
 
@@ -1592,14 +1592,14 @@ public sealed class AlertEngine
                of :167. Numerics carried explicitly (#1830): the count text happens to parse today,
                but the stored value must not depend on parse luck. */
             var delivery = await FireAsync(new AlertOutcome(
-                key, serverName, "Blocking Detected",
+                key, serverName, BlockingWatermarkMetric,
                 effectiveBlockingCount.ToString(),
                 blockingThreshold.ToString(),
                 blockingContext, detailText,
                 NumericCurrentValue: effectiveBlockingCount, NumericThresholdValue: blockingThreshold,
                 Muted: isMuted, Severity: blockingContext?.SeverityOverride,
                 ShortMessage: $"{effectiveBlockingCount} blocking {(effectiveBlockingCount == 1 ? "session" : "sessions")}"), ct);
-            AfterFire("Blocking Detected", _lastBlockingAlert, key, now, alertCooldown, delivery);
+            AfterFire(BlockingWatermarkMetric, _lastBlockingAlert, key, now, alertCooldown, delivery);
 
             /* #4752: the gate advanced the watermark to this count, and it was saved, BEFORE delivery. A fire
                whose every channel failed would leave the retry sweep seeing no new blocking, and the alert
@@ -1629,8 +1629,8 @@ public sealed class AlertEngine
             if (!suppressed && _settings.BlockingEnabled)                           /* :187 */
             {
                 await NotifyResolutionAsync(new AlertResolution(
-                    key, serverName, "Blocking Detected",
-                    "Blocking Cleared",                                             /* :190 */
+                    key, serverName, BlockingWatermarkMetric,
+                    OpenEngineAlerts.BlockingClearedTitle,                                             /* :190 */
                     $"{serverName}: No active blocking"), ct);                      /* :191 */
             }
         }
@@ -1876,8 +1876,8 @@ public sealed class AlertEngine
             if (staleOutcome == PersistenceOutcome.Resolve && !suppressed)
             {
                 await NotifyResolutionAsync(new AlertResolution(
-                    key, serverName, "Blocking Wait Time",
-                    "Blocking Wait Cleared",
+                    key, serverName, BlockingWaitPersistenceMetric,
+                    OpenEngineAlerts.BlockingWaitClearedTitle,
                     $"{serverName}: Total blocked wait back under {thresholdSeconds}s"), ct);
             }
 
@@ -1924,7 +1924,7 @@ public sealed class AlertEngine
         {
             if (!suppressed && CooldownElapsed(_lastBlockingWaitAlert, key, now, alertCooldown))
             {
-                var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = "Blocking Wait Time" };
+                var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = BlockingWaitPersistenceMetric };
                 bool isMuted = _isAlertMuted(muteCtx);
                 _lastBlockingWaitAlert[key] = now;                                  /* stamped even when muted */
 
@@ -1946,14 +1946,14 @@ public sealed class AlertEngine
                    as a number or every history row lands at 0, which is the defect #1830 just fixed. */
                 double totalWaitSeconds = current.TotalWaitSeconds;
                 var delivery = await FireAsync(new AlertOutcome(
-                    key, serverName, "Blocking Wait Time",
+                    key, serverName, BlockingWaitPersistenceMetric,
                     $"{totalWaitSeconds:F0}s across {current.BlockedSessionCount} blocked {(current.BlockedSessionCount == 1 ? "session" : "sessions")}",
                     $"{thresholdSeconds}s",
                     blockingContext, detailText,
                     NumericCurrentValue: totalWaitSeconds, NumericThresholdValue: thresholdSeconds,
                     Muted: isMuted, Severity: blockingContext.SeverityOverride,
                     ShortMessage: $"{totalWaitSeconds:F0}s total blocked wait across {current.BlockedSessionCount} {(current.BlockedSessionCount == 1 ? "session" : "sessions")} (threshold: {thresholdSeconds}s)"), ct);
-                AfterFire("Blocking Wait Time", _lastBlockingWaitAlert, key, now, alertCooldown, delivery);
+                AfterFire(BlockingWaitPersistenceMetric, _lastBlockingWaitAlert, key, now, alertCooldown, delivery);
             }
         }
         else if (outcome == PersistenceOutcome.Resolve)
@@ -1964,8 +1964,8 @@ public sealed class AlertEngine
             if (!suppressed)
             {
                 await NotifyResolutionAsync(new AlertResolution(
-                    key, serverName, "Blocking Wait Time",
-                    "Blocking Wait Cleared",
+                    key, serverName, BlockingWaitPersistenceMetric,
+                    OpenEngineAlerts.BlockingWaitClearedTitle,
                     $"{serverName}: Total blocked wait back under {thresholdSeconds}s"), ct);
             }
         }
@@ -2050,7 +2050,7 @@ public sealed class AlertEngine
            the watermark the Warning fire left is below it. */
         var deadlockTier = GradeDeadlockFire(effectiveDeadlockCount, _settings.DeadlockRateThresholds);
         var deadlockEscalation = _settings.DeadlockEnabled && _deadlockEscalation.IsEscalation(key, deadlockTier);
-        bool deadlockCooldownElapsed = EscalationOpensGate("Deadlocks Detected", key, deadlockEscalation, _lastDeadlockAlert, now, alertCooldown); /* :217 */
+        bool deadlockCooldownElapsed = EscalationOpensGate(DeadlockWatermarkMetric, key, deadlockEscalation, _lastDeadlockAlert, now, alertCooldown); /* :217 */
         var deadlockDecision = _settings.DeadlockEnabled
             ? RollingCountAlertGate.Evaluate(effectiveDeadlockCount, deadlockThreshold, deadlockWatermark, deadlockCooldownElapsed, suppressed)
             : new RollingCountAlertGate.Decision(false, false, 0);                  /* :218-220 */
@@ -2088,7 +2088,7 @@ public sealed class AlertEngine
 
         if (deadlockDecision.Fire)                                                  /* :232 */
         {
-            var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = "Deadlocks Detected" }; /* :234 */
+            var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = DeadlockWatermarkMetric }; /* :234 */
             bool isMuted = _isAlertMuted(muteCtx);                                  /* :235 */
             _lastDeadlockAlert[key] = now;                                          /* :236 */
             var priorDeadlockTier = _deadlockEscalation.Highest(key);
@@ -2122,14 +2122,14 @@ public sealed class AlertEngine
             /* :252-260 — ShortMessage = the toast body of :244. Numerics carried explicitly (#1830):
                the count text happens to parse today, but the stored value must not depend on parse luck. */
             var delivery = await FireAsync(new AlertOutcome(
-                key, serverName, "Deadlocks Detected",
+                key, serverName, DeadlockWatermarkMetric,
                 effectiveDeadlockCount.ToString(),
                 deadlockThreshold.ToString(),
                 deadlockContext, detailText,
                 NumericCurrentValue: effectiveDeadlockCount, NumericThresholdValue: deadlockThreshold,
                 Muted: isMuted, Severity: deadlockContext.SeverityOverride,
                 ShortMessage: $"{effectiveDeadlockCount} {(effectiveDeadlockCount == 1 ? "deadlock" : "deadlocks")} in the last hour"), ct);
-            AfterFire("Deadlocks Detected", _lastDeadlockAlert, key, now, alertCooldown, delivery);
+            AfterFire(DeadlockWatermarkMetric, _lastDeadlockAlert, key, now, alertCooldown, delivery);
 
             /* #4752: the blocking twin above explains it — the watermark moved to this count, and was saved,
                before delivery, so a fire whose every channel failed goes back to the decayed pre-fire value
@@ -2155,7 +2155,7 @@ public sealed class AlertEngine
             if (!suppressed && _settings.DeadlockEnabled)                           /* :264 */
             {
                 await NotifyResolutionAsync(new AlertResolution(
-                    key, serverName, "Deadlocks Detected",
+                    key, serverName, DeadlockWatermarkMetric,
                     EscalationSeed.DeadlocksClearedTitle,                                            /* :267 */
                     $"{serverName}: No deadlocks in the last hour"), ct);           /* :268 */
             }

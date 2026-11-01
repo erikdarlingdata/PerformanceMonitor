@@ -473,10 +473,6 @@ public sealed class AnalysisNotificationService : IDisposable
                 continue;
             }
 
-            /* #7084: the page is going out (or onto the hold-back queue), so a capped wait-profile story's 24 hours start now. */
-            if (route == FindingRoute.Page && FindingPageFloor.IsCappedWaitProfile(lead))
-                _waitProfilePagedAt[CapKey(lead)] = now;
-
             try
             {
                 var context = FindingMessageFormatter.BuildContext(lead, threshold);
@@ -599,7 +595,8 @@ public sealed class AnalysisNotificationService : IDisposable
         }
     }
 
-    /// <summary>#7084: when each capped wait-profile story (server and story hash) last paged, in this process. Seeded lazily
+    /// <summary>#7084: when each capped wait-profile story (server and story hash) last had a page DELIVERED, in this process
+    /// (stamped by the flush with the buckets, never at enqueue). Seeded lazily
     /// from the alert log, so a restart does not open a second page inside the 24 hours.</summary>
     private readonly ConcurrentDictionary<string, DateTime> _waitProfilePagedAt = new();
 
@@ -769,6 +766,12 @@ public sealed class AnalysisNotificationService : IDisposable
     /// </summary>
     private void Stamp(PendingPage page, bool delivered, DateTime at)
     {
+        /* #7084: a capped wait-profile story's 24 hours start when its page was DELIVERED, the same stamp the #2054 hold
+           follows, not when it was queued. A page that reached no channel leaves the story open to re-attempt after one
+           cooldown, which is also what the restart seed (the last delivered page in the alert log) answers. */
+        if (delivered && FindingPageFloor.IsCappedWaitProfile(page.Lead))
+            _waitProfilePagedAt[CapKey(page.Lead)] = at;
+
         var stamped = new HashSet<string>(StringComparer.Ordinal);
         foreach (var (m, key) in page.Members)
         {

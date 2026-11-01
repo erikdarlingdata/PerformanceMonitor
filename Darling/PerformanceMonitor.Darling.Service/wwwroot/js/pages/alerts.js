@@ -247,15 +247,12 @@ function detailCell(a) {
       mount(placeholder, detailBody(a, items));
       return;
     }
-    /* #7084 part 4: an engine alert that analysis findings attach to (instead of paging) lists them here, read on the first open
-     * for this one row, like the advice above. A failed or empty read leaves the list off. */
-    if (isAttachableEngineAlert(a)) {
-      mount(placeholder, [loadingStrip()]);
-      const read = await alertDetailRead(a);
-      mount(placeholder, detailBody(a, null, read?.attached_findings));
-      return;
-    }
-    mount(placeholder, detailBody(a));
+    /* #7084 part 4: any other alert asks get_alert_details too, once, on its first open. The server decides which alerts
+     * findings attach to, so the page keeps no list of its own: it shows the findings the reply carries in attached_findings
+     * (empty for an alert nothing attaches to). A failed or empty read leaves the list off. */
+    mount(placeholder, [loadingStrip()]);
+    const read = await alertDetailRead(a);
+    mount(placeholder, detailBody(a, null, read?.attached_findings));
   });
   return node;
 }
@@ -267,13 +264,6 @@ const adviceCache = new Map();
 
 function isAnalysisAlert(a) {
   return typeof a.metric_name === "string" && a.metric_name.startsWith("Analysis:");
-}
-
-/* The engine alerts a finding attaches to instead of paging (#7084 part 4): the metrics OpenEngineAlerts.Families lists. */
-const ATTACHABLE_ENGINE_METRICS = new Set(["High CPU", "Blocking Detected", "Blocking Wait Time", "Deadlocks Detected"]);
-
-function isAttachableEngineAlert(a) {
-  return ATTACHABLE_ENGINE_METRICS.has(a.metric_name);
 }
 
 /* get_alert_details for one row: { details, attached_findings }, or null when it could not be read. Cached like the advice. */

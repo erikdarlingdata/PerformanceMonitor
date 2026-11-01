@@ -31,16 +31,19 @@ public class AnalysisPageFloorTests
         public List<FindingAlert> Sent { get; } = new();
         public Dictionary<string, DateTime> Seeds { get; } = new(StringComparer.Ordinal);
 
+        /* What a send reports: null is a sender that caught (no channel reached anyone), a delivered one is the hold's trigger. */
+        public AlertDelivery? Delivery { get; set; }
+
         public Task<DateTime?> GetLastDeliveredPageUtcAsync(string serverId, string metricName) =>
             Task.FromResult(Seeds.TryGetValue($"{serverId}:{metricName}", out var t) ? (DateTime?)t : null);
 
         public Task<AlertDelivery?> SendFindingAlertAsync(FindingAlert alert)
         {
             Sent.Add(alert);
-            return Task.FromResult<AlertDelivery?>(null);
+            return Task.FromResult(Delivery);
         }
 
-        public Task<AlertDelivery?> SendFindingSummaryAsync(IReadOnlyList<FindingAlert> named) => Task.FromResult<AlertDelivery?>(null);
+        public Task<AlertDelivery?> SendFindingSummaryAsync(IReadOnlyList<FindingAlert> named) => Task.FromResult(Delivery);
     }
 
     private sealed class Settings : IAlertSettings
@@ -77,9 +80,15 @@ public class AnalysisPageFloorTests
         public FindingRoute UncorroboratedFindingRoute => FindingRoute.Digest;
     }
 
-    private static (AnalysisNotificationService Notifier, CapturingSender Sender) Build()
+    private static AlertDelivery Delivered() => AlertDelivery.FromFanout(
+        new EmailFanoutResult(
+            EmailOutcome: AlertChannelOutcome.NotAttempted, SendError: null,
+            WebhookOutcome: AlertChannelOutcome.Delivered, WebhookSendError: null, AnyChannelConfigured: true),
+        muted: false, trayChannelPresent: false);
+
+    private static (AnalysisNotificationService Notifier, CapturingSender Sender) Build(AlertDelivery? delivery = null)
     {
-        var sender = new CapturingSender();
+        var sender = new CapturingSender { Delivery = delivery };
         var notifier = new AnalysisNotificationService(
             sender, new Settings(), f => f.ServerId.ToString(), NullLogger<AnalysisNotificationService>.Instance);
         return (notifier, sender);
@@ -224,10 +233,6 @@ public class AnalysisPageFloorTests
     private static AnalysisFinding WaitProfile(double meanMsPerSec, string hash = "g000000000000001", double severity = 1.75, string root = "ANOMALY_PG_WAIT_PROFILE")
         => Finding(hash, root, new Dictionary<string, double> { ["mean_ms_per_sec"] = meanMsPerSec, ["current_ms_per_sec"] = meanMsPerSec * 3 }, severity: severity);
 
-    [Fact]
-    public void TheWaitProfileFloor_IsPoisonWaitsWarningBar()
-        => Assert.Equal(PoisonWaitEvaluator.WarningAvgWaiters, FindingPageFloor.WaitProfileAvgWaitersFloor);
-
     [Theory]
     [InlineData("ANOMALY_PG_WAIT_PROFILE")]
     [InlineData("ANOMALY_PG_SAMPLED_WAIT_PROFILE")]
@@ -237,7 +242,7 @@ public class AnalysisPageFloorTests
     [Fact]
     public async Task AWaitProfileAt2WaitingBackends_PagesOnce_AndTheSameStoryLaterDoesNotPageAgain()
     {
-        var (notifier, sender) = Build();
+        var (notifier, sender) = Build(Delivered());
 
         await notifier.NotifyAsync([WaitProfile(2000)]);
         await notifier.FlushPendingAsync();
@@ -247,6 +252,40 @@ public class AnalysisPageFloorTests
         await notifier.NotifyAsync([WaitProfile(2500, severity: 2.0)]);
         await notifier.FlushPendingAsync();
         Assert.Single(sender.Sent);
+    }
+
+    /// <summary>The cap starts when a page is DELIVERED, as the cooldown buckets do (#3633: "did I send" is not "was it delivered").
+    /// A page that reached no channel (SMTP or the webhook failing, or none configured) must not silence its story for 24 hours:
+    /// the story re-attempts on the next cooldown, which these settings put at zero.</summary>
+    [Fact]
+    public async Task AWaitProfilePageThatReachedNoChannel_HoldsNothing_AndTheStoryAttemptsAgain()
+    {
+        var (notifier, sender) = Build();
+
+        await notifier.NotifyAsync([WaitProfile(2000, "g000000000000006")]);
+        await notifier.FlushPendingAsync();
+        Assert.Single(sender.Sent);
+
+        await notifier.NotifyAsync([WaitProfile(2500, "g000000000000006", severity: 2.0)]);
+        await notifier.FlushPendingAsync();
+        Assert.Equal(2, sender.Sent.Count);
+    }
+
+    [Fact]
+    public async Task AWaitProfilePageThatFailedThenDelivered_HoldsFromTheDeliveredOne()
+    {
+        var (notifier, sender) = Build();
+
+        await notifier.NotifyAsync([WaitProfile(2000, "g000000000000007")]);
+        await notifier.FlushPendingAsync();
+        sender.Delivery = Delivered();
+        await notifier.NotifyAsync([WaitProfile(2500, "g000000000000007", severity: 2.0)]);
+        await notifier.FlushPendingAsync();
+        Assert.Equal(2, sender.Sent.Count);
+
+        await notifier.NotifyAsync([WaitProfile(2600, "g000000000000007", severity: 2.6)]);
+        await notifier.FlushPendingAsync();
+        Assert.Equal(2, sender.Sent.Count);
     }
 
     [Fact]

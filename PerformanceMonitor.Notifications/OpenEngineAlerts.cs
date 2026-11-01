@@ -24,15 +24,26 @@ public static class OpenEngineAlerts
     /// reached its reader, and the finding is news again.</summary>
     public static readonly TimeSpan Window = TimeSpan.FromMinutes(60);
 
+    /// <summary>The metric names the shared engine fires under, and the titles of the resolution rows that close them.
+    /// One definition: the engine (<c>AlertEngine</c>, <c>EscalationSeed</c> in PerformanceMonitor.Alerting, and the
+    /// PostgreSQL host's evaluators) alias these, so a rename moves the writers and the "is it resolved" check together.</summary>
+    public const string HighCpuMetric = "High CPU";
+    public const string CpuResolvedTitle = "CPU Resolved";
+    public const string BlockingDetectedMetric = "Blocking Detected";
+    public const string BlockingClearedTitle = "Blocking Cleared";
+    public const string BlockingWaitTimeMetric = "Blocking Wait Time";
+    public const string BlockingWaitClearedTitle = "Blocking Wait Cleared";
+    public const string DeadlocksDetectedMetric = "Deadlocks Detected";
+    public const string DeadlocksClearedTitle = "Deadlocks Cleared";
+
     /// <summary>The attachable engine alerts and the title of the resolution row that closes each (a resolution row is
-    /// stored under its title, not under the metric that fired). The titles are the strings the shared engine writes
-    /// (EscalationSeed.CpuResolvedTitle and DeadlocksClearedTitle in PerformanceMonitor.Alerting, which this assembly cannot reference).</summary>
+    /// stored under its title, not under the metric that fired).</summary>
     public static readonly IReadOnlyList<(string Metric, string ResolutionTitle)> Families = new[]
     {
-        ("High CPU", "CPU Resolved"),
-        ("Blocking Detected", "Blocking Cleared"),
-        ("Blocking Wait Time", "Blocking Wait Cleared"),
-        ("Deadlocks Detected", "Deadlocks Cleared"),
+        (HighCpuMetric, CpuResolvedTitle),
+        (BlockingDetectedMetric, BlockingClearedTitle),
+        (BlockingWaitTimeMetric, BlockingWaitClearedTitle),
+        (DeadlocksDetectedMetric, DeadlocksClearedTitle),
     };
 
     /// <summary>True for a metric whose open fire a finding attaches to, and so for a row whose detail lists attached findings.</summary>
