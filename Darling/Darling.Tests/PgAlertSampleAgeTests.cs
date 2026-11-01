@@ -127,7 +127,8 @@ public sealed class PgAlertSampleAgeTests
         Assert.Contains("\"deadlock\", AlertSampleAge.Newest(rows.Select(r => r.OccurredAtUtc)), now)", source, StringComparison.Ordinal);
         Assert.Contains("\"blocking capture\", AlertSampleAge.Newest(worstPerRoot.Select(r => r.CapturedAt)), now)", source, StringComparison.Ordinal);
         Assert.Contains("newestCollectionBySubject.TryGetValue(finding.Subject, out var newestWaitCollection)", source, StringComparison.Ordinal);
-        Assert.Equal(6, Regex.Matches(source, @"AlertSampleAge\.Stamp\(\s*(?:null|new AlertContext)").Count);
+        /* 8 since #7082: the six above plus the two digest rows it adds (High CPU held at the ceiling, and the held Poison Wait row). */
+        Assert.Equal(8, Regex.Matches(source, @"AlertSampleAge\.Stamp\(\s*(?:null|new AlertContext)").Count);
     }
 
     // ---- the Tier 0 trio and Long-Running Query (#5642, ruling 6) ----
