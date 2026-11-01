@@ -3,7 +3,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:local="clr-namespace:PerformanceMonitor.Darling.Viewer"
         Title="Manage Mute Rules"
-        Height="500" Width="820"
+        Height="500" Width="1060"
         WindowStartupLocation="CenterOwner"
         Icon="EDD.ico"
         ResizeMode="CanResizeWithGrip"
@@ -52,6 +52,7 @@
                     <DataGridTextColumn Header="Metric" Binding="{Binding MetricName}" Width="130"/>
                     <DataGridTextColumn Header="Server" Binding="{Binding ServerName}" Width="130"/>
                     <DataGridTextColumn Header="Reason" Binding="{Binding Reason}" Width="*"/>
+                    <DataGridTextColumn Header="Action" Binding="{Binding ActionDisplay}" Width="90"/>
                     <DataGridTextColumn Header="Schedule" Binding="{Binding Converter={StaticResource ScheduleConverter}, Mode=OneWay}" Width="200"/>
                     <DataGridTextColumn Header="Starts" Binding="{Binding StartsDisplay}" Width="140" SortMemberPath="StartsAtUtc"/>
                     <DataGridTextColumn Header="Expires" Binding="{Binding ExpiresDisplay}" Width="140" SortMemberPath="ExpiresAtUtc"/>

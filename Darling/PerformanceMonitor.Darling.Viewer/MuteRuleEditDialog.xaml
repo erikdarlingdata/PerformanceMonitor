@@ -41,7 +41,7 @@
 
         <TextBlock Grid.Row="0" x:Name="HeaderText" Text="Create Mute Rule" FontSize="18" FontWeight="Bold"
                    HorizontalAlignment="Left" Margin="0,0,0,5"/>
-        <TextBlock Grid.Row="1" Text="Alerts matching all specified fields will be suppressed from notifications."
+        <TextBlock Grid.Row="1" x:Name="IntroText" Text="Alerts matching all specified fields will be suppressed from notifications."
                    Foreground="{DynamicResource ForegroundMutedBrush}" TextWrapping="Wrap" HorizontalAlignment="Left" Margin="0,0,0,15"/>
 
         <TextBlock Grid.Row="2" Text="Reason (optional)" FontWeight="Bold" HorizontalAlignment="Left" Margin="0,0,0,4"/>
@@ -124,21 +124,21 @@
 
             <TextBlock Grid.Row="2" Grid.Column="0" x:Name="QueryTextLabel" Text="Query Text (substring)" HorizontalAlignment="Left" Margin="0,0,0,4"/>
             <TextBox Grid.Row="3" Grid.Column="0" x:Name="QueryTextPatternBox" Margin="0,0,0,8"
-                     ToolTip="Alerts whose query text contains this value (case-insensitive) will be muted. Use a distinctive fragment such as a table name or procedure call."/>
+                     ToolTip="Alerts whose query text contains this value (case-insensitive) will match this rule. Use a distinctive fragment such as a table name or procedure call."/>
 
             <TextBlock Grid.Row="2" Grid.Column="2" x:Name="JobNameLabel" Text="Job Name (substring)" HorizontalAlignment="Left" Margin="0,0,0,4"/>
             <TextBox Grid.Row="3" Grid.Column="2" x:Name="JobNamePatternBox" Margin="0,0,0,8"/>
 
             <TextBlock Grid.Row="4" Grid.Column="0" x:Name="ClientAppLabel" Text="Client Application (substring)" HorizontalAlignment="Left" Margin="0,0,0,4"/>
             <TextBox Grid.Row="5" Grid.Column="0" x:Name="ClientAppPatternBox" Margin="0,0,0,8"
-                     ToolTip="Alerts raised for a client application whose name contains this value (case-insensitive) will be muted, for example Management Studio to mute SSMS cancels."/>
+                     ToolTip="Alerts raised for a client application whose name contains this value (case-insensitive) will match this rule, for example Management Studio to match SSMS cancels."/>
         </Grid>
 
         <!-- #7040: the optional repeating schedule. Hidden on a store below V231, which has no columns for it. -->
         <StackPanel Grid.Row="14" x:Name="ScheduleSection" Margin="0,4,0,0">
             <Border BorderThickness="0,0,0,1" BorderBrush="{DynamicResource BorderBrush}" Margin="0,0,0,12"/>
             <TextBlock Text="Repeats (optional)" FontSize="14" FontWeight="SemiBold" HorizontalAlignment="Left" Margin="0,0,0,4"/>
-            <TextBlock Text="Mute only inside a daily window. Leave the times blank for a one-off rule. With no day ticked, every day counts. A window that ends before it starts crosses midnight and belongs to the day it starts."
+            <TextBlock x:Name="WindowText" Text="Mute only inside a daily window. Leave the times blank for a one-off rule. With no day ticked, every day counts. A window that ends before it starts crosses midnight and belongs to the day it starts."
                        Foreground="{DynamicResource ForegroundMutedBrush}" TextWrapping="Wrap" HorizontalAlignment="Left" Margin="0,0,0,8"/>
             <WrapPanel x:Name="DaysPanel" Margin="0,0,0,8"/>
             <Grid>
@@ -164,7 +164,7 @@
             </Grid>
             <!-- #7083: what the rule does with a matching alert. Mute is the default. -->
             <TextBlock Text="Action" HorizontalAlignment="Left" Margin="0,12,0,4"/>
-            <ComboBox x:Name="ActionBox" SelectedIndex="0" HorizontalAlignment="Left" MinWidth="260"
+            <ComboBox x:Name="ActionBox" SelectedIndex="0" HorizontalAlignment="Left" MinWidth="260" SelectionChanged="ActionBox_SelectionChanged"
                       ToolTip="Mute records a matching alert as muted and sends nothing. The daily digest holds it back from paging and lists it in the daily digest. Pair the digest action with a repeating window.">
                 <ComboBoxItem Content="Mute" Tag="mute"/>
                 <ComboBoxItem Content="Send to the daily digest" Tag="digest"/>

@@ -224,6 +224,9 @@ public class MuteRule
         ClientAppPattern = ClientAppPattern
     };
 
+    /// <summary>The Action column (#7122): what the rule does with a matching alert, in the words the web list uses.</summary>
+    public string ActionDisplay => IsDigestAction ? "Daily digest" : "Mute";
+
     /// <summary>The Starts column (#6231): "At once" for a rule with no start, the local start time otherwise, marked while it is still ahead.</summary>
     public string StartsDisplay => StartsAtUtc.HasValue
         ? StartsAtUtc.Value.ToLocalTime().ToString("g") + (IsUpcomingAt(DateTime.UtcNow) ? " (not started)" : "")
