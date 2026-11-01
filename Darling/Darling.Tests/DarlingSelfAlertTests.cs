@@ -5983,25 +5983,25 @@ public sealed class DarlingSelfAlertTests
             logger: null,
             utcNow: () => now);
 
-        /* Fire: total CPU 90 >= 80, held for AlertEngine.CpuBreachSamples distinct samples (#3282 — one
+        /* Fire: total CPU 90 >= 80, held for AlertEngine.SqlCpuBreachSamples distinct samples (#3282 — one
            sample over the bar is no longer an incident). */
         var sampleAt = new DateTime(2026, 7, 1, 0, 0, 0, DateTimeKind.Utc);
-        for (var i = 0; i < AlertEngine.CpuBreachSamples; i++)
+        for (var i = 0; i < AlertEngine.SqlCpuBreachSamples; i++)
         {
             sampleAt = sampleAt.AddMinutes(1);
-            await engine.EvaluateServerAsync(new AlertServerSnapshot(Key, Name, IsOnline: true, 90, 90, false, false, sampleAt), Ct);
+            await engine.EvaluateServerAsync(new AlertServerSnapshot(Key, Name, IsOnline: true, 90, 90, false, false, sampleAt) { CpuSampleUtcOnly = sampleAt }, Ct);
         }
 
         Assert.Single(deliverer.Outcomes);
         Assert.Empty(history.Records); /* no resolution yet */
 
-        /* Clear: CPU back below threshold for AlertEngine.CpuClearSamples distinct samples => the engine
+        /* Clear: CPU back below threshold for fifteen minutes of distinct samples => the engine
            emits a resolution => a history row is written. */
         now = now.AddMinutes(1);
-        for (var i = 0; i < AlertEngine.CpuClearSamples; i++)
+        for (var i = 0; i < ((int)AlertEngine.SqlCpuClearHold.TotalMinutes + 1); i++)
         {
             sampleAt = sampleAt.AddMinutes(1);
-            await engine.EvaluateServerAsync(new AlertServerSnapshot(Key, Name, IsOnline: true, 10, 10, false, false, sampleAt), Ct);
+            await engine.EvaluateServerAsync(new AlertServerSnapshot(Key, Name, IsOnline: true, 10, 10, false, false, sampleAt) { CpuSampleUtcOnly = sampleAt }, Ct);
         }
         var resolved = Assert.Single(history.Records);
         Assert.Equal("CPU Resolved", resolved.MetricName);
