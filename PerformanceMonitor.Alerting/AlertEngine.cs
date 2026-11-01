@@ -4395,7 +4395,8 @@ public sealed class AlertEngine
                 outcome.MetricName,
                 outcome.Severity?.ToString() ?? "Warning",
                 outcome.ShortMessage,
-                outcome.Muted));
+                outcome.Muted,
+                outcome.Hold is not null));
 
         return await _deliverer.DeliverAndReportAsync(outcome, ct);
     }
