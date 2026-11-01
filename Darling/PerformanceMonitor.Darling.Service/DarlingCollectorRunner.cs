@@ -1163,6 +1163,55 @@ public sealed partial class DarlingCollectorRunner
         return ShouldCapturePlanThisCycle(ordinal, serverId, interval);
     }
 
+    private RepeatLogGate? _repeatLog;
+
+    /// <summary>#7067: the gate for warnings repeated every cycle. The worker gives the runner its own, so both share one
+    /// clock and one memory of what was logged; created on first use otherwise.</summary>
+    internal RepeatLogGate RepeatLog
+    {
+        get => LazyInitializer.EnsureInitialized(ref _repeatLog, static () => new RepeatLogGate());
+        set => _repeatLog = value;
+    }
+
+    /// <summary>
+    /// #7067: the "failed in all N database(s)" line that precedes the surfaced first failure. When the surfaced fault is one of
+    /// the PostgreSQL faults the worker's warning gates (an extension that is not created, a grant that is not given), this
+    /// line is gated too, on its own channel of the shared gate so the two lines never overwrite each other's memory. Its key
+    /// is the worker's fault identity (status, SqlState and explanation) plus the database count, so a changed cause or a
+    /// changed count is logged at once and an unchanged one is repeated as a reminder once a day. The worker clears the
+    /// gate when the collector succeeds. Any other fault (every SQL Server fault, and a PostgreSQL fault that lands in the
+    /// general ERROR arm) is logged by the worker on every cycle, so this line is too and keeps the "every database failed"
+    /// context beside it.
+    /// </summary>
+    internal void LogFailedInAllDatabases(ServerRuntime server, string collector, int count, Exception? firstFailure)
+    {
+        var name = server.Config.DisplayName;
+        if (_logger is null
+            || (GatedPostgresFaultKey(server, collector, firstFailure) is { } faultKey
+                && !RepeatLog.ShouldLog(name, collector, RepeatLogChannel.FailedInAllDatabases, $"{faultKey}|failed in all {count} database(s)")))
+        {
+            return;
+        }
+
+        _logger.LogWarning("{Collector} failed in all {Count} database(s) on '{Server}'; surfacing the first failure",
+            collector, count, name);
+    }
+
+    /// <summary>The worker's gate key for this fault (<c>status|sqlState|explanation</c>, as <see cref="DarlingWorker.LogPostgresFault"/>
+    /// builds it) when the worker logs it through that method (a classified PostgreSQL fault other than a lock-timeout yield),
+    /// the one warning that repeats only once a day. Null for every other fault.</summary>
+    private static string? GatedPostgresFaultKey(ServerRuntime server, string collector, Exception? fault)
+    {
+        if (fault is not PostgresException pg)
+        {
+            return null;
+        }
+
+        var (status, explanation) = DarlingWorker.PostgresFaultOutcome(
+            pg, collector, CollectorFaultDatabase.For(pg, server.ConnectedDatabase), server.PgStatStatementsExtension, server.Target.IsAurora);
+        return status is "ERROR" or "YIELDED" ? null : $"{status}|{pg.SqlState}|{explanation}";
+    }
+
     /// <param name="capturePlans">
     /// Live provider for the plan-capture flag; null defaults to always-on (Darling's SKU default).
     /// The worker passes <c>() =&gt; config.CapturePlans</c> so a store reload takes effect next cycle;

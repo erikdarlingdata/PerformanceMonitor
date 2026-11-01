@@ -5697,7 +5697,6 @@ public sealed class DarlingSelfAlertTests
         var handler = Regex.Match(source[start..end], @"catch \(Exception ex\) when \(ex is not OperationCanceledException\)\s*\{");
         Assert.True(handler.Success, "TryConnectAsync has no failed-connect handler");
         var handlerCode = source[(start + handler.Index)..end];
-        var handlerRaw = raw[(start + handler.Index)..end];
 
         var cleared = handlerCode.IndexOf("server.Runtime = null;", StringComparison.Ordinal);
         Assert.True(cleared >= 0, "the failed-connect handler no longer clears server.Runtime");
@@ -5707,14 +5706,14 @@ public sealed class DarlingSelfAlertTests
             "the server.Retired return comes before server.Runtime = null, so a removed server keeps a half-built runtime");
         var checkEnd = check.Index + check.Length;
 
-        var firstLog = Regex.Match(handlerCode, @"_logger\.Log\w+\(");
+        /* #7067: the connect-failure log lines (first failure, changed cause, hourly "still failing") moved into
+           LogConnectFailure, which the handler calls once. The ordering rule is unchanged: that call, like the count and
+           the backoff, comes after the Retired return. */
         var after = new (string What, int At)[]
         {
             ("the failure count", handlerCode.IndexOf("ConsecutiveConnectFailures++", StringComparison.Ordinal)),
             ("the backoff", handlerCode.IndexOf("NextConnectAttempt =", StringComparison.Ordinal)),
-            ("the first log call", firstLog.Success ? firstLog.Index : -1),
-            ("the 'Connect failed, retrying' log line", handlerRaw.IndexOf("Connect failed, retrying in", StringComparison.Ordinal)),
-            ("the 'Connect still failing, retrying' log line", handlerRaw.IndexOf("Connect still failing, retrying in", StringComparison.Ordinal)),
+            ("the connect-failure log call", handlerCode.IndexOf("LogConnectFailure(", StringComparison.Ordinal)),
             ("the Offline alert", handlerCode.IndexOf("ApplyConnectionOutcomeAsync(", StringComparison.Ordinal)),
         };
 

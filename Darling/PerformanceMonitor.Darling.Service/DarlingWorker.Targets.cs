@@ -367,6 +367,9 @@ public sealed partial class DarlingWorker
                suppressed as a repeat of something the operator had already scrolled past. */
             server.LastConnectFailureLogged = null;
 
+            /* #7067: how long the server was down and how many attempts it took, for the "Connected" line below. */
+            var recoveryNote = TakeConnectRecoveryNote(server);
+
             /* #2228: the tripwire. The connection just told us which database it actually landed in, so this
                is the one moment the registration's claim can be checked against the server's own answer.
                Identity is registration-derived and never verified against the connection, so without this a
@@ -434,11 +437,12 @@ public sealed partial class DarlingWorker
                 return;
             }
 
-            _logger.LogInformation("[{Server}] Connected (major {Major}, edition {Edition}, server_id {ServerId})",
+            _logger.LogInformation("[{Server}] Connected (major {Major}, edition {Edition}, server_id {ServerId}){Recovery}",
                 server.Config.DisplayName,
                 runtime.Target.SqlMajorVersion,
                 runtime.Target.IsAzureSqlDb ? "AzureSqlDb" : runtime.Target.IsAzureManagedInstance ? "ManagedInstance" : "Box",
-                serverId);
+                serverId,
+                recoveryNote);
 
             /* Stage 4: the offline->online connection edge (Server Restored) — fired HERE, right after the
                connection is established and BEFORE the on-load collectors run, using the captured serverId.
@@ -651,43 +655,7 @@ public sealed partial class DarlingWorker
             var retryDelay = ServerConnectBackoff.NextDelay(server.ConsecutiveConnectFailures, Random.Shared.NextDouble());
             server.NextConnectAttempt = DateTime.UtcNow.Add(retryDelay);
             var retrySeconds = (int)Math.Round(retryDelay.TotalSeconds);
-            /* #2255: full text on a NEW cause, one line while it persists. A credential that cannot be
-               decrypted on this host is not a transient connect failure, so its explanation is worth Error
-               once and worth almost nothing on the 1,440th repeat. */
-            /* #6183: SqlClient's native network library not loading breaks every SQL Server connection from this
-               install, and "The type initializer for 'TdsParser' threw an exception" does not say why. The shared
-               explanation replaces the raw text, and it is logged once for the whole process (it is the same cause
-               for every server), not once per server with a retry line. The retry loop itself is unchanged. */
-            var nativeLoadFailure = SqlClientNativeLoadFailure.Describe(ex, AppContext.BaseDirectory);
-            var failure = nativeLoadFailure ?? ex.Message;
-            if (nativeLoadFailure is not null)
-            {
-                server.LastConnectFailureLogged = failure;
-                if (Interlocked.Exchange(ref _nativeLoadFailureLogged, 1) == 0)
-                {
-                    _logger.LogError("Connect failed and will keep failing until fixed: {Message}", failure);
-                }
-            }
-            else if (!string.Equals(server.LastConnectFailureLogged, failure, StringComparison.Ordinal))
-            {
-                server.LastConnectFailureLogged = failure;
-                if (ex is InvalidOperationException && failure.Contains("DPAPI-decrypt", StringComparison.Ordinal))
-                {
-                    /* Error, not Warning: nothing about this clears on its own, so it needs an operator. */
-                    _logger.LogError("[{Server}] Connect failed and will keep failing until fixed: {Message}",
-                        server.Config.DisplayName, failure);
-                }
-                else
-                {
-                    _logger.LogWarning("[{Server}] Connect failed, retrying in {Delay}s: {Message}",
-                        server.Config.DisplayName, retrySeconds, failure);
-                }
-            }
-            else
-            {
-                _logger.LogWarning("[{Server}] Connect still failing, retrying in {Delay}s (same cause as logged above)",
-                    server.Config.DisplayName, retrySeconds);
-            }
+            var failure = LogConnectFailure(server, ex, retrySeconds);
 
             /* Stage 4: the online->offline connection edge (Server Unreachable) — fires once when a
                previously-connected server can no longer be reached; a repeated failed reconnect does NOT
@@ -699,6 +667,97 @@ public sealed partial class DarlingWorker
                 server.Config.ServerId,
                 server.Config.DisplayName, online: false, error: failure, cancellationToken);
         }
+    }
+
+    /// <summary>
+    /// Writes the log line for one failed connect attempt and returns the failure text. #2255: full text on a NEW cause.
+    /// #7067: while the cause stays the same the "still failing" line is written at most once an hour, with the attempts
+    /// and how long the server has been down, instead of on every retry (about every 5 minutes for a server that is
+    /// switched off, 1,982 lines in one day on a host with seven). Timed on <see cref="RepeatLog"/>'s clock.
+    /// </summary>
+    internal string LogConnectFailure(ServerLoopState server, Exception ex, int retrySeconds)
+    {
+        var now = RepeatLog.Clock();
+        server.ConnectDownSinceUtc ??= now;
+        server.ConnectAttemptsSinceDown++;
+
+        /* #2255: full text on a NEW cause, one line while it persists. A credential that cannot be
+           decrypted on this host is not a transient connect failure, so its explanation is worth Error
+           once and worth almost nothing on the 1,440th repeat. */
+        /* #6183: SqlClient's native network library not loading breaks every SQL Server connection from this
+           install, and "The type initializer for 'TdsParser' threw an exception" does not say why. The shared
+           explanation replaces the raw text, and it is logged once for the whole process (it is the same cause
+           for every server), not once per server with a retry line. The retry loop itself is unchanged. */
+        var nativeLoadFailure = SqlClientNativeLoadFailure.Describe(ex, AppContext.BaseDirectory);
+        var failure = nativeLoadFailure ?? ex.Message;
+        if (nativeLoadFailure is not null)
+        {
+            server.LastConnectFailureLogged = failure;
+            server.LastConnectFailureLineUtc = now;
+            if (Interlocked.Exchange(ref _nativeLoadFailureLogged, 1) == 0)
+            {
+                _logger.LogError("Connect failed and will keep failing until fixed: {Message}", failure);
+            }
+        }
+        else if (!string.Equals(server.LastConnectFailureLogged, failure, StringComparison.Ordinal))
+        {
+            server.LastConnectFailureLogged = failure;
+            server.LastConnectFailureLineUtc = now;
+            if (ex is InvalidOperationException && failure.Contains("DPAPI-decrypt", StringComparison.Ordinal))
+            {
+                /* Error, not Warning: nothing about this clears on its own, so it needs an operator. */
+                _logger.LogError("[{Server}] Connect failed and will keep failing until fixed: {Message}",
+                    server.Config.DisplayName, failure);
+            }
+            else
+            {
+                _logger.LogWarning("[{Server}] Connect failed, retrying in {Delay}s: {Message}",
+                    server.Config.DisplayName, retrySeconds, failure);
+            }
+        }
+        else if (now - server.LastConnectFailureLineUtc >= StillFailingInterval)
+        {
+            server.LastConnectFailureLineUtc = now;
+            _logger.LogWarning(
+                "[{Server}] Connect still failing after {Attempts} attempts over {Down}, retrying in {Delay}s (same cause as logged above)",
+                server.Config.DisplayName, server.ConnectAttemptsSinceDown, RepeatLogGate.FormatSpan(now - server.ConnectDownSinceUtc.Value), retrySeconds);
+        }
+
+        return failure;
+    }
+
+    /// <summary>
+    /// The warning for a classified PostgreSQL fault. #7067: a precondition that does not change (an extension that is not
+    /// created) said the same thing on every cycle. It is logged when first seen and when the text changes, then as a
+    /// reminder once a day; the collection_log row is written on every run as before, and a success clears the memory.
+    /// </summary>
+    internal void LogPostgresFault(string serverName, string collectorName, string status, string? sqlState, string explanation)
+    {
+        if (RepeatLog.ShouldLog(serverName, collectorName, RepeatLogChannel.PostgresFault, $"{status}|{sqlState}|{explanation}"))
+        {
+            _logger.LogWarning("  [{Server}] {Collector} => {Status} ({SqlState}): {Message}",
+                serverName, collectorName, status, sqlState, explanation);
+        }
+    }
+
+    /// <summary>#7067: how long the "still failing" connect line stays quiet.</summary>
+    internal static readonly TimeSpan StillFailingInterval = TimeSpan.FromHours(1);
+
+    /// <summary>
+    /// #7067: the tail of the "Connected" line when the server had been failing to connect, and the reset of the
+    /// failure bookkeeping. Empty when the server connected first time. One line carries the recovery, so a server that
+    /// was down for a day logs its first failure, at most 24 reminders and this.
+    /// </summary>
+    internal string TakeConnectRecoveryNote(ServerLoopState server)
+    {
+        var downSince = server.ConnectDownSinceUtc;
+        var attempts = server.ConnectAttemptsSinceDown;
+        server.ConnectDownSinceUtc = null;
+        server.ConnectAttemptsSinceDown = 0;
+        server.LastConnectFailureLineUtc = default;
+        return downSince is null
+            ? string.Empty
+            : $", after {attempts} failed attempt(s) over {RepeatLogGate.FormatSpan(RepeatLog.Clock() - downSince.Value)} down";
     }
 
     /// <summary>1 once the native-library load failure (#6183) has been logged. It is one cause for every server.</summary>
@@ -3095,6 +3154,13 @@ LIMIT 1";
                 runOutcome.Succeeded = true;
             }
 
+            /* #7067: the precondition cleared, so the next failure of this collector is a new sighting and is logged at once.
+               An abandoned cycle is not a success (it read nothing), so it leaves the memory alone. */
+            if (!result.Abandoned)
+            {
+                RepeatLog.Clear(server.Config.DisplayName, collectorName);
+            }
+
             return result.Rows;
         }
         catch (OperationCanceledException)
@@ -3480,8 +3546,7 @@ LIMIT 1";
             }
             else
             {
-                _logger.LogWarning("  [{Server}] {Collector} => {Status} ({SqlState}): {Message}",
-                    server.Config.DisplayName, collectorName, status, ex.SqlState, explanation);
+                LogPostgresFault(server.Config.DisplayName, collectorName, status, ex.SqlState, explanation);
             }
 
             await LogRunAsync(
