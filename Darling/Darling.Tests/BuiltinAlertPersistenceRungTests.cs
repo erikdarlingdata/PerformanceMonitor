@@ -318,9 +318,9 @@ public sealed class BuiltinAlertPersistenceRungTests
             .Split('\n')
             .Single(l => l.StartsWith("| **High CPU**", StringComparison.Ordinal));
 
-        Assert.Contains($"held for {AlertEngine.CpuBreachSamples} samples", row, StringComparison.Ordinal);
-        Assert.Contains($"{AlertEngine.CpuBreachSamples} consecutive collected samples", row, StringComparison.Ordinal);
-        Assert.Contains($"{AlertEngine.CpuClearSamples} consecutive samples below it", row, StringComparison.Ordinal);
+        Assert.Contains($"held for {AlertEngine.SqlCpuBreachSamples} samples", row, StringComparison.Ordinal);
+        Assert.Contains($"{AlertEngine.SqlCpuBreachSamples} consecutive collected samples", row, StringComparison.Ordinal);
+        Assert.Contains($"stayed below it for **{AlertEngine.SqlCpuClearHold.TotalMinutes:0} minutes**", row, StringComparison.Ordinal);
 
         /* NUMERALS, not spelled-out words, and this is the reason rather than a style preference: the row
            first read "three consecutive collected samples", which this pin could not match against the

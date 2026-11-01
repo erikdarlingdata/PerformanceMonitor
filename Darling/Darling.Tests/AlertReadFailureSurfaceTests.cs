@@ -914,7 +914,7 @@ public sealed class AlertReadFailureSurfaceTests
     /// </summary>
     private static readonly (string Path, int Counted, int Exempt)[] s_wholeFileScopes =
     {
-        (Path.Combine("PerformanceMonitor.Alerting", "AlertEngine.cs"), 19, 8),
+        (Path.Combine("PerformanceMonitor.Alerting", "AlertEngine.cs"), 19, 9),
         /* 7th AlertEngine exempt since #5910: the threshold-override fallback in Threshold(), an in-memory lookup and
            not a read; the check it serves still reads, and counts, exactly as before. 8th since #6005: the deadlock
            rollup's catch, a write after the deadlock read, which counts its own failure. */
@@ -1077,6 +1077,7 @@ public sealed class AlertReadFailureSurfaceTests
         ["PostgreSQL poison wait detail read failed, sending the alert without it"] = "#7082: the explanatory text block of a page whose condition was already read and counted (the Poison Wait window read); a failed detail read costs the text only, never the page",
         ["The deadlock rollup failed for {Server}: {Message}"] = "#6005: the daily signature rollup, a write (and its own bookkeeping read) after the deadlock read it counts, which is counted where it is made; the alert is judged on that read, not on this",
         ["Could not persist the {Metric} persistence gate"] = "a write (#3282; one save path for every gated built-in since #3653 A5 put tempdb Space behind the same gate as High CPU); the gate has already decided the observation from its in-memory record, so a dropped save costs the streak across a restart and never an alert - the seeding LOADs beside it are the reads, and they are counted",
+        ["Could not save the High CPU incident's opening instant"] = "a write (#7085): the opened-at instant a restart bounds its seed with; a failed save costs the restart bound (the seed then reads unbounded, as for a legacy incident) and never the opening page",
         ["Alert resolution callback failed"] = "the delivery path",
         ["Connection-change self-alert delivery failed"] = "the delivery path",
         ["Store disk-pressure self-alert failed"] = "handed its evidence as parameters; the read is counted in DarlingWorker",
@@ -1316,7 +1317,8 @@ public sealed class AlertReadFailureSurfaceTests
            fallback, an in-memory lookup and not a read. 43rd since #6005: the deadlock rollup's catch, a write after the deadlock read, which counts its own
            failure. 44th since #6912: the capture-down engine facts catch, whose read goes through the retry adapter that
            already records the failure. 45th since #7041: the daily health report's delivery-stamp write, which costs one re-send
-           at the next restart and never a delivery. */
+           at the next restart and never a delivery. 46th since #7085: the High CPU incident's opened-at save, a write whose
+           loss costs the restart bound and never the opening page. */
         Assert.Equal(46, totalExempt);
 
         /* Every exemption in the table is actually used. An exemption for a message that no longer exists
