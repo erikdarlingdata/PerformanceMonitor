@@ -163,6 +163,15 @@ public class AlertContext
     /// </summary>
     public List<AlertFileIdentity>? FileGrowthFiles { get; set; }
 
+    /// <summary>
+    /// The step a TimescaleDB policy job alert announced (#7076): <see cref="AlertContextSerializer.PolicyJobStepReArmed"/> for the
+    /// first-detection page after the automatic re-arm, <see cref="AlertContextSerializer.PolicyJobStepEscalated"/> for the escalation
+    /// and every repeat after it. The restart seed reads it to tell a job that is owed its "re-hung" page from one already escalated.
+    /// Read only through <see cref="AlertContextSerializer.TryReadPolicyJobStep"/>. No renderer shows it. Null on every other alert
+    /// and on any row written before this member existed, which the seed treats as escalated.
+    /// </summary>
+    public string? PolicyJobStep { get; set; }
+
     /// <summary>The newest source sample behind this alert (#5642): its source label, its UTC instant, and its
     /// age computed ONCE at fire time. Null when the alert has no UTC instant to age (a pre-V134 local stamp, a
     /// live read, or a check not yet wired). Persisted with the alert's context, so the age never drifts at
@@ -435,6 +444,9 @@ public record AlertContextDto(
     /* #7068 file growth: trailing and nullable like External, so a row written before this member existed rehydrates
        to null ("this row lists no files beyond its details"). */
     List<AlertFileIdentity>? FileGrowthFiles = null,
+    /* #7076 policy job step: trailing and nullable like FileGrowthFiles, so a row written before this member existed rehydrates
+       to null ("this row does not say which step it announced"). */
+    string? PolicyJobStep = null,
     /* #7084 part 4: trailing and nullable like External, so a row written before this member existed rehydrates to
        null ("this finding is not attached to an engine alert"). */
     AlertAttachedToDto? AttachedTo = null);
@@ -897,6 +909,8 @@ public static class AlertContextSerializer
             context.External is { } external ? new AlertExternalDto(external.Source, external.Key, external.PendingId) : null,
             /* #7068: every file a file growth firing is about, beyond the five its card lists. */
             context.FileGrowthFiles,
+            /* #7076: the policy job step this firing announced. */
+            context.PolicyJobStep,
             /* #7084 part 4: the open engine alert this finding was attached to. Already the persisted shape. */
             context.AttachedTo);
         return JsonSerializer.Serialize(dto);
@@ -924,6 +938,40 @@ public static class AlertContextSerializer
             }
 
             return waitType.GetString();
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>The <see cref="AlertContext.PolicyJobStep"/> of a job that was automatically re-armed and announced (#7076).</summary>
+    public const string PolicyJobStepReArmed = "ReArmed";
+
+    /// <summary>The <see cref="AlertContext.PolicyJobStep"/> of a job that was escalated, or whose repeat page was sent (#7076).</summary>
+    public const string PolicyJobStepEscalated = "Escalated";
+
+    /// <summary>
+    /// The policy job step a persisted alert-history row carries (#7076), or <c>null</c> when it carries none: any other alert, a row
+    /// written before the member existed, or unparseable JSON. Reads the one property rather than rehydrating the whole context, for
+    /// the reason <see cref="TryReadRoute"/> gives.
+    /// </summary>
+    public static string? TryReadPolicyJobStep(string? contextJson)
+    {
+        if (string.IsNullOrWhiteSpace(contextJson))
+            return null;
+
+        try
+        {
+            using var document = JsonDocument.Parse(contextJson);
+            if (document.RootElement.ValueKind != JsonValueKind.Object
+                || !document.RootElement.TryGetProperty(nameof(AlertContextDto.PolicyJobStep), out var step)
+                || step.ValueKind != JsonValueKind.String)
+            {
+                return null;
+            }
+
+            return step.GetString();
         }
         catch (JsonException)
         {
@@ -1222,6 +1270,10 @@ public static class AlertContextSerializer
             /* #7068: the files a file growth firing is about, null on every other alert and every row written before this
                member existed. */
             context.FileGrowthFiles = dto.FileGrowthFiles;
+
+            /* #7076: the policy job step this firing announced, null on every other alert and every row written before this
+               member existed. */
+            context.PolicyJobStep = dto.PolicyJobStep;
 
             /* #5654: the external source that raised this firing, null on every alert not raised through the store's
                submission function and every row written before this member existed. */
