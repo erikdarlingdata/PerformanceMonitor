@@ -144,12 +144,27 @@ public sealed class ViewerAlertRow
 
     public bool IsWarning => AlertHistoryRowSeverity.IsWarning(MetricName, ContextJson);
 
+    /* #7124: why the alert was held for the digest or paged, the status text's tooltip (the web's alerts.js does the same).
+       The tooltip binding is read when the grid realizes the row, not on hover, so the parse is cached: a row parses its
+       context at most once, however often scrolling realizes it again. */
+    private bool _routingReasonRead;
+    private string? _routingReason;
+
+    public string? RoutingReason
+    {
+        get
+        {
+            if (!_routingReasonRead)
+            {
+                _routingReason = AlertDetailText.RoutingReasonFromJson(ContextJson);
+                _routingReasonRead = true;
+            }
+            return _routingReason;
+        }
+    }
+
     /* #5642: how old the newest sample was when the alert FIRED, the Newest Sample column. Read off the persisted context
        (the carrier the engine stamped), never measured against the clock now; empty on a row without one, as Lite's row. */
-    /* #7124: why the alert was held for the digest or paged, the status cell's tooltip (the web's alerts.js does the same).
-       Parsed only when WPF asks for a tooltip, never while the grid binds its rows. */
-    public string? RoutingReason => AlertDetailText.RoutingReasonFromJson(ContextJson);
-
     public AlertNewestSample? NewestSample => AlertContextSerializer.TryReadNewestSample(ContextJson);
 
     public string NewestSampleDisplay =>
