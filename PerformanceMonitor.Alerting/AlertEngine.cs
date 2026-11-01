@@ -518,6 +518,34 @@ public sealed class AlertEngine
         }
     }
 
+    /// <summary>#7068: the metrics (with their server key) whose observation guard has been seeded, or has seen the condition clear, this process.</summary>
+    private readonly ConcurrentDictionary<string, bool> _observationGuardSeeded = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// #7068: the open fire of a per-observation alert (Force Plan Failures, Database File Growth) for the FIRST sweep of this
+    /// process that finds the condition, or null on every later one. The guard that keeps a standing condition from firing again
+    /// (the observation each plan or file last fired on) and the cooldown stamp are in memory, so a restart read every standing
+    /// plan or file as news. One read per server and metric: the history holds the newest open row only, so a plan or file
+    /// the row does not name is judged as new.
+    /// </summary>
+    private async Task<AlertHistoryFire?> ReadFirstStandingFireAsync(string key, string metric, string resolutionTitle, CancellationToken ct) =>
+        _observationGuardSeeded.TryAdd(metric + "|" + key, true)
+            ? await ReadStandingFireAsync(key, metric, resolutionTitle, ct)
+            : null;
+
+    /// <summary>#7068: the condition did not stand on this sweep, so a row left open in the history from before this process
+    /// is not its own (a clear while the service was down writes none). Returns true so it can lead the clear branch's condition.</summary>
+    private bool NoteObservationClear(string key, string metric)
+    {
+        _observationGuardSeeded.TryAdd(metric + "|" + key, true);
+        return true;
+    }
+
+    /// <summary>#7068: true when the fire row's context carries every one of <paramref name="names"/> (JSON-encoded as the serializer writes them).</summary>
+    private static bool FireNames(AlertHistoryFire fire, params string[] names) =>
+        fire.ContextJson is { } json
+        && names.All(n => json.Contains(System.Text.Json.JsonEncodedText.Encode(n).ToString(), StringComparison.Ordinal));
+
     /// <summary>#7068: true when the fire row's context carries the dedup key of the volume or database now being judged.</summary>
     private static bool FireNamesIncident(AlertHistoryFire fire, IReadOnlyList<AlertIncident> incidents) =>
         incidents.Count > 0 && AlertContextSerializer.ContextJsonContainsDedupKey(fire.ContextJson, incidents[0].DedupKey);
@@ -3398,6 +3426,19 @@ public sealed class AlertEngine
                    The card is per server and carries every breached file, so ONE file with news is enough to
                    send it and every file on it is then stamped as reported. */
                 var alertedObservations = _lastAlertedFileGrowthObservation.GetOrAdd(key, _ => new Dictionary<string, DateTime>(StringComparer.Ordinal));
+                /* #7068: a fire left open in the history from before this process is the same incident: the files it names
+                   count as already reported at its time, and its time is the cooldown stamp, so only a rise observed after it
+                   (or a file it does not name) is news. */
+                if (await ReadFirstStandingFireAsync(key, FileGrowthWatermarkMetric, "Database File Growth Resolved", ct) is { } standingFire)
+                {
+                    foreach (var f in breached.Where(f => FireNames(standingFire, f.DatabaseName, f.FileName)))
+                    {
+                        alertedObservations.TryAdd(FileGrowthObservationKey(f), standingFire.FireAtUtc);
+                    }
+
+                    _lastFileGrowthAlert.TryAdd(key, standingFire.FireAtUtc);
+                }
+
                 var breachedKeys = new HashSet<string>(breached.Select(FileGrowthObservationKey), StringComparer.Ordinal);
                 foreach (var departed in alertedObservations.Keys.Where(k => !breachedKeys.Contains(k)).ToList())
                 {
@@ -3488,7 +3529,7 @@ public sealed class AlertEngine
                     readClock.Restart();
                 }
             }
-            else if (_activeFileGrowthAlert.TryGetValue(key, out var wasGrowing) && wasGrowing)
+            else if (NoteObservationClear(key, FileGrowthWatermarkMetric) && _activeFileGrowthAlert.TryGetValue(key, out var wasGrowing) && wasGrowing)
             {
                 _activeFileGrowthAlert[key] = false;
                 /* #3636: the recovery drops the server's observation memory with it, deliberately — a file
@@ -4076,6 +4117,18 @@ public sealed class AlertEngine
 
         var active = _activeForcePlanAlerts.GetOrAdd(key, _ => new Dictionary<string, ForcePlanActivePlan>(StringComparer.Ordinal));
 
+        /* #7068: the first sweep of this process that finds a failing plan reads the open fire (none when it found nothing:
+           a clear while the service was down left its row open). */
+        AlertHistoryFire? standingFire = null;
+        if (current.Count > 0)
+        {
+            standingFire = await ReadFirstStandingFireAsync(key, ForcePlanTokens.MetricName, "Forced Plan Failing Resolved", ct);
+        }
+        else
+        {
+            NoteObservationClear(key, ForcePlanTokens.MetricName);
+        }
+
         foreach (var (planKey, failure) in current)
         {
             if (active.TryGetValue(planKey, out var plan))
@@ -4086,6 +4139,15 @@ public sealed class AlertEngine
             {
                 plan = new ForcePlanActivePlan(failure);
                 active[planKey] = plan;
+
+                /* #7068: a plan the open fire names was announced before the restart: its observation is that fire's time and its
+                   cooldown clock starts there, so only an observation made after it is news. */
+                if (standingFire is not null
+                    && FireNames(standingFire, $"{failure.DatabaseName} query {failure.QueryId} plan {failure.PlanId}"))
+                {
+                    plan.LastAlertedObservedAtUtc = standingFire.FireAtUtc;
+                    _lastForcePlanAlert.TryAdd(key + "|" + planKey, standingFire.FireAtUtc);
+                }
             }
 
             /* #3579: the observation guard. The row's stamp is the collection that produced the rise; if it

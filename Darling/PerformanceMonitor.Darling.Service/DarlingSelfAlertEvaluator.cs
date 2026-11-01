@@ -1867,6 +1867,13 @@ internal sealed class DarlingSelfAlertEvaluator
                which loses this in-memory state) is the entry and sends ONE alert. While the outage stands it
                repeats only when connection_refire_minutes > 0 and that interval passed, or to send again an
                alert that reached no channel (#4795). It no longer repeats every cooldown. */
+            /* #7068: an open "Collection Stopped" fire in the history is this outage, announced before the restart: it counts
+               as already standing, and only the repeat interval can announce it again. */
+            if (await SeedStandingStateAsync(_lastCollectionStoppedAlert, key, key, key, "Collection Stopped", cancellationToken))
+            {
+                _activeCollectionStopped[key] = true;
+            }
+
             var wasStopped = _activeCollectionStopped.TryGetValue(key, out var standing) && standing;
             _activeCollectionStopped[key] = true;
             var refire = _connectionRefireMinutes();
@@ -1911,7 +1918,7 @@ internal sealed class DarlingSelfAlertEvaluator
                 NoteRetrySend(_collectionStoppedRetries, key, "Collection Stopped", delivery);
             }
         }
-        else if (_activeCollectionStopped.TryRemove(key, out var was) && was)
+        else if (SawStateClear("Collection Stopped", key) && _activeCollectionStopped.TryRemove(key, out var was) && was)
         {
             /* #5489: the outage is over; the next one is a new entry with its own alert. */
             _lastCollectionStoppedAlert.TryRemove(key, out _);
@@ -4729,6 +4736,7 @@ internal sealed class DarlingSelfAlertEvaluator
         if (!running)
         {
             _activeAgentDown[key] = true;
+            await SeedStandingStateAsync(_lastAgentDownAlert, key, key, key, AgentDownMetric, cancellationToken);
             /* #5493: a state alert (see ApplyCaptureDownAsync). */
             var decision = DecideStateAlert(_lastAgentDownAlert, key, AgentDownMetric, key, now, out var refire);
             if (decision is ConnectionAlertDecision.Lost or ConnectionAlertDecision.StillDown)
@@ -4753,7 +4761,7 @@ internal sealed class DarlingSelfAlertEvaluator
                 NoteStateSend(AgentDownMetric, key, delivery);
             }
         }
-        else if (_activeAgentDown.TryRemove(key, out var was) && was)
+        else if (SawStateClear(AgentDownMetric, key) && _activeAgentDown.TryRemove(key, out var was) && was)
         {
             EndStateAlert(_lastAgentDownAlert, key, AgentDownMetric, key);
             await RecordResolutionAsync(new AlertResolution(
@@ -4808,6 +4816,7 @@ internal sealed class DarlingSelfAlertEvaluator
         if (status.Gaps.Count > 0)
         {
             _activeAgentAlertGaps[key] = true;
+            await SeedStandingStateAsync(_lastAgentAlertGapAlert, key, key, key, AgentAlertSetupMetric, cancellationToken);
             var decision = DecideStateAlert(_lastAgentAlertGapAlert, key, AgentAlertSetupMetric, key, now, out var refire);
             if (decision is ConnectionAlertDecision.Lost or ConnectionAlertDecision.StillDown)
             {
@@ -4829,7 +4838,7 @@ internal sealed class DarlingSelfAlertEvaluator
                 NoteStateSend(AgentAlertSetupMetric, key, delivery);
             }
         }
-        else if (_activeAgentAlertGaps.TryRemove(key, out var was) && was)
+        else if (SawStateClear(AgentAlertSetupMetric, key) && _activeAgentAlertGaps.TryRemove(key, out var was) && was)
         {
             EndStateAlert(_lastAgentAlertGapAlert, key, AgentAlertSetupMetric, key);
             await RecordResolutionAsync(new AlertResolution(
@@ -4906,6 +4915,7 @@ internal sealed class DarlingSelfAlertEvaluator
         if (items.Count > 0)
         {
             _activeDatabaseProtection[stateKey] = true;
+            await SeedStandingStateAsync(_lastDatabaseProtectionAlert, stateKey, key, key, metric, cancellationToken);
             var decision = DecideStateAlert(_lastDatabaseProtectionAlert, stateKey, metric, key, now, out var refire);
             if (decision is ConnectionAlertDecision.Lost or ConnectionAlertDecision.StillDown)
             {
@@ -4927,7 +4937,7 @@ internal sealed class DarlingSelfAlertEvaluator
                 NoteStateSend(metric, key, delivery);
             }
         }
-        else if (_activeDatabaseProtection.TryRemove(stateKey, out var was) && was)
+        else if (SawStateClear(metric, stateKey) && _activeDatabaseProtection.TryRemove(stateKey, out var was) && was)
         {
             EndStateAlert(_lastDatabaseProtectionAlert, stateKey, metric, key);
             await RecordResolutionAsync(new AlertResolution(
@@ -5001,6 +5011,7 @@ internal sealed class DarlingSelfAlertEvaluator
             hits.Sort((a, b) => b.Percent.CompareTo(a.Percent));
             var isCritical = hits.Any(h => h.Band == IdentityCapacityMath.BandCritical);
             _activeIdentityCapacity[key] = true;
+            await SeedStandingStateAsync(_lastIdentityCapacityAlert, key, key, key, IdentityCapacityMetric, cancellationToken, ranked: true);
             var decision = DecideStateAlert(_lastIdentityCapacityAlert, key, IdentityCapacityMetric, key, now, out var refire, severityRank: isCritical ? 2 : 1);
             if (decision is ConnectionAlertDecision.Lost or ConnectionAlertDecision.StillDown)
             {
@@ -5033,7 +5044,7 @@ internal sealed class DarlingSelfAlertEvaluator
                 NoteStateSend(IdentityCapacityMetric, key, delivery);
             }
         }
-        else if (_activeIdentityCapacity.TryRemove(key, out var was) && was)
+        else if (SawStateClear(IdentityCapacityMetric, key) && _activeIdentityCapacity.TryRemove(key, out var was) && was)
         {
             EndStateAlert(_lastIdentityCapacityAlert, key, IdentityCapacityMetric, key);
             await RecordResolutionAsync(new AlertResolution(
@@ -5546,6 +5557,13 @@ internal sealed class DarlingSelfAlertEvaluator
             else if (judgement == AgSyncJudgement.Behind)
             {
                 _activeAgSyncBehind[key] = true;
+                /* #7068: the history holds one open row per server and metric, so it seeds this grain only when the row's context
+                   names this AG, database and replica. Another standing grain's row is not this one's (it announces once). */
+                await SeedStandingStateAsync(
+                    _lastAgSyncBehindAlert, key, key, Key(serverId), AgSyncFellBehindMetric, cancellationToken,
+                    ownsRow: context => context is not null
+                        && new[] { database.AgName, database.DatabaseName, database.ReplicaServerName }
+                            .All(name => context.Contains(System.Text.Json.JsonEncodedText.Encode(name).ToString(), StringComparison.Ordinal)));
                 /* #5493: a state alert (see ApplyCaptureDownAsync); the grain's stamp is the AG database's key. */
                 var syncDecision = DecideStateAlert(_lastAgSyncBehindAlert, key, AgSyncFellBehindMetric, key, now, out var syncRefire);
                 if (syncDecision is ConnectionAlertDecision.Lost or ConnectionAlertDecision.StillDown)
@@ -5587,6 +5605,7 @@ internal sealed class DarlingSelfAlertEvaluator
            every key in it came from THIS server's snapshot — rather than something a prefix check has to catch. */
         foreach (var key in measuredCaughtUp)
         {
+            SawStateClear(AgSyncFellBehindMetric, key);
             EndStateAlert(_lastAgSyncBehindAlert, key, AgSyncFellBehindMetric, key);
             if (_activeAgSyncBehind.TryRemove(key, out _))
             {
@@ -5890,6 +5909,8 @@ internal sealed class DarlingSelfAlertEvaluator
         if (report.HasIssues)
         {
             _activeCustomRuleHealth[CustomRuleHealthKey] = true;
+            await SeedStandingStateAsync(
+                _lastCustomRuleHealthAlert, CustomRuleHealthKey, CustomRuleHealthKey, StoreKey(CustomRuleHealthKey), CustomRuleHealthMetric, cancellationToken);
 
             /* #5493: a state alert (see ApplyCaptureDownAsync): one alert on entry, a repeat only per
                connection_refire_minutes. The CURRENT report is rendered each time it is sent, so a rule that breaks
@@ -5938,7 +5959,7 @@ internal sealed class DarlingSelfAlertEvaluator
                 NoteStateSend(CustomRuleHealthMetric, CustomRuleHealthKey, delivery);
             }
         }
-        else if (_activeCustomRuleHealth.TryRemove(CustomRuleHealthKey, out var was) && was)
+        else if (SawStateClear(CustomRuleHealthMetric, CustomRuleHealthKey) && _activeCustomRuleHealth.TryRemove(CustomRuleHealthKey, out var was) && was)
         {
             EndStateAlert(_lastCustomRuleHealthAlert, CustomRuleHealthKey, CustomRuleHealthMetric, CustomRuleHealthKey);
             _customRuleHealthIds.TryRemove(CustomRuleHealthKey, out _);
@@ -6055,6 +6076,8 @@ internal sealed class DarlingSelfAlertEvaluator
         if (total > 0)
         {
             _activeExternalAlerts[ExternalAlertsKey] = true;
+            await SeedStandingStateAsync(
+                _lastExternalAlertsAlert, ExternalAlertsKey, ExternalAlertsKey, StoreKey(ExternalAlertsKey), ExternalAlertsUndeliveredMetric, cancellationToken);
             var decision = DecideStateAlert(_lastExternalAlertsAlert, ExternalAlertsKey, ExternalAlertsUndeliveredMetric, ExternalAlertsKey, now, out var refire);
             if (decision is ConnectionAlertDecision.Lost or ConnectionAlertDecision.StillDown)
             {
@@ -6073,7 +6096,7 @@ internal sealed class DarlingSelfAlertEvaluator
                 NoteStateSend(ExternalAlertsUndeliveredMetric, ExternalAlertsKey, delivery);
             }
         }
-        else if (_activeExternalAlerts.TryRemove(ExternalAlertsKey, out var was) && was)
+        else if (SawStateClear(ExternalAlertsUndeliveredMetric, ExternalAlertsKey) && _activeExternalAlerts.TryRemove(ExternalAlertsKey, out var was) && was)
         {
             EndStateAlert(_lastExternalAlertsAlert, ExternalAlertsKey, ExternalAlertsUndeliveredMetric, ExternalAlertsKey);
             await RecordResolutionAsync(new AlertResolution(
@@ -7113,9 +7136,11 @@ WHERE c.is_enabled";
         {
             if (!report.IsBehind)
             {
+                SawStateClear(FleetGateMetric, FleetGateKey);
                 return;
             }
 
+            await SeedStandingStateAsync(_lastFleetGateAlert, FleetGateKey, FleetGateKey, StoreKey(FleetGateKey), FleetGateMetric, cancellationToken);
             _activeFleetGate[FleetGateKey] = true;
             _fleetGateQuietSince.TryRemove(FleetGateKey, out _);
         }
@@ -7617,6 +7642,8 @@ WHERE c.is_enabled";
             if (percent >= warnPercent)
             {
                 _activeJobOverCadence[key] = true;
+                await SeedStandingStateAsync(
+                    _lastJobOverCadenceAlert, key, key, StoreKey(JobCadenceKeyPrefix + key), JobCadenceMetric, cancellationToken, ranked: true);
                 /* #5493: a state alert (see ApplyCaptureDownAsync). */
                 var decision = DecideStateAlert(_lastJobOverCadenceAlert, key, JobCadenceMetric, key, now, out var refire,
                     severityRank: percent >= 100.0 ? 2 : 1);
@@ -7654,7 +7681,7 @@ WHERE c.is_enabled";
                     NoteStateSend(JobCadenceMetric, key, delivery);
                 }
             }
-            else if (_activeJobOverCadence.TryRemove(key, out var was) && was)
+            else if (SawStateClear(JobCadenceMetric, key) && _activeJobOverCadence.TryRemove(key, out var was) && was)
             {
                 EndStateAlert(_lastJobOverCadenceAlert, key, JobCadenceMetric, key);
                 await RecordResolutionAsync(new AlertResolution(
@@ -7771,6 +7798,8 @@ WHERE c.is_enabled";
             if (!policy.Armed && ratio >= warnRatio)
             {
                 _activeRetentionHold[key] = true;
+                await SeedStandingStateAsync(
+                    _lastRetentionHoldAlert, key, key, StoreKey(RetentionHoldKeyPrefix + key), RetentionHoldMetric, cancellationToken, ranked: true);
                 /* #5493: a state alert (see ApplyCaptureDownAsync). */
                 var decision = DecideStateAlert(_lastRetentionHoldAlert, key, RetentionHoldMetric, key, now, out var refire,
                     severityRank: ratio >= criticalRatio ? 2 : 1);
@@ -7828,7 +7857,7 @@ WHERE c.is_enabled";
     private async Task ClearRetentionHoldAsync(
         string key, RetentionHoldReading policy, double warnRatio, CancellationToken cancellationToken)
     {
-        if (!_activeRetentionHold.TryRemove(key, out var was) || !was)
+        if (!SawStateClear(RetentionHoldMetric, key) || !_activeRetentionHold.TryRemove(key, out var was) || !was)
         {
             return;
         }
@@ -7932,6 +7961,8 @@ WHERE c.is_enabled";
             if (overHorizon && (!lastRan || recordStale))
             {
                 _activeRawPurgeOverHorizon[key] = true;
+                await SeedStandingStateAsync(
+                    _lastRawPurgeOverHorizonAlert, key, key, StoreKey(RawPurgeOverHorizonKeyPrefix + key), RawPurgeOverHorizonMetric, cancellationToken, ranked: true);
                 /* #5493: a state alert (see ApplyCaptureDownAsync). */
                 var decision = DecideStateAlert(_lastRawPurgeOverHorizonAlert, key, RawPurgeOverHorizonMetric, key, now, out var refire,
                     severityRank: reading.OverHorizonRatio!.Value >= criticalRatio ? 2 : 1);
@@ -7964,7 +7995,7 @@ WHERE c.is_enabled";
                     NoteStateSend(RawPurgeOverHorizonMetric, key, delivery);
                 }
             }
-            else if (_activeRawPurgeOverHorizon.TryRemove(key, out var was) && was)
+            else if (SawStateClear(RawPurgeOverHorizonMetric, key) && _activeRawPurgeOverHorizon.TryRemove(key, out var was) && was)
             {
                 EndStateAlert(_lastRawPurgeOverHorizonAlert, key, RawPurgeOverHorizonMetric, key);
                 await RecordResolutionAsync(new AlertResolution(
@@ -8022,6 +8053,7 @@ WHERE c.is_enabled";
         if (stuck.Count > 0)
         {
             _activeComposeStuck[key] = true;
+            await SeedStandingStateAsync(_lastComposeStuckAlert, key, key, StoreKey(ComposeHoursStuckKeyPrefix + key), ComposeHoursStuckMetric, cancellationToken);
             var decision = DecideStateAlert(_lastComposeStuckAlert, key, ComposeHoursStuckMetric, key, now, out var refire);
             if (decision is ConnectionAlertDecision.Lost or ConnectionAlertDecision.StillDown)
             {
@@ -8045,7 +8077,7 @@ WHERE c.is_enabled";
                 NoteStateSend(ComposeHoursStuckMetric, key, delivery);
             }
         }
-        else if (_activeComposeStuck.TryRemove(key, out var was) && was)
+        else if (SawStateClear(ComposeHoursStuckMetric, key) && _activeComposeStuck.TryRemove(key, out var was) && was)
         {
             EndStateAlert(_lastComposeStuckAlert, key, ComposeHoursStuckMetric, key);
             await RecordResolutionAsync(new AlertResolution(
@@ -10016,6 +10048,96 @@ ORDER BY ag_name, database_name, replica_server_name";
         stamps.TryRemove(key, out _);
         _stateRetries.Clear(StateRetryKey(metric, grainKey));
         _stateSeverityRank.TryRemove(StateRetryKey(metric, grainKey), out _);
+    }
+
+    /// <summary>
+    /// #7068: the history rows that close each state alert's fire, by metric. A fire is "open" when none of these is as new
+    /// as it, so the first sweep after a start can tell a condition that stood through the restart (already announced, its
+    /// stamp seeded) from one that cleared and came back (a resolution row is newer, so it announces). One table, read by
+    /// <see cref="SeedStandingStateAsync"/> for every alert that shares <see cref="DecideStateAlert"/> and for Collection Stopped.
+    /// </summary>
+    private static readonly IReadOnlyDictionary<string, string[]> StateAlertResolutionTitles =
+        new Dictionary<string, string[]>(StringComparer.Ordinal)
+        {
+            ["Collection Stopped"] = new[] { "Collection Resumed", "Server Restored" },
+            [AgentDownMetric] = new[] { "Agent Restarted" },
+            [AgentAlertSetupMetric] = new[] { "Agent Alert Gaps Cleared" },
+            [BackupOverdueMetric] = new[] { BackupOverdueMetric + " Cleared" },
+            [LogBackupOverdueMetric] = new[] { LogBackupOverdueMetric + " Cleared" },
+            [CheckDbOverdueMetric] = new[] { CheckDbOverdueMetric + " Cleared" },
+            [IdentityCapacityMetric] = new[] { "Identity Capacity Cleared" },
+            [AgSyncFellBehindMetric] = new[] { "AG Sync Recovered" },
+            [CustomRuleHealthMetric] = new[] { CustomRuleHealthResolvedMetric },
+            [ExternalAlertsUndeliveredMetric] = new[] { ExternalAlertsDeliveredAgainMetric },
+            [FleetGateMetric] = new[] { FleetGateClearedMetric },
+            [JobCadenceMetric] = new[] { "Store Job Cadence Recovered" },
+            [RetentionHoldMetric] = new[] { RetentionHoldClearedMetric },
+            [RawPurgeOverHorizonMetric] = new[] { RawPurgeOverHorizonClearedMetric },
+            [ComposeHoursStuckMetric] = new[] { ComposeHoursStuckClearedMetric },
+        };
+
+    /// <summary>#7068: the state alerts whose seed has been decided this process, by <see cref="StateRetryKey"/>.</summary>
+    private readonly ConcurrentDictionary<string, bool> _standingSeedDone = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// #7068: the first sweep of this process that finds a state alert's condition standing seeds its "already announced"
+    /// stamp from the open fire row in the history (see <see cref="IAlertHistoryStore.GetOpenFireAsync"/>), so a restart in the
+    /// middle of a standing condition does not announce it again. Without it the stamps, which live in memory, read every
+    /// start as a new entry: seven servers down for 21 hours each fired Collection Stopped again at the next service start.
+    /// Once per alert and grain. The stamp becomes the fire's time, so a repeat follows <c>connection_refire_minutes</c> as it
+    /// would have without the restart. When the alert has severity bands (<paramref name="ranked"/>) the band the row fired at
+    /// is seeded too, so a rise still announces and the same band does not. A grain whose row is another grain's
+    /// (<paramref name="ownsRow"/> says no) is not seeded. Nothing is seeded when this process saw the condition clear first
+    /// (<see cref="SawStateClear"/>: a clear while the service was down writes no row), when no row is open, or when the read
+    /// failed (logged, not retried each sweep: the alert fires as it did before this read existed).
+    /// </summary>
+    /// <returns>True when the stamp was seeded from an open fire row.</returns>
+    private async Task<bool> SeedStandingStateAsync(
+        ConcurrentDictionary<string, DateTime> stamps, string stampKey, string grainKey, string historyKey, string metric,
+        CancellationToken cancellationToken, bool ranked = false, Func<string?, bool>? ownsRow = null)
+    {
+        var doneKey = StateRetryKey(metric, stampKey);
+        if (!_standingSeedDone.TryAdd(doneKey, true) || !StateAlertResolutionTitles.TryGetValue(metric, out var titles))
+        {
+            return false;
+        }
+
+        try
+        {
+            var standing = await _historyStore.GetOpenFireAsync(historyKey, metric, titles, null, _serviceStartUtc);
+            if (standing is null || (ownsRow is not null && !ownsRow(standing.ContextJson)) || !stamps.TryAdd(stampKey, standing.FireAtUtc))
+            {
+                return false;
+            }
+
+            if (ranked)
+            {
+                _stateSeverityRank[StateRetryKey(metric, grainKey)] =
+                    AlertContextSerializer.TryReadSeverity(standing.ContextJson) == AlertSeverityLevel.Critical ? 2 : 1;
+            }
+
+            return true;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning("Could not read the open {Metric} incident for {Key} from alert history; a standing condition may be announced again after this restart: {Message}", metric, historyKey, ex.Message);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// #7068: this process saw the condition clear (or not breach) before it ever saw it standing, so an open fire row left in
+    /// the history is not its own: nothing wrote the resolution while the service was down. Returns true so it can lead the
+    /// clear branch's condition.
+    /// </summary>
+    private bool SawStateClear(string metric, string stampKey)
+    {
+        _standingSeedDone.TryAdd(StateRetryKey(metric, stampKey), true);
+        return true;
     }
 
     /// <summary>The key an availability group alert is tracked under in <c>_agRetries</c>: the metric and the AG

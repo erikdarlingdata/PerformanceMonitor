@@ -222,11 +222,25 @@ public sealed class DarlingSelfAlertTests
 
         public List<string> OpenFireAsked { get; } = new();
 
+        /// <summary>#7068: when set, the open fire per (server key, metric) instead of <see cref="OpenFire"/>; a failing read when
+        /// <see cref="OpenFireThrows"/>. Every question is kept in <see cref="OpenFireQuestions"/> with the resolution titles asked.</summary>
+        public Func<string, string, AlertHistoryFire?>? OpenFireFor { get; set; }
+
+        public bool OpenFireThrows { get; set; }
+
+        public List<(string ServerKey, string Metric, string[] Titles)> OpenFireQuestions { get; } = new();
+
         public Task<AlertHistoryFire?> GetOpenFireAsync(
             string serverId, string metricName, IReadOnlyList<string> resolutionMetricNames, DateTime? sinceUtc, DateTime? untilUtc, bool countMuted = true)
         {
             OpenFireAsked.Add(metricName);
-            return Task.FromResult(OpenFire);
+            OpenFireQuestions.Add((serverId, metricName, resolutionMetricNames.ToArray()));
+            if (OpenFireThrows)
+            {
+                throw new InvalidOperationException("history is down");
+            }
+
+            return Task.FromResult(OpenFireFor is null ? OpenFire : OpenFireFor(serverId, metricName));
         }
 
         public Task<DateTime?> GetLastEmailSentUtcAsync(string serverId, string metricName, string? dedupKey = null) =>
