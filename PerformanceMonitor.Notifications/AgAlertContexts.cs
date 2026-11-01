@@ -6,7 +6,9 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace PerformanceMonitor.Notifications;
 
@@ -37,6 +39,19 @@ public static class AgAlertContexts
         context.Details.Add(new AlertDetailItem { Heading = database, Fields = fields });
         return context;
     }
+
+    /// <summary>#7068: true when a "AG Sync Fell Behind" fire row's context names this availability group, database and replica
+    /// (the three facts <see cref="ForDatabase"/> wrote, JSON-encoded as the serializer writes them).</summary>
+    public static bool OwnsSyncFire(string? contextJson, string agName, string database, string replica) =>
+        contextJson is { } json
+        && new[] { agName, database, replica }
+            .All(name => json.Contains(System.Text.Json.JsonEncodedText.Encode(name).ToString(), StringComparison.Ordinal));
+
+    /// <summary>#7068: true when an "AG Sync Recovered" row's message is this grain's. Both apps word it "database D in AG G on
+    /// replica R" (Darling in lower case, Lite with a capital), so the match ignores case.</summary>
+    public static bool OwnsSyncClear(string? detailText, string agName, string database, string replica) =>
+        detailText is { } text
+        && text.Contains($"database {database} in AG {agName} on replica {replica}", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// The incident identity for the AG disconnect/reconnect pair: one replica within one group. A single

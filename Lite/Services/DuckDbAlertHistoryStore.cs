@@ -358,20 +358,33 @@ AND   metric_name = $2"
     /// <summary>
     /// #7068: the newest fire row (inside the optional window, before the exclusive <paramref name="untilUtc"/>) that no
     /// resolution row closed. See <see cref="IAlertHistoryStore.GetOpenFireAsync"/>. A failed read THROWS (no catch here).
+    /// Answers from <see cref="GetStandingAsync"/>, the one read behind it and the per-grain seed.
     /// </summary>
     public async Task<AlertHistoryFire?> GetOpenFireAsync(
+        string serverId, string metricName, System.Collections.Generic.IReadOnlyList<string> resolutionMetricNames,
+        DateTime? sinceUtc, DateTime? untilUtc, bool countMuted = true) =>
+        (await GetStandingAsync(serverId, metricName, resolutionMetricNames, sinceUtc, untilUtc, countMuted)).NewestOpen();
+
+    /// <summary>The most fire rows, and the most resolution rows per title, <see cref="GetStandingAsync"/> reads.</summary>
+    public const int StandingRowCap = 1000;
+
+    /// <summary>
+    /// #7068: every fire row (newest first, at most <see cref="StandingRowCap"/>) and the resolution rows as new as the oldest of
+    /// them. See <see cref="IAlertHistoryStore.GetStandingAsync"/>. A failed read THROWS (no catch here).
+    /// </summary>
+    public async Task<AlertHistoryStanding> GetStandingAsync(
         string serverId, string metricName, System.Collections.Generic.IReadOnlyList<string> resolutionMetricNames,
         DateTime? sinceUtc, DateTime? untilUtc, bool countMuted = true)
     {
         /* Same identity scope as GetLastEmailSentUtcAsync (#3456). */
-        var sid = AlertHistoryServerIdentity.SeedScope(serverId);
-        if (sid is null) return null;
+        var sid = AlertHistoryServerIdentity.OpenFireScope(serverId, metricName);
+        if (sid is null) return AlertHistoryStanding.Empty;
 
         var duckDb = _duckDb;
         if (duckDb == null)
         {
             var dbPath = App.DatabasePath;
-            if (string.IsNullOrEmpty(dbPath)) return null;
+            if (string.IsNullOrEmpty(dbPath)) return AlertHistoryStanding.Empty;
             duckDb = new DuckDbInitializer(dbPath);
         }
 
@@ -391,7 +404,7 @@ AND   alert_time >= $3
 AND   alert_time < $4"
             + AlertHistoryEscalationSeed.KeepUnlessEveryChannelFailedFilter
             + (countMuted ? "" : AlertHistoryEscalationSeed.ExcludeMutedFilter)
-            + "\nORDER BY alert_time DESC\nLIMIT 1";
+            + "\nORDER BY alert_time DESC\nLIMIT " + StandingRowCap.ToString(System.Globalization.CultureInfo.InvariantCulture);
         fireCommand.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = sid.Value });
         fireCommand.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = metricName });
         fireCommand.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter
@@ -400,41 +413,46 @@ AND   alert_time < $4"
         fireCommand.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter
             { Value = untilUtc is { } until ? AlertHistoryEscalationSeed.TruncateToMicroseconds(until) : new DateTime(9000, 1, 1, 0, 0, 0, DateTimeKind.Unspecified) });
 
-        DateTime? fireAt = null;
-        double currentValue = 0;
-        string? contextJson = null;
+        var fires = new List<AlertHistoryFire>();
         using (var reader = await fireCommand.ExecuteReaderAsync())
         {
-            if (await reader.ReadAsync())
+            while (await reader.ReadAsync())
             {
-                fireAt = DateTime.SpecifyKind(reader.GetDateTime(0), DateTimeKind.Utc);
-                currentValue = reader.IsDBNull(1) ? 0 : reader.GetDouble(1);
-                contextJson = reader.IsDBNull(2) ? null : reader.GetString(2);
+                fires.Add(new AlertHistoryFire(
+                    DateTime.SpecifyKind(reader.GetDateTime(0), DateTimeKind.Utc),
+                    reader.IsDBNull(1) ? 0 : reader.GetDouble(1),
+                    reader.IsDBNull(2) ? null : reader.GetString(2)));
             }
         }
 
-        if (fireAt is not { } fired) return null;
+        if (fires.Count == 0) return AlertHistoryStanding.Empty;
 
-        DateTime? resolvedAt = null;
+        var clears = new List<AlertHistoryClear>();
         foreach (var resolutionName in resolutionMetricNames)
         {
-            using var resolutionCommand = connection.CreateCommand();
-            resolutionCommand.CommandText = @"
-SELECT MAX(alert_time)
+            using var clearCommand = connection.CreateCommand();
+            clearCommand.CommandText = @"
+SELECT alert_time, context_json, detail_text
 FROM v_config_alert_log
 WHERE server_id = $1
-AND   metric_name = $2";
-            resolutionCommand.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = sid.Value });
-            resolutionCommand.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = resolutionName });
-            var resolved = await resolutionCommand.ExecuteScalarAsync();
-            if (resolved != null && resolved != DBNull.Value)
+AND   metric_name = $2
+AND   alert_time >= $3
+ORDER BY alert_time DESC
+LIMIT " + StandingRowCap.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            clearCommand.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = sid.Value });
+            clearCommand.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = resolutionName });
+            clearCommand.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = DateTime.SpecifyKind(fires[^1].FireAtUtc, DateTimeKind.Unspecified) });
+            using var clearReader = await clearCommand.ExecuteReaderAsync();
+            while (await clearReader.ReadAsync())
             {
-                var at = DateTime.SpecifyKind(Convert.ToDateTime(resolved), DateTimeKind.Utc);
-                if (resolvedAt is null || at > resolvedAt) resolvedAt = at;
+                clears.Add(new AlertHistoryClear(
+                    DateTime.SpecifyKind(clearReader.GetDateTime(0), DateTimeKind.Utc),
+                    clearReader.IsDBNull(1) ? null : clearReader.GetString(1),
+                    clearReader.IsDBNull(2) ? null : clearReader.GetString(2)));
             }
         }
 
-        return AlertHistoryEscalationSeed.IsOpen(fired, resolvedAt) ? new AlertHistoryFire(fired, currentValue, contextJson) : null;
+        return new AlertHistoryStanding(fires, clears);
     }
 
     /// <summary>

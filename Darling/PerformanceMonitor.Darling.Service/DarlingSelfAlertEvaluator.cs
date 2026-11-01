@@ -5557,13 +5557,12 @@ internal sealed class DarlingSelfAlertEvaluator
             else if (judgement == AgSyncJudgement.Behind)
             {
                 _activeAgSyncBehind[key] = true;
-                /* #7068: the history holds one open row per server and metric, so it seeds this grain only when the row's context
-                   names this AG, database and replica. Another standing grain's row is not this one's (it announces once). */
+                /* #7068: seeded from the newest open row whose context names this AG, database and replica, and closed only by a
+                   recovery that names them too: two databases behind on one server each stay quiet from their own row. */
                 await SeedStandingStateAsync(
                     _lastAgSyncBehindAlert, key, key, Key(serverId), AgSyncFellBehindMetric, cancellationToken,
-                    ownsRow: context => context is not null
-                        && new[] { database.AgName, database.DatabaseName, database.ReplicaServerName }
-                            .All(name => context.Contains(System.Text.Json.JsonEncodedText.Encode(name).ToString(), StringComparison.Ordinal)));
+                    ownsRow: context => AgAlertContexts.OwnsSyncFire(context, database.AgName, database.DatabaseName, database.ReplicaServerName),
+                    ownsClear: clear => AgAlertContexts.OwnsSyncClear(clear.DetailText, database.AgName, database.DatabaseName, database.ReplicaServerName));
                 /* #5493: a state alert (see ApplyCaptureDownAsync); the grain's stamp is the AG database's key. */
                 var syncDecision = DecideStateAlert(_lastAgSyncBehindAlert, key, AgSyncFellBehindMetric, key, now, out var syncRefire);
                 if (syncDecision is ConnectionAlertDecision.Lost or ConnectionAlertDecision.StillDown)
@@ -10055,8 +10054,15 @@ ORDER BY ag_name, database_name, replica_server_name";
     /// as it, so the first sweep after a start can tell a condition that stood through the restart (already announced, its
     /// stamp seeded) from one that cleared and came back (a resolution row is newer, so it announces). One table, read by
     /// <see cref="SeedStandingStateAsync"/> for every alert that shares <see cref="DecideStateAlert"/> and for Collection Stopped.
+    /// <para>Only a metric whose fire row can be found again by the store read is seeded. A per-server key is the row's
+    /// <c>server_id</c>. The fleet alerts that fire under one fixed key (Custom Alert Rules Unhealthy, External Alerts
+    /// Undelivered, Collection Falling Behind) are read from <c>server_id</c> 0 by their metric name
+    /// (<see cref="AlertHistoryServerIdentity.FleetSingleKeyMetrics"/>). The per-job and per-cost-key fleet alerts (Store Job
+    /// Over Cadence, Retention Held, Raw Purge Over Horizon, Compose Rollup Hours Stuck, the Policy Job bands) write every key
+    /// under <c>server_id</c> 0 and one server name, so only free text tells their keys apart: the store answers them with no
+    /// row, and their seed does nothing against PostgreSQL or DuckDB.</para>
     /// </summary>
-    private static readonly IReadOnlyDictionary<string, string[]> StateAlertResolutionTitles =
+    private static readonly Dictionary<string, string[]> StateAlertResolutionTitles =
         new Dictionary<string, string[]>(StringComparer.Ordinal)
         {
             ["Collection Stopped"] = new[] { "Collection Resumed", "Server Restored" },
@@ -10079,6 +10085,9 @@ ORDER BY ag_name, database_name, replica_server_name";
     /// <summary>#7068: the state alerts whose seed has been decided this process, by <see cref="StateRetryKey"/>.</summary>
     private readonly ConcurrentDictionary<string, bool> _standingSeedDone = new(StringComparer.Ordinal);
 
+    /// <summary>#7068: the history read of each state alert's server and metric, taken once per process start.</summary>
+    private readonly ConcurrentDictionary<string, AlertHistoryStanding> _standingReads = new(StringComparer.Ordinal);
+
     /// <summary>
     /// #7068: the first sweep of this process that finds a state alert's condition standing seeds its "already announced"
     /// stamp from the open fire row in the history (see <see cref="IAlertHistoryStore.GetOpenFireAsync"/>), so a restart in the
@@ -10094,7 +10103,8 @@ ORDER BY ag_name, database_name, replica_server_name";
     /// <returns>True when the stamp was seeded from an open fire row.</returns>
     private async Task<bool> SeedStandingStateAsync(
         ConcurrentDictionary<string, DateTime> stamps, string stampKey, string grainKey, string historyKey, string metric,
-        CancellationToken cancellationToken, bool ranked = false, Func<string?, bool>? ownsRow = null)
+        CancellationToken cancellationToken, bool ranked = false, Func<string?, bool>? ownsRow = null,
+        Func<AlertHistoryClear, bool>? ownsClear = null)
     {
         var doneKey = StateRetryKey(metric, stampKey);
         if (!_standingSeedDone.TryAdd(doneKey, true) || !StateAlertResolutionTitles.TryGetValue(metric, out var titles))
@@ -10104,8 +10114,28 @@ ORDER BY ag_name, database_name, replica_server_name";
 
         try
         {
-            var standing = await _historyStore.GetOpenFireAsync(historyKey, metric, titles, null, _serviceStartUtc);
-            if (standing is null || (ownsRow is not null && !ownsRow(standing.ContextJson)) || !stamps.TryAdd(stampKey, standing.FireAtUtc))
+            /* The newest open row THIS grain owns: with several grains standing on one server (two AG databases behind) the newest
+               row of the metric names only one of them. A clear that names another grain does not close this one. */
+            /* One store read per server and metric per process start, shared by every grain of it. */
+            var readKey = StateRetryKey(metric, historyKey);
+            if (!_standingReads.TryGetValue(readKey, out var standingRows))
+            {
+                try
+                {
+                    standingRows = await _historyStore.GetStandingAsync(historyKey, metric, titles, null, _serviceStartUtc);
+                }
+                catch (Exception) when (!cancellationToken.IsCancellationRequested)
+                {
+                    /* Kept as empty so the other grains do not read a store that is down again: they announce, as before this seed. */
+                    _standingReads[readKey] = AlertHistoryStanding.Empty;
+                    throw;
+                }
+
+                _standingReads[readKey] = standingRows;
+            }
+
+            var standing = standingRows.OpenFor(fire => ownsRow is null || ownsRow(fire.ContextJson), ownsClear);
+            if (standing is null || !stamps.TryAdd(stampKey, standing.FireAtUtc))
             {
                 return false;
             }

@@ -153,11 +153,87 @@ public interface IAlertHistoryStore
         string serverId, string metricName, System.Collections.Generic.IReadOnlyList<string> resolutionMetricNames,
         DateTime? sinceUtc, DateTime? untilUtc, bool countMuted = true) =>
         Task.FromResult<AlertHistoryFire?>(null);
+
+    /// <summary>
+    /// #7068: every fire row and every resolution row for (<paramref name="serverId"/>, <paramref name="metricName"/>), under the
+    /// same window, mute and failed-send rules as <see cref="GetOpenFireAsync"/>, so a caller can ask which fires are still open
+    /// FOR ONE GRAIN (a file, a plan, an availability group database) with <see cref="AlertHistoryStanding.OpenFor"/>. The newest
+    /// open row alone is not enough when several things stand at once on one server: only the one it names would stay quiet
+    /// after a restart. One read per server and metric. The default body wraps <see cref="GetOpenFireAsync"/>: a store that
+    /// answers only that (a test double) yields at most the one row. A failed read THROWS, like <see cref="GetOpenFireAsync"/>.
+    /// </summary>
+    async Task<AlertHistoryStanding> GetStandingAsync(
+        string serverId, string metricName, System.Collections.Generic.IReadOnlyList<string> resolutionMetricNames,
+        DateTime? sinceUtc, DateTime? untilUtc, bool countMuted = true) =>
+        AlertHistoryStanding.Of(await GetOpenFireAsync(serverId, metricName, resolutionMetricNames, sinceUtc, untilUtc, countMuted));
 }
 
 /// <summary>#7068: one fire row read back by <see cref="IAlertHistoryStore.GetOpenFireAsync"/>: when it was written, the
 /// numeric value it carried (the worst volume's free percent, the worst database's PVS percent) and its context JSON.</summary>
 public sealed record AlertHistoryFire(DateTime FireAtUtc, double CurrentValue, string? ContextJson);
+
+/// <summary>#7068: one resolution row (a clear) read back with the fire rows: when it was written, its context and its message.
+/// A clear that names its grain in either lets <see cref="AlertHistoryStanding.OpenFor"/> close only that grain's fires.</summary>
+public sealed record AlertHistoryClear(DateTime AtUtc, string? ContextJson, string? DetailText);
+
+/// <summary>
+/// #7068: what <see cref="IAlertHistoryStore.GetStandingAsync"/> read: the fire rows (newest first) and the resolution rows of one
+/// server and metric. <see cref="OpenFor"/> answers, for one grain, the newest fire row that grain owns that none of its clears
+/// closed. Pure: the tie rule is <see cref="AlertHistoryEscalationSeed.IsOpen"/>, shared with both stores.
+/// </summary>
+public sealed class AlertHistoryStanding
+{
+    public static readonly AlertHistoryStanding Empty = new(
+        System.Array.Empty<AlertHistoryFire>(), System.Array.Empty<AlertHistoryClear>());
+
+    public AlertHistoryStanding(
+        System.Collections.Generic.IReadOnlyList<AlertHistoryFire> fires, System.Collections.Generic.IReadOnlyList<AlertHistoryClear> clears)
+    {
+        Fires = fires;
+        Clears = clears;
+    }
+
+    /// <summary>Fire rows, newest first.</summary>
+    public System.Collections.Generic.IReadOnlyList<AlertHistoryFire> Fires { get; }
+
+    public System.Collections.Generic.IReadOnlyList<AlertHistoryClear> Clears { get; }
+
+    /// <summary>A standing read that holds at most one fire and no clears (a store that answers only the newest open row).</summary>
+    public static AlertHistoryStanding Of(AlertHistoryFire? fire) =>
+        fire is null ? Empty : new(new[] { fire }, System.Array.Empty<AlertHistoryClear>());
+
+    /// <summary>The newest fire no clear closed, whatever grain: the answer of <see cref="IAlertHistoryStore.GetOpenFireAsync"/>.</summary>
+    public AlertHistoryFire? NewestOpen() => OpenFor(_ => true);
+
+    /// <summary>
+    /// The newest fire row <paramref name="ownsFire"/> says is the grain's own, or null when none is open. It is open when no
+    /// clear <paramref name="ownsClear"/> says is the grain's (null: every clear is, a clear that ends the whole alert) is as
+    /// new as the fire. Only the grain's newest fire is considered: an older one is the same incident, and a clear after
+    /// the newest fire closes it whichever row opened it.
+    /// </summary>
+    public AlertHistoryFire? OpenFor(Func<AlertHistoryFire, bool> ownsFire, Func<AlertHistoryClear, bool>? ownsClear = null)
+    {
+        foreach (var fire in Fires)
+        {
+            if (!ownsFire(fire))
+            {
+                continue;
+            }
+
+            foreach (var clear in Clears)
+            {
+                if ((ownsClear is null || ownsClear(clear)) && !AlertHistoryEscalationSeed.IsOpen(fire.FireAtUtc, clear.AtUtc))
+                {
+                    return null;
+                }
+            }
+
+            return fire;
+        }
+
+        return null;
+    }
+}
 
 /// <summary>
 /// One alert event to persist. Carries both the display strings (Dashboard

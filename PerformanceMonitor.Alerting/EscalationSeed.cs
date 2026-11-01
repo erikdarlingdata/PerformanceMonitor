@@ -58,14 +58,14 @@ public static class EscalationSeed
     /// #7068: answers an <see cref="OpenFireQuery"/> from <paramref name="store"/>, the standing-incident seed's reader for
     /// Lite and Darling alike. A failed read throws and the engine logs and counts it.
     /// </summary>
-    public static Func<OpenFireQuery, CancellationToken, Task<AlertHistoryFire?>> OpenFireReaderFor(IAlertHistoryStore store)
+    public static Func<OpenFireQuery, CancellationToken, Task<AlertHistoryStanding>> OpenFireReaderFor(IAlertHistoryStore store)
     {
         if (store is null)
         {
             throw new ArgumentNullException(nameof(store));
         }
 
-        return (query, _) => store.GetOpenFireAsync(query.ServerKey, query.MetricName, query.ResolutionTitles, null, query.UntilUtc);
+        return (query, _) => store.GetStandingAsync(query.ServerKey, query.MetricName, query.ResolutionTitles, null, query.UntilUtc);
     }
 
     /// <summary>

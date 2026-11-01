@@ -30,7 +30,7 @@ public sealed class StandingIncidentRestartSeedTests
     {
         private readonly AlertEngineTests.Harness _h;
         private readonly List<(DateTime At, AlertOutcome Fire)> _fires = new();
-        private readonly List<(DateTime At, string Title)> _resolutions = new();
+        private readonly List<(DateTime At, string Title, string Message)> _resolutions = new();
         private int _seenFires;
         private int _seenResolutions;
 
@@ -51,13 +51,13 @@ public sealed class StandingIncidentRestartSeedTests
             _seenFires = _h.Deliverer.Outcomes.Count;
             foreach (var resolution in _h.Resolutions.Skip(_seenResolutions))
             {
-                _resolutions.Add((_h.Now, resolution.Title));
+                _resolutions.Add((_h.Now, resolution.Title, resolution.Message));
             }
 
             _seenResolutions = _h.Resolutions.Count;
         }
 
-        public Func<OpenFireQuery, CancellationToken, Task<AlertHistoryFire?>> Reader => (query, _) =>
+        public Func<OpenFireQuery, CancellationToken, Task<AlertHistoryStanding>> Reader => (query, _) =>
         {
             ReadsAsked++;
             if (Throws)
@@ -65,17 +65,19 @@ public sealed class StandingIncidentRestartSeedTests
                 throw new InvalidOperationException("history is down");
             }
 
-            var fire = _fires.LastOrDefault(f => f.Fire.MetricName == query.MetricName && f.Fire.ServerKey == query.ServerKey && f.At < query.UntilUtc);
-            if (fire.Fire is null)
-            {
-                return Task.FromResult<AlertHistoryFire?>(null);
-            }
-
-            var closed = _resolutions.Any(r => query.ResolutionTitles.Contains(r.Title) && r.At >= fire.At);
-            return Task.FromResult<AlertHistoryFire?>(closed
-                ? null
-                : new AlertHistoryFire(fire.At, fire.Fire.NumericCurrentValue ?? 0,
-                    fire.Fire.Context is null ? null : AlertContextSerializer.Serialize(fire.Fire.Context)));
+            /* Every fire and every clear the first engine produced, as the stores read them. */
+            var fires = Enumerable.Reverse(_fires)
+                .Where(f => f.Fire.MetricName == query.MetricName && f.Fire.ServerKey == query.ServerKey && f.At < query.UntilUtc)
+                .OrderByDescending(f => f.At)
+                .Select(f => new AlertHistoryFire(
+                    f.At, f.Fire.NumericCurrentValue ?? 0,
+                    f.Fire.Context is null ? null : AlertContextSerializer.Serialize(f.Fire.Context)))
+                .ToList();
+            var clears = _resolutions
+                .Where(r => query.ResolutionTitles.Contains(r.Title))
+                .Select(r => new AlertHistoryClear(r.At, null, r.Message))
+                .ToList();
+            return Task.FromResult(new AlertHistoryStanding(fires, clears));
         };
     }
 

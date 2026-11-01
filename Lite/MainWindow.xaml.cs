@@ -106,7 +106,7 @@ public partial class MainWindow : Window
     /// per-server snapshot — the same reason Darling keeps it in its self-alert evaluator rather than the
     /// engine. The decisions themselves are the shared PerformanceMonitor.Common.AgAlertPolicy, so both apps
     /// fire on identical rules under identical metric names.</summary>
-    private readonly Services.AgAlertEvaluator _agAlertEvaluator = new();
+    private readonly Services.AgAlertEvaluator _agAlertEvaluator;
 
     /// <summary>#5642: when the current connection to each server began collecting, the alert snapshot's
     /// <c>WatchingSinceUtc</c>. Keyed by the connection's id, the key <see cref="_previousConnectionStates"/> uses.</summary>
@@ -159,6 +159,8 @@ public partial class MainWindow : Window
            (Plan E E3c): the shared send core fans out to it. The history store is shared
            by both so the webhook service can seed its cooldown across restart (#1145). */
         _alertHistoryStore = new DuckDbAlertHistoryStore(_databaseInitializer);
+        /* #7068: the AG Sync Fell Behind seed reads the same history, so a standing lag is not announced again after a restart. */
+        _agAlertEvaluator = new Services.AgAlertEvaluator(history: _alertHistoryStore);
         _webhookAlertService = new WebhookAlertService(
             _alertSettings, EmailAlertService.Branding, new AppLoggerAdapter<WebhookAlertService>(), _alertHistoryStore);
         /* #5820: the investigation store is built before the email service, which opens requests in it through the shared

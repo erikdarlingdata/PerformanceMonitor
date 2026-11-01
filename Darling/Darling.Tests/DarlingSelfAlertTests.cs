@@ -243,6 +243,27 @@ public sealed class DarlingSelfAlertTests
             return Task.FromResult(OpenFireFor is null ? OpenFire : OpenFireFor(serverId, metricName));
         }
 
+        /// <summary>#7068: every fire and clear the history answers <c>GetStandingAsync</c> with, per (server key, metric); when null the
+        /// standing read is the one open fire above.</summary>
+        public Func<string, string, AlertHistoryStanding>? StandingFor { get; set; }
+
+        public async Task<AlertHistoryStanding> GetStandingAsync(
+            string serverId, string metricName, IReadOnlyList<string> resolutionMetricNames, DateTime? sinceUtc, DateTime? untilUtc, bool countMuted = true)
+        {
+            if (StandingFor is null)
+            {
+                return AlertHistoryStanding.Of(await GetOpenFireAsync(serverId, metricName, resolutionMetricNames, sinceUtc, untilUtc, countMuted));
+            }
+
+            OpenFireQuestions.Add((serverId, metricName, resolutionMetricNames.ToArray()));
+            if (OpenFireThrows)
+            {
+                throw new InvalidOperationException("history is down");
+            }
+
+            return StandingFor(serverId, metricName);
+        }
+
         public Task<DateTime?> GetLastEmailSentUtcAsync(string serverId, string metricName, string? dedupKey = null) =>
             Task.FromResult<DateTime?>(null);
 

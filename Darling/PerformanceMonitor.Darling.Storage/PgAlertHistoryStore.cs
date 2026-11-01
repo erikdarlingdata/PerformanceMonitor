@@ -212,26 +212,37 @@ AND   notification_type IN ('webhook', 'email+webhook')", "WebhookAlert");
 
     /// <summary>
     /// #7068: the newest fire row (inside the optional window, before the exclusive <paramref name="untilUtc"/>) that no
-    /// resolution row closed. See <see cref="IAlertHistoryStore.GetOpenFireAsync"/>. A failed read THROWS (no catch here):
-    /// the engine logs it, and "could not read" must not look like "no history". alert_time is microsecond-precision naive
-    /// UTC; the bounds are sent the same way.
+    /// resolution row closed. See <see cref="IAlertHistoryStore.GetOpenFireAsync"/>. A failed read THROWS (no catch here).
+    /// Answers from <see cref="GetStandingAsync"/>, the one read behind it and the per-grain seed.
     /// </summary>
     public async Task<AlertHistoryFire?> GetOpenFireAsync(
+        string serverId, string metricName, System.Collections.Generic.IReadOnlyList<string> resolutionMetricNames,
+        DateTime? sinceUtc, DateTime? untilUtc, bool countMuted = true) =>
+        (await GetStandingAsync(serverId, metricName, resolutionMetricNames, sinceUtc, untilUtc, countMuted)).NewestOpen();
+
+    /// <summary>The most fire rows, and the most resolution rows, <see cref="GetStandingAsync"/> reads.</summary>
+    public const int StandingRowCap = 1000;
+
+    /// <summary>
+    /// #7068: every fire row (newest first, at most <see cref="StandingRowCap"/>) and the resolution rows as new as the oldest of
+    /// them. See <see cref="IAlertHistoryStore.GetStandingAsync"/>. A failed read THROWS (no catch here): the engine logs it, and
+    /// "could not read" must not look like "no history". alert_time is microsecond-precision naive UTC; the bounds are sent the
+    /// same way. Seeks <c>idx_config_alert_log_time</c> (server_id, metric_name, alert_time) for both reads.
+    /// </summary>
+    public async Task<AlertHistoryStanding> GetStandingAsync(
         string serverId, string metricName, System.Collections.Generic.IReadOnlyList<string> resolutionMetricNames,
         DateTime? sinceUtc, DateTime? untilUtc, bool countMuted = true)
     {
         /* Same identity scope as GetLastEmailSentUtcAsync (#3456). */
-        var sid = AlertHistoryServerIdentity.SeedScope(serverId);
+        var sid = AlertHistoryServerIdentity.OpenFireScope(serverId, metricName);
         if (sid is null)
         {
-            return null;
+            return AlertHistoryStanding.Empty;
         }
 
         await using var connection = await _postgres.OpenConnectionAsync();
 
-        DateTime? fireAt = null;
-        double currentValue = 0;
-        string? contextJson = null;
+        var fires = new System.Collections.Generic.List<AlertHistoryFire>();
         using (var fireCommand = new NpgsqlCommand(@"
 SELECT alert_time, current_value, context_json
 FROM config_alert_log
@@ -241,7 +252,7 @@ AND   alert_time >= COALESCE($3, '-infinity'::timestamp)
 AND   alert_time < COALESCE($4, 'infinity'::timestamp)"
             + AlertHistoryEscalationSeed.KeepUnlessEveryChannelFailedFilter
             + (countMuted ? "" : AlertHistoryEscalationSeed.ExcludeMutedFilter)
-            + "\nORDER BY alert_time DESC\nLIMIT 1", connection) { CommandTimeout = _commandTimeoutSeconds })
+            + "\nORDER BY alert_time DESC\nLIMIT " + StandingRowCap.ToString(CultureInfo.InvariantCulture), connection) { CommandTimeout = _commandTimeoutSeconds })
         {
             fireCommand.Parameters.AddWithValue(sid.Value);
             fireCommand.Parameters.AddWithValue(metricName);
@@ -251,32 +262,44 @@ AND   alert_time < COALESCE($4, 'infinity'::timestamp)"
             fireCommand.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = untilUtc is { } until
                 ? DateTime.SpecifyKind(AlertHistoryEscalationSeed.TruncateToMicroseconds(until), DateTimeKind.Unspecified) : DBNull.Value });
             await using var reader = await fireCommand.ExecuteReaderAsync();
-            if (await reader.ReadAsync())
+            while (await reader.ReadAsync())
             {
-                fireAt = DateTime.SpecifyKind(reader.GetDateTime(0), DateTimeKind.Utc);
-                currentValue = reader.IsDBNull(1) ? 0 : reader.GetDouble(1);
-                contextJson = reader.IsDBNull(2) ? null : reader.GetString(2);
+                fires.Add(new AlertHistoryFire(
+                    DateTime.SpecifyKind(reader.GetDateTime(0), DateTimeKind.Utc),
+                    reader.IsDBNull(1) ? 0 : reader.GetDouble(1),
+                    reader.IsDBNull(2) ? null : reader.GetString(2)));
             }
         }
 
-        if (fireAt is not { } fired)
+        if (fires.Count == 0)
         {
-            return null;
+            return AlertHistoryStanding.Empty;
         }
 
-        using var resolutionCommand = new NpgsqlCommand(@"
-SELECT MAX(alert_time)
+        var clears = new System.Collections.Generic.List<AlertHistoryClear>();
+        using var clearCommand = new NpgsqlCommand(@"
+SELECT alert_time, context_json, detail_text
 FROM config_alert_log
 WHERE server_id = $1
-AND   metric_name = ANY($2)", connection) { CommandTimeout = _commandTimeoutSeconds };
-        resolutionCommand.Parameters.AddWithValue(sid.Value);
-        resolutionCommand.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = System.Linq.Enumerable.ToArray(resolutionMetricNames) });
-        var resolved = await resolutionCommand.ExecuteScalarAsync();
-        DateTime? resolvedAt = resolved == null || resolved == DBNull.Value
-            ? null
-            : DateTime.SpecifyKind(Convert.ToDateTime(resolved, CultureInfo.InvariantCulture), DateTimeKind.Utc);
+AND   metric_name = ANY($2)
+AND   alert_time >= $3
+ORDER BY alert_time DESC
+LIMIT " + StandingRowCap.ToString(CultureInfo.InvariantCulture), connection) { CommandTimeout = _commandTimeoutSeconds };
+        clearCommand.Parameters.AddWithValue(sid.Value);
+        clearCommand.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = System.Linq.Enumerable.ToArray(resolutionMetricNames) });
+        clearCommand.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(fires[^1].FireAtUtc, DateTimeKind.Unspecified) });
+        await using (var clearReader = await clearCommand.ExecuteReaderAsync())
+        {
+            while (await clearReader.ReadAsync())
+            {
+                clears.Add(new AlertHistoryClear(
+                    DateTime.SpecifyKind(clearReader.GetDateTime(0), DateTimeKind.Utc),
+                    clearReader.IsDBNull(1) ? null : clearReader.GetString(1),
+                    clearReader.IsDBNull(2) ? null : clearReader.GetString(2)));
+            }
+        }
 
-        return AlertHistoryEscalationSeed.IsOpen(fired, resolvedAt) ? new AlertHistoryFire(fired, currentValue, contextJson) : null;
+        return new AlertHistoryStanding(fires, clears);
     }
 
     /// <summary>#5825: the most delivered fire rows <see cref="GetOpenDeliveredFiresAsync"/> returns. An alert that
