@@ -116,6 +116,8 @@ alerts AS (
     FROM v_config_alert_log
     WHERE server_id = $1 AND alert_time >= $2 AND alert_time < $3
       AND dismissed = false
+      /* #7086: a digest row is a fire an evaluator held back from paging. It paged nobody, so it is not actionable. */
+      AND notification_type <> 'digest'
       AND metric_name NOT LIKE '%Cleared%'
       AND metric_name NOT LIKE '%Resolved%'
       AND metric_name NOT LIKE '%Restored%'

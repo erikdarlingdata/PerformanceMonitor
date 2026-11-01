@@ -2268,9 +2268,14 @@ public sealed class AlertEngineTests
         Assert.Equal(1L, firstIncident.TotalOccurrences);
         Assert.Equal(h.Now, firstIncident.IncidentStartedUtc);
 
-        /* Same fingerprint (identical graphs), so this is the same incident continuing. */
-        h.Adapter.Deadlocks.Add(DeadlockRow());
-        h.Adapter.Deadlocks.Add(DeadlockRow());
+        /* Same fingerprint (identical graphs), so this is the same incident continuing. #7086: a count rise inside an
+           open episode no longer pages, so the second delivery is the rise to the Critical rate (20 an hour), the
+           one rise that still does. */
+        for (var i = 0; i < 20; i++)
+        {
+            h.Adapter.Deadlocks.Add(DeadlockRow());
+        }
+
         var openedAt = h.Now;
         h.Now = h.Now.AddMinutes(6);
         await engine.EvaluateServerAsync(Harness.Snapshot());
@@ -2278,15 +2283,15 @@ public sealed class AlertEngineTests
         Assert.Equal(2, h.Deliverer.Outcomes.Count);
         var second = h.Deliverer.Outcomes[1];
         var secondIncident = Assert.Single(second.Context!.Incidents!);
-        Assert.Equal(3, secondIncident.OccurrenceCount);
-        Assert.Equal(3L, secondIncident.TotalOccurrences);
+        Assert.Equal(21, secondIncident.OccurrenceCount);
+        Assert.Equal(21L, secondIncident.TotalOccurrences);
 
         /* The start time did NOT move — that is how the consumer tells a continuation from a new incident
            that happens to read 3. */
         Assert.Equal(openedAt, secondIncident.IncidentStartedUtc);
 
         var persisted = h.StateStore.Occurrences[(Key, AlertEngine.DeadlockWatermarkMetric)];
-        Assert.Equal(3L, persisted[secondIncident.DedupKey].TotalOccurrences);
+        Assert.Equal(21L, persisted[secondIncident.DedupKey].TotalOccurrences);
     }
 
     [Fact]
@@ -5023,6 +5028,30 @@ public sealed class AlertEngineTests
         FailureDelta = delta, TotalFailures = total, ObservedAtUtc = observedAt
     };
 
+    /// <summary>#7086: a plan's FIRST failure is held, not paged, and these tests guard what happens to a PAGE (the observation
+    /// guard, the cooldown, the retry after a failed send, the recovery). So each starts after one earlier failure of the same plan
+    /// at <paramref name="firstObservation"/>, inside the 24 hours, which makes its own observation the second one. The held row
+    /// is checked and cleared from the deliverer, and the rows and clock the test set are put back.</summary>
+    private static async Task HoldTheFirstForcePlanFailureAsync(Harness h, AlertEngine engine, DateTime firstObservation)
+    {
+        var rows = h.Adapter.ForcePlanFailures.ToList();
+        var now = h.Now;
+        var report = h.Deliverer.Report;
+        h.Deliverer.Report = null;
+        h.Adapter.ForcePlanFailures.Clear();
+        h.Adapter.ForcePlanFailures.Add(ForcePlanRow(firstObservation));
+        h.Now = firstObservation.AddSeconds(30);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        var held = Assert.Single(h.Deliverer.Outcomes);
+        Assert.NotNull(held.Hold);
+        h.Deliverer.Outcomes.Clear();
+        h.Deliverer.Report = report;
+        h.Adapter.ForcePlanFailures.Clear();
+        h.Adapter.ForcePlanFailures.AddRange(rows);
+        h.Now = now;
+    }
+
     [Fact]
     public async Task ForcePlanFailure_SameObservationAcrossSixCooldowns_FiresOnce_ThenResolvesOnTheNextCollection()
     {
@@ -5037,6 +5066,8 @@ public sealed class AlertEngineTests
         h.Now = Collection0418.AddSeconds(53);
         h.Adapter.ForcePlanFailures.Add(ForcePlanRow(Collection0418));
         var engine = h.Build();
+        await HoldTheFirstForcePlanFailureAsync(h, engine, Collection0402);
+        var fetchesBefore = h.Adapter.ForcePlanFetches;
 
         await engine.EvaluateServerAsync(Harness.Snapshot());
         Assert.Single(h.Deliverer.Outcomes);
@@ -5051,7 +5082,7 @@ public sealed class AlertEngineTests
         Assert.Single(h.Deliverer.Outcomes);
         /* And the read still happened on every pass — the guard is on the FIRE, never on the fetch, so the
            recovery arm keeps seeing fresh evidence. */
-        Assert.Equal(6, h.Adapter.ForcePlanFetches);
+        Assert.Equal(6, h.Adapter.ForcePlanFetches - fetchesBefore);
 
         /* 04:50: APC released the forcing and the counter reset. The adapter's '>' filter drops the row, and
            the recovery is announced exactly as before #3579. */
@@ -5114,6 +5145,7 @@ public sealed class AlertEngineTests
         h.Now = Collection0402.AddSeconds(30);
         h.Adapter.ForcePlanFailures.Add(ForcePlanRow(Collection0402));
         var engine = h.Build();
+        await HoldTheFirstForcePlanFailureAsync(h, engine, Collection0402.AddMinutes(-16));
 
         await engine.EvaluateServerAsync(Harness.Snapshot());
         Assert.Single(h.Deliverer.Outcomes);
@@ -5172,6 +5204,7 @@ public sealed class AlertEngineTests
         h.Now = Collection0418.AddSeconds(53);
         h.Adapter.ForcePlanFailures.Add(ForcePlanRow(Collection0418));
         var engine = h.Build();
+        await HoldTheFirstForcePlanFailureAsync(h, engine, Collection0402);
 
         await engine.EvaluateServerAsync(Harness.Snapshot());
         Assert.Single(h.Deliverer.Outcomes);
@@ -5181,7 +5214,7 @@ public sealed class AlertEngineTests
         await engine.EvaluateServerAsync(Harness.Snapshot());
         Assert.Single(h.Resolutions, r => r.MetricName == ForcePlanTokens.MetricName);
 
-        /* Hours later, forced again and failing again. */
+        /* Hours later (inside the 24 hours of the first failure), forced again and failing again. */
         var laterCollection = Collection0450.AddHours(3);
         h.Adapter.ForcePlanFailures.Add(ForcePlanRow(laterCollection, delta: 1, total: 1));
         h.Now = laterCollection.AddSeconds(30);
@@ -6651,6 +6684,7 @@ public sealed class AlertEngineTests
         h.Adapter.ForcePlanFailures.Add(ForcePlanRow(Collection0418));
         h.Deliverer.Report = _ => FailedByEmail();
         var engine = h.Build();
+        await HoldTheFirstForcePlanFailureAsync(h, engine, Collection0402);
 
         async Task<int> SweepAfterAsync(TimeSpan wait)
         {
