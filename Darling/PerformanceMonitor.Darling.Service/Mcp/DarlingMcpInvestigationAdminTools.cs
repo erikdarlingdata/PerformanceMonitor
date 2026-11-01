@@ -161,7 +161,7 @@ public sealed class DarlingMcpInvestigationAdminTools
         {
             if (!Guid.TryParse(request_id, out var request))
             {
-                return McpHelpers.Refusal("request_id", "The request id is not a request id. Nothing was changed.");
+                return McpHelpers.Refusal("request_id", DarlingWebEndpoints.RequestIdNotGuidText + " Nothing was changed.");
             }
 
             if (InvestigationPersonWrites.ValidateCloseReason(reason) is { } reasonRefusal)
