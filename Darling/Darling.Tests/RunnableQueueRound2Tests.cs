@@ -53,9 +53,9 @@ public sealed class RunnableQueueRound2Tests
     {
         h.Now = at;
         h.Adapter.RunnableQueue = Samples(at, averages);
-        var before = h.Deliverer.Outcomes.Count;
+        var before = h.Deliverer.Outcomes.Count(o => o.Hold is null);
         await engine.EvaluateServerAsync(AlertEngineTests.Harness.Snapshot());
-        return h.Deliverer.Outcomes.Count - before;
+        return h.Deliverer.Outcomes.Count(o => o.Hold is null) - before;
     }
 
     /// <summary>A webhook-only fan-out whose every post failed (an HTTP 429, say).</summary>
@@ -91,10 +91,15 @@ public sealed class RunnableQueueRound2Tests
     public async Task AnEscalationWhoseEveryChannelFailed_IsRetriedAsAnEscalation_AtOnce_AndALaterSuccessRecordsCritical()
     {
         var h = Armed();
+        h.Now = T0;
+        /* #7086: a Warning no longer pages, so the tier this test needs (a Warning the operator was told about) can only come
+           from the restart seed: an install upgraded in the middle of an incident the old version paged at Warning. */
+        h.EscalationSeedReader = (q, _) => Task.FromResult<AlertSeverityLevel?>(
+            q.MetricName == RunnableQueueEvaluator.MetricName ? AlertSeverityLevel.Warning : null);
         var engine = h.Build();
 
-        /* Warning delivered at T0 (an unreported delivery reads as delivered). */
-        Assert.Equal(1, await EvaluateAsync(h, engine, T0, 9, 9, 9));
+        /* The Warning at T0 is held (the seed already holds the page the old version sent). */
+        Assert.Equal(0, await EvaluateAsync(h, engine, T0, 9, 9, 9));
 
         /* The Critical is an escalation, and the Teams post fails on every channel. */
         h.Deliverer.Report = _ => FailedByWebhook();
@@ -201,7 +206,7 @@ public sealed class RunnableQueueRound2Tests
         var engine = h.Build();
         var switchAt = T0;
 
-        /* Warning (10 per scheduler) delivered in the 1-minute era; the queue goes Critical from the third
+        /* Warning (10 per scheduler) held in the 1-minute era; the queue goes Critical from the third
            five-minute collection on. */
         double Value(DateTime t) => t >= switchAt.AddMinutes(15) ? 60 : 10;
 
@@ -224,7 +229,9 @@ public sealed class RunnableQueueRound2Tests
            median over the whole hour the alert was blind until about +50. */
         Assert.NotNull(criticalAt);
         Assert.True(criticalAt <= switchAt.AddMinutes(16).AddSeconds(30), $"first Critical at {criticalAt:HH:mm:ss}");
-        Assert.True(h.Deliverer.Outcomes.First(o => o.Severity == AlertSeverityLevel.Critical).Context!.EscalationBypassesCooldown);
+        /* #7086: the Warnings before it were held (digest rows), so the first Critical is the first page. */
+        Assert.Null(h.Deliverer.Outcomes.First(o => o.Severity == AlertSeverityLevel.Critical).Hold);
+        Assert.All(h.Deliverer.Outcomes.Where(o => o.Severity == AlertSeverityLevel.Warning), o => Assert.NotNull(o.Hold));
         Assert.Empty(h.Resolutions);
     }
 
