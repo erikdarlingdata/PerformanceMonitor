@@ -9824,7 +9824,8 @@ ORDER BY ag_name, database_name, replica_server_name";
         string serverKey, string serverName, string metricName, string currentValue, string thresholdValue,
         string detail, AlertSeverityLevel? severity, string shortMessage,
         double? numericCurrentValue, double? numericThresholdValue, CancellationToken cancellationToken,
-        AlertContext? context = null, bool? muted = null, bool scheduledReport = false, string? displayName = null)
+        AlertContext? context = null, bool? muted = null, bool scheduledReport = false, string? displayName = null,
+        AlertHold? hold = null)
     {
         /* Same mute treatment as the engine: a muted self-alert is still recorded (flagged muted) but its
            channels are skipped — the deliverer honors AlertOutcome.Muted. A caller that brought its own
@@ -9860,14 +9861,15 @@ ORDER BY ag_name, database_name, replica_server_name";
             _logger?.LogWarning(
                 "{Line}",
                 AlertFiringLog.Fired(
-                    serverName, metricName, severity?.ToString() ?? "Warning", shortMessage, isMuted));
+                    serverName, metricName, severity?.ToString() ?? "Warning", shortMessage, isMuted, hold is not null));
         }
 
         return await _deliverer.DeliverAndReportAsync(new AlertOutcome(
             serverKey, serverName, metricName, currentValue, thresholdValue,
             Context: context, DetailText: detail,
             NumericCurrentValue: numericCurrentValue, NumericThresholdValue: numericThresholdValue,
-            Muted: isMuted, Severity: severity, ShortMessage: shortMessage, DisplayName: displayName), cancellationToken);
+            Muted: isMuted, Severity: severity, ShortMessage: shortMessage, DisplayName: displayName,
+            Hold: hold), cancellationToken);
     }
 
     private async Task RecordResolutionAsync(AlertResolution resolution, CancellationToken cancellationToken)

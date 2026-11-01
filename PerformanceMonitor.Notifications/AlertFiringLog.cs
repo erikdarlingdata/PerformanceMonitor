@@ -43,10 +43,10 @@ public static class AlertFiringLog
     /// there is nothing to read. When it is absent the line simply stops after the server name.
     /// </param>
     public static string Fired(
-        string serverName, string metricName, string severity, string? shortMessage, bool muted) =>
+        string serverName, string metricName, string severity, string? shortMessage, bool muted, bool held = false) =>
         $"ALERT TRIGGERED [{severity}] {metricName} on {serverName}"
         + (string.IsNullOrWhiteSpace(shortMessage) ? string.Empty : $": {shortMessage}")
-        + (muted ? " [muted]" : "");
+        + (muted ? " [muted]" : held ? " [held for digest]" : "");
 
     /// <summary>
     /// The line for a SCHEDULED REPORT that was produced and handed to the channels (#6215): the collector-cost
