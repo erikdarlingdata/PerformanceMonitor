@@ -400,6 +400,46 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
         });
     }
 
+    /// <summary>
+    /// #7109: the write checks <c>xact_start</c> and <c>state_change</c> from the binding, in the statement that ends the backend. A backend that
+    /// committed and opened another transaction after the dry run is refused as session_changed and stays alive. So is a backend that held no
+    /// transaction (NULL <c>xact_start</c>) and opened one: a NULL equals only a NULL. The unchanged case ends the backend in the test above.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task TheWriteStep_RefusesABackendWhoseTransactionChangedSinceThePrepare_AndEndsNothing(bool hadTransaction)
+    {
+        await RunAsync(Grants.SignalAndStats, Without.Nothing, async c =>
+        {
+            var (connection, pid, id) = await c.OpenVictimAsync();
+            await using var victimConnection = connection;
+            if (hadTransaction)
+            {
+                await using var open = new NpgsqlCommand("BEGIN; CREATE TEMP TABLE kill_probe (a int);", connection);
+                await open.ExecuteNonQueryAsync(c.Ct);
+            }
+
+            Assert.True(PostgresBackendId.TryUnpack(id, out _, out var epoch));
+            var permit = await c.PermitAsync(pid);
+            var prepared = await DarlingMcpPlanForceTools.PrepareKillBackendAsync(c.Source, NullLogger.Instance, permit, 7, "pg-7", pid, epoch, c.Ct);
+            Assert.True(prepared.Proceed);
+            Assert.Equal(hadTransaction, prepared.Binding!.XactStartUtc is not null);
+
+            /* The session commits, runs a new batch, and opens a new transaction. */
+            await Task.Delay(50, c.Ct);
+            await using (var again = new NpgsqlCommand(hadTransaction ? "COMMIT; BEGIN; CREATE TEMP TABLE kill_probe2 (a int);" : "BEGIN; CREATE TEMP TABLE kill_probe2 (a int);", connection))
+                await again.ExecuteNonQueryAsync(c.Ct);
+
+            var written = await DarlingMcpPlanForceTools.WriteKillBackendAsync(prepared.Executor!, permit, prepared.Binding, c.Ct);
+            Assert.Equal(RemediationOutcome.Refused, written.Outcome);
+            Assert.Equal(RemediationResult.Reasons.SessionChanged, written.Reason);
+            Assert.False(written.Wrote);
+            Assert.Contains("run something new since the dry run", written.Message, StringComparison.Ordinal);
+            Assert.True(await c.StillAliveAsync(pid));
+        });
+    }
+
     [Fact]
     public async Task ThePrepareStep_OfASessionThatIsGone_StopsWithTheReasonToRecord_AndNoBinding()
     {

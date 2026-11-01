@@ -23,9 +23,10 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// dry run, and takes stored facts (the server id and the parsed target fields), never <c>agent_action</c>. The write step takes the binding the
 /// prepare step returned and sends the kill. <c>kill_session</c> calls the two in order, so its answers are what they were.
 /// <para>The permit is the one proof a caller brings in: the executor refuses a call without it, and the gate that issues it needs the agent's
-/// request. The write checks what it checked before: on SQL Server the kill batch compares the session id and the login time only, and on
-/// PostgreSQL the statement compares the pid and the start second only. The binding also carries <c>last_request_end_time</c> (SQL Server) and
-/// <c>xact_start</c> and <c>state_change</c> (PostgreSQL), which a later change makes the write compare.</para>
+/// request. The write checks the binding (#7109): on SQL Server and Azure the kill batch compares the session id, the login time and
+/// <c>last_request_end_time</c>, and on PostgreSQL the statement compares the pid, the start second, <c>xact_start</c> and <c>state_change</c>. A
+/// session that ran something new since the dry run is refused as <c>session_changed</c> and nothing is killed. On an idle session the prepare and the
+/// write in one call see the same values, so the agent's path answers as it did.</para>
 /// </summary>
 public sealed partial class DarlingMcpPlanForceTools
 {
@@ -56,10 +57,10 @@ public sealed partial class DarlingMcpPlanForceTools
 
     /// <summary>The kill batch of either SQL Server engine. The Azure kill reads its database from the permit, the one the gate was asked about.</summary>
     private static Task<RemediationResult> KillSqlBatchAsync(SqlServerRemediationExecutor executor, ServerActionPermit permit, bool azure,
-        int sessionId, DateTime loginServerLocal, bool dryRun, CancellationToken ct) =>
+        int sessionId, DateTime loginServerLocal, bool dryRun, CancellationToken ct, KillExpectedActivity? expected = null) =>
         !azure
-            ? executor.KillSessionAsync(permit, sessionId, loginServerLocal, dryRun, ct)
-            : executor.KillAzureSessionAsync(permit, sessionId, loginServerLocal, dryRun, ct);
+            ? executor.KillSessionAsync(permit, sessionId, loginServerLocal, dryRun, ct, expected)
+            : executor.KillAzureSessionAsync(permit, sessionId, loginServerLocal, dryRun, ct, expected);
 
     /// <summary>
     /// Prepare step, SQL Server and Azure SQL Database: the server's clock, its settings row, the Azure database checks and the dry-run batch.
@@ -120,12 +121,14 @@ public sealed partial class DarlingMcpPlanForceTools
     }
 
     /// <summary>
-    /// Write step, SQL Server and Azure SQL Database: sends the kill batch for the session the binding names. The batch checks the session id and
-    /// the login time, as before. The caller wraps this in its journal.
+    /// Write step, SQL Server and Azure SQL Database: sends the kill batch for the session the binding names. The batch checks the session id, the
+    /// login time and <c>last_request_end_time</c> (a NULL equals only a NULL), and kills nothing when the last end time changed. The caller wraps
+    /// this in its journal.
     /// </summary>
     internal static Task<RemediationResult> WriteKillSessionAsync(SqlServerRemediationExecutor executor, ServerActionPermit permit, bool azure,
         SqlKillBinding binding, CancellationToken ct) =>
-        KillSqlBatchAsync(executor, permit, azure, binding.SessionId, binding.LoginTimeServerLocal, dryRun: false, ct);
+        KillSqlBatchAsync(executor, permit, azure, binding.SessionId, binding.LoginTimeServerLocal, dryRun: false, ct,
+            new KillExpectedActivity(binding.LastRequestEndTimeServerLocal));
 
     /// <summary>
     /// Prepare step, PostgreSQL: the settings row and the dry-run read of the backend (gone, own session, start time, reused, client session, and
@@ -155,10 +158,11 @@ public sealed partial class DarlingMcpPlanForceTools
     }
 
     /// <summary>
-    /// Write step, PostgreSQL: ends the backend the binding names. The statement checks the pid and the start second, as before. The caller wraps
-    /// this in its journal.
+    /// Write step, PostgreSQL: ends the backend the binding names. The statement checks the pid, the start second, <c>xact_start</c> and
+    /// <c>state_change</c> (a NULL equals only a NULL), and ends nothing when either changed. The caller wraps this in its journal.
     /// </summary>
     internal static Task<RemediationResult> WriteKillBackendAsync(PostgresRemediationExecutor executor, ServerActionPermit permit, PgKillBinding binding,
         CancellationToken ct) =>
-        executor.KillBackendAsync(permit, binding.Pid, binding.BackendStartEpoch, dryRun: false, ct);
+        executor.KillBackendAsync(permit, binding.Pid, binding.BackendStartEpoch, dryRun: false, ct,
+            new PgKillExpectedActivity(binding.XactStartUtc, binding.StateChangeUtc));
 }
