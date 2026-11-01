@@ -457,6 +457,9 @@ public sealed class NotificationRoutesMcpTests : IDisposable
             "severities",
             /* #6979: the report notice (Slack and Teams) is Darling-only; Lite has no investigation requests. */
             "report_notice",
+            /* #7109: approval of a Level 3 agent action is Darling-only; Lite has no agent actions to approve. */
+            "action_approval",
+            "approval_single_person",
         };
         Assert.All(darlingOnly, f => Assert.Contains(f, darling));
         Assert.Equal(darling.Except(darlingOnly).OrderBy(n => n, StringComparer.Ordinal), lite.OrderBy(n => n, StringComparer.Ordinal));

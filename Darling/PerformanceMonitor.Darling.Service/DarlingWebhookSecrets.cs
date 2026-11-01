@@ -355,6 +355,11 @@ internal static class DarlingWebhookSecrets
 
             /* #6979: the report notice setting. Notice delivery reads it from the cached route, so an edit of only this member must reopen the cache. */
             Add(r.ReportNotice);
+
+            /* #7109: the approval setting and the single-person flag. Approval reads the routes it applies to, and the route page and the
+               proposal notice read them from the cached route, so an edit of only one of these must reopen the cache. */
+            Add(r.ActionApproval);
+            Add(r.ApprovalSinglePerson ? "1" : "0");
         }
 
         return text.ToString();

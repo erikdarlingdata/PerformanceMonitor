@@ -340,7 +340,9 @@ public sealed class PeopleViewerLiveTests
             await using var connection = new NpgsqlConnection(scratch.ConnectionString);
             await connection.OpenAsync(ct);
             await PgMigrations.MigrateAsync(connection, ct);
-            await using (var drop = new NpgsqlCommand("DROP TABLE config.person_grant; DROP TABLE config.person_identity; DROP TABLE config.person", connection))
+            /* The proposals table (V238, #7109) is the newest probe sentinel, so a store that still has it reads as V238 whatever else is
+               gone. A store below V237 has none of the four. */
+            await using (var drop = new NpgsqlCommand("DROP TABLE config.agent_action_proposals; DROP TABLE config.person_grant; DROP TABLE config.person_identity; DROP TABLE config.person", connection))
             {
                 await drop.ExecuteNonQueryAsync(ct);
             }
@@ -349,6 +351,8 @@ public sealed class PeopleViewerLiveTests
             var below = await viewer.ReadPeopleAsync(ct);
             Assert.True(below.StoreNeedsUpgrade);
             Assert.Empty(below.People);
+            /* The route editor's nobody-can-approve read (#7109) queries the same tables, so it also answers without querying them. */
+            Assert.False(await viewer.NobodyCanApproveAnywhereAsync(ct));
             bodySucceeded = true;
         }
         finally

@@ -63,9 +63,15 @@ public sealed partial class ViewerDataService
     }
 
     /// <summary>True when no enabled mapped person holds any approve grant (#7109): the route editor then says nobody can approve. The Viewer's
-    /// role reads the people tables, as the People window does.</summary>
-    public Task<bool> NobodyCanApproveAnywhereAsync(CancellationToken cancellationToken = default) =>
-        new InvestigationRequestStore(_dataSource, ViewerCommandDeadlines.CurrentInteractiveReadSeconds).NobodyCanApproveAnywhereAsync(cancellationToken);
+    /// role reads the people tables, as the People window does. A store below V237 has no people tables, so nothing is queried and the answer is
+    /// false (no sentence), as it is for a read that fails; a probe that cannot tell reads the tables.</summary>
+    public async Task<bool> NobodyCanApproveAnywhereAsync(CancellationToken cancellationToken = default)
+    {
+        var version = _cachedStoreSchemaVersion ??= await GetStoreSchemaVersionAsync(cancellationToken);
+        if (!PeopleText.StoreHasPeople(version))
+            return false;
+        return await new InvestigationRequestStore(_dataSource, ViewerCommandDeadlines.CurrentInteractiveReadSeconds).NobodyCanApproveAnywhereAsync(cancellationToken);
+    }
 
     private async Task TryDeleteCommandAsync(long commandId, CancellationToken cancellationToken)
     {
