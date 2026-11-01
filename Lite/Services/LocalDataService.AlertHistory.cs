@@ -777,6 +777,25 @@ public class AlertHistoryRow
     public bool IsCritical => AlertHistoryRowSeverity.IsCritical(MetricName, ContextJson);
     public bool IsWarning => AlertHistoryRowSeverity.IsWarning(MetricName, ContextJson);
 
+    /* #7124: why the alert was held for the digest or paged, the status text's tooltip (Lite's Alert Detail window shows the same text).
+       The tooltip binding is read when the grid realizes the row, not on hover, so the parse is cached: a row parses its
+       context at most once, however often scrolling realizes it again. */
+    private bool _routingReasonRead;
+    private string? _routingReason;
+
+    public string? RoutingReason
+    {
+        get
+        {
+            if (!_routingReasonRead)
+            {
+                _routingReason = AlertDetailText.RoutingReasonFromJson(ContextJson);
+                _routingReasonRead = true;
+            }
+            return _routingReason;
+        }
+    }
+
     /* #5642: how old the newest sample was when the alert FIRED, read off the context the row persisted. The engine
        computed the age once at fire time and the history store kept it; this reads it back and never works it out
        from the clock now, so a row opened a day later still says what the alert knew when it went out. Null on a

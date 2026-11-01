@@ -39,6 +39,21 @@ public sealed class AlertDetailCopyTextTests
         }
     });
 
+    /// <summary>#7124: a held row's copy says why, in the header under Status; a row with no routing copies no such line.</summary>
+    [Fact]
+    public void Build_CarriesTheRoutingReason_InTheHeader_OnlyWhenTheRowHasOne()
+    {
+        const string reason = "Held for the daily digest: 1 blocking event at 12 s, below the 15 s page bar.";
+        var held = AlertContextSerializer.Serialize(new AlertContext { Routing = new AlertRoutingDto("digest", reason) });
+
+        var text = AlertDetailCopyText.Build(Header, held, "flat text");
+        var lines = new List<string>(text.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None));
+        Assert.Equal(lines.IndexOf("Status: Sent") + 1, lines.IndexOf("Routing reason: " + reason));
+
+        Assert.DoesNotContain("Routing reason", AlertDetailCopyText.Build(Header, TwoItemContextJson(), null), StringComparison.Ordinal);
+        Assert.DoesNotContain("Routing reason", AlertDetailCopyText.Build(Header, null, "flat text"), StringComparison.Ordinal);
+    }
+
     [Fact]
     public void Build_CarriesTheHeader_ThenEveryItemAndField_InOrder()
     {

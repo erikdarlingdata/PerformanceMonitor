@@ -54,6 +54,7 @@
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
             </Grid.RowDefinitions>
 
             <TextBlock Grid.Row="0" Grid.Column="0" Text="Time:" FontWeight="SemiBold"
@@ -91,34 +92,41 @@
             <TextBox Grid.Row="6" Grid.Column="1" x:Name="StatusValueText"
                      Style="{StaticResource SelectableValueText}" Margin="0,4"/>
 
+            <!-- #7124: why the alert went where it did (held for the daily digest, or paged), from the persisted routing
+                 decision; collapsed on a row that carries none. -->
+            <TextBlock Grid.Row="7" Grid.Column="0" x:Name="RoutingReasonLabel" Text="Routing reason:" FontWeight="SemiBold"
+                       Foreground="{DynamicResource ForegroundBrush}" Margin="0,4" Visibility="Collapsed"/>
+            <TextBox Grid.Row="7" Grid.Column="1" x:Name="RoutingReasonText"
+                     Style="{StaticResource SelectableValueText}" Margin="0,4" Visibility="Collapsed"/>
+
             <!-- #5642: how old the newest sample was when the alert fired, from the persisted context; shown only when
                  the alert persisted it. A header row, as in Lite (#5847), so an alert with an age and no detail items
                  does not open a tall empty Details panel just to hold this line at its bottom. -->
-            <TextBlock Grid.Row="7" Grid.Column="0" x:Name="SampleAgeLabel" Text="Newest sample:" FontWeight="SemiBold"
+            <TextBlock Grid.Row="8" Grid.Column="0" x:Name="SampleAgeLabel" Text="Newest sample:" FontWeight="SemiBold"
                        Foreground="{DynamicResource ForegroundBrush}" Margin="0,4" Visibility="Collapsed"/>
-            <TextBox Grid.Row="7" Grid.Column="1" x:Name="SampleAgeText"
+            <TextBox Grid.Row="8" Grid.Column="1" x:Name="SampleAgeText"
                      Style="{StaticResource SelectableValueText}" Margin="0,4" Visibility="Collapsed"/>
 
             <!-- #5825: a resolution row's send, below #5642's sample-age row; the three rows are collapsed on every
                  other row. Selectable values, as every header value is since #5847. -->
-            <TextBlock Grid.Row="8" Grid.Column="0" x:Name="ResolutionSentAtLabel" Text="Resolution sent:" FontWeight="SemiBold"
+            <TextBlock Grid.Row="9" Grid.Column="0" x:Name="ResolutionSentAtLabel" Text="Resolution sent:" FontWeight="SemiBold"
                        Foreground="{DynamicResource ForegroundBrush}" Margin="0,4"/>
-            <TextBox Grid.Row="8" Grid.Column="1" x:Name="ResolutionSentAtText"
+            <TextBox Grid.Row="9" Grid.Column="1" x:Name="ResolutionSentAtText"
                      Style="{StaticResource SelectableValueText}" Margin="0,4"/>
-            <TextBlock Grid.Row="9" Grid.Column="0" x:Name="ResolutionChannelsLabel" Text="Resolution channels:" FontWeight="SemiBold"
+            <TextBlock Grid.Row="10" Grid.Column="0" x:Name="ResolutionChannelsLabel" Text="Resolution channels:" FontWeight="SemiBold"
                        Foreground="{DynamicResource ForegroundBrush}" Margin="0,4"/>
-            <TextBox Grid.Row="9" Grid.Column="1" x:Name="ResolutionChannelsText"
+            <TextBox Grid.Row="10" Grid.Column="1" x:Name="ResolutionChannelsText"
                      Style="{StaticResource SelectableValueText}" Margin="0,4"/>
-            <TextBlock Grid.Row="10" Grid.Column="0" x:Name="ResolutionOutcomeLabel" Text="Resolution outcome:" FontWeight="SemiBold"
+            <TextBlock Grid.Row="11" Grid.Column="0" x:Name="ResolutionOutcomeLabel" Text="Resolution outcome:" FontWeight="SemiBold"
                        Foreground="{DynamicResource ForegroundBrush}" Margin="0,4"/>
-            <TextBox Grid.Row="10" Grid.Column="1" x:Name="ResolutionOutcomeText"
+            <TextBox Grid.Row="11" Grid.Column="1" x:Name="ResolutionOutcomeText"
                      Style="{StaticResource SelectableValueText}" Margin="0,4"/>
 
             <!-- #7084 part 4: the analysis findings held back from paging because this engine alert was open, read when the
                  window opens; collapsed when there are none or the metric is not one findings attach to. -->
-            <TextBlock Grid.Row="11" Grid.Column="0" x:Name="AttachedFindingsLabel" Text="Attached findings:" FontWeight="SemiBold"
+            <TextBlock Grid.Row="12" Grid.Column="0" x:Name="AttachedFindingsLabel" Text="Attached findings:" FontWeight="SemiBold"
                        Foreground="{DynamicResource ForegroundBrush}" Margin="0,4" Visibility="Collapsed"/>
-            <TextBox Grid.Row="11" Grid.Column="1" x:Name="AttachedFindingsText"
+            <TextBox Grid.Row="12" Grid.Column="1" x:Name="AttachedFindingsText"
                      Style="{StaticResource SelectableValueText}" Margin="0,4" Visibility="Collapsed"/>
         </Grid>
 

@@ -172,6 +172,12 @@
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
                     <DataGridTextColumn Binding="{Binding StatusDisplay}" Width="100">
+                        <!-- #7124: the routing reason as a hover on the status text, on the text element's own style so the cell and theme styles stay; a row with none shows no tooltip. -->
+                        <DataGridTextColumn.ElementStyle>
+                            <Style TargetType="TextBlock" BasedOn="{x:Static DataGridTextColumn.DefaultElementStyle}">
+                                <Setter Property="ToolTip" Value="{Binding RoutingReason}"/>
+                            </Style>
+                        </DataGridTextColumn.ElementStyle>
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="StatusDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/>
