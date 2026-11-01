@@ -2115,6 +2115,13 @@ BEGIN
    END LOOP;
 END $people_seq$;
 
+-- 10e4. The action proposals (V238, #7109). NO role but the store owner (the service's proposal store, which journals each state change)
+--     writes them: REVOKE ALL ... CASCADE takes every privilege the default privileges gave, and SELECT goes back to admin, viewer and web,
+--     which read proposals. mcp reads none: no tool reads a proposal, and its binding holds statement text. The table has no sequence.
+--     provision-roles.sql step 3j4 mirrors it.
+REVOKE ALL ON {config}.agent_action_proposals FROM PUBLIC, {admin}, {viewer}, {web}, {mcp} CASCADE;
+GRANT SELECT ON {config}.agent_action_proposals TO {admin}, {viewer}, {web};
+
 -- 10f. Phase C tables (V193, #5997): the evidence of a request, the daily deadlock signature counts and the signature
 --     merges. Only the store owner (the service) writes them. The default privileges would give admin INSERT/UPDATE/DELETE
 --     on a table made after them, so REVOKE ALL ... CASCADE (which also takes TRIGGER and REFERENCES) takes every privilege
@@ -4272,11 +4279,13 @@ CREATE OR REPLACE TRIGGER trg_investigation_request_alerts_owner_rows
     /// So are the three rows of an agent action (<see cref="AgentActionEvents.OwnerOnly"/>, #6569): the Agent changes list offers Undo on an
     /// <c>action_called</c> row, so only the service, which runs the action and checks the request, journals it and its result.
     /// So are the people directory's events (<see cref="PersonEvents.OwnerOnly"/>, #7107): only <see cref="PersonDirectory"/>, on the owner connection, journals
-    /// who mapped or granted a person.</summary>
+    /// who mapped or granted a person. So are an action proposal's events (<see cref="ProposalEvents.OwnerOnly"/>, #7109): otherwise the mcp or
+    /// admin login could write a false <c>proposal_approved</c> row.</summary>
     internal static string JournalOwnerEventList => string.Join(", ",
         InvestigationEvents.Kinds.Append(InvestigationEvents.Delivered).Append(InvestigationEvents.FallbackSent).Append(ServerActionSwitches.JournalEvent)
             .Concat(AgentActionEvents.OwnerOnly)
             .Concat(PersonEvents.OwnerOnly)
+            .Concat(ProposalEvents.OwnerOnly)
             .Select(k => "'" + k + "'"));
 
     /// <summary>

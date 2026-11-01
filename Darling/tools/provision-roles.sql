@@ -3460,7 +3460,7 @@ BEGIN
       RETURN NEW;
    END IF;
 
-   IF NEW.event IN ('opened', 'joined', 'resolved', 'expired', 'claims_exhausted', 'evidence_ready', 'follow_up', 'deadlock_digest', 'event_delivered', 'fallback_sent', 'server_action_switched', 'action_called', 'action_done', 'action_failed', 'person_added', 'person_renamed', 'person_enabled', 'person_disabled', 'person_identity_added', 'person_identity_removed', 'person_grant_added', 'person_grant_removed') THEN
+   IF NEW.event IN ('opened', 'joined', 'resolved', 'expired', 'claims_exhausted', 'evidence_ready', 'follow_up', 'deadlock_digest', 'event_delivered', 'fallback_sent', 'server_action_switched', 'action_called', 'action_done', 'action_failed', 'person_added', 'person_renamed', 'person_enabled', 'person_disabled', 'person_identity_added', 'person_identity_removed', 'person_grant_added', 'person_grant_removed', 'proposal_created', 'proposal_first_press', 'proposal_approved', 'proposal_run', 'proposal_failed', 'proposal_unknown', 'proposal_refused', 'proposal_expired', 'proposal_superseded', 'proposal_voided') THEN
       IF NEW.event = 'opened'
          AND EXISTS (SELECT 1 FROM config.investigation_requests AS r
                      WHERE r.request_id = NEW.request_id AND r.practice_of IS NOT NULL
@@ -3606,6 +3606,22 @@ BEGIN
    LOOP
       EXECUTE pg_catalog.format('REVOKE ALL ON SEQUENCE %s FROM PUBLIC, admin, viewer, web, mcp', sequence_name);
    END LOOP;
+END $do$;
+
+-- 3j4. The action proposals (V238, #7109), mirroring managed provisioning's section 10e4. NO role but the store owner (the service, which
+--     journals each state change) writes them: REVOKE ALL ... CASCADE takes every privilege (the default privileges would give admin
+--     INSERT/UPDATE/DELETE on a table made after them), and SELECT goes back to admin, viewer and web, which read proposals. mcp reads
+--     none: no tool reads a proposal, and its binding holds statement text. The table has no sequence. It is created by V238: on a store
+--     below it the block warns and skips, so the rest of the script still runs; re-run the script once the service has migrated the store.
+DO $do$
+BEGIN
+   IF pg_catalog.to_regclass('config.agent_action_proposals') IS NULL THEN
+      RAISE WARNING 'The action proposals table was not found, so its grants were skipped. Run this script again after the service has upgraded the store.';
+      RETURN;
+   END IF;
+
+   REVOKE ALL ON config.agent_action_proposals FROM PUBLIC, admin, viewer, web, mcp CASCADE;
+   GRANT SELECT ON config.agent_action_proposals TO admin, viewer, web;
 END $do$;
 
 -- 3k. Query-tag tables (V192, #5977), mirroring managed provisioning's grants for them. mcp writes the three tables a person

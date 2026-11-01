@@ -1481,7 +1481,7 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
     /// claims (its last claim's lease lapsed, or released), to <c>expired</c> and journals that once: <c>expired</c> past the
     /// expiry, <c>claims_exhausted</c> before it. It never reopens a lease. Then, in a transaction of its own, it journals
     /// each live request whose every metric has cleared (<see cref="ResolveCandidatesSql"/>), so a failure there cannot hold
-    /// back the expiry and its fallback (#6003 review).
+    /// back the expiry and its fallback (#6003 review). Last, the action proposals (#7109, <see cref="SweepProposalsAsync"/>).
     /// </summary>
     public async Task<InvestigationSweepResult> SweepAsync(CancellationToken cancellationToken = default)
     {
@@ -1502,7 +1502,12 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
         await using var forceCheckTransaction = await connection.BeginTransactionAsync(cancellationToken);
         var forceChecks = await SweepForceChecksAsync(connection, forceCheckTransaction, now, cancellationToken);
         await forceCheckTransaction.CommitAsync(cancellationToken);
-        return new InvestigationSweepResult(lapsed, expired) { Resolved = resolved, FollowUps = followUps + forceChecks };
+        /* #7109: the action proposals, after the resolved journal so an alert that resolved this pass voids its pending kill in the same
+           pass. A transaction of their own, so a failure there holds back nothing above. */
+        await using var proposalTransaction = await connection.BeginTransactionAsync(cancellationToken);
+        var proposals = await SweepProposalsAsync(connection, proposalTransaction, now, cancellationToken);
+        await proposalTransaction.CommitAsync(cancellationToken);
+        return new InvestigationSweepResult(lapsed, expired) { Resolved = resolved, FollowUps = followUps + forceChecks, Proposals = proposals };
     }
 
     /// <summary>

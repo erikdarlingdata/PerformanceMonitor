@@ -307,6 +307,9 @@ public sealed record InvestigationSweepResult(int LeasesLapsed, int Expired)
 
     /// <summary>#6008: how many follow-up requests this pass opened (each with its <c>follow_up</c> event).</summary>
     public int FollowUps { get; init; }
+
+    /// <summary>#7109: how many action proposals this pass moved (voided, expired, or approved with no outcome to unknown).</summary>
+    public int Proposals { get; init; }
 }
 
 /// <summary>
