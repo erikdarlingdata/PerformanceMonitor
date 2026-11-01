@@ -130,6 +130,9 @@ public sealed class AlertEngine
        the deliverer's own email/webhook cooldown seeds, not these). */
     private readonly ConcurrentDictionary<string, DateTime> _lastCpuAlert = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastBlockingAlert = new();
+    /* #7083 part 2: the stamp of the last HELD Blocking Detected row per server, kept apart from _lastBlockingAlert so a held row
+       never delays a real page (BlockingPageRule.TryHold). */
+    private readonly ConcurrentDictionary<string, DateTime> _lastBlockingHold = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastBlockingWaitAlert = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastDeadlockAlert = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastPoisonWaitAlert = new();
@@ -1517,6 +1520,7 @@ public sealed class AlertEngine
         List<BlockedProcessAlertRow>? blockingRows = null;
         int effectiveBlockingCount = 0;
         long worstBlockingWaitMs = 0;
+        IReadOnlyList<BlockedProcessAlertRow> blockingEvents = Array.Empty<BlockedProcessAlertRow>();
 
         if (_settings.BlockingEnabled)
         {
@@ -1543,6 +1547,7 @@ public sealed class AlertEngine
                    keeps that fire decision and gives a watermark that tracks the filtered count throughout. */
                 var blockingWaits = AlertContextBuilders.BlockingWaitRows(blockingRows, excludedDatabases);
                 effectiveBlockingCount = blockingWaits.Count;
+                blockingEvents = blockingWaits;
                 /* #7083: the page rule needs the longest wait among these events (BlockingPageRule). */
                 worstBlockingWaitMs = blockingWaits.Count == 0 ? 0 : blockingWaits.Max(w => w.WaitTimeMs);
             }
@@ -1652,6 +1657,34 @@ public sealed class AlertEngine
                     key, serverName, "Blocking Detected",
                     "Blocking Cleared",                                             /* :190 */
                     BlockingPageRule.ClearedMessage(serverName, blockingThreshold, blockingWaitBarSeconds)), ct);  /* :191, #7083 */
+            }
+        }
+        else if (_settings.BlockingEnabled && blockingRows is not null
+            && BlockingPageRule.IsHeldBack(effectiveBlockingCount, blockingThreshold, worstBlockingWaitMs, blockingWaitBarSeconds,
+                wasBlockingActive, suppressed))
+        {
+            /* #7083 part 2: the count reached the bar and nothing pages (every wait under the 15 s floor, none at the one-event
+               bar, no Blocking Detected incident open). Record one held row for the digest per cooldown. It stamps
+               _lastBlockingHold, never _lastBlockingAlert, and records no tier, so a real page right after goes out at once.
+               A mute rule still wins: a muted server gets no digest line. */
+            var holdMute = JudgeMute(new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = "Blocking Detected" });
+            if (!holdMute.Muted
+                && BlockingPageRule.TryHold(_lastBlockingHold, key, now, alertCooldown, effectiveBlockingCount, blockingThreshold,
+                    worstBlockingWaitMs, blockingWaitBarSeconds, wasBlockingActive, suppressed))
+            {
+                var holdContext = AlertContextBuilders.BuildBlockingContext(
+                    fingerprintServer, blockingRows, excludedDatabases, blockingOccurrences.Decorate);
+                holdContext = AlertSampleAge.Stamp(holdContext, "blocked process", AlertSampleAge.Newest(blockingRows.Select(r => r.EventTime)), now);
+                var chain = BlockingPageRule.LongestChain(blockingEvents.Select(e => (e.BlockedSpid, e.BlockingSpid)));
+                var holdReason = BlockingPageRule.HoldReason(effectiveBlockingCount, worstBlockingWaitMs, chain);
+                await FireAsync(new AlertOutcome(
+                    key, serverName, "Blocking Detected",
+                    effectiveBlockingCount.ToString(),
+                    blockingThreshold.ToString(),
+                    holdContext, AlertContextBuilders.ContextToDetailText(holdContext),
+                    NumericCurrentValue: effectiveBlockingCount, NumericThresholdValue: blockingThreshold,
+                    Muted: false, Hold: new AlertHold(holdReason), Severity: holdContext?.SeverityOverride,
+                    ShortMessage: holdReason), ct);
             }
         }
 
