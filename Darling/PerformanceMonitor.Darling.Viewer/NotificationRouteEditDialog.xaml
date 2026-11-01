@@ -60,7 +60,7 @@
                           ToolTip="Whether this route posts a notice to its Slack or Teams channel when an agent files a report. Off: no notice (the default). Needs a person or made a change: only a report that says a person is needed, or whose request changed something. All reports: every report. An empty Slack or Teams channel on the route uses the channel from Settings."/>
             <TextBlock x:Name="ReportNoticeHint" Margin="8,0,0,0" VerticalAlignment="Center"
                            Foreground="{DynamicResource ForegroundMutedBrush}"
-                           Text="Applies once the Agent level is Investigate, Act or Act on servers."/>
+                           Text="Needs an agent level above Off."/>
             </StackPanel>
             <TextBlock x:Name="ScopeNoteText" Foreground="{DynamicResource ForegroundMutedBrush}"
                        TextWrapping="Wrap" HorizontalAlignment="Left"
