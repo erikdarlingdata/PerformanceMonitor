@@ -70,6 +70,8 @@
                           Content="The person who asked may approve"
                           ToolTip="Off (the default): a second person approves an action that a person asked for. On: the person who asked may approve it too."/>
             </StackPanel>
+            <TextBlock x:Name="ApprovalNobodyText" Visibility="Collapsed" TextWrapping="Wrap" HorizontalAlignment="Left" Margin="0,0,0,4"
+                       Foreground="{DynamicResource ForegroundMutedBrush}" AutomationProperties.Name="Nobody can approve"/>
             <TextBlock x:Name="ScopeNoteText" Foreground="{DynamicResource ForegroundMutedBrush}"
                        TextWrapping="Wrap" HorizontalAlignment="Left"
                        Text="Generic webhook headers and the body template stay app-wide: set them in Notifications. A route changes only where the post goes."/>

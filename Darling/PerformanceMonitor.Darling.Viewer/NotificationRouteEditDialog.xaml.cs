@@ -75,6 +75,33 @@ public partial class NotificationRouteEditDialog : Window
     /// <param name="dataService">The store, for the signing key of an existing route (#5998); null leaves the key block off.</param>
     private const string FallbackNoneChoice = "None (this route's own channels)";
 
+    private bool _nobodyCanApprove;
+
+    /// <summary>#7109: whether no enabled mapped person holds any approve grant. The window reads it from the store before it shows the dialog.</summary>
+    internal bool NobodyCanApprove
+    {
+        get => _nobodyCanApprove;
+        set
+        {
+            _nobodyCanApprove = value;
+            ShowApprovalNote();
+        }
+    }
+
+    /// <summary>The sentence under the approval setting, or null: only where approval is required, a second person is needed and nobody can approve.</summary>
+    internal static string? ApprovalNote(string? actionApproval, bool singlePerson, bool nobodyCanApprove) =>
+        nobodyCanApprove && !singlePerson
+        && NotificationRouteKinds.NormalizeActionApproval(actionApproval) == NotificationRouteKinds.ActionApprovalRequired
+            ? PerformanceMonitor.Darling.Storage.ActionApprovalRules.NobodyCanApproveMessage
+            : null;
+
+    private void ShowApprovalNote()
+    {
+        var note = ApprovalNote((ActionApprovalCombo.SelectedItem as ComboBoxItem)?.Tag as string, ApprovalSinglePersonCheck.IsChecked == true, _nobodyCanApprove);
+        ApprovalNobodyText.Text = note ?? "";
+        ApprovalNobodyText.Visibility = note is null ? Visibility.Collapsed : Visibility.Visible;
+    }
+
     public NotificationRouteEditDialog(ViewerRouteScopeInputs? scopeInputs, NotificationRouteRow? existing = null, ViewerDataService? dataService = null,
         System.Collections.Generic.IEnumerable<NotificationRouteRow>? allRoutes = null)
     {
@@ -123,6 +150,8 @@ public partial class NotificationRouteEditDialog : Window
         var storedApproval = NotificationRouteKinds.NormalizeActionApproval(existing?.ActionApproval);
         ActionApprovalCombo.SelectedItem = ActionApprovalCombo.Items.Cast<ComboBoxItem>().First(i => Equals(i.Tag, storedApproval));
         ApprovalSinglePersonCheck.IsChecked = existing?.ApprovalSinglePerson == true;
+        ActionApprovalCombo.SelectionChanged += (_, _) => ShowApprovalNote();
+        ApprovalSinglePersonCheck.Click += (_, _) => ShowApprovalNote();
 
         /* #6036: the fallback picker lists every OTHER route, with a none choice; the route being edited is never offered. */
         FallbackRouteCombo.Items.Add(new ComboBoxItem { Content = FallbackNoneChoice, Tag = null });

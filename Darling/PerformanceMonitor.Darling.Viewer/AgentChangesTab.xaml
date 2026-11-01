@@ -10,6 +10,9 @@
             <RowDefinition Height="2*"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
         <TextBlock Grid.Row="0" TextWrapping="Wrap" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,0,0,8"
                    Text="What agents changed, newest first. Undo restores what the setting was before the agent's change, but only if nobody has changed it since; otherwise it says so and leaves the setting alone. Undo works for 365 days."/>
@@ -42,5 +45,23 @@
                 <DataGridTextColumn Header="Refused because" Binding="{Binding Code}" Width="*"/>
             </DataGrid.Columns>
         </DataGrid>
+        <!-- #7109: the actions agents proposed. The Viewer is an administrator path with no person, so it approves only on a route that allows
+             single-person approval: first press (the fresh facts), then confirm. On any other route a mapped person approves in the web. -->
+        <TextBlock x:Name="ProposalsLabel" Grid.Row="5" TextWrapping="Wrap" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,8,0,8"
+                   Text="Actions agents proposed, newest first. The agent's reason is the agent's own words. Approve here works on a route set to single-person approval: the first press reads the facts again and shows them, and the confirm runs the action only if they still match."/>
+        <DataGrid Grid.Row="6" x:Name="ProposalsGrid" Style="{DynamicResource DarkGrid}" IsReadOnly="True" SelectionMode="Single" AutomationProperties.Name="Proposed agent actions">
+            <DataGrid.Columns>
+                <DataGridTextColumn Header="Kind" Binding="{Binding Kind}" Width="140"/>
+                <DataGridTextColumn Header="Server" Binding="{Binding Server}" Width="90"/>
+                <DataGridTextColumn Header="Target" Binding="{Binding Target}" Width="180"/>
+                <DataGridTextColumn Header="State" Binding="{Binding State}" Width="80"/>
+                <DataGridTextColumn Header="Agent's reason" Binding="{Binding ReasonDisplay}" Width="*"/>
+                <DataGridTextColumn Header="Expires" Binding="{Binding ExpiresDisplay}" Width="130" SortMemberPath="ExpiresAtUtc"/>
+                <DataGridTextColumn Header="Approval" Binding="{Binding ApprovalDisplay}" Width="2*"/>
+            </DataGrid.Columns>
+        </DataGrid>
+        <StackPanel x:Name="ProposalsPanel" Grid.Row="7" Orientation="Horizontal" Margin="0,8,0,0">
+            <Button Content="Approve _Selected Proposal" Height="26" Padding="10,0" Click="Approve_Click"/>
+        </StackPanel>
     </Grid>
 </UserControl>

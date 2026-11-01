@@ -95,7 +95,7 @@ public partial class NotificationRoutesWindow : Window
 
     private async void AddRoute_Click(object sender, RoutedEventArgs e)
     {
-        var dialog = new NotificationRouteEditDialog(_scopeInputs, null, null, _routes) { Owner = this };
+        var dialog = new NotificationRouteEditDialog(_scopeInputs, null, null, _routes) { Owner = this, NobodyCanApprove = await NobodyCanApproveAsync() };
         if (dialog.ShowDialog() != true)
         {
             return;
@@ -142,6 +142,19 @@ public partial class NotificationRoutesWindow : Window
         }
     }
 
+    /// <summary>#7109: whether nobody can approve an action, for the editor's sentence. A read that fails shows no sentence.</summary>
+    private async System.Threading.Tasks.Task<bool> NobodyCanApproveAsync()
+    {
+        try
+        {
+            return await _dataService.NobodyCanApproveAnywhereAsync();
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return false;
+        }
+    }
+
     private async void EditRoute_Click(object sender, RoutedEventArgs e)
     {
         if (RoutesGrid.SelectedItem is not NotificationRouteRow selected)
@@ -149,7 +162,7 @@ public partial class NotificationRoutesWindow : Window
             return;
         }
 
-        var dialog = new NotificationRouteEditDialog(_scopeInputs, selected, _dataService, _routes) { Owner = this };
+        var dialog = new NotificationRouteEditDialog(_scopeInputs, selected, _dataService, _routes) { Owner = this, NobodyCanApprove = await NobodyCanApproveAsync() };
         if (dialog.ShowDialog() != true)
         {
             return;

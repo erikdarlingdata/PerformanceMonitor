@@ -1007,7 +1007,9 @@ public sealed partial class DarlingWorker
            collection loop stops so both drain cleanly on shutdown. */
         var commandHost = new WorkerCommandHost(this, servers, runner, planFetcher, notificationService, config, stoppingToken);
         var serviceInstance = $"{Environment.MachineName}:{Environment.ProcessId.ToString(CultureInfo.InvariantCulture)}";
-        var commandExecutor = new DarlingCommandExecutor(postgres, commandHost, serviceInstance, _logger);
+        var commandExecutor = new DarlingCommandExecutor(postgres, commandHost, serviceInstance, _logger,
+            McpDataDetailModes.TryParse(config.Mcp.DataDetail, out McpDataDetail commandDataDetail) ? commandDataDetail : McpDataDetail.MetadataOnly,
+            () => alertSettings.TriageBaseUrl);
         var commandLoop = RunCommandLoopAsync(commandExecutor, stoppingToken);
 
         /* #5654: the drain for alerts other services queue through config.submit_external_alert. The SAME deliverer, mute

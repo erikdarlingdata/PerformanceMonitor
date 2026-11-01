@@ -28,7 +28,7 @@ namespace Darling.Tests;
 /// the kill runs through <see cref="InvestigationRequestStore.RunApprovedActionAsync"/> with no claim. Each test names the part it covers.
 /// </summary>
 /* #1776 own-store: each test mints its own scratch store database through ScratchPostgres and its own roles on the cluster. */
-public sealed class ApprovalPathLiveTests(PostgresKillLiveTests.ScramTlsCluster target) : IClassFixture<PostgresKillLiveTests.ScramTlsCluster>
+public sealed partial class ApprovalPathLiveTests(PostgresKillLiveTests.ScramTlsCluster target) : IClassFixture<PostgresKillLiveTests.ScramTlsCluster>
 {
     private static string? Cluster => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
