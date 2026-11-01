@@ -783,8 +783,8 @@ the running service picks the change up on its next sweep, no restart:
 | `Deadlocks Detected` | `pg_deadlocks` | `deadlockEnabled` — shared with SQL Server | **`pgDeadlockCountThreshold`** (`deadlocks.pg_count_threshold` on the MCP surface): distinct deadlocks inside the rolling one-hour window; default 1, floor 1 (#3444, V122) |
 | `Blocking Detected` | `pg_blocking` | `blockingEnabled` — shared | **`pgBlockingCountThreshold`** (`blocking.pg_count_threshold`): distinct ROOT blockers inside the rolling one-hour window; default 1, floor 1 (#3444, V122) |
 | `Long-Running Query` | `pg_session_states` | `longRunningQueryEnabled` — shared | `longRunningQueryThresholdMinutes` — the shared value, judged against the most recent capture |
-| `Poison Wait` | `pg_wait_stats` (Aurora only — the IPC pair `BtreePage` / `BufferIo`) | `poisonWaitEnabled` — shared | the shared accumulation bars: one backend continuously stuck across the ten-minute window warns, ten is critical; no per-engine knob, by the same reasoning as the trio |
-| `High CPU` | `pg_cpu_utilization` (Aurora/RDS only) | `cpuEnabled` — shared | `cpuThresholdPercent` — the shared value, sustained across the same consecutive-sample gate SQL Server uses |
+| `Poison Wait` | `pg_wait_stats` (Aurora only — the IPC pair `BtreePage` / `BufferIo`) | `poisonWaitEnabled` — shared | the shared accumulation bars: one backend continuously stuck across the ten-minute window warns, ten is critical; no per-engine knob, by the same reasoning as the trio. On PostgreSQL a warning also needs the previous ten-minute window at or over the same bar (20 minutes in all, #7082); critical does not |
+| `High CPU` | `pg_cpu_utilization` (Aurora/RDS only) | `cpuEnabled` — shared | `cpuThresholdPercent` — the shared value, sustained across the same consecutive-sample gate SQL Server uses. A sample counts only when both capacity use (percent of the ACU ceiling) and instance CPU are at or over it (#7082) |
 
 The two PostgreSQL count knobs are deliberately **not** their SQL Server neighbours
 (`deadlockCountThreshold`, `blockingCountThreshold`), and a store that upgrades without touching them

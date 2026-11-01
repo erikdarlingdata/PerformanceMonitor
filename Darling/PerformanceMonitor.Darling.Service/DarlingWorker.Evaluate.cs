@@ -603,6 +603,7 @@ public sealed partial class DarlingWorker
     /// reader is never left inferring either.</para>
     /// </summary>
     private async Task EvaluatePgCpuAsync(
+
         ServerRuntime runtime, AlertServerSnapshot snapshot, DarlingConfig config, CancellationToken cancellationToken)
     {
         if (_postgres is null || _alertDeliverer is null)
@@ -729,9 +730,15 @@ public sealed partial class DarlingWorker
                     continue;
                 }
 
+                /* #7082: a sample breaches only when instance CPU is ALSO at or over the bar. Serverless v2 holds
+                   capacity for memory, so capacity at the ceiling with the instance at 1% to 14% CPU is not CPU
+                   load (the field review: 73 of the sampled pages had instance CPU under 20%). Every sample this
+                   gate reads carries instance CPU (the read requires cpu_percent IS NOT NULL), so there is no
+                   "target without an instance CPU source" arm here; a target with no Performance Insights rows
+                   has no samples and never reaches the gate. */
                 var evaluation = AlertPersistenceGate.Evaluate(
                     record.State,
-                    capacityPercent.Value >= alertSettings.CpuThresholdPercent,
+                    PgCpuSampleBreaches(capacityPercent.Value, sample.CpuPercent, alertSettings.CpuThresholdPercent),
                     AlertEngine.CpuBreachSamples,
                     AlertEngine.CpuClearSamples);
 
@@ -792,7 +799,8 @@ public sealed partial class DarlingWorker
             }
 
             bool breaching = lastCapacityPercent.HasValue
-                && lastCapacityPercent.Value >= alertSettings.CpuThresholdPercent;
+                && lastCounted is not null
+                && PgCpuSampleBreaches(lastCapacityPercent.Value, lastCounted.CpuPercent, alertSettings.CpuThresholdPercent);
 
             if (record.State.Firing && breaching)
             {
@@ -857,8 +865,8 @@ public sealed partial class DarlingWorker
                         DetailText:
                             $"  Capacity: {lastCapacityPercent.Value:F0}% {FleetCpuProvenance.CapacityDenominator}\n"
                             + allocation
-                            + $"  Instance CPU: {reading.CpuPercent:F0}% of currently allocated capacity\n"
-                            + $"  Threshold: {alertSettings.CpuThresholdPercent}%\n"
+                            + $"  Instance CPU: {reading.CpuPercent:F0}% of currently allocated capacity (also at or over the threshold)\n"
+                            + $"  Threshold: {alertSettings.CpuThresholdPercent}% on both\n"
                             + $"  Sustained: {AlertEngine.CpuBreachSamples} consecutive samples",
                         NumericCurrentValue: lastCapacityPercent.Value,
                         NumericThresholdValue: alertSettings.CpuThresholdPercent,
@@ -1546,6 +1554,13 @@ public sealed partial class DarlingWorker
     }
 
     /// <summary>
+    /// The High CPU breach test for one PostgreSQL sample (#7082): capacity use (percent of the configured ACU
+    /// ceiling) AND instance CPU both at or over the bar, on the same sample.
+    /// </summary>
+    internal static bool PgCpuSampleBreaches(double capacityPercent, double instanceCpuPercent, int thresholdPercent) =>
+        capacityPercent >= thresholdPercent && instanceCpuPercent >= thresholdPercent;
+
+    /// <summary>
     /// The Postgres Poison Wait analogue (#2711): fires when a poison wait event — the IPC
     /// BtreePage/BufferIo pair, chosen from the issue's own fleet research — accumulated enough wait time
     /// across <see cref="PostgresAlertEvaluator.PoisonWaitWindowMinutes"/> to average at least
@@ -1699,6 +1714,31 @@ public sealed partial class DarlingWorker
                     WaitType = finding.Subject,
                 }) ?? false;
 
+                /* #7082: the top wait events and the statements waiting on this one, so a reader can judge the
+                   page. Read only for a page that is about to go out (after the cooldown and fresh-row gates),
+                   and a failed read costs the text, never the page. */
+                string? poisonDetailText = null;
+                var poisonRow = rows.FirstOrDefault(r =>
+                    string.Equals(PostgresAlertEvaluator.PoisonWaitSubject(r), finding.Subject, StringComparison.Ordinal));
+                if (poisonRow is not null)
+                {
+                    try
+                    {
+                        var poisonDetail = await adapter.GetPoisonWaitDetailAsync(
+                            runtime.ServerId, poisonRow.WaitType, poisonRow.WaitEvent,
+                            McpDataDetailModes.Resolve(config.Mcp?.DataDetail), cancellationToken);
+                        poisonDetailText = PostgresAlertEvaluator.BuildPoisonWaitDetailText(poisonDetail, finding.Subject);
+                    }
+                    catch (Exception detailEx) when (detailEx is not OperationCanceledException)
+                    {
+                        _logger.LogDebug(
+                            "[{Server}] PostgreSQL poison wait detail read failed, sending the alert without it: {Message}",
+                            runtime.Config.DisplayName, detailEx.Message);
+                    }
+
+                    readClock.Restart();
+                }
+
                 var delivery = await _alertDeliverer.DeliverAndReportAsync(
                     new AlertOutcome(
                         serverKey,
@@ -1723,7 +1763,7 @@ public sealed partial class DarlingWorker
                             "wait stats",
                             newestCollectionBySubject.TryGetValue(finding.Subject, out var newestWaitCollection) ? newestWaitCollection : null,
                             now),
-                        DetailText: null,
+                        DetailText: poisonDetailText,
                         finding.NumericCurrentValue,
                         finding.NumericThresholdValue,
                         Muted: muted,
