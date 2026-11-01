@@ -99,11 +99,12 @@ namespace PerformanceMonitor.Darling.Service;
 public static class DarlingManagedRoles
 {
     /// <summary>
-    /// The path every refusal and log line gives for the role-provisioning script. The script is in the project repository
-    /// under <c>Darling/tools</c>. The release zip and the service folder do not carry it. The managed store and the compose
-    /// store never run it by hand, because the service provisions their roles at every start.
+    /// The words every refusal and log line uses to name the role-provisioning script. The release zip and the service
+    /// folder carry it beside the service exe (the project file links it into the output), and a source build has it at
+    /// <c>Darling/tools</c>, so the text names both. The managed store and the compose store never run it by hand, because
+    /// the service provisions their roles at every start.
     /// </summary>
-    public const string ProvisionRolesScriptPath = "Darling/tools/provision-roles.sql";
+    public const string ProvisionRolesScriptPath = "provision-roles.sql in the install folder (Darling/tools/provision-roles.sql in the source tree)";
 
     /// <summary>
     /// The comment stamped on every Darling-created login role (<c>COMMENT ON ROLE … IS</c>, read back
