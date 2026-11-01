@@ -139,9 +139,10 @@ public sealed class ReportNoticeDeliveryLiveTests
     private static async Task AddChangeAsync(NpgsqlConnection connection, Guid request, int routeId, string tool, string targetId, string? database, string result, CancellationToken ct)
     {
         var target = database is null ? $"{{\"id\":\"{targetId}\"}}" : $"{{\"id\":\"{targetId}\",\"database\":\"{database}\"}}";
+        var detail = $"{{\"tool\":\"{tool}\",\"kind\":\"mute\",\"target\":{target}}}".Replace("'", "''", StringComparison.Ordinal);
         var called = await ScalarAsync(connection,
             "INSERT INTO config.investigation_journal (event_time, request_id, route_id, server_id, event, actor, reason, detail) "
-            + $"VALUES (now(), '{request}', {routeId}, {100 + routeId}, 'action_called', 'agent:agent-a', 'why', '{{\"tool\":\"{tool}\",\"kind\":\"mute\",\"target\":{target}}}'::jsonb) RETURNING journal_id", ct);
+            + $"VALUES (now(), '{request}', {routeId}, {100 + routeId}, 'action_called', 'agent:agent-a', 'why', '{detail}'::jsonb) RETURNING journal_id", ct);
         if (result != "unknown")
         {
             await ExecAsync(connection,
