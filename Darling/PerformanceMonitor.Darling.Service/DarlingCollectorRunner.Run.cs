@@ -1493,7 +1493,7 @@ public sealed partial class DarlingCollectorRunner
                ERROR) instead. Mirrors Lite's definition runner. */
             if (attempted > 0 && failed == attempted && firstFailure is not null)
             {
-                LogFailedInAllDatabases(definition.Name, attempted, server.Config.DisplayName);
+                LogFailedInAllDatabases(server, definition.Name, attempted, firstFailure);
 
                 /* #5813: the fan-out rides on the rethrown failure, so the worker's ERROR row names a database whose
                    Query Store read timed out. On a one-database server that is the only row the timeout ever writes. */
@@ -2136,7 +2136,7 @@ public sealed partial class DarlingCollectorRunner
 
                 if (driverResult.AllItemsFailed)
                 {
-                    LogFailedInAllDatabases(definition.Name, driverResult.Attempted, server.Config.DisplayName);
+                    LogFailedInAllDatabases(server, definition.Name, driverResult.Attempted, driverResult.FirstError);
                     CollectorFaultDatabase.Stamp(driverResult.FirstError, driverResult.FailedItems?[0]);
                     CollectorFaultFanout.Stamp(driverResult.FirstError, fanout.Result); // #5813, as the Azure loop's rethrow
                     System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(driverResult.FirstError!).Throw();

@@ -14,8 +14,9 @@ namespace PerformanceMonitor.Darling.Service;
 /// <summary>
 /// #7067: decides whether a warning that a collector repeats on every cycle is written to the service log again.
 /// A precondition that does not change (an extension that is not created, a grant that is not given) said the same
-/// thing on every cycle, and the repeats buried the lines that carry news. For each server, collector and message the
-/// first sighting is logged, a changed message is a new sighting, and an unchanged one is repeated as a reminder at most
+/// thing on every cycle, and the repeats buried the lines that carry news. For each server and collector the gate
+/// remembers the last message written. A message that differs from it is a new sighting and is logged at once, so a cause
+/// that flips from A to B and back to A logs all three. The same message as the last one is repeated as a reminder at most
 /// once a day. <see cref="Clear"/> forgets a server and collector when the collector succeeds, so a failure that comes
 /// back is logged at once. Only the log file is affected: the collection_log rows, the health bands and the alerts do not
 /// read this.
@@ -25,12 +26,8 @@ internal sealed class RepeatLogGate
     /// <summary>How long an unchanged message stays quiet before it is logged again as a reminder.</summary>
     public static readonly TimeSpan ReminderInterval = TimeSpan.FromDays(1);
 
-    /// <summary>A message that embeds a changing value would add a new entry on every cycle; past this many for one
-    /// server and collector the pair is forgotten, which logs the next message at once.</summary>
-    private const int MaxMessagesPerPair = 32;
-
     private readonly object _lock = new();
-    private readonly Dictionary<(string Server, string Collector), Dictionary<string, DateTime>> _lastLogged = new();
+    private readonly Dictionary<(string Server, string Collector), (string Message, DateTime LoggedAt)> _last = new();
 
     /// <summary>The clock the reminder interval is measured on; a test steps it.</summary>
     public Func<DateTime> Clock { get; set; } = static () => DateTime.UtcNow;
@@ -41,23 +38,14 @@ internal sealed class RepeatLogGate
         var now = Clock();
         lock (_lock)
         {
-            if (!_lastLogged.TryGetValue((server, collector), out var messages))
-            {
-                messages = new Dictionary<string, DateTime>(StringComparer.Ordinal);
-                _lastLogged[(server, collector)] = messages;
-            }
-
-            if (messages.TryGetValue(message, out var last) && now - last < ReminderInterval)
+            if (_last.TryGetValue((server, collector), out var last)
+                && string.Equals(last.Message, message, StringComparison.Ordinal)
+                && now - last.LoggedAt < ReminderInterval)
             {
                 return false;
             }
 
-            if (messages.Count >= MaxMessagesPerPair && !messages.ContainsKey(message))
-            {
-                messages.Clear();
-            }
-
-            messages[message] = now;
+            _last[(server, collector)] = (message, now);
             return true;
         }
     }
@@ -67,7 +55,7 @@ internal sealed class RepeatLogGate
     {
         lock (_lock)
         {
-            _lastLogged.Remove((server, collector));
+            _last.Remove((server, collector));
         }
     }
 
