@@ -534,12 +534,20 @@ public sealed class AlertEngineTests
             double? sqlCpu = null, double? totalCpu = null,
             bool isOnline = true, bool isAzureSqlDb = false, bool suppressed = false,
             DateTime? cpuSampleTime = null, bool noCpuSampleTime = false,
-            IReadOnlyList<string>? separatelyMonitored = null) =>
-            new(Key, Name, isOnline, sqlCpu, totalCpu, isAzureSqlDb, suppressed,
-                noCpuSampleTime
-                    ? null
-                    : cpuSampleTime ?? SampleBase.AddMinutes(System.Threading.Interlocked.Increment(ref s_sampleTick)),
+            IReadOnlyList<string>? separatelyMonitored = null, bool localStampOnly = false)
+        {
+            var sampleAt = noCpuSampleTime
+                ? (DateTime?)null
+                : cpuSampleTime ?? SampleBase.AddMinutes(System.Threading.Interlocked.Increment(ref s_sampleTick));
+            var snapshot = new AlertServerSnapshot(Key, Name, isOnline, sqlCpu, totalCpu, isAzureSqlDb, suppressed, sampleAt,
                 SeparatelyMonitoredDatabases: separatelyMonitored);
+
+            /* #7085: the UTC twin every V134+ store hands the engine. The clear hold is measured on it, so a snapshot without it
+               (localStampOnly: a pre-V134 row, whose only stamp is the target's local clock) is held on the sweep's clock instead.
+               Only a reading under the default 80 bar carries it here: the hold reads it on clear samples alone, and on a breaching
+               sample it would add the card's sample-age line to every pin that asserts the card byte for byte. */
+            return sampleAt is { } utc && !localStampOnly && (totalCpu ?? sqlCpu) < 80 ? snapshot with { CpuSampleUtcOnly = utc } : snapshot;
+        }
 
         /// <summary>The instant distinct sample times are counted from — arbitrary, only the ordering matters.</summary>
         public static readonly DateTime SampleBase = new(2026, 7, 1, 0, 0, 0, DateTimeKind.Utc);
@@ -1177,18 +1185,27 @@ public sealed class AlertEngineTests
     /* #7085: samples one minute apart with the engine clock moving WITH them, so the five-minute alert cooldown really
        elapses during a long run. On a frozen clock the old reminder path could never show. */
     private static async Task<DateTime> DriveCpuTimedAsync(
-        Harness h, AlertEngine engine, double totalCpu, int samples, DateTime from)
+        Harness h, AlertEngine engine, double totalCpu, int samples, DateTime from, bool suppressed = false)
     {
         var at = from;
         for (var i = 0; i < samples; i++)
         {
             at = at.AddMinutes(1);
             h.Now = at;
-            await engine.EvaluateServerAsync(Harness.Snapshot(sqlCpu: 70, totalCpu: totalCpu, suppressed: false, cpuSampleTime: at));
+            await engine.EvaluateServerAsync(Harness.Snapshot(sqlCpu: 70, totalCpu: totalCpu, suppressed: suppressed, cpuSampleTime: at));
         }
 
         return at;
     }
+
+    /* #7085 review: the alert history as the restart seed reads it. Each row is a delivered High CPU page (a fire whose every channel
+       failed, or one raised under suppression, is never in it), with the tier its context carries. */
+    private static Func<OpenFireQuery, CancellationToken, Task<AlertHistoryStanding>> HistoryOfPages(params (DateTime At, AlertSeverityLevel Tier)[] pages) =>
+        (_, _) => Task.FromResult(new AlertHistoryStanding(
+            pages.OrderByDescending(p => p.At)
+                .Select(p => new AlertHistoryFire(p.At, 90, AlertContextSerializer.Serialize(new AlertContext { SeverityOverride = p.Tier })))
+                .ToList(),
+            Array.Empty<AlertHistoryClear>()));
 
     [Fact]
     public async Task Cpu_ADipUnderTheBarForThreeMinutes_HoldsTheIncident_OnePageAndNoResolved()
@@ -1289,20 +1306,99 @@ public sealed class AlertEngineTests
     [Fact]
     public async Task Cpu_AnIncidentOpenBeforeARestart_IsNotPagedAgainAfterTheCooldown()
     {
-        /* #7085 and the restart seed: the persisted Firing bit restores an open incident whose tier this process never saw.
-           The first fire it judges only learns the tier, so neither the restart nor the cooldown after it re-pages. */
+        /* #7085 and the restart seed: the persisted Firing bit restores an open incident, and the alert history says its page was
+           delivered. The first fire it judges only learns the tier, so neither the restart nor the cooldown after it re-pages. */
         var h = new Harness();
         h.Settings.CpuEnabled = true;
 
         var at = await DriveCpuTimedAsync(h, h.Build(), 90, 5, Harness.SampleBase);
         Assert.Single(h.Deliverer.Outcomes);
 
+        h.OpenFireReader = HistoryOfPages((at, AlertSeverityLevel.Warning));
         var restarted = h.Build();
         at = await DriveCpuTimedAsync(h, restarted, 90, 20, at);
         Assert.Single(h.Deliverer.Outcomes);
 
         at = await DriveCpuTimedAsync(h, restarted, 97, 1, at);
         Assert.Equal(2, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public async Task Cpu_AnIncidentOpenedUnderSuppression_PagesOnceAfterARestart()
+    {
+        /* #7085 review: the gate advances under suppression, so the persisted Firing bit says "open" for an incident nobody was paged
+           for. The history holds no delivered High CPU row, so the first unsuppressed breach after the restart is the opening page,
+           and the incident stays at that one page. */
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+        h.OpenFireReader = HistoryOfPages();
+
+        var at = await DriveCpuTimedAsync(h, h.Build(), 90, 5, Harness.SampleBase, suppressed: true);
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.True(Assert.Single(h.StateStore.Persistence).Value.State.Firing);
+
+        var restarted = h.Build();
+        at = await DriveCpuTimedAsync(h, restarted, 90, 20, at);
+
+        var page = Assert.Single(h.Deliverer.Outcomes);
+        Assert.False(page.Context!.EscalationBypassesCooldown);
+    }
+
+    [Fact]
+    public async Task Cpu_AWarningPagedLongBeforeARestart_StillPagesTheCriticalThatFollows()
+    {
+        /* #7085 review: the Warning page is 90 minutes old, older than the one-cooldown window the tier seed reads, so only the open
+           incident's own delivered rows can say it was paged. The first sample after the restart is already Critical: an escalation. */
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+
+        var engine = h.Build();
+        var at = await DriveCpuTimedAsync(h, engine, 90, 5, Harness.SampleBase);
+        Assert.Single(h.Deliverer.Outcomes);
+        var pagedAt = at;
+        at = await DriveCpuTimedAsync(h, engine, 90, 90, at);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.OpenFireReader = HistoryOfPages((pagedAt, AlertSeverityLevel.Warning));
+        h.EscalationSeedReader = (_, _) => Task.FromResult<AlertSeverityLevel?>(null);
+        var restarted = h.Build();
+        at = await DriveCpuTimedAsync(h, restarted, 97, 1, at);
+
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        var escalation = h.Deliverer.Outcomes[1];
+        Assert.Equal(AlertSeverityLevel.Critical, escalation.Severity);
+        Assert.True(escalation.Context!.EscalationBypassesCooldown);
+    }
+
+    [Fact]
+    public async Task Cpu_AClearHoldOnLocalClockStamps_IsMeasuredOnTheSweepsUtcClock_NotOnTheStampsDifference()
+    {
+        /* #7085 review: a row from before V134 carries only the target's LOCAL clock. Across a spring-forward gap its stamps jump an
+           hour, which used to complete the fifteen-minute hold after two real minutes. With no UTC instant the hold runs on the sweep's
+           clock, so the stamps' jump changes nothing: fifteen real minutes under the bar, then the Resolved. */
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+        var engine = h.Build();
+
+        var at = await DriveCpuTimedAsync(h, engine, 90, 5, Harness.SampleBase);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        var utc = at;
+        var local = at;
+        for (var i = 1; i <= 15; i++)
+        {
+            utc = utc.AddMinutes(1);
+            h.Now = utc;
+            local = i == 3 ? local.AddMinutes(61) : local.AddMinutes(1);
+            await engine.EvaluateServerAsync(Harness.Snapshot(sqlCpu: 70, totalCpu: 30, cpuSampleTime: local, localStampOnly: true));
+        }
+
+        Assert.Empty(h.Resolutions);
+
+        utc = utc.AddMinutes(1);
+        h.Now = utc;
+        await engine.EvaluateServerAsync(Harness.Snapshot(sqlCpu: 70, totalCpu: 30, cpuSampleTime: local.AddMinutes(1), localStampOnly: true));
+        Assert.Single(h.Resolutions);
     }
 
     [Fact]

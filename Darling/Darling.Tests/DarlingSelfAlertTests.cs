@@ -5891,7 +5891,7 @@ public sealed class DarlingSelfAlertTests
         for (var i = 0; i < AlertEngine.SqlCpuBreachSamples; i++)
         {
             sampleAt = sampleAt.AddMinutes(1);
-            await engine.EvaluateServerAsync(new AlertServerSnapshot(Key, Name, IsOnline: true, 90, 90, false, false, sampleAt), Ct);
+            await engine.EvaluateServerAsync(new AlertServerSnapshot(Key, Name, IsOnline: true, 90, 90, false, false, sampleAt) { CpuSampleUtcOnly = sampleAt }, Ct);
         }
 
         Assert.Single(deliverer.Outcomes);
@@ -5903,7 +5903,7 @@ public sealed class DarlingSelfAlertTests
         for (var i = 0; i < ((int)AlertEngine.SqlCpuClearHold.TotalMinutes + 1); i++)
         {
             sampleAt = sampleAt.AddMinutes(1);
-            await engine.EvaluateServerAsync(new AlertServerSnapshot(Key, Name, IsOnline: true, 10, 10, false, false, sampleAt), Ct);
+            await engine.EvaluateServerAsync(new AlertServerSnapshot(Key, Name, IsOnline: true, 10, 10, false, false, sampleAt) { CpuSampleUtcOnly = sampleAt }, Ct);
         }
         var resolved = Assert.Single(history.Records);
         Assert.Equal("CPU Resolved", resolved.MetricName);

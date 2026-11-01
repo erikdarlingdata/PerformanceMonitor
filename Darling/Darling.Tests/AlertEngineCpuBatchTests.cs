@@ -341,6 +341,39 @@ public sealed class AlertEngineCpuBatchTests
     }
 
     [Fact]
+    public async Task AClearHoldCompletedInThisSweep_ThenAFreshRunOverTheBar_ResolvesFirstAndPagesTheNewIncident()
+    {
+        /* #7085 review: the clear run began in an earlier sweep, so this batch is [the 16th clear sample, five breaching samples]. The
+           hold completed, so the old incident closes (Resolved, tier closed) and the new run opens a new incident that pages as an
+           opening page. It used to cancel the resolve with the fire: no Resolved, no page, and the old Critical tier inherited. */
+        var h = NewHarness();
+        var engine = h.Build();
+        var t = Noon.AddMinutes(-40);
+
+        h.Now = t.AddMinutes(AlertEngine.SqlCpuBreachSamples);
+        await engine.EvaluateServerAsync(Batch(Noon.AddMinutes(-60), Hots(t, AlertEngine.SqlCpuBreachSamples)));
+        var first = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(AlertSeverityLevel.Critical, first.Severity);
+
+        var firstCool = t.AddMinutes(AlertEngine.SqlCpuBreachSamples);
+        h.Now = firstCool.AddMinutes(14);
+        await engine.EvaluateServerAsync(Batch(Noon.AddMinutes(-60), Cools(firstCool, 15)));
+        Assert.Empty(h.Resolutions);
+
+        var sixteenth = firstCool.AddMinutes(15);
+        h.Now = sixteenth.AddMinutes(AlertEngine.SqlCpuBreachSamples);
+        await engine.EvaluateServerAsync(Batch(
+            Noon.AddMinutes(-60),
+            Cools(sixteenth, 1).Concat(Enumerable.Range(1, AlertEngine.SqlCpuBreachSamples).Select(i => HotAt(sixteenth.AddMinutes(i), 90))).ToArray()));
+
+        Assert.Equal("CPU Resolved", Assert.Single(h.Resolutions).Title);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        var second = h.Deliverer.Outcomes[1];
+        Assert.Equal(AlertSeverityLevel.Warning, second.Severity);
+        Assert.False(second.Context!.EscalationBypassesCooldown);
+    }
+
+    [Fact]
     public async Task ABatchOfFiveHotSamples_DeliversTheNewestBreachingReading_AndItsInstant()
     {
         var h = NewHarness();

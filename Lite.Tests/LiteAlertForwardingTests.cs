@@ -314,9 +314,15 @@ public partial class LiteAlertForwardingTests : IDisposable
         public static AlertServerSnapshot Snapshot(
             double? sqlCpu = null, double? totalCpu = null,
             bool isOnline = true, bool isAzureSqlDb = false, bool suppressed = false,
-            DateTime? cpuSampleTime = null) =>
-            new(Key, Name, isOnline, sqlCpu, totalCpu, isAzureSqlDb, suppressed,
-                cpuSampleTime ?? SampleBase.AddMinutes(System.Threading.Interlocked.Increment(ref s_sampleTick)));
+            DateTime? cpuSampleTime = null)
+        {
+            var sampleAt = cpuSampleTime ?? SampleBase.AddMinutes(System.Threading.Interlocked.Increment(ref s_sampleTick));
+
+            /* #7085: Lite's snapshot always carries the UTC twin (MainWindow.AlertEngine.cs), and the clear hold is measured on it. Only a
+               reading under the default 80 bar carries it here, so the card's sample-age line stays off the pins that assert it byte for byte. */
+            var snapshot = new AlertServerSnapshot(Key, Name, isOnline, sqlCpu, totalCpu, isAzureSqlDb, suppressed, sampleAt);
+            return (totalCpu ?? sqlCpu) < 80 ? snapshot with { CpuSampleUtcOnly = sampleAt } : snapshot;
+        }
     }
 
     /// <summary>Everything except the named check off, so a scenario pins exactly one alert.</summary>
