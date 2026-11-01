@@ -265,7 +265,8 @@ public sealed partial class DarlingMcpAlertTools
         try
         {
             var store = new PgNotificationRouteStore(postgres);
-            var existing = (await store.LoadSummariesAsync(cancellationToken)).FirstOrDefault(r => r.RouteId == route_id);
+            var routes = await store.LoadSummariesAsync(cancellationToken);
+            var existing = routes.FirstOrDefault(r => r.RouteId == route_id);
             if (existing is null)
             {
                 return Outcome("not_found", $"No notification route with route_id {route_id}.");
@@ -408,7 +409,11 @@ public sealed partial class DarlingMcpAlertTools
             var journalsMatchOrFlag = operatorActor is not null && existing.AgentLevel is not null
                 && columns.Any(c => c is "metric_match" or "scope" or "enabled" or "severities" or "report_notice");
 
-            if (ApprovalRouteRefusal(existing, agent, columns, enabledNow, "update_notification_route") is { } approvalRefusal)
+            /* #7109: another enabled Level 3 route with approval off, read from the same list, which a disable or reshape of this route could hand
+               its metrics to. This route itself is left out: moving metrics off it never moves them onto it. */
+            var levelThreeOff = routes.FirstOrDefault(r => r.RouteId != route_id && r.Enabled && r.AgentLevel == NotificationRoute.AgentLevelServerAct
+                && NotificationRouteKinds.NormalizeActionApproval(r.ActionApproval) == NotificationRouteKinds.ActionApprovalOff);
+            if (ApprovalRouteRefusal(existing, agent, columns, enabledNow, "update_notification_route", levelThreeOff) is { } approvalRefusal)
             {
                 return approvalRefusal;
             }

@@ -1170,12 +1170,17 @@ public sealed partial class DarlingMcpAlertTools
     /// still go down to 0, 1 or 2.</item>
     /// <item>A route with approval off cannot be raised to Level 3 (unless the same call sets required), and at Level 3 it cannot be enabled or
     /// have its match, scope or severities changed. Each of those lets it take a metric from a route with approval required.</item>
+    /// <item>While another enabled route is at Level 3 with approval off (<paramref name="levelThreeOff"/>), a route with any agent level cannot be
+    /// disabled, put back to Inherit, or have its match, scope or severities changed. Each of those can move a metric off this route and onto
+    /// that one, whose actions run with no proposal. Without this, a Level 3 route with approval required is first lowered to Level 2 (allowed)
+    /// and then disabled or reshaped by a second call, which the rule above no longer sees.</item>
     /// </list>
     /// Checked on the stored row, before anything is written. Only an operator token reaches a Level 3 route over MCP (<see cref="AgentRouteRefusal"/>
     /// and the store function refuse every other caller), so this runs on the operator path. Null when the change may go on.
     /// </summary>
     internal static string? ApprovalRouteRefusal(
-        PgNotificationRouteStore.RouteSummary route, DarlingMcpAlertTools.RouteAgentRequest agent, IReadOnlyCollection<string> columns, bool enabledNow, string tool)
+        PgNotificationRouteStore.RouteSummary route, DarlingMcpAlertTools.RouteAgentRequest agent, IReadOnlyCollection<string> columns, bool enabledNow, string tool,
+        PgNotificationRouteStore.RouteSummary? levelThreeOff = null)
     {
         const string person = "A person can make this change in the Viewer's Settings window (Notifications, routes) or on the web dashboard's admin notification routes page.";
         var storedApproval = NotificationRouteKinds.NormalizeActionApproval(route.ActionApproval);
@@ -1207,6 +1212,18 @@ public sealed partial class DarlingMcpAlertTools
             {
                 return Outcome("refused", $"Route {route.RouteId} is a Level 3 route with action approval required: {tool} does not change its match, scope or severities over MCP, " + why + person);
             }
+        }
+
+        /* #7109: the second call of a lower-then-disable pair. Any route with a level answers ResolveAgent for its metrics, so taking it out of the
+           lookup hands them to the next matching route, which can be the Level 3 route with approval off. */
+        if (route.AgentLevel is not null && levelThreeOff is not null
+            && ((columns.Contains("enabled") && !enabledNow) || agent.ClearLevel || reshapes))
+        {
+            return Outcome("refused",
+                $"Route {route.RouteId} has an agent level ({route.AgentLevel}), and route {levelThreeOff.RouteId} is an enabled Level 3 route with action approval off: "
+                + $"{tool} does not disable this route, put its level back to Inherit, or change its match, scope or severities over MCP, because an alert could then "
+                + $"move to route {levelThreeOff.RouteId}, whose Level 3 actions run without a person's approval. Setting action_approval to required on route "
+                + $"{levelThreeOff.RouteId} can still be done here. " + person);
         }
 
         if (storedApproval == NotificationRouteKinds.ActionApprovalOff)

@@ -368,28 +368,49 @@ public sealed partial class DarlingMcpPlanForceTools
     /// <summary>How long the read after a force with an unknown outcome may take. It has its own token: the call's may be the one that fired.</summary>
     private static readonly TimeSpan UnknownForceReadTimeout = TimeSpan.FromSeconds(30);
 
+    /// <summary>What the journal and the answer say when a force's reply was lost and the plan was then read forced.</summary>
+    internal const string LostForceFoundForcedMessage = "The reply to the force was lost; the plan was found forced when the server was read again.";
+
     /// <summary>
     /// A forward force was sent and its reply was lost (#5632): the plan may be forced, and a force with no <c>action_done</c> gets no post-force
-    /// checks. Reads the plan's state again with a fresh token (on the executor's own connection, which is a fresh one per call) and, when the plan is
-    /// forced now, journals <c>action_done</c> marked <c>recorded_late</c>, as for a force the store could not record. Best effort: a read or a
-    /// write that fails, or a plan that is not forced, leaves the call with no result row, which reads as "result unknown".
+    /// checks. Reads the plan's state again (<see cref="ReadForcedAfterLostReplyAsync"/>) and, when the plan is forced now, journals
+    /// <c>action_done</c> marked <c>recorded_late</c>, as for a force the store could not record. Best effort: a read or a write that fails, or a
+    /// plan that is not forced, leaves the call with no result row, which reads as "result unknown".
     /// </summary>
     private static async Task RecordUnknownForceTookEffectAsync(InvestigationRequestStore store, SqlServerRemediationExecutor executor, ServerActionPermit permit,
         ILogger logger, AgentAction action, int serverId, long calledId, string statement, long queryId, long planId)
+    {
+        if (await ReadForcedAfterLostReplyAsync(executor, permit, logger, queryId, planId) is not { } state)
+            return;
+        try
+        {
+            var after = JsonSerializer.Serialize(new { statement, state, message = LostForceFoundForcedMessage });
+            await store.RecordForceTookEffectAsync(action.RequestId, serverId, action.AgentId, calledId, after, LostForceFoundForcedMessage);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning("The late result of the force of plan {PlanId} for query {QueryId} with an unknown outcome was not journaled: {Message}", planId, queryId, ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// The read after a forward force whose reply was lost (#5632), shared by the agent's call and an approved proposal's press (#7109): the plan's
+    /// state read again with a fresh token (the call's may be the one that fired), on the executor's own connection, which is a fresh one per call.
+    /// The state when the requested plan is forced now. Null when it is not forced or the read fails, so the outcome stays unknown.
+    /// </summary>
+    internal static async Task<PlanForceState?> ReadForcedAfterLostReplyAsync(SqlServerRemediationExecutor executor, ServerActionPermit permit,
+        ILogger logger, long queryId, long planId)
     {
         try
         {
             using var fresh = new CancellationTokenSource(UnknownForceReadTimeout);
             var read = await executor.ReadPlanStateAsync(permit, queryId, planId, fresh.Token);
-            if (read.State is not { } state || state.RequestedPlan is not { IsForced: true })
-                return;
-            var after = JsonSerializer.Serialize(new { statement, state, message = "The reply to the force was lost; the plan was found forced when the server was read again." });
-            await store.RecordForceTookEffectAsync(action.RequestId, serverId, action.AgentId, calledId, after,
-                "The reply to the force was lost; the plan was found forced when the server was read again.");
+            return read.State is { RequestedPlan.IsForced: true } state ? state : null;
         }
         catch (Exception ex)
         {
             logger.LogWarning("The state read after the force of plan {PlanId} for query {QueryId} with an unknown outcome failed: {Message}", planId, queryId, ex.Message);
+            return null;
         }
     }
 

@@ -234,6 +234,15 @@ public sealed class ActionProposalPress
         return new Prepared(DarlingMcpPlanForceTools.ForcePlanBinding(facts), async (runPermit, token) =>
         {
             var written = await DarlingMcpPlanForceTools.WriteForcePlanAsync(executor, runPermit, facts, token);
+            /* A force whose reply was lost may still have taken effect: read the plan again, as the agent's own call does, and end the proposal run
+               when it is forced. A read that fails or shows it not forced leaves it unknown, as the agent's call leaves its own. */
+            if (force && written.Outcome == RemediationOutcome.Unknown
+                && await DarlingMcpPlanForceTools.ReadForcedAfterLostReplyAsync(executor, runPermit, _logger, queryId, planId) is { } found)
+            {
+                return new ApprovedWriteOutcome("run", DarlingMcpPlanForceTools.LostForceFoundForcedMessage,
+                    JsonSerializer.Serialize(new { statement = facts.Statement, state = found, message = DarlingMcpPlanForceTools.LostForceFoundForcedMessage }));
+            }
+
             PlanForceState? after = null;
             if (written.Outcome == RemediationOutcome.Done && written.Wrote)
             {

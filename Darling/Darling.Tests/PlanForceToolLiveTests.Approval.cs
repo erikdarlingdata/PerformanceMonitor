@@ -303,4 +303,76 @@ public sealed partial class PlanForceToolLiveTests
             Assert.Equal(0, await JournalActionRowsAsync(c));
         }, approval: "required");
     }
+
+    /* A confirmed force whose reply is lost after the server forced the plan: the press reads the plan again, as the agent's own call does
+       (AForce_WhoseReplyIsLostAfterItTookEffect_JournalsDoneLate_SoItsChecksRun), and ends the proposal run with action_done, not unknown. */
+    [Fact]
+    public async Task AnApprovedForce_WhoseReplyIsLostAfterItTookEffect_EndsRun_AndJournalsDone()
+    {
+        await RunAsync(Without.Nothing, async c =>
+        {
+            await SinglePersonAsync(c);
+            var (query, planA, _) = await c.Sql.TwoPlansAsync("pa9", c.Ct);
+            var proposalId = ProposalIdOf(await c.Tool(force: true, query, planA, dryRun: false));
+            var press = Press(c);
+            var first = await press.FirstPressAsync(proposalId, Approver, c.Ct);
+            Assert.True("first_pressed" == first.Status, first.Code + " " + first.Message);
+
+            PerformanceMonitor.Darling.Remediation.SqlServerRemediationExecutor.PlanWriteSeam.Value = async (command, token) =>
+            {
+                await command.ExecuteNonQueryAsync(token);
+                throw new System.IO.IOException("The connection was reset.");
+            };
+            ProposalPressResult confirmed;
+            try
+            {
+                confirmed = await press.ConfirmAsync(proposalId, Approver, c.Ct);
+            }
+            finally
+            {
+                PerformanceMonitor.Darling.Remediation.SqlServerRemediationExecutor.PlanWriteSeam.Value = null;
+            }
+
+            Assert.True("run" == confirmed.Status, confirmed.Code + " " + confirmed.Message);
+            Assert.Equal(planA, await c.Sql.ForcedPlanAsync(query, c.Ct));
+            Assert.Equal("run", await ProposalStateAsync(c, proposalId));
+            var done = Assert.Single(await RowsAsync(c, "action_done"));
+            Assert.Equal(planA, (long)done["after"]!["state"]!["forced_plan"]!["plan_id"]!);
+            Assert.Empty(await RowsAsync(c, "action_failed"));
+        }, approval: "required");
+    }
+
+    /* The reply is lost before the procedure ran, so the plan is not forced: the press reads it again and leaves the proposal unknown, with no
+       result row, as the agent's own call leaves its call (AForce_WhoseReplyIsLost_AnswersOutcomeUnknown_JournalsNoFailure_AndTheListSaysResultUnknown). */
+    [Fact]
+    public async Task AnApprovedForce_WhoseReplyIsLostBeforeItRan_EndsUnknown_AndJournalsNoResult()
+    {
+        await RunAsync(Without.Nothing, async c =>
+        {
+            await SinglePersonAsync(c);
+            var (query, planA, _) = await c.Sql.TwoPlansAsync("pa10", c.Ct);
+            var proposalId = ProposalIdOf(await c.Tool(force: true, query, planA, dryRun: false));
+            var press = Press(c);
+            var first = await press.FirstPressAsync(proposalId, Approver, c.Ct);
+            Assert.True("first_pressed" == first.Status, first.Code + " " + first.Message);
+
+            PerformanceMonitor.Darling.Remediation.SqlServerRemediationExecutor.PlanWriteSeam.Value = (_, _) =>
+                throw new System.IO.IOException("The connection was reset.");
+            ProposalPressResult confirmed;
+            try
+            {
+                confirmed = await press.ConfirmAsync(proposalId, Approver, c.Ct);
+            }
+            finally
+            {
+                PerformanceMonitor.Darling.Remediation.SqlServerRemediationExecutor.PlanWriteSeam.Value = null;
+            }
+
+            Assert.True("unknown" == confirmed.Status, confirmed.Code + " " + confirmed.Message);
+            Assert.Null(await c.Sql.ForcedPlanAsync(query, c.Ct));
+            Assert.Equal("unknown", await ProposalStateAsync(c, proposalId));
+            Assert.Empty(await RowsAsync(c, "action_done"));
+            Assert.Empty(await RowsAsync(c, "action_failed"));
+        }, approval: "required");
+    }
 }

@@ -537,6 +537,43 @@ public sealed class McpRouteAgentFieldsLiveTests
         });
     }
 
+    /// <summary>#7109: lowering a Level 3 route with approval required to Level 2 goes through, but while another enabled Level 3 route has approval
+    /// off, the second call that would disable, clear or reshape it is refused by both tools and names that route, because the metric could fall
+    /// through to it. With no such route the same call goes through.</summary>
+    [Fact]
+    public async Task LoweringThenDisabling_IsRefusedAtTheSecondCall_WhileALevel3RouteWithApprovalOffIsEnabled()
+    {
+        await WithMcpRoleAsync(async (owner, asMcp, ct) =>
+        {
+            var routeId = RouteIdOf(await DarlingMcpAlertTools.CreateNotificationRoute(asMcp, "Deadlocks", agent_level: 3, served: OperatorPolicy(), cancellationToken: ct));
+            var offId = RouteIdOf(await DarlingMcpAlertTools.CreateNotificationRoute(asMcp, "Blocking", agent_level: 3, served: OperatorPolicy(), cancellationToken: ct));
+            await ExecAsync(owner, $"UPDATE config.config_notification_routes SET action_approval = 'off' WHERE route_id = {offId}", ct);
+
+            Assert.Equal("updated", Status(await DarlingMcpAlertTools.UpdateNotificationRoute(asMcp, routeId, agent_level: 2, served: OperatorPolicy(), cancellationToken: ct)));
+            foreach (var answer in new[]
+            {
+                await DarlingMcpAlertTools.SetNotificationRouteEnabled(asMcp, routeId, false, served: OperatorPolicy(), cancellationToken: ct),
+                await DarlingMcpAlertTools.UpdateNotificationRoute(asMcp, routeId, enabled: false, served: OperatorPolicy(), cancellationToken: ct),
+                await DarlingMcpAlertTools.UpdateNotificationRoute(asMcp, routeId, clear_agent_level: true, served: OperatorPolicy(), cancellationToken: ct),
+                await DarlingMcpAlertTools.UpdateNotificationRoute(asMcp, routeId, metric_match: "Blocking", served: OperatorPolicy(), cancellationToken: ct),
+                await DarlingMcpAlertTools.UpdateNotificationRoute(asMcp, routeId, severities: "critical", served: OperatorPolicy(), cancellationToken: ct),
+                await DarlingMcpAlertTools.UpdateNotificationRoute(asMcp, routeId, scope_server_id: 999, served: OperatorPolicy(), cancellationToken: ct),
+            })
+            {
+                Assert.Equal("refused", Status(answer));
+                Assert.Contains($"route {offId} is an enabled Level 3 route with action approval off", Message(answer), StringComparison.Ordinal);
+                Assert.Contains("Viewer", Message(answer), StringComparison.Ordinal);
+            }
+
+            Assert.Equal("true|2|Deadlocks|both", await ScalarAsync(owner,
+                $"SELECT enabled::text || '|' || agent_level::text || '|' || metric_match || '|' || severities FROM config.config_notification_routes WHERE route_id = {routeId}", ct));
+
+            /* Once a person turns the other route's approval on, nothing can fall through to an unapproved route, and the disable goes through. */
+            await ExecAsync(owner, $"UPDATE config.config_notification_routes SET action_approval = 'required' WHERE route_id = {offId}", ct);
+            Assert.Equal("updated", Status(await DarlingMcpAlertTools.SetNotificationRouteEnabled(asMcp, routeId, false, served: OperatorPolicy(), cancellationToken: ct)));
+        });
+    }
+
     /// <summary>Runs an answer's undo, an update_notification_route call, as the operator token, with the arguments it carries.</summary>
     private static Task<string> RunUndoAsync(NpgsqlDataSource asMcp, string answer, CancellationToken ct)
     {

@@ -120,6 +120,56 @@ public sealed class McpRouteApprovalRuleTests
         Assert.Null(DarlingMcpAlertTools.ApprovalRouteRefusal(Route(3, "off"), Agent(clear: true), [], true, Tool));
     }
 
+    /// <summary>Another enabled Level 3 route with approval off, a less specific one a metric can fall through to.</summary>
+    private static PgNotificationRouteStore.RouteSummary LevelThreeOff() =>
+        new(9, "*", null, Array.Empty<string>(), "", true, DateTime.UtcNow) { AgentLevel = 3, ActionApproval = "off" };
+
+    [Fact]
+    public void LoweringThenDisabling_IsRefusedAtTheSecondCall_WhileALevel3OffRouteExists()
+    {
+        /* The first call lowers a Level 3 required route to Level 2: allowed. */
+        Assert.Null(DarlingMcpAlertTools.ApprovalRouteRefusal(Route(3, "required"), Agent(level: 2), [], true, Tool, LevelThreeOff()));
+        /* The second call sees Level 2, which the Level 3 rule does not cover, and is refused because route 9 would take the metric. */
+        var lowered = Route(2, "required");
+        AssertRefused(DarlingMcpAlertTools.ApprovalRouteRefusal(lowered, Agent(), ["enabled"], false, Tool, LevelThreeOff()), "route 9");
+        AssertRefused(DarlingMcpAlertTools.ApprovalRouteRefusal(lowered, Agent(clear: true), [], true, Tool, LevelThreeOff()), "route 9");
+        foreach (var column in new[] { "metric_match", "scope", "severities" })
+            AssertRefused(DarlingMcpAlertTools.ApprovalRouteRefusal(lowered, Agent(), [column], true, Tool, LevelThreeOff()), "route 9");
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    public void EveryRouteWithALevel_KeepsItsMetrics_WhileALevel3OffRouteExists_AndIsFreeWhenNoneDoes(int level)
+    {
+        var route = Route(level, "required");
+        var cases = new (DarlingMcpAlertTools.RouteAgentRequest Agent, string[] Columns, bool Enabled)[]
+        {
+            (Agent(), ["enabled"], false),
+            (Agent(clear: true), [], true),
+            (Agent(), ["metric_match"], true),
+            (Agent(), ["scope"], true),
+            (Agent(), ["severities"], true),
+        };
+        foreach (var (agent, columns, enabled) in cases)
+        {
+            AssertRefused(DarlingMcpAlertTools.ApprovalRouteRefusal(route, agent, columns, enabled, Tool, LevelThreeOff()), "approval off");
+            Assert.Null(DarlingMcpAlertTools.ApprovalRouteRefusal(route, agent, columns, enabled, Tool));
+        }
+    }
+
+    [Fact]
+    public void ALevel3OffRoute_LeavesTheOtherChangesOpen()
+    {
+        /* Lowering, raising with required, turning approval on, enabling and a route with no level stay open. */
+        Assert.Null(DarlingMcpAlertTools.ApprovalRouteRefusal(Route(3, "required"), Agent(level: 1), [], true, Tool, LevelThreeOff()));
+        Assert.Null(DarlingMcpAlertTools.ApprovalRouteRefusal(Route(2, "required"), Agent(level: 3), [], true, Tool, LevelThreeOff()));
+        Assert.Null(DarlingMcpAlertTools.ApprovalRouteRefusal(Route(2, "off"), Agent(approval: "required"), [], true, Tool, LevelThreeOff()));
+        Assert.Null(DarlingMcpAlertTools.ApprovalRouteRefusal(Route(2, "required", enabled: false), Agent(), ["enabled"], true, Tool, LevelThreeOff()));
+        Assert.Null(DarlingMcpAlertTools.ApprovalRouteRefusal(Route(null, "required"), Agent(), ["enabled", "metric_match", "scope", "severities"], false, Tool, LevelThreeOff()));
+    }
+
     [Fact]
     public void AnUnknownStoredWord_ReadsAsRequired()
     {

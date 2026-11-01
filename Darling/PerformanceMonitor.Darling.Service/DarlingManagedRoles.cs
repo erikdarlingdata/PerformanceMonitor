@@ -4281,13 +4281,16 @@ CREATE OR REPLACE TRIGGER trg_investigation_request_alerts_owner_rows
     /// So are the people directory's events (<see cref="PersonEvents.OwnerOnly"/>, #7107): only <see cref="PersonDirectory"/>, on the owner connection, journals
     /// who mapped or granted a person. So are an action proposal's events (<see cref="ProposalEvents.OwnerOnly"/>, #7109): otherwise the mcp or
     /// admin login could write a false <c>proposal_approved</c> row. So is a proposal's notice mark
-    /// (<see cref="InvestigationRequestStore.ProposalNoticeSent"/>, #7109): another login that wrote it first would stop the proposal's notice.</summary>
+    /// (<see cref="InvestigationRequestStore.ProposalNoticeSent"/>, #7109): another login that wrote it first would stop the proposal's notice. So is
+    /// <see cref="InvestigationRequestStore.AskerJournalEvent"/> (#7109): the approver check reads askers from it, so a row another login wrote would
+    /// block an approver.</summary>
     internal static string JournalOwnerEventList => string.Join(", ",
         InvestigationEvents.Kinds.Append(InvestigationEvents.Delivered).Append(InvestigationEvents.FallbackSent).Append(ServerActionSwitches.JournalEvent)
             .Concat(AgentActionEvents.OwnerOnly)
             .Concat(PersonEvents.OwnerOnly)
             .Concat(ProposalEvents.OwnerOnly)
             .Append(InvestigationRequestStore.ProposalNoticeSent)
+            .Append(InvestigationRequestStore.AskerJournalEvent)
             .Select(k => "'" + k + "'"));
 
     /// <summary>
