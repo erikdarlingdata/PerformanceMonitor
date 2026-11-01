@@ -171,6 +171,29 @@ public sealed class McpDataDetailMaskerTests
     }
 
     [Fact]
+    public void MaskProse_KeepsAnApostropheInsideAWord_AndStillMasksAQuotedValueInTheSameText()
+    {
+        Assert.Equal(
+            "The session's blocker doesn't release '?' after ? minutes, said O'Brien",
+            McpDataDetailMasker.MaskProse("The session's blocker doesn't release 'alice' after 10 minutes, said O'Brien"));
+    }
+
+    [Fact]
+    public void MaskProse_StillMasksAPrefixedOrDoubledQuoteLiteral()
+    {
+        Assert.Equal(
+            "WHERE a = N'?' AND b = '?' AND c = '?' AND d = E'?' and the session's lock",
+            McpDataDetailMasker.MaskProse("WHERE a = N'abc' AND b = 'abc' AND c = 'it''s' AND d = E'x' and the session's lock"));
+        Assert.Equal("N'?'", McpDataDetailMasker.MaskProse("N'abc'"));
+    }
+
+    [Fact]
+    public void MaskLiterals_StillTreatsEveryApostropheAsAQuote_ForSqlText()
+    {
+        Assert.Equal("The session'?'", McpDataDetailMasker.MaskLiterals("The session's blocker held 3 locks"));
+    }
+
+    [Fact]
     public void MaskLiterals_KeepsIdentifiersAndParameters_AndEmptiesComments()
     {
         const string sql = "SELECT [col 1], \"c2\", t1.x, @p1, $1 FROM #t2 WHERE y = $$abc$$ -- note 5\n AND z = 0x1F /* 9 */ AND w = 1.5e3 AND v = 'it''s'";

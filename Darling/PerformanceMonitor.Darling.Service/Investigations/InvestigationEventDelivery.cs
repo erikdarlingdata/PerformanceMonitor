@@ -421,7 +421,7 @@ public sealed class InvestigationEventDelivery
             return null;
         }
 
-        var text = mode == McpDataDetail.MaskLiterals ? McpDataDetailMasker.MaskLiterals(rootCause) : rootCause;
+        var text = mode == McpDataDetail.MaskLiterals ? McpDataDetailMasker.MaskProse(rootCause) : rootCause;
         foreach (var line in text.Split('\n'))
         {
             var trimmed = line.Trim();
@@ -437,14 +437,14 @@ public sealed class InvestigationEventDelivery
     /// <summary>
     /// #6979: a change's object at <paramref name="mode"/>: the target id, with the database when the tool named one. Object and
     /// database names stay in the notice at every level (the MCP tools keep them, <c>McpDataDetail</c>), but a name can carry a
-    /// literal (a plan guide's name, a threshold key), so both go through <see cref="McpDataDetailMasker.MaskLiterals"/> at
+    /// literal (a plan guide's name, a threshold key), so both go through <see cref="McpDataDetailMasker.MaskProse"/> (#7106) at
     /// <c>maskLiterals</c> and at <c>metadataOnly</c>, which never hands out more than <c>maskLiterals</c> does. An all-digit id
     /// (a rule, plan or session id the store or the server assigned) is kept: it is no literal of collected data, and masked it
     /// would read <c>?</c>.
     /// </summary>
     internal static string ChangeObject(string targetId, string? database, McpDataDetail mode)
     {
-        string Mask(string value) => mode == McpDataDetail.Full || value.All(char.IsAsciiDigit) ? value : McpDataDetailMasker.MaskLiterals(value);
+        string Mask(string value) => mode == McpDataDetail.Full || value.All(char.IsAsciiDigit) ? value : McpDataDetailMasker.MaskProse(value);
         var id = Mask(targetId ?? "");
         return string.IsNullOrWhiteSpace(database) ? id : id + " in " + Mask(database);
     }
