@@ -12,6 +12,7 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
@@ -79,6 +80,7 @@ public sealed class DarlingMcpPgSlotTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to analyze, used for the WAL growth comparison. Default 24.")] int hours_back = 24,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorForAnswerAsync(postgres, server_name, cancellationToken);
@@ -110,16 +112,24 @@ public sealed class DarlingMcpPgSlotTools
                     return gated;
                 }
 
-                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, JsonSerializer.Serialize(new
+                /* #7010: a slot row exists only while the slot does, so the probe reads the collector's logged runs (the web's
+                   source for this read), which are written whether or not a slot existed: "collected, nothing there" is a run with
+                   no row, "not collected" is no run. The all-clear is an empty answer and carries the window floor under hints. */
+                var emptyNotice = await DarlingMcpWindowNotice.ReadForToolAsync(
+                    postgres, "get_pg_replication_slots", resolved.ServerName, now.AddHours(-hours_back), now, emptyAnswer: true, logger, cancellationToken);
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, DarlingMcpWindowNotice.FinishEmpty(JsonSerializer.Serialize(new
                 {
                     server = resolved.DisplayName,
                     hours_back,
                     status = "empty",
-                    finding = "This instance has no replication slots in the window, so it is not itself "
-                            + "retaining WAL or pinning vacuum through one.",
+                    hints = emptyNotice.AsHints(),
+                    finding = McpHelpers.QuietUnlessCut(
+                        emptyNotice.WindowTruncated, emptyNotice.EffectiveStart,
+                        factual: "This instance has no replication slots in the captures the store holds for the window",
+                        coveredClaim: ", so it is not itself retaining WAL or pinning vacuum through one."),
                     scope = "Per-instance. Slots live on the writer, so if this target is a replica, check "
                           + "the cluster's writer before concluding the cluster has no abandoned slot.",
-                }, McpHelpers.JsonOptions), cancellationToken);
+                }, McpHelpers.JsonOptions), emptyNotice), cancellationToken);
             }
 
             var slots = rows.Select(r =>
@@ -178,10 +188,18 @@ public sealed class DarlingMcpPgSlotTools
 
             var worst = slots[0];
 
-            return JsonSerializer.Serialize(new
+            /* #7010: the growth figures compare a slot's retained WAL at its first sighting in the window with its latest, so the
+               answer names where the store's coverage of the window starts. */
+            var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
+                postgres, "get_pg_replication_slots", resolved.ServerName, now.AddHours(-hours_back), now, emptyAnswer: false, logger, cancellationToken);
+            return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
                 hours_back,
+                /* #7010: the window floor, right after hours_back. */
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 status = "slots_present",
                 slot_count = slots.Count,
                 inactive_count = slots.Count(s => !s.is_active),
@@ -190,7 +208,7 @@ public sealed class DarlingMcpPgSlotTools
                 total_retained_wal_gb = Math.Round(
                     slots.Where(s => s.retained_wal_bytes > 0).Sum(s => s.retained_wal_bytes ?? 0) / 1024.0 / 1024.0 / 1024.0, 2),
                 slots,
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions), notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

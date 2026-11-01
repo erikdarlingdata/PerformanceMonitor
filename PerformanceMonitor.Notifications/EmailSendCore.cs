@@ -202,6 +202,21 @@ public sealed class EmailSendCore
                     metricName, serverName, currentValue, thresholdValue, _settings.EmailCooldownMinutes, _branding,
                     render.Context, render.Prose, displayName, triageUrl);
 
+                /* #7041: a scheduled report that rendered its own page (the Daily Health Report) supplies the HTML
+                   view and the subject. Read from the ORIGINAL context: the delivery filter's copy carries only what
+                   the channel builders render. The plain view stays the template's own, built from the report's
+                   text, so a client that shows plain text still gets the report. The HTML is used as given and is
+                   not run through the template's escaping a second time. */
+                if (!string.IsNullOrEmpty(context?.EmailHtmlBody))
+                {
+                    htmlBody = context.EmailHtmlBody;
+                }
+
+                if (!string.IsNullOrWhiteSpace(context?.EmailSubject))
+                {
+                    subject = context.EmailSubject.Trim();
+                }
+
                 /* #3598: WHO receives this firing — an exact-metric route's recipients, else its family route's,
                    else the parent's list. Resolved here, after the cooldown and the budget, so a throttled alert
                    never consults a route; with zero routes the list IS _settings.SmtpRecipients and the send is the

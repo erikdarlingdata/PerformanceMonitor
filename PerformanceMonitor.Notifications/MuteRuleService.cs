@@ -57,7 +57,7 @@ public class MuteRuleService
     {
         lock (_lock)
         {
-            return _rules.Where(r => r.Enabled && !r.IsExpired && !r.IsUpcomingAt(DateTime.UtcNow)).ToList();
+            return _rules.Where(r => r.IsInEffectAt(DateTime.UtcNow)).ToList();
         }
     }
 

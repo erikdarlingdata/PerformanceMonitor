@@ -446,7 +446,7 @@ public sealed class DarlingConfig
     internal List<string> SecretReferencesAsWritten { get; set; } = new();
 
     /// <summary>#5307: the paths (never the values) of keys under <c>web.network</c> and <c>mcp.network</c>, their
-    /// <c>tls</c> blocks and <c>web.network.oidc</c> that no config class declares, e.g. <c>mcp.network.ssl</c>,
+    /// <c>tls</c> blocks, <c>web.network.oidc</c> and each <c>mcp.tokens</c> entry (#7023) that no config class declares, e.g. <c>mcp.network.ssl</c>,
     /// found by <see cref="DarlingUnknownKeys"/> in <see cref="Parse"/>. Internal and <c>[JsonIgnore]</c>, so a
     /// serialized config (the diagnostics bundle) never carries it.</summary>
     [JsonIgnore]
@@ -1105,13 +1105,13 @@ public sealed class AlertsConfig
     [JsonPropertyName("deadlockCriticalPerHour")]
     public double DeadlockCriticalPerHour { get; set; } = ServerHealthThresholds.DeadlockCriticalPerHourDefault;
 
-    /// <summary>#6927 (V228): the blocking health band's WARNING tier, blocked-process reports per hour over the window a card
+    /// <summary>#6927 (V228): the blocking health band's WARNING tier, blocked waits per hour (#7028, the unit blocking.count_threshold uses) over the window a card
     /// counted them in. Seeded from <see cref="ServerHealthThresholds.BlockingWarnPerHour"/>, named rather than restated, so a store
     /// that never sets it bands as every earlier build did. <c>BlockingBandThresholds</c> clamps it on read.</summary>
     [JsonPropertyName("blockingWarnPerHour")]
     public double BlockingWarnPerHour { get; set; } = ServerHealthThresholds.BlockingWarnPerHour;
 
-    /// <summary>#6927 (V228): the blocking health band's CRITICAL tier, reports per hour, seeded from
+    /// <summary>#6927 (V228): the blocking health band's CRITICAL tier, waits per hour, seeded from
     /// <see cref="ServerHealthThresholds.BlockingCriticalPerHour"/>.</summary>
     [JsonPropertyName("blockingCriticalPerHour")]
     public double BlockingCriticalPerHour { get; set; } = ServerHealthThresholds.BlockingCriticalPerHour;
@@ -1125,6 +1125,34 @@ public sealed class AlertsConfig
     /// <see cref="ServerHealthThresholds.BlockingCriticalWaitSeconds"/>.</summary>
     [JsonPropertyName("blockingCriticalWaitSeconds")]
     public double BlockingCriticalWaitSeconds { get; set; } = ServerHealthThresholds.BlockingCriticalWaitSeconds;
+
+    /// <summary>#7028 (V230): the blocking band's WARNING bar on the longest total blocked wait in one sampled snapshot, seconds. 0 means the
+    /// tier is off, as the Blocking Wait Time alert's own bar does at 0. Valid values are 0 and 1 to 86400. When both tiers are above 0, critical
+    /// is at least warn. <c>BlockingBandThresholds</c> clamps it on read.</summary>
+    [JsonPropertyName("blockingWarnSnapshotWaitSeconds")]
+    public double BlockingWarnSnapshotWaitSeconds { get; set; }
+
+    /// <summary>#7028 (V230): the blocking band's CRITICAL bar on the longest total blocked wait in one sampled snapshot, seconds. 0 means off.</summary>
+    [JsonPropertyName("blockingCriticalSnapshotWaitSeconds")]
+    public double BlockingCriticalSnapshotWaitSeconds { get; set; }
+
+    /// <summary>The scheduled Daily Health Report (#7041): one report a day through the alert pipeline, as the "Daily Health Report" metric. Ships OFF.
+    /// Store column <c>daily_report_enabled</c> (V232).</summary>
+    [JsonPropertyName("dailyReportEnabled")]
+    public bool DailyReportEnabled { get; set; }
+
+    /// <summary>The local time of day (<c>HH:mm</c>, in <see cref="DailyReportTimeZone"/>) the Daily Health Report goes out; it covers the 24 hours before.
+    /// Store column <c>daily_report_send_at</c> (V232).</summary>
+    [JsonPropertyName("dailyReportSendAt")]
+    public string DailyReportSendAt { get; set; } = Reports.DailyHealthReportSettings.DefaultSendAt;
+
+    /// <summary>The report's time zone id; NULL means the service host's local zone. Store column <c>daily_report_time_zone</c> (V232).</summary>
+    [JsonPropertyName("dailyReportTimeZone")]
+    public string? DailyReportTimeZone { get; set; }
+
+    /// <summary>The report's title; NULL means "Daily Health Report". Store column <c>daily_report_title</c> (V232).</summary>
+    [JsonPropertyName("dailyReportTitle")]
+    public string? DailyReportTitle { get; set; }
 
     [JsonPropertyName("longRunningJobEnabled")]
     public bool LongRunningJobEnabled { get; set; } = true;
@@ -1569,7 +1597,8 @@ public sealed class McpConfig
     /// Null or empty keeps the legacy single token (<see cref="McpNetworkConfig.Token"/> or <see cref="McpNetworkConfig.EncryptedToken"/>)
     /// exactly as before. With entries, the token on each request picks the tool set: <c>operator</c> gets the reads and the write
     /// tools (never the claim or submit tools), <c>agent</c> gets the reads, the investigation tools and the Level 2 action tools
-    /// (never a tool in <c>DarlingMcpWritePolicy.NeverAgentTools</c>), and an agent's identity is the entry's name. A legacy token
+    /// (never a tool in <c>DarlingMcpWritePolicy.NeverAgentTools</c>), an agent's identity is the entry's name, and <c>reader</c> (#7023)
+    /// gets the reads only, whatever <see cref="AllowWrites"/>, <see cref="AllowServerAdmin"/> and <see cref="AllowInvestigations"/> say. A legacy token
     /// set beside them keeps its role from <see cref="AllowWrites"/> and <see cref="AllowInvestigations"/>. File-only and restart-only.
     /// </summary>
     [JsonPropertyName("tokens")]
@@ -1584,7 +1613,8 @@ public sealed class McpConfig
 /// <summary>
 /// One named MCP bearer token (#6542): a <see cref="Name"/> (1 to 64 of <c>A-Za-z0-9._:-</c>), the token itself
 /// (<see cref="EncryptedToken"/> or <see cref="Token"/>, the same rules as <c>mcp.network</c>'s), and a <see cref="Role"/>,
-/// <c>operator</c> or <c>agent</c>. The name is what logs and the journal record; the value is never logged.
+/// <c>operator</c>, <c>agent</c> or <c>reader</c> (#7023), and optionally a <see cref="DataDetail"/> that narrows <c>mcp.dataDetail</c> for
+/// this token. The name is what logs and the journal record; the value is never logged.
 /// </summary>
 public sealed class McpTokenEntry
 {
@@ -1593,6 +1623,10 @@ public sealed class McpTokenEntry
 
     /// <summary>The <c>agent</c> role.</summary>
     public const string AgentRole = "agent";
+
+    /// <summary>The <c>reader</c> role (#7023): the read tools only. It is not an agent: no identity in the journal, no claim, no submit,
+    /// no Level 2 action, and no setting widens it.</summary>
+    public const string ReaderRole = "reader";
 
     [JsonPropertyName("name")]
     public string? Name { get; set; }
@@ -1607,6 +1641,11 @@ public sealed class McpTokenEntry
 
     [JsonPropertyName("role")]
     public string? Role { get; set; }
+
+    /// <summary>Optional (#7023): <c>full</c>, <c>maskLiterals</c> or <c>metadataOnly</c>. It can only narrow <c>mcp.dataDetail</c>: the level this
+    /// token is served is the stricter of the two. Absent, the token is served <c>mcp.dataDetail</c>. An unrecognized value leaves the entry unserved.</summary>
+    [JsonPropertyName("dataDetail")]
+    public string? DataDetail { get; set; }
 
     /// <summary>The token, preferring <see cref="EncryptedToken"/> over <see cref="Token"/>; null when neither is set. Throws when an
     /// encrypted token cannot be read.</summary>

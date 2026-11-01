@@ -144,10 +144,13 @@ public sealed class DarlingMcpHealthToolsSurfaceAndSqlTests
             "signal_sources_present must trail collection_runs so the positional reads before it stay put");
         /* #3653 A6: seven arms still, but the queries arm reads the COUNT (q.c) rather than the day (q.d),
            because the routed statement's not-carried row carries the day with a NULL count and a day the
-           rollup never carried is not a source that holds the day. Six day-arms plus the one count-arm is the
-           SignalSourceCount; Lite's copy (no rollup tier, no not-carried row) keeps seven day-arms. */
-        Assert.Equal(DailySummaryRetention.SignalSourceCount - 1, System.Text.RegularExpressions.Regex.Matches(sql, @"CASE WHEN (\w+)\.d IS NULL THEN 0 ELSE 1 END").Count);
+           rollup never carried is not a source that holds the day. #7028: the blocked-process reports arm reads
+           the report-sourced wait count (b.xe_c) too, because the chosen waits (b.d) also come from DMV snapshots,
+           which have their own arm (dm.d). Five day-arms plus those two count-arms is the SignalSourceCount;
+           Lite's copy (no rollup tier, no not-carried row) keeps seven day-arms. */
+        Assert.Equal(DailySummaryRetention.SignalSourceCount - 2, System.Text.RegularExpressions.Regex.Matches(sql, @"CASE WHEN (\w+)\.d IS NULL THEN 0 ELSE 1 END").Count);
         Assert.Single(System.Text.RegularExpressions.Regex.Matches(sql, @"CASE WHEN q\.c IS NULL THEN 0 ELSE 1 END"));
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(sql, @"CASE WHEN COALESCE\(b\.xe_c, 0\) = 0 THEN 0 ELSE 1 END"));
         Assert.DoesNotContain("CASE WHEN q.d IS NULL THEN 0 ELSE 1 END", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("CASE WHEN cl.d IS NULL", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("CASE WHEN al.d IS NULL", sql, StringComparison.Ordinal);

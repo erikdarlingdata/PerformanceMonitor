@@ -59,6 +59,8 @@ PowerShell's `ConvertFrom-Json` fails on this file. Some parsers accept comments
 
 ## Step 2: Download and verify
 
+The release also has `PerformanceMonitorDarling-<version>.msi`. To install with the MSI instead of the zip, read [Installing with the MSI](#installing-with-the-msi) and skip to step 7.
+
 Take `PerformanceMonitorDarling-<version>.zip` and `SHA256SUMS.txt` from the release (or the nightly) that you were pointed at. Check the hash before you extract anything. Work from an **elevated** PowerShell in the folder that you downloaded to. The next step extracts into Program Files, and only administrators can write there.
 
 ```powershell
@@ -88,6 +90,8 @@ The service runs as the unprivileged virtual account `NT SERVICE\PerformanceMoni
 
 ## Step 4: Write `darling.json`
 
+This step is optional. If you skip it, step 6 writes a minimal `darling.json` with an empty `servers` list, and you add the first server in the Viewer. Do this step to name servers in the file before the first start.
+
 Stay elevated, so that Notepad can save into Program Files:
 
 ```powershell
@@ -95,7 +99,7 @@ Copy-Item "C:\Program Files\PerformanceMonitorDarling\darling.sample.json" "C:\P
 notepad "C:\Program Files\PerformanceMonitorDarling\darling.json"
 ```
 
-The minimum is one entry in `servers`. Everything else in the sample has a working default:
+You can leave `servers` as an empty list and add the first server in the Viewer. To name a server in the file, add one entry. Everything else in the sample has a working default:
 
 ```json
 {
@@ -181,7 +185,17 @@ The script does these things:
 - It reconciles the firewall rules and starts the service.
 - It creates **Darling Viewer** shortcuts on the Desktop and in the Start Menu.
 
-`.\uninstall-darling.ps1` reverses the install. It leaves your store and config alone unless you pass `-PurgeData`.
+`.\uninstall-darling.ps1` reverses the install. It leaves your store, your config and the `PerformanceMonitor Darling Operators` group alone unless you pass `-PurgeData`. With `-PurgeData` it also removes that group, but only when the install made it.
+
+These switches change what the script does:
+
+| Switch | Effect |
+|---|---|
+| `-SkipPreflight` | Skips the `--test-connection` check that the script runs first. |
+| `-NoShortcuts` | Does not create the **Darling Viewer** shortcuts. |
+| `-AddOperator <account>` | At the end of the install, adds that account (`DOMAIN\user`, or a local user's name) to the `PerformanceMonitor Darling Operators` group without asking. Use it for a scripted install. You cannot combine it with `-NoOperatorPrompt`. |
+| `-NoOperatorPrompt` | Never asks whether to add the signed-in account to that group. |
+| `-WebDashboard` | When the script writes the minimal `darling.json`, turns the web dashboard on and writes a web token. It does nothing when `darling.json` already exists. To show the token, run `PerformanceMonitor.Darling.Service.exe --print-web-token` from an elevated PowerShell. |
 
 To set up the LAN endpoints in the same pass, use `.\install-darling.ps1 -Network`. It runs the guided wizard at the end. You can also do this later (see [the web dashboard](web-dashboard.md) and [MCP](../mcp-server.md#darling)).
 
@@ -205,7 +219,7 @@ Managed Postgres cluster initialized (scram-sha-256, data checksums, UTF8/C loca
 Managed Postgres started
 Creating the 'darling' database
 Postgres store ready (schema v<version>, <count> migration(s) applied)
-Least-privilege roles ready (admin: ...; viewer: ...; mcp: ...)
+Least-privilege roles ready (admin: ...; viewer: ...; web: ...; mcp: ...)
 TimescaleDB detected — hypertables, chunk-based retention, and compression enabled
 TimescaleDB: <n>/<n> collector table(s) are hypertables
 PerformanceMonitor Darling collection loop started
@@ -255,11 +269,11 @@ Each of these has cost somebody real time.
 These gaps are known and current. They are not bugs. Read this list so that you do not file them twice.
 
 - TLS is opt-in on the MCP and the web endpoint (`mcp.network.tls`, `web.network.tls`). Without it, the token travels in clear on the segment. The other control is a TLS-terminating reverse proxy. Both are opt-ins for a trusted LAN.
-- The viewer has no client-side secret store. The `darling.json` of a remote seat holds the store role password in cleartext. Set an ACL on it. This is fine for the read-only `viewer` role. Think about it for `admin`.
+- The viewer has no client-side secret store. The `darling.json` of a remote seat holds the store role password in cleartext. Set an ACL on it. This is fine for the read-only `viewer` role, the login for remote seats. Think about it for `admin`.
 - The web dashboard has no plan analysis and no live-server actions. That is the job of the WPF viewer. The page set of the dashboard is a deliberate subset of the page set of the viewer.
 - `network` blocks need a service restart. There is no hot reload for exposure. The service says so at startup and names the block that it loaded. So a config edit that appears to do nothing is at least explained.
-- PostgreSQL monitored targets collect, and you can read them on both UIs. Apart from the three Tier 0 outage predictors, they do not raise alerts or produce analysis findings yet. There is no execution plan capture at all for them. That is the largest remaining gap, because plans are the reason people open a database monitoring tool. See [PostgreSQL Targets](postgresql-targets.md#postgresql-targets).
-- The PostgreSQL tabs have no charts and no drill-downs. Every panel on both surfaces is a table over the window. There is no PostgreSQL equivalent of the correlated timeline lanes on the SQL Server Overview. You cannot click through from a blocking root to the sessions behind it. There is no history window for a single query.
+- PostgreSQL monitored targets collect, and you can read them on both UIs. Plan capture is available for them. Alerts and analysis findings for them cover less than for SQL Server. See [What it does not do yet](postgresql-targets.md#what-it-does-not-do-yet).
+- The Darling viewer charts four PostgreSQL trends and shows PostgreSQL deadlock graphs. The other PostgreSQL panels are tables over the window. There is no PostgreSQL equivalent of the correlated timeline lanes on the SQL Server Overview. You cannot click through from a blocking root to the sessions behind it.
 
 If you hit a problem that this list and [Troubleshooting](troubleshooting.md) do not cover, please report it. Include the service log lines around the failure.
 
@@ -425,7 +439,7 @@ These properties are available:
 | `INSTALLFOLDER` | The install folder. The default is `C:\Program Files\PerformanceMonitorDarling`. Setup stops and rolls back if any account other than SYSTEM, Administrators and TrustedInstaller can change files in the folder. A folder made directly under `C:\` is one of these, because it gets Modify for Authenticated Users from the drive. The MSI log (`msiexec /l*v`) names the accounts. Choose a folder under Program Files, or remove those permissions and run setup again. |
 | `OPERATORACCOUNT` | A `DOMAIN\user` account to add to the `PerformanceMonitor Darling Operators` group. |
 | `WEBDASHBOARD` | If you set `1`, the `darling.json` that setup writes has `web.enabled` on and a web token that setup makes for you. The token is stored encrypted in `web.network.encryptedToken`. The dashboard listens on this machine only and asks for that token. To show it, run `& "C:\Program Files\PerformanceMonitorDarling\PerformanceMonitor.Darling.Service.exe" --print-web-token` in an elevated PowerShell (use your install folder if you chose another). If `darling.json` already exists, setup ignores this property and leaves its web settings as they are. |
-| `PURGEDATA` | If you set `1` on uninstall, the uninstall also deletes the store. |
+| `PURGEDATA` | If you set `1` on uninstall, the uninstall also deletes the store, and removes the `PerformanceMonitor Darling Operators` group when the install made it. A group an administrator made is kept. |
 
 The MSI and the scripts must not manage the same install. If `install-darling.ps1` already installed the service on this machine, the MSI stops and changes nothing. To switch, run `uninstall-darling.ps1` from the script install's folder, which keeps `darling.json` and the store. Then run the MSI again with the same `INSTALLFOLDER`. To stay on the scripts, keep using `upgrade-darling.ps1`. In the other direction, `install-darling.ps1`, `upgrade-darling.ps1` and `uninstall-darling.ps1` refuse to run over an MSI install. Uninstall an MSI install from Settings, Apps.
 

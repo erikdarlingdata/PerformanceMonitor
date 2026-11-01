@@ -30,6 +30,7 @@ import { VIZ } from "../panels.js";
 import { routeHash, el, mount, loadingStrip, errorStrip, emptyStrip, noticeStrip, listOnlyNote, readTool, apiGet, apiGetFleet, apiWrite, onSessionExpired, localizeIsoText, storeHash } from "../util.js";
 import { getSession } from "../views-api.js";
 import { writeNote, startPractice, writeAccess, SIGN_IN_SENTENCE, NOTE_MAX_LENGTH, NOTE_MAX_DAYS, NOTE_DEFAULT_DAYS } from "../investigation-writes.js";
+import { dailyReportEditor } from "./admin-daily-report.js";
 import { buildAgentChanges, resetAgentChangesStatus } from "./admin-agent-changes.js";
 import { buildServerActions, resetServerActionsStatus } from "./admin-server-actions.js";
 import { buildProfiles, readAgentSetupAccess, routeColumns, routeEditorNodes, routeListOnlyNodes, routeUseText } from "./admin-agent-setup.js";
@@ -134,6 +135,7 @@ const GROUP_LABELS = {
   health_bands: "Health bands",
   analysis: "Automated analysis",
   fleet_sweep: "Fleet sweep reports",
+  daily_report: "Daily Health Report",
 };
 
 /* A unit at the end of a key reads as a bracketed unit: wait_threshold_seconds -> "wait threshold (seconds)". */
@@ -189,6 +191,7 @@ export const SETTING_SECTIONS = [
   { title: "Global alert filters", groups: [], top: ["excluded_databases", "excluded_volumes"] },
   { title: "Automated analysis", groups: ["analysis"], top: [] },
   { title: "Fleet sweep reports", groups: ["fleet_sweep"], top: [] },
+  { title: "Daily Health Report", groups: ["daily_report"], top: [] },
 ];
 
 /* The fields the page shows for each group. A key the read carries that is not listed here is not drawn, so a field
@@ -198,7 +201,7 @@ export const GROUP_FIELDS = {
   blocking: ["enabled", "count_threshold", "wait_threshold_seconds", "pg_count_threshold"],
   deadlocks: ["enabled", "count_threshold", "pg_count_threshold"],
   health_bands: ["deadlock_warn_per_hour", "deadlock_critical_per_hour", "blocking_warn_per_hour", "blocking_critical_per_hour",
-    "blocking_warn_wait_seconds", "blocking_critical_wait_seconds"],
+    "blocking_warn_wait_seconds", "blocking_critical_wait_seconds", "blocking_warn_snapshot_wait_seconds", "blocking_critical_snapshot_wait_seconds"],
   poison_wait: ["enabled", "threshold_ms"],
   runnable_queue: ["enabled", "warning_per_scheduler", "critical_per_scheduler"],
   client_timeouts: ["enabled", "warning_per_minute", "critical_per_minute", "warning_multiple", "critical_multiple"],
@@ -223,6 +226,7 @@ export const GROUP_FIELDS = {
   analysis: ["enabled", "interval_minutes", "notifications_enabled", "notify_severity", "notify_cooldown_minutes",
     "uncorroborated_route", "uncorroborated_route_source"],
   fleet_sweep: ["enabled", "interval_minutes"],
+  daily_report: ["enabled", "send_at", "time_zone", "title"],
 };
 
 /* A key that names a credential or a destination is never shown, whatever the read carries. */
@@ -1307,11 +1311,11 @@ const buildProfilesTab = (body, generation) => buildProfiles(body, generation, {
 });
 
 const SETTINGS_NOTE =
-  "Read only. Delivery credentials (SMTP, webhooks) are not reported by this read. The data-collection flags " +
+  "Read only, except the Daily Health Report, which a signed-in admin can change here. Delivery credentials (SMTP, webhooks) are not reported by this read. The data-collection flags " +
   "(plan capture and similar) are not carried by it either; they stay in the desktop Settings window.";
 
 async function buildSettings(body, generation) {
-  const res = await readTool("get_alert_settings", {});
+  const [res, session] = await Promise.all([readTool("get_alert_settings", {}), getSession()]);
   if (generation !== renderGeneration) return;
   const bad = failure(res);
   if (bad) return mount(body, bad);
@@ -1321,6 +1325,10 @@ async function buildSettings(body, generation) {
   for (const s of sections) {
     nodes.push(el("h3", { class: "section-title", text: s.title }));
     nodes.push(VIZ.table({ rows: s.rows }, { rowsKey: "rows", columns: SETTING_COLUMNS }));
+    /* #7041: the Daily Health Report is the one setting group the web edits; a signed-in admin gets the form under its rows. */
+    if (s.title === "Daily Health Report" && session && session.can_edit === true) {
+      nodes.push(dailyReportEditor(res.data.daily_report, () => (shownTab === "settings" && shownBody ? startBuilder("settings", shownBody, ++renderGeneration) : undefined)));
+    }
   }
   mount(body, nodes);
 }

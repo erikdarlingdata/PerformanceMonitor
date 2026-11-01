@@ -228,7 +228,7 @@ public sealed class BlockingDatabaseFilterLiveTests
         await RunAsync(async (postgres, now, ct) =>
         {
             using (var doc = JsonDocument.Parse(await DarlingMcpBlockingTools.GetBlockingTrend(
-                postgres, ServerName, 1, null, DatabaseFilter.Of(["A", "B"]), ct)))
+                postgres, ServerName, 1, null, DatabaseFilter.Of(["A", "B"]), cancellationToken: ct)))
             {
                 Assert.Equal(2, doc.RootElement.GetProperty("trend").EnumerateArray().Sum(p => p.GetProperty("count").GetInt32()));
                 Assert.Equal("the chosen databases", doc.RootElement.GetProperty("database_name").GetString());
@@ -239,19 +239,19 @@ public sealed class BlockingDatabaseFilterLiveTests
             /* The collectors ran (seeded below) and none of the chosen databases' blocking was in the captures: an all-clear
                for THOSE databases, worded that way, with the status word unchanged. */
             var one = JsonDocument.Parse(await DarlingMcpBlockingTools.GetBlockingTrend(
-                postgres, ServerName, 1, null, DatabaseFilter.One("Nope"), ct)).RootElement;
+                postgres, ServerName, 1, null, DatabaseFilter.One("Nope"), cancellationToken: ct)).RootElement;
             Assert.Equal("empty", one.GetProperty("status").GetString());
             Assert.Equal(JsonValueKind.Null, one.GetProperty("source").ValueKind);
             Assert.Contains("for the database Nope in the last 1 hour(s)", one.GetProperty("message").GetString(), StringComparison.Ordinal);
 
             var many = JsonDocument.Parse(await DarlingMcpBlockingTools.GetBlockingTrend(
-                postgres, ServerName, 1, null, DatabaseFilter.Of(["Nope", "Gone"]), ct)).RootElement;
+                postgres, ServerName, 1, null, DatabaseFilter.Of(["Nope", "Gone"]), cancellationToken: ct)).RootElement;
             Assert.Equal("empty", many.GetProperty("status").GetString());
             Assert.Contains("for the chosen databases in the last 1 hour(s)", many.GetProperty("message").GetString(), StringComparison.Ordinal);
 
             /* A window the collectors never ran in stays "unavailable" whatever the selection (no capture is no all-clear). */
             var gap = JsonDocument.Parse(await DarlingMcpBlockingTools.GetBlockingTrend(
-                postgres, ServerName, 1, now.AddDays(-20).ToString("o"), DatabaseFilter.One("Nope"), ct)).RootElement;
+                postgres, ServerName, 1, now.AddDays(-20).ToString("o"), DatabaseFilter.One("Nope"), cancellationToken: ct)).RootElement;
             Assert.Equal("unavailable", gap.GetProperty("status").GetString());
         });
     }

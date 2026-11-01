@@ -67,7 +67,7 @@ VALUES ($1, $2, $3, $4, 'appdb', $5, $6, $7, $8, $9, $10, $11, NULL)",
                     CollectionIdGenerator.Next(), r.T, ServerId, ServerName, r.Commit, r.Rollback, r.Read, r.Hit, r.TempFiles, r.TempBytes, r.Deadlocks);
             }
 
-            var web = Root(await DarlingMcpPgTrendTools.GetPgDatabaseTrend(postgres, ServerName, null, Hours, AsOfText, null, TrendBudget.Chart, ct));
+            var web = Root(await DarlingMcpPgTrendTools.GetPgDatabaseTrend(postgres, ServerName, null, Hours, AsOfText, null, TrendBudget.Chart, cancellationToken: ct));
             var (start, end) = Window();
             var read = await viewer.GetPgDatabaseTrendAsync(ServerId, start, end, ct);
 
@@ -105,7 +105,7 @@ VALUES ($1, $2, $3, $4, 'appdb', $5, $6, $7, $8, $9, $10, $11, NULL)",
                 await SeedStatementAsync(connection, ct, T0.AddMinutes(i), 88, deltaCalls: 5, deltaMs: 5.0, interval: 60);
             }
 
-            var web = Root(await DarlingMcpPgTrendTools.GetPgQueryDurationTrend(postgres, ServerName, null, Hours, AsOfText, null, TrendBudget.Chart, ct));
+            var web = Root(await DarlingMcpPgTrendTools.GetPgQueryDurationTrend(postgres, ServerName, null, Hours, AsOfText, null, TrendBudget.Chart, cancellationToken: ct));
             var (start, end) = Window();
             var read = await viewer.GetPgQueryDurationTrendAsync(ServerId, start, end, ct);
 
@@ -145,7 +145,7 @@ VALUES ($1, $2, $3, $4, 'appdb', $5, $6, $7, $8, $9, $10, $11, NULL)",
                     CollectionIdGenerator.Next(), T0.AddMinutes(i), ServerId, ServerName, 10L * i, 100L * i);
             }
 
-            var web = Root(await DarlingMcpPgTrendTools.GetPgWaitTrend(postgres, ServerName, null, Hours, AsOfText, ct));
+            var web = Root(await DarlingMcpPgTrendTools.GetPgWaitTrend(postgres, ServerName, null, Hours, AsOfText, cancellationToken: ct));
             var (start, end) = Window();
             var read = await viewer.GetPgWaitTrendAsync(ServerId, start, end, ct);
 
@@ -179,7 +179,7 @@ VALUES ($1, $2, $3, $4, 'appdb', $5, $6, $7, $8, $9, $10, $11, NULL)",
                 await SeedIoAsync(connection, ct, T0.AddMinutes(i), "checkpointer", reads: 50 + i, hits: 0);
             }
 
-            var web = Root(await DarlingMcpPgTrendTools.GetPgIoTrend(postgres, ServerName, null, null, Hours, AsOfText, null, TrendBudget.Chart, ct));
+            var web = Root(await DarlingMcpPgTrendTools.GetPgIoTrend(postgres, ServerName, null, null, Hours, AsOfText, null, TrendBudget.Chart, cancellationToken: ct));
             var (start, end) = Window();
             var read = await viewer.GetPgIoTrendAsync(ServerId, start, end, ct);
 

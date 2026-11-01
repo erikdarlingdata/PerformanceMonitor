@@ -2,7 +2,7 @@
 
 Audience: operators.
 
-This page moved to [MCP server](../mcp-server.md#darling). That page now holds the Darling setup, the network access and the troubleshooting for both editions.
+This page moved to [MCP server](../mcp-server.md#darling). That page now holds the Darling setup, the network access and the troubleshooting for both editions. It also has the [GitHub Copilot in VS Code](../mcp-server.md#github-copilot-in-vs-code) setup.
 
 ## Why it is off
 

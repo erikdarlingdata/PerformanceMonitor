@@ -13,6 +13,7 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
@@ -87,6 +88,7 @@ public sealed class DarlingMcpPgAutovacuumTools
         [Description("Hours of history to analyze, used for the dead-tuple growth comparison. Default 24.")] int hours_back = 24,
         [Description("Maximum tables to return, worst first. Default 20. This is what bounds the page - read truncated to know whether more tables had pending work than were returned.")] int limit = 20,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorForAnswerAsync(postgres, server_name, cancellationToken);
@@ -121,15 +123,23 @@ public sealed class DarlingMcpPgAutovacuumTools
                     return gated;
                 }
 
-                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, JsonSerializer.Serialize(new
+                /* #7010: the collector stores a table only while it has pending work, so the probe reads its logged runs (the web's
+                   source for this read). The all-clear is an empty answer and carries the window floor under hints. */
+                var emptyNotice = await DarlingMcpWindowNotice.ReadForToolAsync(
+                    postgres, "get_pg_autovacuum_health", resolved.ServerName, now.AddHours(-hours_back), now, emptyAnswer: true, logger, cancellationToken);
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, DarlingMcpWindowNotice.FinishEmpty(JsonSerializer.Serialize(new
                 {
                     server = resolved.DisplayName,
                     hours_back,
                     status = "empty",
-                    finding = "No table on this server has dead tuples, pending analyze work, inserts since "
-                            + "its last vacuum, or autovacuum disabled. The collector records only tables with "
-                            + "pending work, so an empty result is the healthy case rather than missing data.",
-                }, McpHelpers.JsonOptions), cancellationToken);
+                    hints = emptyNotice.AsHints(),
+                    finding = McpHelpers.QuietUnlessCut(
+                        emptyNotice.WindowTruncated, emptyNotice.EffectiveStart,
+                        factual: "No table on this server has dead tuples, pending analyze work, inserts since "
+                            + "its last vacuum, or autovacuum disabled in the captures the store holds for the window",
+                        coveredClaim: ". The collector records only tables with "
+                            + "pending work, so an empty result is the healthy case rather than missing data."),
+                }, McpHelpers.JsonOptions), emptyNotice), cancellationToken);
             }
 
             /* #3603: the cost half, read once for every table on the page and attached per table below. The
@@ -230,10 +240,18 @@ public sealed class DarlingMcpPgAutovacuumTools
 
             var tablesWithRuns = tables.Count(t => t.recent_runs is not null);
 
-            return JsonSerializer.Serialize(new
+            /* #7010: the dead-tuple growth comparison and the run history are read over the window, so the answer names where the
+               store's coverage of it starts. */
+            var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
+                postgres, "get_pg_autovacuum_health", resolved.ServerName, now.AddHours(-hours_back), now, emptyAnswer: false, logger, cancellationToken);
+            return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
                 hours_back,
+                /* #7010: the window floor, right after hours_back. */
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 status = "tables_with_pending_maintenance",
                 /* The page's count under the page's name (#3594: a page count is never a total, and it is
                    spelled *_returned so a reader can tell it from one). */
@@ -265,7 +283,7 @@ public sealed class DarlingMcpPgAutovacuumTools
                       + "collector recorded); or nothing on this page was vacuumed in the window, which for a "
                       + "table far past its threshold is itself the finding.",
                 tables,
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions), notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

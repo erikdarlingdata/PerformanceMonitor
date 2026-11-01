@@ -34,6 +34,20 @@ public class AlertContext
     public string? AttachmentFileName { get; set; }
 
     /// <summary>
+    /// #7041: a finished HTML email body, for a scheduled report that renders its own page (the Daily Health Report).
+    /// <see cref="EmailSendCore"/> sends it as the HTML view in place of the shared alert template when it is set; the
+    /// plain view stays the alert's own detail text. Unpersisted like <see cref="AttachmentXml"/>: live-render data,
+    /// not row data, so the alert-history context JSON never carries a page.
+    /// </summary>
+    public string? EmailHtmlBody { get; set; }
+
+    /// <summary>
+    /// #7041: the email subject line to use in place of the shared <c>[SQL Monitor Alert] ... on ...</c> subject
+    /// when it is set. Unpersisted for the same reason as <see cref="EmailHtmlBody"/>.
+    /// </summary>
+    public string? EmailSubject { get; set; }
+
+    /// <summary>
     /// Forces the rendered severity tier (email badge/color, Teams/Slack accent) regardless of
     /// metric name, for metrics graded at runtime — low-disk fires WARNING normally and CRITICAL
     /// when critically low (#1136). <c>null</c> = use the per-metric <see cref="AlertSeverity"/>

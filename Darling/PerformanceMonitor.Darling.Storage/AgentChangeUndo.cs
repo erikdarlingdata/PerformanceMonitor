@@ -16,6 +16,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using NpgsqlTypes;
+using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitor.Darling.Storage;
 
@@ -626,7 +627,7 @@ WHERE journal_id = $1 AND event = 'action_called'", P(calledId)))
 
     private async Task<JsonObject?> ReadCurrentAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, Spec spec, RowKey key, CancellationToken cancellationToken)
     {
-        var columns = string.Join(", ", spec.Fields.Select(f => f.Type == ImageColumnType.Json ? $"{f.Name}::text" : f.Name));
+        var columns = string.Join(", ", spec.Fields.Select(f => f.Type switch { ImageColumnType.Json or ImageColumnType.TimeOfDay => $"{f.Name}::text", ImageColumnType.DayMask => $"{f.Name}::int", _ => f.Name }));
         await using var command = Command(connection, transaction, $"SELECT {columns} FROM {spec.Table} WHERE {Where(key)} FOR UPDATE", KeyParams(key));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
@@ -642,6 +643,8 @@ WHERE journal_id = $1 AND event = 'action_called'", P(calledId)))
                 ImageColumnType.Real => JsonValue.Create(reader.GetDouble(i)),
                 ImageColumnType.Time => JsonValue.Create(Utc(reader.GetDateTime(i)).ToString("o", CultureInfo.InvariantCulture)),
                 ImageColumnType.Json => JsonNode.Parse(reader.GetString(i)),
+                ImageColumnType.DayMask => new JsonArray(MuteRecurrence.DayNames(reader.GetInt32(i)).Select(d => (JsonNode?)JsonValue.Create(d)).ToArray()),
+                ImageColumnType.TimeOfDay => JsonValue.Create(TimeText(reader.GetString(i))),
                 _ => JsonValue.Create(reader.GetString(i)),
             };
         }
@@ -684,6 +687,10 @@ WHERE journal_id = $1 AND event = 'action_called'", P(calledId)))
                     && Math.Abs((x - y).Ticks) < TimeSpan.TicksPerMillisecond / 1000;
             case ImageColumnType.Json:
                 return JsonNode.DeepEquals(Structured(a), Structured(b));
+            case ImageColumnType.DayMask:
+                return DayMaskOf(a) == DayMaskOf(b);
+            case ImageColumnType.TimeOfDay:
+                return TimeText(a.ToString()) == TimeText(b.ToString());
             case ImageColumnType.Bool:
                 return a.GetValue<bool>() == b.GetValue<bool>();
             case ImageColumnType.Whole:
@@ -692,6 +699,17 @@ WHERE journal_id = $1 AND event = 'action_called'", P(calledId)))
                 return string.Equals(a.GetValue<string>(), b.GetValue<string>(), StringComparison.Ordinal);
         }
     }
+
+    /// <summary>A journaled day list (<c>["Mon","Fri"]</c>) as the column's bit mask (#7040).</summary>
+    private static int DayMaskOf(JsonNode node)
+    {
+        var names = node is JsonArray array ? array.Select(n => n?.ToString()).ToList() : [];
+        return MuteRecurrence.TryParseDays(names, out var mask, out _) ? mask ?? 0 : 0;
+    }
+
+    /// <summary>A time of day as <c>HH:mm</c> (seconds only when set), whichever of the stored or journaled spellings it arrives in.</summary>
+    private static string TimeText(string text) =>
+        MuteRecurrence.TryParseTime(text, out var time) ? MuteRecurrence.FormatTime(time) : text;
 
     private static JsonNode? Structured(JsonNode node) =>
         node is JsonValue v && v.TryGetValue(out string? s) && s is not null && (s.TrimStart().StartsWith('{') || s.TrimStart().StartsWith('['))
@@ -720,6 +738,12 @@ WHERE journal_id = $1 AND event = 'action_called'", P(calledId)))
             TypedValue = value is null ? null : DateTime.SpecifyKind(DateTime.Parse(value.ToString(), CultureInfo.InvariantCulture,
                 DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal), DateTimeKind.Unspecified),
             NpgsqlDbType = NpgsqlDbType.Timestamp,
+        },
+        ImageColumnType.DayMask => new NpgsqlParameter<short?> { TypedValue = value is null ? null : (short?)DayMaskOf(value), NpgsqlDbType = NpgsqlDbType.Smallint },
+        ImageColumnType.TimeOfDay => new NpgsqlParameter<TimeOnly?>
+        {
+            TypedValue = value is not null && MuteRecurrence.TryParseTime(value.ToString(), out var tod) ? tod : null,
+            NpgsqlDbType = NpgsqlDbType.Time,
         },
         ImageColumnType.Json => new NpgsqlParameter<string?> { TypedValue = value is null ? null : (Structured(value) ?? value).ToJsonString(), NpgsqlDbType = NpgsqlDbType.Jsonb },
         _ => PText(value?.GetValue<string>()),

@@ -14,6 +14,9 @@
  *
  * The read carries no updated-at or last-matched field, so the page shows created and expiry only.
  *
+ * A rule can also repeat on a schedule (#7040): days of the week, a daily start and end time, and an IANA time zone.
+ * The four fields travel together (scheduleOf, scheduleBody, schedulePatch); all four empty is a one-off rule.
+ *
  * Polling: app.js re-calls renderMuteRules on its 60 s tick. The form, its typed values and its focus live in
  * module scope (`live`, `form`): a tick re-reads and redraws the LIST only and never touches an open form.
  *
@@ -45,6 +48,15 @@ const STARTS = "starts_at_utc";
    the rule is keyed on the server's store id (the name is only its label). */
 const SERVER_ID = "server_id";
 const EDITABLE_KEYS = TEXT_FIELDS.map((f) => f.key).concat([STARTS, EXPIRY, SERVER_ID]);
+/* #7040: the schedule's four form fields, named as the write routes name them. The read names the times recur_start_time and
+   recur_end_time; the write names them recur_start and recur_end. */
+const RECUR_DAYS = "recur_days";
+const RECUR_START = "recur_start";
+const RECUR_END = "recur_end";
+const RECUR_ZONE = "recur_time_zone";
+export const SCHEDULE_KEYS = [RECUR_DAYS, RECUR_START, RECUR_END, RECUR_ZONE];
+/** The day names the form offers, Monday first, as the write routes accept them. */
+export const DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 /* The only fields a link may fill in: the ones the app's own "Mute this alert" and "Mute similar" links send
    (mute-context.js's mutePrefillParams, alerts.js's muteCell). The reason, the external source, the start and the
    expiry are never taken from a link: they are typed in the form (#6286). */
@@ -78,6 +90,56 @@ function fieldValue(values, key) {
   return raw === "" ? null : raw;
 }
 
+/** The browser's own IANA time zone, the default for a new schedule. "" when the browser does not say. */
+export function browserZone() {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "";
+  } catch {
+    return "";
+  }
+}
+
+/** A day name from the form or the read to its three-letter lower-case key ("Monday" and "mon" both give "mon"). */
+function dayKey(name) {
+  return String(name == null ? "" : name).trim().slice(0, 3).toLowerCase();
+}
+
+/** The schedule a form holds, as the write routes take it, or null when the form has none. A schedule needs the times: days with
+ *  no time are kept so the server can refuse them with its own message. The zone rides only with times, since the form starts
+ *  with the browser's zone filled in and that must not turn a one-off rule into a scheduled one. */
+export function scheduleOf(values) {
+  const start = values[RECUR_START] == null ? "" : String(values[RECUR_START]).trim();
+  const end = values[RECUR_END] == null ? "" : String(values[RECUR_END]).trim();
+  const days = Array.isArray(values[RECUR_DAYS]) ? values[RECUR_DAYS].filter((d) => DAY_NAMES.includes(d)) : [];
+  if (!start && !end && days.length === 0) return null;
+  const zone = values[RECUR_ZONE] == null ? "" : String(values[RECUR_ZONE]).trim();
+  return {
+    [RECUR_DAYS]: days.length ? days : null,
+    [RECUR_START]: start || null,
+    [RECUR_END]: end || null,
+    [RECUR_ZONE]: start || end ? zone || null : null,
+  };
+}
+
+/** The stored rule's schedule in the same shape as scheduleOf, or null for a one-off rule. */
+function storedSchedule(rule) {
+  if (!rule || (rule.recur_start_time == null && rule.recur_end_time == null)) return null;
+  return {
+    [RECUR_DAYS]: Array.isArray(rule.recur_days) && rule.recur_days.length ? rule.recur_days : null,
+    [RECUR_START]: rule.recur_start_time || null,
+    [RECUR_END]: rule.recur_end_time || null,
+    [RECUR_ZONE]: rule.recur_time_zone || null,
+  };
+}
+
+function sameSchedule(a, b) {
+  if (a === null || b === null) return a === b;
+  const days = (x) => (x[RECUR_DAYS] ? x[RECUR_DAYS].map(dayKey).sort().join(",") : "");
+  /* A stored zone the person did not touch is the same schedule; an empty zone on the form means "the default", not a change. */
+  return days(a) === days(b) && a[RECUR_START] === b[RECUR_START] && a[RECUR_END] === b[RECUR_END]
+    && (a[RECUR_ZONE] || "") === (b[RECUR_ZONE] || "");
+}
+
 /** The POST body: only the fields that hold a value. A blank form gives {} — see isEmptyCreate. */
 export function formToCreateBody(values) {
   const body = {};
@@ -85,12 +147,16 @@ export function formToCreateBody(values) {
     const v = fieldValue(values, key);
     if (v !== null) body[key] = v;
   }
+  const schedule = scheduleOf(values);
+  if (schedule) {
+    for (const key of SCHEDULE_KEYS) if (schedule[key] !== null) body[key] = schedule[key];
+  }
   return body;
 }
 
 /** True for a create body that names no scope at all: such a rule mutes EVERY alert, so the page confirms first. */
 export function isEmptyCreate(body) {
-  return !body || Object.keys(body).filter((k) => k !== "reason" && k !== EXPIRY && k !== STARTS).length === 0;
+  return !body || Object.keys(body).filter((k) => k !== "reason" && k !== EXPIRY && k !== STARTS && !SCHEDULE_KEYS.includes(k)).length === 0;
 }
 
 export const EMPTY_CREATE_WARNING =
@@ -111,6 +177,12 @@ export function buildPatch(original, values) {
       : next === old;
     if (!same) patch[key] = next;
   }
+  /* #7040: the schedule is one unit. When any part changed, all four are sent, so the times always go together; clearing it
+     sends all four as null. */
+  const nextSchedule = scheduleOf(values);
+  if (!sameSchedule(nextSchedule, storedSchedule(original))) {
+    for (const key of SCHEDULE_KEYS) patch[key] = nextSchedule ? nextSchedule[key] : null;
+  }
   return patch;
 }
 
@@ -124,7 +196,7 @@ export function interpretWrite(status, body) {
   if (status === 409 && b.status === "already_exists") return { kind: "exists", existingId: b.rule_id || null, message };
   if (status === 400) {
     const m = /'([a-z_]+)'/.exec(message);
-    const field = m && EDITABLE_KEYS.includes(m[1]) ? m[1] : null;
+    const field = m && (EDITABLE_KEYS.includes(m[1]) || SCHEDULE_KEYS.includes(m[1])) ? m[1] : null;
     return { kind: "invalid", field, message };
   }
   if (status >= 200 && status < 300) return { kind: "ok", rule: b.mute_rule || null, status: b.status || null };
@@ -236,7 +308,7 @@ async function refreshList(state) {
 
 function drawList(state) {
   if (!state.rules.length) return mount(state.listBox, emptyStrip("No mute rules are configured."));
-  const head = ["Status", "Scope", "External source", "Reason", "Starts", "Expires", "Created", state.canEdit ? "" : null]
+  const head = ["Status", "Scope", "External source", "Reason", "Schedule", "Starts", "Expires", "Created", state.canEdit ? "" : null]
     .filter((h) => h !== null)
     .map((h) => el("th", { text: h }));
   const rows = state.rules.map((r) => ruleRow(r, state.canEdit));
@@ -252,6 +324,14 @@ function statusOf(r) {
   return isUpcoming(r) ? "Upcoming" : "Enabled";
 }
 
+/** The Schedule cell: the backend's schedule text and whether a window is open now, or a dash for a one-off rule. */
+export function scheduleCell(r) {
+  if (!r.schedule) return "—";
+  if (r.in_window_now === true) return r.schedule + " (in window now)";
+  if (r.in_window_now === false) return r.schedule + " (outside window)";
+  return r.schedule;
+}
+
 function ruleRow(r, canEdit) {
   const st = statusOf(r);
   const scope = r.match_summary || "Every alert";
@@ -260,6 +340,7 @@ function ruleRow(r, canEdit) {
     el("td", { text: scope, title: r.server_id != null ? "server_id " + r.server_id : null }),
     el("td", { text: r.external_source || "—" }),
     el("td", { text: r.reason || "—" }),
+    el("td", { text: scheduleCell(r), title: r.next_window_start_utc ? "Next window opens " + localTime(r.next_window_start_utc) : null }),
     el("td", { text: r.starts_at_utc ? localTime(r.starts_at_utc) + (isUpcoming(r) ? " (not started)" : "") : "At once" }),
     el("td", { text: r.expires_at_utc ? localTime(r.expires_at_utc) + (isExpired(r) ? " (expired)" : "") : "Never" }),
     el("td", { text: r.created_at_utc ? localTime(r.created_at_utc) : "—" }),
@@ -279,6 +360,11 @@ function valuesOf(r) {
   for (const f of TEXT_FIELDS) v[f.key] = r[f.key] || "";
   v[STARTS] = isoToLocalInput(r.starts_at_utc);
   v[EXPIRY] = isoToLocalInput(r.expires_at_utc);
+  /* A null recur_days is every day, which the form says as no day ticked. */
+  v[RECUR_DAYS] = Array.isArray(r.recur_days) ? r.recur_days.map((d) => DAY_NAMES.find((n) => dayKey(n) === dayKey(d))).filter(Boolean) : [];
+  v[RECUR_START] = r.recur_start_time || "";
+  v[RECUR_END] = r.recur_end_time || "";
+  v[RECUR_ZONE] = r.recur_time_zone || browserZone();
   return v;
 }
 
@@ -303,6 +389,8 @@ async function remove(r) {
 
 function openForm(f) {
   form = { errors: {}, banner: null, exists: null, confirmEmpty: false, ...f };
+  /* A new rule's schedule zone starts as the browser's; it rides along only when times are filled in (see scheduleOf). */
+  if (form.values[RECUR_ZONE] == null) form.values[RECUR_ZONE] = browserZone();
   drawForm();
 }
 
@@ -326,6 +414,7 @@ function formNode() {
   const fields = TEXT_FIELDS.map((f) => fieldRow(f.key, f.label, "text"));
   fields.push(fieldRow(STARTS, "Starts (local time; blank = at once)", "datetime-local"));
   fields.push(fieldRow(EXPIRY, "Expires (local time; blank = never)", "datetime-local"));
+  fields.push(scheduleNode());
   const empty = form.mode === "create" && isEmptyCreate(formToCreateBody(form.values));
   return el("div", { class: "card mute-form" }, [
     el("h3", { text: form.mode === "create" ? "New mute rule" : "Edit mute rule" }),
@@ -357,6 +446,42 @@ function goToExisting() {
     row.classList.add("mute-rules-highlight");
     if (row.scrollIntoView) row.scrollIntoView({ block: "center" });
   }
+}
+
+/** The optional repeating schedule: day boxes, start and end time, and the zone. All four empty is a one-off rule. */
+function scheduleNode() {
+  const days = Array.isArray(form.values[RECUR_DAYS]) ? form.values[RECUR_DAYS] : (form.values[RECUR_DAYS] = []);
+  const boxes = DAY_NAMES.map((d) => {
+    const box = el("input", { type: "checkbox", "data-day": d, "aria-label": d });
+    box.checked = days.includes(d);
+    box.addEventListener("change", () => {
+      const now = form.values[RECUR_DAYS].filter((x) => x !== d);
+      if (box.checked) now.push(d);
+      form.values[RECUR_DAYS] = DAY_NAMES.filter((x) => now.includes(x));
+      form.confirmEmpty = false;
+    });
+    return el("label", { class: "mute-day" }, [box, el("span", { text: " " + d })]);
+  });
+  const zoneRow = fieldRow(RECUR_ZONE, "Time zone (IANA id, e.g. America/New_York)", "text");
+  const zoneInput = zoneRow.querySelector("input");
+  if (typeof Intl !== "undefined" && typeof Intl.supportedValuesOf === "function") {
+    try {
+      const list = el("datalist", { id: "mute-zones" }, Intl.supportedValuesOf("timeZone").map((z) => el("option", { value: z })));
+      zoneInput.setAttribute("list", "mute-zones");
+      zoneRow.appendChild(list);
+    } catch {
+      /* The browser does not list its zones; the box still takes a typed id. */
+    }
+  }
+  return el("fieldset", { class: "mute-schedule" }, [
+    el("legend", { text: "Repeats (optional)" }),
+    el("div", { class: "meta", text: "Mute only inside a daily window. Leave the times blank for a one-off rule. With no day ticked, every day counts. A window that ends before it starts crosses midnight and belongs to the day it starts." }),
+    el("div", { class: "mute-days" }, boxes),
+    form.errors[RECUR_DAYS] ? el("span", { class: "mute-rules-field-error", text: form.errors[RECUR_DAYS] }) : null,
+    fieldRow(RECUR_START, "From (daily start, HH:mm)", "time"),
+    fieldRow(RECUR_END, "To (daily end, HH:mm)", "time"),
+    zoneRow,
+  ]);
 }
 
 function fieldRow(key, label, type) {

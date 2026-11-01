@@ -75,7 +75,7 @@ public sealed class ChartIntegerTicksPinTests
         Assert.Equal(2, countPanels);
         Assert.Equal(countPanels, Regex.Matches(tabs, @"(?:COUNT_SERIES|BLOCKING_REPORT_SERIES), \{\n\s+subtitle: ctx\.label,\n\s+format: ""int"",").Count);
 
-        /* The Blocked Sessions chart is a fanout spec rather than a line() call. */
+        /* The Blocked Sessions chart is a fanout spec rather than a linePanel() call. */
         Assert.Matches(@"series: BLOCKED_SESSION_SERIES,\n\s+format: ""int"",", tabs);
     }
 

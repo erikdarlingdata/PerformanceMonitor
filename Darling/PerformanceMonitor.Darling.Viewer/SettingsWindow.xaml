@@ -449,10 +449,10 @@
                                     <TextBlock x:Name="BandBlockingWarnPerHourLabel" Text="Blocking warn at" VerticalAlignment="Center"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                     <TextBox AutomationProperties.LabeledBy="{Binding ElementName=BandBlockingWarnPerHourLabel}" x:Name="BandBlockingWarnPerHourBox" Width="45" Text="5.0" Margin="6,0,0,0" VerticalAlignment="Center"/>
-                                    <TextBlock Text="reports per hour; critical at" VerticalAlignment="Center" Margin="2,0,0,0"
+                                    <TextBlock Text="waits per hour; critical at" VerticalAlignment="Center" Margin="2,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
-                                    <TextBox AutomationProperties.Name="Blocking critical at, reports per hour" x:Name="BandBlockingCriticalPerHourBox" Width="45" Text="20.0" Margin="6,0,0,0" VerticalAlignment="Center"/>
-                                    <TextBlock Text="per hour (1.0 or above)" VerticalAlignment="Center" Margin="2,0,0,0"
+                                    <TextBox AutomationProperties.Name="Blocking critical at, waits per hour" x:Name="BandBlockingCriticalPerHourBox" Width="45" Text="20.0" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                                    <TextBlock Text="waits per hour, the unit the Blocking Count alert uses (1.0 or above)" VerticalAlignment="Center" Margin="2,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                 </WrapPanel>
                                 <WrapPanel Orientation="Horizontal" Margin="20,4,0,0">
@@ -463,6 +463,16 @@
                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                     <TextBox AutomationProperties.Name="Longest block critical at, seconds" x:Name="BandBlockingCriticalWaitSecondsBox" Width="55" Text="60.0" Margin="6,0,0,0" VerticalAlignment="Center"/>
                                     <TextBlock Text="seconds (1.0 or above; critical not below warn)" VerticalAlignment="Center" Margin="2,0,0,0"
+                                               Foreground="{DynamicResource ForegroundBrush}"/>
+                                </WrapPanel>
+                                <WrapPanel Orientation="Horizontal" Margin="20,4,0,0">
+                                    <TextBlock x:Name="BandBlockingWarnSnapshotWaitSecondsLabel" Text="Total wait in one snapshot warns at" VerticalAlignment="Center"
+                                               Foreground="{DynamicResource ForegroundBrush}"/>
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=BandBlockingWarnSnapshotWaitSecondsLabel}" x:Name="BandBlockingWarnSnapshotWaitSecondsBox" Width="55" Text="0.0" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                                    <TextBlock Text="seconds; critical at" VerticalAlignment="Center" Margin="2,0,0,0"
+                                               Foreground="{DynamicResource ForegroundBrush}"/>
+                                    <TextBox AutomationProperties.Name="Total wait in one snapshot critical at, seconds" x:Name="BandBlockingCriticalSnapshotWaitSecondsBox" Width="55" Text="0.0" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                                    <TextBlock TextWrapping="Wrap" Text="seconds (0 turns a tier off, otherwise 1.0 or above; set to the Blocking Wait Time alert's bar to colour on the same measure)" VerticalAlignment="Center" Margin="2,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                 </WrapPanel>
                                 <TextBlock Text="Normalised over whatever window a surface asks for, so one pair means the same condition on a 1-hour and a 24-hour read."
@@ -1042,6 +1052,37 @@
                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                     <TextBox AutomationProperties.LabeledBy="{Binding ElementName=FleetSweepIntervalLabel}" x:Name="FleetSweepIntervalBox" Width="45" TextAlignment="Center" VerticalAlignment="Center"/>
                                     <TextBlock Text="minutes (15 - 1440)" VerticalAlignment="Center" Margin="4,0,0,0"
+                                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                                </WrapPanel>
+
+                                <!-- #7041 (V232): the Daily Health Report. Like the fleet sweep it is outside the master alerts toggle; the
+                                     service sends it to the routes for the "reports" family or the "Daily Health Report" metric. -->
+                                <TextBlock Text="Daily Health Report" FontWeight="SemiBold" FontSize="12"
+                                           Foreground="{DynamicResource ForegroundBrush}" Margin="20,14,0,4"/>
+                                <TextBlock Text="One report a day on the last 24 hours across the fleet, sent through your notification channels at the time below. Off by default. To send it to chosen recipients only, add a notification route for the reports family or the Daily Health Report metric."
+                                           FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
+                                           Margin="20,0,0,4" TextWrapping="Wrap"/>
+                                <CheckBox x:Name="DailyReportEnabledCheckBox" Content="Send a daily health report"
+                                          Margin="20,4,0,0" Foreground="{DynamicResource ForegroundBrush}"/>
+                                <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
+                                    <TextBlock x:Name="DailyReportSendAtLabel" Text="Send at" VerticalAlignment="Center" Margin="0,0,8,0"
+                                               Foreground="{DynamicResource ForegroundBrush}"/>
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=DailyReportSendAtLabel}" x:Name="DailyReportSendAtBox" Width="60" TextAlignment="Center" VerticalAlignment="Center"/>
+                                    <TextBlock Text="(HH:mm, 24-hour)" VerticalAlignment="Center" Margin="4,0,0,0"
+                                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                                </WrapPanel>
+                                <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
+                                    <TextBlock x:Name="DailyReportTimeZoneLabel" Text="Time zone" VerticalAlignment="Center" Margin="0,0,8,0"
+                                               Foreground="{DynamicResource ForegroundBrush}"/>
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=DailyReportTimeZoneLabel}" x:Name="DailyReportTimeZoneBox" Width="220" VerticalAlignment="Center"/>
+                                    <TextBlock Text="(an IANA id such as America/New_York; blank uses the service host's zone)" VerticalAlignment="Center" Margin="4,0,0,0"
+                                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                                </WrapPanel>
+                                <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
+                                    <TextBlock x:Name="DailyReportTitleLabel" Text="Title" VerticalAlignment="Center" Margin="0,0,8,0"
+                                               Foreground="{DynamicResource ForegroundBrush}"/>
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=DailyReportTitleLabel}" x:Name="DailyReportTitleBox" Width="260" MaxLength="100" VerticalAlignment="Center"/>
+                                    <TextBlock Text="(optional; blank uses Daily Health Report)" VerticalAlignment="Center" Margin="4,0,0,0"
                                                Foreground="{DynamicResource ForegroundMutedBrush}"/>
                                 </WrapPanel>
                             </StackPanel>

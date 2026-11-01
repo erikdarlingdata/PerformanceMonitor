@@ -749,7 +749,7 @@ public sealed class TimeHonestyRungReadTests : IClassFixture<SharedDuckDbFixture
         var root = doc.RootElement;
 
         Assert.Equal(
-            new[] { "server", "hours_back", "bucket", "bucket_minutes", "aggregate_note", "note", "samples" },
+            new[] { "server", "hours_back", "bucket", "bucket_minutes", "aggregate_note", "note", "samples", "effective_start", "window_truncated", "truncation_note" },
             root.EnumerateObject().Select(p => p.Name).ToArray());
 
         var sample = Assert.Single(root.GetProperty("samples").EnumerateArray());

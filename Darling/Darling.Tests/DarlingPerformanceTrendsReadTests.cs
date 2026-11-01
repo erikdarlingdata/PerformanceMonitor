@@ -57,6 +57,8 @@ public sealed class DarlingPerformanceTrendsReadTests
         try
         {
             await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            /* #7010: the server was registered days ago, so a window of a few hours is inside what the store can cover (the window floor of a server with no collection log runs is its registration time). */
+            await DarlingMcpTestData.ExecAsync(connection, ct, "UPDATE servers SET created_date = $2 WHERE server_id = $1", ServerId, DarlingMcpTestData.Naive(DateTime.UtcNow.AddDays(-3)));
 
             /* ── never sampled: all three siblings refuse to look like a quiet server ── */
             var neverProcs = JsonDocument.Parse(
@@ -86,6 +88,8 @@ public sealed class DarlingPerformanceTrendsReadTests
             /* ── sampled, but outside the window: a quiet window, and widening IS the move ── */
             await SeedProcedureAsync(connection, ct, HoursAgo(48), executions: 10, elapsedUs: 5_000_000);
             await SeedQueryAsync(connection, ct, HoursAgo(48), executions: 10, elapsedUs: 5_000_000);
+            await RecordRunAsync(connection, ct, "procedure_stats");
+            await RecordRunAsync(connection, ct, "query_stats");
 
             var quietProcs = JsonDocument.Parse(
                 await DarlingMcpTrendTools.GetProcedureDurationTrend(postgres, ServerName, 1)).RootElement;
@@ -109,7 +113,19 @@ public sealed class DarlingPerformanceTrendsReadTests
             {
                 AssertDisclosureBlock(envelope);
                 Assert.Equal("raw", envelope.GetProperty("source").GetString());
+            }
+
+            /* #7010: the window floor counts a server in a window when it holds a row there or the collection log records a run there. The quiet
+               answers have the runs recorded above, so their window is covered; the never-sampled answers have neither a row nor a run in the
+               window, so the store holds none of it and they say so. */
+            foreach (var envelope in new[] { quietProcs, quietQueries })
+            {
                 Assert.False(envelope.GetProperty("window_truncated").GetBoolean());
+            }
+
+            foreach (var envelope in new[] { neverProcs, neverStore, neverQueries })
+            {
+                Assert.True(envelope.GetProperty("window_truncated").GetBoolean());
             }
 
             /* Not asserted: effective_hours_back on the empty raw answers. It is derived from the store's
@@ -121,6 +137,10 @@ public sealed class DarlingPerformanceTrendsReadTests
                names the width it would have served. */
             Assert.Equal("1 minute", quietQueries.GetProperty("bucket").GetString());
             Assert.Equal(1, quietQueries.GetProperty("bucket_minutes").GetInt32());
+
+            /* The procedure trend's time axis is the collector's clean runs (a run that stored no row is a measured 0), so the runs recorded for the
+               quiet window must not become points of the series below: it reads the two collections it seeds and nothing else. */
+            await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM collection_log WHERE server_id = $1", ServerId);
 
             /*
                 ── the procedure series, at a rate BELOW one execution per second ──
@@ -304,9 +324,21 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
             Db, 7L, 9L, "Regular", executions, avgDurationUs, intervalId,
             DarlingMcpTestData.Naive(intervalStart));
 
+    /// <summary>
+    /// #7010: one clean collector run for the table's collector half an hour ago. A running collector logs a run every cycle, and the window floor counts a
+    /// server in a window when it holds a row there or the collection log records a run there: a sparse table's quiet window has the runs and no rows.
+    /// </summary>
+    private static Task RecordRunAsync(NpgsqlConnection connection, CancellationToken ct, string table) =>
+        DarlingMcpTestData.ExecAsync(connection, ct,
+            @"INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected)
+VALUES ($1,$2,$3,$4,$5,100,'SUCCESS',0)",
+            CollectionIdGenerator.Next(), ServerId, ServerName, CollectorCatalog.All.First(c => c.TargetTable == table).Name,
+            DarlingMcpTestData.Naive(DateTime.UtcNow.AddMinutes(-30)));
+
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM procedure_stats WHERE server_id = $1", ServerId);
+        await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM collection_log WHERE server_id = $1", ServerId);
         await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM query_stats WHERE server_id = $1", ServerId);
         await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM query_store_stats WHERE server_id = $1", ServerId);
         await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM servers WHERE server_id = $1", ServerId);

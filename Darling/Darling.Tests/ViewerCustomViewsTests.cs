@@ -316,7 +316,7 @@ public sealed class ViewerCustomViewsLiveTests
         try
         {
             await ExecAsync(owner, $"CREATE ROLE {role} LOGIN NOSUPERUSER PASSWORD '{RolePassword}'", ct);
-            foreach (var statement in ViewerGrantReplay.StatementsFor(role, scratch.DatabaseName, "viewer"))
+            foreach (var statement in ViewerGrantReplay.StatementsFor(role, scratch.DatabaseName, "web"))
             {
                 await ExecAsync(owner, statement, ct);
             }

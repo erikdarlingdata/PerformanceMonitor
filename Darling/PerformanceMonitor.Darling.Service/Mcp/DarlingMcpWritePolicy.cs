@@ -150,6 +150,7 @@ internal static class DarlingMcpWritePolicy
         "create_known_pattern",
         "update_known_pattern",
         "delete_known_pattern",
+        "send_daily_health_report_now",
         "set_collector_databases",
         "reset_collector_schedules",
         "update_service_flags",
@@ -238,6 +239,7 @@ internal static class DarlingMcpWritePolicy
         "create_known_pattern",
         "update_known_pattern",
         "delete_known_pattern",
+        "send_daily_health_report_now",
         "set_collector_databases",
         "reset_collector_schedules",
         "update_service_flags",
@@ -447,6 +449,13 @@ internal static class DarlingMcpWritePolicy
                 "submit_investigation_report), which write only investigation state, and the write tools an agent may call with an " +
                 "agent_action. Every other write tool is served to an operator token only. An unserved write fails as unknown: " +
                 "ask the operator, do not retry. " + Data;
+        }
+
+        if (!policy.Writes)
+        {
+            return "This token has the reader role, so it is served the reads only. The write tools, the server registry tools, the " +
+                "investigation tools and the agent actions are never served to it, whatever the settings say. An unserved tool fails as " +
+                "unknown: ask the operator, do not retry. " + Data;
         }
 
         var admin = policy.ServerAdmin

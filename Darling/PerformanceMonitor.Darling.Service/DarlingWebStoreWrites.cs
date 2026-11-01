@@ -23,15 +23,20 @@ internal static class DarlingWebStoreWrites
 
     /// <summary>The 403 sentence for a write the web's store login cannot make. <paramref name="cannot"/> finishes "this dashboard cannot ..."
     /// (for example <c>record feedback</c>). <paramref name="instead"/> is the imperative that says where to do it, with no final period.
-    /// <paramref name="bringYourOwnExtra"/> is appended on a store you bring yourself only. <paramref name="adminWritesOff"/> is true on the
+    /// <paramref name="bringYourOwnExtra"/> is appended on a store you bring yourself only. <paramref name="webLoginWrite"/> is true for a
+    /// write the <c>web</c> role holds the grant for (the store refused the dashboard's login for privilege): on a store you bring yourself the
+    /// sentence then points at the <c>web</c> role, not the admin login. <paramref name="adminWritesOff"/> is true on the
     /// managed store when the dashboard has no admin pool (<c>web.allowAdminWrites</c> is off), and then the sentence names the switch.</summary>
     internal static string Refused(string cannot, bool managedStore, string instead = "Use the Viewer app to make the change",
-        string? bringYourOwnExtra = null, bool adminWritesOff = false) =>
+        string? bringYourOwnExtra = null, bool adminWritesOff = false, bool webLoginWrite = false) =>
         managedStore
             ? $"This dashboard lists only on this store, so it cannot {cannot}. {instead}."
               + (adminWritesOff ? " To let a signed-in admin make it here, set web.allowAdminWrites to true in darling.json and restart the service." : "")
-            : $"This dashboard's store login cannot {cannot}. {instead}, or give the web an admin store login "
-              + "(set postgres.webConnectionString to an admin login)." + bringYourOwnExtra;
+            : webLoginWrite
+                ? $"This dashboard's store login cannot {cannot}. Point postgres.webConnectionString at the web role "
+                  + "tools/provision-roles.sql creates." + bringYourOwnExtra
+                : $"This dashboard's store login cannot {cannot}. {instead}, or give the web an admin store login "
+                  + "(set postgres.webConnectionString to an admin login)." + bringYourOwnExtra;
 
     /// <summary>Whether the managed store's dashboard has no admin pool, so its Admin writes are list-only until <c>web.allowAdminWrites</c> is on.</summary>
     internal static bool AdminWritesOff(bool managedStore, WebAdminArm? arm) => managedStore && arm is null;

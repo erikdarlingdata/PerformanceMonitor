@@ -22,6 +22,7 @@ using Npgsql;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Service.Reports;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
 
@@ -3102,6 +3103,226 @@ internal sealed class DarlingSelfAlertEvaluator
         await RecordDocumentDeliveredAsync(
             _lastSweepRollup, FleetSweepRollupKey, PgSelfAlertDeliveryStampStore.FleetSweepRollupStateKey,
             delivery, FleetSweepRollupInterval, now, "fleet-sweep rollup", cancellationToken);
+    }
+
+    /* ------------------------- #7041: the scheduled Daily Health Report ------------------------- */
+
+    /// <summary>
+    /// The metric name the Daily Health Report fires under (#7041). A WEBHOOK AUTOMATION KEY like its siblings (family
+    /// <c>reports</c>, declared INFO), so it is a const and must stay stable across releases. A route or a mute rule keyed on it
+    /// chooses the channels and recipients, or silences the report.
+    /// </summary>
+    internal const string DailyHealthReportMetric = "Daily Health Report";
+
+    /// <summary>Fleet-level key, non-numeric so it never collides with a real server_id (the <see cref="DiskKey"/> shape).</summary>
+    private const string DailyHealthReportKey = "dailyhealthreport";
+
+    /// <summary>When the report was last known DELIVERED, a cache of the stamp (the <see cref="_lastSweepRollup"/> idiom).</summary>
+    private readonly ConcurrentDictionary<string, DateTime> _lastDailyReport = new();
+
+    /// <summary>
+    /// How long after a failed build or a failed send the next attempt waits. The check rides the 15-second sweep, and a build reads the
+    /// store for every server, so a store that cannot answer must not be asked again every tick.
+    /// </summary>
+    internal static readonly TimeSpan DailyReportRetryDelay = TimeSpan.FromMinutes(5);
+
+    private DateTime _nextDailyReportAttemptUtc = DateTime.MinValue;
+
+    /// <summary>The longest <c>Text</c> a chat or webhook post carries. Teams rejects a card near 28 KB, so a long fleet's text is cut at a line and points at the email and the web page.</summary>
+    internal const int DailyReportMaxTextLength = 10_000;
+
+    /// <summary>Where the report is built from. Null (a test harness, or a build with no builder) means the report is never sent.</summary>
+    internal IDailyHealthReportSource? DailyReportSource { get; set; }
+
+    /// <summary>The report's settings, read live so a store edit takes effect on the next check. Null means off.</summary>
+    internal Func<DailyHealthReportSchedule>? DailyReportSchedule { get; set; }
+
+    /// <summary>
+    /// The scheduled send (#7041), called on every sweep tick (15 seconds): the due check is the only cost until a report is due. The
+    /// report is due at the first check at or after <c>send_at</c> local time in the report's zone, so a service that was down at
+    /// <c>send_at</c> sends when it is back the same local day. One report per local day: the delivered-today stamp
+    /// (<see cref="PgSelfAlertDeliveryStampStore.DailyHealthReportStateKey"/>) holds the instant of the last delivery and is
+    /// compared by local date. A failed delivery writes no stamp, so the next attempt (after <see cref="DailyReportRetryDelay"/>)
+    /// retries the same day. Never backfills: a missed day is not sent late on the next one. A store that cannot answer the stamp read
+    /// falls back to process memory, which re-sends once after a restart, the same fail-open rule the rollup has.
+    /// </summary>
+    public async Task EvaluateDailyHealthReportAsync(CancellationToken cancellationToken)
+    {
+        var source = DailyReportSource;
+        if (DailyReportSchedule?.Invoke() is not { Enabled: true } schedule || source is null || !_settings.AlertsEnabled)
+        {
+            return;
+        }
+
+        var now = _utcNow();
+        if (!schedule.IsDue(now) || now < _nextDailyReportAttemptUtc)
+        {
+            return;
+        }
+
+        if (await DailyReportDeliveredTodayAsync(schedule, now, cancellationToken))
+        {
+            return;
+        }
+
+        DailyHealthReportRendered report;
+        var buildClock = Stopwatch.StartNew();
+        try
+        {
+            report = await source.BuildAsync(schedule.MostRecentSendAtUtc(now), cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            /* A failed build consumes nothing: the next attempt is DailyReportRetryDelay away, the same day. */
+            _nextDailyReportAttemptUtc = now + DailyReportRetryDelay;
+            _logger?.LogWarning(ex, "Daily health report build failed after {ElapsedMs} ms; trying again in {Delay}", buildClock.ElapsedMilliseconds, DailyReportRetryDelay);
+            _readFailures?.RecordReadFailure(null, "daily-health-report self-alert", buildClock.ElapsedMilliseconds);
+            return;
+        }
+
+        var delivery = await DeliverDailyHealthReportAsync(report, schedule.Title, cancellationToken);
+        await RecordDailyReportDeliveredAsync(delivery, now, cancellationToken);
+    }
+
+    /// <summary>
+    /// Sends one built report through the normal alert pipeline: the metric <see cref="DailyHealthReportMetric"/> at the declared INFO tier,
+    /// so notification routes choose the channels and recipients and a mute rule on the metric mutes it. Email carries the report's own HTML
+    /// page and subject; Slack, Teams and the webhook carry its text. Does not touch the delivered-today stamp, so
+    /// <c>send_daily_health_report_now</c> shares this and leaves the day's scheduled report alone.
+    /// </summary>
+    internal Task<AlertDelivery?> DeliverDailyHealthReportAsync(
+        DailyHealthReportRendered report, string title, CancellationToken cancellationToken) =>
+        FireAsync(
+            StoreKey(DailyHealthReportKey), _storeLabel, DailyHealthReportMetric,
+            currentValue: report.ServerCount.ToString(CultureInfo.InvariantCulture),
+            thresholdValue: "no threshold (report)",
+            detail: CapDailyReportText(report.Text),
+            severity: null,
+            shortMessage: report.Subject,
+            numericCurrentValue: report.ServerCount,
+            numericThresholdValue: 0,
+            cancellationToken,
+            /* A once-a-day document has no repeat to throttle: the per-(server, metric) delivery cooldown would otherwise mute the
+               scheduled send for 15 minutes after a manual one and the day's report would never go out (#7041). */
+            context: new AlertContext { EmailHtmlBody = report.Html, EmailSubject = report.Subject, EscalationBypassesCooldown = true },
+            scheduledReport: true,
+            displayName: title);
+
+    /// <summary>
+    /// The manual send (#7041, <c>send_daily_health_report_now</c>): builds the report for the period that ended at the most recent
+    /// <c>send_at</c> and sends it through <see cref="DeliverDailyHealthReportAsync"/>. Never reads or writes the delivered-today stamp or
+    /// the retry delay, so the day's scheduled report is unaffected. Works while the report is off; refused while the alert master switch
+    /// is off, like every other alert delivery. A build failure propagates to the tool, which reports it.
+    /// </summary>
+    internal async Task<Mcp.DailyHealthReportSendResult> SendDailyHealthReportNowAsync(CancellationToken cancellationToken)
+    {
+        var source = DailyReportSource;
+        if (source is null || DailyReportSchedule is not { } scheduleSource)
+        {
+            return Mcp.DailyHealthReportSendResult.Refused("not_available", "This service has no Daily Health Report builder.");
+        }
+
+        if (!_settings.AlertsEnabled)
+        {
+            return Mcp.DailyHealthReportSendResult.Refused("alerts_disabled", "The alert master switch is off, so no alert is delivered.");
+        }
+
+        var schedule = scheduleSource();
+        var periodEnd = schedule.MostRecentSendAtUtc(_utcNow());
+        var report = await source.BuildAsync(periodEnd, cancellationToken);
+        var delivery = await DeliverDailyHealthReportAsync(report, schedule.Title, cancellationToken);
+        return new Mcp.DailyHealthReportSendResult(true, null, null, periodEnd, report.ServerCount, delivery?.Channel ?? "unreported");
+    }
+
+    /// <summary>Cuts the report text at a line break under <see cref="DailyReportMaxTextLength"/> and says where the rest is.</summary>
+    internal static string CapDailyReportText(string text)
+    {
+        if (text.Length <= DailyReportMaxTextLength)
+        {
+            return text;
+        }
+
+        var cut = text.LastIndexOf('\n', DailyReportMaxTextLength - 1);
+        if (cut < DailyReportMaxTextLength / 2)
+        {
+            /* A hard cut lands on a whole text element: a split surrogate pair reaches the chat as U+FFFD (#3625). */
+            cut = McpHelpers.TextElementCutLength(text, DailyReportMaxTextLength);
+        }
+
+        return text[..cut].TrimEnd() + "\n(Shortened for chat. The email and the web page carry the full report.)";
+    }
+
+    /// <summary>
+    /// Whether a report was already delivered on today's local date: process memory first, the stamp when memory cannot answer. A stamp
+    /// that cannot be read leaves the answer as "not delivered" (fail open, counted once), the rollup's rule.
+    /// </summary>
+    private async Task<bool> DailyReportDeliveredTodayAsync(DailyHealthReportSchedule schedule, DateTime now, CancellationToken cancellationToken)
+    {
+        if (!_lastDailyReport.TryGetValue(DailyHealthReportKey, out var known))
+        {
+            known = NoDeliveryKnown;
+            if (_deliveryStamps is not null)
+            {
+                var stampClock = Stopwatch.StartNew();
+                try
+                {
+                    known = await _deliveryStamps.GetDeliveredAtUtcAsync(
+                        PgSelfAlertDeliveryStampStore.DailyHealthReportStateKey, cancellationToken) ?? NoDeliveryKnown;
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    _logger?.LogWarning(ex,
+                        "Daily health report delivery stamp could not be read after {ElapsedMs} ms; gating on process memory from here, which re-sends once per restart until the store answers",
+                        stampClock.ElapsedMilliseconds);
+                    _readFailures?.RecordReadFailure(null, "daily-health-report delivery-stamp self-alert", stampClock.ElapsedMilliseconds);
+                }
+            }
+
+            _lastDailyReport[DailyHealthReportKey] = known;
+        }
+
+        return known != NoDeliveryKnown && schedule.LocalDate(known) == schedule.LocalDate(now);
+    }
+
+    /// <summary>
+    /// Stamps a delivery, memory first and then the store, unless nothing reached a reader because every channel failed, was throttled by
+    /// the delivery cooldown or was folded onto another delivery (the next attempt retries). A muted or unconfigured send is still the
+    /// day's delivery: there is nothing to retry. A not-delivered attempt also waits <see cref="DailyReportRetryDelay"/>.
+    /// </summary>
+    private async Task RecordDailyReportDeliveredAsync(AlertDelivery? delivery, DateTime now, CancellationToken cancellationToken)
+    {
+        if (delivery is { Channel: AlertDelivery.ChannelFailed or AlertDelivery.ChannelThrottled or AlertDelivery.ChannelFolded })
+        {
+            _nextDailyReportAttemptUtc = now + DailyReportRetryDelay;
+            LogDocumentDeliveryFailure("daily health report", delivery.SendError ?? $"not delivered ({delivery.Channel})", now);
+            return;
+        }
+
+        LogDocumentDeliveryRecovered("daily health report");
+        _lastDailyReport[DailyHealthReportKey] = now;
+        if (_deliveryStamps is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await _deliveryStamps.RecordDeliveredAtUtcAsync(PgSelfAlertDeliveryStampStore.DailyHealthReportStateKey, now, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            /* NOT counted by #3013's swallowed-read counter: a stamp WRITE, not a condition read. */
+            _logger?.LogWarning(ex,
+                "The daily health report went out but its stamp could not be persisted; process memory gates it until the next restart, which will re-send it");
+        }
     }
 
     /* ------------------------- #5450: the daily retained-history audit ------------------------- */
@@ -9209,33 +9430,77 @@ SELECT EXISTS
     internal Task<(DateTime? CollectionTimeUtc, bool? AgentRunning)> ReadLatestAgentStatusAsync(
         NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
         => ReadWithOneRetryAsync(
-            token => ReadLatestAgentStatusCoreAsync(postgres, serverId, token),
+            token => ReadLatestAgentStatusCoreAsync(postgres, serverId, _agentStatusFloor, token),
             serverId, AgentStatusReadName, cancellationToken);
 
     /// <summary>The read itself, byte-identical to what shipped before #3854 routed it through the seam.</summary>
     private static async Task<(DateTime? CollectionTimeUtc, bool? AgentRunning)> ReadLatestAgentStatusCoreAsync(
-        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, int serverId, NewestRowFloor floor, CancellationToken cancellationToken)
     {
         await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
-        using var command = new NpgsqlCommand(@"
+        (DateTime? CollectionTimeUtc, bool? AgentRunning) result = (null, null);
+        /* #7017: the shared newest-row floor loop (#6968). collection_time is NOT NULL, so a found row has one. */
+        await floor.ReadAsync(serverId, async since =>
+        {
+            result = (null, null);
+            using var command = new NpgsqlCommand(since is null ? LatestAgentStatusSql : LatestAgentStatusSinceSql, connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
+            command.Parameters.AddWithValue(serverId);
+            AddFloorParameter(command, since);
+
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                return null;
+            }
+
+            bool? running = reader.IsDBNull(0) ? null : reader.GetBoolean(0);
+            DateTime? collectionTime = reader.IsDBNull(1)
+                ? null
+                : DateTime.SpecifyKind(reader.GetDateTime(1), DateTimeKind.Utc);
+            result = (collectionTime, running);
+            return collectionTime;
+        });
+
+        return result;
+    }
+
+    /// <summary>The newest <c>agent_status</c> row of a server (the read before #7017).</summary>
+    internal const string LatestAgentStatusSql = @"
 SELECT agent_running, collection_time
 FROM agent_status
 WHERE server_id = $1
 ORDER BY collection_time DESC
-LIMIT 1", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
-        command.Parameters.AddWithValue(serverId);
+LIMIT 1";
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        if (!await reader.ReadAsync(cancellationToken))
+    /// <summary>
+    /// #7017: <see cref="LatestAgentStatusSql"/> bounded below by <c>collection_time</c> $2, a value a previous read of the same
+    /// server returned (<see cref="NewestRowFloor"/>), never a clock, so a server whose newest row is old (or that has none)
+    /// does not open every chunk between that row and now on each pass. Same ordering, same row.
+    /// </summary>
+    internal const string LatestAgentStatusSinceSql = @"
+SELECT agent_running, collection_time
+FROM agent_status
+WHERE server_id = $1
+AND   collection_time >= $2
+ORDER BY collection_time DESC
+LIMIT 1";
+
+    /// <summary>Where each server's next agent-status read starts (#7017).</summary>
+    private readonly NewestRowFloor _agentStatusFloor = new();
+
+    /// <summary>Where each server's next AG replica-state read starts (#7017).</summary>
+    private readonly NewestRowFloor _agReplicaFloor = new();
+
+    /// <summary>Where each server's next AG database-replica-state read starts (#7017).</summary>
+    private readonly NewestRowFloor _agDatabaseReplicaFloor = new();
+
+    /// <summary>Adds the floor as the statement's $2: a typed naive timestamp, the column's own type.</summary>
+    private static void AddFloorParameter(NpgsqlCommand command, DateTime? since)
+    {
+        if (since is { } floor)
         {
-            return (null, null);
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = floor });
         }
-
-        bool? running = reader.IsDBNull(0) ? null : reader.GetBoolean(0);
-        DateTime? collectionTime = reader.IsDBNull(1)
-            ? null
-            : DateTime.SpecifyKind(reader.GetDateTime(1), DateTimeKind.Utc);
-        return (collectionTime, running);
     }
 
     /// <summary>
@@ -9260,44 +9525,71 @@ LIMIT 1", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassComman
     internal Task<(DateTime? CollectionTimeUtc, IReadOnlyList<AgReplicaReading> Replicas)> ReadLatestAgReplicaStatesAsync(
         NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
         => ReadWithOneRetryAsync(
-            token => ReadLatestAgReplicaStatesCoreAsync(postgres, serverId, token),
+            token => ReadLatestAgReplicaStatesCoreAsync(postgres, serverId, _agReplicaFloor, token),
             serverId, AgStateReadName, cancellationToken);
 
     /// <summary>The read itself, byte-identical to what shipped before #3854 routed it through the seam.</summary>
     private static async Task<(DateTime? CollectionTimeUtc, IReadOnlyList<AgReplicaReading> Replicas)> ReadLatestAgReplicaStatesCoreAsync(
-        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, int serverId, NewestRowFloor floor, CancellationToken cancellationToken)
     {
         var replicas = new List<AgReplicaReading>();
         DateTime? newest = null;
 
         await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
-        using var command = new NpgsqlCommand(@"
+        /* #7017: the shared newest-row floor loop (#6968). The floor is the snapshot's time, so a bounded read that finds no row
+           means the snapshot is gone and the loop reads again without a bound. A server with no Availability Group has no rows
+           either way and gets the loop's empty-read floor. */
+        await floor.ReadAsync(serverId, async since =>
+        {
+            replicas.Clear();
+            newest = null;
+            using var command = new NpgsqlCommand(since is null ? LatestAgReplicaStatesSql : LatestAgReplicaStatesSinceSql, connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
+            command.Parameters.AddWithValue(serverId);
+            AddFloorParameter(command, since);
+
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                newest = Newest(newest, reader, 5);
+                if (reader.IsDBNull(0) || reader.IsDBNull(1))
+                {
+                    continue;
+                }
+
+                replicas.Add(new AgReplicaReading(
+                    AgName: reader.GetString(0),
+                    ReplicaServerName: reader.GetString(1),
+                    RoleDesc: reader.IsDBNull(2) ? null : reader.GetString(2),
+                    ConnectedStateDesc: reader.IsDBNull(3) ? null : reader.GetString(3),
+                    IsLocal: reader.IsDBNull(4) ? null : reader.GetBoolean(4)));
+            }
+
+            return newest;
+        });
+
+        return (newest, replicas);
+    }
+
+    /// <summary>The server's newest <c>ag_replica_states</c> snapshot (the read before #7017).</summary>
+    internal const string LatestAgReplicaStatesSql = @"
 SELECT ag_name, replica_server_name, role_desc, connected_state_desc, is_local, collection_time
 FROM ag_replica_states
 WHERE server_id = $1
 AND   collection_time = (SELECT MAX(collection_time) FROM ag_replica_states WHERE server_id = $1)
-ORDER BY ag_name, replica_server_name", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
-        command.Parameters.AddWithValue(serverId);
+ORDER BY ag_name, replica_server_name";
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
-        {
-            newest = Newest(newest, reader, 5);
-            if (reader.IsDBNull(0) || reader.IsDBNull(1))
-            {
-                continue;
-            }
-
-            replicas.Add(new AgReplicaReading(
-                AgName: reader.GetString(0),
-                ReplicaServerName: reader.GetString(1),
-                RoleDesc: reader.IsDBNull(2) ? null : reader.GetString(2),
-                ConnectedStateDesc: reader.IsDBNull(3) ? null : reader.GetString(3),
-                IsLocal: reader.IsDBNull(4) ? null : reader.GetBoolean(4)));
-        }
-
-        return (newest, replicas);
-    }
+    /// <summary>
+    /// #7017: <see cref="LatestAgReplicaStatesSql"/> bounded below by <c>collection_time</c> $2, a value a previous read of the same
+    /// server returned (<see cref="NewestRowFloor"/>), never a clock. The bound sits on the newest-snapshot subquery AND the outer
+    /// filter. Same rows, same order.
+    /// </summary>
+    internal const string LatestAgReplicaStatesSinceSql = @"
+SELECT ag_name, replica_server_name, role_desc, connected_state_desc, is_local, collection_time
+FROM ag_replica_states
+WHERE server_id = $1
+AND   collection_time >= $2
+AND   collection_time = (SELECT MAX(collection_time) FROM ag_replica_states WHERE server_id = $1 AND collection_time >= $2)
+ORDER BY ag_name, replica_server_name";
 
     /// <summary>
     /// The server's LATEST <c>ag_database_replica_states</c> snapshot (#991), with its OWN
@@ -9310,47 +9602,72 @@ ORDER BY ag_name, replica_server_name", connection) { CommandTimeout = DarlingAl
     internal Task<(DateTime? CollectionTimeUtc, IReadOnlyList<AgDatabaseReading> Databases)> ReadLatestAgDatabaseReplicaStatesAsync(
         NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
         => ReadWithOneRetryAsync(
-            token => ReadLatestAgDatabaseReplicaStatesCoreAsync(postgres, serverId, token),
+            token => ReadLatestAgDatabaseReplicaStatesCoreAsync(postgres, serverId, _agDatabaseReplicaFloor, token),
             serverId, AgStateReadName, cancellationToken);
 
     /// <summary>The read itself, byte-identical to what shipped before #3854 routed it through the seam.</summary>
     private static async Task<(DateTime? CollectionTimeUtc, IReadOnlyList<AgDatabaseReading> Databases)> ReadLatestAgDatabaseReplicaStatesCoreAsync(
-        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, int serverId, NewestRowFloor floor, CancellationToken cancellationToken)
     {
         var databases = new List<AgDatabaseReading>();
         DateTime? newest = null;
 
         await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
-        using var command = new NpgsqlCommand(@"
+        /* #7017: the shared newest-row floor loop (#6968), as in the replica read above. */
+        await floor.ReadAsync(serverId, async since =>
+        {
+            databases.Clear();
+            newest = null;
+            using var command = new NpgsqlCommand(since is null ? LatestAgDatabaseReplicaStatesSql : LatestAgDatabaseReplicaStatesSinceSql, connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
+            command.Parameters.AddWithValue(serverId);
+            AddFloorParameter(command, since);
+
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                newest = Newest(newest, reader, 7);
+                if (reader.IsDBNull(0) || reader.IsDBNull(1) || reader.IsDBNull(2))
+                {
+                    continue;
+                }
+
+                databases.Add(new AgDatabaseReading(
+                    AgName: reader.GetString(0),
+                    DatabaseName: reader.GetString(1),
+                    ReplicaServerName: reader.GetString(2),
+                    SecondaryLagSeconds: reader.IsDBNull(3) ? null : reader.GetInt64(3),
+                    RedoQueueSizeKb: reader.IsDBNull(4) ? null : reader.GetInt64(4),
+                    IsSuspended: reader.IsDBNull(5) ? null : reader.GetBoolean(5),
+                    SuspendReasonDesc: reader.IsDBNull(6) ? null : reader.GetString(6)));
+            }
+
+            return newest;
+        });
+
+        return (newest, databases);
+    }
+
+    /// <summary>The server's newest <c>ag_database_replica_states</c> snapshot (the read before #7017).</summary>
+    internal const string LatestAgDatabaseReplicaStatesSql = @"
 SELECT ag_name, database_name, replica_server_name, secondary_lag_seconds, redo_queue_size,
        is_suspended, suspend_reason_desc, collection_time
 FROM ag_database_replica_states
 WHERE server_id = $1
 AND   collection_time = (SELECT MAX(collection_time) FROM ag_database_replica_states WHERE server_id = $1)
-ORDER BY ag_name, database_name, replica_server_name", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
-        command.Parameters.AddWithValue(serverId);
+ORDER BY ag_name, database_name, replica_server_name";
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
-        {
-            newest = Newest(newest, reader, 7);
-            if (reader.IsDBNull(0) || reader.IsDBNull(1) || reader.IsDBNull(2))
-            {
-                continue;
-            }
-
-            databases.Add(new AgDatabaseReading(
-                AgName: reader.GetString(0),
-                DatabaseName: reader.GetString(1),
-                ReplicaServerName: reader.GetString(2),
-                SecondaryLagSeconds: reader.IsDBNull(3) ? null : reader.GetInt64(3),
-                RedoQueueSizeKb: reader.IsDBNull(4) ? null : reader.GetInt64(4),
-                IsSuspended: reader.IsDBNull(5) ? null : reader.GetBoolean(5),
-                SuspendReasonDesc: reader.IsDBNull(6) ? null : reader.GetString(6)));
-        }
-
-        return (newest, databases);
-    }
+    /// <summary>
+    /// #7017: <see cref="LatestAgDatabaseReplicaStatesSql"/> bounded below by <c>collection_time</c> $2, a value a previous read
+    /// of the same server returned (<see cref="NewestRowFloor"/>), never a clock. Same rows, same order.
+    /// </summary>
+    internal const string LatestAgDatabaseReplicaStatesSinceSql = @"
+SELECT ag_name, database_name, replica_server_name, secondary_lag_seconds, redo_queue_size,
+       is_suspended, suspend_reason_desc, collection_time
+FROM ag_database_replica_states
+WHERE server_id = $1
+AND   collection_time >= $2
+AND   collection_time = (SELECT MAX(collection_time) FROM ag_database_replica_states WHERE server_id = $1 AND collection_time >= $2)
+ORDER BY ag_name, database_name, replica_server_name";
 
     /// <summary>Running maximum of a snapshot's <c>collection_time</c> column, as naive UTC.</summary>
     private static DateTime? Newest(DateTime? running, NpgsqlDataReader reader, int ordinal)
@@ -9440,7 +9757,7 @@ ORDER BY ag_name, database_name, replica_server_name", connection) { CommandTime
         string serverKey, string serverName, string metricName, string currentValue, string thresholdValue,
         string detail, AlertSeverityLevel? severity, string shortMessage,
         double? numericCurrentValue, double? numericThresholdValue, CancellationToken cancellationToken,
-        AlertContext? context = null, bool? muted = null, bool scheduledReport = false)
+        AlertContext? context = null, bool? muted = null, bool scheduledReport = false, string? displayName = null)
     {
         /* Same mute treatment as the engine: a muted self-alert is still recorded (flagged muted) but its
            channels are skipped — the deliverer honors AlertOutcome.Muted. A caller that brought its own
@@ -9483,7 +9800,7 @@ ORDER BY ag_name, database_name, replica_server_name", connection) { CommandTime
             serverKey, serverName, metricName, currentValue, thresholdValue,
             Context: context, DetailText: detail,
             NumericCurrentValue: numericCurrentValue, NumericThresholdValue: numericThresholdValue,
-            Muted: isMuted, Severity: severity, ShortMessage: shortMessage), cancellationToken);
+            Muted: isMuted, Severity: severity, ShortMessage: shortMessage, DisplayName: displayName), cancellationToken);
     }
 
     private async Task RecordResolutionAsync(AlertResolution resolution, CancellationToken cancellationToken)

@@ -372,7 +372,7 @@ public sealed partial class DarlingMcpInvestigationTools
         "On a named agent token, if you lost your claim_id, claim again while your lease is live: status renewed, reclaimed true, " +
         "your existing claim_id and a renewed lease (the token's name is your agent_id; any other agent still gets already_claimed). " +
         "On the legacy token a second claim while a lease is live answers already_claimed, even for the same agent_id. " +
-        "The brief is composed at claim time, masked at mcp.dataDetail, and stored; if it cannot be composed the claim is " +
+        "The brief is composed at claim time, masked at your data detail level, and stored; if it cannot be composed the claim is " +
         "released (it stays counted) and the answer is status error. brief_format: omit, or 1. agent_id names your agent " +
         "in the journal: 1-64 letters, digits, '.', '_', ':' or '-'. Return your findings with submit_investigation_report under this claim_id.")]
     public static Task<string> ClaimInvestigationRequest(
@@ -521,7 +521,7 @@ public sealed partial class DarlingMcpInvestigationTools
         "agent_id_is_named_token (the legacy token passed a claim_id a named token holds) can also answer. " +
         "The brief is composed once, at claim time; evidence that freezes later reaches you only as an evidence_ready event " +
         "from wait_for_investigation_requests. Call this with that event's request_id to read it. Each section carries its " +
-        "status (ready, pending, empty, unavailable or not_collected) and its content as stored, masked at mcp.dataDetail the " +
+        "status (ready, pending, empty, unavailable or not_collected) and its content as stored, masked at your data detail level the " +
         "way the brief masks it. A pending section comes back as pending with no content: it never waits, so read it again " +
         "after a later evidence_ready. sections (optional) names the sections to return; omit it for all. A request that " +
         "another agent holds a live claim on is refused (already_claimed) unless you pass its claim_id; an unclaimed or " +
@@ -554,12 +554,11 @@ public sealed partial class DarlingMcpInvestigationTools
             if (request.Value.Row.State == "claimed")
             {
                 var holder = Guid.TryParse(claim_id, out var claim) ? await store.ClaimHolderAsync(requestId, claim, cancellationToken) : null;
-                /* A claim_id is the claiming token's: a named token that presents another token's claim_id is refused, and journaled as itself. */
+                /* A claim_id is the claiming token's: a named token that presents another token's claim_id is refused. The read journals
+                   nothing (it is a read, and the write policy serves it as one): a journaled refusal counts toward MaxAgentJournalRows,
+                   and at the cap the claiming agent's next journaled call on the request is refused. */
                 if (ClaimTokenRefusal(tokenName, namedAgentNames, holder) is { } notYours)
-                {
-                    await store.RecordRefusalAsync(requestId, tokenName ?? InvestigationRules.InvalidAgentId, "evidence", notYours.Status, null, cancellationToken);
                     return InvestigationToolCore.Status(notYours.Status, notYours.Message);
-                }
 
                 if (holder is null)
                     return InvestigationToolCore.Status("already_claimed", "Another claim holds a live lease on this request.");

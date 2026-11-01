@@ -71,6 +71,36 @@ UPDATE config_mute_rules SET
     external_source = $13, starts_at_utc = $14
 WHERE id = $1";
 
+    /// <summary>The store version that added the recurring schedule columns on <c>config_mute_rules</c> (V231, #7040). A store below it
+    /// has none, so the viewer reads and writes the statements without them and hides the schedule fields.</summary>
+    internal const int RecurringMuteStoreSchemaVersion = 231;
+
+    /// <summary>The list read for a store that has the schedule (V231, #7040): the columns above plus the four recurrence columns.</summary>
+    public const string MuteRulesSelectWithRecurrenceSql = @"
+SELECT id, enabled, created_at_utc, expires_at_utc, reason,
+       server_name, metric_name, database_pattern,
+       query_text_pattern, wait_type_pattern, job_name_pattern, server_id, client_app_pattern, external_source, starts_at_utc,
+       recur_days, recur_start_time, recur_end_time, recur_time_zone
+FROM config_mute_rules
+ORDER BY created_at_utc DESC";
+
+    public const string MuteRuleInsertWithRecurrenceSql = @"
+INSERT INTO config_mute_rules
+    (id, enabled, created_at_utc, expires_at_utc, reason,
+     server_name, metric_name, database_pattern,
+     query_text_pattern, wait_type_pattern, job_name_pattern, server_id, client_app_pattern, external_source, starts_at_utc,
+     recur_days, recur_start_time, recur_end_time, recur_time_zone)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)";
+
+    public const string MuteRuleUpdateWithRecurrenceSql = @"
+UPDATE config_mute_rules SET
+    enabled = $2, expires_at_utc = $3, reason = $4,
+    server_name = $5, metric_name = $6, database_pattern = $7,
+    query_text_pattern = $8, wait_type_pattern = $9, job_name_pattern = $10, server_id = $11, client_app_pattern = $12,
+    external_source = $13, starts_at_utc = $14,
+    recur_days = $15, recur_start_time = $16, recur_end_time = $17, recur_time_zone = $18
+WHERE id = $1";
+
     public const string MuteRuleSetEnabledSql = "UPDATE config_mute_rules SET enabled = $2 WHERE id = $1";
 
     public const string MuteRuleDeleteSql = MuteRulePurge.DeleteByIdSql;
@@ -158,7 +188,9 @@ WHERE id = $1";
         && rule.JobNamePattern is null
         /* A rule limited to one external source is narrower than a whole-server silence (#5654). */
         && rule.ClientAppPattern is null
-        && rule.ExternalSource is null;
+        && rule.ExternalSource is null
+        /* A rule that repeats on a schedule mutes only inside its windows, so it is not a whole-server silence (#7040). */
+        && !rule.IsRecurring;
 
     /// <summary>What "Unsilence" does for one server: the silence rules to delete, and the id-keyed silences to
     /// create BEFORE deleting, for the other servers a deleted legacy rule used to cover.
@@ -238,9 +270,9 @@ WHERE id = $1";
     {
         var rules = new List<MuteRule>();
 
-        /* client_app_pattern (#5640) exists from V179, and the viewer refuses to connect to a store below its own
-           RequiredStoreSchemaVersion (MainWindow's connect-time gate), so no read reaches an older store: one statement. */
-        await using var command = _dataSource.CreateCommand(MuteRulesSelectSql);
+        /* V231 (#7040): a store below it has no schedule columns, so the list reads the older statement and every rule is a one-off. */
+        var hasRecurrence = await SupportsMuteRecurrenceAsync(cancellationToken);
+        await using var command = _dataSource.CreateCommand(hasRecurrence ? MuteRulesSelectWithRecurrenceSql : MuteRulesSelectSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -262,10 +294,68 @@ WHERE id = $1";
                 ClientAppPattern = reader.IsDBNull(12) ? null : reader.GetString(12),
                 ExternalSource = reader.IsDBNull(13) ? null : reader.GetString(13),
                 StartsAtUtc = reader.IsDBNull(14) ? null : DateTime.SpecifyKind(reader.GetDateTime(14), DateTimeKind.Utc),
+                RecurDays = hasRecurrence && !reader.IsDBNull(15) ? reader.GetInt16(15) : null,
+                RecurStartTime = hasRecurrence && !reader.IsDBNull(16) ? reader.GetFieldValue<TimeOnly>(16) : null,
+                RecurEndTime = hasRecurrence && !reader.IsDBNull(17) ? reader.GetFieldValue<TimeOnly>(17) : null,
+                RecurTimeZone = hasRecurrence && !reader.IsDBNull(18) ? reader.GetString(18) : null,
             });
         }
 
         return rules;
+    }
+
+    /// <summary>Whether the store has the recurring schedule columns (V231, #7040). The dialog hides the schedule fields when it does not. A probe
+    /// that cannot tell reads as "no", so an unreachable probe never makes the viewer write a column an older store lacks.</summary>
+    public async Task<bool> SupportsMuteRecurrenceAsync(CancellationToken cancellationToken = default)
+    {
+        var version = _cachedStoreSchemaVersion ??= await GetStoreSchemaVersionAsync(cancellationToken);
+        return version is int known && known >= RecurringMuteStoreSchemaVersion;
+    }
+
+    /// <summary>The check every write runs (the dialog runs it first to show the text): the schedule is whole and the zone is an IANA id.</summary>
+    private static void ThrowIfRecurrenceInvalid(MuteRule rule)
+    {
+        if (!rule.TryNormalizeRecurrence(out var error))
+        {
+            throw new ArgumentException(error, nameof(rule));
+        }
+    }
+
+    /// <summary>A repeating rule's zone must be one the store's PostgreSQL resolves (#7040): the fleet read treats any other as outside the
+    /// window, so a rule saved with one would mute nothing and say nothing. The host check above cannot see the store's tzdata.</summary>
+    private async Task ThrowIfZoneUnknownAsync(MuteRule rule, CancellationToken cancellationToken)
+    {
+        if (!rule.IsRecurring) return;
+        await using var command = _dataSource.CreateCommand();
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+        if (await MuteRuleRecurrenceSql.RefusalAsync(command, rule.RecurTimeZone, cancellationToken) is { } refusal)
+        {
+            throw new ArgumentException(refusal);
+        }
+    }
+
+    private const string RecurrenceNeedsNewerStore = "This store is below the version that keeps recurring mute rules. Upgrade the Darling service first.";
+
+    private static void AddNullableSmallInt(NpgsqlCommand command, int? value) =>
+        command.Parameters.Add(new NpgsqlParameter
+        {
+            NpgsqlDbType = NpgsqlDbType.Smallint,
+            Value = value.HasValue ? (short)value.Value : DBNull.Value,
+        });
+
+    private static void AddNullableTime(NpgsqlCommand command, TimeOnly? value) =>
+        command.Parameters.Add(new NpgsqlParameter
+        {
+            NpgsqlDbType = NpgsqlDbType.Time,
+            Value = value.HasValue ? value.Value : DBNull.Value,
+        });
+
+    private static void AddRecurrence(NpgsqlCommand command, MuteRule rule)
+    {
+        AddNullableSmallInt(command, rule.RecurDays);
+        AddNullableTime(command, rule.RecurStartTime);
+        AddNullableTime(command, rule.RecurEndTime);
+        AddNullableText(command, rule.RecurTimeZone);
     }
 
     /// <summary>Inserts a new mute rule (the Add dialog's Save).</summary>
@@ -276,7 +366,16 @@ WHERE id = $1";
             throw new ArgumentNullException(nameof(rule));
         }
 
-        await using var command = _dataSource.CreateCommand(MuteRuleInsertSql);
+        ThrowIfRecurrenceInvalid(rule);
+        var hasRecurrence = await SupportsMuteRecurrenceAsync(cancellationToken);
+        if (!hasRecurrence && rule.IsRecurring)
+        {
+            throw new InvalidOperationException(RecurrenceNeedsNewerStore);
+        }
+
+        await ThrowIfZoneUnknownAsync(rule, cancellationToken);
+
+        await using var command = _dataSource.CreateCommand(hasRecurrence ? MuteRuleInsertWithRecurrenceSql : MuteRuleInsertSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = rule.Id });
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = rule.Enabled });
@@ -293,6 +392,11 @@ WHERE id = $1";
         AddNullableText(command, rule.ClientAppPattern);
         AddNullableText(command, rule.ExternalSource);
         AddNullableTimestamp(command, rule.StartsAtUtc);
+        if (hasRecurrence)
+        {
+            AddRecurrence(command, rule);
+        }
+
         await ExecuteWriteAsync(command, cancellationToken);
         await SignalConfigReloadAsync(cancellationToken);
     }
@@ -305,7 +409,16 @@ WHERE id = $1";
             throw new ArgumentNullException(nameof(rule));
         }
 
-        await using var command = _dataSource.CreateCommand(MuteRuleUpdateSql);
+        ThrowIfRecurrenceInvalid(rule);
+        var hasRecurrence = await SupportsMuteRecurrenceAsync(cancellationToken);
+        if (!hasRecurrence && rule.IsRecurring)
+        {
+            throw new InvalidOperationException(RecurrenceNeedsNewerStore);
+        }
+
+        await ThrowIfZoneUnknownAsync(rule, cancellationToken);
+
+        await using var command = _dataSource.CreateCommand(hasRecurrence ? MuteRuleUpdateWithRecurrenceSql : MuteRuleUpdateSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = rule.Id });
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = rule.Enabled });
@@ -321,6 +434,11 @@ WHERE id = $1";
         AddNullableText(command, rule.ClientAppPattern);
         AddNullableText(command, rule.ExternalSource);
         AddNullableTimestamp(command, rule.StartsAtUtc);
+        if (hasRecurrence)
+        {
+            AddRecurrence(command, rule);
+        }
+
         await ExecuteWriteAsync(command, cancellationToken);
         await SignalConfigReloadAsync(cancellationToken);
     }

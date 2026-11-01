@@ -861,7 +861,7 @@ public sealed class AlertReadFailureCounter
         + "store checkpointer pressure read behind the WAL levers, and the store settings self-alert's "
         + "managed-conf verdicts read (#4215), the daily collection-history audit's rollup read (#5450), and the "
         + "external-alert delivery self-alert's count of undelivered rows (#5654), and the threshold-override "
-        + "reload (#5916)";
+        + "reload (#5916), daily report (#7041)";
 
     /// <summary>
     /// The window these figures cover, and the window they do NOT.

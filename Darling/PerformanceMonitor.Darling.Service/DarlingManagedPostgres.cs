@@ -100,6 +100,13 @@ public sealed class DarlingManagedPostgres
     public const string ViewerCredentialFileName = "pg-viewer-credential.dpapi";
 
     /// <summary>
+    /// DPAPI-LocalMachine blob holding the generated password for the <c>web</c> login, the web dashboard host's own store identity:
+    /// the writes its pages make, which the read-only <c>viewer</c> login (the one the export verbs hand to a remote seat) does not hold.
+    /// Consumed only by the in-service web host, so, like the mcp credential, it is hardened non-interactive.
+    /// </summary>
+    public const string WebCredentialFileName = "pg-web-credential.dpapi";
+
+    /// <summary>
     /// DPAPI-LocalMachine blob holding the generated password for the dedicated least-privilege
     /// <c>mcp</c> login role (darling-network-endpoints, D3-role) — the store pool identity the
     /// (optionally network-exposed) MCP host connects as. Same location/posture as the admin/viewer
@@ -113,6 +120,7 @@ public sealed class DarlingManagedPostgres
     /// <c>mcp</c> added for the network endpoints, D3-role).</summary>
     public const string AdminRoleName = "admin";
     public const string ViewerRoleName = "viewer";
+    public const string WebRoleName = "web";
     public const string McpRoleName = "mcp";
 
     /// <summary>
@@ -904,6 +912,10 @@ public sealed class DarlingManagedPostgres
     /// <summary>Path to the <c>viewer</c> role's DPAPI credential, beside the data directory.</summary>
     public static string ViewerCredentialPathFor(string dataDirectory)
         => Path.Combine(ParentOf(dataDirectory), ViewerCredentialFileName);
+
+    /// <summary>Path to the <c>web</c> role's DPAPI credential, beside the data directory.</summary>
+    public static string WebCredentialPathFor(string dataDirectory)
+        => Path.Combine(ParentOf(dataDirectory), WebCredentialFileName);
 
     /// <summary>Path to the <c>mcp</c> role's DPAPI credential, beside the data directory (darling-network-endpoints).</summary>
     public static string McpCredentialPathFor(string dataDirectory)
@@ -3106,6 +3118,24 @@ public sealed class DarlingManagedPostgres
         }
 
         return BuildRoleConnectionString(config.Port, ViewerRoleName, DarlingSecrets.Unprotect(File.ReadAllText(credentialPath).Trim()), WebApplicationName);
+    }
+
+    /// <summary>
+    /// Derives the web dashboard host's WRITE-capable connection string from the stored <c>web</c>-role credential WITHOUT touching the server:
+    /// the login that holds the writes the dashboard's pages make (mute rules, dismissals, custom alerts, server add and edit, the command
+    /// requests), which the read-only <c>viewer</c> login does not hold. Null until <see cref="DarlingManagedRoles.EnsureProvisionedAsync"/>
+    /// has written the credential. Never derived from the viewer credential: the caller that falls back to viewer reads only.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    public static string? TryBuildWebConnectionStringFromStoredCredential(PostgresConfig config)
+    {
+        var credentialPath = WebCredentialPathFor(ResolveDataDirectory(config));
+        if (!File.Exists(credentialPath))
+        {
+            return null;
+        }
+
+        return BuildRoleConnectionString(config.Port, WebRoleName, DarlingSecrets.Unprotect(File.ReadAllText(credentialPath).Trim()), WebApplicationName);
     }
 
     /// <summary>

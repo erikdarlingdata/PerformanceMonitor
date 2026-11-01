@@ -8,11 +8,14 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 
@@ -208,6 +211,72 @@ internal static class DarlingMcpWindowNotice
         return node.ToJsonString(McpHelpers.JsonOptions);
     }
 
+    /// <summary>
+    /// A data answer already serialized by a shared payload builder (one Lite and Darling both call, so it cannot take the notice as an
+    /// argument), with the three window-floor keys appended at the top level. A notice from a failed probe leaves the payload as it
+    /// was (<see cref="McpWindowNotice.IsUnavailable"/>).
+    /// </summary>
+    internal static string Attach(string json, McpWindowNotice notice)
+    {
+        if (notice.IsUnavailable)
+        {
+            return json;
+        }
+
+        var node = JsonNode.Parse(json)!.AsObject();
+        node["effective_start"] = notice.EffectiveStart;
+        node["window_truncated"] = notice.WindowTruncated;
+        node["truncation_note"] = notice.TruncationNote;
+        KeepTrailingKeysLast(node);
+        return node.ToJsonString(McpHelpers.JsonOptions);
+    }
+
+    /// <summary>
+    /// Two notes under one <c>truncation_note</c> key: a payload whose own note says another cut (get_analysis_findings' read cap) keeps it,
+    /// and the window-floor sentence follows. Either alone when the other is null.
+    /// </summary>
+    internal static string? JoinNotes(string? own, string? floorNote) =>
+        own is null ? floorNote : floorNote is null ? own : own + " " + floorNote;
+
+    /// <summary>
+    /// A hints payload a tool already built (not a bare notice), with the three window-floor keys added at its top level. A notice from a failed
+    /// probe leaves the payload as it was (<see cref="McpWindowNotice.IsUnavailable"/>).
+    /// </summary>
+    internal static object AttachToHints(object payload, McpWindowNotice notice)
+    {
+        if (notice.IsUnavailable)
+        {
+            return payload;
+        }
+
+        var node = JsonSerializer.SerializeToNode(payload, McpHelpers.JsonOptions)!.AsObject();
+        node["effective_start"] = notice.EffectiveStart;
+        node["window_truncated"] = notice.WindowTruncated;
+        node["truncation_note"] = notice.TruncationNote;
+        KeepTrailingKeysLast(node);
+        return node;
+    }
+
+    /// <summary>
+    /// The keys a payload promises as its LAST (the trend tools' <c>discontinuities</c>, #6334, and the analysis tools'
+    /// <c>collection_caveats</c>, #3691). The notice keys are appended after whatever the payload had, which would end it
+    /// on <c>truncation_note</c>, so each of these that is present moves back to the end, keeping the order they already had among themselves.
+    /// One helper for every path that adds the notice to a payload someone else built.
+    /// </summary>
+    private static void KeepTrailingKeysLast(JsonObject node)
+    {
+        var trailing = node.Where(p => Array.IndexOf(TrailingKeys, p.Key) >= 0).Select(p => p.Key).ToList();
+        foreach (var key in trailing)
+        {
+            var value = node[key];
+            node.Remove(key);
+            node[key] = value;
+        }
+    }
+
+    /// <summary>The keys a payload ends on when it has them.</summary>
+    private static readonly string[] TrailingKeys = [BaselineDiscontinuities.PayloadKey, "collection_caveats"];
+
     /// <summary>The reads the web does not list, and the collector table each one windows on (both on <c>collection_time</c>).</summary>
     internal static readonly System.Collections.Generic.IReadOnlyDictionary<string, string> UnlistedTableByRead =
         new System.Collections.Generic.Dictionary<string, string>(StringComparer.Ordinal)
@@ -291,6 +360,24 @@ internal static class DarlingMcpWindowNotice
     internal static Task<DateTime?> Probe(
         NpgsqlDataSource postgres, DataWindowFloor.Source source, string serverName, DateTime start, DateTime end, CancellationToken cancellationToken) =>
         Probe(postgres, [source], serverName, start, end, cancellationToken);
+
+    /// <summary>
+    /// The fleet form of the coverage probe (#7010): with <paramref name="serverNames"/> null, the earliest coverage start among every
+    /// registered server, for a read whose answer is the store's own (alert history, the tag roll-up) and not one server's collection;
+    /// else among the servers named. One probe whatever the number of servers.
+    /// </summary>
+    internal static Task<DateTime?> ProbeScoped(
+        NpgsqlDataSource postgres, IReadOnlyList<DataWindowFloor.Source> sources, IReadOnlyList<string>? serverNames, DateTime start, DateTime end,
+        CancellationToken cancellationToken)
+    {
+        var stub = TestOnlyProbe;
+        if (stub != null)
+        {
+            return stub();
+        }
+
+        return DataWindowFloor.GetAsync(postgres, sources, serverNames, start, end, StorageCommandDeadlines.McpReadSeconds, cancellationToken);
+    }
 
     /// <summary>
     /// The coverage probe over several sources a page is fed by (get_blocking's XE reports and DMV snapshots, #4966):

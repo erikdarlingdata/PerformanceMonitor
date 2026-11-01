@@ -130,8 +130,17 @@ try {
       urls.length = 0; await pick(byLabel(main, "Server"), "srv-b"); out.server = readsOf().pop();
       const cb = checkbox(main);
       urls.length = 0; cb.checked = true; cb.fire("change"); await settle(); out.dismissed = readsOf().pop();
-      out.windowOptions = pickerItems(main, "Time range").filter((i) => !i.disabled).map((i) => i.name);
-      out.windowGreyed = pickerItems(main, "Time range").filter((i) => i.disabled).map((i) => i.name);
+      /* What the popup greys out depends on the date: Year to Date is inside the 90 day reach until day 90 of the year, so from
+         1 January to 31 March it is offered instead of greyed out. The clock is pinned to mid-June so the lists are the same on
+         every day (#7055). */
+      const realNow = Date.now;
+      Date.now = () => Date.UTC(2026, 5, 15, 12, 0, 0);
+      try {
+        out.windowOptions = pickerItems(main, "Time range").filter((i) => !i.disabled).map((i) => i.name);
+        out.windowGreyed = pickerItems(main, "Time range").filter((i) => i.disabled).map((i) => i.name);
+      } finally {
+        Date.now = realNow;
+      }
       out.windowShape = popupShape(main, "Time range");
       out.refused = pickRange(main, "Time range", "120d");
       urls.length = 0; pickRange(main, "Time range", "yesterday"); await settle(); out.finished = readsOf().pop();

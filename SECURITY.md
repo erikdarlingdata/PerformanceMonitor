@@ -25,7 +25,7 @@ This policy applies to:
 - The deprecated Full Edition, which is still supported for existing users
   - The SQL collection and reporting stored procedures
   - The SQL installation scripts in `install/`
-  - The Full Dashboard and the CLI installer in `deprecated/`
+  - The Full Dashboard and the CLI installer, whose frozen source is in `deprecated/dashboard-installer-source.zip`. They are not built or released from this repository
 
 ## Security Best Practices
 

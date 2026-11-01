@@ -125,6 +125,10 @@ public sealed class DarlingLockWaitTrendTests
             var hit = await DarlingMcpBlockingTools.GetLockWaitTrend(dataSource, ServerName, 4);
             var root = JsonDocument.Parse(hit).RootElement;
             Assert.Equal(ServerName, root.GetProperty("server").GetString());
+            /* #7010: the three window keys sit right behind hours_back, and the empty answer above carries them under hints. */
+            Assert.True(root.TryGetProperty("window_truncated", out _));
+            Assert.True(root.TryGetProperty("effective_start", out _));
+            Assert.True(noLocksDoc.RootElement.GetProperty("hints").TryGetProperty("window_truncated", out _));
 
             /* The family: the FIRST collection of each type has no prior sample to difference against and (a
                pre-V127 row) no stored interval, so it is left out (#3540) — the one rated collection is `second`,

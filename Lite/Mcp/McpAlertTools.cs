@@ -60,6 +60,42 @@ public sealed class McpAlertTools
         [Description("Alert family: self-monitor, reports, agent-jobs, performance or external. Not an investigation family such as blocking or resources: filter those with metric_name. Omit for all.")] string? family = null,
         [Description("Add streak_days to each row: days in a row (up to 7) this metric fired at this time of day before the alert, muted fires counting. Default false: rows are unchanged.")] bool include_streak = false)
     {
+        var answer = await GetAlertHistoryCore(dataService, hours_back, limit, as_of, include_dismissed, metric_name, family, include_streak);
+        /* #7005: the floor is the store's data floor (the wait_stats collector, which every collecting server runs every cycle: the oldest of its runs or rows any server has in the window; not the collection log, which also holds the Query Store backfill's older runs),
+           not the oldest alert row: a window that holds no alert is not truncation, a window that starts before the data is. The alert log is
+           archived and pruned with the collector tables (ArchiveService.ArchivableTables), so it has no earlier cutoff of its own. */
+        if (McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd) != null)
+        {
+            return answer;
+        }
+
+        try
+        {
+            var windowStart = windowEnd.AddHours(-hours_back);
+            return await McpQueryTools.WithProbedWindowNoticeAsync(
+                answer,
+                () => dataService.GetFleetWindowFloorAsync(QueryWindowRelation.WaitStats, windowStart, windowEnd),
+                () => dataService.GetOldestFleetWindowRowAsync(QueryWindowRelation.WaitStats),
+                windowStart, windowEnd, "collector data");
+        }
+        catch (Exception ex)
+        {
+            return McpHelpers.FormatError("get_alert_history", ex);
+        }
+    }
+
+    private static async Task<string> GetAlertHistoryCore(
+        LocalDataService dataService,
+        [Description("Hours of history. Default 24.")] int hours_back = 24,
+        [Description("Maximum rows to return, newest first. Default 50. This is what bounds the page — read truncated to know whether the window held more.")] int limit = 50,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        /* Appended after as_of: MCP invokes by name, and a trailing optional is the one position no existing
+           positional C# caller can be re-bound by. Same convention as Darling's twin. */
+        [Description("Include alerts an operator has dismissed in the Alerts History tab. Default false, which is the tab's own read.")] bool include_dismissed = false,
+        [Description("Only alerts with this metric name (e.g. 'High CPU', 'Blocking Detected'), matched exactly, ignoring case. Omit for every metric.")] string? metric_name = null,
+        [Description("Alert family: self-monitor, reports, agent-jobs, performance or external. Not an investigation family such as blocking or resources: filter those with metric_name. Omit for all.")] string? family = null,
+        [Description("Add streak_days to each row: days in a row (up to 7) this metric fired at this time of day before the alert, muted fires counting. Default false: rows are unchanged.")] bool include_streak = false)
+    {
         try
         {
             var hoursError = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);

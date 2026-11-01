@@ -14,6 +14,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Service.FrontDoor;
 
@@ -48,7 +49,11 @@ internal sealed class DarlingFrontDoorTool : DelegatingMcpServerTool
         ArgumentNullException.ThrowIfNull(request);
 
         var agentRole = _agentRoleOf(request.Services);
-        return await _router.CallAsync(_protocolTool.Name, request.Params?.Arguments, agentRole, cancellationToken).ConfigureAwait(false);
+
+        /* #7023: the level this caller is served here (its token's dataDetail, narrowing mcp.dataDetail). The store gets it with the call and
+           serves the stricter of that and its own, so a narrowed caller is not handed the free text a store at full would send. */
+        var detail = (request.Services?.GetService(typeof(McpDataDetailSetting)) as McpDataDetailSetting)?.Mode ?? McpDataDetail.Full;
+        return await _router.CallAsync(_protocolTool.Name, request.Params?.Arguments, agentRole, cancellationToken, detail).ConfigureAwait(false);
     }
 
     /// <summary>A copy of <paramref name="source"/> whose input schema also has the optional <c>store</c> string, an enum of the

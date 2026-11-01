@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using System.Linq;
 using System.Text.Json;
 using System.Threading;
@@ -31,20 +32,35 @@ public sealed partial class DarlingMcpFinOpsTools
     {
         var rows = await DarlingFinOpsHighImpactReader.ReadAsync(
             postgres, resolved.ServerId, hoursBack, McpCommandDeadlines.ReadSeconds, ct, limit);
+        /* #7010: the window-floor notice of query_stats, the table the ranking reads. The unmet-engine answer says its own cause and stays
+           bare; a failed probe costs the notice, never the rows. */
+        var now = DateTime.UtcNow;
+        var start = now.AddHours(-hoursBack);
+        Task<McpWindowNotice> NoticeAsync(bool emptyAnswer) => DarlingMcpWindowNotice.ReadAsync(
+            () => DarlingMcpWindowNotice.Probe(postgres, "query_stats", resolved.ServerName, start, now, ct),
+            start, now, "query_stats", emptyAnswer: emptyAnswer, cancellationToken: ct);
+
         if (rows.Count == 0)
         {
-            return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "query_stats", ct)
-                ?? McpHelpers.Status("empty",
-                    $"No query statistics were collected for this server in the last {hoursBack} hours, so there is nothing to rank.");
+            var unmet = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "query_stats", ct);
+            if (unmet is not null) return unmet;
+
+            var noRows = await NoticeAsync(emptyAnswer: true);
+            return DarlingMcpWindowNotice.FinishEmpty(McpHelpers.Status("empty",
+                $"No query statistics were collected for this server in the last {hoursBack} hours, so there is nothing to rank.", noRows.AsHints()), noRows);
         }
 
-        return JsonSerializer.Serialize(new
+        var notice = await NoticeAsync(emptyAnswer: false);
+        return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new
         {
             server = resolved.DisplayName,
             view = HighImpactView,
             hours_back = hoursBack,
+            effective_start = notice.EffectiveStart,
+            window_truncated = notice.WindowTruncated,
+            truncation_note = notice.TruncationNote,
             rows = rows.Select(HighImpactRow).ToList(),
-        }, McpHelpers.JsonOptions);
+        }, McpHelpers.JsonOptions), notice);
     }
 
     /// <summary>One high-impact row in the wire shape: snake_case keys, the band decided here, no query text beyond

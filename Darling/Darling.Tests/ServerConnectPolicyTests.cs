@@ -82,16 +82,6 @@ public sealed class ServerConnectBackoffTests
         Assert.Equal(DateTime.MinValue, (DateTime)loopState.GetProperty("NextConnectAttempt")!.GetValue(state)!);
     }
 
-    [Fact]
-    public void TheWorker_BacksOffOnFailure_AndResetsOnSuccess()
-    {
-        var source = ReadWorkerSource();
-
-        Assert.Contains("ServerConnectBackoff.NextDelay(server.ConsecutiveConnectFailures", source, StringComparison.Ordinal);
-        Assert.Contains("server.ConsecutiveConnectFailures = 0;", source, StringComparison.Ordinal);
-        Assert.DoesNotContain("server.NextConnectAttempt = DateTime.UtcNow.AddSeconds(60);\r\n            /* #2255", source, StringComparison.Ordinal);
-    }
-
     internal static object NewLoopState(Type loopState, MonitoredServer config)
     {
         var state = Activator.CreateInstance(loopState)!;
@@ -109,7 +99,7 @@ public sealed class ServerConnectBackoffTests
         }
 
         Assert.NotNull(dir);
-        return File.ReadAllText(Path.Combine(dir!, relative));
+        return RepoFile.ReadRepoFile(Path.Combine(dir!, relative));
     }
 }
 

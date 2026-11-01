@@ -250,6 +250,6 @@ public sealed class PgStatementTextTests
         }
 
         Assert.NotNull(dir);
-        return File.ReadAllText(Path.Combine(dir!, relative));
+        return RepoFile.ReadRepoFile(Path.Combine(dir!, relative));
     }
 }

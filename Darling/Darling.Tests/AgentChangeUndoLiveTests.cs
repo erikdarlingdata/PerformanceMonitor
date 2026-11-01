@@ -108,6 +108,58 @@ public sealed class AgentChangeUndoLiveTests
         });
     }
 
+    /// <summary>The mute image with the four repeating-schedule fields (#7040): days as names, times as HH:mm, the IANA zone.</summary>
+    private static string ScheduledMute(string reason, string[]? days, string? start, string? end, string? zone) =>
+        new JsonObject
+        {
+            ["enabled"] = true, ["reason"] = reason, ["metric_name"] = "Blocking", ["server_id"] = 7, ["expires_at_utc"] = null,
+            ["recur_days"] = days is null ? null : new JsonArray(days.Select(d => (JsonNode?)JsonValue.Create(d)).ToArray()),
+            ["recur_start_time"] = start, ["recur_end_time"] = end, ["recur_time_zone"] = zone,
+        }.ToJsonString();
+
+    /// <summary>#7040: a person's repeating schedule survives an agent delete then undo. The undo writes the mask, the two times and the
+    /// zone back, which needs the smallint and time columns to take the image's day names and HH:mm text.</summary>
+    [Fact]
+    public async Task ADeletedRepeatingMute_ComesBackWithItsSchedule()
+    {
+        await RunAsync(async (undo, connection, ct) =>
+        {
+            var called = await JournalChangeAsync(connection, "mute", "s1", 7,
+                ScheduledMute("nightly", ["Mon", "Fri"], "22:00", "02:00", "America/New_York"), null, ct: ct);
+
+            var result = await undo.UndoAsync(called, Login, ct);
+            Assert.True(result.Undone, result.Words);
+            Assert.Equal("34|22:00:00|02:00:00|America/New_York", await ScalarAsync(connection,
+                "SELECT recur_days::int || '|' || recur_start_time::text || '|' || recur_end_time::text || '|' || recur_time_zone FROM config.config_mute_rules WHERE id = 's1'", ct));
+        });
+    }
+
+    /// <summary>#7040: an update that added a schedule is undone to the rule without one while the row still reads as the agent left
+    /// it (the mask compares as an integer, the times as text), and refused once a person changed the days.</summary>
+    [Fact]
+    public async Task AnUpdatedRepeatingMute_IsRestoredWhenUnchanged_AndRefusedWhenTheDaysChanged()
+    {
+        await RunAsync(async (undo, connection, ct) =>
+        {
+            await ExecAsync(connection, "INSERT INTO config.config_mute_rules (id, enabled, created_at_utc, reason, metric_name, server_id, recur_days, recur_start_time, recur_end_time, recur_time_zone) VALUES ('s2', true, now() at time zone 'utc', 'agent says', 'Blocking', 7, 34, '22:00', '02:00', 'America/New_York')", ct);
+            var called = await JournalChangeAsync(connection, "mute", "s2", 7,
+                ScheduledMute("old", null, null, null, null), ScheduledMute("agent says", ["Mon", "Fri"], "22:00", "02:00", "America/New_York"), ct: ct);
+
+            var result = await undo.UndoAsync(called, Login, ct);
+            Assert.True(result.Undone, result.Words);
+            Assert.Equal("old|null|null|null|null", await ScalarAsync(connection,
+                "SELECT reason || '|' || coalesce(recur_days::text, 'null') || '|' || coalesce(recur_start_time::text, 'null') || '|' || coalesce(recur_end_time::text, 'null') || '|' || coalesce(recur_time_zone, 'null') FROM config.config_mute_rules WHERE id = 's2'", ct));
+
+            await ExecAsync(connection, "INSERT INTO config.config_mute_rules (id, enabled, created_at_utc, reason, metric_name, server_id, recur_days, recur_start_time, recur_end_time, recur_time_zone) VALUES ('s3', true, now() at time zone 'utc', 'agent says', 'Blocking', 7, 2, '22:00', '02:00', 'America/New_York')", ct);
+            var changedSince = await JournalChangeAsync(connection, "mute", "s3", 7,
+                ScheduledMute("old", null, null, null, null), ScheduledMute("agent says", ["Mon", "Fri"], "22:00", "02:00", "America/New_York"), ct: ct);
+            var refused = await undo.UndoAsync(changedSince, Login, ct);
+            Assert.False(refused.Undone);
+            Assert.Equal("changed_since", refused.Code);
+            Assert.Equal("2", await ScalarAsync(connection, "SELECT recur_days::text FROM config.config_mute_rules WHERE id = 's3'", ct));
+        });
+    }
+
     [Fact]
     public async Task MuteTheAgentCreated_IsDeleted_AndAnUpdatedAtDifferenceIsNotAChange()
     {

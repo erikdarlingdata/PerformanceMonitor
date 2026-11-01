@@ -232,6 +232,46 @@ public sealed class MuteRulesBehaviourTests
     }
 
     [Fact]
+    public void TheSchedule_TravelsAsOneUnit_AndAOneOffRuleNeverCarriesTheDefaultZone()
+    {
+        if (!TryRun("schedule", out var r)) return;
+
+        Assert.Equal("{\"server_name\":\"SRV1\",\"metric_name\":\"High CPU\",\"reason\":\"noisy\"}", r.GetProperty("oneOff").GetRawText());
+        Assert.Equal("{}", r.GetProperty("oneOffPatch").GetRawText());
+        var create = JsonNode.Parse(r.GetProperty("create").GetRawText())!.AsObject();
+        Assert.Equal(["Sat", "Sun"], create["recur_days"]!.AsArray().Select(n => n!.GetValue<string>()));
+        Assert.Equal("22:00", create["recur_start"]!.GetValue<string>());
+        Assert.Equal("02:00", create["recur_end"]!.GetValue<string>());
+        Assert.Equal("UTC", create["recur_time_zone"]!.GetValue<string>());
+        var everyDay = JsonNode.Parse(r.GetProperty("everyDay").GetRawText())!.AsObject();
+        Assert.False(everyDay.ContainsKey("recur_days"));
+        Assert.Equal("01:00", everyDay["recur_start"]!.GetValue<string>());
+        var daysOnly = JsonNode.Parse(r.GetProperty("daysOnly").GetRawText())!.AsObject();
+        Assert.True(daysOnly.ContainsKey("recur_days"));
+        Assert.False(daysOnly.ContainsKey("recur_start"));
+        Assert.True(r.GetProperty("scheduleAloneIsNotAScope").GetBoolean());
+
+        Assert.Equal("{}", r.GetProperty("unchanged").GetRawText());
+        var changed = JsonNode.Parse(r.GetProperty("changedEnd").GetRawText())!.AsObject();
+        Assert.Equal(4, changed.Count);
+        Assert.Equal("03:00", changed["recur_end"]!.GetValue<string>());
+        Assert.Equal("22:00", changed["recur_start"]!.GetValue<string>());
+        var cleared = JsonNode.Parse(r.GetProperty("cleared").GetRawText())!.AsObject();
+        Assert.Equal(4, cleared.Count);
+        Assert.All(cleared, kv => Assert.Null(kv.Value));
+        Assert.Equal(4, JsonNode.Parse(r.GetProperty("added").GetRawText())!.AsObject().Count);
+
+        var values = r.GetProperty("values");
+        Assert.Equal("22:00", values.GetProperty("recur_start").GetString());
+        Assert.Equal(2, values.GetProperty("recur_days").GetArrayLength());
+        Assert.Equal("recur_start", r.GetProperty("invalid").GetProperty("field").GetString());
+        var cell = r.GetProperty("cell").EnumerateArray().Select(e => e.GetString()).ToArray();
+        Assert.Equal("—", cell[0]);
+        Assert.EndsWith("(in window now)", cell[1]);
+        Assert.EndsWith("(outside window)", cell[2]);
+    }
+
+    [Fact]
     public void CancellingTheForm_LetsTheSameMuteLinkReopenIt()
     {
         if (!TryRun("reopen", out var r)) return;

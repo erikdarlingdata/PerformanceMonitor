@@ -193,10 +193,10 @@ public sealed class AwsPerServerRoleRungTests
         var wrapperAt = batch.IndexOf(wrapper, StringComparison.Ordinal);
         Assert.True(functionAt >= 0 && wrapperAt > functionAt, "the wrapper must be created after the function it calls");
         Assert.Contains(
-            $"GRANT EXECUTE ON FUNCTION config.edit_monitored_server({DarlingManagedRoles.EditMonitoredServerSignature}) TO viewer, mcp;",
+            $"GRANT EXECUTE ON FUNCTION config.edit_monitored_server({DarlingManagedRoles.EditMonitoredServerSignature}) TO web, mcp;",
             batch, StringComparison.Ordinal);
         Assert.Contains(
-            $"GRANT EXECUTE ON FUNCTION config.edit_monitored_server({DarlingManagedRoles.EditMonitoredServerLegacySignature}) TO viewer, mcp;",
+            $"GRANT EXECUTE ON FUNCTION config.edit_monitored_server({DarlingManagedRoles.EditMonitoredServerLegacySignature}) TO web, mcp;",
             batch, StringComparison.Ordinal);
     }
 
@@ -209,10 +209,10 @@ public sealed class AwsPerServerRoleRungTests
         Assert.Contains(
             NormalizeSql(DarlingManagedRoles.BuildEditMonitoredServerLegacyWrapperSql("config")), NormalizeSql(script), StringComparison.Ordinal);
         Assert.Contains(
-            $"GRANT EXECUTE ON FUNCTION config.edit_monitored_server({DarlingManagedRoles.EditMonitoredServerSignature}) TO viewer, mcp;",
+            $"GRANT EXECUTE ON FUNCTION config.edit_monitored_server({DarlingManagedRoles.EditMonitoredServerSignature}) TO web, mcp;",
             script, StringComparison.Ordinal);
         Assert.Contains(
-            $"GRANT EXECUTE ON FUNCTION config.edit_monitored_server({DarlingManagedRoles.EditMonitoredServerLegacySignature}) TO viewer, mcp;",
+            $"GRANT EXECUTE ON FUNCTION config.edit_monitored_server({DarlingManagedRoles.EditMonitoredServerLegacySignature}) TO web, mcp;",
             script, StringComparison.Ordinal);
 
         var rules = DarlingManagedRoles.BuildServerPasswordRulesSql("config");
