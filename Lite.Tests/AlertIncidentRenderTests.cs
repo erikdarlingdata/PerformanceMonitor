@@ -174,7 +174,7 @@ public class AlertIncidentRenderTests
                 /* #7041: EmailHtmlBody and EmailSubject belong to the Daily Health Report, which carries no incidents, so no delivery filter or split copy touches it.
                    The copies deliberately leave them out. */
                 "AgReplicaIdentity", "AttachmentFileName", "AttachmentXml", "CollectorName", "Details",
-                "EmailHtmlBody", "EmailSubject", "EscalationBypassesCooldown", "External", "Incidents", "NewestSample", "Route", "Routing", "SeverityOverride", "WaitType"
+                "EmailHtmlBody", "EmailSubject", "EscalationBypassesCooldown", "External", "FileGrowthFiles", "Incidents", "NewestSample", "Route", "Routing", "SeverityOverride", "WaitType"
             },
             census);
 
