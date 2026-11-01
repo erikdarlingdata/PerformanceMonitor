@@ -47,6 +47,17 @@ public sealed partial class DarlingMcpPlanForceTools
     /// <summary>The facts that decide a PostgreSQL kill. <see cref="BackendStartEpoch"/> is the start second the statement compares.</summary>
     internal sealed record PgKillBinding(int Pid, string? BackendId, long BackendStartEpoch, DateTime? XactStartUtc, DateTime? StateChangeUtc, string? State);
 
+    /// <summary>A PostgreSQL kill's binding as a proposal stores it (#7109), and as a press compares it: one shape for both.</summary>
+    internal static object PgKillBindingImage(PgKillBinding binding) => new
+    {
+        pid = binding.Pid,
+        backend_id = binding.BackendId,
+        backend_start_epoch = binding.BackendStartEpoch,
+        xact_start = binding.XactStartUtc,
+        state_change = binding.StateChangeUtc,
+        state = binding.State,
+    };
+
     internal sealed record SqlKillPrepared(SqlKillBinding? Binding, SqlServerRemediationExecutor? Executor, ServerClock? Clock, RemediationResult? Dry,
         object? Before, string[] Warnings, string? FixedAnswer, string? RecordReason, RemediationResult? NotDone)
         : KillPrepareStop(FixedAnswer, RecordReason, NotDone);

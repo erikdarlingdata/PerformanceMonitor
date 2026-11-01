@@ -558,7 +558,7 @@ RETURNING journal_id";
 
     private sealed record AgentActionRequest(string State, Guid? ClaimId, string? ClaimedBy, DateTime? LeaseUntil,
         DateTime ExpiresAt, int ServerId, string ServerName, Guid? PracticeOf, int AutonomyLevel, int ClaimCount,
-        IReadOnlyList<(string Metric, AlertSeverityLevel? Severity)> Metrics, string TriggerKind);
+        IReadOnlyList<(string Metric, AlertSeverityLevel? Severity)> Metrics, string TriggerKind, Guid RequestId);
 
     private async Task<AgentActionRequest?> ReadAgentActionRequestAsync(NpgsqlConnection connection,
         NpgsqlTransaction transaction, Guid requestId, CancellationToken cancellationToken)
@@ -583,7 +583,8 @@ RETURNING journal_id";
                 reader.GetInt16(8),
                 reader.GetInt32(9),
                 Array.Empty<(string, AlertSeverityLevel?)>(),
-                reader.GetString(11));
+                reader.GetString(11),
+                requestId);
         }
 
         /* #6928: each alert's metric at the tier it arrived at, so the live routes are read at the tier dispatch used: a Critical alert

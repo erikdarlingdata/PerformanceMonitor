@@ -167,7 +167,7 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
     }
 
     /// <summary>The collector's own expression for <c>backend_id</c> (PgBlockingCollector, PgSessionStatesCollector), run on the server for one pid.</summary>
-    private const string CollectorBackendIdSql =
+    internal const string CollectorBackendIdSql =
         "SELECT (extract(epoch FROM coalesce(a.backend_start, pg_postmaster_start_time()))::bigint::text || to_char(a.pid, 'FM0000000'))::bigint::text FROM pg_stat_activity AS a WHERE a.pid = $1";
 
     private enum Grants { SignalAndStats, StatsOnly, Nothing }

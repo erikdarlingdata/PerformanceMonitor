@@ -722,15 +722,7 @@ public sealed partial class DarlingMcpPlanForceTools
         if (decision.NeedsApproval)
             return await ProposeAsync(owner, null, decision, action!, tool, ServerActionNames.KillSession, resolved.ServerId, resolved.DisplayName,
                 new { pid, backend_start_epoch = startEpoch },
-                new
-                {
-                    pid = binding.Pid,
-                    backend_id = binding.BackendId,
-                    backend_start_epoch = binding.BackendStartEpoch,
-                    xact_start = binding.XactStartUtc,
-                    state_change = binding.StateChangeUtc,
-                    state = binding.State,
-                },
+                PgKillBindingImage(binding),
                 new { session = before, warnings }, ct);
 
         RemediationResult? killed = null;

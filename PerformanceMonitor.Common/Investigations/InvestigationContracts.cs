@@ -453,6 +453,13 @@ public static class AgentActionCodes
     /// stores a proposal instead of writing.</summary>
     public const string ApprovalRequired = "approval_required";
 
+    /// <summary>The shared server-action conditions (#7109): a person closed the request, so no action runs under it.</summary>
+    public const string RequestClosed = "request_closed";
+
+    /// <summary>The shared server-action conditions (#7109): a kill on an alert request whose alert has resolved. A kill is about the session
+    /// now, and the alert that showed it is gone.</summary>
+    public const string AlertResolved = "alert_resolved";
+
     /// <summary>The server-action gate: the action is not one of the fixed list.</summary>
     public const string UnknownServerAction = "unknown_server_action";
 
