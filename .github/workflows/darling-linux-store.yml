@@ -75,7 +75,10 @@ jobs:
           tags: ${{ env.DARLING_IMAGE }}
           load: true
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # A pull request only reads. Writing the max-mode cache took 87 s of the first run (every build layer is
+          # exported), more than a pull request can win back, and its publish layer changes with every source edit anyway.
+          # The nightly and a manual dispatch run on dev and write it; a pull request against dev reads dev's cache.
+          cache-to: ${{ github.event_name != 'pull_request' && 'type=gha,mode=max' || '' }}
 
       # #5479: the guard's reader on the real /proc and cgroup files. `--memory 512m` makes the limit the cgroup's; the verb
       # fails unless the guard measures resident memory and reads 512 MiB as its limit (cgroup v2 on ubuntu-latest).
