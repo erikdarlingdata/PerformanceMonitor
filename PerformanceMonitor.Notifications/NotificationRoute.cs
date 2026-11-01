@@ -171,6 +171,11 @@ public sealed record NotificationRoute(
     /// A route whose filter excludes an alert's severity does not match it, and matching goes on to the next route.</summary>
     public string Severities { get; init; } = NotificationRouteKinds.SeveritiesBoth;
 
+    /// <summary>Whether this route posts a chat notice when an agent files a report (<c>report_notice</c>, #6979):
+    /// <see cref="NotificationRouteKinds.ReportNoticeOff"/> (the default), <see cref="NotificationRouteKinds.ReportNoticeNeedsPersonOrChange"/>
+    /// or <see cref="NotificationRouteKinds.ReportNoticeAll"/>.</summary>
+    public string ReportNotice { get; init; } = NotificationRouteKinds.ReportNoticeOff;
+
     /// <summary>Whether this route's severity filter takes an alert of <paramref name="severity"/> (#6928). Null takes every route.</summary>
     public bool AcceptsSeverity(AlertSeverityLevel? severity) => NotificationRouteKinds.SeveritiesAccept(Severities, severity);
 
