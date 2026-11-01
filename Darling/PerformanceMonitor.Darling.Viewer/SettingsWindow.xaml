@@ -951,6 +951,13 @@
                                 <TextBlock Text="The requests an agent route hands to your own agent, with their reports and journal; the notes a brief may carry; and the environment profile per fleet, server or tag."
                                            FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
                                            Margin="20,0,0,0" TextWrapping="Wrap"/>
+                                <!-- #7107: the people the agents' requests and approvals will know, their identities and grants. -->
+                                <Button x:Name="ManagePeopleButton" Content="Manage _People..."
+                                        Click="ManagePeopleButton_Click" HorizontalAlignment="Left"
+                                        Padding="12,4" Margin="20,8,0,4"/>
+                                <TextBlock Text="The people who work with the agents, the web sign-in and Slack identities that map to each, and what each may do. Nothing reads a grant yet."
+                                           FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
+                                           Margin="20,0,0,0" TextWrapping="Wrap"/>
                             </StackPanel>
                         </Border>
                         <TextBlock Style="{StaticResource ScopeLineStyle}" Text="This viewer only. The defaults below apply to what you do in this viewer."/>
