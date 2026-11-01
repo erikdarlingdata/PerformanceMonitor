@@ -99,11 +99,11 @@ A named token that cannot be served is left out, and the start logs one Critical
 
 Darling reads `mcp.tokens` once, at start.
 
-Route agent fields over MCP (the agent level and its limits on `create_notification_route` and `update_notification_route`, for the operator role only) come in a later change. Until then you set agent routes in the Viewer.
+Route agent fields over MCP (the agent level and its limits on `create_notification_route` and `update_notification_route`, for the operator role only) are available. The fields are `agent_level`, `agent_max_per_hour`, `agent_max_per_day`, `agent_lease_minutes` and `agent_expiry_minutes`. `update_notification_route` also takes `clear_agent_level`.
 
 ## Create an agent route
 
-You create and edit agent routes in the Viewer's route editor. The web dashboard shows routes but does not edit them. No MCP tool changes an agent route.
+You create and edit agent routes in the Viewer's route editor or on the web dashboard. The operator role can also change them with `create_notification_route` and `update_notification_route`.
 
 Set **Agent investigation** on the route to one of these:
 

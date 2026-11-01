@@ -125,6 +125,8 @@ Windows PowerShell 5.1 and PowerShell 7 both run the script. Add `-Check` to the
 
 The script refuses to run from the install folder itself. It never kills a process. If it names a process that blocks the upgrade, close that process and run it again. It keeps the newest three rollback backups. To clear old ones, run `& "C:\Program Files\PerformanceMonitorDarling\upgrade-darling.ps1" -PruneOnly`.
 
+The script also refuses a build made with a plain `dotnet publish` over a release install. Such a build carries no .NET runtime, and the old runtime files left in the folder stop the service from starting. The refusal comes before the service stops, so nothing changes. Use the release zip, or publish with `--runtime win-x64 --self-contained`.
+
 If you installed with the MSI, do not use this script. Run the newer MSI instead. It upgrades in place and keeps `darling.json` and the store.
 
 For more, see [Upgrading an existing install](#upgrading-an-existing-install) and [Rolling back to an older build](#rolling-back-to-an-older-build).
