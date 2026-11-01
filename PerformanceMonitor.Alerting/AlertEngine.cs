@@ -148,6 +148,14 @@ public sealed class AlertEngine
        is keyed per server too). A failed escalation (#4752) backs off like any failed send: EscalationOpensGate holds it for the
        retry delay while the family and key have an open failure streak. */
     private readonly TierEscalation _cpuEscalation = new();
+
+    /* #7085: the sample instant that began the current run of samples under the High CPU bar, per server. In memory only: a restart
+       begins a new run at the next clear sample, which can only hold an open incident longer, never close it early. */
+    private readonly ConcurrentDictionary<string, DateTime> _cpuClearRunStart = new();
+
+    /* #7085: servers whose High CPU incident was already open when this process started (the seeded Firing bit). That page went out
+       before the restart, so the first fire this process judges for the key only records its tier and sends nothing. */
+    private readonly ConcurrentDictionary<string, bool> _cpuRestoredOpen = new();
     private readonly TierEscalation _deadlockEscalation = new();
     private readonly TierEscalation _poisonWaitEscalation = new();
     private readonly TierEscalation _lowDiskEscalation = new();
@@ -697,6 +705,7 @@ public sealed class AlertEngine
                 if (cpuPersistence.Value.State.Firing)
                 {
                     _lastCpuAlert[key] = _utcNow();
+                    _cpuRestoredOpen[key] = true;
                 }
             }
 
@@ -845,6 +854,26 @@ public sealed class AlertEngine
     /// three would hold incidents open a further minute and buy nothing.
     /// </summary>
     public const int CpuClearSamples = 2;
+
+    /// <summary>
+    /// Consecutive breaching samples that open a SQL Server High CPU incident (#7085): five, which at the
+    /// one-minute CPU sample cadence is five minutes of CPU at or over the bar. Three (<see cref="CpuBreachSamples"/>)
+    /// still paged on isolated spikes of one to six minutes that ended on their own: 19 of the 58 High CPU
+    /// pages in a 14-day field review of one store. <see cref="CpuBreachSamples"/> keeps its 3 for the
+    /// PostgreSQL target gate, which has its own cadence and its own issue.
+    /// </summary>
+    public const int SqlCpuBreachSamples = 5;
+
+    /// <summary>
+    /// How long CPU must stay under the bar, in sample time, before an open SQL Server High CPU incident
+    /// clears and CPU Resolved goes out (#7085). Time, not a sample count, so it does not depend on the
+    /// collector's cadence. Measured from the first sample under the bar to the sample that completes the
+    /// span, so at a one-minute cadence it is sixteen samples in a row. One server paged 22 times in three
+    /// mornings because two clear samples closed the incident and the next three breaching samples
+    /// opened it again. While the incident is held open, a new run over the bar does not page; only a rise to
+    /// a higher tier does (see <c>FireCpuAsync</c>).
+    /// </summary>
+    public static readonly TimeSpan SqlCpuClearHold = TimeSpan.FromMinutes(15);
 
     /// <summary>
     /// The (server, metric) key the CPU gate's state is persisted under. The SAME string the mute context,
@@ -1049,9 +1078,32 @@ public sealed class AlertEngine
             }
 
             bool breaching = sampleValue.Value >= cpuThreshold;      /* :65-67 */
+
+            /* #7085: the incident clears on TIME under the bar, not a sample count. The gate is handed an unreachable clear bar
+               until the run of clear samples has lasted SqlCpuClearHold by the samples' own instants, then a bar of one so
+               that sample resolves. A breaching sample ends the run; a sample with no value never reaches here. */
+            int clearBar = int.MaxValue;
+            if (breaching)
+            {
+                _cpuClearRunStart.TryRemove(key, out _);
+            }
+            else if (_cpuPersistence.TryGetValue(key, out var cpuPrior) && cpuPrior.State.Firing)
+            {
+                var sampleAt = obs.UtcInstant ?? obs.Instant ?? now;
+                var runStart = _cpuClearRunStart.GetOrAdd(key, sampleAt);
+                if (sampleAt - runStart >= SqlCpuClearHold)
+                {
+                    clearBar = 1;
+                }
+            }
+
             var (outcome, incidentOpen) = await ObservePersistenceAsync(
                 _cpuPersistence, CpuPersistenceMetric, key, obs.Instant, breaching,
-                CpuBreachSamples, CpuClearSamples);
+                SqlCpuBreachSamples, clearBar);
+            if (outcome == PersistenceOutcome.Resolve)
+            {
+                _cpuClearRunStart.TryRemove(key, out _);
+            }
 
             if (incidentOpen && breaching)
             {
@@ -1091,6 +1143,7 @@ public sealed class AlertEngine
             {
                 /* #5715: the incident is over whether or not anyone is told, so the next one starts from nothing delivered. */
                 _cpuEscalation.Close(key);
+                _cpuRestoredOpen.TryRemove(key, out _);
                 if (suppressed)
                 {
                     continue;
@@ -1232,7 +1285,22 @@ public sealed class AlertEngine
         var cpuGrade = GradeCpuFire(alertCpuValue);
         var escalation = _cpuEscalation.IsEscalation(key, cpuGrade);
 
-        if (!suppressed && EscalationOpensGate("High CPU", key, escalation, _lastCpuAlert, now, alertCooldown)) /* :72 */
+        /* #7085: an incident that has already paged is held open until CPU stays under the bar for SqlCpuClearHold, so
+           inside it only an escalation pages: no cooldown reminder, no page for a new run over the bar after a dip. A fire whose
+           every channel failed put its tier back, so the incident has not paged yet and the cooldown path retries it. */
+        if (!suppressed && _cpuRestoredOpen.TryRemove(key, out _) && _cpuEscalation.Highest(key) is null)
+        {
+            /* Open before this process started: the page went out then. Learn the tier and wait for an escalation. */
+            _cpuEscalation.Record(key, cpuGrade);
+            return;
+        }
+
+        bool incidentPaged = _cpuEscalation.Highest(key) is not null;
+        bool opensGate = incidentPaged
+            ? escalation && !_failedSends.HasOpenStreak("High CPU", key, now)
+            : EscalationOpensGate("High CPU", key, escalation, _lastCpuAlert, now, alertCooldown);
+
+        if (!suppressed && opensGate) /* :72 */
         {
             var muteCtx = new AlertMuteContext { ServerName = serverName, ServerId = serverId, MetricName = "High CPU" }; /* :74 */
             bool isMuted = _isAlertMuted(muteCtx);                              /* :75 */

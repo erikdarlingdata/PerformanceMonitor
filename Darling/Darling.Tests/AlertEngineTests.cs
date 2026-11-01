@@ -703,7 +703,7 @@ public sealed class AlertEngineTests
         h.Settings.CpuEnabled = true;
         var engine = h.Build();
 
-        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: AlertEngine.CpuBreachSamples - 1, from: Harness.SampleBase);
+        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: AlertEngine.SqlCpuBreachSamples - 1, from: Harness.SampleBase);
         Assert.Empty(h.Deliverer.Outcomes);
 
         at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: 1, from: at);
@@ -729,13 +729,11 @@ public sealed class AlertEngineTests
         at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 85, samples: 1, from: at);
         Assert.Single(h.Deliverer.Outcomes);
 
-        /* After the cooldown elapses the STANDING breach re-fires. #3282 changed what counts as an
-           incident, deliberately not how often a standing one repeats: the gate's rising edge is a
-           separate question from the reminder cadence, and silencing the reminder would be a second
-           behaviour change nobody asked for. */
+        /* After the cooldown elapses the STANDING breach does not page again (#7085). An incident that has paged is held
+           open and only an escalation pages inside it, so the cooldown reminder this test used to expect is gone. */
         h.Now = h.Now.AddMinutes(5);
         await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 85, samples: 1, from: at);
-        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.Single(h.Deliverer.Outcomes);
     }
 
     [Fact]
@@ -770,7 +768,7 @@ public sealed class AlertEngineTests
         var engine = h.Build();
 
         var stuck = Harness.SampleBase.AddMinutes(1);
-        for (var i = 0; i < AlertEngine.CpuBreachSamples * 3; i++)
+        for (var i = 0; i < AlertEngine.SqlCpuBreachSamples * 3; i++)
         {
             await engine.EvaluateServerAsync(Harness.Snapshot(sqlCpu: 70, totalCpu: 95, cpuSampleTime: stuck));
         }
@@ -778,7 +776,7 @@ public sealed class AlertEngineTests
         Assert.Empty(h.Deliverer.Outcomes);
 
         /* Two genuinely new samples on top of that one observation reach the bar. */
-        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 95, samples: AlertEngine.CpuBreachSamples - 1, from: stuck);
+        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 95, samples: AlertEngine.SqlCpuBreachSamples - 1, from: stuck);
         Assert.Single(h.Deliverer.Outcomes);
     }
 
@@ -816,20 +814,27 @@ public sealed class AlertEngineTests
 
         var fallenBack = new DateTime(2026, 11, 1, 1, 0, 0);          /* 01:00 EST: one real minute later, 59 local minutes EARLIER */
         Assert.True(fallenBack < local, "the fixture must run the stamp backwards, or it tests nothing #3744 changed");
-        await ObserveCpuAsync(engine, fallenBack, breaching: true);       /* 3 — the bar */
+        await ObserveCpuAsync(engine, fallenBack, breaching: true);       /* 3 */
+        await ObserveCpuAsync(engine, fallenBack.AddMinutes(1), breaching: true); /* 4 */
+        Assert.Empty(h.Deliverer.Outcomes);
+        await ObserveCpuAsync(engine, fallenBack.AddMinutes(2), breaching: true); /* 5 — the bar */
         Assert.Single(h.Deliverer.Outcomes);
 
         /* The same rule on the falling edge: an incident open across the fall-back clears in the repeated
-           hour rather than waiting for the local clock to climb past 01:59 again. */
-        await ObserveCpuAsync(engine, fallenBack.AddMinutes(1), breaching: false);
+           hour rather than waiting for the local clock to climb past 01:59 again. Fifteen minutes under the bar (#7085). */
+        for (var i = 3; i <= 17; i++)
+        {
+            await ObserveCpuAsync(engine, fallenBack.AddMinutes(i), breaching: false);
+        }
+
         Assert.Empty(h.Resolutions);
-        await ObserveCpuAsync(engine, fallenBack.AddMinutes(2), breaching: false);
+        await ObserveCpuAsync(engine, fallenBack.AddMinutes(18), breaching: false);
         Assert.Single(h.Resolutions);
 
         /* And a repeat of the LAST counted instant is still the same sample: the streak holds and nothing is
            written — equality lost none of #3282. */
         var writes = h.StateStore.SavedPersistence.Count;
-        await ObserveCpuAsync(engine, fallenBack.AddMinutes(2), breaching: false);
+        await ObserveCpuAsync(engine, fallenBack.AddMinutes(18), breaching: false);
         Assert.Equal(writes, h.StateStore.SavedPersistence.Count);
     }
 
@@ -872,9 +877,12 @@ public sealed class AlertEngineTests
         Assert.Equal(writes, h.StateStore.SavedPersistence.Count);
 
         /* Within the UTC frame the samples advance and the bar is reached where it should be. */
-        await ObserveCpuAsync(upgraded, utc.AddMinutes(1), breaching: true);                              /* 3 — the bar */
+        await ObserveCpuAsync(upgraded, utc.AddMinutes(1), breaching: true);                              /* 3 */
+        await ObserveCpuAsync(upgraded, utc.AddMinutes(2), breaching: true);                              /* 4 */
+        Assert.Empty(h.Deliverer.Outcomes);
+        await ObserveCpuAsync(upgraded, utc.AddMinutes(3), breaching: true);                              /* 5 — the bar */
         Assert.Single(h.Deliverer.Outcomes);
-        Assert.Equal(utc.AddMinutes(1), Assert.Single(h.StateStore.Persistence).Value.LastObservedSampleUtc);
+        Assert.Equal(utc.AddMinutes(3), Assert.Single(h.StateStore.Persistence).Value.LastObservedSampleUtc);
     }
 
     [Fact]
@@ -900,7 +908,10 @@ public sealed class AlertEngineTests
         await ObserveCpuAsync(upgraded, utc, breaching: true);                                            /* held */
         Assert.Empty(h.Deliverer.Outcomes);
 
-        await ObserveCpuAsync(upgraded, utc.AddMinutes(1), breaching: true);                              /* 3 — the bar */
+        await ObserveCpuAsync(upgraded, utc.AddMinutes(1), breaching: true);                              /* 3 */
+        await ObserveCpuAsync(upgraded, utc.AddMinutes(2), breaching: true);                              /* 4 */
+        Assert.Empty(h.Deliverer.Outcomes);
+        await ObserveCpuAsync(upgraded, utc.AddMinutes(3), breaching: true);                              /* 5 — the bar */
         Assert.Single(h.Deliverer.Outcomes);
     }
 
@@ -943,26 +954,26 @@ public sealed class AlertEngineTests
 
         /* SqlProcess mode compares the SQL value even when total is higher. */
         h.Settings.CpuAlertMode = CpuAlertMode.SqlProcess;
-        at = await DriveCpuAsync(h.Build(), sqlCpu: 50, totalCpu: 95, samples: AlertEngine.CpuBreachSamples, from: at);
+        at = await DriveCpuAsync(h.Build(), sqlCpu: 50, totalCpu: 95, samples: AlertEngine.SqlCpuBreachSamples, from: at);
         Assert.Empty(h.Deliverer.Outcomes);
 
-        at = await DriveCpuAsync(h.Build(), sqlCpu: 85, totalCpu: 95, samples: AlertEngine.CpuBreachSamples, from: at);
+        at = await DriveCpuAsync(h.Build(), sqlCpu: 85, totalCpu: 95, samples: AlertEngine.SqlCpuBreachSamples, from: at);
         Assert.Equal("85% (SQL CPU)", Assert.Single(h.Deliverer.Outcomes).CurrentValue);
 
         /* TotalServer mode falls back to the SQL value when no total is available. A fresh harness, so the
            incident the sub-case above opened cannot mask this one's rising edge. */
         h = new Harness { Settings = { CpuEnabled = true, CpuAlertMode = CpuAlertMode.TotalServer } };
-        at = await DriveCpuAsync(h.Build(), sqlCpu: 90, totalCpu: null, samples: AlertEngine.CpuBreachSamples, from: at);
+        at = await DriveCpuAsync(h.Build(), sqlCpu: 90, totalCpu: null, samples: AlertEngine.SqlCpuBreachSamples, from: at);
         Assert.Equal("90% (Total CPU)", Assert.Single(h.Deliverer.Outcomes).CurrentValue);
 
         /* No CPU sample at all → no alert (:66 HasValue gate), on a fresh harness so nothing is open. */
         h = new Harness { Settings = { CpuEnabled = true, CpuAlertMode = CpuAlertMode.TotalServer } };
-        await DriveCpuAsync(h.Build(), sqlCpu: null, totalCpu: null, samples: AlertEngine.CpuBreachSamples, from: at);
+        await DriveCpuAsync(h.Build(), sqlCpu: null, totalCpu: null, samples: AlertEngine.SqlCpuBreachSamples, from: at);
         Assert.Empty(h.Deliverer.Outcomes);
     }
 
     [Fact]
-    public async Task Cpu_ResolvesOnlyAfterTwoConsecutiveClearSamples_WithLiteToastStrings_UnlessSuppressed()
+    public async Task Cpu_ResolvesOnlyAfterFifteenMinutesUnderTheBar_WithLiteToastStrings_UnlessSuppressed()
     {
         /* Lite AlertEngine.cs:101-113 — the "CPU Resolved" strings are unchanged; what changed is that
            ONE sample under the bar no longer announces a recovery. */
@@ -970,10 +981,10 @@ public sealed class AlertEngineTests
         h.Settings.CpuEnabled = true;
         var engine = h.Build();
 
-        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 90, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 90, samples: AlertEngine.SqlCpuBreachSamples, from: Harness.SampleBase);
         Assert.Single(h.Deliverer.Outcomes);
 
-        at = await DriveCpuAsync(engine, sqlCpu: 20, totalCpu: 40, samples: AlertEngine.CpuClearSamples - 1, from: at);
+        at = await DriveCpuAsync(engine, sqlCpu: 20, totalCpu: 40, samples: ((int)AlertEngine.SqlCpuClearHold.TotalMinutes + 1) - 1, from: at);
         Assert.Empty(h.Resolutions);
 
         at = await DriveCpuAsync(engine, sqlCpu: 20, totalCpu: 40, samples: 1, from: at);
@@ -986,8 +997,8 @@ public sealed class AlertEngineTests
            nothing (:107). */
         h.Resolutions.Clear();
         h.Deliverer.Outcomes.Clear();
-        at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 90, samples: AlertEngine.CpuBreachSamples, from: at, suppressed: true);
-        await DriveCpuAsync(engine, sqlCpu: 20, totalCpu: 40, samples: AlertEngine.CpuClearSamples, from: at, suppressed: true);
+        at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 90, samples: AlertEngine.SqlCpuBreachSamples, from: at, suppressed: true);
+        await DriveCpuAsync(engine, sqlCpu: 20, totalCpu: 40, samples: ((int)AlertEngine.SqlCpuClearHold.TotalMinutes + 1), from: at, suppressed: true);
         Assert.Empty(h.Resolutions);
         Assert.Empty(h.Deliverer.Outcomes);
     }
@@ -1002,7 +1013,7 @@ public sealed class AlertEngineTests
         h.Settings.CpuEnabled = true;
         var engine = h.Build();
 
-        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 99, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 99, samples: AlertEngine.SqlCpuBreachSamples, from: Harness.SampleBase);
         at = await DriveCpuAsync(engine, sqlCpu: 20, totalCpu: 23, samples: 1, from: at);
         await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 99, samples: 1, from: at);
 
@@ -1021,14 +1032,14 @@ public sealed class AlertEngineTests
         h.Settings.CpuEnabled = true;
         var engine = h.Build();
 
-        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 90, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 90, samples: AlertEngine.SqlCpuBreachSamples, from: Harness.SampleBase);
         Assert.Single(h.Deliverer.Outcomes);
 
         at = await DriveCpuAsync(engine, sqlCpu: null, totalCpu: null, samples: 5, from: at);
         Assert.Empty(h.Resolutions);
 
-        /* And the frozen streak is the BREACH streak: one real clear sample still is not enough. */
-        at = await DriveCpuAsync(engine, sqlCpu: 20, totalCpu: 40, samples: 1, from: at);
+        /* And the frozen streak is the BREACH streak: real clear samples short of the fifteen-minute hold are not enough. */
+        at = await DriveCpuAsync(engine, sqlCpu: 20, totalCpu: 40, samples: ((int)AlertEngine.SqlCpuClearHold.TotalMinutes), from: at);
         Assert.Empty(h.Resolutions);
 
         await DriveCpuAsync(engine, sqlCpu: 20, totalCpu: 40, samples: 1, from: at);
@@ -1046,7 +1057,7 @@ public sealed class AlertEngineTests
         h.Settings.CpuEnabled = true;
         var engine = h.Build();
 
-        for (var i = 0; i < AlertEngine.CpuBreachSamples; i++)
+        for (var i = 0; i < AlertEngine.SqlCpuBreachSamples; i++)
         {
             await engine.EvaluateServerAsync(Harness.Snapshot(sqlCpu: 70, totalCpu: 95, noCpuSampleTime: true));
         }
@@ -1064,12 +1075,12 @@ public sealed class AlertEngineTests
         var h = new Harness();
         h.Settings.CpuEnabled = true;
 
-        var at = await DriveCpuAsync(h.Build(), sqlCpu: 70, totalCpu: 95, samples: AlertEngine.CpuBreachSamples - 1, from: Harness.SampleBase);
+        var at = await DriveCpuAsync(h.Build(), sqlCpu: 70, totalCpu: 95, samples: AlertEngine.SqlCpuBreachSamples - 1, from: Harness.SampleBase);
         Assert.Empty(h.Deliverer.Outcomes);
 
         var persisted = Assert.Single(h.StateStore.Persistence);
         Assert.Equal(AlertEngine.CpuPersistenceMetric, persisted.Key.Metric);
-        Assert.Equal(AlertEngine.CpuBreachSamples - 1, persisted.Value.State.ConsecutiveBreaches);
+        Assert.Equal(AlertEngine.SqlCpuBreachSamples - 1, persisted.Value.State.ConsecutiveBreaches);
         Assert.False(persisted.Value.State.Firing);
 
         /* A brand-new engine over the same state store IS the restart. */
@@ -1088,7 +1099,7 @@ public sealed class AlertEngineTests
         var h = new Harness();
         h.Settings.CpuEnabled = true;
 
-        var at = await DriveCpuAsync(h.Build(), sqlCpu: 70, totalCpu: 95, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+        var at = await DriveCpuAsync(h.Build(), sqlCpu: 70, totalCpu: 95, samples: AlertEngine.SqlCpuBreachSamples, from: Harness.SampleBase);
         Assert.Single(h.Deliverer.Outcomes);
         Assert.True(Assert.Single(h.StateStore.Persistence).Value.State.Firing);
 
@@ -1097,7 +1108,7 @@ public sealed class AlertEngineTests
         Assert.Single(h.Deliverer.Outcomes);
 
         /* And it resolves normally rather than being orphaned. */
-        at = await DriveCpuAsync(restarted, sqlCpu: 20, totalCpu: 30, samples: AlertEngine.CpuClearSamples, from: at);
+        at = await DriveCpuAsync(restarted, sqlCpu: 20, totalCpu: 30, samples: ((int)AlertEngine.SqlCpuClearHold.TotalMinutes + 1), from: at);
         Assert.Single(h.Resolutions);
     }
 
@@ -1116,7 +1127,7 @@ public sealed class AlertEngineTests
         h.Settings.CpuEnabled = true;
         var engine = h.Build();
 
-        var at = await DriveCpuAsync(engine, sqlCpu: 95, totalCpu: 99, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase, suppressed: true);
+        var at = await DriveCpuAsync(engine, sqlCpu: 95, totalCpu: 99, samples: AlertEngine.SqlCpuBreachSamples, from: Harness.SampleBase, suppressed: true);
         Assert.Empty(h.Deliverer.Outcomes);
 
         /* One UNsuppressed sample: the incident is already open from the suppressed streak, so this is the
@@ -1150,7 +1161,7 @@ public sealed class AlertEngineTests
             resolutionCallback: (r, _) => { h.Resolutions.Add(r); return Task.CompletedTask; },
             utcNow: () => h.Now, readFailures: counter);
 
-        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 95, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 95, samples: AlertEngine.SqlCpuBreachSamples, from: Harness.SampleBase);
 
         Assert.True(store.SaveAttempts > 0, "the engine must have tried to persist, or this pin proves nothing");
         Assert.Single(h.Deliverer.Outcomes);
@@ -1158,24 +1169,154 @@ public sealed class AlertEngineTests
         Assert.Equal(0, counter.ReadFor(Key).InstanceReadFailures);
 
         /* And it resolves normally too — a broken save must not strand an open incident. */
-        await DriveCpuAsync(engine, sqlCpu: 20, totalCpu: 30, samples: AlertEngine.CpuClearSamples,
-            from: Harness.SampleBase.AddMinutes(AlertEngine.CpuBreachSamples));
+        await DriveCpuAsync(engine, sqlCpu: 20, totalCpu: 30, samples: ((int)AlertEngine.SqlCpuClearHold.TotalMinutes + 1),
+            from: Harness.SampleBase.AddMinutes(AlertEngine.SqlCpuBreachSamples));
         Assert.Single(h.Resolutions);
+    }
+
+    /* #7085: samples one minute apart with the engine clock moving WITH them, so the five-minute alert cooldown really
+       elapses during a long run. On a frozen clock the old reminder path could never show. */
+    private static async Task<DateTime> DriveCpuTimedAsync(
+        Harness h, AlertEngine engine, double totalCpu, int samples, DateTime from)
+    {
+        var at = from;
+        for (var i = 0; i < samples; i++)
+        {
+            at = at.AddMinutes(1);
+            h.Now = at;
+            await engine.EvaluateServerAsync(Harness.Snapshot(sqlCpu: 70, totalCpu: totalCpu, suppressed: false, cpuSampleTime: at));
+        }
+
+        return at;
+    }
+
+    [Fact]
+    public async Task Cpu_ADipUnderTheBarForThreeMinutes_HoldsTheIncident_OnePageAndNoResolved()
+    {
+        /* #7085 verify 1: 90% for 5 minutes, 70% for 3, 90% for 5 again. Before: the 3-minute dip took two clear samples to
+           resolve and the second run paged again once the cooldown had passed. */
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+        var engine = h.Build();
+
+        var at = await DriveCpuTimedAsync(h, engine, 90, 5, Harness.SampleBase);
+        Assert.Single(h.Deliverer.Outcomes);
+        at = await DriveCpuTimedAsync(h, engine, 70, 3, at);
+        at = await DriveCpuTimedAsync(h, engine, 90, 5, at);
+
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Empty(h.Resolutions);
+    }
+
+    [Fact]
+    public async Task Cpu_SixteenMinutesUnderTheBar_ResolvesOnce_AndTheNextIncidentPagesAgain()
+    {
+        /* #7085 verify 2: the same shape with 16 minutes under the bar in between: two pages, one Resolved between. Fifteen
+           minutes of samples under the bar is not yet fifteen minutes of CPU under the bar (the first clear sample starts the run). */
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+        var engine = h.Build();
+
+        var at = await DriveCpuTimedAsync(h, engine, 90, 5, Harness.SampleBase);
+        at = await DriveCpuTimedAsync(h, engine, 70, 15, at);
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Empty(h.Resolutions);
+
+        at = await DriveCpuTimedAsync(h, engine, 70, 1, at);
+        var resolution = Assert.Single(h.Resolutions);
+        Assert.Equal("CPU Resolved", resolution.Title);
+
+        at = await DriveCpuTimedAsync(h, engine, 70, 1, at);
+        Assert.Single(h.Resolutions);
+
+        at = await DriveCpuTimedAsync(h, engine, 90, 5, at);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.Single(h.Resolutions);
+    }
+
+    [Fact]
+    public async Task Cpu_AFourSampleSpike_DoesNotPage()
+    {
+        /* #7085 verify 3: three samples used to open an incident; four still do not. */
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+        var engine = h.Build();
+
+        var at = await DriveCpuTimedAsync(h, engine, 99, AlertEngine.SqlCpuBreachSamples - 1, Harness.SampleBase);
+        at = await DriveCpuTimedAsync(h, engine, 30, 20, at);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.Resolutions);
+    }
+
+    [Fact]
+    public async Task Cpu_SustainedWarningThatRisesToCritical_PagesTwice_AndADropBackToWarningAddsNothing()
+    {
+        /* #7085 verify 4: open at Warning, rise to Critical (page two), fall back to Warning and rise again: nothing more. */
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+        var engine = h.Build();
+
+        var at = await DriveCpuTimedAsync(h, engine, 90, 5, Harness.SampleBase);
+        Assert.Single(h.Deliverer.Outcomes);
+        at = await DriveCpuTimedAsync(h, engine, 90, 12, at);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        at = await DriveCpuTimedAsync(h, engine, 97, 1, at);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.Equal(AlertSeverityLevel.Critical, h.Deliverer.Outcomes[1].Severity);
+
+        at = await DriveCpuTimedAsync(h, engine, 90, 12, at);
+        at = await DriveCpuTimedAsync(h, engine, 97, 12, at);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.Empty(h.Resolutions);
+    }
+
+    [Fact]
+    public async Task Cpu_AStandingIncidentPastTheCooldown_IsNotRemindedOf()
+    {
+        /* #7085: a held incident pages once. Before, every 5-minute cooldown that elapsed on a still-breaching sample
+           delivered another page for the same incident. */
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+        var engine = h.Build();
+
+        await DriveCpuTimedAsync(h, engine, 90, 40, Harness.SampleBase);
+
+        Assert.Single(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task Cpu_AnIncidentOpenBeforeARestart_IsNotPagedAgainAfterTheCooldown()
+    {
+        /* #7085 and the restart seed: the persisted Firing bit restores an open incident whose tier this process never saw.
+           The first fire it judges only learns the tier, so neither the restart nor the cooldown after it re-pages. */
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+
+        var at = await DriveCpuTimedAsync(h, h.Build(), 90, 5, Harness.SampleBase);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        var restarted = h.Build();
+        at = await DriveCpuTimedAsync(h, restarted, 90, 20, at);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        at = await DriveCpuTimedAsync(h, restarted, 97, 1, at);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
     }
 
     [Fact]
     public void CpuGateDefaults_AreDerivedFromTheSampleCadence()
     {
-        /* The numbers are a real decision, so they are pinned rather than left to drift silently. Three
-           breaching samples at the ~60-second SCHEDULER_MONITOR cadence is about three minutes, which is
-           above every excursion measured on the fleet for #3282 (42-147 seconds, median 87 s, worst two
-           consecutive one-minute samples over the bar). Clearing is deliberately FASTER than firing: a
-           late resolve is a stale open incident, an early one is the resolve/fire pair this issue exists
-           to remove. */
+        /* The numbers are a real decision, so they are pinned rather than left to drift silently. Five
+           breaching samples at the ~60-second SCHEDULER_MONITOR cadence is about five minutes (#7085: three
+           still paged on isolated spikes of one to six minutes), and an open incident clears only after
+           fifteen minutes of sample time under the bar (the 22-pages-in-three-mornings flap closed on two). */
+        Assert.Equal(5, AlertEngine.SqlCpuBreachSamples);
+        Assert.Equal(TimeSpan.FromMinutes(15), AlertEngine.SqlCpuClearHold);
+        /* The PostgreSQL target gate keeps its own numbers (#7085 changed only the SQL Server arm). */
         Assert.Equal(3, AlertEngine.CpuBreachSamples);
         Assert.Equal(2, AlertEngine.CpuClearSamples);
-        Assert.True(AlertEngine.CpuClearSamples < AlertEngine.CpuBreachSamples);
-        Assert.True(AlertEngine.CpuClearSamples > 1);
 
         /* The persisted subject is the metric an operator already knows, not a second spelling of it. */
         Assert.Equal("High CPU", AlertEngine.CpuPersistenceMetric);
@@ -1193,7 +1334,7 @@ public sealed class AlertEngineTests
         h.Muted = true;
         var engine = h.Build();
 
-        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 90, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 90, samples: AlertEngine.SqlCpuBreachSamples, from: Harness.SampleBase);
         Assert.True(Assert.Single(h.Deliverer.Outcomes).Muted);
 
         /* Unmuting inside the cooldown does not re-fire — the muted fire stamped it (:76). */
@@ -2442,7 +2583,7 @@ public sealed class AlertEngineTests
         h.Settings.CpuEnabled = true;
         var engine = h.Build();
 
-        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: totalCpu, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: totalCpu, samples: AlertEngine.SqlCpuBreachSamples, from: Harness.SampleBase);
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal("High CPU", fired.MetricName);
@@ -3154,7 +3295,7 @@ public sealed class AlertEngineTests
         h.Adapter.LongRunning.Add(BackupSession());
         var engine = h.Build();
 
-        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 95, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 95, samples: AlertEngine.SqlCpuBreachSamples, from: Harness.SampleBase);
 
         Assert.Single(h.Deliverer.Outcomes);
         Assert.True(h.Adapter.LastLrqExclusions!.IsEmpty);
@@ -3196,7 +3337,7 @@ public sealed class AlertEngineTests
         h.Adapter.LongRunning.Add(BackupSession());
         var engine = h.Build();
 
-        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 95, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 95, samples: AlertEngine.SqlCpuBreachSamples, from: Harness.SampleBase);
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal("High CPU", fired.MetricName);
@@ -3234,7 +3375,7 @@ public sealed class AlertEngineTests
         });
         var engine = h.Build();
 
-        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 95, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 95, samples: AlertEngine.SqlCpuBreachSamples, from: Harness.SampleBase);
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal("  Total CPU: 95%\n  Threshold: 80%", fired.DetailText);
@@ -3253,7 +3394,7 @@ public sealed class AlertEngineTests
         h.Adapter.ThrowOnLongRunningRead = true;
         var engine = h.Build();
 
-        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 95, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 95, samples: AlertEngine.SqlCpuBreachSamples, from: Harness.SampleBase);
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal("High CPU", fired.MetricName);
@@ -3280,7 +3421,7 @@ public sealed class AlertEngineTests
         }
         var engine = h.Build();
 
-        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 95, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 95, samples: AlertEngine.SqlCpuBreachSamples, from: Harness.SampleBase);
 
         var detail = Assert.Single(h.Deliverer.Outcomes).DetailText!;
         Assert.Equal(AlertContextBuilders.ActiveMaintenanceMaxLines,
@@ -4840,7 +4981,7 @@ public sealed class AlertEngineTests
         var engine = h.Build();
 
         /* #3282: CpuBreachSamples distinct samples per server, since High CPU no longer fires on one. */
-        for (var i = 1; i <= AlertEngine.CpuBreachSamples; i++)
+        for (var i = 1; i <= AlertEngine.SqlCpuBreachSamples; i++)
         {
             var at = Harness.SampleBase.AddMinutes(i);
             await engine.EvaluateServerAsync(new AlertServerSnapshot("101", "SRV-A", true, 70, 90, false, false, at));
@@ -5688,7 +5829,7 @@ public sealed class AlertEngineTests
         h.Deliverer.Report = _ => webhookOnly ? FailedByWebhook() : FailedByEmail();
         var engine = h.Build();
 
-        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: AlertEngine.SqlCpuBreachSamples, from: Harness.SampleBase);
         Assert.Single(h.Deliverer.Outcomes);
 
         async Task<int> SweepAfterAsync(TimeSpan wait)
@@ -5709,15 +5850,10 @@ public sealed class AlertEngineTests
         h.Deliverer.Report = _ => DeliveredByWebhook();
         Assert.Equal(3, await SweepAfterAsync(TimeSpan.FromSeconds(2)));
 
-        /* A delivered fire waits the whole cooldown, as it always did. */
+        /* A delivered incident is held open and not reminded of (#7085), cooldown or no cooldown. */
         Assert.Equal(3, await SweepAfterAsync(TimeSpan.FromSeconds(61)));
         Assert.Equal(3, await SweepAfterAsync(TimeSpan.FromSeconds(238)));
-        h.Deliverer.Report = _ => FailedByEmail();
-        Assert.Equal(4, await SweepAfterAsync(TimeSpan.FromSeconds(2)));
-
-        /* ...and the next failure starts over at a minute, not at the four the old streak would have reached. */
-        Assert.Equal(4, await SweepAfterAsync(TimeSpan.FromSeconds(59)));
-        Assert.Equal(5, await SweepAfterAsync(TimeSpan.FromSeconds(2)));
+        Assert.Equal(3, await SweepAfterAsync(TimeSpan.FromSeconds(600)));
     }
 
     [Fact]
@@ -5730,7 +5866,7 @@ public sealed class AlertEngineTests
         h.Deliverer.Report = _ => FailedByEmail();
         var engine = h.Build();
 
-        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: AlertEngine.SqlCpuBreachSamples, from: Harness.SampleBase);
         Assert.Single(h.Deliverer.Outcomes);
 
         async Task<int> SweepAfterAsync(TimeSpan wait)
@@ -5760,16 +5896,17 @@ public sealed class AlertEngineTests
         h.Deliverer.Report = _ => FailedByEmailButDeliveredByWebhook();
         var engine = h.Build();
 
-        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: AlertEngine.SqlCpuBreachSamples, from: Harness.SampleBase);
         Assert.Single(h.Deliverer.Outcomes);
 
         h.Now = h.Now.AddSeconds(61);
         at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: 1, from: at);
         Assert.Single(h.Deliverer.Outcomes);
 
+        /* Past the cooldown too: the delivered incident is held open and sends no reminder (#7085). */
         h.Now = h.Now.AddMinutes(4);
         await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: 1, from: at);
-        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.Single(h.Deliverer.Outcomes);
     }
 
     [Fact]
@@ -5783,16 +5920,17 @@ public sealed class AlertEngineTests
         h.Deliverer.Report = _ => MutedNothingAttempted();
         var engine = h.Build();
 
-        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: AlertEngine.SqlCpuBreachSamples, from: Harness.SampleBase);
         Assert.True(Assert.Single(h.Deliverer.Outcomes).Muted);
 
         h.Now = h.Now.AddSeconds(61);
         at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: 1, from: at);
         Assert.Single(h.Deliverer.Outcomes);
 
+        /* Past the cooldown too: the delivered incident is held open and sends no reminder (#7085). */
         h.Now = h.Now.AddMinutes(4);
         await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: 1, from: at);
-        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.Single(h.Deliverer.Outcomes);
     }
 
     [Fact]
@@ -6649,7 +6787,7 @@ public sealed class AlertEngineTests
         h.Deliverer.Report = _ => FailedByEmail();
         var engine = h.Build();
 
-        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: AlertEngine.SqlCpuBreachSamples, from: Harness.SampleBase);
         Assert.Single(h.Deliverer.Outcomes);
 
         /* Failure one waits a minute; failure two, now the second in a row, would wait two. */
@@ -6658,12 +6796,12 @@ public sealed class AlertEngineTests
         Assert.Equal(2, h.Deliverer.Outcomes.Count);
 
         /* The condition clears... */
-        at = await DriveCpuAsync(engine, sqlCpu: 20, totalCpu: 40, samples: AlertEngine.CpuClearSamples, from: at);
+        at = await DriveCpuAsync(engine, sqlCpu: 20, totalCpu: 40, samples: ((int)AlertEngine.SqlCpuClearHold.TotalMinutes + 1), from: at);
         Assert.Single(h.Resolutions);
 
         /* ...and comes back eleven minutes after the second failure: more than twice the five-minute cooldown. */
         h.Now = h.Now.AddMinutes(11);
-        at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: AlertEngine.CpuBreachSamples, from: at);
+        at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: AlertEngine.SqlCpuBreachSamples, from: at);
         Assert.Equal(3, h.Deliverer.Outcomes.Count);
 
         /* That failure is number one again, so its retry is a minute away, not the four a streak of three waits. */

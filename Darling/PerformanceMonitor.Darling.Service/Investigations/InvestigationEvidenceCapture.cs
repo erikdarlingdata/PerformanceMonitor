@@ -64,7 +64,7 @@ public sealed partial class InvestigationEvidenceCapture
     public const string HighCpuMetric = AlertEngine.CpuPersistenceMetric;
 
     /// <summary>How far before the first alert the breach window reaches. The alert fires after
-    /// <see cref="AlertEngine.CpuBreachSamples"/> breaching one-minute samples, so this holds the whole breach and its lead-in.</summary>
+    /// <see cref="AlertEngine.SqlCpuBreachSamples"/> breaching one-minute samples, so this holds the whole breach and its lead-in.</summary>
     public static readonly TimeSpan BreachLeadIn = TimeSpan.FromMinutes(15);
 
     /// <summary>How far after the first alert the window reaches, for the sample that was in flight when it fired.</summary>

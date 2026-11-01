@@ -407,7 +407,7 @@ public partial class LiteAlertForwardingTests : IDisposable
         await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 99, samples: 1, from: Harness.SampleBase);
         Assert.Empty(h.Deliverer.Outcomes);
 
-        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 99, samples: AlertEngine.CpuBreachSamples - 1, from: Harness.SampleBase.AddMinutes(1));
+        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 99, samples: AlertEngine.SqlCpuBreachSamples - 1, from: Harness.SampleBase.AddMinutes(1));
         Assert.Single(h.Deliverer.Outcomes);
     }
 
@@ -422,11 +422,11 @@ public partial class LiteAlertForwardingTests : IDisposable
         App.AlertCpuEnabled = true;
         var h = new Harness();
 
-        await DriveCpuAsync(h.Build(), sqlCpu: 70, totalCpu: 95, samples: AlertEngine.CpuBreachSamples - 1, from: Harness.SampleBase);
+        await DriveCpuAsync(h.Build(), sqlCpu: 70, totalCpu: 95, samples: AlertEngine.SqlCpuBreachSamples - 1, from: Harness.SampleBase);
 
         var persisted = Assert.Single(h.StateStore.Persistence);
         Assert.Equal(AlertEngine.CpuPersistenceMetric, persisted.Key.Metric);
-        Assert.Equal(AlertEngine.CpuBreachSamples - 1, persisted.Value.State.ConsecutiveBreaches);
+        Assert.Equal(AlertEngine.SqlCpuBreachSamples - 1, persisted.Value.State.ConsecutiveBreaches);
         Assert.False(persisted.Value.State.Firing);
         Assert.NotNull(persisted.Value.LastObservedSampleUtc);
     }
@@ -463,10 +463,19 @@ public partial class LiteAlertForwardingTests : IDisposable
         var fallenBack = new DateTime(2026, 11, 1, 1, 0, 0);
         Assert.True(fallenBack < local, "the fixture must run the stamp backwards, or it tests nothing #3744 changed");
         await ObserveCpuAsync(engine, fallenBack, breaching: true);
+        await ObserveCpuAsync(engine, fallenBack.AddMinutes(1), breaching: true);
+        Assert.Empty(h.Deliverer.Outcomes);
+        await ObserveCpuAsync(engine, fallenBack.AddMinutes(2), breaching: true);
         Assert.Single(h.Deliverer.Outcomes);
 
-        await ObserveCpuAsync(engine, fallenBack.AddMinutes(1), breaching: false);
-        await ObserveCpuAsync(engine, fallenBack.AddMinutes(2), breaching: false);
+        /* Fifteen minutes of samples under the bar (#7085), then the sixteenth resolves. */
+        for (var i = 3; i <= 17; i++)
+        {
+            await ObserveCpuAsync(engine, fallenBack.AddMinutes(i), breaching: false);
+        }
+
+        Assert.Empty(h.Resolutions);
+        await ObserveCpuAsync(engine, fallenBack.AddMinutes(18), breaching: false);
         Assert.Single(h.Resolutions);
     }
 
@@ -491,6 +500,9 @@ public partial class LiteAlertForwardingTests : IDisposable
         Assert.Empty(h.Deliverer.Outcomes);
 
         await ObserveCpuAsync(upgraded, utc.AddMinutes(1), breaching: true);
+        await ObserveCpuAsync(upgraded, utc.AddMinutes(2), breaching: true);
+        Assert.Empty(h.Deliverer.Outcomes);
+        await ObserveCpuAsync(upgraded, utc.AddMinutes(3), breaching: true);
         Assert.Single(h.Deliverer.Outcomes);
     }
 
@@ -519,10 +531,10 @@ public partial class LiteAlertForwardingTests : IDisposable
         var engine = h.Build();
 
         /* Fire: Total mode uses TotalCpuPercent (:65 CpuPercentForAlert → Total), after
-           AlertEngine.CpuBreachSamples distinct samples over the bar (#3282 — one is no longer an
+           AlertEngine.SqlCpuBreachSamples distinct samples over the bar (#3282 — one is no longer an
            incident, on either SKU). The delivered STRINGS are what this test is about and they are
            unchanged. */
-        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 92, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 92, samples: AlertEngine.SqlCpuBreachSamples, from: Harness.SampleBase);
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal("High CPU", fired.MetricName);
@@ -548,9 +560,9 @@ public partial class LiteAlertForwardingTests : IDisposable
         Assert.False(fired.Muted);
 
         /* Resolve: :110-113 — exact title + message strings, Success-severity tray-only toast, after
-           AlertEngine.CpuClearSamples consecutive clears. */
+           fifteen minutes of clear samples. */
         h.Now = h.Now.AddMinutes(6);
-        await DriveCpuAsync(engine, sqlCpu: 10, totalCpu: 12, samples: AlertEngine.CpuClearSamples, from: at);
+        await DriveCpuAsync(engine, sqlCpu: 10, totalCpu: 12, samples: ((int)AlertEngine.SqlCpuClearHold.TotalMinutes + 1), from: at);
 
         var res = Assert.Single(h.Resolutions);
         Assert.Equal("CPU Resolved", res.Title);
@@ -567,7 +579,7 @@ public partial class LiteAlertForwardingTests : IDisposable
         var h = new Harness();
 
         /* SqlOnly compares CpuPercent (90), not Total (95) — :65 CpuPercentForAlert → SqlOnly. */
-        await DriveCpuAsync(h.Build(), sqlCpu: 90, totalCpu: 95, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+        await DriveCpuAsync(h.Build(), sqlCpu: 90, totalCpu: 95, samples: AlertEngine.SqlCpuBreachSamples, from: Harness.SampleBase);
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal("90% (SQL CPU)", fired.CurrentValue);
@@ -697,7 +709,7 @@ public partial class LiteAlertForwardingTests : IDisposable
            suppression, exactly like the blocking gate, because suppression is evaluate-but-don't-deliver.
            Driving only one sample would leave this pin unable to distinguish "suppressed" from "the streak
            never reached the bar", which is the thing it exists to check). */
-        var at = await DriveCpuSuppressedAsync(engine, sqlCpu: 95, totalCpu: 99, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+        var at = await DriveCpuSuppressedAsync(engine, sqlCpu: 95, totalCpu: 99, samples: AlertEngine.SqlCpuBreachSamples, from: Harness.SampleBase);
 
         Assert.Empty(h.Deliverer.Outcomes);
         Assert.Empty(h.Resolutions);
@@ -726,7 +738,7 @@ public partial class LiteAlertForwardingTests : IDisposable
         var h = new Harness { Muted = true };
         var engine = h.Build();
 
-        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 92, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 92, samples: AlertEngine.SqlCpuBreachSamples, from: Harness.SampleBase);
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.True(fired.Muted);
