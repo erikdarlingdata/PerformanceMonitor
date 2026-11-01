@@ -501,6 +501,23 @@ public sealed class ReportNoticeDeliveryLiveTests
         Assert.DoesNotContain("ali", masked);
     }
 
+    [Fact]
+    public void TheRootCauseFirstLine_AtMaskLiterals_KeepsAnApostropheInsideAWord_AndMasksTheQuotedValues()
+    {
+        Assert.Equal(
+            "The session's blocker doesn't release '?' after ? minutes",
+            InvestigationEventDelivery.RootCauseFirstLine("The session's blocker doesn't release 'alice' after 10 minutes\nsecond line", McpDataDetail.MaskLiterals));
+        Assert.Equal(
+            "The session's lock on N'?' and '?' blocked the doesn't-exist check",
+            InvestigationEventDelivery.RootCauseFirstLine("The session's lock on N'abc' and 'it''s' blocked the doesn't-exist check", McpDataDetail.MaskLiterals));
+    }
+
+    [Fact]
+    public void AChangeObject_AtMaskLiterals_KeepsAnApostropheInsideAWord_AndMasksTheQuotedValues()
+    {
+        Assert.Equal("O'Brien guide '?' ? in Sales", InvestigationEventDelivery.ChangeObject("O'Brien guide 'x' 5", "Sales", McpDataDetail.MaskLiterals));
+    }
+
     private async Task RunAsync(Func<InvestigationRequestStore, NpgsqlConnection, CancellationToken, Task> body)
     {
         var baseConnectionString = ConnectionString;

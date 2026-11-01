@@ -171,6 +171,57 @@ public sealed class McpDataDetailMaskerTests
     }
 
     [Fact]
+    public void MaskProse_KeepsAnApostropheInsideAWord_AndStillMasksAQuotedValueInTheSameText()
+    {
+        Assert.Equal(
+            "The session's blocker doesn't release '?' after ? minutes, said O'Brien",
+            McpDataDetailMasker.MaskProse("The session's blocker doesn't release 'alice' after 10 minutes, said O'Brien"));
+    }
+
+    [Fact]
+    public void MaskProse_StillMasksAPrefixedOrDoubledQuoteLiteral()
+    {
+        Assert.Equal(
+            "WHERE a = N'?' AND b = '?' AND c = '?' AND d = E'?' and the session's lock",
+            McpDataDetailMasker.MaskProse("WHERE a = N'abc' AND b = 'abc' AND c = 'it''s' AND d = E'x' and the session's lock"));
+        Assert.Equal("N'?'", McpDataDetailMasker.MaskProse("N'abc'"));
+    }
+
+    [Fact]
+    public void MaskProse_KeepsAPossessivePlural_AndStillMasksQuotesAfterPunctuation()
+    {
+        Assert.Equal(
+            "both sessions' locks are held by '?' and name='?' (is '?', '?')",
+            McpDataDetailMasker.MaskProse("both sessions' locks are held by 'bob' and name='abc' (is 'x', 'it''s')"));
+        Assert.Equal("both sessions' locks are held", McpDataDetailMasker.MaskProse("both sessions' locks are held"));
+        Assert.Equal("B'?' and X'?' and the sessions'", McpDataDetailMasker.MaskProse("B'101' and X'1F' and the sessions'"));
+    }
+
+    [Fact]
+    public void MaskProse_DoesNotTreatADashOrASlashStarAsAComment()
+    {
+        Assert.Equal(
+            "the blocker -- session ? -- held ? locks",
+            McpDataDetailMasker.MaskProse("the blocker -- session 87 -- held 3 locks"));
+        Assert.Equal("the blocker /* session ? */ held", McpDataDetailMasker.MaskProse("the blocker /* session 87 */ held"));
+        Assert.Equal("the blocker -- '?' held it", McpDataDetailMasker.MaskProse("the blocker -- 'alice' held it"));
+    }
+
+    [Fact]
+    public void MaskLiterals_StillTreatsEveryApostropheAsAQuote_ForSqlText()
+    {
+        Assert.Equal("The session'?'", McpDataDetailMasker.MaskLiterals("The session's blocker held 3 locks"));
+        Assert.Equal("both sessions'?'", McpDataDetailMasker.MaskLiterals("both sessions' locks are held"));
+    }
+
+    [Fact]
+    public void MaskLiterals_StillMasksADashDashAndASlashStarComment()
+    {
+        Assert.Equal("the blocker --\nheld", McpDataDetailMasker.MaskLiterals("the blocker -- session 87\nheld"));
+        Assert.Equal("the blocker /**/ held", McpDataDetailMasker.MaskLiterals("the blocker /* session 87 */ held"));
+    }
+
+    [Fact]
     public void MaskLiterals_KeepsIdentifiersAndParameters_AndEmptiesComments()
     {
         const string sql = "SELECT [col 1], \"c2\", t1.x, @p1, $1 FROM #t2 WHERE y = $$abc$$ -- note 5\n AND z = 0x1F /* 9 */ AND w = 1.5e3 AND v = 'it''s'";
