@@ -14,8 +14,9 @@ using System.Text.Json.Serialization;
 
 namespace PerformanceMonitor.Darling.Storage;
 
-/// <summary>How the undo reads and writes one image field's column (#5917).</summary>
-public enum ImageColumnType { Text, Bool, Whole, Real, Time, Json }
+/// <summary>How the undo reads and writes one image field's column (#5917). <c>DayMask</c> (#7040) is a day-of-week bit mask column shown as a
+/// list of short day names; <c>TimeOfDay</c> is a <c>time</c> column shown as <c>HH:mm</c>.</summary>
+public enum ImageColumnType { Text, Bool, Whole, Real, Time, Json, DayMask, TimeOfDay }
 
 /// <summary>
 /// Marks a property of an image record as a column of the changed table, with its type. The column's name is the property's
@@ -82,6 +83,10 @@ public sealed record MuteRuleImage(
     [property: JsonPropertyName("wait_type_pattern"), ImageColumn(ImageColumnType.Text)] string? WaitTypePattern,
     [property: JsonPropertyName("job_name_pattern"), ImageColumn(ImageColumnType.Text)] string? JobNamePattern,
     [property: JsonPropertyName("client_app_pattern"), ImageColumn(ImageColumnType.Text)] string? ClientAppPattern,
+    [property: JsonPropertyName("recur_days"), ImageColumn(ImageColumnType.DayMask)] string[]? RecurDays,
+    [property: JsonPropertyName("recur_start_time"), ImageColumn(ImageColumnType.TimeOfDay)] string? RecurStartTime,
+    [property: JsonPropertyName("recur_end_time"), ImageColumn(ImageColumnType.TimeOfDay)] string? RecurEndTime,
+    [property: JsonPropertyName("recur_time_zone"), ImageColumn(ImageColumnType.Text)] string? RecurTimeZone,
     [property: JsonPropertyName("match_summary")] string? MatchSummary)
 {
     public const string Kind = AgentChangeKinds.Mute;

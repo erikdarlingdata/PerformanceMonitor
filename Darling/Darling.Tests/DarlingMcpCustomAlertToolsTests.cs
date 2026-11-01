@@ -95,6 +95,26 @@ public sealed class DarlingMcpCustomAlertToolsSurfaceTests
         Assert.All(toolMethods, m => Assert.True(m.ReturnType == typeof(Task<string>), $"{m.Name} must return Task<string>"));
     }
 
+    /// <summary>
+    /// #7015: the backtest answers with ONE window notice, the least covered replayed server's. Among truncated servers a null
+    /// EffectiveStart (no coverage anywhere in the span) is the least covered, not the most: an ordinal descending sort reads null as ""
+    /// and put it last, so the answer named a start the other server had when this one had nothing.
+    /// </summary>
+    [Fact]
+    public void BacktestNotice_NamesTheServerWithNoCoverage_AboveOneWithALaterStart()
+    {
+        var withStart = new McpWindowNotice("2026-10-30T00:00:00.0000000Z", true, "starts late");
+        var withEarlierStart = new McpWindowNotice("2026-10-28T00:00:00.0000000Z", true, "starts early");
+        var noCoverage = new McpWindowNotice(null, true, "no collection");
+        var covered = new McpWindowNotice("2026-10-31T00:00:00.0000000Z", false, null);
+
+        Assert.Equal(noCoverage, DarlingMcpCustomAlertTools.LeastCovered(new[] { withStart, noCoverage, withEarlierStart }));
+        Assert.Equal(noCoverage, DarlingMcpCustomAlertTools.LeastCovered(new[] { noCoverage, withStart }));
+        Assert.Equal(withStart, DarlingMcpCustomAlertTools.LeastCovered(new[] { withEarlierStart, withStart, covered }));
+        Assert.Equal(withEarlierStart, DarlingMcpCustomAlertTools.LeastCovered(new[] { covered, withEarlierStart }));
+        Assert.Equal(covered, DarlingMcpCustomAlertTools.LeastCovered(new[] { covered }));
+    }
+
     private static System.Collections.Generic.Dictionary<string, ModelContextProtocol.Protocol.Tool> BuildToolSchemas()
     {
         var services = new ServiceCollection();

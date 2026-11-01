@@ -594,7 +594,7 @@ public sealed class IntervalHonestHourlyRollupTests
         }
 
         Assert.False(dir is null, "could not locate the repo root from the test source path");
-        return File.ReadAllText(Path.Combine(dir!, relative));
+        return RepoFile.ReadRepoFile(Path.Combine(dir!, relative));
     }
 }
 

@@ -104,6 +104,38 @@ VALUES ($1, $2, 'Srv', $3, 0, 0, $4, $5, $6, $7, $8)", connection);
     });
 
     [Fact]
+    public Task GetOpenFire_HasNoLowerBound_ReadsTheValue_AndAnyResolutionTitleClosesIt() => RunLiveAsync(async (store, c) =>
+    {
+        // #7068: an incident that has stood for weeks is still open; the value and context come back; either title closes it.
+        await InsertAsync(c, Now.AddDays(-40), Fire, Warning);
+        using (var set = new NpgsqlCommand("UPDATE config_alert_log SET current_value = 1.5 WHERE server_id = $1;", c))
+        {
+            set.Parameters.AddWithValue(Server);
+            await set.ExecuteNonQueryAsync(Ct);
+        }
+
+        var titles = new[] { "Capture Restored", Resolution };
+        var open = await store.GetOpenFireAsync("-571510", Fire, titles, null, Now);
+        Assert.NotNull(open);
+        Assert.Equal(1.5, open!.CurrentValue);
+        Assert.Equal(Warning, open.ContextJson);
+        Assert.Equal(Now.AddDays(-40), open.FireAtUtc);
+
+        // The exclusive upper bound and the window still apply.
+        Assert.Null(await store.GetOpenFireAsync("-571510", Fire, titles, null, Now.AddDays(-40)));
+        Assert.Null(await store.GetOpenFireAsync("-571510", Fire, titles, Now.AddDays(-1), Now));
+
+        // A resolution under either title, as new as the fire, closes it.
+        await InsertAsync(c, Now.AddDays(-39), "Capture Restored", null, sent: false, type: "none");
+        Assert.Null(await store.GetOpenFireAsync("-571510", Fire, titles, null, Now));
+        Assert.NotNull(await store.GetOpenFireAsync("-571510", Fire, new[] { Resolution }, null, Now));
+
+        // A fire after the resolution is open again.
+        await InsertAsync(c, Now.AddDays(-2), Fire, Critical);
+        Assert.Equal(Critical, (await store.GetOpenFireAsync("-571510", Fire, titles, null, Now))!.ContextJson);
+    });
+
+    [Fact]
     public Task NewerResolution_GivesNull_ButAFireAfterItSeeds() => RunLiveAsync(async (store, c) =>
     {
         await InsertAsync(c, Now.AddMinutes(-6), Fire, Warning);

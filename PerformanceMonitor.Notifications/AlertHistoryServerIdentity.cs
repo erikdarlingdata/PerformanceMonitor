@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using System.Globalization;
 
 namespace PerformanceMonitor.Notifications;
@@ -74,4 +75,28 @@ public static class AlertHistoryServerIdentity
         int.TryParse(serverId, NumberStyles.Integer, CultureInfo.InvariantCulture, out var sid) && sid != 0
             ? sid
             : null;
+
+    /// <summary>
+    /// #7068: the fleet alerts that fire under ONE fixed non-numeric key and no other writer uses their metric name:
+    /// "Custom Alert Rules Unhealthy" (key <c>customalerts</c>), "External Alerts Undelivered" (<c>externalalerts</c>) and
+    /// "Collection Falling Behind" (<c>fleetgate</c>), all in <c>DarlingSelfAlertEvaluator</c>. Their rows land in the
+    /// <c>server_id</c> 0 bucket, but with the metric name that is one key's rows and not a mixture, so a standing-incident
+    /// read may use it. An alert with several keys under one metric (per job, per cost key) does NOT belong here. The
+    /// cooldown seeds above still decline the bucket (#3456): this list serves only <see cref="OpenFireScope"/>.
+    /// </summary>
+    public static readonly System.Collections.Generic.IReadOnlySet<string> FleetSingleKeyMetrics =
+        new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal)
+        {
+            "Custom Alert Rules Unhealthy",
+            "External Alerts Undelivered",
+            "Collection Falling Behind",
+        };
+
+    /// <summary>The <c>server_id</c> a standing-incident read (<c>GetStandingAsync</c>) may use: <see cref="SeedScope"/>, or 0 for
+    /// a non-numeric key whose metric is in <see cref="FleetSingleKeyMetrics"/>. Never the bucket for an unlisted metric.</summary>
+    public static int? OpenFireScope(string serverId, string metricName) =>
+        SeedScope(serverId)
+        ?? (!int.TryParse(serverId, NumberStyles.Integer, CultureInfo.InvariantCulture, out _) && FleetSingleKeyMetrics.Contains(metricName)
+            ? 0
+            : null);
 }

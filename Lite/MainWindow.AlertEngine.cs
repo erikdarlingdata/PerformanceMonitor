@@ -525,6 +525,9 @@ public partial class MainWindow : Window
             var (databaseTimeUtc, databases) = await data.GetLatestAgDatabaseReplicaStatesAsync(serverId);
             if (IsFresh(databaseTimeUtc))
             {
+                /* #7068: a lag that was already announced before this start is seeded from the history first. */
+                await _agAlertEvaluator.SeedStandingAsync(
+                    serverId, databases, App.AgLagAlertSeconds, App.AgRedoQueueAlertKb, sweepGeneration: generation);
                 alerts.AddRange(_agAlertEvaluator.EvaluateDatabases(
                     serverId,
                     databases,

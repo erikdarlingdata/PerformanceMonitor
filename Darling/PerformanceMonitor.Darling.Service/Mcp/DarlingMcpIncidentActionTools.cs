@@ -288,7 +288,7 @@ public sealed class DarlingMcpIncidentActionTools
             }
 
             var changes = new AgentChangeUndo(postgres, McpCommandDeadlines.ReadSeconds);
-            var read = await changes.ReadAsync(DarlingWebEndpoints.AgentChangesLimit, cancellationToken);
+            var read = await changes.ReadAsync(DarlingWebEndpoints.AgentChangesLimit, cancellationToken: cancellationToken);
             var body = DarlingWebEndpoints.AgentChangesBody(read, canDecide: false, DateTime.UtcNow);
             var all = body["changes"]!.AsArray().Select(c => c!.AsObject()).ToList();
             var shown = all.Where(c => !undoable_only || c["can_undo"]?.GetValue<bool>() == true).Take(limit).ToList();

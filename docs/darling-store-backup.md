@@ -25,7 +25,7 @@ The folder that holds the data directory is the store root. Keep all of it. Thes
 |---|---|---|
 | `pg\` | the store root | The database files |
 | `pg-credential.dpapi` | the store root, beside `pg\` | The password of the store owner, `darling` |
-| `pg-admin-credential.dpapi`, `pg-viewer-credential.dpapi`, `pg-mcp-credential.dpapi` | the store root | The passwords of the three least-privilege roles |
+| `pg-admin-credential.dpapi`, `pg-viewer-credential.dpapi`, `pg-web-credential.dpapi`, `pg-mcp-credential.dpapi` | the store root | The passwords of the four least-privilege roles |
 | `password-key.dpapi` | the store root | The key that opens the SQL login passwords saved in the store |
 | `log-hash-key.dpapi` | the store root | The key for the identities of stored log events |
 | `server.crt` and `server.key` | the store root, only when the store has TLS on | The store's own certificate and key |
@@ -243,8 +243,8 @@ A purge runs on the first sweep after the service starts, and then once a day. W
 |---|---|
 | 7 | `query_snapshots`, `waiting_tasks`, `running_jobs`, `agent_status` |
 | 14 | `pg_plan_capture` |
-| 30 | Every other collector, 51 in all. Examples are `wait_stats`, `query_stats`, `query_store`, `cpu_utilization`, `deadlocks`, `pg_wait_stats` and `pg_log_events` |
-| 90 | `database_size_stats`, `index_object_stats`, `pvs_stats`, `pg_wraparound_stats`, `pg_deadlocks`, `pg_replication_slots`, `pg_autovacuum_stats`, `pg_index_usage_stats`, `pg_table_bloat_stats`, `pg_index_bloat` |
+| 30 | Every other collector, 53 in all. Examples are `wait_stats`, `query_stats`, `query_store`, `cpu_utilization`, `deadlocks`, `pg_wait_stats` and `pg_log_events` |
+| 90 | `database_size_stats`, `index_object_stats`, `database_protection`, `identity_capacity`, `pvs_stats`, `pg_wraparound_stats`, `pg_deadlocks`, `pg_replication_slots`, `pg_autovacuum_stats`, `pg_index_usage_stats`, `pg_table_bloat_stats`, `pg_index_bloat` |
 | 365 | `server_properties`, `job_history`, `pg_server_config`, `pg_plan_capture_readiness`, `pg_extension_availability`, `pg_column_stats`, `pg_database_size_stats` |
 
 Some data follows its own horizon, not a collector's.

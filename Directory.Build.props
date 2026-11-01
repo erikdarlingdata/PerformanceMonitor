@@ -53,4 +53,66 @@
     app and carries the product version either way.
   -->
 
+  <!--
+    #6978: the warning suppressions shared by every project outside deprecated/, declared once. Each code
+    names what the rule flags and why this repo turns it off. A project that needs a code beyond these
+    appends it in its own project file with its reason, always in the form that begins with the inherited
+    value, because a plain assignment there would replace this whole list.
+
+    The deprecated projects each assign their own list without the inherited value, so this block does not
+    reach them and their suppressions are unchanged. Codes that no longer fired anywhere (CA1849, CA2007,
+    CA1508, CA2201, CA1852, CA1860) were removed from the old copied lists after a build with no
+    suppressions at all counted zero hits for them.
+  -->
+  <PropertyGroup>
+    <!-- CA1305: Specify IFormatProvider. Log text, diagnostics and test output are formatted with the current culture on purpose and are not user-facing. -->
+    <NoWarn>$(NoWarn);CA1305</NoWarn>
+
+    <!-- CA1507: Use nameof instead of a string literal. Literal names in messages, binding paths and test data are kept as written. -->
+    <NoWarn>$(NoWarn);CA1507</NoWarn>
+
+    <!-- CA1510: Use ArgumentNullException.ThrowIfNull. The explicit null check and throw is kept; the helper is a style choice, not a fix. -->
+    <NoWarn>$(NoWarn);CA1510</NoWarn>
+
+    <!-- CA1707: No underscores in identifiers. Test methods are named Subject_Condition_Result. -->
+    <NoWarn>$(NoWarn);CA1707</NoWarn>
+
+    <!-- CA1805: Do not initialize a field to its default value. An explicit default (= false, = 0, = null) is kept where it documents intent. -->
+    <NoWarn>$(NoWarn);CA1805</NoWarn>
+
+    <!-- CA1806: Do not ignore a method result. Best-effort calls whose result is deliberately unused are written as plain statements. -->
+    <NoWarn>$(NoWarn);CA1806</NoWarn>
+
+    <!-- CA1816: Call GC.SuppressFinalize in Dispose. The types have no finalizer, so the call would do nothing. -->
+    <NoWarn>$(NoWarn);CA1816</NoWarn>
+
+    <!-- CA1822: Member can be static. Instance members stay instance members for interface shape, dependency injection, WPF handlers and stable call sites. -->
+    <NoWarn>$(NoWarn);CA1822</NoWarn>
+
+    <!-- CA1845: Use span-based string.Concat. A micro-allocation tweak that costs readability and is not worth it off a hot path. -->
+    <NoWarn>$(NoWarn);CA1845</NoWarn>
+
+    <!-- CA1848: Use LoggerMessage delegates. Logging goes through the plain ILogger extension methods; no logging call sits on a hot path. -->
+    <NoWarn>$(NoWarn);CA1848</NoWarn>
+
+    <!-- CA1861: Avoid constant arrays as arguments. Inline array literals (parameter lists, test data) run once per call and are clearer than hoisted fields. -->
+    <NoWarn>$(NoWarn);CA1861</NoWarn>
+
+    <!-- CA2254: The logging message template should not vary between calls. Interpolated log messages are kept for readable single-line output. -->
+    <NoWarn>$(NoWarn);CA2254</NoWarn>
+  </PropertyGroup>
+
+  <!--
+    #7065: a warning fails the build of every project outside deprecated/, product and test alike, so a new one
+    cannot sit unnoticed. Before this the gate lived only in the two test projects, and a product warning
+    (CA1068 in a Darling storage file) reached CI as nothing more than a count in a build log. The suppressions
+    above are the only rules held back. The NuGet audit codes (NU1901 to NU1904) stay warnings: an advisory
+    published against a package we already use would otherwise turn every build red on a day nothing in the
+    repo changed. A project that cannot meet the gate says why in its own project file.
+  -->
+  <PropertyGroup>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <WarningsNotAsErrors>$(WarningsNotAsErrors);NU1901;NU1902;NU1903;NU1904</WarningsNotAsErrors>
+  </PropertyGroup>
+
 </Project>

@@ -83,6 +83,33 @@ public sealed class EmailRouteRecipientsTests
     }
 
     /// <summary>
+    /// #7041: a report that rendered its own page supplies the HTML view and the subject, the plain view stays the template's own (it
+    /// carries the report's text), and the page is sent as given: its markup is not escaped a second time.
+    /// </summary>
+    [Fact]
+    public async Task AReportsOwnHtmlAndSubject_AreUsed_AndAnotherAlertIsUnchanged()
+    {
+        using var rig = new Rig(defaultRecipients: "ops@example.invalid");
+
+        var report = await rig.FireAsync(
+            "Daily Health Report",
+            context: new AlertContext { EmailHtmlBody = "<h1>PageMarkerOne</h1><p>second</p>", EmailSubject = "Fleet report for Tuesday" });
+        var other = await rig.FireAsync("Server Unreachable", displayName: "Server Unreachable");
+
+        Assert.Equal(AlertChannelOutcome.Delivered, report.EmailOutcome);
+        Assert.Equal(AlertChannelOutcome.Delivered, other.EmailOutcome);
+        var mine = rig.Smtp.RawMessages[0];
+        Assert.Contains("Subject: Fleet report for Tuesday", mine, StringComparison.Ordinal);
+        Assert.Contains("<h1>PageMarkerOne</h1><p>second</p>", mine, StringComparison.Ordinal);
+        Assert.DoesNotContain("&lt;h1&gt;", mine, StringComparison.Ordinal);
+        Assert.DoesNotContain("[SQL Monitor Alert]", mine, StringComparison.Ordinal);
+
+        var template = rig.Smtp.RawMessages[1];
+        Assert.Contains("Subject: [SQL Monitor Alert] Server Unreachable on SRV1", template, StringComparison.Ordinal);
+        Assert.DoesNotContain("PageMarkerOne", template, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// The negative half, and the one that would have turned silence into failed rows: SMTP is now "enabled"
     /// on host and from alone, so a firing no route covers reaches the recipient resolution with nobody to
     /// send to. It must end as <see cref="AlertChannelOutcome.NotAttempted"/> — not thrown at the send, not

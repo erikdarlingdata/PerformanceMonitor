@@ -23,7 +23,7 @@ public sealed partial class ViewerDataService
 {
     /// <summary>Reads the agent calls, the refusals and the switch.</summary>
     public Task<AgentChangesRead> ReadAgentChangesAsync(CancellationToken cancellationToken = default) =>
-        new AgentChangeUndo(_dataSource, ViewerCommandDeadlines.CurrentInteractiveReadSeconds).ReadAsync(200, cancellationToken);
+        new AgentChangeUndo(_dataSource, ViewerCommandDeadlines.CurrentInteractiveReadSeconds).ReadAsync(200, cancellationToken: cancellationToken);
 
     /// <summary>Undoes one agent change as <paramref name="login"/>; a refusal comes back as the result, a read-only role throws.</summary>
     public async Task<AgentUndoResult> UndoAgentChangeAsync(long calledId, string login, CancellationToken cancellationToken = default)

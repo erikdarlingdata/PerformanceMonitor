@@ -59,6 +59,58 @@ public sealed class DarlingMcpDataTools
     internal static readonly IReadOnlyList<string> CollectionLogStatuses =
         AnalysisPassRow.WithAnalysisPassStatuses(EnumeratedCollectorDriver.CollectionLogStatuses);
 
+    /// <summary>
+    /// #7010: the window-floor notice of a raw collector table for a tool that answers over [<paramref name="start"/>, <paramref name="end"/>].
+    /// A failed probe answers <see cref="McpWindowNotice.Unavailable"/> (see <see cref="DarlingMcpWindowNotice.ReadAsync"/>).
+    /// </summary>
+    private static Task<McpWindowNotice> TableNoticeAsync(
+        NpgsqlDataSource postgres, string table, string serverName, DateTime start, DateTime end, bool emptyAnswer,
+        CancellationToken cancellationToken) =>
+        DarlingMcpWindowNotice.ReadAsync(
+            () => DarlingMcpWindowNotice.Probe(postgres, table, serverName, start, end, cancellationToken),
+            start, end, table, emptyAnswer: emptyAnswer, cancellationToken: cancellationToken);
+
+    /// <summary>
+    /// #7010: a serialized data answer with the three window-floor keys right behind <c>hours_back</c> (first when it has none), for the
+    /// payloads <see cref="TrendPayloads"/> builds, which Lite shares and which carry no notice. A failed probe adds nothing.
+    /// </summary>
+    private static string WithWindowNotice(string json, McpWindowNotice notice)
+    {
+        if (notice.IsUnavailable || JsonNode.Parse(json) is not JsonObject node)
+        {
+            return json;
+        }
+
+        var at = node.IndexOf("hours_back") + 1;
+        node.Insert(at, "effective_start", notice.EffectiveStart);
+        node.Insert(at + 1, "window_truncated", notice.WindowTruncated);
+        node.Insert(at + 2, "truncation_note", notice.TruncationNote);
+        return node.ToJsonString(McpHelpers.JsonOptions);
+    }
+
+    /// <summary>
+    /// #7010: an <c>empty</c> or <c>unavailable</c> status answer with the window floor under <c>hints</c>, merged into the hints it already
+    /// has. Any other status (not_collected, precondition, an error) is permanent or not about the window and is left as it is, as is an
+    /// answer whose hints already say <c>window_truncated</c>, and so is every answer when the probe failed.
+    /// </summary>
+    private static string WithWindowHints(string statusJson, McpWindowNotice notice)
+    {
+        if (notice.IsUnavailable
+            || JsonNode.Parse(statusJson) is not JsonObject node
+            || node["status"]?.GetValue<string>() is not ("empty" or "unavailable")
+            || node["hints"] is JsonObject { } existing && existing.ContainsKey("window_truncated"))
+        {
+            return statusJson;
+        }
+
+        var hints = node["hints"] as JsonObject ?? new JsonObject();
+        hints["effective_start"] = notice.EffectiveStart;
+        hints["window_truncated"] = notice.WindowTruncated;
+        hints["truncation_note"] = notice.TruncationNote;
+        node["hints"] = hints;
+        return node.ToJsonString(McpHelpers.JsonOptions);
+    }
+
     /* ═══════════════════════════ resource metrics ═══════════════════════════ */
 
     [McpServerTool(Name = "get_cpu_utilization"), Description("Gets CPU utilization over time in time buckets: SQL Server CPU %, other process CPU %, total CPU % and idle %, with each bucket's busiest sample. Use this to identify CPU pressure periods, then use get_top_queries_by_cpu to find the culprit queries.")]
@@ -93,15 +145,24 @@ public sealed class DarlingMcpDataTools
 
         try
         {
-            var points = await DarlingDataReader.GetCpuBucketsAsync(postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, bucketMinutes, cancellationToken);
+            var cpuStart = windowEnd.AddHours(-hours_back);
+            var points = await DarlingDataReader.GetCpuBucketsAsync(postgres, resolved.ServerId, cpuStart, windowEnd, bucketMinutes, cancellationToken);
             if (points.Count == 0)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "cpu_utilization", cancellationToken)
-                    ?? McpHelpers.Status("unavailable", "No CPU utilization data available.");
+            {
+                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "cpu_utilization", cancellationToken);
+                if (gated != null) return gated;
+
+                /* #7010: the empty answer carries the window floor under hints; the samples window on collection_time, the probe's column. */
+                var emptyNotice = await TableNoticeAsync(postgres, "cpu_utilization_stats", resolved.ServerName, cpuStart, windowEnd, emptyAnswer: true, cancellationToken);
+                return McpHelpers.Status("unavailable", "No CPU utilization data available.", emptyNotice.AsHints());
+            }
+
+            var notice = await TableNoticeAsync(postgres, "cpu_utilization_stats", resolved.ServerName, cpuStart, windowEnd, emptyAnswer: false, cancellationToken);
 
             /* #3653 A15/A16: the source-cadence sentence both SKUs publish is TrendPayloads.CpuCadenceNote, the one
                place it is spelled (the ring buffer writes one record a minute on-prem, MI and RDS; Azure SQL DB's
                sys.dm_db_resource_stats one every 15 seconds; samples_in_bucket is the measured count). */
-            return TrendPayloads.CpuUtilization(resolved.DisplayName, hours_back, points, bucketMinutes, bucket_minutes is not null, budget.AutoPoints);
+            return WithWindowNotice(TrendPayloads.CpuUtilization(resolved.DisplayName, hours_back, points, bucketMinutes, bucket_minutes is not null, budget.AutoPoints), notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -134,8 +195,14 @@ public sealed class DarlingMcpDataTools
                signal. The reader's LIMIT 50 sat under a limit the tool accepts up to 1,000. */
             var rows = await DarlingDataReader.GetWaitStatsAsync(postgres, resolved.ServerId, now.AddHours(-hours_back), now, limit + 1, cancellationToken);
             if (rows.Count == 0)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "wait_stats", cancellationToken)
-                    ?? McpHelpers.Status("unavailable", "No wait stats data available for the specified time range.");
+            {
+                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "wait_stats", cancellationToken);
+                if (gated != null) return gated;
+
+                /* #7010: the empty answer carries the window floor under hints, as the data answer carries it as keys. */
+                var emptyNotice = await TableNoticeAsync(postgres, "wait_stats", resolved.ServerName, now.AddHours(-hours_back), now, emptyAnswer: true, cancellationToken);
+                return McpHelpers.Status("unavailable", "No wait stats data available for the specified time range.", emptyNotice.AsHints());
+            }
 
             var truncated = rows.Count > limit;
             var page = truncated ? rows.Take(limit).ToList() : rows;
@@ -220,21 +287,32 @@ public sealed class DarlingMcpDataTools
                     return gated;
                 }
 
+                /* #7010: the empty answers carry the window floor under hints, and a cut window does not claim the window was quiet. */
+                var emptyNotice = await TableNoticeAsync(postgres, "wait_stats", resolved.ServerName, now.AddHours(-hours_back), now, emptyAnswer: true, cancellationToken);
                 return await DarlingDataReader.HasAnyWaitStatAsync(postgres, resolved.ServerId, cancellationToken)
                     ? McpHelpers.Status(
                         "empty",
-                        $"No wait types recorded for {resolved.DisplayName} in the last {hours_back} hour(s). This server HAS collected wait stats before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples.")
+                        McpHelpers.QuietUnlessCut(
+                            emptyNotice.WindowTruncated, emptyNotice.EffectiveStart,
+                            factual: $"No wait types recorded for {resolved.DisplayName} in the last {hours_back} hour(s)",
+                            coveredClaim: ". This server HAS collected wait stats before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples."),
+                        emptyNotice.AsHints())
                     : McpHelpers.Status(
                         "unavailable",
-                        $"No wait stats have EVER been recorded for {resolved.DisplayName}. This is not an empty window — nothing has been stored for this server at all. Delta wait stats need a SECOND collection cycle before the first row exists, so on a newly added server this clears itself; otherwise check that collection is running and that the server is enabled.");
+                        $"No wait stats have EVER been recorded for {resolved.DisplayName}. This is not an empty window — nothing has been stored for this server at all. Delta wait stats need a SECOND collection cycle before the first row exists, so on a newly added server this clears itself; otherwise check that collection is running and that the server is enabled.",
+                        emptyNotice.AsHints());
             }
 
-            return JsonSerializer.Serialize(new
+            var notice = await TableNoticeAsync(postgres, "wait_stats", resolved.ServerName, now.AddHours(-hours_back), now, emptyAnswer: false, cancellationToken);
+            return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
                 hours_back,
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 wait_types = types
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions), notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -291,8 +369,14 @@ public sealed class DarlingMcpDataTools
                 var collected = await DarlingDataReader.GetDistinctWaitTypesAsync(postgres, resolved.ServerId, start, now, cancellationToken);
                 /* #6446: the collector skips the ignored (benign) waits, so only those are never collected; a wait type it would
                    store that had no waiting in the window is empty, not not_collected. The hint stays for a typo. */
-                return TrendPayloads.WaitTrendMiss(wait_type, hours_back, IgnoredWaitDefaults.All, collected);
+                var miss = TrendPayloads.WaitTrendMiss(wait_type, hours_back, IgnoredWaitDefaults.All, collected);
+                /* #7010: an empty or unavailable miss over a window the store does not reach back to is not a true negative, so it carries
+                   the window floor under hints (merged into the collected_wait_types hint); not_collected is permanent and carries none. */
+                var missNotice = await TableNoticeAsync(postgres, "wait_stats", resolved.ServerName, start, now, emptyAnswer: true, cancellationToken);
+                return WithWindowHints(miss, missNotice);
             }
+
+            var waitNotice = await TableNoticeAsync(postgres, "wait_stats", resolved.ServerName, start, now, emptyAnswer: false, cancellationToken);
 
             /* #3653 A5: wait_stats is the FIRST identity-epoch carrier (#3705), so this is the trend whose
                step a restart or failover most directly manufactures; the markers ride the payload's trailing
@@ -300,9 +384,9 @@ public sealed class DarlingMcpDataTools
                window as the points. */
             var discontinuities = await DarlingTrendReader.GetBaselineDiscontinuitiesAsync(postgres, resolved.ServerId, start, now, cancellationToken);
 
-            return TrendPayloads.WaitTrend(
+            return WithWindowNotice(TrendPayloads.WaitTrend(
                 resolved.DisplayName, wait_type, hours_back, points, bucketMinutes, bucket_minutes is not null,
-                budget.AutoPoints, BaselineDiscontinuities.ToPayload(discontinuities));
+                budget.AutoPoints, BaselineDiscontinuities.ToPayload(discontinuities)), waitNotice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -574,13 +658,21 @@ public sealed class DarlingMcpDataTools
 
         try
         {
-            var points = await DarlingDataReader.GetTempDbBucketsAsync(postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, bucketMinutes, cancellationToken);
+            var tempDbStart = windowEnd.AddHours(-hours_back);
+            var points = await DarlingDataReader.GetTempDbBucketsAsync(postgres, resolved.ServerId, tempDbStart, windowEnd, bucketMinutes, cancellationToken);
             if (points.Count == 0)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "tempdb_stats", cancellationToken)
-                    ?? await DarlingRuntimePrecondition.StatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "tempdb_stats", cancellationToken)
-                    ?? McpHelpers.Status("unavailable", "No TempDB data available.");
+            {
+                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "tempdb_stats", cancellationToken)
+                    ?? await DarlingRuntimePrecondition.StatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "tempdb_stats", cancellationToken);
+                if (gated != null) return gated;
 
-            return TrendPayloads.TempDbTrend(resolved.DisplayName, hours_back, points, bucketMinutes, bucket_minutes is not null, budget.AutoPoints);
+                /* #7010: the empty answer carries the window floor under hints. */
+                var emptyNotice = await TableNoticeAsync(postgres, "tempdb_stats", resolved.ServerName, tempDbStart, windowEnd, emptyAnswer: true, cancellationToken);
+                return McpHelpers.Status("unavailable", "No TempDB data available.", emptyNotice.AsHints());
+            }
+
+            var notice = await TableNoticeAsync(postgres, "tempdb_stats", resolved.ServerName, tempDbStart, windowEnd, emptyAnswer: false, cancellationToken);
+            return WithWindowNotice(TrendPayloads.TempDbTrend(resolved.DisplayName, hours_back, points, bucketMinutes, bucket_minutes is not null, budget.AutoPoints), notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -834,7 +926,8 @@ public sealed class DarlingMcpDataTools
                     });
             }
 
-            if (rows.Count == 0)
+            /* #7010: an empty page carries the window floor under hints (the floor the data answer's keys are built from). */
+            async Task<string> EmptyPageAsync()
             {
                 /* #5984: a tag that matched nothing is an answer, not a collection miss. */
                 if (tagFilter.Active)
@@ -896,6 +989,9 @@ public sealed class DarlingMcpDataTools
                         "query_stats", hours_back, "executed statements", databases))
                     ?? McpHelpers.Status("unavailable", "No query stats available for the specified time range.");
             }
+
+            if (rows.Count == 0)
+                return WithWindowHints(await EmptyPageAsync(), DarlingMcpWindowNotice.Build(floor, requestedStart, "query_stats", emptyAnswer: true));
 
             /* #2320: what fraction of the box's measured CPU the RETURNED rows explain — numerator is
                the caller-visible ranking (post top-N, post filters), denominator is measured, and the
@@ -1202,7 +1298,12 @@ public sealed class DarlingMcpDataTools
                     $"No procedure on {resolved.DisplayName} in the last {hours_back} hour(s) carries query tag '{tagFilter.Requested}'. The tag filter was applied in SQL before the top-{top} ranking."), leftOut)!;
 
             if (rows.Count == 0)
-                return McpHelpers.WithDatabasesLeftOut(await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "procedure_stats", cancellationToken)
+            {
+                /* #7010: an empty page carries the window floor under hints. The data answer's floor is computed below; this is the same one. */
+                var emptyFloor = routed.Tier == RetentionTier.Hourly
+                    ? routed.HourlyFirstBucket
+                    : await DarlingDataReader.GetProcedureStatsWindowFloorAsync(postgres, resolved.ServerId, requestedStart, now, cancellationToken);
+                var emptyPage = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "procedure_stats", cancellationToken)
                     ?? (routed.RawForced
                         /* #5226: a reads ranking that read raw (the io rollup, procedure_stats_io_hourly, did not reach back further
                            than raw), so an empty page here means raw holds nothing in the window while the stitched hourly rollups
@@ -1215,7 +1316,10 @@ public sealed class DarlingMcpDataTools
                            empty page means the collector looked and no procedure ran, so say that (shared words, Lite says the same). */
                         : EmptyProcedureStatsStatus(
                             await DarlingCollectorRunFactsReader.ReadAsync(postgres, resolved.ServerId, "procedure_stats", requestedStart, now, cancellationToken),
-                            hours_back, leftOut?.Count ?? 0)), leftOut)!;
+                            hours_back, leftOut?.Count ?? 0));
+                return McpHelpers.WithDatabasesLeftOut(
+                    WithWindowHints(emptyPage!, DarlingMcpWindowNotice.Build(emptyFloor, requestedStart, "procedure_stats", emptyAnswer: true)), leftOut)!;
+            }
 
             /* #4231: what the raw tier actually held, beside what was asked for — same probe and disclosure as
                get_top_queries_by_cpu and get_query_store_top (#2364), over procedure_stats.
@@ -1506,15 +1610,18 @@ public sealed class DarlingMcpDataTools
                floor probe is not asked: raw's floor describes a tier that did not answer. */
             DateTime effectiveStart;
             bool truncated;
+            DateTime? coverageFloor;
             if (tablePlan is { } plan)
             {
                 effectiveStart = plan.ReadStart;
+                coverageFloor = plan.ReadStart;
                 /* The table's proven-complete history starts at its read bound. */
                 truncated = RawWindowFloor.IsTruncated(effectiveStart, requestedStart);
             }
             else
             {
                 var floor = await DarlingDataReader.GetQueryStoreWindowFloorAsync(postgres, resolved.ServerId, requestedStart, now, cancellationToken);
+                coverageFloor = floor;
                 /* The floor can sit before the requested start when the rows reach back past the window; the
                    shared helper never reports a served start earlier than the one asked for. */
                 effectiveStart = RawWindowFloor.EffectiveStart(floor, requestedStart);
@@ -1604,7 +1711,8 @@ public sealed class DarlingMcpDataTools
 
             if (rows.Count == 0)
                 return await DarlingRuntimePrecondition.WithQueryStoreNotWritingHintAsync(
-                    await EmptyAnswerAsync(), postgres, resolved.ServerId, resolved.DisplayName, databases, cancellationToken);
+                    /* #7010: the empty answer carries the window floor under hints (a null floor: the store holds no row in the window). */
+                    WithWindowHints(await EmptyAnswerAsync(), DarlingMcpWindowNotice.Build(coverageFloor, requestedStart, "query_store_stats", emptyAnswer: true)), postgres, resolved.ServerId, resolved.DisplayName, databases, cancellationToken);
 
             var approximate = read.DailyDaysUsed > 0 && read.DailySpan is not null;
             var result = rows.Select(r => new
@@ -3551,6 +3659,9 @@ ORDER BY server_name";
                 }
 
                 var everCollected = await DarlingDataReader.HasAnyWaitingTaskSampleAsync(postgres, resolved.ServerId, cancellationToken);
+                /* #7010: the empty answers carry the window floor under hints, and a cut window does not claim an all-clear. waiting_tasks is
+                   the probe's table (both series window on collection_time). */
+                var emptyNotice = await TableNoticeAsync(postgres, "waiting_tasks", resolved.ServerName, start, end, emptyAnswer: true, cancellationToken);
 
                 /* #6453: no row EVER stored is not "unavailable" when the collector's own newest run completed clean: the
                    server was sampled and had nothing waiting, which is what get_collection_health calls HEALTHY. */
@@ -3560,22 +3671,31 @@ ORDER BY server_name";
                         postgres, resolved.ServerId, resolved.DisplayName, "waiting_tasks", "waiting-task samples", cancellationToken);
                 if (healthyEmpty != null)
                 {
-                    return McpHelpers.Status("empty", healthyEmpty);
+                    return McpHelpers.Status("empty", healthyEmpty, emptyNotice.AsHints());
                 }
 
                 return everCollected
                     ? McpHelpers.Status(
                         "empty",
-                        $"Nothing was waiting on {resolved.DisplayName} in the last {hours_back} hour(s). The collector has sampled this server, so this is a genuine all-clear for the window rather than missing data.")
+                        McpHelpers.QuietUnlessCut(
+                            emptyNotice.WindowTruncated, emptyNotice.EffectiveStart,
+                            factual: $"Nothing was waiting on {resolved.DisplayName} in the last {hours_back} hour(s)",
+                            coveredClaim: ". The collector has sampled this server, so this is a genuine all-clear for the window rather than missing data."),
+                        emptyNotice.AsHints())
                     : McpHelpers.Status(
                         "unavailable",
-                        $"No waiting-task samples have EVER been recorded for {resolved.DisplayName}, so this is NOT an all-clear — there is nothing to read. Check that collection is running for this server before concluding it was quiet.");
+                        $"No waiting-task samples have EVER been recorded for {resolved.DisplayName}, so this is NOT an all-clear — there is nothing to read. Check that collection is running for this server before concluding it was quiet.",
+                        emptyNotice.AsHints());
             }
 
-            return JsonSerializer.Serialize(new
+            var notice = await TableNoticeAsync(postgres, "waiting_tasks", resolved.ServerName, start, end, emptyAnswer: false, cancellationToken);
+            return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
                 hours_back = hours_back,
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 /* #5244: the name for one database, "the chosen databases" for two or more, null for all. */
                 database_name = databases.Describe(),
                 /*
@@ -3595,7 +3715,7 @@ ORDER BY server_name";
                     database_name = b.DatabaseName,
                     blocked_count = b.BlockedCount,
                 }),
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions), notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

@@ -107,6 +107,8 @@ public sealed class DarlingWebHostService : BackgroundService
     private readonly CollectorRuntimeState _collectorState;
     private WebApplication? _app;
     private NpgsqlDataSource? _appDataSource;
+    /* The read-only viewer pool /api/compose/run runs on (null when the store has no viewer login to give: the run then uses the web pool). */
+    private NpgsqlDataSource? _composeReadDataSource;
 
     /// <summary>#6600: the second, small pool the Admin writes use on the managed store (null on a store you bring, or with web.allowAdminWrites off).</summary>
     private WebAdminArm? _adminArm;
@@ -360,6 +362,12 @@ public sealed class DarlingWebHostService : BackgroundService
 
         _app = null;
 
+        if (_composeReadDataSource is not null)
+        {
+            await _composeReadDataSource.DisposeAsync();
+            _composeReadDataSource = null;
+        }
+
         if (_appDataSource is not null)
         {
             await _appDataSource.DisposeAsync();
@@ -407,6 +415,12 @@ public sealed class DarlingWebHostService : BackgroundService
         {
             try { await _app.DisposeAsync(); } catch { /* best-effort */ }
             _app = null;
+        }
+
+        if (_composeReadDataSource is not null)
+        {
+            try { await _composeReadDataSource.DisposeAsync(); } catch { /* best-effort */ }
+            _composeReadDataSource = null;
         }
 
         if (_appDataSource is not null)
@@ -905,6 +919,17 @@ public sealed class DarlingWebHostService : BackgroundService
                 postgres = DarlingWorker.CreateHostStoreDataSource(storeConnectionString, DarlingManagedPostgres.WebApplicationName);
                 _appDataSource = postgres;
 
+                /* The composer's run reads only, so it runs on the read-only viewer login, not on the web login that holds the writes. The managed
+                   store has the stored viewer credential; a compose store has the one this start provisioned. A store the operator brings has no
+                   viewer login the service knows, and neither does a web login the operator set by hand, so the run stays on the web pool there. */
+                var composeReadString = config.Postgres.Managed
+                    ? (OperatingSystem.IsWindows() ? DarlingManagedPostgres.TryBuildViewerConnectionStringFromStoredCredential(config.Postgres) : null)
+                    : (string.IsNullOrWhiteSpace(config.Postgres.WebConnectionString) ? DarlingStoreLogins.ReadComposeStoreVerdict()?.ViewerConnectionString : null);
+                if (composeReadString is not null && DarlingStoreConnection.TryDescribeParseFailure(composeReadString) is null)
+                {
+                    _composeReadDataSource = DarlingWorker.CreateHostStoreDataSource(composeReadString, DarlingManagedPostgres.WebApplicationName);
+                }
+
                 /* #6600: on the managed store, a signed-in admin's Admin writes use a second, small pool on the stored admin login. It opens
                    nothing until the first such request. A store you bring yourself, or web.allowAdminWrites off, builds none. */
                 if (OperatingSystem.IsWindows())
@@ -1038,8 +1063,8 @@ public sealed class DarlingWebHostService : BackgroundService
 
             /* #6265: a web token with the MCP token's value is refused for web sign-in (the pipeline checks each posted token). The
                service still starts, so an upgrade of such a setup keeps running; this says why the token form answers 403. */
-            var mcpToken = DarlingAgentDispatchChecks.ResolveToken(config.Mcp).Token;
-            if (DarlingAgentDispatchChecks.WebTokenIsMcpToken(accessToken, mcpToken))
+            var mcpTokens = DarlingAgentDispatchChecks.ResolveAllTokens(config.Mcp);
+            if (DarlingAgentDispatchChecks.WebTokenIsMcpToken(accessToken, mcpTokens))
             {
                 _logger.LogWarning("{Message}", DarlingAgentDispatchChecks.WebTokenSameAsMcpMessage);
             }
@@ -1048,7 +1073,7 @@ public sealed class DarlingWebHostService : BackgroundService
                was parsed before any degrade and still holds it afterwards, so it goes through the MCP host's
                ResolveHostGuardListenIp (the one rule both hosts share) with the final mode: a start that fell back to
                loopback-only admits loopback names only, whatever it parsed. */
-            ConfigurePipeline(_app, postgres, networkMode, DarlingMcpHostService.ResolveHostGuardListenIp(networkMode, networkListenIp), allowedCidr, accessToken, oidcClient, publicBaseUrlHost, storeHostPostgresConfig, config.Analyzer, requireTokenWhenLoopbackOnly, trustedProxies: trustedProxies, sendHsts: network?.Hsts ?? false, dataDetail: McpDataDetailModes.Resolve(config.Mcp.DataDetail), mcpToken: mcpToken, sharedTokenReadsOnlyProblem: writeTokenProblem, adminArm: _adminArm, allowWindowsAuthOverUnverifiedTls: web.AllowWindowsAuthOverUnverifiedTls, frontDoorProxy: frontDoorProxy);
+            ConfigurePipeline(_app, postgres, networkMode, DarlingMcpHostService.ResolveHostGuardListenIp(networkMode, networkListenIp), allowedCidr, accessToken, oidcClient, publicBaseUrlHost, storeHostPostgresConfig, config.Analyzer, requireTokenWhenLoopbackOnly, trustedProxies: trustedProxies, sendHsts: network?.Hsts ?? false, dataDetail: McpDataDetailModes.Resolve(config.Mcp.DataDetail), mcpTokens: mcpTokens, sharedTokenReadsOnlyProblem: writeTokenProblem, adminArm: _adminArm, allowWindowsAuthOverUnverifiedTls: web.AllowWindowsAuthOverUnverifiedTls, frontDoorProxy: frontDoorProxy, composeReadPostgres: _composeReadDataSource);
 
             /* #2389: name the authority for each half of what is being started — enabled/port from whichever
                plane the supervisor resolved, listen/allowFrom/token always from darling.json. */
@@ -1297,11 +1322,12 @@ public sealed class DarlingWebHostService : BackgroundService
         bool sendHsts = false,
         Func<DateTime>? utcNow = null,
         McpDataDetail dataDetail = McpDataDetail.MetadataOnly,
-        string? mcpToken = null,
+        IReadOnlyList<string>? mcpTokens = null,
         string? sharedTokenReadsOnlyProblem = null,
         WebAdminArm? adminArm = null,
         bool allowWindowsAuthOverUnverifiedTls = false,
-        DarlingFrontDoorWebProxy? frontDoorProxy = null)
+        DarlingFrontDoorWebProxy? frontDoorProxy = null,
+        NpgsqlDataSource? composeReadPostgres = null)
     {
         /* A caller that does not say whether the token is under the length floor gets the same answer the start path
            computes: a short shared token serves reads only. Without this a forgotten argument meant writes. */
@@ -1357,7 +1383,7 @@ public sealed class DarlingWebHostService : BackgroundService
            bind). Compression only transforms an OUTGOING body (Content-Encoding), never a routing or auth decision, so it costs
            nothing to wrap the gates' own refusal bodies and the login page in it. A throw before the marker below comes from a
            request nobody has authenticated, so the observer's line for it goes through the refusals throttle (round 2, L1). */
-        app.UseMiddleware<DarlingWebFailureObserver>(_logger, refusals);
+        app.UseMiddleware<DarlingWebFailureObserver>(_logger, refusals, DarlingWebStoreWrites.IsManaged(postgresConfig));
 
         /* The browser-facing response headers (Content-Security-Policy, X-Frame-Options, X-Content-Type-Options,
            Referrer-Policy) ride on EVERY response: the shell, static assets, API replies and every gate's refusal
@@ -1527,7 +1553,7 @@ public sealed class DarlingWebHostService : BackgroundService
                            abort still propagates — that is not a failure to report. */
                         try
                         {
-                            await HandleAuthFlowAsync(context, oidcClient, signingKey, transactionKey, seat, refusals, token, signInThrottle, admittedHostName, clock, mcpToken);
+                            await HandleAuthFlowAsync(context, oidcClient, signingKey, transactionKey, seat, refusals, token, signInThrottle, admittedHostName, clock, mcpTokens);
                         }
                         catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
                         {
@@ -1692,7 +1718,7 @@ public sealed class DarlingWebHostService : BackgroundService
         }
         else
         {
-            DarlingWebEndpoints.MapAll(app, postgres ?? throw new ArgumentNullException(nameof(postgres)), _collectorState, _logger, _baselineCache, postgresConfig, _readLatency, analyzerConfig, _registryState, _slowReads, _readAdmission, _ownerSource, dataDetail, _pseudonymKeys, adminArm: adminArm, allowWindowsAuthOverUnverifiedTls: allowWindowsAuthOverUnverifiedTls);
+            DarlingWebEndpoints.MapAll(app, postgres ?? throw new ArgumentNullException(nameof(postgres)), _collectorState, _logger, _baselineCache, postgresConfig, _readLatency, analyzerConfig, _registryState, _slowReads, _readAdmission, _ownerSource, dataDetail, _pseudonymKeys, adminArm: adminArm, allowWindowsAuthOverUnverifiedTls: allowWindowsAuthOverUnverifiedTls, composeReadPostgres: composeReadPostgres);
         }
 
         app.UseDefaultFiles();
@@ -2059,14 +2085,14 @@ public sealed class DarlingWebHostService : BackgroundService
         DarlingSignInThrottle signInThrottle,
         string? publicHostName,
         Func<DateTime> clock,
-        string? mcpToken)
+        IReadOnlyList<string>? mcpTokens)
     {
         var path = context.Request.Path.Value ?? "/";
         var remote = context.Connection.RemoteIpAddress;
 
         if (string.Equals(path, LoginPath, StringComparison.OrdinalIgnoreCase))
         {
-            await HandleTokenSignInAsync(context, accessToken, signingKey, signInThrottle, refusals, oidcClient is not null, publicHostName, clock, mcpToken);
+            await HandleTokenSignInAsync(context, accessToken, signingKey, signInThrottle, refusals, oidcClient is not null, publicHostName, clock, mcpTokens);
             return;
         }
 
@@ -2334,7 +2360,7 @@ public sealed class DarlingWebHostService : BackgroundService
         bool oidcEnabled,
         string? publicHostName,
         Func<DateTime> clock,
-        string? mcpToken)
+        IReadOnlyList<string>? mcpTokens)
     {
         var remote = context.Connection.RemoteIpAddress;
         var now = clock();
@@ -2356,7 +2382,7 @@ public sealed class DarlingWebHostService : BackgroundService
         /* #6265: the web token is the credential for a person's writes (approving a note, closing a request), and an MCP agent holds the
            MCP token. A web token with the same value would let that agent sign in as a person, so the token form refuses to sign in
            at all (before the form is read or counted); OIDC sign-in is unaffected. The service logs a warning at start. */
-        if (DarlingAgentDispatchChecks.WebTokenIsMcpToken(accessToken, mcpToken))
+        if (DarlingAgentDispatchChecks.WebTokenIsMcpToken(accessToken, mcpTokens))
         {
             refusals.Report(
                 _logger, "Web dashboard", DarlingRefusalGate.Token, StatusCodes.Status403Forbidden, remote,
@@ -2960,7 +2986,7 @@ if (location.pathname.toLowerCase() !== '/auth/login') { document.getElementById
     {
         for (var attempt = 0; attempt < 60; attempt++)
         {
-            var connectionString = DarlingManagedPostgres.TryBuildViewerConnectionStringFromStoredCredential(config);
+            var connectionString = DarlingManagedPostgres.TryBuildWebConnectionStringFromStoredCredential(config);
             if (connectionString is not null)
             {
                 return connectionString;
@@ -2968,7 +2994,7 @@ if (location.pathname.toLowerCase() !== '/auth/login') { document.getElementById
 
             if (attempt == 0)
             {
-                _logger.LogInformation("Waiting for the managed Postgres viewer-role credential (first-run initialization) before starting the web dashboard");
+                _logger.LogInformation("Waiting for the managed Postgres web-role credential (first-run initialization, or the first start after an upgrade) before starting the web dashboard");
             }
 
             try
@@ -2981,7 +3007,17 @@ if (location.pathname.toLowerCase() !== '/auth/login') { document.getElementById
             }
         }
 
-        _logger.LogError("Web dashboard not started: the managed Postgres viewer-role credential never appeared — see the worker log for the bootstrap failure");
+        /* The web login never appeared (a failed role batch, or a credential file the service refused). Reads keep working on the read-only
+           viewer login, which holds no write, so every write the dashboard makes is refused by the store; it never writes as viewer. */
+        var viewer = DarlingManagedPostgres.TryBuildViewerConnectionStringFromStoredCredential(config);
+        if (viewer is not null)
+        {
+            _logger.LogWarning(
+                "The managed Postgres web-role credential never appeared, so the web dashboard starts on the read-only viewer login: it lists, and every write it offers (mute rules, dismissals, custom alerts, server add and edit, run-now requests) is refused until the service provisions the web role (see the worker log for the role batch). Restart the service once it has.");
+            return viewer;
+        }
+
+        _logger.LogError("Web dashboard not started: the managed Postgres web-role and viewer-role credentials never appeared — see the worker log for the bootstrap failure");
         return null;
     }
 

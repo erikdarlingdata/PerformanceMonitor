@@ -405,8 +405,10 @@ public sealed class AlertEngine
         AlertReadFailureCounter? readFailures = null,
         Func<EscalationSeedQuery, CancellationToken, Task<AlertSeverityLevel?>>? escalationSeedReader = null,
         IAlertThresholdOverrides? overrides = null,
-        IDeadlockRollup? deadlockRollup = null)
+        IDeadlockRollup? deadlockRollup = null,
+        Func<OpenFireQuery, CancellationToken, Task<AlertHistoryStanding>>? openFireReader = null)
     {
+        _openFireReader = openFireReader;
         _deadlockRollup = deadlockRollup;
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
         _readAdapter = readAdapter ?? throw new ArgumentNullException(nameof(readAdapter));
@@ -478,6 +480,75 @@ public sealed class AlertEngine
     private readonly Func<EscalationSeedQuery, CancellationToken, Task<AlertSeverityLevel?>>? _escalationSeedReader;
 
     private readonly (string Metric, string ResolutionTitle, bool CountMuted, bool TierlessRowIsWarning, TierEscalation Escalation)[] _escalationSeedFamilies;
+
+    /// <summary>#7068: the history reader that tells a worsening-gated alert (Volume Free Space, Version Store (PVS)) its
+    /// incident is already open after a restart; null leaves that state in memory only.</summary>
+    private readonly Func<OpenFireQuery, CancellationToken, Task<AlertHistoryStanding>>? _openFireReader;
+
+    /// <summary>
+    /// #7068: the fire row of an incident that was open when this engine started, for the first sweep that finds the
+    /// condition. The worsening gate's last-alerted level, its cooldown stamp and (Volume Free Space) its tier are all
+    /// in memory, so a service restart in the middle of a standing condition read it as new and wrote a fresh history row,
+    /// logged a fresh trigger and sent it again. Returns null when no reader is wired, when the history holds no open fire,
+    /// or when the read failed (logged and counted: an annotation, never a suppression). The caller applies the row only when
+    /// it names the volume or database now being judged, and runs this only on the first sweep of the process that sees the
+    /// condition, so a fire this process made, or a clear it saw, always wins.
+    /// </summary>
+    private async Task<AlertHistoryFire?> ReadStandingFireAsync(string key, string metric, string resolutionTitle, CancellationToken ct) =>
+        (await ReadStandingAsync(key, metric, resolutionTitle, ct))?.NewestOpen();
+
+    /// <summary>#7068: the same read as <see cref="ReadStandingFireAsync"/> with every fire and clear row, for the alerts that judge
+    /// each file or plan by its own row (<see cref="AlertHistoryStanding.OpenFor"/>). Null on no reader or a failed read.</summary>
+    private async Task<AlertHistoryStanding?> ReadStandingAsync(string key, string metric, string resolutionTitle, CancellationToken ct)
+    {
+        if (_openFireReader is null)
+        {
+            return null;
+        }
+
+        var readClock = Stopwatch.StartNew();
+        try
+        {
+            return await _openFireReader(new OpenFireQuery(key, metric, new[] { resolutionTitle }, _engineStartUtc), ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError("Could not read the open {Metric} incident from alert history for {ServerKey} after {ElapsedMs} ms; a standing condition may be announced again after this restart: {Message}", metric, key, readClock.ElapsedMilliseconds, ex.Message);
+            _readFailures?.RecordReadFailure(key, "standing incident seed", readClock.ElapsedMilliseconds);
+            return null;
+        }
+    }
+
+    /// <summary>#7068: the metrics (with their server key) whose observation guard has been seeded, or has seen the condition clear, this process.</summary>
+    private readonly ConcurrentDictionary<string, bool> _observationGuardSeeded = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// #7068: the open fire of a per-observation alert (Force Plan Failures, Database File Growth) for the FIRST sweep of this
+    /// process that finds the condition, or null on every later one. The guard that keeps a standing condition from firing again
+    /// (the observation each plan or file last fired on) and the cooldown stamp are in memory, so a restart read every standing
+    /// plan or file as news. One read per server and metric, of every fire and clear row: each plan or file is judged by the
+    /// newest open row that names it (<see cref="AlertHistoryStanding.OpenFor"/>), and one the history does not name is news.
+    /// </summary>
+    private async Task<AlertHistoryStanding?> ReadFirstStandingAsync(string key, string metric, string resolutionTitle, CancellationToken ct) =>
+        _observationGuardSeeded.TryAdd(metric + "|" + key, true)
+            ? await ReadStandingAsync(key, metric, resolutionTitle, ct)
+            : null;
+
+    /// <summary>#7068: the condition did not stand on this sweep, so a row left open in the history from before this process
+    /// is not its own (a clear while the service was down writes none). Returns true so it can lead the clear branch's condition.</summary>
+    private bool NoteObservationClear(string key, string metric)
+    {
+        _observationGuardSeeded.TryAdd(metric + "|" + key, true);
+        return true;
+    }
+
+    /// <summary>#7068: true when the fire row's context carries the dedup key of the volume or database now being judged.</summary>
+    private static bool FireNamesIncident(AlertHistoryFire fire, IReadOnlyList<AlertIncident> incidents) =>
+        incidents.Count > 0 && AlertContextSerializer.ContextJsonContainsDedupKey(fire.ContextJson, incidents[0].DedupKey);
 
     /// <summary>#5715 round 1: when this engine was built. History rows at or after it are this process's own; the seed reads
     /// only rows before it, and a family's seed ends one cooldown after it (every earlier row is then outside the window).</summary>
@@ -3045,6 +3116,23 @@ public sealed class AlertEngine
             if (breached.Count > 0)
             {
                 var worst = breached[0];                                            /* :489 */
+                /* #7068: the first sweep of this process that finds the condition. An incident the history shows open for this
+                   very volume is a standing one: seed the level, the cooldown stamp and the tier it was told at, so it is
+                   not announced again. A different volume, a cleared incident (a resolution row, or this process having
+                   already seen the volumes clear) and a failed read all leave the state empty, and the fire follows. */
+                if (!_activeLowDiskAlert.ContainsKey(key))
+                {
+                    var standing = await ReadStandingFireAsync(key, VolumeFreeSpaceWatermarkMetric, EscalationSeed.VolumeFreeSpaceResolvedTitle, ct);
+                    readClock.Restart();
+                    if (standing is not null && FireNamesIncident(standing, AlertContextBuilders.VolumeFreeSpaceIncidents(fingerprintServer, new[] { worst })))
+                    {
+                        _lastAlertedLowDiskPercent[key] = standing.CurrentValue;
+                        _lastLowDiskAlert[key] = standing.FireAtUtc;
+                        /* Volume Free Space persists a tier only for a Critical fire, so a row with none was a Warning. */
+                        _lowDiskEscalation.Restore(key, AlertContextSerializer.TryReadSeverity(standing.ContextJson) ?? AlertSeverityLevel.Warning);
+                    }
+                }
+
                 _activeLowDiskAlert[key] = true;                                    /* :490 */
                 double? lastLowDiskPercent =
                     _lastAlertedLowDiskPercent.TryGetValue(key, out var lowDiskPct) ? lowDiskPct : (double?)null; /* :491-492 */
@@ -3107,6 +3195,12 @@ public sealed class AlertEngine
                     }
                     readClock.Restart();
                 }
+            }
+            else if (!_activeLowDiskAlert.ContainsKey(key))
+            {
+                /* #7068: this process saw the volumes clear before it ever saw them breached, so an open fire row left in the
+                   history (nothing wrote its resolution while the service was down) is not this condition's. */
+                _activeLowDiskAlert[key] = false;
             }
             else if (_activeLowDiskAlert.TryGetValue(key, out var wasLowDisk) && wasLowDisk) /* :538 */
             {
@@ -3178,6 +3272,19 @@ public sealed class AlertEngine
             if (breached.Count > 0)
             {
                 var worst = breached[0];
+                /* #7068: as the low-disk twin: the first sweep of this process that finds the condition seeds the level and the
+                   cooldown stamp from an open fire row that names this database. */
+                if (!_activePvsAlert.ContainsKey(key))
+                {
+                    var standing = await ReadStandingFireAsync(key, "Version Store (PVS)", EscalationSeed.PvsResolvedTitle, ct);
+                    readClock.Restart();
+                    if (standing is not null && FireNamesIncident(standing, AlertContextBuilders.PvsPressureIncidents(fingerprintServer, new[] { worst })))
+                    {
+                        _lastAlertedPvsPercent[key] = standing.CurrentValue;
+                        _lastPvsAlert[key] = standing.FireAtUtc;
+                    }
+                }
+
                 _activePvsAlert[key] = true;
                 double? lastPvsPercent =
                     _lastAlertedPvsPercent.TryGetValue(key, out var pvsPct) ? pvsPct : (double?)null;
@@ -3216,6 +3323,10 @@ public sealed class AlertEngine
                     }
                     readClock.Restart();
                 }
+            }
+            else if (!_activePvsAlert.ContainsKey(key))
+            {
+                _activePvsAlert[key] = false;                                       /* #7068: see the low-disk twin */
             }
             else if (_activePvsAlert.TryGetValue(key, out var wasPvs) && wasPvs)
             {
@@ -3323,6 +3434,35 @@ public sealed class AlertEngine
                    The card is per server and carries every breached file, so ONE file with news is enough to
                    send it and every file on it is then stamped as reported. */
                 var alertedObservations = _lastAlertedFileGrowthObservation.GetOrAdd(key, _ => new Dictionary<string, DateTime>(StringComparer.Ordinal));
+                /* #7068: a fire left open in the history from before this process is the same incident: the files it names
+                   count as already reported at its time, and its time is the cooldown stamp, so only a rise observed after it
+                   (or a file it does not name) is news. */
+                var standingRead = await ReadFirstStandingAsync(key, FileGrowthWatermarkMetric, "Database File Growth Resolved", ct);
+                readClock.Restart();
+                if (standingRead is { } standing)
+                {
+                    /* Each file is judged by the newest open row that names it, not by the newest row alone: two files standing
+                       on one server were written by different rows. The resolution ends the whole alert (it names no file). */
+                    DateTime? newestSeed = null;
+                    foreach (var f in breached)
+                    {
+                        if (standing.OpenFor(fire => AlertContextSerializer.ContextJsonHasDetailFields(
+                            fire.ContextJson, ("Database", f.DatabaseName), ("File", f.FileName))) is { } standingFire)
+                        {
+                            alertedObservations.TryAdd(FileGrowthObservationKey(f), standingFire.FireAtUtc);
+                            if (newestSeed is not { } seen || standingFire.FireAtUtc > seen)
+                            {
+                                newestSeed = standingFire.FireAtUtc;
+                            }
+                        }
+                    }
+
+                    if (newestSeed is { } seeded)
+                    {
+                        _lastFileGrowthAlert.TryAdd(key, seeded);
+                    }
+                }
+
                 var breachedKeys = new HashSet<string>(breached.Select(FileGrowthObservationKey), StringComparer.Ordinal);
                 foreach (var departed in alertedObservations.Keys.Where(k => !breachedKeys.Contains(k)).ToList())
                 {
@@ -3413,7 +3553,7 @@ public sealed class AlertEngine
                     readClock.Restart();
                 }
             }
-            else if (_activeFileGrowthAlert.TryGetValue(key, out var wasGrowing) && wasGrowing)
+            else if (NoteObservationClear(key, FileGrowthWatermarkMetric) && _activeFileGrowthAlert.TryGetValue(key, out var wasGrowing) && wasGrowing)
             {
                 _activeFileGrowthAlert[key] = false;
                 /* #3636: the recovery drops the server's observation memory with it, deliberately — a file
@@ -4001,6 +4141,18 @@ public sealed class AlertEngine
 
         var active = _activeForcePlanAlerts.GetOrAdd(key, _ => new Dictionary<string, ForcePlanActivePlan>(StringComparer.Ordinal));
 
+        /* #7068: the first sweep of this process that finds a failing plan reads the open fire (none when it found nothing:
+           a clear while the service was down left its row open). */
+        AlertHistoryStanding? standing = null;
+        if (current.Count > 0)
+        {
+            standing = await ReadFirstStandingAsync(key, ForcePlanTokens.MetricName, "Forced Plan Failing Resolved", ct);
+        }
+        else
+        {
+            NoteObservationClear(key, ForcePlanTokens.MetricName);
+        }
+
         foreach (var (planKey, failure) in current)
         {
             if (active.TryGetValue(planKey, out var plan))
@@ -4011,6 +4163,24 @@ public sealed class AlertEngine
             {
                 plan = new ForcePlanActivePlan(failure);
                 active[planKey] = plan;
+
+                /* #7068: a plan the open fire names was announced before the restart: its observation is that fire's time and its
+                   cooldown clock starts there, so only an observation made after it is news. */
+                var planName = $"{failure.DatabaseName} query {failure.QueryId} plan {failure.PlanId}";
+                /* Judged by the newest open row that names THIS plan (database, query and plan id each equal): its clear names it
+                   too ("...: db query Q plan P no longer failing to force", the plan id ended by the words that follow it), so
+                   another plan's clear, plan 22's for plan 2, leaves this one's fire open. */
+                if (standing?.OpenFor(
+                        fire => AlertContextSerializer.ContextJsonHasDetailFields(
+                            fire.ContextJson,
+                            ("Database", failure.DatabaseName),
+                            ("Query ID", failure.QueryId.ToString(CultureInfo.InvariantCulture)),
+                            ("Plan ID", failure.PlanId.ToString(CultureInfo.InvariantCulture))),
+                        clear => clear.DetailText is { } text && text.Contains($": {planName} no longer failing to force", StringComparison.Ordinal)) is { } standingFire)
+                {
+                    plan.LastAlertedObservedAtUtc = standingFire.FireAtUtc;
+                    _lastForcePlanAlert.TryAdd(key + "|" + planKey, standingFire.FireAtUtc);
+                }
             }
 
             /* #3579: the observation guard. The row's stamp is the collection that produced the rise; if it

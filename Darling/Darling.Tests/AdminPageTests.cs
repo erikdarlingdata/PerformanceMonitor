@@ -43,7 +43,7 @@ public sealed class AdminPageTests
 
     [Theory]
     [InlineData("SERVER_COLUMNS", new[] { "display_name", "server_name", "auth", "engine", "version", "status", "freshness", "monthly_cost", "read_only", "added", "last_collected", "same_machine_as" })]
-    [InlineData("ROUTE_COLUMNS", new[] { "route_id", "enabled", "metric_match", "match_kind", "family", "applies_to", "severities", "status", "channels", "agent", "resolutions", "smtp_recipients", "modified_at_utc" })]
+    [InlineData("ROUTE_COLUMNS", new[] { "route_id", "enabled", "metric_match", "match_kind", "family", "applies_to", "severities", "report_notice", "status", "channels", "agent", "resolutions", "smtp_recipients", "modified_at_utc" })]
     [InlineData("SETTING_COLUMNS", new[] { "setting", "value" })]
     public void EachTab_DeclaresItsColumnKeys(string name, string[] keys)
     {

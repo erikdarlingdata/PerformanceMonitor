@@ -31,6 +31,7 @@ public sealed class DarlingMcpPgSourceTests
     public static IEnumerable<object[]> WebListed() =>
         [["get_pg_top_queries"], ["get_pg_database_stats"], ["get_pg_io_stats"], ["get_pg_plans"],
          ["get_pg_blocking"], ["get_pg_session_states"], ["get_pg_replication_stats"],
+         ["get_pg_autovacuum_health"], ["get_pg_replication_slots"], ["get_pg_wraparound_risk"],
          ["get_pg_wait_stats"], ["get_pg_wait_sampling"], ["get_pg_kernel_stats"], ["get_pg_lock_stats"], ["get_pg_predicate_stats"],
          ["get_pg_server_config_changes"], ["get_pg_xmin_horizon"]];
 
@@ -113,6 +114,12 @@ public sealed class DarlingMcpPgWindowD8aLiveTests
             (ds, n, h, end) => DarlingMcpPgPlanTools.GetPgPlans(ds, n, h, as_of: AsOf(end)),
             async (c, n, at) => await Exec(c,
                 "INSERT INTO pg_plan_capture (collection_id, collection_time, server_id, server_name, query_id, plan_hash, duration_ms, node_count, top_node_type, plan_json) VALUES ($1, $2, $3, $4, 7, 'h1', 1200.0, 3, 'Seeded', '{\"Plan\":{\"Node Type\":\"Seq Scan\"}}')",
+                CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(at), Id(n), n)),
+        /* #7010: one row per database every collection, so the table's own first row is the start (not run-probed). */
+        new("get_pg_wraparound_risk", "pg_wraparound_stats", "pg_wraparound_stats",
+            (ds, n, h, end) => DarlingMcpPgWraparoundTools.GetPgWraparoundRisk(ds, n, h, AsOf(end)),
+            async (c, n, at) => await Exec(c,
+                "INSERT INTO pg_wraparound_stats (collection_id, collection_time, server_id, server_name, database_name, frozen_xid_age, min_multixid_age, autovacuum_freeze_max_age, autovacuum_multixact_freeze_max_age, pct_toward_emergency_vacuum, pct_toward_wraparound, pct_toward_multixact_emergency, pct_toward_multixact_wraparound, xids_remaining, multixids_remaining, allows_connections) VALUES ($1, $2, $3, $4, 'appdb', 1000, 1000, 200000000, 400000000, 0, 0, 0, 0, 2147482648, 2147482648, TRUE)",
                 CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(at), Id(n), n)),
         new("get_pg_cpu_utilization", "pg_cpu_utilization", "pg_cpu_utilization",
             (ds, n, h, end) => DarlingMcpPgCpuUtilizationTools.GetPgCpuUtilization(ds, n, h, AsOf(end)),

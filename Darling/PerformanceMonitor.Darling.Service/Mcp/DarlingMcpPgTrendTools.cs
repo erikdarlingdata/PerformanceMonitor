@@ -9,6 +9,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
@@ -34,6 +35,7 @@ public sealed class DarlingMcpPgTrendTools
         [Description("The exact wait event name, e.g. DataFileRead, WALWrite. Omit to follow whichever event dominates the window.")] string? wait_event = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorForAnswerAsync(postgres, server_name, cancellationToken);
@@ -57,7 +59,7 @@ public sealed class DarlingMcpPgTrendTools
             {
                 return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, await DarlingEngineCapability.NotCollectedStatusAsync(
                     postgres, resolved.ServerId, resolved.DisplayName, "pg_wait_sampling", cancellationToken)
-                    ?? McpHelpers.Status(
+                    ?? EmptyStatus(await EmptyHintsAsync(postgres, "get_pg_wait_trend", resolved.ServerName, start, windowEnd, logger, cancellationToken),
                         "empty",
                         $"No wait event was sampled on {resolved.DisplayName} in the last {hours_back} "
                         + "hour(s), so there is nothing to follow. pg_wait_sampling needs the extension "
@@ -71,7 +73,7 @@ public sealed class DarlingMcpPgTrendTools
             {
                 return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, await DarlingEngineCapability.NotCollectedStatusAsync(
                     postgres, resolved.ServerId, resolved.DisplayName, "pg_wait_sampling", cancellationToken)
-                    ?? McpHelpers.Status(
+                    ?? EmptyStatus(await EmptyHintsAsync(postgres, "get_pg_wait_trend", resolved.ServerName, start, windowEnd, logger, cancellationToken),
                         "empty",
                         $"No samples for wait event '{chosen}' on {resolved.DisplayName} in the last "
                         + $"{hours_back} hour(s). A trend needs at least TWO snapshots to difference, so a "
@@ -81,7 +83,12 @@ public sealed class DarlingMcpPgTrendTools
 
             var resets = points.Count(p => p.CounterReset);
 
-            return JsonSerializer.Serialize(new
+            /* #7010: where the store's coverage of the window starts, probed on the web's own source for this read (WebDataStartNote). A window of
+               90 minutes or less starts no probe; a failed probe costs the notice, never the series. */
+            var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
+                postgres, "get_pg_wait_trend", resolved.ServerName, start, windowEnd, emptyAnswer: false, logger, cancellationToken);
+
+            return DarlingMcpWindowNotice.Attach(JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
                 wait_event = chosen,
@@ -118,7 +125,7 @@ public sealed class DarlingMcpPgTrendTools
                     backend_count = p.BackendCount,
                     counter_reset = p.CounterReset,
                 }),
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions), notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -134,8 +141,9 @@ public sealed class DarlingMcpPgTrendTools
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default) =>
-        GetPgQueryDurationTrend(postgres, server_name, queryid, hours_back, as_of, bucket_minutes, TrendBudget.Mcp(TrendBuckets.PgQueryDurationMaxPoints), cancellationToken);
+        GetPgQueryDurationTrend(postgres, server_name, queryid, hours_back, as_of, bucket_minutes, TrendBudget.Mcp(TrendBuckets.PgQueryDurationMaxPoints), logger, cancellationToken);
 
     /// <summary>
     /// get_pg_query_duration_trend under an explicit <paramref name="budget"/> (#3960): the MCP tool passes its own,
@@ -144,7 +152,7 @@ public sealed class DarlingMcpPgTrendTools
     /// </summary>
     internal static async Task<string> GetPgQueryDurationTrend(
         NpgsqlDataSource postgres, string? server_name, string? queryid, int hours_back, string? as_of, int? bucket_minutes,
-        TrendBudget budget, CancellationToken cancellationToken = default)
+        TrendBudget budget, ILogger? logger = null, CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorForAnswerAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
@@ -181,7 +189,7 @@ public sealed class DarlingMcpPgTrendTools
                 {
                     return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, await DarlingEngineCapability.NotCollectedStatusAsync(
                         postgres, resolved.ServerId, resolved.DisplayName, "pg_statement_stats", cancellationToken)
-                        ?? McpHelpers.Status(
+                        ?? EmptyStatus(await EmptyHintsAsync(postgres, "get_pg_query_duration_trend", resolved.ServerName, start, windowEnd, logger, cancellationToken),
                             "empty",
                             $"No statement recorded execution time on {resolved.DisplayName} in the last "
                             + $"{hours_back} hour(s), so there is nothing to follow."), cancellationToken);
@@ -201,7 +209,7 @@ public sealed class DarlingMcpPgTrendTools
             {
                 return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, await DarlingEngineCapability.NotCollectedStatusAsync(
                     postgres, resolved.ServerId, resolved.DisplayName, "pg_statement_stats", cancellationToken)
-                    ?? McpHelpers.Status(
+                    ?? EmptyStatus(await EmptyHintsAsync(postgres, "get_pg_query_duration_trend", resolved.ServerName, start, windowEnd, logger, cancellationToken),
                         "empty",
                         $"No samples for queryid {parsedQueryId} on {resolved.DisplayName} in the last "
                         + $"{hours_back} hour(s). pg_stat_statements evicts statements under memory "
@@ -211,7 +219,12 @@ public sealed class DarlingMcpPgTrendTools
 
             var ran = points.Where(p => p.Calls > 0).ToList();
 
-            return JsonSerializer.Serialize(new
+            /* #7010: where the store's coverage of the window starts, probed on the web's own source for this read (WebDataStartNote). A window of
+               90 minutes or less starts no probe; a failed probe costs the notice, never the series. */
+            var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
+                postgres, "get_pg_query_duration_trend", resolved.ServerName, start, windowEnd, emptyAnswer: false, logger, cancellationToken);
+
+            return DarlingMcpWindowNotice.Attach(JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
                 queryid = parsedQueryId.ToString(CultureInfo.InvariantCulture),
@@ -247,7 +260,7 @@ public sealed class DarlingMcpPgTrendTools
                     peak_mean_exec_ms = p.PeakMeanExecMs is { } peak ? Math.Round(peak, 3) : (double?)null,
                     calls_per_second = Math.Round(p.CallsPerSecond, 4),
                 }),
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions), notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -264,8 +277,9 @@ public sealed class DarlingMcpPgTrendTools
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default) =>
-        GetPgIoTrend(postgres, server_name, backend_type, context, hours_back, as_of, bucket_minutes, TrendBudget.Mcp(TrendBuckets.PgIoMcpAutoPoints, TrendBuckets.PgIoMaxPoints), cancellationToken);
+        GetPgIoTrend(postgres, server_name, backend_type, context, hours_back, as_of, bucket_minutes, TrendBudget.Mcp(TrendBuckets.PgIoMcpAutoPoints, TrendBuckets.PgIoMaxPoints), logger, cancellationToken);
 
     /// <summary>
     /// get_pg_io_trend under an explicit <paramref name="budget"/> (#3897): the MCP tool passes its own, the web
@@ -275,7 +289,7 @@ public sealed class DarlingMcpPgTrendTools
     /// </summary>
     internal static async Task<string> GetPgIoTrend(
         NpgsqlDataSource postgres, string? server_name, string? backend_type, string? context, int hours_back,
-        string? as_of, int? bucket_minutes, TrendBudget budget, CancellationToken cancellationToken = default)
+        string? as_of, int? bucket_minutes, TrendBudget budget, ILogger? logger = null, CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorForAnswerAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
@@ -321,7 +335,7 @@ public sealed class DarlingMcpPgTrendTools
                 {
                     return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, await DarlingEngineCapability.NotCollectedStatusAsync(
                         postgres, resolved.ServerId, resolved.DisplayName, "pg_io_stats", cancellationToken)
-                        ?? McpHelpers.Status(
+                        ?? EmptyStatus(await EmptyHintsAsync(postgres, "get_pg_io_trend", resolved.ServerName, start, windowEnd, logger, cancellationToken),
                             "empty",
                             (askedBackend ?? askedContext) is null
                                 ? $"No backend type recorded any I/O or buffer activity on "
@@ -348,7 +362,7 @@ public sealed class DarlingMcpPgTrendTools
             {
                 return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, await DarlingEngineCapability.NotCollectedStatusAsync(
                     postgres, resolved.ServerId, resolved.DisplayName, "pg_io_stats", cancellationToken)
-                    ?? McpHelpers.Status(
+                    ?? EmptyStatus(await EmptyHintsAsync(postgres, "get_pg_io_trend", resolved.ServerName, start, windowEnd, logger, cancellationToken),
                         "empty",
                         $"No I/O samples for '{chosenBackend}' in the '{chosenContext}' context on "
                         + $"{resolved.DisplayName} in the last {hours_back} hour(s). A trend needs at least "
@@ -372,7 +386,12 @@ public sealed class DarlingMcpPgTrendTools
                the figure is intervals, as it always was. */
             var resets = points.Sum(p => p.CounterResets);
 
-            return JsonSerializer.Serialize(new
+            /* #7010: where the store's coverage of the window starts, probed on the web's own source for this read (WebDataStartNote). A window of
+               90 minutes or less starts no probe; a failed probe costs the notice, never the series. */
+            var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
+                postgres, "get_pg_io_trend", resolved.ServerName, start, windowEnd, emptyAnswer: false, logger, cancellationToken);
+
+            return DarlingMcpWindowNotice.Attach(JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
                 backend_type = chosenBackend,
@@ -511,7 +530,7 @@ public sealed class DarlingMcpPgTrendTools
                         : (double?)null,
                     counter_reset = p.CounterReset,
                 }),
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions), notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -527,8 +546,9 @@ public sealed class DarlingMcpPgTrendTools
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default) =>
-        GetPgDatabaseTrend(postgres, server_name, database, hours_back, as_of, bucket_minutes, TrendBudget.Mcp(TrendBuckets.PgDatabaseMaxPoints), cancellationToken);
+        GetPgDatabaseTrend(postgres, server_name, database, hours_back, as_of, bucket_minutes, TrendBudget.Mcp(TrendBuckets.PgDatabaseMaxPoints), logger, cancellationToken);
 
     /// <summary>
     /// get_pg_database_trend under an explicit <paramref name="budget"/> (#3897): the MCP tool passes its own, the
@@ -538,7 +558,7 @@ public sealed class DarlingMcpPgTrendTools
     /// </summary>
     internal static async Task<string> GetPgDatabaseTrend(
         NpgsqlDataSource postgres, string? server_name, string? database, int hours_back, string? as_of,
-        int? bucket_minutes, TrendBudget budget, CancellationToken cancellationToken = default)
+        int? bucket_minutes, TrendBudget budget, ILogger? logger = null, CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorForAnswerAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
@@ -577,7 +597,7 @@ public sealed class DarlingMcpPgTrendTools
                 {
                     return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, await DarlingEngineCapability.NotCollectedStatusAsync(
                         postgres, resolved.ServerId, resolved.DisplayName, "pg_database_stats", cancellationToken)
-                        ?? McpHelpers.Status(
+                        ?? EmptyStatus(await EmptyHintsAsync(postgres, "get_pg_database_trend", resolved.ServerName, start, windowEnd, logger, cancellationToken),
                             "empty",
                             $"No database recorded block accesses or temp files on {resolved.DisplayName} in "
                             + $"the last {hours_back} hour(s), so there is nothing to follow."), cancellationToken);
@@ -606,7 +626,7 @@ public sealed class DarlingMcpPgTrendTools
                 var (samplesInWindow, everCollected) = await DarlingPgDatabaseReader.GetCoverageAsync(
                     postgres, resolved.ServerId, start, windowEnd, cancellationToken);
 
-                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, McpHelpers.Status(
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, EmptyStatus(await EmptyHintsAsync(postgres, "get_pg_database_trend", resolved.ServerName, start, windowEnd, logger, cancellationToken),
                     "empty",
                     $"No differenced intervals for database '{label}' on {resolved.DisplayName} in the last "
                     + $"{hours_back} hour(s). "
@@ -643,7 +663,12 @@ public sealed class DarlingMcpPgTrendTools
                 ? Math.Round((double)totalHits / totalAccesses * 100, 2)
                 : null;
 
-            return JsonSerializer.Serialize(new
+            /* #7010: where the store's coverage of the window starts, probed on the web's own source for this read (WebDataStartNote). A window of
+               90 minutes or less starts no probe; a failed probe costs the notice, never the series. */
+            var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
+                postgres, "get_pg_database_trend", resolved.ServerName, start, windowEnd, emptyAnswer: false, logger, cancellationToken);
+
+            return DarlingMcpWindowNotice.Attach(JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
                 database = label,
@@ -717,11 +742,22 @@ public sealed class DarlingMcpPgTrendTools
                     worst_cache_hit_pct = p.WorstCacheHitPct is { } worstHit ? Math.Round(worstHit, 2) : (double?)null,
                     peak_temp_bytes_per_second = p.PeakTempBytesPerSecond is { } peakSpill ? Math.Round(peakSpill, 1) : (double?)null,
                 }),
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions), notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_pg_database_trend", ex);
         }
     }
+
+    /// <summary>
+    /// The hints an EMPTY trend answer carries (#7010): the window floor probed on the web's own source for the read, so an empty answer over a
+    /// window that starts before the store's data says so instead of reading as a quiet server. A failed probe answers no hints.
+    /// </summary>
+    private static async Task<object?> EmptyHintsAsync(
+        NpgsqlDataSource postgres, string tool, string serverName, DateTime start, DateTime windowEnd, ILogger? logger, CancellationToken cancellationToken) =>
+        (await DarlingMcpWindowNotice.ReadForToolAsync(postgres, tool, serverName, start, windowEnd, emptyAnswer: true, logger, cancellationToken)).AsHints();
+
+    /// <summary>A status envelope carrying the window-floor <paramref name="hints"/> (omitted when null).</summary>
+    private static string EmptyStatus(object? hints, string status, string message) => McpHelpers.Status(status, message, hints);
 }

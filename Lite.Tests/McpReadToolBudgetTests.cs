@@ -70,7 +70,7 @@ namespace PerformanceMonitorLite.Tests;
 [Trait("Stage", "Guard")]
 public sealed class McpReadToolBudgetTests : IClassFixture<SharedDuckDbFixture>, IDisposable
 {
-    private const string ServerName = "mcp-read-tool-budget-4198";
+    internal const string ServerName = "mcp-read-tool-budget-4198";
 
     private const int DbCount = 4;
     private const int QueriesPerDb = 10;
@@ -285,14 +285,15 @@ public sealed class McpReadToolBudgetTests : IClassFixture<SharedDuckDbFixture>,
         name == "audit_config" ||
         WriteToolRoster.Contains(name);
 
-    private static (string Name, MethodInfo Method)[] ReadToolMethods() =>
+    internal static (string Name, MethodInfo Method)[] ReadToolMethods() =>
         AllToolMethods().Where(x => !IsExcluded(x.Name)).ToArray();
 
     /// <summary>Binds one tool's parameters: its DI services, <c>server_name</c> at the seeded server, every
     /// other optional parameter at its declared default. A required parameter that is none of those gets a
     /// placeholder and a <paramref name="gaps"/> note -- see the class remarks' "Known gaps".</summary>
-    private static object?[] BindArgs(MethodInfo method, LocalDataService dataService, ServerManager serverManager,
-        AnalysisService analysisService, McpToolGuideCatalog catalog, List<string> gaps, string toolName)
+    internal static object?[] BindArgs(MethodInfo method, LocalDataService dataService, ServerManager serverManager,
+        AnalysisService analysisService, McpToolGuideCatalog catalog, List<string> gaps, string toolName,
+        IReadOnlyDictionary<string, object?>? overrides = null)
     {
         var parameters = method.GetParameters();
         var args = new object?[parameters.Length];
@@ -304,6 +305,8 @@ public sealed class McpReadToolBudgetTests : IClassFixture<SharedDuckDbFixture>,
             if (p.ParameterType == typeof(AnalysisService)) { args[i] = analysisService; continue; }
             if (p.ParameterType == typeof(McpToolGuideCatalog)) { args[i] = catalog; continue; }
             if (p.Name == "server_name") { args[i] = ServerName; continue; }
+            /* #6984: the window matrix sets hours_back and as_of per run; every other parameter keeps its default. */
+            if (p.Name is not null && overrides is not null && overrides.TryGetValue(p.Name, out var overridden)) { args[i] = overridden; continue; }
             if (p.HasDefaultValue) { args[i] = p.DefaultValue; continue; }
 
             gaps.Add($"{toolName}: '{p.Name}' ({p.ParameterType.Name}) has no default and is not a known DI service -- placeholder passed, likely answers empty/invalid.");
@@ -314,7 +317,7 @@ public sealed class McpReadToolBudgetTests : IClassFixture<SharedDuckDbFixture>,
 
     /// <summary>Every MCP tool method returns either <c>string</c> (<c>get_tool_guide</c>) or <c>Task&lt;string&gt;</c>
     /// (everything else); this is the reply an MCP client would receive either way.</summary>
-    private static async Task<string> InvokeAsync(MethodInfo method, object?[] args)
+    internal static async Task<string> InvokeAsync(MethodInfo method, object?[] args)
     {
         var result = method.Invoke(null, args);
         return result switch

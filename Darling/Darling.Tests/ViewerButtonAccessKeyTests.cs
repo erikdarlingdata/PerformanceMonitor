@@ -28,11 +28,13 @@ namespace Darling.Tests;
 /// binding failure, and no resource to fail to resolve. It is a rendering fact about a template, which is
 /// why the assertion is over the markup.</para>
 ///
-/// <para><b>Fifteen templates was the estimate; fifty-five is the population.</b> #3835 named three theme
+/// <para><b>Fifteen templates was the estimate; the population was fifty-five, and is thirty-five now.</b>
+/// #3835 named three theme
 /// files by the count of <c>TargetType="Button"</c> templates in the Darling viewer's <c>Themes/</c>
 /// directory. There are three PARALLEL theme families — <c>Darling/PerformanceMonitor.Darling.Viewer/Themes/</c>,
-/// <c>Lite/Themes/</c> and <c>deprecated/Dashboard/Themes/</c>, the last still in
-/// <c>PerformanceMonitor.sln</c> — plus five one-off templates outside any of them, including
+/// <c>Lite/Themes/</c> and the Dashboard's, which moved into
+/// <c>deprecated/dashboard-installer-source.zip</c> in #6973 and left the walk (twenty of the fifty-five
+/// templates went with it) — plus five one-off templates outside any of them, including
 /// <c>ViewerDarkTheme.xaml</c>'s <c>ViewerButton</c>, which is the implicit <c>Button</c> style for every
 /// secondary window and therefore the template the reported <c>_Save</c> and <c>_Close</c> actually hit.
 /// A rule scoped to the three files in the report would have left two thirds of the defect in place and
@@ -194,22 +196,39 @@ public sealed class ViewerButtonAccessKeyTests
             }
         }
 
-        /* Nine theme files across three parallel families, and the count is the point: #3835 was reported as
-           three. A fourth family, or a fourth theme inside one, arrives here as a governed template like any
-           other — but this floor is what catches a walk that stopped seeing the families it already has. */
+        /* Seven theme files: the Viewer's three themes, its ViewerDarkTheme.xaml one-off (the implicit Button
+           style for the secondary windows) and Lite's three. The Dashboard's family went into the frozen zip
+           (#6973). A new theme arrives here as a governed template like any other and need not be listed,
+           but a listed name missing from the walk catches a walk that stopped seeing a family it already
+           has, which a bare count would miss (it passes on a different mix of files). */
+        var expectedThemeFiles = new[]
+        {
+            "Darling/PerformanceMonitor.Darling.Viewer/Themes/CoolBreezeTheme.xaml",
+            "Darling/PerformanceMonitor.Darling.Viewer/Themes/DarkTheme.xaml",
+            "Darling/PerformanceMonitor.Darling.Viewer/Themes/LightTheme.xaml",
+            "Darling/PerformanceMonitor.Darling.Viewer/ViewerDarkTheme.xaml",
+            "Lite/Themes/CoolBreezeTheme.xaml",
+            "Lite/Themes/DarkTheme.xaml",
+            "Lite/Themes/LightTheme.xaml",
+        };
+        var themeFilesSeen = themeFiles.Select(f => f.Replace('\\', '/')).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var missingThemeFiles = expectedThemeFiles.Where(f => !themeFilesSeen.Contains(f)).ToList();
         Assert.True(
-            themeFiles.Count >= 9,
-            $"only {themeFiles.Count} *Theme.xaml files were read ({string.Join(", ", themeFiles.OrderBy(f => f, StringComparer.Ordinal))}); "
-          + "there are three parallel theme families with three themes each, so the walk is missing at least one");
+            missingThemeFiles.Count == 0,
+            $"the walk did not read {string.Join(", ", missingThemeFiles)}; it read "
+          + $"{string.Join(", ", themeFilesSeen.OrderBy(f => f, StringComparer.Ordinal))}. The Viewer's three "
+          + "themes, ViewerDarkTheme.xaml and Lite's three themes are the theme files that remain, so the "
+          + "walk is missing at least one");
 
         Assert.True(
-            family >= 90,
+            family >= 55,
             $"only {family} button-family ControlTemplates were seen; the element walk is not descending the "
           + "resource dictionaries");
 
         Assert.True(
-            governed >= 50,
-            $"only {governed} TargetType=\"Button\" templates were found. The defect spanned 55, so either the "
+            governed >= 30,
+            $"only {governed} TargetType=\"Button\" templates were found. 35 remain (55 before the Dashboard's "
+          + "went into the frozen zip), so either the "
           + "templates were consolidated — in which case raise this floor on purpose — or this scan has "
           + "stopped seeing most of them and is reporting clean on the remainder");
 
@@ -217,7 +236,7 @@ public sealed class ViewerButtonAccessKeyTests
            govern, which is the TabCloseButton shape. Flooring the presenters separately is what says the
            attribute assertion had subjects. */
         Assert.True(
-            presenters >= 45,
+            presenters >= 25,
             $"only {presenters} unsourced ContentPresenters were checked inside button templates; the rule is "
           + "passing because it found almost nothing to judge");
 

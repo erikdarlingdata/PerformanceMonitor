@@ -297,7 +297,8 @@ public sealed class WebhookChannelFailureNoticeTests
     {
         Assert.Equal(3, WebhookAlertService.FailingChannelThreshold);
 
-        var source = ReadRepoFile(Path.Combine("PerformanceMonitor.Notifications", "WebhookAlertService.cs"));
+        var source = string.Concat(new[] { "", ".Teams", ".Slack", ".Generic", ".PagerDuty", ".Shared" }
+            .Select(part => ReadRepoFile(Path.Combine("PerformanceMonitor.Notifications", "WebhookAlertService" + part + ".cs"))));
         foreach (var channel in new[] { "Teams", "Slack", "Generic", "PagerDuty" })
         {
             Assert.Contains($"_consecutive{channel}Failures <= FailingChannelThreshold", source, StringComparison.Ordinal);

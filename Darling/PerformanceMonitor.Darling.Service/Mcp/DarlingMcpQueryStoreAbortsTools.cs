@@ -95,6 +95,23 @@ public sealed class DarlingMcpQueryStoreAbortsTools
                 truncationNote = truncated
                     ? "The window reaches further back than this server's raw query_store_stats retains, so the older part of it was not read."
                     : null;
+
+                /* #7010: that floor is the oldest row IN the window, so a window holding no row at all answers null, and a null floor read as
+                   covered: an empty answer over a window before the data said window_truncated false. The shared notice reads such a window by the
+                   collector's runs and the server's first collection, and says not covered when the store holds none of it. */
+                if (floor is null && page.Count == 0)
+                {
+                    DateTime? sharedFloor = null;
+                    var notice = await DarlingMcpWindowNotice.ReadAsync(
+                        async () => sharedFloor = await DarlingMcpWindowNotice.Probe(postgres, "query_store_stats", resolved.ServerName, requestedStart, windowEnd, cancellationToken),
+                        requestedStart, windowEnd, "query_store_stats", emptyAnswer: true, cancellationToken: cancellationToken);
+                    if (!notice.IsUnavailable && notice.WindowTruncated)
+                    {
+                        truncated = true;
+                        effectiveStart = sharedFloor is DateTime covered ? RawWindowFloor.EffectiveStart(covered, requestedStart) : windowEnd;
+                        truncationNote = notice.TruncationNote;
+                    }
+                }
             }
 
             var scopeName = databases.Describe();

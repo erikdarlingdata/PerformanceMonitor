@@ -207,6 +207,7 @@ FROM (
            concat_ws(' ', CASE WHEN m.enabled THEN 'enabled' ELSE 'disabled' END, 'mute rule',
                      'for ' || coalesce(m.metric_name, 'every metric'),
                      CASE WHEN m.expires_at_utc IS NOT NULL THEN 'until ' || to_char(m.expires_at_utc, 'YYYY-MM-DD""T""HH24:MI:SS""Z""') END,
+                     CASE WHEN m.recur_start_time IS NOT NULL THEN 'repeating window ' || to_char(m.recur_start_time, 'HH24:MI') || '-' || to_char(m.recur_end_time, 'HH24:MI') || ' ' || m.recur_time_zone END,
                      CASE WHEN m.reason IS NOT NULL THEN 'reason: ' || m.reason END) AS text,
            m.query_text_pattern AS pattern
     FROM config_mute_rules AS m

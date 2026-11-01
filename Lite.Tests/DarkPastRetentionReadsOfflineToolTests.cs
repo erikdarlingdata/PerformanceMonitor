@@ -66,6 +66,27 @@ public sealed class DarkPastRetentionReadsOfflineToolTests : IClassFixture<Share
     }
 
     /// <summary>
+    /// #7062: the horizon at the instants a calendar bends, through the clock parameter. A month end clamps the
+    /// cutoff back (31 May, 31 December, 29 February), and an exact month start stays where it is.
+    /// </summary>
+    [Theory]
+    [InlineData("2026-10-31T23:59:59", "2026-08-01")]
+    [InlineData("2026-11-01T00:00:00", "2026-08-01")]
+    [InlineData("2026-11-01T00:49:00", "2026-09-01")]
+    [InlineData("2026-12-31T23:59:59", "2026-10-01")]
+    [InlineData("2027-01-01T00:00:00", "2026-10-01")]
+    [InlineData("2027-01-01T00:10:00", "2026-11-01")]
+    [InlineData("2028-02-29T00:00:00", "2027-12-01")]
+    [InlineData("2028-03-01T00:00:00", "2027-12-01")]
+    [InlineData("2028-05-31T10:00:00", "2028-03-01")]
+    [InlineData("2026-03-31T12:00:00", "2026-01-01")]
+    public void TheHorizon_AtACalendarEdge_IsTheFirstMonthStartTheArchiveStillHoldsWhole(string utcNow, string expected)
+    {
+        var now = DateTime.SpecifyKind(DateTime.Parse(utcNow, System.Globalization.CultureInfo.InvariantCulture), DateTimeKind.Utc);
+        Assert.Equal(DateTime.Parse(expected, System.Globalization.CultureInfo.InvariantCulture), RetentionService.OldestRetainedInstant(now));
+    }
+
+    /// <summary>
     /// The horizon against the cleanup itself, so the two cannot drift: the monthly file for the horizon's
     /// month survives <see cref="RetentionService.CleanupOldArchives"/>, and the month before it does not.
     /// </summary>

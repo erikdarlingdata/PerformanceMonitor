@@ -31,21 +31,21 @@ namespace Darling.Tests;
 /// with <c>error NU1004</c> in its own log, and the only job that went red was the one whose restore is a
 /// single-command step.</para>
 ///
-/// <para><b>And one lock file was reached by nothing.</b> <c>deprecated/Installer</c> carries a lock file, is
+/// <para><b>And one lock file was reached by nothing.</b> The deprecated Installer carried a lock file, was
 /// referenced by no project, and was restored by no workflow. Measured rather than reasoned: perturbing that
-/// file left all six restores CI ran green, and failed only a direct restore of that project.</para>
+/// file left all six restores CI ran green, and failed only a direct restore of that project. The project is
+/// now frozen in a zip (#6973), so no lock file is exempt today and the ratchet below holds the set empty.</para>
 ///
 /// <para><b>Coverage is derived, not listed.</b> The requirement comes from the lock files on disk and the
 /// <c>ProjectReference</c> edges between projects, so a tenth lock file arriving makes its restore mandatory
 /// instead of remembered. A referenced project's own lock file IS validated by a locked-mode restore of the
-/// referencing project — verified against NuGet by perturbing <c>Installer.Core</c>'s lock file and watching
-/// a locked-mode restore of <c>Installer.Tests</c> fail <c>NU1004</c> — so the closure arm encodes measured
-/// behaviour rather than an assumption about it.</para>
+/// referencing project — verified against NuGet by perturbing a referenced project's lock file and watching
+/// a locked-mode restore of the project that references it fail <c>NU1004</c> — so the closure arm encodes
+/// measured behaviour rather than an assumption about it.</para>
 ///
 /// <para><b>Where this runs.</b> Its inputs span the whole repository — every lock file, every project
 /// file, <c>global.json</c>, <c>Directory.Packages.props</c>, both workflows — so no area path filter
-/// reaches them, and <c>deprecated/Installer</c> in particular belongs to <c>installer</c> alone while the
-/// step that runs this suite is gated on <c>darling</c>. Coverage therefore rests on
+/// reaches them, and the step that runs this suite is gated on <c>darling</c>. Coverage therefore rests on
 /// <c>darling-tree-guards</c>, which runs the whole suite exactly when the <c>darling</c> filter did not
 /// fire — the backstop <c>CrossAppGuardCiGateTests</c> documents and whose gate it pins. Growing a filter
 /// to name these paths instead would be a hand-maintained copy of a whole-tree input set, and the honest
@@ -74,11 +74,12 @@ public sealed class LockedModeRestoreCoverageTests
 
     /// <summary>
     /// The lock files that cannot be validated in locked mode while the SDK patch floats — held as a ratchet
-    /// on the DERIVED set below, not as the requirement itself. Without the ratchet, a project newly
+    /// on the DERIVED set below, not as the requirement itself. Empty since the deprecated Installer, the one
+    /// project that published single-file, was frozen into a zip (#6973). Without the ratchet, a project newly
     /// publishing single-file would take the exemption silently, which is the same shape of quiet widening
     /// this class exists to stop.
     /// </summary>
-    private static readonly string[] s_sdkCoupledLockFiles = { "deprecated/Installer" };
+    private static readonly string[] s_sdkCoupledLockFiles = Array.Empty<string>();
 
     /// <summary>
     /// The text of a <c>dotnet restore</c> and what it names, deliberately broad: any line carrying the
@@ -232,14 +233,7 @@ public sealed class LockedModeRestoreCoverageTests
            report perfect coverage. */
         var lockFiles = LockFileDirectories();
         Assert.Contains("Darling/Darling.Tests", lockFiles);
-        Assert.Contains("deprecated/Installer", lockFiles);
         Assert.NotEmpty(RestoredProjects(buildYaml));
-
-        /* The closure arm carries real weight in the tree as it stands, rather than being a spare wheel that
-           would never turn: deprecated/Dashboard holds a lock file, is named by no restore line in the
-           workflow, and is covered only because Dashboard.Tests references it. */
-        Assert.DoesNotContain("dotnet restore deprecated/Dashboard/Dashboard.csproj", buildYaml, StringComparison.Ordinal);
-        Assert.DoesNotContain("deprecated/Dashboard", UncoveredLockFiles(buildYaml, globalJson));
 
         var uncovered = UncoveredLockFiles(buildYaml, globalJson);
 
@@ -254,11 +248,10 @@ public sealed class LockedModeRestoreCoverageTests
 
     /// <summary>
     /// The lock files exempt from that requirement are exactly the ones whose contents follow the SDK, and
-    /// there is one.
+    /// there are none.
     ///
-    /// <para><b>Why an exemption exists at all.</b> <c>deprecated/Installer</c> is the only project
-    /// publishing single-file, so the SDK adds an implicit <c>Microsoft.NET.ILLink.Tasks</c> reference at the
-    /// version bundled with whichever SDK ran the restore. <c>global.json</c> rolls forward across patches,
+    /// <para><b>Why an exemption exists at all.</b> A project publishing single-file gets an implicit
+    /// <c>Microsoft.NET.ILLink.Tasks</c> reference at the version bundled with whichever SDK ran the restore. <c>global.json</c> rolls forward across patches,
     /// so a runner on 10.0.303 wants <c>[10.0.11, )</c> where a lock file written under 10.0.302 records
     /// <c>[10.0.10, )</c>. No restore line can make that file right for both, and nothing had restored the
     /// project, so the drift accumulated unseen until #3143 pointed a restore at it.</para>
@@ -277,13 +270,7 @@ public sealed class LockedModeRestoreCoverageTests
 
         Assert.Equal(s_sdkCoupledLockFiles, SdkCoupledLockFiles(globalJson).ToArray());
 
-        /* The reason, read off the tree rather than restated: the exempt project publishes single-file, which
-           is what makes the SDK add the reference, and its lock file is the only one carrying it. */
-        Assert.Contains(
-            "<PublishSingleFile>true</PublishSingleFile>",
-            ReadRepoFileLf("deprecated", "Installer", "PerformanceMonitorInstaller.csproj"),
-            StringComparison.Ordinal);
-
+        /* The reason, read off the tree rather than restated: no lock file carries the SDK-coupled package. */
         Assert.Equal(
             s_sdkCoupledLockFiles,
             LockFileDirectories()
@@ -320,7 +307,6 @@ public sealed class LockedModeRestoreCoverageTests
             StringComparer.Ordinal);
 
         var directArm = new SortedSet<string>(StringComparer.Ordinal);
-        var closureArm = new SortedSet<string>(StringComparer.Ordinal);
 
         foreach (var line in real.Split('\n').Where(IsRestoreInvocation))
         {
@@ -329,20 +315,16 @@ public sealed class LockedModeRestoreCoverageTests
 
             foreach (var uncovered in UncoveredLockFiles(without, globalJson))
             {
-                /* A directory the deleted line NAMED is the direct arm; one it only reached through a
-                   ProjectReference is the closure arm. The two are separated by what the workflow spells,
-                   so neither is a list. */
-                _ = namedByARestore.Contains(uncovered) ? directArm.Add(uncovered) : closureArm.Add(uncovered);
+                /* A directory the deleted line NAMED is the direct arm. A lock file reached only through a
+                   ProjectReference used to be the closure arm here, proved on the Dashboard; the five
+                   remaining projects are each named by a restore, so the closure arm is proved on a fixture
+                   in TheClosureWalk_ReachesALockFileOnlyThroughAProjectReference. */
+                Assert.Contains(uncovered, namedByARestore);
+                directArm.Add(uncovered);
             }
         }
 
         Assert.NotEmpty(directArm);
-
-        Assert.True(
-            closureArm.Count > 0,
-            "no restore line's removal uncovers a lock file it reaches only through a ProjectReference, so "
-            + "the closure walk in this check is not load-bearing and could be returning the directories it "
-            + "was handed");
 
         /* The exemption arm: with the SDK pinned exactly, the SDK-coupled lock file stops being excusable
            and the requirement reports it — which is the state a decision to keep that lock file has to
@@ -355,6 +337,53 @@ public sealed class LockedModeRestoreCoverageTests
         Assert.NotEqual(globalJson, pinnedSdk);
         Assert.Empty(SdkCoupledLockFiles(pinnedSdk));
         Assert.Equal(s_sdkCoupledLockFiles, UncoveredLockFiles(real, pinnedSdk).ToArray());
+    }
+
+    /// <summary>
+    /// The closure walk is load-bearing: a lock file that no restore names, but that a restored project
+    /// reaches through a <c>ProjectReference</c>, is covered; removing the one restore line uncovers it; and
+    /// a lock file nothing references is still reported. Run on a fixture because every project in the
+    /// repository now has a restore of its own (the Dashboard, whose Core library was reached only through
+    /// a reference, went into the frozen zip, #6973), so the real tree can no longer show the walk doing
+    /// anything a plain list of the restored directories would not.
+    /// </summary>
+    [Fact]
+    public void TheClosureWalk_ReachesALockFileOnlyThroughAProjectReference()
+    {
+        var fixture = Path.Combine(Path.GetTempPath(), "lockedmode-closure-" + Guid.NewGuid().ToString("N"));
+
+        try
+        {
+            foreach (var directory in new[] { "app", "lib", "orphan" })
+            {
+                Directory.CreateDirectory(Path.Combine(fixture, directory));
+                File.WriteAllText(Path.Combine(fixture, directory, "packages.lock.json"), "{}");
+            }
+
+            File.WriteAllText(
+                Path.Combine(fixture, "app", "App.csproj"),
+                "<Project><ItemGroup><ProjectReference Include=\"..\\lib\\Lib.csproj\" /></ItemGroup></Project>");
+            File.WriteAllText(Path.Combine(fixture, "lib", "Lib.csproj"), "<Project />");
+            File.WriteAllText(Path.Combine(fixture, "orphan", "Orphan.csproj"), "<Project />");
+
+            const string restoreApp = "          dotnet restore app/App.csproj --locked-mode\n";
+            const string pinnedSdk = "{ \"sdk\": { \"rollForward\": \"disable\" } }";
+
+            /* lib is reached only through app's reference, and orphan by nothing: the walk covers the first
+               and still reports the second. */
+            Assert.Equal(new[] { "orphan" }, UncoveredLockFiles(restoreApp, pinnedSdk, fixture).ToArray());
+
+            /* Remove the one restore line and app, which it named, and lib, which it only reached, are both
+               reported. A walk that returned just the directories it was handed would already have
+               reported lib in the first call. */
+            Assert.Equal(
+                new[] { "app", "lib", "orphan" },
+                UncoveredLockFiles(string.Empty, pinnedSdk, fixture).OrderBy(d => d, StringComparer.Ordinal).ToArray());
+        }
+        finally
+        {
+            Directory.Delete(fixture, recursive: true);
+        }
     }
 
     /// <summary>
@@ -597,18 +626,19 @@ public sealed class LockedModeRestoreCoverageTests
     /// <summary>
     /// Every directory holding a committed <c>packages.lock.json</c>, repo-relative with forward slashes.
     /// </summary>
-    private static SortedSet<string> LockFileDirectories()
+    private static SortedSet<string> LockFileDirectories(string? root = null)
     {
+        root ??= Root;
         var found = new SortedSet<string>(StringComparer.Ordinal);
 
-        foreach (var lockFile in Directory.GetFiles(Root, "packages.lock.json", SearchOption.AllDirectories))
+        foreach (var lockFile in Directory.GetFiles(root, "packages.lock.json", SearchOption.AllDirectories))
         {
-            if (IsBuildOutput(lockFile))
+            if (IsBuildOutput(lockFile, root))
             {
                 continue;
             }
 
-            found.Add(RepoRelative(Path.GetDirectoryName(lockFile)!));
+            found.Add(RepoRelative(Path.GetDirectoryName(lockFile)!, root));
         }
 
         Assert.NotEmpty(found);
@@ -621,11 +651,11 @@ public sealed class LockedModeRestoreCoverageTests
     /// reason it does not today is that it names a <c>.sln</c> — a property of the message's wording, not of
     /// this code.
     /// </summary>
-    private static List<string> RestoredProjects(string yaml) =>
+    private static List<string> RestoredProjects(string yaml, string? root = null) =>
         yaml.Split('\n')
             .Select(RestoreTarget)
             .Where(target => target.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase))
-            .Select(target => Path.GetFullPath(Path.Combine(Root, target.Replace('/', Path.DirectorySeparatorChar))))
+            .Select(target => Path.GetFullPath(Path.Combine(root ?? Root, target.Replace('/', Path.DirectorySeparatorChar))))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
 
@@ -635,14 +665,14 @@ public sealed class LockedModeRestoreCoverageTests
     /// SDK patch float. Empty when the SDK is pinned exactly, which is what makes the exemption a statement
     /// about the current configuration rather than about those projects.
     /// </summary>
-    private static List<string> SdkCoupledLockFiles(string globalJson)
+    private static List<string> SdkCoupledLockFiles(string globalJson, string? root = null)
     {
         if (globalJson.Contains("\"rollForward\": \"disable\"", StringComparison.Ordinal))
         {
             return new List<string>();
         }
 
-        return LockFileDirectories()
+        return LockFileDirectories(root)
             .Where(directory => ReadRepoFileLf(directory, "packages.lock.json").Contains(SdkCoupledPackage, StringComparison.Ordinal))
             .ToList();
     }
@@ -651,11 +681,11 @@ public sealed class LockedModeRestoreCoverageTests
     /// The lock-file directories no restore in one workflow reaches, excluding the ones the SDK float
     /// excuses.
     /// </summary>
-    private static List<string> UncoveredLockFiles(string yaml, string globalJson)
+    private static List<string> UncoveredLockFiles(string yaml, string globalJson, string? root = null)
     {
         var reached = new HashSet<string>(StringComparer.Ordinal);
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var pending = new Queue<string>(RestoredProjects(yaml));
+        var pending = new Queue<string>(RestoredProjects(yaml, root));
 
         while (pending.Count > 0)
         {
@@ -671,7 +701,7 @@ public sealed class LockedModeRestoreCoverageTests
             Assert.True(File.Exists(project), $"a restore names, or a ProjectReference points at, a file that is not there: {project}");
 
             var directory = Path.GetDirectoryName(project)!;
-            reached.Add(RepoRelative(directory));
+            reached.Add(RepoRelative(directory, root));
 
             foreach (Match match in ProjectReference.Matches(File.ReadAllText(project)))
             {
@@ -683,9 +713,9 @@ public sealed class LockedModeRestoreCoverageTests
             }
         }
 
-        var excused = SdkCoupledLockFiles(globalJson);
+        var excused = SdkCoupledLockFiles(globalJson, root);
 
-        return LockFileDirectories()
+        return LockFileDirectories(root)
             .Where(directory => !reached.Contains(directory))
             .Where(directory => !excused.Contains(directory, StringComparer.Ordinal))
             .ToList();
@@ -700,8 +730,8 @@ public sealed class LockedModeRestoreCoverageTests
     /// An absolute path as a repo-relative one with forward slashes, so the two sides of the coverage
     /// comparison and the failure message all spell a directory the same way.
     /// </summary>
-    private static string RepoRelative(string absolute) =>
-        Path.GetRelativePath(Root, absolute).Replace(Path.DirectorySeparatorChar, '/');
+    private static string RepoRelative(string absolute, string? root = null) =>
+        Path.GetRelativePath(root ?? Root, absolute).Replace(Path.DirectorySeparatorChar, '/');
 
     /// <summary>
     /// Whether a path sits under a <c>bin</c> or <c>obj</c> directory below the repository root.
@@ -714,8 +744,8 @@ public sealed class LockedModeRestoreCoverageTests
     /// requirement produced by a local artefact, failing for whoever had built the tree and passing for
     /// whoever had not. The repository already excludes build output by construction for the same reason.</para>
     /// </summary>
-    private static bool IsBuildOutput(string absolute) =>
-        Path.GetRelativePath(Root, absolute)
+    private static bool IsBuildOutput(string absolute, string? root = null) =>
+        Path.GetRelativePath(root ?? Root, absolute)
             .Split(Path.DirectorySeparatorChar, '/')
             .Any(segment => segment.Equals("bin", StringComparison.OrdinalIgnoreCase)
                          || segment.Equals("obj", StringComparison.OrdinalIgnoreCase));

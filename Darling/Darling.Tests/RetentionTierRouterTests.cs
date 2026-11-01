@@ -236,7 +236,10 @@ public sealed class RetentionTierRouterTests
         Assert.Contains($"SELECT 1 FROM collect.{expectedRelation} AS r", sql[notCarriedAt..], StringComparison.Ordinal);
         var expectedSource = tier == RetentionTier.Daily ? TimescaleSupport.QueryStatsHourlyView : "query_stats";
         Assert.Contains($"SELECT 1 FROM collect.{expectedSource} AS s", sql[notCarriedAt..], StringComparison.Ordinal);
-        Assert.Equal(2, sql.Split("UNION ALL").Length - 1);
+        /* #7028: counted inside the queries CTE only (it ends where deadlocks begins): the blocking waits chain that
+           follows (BlockingWaits.HourlyChosenWaitsSql) holds its own NOT EXISTS and UNION ALL. */
+        var queriesCte = sql[sql.IndexOf("queries AS (", StringComparison.Ordinal)..sql.IndexOf("deadlocks AS (", StringComparison.Ordinal)];
+        Assert.Equal(2, queriesCte.Split("UNION ALL").Length - 1);
 
         /* The untouched sources still read raw. */
         foreach (var untouched in new[] { "FROM v_wait_stats", "FROM v_deadlocks", "FROM v_cpu_utilization_stats", "FROM v_collection_log", "FROM v_memory_pressure_events" })

@@ -10,8 +10,6 @@ A clear description of the change and why it's being made.
 - [ ] Darling Tests
 - [ ] SQL collection scripts
 - [ ] Documentation
-- [ ] Full Dashboard (deprecated)
-- [ ] CLI Installer (deprecated)
 
 ## How was this tested?
 

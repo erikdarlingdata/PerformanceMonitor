@@ -430,7 +430,7 @@ public sealed class AgentSetupWebLiveTests
     [Fact]
     public async Task AgentSetup_AsTheManagedViewerRole_Lists_ButEveryWriteIs403_AndChangesNothing()
     {
-        await WithWebRoutesAsync("viewer", async (owner, viewer, Send, ct) =>
+        await WithWebRoutesAsync("web", async (owner, viewer, Send, ct) =>
         {
             var seeded = await SeedRouteAsync(owner, "performance", ct);
             await new InvestigationRequestStore(owner, 30).SaveProfileAsync(null, null, "fleet: OLTP", "tester", null, ct);
@@ -474,7 +474,7 @@ public sealed class AgentSetupWebLiveTests
     [InlineData(false)]
     public async Task TheViewerRoles403_NamesTheAdminLoginOption_OnlyOnAStoreYouBringYourself(bool managedStore)
     {
-        await WithWebRoutesAsync("viewer", async (owner, viewer, Send, ct) =>
+        await WithWebRoutesAsync("web", async (owner, viewer, Send, ct) =>
         {
             var seeded = await SeedRouteAsync(owner, "performance", ct);
             foreach (var (method, path, json) in new[]
@@ -553,7 +553,7 @@ public sealed class AgentSetupWebLiveTests
     [Fact]
     public async Task OnTheManagedStore_ASignedInAdminSeat_WritesThroughTheArm_AndTheAccessFlagsAreTrue()
     {
-        await WithWebRoutesAsync("viewer", async (owner, _, Send, ct) =>
+        await WithWebRoutesAsync("web", async (owner, _, Send, ct) =>
         {
             var seeded = await SeedRouteAsync(owner, "performance", ct);
 
@@ -578,7 +578,7 @@ public sealed class AgentSetupWebLiveTests
     [Fact]
     public async Task OnTheManagedStore_AReadOnlySeat_NeverOpensTheArm_AndAnswersAsToday()
     {
-        await WithWebRoutesAsync("viewer", async (owner, _, Send, ct) =>
+        await WithWebRoutesAsync("web", async (owner, _, Send, ct) =>
         {
             var seeded = await SeedRouteAsync(owner, "performance", ct);
 
@@ -597,7 +597,7 @@ public sealed class AgentSetupWebLiveTests
     [Fact]
     public async Task OnTheManagedStore_WithTheSwitchOff_TheSignedInAdminStillListsOnly()
     {
-        await WithWebRoutesAsync("viewer", async (owner, _, Send, ct) =>
+        await WithWebRoutesAsync("web", async (owner, _, Send, ct) =>
         {
             var access = await Send("GET", "/api/agent-setup/access", null);
             Assert.False((bool)access.Body!["can_edit_routes"]!);

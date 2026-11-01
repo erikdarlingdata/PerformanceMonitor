@@ -406,7 +406,7 @@ public sealed class PostgresEngineGateBehaviorTests
     [Fact]
     public void ThePreDispatchGate_AppliesToEveryEngine_NotOnlyPostgres()
     {
-        var source = File.ReadAllText(Path.Combine(
+        var source = RepoFile.ReadRepoFile(Path.Combine(
             RepoRoot(), "Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"));
 
         /* THREE dispatch loops carry this gate — the scheduled sweep, the on-load loop that runs on every

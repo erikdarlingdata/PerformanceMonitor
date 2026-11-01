@@ -439,7 +439,7 @@ public sealed partial class StatementCollectionCensusTests
     [Fact]
     public void QueryStats_TheDeferredFetch_CachesAWholeMarkerPlanUnlessTheBudgetSkippedIt()
     {
-        var source = System.IO.File.ReadAllText(RepoFile.PathTo("Darling/PerformanceMonitor.Darling.Service/DarlingCollectorRunner.cs"));
+        var source = RepoFile.ReadRepoFile("Darling/PerformanceMonitor.Darling.Service/DarlingCollectorRunner.cs");
         var bodies = StatementColumnCensusTests.BodiesOf(source, "DarlingCollectorRunner", "FetchDeferredQueryStatsPlansAsync");
 
         Assert.Single(bodies);
