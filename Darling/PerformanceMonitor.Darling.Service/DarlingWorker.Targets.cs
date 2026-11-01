@@ -733,7 +733,7 @@ public sealed partial class DarlingWorker
     /// </summary>
     internal void LogPostgresFault(string serverName, string collectorName, string status, string? sqlState, string explanation)
     {
-        if (RepeatLog.ShouldLog(serverName, collectorName, $"{status}|{sqlState}|{explanation}"))
+        if (RepeatLog.ShouldLog(serverName, collectorName, RepeatLogChannel.PostgresFault, $"{status}|{sqlState}|{explanation}"))
         {
             _logger.LogWarning("  [{Server}] {Collector} => {Status} ({SqlState}): {Message}",
                 serverName, collectorName, status, sqlState, explanation);

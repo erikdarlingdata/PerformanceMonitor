@@ -239,6 +239,46 @@ public sealed class RepeatLogNoiseTests
     }
 
     [Fact]
+    public void TheSurfacingLineAndTheWorkersWarning_ShareOneGate_ButKeepTheirOwnReminderClocks()
+    {
+        /* An undefined table in every database: each cycle the runner logs "failed in all N" and the worker then logs the
+           classified warning, both through the one gate the worker hands the runner. Each must log once a day, not both
+           on every cycle because the two messages kept overwriting one slot. */
+        var (worker, workerLog, clock) = NewWorker();
+        var logger = new CapturingTestLogger();
+        var runner = NewRunner(logger, worker.RepeatLog);
+        var server = RuntimeFor("pg-a", CollectorTargetEngine.PostgreSql);
+        var fault = new PostgresException("relation does not exist", "ERROR", "ERROR", "42P01");
+
+        void Cycle()
+        {
+            runner.LogFailedInAllDatabases(server, "pg_predicate_stats", 3, fault);
+            worker.LogPostgresFault("pg-a", "pg_predicate_stats", "PRECONDITION", "42P01", "relation does not exist");
+        }
+
+        for (var hour = 0; hour < 24; hour++)
+        {
+            clock.Now = T0.AddHours(hour);
+            Cycle();
+        }
+
+        Assert.Equal(1, Surfaced(logger));
+        Assert.Equal(1, workerLog.Count("pg_predicate_stats => PRECONDITION"));
+
+        clock.Now = T0.AddHours(24);
+        Cycle();
+        Cycle();
+        Assert.Equal(2, Surfaced(logger));
+        Assert.Equal(2, workerLog.Count("pg_predicate_stats => PRECONDITION"));
+
+        /* A success clears both memories, so the next failure logs both lines at once. */
+        worker.RepeatLog.Clear("pg-a", "pg_predicate_stats");
+        Cycle();
+        Assert.Equal(3, Surfaced(logger));
+        Assert.Equal(3, workerLog.Count("pg_predicate_stats => PRECONDITION"));
+    }
+
+    [Fact]
     public void TheSurfacingLine_IsLoggedEveryCycle_WhenTheWorkersWarningForTheFaultIsNotGated()
     {
         var logger = new CapturingTestLogger();

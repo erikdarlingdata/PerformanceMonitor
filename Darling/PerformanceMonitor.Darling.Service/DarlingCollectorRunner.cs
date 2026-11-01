@@ -1176,8 +1176,9 @@ public sealed partial class DarlingCollectorRunner
     /// <summary>
     /// #7067: the "failed in all N database(s)" line that precedes the surfaced first failure. It follows the same decision as
     /// the line it explains. When the surfaced fault is one of the PostgreSQL faults the worker's warning gates (an extension
-    /// that is not created, a grant that is not given), this line is gated the same way: logged when first seen and when it
-    /// changes, then a reminder once a day, and the worker clears the gate when the collector succeeds. Any other fault
+    /// that is not created, a grant that is not given), this line is gated too, on its own channel of the shared gate so the two
+    /// lines never overwrite each other's memory: logged when first seen and when it changes, then a reminder once a day, and
+    /// the worker clears the gate when the collector succeeds. Any other fault
     /// (every SQL Server fault, and a PostgreSQL fault that lands in the general ERROR arm) is logged by the worker on every
     /// cycle, so this line is too and keeps the "every database failed" context beside it.
     /// </summary>
@@ -1185,7 +1186,7 @@ public sealed partial class DarlingCollectorRunner
     {
         var name = server.Config.DisplayName;
         if (_logger is null
-            || (IsGatedPostgresFault(server, collector, firstFailure) && !RepeatLog.ShouldLog(name, collector, $"failed in all {count} database(s)")))
+            || (IsGatedPostgresFault(server, collector, firstFailure) && !RepeatLog.ShouldLog(name, collector, RepeatLogChannel.FailedInAllDatabases, $"failed in all {count} database(s)")))
         {
             return;
         }
