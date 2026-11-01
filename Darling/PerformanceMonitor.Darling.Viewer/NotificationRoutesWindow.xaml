@@ -78,8 +78,7 @@
             <Button Content="_Delete" Width="80" Height="28" Margin="0,0,8,0" Click="DeleteRoute_Click"/>
         </StackPanel>
         <TextBlock x:Name="ReadOnlyBanner" Grid.Row="3" HorizontalAlignment="Left" VerticalAlignment="Center"
-                   Margin="0,12,0,0" Foreground="{DynamicResource WarningTextBrush}" TextWrapping="Wrap" MaxWidth="600" Visibility="Collapsed"
-                   Text="Read-only connection (postgres.connectAs = &quot;viewer&quot;): routes can be viewed but not changed here, and their destination URLs are not shown. Set connectAs to &quot;admin&quot; and restart the viewer to edit them."/>
+                   Margin="0,12,0,0" Foreground="{DynamicResource WarningTextBrush}" TextWrapping="Wrap" MaxWidth="600" Visibility="Collapsed"/>
         <Button Grid.Row="3" Content="_Close" Width="80" Height="28" Margin="0,12,0,0"
                 HorizontalAlignment="Right" Click="Close_Click" IsCancel="True"/>
     </Grid>

@@ -73,8 +73,7 @@
             <Button Content="_Purge Expired" Width="110" Height="28" Click="PurgeExpired_Click"/>
         </StackPanel>
         <TextBlock x:Name="ReadOnlyBanner" Grid.Row="3" HorizontalAlignment="Left" VerticalAlignment="Center"
-                   Margin="0,12,0,0" Foreground="{DynamicResource WarningTextBrush}" TextWrapping="Wrap" MaxWidth="560" Visibility="Collapsed"
-                   Text="Read-only connection (postgres.connectAs = &quot;viewer&quot;): mute rules can be viewed but not changed here. Set connectAs to &quot;admin&quot; and restart the viewer to edit them."/>
+                   Margin="0,12,0,0" Foreground="{DynamicResource WarningTextBrush}" TextWrapping="Wrap" MaxWidth="560" Visibility="Collapsed"/>
         <Button Grid.Row="3" Content="_Close" Width="80" Height="28" Margin="0,12,0,0"
                 HorizontalAlignment="Right" Click="Close_Click" IsCancel="True"/>
     </Grid>

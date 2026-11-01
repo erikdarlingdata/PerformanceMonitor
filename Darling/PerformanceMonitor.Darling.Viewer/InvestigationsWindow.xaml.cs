@@ -33,7 +33,8 @@ public partial class InvestigationsWindow : Window
 {
     /// <summary>The status line a read-only seat shows in place of the write controls.</summary>
     internal const string ReadOnlyMessage =
-        "Read-only connection (postgres.connectAs = \"viewer\"): investigations can be viewed but not closed, and notes, profiles and report feedback cannot be changed here. Set connectAs to \"admin\" and restart the viewer to change them.";
+        "Read-only connection: investigations can be viewed but not closed, and notes, profiles and report feedback cannot be changed here. " +
+        ViewerReadOnlyException.HowToConnectAsAdmin;
 
     private readonly ViewerDataService _dataService;
     private readonly ObservableCollection<InvestigationRequestViewRow> _requests = new();

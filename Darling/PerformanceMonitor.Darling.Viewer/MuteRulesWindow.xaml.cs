@@ -48,6 +48,7 @@ public partial class MuteRulesWindow : Window
         if (dataService.IsReadOnly)
         {
             ActionButtonsPanel.Visibility = Visibility.Collapsed;
+            ReadOnlyBanner.Text = "Read-only connection: mute rules can be viewed but not changed here. " + ViewerReadOnlyException.HowToConnectAsAdmin;
             ReadOnlyBanner.Visibility = Visibility.Visible;
         }
 
