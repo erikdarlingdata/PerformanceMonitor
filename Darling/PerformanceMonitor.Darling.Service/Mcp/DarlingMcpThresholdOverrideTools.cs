@@ -64,7 +64,7 @@ public sealed class DarlingMcpThresholdOverrideTools
 
     internal const string PreconditionMessage =
         "The service's mcp store role has no grant on config.config_threshold_overrides. A bring-your-own store needs " +
-        "Darling/tools/provision-roles.sql re-run (it is idempotent; single-table grants only reach a store when the script " +
+        DarlingManagedRoles.ProvisionRolesScriptPath + " re-run (it is idempotent; single-table grants only reach a store when the script " +
         "runs again) as a superuser. Managed and compose stores grant it themselves on start. Call again after the script has run.";
 
     [McpServerTool(Name = "set_alert_threshold_override"), Description(

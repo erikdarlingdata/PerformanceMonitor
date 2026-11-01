@@ -295,7 +295,7 @@ public sealed class ManageTagsBehaviourTests
     [InlineData(404, "No such tag.")] // an unknown parent, not a gone tag
     [InlineData(415, "Content-Type must be application/json.")]
     [InlineData(500, "Boom.")]
-    [InlineData(0, "Network error: connection refused")]
+    [InlineData(0, "Could not reach the Darling service (connection refused). Check that the service is running and that you can open this address, then reload.")]
     public void AFailedWrite_ShowsTheHouseMessage_AndKeepsTheForm(int status, string message)
     {
         if (!TryRun("refusal:" + status, out var r)) return;

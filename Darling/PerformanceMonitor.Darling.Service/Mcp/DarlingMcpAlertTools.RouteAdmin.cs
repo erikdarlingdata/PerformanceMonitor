@@ -620,7 +620,7 @@ public sealed partial class DarlingMcpAlertTools
     /// provision-roles.sql creates them). Never PostgreSQL's own text. The web dashboard's route save does not use it: it writes
     /// the table on its own login and maps a 42501 itself (<c>DarlingWebAgentSetup</c>).</summary>
     internal const string RouteStoreNeedsRolesText =
-        "This store's roles predate this route, signing key or notification channel write: re-run Darling/tools/provision-roles.sql on the store, then try again.";
+        "This store's roles predate this route, signing key or notification channel write: re-run " + DarlingManagedRoles.ProvisionRolesScriptPath + " on the store, then try again.";
 
     /// <summary>Whether the operator runs provision-roles.sql on this store: false on the managed store and on the compose
     /// distribution's own store (the MCP host connects as a role the service provisioned, this start or an earlier one), where

@@ -30,11 +30,11 @@ internal static class DarlingWebStoreWrites
     internal static string Refused(string cannot, bool managedStore, string instead = "Use the Viewer app to make the change",
         string? bringYourOwnExtra = null, bool adminWritesOff = false, bool webLoginWrite = false) =>
         managedStore
-            ? $"This dashboard lists only on this store, so it cannot {cannot}. {instead}."
+            ? $"This dashboard has read-only access to the bundled store, so it cannot {cannot}. {instead}."
               + (adminWritesOff ? " To let a signed-in admin make it here, set web.allowAdminWrites to true in darling.json and restart the service." : "")
             : webLoginWrite
                 ? $"This dashboard's store login cannot {cannot}. Point postgres.webConnectionString at the web role "
-                  + "tools/provision-roles.sql creates." + bringYourOwnExtra
+                  + DarlingManagedRoles.ProvisionRolesScriptPath + " creates." + bringYourOwnExtra
                 : $"This dashboard's store login cannot {cannot}. {instead}, or give the web an admin store login "
                   + "(set postgres.webConnectionString to an admin login)." + bringYourOwnExtra;
 

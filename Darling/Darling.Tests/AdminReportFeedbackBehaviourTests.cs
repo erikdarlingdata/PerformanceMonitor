@@ -84,7 +84,7 @@ public sealed class AdminReportFeedbackBehaviourTests
         Assert.Equal(0, page.GetProperty("formsBefore").GetInt32());
         var note = Assert.Single(Strings(page.GetProperty("strips")), t => t.Contains("this page is list-only", System.StringComparison.Ordinal));
         const string SwitchSentence = " To let a signed-in admin make it here, set web.allowAdminWrites to true in darling.json and restart the service.";
-        Assert.Equal("This dashboard lists only on this store, so this page is list-only. To record feedback, use the Viewer app." + SwitchSentence, note);
+        Assert.Equal("This dashboard has read-only access to the bundled store, so this page is list-only. To record feedback, use the Viewer app." + SwitchSentence, note);
         Assert.EndsWith(SwitchSentence, PerformanceMonitor.Darling.Service.DarlingWebEndpoints.FeedbackRefusedMessage(true, adminWritesOff: true), System.StringComparison.Ordinal);
     }
 

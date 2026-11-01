@@ -1315,7 +1315,7 @@ public sealed class McpAnalysisTools
             return new MuteScope(null, string.Empty, JsonSerializer.Serialize(new
             {
                 status = "not_found",
-                message = $"Could not resolve server. Available servers:\n{ServerResolver.ListAvailableServers(servers)}",
+                message = ServerResolver.MissSentence(servers, serverName),
                 story_path_hash = storyPathHash,
                 registered = false,
                 already_muted = false,
