@@ -1,5 +1,10 @@
 // Copyright (c) 2026 Darling Data, LLC. All rights reserved.
+using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Linq;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
@@ -75,6 +80,76 @@ public class BlockingPageRuleTests
         Assert.Equal(BlockingPageRule.CountThresholdDefault, row.BlockingCountThreshold);
         Assert.Equal(BlockingPageRule.WaitSecondsThresholdDefault, row.BlockingWaitSecondsThreshold);
         Assert.Equal(PostgresAlertEvaluator.BlockingCountThresholdDefault, row.PgBlockingCountThreshold);
+    }
+
+    /* #7083 part 2: the held-fire gate both engines share. */
+
+    [Fact]
+    public void ACountAtTheBarWithEveryWaitUnder15Seconds_IsHeldBack_OnceUnderTheOneEventBar()
+    {
+        Assert.True(BlockingPageRule.IsHeldBack(14, 3, 9_000, 60, wasActive: false, suppressed: false));
+        Assert.True(BlockingPageRule.IsHeldBack(3, 3, 14_999, 60, wasActive: false, suppressed: false));
+        Assert.False(BlockingPageRule.IsHeldBack(2, 3, 9_000, 60, wasActive: false, suppressed: false), "under the count bar");
+        Assert.False(BlockingPageRule.IsHeldBack(3, 3, 15_000, 60, wasActive: false, suppressed: false), "the count arm pages");
+        Assert.False(BlockingPageRule.IsHeldBack(1, 1, 90_000, 60, wasActive: false, suppressed: false), "the one-event bar pages");
+        Assert.False(BlockingPageRule.IsHeldBack(14, 0, 9_000, 60, wasActive: false, suppressed: false), "a count bar of 0 is off");
+        Assert.False(BlockingPageRule.IsHeldBack(14, 3, 9_000, 60, wasActive: true, suppressed: false), "an incident is open");
+        Assert.False(BlockingPageRule.IsHeldBack(14, 3, 9_000, 60, wasActive: false, suppressed: true), "the server is silenced");
+    }
+
+    [Fact]
+    public void TryHold_WritesOnePerCooldown_AndNeverTouchesThePageCooldown()
+    {
+        var stamps = new ConcurrentDictionary<string, DateTime>();
+        var t0 = new DateTime(2026, 8, 31, 12, 0, 0, DateTimeKind.Utc);
+        var cooldown = TimeSpan.FromMinutes(5);
+
+        Assert.True(BlockingPageRule.TryHold(stamps, "pg-a", t0, cooldown, 14, 3, 9_000, 60, false, false));
+        Assert.False(BlockingPageRule.TryHold(stamps, "pg-a", t0.AddMinutes(4), cooldown, 14, 3, 9_000, 60, false, false));
+        Assert.True(BlockingPageRule.TryHold(stamps, "pg-b", t0.AddMinutes(4), cooldown, 14, 3, 9_000, 60, false, false), "another server");
+        Assert.True(BlockingPageRule.TryHold(stamps, "pg-a", t0.AddMinutes(5), cooldown, 14, 3, 9_000, 60, false, false));
+
+        /* A held row followed by one event over the bar: the page rule has no memory of the hold. */
+        var page = BlockingPageRule.Evaluate(15, 3, 90_000, 60, watermark: 0, cooldownElapsed: true, suppressed: false, wasActive: false);
+        Assert.True(page.Fire);
+    }
+
+    [Fact]
+    public void TheHoldReason_SaysCountWorstWaitAndChain()
+    {
+        Assert.Equal("14 blocking events, worst wait 9 s, longest chain 2", BlockingPageRule.HoldReason(14, 9_000, 2));
+        Assert.Equal("1 blocking event, worst wait 0.4 s, longest chain 1", BlockingPageRule.HoldReason(1, 400, 0));
+        Assert.Equal("4 root blockers, worst wait 12.5 s, longest chain 3", BlockingPageRule.HoldReason(4, 12_500, 3, rootBlockers: true));
+    }
+
+    [Fact]
+    public void TheLongestChain_CountsBlockedSessionsBehindARoot_AndSurvivesALoop()
+    {
+        Assert.Equal(0, BlockingPageRule.LongestChain(Array.Empty<(int, int)>()));
+        Assert.Equal(1, BlockingPageRule.LongestChain(new[] { (10, 1), (11, 2) }));
+        Assert.Equal(3, BlockingPageRule.LongestChain(new[] { (10, 1), (20, 10), (30, 20), (99, 98) }));
+        Assert.Equal(0, BlockingPageRule.LongestChain(new[] { (5, 5) })); /* a self-wait is not a chain */
+        Assert.Equal(1, BlockingPageRule.LongestChain(new[] { (1, 2), (2, 1) }));
+    }
+
+    private static DarlingPgBlockingReader.PgBlockingChainRow PgRoot(long backendId, long worstWaitMs, int depth) =>
+        new(new DateTime(2026, 8, 31, 12, 0, 0, DateTimeKind.Utc), backendId, (int)backendId, new[] { "sales" }, "app", "webapi",
+            "active", "SELECT 1", false, 5_000, 5_000, 3, 3, depth, worstWaitMs, "SELECT 2", 1, false, false);
+
+    [Fact]
+    public void PgHeldBlocking_CarriesTheRootCountWorstWaitAndDeepestChain_AsADigestHold()
+    {
+        var roots = Enumerable.Range(1, 5).Select(i => PgRoot(i, i == 3 ? 9_000 : 2_000, i == 2 ? 2 : 1)).ToList();
+
+        var outcome = DarlingWorker.PgBlockingHoldOutcome("pg-a", "PG A", roots, 3, new DateTime(2026, 8, 31, 12, 1, 0, DateTimeKind.Utc));
+
+        Assert.Equal("Blocking Detected", outcome.MetricName);
+        Assert.Equal("5 root blockers, worst wait 9 s, longest chain 2", outcome.Hold!.Reason);
+        Assert.False(outcome.Muted);
+        Assert.Equal("5", outcome.CurrentValue);
+        Assert.Equal("3", outcome.ThresholdValue);
+        /* The rule that chose to hold it: 5 roots at the count bar of 3, worst wait 9 s, nothing at 15 s or 60 s. */
+        Assert.True(BlockingPageRule.IsHeldBack(5, 3, 9_000, 60, wasActive: false, suppressed: false));
     }
 
     [Fact]

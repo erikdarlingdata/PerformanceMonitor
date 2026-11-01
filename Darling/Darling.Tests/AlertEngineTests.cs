@@ -1302,14 +1302,122 @@ public sealed class AlertEngineTests
         await h.Build().EvaluateServerAsync(Harness.Snapshot());
         Assert.Equal("3", Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Detected").CurrentValue);
 
-        /* Six events of 5 s each: 30 s of total wait, worst 5 s. No page. */
+        /* Six events of 5 s each: 30 s of total wait, worst 5 s. No page; #7083 part 2 records it as a held (digest) row. */
         var quiet = NewDefaultsHarness();
         for (var spid = 60; spid < 66; spid++)
         {
             quiet.Adapter.Blocking.Add(TimedBlockingRow(spid, 5000));
         }
         await quiet.Build().EvaluateServerAsync(Harness.Snapshot());
-        Assert.DoesNotContain(quiet.Deliverer.Outcomes, o => o.MetricName == "Blocking Detected");
+        Assert.All(quiet.Deliverer.Outcomes.Where(o => o.MetricName == "Blocking Detected"), o => Assert.NotNull(o.Hold));
+    }
+
+    /// <summary>#7083 part 2: 14 events, none over 9 s, one of them stacked behind another (a chain of 2).</summary>
+    private static void AddFourteenShortEvents(Harness h)
+    {
+        for (var spid = 60; spid < 73; spid++)
+        {
+            h.Adapter.Blocking.Add(TimedBlockingRow(spid, 9000));
+        }
+
+        /* Session 160 is the blocker of session 60 (60 + 100) and is itself blocked: a chain of two. */
+        h.Adapter.Blocking.Add(TimedBlockingRow(160, 9000));
+    }
+
+    [Fact]
+    public async Task Blocking_FourteenEventsWorstWait9Seconds_WriteOneHeldRow_SendNothing_AndOnlyOnePerCooldown()
+    {
+        var h = NewDefaultsHarness();
+        AddFourteenShortEvents(h);
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        var held = Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Detected");
+        Assert.NotNull(held.Hold);
+        Assert.Equal("14 blocking events, worst wait 9 s, longest chain 2", held.Hold!.Reason);
+        Assert.False(held.Muted);
+        Assert.Equal("14", held.CurrentValue);
+        Assert.Empty(h.Resolutions);
+
+        /* Inside the cooldown (5 minutes): the same pattern writes nothing more. */
+        h.Now = h.Now.AddMinutes(2);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Detected");
+
+        /* One cooldown later the sustained pattern writes its next row, still held. */
+        h.Now = h.Now.AddMinutes(4);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        var rows = h.Deliverer.Outcomes.Where(o => o.MetricName == "Blocking Detected").ToList();
+        Assert.Equal(2, rows.Count);
+        Assert.All(rows, o => Assert.NotNull(o.Hold));
+    }
+
+    [Fact]
+    public async Task Blocking_ThreeEventsWorstWait20Seconds_PageAndWriteNoHeldRow()
+    {
+        var h = NewDefaultsHarness();
+        h.Adapter.Blocking.Add(TimedBlockingRow(55, 20000));
+        h.Adapter.Blocking.Add(TimedBlockingRow(56, 3000));
+        h.Adapter.Blocking.Add(TimedBlockingRow(57, 3000));
+
+        await h.Build().EvaluateServerAsync(Harness.Snapshot());
+
+        var fired = Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Detected");
+        Assert.Null(fired.Hold);
+    }
+
+    [Fact]
+    public async Task Blocking_AHeldRowThenA90SecondEvent_PagesAtOnce()
+    {
+        var h = NewDefaultsHarness();
+        AddFourteenShortEvents(h);
+        var engine = h.Build();
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.NotNull(Assert.Single(h.Deliverer.Outcomes).Hold);
+
+        /* A minute later one event has waited 90 s: the held row stamped no page cooldown and no tier. */
+        h.Now = h.Now.AddMinutes(1);
+        h.Adapter.Blocking.Add(TimedBlockingRow(99, 90000));
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        var page = h.Deliverer.Outcomes.Last(o => o.MetricName == "Blocking Detected");
+        Assert.Null(page.Hold);
+        Assert.Equal("15", page.CurrentValue);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count(o => o.MetricName == "Blocking Detected"));
+
+        /* The incident is open now, so a later sweep over the same window holds nothing back. */
+        h.Now = h.Now.AddMinutes(10);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count(o => o.MetricName == "Blocking Detected"));
+    }
+
+    [Fact]
+    public async Task Blocking_CountBarOff_WritesNoHeldRow()
+    {
+        var h = NewDefaultsHarness();
+        h.Settings.BlockingCountThreshold = 0;
+        AddFourteenShortEvents(h);
+
+        await h.Build().EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.DoesNotContain(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Detected");
+    }
+
+    [Fact]
+    public async Task Blocking_FewerEventsThanTheCountBar_OrAMutedServer_WriteNoHeldRow()
+    {
+        var few = NewDefaultsHarness();
+        few.Adapter.Blocking.Add(TimedBlockingRow(55, 9000));
+        few.Adapter.Blocking.Add(TimedBlockingRow(56, 9000));
+        await few.Build().EvaluateServerAsync(Harness.Snapshot());
+        Assert.DoesNotContain(few.Deliverer.Outcomes, o => o.MetricName == "Blocking Detected");
+
+        var muted = NewDefaultsHarness();
+        muted.Muted = true;
+        AddFourteenShortEvents(muted);
+        await muted.Build().EvaluateServerAsync(Harness.Snapshot());
+        Assert.DoesNotContain(muted.Deliverer.Outcomes, o => o.MetricName == "Blocking Detected");
     }
 
     [Fact]

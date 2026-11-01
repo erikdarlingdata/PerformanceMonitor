@@ -1261,6 +1261,27 @@ public sealed partial class DarlingWorker
             {
                 await NotifyPgResolutionAsync(key, snapshot.ServerName, metricName, "Blocking Cleared",
                     BlockingPageRule.ClearedMessage(snapshot.ServerName, threshold, waitBarSeconds));
+                readClock.Restart();
+            }
+            else if (BlockingPageRule.IsHeldBack(count, threshold, worstWaitMs, waitBarSeconds, wasActive, suppressed: false))
+            {
+                /* #7083 part 2: the count reached the bar and nothing pages. One held row for the digest per cooldown, on its own
+                   stamp (never _lastPgBlockingAlert), with no tier, so a real page right after goes out at once. A mute rule
+                   still wins: a muted server gets no digest line. */
+                var holdMute = JudgeMute(new AlertMuteContext
+                {
+                    ServerName = snapshot.ServerName,
+                    ServerId = snapshot.ServerId,
+                    MetricName = metricName,
+                });
+                if (!holdMute.Muted
+                    && BlockingPageRule.TryHold(_lastPgBlockingHold, key, now, cooldown, count, threshold, worstWaitMs,
+                        waitBarSeconds, wasActive, suppressed: false))
+                {
+                    await _alertDeliverer.DeliverAndReportAsync(
+                        PgBlockingHoldOutcome(key, snapshot.ServerName, worstPerRoot, threshold, now), cancellationToken);
+                    readClock.Restart();
+                }
             }
         }
         catch (OperationCanceledException)
@@ -1273,6 +1294,36 @@ public sealed partial class DarlingWorker
                 runtime.Config.DisplayName, readClock.ElapsedMilliseconds, ex.Message);
             _readFailures.RecordReadFailure(snapshot.ServerKey, "PostgreSQL blocking alert read", readClock.ElapsedMilliseconds);
         }
+    }
+
+    /// <summary>
+    /// #7083 part 2: the held Blocking Detected fire of the PostgreSQL path. The count of root blockers reached the bar and
+    /// no page is due, so the row goes to the digest: "N root blockers, worst wait X s, longest chain Y", where the chain
+    /// is the deepest <c>MaxDepth</c> among the roots. Pure, so a test can read what would be recorded.
+    /// </summary>
+    internal static AlertOutcome PgBlockingHoldOutcome(
+        string key, string serverName, IReadOnlyList<DarlingPgBlockingReader.PgBlockingChainRow> worstPerRoot,
+        int threshold, DateTime now)
+    {
+        var count = worstPerRoot.Count;
+        var worstWaitMs = count == 0 ? 0 : worstPerRoot.Max(r => r.WorstVictimWaitMs);
+        var chain = count == 0 ? 0 : worstPerRoot.Max(r => r.MaxDepth);
+        var reason = BlockingPageRule.HoldReason(count, worstWaitMs, chain, rootBlockers: true);
+        var context = AlertSampleAge.Stamp(
+            BuildPgBlockingContext(worstPerRoot),
+            "blocking capture", AlertSampleAge.Newest(worstPerRoot.Select(r => r.CapturedAt)), now);
+        return new AlertOutcome(
+            key, serverName, "Blocking Detected",
+            count.ToString(CultureInfo.InvariantCulture),
+            threshold.ToString(CultureInfo.InvariantCulture),
+            Context: context,
+            DetailText: AlertContextBuilders.ContextToDetailText(context),
+            NumericCurrentValue: count,
+            NumericThresholdValue: threshold,
+            Muted: false,
+            Severity: PgBlockingFireSeverity,
+            ShortMessage: reason,
+            Hold: new AlertHold(reason));
     }
 
     /// <summary>

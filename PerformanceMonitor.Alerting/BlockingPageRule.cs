@@ -1,4 +1,8 @@
 using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Globalization;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Alerting;
 
@@ -54,6 +58,98 @@ public static class BlockingPageRule
         }
 
         return RollingCountAlertGate.Evaluate(count, countThreshold, watermark, cooldownElapsed, suppressed);
+    }
+
+    /// <summary>
+    /// #7083 part 2: true when the count reached the count bar but no page is due, because every event's wait is under
+    /// <see cref="CountArmWorstWaitFloorMs"/> and none is at the long-event bar. That window is held for the digest
+    /// instead of vanishing. False when a count bar of 0 turns the arm off, when the server is silenced
+    /// (<paramref name="suppressed"/>), and when a Blocking Detected incident is already open
+    /// (<paramref name="wasActive"/>): an open page already says blocking is happening. A page that is only waiting out
+    /// its cooldown or its watermark is not this case either, since its worst wait is over the floor.
+    /// </summary>
+    public static bool IsHeldBack(
+        int count, int countThreshold, long worstWaitMs, int waitBarSeconds, bool wasActive, bool suppressed)
+    {
+        if (countThreshold <= 0 || count < countThreshold || wasActive || suppressed)
+        {
+            return false;
+        }
+
+        bool longEvent = waitBarSeconds > 0 && worstWaitMs >= waitBarSeconds * 1000L;
+        return !longEvent && worstWaitMs < CountArmWorstWaitFloorMs;
+    }
+
+    /// <summary>
+    /// The held-fire gate for one server: true, and the stamp written, when <see cref="IsHeldBack"/> holds and no held
+    /// row was written for <paramref name="key"/> inside <paramref name="cooldown"/>. A sustained low-wait pattern
+    /// therefore writes one row per cooldown. The stamp is the hold's own: it is never the page cooldown, so a real
+    /// page right after a held row goes out at once.
+    /// </summary>
+    public static bool TryHold(
+        ConcurrentDictionary<string, DateTime> lastHold, string key, DateTime now, TimeSpan cooldown,
+        int count, int countThreshold, long worstWaitMs, int waitBarSeconds, bool wasActive, bool suppressed)
+    {
+        if (!IsHeldBack(count, countThreshold, worstWaitMs, waitBarSeconds, wasActive, suppressed))
+        {
+            return false;
+        }
+
+        if (LastFiredStamp.TryGet(lastHold, key, now, out var last) && now - last < cooldown)
+        {
+            return false;
+        }
+
+        lastHold[key] = now;
+        return true;
+    }
+
+    /// <summary>
+    /// The digest line for a held fire: "14 blocking events, worst wait 9 s, longest chain 2". On the PostgreSQL path
+    /// the events are root blockers (<paramref name="rootBlockers"/>).
+    /// </summary>
+    public static string HoldReason(int count, long worstWaitMs, int longestChain, bool rootBlockers = false)
+    {
+        string noun = rootBlockers
+            ? (count == 1 ? "root blocker" : "root blockers")
+            : (count == 1 ? "blocking event" : "blocking events");
+        string seconds = (Math.Max(0, worstWaitMs) / 1000.0).ToString("0.#", CultureInfo.InvariantCulture);
+        return $"{count} {noun}, worst wait {seconds} s, longest chain {Math.Max(1, longestChain)}";
+    }
+
+    /// <summary>
+    /// The longest blocking chain among the events of one window, counted in blocked sessions stacked behind a root
+    /// (A blocks B is 1, A blocks B blocks C is 2). Each pair is (blocked session, its blocker); a pair naming the same
+    /// session twice is a self-wait and is skipped, and a loop stops at the first session seen twice. Zero when there
+    /// are no usable pairs.
+    /// </summary>
+    public static int LongestChain(IEnumerable<(int Blocked, int Blocking)> pairs)
+    {
+        var blockerOf = new Dictionary<int, int>();
+        foreach (var (blocked, blocking) in pairs)
+        {
+            if (blocked != blocking)
+            {
+                blockerOf.TryAdd(blocked, blocking);
+            }
+        }
+
+        int best = 0;
+        foreach (var start in blockerOf.Keys)
+        {
+            var seen = new HashSet<int> { start };
+            int length = 0;
+            int current = start;
+            while (blockerOf.TryGetValue(current, out var blocker) && seen.Add(blocker))
+            {
+                length++;
+                current = blocker;
+            }
+
+            best = Math.Max(best, length);
+        }
+
+        return best;
     }
 
     /// <summary>
