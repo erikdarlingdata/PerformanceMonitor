@@ -236,14 +236,16 @@ internal sealed class ScratchPostgres : IAsyncDisposable
     private const string TemplateCreator = "this process's store template";
 
     /// <summary>
-    /// One template per cluster, role and base database in this process. Evicted when its build fails or the database goes.
-    /// Only a test ever passes a second base database, to get a template no parallel test clones.
+    /// One template per cluster, role and application name in this process. Evicted when its build fails or the database
+    /// goes. The application name is there for a test that drops a template: its own name gets it one no parallel test clones.
     /// </summary>
     private static readonly ConcurrentDictionary<string, Lazy<Task<StoreTemplate>>> Templates = new();
 
-    private static string TemplateKey(string baseConnectionString) =>
-        ClusterKey(baseConnectionString) + ":" + new NpgsqlConnectionStringBuilder(baseConnectionString).Username
-        + ":" + new NpgsqlConnectionStringBuilder(baseConnectionString).Database;
+    private static string TemplateKey(string baseConnectionString)
+    {
+        var builder = new NpgsqlConnectionStringBuilder(baseConnectionString);
+        return $"{ClusterKey(baseConnectionString)}:{builder.Username}:{builder.ApplicationName}";
+    }
 
     /// <summary>
     /// The template this process clones for this cluster and role, built on first use (#7097). Migrating every store

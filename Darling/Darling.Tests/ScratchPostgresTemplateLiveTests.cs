@@ -113,19 +113,16 @@ public sealed class ScratchPostgresTemplateLiveTests
 
     /// <summary>
     /// A template nobody can connect to: a session in the source fails every clone, and the launcher must not start a
-    /// scheduler there. A sweep in another process can drop it, and this process recovers. The base string names another
-    /// database on the same cluster, so this test has a template of its own: dropping the one the tests running beside it
-    /// clone would prove nothing more and slow them down.
+    /// scheduler there. A sweep in another process can drop it, and this process recovers. The base string carries its own
+    /// application name, so this test has a template of its own: dropping the one the tests running beside it clone would
+    /// prove nothing more and slow them down.
     /// </summary>
     [Fact]
     public async Task TheTemplate_IsClosedAndSessionFree_AndALostTemplateIsRebuilt()
     {
         var baseConnectionString = BaseConnectionString();
         var ct = TestContext.Current.CancellationToken;
-        var ownBuilder = new NpgsqlConnectionStringBuilder(baseConnectionString);
-        Assert.SkipWhen(ownBuilder.Database == "postgres", "DARLING_TEST_PG names the database this test needs as a second base.");
-        ownBuilder.Database = "postgres";
-        var ownBase = ownBuilder.ConnectionString;
+        var ownBase = new NpgsqlConnectionStringBuilder(baseConnectionString) { ApplicationName = nameof(ScratchPostgresTemplateLiveTests) }.ConnectionString;
 
         await using var first = await ScratchPostgres.CreateAsync(ownBase, ct);
         var template = await ScratchPostgres.GetTemplateAsync(ownBase, ct);
@@ -137,13 +134,8 @@ public sealed class ScratchPostgresTemplateLiveTests
         Assert.False(await ScalarAsync<bool>(admin, $"SELECT datistemplate FROM pg_database WHERE datname = '{template.Name}'", ct));
         Assert.Equal(0L, await ScalarAsync<long>(admin, $"SELECT count(*) FROM pg_stat_activity WHERE datname = '{template.Name}'", ct));
 
-        /* The plain drop the sweep uses. */
-        await using (var connection = new NpgsqlConnection(admin))
-        {
-            await connection.OpenAsync(ct);
-            await using var drop = new NpgsqlCommand($"DROP DATABASE \"{template.Name}\"", connection);
-            await drop.ExecuteNonQueryAsync(ct);
-        }
+        await ScratchPostgres.DropRememberedAsync(template.Name);
+        Assert.False(ScratchPostgres.IsRemembered(template.Name));
 
         await using var second = await ScratchPostgres.CreateAsync(ownBase, ct);
         await using var migrate = new NpgsqlConnection(second.ConnectionString);
