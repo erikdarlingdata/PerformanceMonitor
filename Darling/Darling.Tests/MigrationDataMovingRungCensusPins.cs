@@ -405,6 +405,14 @@ public sealed class MigrationDataMovingRungCensusPins
             + "#7083). The ADD COLUMN with a constant default is catalog-only. The CHECK reads the table once to validate it, and the table is a "
             + "hand-edited registry of mute rules (a store holds a handful, a very large one a few hundred), so the scan takes milliseconds. It reads "
             + "no collected data and spends none of the lock-wait budget, so the multiple stays 5."),
+        new(
+            238,
+            SetsTheFloor: false,
+            "ADD COLUMN action_approval text NOT NULL DEFAULT 'required' with its CHECK, then one UPDATE of the rows at agent_level 3, plus ADD "
+            + "COLUMN IF NOT EXISTS approval_single_person on config.config_notification_routes (created V131, #7109). The ADD COLUMNs with a "
+            + "constant default are catalog-only. The CHECK and the UPDATE each read the table once, and the table is a hand-edited registry of at "
+            + "most a few hundred routes, so both take milliseconds. The new proposals table starts empty. It reads no collected data and spends "
+            + "none of the lock-wait budget, so the multiple stays 5."),
     ];
 
     /// <summary>

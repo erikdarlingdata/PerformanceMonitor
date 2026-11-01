@@ -2986,6 +2986,7 @@ $rung$;";
         new Migration(235, "blocking-pages-on-wait-time-defaults", V235Sql),
         new Migration(236, "mute-rule-action", V236Sql),
         new Migration(237, "people-identities-grants", V237Sql),
+        new Migration(238, "action-approval-proposals", V238Sql),
     };
 
     /// <summary>
@@ -3344,6 +3345,98 @@ BEGIN
     IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles AS r WHERE r.rolname = 'mcp') THEN
         REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON config.person, config.person_identity, config.person_grant FROM mcp;
         REVOKE ALL ON SEQUENCE config.person_person_id_seq, config.person_identity_identity_id_seq, config.person_grant_grant_id_seq FROM mcp;
+    END IF;
+END
+$do$;";
+
+    /// <summary>
+    /// V238 (#7109, child (d1) of #6980): the approval core's store. Two route columns and one new table.
+    /// <para><c>action_approval</c> (<c>off</c> or <c>required</c>, default <c>required</c>) says whether a Level 3 action on the route needs a
+    /// person's approval, and <c>approval_single_person</c> (default false) whether the person who asked may approve it. The column defaults to
+    /// <c>required</c>, so a route a person later raises to Level 3 gets approval, and the backfill sets <c>off</c> only on the rows at
+    /// <c>agent_level = 3</c> today, so no route that acts now starts to wait. The backfill runs only in the statement that adds the column: a
+    /// re-run of the rung (a rewind) must not turn approval off on a Level 3 route a person has since set to <c>required</c>. No path reads
+    /// either column yet, so no current path changes.</para>
+    /// <para><c>config.agent_action_proposals</c> holds one proposed Level 3 action: the request, its claim number and agent, the tool, the
+    /// server, the parsed target (canonical JSON, with its SHA-256 in <c>target_key</c>), the binding, the agent's reason, the times, the state,
+    /// the first of a person's two presses (who, when and the facts it showed, so the confirming press can be checked against it on any
+    /// surface and across a service restart), who decided it and the outcome. It holds no <c>agent_action</c> and no claim id, as the journal holds none. One live proposal (pending or
+    /// approved) for each request, tool and target (<c>uq_agent_action_proposals_live</c>), so a retry gets the same id. The request's foreign
+    /// key cascades, as every other request table's does.</para>
+    /// <para><b>Owner-only.</b> Only the store owner writes it (the proposal store, which journals each state change in the same transaction).
+    /// Managed provisioning section 10e4 and <c>provision-roles.sql</c> step 3j4 take every privilege back and give SELECT to <c>admin</c>,
+    /// <c>viewer</c> and <c>web</c>, not <c>mcp</c> (no tool reads a proposal, and its binding holds statement text). The rung takes the writes
+    /// back too, as V237 does, so a store whose provisioning has not run again since the upgrade does not leave <c>admin</c> the default
+    /// privileges' writes. The table has no sequence. Every statement is idempotent. <b>No Lite twin</b>: Lite has no agent actions.</para>
+    /// </summary>
+    private const string V238Sql = @"
+DO $do$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+                   WHERE attrelid = 'config.config_notification_routes'::regclass AND attname = 'action_approval' AND NOT attisdropped) THEN
+        ALTER TABLE config.config_notification_routes
+            ADD COLUMN action_approval text NOT NULL DEFAULT 'required'
+                CONSTRAINT ck_config_notification_routes_action_approval CHECK (action_approval IN ('off', 'required'));
+        UPDATE config.config_notification_routes SET action_approval = 'off' WHERE agent_level = 3;
+    END IF;
+END
+$do$;
+
+ALTER TABLE config.config_notification_routes
+    ADD COLUMN IF NOT EXISTS approval_single_person boolean NOT NULL DEFAULT FALSE;
+
+CREATE TABLE IF NOT EXISTS config.agent_action_proposals
+(
+    proposal_id uuid NOT NULL,
+    request_id uuid NOT NULL,
+    claim_no smallint NOT NULL,
+    agent text NOT NULL,
+    tool text NOT NULL,
+    server_id integer NOT NULL,
+    target jsonb NOT NULL,
+    target_key text NOT NULL,
+    binding jsonb NOT NULL,
+    reason text,
+    proposed_at timestamptz NOT NULL,
+    expires_at timestamptz NOT NULL,
+    state text NOT NULL DEFAULT 'pending',
+    first_press_by text,
+    first_press_at timestamptz,
+    first_press_facts jsonb,
+    decided_by text,
+    decided_at timestamptz,
+    finished_at timestamptz,
+    outcome jsonb,
+    CONSTRAINT pk_agent_action_proposals PRIMARY KEY (proposal_id),
+    CONSTRAINT fk_agent_action_proposals_request FOREIGN KEY (request_id)
+        REFERENCES config.investigation_requests (request_id) ON DELETE CASCADE,
+    CONSTRAINT ck_agent_action_proposals_tool CHECK (tool IN
+        ('force_query_store_plan', 'unforce_query_store_plan', 'evict_cached_plan', 'kill_session', 'recompile_module', 'create_plan_guide',
+         'drop_plan_guide')),
+    CONSTRAINT ck_agent_action_proposals_state CHECK (state IN
+        ('pending', 'approved', 'run', 'failed', 'unknown', 'refused', 'expired', 'superseded', 'voided')),
+    CONSTRAINT ck_agent_action_proposals_target_key CHECK (target_key ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT ck_agent_action_proposals_expiry CHECK (expires_at > proposed_at)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_action_proposals_live
+    ON config.agent_action_proposals (request_id, tool, target_key) WHERE state IN ('pending', 'approved');
+
+REVOKE ALL ON config.agent_action_proposals FROM PUBLIC;
+
+DO $do$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles AS r WHERE r.rolname = 'admin') THEN
+        REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON config.agent_action_proposals FROM admin;
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles AS r WHERE r.rolname = 'viewer') THEN
+        REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON config.agent_action_proposals FROM viewer;
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles AS r WHERE r.rolname = 'web') THEN
+        REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON config.agent_action_proposals FROM web;
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles AS r WHERE r.rolname = 'mcp') THEN
+        REVOKE ALL ON config.agent_action_proposals FROM mcp;
     END IF;
 END
 $do$;";
