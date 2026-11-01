@@ -4378,7 +4378,7 @@ CREATE OR REPLACE TRIGGER trg_monitored_server_password_rules
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger.LogWarning(
-                "Could not create the store's password or journal rules ({Message}). Run provision-roles.sql against the store as the role that owns its tables.",
+                "Could not create the store's password or journal rules ({Message}). Run " + ProvisionRolesScriptPath + " against the store as the role that owns its tables.",
                 ex.Message);
             return false;
         }
