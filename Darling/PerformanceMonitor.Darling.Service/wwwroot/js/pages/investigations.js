@@ -255,7 +255,7 @@ export const REQUEST_CHANGE_COLUMNS = [
   { key: "undone_by", label: "Undone by" },
 ];
 
-/* The rows are GET /api/agent-changes?request=<id>: the service filters by request_id, so an old request is listed whole (#6979). */
+/* The rows are GET /api/agent-changes?request=<id>: the service filters by request_id and lists up to 200 of that request's changes, newest first (AgentChangesLimit), and one request makes far fewer (#6979). */
 function changesSection(res) {
   const link = el("a", { href: "#/admin/agent-changes", text: "Open the Agent changes tab" });
   if (res.kind === "error") return section("Agent changes", [errorStrip("Could not read the agent changes: " + res.message), link]);
