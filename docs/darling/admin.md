@@ -91,7 +91,7 @@ The token is a secret in `darling.json`. The `web.network` and `mcp.network` blo
 
 ## People, sign-ins and grants
 
-Darling keeps a list of people. Each person has a name, the sign-ins that belong to them, and grants that say what they can do and where. Removing a server or a tag removes the grants on it, so adding the same server back does not bring them back. Nothing reads a grant yet, so adding one changes no power today. Administrators keep every power they have. For who can write the list and what is recorded, see [People, identities and grants](security.md).
+Darling keeps a list of people. Each person has a name, the sign-ins that belong to them, and grants that say what they can do and where. Removing a server or a tag removes the grants on it, so adding the same server back does not bring them back. Only the `approve` grant is read today, when a person approves a server action that an agent proposed (see [Level 3 server actions: approval](security.md#level-3-server-actions-approval)). Adding any other grant changes no power. Administrators keep every power they have. For who can write the list and what is recorded, see [People, identities and grants](security.md).
 
 A sign-in is one of two kinds:
 
