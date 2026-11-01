@@ -87,6 +87,7 @@ public sealed record MuteRuleImage(
     [property: JsonPropertyName("recur_start_time"), ImageColumn(ImageColumnType.TimeOfDay)] string? RecurStartTime,
     [property: JsonPropertyName("recur_end_time"), ImageColumn(ImageColumnType.TimeOfDay)] string? RecurEndTime,
     [property: JsonPropertyName("recur_time_zone"), ImageColumn(ImageColumnType.Text)] string? RecurTimeZone,
+    [property: JsonPropertyName("action"), ImageColumn(ImageColumnType.Text)] string? Action,
     [property: JsonPropertyName("match_summary")] string? MatchSummary)
 {
     public const string Kind = AgentChangeKinds.Mute;

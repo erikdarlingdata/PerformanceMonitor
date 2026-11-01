@@ -542,4 +542,68 @@ public sealed class DarlingPgOperationalAlertTests
         Assert.Equal(("critical", AlertHistoryRowSeverity.SourceMetricName), AlertHistoryRowSeverity.Describe("Deadlocks Detected", "{\"Details\":[],\"Incidents\":[]}"));
         Assert.Equal(("warning", AlertHistoryRowSeverity.SourceMetricName), AlertHistoryRowSeverity.Describe("High CPU", null));
     }
+
+    /* #7083: the field chains had one victim and a worst wait near 25 seconds, and the detail text named neither
+       statement nor the wait. */
+    private static DarlingPgBlockingReader.PgBlockingChainRow ChainWithStatements() =>
+        BlockingRow(rootBackendId: 7, rootPid: 42, totalVictims: 1) with
+        {
+            RootQuery = "UPDATE orders SET status = 'held' WHERE customer_id = 90210",
+            WorstVictimQuery = "SELECT * FROM orders WHERE customer_id = 90210 FOR UPDATE",
+            WorstVictimWaitMs = 25_400,
+        };
+
+    [Fact]
+    public void BuildPgBlockingContext_DetailText_NamesBlockerStatementVictimStatementAndWaitTime()
+    {
+        var context = DarlingWorker.BuildPgBlockingContext(new[] { ChainWithStatements() });
+        var text = AlertContextBuilders.ContextToDetailText(context)!;
+
+        Assert.Contains("Blocking Query: UPDATE orders SET status = 'held' WHERE customer_id = 90210", text, StringComparison.Ordinal);
+        Assert.Contains("Blocked Query: SELECT * FROM orders WHERE customer_id = 90210 FOR UPDATE", text, StringComparison.Ordinal);
+        Assert.Contains("Wait Range: 25.4s", text, StringComparison.Ordinal);
+        Assert.Contains("Database: sales", text, StringComparison.Ordinal);
+        Assert.Single(context.Incidents!);
+    }
+
+    [Fact]
+    public void BuildPgBlockingContext_UnderMaskLiterals_KeepsTheStatementShapeAndTheWaitButNotTheValues()
+    {
+        var text = AlertContextBuilders.ContextToDetailText(DarlingWorker.BuildPgBlockingContext(new[] { ChainWithStatements() }))!;
+
+        /* The MCP read path masks the stored detail_text by key (McpDataDetailKeys), so the same call it makes. */
+        var masked = McpDataDetailMasker.MaskField("detail_text", text, McpDataDetail.MaskLiterals)!;
+
+        Assert.DoesNotContain("90210", masked, StringComparison.Ordinal);
+        Assert.DoesNotContain("'held'", masked, StringComparison.Ordinal);
+        Assert.Contains("UPDATE orders SET status", masked, StringComparison.Ordinal);
+        Assert.Contains("FOR UPDATE", masked, StringComparison.Ordinal);
+        Assert.Contains("Wait Range:", masked, StringComparison.Ordinal);
+
+        /* The flattened text is masked as one free-text block, which turns the number in "25.4s" into a placeholder too (the
+           SQL Server blocking text behaves the same). The structured Wait Range field is not a statement and is kept at every level. */
+        var context = DarlingWorker.BuildPgBlockingContext(new[] { ChainWithStatements() });
+        var waitRange = Assert.Single(context.Incidents!).WaitRange;
+        Assert.Equal("25.4s", McpDataDetailMasker.MaskField("Wait Range", waitRange, McpDataDetail.MaskLiterals));
+        Assert.Equal("?", McpDataDetailMasker.MaskField("Blocking Query", "90210", McpDataDetail.MaskLiterals));
+    }
+
+    [Fact]
+    public void BuildPgBlockingContext_WithoutStatements_StillReportsTheWait_AndKeepsEveryRootAsAnIncident()
+    {
+        var rows = new List<DarlingPgBlockingReader.PgBlockingChainRow>();
+        for (var i = 1; i <= 12; i++)
+        {
+            rows.Add(BlockingRow(rootBackendId: i, rootPid: 100 + i, rootQuery: null) with { WorstVictimQuery = null, WorstVictimWaitMs = 25_000 });
+        }
+
+        var context = DarlingWorker.BuildPgBlockingContext(rows);
+        var text = AlertContextBuilders.ContextToDetailText(context)!;
+
+        Assert.DoesNotContain("Blocked Query", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("Blocking Query", text, StringComparison.Ordinal);
+        Assert.Contains("Wait Range: 25.0s", text, StringComparison.Ordinal);
+        Assert.Equal(12, context.Incidents!.Count);
+        Assert.Contains("+2 more distinct blocking chains", text, StringComparison.Ordinal);
+    }
 }

@@ -117,6 +117,7 @@ internal sealed class DarlingSelfAlertEvaluator
     private readonly IAlertDeliverer _deliverer;
     private readonly IAlertHistoryStore _historyStore;
     private readonly Func<AlertMuteContext, bool> _isAlertMuted;
+    private readonly Func<AlertMuteContext, string?>? _digestWindowReason;
     private readonly ILogger? _logger;
     private readonly Func<DateTime> _utcNow;
 
@@ -1328,8 +1329,10 @@ internal sealed class DarlingSelfAlertEvaluator
         Func<bool>? identityCapacityEnabled = null,
         Func<int>? identityCapacityWarningPercent = null,
         Func<int>? identityCapacityCriticalPercent = null,
-        Func<string, string, string?, int, int>? resolveThreshold = null)
+        Func<string, string, string?, int, int>? resolveThreshold = null,
+        Func<AlertMuteContext, string?>? digestWindowReason = null)
     {
+        _digestWindowReason = digestWindowReason;
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
         _deliverer = deliverer ?? throw new ArgumentNullException(nameof(deliverer));
         _historyStore = historyStore ?? throw new ArgumentNullException(nameof(historyStore));
@@ -10053,13 +10056,24 @@ ORDER BY ag_name, database_name, replica_server_name";
         /* Same mute treatment as the engine: a muted self-alert is still recorded (flagged muted) but its
            channels are skipped — the deliverer honors AlertOutcome.Muted. A caller that brought its own
            decision does not even ASK, so a throwing Matches() cannot reach it either. */
-        bool isMuted = muted
-            ?? _isAlertMuted(new AlertMuteContext
+        /* #7083: a mute rule wins; else a digest rule's open window holds the fire for the daily digest, unless the caller already
+           holds it for its own reason. A window hold stamps as a mute does, so the log line and the caller's state read it as silenced. */
+        bool isMuted;
+        if (muted is bool callerMuted)
+        {
+            isMuted = callerMuted;
+        }
+        else
+        {
+            var judgment = MuteJudgment.Judge(_isAlertMuted, _digestWindowReason, new AlertMuteContext
             {
                 ServerName = serverName,
                 ServerId = ServerIdFromKey(serverKey),
                 MetricName = metricName
             });
+            isMuted = judgment.Muted;
+            hold ??= judgment.Hold;
+        }
 
         /* #1681: log the FIRING, not just the recovery. RecordResolutionAsync has always logged at Information,
            so the service log showed "… Recovered" with nothing before it — which reads as a spontaneous

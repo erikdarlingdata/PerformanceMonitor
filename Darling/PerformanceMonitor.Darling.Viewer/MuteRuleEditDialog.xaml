@@ -162,6 +162,13 @@
                 <TextBox Grid.Column="2" x:Name="RecurZoneBox" Margin="8,0,0,0"
                          ToolTip="The zone the times are in, for example America/New_York. It starts as this computer's zone."/>
             </Grid>
+            <!-- #7083: what the rule does with a matching alert. Mute is the default. -->
+            <TextBlock Text="Action" HorizontalAlignment="Left" Margin="0,12,0,4"/>
+            <ComboBox x:Name="ActionBox" SelectedIndex="0" HorizontalAlignment="Left" MinWidth="260"
+                      ToolTip="Mute records a matching alert as muted and sends nothing. The daily digest holds it back from paging and lists it in the daily digest. Pair the digest action with a repeating window.">
+                <ComboBoxItem Content="Mute" Tag="mute"/>
+                <ComboBoxItem Content="Send to the daily digest" Tag="digest"/>
+            </ComboBox>
         </StackPanel>
 
         <StackPanel Grid.Row="15" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">

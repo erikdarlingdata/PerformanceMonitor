@@ -173,12 +173,9 @@ public sealed class ViewerMuteRecurrenceTests
             /* A store below V231 has no columns: the list still reads, and the viewer refuses a schedule it cannot keep. */
             await ExecAsync(connection,
                 "ALTER TABLE config.config_mute_rules DROP COLUMN recur_days, DROP COLUMN recur_start_time, DROP COLUMN recur_end_time, DROP COLUMN recur_time_zone", ct);
-            /* The probe reads newest first, so the report notice column (V233, #6979) and the Daily Health Report columns (V232, #7041) go too, or the store would still read as V233. */
-            await ExecAsync(connection, "ALTER TABLE config.config_notification_routes DROP COLUMN report_notice", ct);
-            /* And the alert key column on the alert log (V234, #7076), the newest sentinel. */
-            await ExecAsync(connection, "ALTER TABLE config.config_alert_log DROP COLUMN alert_key", ct);
-            await ExecAsync(connection,
-                "ALTER TABLE config.config_alert_settings DROP COLUMN daily_report_enabled, DROP COLUMN daily_report_send_at, DROP COLUMN daily_report_time_zone, DROP COLUMN daily_report_title", ct);
+            /* The probe reads newest first, so every sentinel above V231 goes too, or the store would still read as the newest rung: the Daily Health Report
+               columns (V232, #7041), the report notice (V233, #6979), the alert key (V234, #7076), the blocking bars (V235) and the rule action (V236, #7083). */
+            await RungRewindArtifacts.DropSentinelsAboveAsync(connection, 231, ct);
             await using (var older = new ViewerDataService(scratch.ConnectionString))
             {
                 Assert.False(await older.SupportsMuteRecurrenceAsync(ct));
