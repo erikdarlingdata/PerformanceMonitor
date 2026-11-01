@@ -388,7 +388,10 @@ public sealed class PgAlertFailedSendRetryTests
         var worker = Worker();
 
         Assert.DoesNotContain("_alertDeliverer.DeliverAsync(", worker, StringComparison.Ordinal);
-        Assert.Equal(6, CountOccurrences(worker, "_alertDeliverer.DeliverAndReportAsync("));
+        /* Eight sends: the six pages above, plus the two held-back rows #7082 writes (the capacity-at-the-ceiling High CPU
+           row and the held Poison Wait Warning). A held row is a digest row, not a page, so it has no failed-send retry
+           and no AfterPgFire; the AfterPgFire count below stays at the six pages. */
+        Assert.Equal(8, CountOccurrences(worker, "_alertDeliverer.DeliverAndReportAsync("));
 
         /* The definition is "bool AfterPgFire(" and "AfterPgFireCore(" does not match; the rest are the six calls. */
         Assert.Equal(6, CountOccurrences(worker, "AfterPgFire(") - CountOccurrences(worker, "bool AfterPgFire("));

@@ -602,6 +602,33 @@ public static class PostgresAlertEvaluator
             return null;
         }
 
+        return BuildPoisonWaitFinding(wait, avgWaiters, critical);
+    }
+
+    /// <summary>
+    /// The Warning-level Poison Wait that the two-window hold (#7082) is holding back right now: at or over the
+    /// Warning bar in the current window, under the Critical bar, and the earlier window under the Warning bar. The
+    /// host writes one held (digest) row per episode for it and pages nothing. Null for anything else, so a
+    /// finding <see cref="EvaluatePoisonWait"/> pages is never also held.
+    /// </summary>
+    public static Finding? EvaluateHeldPoisonWait(PostgresPoisonWaitAlertInfo wait)
+    {
+        ArgumentNullException.ThrowIfNull(wait);
+        var windowMs = PoisonWaitWindowMinutes * 60_000.0;
+        var avgWaiters = wait.AccumulatedWaitMs / windowMs;
+        if (avgWaiters < PoisonWaitWarningAvgWaiters
+            || avgWaiters >= PoisonWaitCriticalAvgWaiters
+            || wait.PriorWindowAccumulatedWaitMs >= PoisonWaitWarningAvgWaiters * windowMs)
+        {
+            return null;
+        }
+
+        return BuildPoisonWaitFinding(wait, avgWaiters, critical: false);
+    }
+
+    private static Finding BuildPoisonWaitFinding(PostgresPoisonWaitAlertInfo wait, double avgWaiters, bool critical)
+    {
+        var windowMs = PoisonWaitWindowMinutes * 60_000.0;
         var breachedAvg = critical ? PoisonWaitCriticalAvgWaiters : PoisonWaitWarningAvgWaiters;
         var subject = PoisonWaitSubject(wait);
         var accumulatedSeconds = wait.AccumulatedWaitMs / 1000;
