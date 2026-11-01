@@ -994,8 +994,9 @@ public sealed class AlertReadFailureSurfaceTests
     /* 13th: the deadlock text repair pass's catch in SweepStoreSelfMetricsAsync, exempt like the re-mask pass beside it.
        14th: the collection log hourly rollup's catch there (#5810), a maintenance write no alert is judged on.
        15th: EvaluateComposeHoursStuckAsync's catch (#5867), the compose builder's failure record read for its self-alert, which
-       holds the standing alert on a failed read. */
-    private const int WorkerExemptSites = 15;
+       holds the standing alert on a failed read.
+       16th: the Poison Wait detail read in EvaluatePgPoisonWaitAsync (#7082), the text of a page whose condition was read and counted. */
+    private const int WorkerExemptSites = 16;
 
     /// <summary>
     /// Counted sites tree-wide. ONE numeral with several readers rather than the same number written out at
@@ -1066,6 +1067,7 @@ public sealed class AlertReadFailureSurfaceTests
     {
         ["Could not load incident occurrences"] = "bookkeeping about an alert, not the condition read it is judged on",
         ["Could not persist incident occurrences"] = "a write",
+        ["PostgreSQL poison wait detail read failed, sending the alert without it"] = "#7082: the explanatory text block of a page whose condition was already read and counted (the Poison Wait window read); a failed detail read costs the text only, never the page",
         ["The deadlock rollup failed for {Server}: {Message}"] = "#6005: the daily signature rollup, a write (and its own bookkeeping read) after the deadlock read it counts, which is counted where it is made; the alert is judged on that read, not on this",
         ["Could not persist the {Metric} persistence gate"] = "a write (#3282; one save path for every gated built-in since #3653 A5 put tempdb Space behind the same gate as High CPU); the gate has already decided the observation from its in-memory record, so a dropped save costs the streak across a restart and never an alert - the seeding LOADs beside it are the reads, and they are counted",
         ["Alert resolution callback failed"] = "the delivery path",
@@ -1308,7 +1310,7 @@ public sealed class AlertReadFailureSurfaceTests
            failure. 44th since #6912: the capture-down engine facts catch, whose read goes through the retry adapter that
            already records the failure. 45th since #7041: the daily health report's delivery-stamp write, which costs one re-send
            at the next restart and never a delivery. */
-        Assert.Equal(45, totalExempt);
+        Assert.Equal(46, totalExempt);
 
         /* Every exemption in the table is actually used. An exemption for a message that no longer exists
            is a hole this pin would otherwise keep open indefinitely — the shape that lets a real new catch

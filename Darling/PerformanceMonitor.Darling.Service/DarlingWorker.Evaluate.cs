@@ -1733,8 +1733,7 @@ public sealed partial class DarlingWorker
                     {
                         _logger.LogDebug(
                             "[{Server}] PostgreSQL poison wait detail read failed, sending the alert without it: {Message}",
-                            runtime.Config.DisplayName, detailEx.Message);
-                    }
+                            runtime.Config.DisplayName, detailEx.Message);                    }
 
                     readClock.Restart();
                 }
