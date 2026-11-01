@@ -214,7 +214,7 @@ public sealed class DarlingUpgradePreflightTests
 
     // The whole script, against a temp install root. The wrapper stands in for the service and records a Stop-Service call.
     // The script's own copy goes in a folder of its own, so it is not running from the install root.
-    private static string ScriptWrapper(string mode, string scriptArguments, string patchedScriptPath)
+    private static string ScriptWrapper(string mode, string scriptArguments, string patchedScriptPath, string setup = "", string sourceArgument = "$src")
     {
         return $$"""
             $ErrorActionPreference = 'Stop'
@@ -235,9 +235,10 @@ public sealed class DarlingUpgradePreflightTests
             function Stop-Service { Add-Content -LiteralPath (Join-Path $base 'stop-called.txt') -Value 'stop' }
             if ($mode -eq 'fail') { function Set-Acl { throw 'stubbed failure' } }
             $listing = { (Get-ChildItem -LiteralPath $root -Force -Recurse | ForEach-Object { $_.FullName.Substring($root.Length) + '|' + $_.Length }) -join ';' }
+            {{setup}}
             try {
                 $before = & $listing
-                & $patched {{scriptArguments}} -Source $src -InstallRoot $root -AcceptWritableExtraction -SkipHashCheck
+                & $patched {{scriptArguments}} -Source {{sourceArgument}} -InstallRoot $root -AcceptWritableExtraction -SkipHashCheck
                 'exit=' + $LASTEXITCODE
                 'unchanged=' + ($before -eq (& $listing))
                 'stopCalled=' + (Test-Path -LiteralPath (Join-Path $base 'stop-called.txt'))
@@ -247,7 +248,7 @@ public sealed class DarlingUpgradePreflightTests
     }
 
     /// <summary>Runs the whole script, with its elevation test replaced, in <paramref name="host"/> over a temp install root.</summary>
-    private static List<string> RunScript(string host, string mode, string scriptArguments)
+    private static List<string> RunScript(string host, string mode, string scriptArguments, string setup = "", string sourceArgument = "$src")
     {
         var script = Script();
         Assert.Contains(ElevationTest, script, StringComparison.Ordinal);
@@ -256,7 +257,7 @@ public sealed class DarlingUpgradePreflightTests
         {
             var patched = Path.Combine(folder, "upgrade-darling.ps1");
             File.WriteAllText(patched, script.Replace(ElevationTest, "if ($false) {", StringComparison.Ordinal), new UTF8Encoding(false));
-            return Run(ScriptWrapper(mode, scriptArguments, patched), host);
+            return Run(ScriptWrapper(mode, scriptArguments, patched, setup, sourceArgument), host);
         }
         finally
         {
@@ -323,6 +324,130 @@ public sealed class DarlingUpgradePreflightTests
         Assert.Contains("cannot be combined with -PruneOnly or -ListRollbacks", all, StringComparison.Ordinal);
         Assert.Contains("exit=1", all, StringComparison.Ordinal);
         Assert.Contains("unchanged=True", all, StringComparison.Ordinal);
+        Assert.Contains("stopCalled=False", all, StringComparison.Ordinal);
+    }
+
+    // #7063: a build with no hostfxr.dll ships no .NET runtime. Over an install that has one, it leaves the old runtime in
+    // place and the service cannot find a framework. The refusal comes before the service stop, whichever form the source takes.
+    private const string InstallWithRuntime =
+        "Set-Content -LiteralPath (Join-Path $root 'hostfxr.dll') -Value 'old runtime'";
+
+    private const string SourceWithRuntime =
+        "Set-Content -LiteralPath (Join-Path $src 'hostfxr.dll') -Value 'new runtime'";
+
+    // A zip of the source folder, plus a nested viewer folder hostfxr.dll that must not count as the service's runtime.
+    private const string SourceZip =
+        "$zsrc = Join-Path $base 'zipsrc'; New-Item -ItemType Directory -Path $zsrc | Out-Null; " +
+        "Copy-Item -LiteralPath (Join-Path $src 'PerformanceMonitor.Darling.Service.exe') -Destination $zsrc; " +
+        "New-Item -ItemType Directory -Path (Join-Path $zsrc 'viewer') | Out-Null; " +
+        "Set-Content -LiteralPath (Join-Path $zsrc 'viewer\\hostfxr.dll') -Value 'viewer runtime'; " +
+        "ZIPEXTRA " +
+        "$zip = Join-Path $base 'PerformanceMonitorDarling-9.9.9.zip'; Compress-Archive -Path (Join-Path $zsrc '*') -DestinationPath $zip";
+
+    private const string RefusalText = "framework-dependent build";
+
+    [Theory]
+    [InlineData("pwsh", "-Check")]
+    [InlineData("powershell.exe", "-Check")]
+    [InlineData("pwsh", "")]
+    [InlineData("powershell.exe", "")]
+    public void AFolderWithNoRuntime_OverAnInstallThatHasOne_IsRefused_BeforeTheServiceStop(string host, string scriptArguments)
+    {
+        if (SkipUnlessRunnable(host, needsElevation: false))
+        {
+            return;
+        }
+
+        var all = string.Join("\n", RunScript(host, "ok", scriptArguments, InstallWithRuntime));
+
+        Assert.Contains(RefusalText, all, StringComparison.Ordinal);
+        Assert.Contains("self-contained install", all, StringComparison.Ordinal);
+        Assert.Contains("--runtime win-x64 --self-contained", all, StringComparison.Ordinal);
+        Assert.Contains("NOTHING has been stopped or copied", all, StringComparison.Ordinal);
+        Assert.Contains("exit=1", all, StringComparison.Ordinal);
+        Assert.Contains("unchanged=True", all, StringComparison.Ordinal);
+        Assert.Contains("stopCalled=False", all, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("pwsh")]
+    [InlineData("powershell.exe")]
+    public void AZipWithNoRuntimeAtItsRoot_OverAnInstallThatHasOne_IsRefused_BeforeTheServiceStop(string host)
+    {
+        if (SkipUnlessRunnable(host, needsElevation: true))
+        {
+            return;
+        }
+
+        var setup = InstallWithRuntime + "; " + SourceZip.Replace("ZIPEXTRA ", string.Empty, StringComparison.Ordinal);
+        var all = string.Join("\n", RunScript(host, "ok", "-Check", setup, "$zip"));
+
+        Assert.Contains(RefusalText, all, StringComparison.Ordinal);
+        Assert.Contains("exit=1", all, StringComparison.Ordinal);
+        Assert.Contains("unchanged=True", all, StringComparison.Ordinal);
+        Assert.Contains("stopCalled=False", all, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("pwsh")]
+    [InlineData("powershell.exe")]
+    public void AnUnreadableZip_FailsBeforeTheServiceStop_WithItsOwnMessage(string host)
+    {
+        if (SkipUnlessRunnable(host, needsElevation: true))
+        {
+            return;
+        }
+
+        // #7063: the file has a .zip name, but its bytes are not a zip, so the runtime check cannot open it.
+        // It must refuse with its own message, before the service stop.
+        var setup = InstallWithRuntime + "; " + "$zip = Join-Path $base 'PerformanceMonitorDarling-9.9.9.zip'; Set-Content -LiteralPath $zip -Value 'not a zip'";
+        var all = string.Join("\n", RunScript(host, "ok", "-Check", setup, "$zip"));
+
+        Assert.Contains("could not be read to check whether it carries a .NET runtime", all, StringComparison.Ordinal);
+        Assert.Contains("exit=1", all, StringComparison.Ordinal);
+        Assert.Contains("unchanged=True", all, StringComparison.Ordinal);
+        Assert.Contains("stopCalled=False", all, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("pwsh", true)]
+    [InlineData("powershell.exe", true)]
+    [InlineData("pwsh", false)]
+    [InlineData("powershell.exe", false)]
+    public void ASelfContainedFolder_OverAnInstallWithOrWithoutARuntime_PassesTheCheck(string host, bool installHasRuntime)
+    {
+        if (SkipUnlessRunnable(host, needsElevation: true))
+        {
+            return;
+        }
+
+        // installHasRuntime: self-contained over self-contained. Otherwise self-contained over framework-dependent, the reverse direction.
+        var setup = SourceWithRuntime + (installHasRuntime ? "; " + InstallWithRuntime : string.Empty);
+        var all = string.Join("\n", RunScript(host, "ok", "-Check", setup));
+
+        Assert.DoesNotContain(RefusalText, all, StringComparison.Ordinal);
+        Assert.Contains("-Check passed", all, StringComparison.Ordinal);
+        Assert.Contains("exit=0", all, StringComparison.Ordinal);
+        Assert.Contains("stopCalled=False", all, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("pwsh")]
+    [InlineData("powershell.exe")]
+    public void AZipWithARuntimeAtItsRoot_OverAnInstallThatHasOne_PassesTheCheck(string host)
+    {
+        if (SkipUnlessRunnable(host, needsElevation: true))
+        {
+            return;
+        }
+
+        var zipExtra = "Set-Content -LiteralPath (Join-Path $zsrc 'hostfxr.dll') -Value 'new runtime'; ";
+        var setup = InstallWithRuntime + "; " + SourceZip.Replace("ZIPEXTRA ", zipExtra, StringComparison.Ordinal);
+        var all = string.Join("\n", RunScript(host, "ok", "-Check", setup, "$zip"));
+
+        Assert.DoesNotContain(RefusalText, all, StringComparison.Ordinal);
+        Assert.Contains("-Check passed", all, StringComparison.Ordinal);
+        Assert.Contains("exit=0", all, StringComparison.Ordinal);
         Assert.Contains("stopCalled=False", all, StringComparison.Ordinal);
     }
 }
