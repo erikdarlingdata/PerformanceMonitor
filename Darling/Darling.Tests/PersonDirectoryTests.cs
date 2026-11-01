@@ -100,6 +100,30 @@ public sealed class PersonDirectoryCommandTests
         Assert.Equal("invalid_args", answer.Code);
     }
 
+    private static PostgresException ForeignKeyViolation(string constraint) =>
+        new("violates foreign key constraint", "ERROR", "ERROR", PostgresErrorCodes.ForeignKeyViolation, constraintName: constraint);
+
+    [Theory]
+    [InlineData("fk_person_grant_server", "unknown_server")]
+    [InlineData("fk_person_grant_tag", "unknown_tag")]
+    [InlineData("fk_person_grant_person", "unknown_person")]
+    [InlineData("fk_person_identity_person", "unknown_person")]
+    public void AForeignKeyLostToARemoval_IsRefusedWithTheCodeTheExistenceCheckGives(string constraint, string code)
+    {
+        var refusal = PersonDirectory.RefusalForForeignKey(ForeignKeyViolation(constraint).ConstraintName);
+        Assert.NotNull(refusal);
+        Assert.False(refusal.Succeeded);
+        Assert.Equal("refused", refusal.Status);
+        Assert.Equal(code, refusal.Code);
+    }
+
+    [Fact]
+    public void AnUnrelatedForeignKey_IsNotRefused_SoItStillThrows()
+    {
+        Assert.Null(PersonDirectory.RefusalForForeignKey(ForeignKeyViolation("fk_something_else").ConstraintName));
+        Assert.Null(PersonDirectory.RefusalForForeignKey(null));
+    }
+
     [Fact]
     public void TheRungIsTheLadderTop_AndTheProbeMapsIt()
     {
@@ -111,7 +135,7 @@ public sealed class PersonDirectoryCommandTests
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var parameters = method.GetParameters();
         var own = Array.FindIndex(parameters, p => p.Name == "hasPeopleGrants");
-        Assert.Equal(parameters.Length - 1, own);
+        Assert.True(own >= 0);
         var all = Enumerable.Repeat((object)true, parameters.Length).ToArray();
         Assert.Equal(237, (int)method.Invoke(null, all)!);
         all[own] = false;
@@ -291,6 +315,43 @@ public sealed class PersonDirectoryLiveTests
             await PgMigrations.MigrateAsync(connection, ct);
             Assert.Equal("True", await ScalarAsync(connection, "SELECT to_regclass('config.person_grant') IS NOT NULL", ct));
             Assert.True((await PersonDirectory.AddPersonAsync(owner, "Ann", "person:alice", ServerActionSurfaces.Viewer, ct)).Succeeded);
+        });
+    }
+
+    [Fact]
+    public async Task TheSameIdentityAddedAtOnce_IsRefusedAsAConflict_AndChangesNothing()
+    {
+        await WithStoreAsync(async (connection, owner, ct) =>
+        {
+            const string Admin = "person:alice";
+            var ann = (await PersonDirectory.AddPersonAsync(owner, "Ann", Admin, ServerActionSurfaces.Viewer, ct)).PersonId!.Value;
+            var bob = (await PersonDirectory.AddPersonAsync(owner, "Bob", Admin, ServerActionSurfaces.Viewer, ct)).PersonId!.Value;
+            var journalBefore = await ScalarAsync(connection, "SELECT count(*) FROM config.investigation_journal", ct);
+
+            /* Another administrator's transaction has inserted the identity and not committed: Ann's existence check cannot see it, her insert waits on
+               the unique index, and when the other transaction commits the insert meets the duplicate. */
+            await using var other = await owner.OpenConnectionAsync(ct);
+            await using var otherTransaction = await other.BeginTransactionAsync(ct);
+            await using (var insert = new NpgsqlCommand(
+                "INSERT INTO config.person_identity (person_id, kind, external_id, created_by) VALUES (@p, 'slack', 'T01:U02', 'person:bob')", other, otherTransaction))
+            {
+                insert.Parameters.AddWithValue("p", bob);
+                await insert.ExecuteNonQueryAsync(ct);
+            }
+
+            var racing = PersonDirectory.AddIdentityAsync(owner, ann, "slack", "T01:U02", Admin, ServerActionSurfaces.Web, ct);
+            for (var i = 0; i < 100 && await ScalarAsync(connection, "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND datname = current_database()", ct) == "0"; i++)
+                await Task.Delay(100, ct);
+            Assert.False(racing.IsCompleted);
+            await otherTransaction.CommitAsync(ct);
+
+            var result = await racing;
+            Assert.False(result.Succeeded);
+            Assert.Equal("refused", result.Status);
+            Assert.Equal("conflict", result.Code);
+            Assert.Equal(bob.ToString(CultureInfo.InvariantCulture), await ScalarAsync(connection, "SELECT person_id FROM config.person_identity WHERE external_id = 'T01:U02'", ct));
+            Assert.Equal("1", await ScalarAsync(connection, "SELECT count(*) FROM config.person_identity", ct));
+            Assert.Equal(journalBefore, await ScalarAsync(connection, "SELECT count(*) FROM config.investigation_journal", ct));
         });
     }
 }

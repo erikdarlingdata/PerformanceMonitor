@@ -454,6 +454,11 @@ ORDER BY g.person_id, g.capability, g.grant_id";
             /* Two administrators added the same identity or grant at once: the second one's insert meets the unique index. Rolled back on dispose. */
             return Refused("conflict", "Somebody else made the same change at the same time. Reload and try again.");
         }
+        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.ForeignKeyViolation && RefusalForForeignKey(ex.ConstraintName) is { } refusal)
+        {
+            /* A server, tag or person was removed between the existence check and the insert: the V237 foreign key refuses it. Same answer as the check gives. */
+            return refusal;
+        }
     }
 
     private static async Task<(string Name, bool Enabled)?> LockPersonAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, long personId,
@@ -497,6 +502,18 @@ ORDER BY g.person_id, g.capability, g.grant_id";
         new(false, "refused", "unknown_person", "That person does not exist.", personId);
 
     private static PersonWriteResult Refused(string code, string message) => new(false, "refused", code, message);
+
+    /// <summary>
+    /// The refusal for a foreign key violation raised by a people table insert, by constraint name, or null for any other foreign key (the caller
+    /// rethrows it). The grant's scope server and tag and the owning person are the only references a write can lose to a concurrent removal.
+    /// </summary>
+    public static PersonWriteResult? RefusalForForeignKey(string? constraintName) => constraintName switch
+    {
+        "fk_person_grant_server" => Refused("unknown_server", "That server is not in the registry."),
+        "fk_person_grant_tag" => Refused("unknown_tag", "That tag does not exist."),
+        "fk_person_grant_person" or "fk_person_identity_person" => Refused("unknown_person", "That person does not exist."),
+        _ => null,
+    };
 
     private static NpgsqlCommand Command(NpgsqlConnection connection, NpgsqlTransaction transaction, string sql, params NpgsqlParameter[] parameters)
     {
