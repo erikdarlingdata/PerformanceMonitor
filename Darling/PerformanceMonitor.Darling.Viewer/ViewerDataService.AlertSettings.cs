@@ -589,11 +589,11 @@ public sealed class AlertSettingsRow
     public string CpuMode { get; set; } = ViewerDataService.CpuModeTotal;
 
     public bool BlockingEnabled { get; set; } = true;
-    public int BlockingCountThreshold { get; set; } = 1;
+    public int BlockingCountThreshold { get; set; } = BlockingPageRule.CountThresholdDefault;
 
     /// <summary>#1839 (V40): fire when the latest blocking snapshot's TOTAL blocked wait reaches this many
-    /// seconds. 0 = off, matching the V40 DDL default — the shipped behavior is unchanged on upgrade.</summary>
-    public int BlockingWaitSecondsThreshold { get; set; }
+    /// seconds, and the bar for one blocked event (#7083). 0 = off. Default 60 since #7083 (V235 moves a store still at the old 0).</summary>
+    public int BlockingWaitSecondsThreshold { get; set; } = BlockingPageRule.WaitSecondsThresholdDefault;
 
     public bool DeadlockEnabled { get; set; } = true;
     public int DeadlockCountThreshold { get; set; } = 1;

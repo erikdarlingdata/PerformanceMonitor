@@ -1287,8 +1287,8 @@ public partial class SettingsWindow : Window
     {
         AlertCpuThresholdBox.Text = "80";
         AlertCpuModeBox.SelectedIndex = 0; // Total
-        AlertBlockingThresholdBox.Text = "1";
-        AlertBlockingWaitSecondsBox.Text = "0";
+        AlertBlockingThresholdBox.Text = BlockingPageRule.CountThresholdDefault.ToString(CultureInfo.InvariantCulture);
+        AlertBlockingWaitSecondsBox.Text = BlockingPageRule.WaitSecondsThresholdDefault.ToString(CultureInfo.InvariantCulture);
         AlertDeadlockThresholdBox.Text = "1";
         /* #3444 (V122): from the shared constants rather than a literal "1", so a moved default cannot
            leave this button writing a threshold nobody chose. */

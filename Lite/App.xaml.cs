@@ -218,14 +218,14 @@ public partial class App : Application
     /// <summary>Which CPU metric the alert evaluates against. Total = sql_server_cpu + other_process_cpu (matches OS user+system). SqlOnly = SQL Server scheduler %.</summary>
     public static CpuAlertMode AlertCpuMode { get; set; } = CpuAlertMode.Total;
     public static bool AlertBlockingEnabled { get; set; } = true;
-    public static int AlertBlockingThreshold { get; set; } = 1;
+    public static int AlertBlockingThreshold { get; set; } = BlockingPageRule.CountThresholdDefault;
     /// <summary>
     /// #1839: fire when the latest blocking snapshot's TOTAL blocked wait reaches this many seconds.
     /// 0 = off, and off ships by default — a count threshold can't tell one session blocked for an hour
     /// from one blocked for a second, but turning this on for everyone would change what existing
     /// installs alert about.
     /// </summary>
-    public static int AlertBlockingWaitSecondsThreshold { get; set; }
+    public static int AlertBlockingWaitSecondsThreshold { get; set; } = BlockingPageRule.WaitSecondsThresholdDefault;
     public static bool AlertDeadlockEnabled { get; set; } = true;
     public static int AlertDeadlockThreshold { get; set; } = 1;
     public static bool AlertPoisonWaitEnabled { get; set; } = true;
@@ -1407,8 +1407,20 @@ public partial class App : Application
             if (read.TryGetProperty("alert_cpu_mode", out v) && Enum.TryParse<CpuAlertMode>(v.TextOrNull(), out var mode))
                 AlertCpuMode = mode;
             if (read.TryGetProperty("alert_blocking_enabled", out v)) AlertBlockingEnabled = v.Bool(AlertBlockingEnabled);
-            if (read.TryGetProperty("alert_blocking_threshold", out v)) AlertBlockingThreshold = v.WholeNumber(AlertBlockingThreshold);
-            if (read.TryGetProperty("alert_blocking_wait_seconds_threshold", out v)) AlertBlockingWaitSecondsThreshold = v.WholeNumber(AlertBlockingWaitSecondsThreshold);
+            /* #7083: the two blocking bars moved (1 -> 3, 0 -> 60). A Settings save writes the whole block, so a saved 1 or 0
+               is usually the old default and not a choice. Beside the marker a saved value is a choice and is kept as it is; without it
+               a value equal to the old default loads as the new default, and any other value is kept. */
+            var blockingBarsApplied = read.TryGetProperty("alert_blocking_defaults_applied", out v) && v.Bool(false);
+            if (read.TryGetProperty("alert_blocking_threshold", out v))
+            {
+                var savedBlockingCount = v.WholeNumber(AlertBlockingThreshold);
+                if (blockingBarsApplied || savedBlockingCount != 1) AlertBlockingThreshold = savedBlockingCount;
+            }
+            if (read.TryGetProperty("alert_blocking_wait_seconds_threshold", out v))
+            {
+                var savedBlockingWait = v.WholeNumber(AlertBlockingWaitSecondsThreshold);
+                if (blockingBarsApplied || savedBlockingWait != 0) AlertBlockingWaitSecondsThreshold = savedBlockingWait;
+            }
             if (read.TryGetProperty("alert_deadlock_enabled", out v)) AlertDeadlockEnabled = v.Bool(AlertDeadlockEnabled);
             if (read.TryGetProperty("alert_deadlock_threshold", out v)) AlertDeadlockThreshold = v.WholeNumber(AlertDeadlockThreshold);
             if (read.TryGetProperty("alert_poison_wait_enabled", out v)) AlertPoisonWaitEnabled = v.Bool(AlertPoisonWaitEnabled);

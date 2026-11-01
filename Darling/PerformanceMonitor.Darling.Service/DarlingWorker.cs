@@ -9106,8 +9106,14 @@ LIMIT 1";
             var threshold = _thresholdOverrides.ResolveWire(
                 DarlingThresholdKeys.PgBlockingCount, snapshot.ServerKey, null, alertSettings.PgBlockingCountThreshold);
 
-            var decision = RollingCountAlertGate.Evaluate(
-                count, threshold, watermark, cooldownElapsed, suppressed: false);
+            /* #7083: the same page rule as the SQL Server path. A root's event is its chain's worst victim wait;
+               the wait bar is the shared blockingWaitSecondsThreshold (and its per-server override). */
+            var waitBarSeconds = _thresholdOverrides.ResolveWire(
+                "blocking.wait_threshold_seconds", snapshot.ServerKey, null, alertSettings.BlockingWaitSecondsThreshold);
+            var worstWaitMs = worstPerRoot.Count == 0 ? 0 : worstPerRoot.Max(r => r.WorstVictimWaitMs);
+            var wasActiveBefore = _activePgBlockingAlert.TryGetValue(key, out var activeNow) && activeNow;
+            var decision = BlockingPageRule.Evaluate(
+                count, threshold, worstWaitMs, waitBarSeconds, watermark, cooldownElapsed, suppressed: false, wasActiveBefore);
             _lastAlertedPgBlockingCount[key] = decision.Watermark;
             if (decision.Watermark != watermark)
             {
@@ -9115,7 +9121,7 @@ LIMIT 1";
                 readClock.Restart();
             }
 
-            var wasActive = _activePgBlockingAlert.TryGetValue(key, out var activeBefore) && activeBefore;
+            var wasActive = wasActiveBefore;
             _activePgBlockingAlert[key] = decision.Active;
 
             if (decision.Fire)
@@ -9173,7 +9179,7 @@ LIMIT 1";
             else if (!decision.Active && wasActive)
             {
                 await NotifyPgResolutionAsync(key, snapshot.ServerName, metricName, "Blocking Cleared",
-                    $"{snapshot.ServerName}: No active blocking");
+                    BlockingPageRule.ClearedMessage(snapshot.ServerName, threshold, waitBarSeconds));
             }
         }
         catch (OperationCanceledException)

@@ -1406,6 +1406,7 @@ public sealed class AlertEngine
     {
         List<BlockedProcessAlertRow>? blockingRows = null;
         int effectiveBlockingCount = 0;
+        long worstBlockingWaitMs = 0;
 
         if (_settings.BlockingEnabled)
         {
@@ -1430,7 +1431,10 @@ public sealed class AlertEngine
                    do not fall back to DMV waits. The old shape counted every row, then recounted outside
                    the excluded set only once the raw count reached the threshold; filtering before counting
                    keeps that fire decision and gives a watermark that tracks the filtered count throughout. */
-                effectiveBlockingCount = AlertContextBuilders.BlockingWaitRows(blockingRows, excludedDatabases).Count;
+                var blockingWaits = AlertContextBuilders.BlockingWaitRows(blockingRows, excludedDatabases);
+                effectiveBlockingCount = blockingWaits.Count;
+                /* #7083: the page rule needs the longest wait among these events (BlockingPageRule). */
+                worstBlockingWaitMs = blockingWaits.Count == 0 ? 0 : blockingWaits.Max(w => w.WaitTimeMs);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -1450,8 +1454,12 @@ public sealed class AlertEngine
         int blockingWatermark = _lastAlertedBlockingCount.TryGetValue(key, out var labc) ? labc : 0; /* :138 */
         bool blockingCooldownElapsed = CooldownElapsed(_lastBlockingAlert, key, now, alertCooldown); /* :139 */
         int blockingThreshold = Threshold(AlertThresholdKey.BlockingCountThreshold, key);
+        int blockingWaitBarSeconds = Threshold(AlertThresholdKey.BlockingWaitSecondsThreshold, key);
+        bool wasBlockingActiveBefore = _activeBlockingAlert.TryGetValue(key, out var wasBlockingBefore) && wasBlockingBefore;
+        /* #7083: pages on the count arm (threshold events AND a 15 s worst wait) or on one event at the wait bar. */
         var blockingDecision = _settings.BlockingEnabled
-            ? RollingCountAlertGate.Evaluate(effectiveBlockingCount, blockingThreshold, blockingWatermark, blockingCooldownElapsed, suppressed)
+            ? BlockingPageRule.Evaluate(effectiveBlockingCount, blockingThreshold, worstBlockingWaitMs, blockingWaitBarSeconds,
+                blockingWatermark, blockingCooldownElapsed, suppressed, wasBlockingActiveBefore)
             : new RollingCountAlertGate.Decision(false, false, 0);                  /* :140-142 */
         _lastAlertedBlockingCount[key] = blockingDecision.Watermark;                /* :143 */
         if (blockingDecision.Watermark != blockingWatermark)                        /* :147 — persist on change (#1145) */
@@ -1533,7 +1541,7 @@ public sealed class AlertEngine
                 await NotifyResolutionAsync(new AlertResolution(
                     key, serverName, "Blocking Detected",
                     "Blocking Cleared",                                             /* :190 */
-                    $"{serverName}: No active blocking"), ct);                      /* :191 */
+                    BlockingPageRule.ClearedMessage(serverName, blockingThreshold, blockingWaitBarSeconds)), ct);  /* :191, #7083 */
             }
         }
 

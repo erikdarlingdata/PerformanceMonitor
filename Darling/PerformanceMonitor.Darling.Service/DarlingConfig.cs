@@ -824,17 +824,20 @@ public sealed class AlertsConfig
     [JsonPropertyName("blockingEnabled")]
     public bool BlockingEnabled { get; set; } = true;
 
+    /// <summary>
+    /// #7083: blocked events in the window that page, but only when the worst wait among them is also at
+    /// least <see cref="BlockingPageRule.CountArmWorstWaitFloorMs"/> (15 seconds, fixed). Default 3.
+    /// </summary>
     [JsonPropertyName("blockingCountThreshold")]
-    public int BlockingCountThreshold { get; set; } = 1;
+    public int BlockingCountThreshold { get; set; } = BlockingPageRule.CountThresholdDefault;
 
     /// <summary>
     /// #1839: fire when the latest blocking snapshot's TOTAL blocked wait reaches this many seconds.
-    /// 0 = off, and off is the shipped default — a count threshold cannot tell one session blocked for
-    /// an hour from one blocked for a second, but enabling it for everyone would change what existing
-    /// deployments alert about.
+    /// #7083: ON by default at 60 seconds, and the same figure is the bar for one blocked event: a single
+    /// event whose own wait reaches it pages at once. 0 turns both off.
     /// </summary>
     [JsonPropertyName("blockingWaitSecondsThreshold")]
-    public int BlockingWaitSecondsThreshold { get; set; }
+    public int BlockingWaitSecondsThreshold { get; set; } = BlockingPageRule.WaitSecondsThresholdDefault;
 
     [JsonPropertyName("deadlockEnabled")]
     public bool DeadlockEnabled { get; set; } = true;
@@ -1062,7 +1065,7 @@ public sealed class AlertsConfig
     public int PgDeadlockCountThreshold { get; set; } = PostgresAlertEvaluator.DeadlockCountThresholdDefault;
 
     /// <summary>#3444 (V122): how many distinct ROOT BLOCKERS inside the rolling window fire the PostgreSQL
-    /// Blocking alert, seeded from <see cref="PostgresAlertEvaluator.BlockingCountThresholdDefault"/> for
+    /// Blocking alert (default 3 since #7083, same 15-second worst-wait floor as the SQL Server count arm), seeded from <see cref="PostgresAlertEvaluator.BlockingCountThresholdDefault"/> for
     /// the reason its deadlock sibling above is.
     ///
     /// <para>Separate from <see cref="BlockingCountThreshold"/> because the two count different things: that

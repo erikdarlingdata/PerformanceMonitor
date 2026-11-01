@@ -136,7 +136,7 @@ public sealed class ViewerAppSettings
     public string AlertCpuMode { get; set; } = "Total";
 
     public bool AlertBlockingEnabled { get; set; } = true;
-    public int AlertBlockingThreshold { get; set; } = 1;
+    public int AlertBlockingThreshold { get; set; } = BlockingPageRule.CountThresholdDefault;
     public bool AlertDeadlockEnabled { get; set; } = true;
     public int AlertDeadlockThreshold { get; set; } = 1;
     public bool AlertPoisonWaitEnabled { get; set; } = true;
@@ -236,7 +236,7 @@ public sealed class ViewerAppSettings
 
         AlertCpuThreshold = Clamp(AlertCpuThreshold, 1, 100, 80);
         AlertCpuMode = (AlertCpuMode is "Total" or "SqlOnly") ? AlertCpuMode : "Total";
-        AlertBlockingThreshold = Clamp(AlertBlockingThreshold, 1, int.MaxValue, 1);
+        AlertBlockingThreshold = Clamp(AlertBlockingThreshold, 1, int.MaxValue, BlockingPageRule.CountThresholdDefault);
         AlertDeadlockThreshold = Clamp(AlertDeadlockThreshold, 1, int.MaxValue, 1);
         AlertPoisonWaitThresholdMs = Clamp(AlertPoisonWaitThresholdMs, 1, int.MaxValue, 500);
         AlertLongRunningQueryThresholdMinutes = Clamp(AlertLongRunningQueryThresholdMinutes, 1, int.MaxValue, 30);
