@@ -68,6 +68,20 @@ VALUES ($1, $2, 'Srv', $3, 0, 0, $4, $5, $6, $7, $8)";
             serverId, Fire, Resolution, Now - (window ?? TimeSpan.FromMinutes(15)), countMuted, untilUtc: until);
 
     [Fact]
+    public async Task DigestRows_NeverSeedATier_OrAnOpenFire()
+    {
+        // #7086: the same case as the Darling store's live test. A held fire is a digest row that paged nobody.
+        await InsertAsync(Now.AddMinutes(-2), Fire, Critical, sent: false, type: "digest");
+        Assert.Null(await ReadAsync());
+        Assert.Null(await _store.GetOpenFireAsync("7", Fire, new[] { Resolution }, null, Now));
+        Assert.Empty((await _store.GetStandingAsync("7", Fire, new[] { Resolution }, null, Now)).Fires);
+
+        await InsertAsync(Now.AddMinutes(-6), Fire, Warning);
+        Assert.Equal(AlertSeverityLevel.Warning, await ReadAsync());
+        Assert.Equal(Warning, (await _store.GetOpenFireAsync("7", Fire, new[] { Resolution }, null, Now))!.ContextJson);
+    }
+
+    [Fact]
     public void TheStoreOverridesTheInterfaceDefault()
     {
         var map = typeof(DuckDbAlertHistoryStore).GetInterfaceMap(typeof(IAlertHistoryStore));
