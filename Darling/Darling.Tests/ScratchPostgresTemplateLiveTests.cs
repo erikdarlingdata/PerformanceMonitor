@@ -145,4 +145,34 @@ public sealed class ScratchPostgresTemplateLiveTests
         var rebuilt = await ScratchPostgres.GetTemplateAsync(ownBase, ct);
         Assert.NotEqual(template.Name, rebuilt.Name);
     }
+
+    /// <summary>
+    /// A template build that fails is not cached: the next call builds again instead of failing every test left in the
+    /// process. The role does not exist, so the build fails at its first connect, on any cluster; the application name
+    /// and the role give it a template key of its own. A cached failure would hand back the same exception object, a
+    /// second build throws a new one, so nothing here depends on timing.
+    /// </summary>
+    [Fact]
+    public async Task AFailedTemplateBuild_IsNotCached_AndTheNextCallBuildsAgain()
+    {
+        var baseConnectionString = BaseConnectionString();
+        var ct = TestContext.Current.CancellationToken;
+        var failing = new NpgsqlConnectionStringBuilder(baseConnectionString)
+        {
+            Username = "no_such_role_7097",
+            ApplicationName = nameof(AFailedTemplateBuild_IsNotCached_AndTheNextCallBuildsAgain),
+            Timeout = 5,
+        }.ConnectionString;
+
+        try
+        {
+            var first = await Assert.ThrowsAnyAsync<Exception>(() => ScratchPostgres.GetTemplateAsync(failing, ct));
+            var second = await Assert.ThrowsAnyAsync<Exception>(() => ScratchPostgres.GetTemplateAsync(failing, ct));
+            Assert.NotSame(first, second);
+        }
+        finally
+        {
+            ScratchPostgres.ForgetRememberedFor(failing);
+        }
+    }
 }

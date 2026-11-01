@@ -372,6 +372,22 @@ internal sealed class ScratchPostgres : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Forgets every pending drop made through <paramref name="baseConnectionString"/>. For a test that mints through a
+    /// connection string that can never create a database (so none exists), where the exit drain's drop would only fail
+    /// and report a leak.
+    /// </summary>
+    internal static void ForgetRememberedFor(string baseConnectionString)
+    {
+        foreach (var (name, entry) in Remembered.ToArray())
+        {
+            if (entry.AdminConnectionString == baseConnectionString)
+            {
+                Remembered.TryRemove(name, out _);
+            }
+        }
+    }
+
     /// <summary>Total time <see cref="QuiesceTimescaleJobsAsync"/> may spend before it lets the drop go ahead.</summary>
     internal static readonly TimeSpan QuiesceCap = TimeSpan.FromSeconds(10);
 

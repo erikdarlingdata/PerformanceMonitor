@@ -59,8 +59,8 @@ public sealed class ProcedureStatsTotalsWriterLiveTests
 
         public static async Task<Rig> OpenAsync(int serverId, string serverName, CancellationToken ct, bool timescale = false, bool plainStore = false)
         {
-            /* plainStore: the test's subject is a store WITHOUT TimescaleDB (the sweep run with its timescale flag off); CreateAsync enables the extension by default (#6317). */
-            var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct, plainPostgres: plainStore);
+            /* plainStore: the test's subject is a store WITHOUT TimescaleDB (the sweep run with its timescale flag off); CreateAsync enables the extension by default (#6317). emptyStore: the test migrates (and, for timescale, converts) the store itself, and some tests stage a legacy schema first, so it must not start from the migrated template (#7097). */
+            var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct, plainPostgres: plainStore, emptyStore: true);
             var connection = new NpgsqlConnection(scratch.ConnectionString);
             await connection.OpenAsync(ct);
             await PgMigrations.MigrateAsync(connection, ct);
