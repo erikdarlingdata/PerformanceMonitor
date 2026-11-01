@@ -86,8 +86,10 @@ public sealed record AlertDelivery
     /// the finding is persisted, visible on the web and MCP surfaces the instant it fired, and named in the
     /// digest under the same dedup key a page would have carried. The row's context JSON carries the
     /// <see cref="AlertContext.Routing"/> record with the reason (a lone fact, no matched co-fire check), so
-    /// "why didn't this page" is answered by the row. Written only by the analysis-finding senders; an engine
-    /// alert never carries it.</summary>
+    /// "why didn't this page" is answered by the row. Written by the analysis-finding senders, and (#7086) by
+    /// an engine alert the evaluator held back from paging (<see cref="AlertHold"/> on
+    /// <c>AlertOutcome.Hold</c>): the deliverer records the fire as a digest row, sends nothing, and the
+    /// standing-fire reads leave the row out so a restart never seeds a tier or an open fire from it.</summary>
     public const string ChannelDigest = "digest";
 
     public const string ChannelEmail = "email";

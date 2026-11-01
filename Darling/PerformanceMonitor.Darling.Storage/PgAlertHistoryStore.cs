@@ -251,6 +251,7 @@ AND   metric_name = $2
 AND   alert_time >= COALESCE($3, '-infinity'::timestamp)
 AND   alert_time < COALESCE($4, 'infinity'::timestamp)"
             + AlertHistoryEscalationSeed.KeepUnlessEveryChannelFailedFilter
+            + AlertHistoryEscalationSeed.ExcludeDigestFilter
             + (countMuted ? "" : AlertHistoryEscalationSeed.ExcludeMutedFilter)
             + "\nORDER BY alert_time DESC\nLIMIT " + StandingRowCap.ToString(CultureInfo.InvariantCulture), connection) { CommandTimeout = _commandTimeoutSeconds })
         {
