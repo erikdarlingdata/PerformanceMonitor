@@ -138,14 +138,20 @@ Scheduled analysis: the triage engine runs per server on a cadence, persists its
 
 **Escalation is the corroboration event.** A single that later gains a fact or a matched check pages at that moment as a NEW firing — the digest route cools in its own key namespace and digest rows are excluded from the page cooldown's restart seed, so an earlier digest entry can never be the cooldown that eats the page. An uncorroborated single riding in an incident with a corroborated finding is named on that page as co-fired, exactly as before.
 
-**The Daily Digest** is the third daily document beside the Collector Cost Digest and the Fleet Sweep Rollup. It is where an alert that was held back from paging reaches a person. Its metric name is `Analysis Singles Digest` (the name notification routes, mute rules and webhook automations match on, kept from before the digest also carried held alerts), and its title on email, Slack and Teams is "Daily Digest". It runs whenever alerts are on, goes out through the `reports` family at INFO once per trailing day, keeps a delivered-today stamp in the store, and posts nothing on a day with nothing to report.
+**The Daily Digest** is the third daily document beside the Collector Cost Digest and the Fleet Sweep Rollup. It is where an alert that was held back from paging reaches a person. Its metric name is `Analysis Singles Digest`. Notification routes, mute rules and webhook automations match on that name, so it stays as it was before the digest also carried held alerts. Its title on email, Slack and Teams is "Daily Digest".
 
-An alert can be held back instead of paged: a first failure that has not repeated, or a small event below the paging bar. A held alert is recorded in Alert History with the status Digest and the reason on the row (`routing_reason`), and nothing is sent. The digest has two sections.
+The digest goes out through the `reports` family at INFO, once per trailing day, whenever alerts are on. A delivered-today stamp in the store keeps it to one per day, and a day with nothing to report posts nothing.
 
-- **Held back from paging.** One line per server and metric: how many were held, the first and last time (UTC), and the reason stored with the newest one. Example: `Prod-1 - Runnable Queue Warning: 3 held, first 2026-11-01 02:10 UTC, last 2026-11-01 09:40 UTC. <reason>`.
-- **Analysis singles.** The top movers by severity and a by-family, by-server breakdown, each line carrying the same alert-history key (`Analysis: <category> [<hash>]`) and #1140 dedup fingerprints a page would have carried, so any single can be promoted to a full drill-down.
+An alert can be held back instead of paged: a first failure that has not repeated, or a small event below the paging bar. A held alert is recorded in Alert History with the status Digest and the reason on the row (`routing_reason`). Nothing is sent. The digest has two sections.
 
-The short message counts both, for example "12 held alerts and 30 analysis singles across 9 servers". A day with only one kind shows only that section. A condition that later meets its paging bar pages at that moment as its own alert, so nothing in the digest waits on it. A mute rule wins over a hold: a muted alert is recorded as muted and is not in the digest. To keep one metric out of the digest, mute it. To change where the digest goes, edit the route for the `reports` family. Lite has no daily digest, and its Daily Summary leaves held alerts out of its count.
+- **Held back from paging.** One line per server and metric. It gives how many were held, the first and last time (UTC), and the reason stored with the newest one. Example: `Prod-1 - Runnable Queue Warning: 3 held, first 2026-11-01 02:10 UTC, last 2026-11-01 09:40 UTC. <reason>`.
+- **Analysis singles.** The top movers by severity, then a breakdown by family and server. Each line carries the alert-history key (`Analysis: <category> [<hash>]`) and the #1140 dedup fingerprints of the finding. Use them to open the full drill-down.
+
+The short message counts both, for example "12 held alerts and 30 analysis singles across 9 servers". A day with only one kind shows only that section. A condition that later meets its paging bar pages at that moment as its own alert, so nothing in the digest waits on it.
+
+A mute rule wins over a hold: a muted alert is recorded as muted and is not in the digest. To keep one metric out of the digest, mute it. To change where the digest goes, edit the route for the `reports` family. Lite has no daily digest, and its Daily Summary leaves held alerts out of its count.
+
+The Daily Health Report shows the held part of a metric's count, as in `Blocking Detected x12 (9 held)`. A metric with no held alerts reads as before.
 
 ## Daily Health Report
 
@@ -162,7 +168,7 @@ The Daily Health Report ([#7041](https://github.com/erikdarlingdata/PerformanceM
 
 The columns arrive with store schema V232. A time that is not `HH:mm`, a zone the machine does not know and a title that is blank, over 100 characters or holds a control character are refused, and nothing is written. A refusal names the field. `update_alert_settings` and the web editor check a zone against the service host. The Viewer checks it against the machine it runs on, and a stored id the service host does not know is read as the host's own zone.
 
-**What it contains.** A fleet header, then each server worst first. Each server shows the day's health band and its reasons. It then lists the alerts that fired (a metric whose alerts were held back from paging shows the held part, as in `Blocking Detected x12 (9 held)`, and the Daily Digest carries those), failed Agent jobs, databases past the full backup, log backup or CHECKDB bar, low disk space and collection problems. A healthy server takes one line. The report is built only from data the store already holds, so it adds no load on a monitored server. PostgreSQL targets show the sections that apply to them: failed jobs, database protection and low disk are SQL Server only.
+**What it contains.** A fleet header, then each server worst first. Each server shows the day's health band and its reasons. It then lists the alerts that fired, failed Agent jobs, databases past the full backup, log backup or CHECKDB bar, low disk space and collection problems. A healthy server takes one line. The report is built only from data the store already holds, so it adds no load on a monitored server. PostgreSQL targets show the sections that apply to them: failed jobs, database protection and low disk are SQL Server only.
 
 - **The band** is the same 24-hour band the fleet overview card shows for the server, not a second grading.
 - **Collection problems and database protection** are read as the store holds them when the report is built. They are not rebuilt as they stood at the end of the 24 hours. For the scheduled report that is the same moment. For an earlier day read with `get_daily_health_report`, they are today's.
