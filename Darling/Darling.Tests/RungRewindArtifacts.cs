@@ -623,6 +623,10 @@ ALTER TABLE IF EXISTS config.investigation_request_alerts DROP COLUMN IF EXISTS 
     DROP COLUMN IF EXISTS daily_report_send_at,
     DROP COLUMN IF EXISTS daily_report_time_zone,
     DROP COLUMN IF EXISTS daily_report_title;"),
+        // V233 (#6979): the report notice setting on the notification routes. The column is the probe's newest sentinel. The rewind drops the
+        // column (its CHECK goes with it), so a re-run of V233 does everything again. Safe on a store that never had it.
+        new(233, "hasReportNotice",
+            @"ALTER TABLE config.config_notification_routes DROP COLUMN IF EXISTS report_notice;"),
     ];
 
     /// <summary>

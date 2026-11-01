@@ -2981,6 +2981,7 @@ $rung$;";
         new Migration(230, "blocking-band-snapshot-wait-tiers", V230Sql),
         new Migration(231, "mute-rule-recurrence", V231Sql),
         new Migration(232, "daily-health-report", V232Sql),
+        new Migration(233, "notification-route-report-notice", V233Sql),
     };
 
     /// <summary>
@@ -3152,6 +3153,28 @@ ALTER TABLE config.config_alert_settings
     ADD COLUMN IF NOT EXISTS daily_report_time_zone text;
 ALTER TABLE config.config_alert_settings
     ADD COLUMN IF NOT EXISTS daily_report_title text;";
+
+    /// <summary>
+    /// V233 (#6979): <c>config.config_notification_routes.report_notice</c>, whether a route posts a chat notice when an agent files its report
+    /// on an investigation request: <c>off</c> (the default, which is what every route did before), <c>needs_person_or_change</c> (a report
+    /// with the needs_person verdict, or one whose request made at least one agent change) or <c>all</c>. NOT NULL with the default, so every
+    /// stored route reads <c>off</c> and keeps its effect, and a CHECK holds the three words. Idempotent: the column and the constraint are each
+    /// added only when absent. No backfill and no view refresh: a registry table. Table-level grants already cover a new column on this table.
+    /// An older build ignores the column.
+    /// </summary>
+    private const string V233Sql = @"
+ALTER TABLE config.config_notification_routes
+    ADD COLUMN IF NOT EXISTS report_notice text NOT NULL DEFAULT 'off';
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_config_notification_routes_report_notice'
+                   AND conrelid = 'config.config_notification_routes'::regclass) THEN
+        ALTER TABLE config.config_notification_routes
+            ADD CONSTRAINT ck_config_notification_routes_report_notice
+            CHECK (report_notice IN ('off', 'needs_person_or_change', 'all'));
+    END IF;
+END
+$$;";
 
     /// <summary>
     /// V189 (#5867): <c>collect.query_store_compose_stamp_failures</c>, the failure record of the Query Store compose builder: one row
