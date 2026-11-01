@@ -135,6 +135,12 @@ public sealed class WebExceptionTextCensusTests
         ),
         (
             Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs"),
+            "[\"message\"] = result.Message",
+            "#7109: PressJson's ProposalPressResult.Message (DarlingWebEndpoints.Proposals.cs) - the press's own refusal sentence or the " +
+            "server-action writer's outcome sentence, which the MCP tools answer too. ActionProposalPress sends an exception only to its log."
+        ),
+        (
+            Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs"),
             "invalid.Message",
             "CustomViewResult.Invalid / CustomAlertRuleResult.Invalid's own validation text (400 body) " +
             "— the store-write layer's own sentence, never ex.Message."
