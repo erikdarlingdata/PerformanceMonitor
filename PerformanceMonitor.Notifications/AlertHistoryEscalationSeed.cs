@@ -34,6 +34,10 @@ public static class AlertHistoryEscalationSeed
     /// </summary>
     public static DateTime TruncateToMicroseconds(DateTime value) => new(value.Ticks - (value.Ticks % 10), value.Kind);
 
+    /// <summary>A fire is open unless a resolution row is as new as it or newer (a tie closes it). The one tie rule, shared by
+    /// the tier seed above and <see cref="IAlertHistoryStore.GetOpenFireAsync"/> in both stores.</summary>
+    public static bool IsOpen(DateTime fireAtUtc, DateTime? resolvedAtUtc) => resolvedAtUtc is not { } resolved || resolved < fireAtUtc;
+
     /// <summary>
     /// The tier to seed: the tier of the newest fire row (<paramref name="fireAtUtc"/>, read from its
     /// <paramref name="contextJson"/> the way <c>AlertHistoryRowSeverity.FiredAt</c> does), or null when there is no
@@ -54,7 +58,7 @@ public static class AlertHistoryEscalationSeed
             return null;
         }
 
-        if (resolvedAtUtc is { } resolved && resolved >= fired)
+        if (!IsOpen(fired, resolvedAtUtc))
         {
             return null;
         }

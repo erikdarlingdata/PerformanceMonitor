@@ -483,6 +483,8 @@ public sealed class AlertEngineTests
         public AlertReadFailureCounter? ReadFailures { get; set; }
         /// <summary>#5715 part B: the alert-history reader that seeds the escalation tier; null (the default) leaves the engine memory-only.</summary>
         public Func<EscalationSeedQuery, CancellationToken, Task<AlertSeverityLevel?>>? EscalationSeedReader { get; set; }
+        /// <summary>#7068: the alert-history reader that tells a standing Volume Free Space or PVS incident it is already open; null (the default) is the engine before #7068.</summary>
+        public Func<OpenFireQuery, CancellationToken, Task<AlertHistoryFire?>>? OpenFireReader { get; set; }
         /// <summary>#5910: the threshold overrides; null (the default) is the engine before #5910, so every pin above is unchanged.</summary>
         public IAlertThresholdOverrides? Overrides { get; set; }
 
@@ -516,7 +518,8 @@ public sealed class AlertEngineTests
             utcNow: () => Now,
             readFailures: ReadFailures,
             escalationSeedReader: EscalationSeedReader,
-            overrides: Overrides);
+            overrides: Overrides,
+            openFireReader: OpenFireReader);
 
         /* #3282: every snapshot gets a DISTINCT, increasing CPU sample instant unless the test says
            otherwise, because that is the realistic case — the sweep sees a new ring-buffer sample each

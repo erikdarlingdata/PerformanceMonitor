@@ -350,6 +350,19 @@ AND   metric_name = $2"
         string serverId, string metricName, string resolutionMetricName, DateTime sinceUtc, bool countMuted = true,
         AlertSeverityLevel? tierWhenRowCarriesNone = null, DateTime? untilUtc = null)
     {
+        /* #7068: the one read of "the newest fire that no resolution closed" now serves the tier seed and the standing-incident seed. */
+        var fire = await GetOpenFireAsync(serverId, metricName, new[] { resolutionMetricName }, sinceUtc, untilUtc, countMuted);
+        return fire is null ? null : AlertContextSerializer.TryReadSeverity(fire.ContextJson) ?? tierWhenRowCarriesNone;
+    }
+
+    /// <summary>
+    /// #7068: the newest fire row (inside the optional window, before the exclusive <paramref name="untilUtc"/>) that no
+    /// resolution row closed. See <see cref="IAlertHistoryStore.GetOpenFireAsync"/>. A failed read THROWS (no catch here).
+    /// </summary>
+    public async Task<AlertHistoryFire?> GetOpenFireAsync(
+        string serverId, string metricName, System.Collections.Generic.IReadOnlyList<string> resolutionMetricNames,
+        DateTime? sinceUtc, DateTime? untilUtc, bool countMuted = true)
+    {
         /* Same identity scope as GetLastEmailSentUtcAsync (#3456). */
         var sid = AlertHistoryServerIdentity.SeedScope(serverId);
         if (sid is null) return null;
@@ -366,54 +379,62 @@ AND   metric_name = $2"
         using var connection = duckDb.CreateConnection();
         await connection.OpenAsync();
 
-        /* v_config_alert_log = live UNION ALL archive (#4887), so a reset cannot hide a fire or a resolution. */
+        /* v_config_alert_log = live UNION ALL archive (#4887), so a reset cannot hide a fire or a resolution. "No bound" is
+           a far-past or far-future instant, so the statement keeps one shape. */
         using var fireCommand = connection.CreateCommand();
         fireCommand.CommandText = @"
-SELECT alert_time, context_json
+SELECT alert_time, current_value, context_json
 FROM v_config_alert_log
 WHERE server_id = $1
 AND   metric_name = $2
-AND   alert_time >= $3"
-            + (untilUtc is null ? "" : "\nAND   alert_time < $4")
+AND   alert_time >= $3
+AND   alert_time < $4"
             + AlertHistoryEscalationSeed.KeepUnlessEveryChannelFailedFilter
             + (countMuted ? "" : AlertHistoryEscalationSeed.ExcludeMutedFilter)
             + "\nORDER BY alert_time DESC\nLIMIT 1";
         fireCommand.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = sid.Value });
         fireCommand.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = metricName });
-        fireCommand.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = AlertHistoryEscalationSeed.TruncateToMicroseconds(sinceUtc) });
-        if (untilUtc is { } until)
-        {
-            /* #5715 round 1: exclusive, microsecond like the column; a row at or after the engine start is this process's own. */
-            fireCommand.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = AlertHistoryEscalationSeed.TruncateToMicroseconds(until) });
-        }
+        fireCommand.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter
+            { Value = sinceUtc is { } since ? AlertHistoryEscalationSeed.TruncateToMicroseconds(since) : new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Unspecified) });
+        /* #5715 round 1: exclusive, microsecond like the column; a row at or after the engine start is this process's own. */
+        fireCommand.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter
+            { Value = untilUtc is { } until ? AlertHistoryEscalationSeed.TruncateToMicroseconds(until) : new DateTime(9000, 1, 1, 0, 0, 0, DateTimeKind.Unspecified) });
 
         DateTime? fireAt = null;
+        double currentValue = 0;
         string? contextJson = null;
         using (var reader = await fireCommand.ExecuteReaderAsync())
         {
             if (await reader.ReadAsync())
             {
                 fireAt = DateTime.SpecifyKind(reader.GetDateTime(0), DateTimeKind.Utc);
-                contextJson = reader.IsDBNull(1) ? null : reader.GetString(1);
+                currentValue = reader.IsDBNull(1) ? 0 : reader.GetDouble(1);
+                contextJson = reader.IsDBNull(2) ? null : reader.GetString(2);
             }
         }
 
-        if (fireAt is null) return null;
+        if (fireAt is not { } fired) return null;
 
-        using var resolutionCommand = connection.CreateCommand();
-        resolutionCommand.CommandText = @"
+        DateTime? resolvedAt = null;
+        foreach (var resolutionName in resolutionMetricNames)
+        {
+            using var resolutionCommand = connection.CreateCommand();
+            resolutionCommand.CommandText = @"
 SELECT MAX(alert_time)
 FROM v_config_alert_log
 WHERE server_id = $1
 AND   metric_name = $2";
-        resolutionCommand.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = sid.Value });
-        resolutionCommand.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = resolutionMetricName });
-        var resolved = await resolutionCommand.ExecuteScalarAsync();
-        DateTime? resolvedAt = resolved == null || resolved == DBNull.Value
-            ? null
-            : DateTime.SpecifyKind(Convert.ToDateTime(resolved), DateTimeKind.Utc);
+            resolutionCommand.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = sid.Value });
+            resolutionCommand.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = resolutionName });
+            var resolved = await resolutionCommand.ExecuteScalarAsync();
+            if (resolved != null && resolved != DBNull.Value)
+            {
+                var at = DateTime.SpecifyKind(Convert.ToDateTime(resolved), DateTimeKind.Utc);
+                if (resolvedAt is null || at > resolvedAt) resolvedAt = at;
+            }
+        }
 
-        return AlertHistoryEscalationSeed.Resolve(fireAt, contextJson, resolvedAt, tierWhenRowCarriesNone);
+        return AlertHistoryEscalationSeed.IsOpen(fired, resolvedAt) ? new AlertHistoryFire(fired, currentValue, contextJson) : null;
     }
 
     /// <summary>

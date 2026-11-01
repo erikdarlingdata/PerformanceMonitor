@@ -136,7 +136,28 @@ public interface IAlertHistoryStore
         string serverId, string metricName, string resolutionMetricName, DateTime sinceUtc, bool countMuted = true,
         AlertSeverityLevel? tierWhenRowCarriesNone = null, DateTime? untilUtc = null) =>
         Task.FromResult<AlertSeverityLevel?>(null);
+
+    /// <summary>
+    /// #7068: the newest FIRE row for (<paramref name="serverId"/>, <paramref name="metricName"/>) that no resolution row
+    /// closed, with the value it was written at and its context JSON, or null. Seeds a standing alert's "already told" state
+    /// across a restart: a Volume Free Space or Version Store (PVS) condition that has stood for days must not read as a new
+    /// incident each time the service starts. The row is the newest one before <paramref name="untilUtc"/> (EXCLUSIVE, the
+    /// engine's start: a later row is this process's own) and, when <paramref name="sinceUtc"/> is given, at or after it.
+    /// <para>Open means no row under any of <paramref name="resolutionMetricNames"/> is as new as the fire (a tie closes it,
+    /// as <see cref="AlertHistoryEscalationSeed.Resolve"/> has it). A fire whose every attempted channel failed is skipped
+    /// (<see cref="AlertHistoryEscalationSeed.KeepUnlessEveryChannelFailedFilter"/>), so the retry still fires; a muted fire
+    /// counts unless <paramref name="countMuted"/> is false. Server identity is scoped as
+    /// <see cref="GetLastEmailSentUtcAsync"/> scopes it. A failed read THROWS, like <see cref="GetLastFiredTierAsync"/>.</para>
+    /// </summary>
+    Task<AlertHistoryFire?> GetOpenFireAsync(
+        string serverId, string metricName, System.Collections.Generic.IReadOnlyList<string> resolutionMetricNames,
+        DateTime? sinceUtc, DateTime? untilUtc, bool countMuted = true) =>
+        Task.FromResult<AlertHistoryFire?>(null);
 }
+
+/// <summary>#7068: one fire row read back by <see cref="IAlertHistoryStore.GetOpenFireAsync"/>: when it was written, the
+/// numeric value it carried (the worst volume's free percent, the worst database's PVS percent) and its context JSON.</summary>
+public sealed record AlertHistoryFire(DateTime FireAtUtc, double CurrentValue, string? ContextJson);
 
 /// <summary>
 /// One alert event to persist. Carries both the display strings (Dashboard

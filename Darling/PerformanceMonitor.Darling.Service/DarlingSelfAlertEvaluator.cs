@@ -157,6 +157,8 @@ internal sealed class DarlingSelfAlertEvaluator
     private readonly ConcurrentDictionary<string, DateTime> _lastCollectionStoppedAlert = new();
     private readonly ConcurrentDictionary<string, bool> _activeCaptureDown = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastCaptureDownAlert = new();
+    /* #7068: servers whose first Capture Down verdict of this process was taken (seeded from history or seen clear). */
+    private readonly ConcurrentDictionary<string, bool> _captureDownSeedDone = new();
     /* #6912: the captures named by the last pass that found any down, so a recovery can say which came back. */
     private readonly ConcurrentDictionary<string, string> _lastCaptureDownList = new();
     private readonly ConcurrentDictionary<string, bool> _activeAgentDown = new();
@@ -1949,6 +1951,33 @@ internal sealed class DarlingSelfAlertEvaluator
 
         if (missing.Count > 0)
         {
+            /* #7068: the first sweep of this process that finds a capture down. The stamp below is in memory, so a restart in the
+               middle of a standing condition read it as a new entry and announced it again (a fresh history row and trigger
+               line every start). An open Capture Down fire row (no Capture Restored or Capture Cleared newer) is that same
+               condition: its time becomes the stamp, and the alert repeats only per connection_refire_minutes as it would
+               have without the restart. A failed read, or a clear this process already saw, seeds nothing. */
+            if (_captureDownSeedDone.TryAdd(key, true) && !_activeCaptureDown.ContainsKey(key))
+            {
+                try
+                {
+                    var standing = await _historyStore.GetOpenFireAsync(
+                        key, CaptureDownMetric, new[] { "Capture Restored", "Capture Cleared" }, null, _serviceStartUtc);
+                    if (standing is not null)
+                    {
+                        _lastCaptureDownAlert[key] = standing.FireAtUtc;
+                    }
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    _captureDownSeedDone.TryRemove(key, out _);
+                    _logger?.LogWarning("Could not read the open Capture Down incident from alert history for server {ServerId}; a standing capture-down may be announced again after this restart: {Message}", serverId, ex.Message);
+                }
+            }
+
             _activeCaptureDown[key] = true;
             var list = string.Join(" and ", missing);
             _lastCaptureDownList[key] = list;
@@ -1977,6 +2006,11 @@ internal sealed class DarlingSelfAlertEvaluator
 
                 NoteStateSend(CaptureDownMetric, key, delivery);
             }
+        }
+        else if (_captureDownSeedDone.TryAdd(key, true) && !_activeCaptureDown.ContainsKey(key))
+        {
+            /* #7068: this process saw the captures running before it ever saw one down; an open fire row left in the history is not
+               this condition's (nothing wrote its Capture Restored while the service was down). */
         }
         else if (_activeCaptureDown.TryRemove(key, out var was) && was)
         {

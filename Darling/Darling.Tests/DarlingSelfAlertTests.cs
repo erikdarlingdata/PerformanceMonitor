@@ -217,6 +217,18 @@ public sealed class DarlingSelfAlertTests
             return Task.CompletedTask;
         }
 
+        /// <summary>#7068: the open fire row the history answers <c>GetOpenFireAsync</c> with (null: none), and the metrics asked.</summary>
+        public AlertHistoryFire? OpenFire { get; set; }
+
+        public List<string> OpenFireAsked { get; } = new();
+
+        public Task<AlertHistoryFire?> GetOpenFireAsync(
+            string serverId, string metricName, IReadOnlyList<string> resolutionMetricNames, DateTime? sinceUtc, DateTime? untilUtc, bool countMuted = true)
+        {
+            OpenFireAsked.Add(metricName);
+            return Task.FromResult(OpenFire);
+        }
+
         public Task<DateTime?> GetLastEmailSentUtcAsync(string serverId, string metricName, string? dedupKey = null) =>
             Task.FromResult<DateTime?>(null);
 

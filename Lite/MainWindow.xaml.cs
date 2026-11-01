@@ -458,6 +458,8 @@ public partial class MainWindow : Window
                 logger: new AppLoggerAdapter<AlertEngine>(),
                 /* #5715 part B: a Warning delivered before a restart still lets the Critical through at once. */
                 escalationSeedReader: PerformanceMonitor.Alerting.EscalationSeed.ReaderFor(_alertHistoryStore),
+                /* #7068: a standing Volume Free Space or PVS condition is not announced again after a restart. */
+                openFireReader: PerformanceMonitor.Alerting.EscalationSeed.OpenFireReaderFor(_alertHistoryStore),
                 /* #3013: the process counter every swallowed condition read is tallied on, which
                    get_collection_health's alert_read_health block reads back. Lite's alert reads hit the
                    local DuckDB store rather than a Postgres one, so the deadline mechanism #3013 measured
