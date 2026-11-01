@@ -497,7 +497,7 @@ public static partial class DarlingWebEndpoints
                     requestId = parsed;
                 }
 
-                var read = await changes.ReadAsync(AgentChangesLimit, context.RequestAborted, requestId);
+                var read = await changes.ReadAsync(AgentChangesLimit, requestId, context.RequestAborted);
                 var canDecide = await AdminChanges(context).CanDecideAsync(context.RequestAborted);
                 return DarlingWebStatementSweep.JsonText(
                     AgentChangesBody(read, canDecide, DateTime.UtcNow), "/api/agent-changes", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);

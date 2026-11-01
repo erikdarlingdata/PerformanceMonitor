@@ -12,10 +12,12 @@ using System.Globalization;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Investigations;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
@@ -103,8 +105,26 @@ public sealed class ReportNoticeDeliveryLiveTests
         public string TriageBaseUrl => "";
     }
 
-    private static NotificationRoute Route(int routeId, string slack = "", string teams = "", bool enabled = true, string[]? off = null) =>
-        new(routeId, "High CPU", teams, slack, "", "", "", Enabled: enabled)
+    /// <summary>Keeps every entry written at Warning or above, from whichever component shares it.</summary>
+    private sealed class CaptureLogger : ILogger<WebhookAlertService>
+    {
+        public List<string> Problems { get; } = [];
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            if (logLevel >= LogLevel.Warning)
+            {
+                Problems.Add(formatter(state, exception));
+            }
+        }
+    }
+
+    private static NotificationRoute Route(int routeId, string slack = "", string teams = "", bool enabled = true, string[]? off = null, string match = "High CPU") =>
+        new(routeId, match, teams, slack, "", "", "", Enabled: enabled)
         {
             AgentLevel = NotificationRoute.AgentLevelInvestigate, AgentMaxPerHour = 50, AgentMaxPerDay = 500, OffChannels = off,
         };
@@ -307,7 +327,94 @@ public sealed class ReportNoticeDeliveryLiveTests
             var settings = why is "slack_off" ? new Settings(slackUrl: ParentSlack) : new Settings();
             Assert.Equal(0, (await Delivery(store, notices, routes, settings).RunOnceAsync(ct)).Notices);
             Assert.Empty(notices.Sent);
-            Assert.Equal("0", await ScalarAsync(connection, "SELECT count(*) FROM config.investigation_journal WHERE event = 'report_notice_sent'", ct));
+
+            /* A route with nowhere to send marks the report (#6979), so a later pass does not read it again; a disabled or gone route does not. */
+            var marked = why is "slack_off" or "nowhere";
+            Assert.Equal(marked ? "1" : "0", await ScalarAsync(connection, "SELECT count(*) FROM config.investigation_journal WHERE event = 'report_notice_sent'", ct));
+            Assert.Equal(marked ? InvestigationEventDelivery.NoReportNoticeDestination : null,
+                await ScalarAsync(connection, "SELECT reason FROM config.investigation_journal WHERE event = 'report_notice_sent'", ct));
+        });
+    }
+
+    [Fact]
+    public async Task AReportWithNoDestination_IsMarkedOnce_AndALaterPassDoesNotReadItAgain()
+    {
+        await RunAsync(async (store, connection, ct) =>
+        {
+            await ReportedAsync(store, connection, 1, "all", "needs_person", "cause", ct);
+            var notices = new FakeNotices();
+            var delivery = Delivery(store, notices, [Route(1)]);
+
+            Assert.NotEmpty(await store.PendingReportNoticesAsync(_now.AddMinutes(-30), 100, ct));
+            await delivery.RunOnceAsync(ct);
+
+            Assert.Empty(await store.PendingReportNoticesAsync(_now.AddMinutes(-30), 100, ct));
+            Assert.Empty(notices.Sent);
+        });
+    }
+
+    [Fact]
+    public async Task ARouteEditedSoItNoLongerMatchesTheRequest_StillSendsToItsOwnChannel_NotTheParent()
+    {
+        await RunAsync(async (store, connection, ct) =>
+        {
+            /* The request opened on "High CPU"; the route now matches another metric. The resolver would drop it and use the parent channel. */
+            await ReportedAsync(store, connection, 1, "all", "real", "cause", ct);
+            var notices = new FakeNotices();
+
+            await Delivery(store, notices, [Route(1, slack: RouteSlack, match: "Blocking")], new Settings(slackUrl: ParentSlack)).RunOnceAsync(ct);
+
+            Assert.Equal([("Slack", RouteSlack)], notices.Sent.Select(x => (x.Channel, x.Destination)).ToArray());
+        });
+    }
+
+    [Fact]
+    public async Task WithMaskLiterals_APostedNoticeCarriesNoLiteral()
+    {
+        await RunAsync(async (store, connection, ct) =>
+        {
+            var request = await ReportedAsync(store, connection, 1, "all", "real", "Blocked by 'alice' on 42 rows", ct);
+            await AddChangeAsync(connection, request, 1, "create_plan_guide", "guide 'carol' 5", "Sales", "action_done", ct);
+            var notices = new FakeNotices();
+
+            await Delivery(store, notices, [Route(1, slack: RouteSlack, teams: "https://hooks.example/route-teams")],
+                dataDetail: McpDataDetail.MaskLiterals).RunOnceAsync(ct);
+
+            var content = notices.Sent.Select(x => x.Content).First();
+            var posted = new[]
+            {
+                WebhookAlertService.BuildReportNoticeSlackPayload(content, DarlingAlertDeliverer.Branding),
+                WebhookAlertService.BuildReportNoticeTeamsPayload(content),
+            };
+            foreach (var text in posted)
+            {
+                Assert.Contains("Blocked by", text, StringComparison.Ordinal);
+                Assert.DoesNotContain("alice", text, StringComparison.Ordinal);
+                Assert.DoesNotContain("carol", text, StringComparison.Ordinal);
+            }
+        });
+    }
+
+    [Fact]
+    public async Task AFailedSend_IsLoggedOnce_WithTheRequestIdTheChannelAndTheError()
+    {
+        await RunAsync(async (store, connection, ct) =>
+        {
+            var request = await ReportedAsync(store, connection, 1, "all", "real", "cause", ct);
+            var logger = new CaptureLogger();
+
+            /* The real sender, to a closed local port: the service and the pass share one logger, so a second log line would show. */
+            var service = new WebhookAlertService(new DarlingAlertSettings(new DarlingConfig()), DarlingAlertDeliverer.Branding, logger);
+            var delivery = new InvestigationEventDelivery(store, () => [Route(1, slack: "http://127.0.0.1:1/hook")], new QuietSends(), null, logger,
+                () => _now, service, new Settings(), McpDataDetail.Full, () => "https://dash.example");
+
+            Assert.Equal(0, (await delivery.RunOnceAsync(ct)).Notices);
+
+            var line = Assert.Single(logger.Problems);
+            Assert.Contains(request.ToString(), line, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("Slack", line, StringComparison.Ordinal);
+            var failure = Assert.Single(service.GetChannelFailureCounts(), c => c.Channel == "Slack");
+            Assert.Equal(1, failure.ConsecutiveFailures);
         });
     }
 

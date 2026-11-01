@@ -266,6 +266,9 @@ public sealed class InvestigationEventDelivery
 
     private const string NeedsPersonVerdict = "needs_person";
 
+    /// <summary>#6979: the reason of the mark a qualifying report gets when its route has no Slack or Teams destination.</summary>
+    internal const string NoReportNoticeDestination = "no_destination";
+
     /// <summary>#6979: the report notices this pass sends. Answers how many reports reached at least one channel.</summary>
     private async Task<int> NoticePassAsync(IReadOnlyList<NotificationRoute> routes, CancellationToken cancellationToken)
     {
@@ -295,17 +298,20 @@ public sealed class InvestigationEventDelivery
             return false;
         }
 
-        /* A route that is gone or disabled, or that has nowhere to send, writes no mark: the report stays a candidate for the rest of
-           its window, so a destination set within it still gets the notice, and no mark claims a notice that was never sent. */
+        /* A route that is gone or disabled writes no mark (the SQL leaves a disabled one out): a gone route's report stays a
+           candidate for the rest of its window. */
         var route = routes.FirstOrDefault(r => r.RouteId == candidate.RouteId);
         if (route is null || !route.Enabled)
         {
             return false;
         }
 
-        var targets = ReportNoticeTargets(route, candidate.Metric, candidate.ServerId, defaults);
+        /* A route with nowhere to send writes a mark that says so, so the report is not read again on every pass for the rest of its
+           window and takes no place in the page. A destination set later does not send a notice for it. */
+        var targets = ReportNoticeTargets(route, defaults);
         if (targets.Count == 0)
         {
+            await _store.MarkReportNoticeAsync(candidate, NoReportNoticeDestination, cancellationToken);
             return false;
         }
 
@@ -368,14 +374,15 @@ public sealed class InvestigationEventDelivery
     }
 
     /// <summary>
-    /// #6979: the Slack and Teams destinations of a report notice, resolved as an alert's are (<see cref="NotificationRouter.Resolve"/>
-    /// over the request's route alone, <paramref name="defaults"/> as the parent), so a route with no channel of its own sends to the
-    /// settings' channel. Nothing for a disabled route, and nothing for a channel the route turns off (<see cref="NotificationRoute.IsOffFor"/>),
-    /// even when the metric no longer matches the route and the resolver would reach the parent. Email, the generic URL and
-    /// PagerDuty carry no notice.
+    /// #6979: the Slack and Teams destinations of a report notice. The route's own URL answers first and the settings' channel
+    /// (<paramref name="defaults"/>, when it is switched on) is the parent for a route with none of its own, as it is for an alert.
+    /// The route is NOT matched against the request's metric, scope or tag again: a route that was edited, or a server whose tags
+    /// changed, while the request was open must not send the notice to the parent channel instead of the route's own. Nothing for a
+    /// disabled route, and nothing for a channel the route turns off (<see cref="NotificationRoute.IsOffFor"/>). Email, the generic
+    /// URL and PagerDuty carry no notice.
     /// </summary>
     internal static IReadOnlyList<(string Channel, string Destination)> ReportNoticeTargets(
-        NotificationRoute route, string metric, int serverId, IAlertSettings defaults)
+        NotificationRoute route, IAlertSettings defaults)
     {
         ArgumentNullException.ThrowIfNull(route);
         ArgumentNullException.ThrowIfNull(defaults);
@@ -385,12 +392,17 @@ public sealed class InvestigationEventDelivery
             return targets;
         }
 
-        var decision = NotificationRouter.Resolve(metric, [route], defaults, serverId);
-        foreach (var routed in new[] { decision.Teams, decision.Slack })
+        (string Channel, string? Own, string? Parent)[] channels =
+        [
+            (NotificationRouter.TeamsChannel, route.TeamsUrl, defaults.TeamsWebhookEnabled ? defaults.TeamsWebhookUrl : null),
+            (NotificationRouter.SlackChannel, route.SlackUrl, defaults.SlackWebhookEnabled ? defaults.SlackWebhookUrl : null),
+        ];
+        foreach (var (channel, own, parent) in channels)
         {
-            if (routed.IsDelivered && !route.IsOffFor(routed.Channel))
+            var destination = string.IsNullOrWhiteSpace(own) ? parent : own;
+            if (!route.IsOffFor(channel) && !string.IsNullOrWhiteSpace(destination))
             {
-                targets.Add((routed.Channel, routed.Destination!.Trim()));
+                targets.Add((channel, destination.Trim()));
             }
         }
 

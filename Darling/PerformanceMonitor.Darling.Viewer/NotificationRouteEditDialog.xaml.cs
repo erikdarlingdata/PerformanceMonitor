@@ -455,6 +455,11 @@ public partial class NotificationRouteEditDialog : Window
         AgentMaxPerDayBox.IsEnabled = investigates;
         AgentLeaseMinutesBox.IsEnabled = investigates;
         AgentExpiryMinutesBox.IsEnabled = investigates;
+
+        /* #6979: only a route with its own agent level owns requests, so a report notice can fire only there. The stored value is kept
+           and still saved while the setting is disabled. */
+        ReportNoticeCombo.IsEnabled = investigates;
+        ReportNoticeHint.Visibility = investigates ? Visibility.Collapsed : Visibility.Visible;
     }
 
     private void AgentLevelCombo_SelectionChanged(object sender, SelectionChangedEventArgs e) => UpdateAgentLimitsEnabled();

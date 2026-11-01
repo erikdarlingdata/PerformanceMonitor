@@ -259,7 +259,7 @@ WHERE c.journal_id = $1 AND c.event = 'action_called'";
     /// only that request's calls and refusals, read by <c>request_id</c> in SQL (<c>ix_investigation_journal_request</c>) rather than
     /// out of the newest <paramref name="limit"/>, and with no window: one request's own rows are few, and the undo's window is
     /// <see cref="AgentChangeRow.CanTryUndo"/>'s call.</summary>
-    public async Task<AgentChangesRead> ReadAsync(int limit = 200, CancellationToken cancellationToken = default, Guid? requestId = null)
+    public async Task<AgentChangesRead> ReadAsync(int limit = 200, Guid? requestId = null, CancellationToken cancellationToken = default)
     {
         limit = Math.Clamp(limit, 1, 1000);
         var since = requestId is null ? Now() - Window : DateTime.UnixEpoch;

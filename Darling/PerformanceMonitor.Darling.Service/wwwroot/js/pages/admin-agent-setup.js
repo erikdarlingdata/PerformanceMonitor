@@ -231,6 +231,16 @@ function routeForm(options) {
   };
   const enabled = el("input", { type: "checkbox", "data-field": "enabled" });
   enabled.checked = entries.enabled;
+  /* #6979: a report notice fires for a request of this route, and only a route with its own agent level (Investigate, Act or Act on servers)
+     owns requests. While the level is Inherit or Off the setting is disabled, with a hint; the stored value is kept and still saved. */
+  const noticeHint = el("span", { class: "mute-label", text: " Applies once the Agent level is Investigate, Act or Act on servers." });
+  const syncNoticeEnabled = () => {
+    const owns = controls.level.value === "1" || controls.level.value === "2" || controls.level.value === "3";
+    controls.reportNotice.disabled = !owns;
+    noticeHint.hidden = owns;
+  };
+  syncNoticeEnabled();
+  controls.level.addEventListener("input", syncNoticeEnabled);
   /* The webhook boxes never hold a saved value (the page is never given one): a box is for a NEW value, and Remove is for a saved one. */
   const hookBoxes = {};
   const removeBoxes = {};
@@ -272,7 +282,7 @@ function routeForm(options) {
     onClick: () => sendRoute("save", read(), options.repaint),
   });
   const parts = [
-    field("Match:", controls.match), field("Applies to:", controls.scope), field("Severity:", controls.severities), field("Agent:", controls.level), field("Report notice:", controls.reportNotice),
+    field("Match:", controls.match), field("Applies to:", controls.scope), field("Severity:", controls.severities), field("Agent:", controls.level), el("label", { class: "tag-field" }, [el("span", { class: "mute-label", text: "Report notice:" }), controls.reportNotice, noticeHint]),
     field("Requests per hour:", controls.perHour), field("Requests per day:", controls.perDay),
     field("Lease minutes:", controls.lease), field("Expiry minutes:", controls.expiry),
     field("Send resolutions:", controls.resolutions), field("Fallback route:", controls.fallback),

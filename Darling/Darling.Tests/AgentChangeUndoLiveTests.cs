@@ -55,7 +55,7 @@ public sealed class AgentChangeUndoLiveTests
             await JournalChangeAsync(connection, "mute", "m2", 99, Mute("old"), Mute("agent says"), ct: ct);
             await ExecAsync(connection, "INSERT INTO config.investigation_journal (event_time, server_id, event, actor, detail) VALUES (now(), 7, 'refused', 'agent:a', '{\"tool\":\"force_plan\"}'::jsonb), (now(), 99, 'refused', 'agent:a', '{\"tool\":\"force_plan\"}'::jsonb)", ct);
 
-            var read = await undo.ReadAsync(50, ct);
+            var read = await undo.ReadAsync(50, cancellationToken: ct);
             Assert.Equal("SQL2019", read.Changes.Single(c => c.ServerId == 7).ServerLabel);
             Assert.Equal("Server 99 (removed)", read.Changes.Single(c => c.ServerId == 99).ServerLabel);
             Assert.Equal("SQL2019", read.Refusals.Single(r => r.ServerId == 7).ServerLabel);
@@ -185,7 +185,7 @@ VALUES (now() at time zone 'utc' - interval '1 hour', 7, 'srv-7', 'Blocking', 9,
        (now() at time zone 'utc' - interval '1 hour', 7, 'srv-7', 'Deadlocks', 9, 5, true),
        (now() at time zone 'utc' - interval '9 hours', 7, 'srv-7', 'Blocking', 9, 5, true)", ct);
 
-            var row = (await undo.ReadAsync(50, ct)).Changes.Single(c => c.CalledId == called);
+            var row = (await undo.ReadAsync(50, cancellationToken: ct)).Changes.Single(c => c.CalledId == called);
             Assert.Equal(1, row.MutedAlerts);
             Assert.Single(await undo.ReadMutedAlertsAsync(called, 50, ct));
         });
@@ -202,7 +202,7 @@ VALUES (now() at time zone 'utc' - interval '1 hour', 7, 'srv-7', 'Blocking', 9,
             await ExecAsync(connection, @"INSERT INTO config.config_alert_log (alert_time, server_id, server_name, metric_name, current_value, threshold_value, muted)
 SELECT now() at time zone 'utc' - interval '1 hour', 7, 'srv-7', 'Blocking', 9, 5, true FROM generate_series(1, 1005)", ct);
 
-            var row = (await undo.ReadAsync(50, ct)).Changes.Single(c => c.CalledId == called);
+            var row = (await undo.ReadAsync(50, cancellationToken: ct)).Changes.Single(c => c.CalledId == called);
             Assert.Equal(1005, row.MutedAlerts);
             /* The alerts route still pages, and says how many it returned. */
             Assert.Equal(2, (await undo.ReadMutedAlertsAsync(called, 2, ct)).Count);
@@ -286,7 +286,7 @@ SELECT now() at time zone 'utc' - interval '1 hour', 7, 'srv-7', 'Blocking', 9, 
             var unknown = await JournalChangeAsync(connection, "mute", "m5", 7, null, Mute("agent says"), result: "none", ct: ct);
             var failed = await JournalChangeAsync(connection, "mute", "m5", 7, null, Mute("agent says"), result: "failed", ct: ct);
 
-            var read = await undo.ReadAsync(50, ct);
+            var read = await undo.ReadAsync(50, cancellationToken: ct);
             Assert.Equal(AgentChangeResult.Unknown, read.Changes.Single(c => c.CalledId == unknown).Result);
             Assert.Equal(AgentChangeResult.Failed, read.Changes.Single(c => c.CalledId == failed).Result);
             Assert.All(read.Changes, c => Assert.False(c.CanTryUndo(DateTime.UtcNow)));
@@ -354,7 +354,7 @@ SELECT now() at time zone 'utc' - interval '1 hour', 7, 'srv-7', 'Blocking', 9, 
             await ExecAsync(connection, "INSERT INTO config.investigation_journal (event, actor, reason, detail) VALUES ('refused', 'agent:a', 'actions_off', '{\"tool\":\"create_mute_rule\"}')", ct);
             /* A Level 1 request refusal (InvestigationRequestStore.RecordRefusalAsync: claim and submit) is an agent refusal with no tool; it refused no change (#5917). */
             await ExecAsync(connection, "INSERT INTO config.investigation_journal (event, actor, reason, detail) VALUES ('refused', 'agent:a', 'claim:not_open', NULL), ('refused', 'agent:a', 'submit:stale', '{\"note\":\"x\"}')", ct);
-            var read = await undo.ReadAsync(50, ct);
+            var read = await undo.ReadAsync(50, cancellationToken: ct);
             var refusal = Assert.Single(read.Refusals);
             Assert.Equal("actions_off", refusal.Code);
             Assert.Equal("create_mute_rule", refusal.Tool);

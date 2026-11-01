@@ -56,11 +56,7 @@ public partial class WebhookAlertService : IReportNoticeSends
             var error = await PostWebhookAsync(
                 destination, payload, slack ? settings.SlackProxyAddress : settings.TeamsProxyAddress,
                 cancellationToken: cancellationToken, bodyLog: _logger);
-            if (error is not null)
-            {
-                _logger.LogError($"{channel.ToUpperInvariant()} REPORT NOTICE FAILED for request {content.RequestId}: {error}");
-            }
-
+            RecordReportNoticeHealth(slack, error);
             return error;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -69,8 +65,27 @@ public partial class WebhookAlertService : IReportNoticeSends
         }
         catch (Exception ex)
         {
-            _logger.LogError($"{channel} report notice error for request {content.RequestId}: {ex.Message}");
+            RecordReportNoticeHealth(channel == NotificationRouter.SlackChannel, ex.Message);
             return ex.Message;
+        }
+    }
+
+    /// <summary>
+    /// #6979: a notice send counts toward the channel's health as an alert send does (the consecutive-failure count and the last
+    /// error that <see cref="GetChannelFailureCounts"/> serves, which the "Notification Channel Failing" self-alert reads).
+    /// It logs nothing: the caller logs a failed notice once, with the request id, the channel and the error.
+    /// </summary>
+    private void RecordReportNoticeHealth(bool slack, string? error)
+    {
+        if (slack)
+        {
+            _consecutiveSlackFailures = error is null ? 0 : _consecutiveSlackFailures + 1;
+            _lastSlackError = error;
+        }
+        else
+        {
+            _consecutiveTeamsFailures = error is null ? 0 : _consecutiveTeamsFailures + 1;
+            _lastTeamsError = error;
         }
     }
 
