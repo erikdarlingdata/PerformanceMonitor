@@ -53,7 +53,7 @@ public sealed class ClientTimeoutsOnByDefaultV216LiveTests
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipText);
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, emptyStore: true);
         await using var connection = await OpenStoreAsync(scratch, ct);
 
         await ExecAsync(connection, "INSERT INTO config.config_alert_settings (id) VALUES (1)", ct);
@@ -68,7 +68,7 @@ public sealed class ClientTimeoutsOnByDefaultV216LiveTests
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipText);
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, emptyStore: true);
         await using var connection = await OpenStoreAsync(scratch, ct);
 
         /* Back to V215: the default is V179's FALSE again and the version stamp is gone. The row is the one a V215 store holds: off, with a bar

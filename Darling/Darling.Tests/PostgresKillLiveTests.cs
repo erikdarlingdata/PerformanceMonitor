@@ -271,7 +271,7 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
         Assert.SkipWhen(target.SkipReason is not null, target.SkipReason ?? "");
         var ct = TestContext.Current.CancellationToken;
         var roles = new Roles();
-        await using var scratch = await ScratchPostgres.CreateAsync(Cluster!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(Cluster!, ct, emptyStore: true);
         var bodySucceeded = false;
         await using var admin = new NpgsqlConnection(target.SuperuserConnectionString);
         await admin.OpenAsync(ct);

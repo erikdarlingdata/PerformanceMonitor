@@ -172,7 +172,7 @@ public sealed class QueryStoreComposeStampWriterGuardLiveTests
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
         var ct = TestContext.Current.CancellationToken;
         /* An empty database with a plain (not partitioned) table of the wide table's name: pg_partition_tree returns no row for it. */
-        var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct, emptyStore: true);
         var bodySucceeded = false;
         try
         {

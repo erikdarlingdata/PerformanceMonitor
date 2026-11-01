@@ -278,7 +278,7 @@ public sealed class QueryStoreIntervalBoundedReadPruningLiveTests
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipText);
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, emptyStore: true);
         await using var connection = await OpenStoreAsync(scratch, ct);
         await SeedAsync(connection, Wide, ct);
         await AssertReadsPruneAsync(connection, Wide, WideReads(new DateTime(2026, 10, 7), new DateTime(2026, 10, 8), new DateTime(2026, 10, 6)), ct);
@@ -290,7 +290,7 @@ public sealed class QueryStoreIntervalBoundedReadPruningLiveTests
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipText);
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, emptyStore: true);
         await using var connection = await OpenStoreAsync(scratch, ct);
         await SeedAsync(connection, Latest, ct);
         await AssertReadsPruneAsync(connection, Latest, LatestReads(new DateTime(2026, 10, 6)), ct);
@@ -307,7 +307,7 @@ public sealed class QueryStoreIntervalBoundedReadPruningLiveTests
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipText);
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, emptyStore: true);
         await using var connection = await OpenStoreAsync(scratch, ct);
         await SeedAsync(connection, Wide, ct);
         await ExecAsync(connection, "SET search_path = collect, config, public", ct);

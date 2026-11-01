@@ -276,7 +276,7 @@ public sealed class AgentLevel2StoreRungTests
     {
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the Level 2 store pins.");
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
         await using var store = new NpgsqlConnection(scratch.ConnectionString);
         await store.OpenAsync(ct);
         await PgMigrations.MigrateAsync(store, ct);
@@ -415,7 +415,7 @@ public sealed class AgentLevel2StoreGrantLiveTests
     {
         var connectionString = RequireLivePostgres();
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct, emptyStore: true);
         var bodySucceeded = false;
         try
         {
@@ -449,7 +449,7 @@ public sealed class AgentLevel2StoreGrantLiveTests
     {
         var connectionString = RequireLivePostgres();
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct, emptyStore: true);
         var bodySucceeded = false;
         try
         {

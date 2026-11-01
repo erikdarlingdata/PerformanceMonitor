@@ -493,7 +493,7 @@ VALUES ($1, $2, $3, $4, $5, 'dbo', $6, $7, $8, $8, 1, 300)", store.Connection);
         var at = anchor ?? Anchor;
         var layout = Layout.For(at);
 
-        var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, emptyStore: true);
         NpgsqlConnection? connection = null;
         NpgsqlDataSource? dataSource = null;
         try

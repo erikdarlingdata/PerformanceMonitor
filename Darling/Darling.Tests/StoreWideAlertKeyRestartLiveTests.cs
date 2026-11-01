@@ -97,7 +97,7 @@ public sealed class StoreWideAlertKeyRestartLiveTests
     public async Task AStandingJobOverCadence_AfterARestart_WritesNoRow_AndASecondJobStillFires()
     {
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the V234 live restart seed test (it mints its own scratch database).");
-        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, Ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, Ct, emptyStore: true);
         await using var connection = await OpenAsync(scratch);
         var bodySucceeded = false;
         try
@@ -135,7 +135,7 @@ public sealed class StoreWideAlertKeyRestartLiveTests
     public async Task AJobStuckBeforeARestart_IsNotReArmedOrAnnouncedAgain_AndAJobThatClearedWhileDownIsAnnouncedWhenItSticksAgain()
     {
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the V234 live restart seed test (it mints its own scratch database).");
-        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, Ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, Ct, emptyStore: true);
         await using var connection = await OpenAsync(scratch);
         var bodySucceeded = false;
         try
@@ -199,7 +199,7 @@ public sealed class StoreWideAlertKeyRestartLiveTests
     public async Task AJobReArmedBeforeARestart_AndStillStuckAfterIt_SendsItsReHungPageOnce_AndIsThenSeededEscalated()
     {
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the V234 live restart seed test (it mints its own scratch database).");
-        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, Ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, Ct, emptyStore: true);
         await using var connection = await OpenAsync(scratch);
         var bodySucceeded = false;
         try
@@ -247,7 +247,7 @@ public sealed class StoreWideAlertKeyRestartLiveTests
     public async Task AJobStuckHealthyAndStuckAcrossTwoRestarts_IsReArmedAndAnnouncedAsANewEpisode()
     {
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the V234 live restart seed test (it mints its own scratch database).");
-        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, Ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, Ct, emptyStore: true);
         await using var connection = await OpenAsync(scratch);
         var bodySucceeded = false;
         try
@@ -292,7 +292,7 @@ public sealed class StoreWideAlertKeyRestartLiveTests
     public async Task V234_ReadsNullOnAnUpgradedStore_AppliesTwice_AndALegacyRowIsNotMatched()
     {
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the V234 live pin (it mints its own scratch database).");
-        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, Ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, Ct, emptyStore: true);
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(Ct);
         await PgMigrations.MigrateAsync(connection, Ct);

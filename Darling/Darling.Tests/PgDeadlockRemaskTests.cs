@@ -427,7 +427,7 @@ public sealed class PgDeadlockRemaskTests
             "Set DARLING_TEST_PG to a Postgres connection string to run the live deadlock re-mask test.");
 
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
@@ -653,7 +653,7 @@ public sealed class PgDeadlockRemaskTests
             "Set DARLING_TEST_PG to a Postgres connection string to run the live deadlock re-mask test.");
 
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         await using var connection = await OpenMigratedAsync(scratch.ConnectionString, ct);
         var now = DateTime.SpecifyKind(DateTime.UtcNow.Date, DateTimeKind.Unspecified).AddHours(12);
 
@@ -745,7 +745,7 @@ public sealed class PgDeadlockRemaskTests
             "Set DARLING_TEST_PG to a Postgres connection string to run the live deadlock re-mask test.");
 
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         await using var connection = await OpenMigratedAsync(scratch.ConnectionString, ct);
         await PlantRawReportsAsync(connection, 30, DateTime.SpecifyKind(DateTime.UtcNow.Date, DateTimeKind.Unspecified).AddDays(-2), ct);
 
@@ -816,7 +816,7 @@ public sealed class PgDeadlockRemaskTests
             "Set DARLING_TEST_PG to a Postgres connection string to run the live deadlock re-mask test.");
 
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         await using var connection = await OpenMigratedAsync(scratch.ConnectionString, ct);
         await PlantRawReportsAsync(connection, 5, DateTime.SpecifyKind(DateTime.UtcNow.Date, DateTimeKind.Unspecified).AddDays(-2), ct);
 
@@ -855,7 +855,7 @@ public sealed class PgDeadlockRemaskTests
             "Set DARLING_TEST_PG to a Postgres connection string to run the live deadlock re-mask test.");
 
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         await using var connection = await OpenMigratedAsync(scratch.ConnectionString, ct);
         await PlantRawReportsAsync(connection, 5, DateTime.SpecifyKind(DateTime.UtcNow.Date, DateTimeKind.Unspecified).AddDays(-2), ct);
 
@@ -886,7 +886,7 @@ public sealed class PgDeadlockRemaskTests
             "Set DARLING_TEST_PG to a Postgres connection string to run the live deadlock re-mask test.");
 
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         await using var connection = await OpenMigratedAsync(scratch.ConnectionString, ct);
         var now = DateTime.SpecifyKind(DateTime.UtcNow.Date, DateTimeKind.Unspecified).AddHours(12);
         await PlantRawReportsAsync(connection, 5, now.AddDays(-2), ct);
@@ -928,7 +928,7 @@ public sealed class PgDeadlockRemaskTests
             "Set DARLING_TEST_PG to a Postgres connection string to run the live deadlock re-mask test.");
 
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         await using var connection = await OpenMigratedAsync(scratch.ConnectionString, ct);
         var now = DateTime.SpecifyKind(DateTime.UtcNow.Date, DateTimeKind.Unspecified).AddHours(12);
         await PlantRawReportsAsync(connection, 5, now.AddDays(-2), ct);
@@ -1058,7 +1058,7 @@ public sealed class PgDeadlockRemaskTests
             "Set DARLING_TEST_PG to a Postgres connection string to run the live deadlock re-mask test.");
 
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         await using var connection = await OpenMigratedAsync(scratch.ConnectionString, ct);
         var now = DateTime.SpecifyKind(DateTime.UtcNow.Date, DateTimeKind.Unspecified).AddHours(12);
         await PlantRawReportsAsync(connection, 5, now.AddDays(-2), ct);
@@ -1124,7 +1124,7 @@ CREATE TRIGGER remask_bound_report BEFORE UPDATE ON pg_deadlocks FOR EACH ROW EX
             "Set DARLING_TEST_PG to a Postgres connection string to run the live deadlock re-mask test.");
 
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         await using var connection = await OpenMigratedAsync(scratch.ConnectionString, ct);
         var now = DateTime.SpecifyKind(DateTime.UtcNow.Date, DateTimeKind.Unspecified).AddHours(12);
 
@@ -1223,7 +1223,7 @@ VALUES ('{now.AddDays(-1):yyyy-MM-dd HH:mm:ss}', 1, 'first', '{AlertEngine.Deadl
             "Set DARLING_TEST_PG to a Postgres connection string to run the live deadlock re-mask test.");
 
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         await using var connection = await OpenMigratedAsync(scratch.ConnectionString, ct);
         await PlantRawReportsAsync(connection, 40, DateTime.SpecifyKind(DateTime.UtcNow.Date, DateTimeKind.Unspecified).AddDays(-2), ct);
 
@@ -1321,7 +1321,7 @@ VALUES ('{now.AddDays(-1):yyyy-MM-dd HH:mm:ss}', 1, 'first', '{AlertEngine.Deadl
             "Set DARLING_TEST_PG to a Postgres connection string to run the live deadlock re-mask test.");
 
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         await using var connection = await OpenMigratedAsync(scratch.ConnectionString, ct);
         var now = DateTime.SpecifyKind(DateTime.UtcNow.Date, DateTimeKind.Unspecified).AddHours(12);
 
@@ -1382,7 +1382,7 @@ VALUES ('{now.AddDays(-1):yyyy-MM-dd HH:mm:ss}', 1, 'first', '{AlertEngine.Deadl
             "Set DARLING_TEST_PG to a Postgres connection string to run the live deadlock re-mask test.");
 
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         await using var connection = await OpenMigratedAsync(scratch.ConnectionString, ct);
         var from = DateTime.SpecifyKind(DateTime.UtcNow.Date, DateTimeKind.Unspecified).AddDays(-2);
 
@@ -1467,7 +1467,7 @@ WHERE victim_pid = 10004", ct);
             "Set DARLING_TEST_PG to a Postgres connection string to run the live deadlock re-mask test.");
 
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         await using var connection = await OpenMigratedAsync(scratch.ConnectionString, ct);
         await PlantRawReportsAsync(connection, PgDeadlockRemask.MaxReportRowsPerPass + 150, DateTime.SpecifyKind(DateTime.UtcNow.Date, DateTimeKind.Unspecified).AddDays(-2), ct);
 
@@ -1539,7 +1539,7 @@ WHERE victim_pid = 10004", ct);
             "Set DARLING_TEST_PG to a Postgres connection string to run the live deadlock re-mask test.");
 
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         await using var connection = await OpenMigratedAsync(scratch.ConnectionString, ct);
         var at = DateTime.SpecifyKind(DateTime.UtcNow.Date, DateTimeKind.Unspecified).AddDays(-2);
         var other = LegacyGraph.Replace("UPDATE accounts SET pin = '47Q1'", "UPDATE ledgers SET pin = '47Q1'", StringComparison.Ordinal);
@@ -1581,7 +1581,7 @@ WHERE victim_pid = 10004", ct);
             "Set DARLING_TEST_PG to a Postgres connection string to run the live deadlock re-mask test.");
 
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         await using var connection = await OpenMigratedAsync(scratch.ConnectionString, ct);
         var now = DateTime.SpecifyKind(DateTime.UtcNow.Date, DateTimeKind.Unspecified).AddHours(12);
 
@@ -1647,7 +1647,7 @@ WHERE victim_pid = 10004", ct);
             "Set DARLING_TEST_PG to a Postgres connection string to run the live deadlock re-mask test.");
 
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         await using var connection = await OpenMigratedAsync(scratch.ConnectionString, ct);
         var at = DateTime.SpecifyKind(DateTime.UtcNow.Date, DateTimeKind.Unspecified).AddDays(-1).AddHours(12);
         var (start, otherStart, end) = (at.AddHours(-2), at.AddHours(-3), at.AddHours(-1));
@@ -1701,7 +1701,7 @@ WHERE victim_pid = 10004", ct);
             "Set DARLING_TEST_PG to a Postgres connection string to run the live deadlock re-mask test.");
 
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         await using var connection = await OpenMigratedAsync(scratch.ConnectionString, ct);
         var now = DateTime.SpecifyKind(DateTime.UtcNow.Date, DateTimeKind.Unspecified).AddHours(12);
 

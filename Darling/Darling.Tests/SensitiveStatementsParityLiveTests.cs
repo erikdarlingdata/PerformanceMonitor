@@ -38,7 +38,7 @@ public sealed class SensitiveStatementsParityLiveTests
             "Set DARLING_TEST_PG to a connection string to compare the #4348 pattern in both engines.");
 
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(connectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString!, ct, emptyStore: true);
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
 
@@ -82,7 +82,7 @@ public sealed class SensitiveStatementsParityLiveTests
             "Set DARLING_TEST_PG to a connection string to time the #4348 adversarial strings in PostgreSQL.");
 
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(connectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString!, ct, emptyStore: true);
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
 
@@ -106,7 +106,7 @@ public sealed class SensitiveStatementsParityLiveTests
             "Set DARLING_TEST_PG to a connection string to compare the #5320 typed-declaration strings in both engines.");
 
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(connectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString!, ct, emptyStore: true);
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
 
@@ -136,7 +136,7 @@ public sealed class SensitiveStatementsParityLiveTests
             "Set DARLING_TEST_PG to a connection string to compare the #5320 dash-banner row in both engines.");
 
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(connectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString!, ct, emptyStore: true);
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
 
@@ -166,7 +166,7 @@ public sealed class SensitiveStatementsParityLiveTests
             "Set DARLING_TEST_PG to a connection string to compare the #5320 Kelvin-sign case in both engines.");
 
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(connectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString!, ct, emptyStore: true);
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
 

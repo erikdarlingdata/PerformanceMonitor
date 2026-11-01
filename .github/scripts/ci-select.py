@@ -1122,6 +1122,8 @@ KEEP_FULL = (
     "**/*.targets",
     "**/packages.lock.json",
     "**/xunit.runner.json",
+    # The store factory (#7097): 1,218 sites build their store through it, and the map cannot see a change in the stores they get.
+    "Darling/Darling.Tests/ScratchPostgres.cs",
 )
 
 # The shared projects (#5951). A change under one of them used to run everything, because both are referenced by

@@ -48,7 +48,7 @@ public sealed class ExcludedVolumesStoreTests
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the V200 round trip (it mints its own scratch database).");
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
         await using (var migrate = new NpgsqlConnection(scratch.ConnectionString))
         {
             await migrate.OpenAsync(ct);

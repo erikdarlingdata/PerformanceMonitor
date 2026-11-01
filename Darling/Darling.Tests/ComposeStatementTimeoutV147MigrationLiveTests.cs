@@ -92,7 +92,7 @@ public sealed class ComposeStatementTimeoutV147MigrationLiveTests
 
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
 
@@ -136,7 +136,7 @@ public sealed class ComposeStatementTimeoutV147MigrationLiveTests
 
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
 
@@ -172,7 +172,7 @@ public sealed class ComposeStatementTimeoutV147MigrationLiveTests
 
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
 
         /* #5602: viewer, web and mcp are the cluster's FIXED roles, shared with every scratch database. The ones this fact
            makes it drops again: left behind, they made the later classes that provision the managed roles skip

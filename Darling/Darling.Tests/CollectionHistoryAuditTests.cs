@@ -1052,7 +1052,7 @@ AND   NOT (b::date = DATE '2026-10-14' AND extract(hour FROM b) BETWEEN 5 AND 7 
     {
         Assert.SkipWhen(string.IsNullOrEmpty(Env()), "Set DARLING_TEST_PG to run the #5450 live tests.");
         var ok = false;
-        var scratch = await ScratchPostgres.CreateAsync(Env()!, Ct);
+        var scratch = await ScratchPostgres.CreateAsync(Env()!, Ct, emptyStore: true);
         try
         {
             await using var connection = new NpgsqlConnection(scratch.ConnectionString);
@@ -1146,7 +1146,7 @@ AND   NOT (b::date = DATE '2026-10-14' AND extract(hour FROM b) BETWEEN 5 AND 7 
     {
         Assert.SkipWhen(string.IsNullOrEmpty(Env()), "Set DARLING_TEST_PG to run the #5450 live tests.");
         var ok = false;
-        var scratch = await ScratchPostgres.CreateAsync(Env()!, Ct);
+        var scratch = await ScratchPostgres.CreateAsync(Env()!, Ct, emptyStore: true);
         try
         {
             await using var connection = new NpgsqlConnection(scratch.ConnectionString);
@@ -1263,7 +1263,7 @@ FROM probe_spec AS s CROSS JOIN LATERAL generate_series(1, s.n) AS i;");
     {
         Assert.SkipWhen(string.IsNullOrEmpty(Env()), "Set DARLING_TEST_PG to run the #5461 live tests.");
         var ok = false;
-        var scratch = await ScratchPostgres.CreateAsync(Env()!, Ct);
+        var scratch = await ScratchPostgres.CreateAsync(Env()!, Ct, emptyStore: true);
         try
         {
             await using var connection = new NpgsqlConnection(scratch.ConnectionString);
@@ -1328,7 +1328,7 @@ GROUP BY r.bucket", connection))
     {
         Assert.SkipWhen(string.IsNullOrEmpty(Env()), "Set DARLING_TEST_PG to run the #5461 live tests.");
         var ok = false;
-        var scratch = await ScratchPostgres.CreateAsync(Env()!, Ct);
+        var scratch = await ScratchPostgres.CreateAsync(Env()!, Ct, emptyStore: true);
         try
         {
             await using var connection = new NpgsqlConnection(scratch.ConnectionString);

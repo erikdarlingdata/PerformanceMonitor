@@ -48,7 +48,7 @@ public sealed class BlockingListPlanFlagsLivePostgresTests
         var ct = TestContext.Current.CancellationToken;
 
         // #1776 own-store: a scratch database, so no other class's chunks shape the store under test (#4650).
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         var cs = scratch.ConnectionString;
         using var connection = new NpgsqlConnection(cs);
         await connection.OpenAsync(ct);
@@ -121,7 +121,7 @@ VALUES ($1,$2,$3,$4,$5,'PlanFlagsDb',$6,0,$7,0,1000,'X','SELECT 1','UPDATE t SET
         var ct = TestContext.Current.CancellationToken;
 
         // #1776 own-store: a scratch database, so no other class's chunks shape the store under test (#4650).
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         var cs = scratch.ConnectionString;
         using var connection = new NpgsqlConnection(cs);
         await connection.OpenAsync(ct);
@@ -176,7 +176,7 @@ VALUES ($1,$2,$3,$4,$5,$6,'UPDATE t SET c = 1','<deadlock/>',$7,'PlanFlagsDb')",
         var ct = TestContext.Current.CancellationToken;
 
         // #1776 own-store: a scratch database, so no other class's chunks shape the plan under test (#4650).
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         var cs = scratch.ConnectionString;
         using var connection = new NpgsqlConnection(cs);
         await connection.OpenAsync(ct);

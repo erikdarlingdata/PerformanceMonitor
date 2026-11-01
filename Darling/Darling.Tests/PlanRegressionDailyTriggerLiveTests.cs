@@ -59,7 +59,7 @@ public sealed class PlanRegressionDailyTriggerLiveTests
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #5448 trigger test.");
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, emptyStore: true);
         await using var connection = await OpenMigratedAsync(scratch, ct);
 
         /* Function statistics are off by default; this session turns them on. */
@@ -94,7 +94,7 @@ public sealed class PlanRegressionDailyTriggerLiveTests
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #5448 trigger test.");
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, emptyStore: true);
         await using var connection = await OpenMigratedAsync(scratch, ct);
 
         var today = DateTime.UtcNow.Date;
@@ -144,7 +144,7 @@ public sealed class PlanRegressionDailyTriggerLiveTests
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #5448 trigger test.");
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, emptyStore: true);
         await using var connection = await OpenMigratedAsync(scratch, ct);
         await ExecAsync(connection, "SET track_functions = 'all'", ct);
 
@@ -194,7 +194,7 @@ public sealed class PlanRegressionDailyTriggerLiveTests
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #5448 trigger test.");
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, emptyStore: true);
         await using var connection = await OpenMigratedAsync(scratch, ct);
 
         var today = DateTime.UtcNow.Date;
@@ -241,7 +241,7 @@ public sealed class PlanRegressionDailyTriggerLiveTests
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #5448 trigger test.");
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, emptyStore: true);
         await using var connection = await OpenMigratedAsync(scratch, ct);
 
         Assert.Equal("{\"search_path=pg_catalog, pg_temp\"}", await ScalarStringAsync(connection,
@@ -271,7 +271,7 @@ SET search_path = decoy, pg_catalog;", ct);
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #5448 trigger test.");
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, emptyStore: true);
         await using var connection = await OpenMigratedAsync(scratch, ct);
 
         var d = DateTime.UtcNow.Date.AddDays(-4);
@@ -300,7 +300,7 @@ SET search_path = decoy, pg_catalog;", ct);
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #5448 trigger test.");
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, emptyStore: true);
         await using var connection = await OpenMigratedAsync(scratch, ct);
 
         /* The trigger's WHEN clause windows on the database's now(), so the edges below must come from the database's clock,
@@ -367,7 +367,7 @@ SET search_path = decoy, pg_catalog;", ct);
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #5448 trigger test.");
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, emptyStore: true);
         await using var connection = await OpenMigratedAsync(scratch, ct);
 
         var today = DateTime.UtcNow.Date;
@@ -421,7 +421,7 @@ SET search_path = decoy, pg_catalog;", ct);
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #5448 trigger test.");
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, emptyStore: true);
         await using var connection = await OpenMigratedAsync(scratch, ct);
 
         var utcNow = DateTime.UtcNow;
@@ -484,7 +484,7 @@ SET search_path = decoy, pg_catalog;", ct);
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #5448 trigger test.");
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, emptyStore: true);
         await using var connection = await OpenMigratedAsync(scratch, ct);
 
         var today = DateTime.UtcNow.Date;

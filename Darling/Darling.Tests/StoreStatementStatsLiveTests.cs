@@ -309,7 +309,7 @@ public sealed class StoreStatementStatsLiveTests
             "Set DARLING_TEST_PG to a superuser connection string to run the #3899 setup proof in a scratch database.");
 
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         await using var c = await OpenAsync(scratch.ConnectionString, ct);
 
         var preloaded = await IsPreloadedAsync(c, ct);
@@ -361,7 +361,7 @@ public sealed class StoreStatementStatsLiveTests
             "Set DARLING_TEST_PG to a superuser connection string to run the #3899 version proof in a scratch database.");
 
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         await using var c = await OpenAsync(scratch.ConnectionString, ct);
         var preloaded = await IsPreloadedAsync(c, ct);
         await ExecAsync(c, "CREATE SCHEMA IF NOT EXISTS config", ct);
@@ -407,7 +407,7 @@ public sealed class StoreStatementStatsLiveTests
             "Set DARLING_TEST_PG to a connection string to judge the #3915 patterns in PostgreSQL's regex engine.");
 
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         await using var c = await OpenAsync(scratch.ConnectionString, ct);
 
         var cases = new (string Text, bool Readable, bool Sensitive)[]

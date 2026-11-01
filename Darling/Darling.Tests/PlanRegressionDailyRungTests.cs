@@ -408,7 +408,7 @@ public sealed class PlanRegressionDailyRungTests
         var ct = TestContext.Current.CancellationToken;
 
         // #1776 own-store: a scratch database of its own, so no other class's migrations race it.
-        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
         await using var connection = await MigratedAsync(scratch, ct);
 
         var bodySucceeded = false;
@@ -458,7 +458,7 @@ public sealed class PlanRegressionDailyRungTests
         var ct = TestContext.Current.CancellationToken;
 
         // #1776 own-store: a scratch database of its own, so no other class's migrations race it.
-        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
         await using var connection = await MigratedAsync(scratch, ct);
 
         var bodySucceeded = false;
@@ -489,7 +489,7 @@ public sealed class PlanRegressionDailyRungTests
         var ct = TestContext.Current.CancellationToken;
 
         // #1776 own-store: a scratch database of its own, so no other class's migrations race it.
-        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
         await using var connection = await MigratedAsync(scratch, ct);
 
         var bodySucceeded = false;

@@ -195,7 +195,7 @@ public sealed class ComposeHourlyEdgesLedgerGuardLiveTests
         var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
             "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live hour-ledger runner tests.");
-        return await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        return await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
     }
 
     /// <summary>Migrates the scratch store, makes the hourly rollup the guard reads and stops the TimescaleDB scheduler.</summary>

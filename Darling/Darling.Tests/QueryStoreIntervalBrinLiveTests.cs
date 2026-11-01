@@ -75,7 +75,7 @@ public sealed class QueryStoreIntervalBrinLiveTests
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipText);
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, emptyStore: true);
         await using var connection = await OpenStoreAsync(scratch, ct);
         var logger = new ListLogger();
 
@@ -123,7 +123,7 @@ public sealed class QueryStoreIntervalBrinLiveTests
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipText);
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, emptyStore: true);
         await using var connection = await OpenStoreAsync(scratch, ct);
         var logger = new ListLogger();
 
@@ -145,7 +145,7 @@ public sealed class QueryStoreIntervalBrinLiveTests
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipText);
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, emptyStore: true);
         await using var connection = await OpenStoreAsync(scratch, ct);
         await using var blocker = await OpenStoreAsync(scratch, ct);
         await using var watcher = await OpenStoreAsync(scratch, ct);
@@ -209,7 +209,7 @@ public sealed class QueryStoreIntervalBrinLiveTests
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipText);
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, emptyStore: true);
         await using var connection = await OpenStoreAsync(scratch, ct);
         await ExecAsync(connection, $"CREATE INDEX {Brin}_legacy ON collect.query_store_interval_wide_legacy USING brin (collection_time) WITH (autosummarize = off)", ct);
         await InsertAsync(connection, Wide, Now.AddHours(-2), 1, ct);
@@ -413,7 +413,7 @@ public sealed class QueryStoreIntervalBrinLiveTests
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipText);
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, emptyStore: true);
         await using var connection = await OpenStoreAsync(scratch, ct);
         await using var watcher = await OpenStoreAsync(scratch, ct);
         var logger = new ListLogger();
@@ -453,7 +453,7 @@ public sealed class QueryStoreIntervalBrinLiveTests
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipText);
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, emptyStore: true);
         await using var connection = await OpenStoreAsync(scratch, ct);
         await using var reader = await OpenStoreAsync(scratch, ct);
         var logger = new ListLogger();
@@ -516,7 +516,7 @@ public sealed class QueryStoreIntervalBrinLiveTests
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipText);
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, emptyStore: true);
         await using var connection = await OpenStoreAsync(scratch, ct);
         await using var watcher = await OpenStoreAsync(scratch, ct);
         var logger = new ListLogger();
@@ -551,7 +551,7 @@ public sealed class QueryStoreIntervalBrinLiveTests
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipText);
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, emptyStore: true);
         await using var connection = await OpenStoreAsync(scratch, ct);
 
         await ExecAsync(connection, $"CREATE INDEX {Brin}_legacy ON {LegacyTable} USING brin (collection_time) WITH (autosummarize = off)", ct);
@@ -596,7 +596,7 @@ public sealed class QueryStoreIntervalBrinLiveTests
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipText);
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, emptyStore: true);
         await using var connection = await OpenStoreAsync(scratch, ct);
 
         /* 100000 is the smallest autovacuum_freeze_max_age a table may set; 2000000000 the largest, far above the server's 200 M. */

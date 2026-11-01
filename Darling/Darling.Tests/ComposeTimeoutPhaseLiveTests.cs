@@ -64,7 +64,7 @@ public sealed class ComposeTimeoutPhaseLiveTests
     public async Task AnExhaustedPool_IsAStoreConnectionError_NotTheStatementTimeoutText()
     {
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString, ct, emptyStore: true);
         await using var store = NpgsqlDataSource.Create(scratch.ConnectionString + ";Pooling=true;Maximum Pool Size=1;Timeout=1");
         await using var held = await OpenHeldConnectionAsync(store, ct);
 

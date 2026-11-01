@@ -173,7 +173,7 @@ VALUES (TIMESTAMP '{At(collectionTime)}', {serverId}, 'dbX', 99, 99, 'Regular', 
 
     private static async Task<(ScratchPostgres Scratch, NpgsqlConnection Connection, NpgsqlDataSource Source, DateTime HourNow)> ArrangeAsync(CancellationToken ct, int servers = 3)
     {
-        var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct, emptyStore: true);
         var connection = await MigratedAsync(scratch, ct);
         var hourNow = ThisHour();
         for (var s = 1; s <= servers; s++)
@@ -341,7 +341,7 @@ WHERE ctid = (SELECT ctid FROM collect.query_store_interval_wide WHERE server_id
     {
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct, emptyStore: true);
         await using var connection = await MigratedAsync(scratch, ct);
         var bodySucceeded = false;
         try
@@ -382,7 +382,7 @@ INSERT INTO collect.query_store_compose_stamp_hours (hour, built_at) VALUES (TIM
     {
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct, emptyStore: true);
         await using var connection = await MigratedAsync(scratch, ct);
         var bodySucceeded = false;
         try
@@ -420,7 +420,7 @@ SELECT md5(
     {
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct, emptyStore: true);
         await using var connection = await MigratedAsync(scratch, ct);
         var bodySucceeded = false;
         try
@@ -477,7 +477,7 @@ SELECT md5(
     {
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct, emptyStore: true);
         const string Role = "qs_stamp_reader_5582";
         var connection = await MigratedAsync(scratch, ct);
         var bodySucceeded = false;

@@ -41,7 +41,7 @@ public sealed class PublicConnectCatalogReadLiveTests
         var ct = TestContext.Current.CancellationToken;
 
         /* #1776 own-store: the revoke below is on this test's own scratch database, never on the shared one. */
-        await using var scratch = await ScratchPostgres.CreateAsync(cs!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(cs!, ct, emptyStore: true);
 
         var before = PublicConnectGuardAttribute.PublicConnectOn(cs!, scratch.DatabaseName, "database_that_does_not_exist_5618");
         Assert.Equal([scratch.DatabaseName], before.Keys.ToArray());
