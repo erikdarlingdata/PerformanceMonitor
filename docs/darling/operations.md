@@ -147,7 +147,7 @@ A purge runs on the first sweep after startup and then daily, and it does not dr
 | 7 days | `query_snapshots`, `waiting_tasks`, `running_jobs`, `agent_status` |
 | 14 days | `pg_plan_capture` |
 | 30 days | Most collector tables (wait/query/procedure/Query Store stats, CPU, memory, file I/O, tempdb, perfmon, deadlocks, blocking, sessions, config snapshots), and `pg_log_events` — an event log sized by the target's `log_*` settings rather than by anything rare, so it gets the common horizon rather than `pg_deadlocks`' 90 (#3601) |
-| 90 days | `database_size_stats`, `index_object_stats`, `pvs_stats`, and the PostgreSQL bloat/vacuum/replication families (`pg_table_bloat_stats`, `pg_index_bloat`, `pg_index_usage_stats`, `pg_autovacuum_stats`, `pg_replication_slots`, `pg_wraparound_stats`, `pg_deadlocks`) |
+| 90 days | `database_size_stats`, `index_object_stats`, `database_protection`, `identity_capacity`, `pvs_stats`, and the PostgreSQL bloat/vacuum/replication families (`pg_table_bloat_stats`, `pg_index_bloat`, `pg_index_usage_stats`, `pg_autovacuum_stats`, `pg_replication_slots`, `pg_wraparound_stats`, `pg_deadlocks`) |
 | 365 days | `server_properties`, `job_history`, `pg_server_config`, `pg_column_stats`, `pg_extension_availability`, `pg_plan_capture_readiness`, and `pg_database_size_stats` — a size series is asked "since last year" (#3691) |
 
 `CollectorScheduleDefaults.cs` is the authority for that half; the rows above are its distinct horizon values, not a hand-maintained copy of every entry.

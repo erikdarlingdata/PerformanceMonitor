@@ -118,7 +118,7 @@ GitHub Copilot in VS Code can use Lite or Darling as an MCP server. The steps ar
 
 ##### Why Darling uses /core
 
-VS Code allows at most 128 tools in one chat request. Over that, the chat fails with "Cannot have more than 128 tools per request." Darling's root URL (`http://localhost:5152/`) serves 190 tools even with the write tools off, which is too many.
+VS Code allows at most 128 tools in one chat request. Over that, the chat fails with "Cannot have more than 128 tools per request." Darling's root URL (`http://localhost:5152/`) serves 191 tools even with the write tools off, which is too many.
 
 The `http://localhost:5152/core` URL serves a subset of 75 tools. They are the diagnostic reads an assistant needs to investigate a server. A tool outside that set fails on `/core` as an unknown tool, the same as a tool that is switched off.
 
