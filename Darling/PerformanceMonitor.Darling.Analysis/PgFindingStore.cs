@@ -406,6 +406,7 @@ ORDER BY local_bucket, story_path_hash";
                     PathKeys = story.Path,
                     /* Carried in-memory only; no analysis_findings column for it. */
                     RootFactMetadata = story.RootFactMetadata,
+                    PageEvidence = story.PageEvidence,
                     /* #3691 lane 43: the root fact's ranked objects, in memory only like the metadata above —
                        analyze_server's root_fact renders them; a read-back finding has none. */
                     RootFactRanked = story.RootFactRanked

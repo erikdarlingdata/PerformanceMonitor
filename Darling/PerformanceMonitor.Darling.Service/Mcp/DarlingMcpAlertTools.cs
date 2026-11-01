@@ -168,6 +168,7 @@ public sealed partial class DarlingMcpAlertTools
             {
                 var (severity, severitySource) = AlertHistoryRowSeverity.Describe(r.MetricName, r.ContextJson);
                 var routing = AlertContextSerializer.TryReadRouting(r.ContextJson);
+                var attachedTo = AlertContextSerializer.TryReadAttachedTo(r.ContextJson);
                 var known = DarlingMcpKnownPatternTools.ForAlert(knownPatterns, r.ServerId, r.MetricName, r.AlertTime, knownMasker);
                 return new
                 {
@@ -215,6 +216,10 @@ public sealed partial class DarlingMcpAlertTools
                        analysis row written before the gate existed; a null here is not evidence of anything. */
                     routing = routing?.Route,
                     routing_reason = routing?.Reason,
+                    /* #7084 part 4: the open engine alert an analysis finding was attached to instead of paging
+                       (metric and fire time, UTC), the other half of routing_reason's sentence. Null on every other
+                       row and on every row written before the member existed. */
+                    attached_to = attachedTo is null ? null : new { metric_name = attachedTo.Metric, alert_time = McpHelpers.FormatEffectiveStart(attachedTo.AlertTimeUtc) },
                     /* #5642: how old the newest sample behind the alert was WHEN IT FIRED (source, instant UTC, age,
                        and the one-line sentence the notification carried), read from the persisted context and
                        never measured against this read's clock. Null on an alert with no UTC sample instant and on
@@ -301,6 +306,7 @@ public sealed partial class DarlingMcpAlertTools
         try
         {
             JsonArray? details = null;
+            var attached = new JsonArray();
             if (!string.IsNullOrEmpty(metric_name)
                 && DateTime.TryParseExact(alert_time.Trim(), AlertTimeFormats, CultureInfo.InvariantCulture,
                     DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var time))
@@ -308,9 +314,21 @@ public sealed partial class DarlingMcpAlertTools
                 var contextJson = await DarlingAlertReader.GetAlertContextJsonAsync(
                     postgres, server_id, metric_name, DateTime.SpecifyKind(time, DateTimeKind.Unspecified), cancellationToken);
                 details = ProjectDetails(contextJson);
+
+                /* #7084 part 4: an engine alert's detail lists the findings that attached to it instead of paging. */
+                foreach (var finding in await DarlingAlertReader.GetAttachedFindingsAsync(
+                    postgres, server_id, metric_name, time, cancellationToken))
+                {
+                    attached.Add(new JsonObject
+                    {
+                        ["alert_time"] = McpHelpers.FormatEffectiveStart(finding.AlertTimeUtc),
+                        ["metric_name"] = finding.MetricName,
+                        ["routing_reason"] = finding.Reason,
+                    });
+                }
             }
 
-            return new JsonObject { ["details"] = details ?? new JsonArray() }.ToJsonString(McpHelpers.JsonOptions);
+            return new JsonObject { ["details"] = details ?? new JsonArray(), ["attached_findings"] = attached }.ToJsonString(McpHelpers.JsonOptions);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

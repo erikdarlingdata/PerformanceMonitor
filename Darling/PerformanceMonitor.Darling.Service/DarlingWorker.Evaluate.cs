@@ -885,7 +885,7 @@ public sealed partial class DarlingWorker
                    a recovery it did not measure — a subject whose capacity readings stopped arriving
                    altogether never reaches this arm at all now, because a missing reading freezes the gate
                    instead of clearing it. */
-                await NotifyPgResolutionAsync(key, snapshot.ServerName, metricName, "CPU Resolved",
+                await NotifyPgResolutionAsync(key, snapshot.ServerName, metricName, OpenEngineAlerts.CpuResolvedTitle,
                     lastCapacityPercent.HasValue
                         ? $"{snapshot.ServerName}: capacity back to {lastCapacityPercent.Value:F0}% "
                             + FleetCpuProvenance.CapacityDenominator
@@ -936,7 +936,7 @@ public sealed partial class DarlingWorker
             return;
         }
 
-        const string metricName = "Deadlocks Detected";
+        const string metricName = OpenEngineAlerts.DeadlocksDetectedMetric;
         var key = snapshot.ServerKey;
         var stateStore = new PgAlertStateStore(_postgres, _logger);
 
@@ -1079,7 +1079,7 @@ public sealed partial class DarlingWorker
             }
             else if (!decision.Active && wasActive)
             {
-                await NotifyPgResolutionAsync(key, snapshot.ServerName, metricName, "Deadlocks Cleared",
+                await NotifyPgResolutionAsync(key, snapshot.ServerName, metricName, OpenEngineAlerts.DeadlocksClearedTitle,
                     $"{snapshot.ServerName}: No deadlocks in the last hour");
             }
         }
@@ -1147,7 +1147,7 @@ public sealed partial class DarlingWorker
             return;
         }
 
-        const string metricName = "Blocking Detected";
+        const string metricName = OpenEngineAlerts.BlockingDetectedMetric;
         var key = snapshot.ServerKey;
         var stateStore = new PgAlertStateStore(_postgres, _logger);
 
@@ -1259,7 +1259,7 @@ public sealed partial class DarlingWorker
             }
             else if (!decision.Active && wasActive)
             {
-                await NotifyPgResolutionAsync(key, snapshot.ServerName, metricName, "Blocking Cleared",
+                await NotifyPgResolutionAsync(key, snapshot.ServerName, metricName, OpenEngineAlerts.BlockingClearedTitle,
                     BlockingPageRule.ClearedMessage(snapshot.ServerName, threshold, waitBarSeconds));
                 readClock.Restart();
             }

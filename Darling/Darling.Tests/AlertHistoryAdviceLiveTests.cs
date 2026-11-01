@@ -138,7 +138,7 @@ VALUES ($1, $2, $3, $4, 1, 1, FALSE, 'none', NULL, FALSE, FALSE, $5, $6)",
 
             var json = await WebReadAsync(postgres, "get_alert_details", DetailsQuery(AdviceMetric, now.AddMinutes(-2)));
             using var doc = JsonDocument.Parse(json);
-            Assert.Equal(new[] { "details" }, doc.RootElement.EnumerateObject().Select(p => p.Name).ToArray());
+            Assert.Equal(new[] { "details", "attached_findings" }, doc.RootElement.EnumerateObject().Select(p => p.Name).ToArray());
             var details = doc.RootElement.GetProperty("details").EnumerateArray().ToList();
             Assert.Equal(new[] { "Diagnosis", "Plan regression", "Remediation T-SQL" },
                 details.Select(d => d.GetProperty("heading").GetString()).ToArray());
@@ -188,7 +188,7 @@ VALUES ($1, $2, $3, $4, 1, 1, FALSE, 'none', NULL, FALSE, FALSE, $5, $6)",
             await SeedAsync(connection, now, ct);
             await using var postgres = OpenDataSource(cs);
 
-            const string empty = "{\"details\":[]}";
+            const string empty = "{\"details\":[],\"attached_findings\":[]}";
             /* An engine alert's context holds no prose: its detail_text already says everything, so it gets none. */
             Assert.Equal(empty, await WebReadAsync(postgres, "get_alert_details", DetailsQuery(EngineMetric, now.AddMinutes(-1))));
             /* Unknown metric, unknown time, unknown server: no match is an empty answer, not an error. */

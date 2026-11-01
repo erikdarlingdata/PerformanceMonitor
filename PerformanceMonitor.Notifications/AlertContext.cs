@@ -111,6 +111,14 @@ public class AlertContext
     public AlertRoutingDto? Routing { get; set; }
 
     /// <summary>
+    /// The open engine alert an analysis finding was attached to instead of paging (#7084 part 4), or null: every other
+    /// row, and every row written before the member existed. An alert-history row has no id, so the reference is the
+    /// server (the finding's own row), the engine alert's metric and its fire time. Persisted as the trailing
+    /// <c>AttachedTo</c> member of the JSON projection.
+    /// </summary>
+    public AlertAttachedToDto? AttachedTo { get; set; }
+
+    /// <summary>
     /// The wait type this firing is ABOUT (#4223 Poison Wait notebook), as structured data rather than
     /// something a reader has to regex out of <see cref="Details"/>'s prose heading or <c>DetailText</c>.
     /// Set by the Poison Wait fire sites on both engines — the SQL Server evaluator's worst-graded
@@ -438,7 +446,17 @@ public record AlertContextDto(
     List<AlertFileIdentity>? FileGrowthFiles = null,
     /* #7076 policy job step: trailing and nullable like FileGrowthFiles, so a row written before this member existed rehydrates
        to null ("this row does not say which step it announced"). */
-    string? PolicyJobStep = null);
+    string? PolicyJobStep = null,
+    /* #7084 part 4: trailing and nullable like External, so a row written before this member existed rehydrates to
+       null ("this finding is not attached to an engine alert"). */
+    AlertAttachedToDto? AttachedTo = null);
+
+/// <summary>
+/// The engine alert a held analysis finding was attached to (#7084 part 4): the metric of the delivered row (High CPU,
+/// Blocking Detected, Blocking Wait Time or Deadlocks Detected) and its fire time, UTC at the store's microsecond
+/// precision. With the server id of the finding's own row it names the engine alert, since the log has no row id.
+/// </summary>
+public record AlertAttachedToDto(string Metric, DateTime AlertTimeUtc);
 
 /// <summary>JSON mirror of <see cref="AlertExternalOrigin"/> (#5654). <c>PendingId</c> is the LAST member on purpose:
 /// <see cref="AlertContextSerializer.BuildPendingIdLikePattern"/> anchors on <c>"PendingId":&lt;n&gt;}</c>.</summary>
@@ -892,7 +910,9 @@ public static class AlertContextSerializer
             /* #7068: every file a file growth firing is about, beyond the five its card lists. */
             context.FileGrowthFiles,
             /* #7076: the policy job step this firing announced. */
-            context.PolicyJobStep);
+            context.PolicyJobStep,
+            /* #7084 part 4: the open engine alert this finding was attached to. Already the persisted shape. */
+            context.AttachedTo);
         return JsonSerializer.Serialize(dto);
     }
 
@@ -981,6 +1001,35 @@ public static class AlertContextSerializer
             }
 
             return collectorName.GetString();
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// The engine alert a persisted analysis-finding row was attached to (#7084 part 4), or <c>null</c> when it carries
+    /// none: every other row, a row written before the member existed, or unparseable JSON. Reads the one property, for
+    /// the reason <see cref="TryReadRoute"/> gives.
+    /// </summary>
+    public static AlertAttachedToDto? TryReadAttachedTo(string? contextJson)
+    {
+        if (string.IsNullOrWhiteSpace(contextJson))
+            return null;
+
+        try
+        {
+            using var document = JsonDocument.Parse(contextJson);
+            if (document.RootElement.ValueKind != JsonValueKind.Object
+                || !document.RootElement.TryGetProperty(nameof(AlertContextDto.AttachedTo), out var attached)
+                || attached.ValueKind != JsonValueKind.Object)
+            {
+                return null;
+            }
+
+            var dto = attached.Deserialize<AlertAttachedToDto>();
+            return dto is { Metric: not null } ? dto : null;
         }
         catch (JsonException)
         {
@@ -1231,6 +1280,10 @@ public static class AlertContextSerializer
             context.External = dto.External is { } external && !string.IsNullOrWhiteSpace(external.Source)
                 ? new AlertExternalOrigin(external.Source, external.Key, external.PendingId)
                 : null;
+
+            /* #7084 part 4: the engine alert this finding was attached to, null on every other row and every row
+               written before this member existed. */
+            context.AttachedTo = dto.AttachedTo is { } attached && !string.IsNullOrWhiteSpace(attached.Metric) ? attached : null;
 
             foreach (var d in dto.Details)
             {

@@ -137,7 +137,7 @@ public interface IAlertSettings
     /// (shipped) keeps it off the paging channels and puts it in the daily digest and the web/MCP surfaces;
     /// <see cref="FindingRoute.Page"/> restores the pre-#3712 behaviour where every notify-worthy finding
     /// pages. A CORROBORATED finding pages under either value — the knob moves only the uncorroborated arm.
-    /// See <see cref="FindingRouting.Classify(PerformanceMonitor.Analysis.AnalysisFinding, FindingRoute)"/>.
+    /// See <see cref="FindingRouting.Classify(PerformanceMonitor.Analysis.AnalysisFinding, FindingRoute, double)"/>.
     ///
     /// <para>Defaulted on the interface rather than declared abstract, on <see cref="NotificationRoutes"/>'
     /// precedent and for the same reason: the default IS the ruling, so an adapter that does not implement
