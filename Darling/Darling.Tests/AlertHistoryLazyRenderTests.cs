@@ -76,7 +76,7 @@ public sealed class AlertHistoryLazyRenderTests
         /* The control: detailBody is where that work actually happens, so the absence above is real and not a
            matcher for text that was never going to appear anywhere in this file. Same field/error shape as the
            pre-#4194 eager version - only when it runs has changed. */
-        var detailBody = ExtractFunction(js, "function detailBody(a, details) {");
+        var detailBody = ExtractFunction(js, "function detailBody(a, details, attached) {");
         Assert.Contains("parseDetailFields(", detailBody, StringComparison.Ordinal);
         Assert.Contains("fieldRow", detailBody, StringComparison.Ordinal);
         Assert.Contains("detail-fields", detailBody, StringComparison.Ordinal);
@@ -126,8 +126,8 @@ public sealed class AlertHistoryLazyRenderTests
         var loadingStripUses = Regex.Matches(js, Regex.Escape("loadingStrip(")).Count;
         /* The first mount in renderAlerts, and (#5241) the one in an opened Analysis row's own expansion while its advice
            loads; neither is on the poll path. #5632 Phase A adds two in the Investigations panel: its first fill, only while
-           its box is empty, and a row's journal on its first expand. The alert table's poll path still shows none. */
-        Assert.Equal(4, loadingStripUses);
+           its box is empty, and a row's journal on its first expand. #7084 part 4 adds one in an opened engine alert's expansion while its attached findings load. The alert table's poll path still shows none. */
+        Assert.Equal(5, loadingStripUses);
         Assert.Contains("mount(body, [loadingStrip()]);", ExtractFunction(js, "function journalCell(r) {"), StringComparison.Ordinal);
         Assert.Contains("if (!state.box.firstChild) mount(state.box, loadingStrip(", ExtractFunction(js, "async function refreshInvestigations(state) {"), StringComparison.Ordinal);
         Assert.Contains("mount(placeholder, [loadingStrip()]);", ExtractFunction(js, "function detailCell(a) {"), StringComparison.Ordinal);
