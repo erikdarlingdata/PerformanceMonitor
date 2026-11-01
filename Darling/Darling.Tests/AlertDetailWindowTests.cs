@@ -147,6 +147,76 @@ public sealed class AlertDetailWindowTests
         });
     }
 
+    /* #7124: why an alert was held or paged. The reader is the one the MCP history read uses; the window, its copy text and the
+       grid row's tooltip all read through it. */
+    private const string HeldReason = "Held for the daily digest: 1 blocking event at 12 s, below the 15 s page bar.";
+
+    private static string RoutedJson(string route, string reason) =>
+        AlertContextSerializer.Serialize(new AlertContext { Routing = new AlertRoutingDto(route, reason) });
+
+    private static ViewerAlertRow RowWith(string? contextJson) => new()
+    {
+        AlertTime = new DateTime(2026, 10, 15, 9, 0, 0),
+        ServerName = "SQL01",
+        MetricName = "Blocking Detected",
+        CurrentValue = 1,
+        ThresholdValue = 3,
+        AlertSent = false,
+        NotificationType = "digest",
+        Muted = false,
+        ContextJson = contextJson
+    };
+
+    [Fact]
+    public void RoutingReason_IsReadForAHeldRow_AndAPagedFinding_AndNullWhenThereIsNone()
+    {
+        Assert.Equal(HeldReason, AlertDetailText.RoutingReasonFromJson(RoutedJson("digest", HeldReason)));
+        Assert.Equal("Paged: two independent signals agree.", AlertDetailText.RoutingReasonFromJson(RoutedJson("page", "  Paged: two independent signals agree.  ")));
+
+        // A row with context but no routing (an engine alert), no context, an empty reason, and foreign JSON.
+        Assert.Null(AlertDetailText.RoutingReasonFromJson(AlertContextSerializer.Serialize(new AlertContext())));
+        Assert.Null(AlertDetailText.RoutingReasonFromJson(null));
+        Assert.Null(AlertDetailText.RoutingReasonFromJson(""));
+        Assert.Null(AlertDetailText.RoutingReasonFromJson(RoutedJson("digest", "   ")));
+        Assert.Null(AlertDetailText.RoutingReasonFromJson("not json"));
+    }
+
+    [Fact]
+    public void RoutingReason_IsAHeaderRow_AndInTheCopyText_ForAHeldRow_AndCollapsedForOneWithout()
+    {
+        StaTestThread.Run(() =>
+        {
+            var held = new AlertDetailWindow(RowWith(RoutedJson("digest", HeldReason)));
+            var plain = new AlertDetailWindow(RowWith(AlertContextSerializer.Serialize(new AlertContext())));
+            try
+            {
+                LayOut(held);
+                LayOut(plain);
+
+                Assert.Equal(HeldReason, held.RoutingReasonText.Text);
+                Assert.Equal(Visibility.Visible, held.RoutingReasonLabel.Visibility);
+                Assert.Equal(Visibility.Visible, held.RoutingReasonText.Visibility);
+                Assert.Contains("Routing reason: " + HeldReason, held.BuildCopyText(), StringComparison.Ordinal);
+
+                Assert.Equal(Visibility.Collapsed, plain.RoutingReasonLabel.Visibility);
+                Assert.Equal(Visibility.Collapsed, plain.RoutingReasonText.Visibility);
+                Assert.DoesNotContain("Routing reason", plain.BuildCopyText(), StringComparison.Ordinal);
+            }
+            finally
+            {
+                held.Close();
+                plain.Close();
+            }
+        });
+    }
+
+    [Fact]
+    public void RoutingReason_OnTheGridRow_ReadsTheContext_AndIsNullWithoutOne()
+    {
+        Assert.Equal(HeldReason, RowWith(RoutedJson("digest", HeldReason)).RoutingReason);
+        Assert.Null(RowWith(null).RoutingReason);
+    }
+
     [Fact]
     public void CopyText_CarriesTheHeader_AndBothItems()
     {

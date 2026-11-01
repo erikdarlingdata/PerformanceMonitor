@@ -137,6 +137,18 @@ public static class AlertDetailText
     }
 
     /// <summary>
+    /// The one-sentence reason the alert was routed as it was (#7124): why a held row went to the Daily Digest, or
+    /// why a finding paged. Read from the routing decision the engine persisted in the context, through the same
+    /// reader the MCP history read uses (<c>routing_reason</c>). Null when the row carries no routing, no context,
+    /// or an empty reason, so a window or tooltip shows nothing rather than a blank row.
+    /// </summary>
+    public static string? RoutingReasonFromJson(string? contextJson)
+    {
+        var reason = AlertContextSerializer.TryReadRouting(contextJson)?.Reason;
+        return string.IsNullOrWhiteSpace(reason) ? null : reason.Trim();
+    }
+
+    /// <summary>
     /// The detail text to persist and deliver for an alert whose context carries a sample age (#5642): the
     /// text unchanged when it already carries the line (the engine built it with the age stamped) or the
     /// context has none; the line appended once when it does not (a text built before the age was stamped);
