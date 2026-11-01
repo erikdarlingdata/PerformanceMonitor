@@ -3460,7 +3460,7 @@ BEGIN
       RETURN NEW;
    END IF;
 
-   IF NEW.event IN ('opened', 'joined', 'resolved', 'expired', 'claims_exhausted', 'evidence_ready', 'follow_up', 'deadlock_digest', 'event_delivered', 'fallback_sent', 'server_action_switched', 'action_called', 'action_done', 'action_failed', 'person_added', 'person_renamed', 'person_enabled', 'person_disabled', 'person_identity_added', 'person_identity_removed', 'person_grant_added', 'person_grant_removed', 'proposal_created', 'proposal_first_press', 'proposal_approved', 'proposal_run', 'proposal_failed', 'proposal_unknown', 'proposal_refused', 'proposal_expired', 'proposal_superseded', 'proposal_voided') THEN
+   IF NEW.event IN ('opened', 'joined', 'resolved', 'expired', 'claims_exhausted', 'evidence_ready', 'follow_up', 'deadlock_digest', 'event_delivered', 'fallback_sent', 'server_action_switched', 'action_called', 'action_done', 'action_failed', 'person_added', 'person_renamed', 'person_enabled', 'person_disabled', 'person_identity_added', 'person_identity_removed', 'person_grant_added', 'person_grant_removed', 'proposal_created', 'proposal_first_press', 'proposal_approved', 'proposal_run', 'proposal_failed', 'proposal_unknown', 'proposal_refused', 'proposal_expired', 'proposal_superseded', 'proposal_voided', 'proposal_notice_sent') THEN
       IF NEW.event = 'opened'
          AND EXISTS (SELECT 1 FROM config.investigation_requests AS r
                      WHERE r.request_id = NEW.request_id AND r.practice_of IS NOT NULL

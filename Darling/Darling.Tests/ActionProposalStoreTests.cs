@@ -38,7 +38,7 @@ public sealed class ActionProposalRulesTests
     public void EveryProposalEvent_IsInTheJournalsOwnerOnlyList()
     {
         var list = DarlingManagedRoles.JournalOwnerEventList.Split(", ");
-        foreach (var kind in ProposalEvents.OwnerOnly)
+        foreach (var kind in ProposalEvents.OwnerOnly.Append(InvestigationRequestStore.ProposalNoticeSent))
             Assert.Contains("'" + kind + "'", list);
     }
 
@@ -339,8 +339,9 @@ public sealed class ActionProposalGrantLiveTests
             else
                 Assert.Equal("1", await ActionProposalStoreLiveTests.ScalarAsync(login, "SELECT count(*) FROM config.agent_action_proposals", ct));
 
-            /* The journal trigger keeps every proposal event to the owner, so neither login can write a false proposal_approved row. */
-            foreach (var kind in ProposalEvents.OwnerOnly)
+            /* The journal trigger keeps every proposal event to the owner, so neither login can write a false proposal_approved row, nor
+               the notice mark first, which would stop the proposal's notice. */
+            foreach (var kind in ProposalEvents.OwnerOnly.Append(InvestigationRequestStore.ProposalNoticeSent))
             {
                 var journal = await Assert.ThrowsAsync<PostgresException>(() => ActionProposalStoreLiveTests.ExecAsync(login,
                     $"INSERT INTO config.investigation_journal (request_id, event, actor, detail) VALUES ('{s_request}', '{kind}', 'person:eve', '{{}}'::jsonb)", ct));

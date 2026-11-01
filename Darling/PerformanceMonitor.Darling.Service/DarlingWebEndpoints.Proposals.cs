@@ -46,7 +46,19 @@ public static partial class DarlingWebEndpoints
 
     /// <summary>What the proposal page says to a session that cannot press at all (#7109).</summary>
     internal const string ProposalPressSignInNote =
-        "Sign in to the web as an admin to press a proposal. A route that needs two people also needs your sign-in mapped to a person on Admin > People.";
+        "Sign in to the web to press a proposal. An admin sign-in presses as an administrator on a route with single-person approval. Any sign-in "
+        + "mapped to an enabled person on Admin > People presses as that person, with that person's approve grant.";
+
+    /// <summary>What the proposal page and the press say to a viewer-role sign-in that maps to no enabled person (#7109).</summary>
+    internal const string ProposalPressViewerNotMappedNote =
+        "Your sign-in can read but not edit, so it presses a proposal only as the person it is mapped to, and it is not mapped to an enabled "
+        + "person. An administrator can map your sign-in on Admin > People and give that person the approve grant.";
+
+    /// <summary>The note for a session that cannot press: a viewer-role sign-in is told it needs a mapping, every other session how to sign in.</summary>
+    private static string CannotPressNote(HttpContext context) =>
+        !DarlingWebSeat.IsSignedInAdmin(context) && PersonDirectoryCommands.WebIdentityOf(DarlingWebSeat.FromContext(context)) is not null
+            ? ProposalPressViewerNotMappedNote
+            : ProposalPressSignInNote;
 
     /// <summary>The most proposals the list answers.</summary>
     internal const int ProposalsLimit = 200;
@@ -56,17 +68,21 @@ public static partial class DarlingWebEndpoints
     /// identity is the seat's owner key (<see cref="PersonDirectoryCommands.WebIdentityOf"/>), else an administrator path. A seat with no owner
     /// key (the shared web token, an older cookie) and a signed-in admin whose key maps to no enabled person are administrator paths. The press
     /// API checks the grant, open rule 1 and the same person on both presses in its own transaction, so a mapping read here that goes stale
-    /// before the press is caught there. Null for a seat that cannot press (reads only, viewer).
+    /// before the press is caught there. A seat that cannot edit (a viewer-role sign-in) presses only as the enabled person its owner key maps
+    /// to, never as an administrator: a grant gives the approve power to that person whatever the role of the sign-in. Null for a seat that
+    /// cannot press: the reads-only seat, and a viewer-role sign-in that maps to no enabled person.
     /// </summary>
     internal static async Task<(ProposalApprover Approver, PersonRow? Person)?> ProposalApproverForSeatAsync(HttpContext context, NpgsqlDataSource people,
         CancellationToken cancellationToken)
     {
-        if (!DarlingWebSeat.IsSignedInAdmin(context))
+        var seat = DarlingWebSeat.FromContext(context);
+        var canEdit = DarlingWebSeat.IsSignedInAdmin(context);
+        var key = PersonDirectoryCommands.WebIdentityOf(seat);
+        if (!canEdit && key is null)
         {
             return null;
         }
 
-        var key = PersonDirectoryCommands.WebIdentityOf(DarlingWebSeat.FromContext(context));
         if (key is not null)
         {
             foreach (var person in await PersonDirectory.ListAsync(people, cancellationToken))
@@ -85,7 +101,7 @@ public static partial class DarlingWebEndpoints
             }
         }
 
-        return (ProposalApprover.Administrator(ServerActionSurfaces.Web), null);
+        return canEdit ? (ProposalApprover.Administrator(ServerActionSurfaces.Web), null) : null;
     }
 
     /// <summary>
@@ -97,8 +113,9 @@ public static partial class DarlingWebEndpoints
     /// <para><c>POST /api/proposals/{id}/first-press</c> and <c>POST /api/proposals/{id}/confirm</c> call <see cref="ActionProposalPress"/>. They
     /// run the checks of the other web write routes in the same order before the store is touched: 415 without <c>application/json</c> (a
     /// cross-site form or plain-text post), 400 for a body that is not a JSON object, 403 unless the request is a signed-in session that may
-    /// edit, 403 when the web's store login cannot decide (<see cref="AgentChangeUndo.CanDecideAsync"/>), 503 before the owner connection is
-    /// published. The body names nothing the press reads: the approver comes from the seat (<see cref="ProposalApproverForSeatAsync"/>). The
+    /// edit or a viewer-role sign-in mapped to an enabled person (the host's gate lets a sign-in with an owner key reach exactly these two
+    /// routes, <see cref="DarlingWebSeat.IsProposalPressPath"/>), 403 when the login an admin write would run on cannot decide
+    /// (<see cref="AgentChangeUndo.CanDecideAsync"/>), 503 before the owner connection is published. The body names nothing the press reads: the approver comes from the seat (<see cref="ProposalApproverForSeatAsync"/>). The
     /// answer is the press result: 200 for <c>first_pressed</c> and <c>run</c>, 404 for an unknown proposal, 409 for <c>superseded</c> and every
     /// refusal, 502 when the press could not read the server or the write failed or lost its reply.</para>
     /// </summary>
@@ -108,17 +125,21 @@ public static partial class DarlingWebEndpoints
         var adminWritesOff = DarlingWebStoreWrites.AdminWritesOff(managedStore, adminArm);
         var reads = new InvestigationRequestStore(postgres, McpCommandDeadlines.ReadSeconds);
 
-        AgentChangeUndo DecideProbe(HttpContext context) =>
-            adminArm is null ? changes : new AgentChangeUndo(WebAdminArm.SourceFor(adminArm, context, postgres), McpCommandDeadlines.ReadSeconds);
+        /* Whether the web may make changes on this store at all: the login an admin seat's write would run on (the admin arm's pool when it is
+           available, else the web login). The press itself writes on the owner connection whatever the seat, so a viewer-role person asks the
+           same question an admin seat asks. Asking the viewer pool instead would refuse every viewer-role press on a managed store, and nothing
+           here grants that pool anything. */
+        AgentChangeUndo DecideProbe() =>
+            adminArm?.Source is { } armSource ? new AgentChangeUndo(armSource, McpCommandDeadlines.ReadSeconds) : changes;
 
         async Task<JsonObject> SeatFieldsAsync(HttpContext context, JsonObject body)
         {
             var seat = await ProposalApproverForSeatAsync(context, postgres, context.RequestAborted);
-            var canPress = seat is not null && await DecideProbe(context).CanDecideAsync(context.RequestAborted);
+            var canPress = seat is not null && await DecideProbe().CanDecideAsync(context.RequestAborted);
             body["can_press"] = canPress;
             body["presses_as"] = !canPress ? null : seat!.Value.Approver.IsPerson ? "person" : "administrator";
             body["person_name"] = canPress ? seat!.Value.Person?.DisplayName : null;
-            body["press_note"] = !canPress ? ProposalPressSignInNote : seat!.Value.Approver.IsPerson ? null : AdministratorPressNote;
+            body["press_note"] = seat is null ? CannotPressNote(context) : !canPress ? ProposalPressSignInNote : seat!.Value.Approver.IsPerson ? null : AdministratorPressNote;
             return body;
         }
 
@@ -195,13 +216,16 @@ public static partial class DarlingWebEndpoints
                     return ErrorResult("Send the press as a JSON object, such as {}.", StatusCodes.Status400BadRequest);
                 }
 
-                /* A signed-in session that may edit comes first: the store login the web runs on says nothing about who is calling. */
-                if (!DarlingWebSeat.IsSignedInAdmin(context))
+                /* Who presses comes first: the store login the web runs on says nothing about who is calling. A session that may edit presses as
+                   its mapped person or as an administrator. A viewer-role sign-in presses only as its mapped enabled person, so one that maps to
+                   nobody is refused here, before the press API runs. */
+                var seat = await ProposalApproverForSeatAsync(context, postgres, context.RequestAborted);
+                if (seat is null)
                 {
-                    return ErrorResult(ProposalPressSignInNote, StatusCodes.Status403Forbidden);
+                    return ErrorResult(CannotPressNote(context), StatusCodes.Status403Forbidden);
                 }
 
-                if (!await DecideProbe(context).CanDecideAsync(context.RequestAborted))
+                if (!await DecideProbe().CanDecideAsync(context.RequestAborted))
                 {
                     return ErrorResult(DarlingWebStoreWrites.Refused("press a proposal", managedStore, adminWritesOff: adminWritesOff),
                         StatusCodes.Status403Forbidden);
@@ -214,8 +238,7 @@ public static partial class DarlingWebEndpoints
                         StatusCodes.Status503ServiceUnavailable);
                 }
 
-                var seat = await ProposalApproverForSeatAsync(context, postgres, context.RequestAborted);
-                var result = await press(new ActionProposalPress(owner, logger), seat!.Value.Approver, context.RequestAborted);
+                var result = await press(new ActionProposalPress(owner, logger), seat.Value.Approver, context.RequestAborted);
                 return DarlingWebStatementSweep.JsonText(PressJson(result, McpDataDetailMasker.ForAnswer(dataDetail)), route, logger,
                     stopwatch.ElapsedMilliseconds, context.RequestAborted, PressStatus(result));
             }

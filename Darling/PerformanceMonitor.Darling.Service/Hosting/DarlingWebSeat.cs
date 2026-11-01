@@ -213,6 +213,11 @@ internal sealed record DarlingWebSeat(string? Subject, bool CanEdit, string? Own
     /// custom-view panel through it, so blocking it would break the read surface the viewer seat exists to
     /// grant). Everything else non-GET is refused — INCLUDING write endpoints that do not exist yet, which is
     /// the point of gating on the method instead of enumerating routes.
+    /// <para>One more exception (#7109): a seat signed in with an <see cref="OwnerKey"/> may POST the two proposal presses,
+    /// <c>/api/proposals/{id}/first-press</c> and <c>/api/proposals/{id}/confirm</c>, matched exactly (<see cref="IsProposalPressPath"/>).
+    /// A grant gives the approve power to a person whatever the role of their sign-in, so the press endpoint, not this gate, decides: a seat
+    /// that cannot edit presses only as the enabled person its key maps to, and the press API checks that person's grant. A seat with no
+    /// owner key (the reads-only shared token, a front door's viewer, an older cookie) names nobody and stays refused here.</para>
     /// </summary>
     internal static bool IsRequestAllowed(DarlingWebSeat seat, string method, string path)
     {
@@ -226,6 +231,33 @@ internal sealed record DarlingWebSeat(string? Subject, bool CanEdit, string? Own
             return true;
         }
 
-        return HttpMethods.IsPost(method) && string.Equals(path, "/api/compose/run", StringComparison.OrdinalIgnoreCase);
+        if (!HttpMethods.IsPost(method))
+        {
+            return false;
+        }
+
+        return string.Equals(path, "/api/compose/run", StringComparison.OrdinalIgnoreCase)
+            || (seat.OwnerKey is not null && IsProposalPressPath(path));
+    }
+
+    /// <summary>True for exactly <c>/api/proposals/{id}/first-press</c> or <c>/api/proposals/{id}/confirm</c>, the id a GUID in its hyphenated
+    /// form, with no other segment and no trailing slash (#7109).</summary>
+    internal static bool IsProposalPressPath(string path)
+    {
+        const string Prefix = "/api/proposals/";
+        if (!path.StartsWith(Prefix, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var rest = path.AsSpan(Prefix.Length);
+        var slash = rest.IndexOf('/');
+        if (slash < 0 || !Guid.TryParseExact(rest[..slash], "D", out _))
+        {
+            return false;
+        }
+
+        var verb = rest[(slash + 1)..];
+        return verb.Equals("first-press", StringComparison.OrdinalIgnoreCase) || verb.Equals("confirm", StringComparison.OrdinalIgnoreCase);
     }
 }

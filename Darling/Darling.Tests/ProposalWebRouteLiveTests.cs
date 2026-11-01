@@ -16,6 +16,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.Logging;
 using Npgsql;
@@ -66,8 +67,9 @@ public sealed class ProposalWebRouteLiveTests(PostgresKillLiveTests.ScramTlsClus
         }
 
         /// <summary>A person with one web identity (the seat's owner key) and, unless <paramref name="grant"/> is false, <c>approve</c> for
-        /// <c>kill_session</c> on server 7. Answers the person id and a signed-in admin seat whose key is that identity.</summary>
-        public async Task<(long PersonId, DarlingWebSeat Seat)> PersonAsync(string name, bool grant = true, bool enabled = true)
+        /// <c>kill_session</c> on server 7. Answers the person id and a signed-in seat whose key is that identity: an admin seat, or a
+        /// viewer-role seat when <paramref name="canEdit"/> is false.</summary>
+        public async Task<(long PersonId, DarlingWebSeat Seat)> PersonAsync(string name, bool grant = true, bool enabled = true, bool canEdit = true)
         {
             var personId = (long)(await ScalarAsync(
                 $"INSERT INTO config.person (display_name, enabled, created_by, updated_by) VALUES ('{name}', {(enabled ? "TRUE" : "FALSE")}, 'test', 'test') RETURNING person_id"))!;
@@ -75,7 +77,7 @@ public sealed class ProposalWebRouteLiveTests(PostgresKillLiveTests.ScramTlsClus
             await ScalarAsync($"INSERT INTO config.person_identity (person_id, kind, external_id, created_by) VALUES ({personId}, 'web', '{key}', 'test') RETURNING identity_id");
             if (grant)
                 await ScalarAsync($"INSERT INTO config.person_grant (person_id, scope_server_id, capability, kinds, created_by) VALUES ({personId}, 7, 'approve', ARRAY['kill_session'], 'test') RETURNING grant_id");
-            return (personId, new DarlingWebSeat(name.ToLowerInvariant().Replace(' ', '.'), CanEdit: true, key));
+            return (personId, new DarlingWebSeat(name.ToLowerInvariant().Replace(' ', '.'), canEdit, key));
         }
 
         public async Task<object?> ScalarAsync(string sql)
@@ -103,7 +105,8 @@ public sealed class ProposalWebRouteLiveTests(PostgresKillLiveTests.ScramTlsClus
             return true;
         }
 
-        /// <summary>Starts the web routes over this store at <paramref name="dataDetail"/>, with the seat in <see cref="Seats"/> on every request.</summary>
+        /// <summary>Starts the web routes over this store at <paramref name="dataDetail"/>, with the seat in <see cref="Seats"/> on every request,
+        /// behind the host's real write gate (<see cref="DarlingWebSeat.IsRequestAllowed"/>), which answers 403 as the host does.</summary>
         public async Task<Web> WebAsync(McpDataDetail dataDetail = McpDataDetail.Full)
         {
             var builder = WebApplication.CreateBuilder(new WebApplicationOptions
@@ -118,6 +121,12 @@ public sealed class ProposalWebRouteLiveTests(PostgresKillLiveTests.ScramTlsClus
             app.Use((context, next) =>
             {
                 context.Items[DarlingWebSeat.HttpContextItemKey] = seats.Seat;
+                if (!DarlingWebSeat.IsRequestAllowed(seats.Seat, context.Request.Method, context.Request.Path.Value ?? "/"))
+                {
+                    context.Response.StatusCode = 403;
+                    return context.Response.WriteAsync("{\"error\":\"" + GateRefusal + "\"}");
+                }
+
                 return next(context);
             });
             var owner = new StoreOwnerSource();
@@ -151,6 +160,9 @@ public sealed class ProposalWebRouteLiveTests(PostgresKillLiveTests.ScramTlsClus
 
         public async ValueTask DisposeAsync() => await app.DisposeAsync();
     }
+
+    /// <summary>What this test's copy of the host gate answers, so a test can tell a gate refusal from an endpoint refusal.</summary>
+    private const string GateRefusal = "refused by the gate";
 
     private static string NewKey() => (Guid.NewGuid().ToString("N") + "ABCDEFGHIJK")[..43];
 
@@ -375,19 +387,119 @@ public sealed class ProposalWebRouteLiveTests(PostgresKillLiveTests.ScramTlsClus
             Assert.Equal(415, (await web.SendAsync("POST", path, null, "{}")).Status);
             Assert.Equal(400, (await web.SendAsync("POST", path, "application/json", "[]")).Status);
 
-            foreach (var seat in new[] { DarlingWebSeat.ReadsOnly, new DarlingWebSeat("viewer.v", CanEdit: false, NewKey()) })
+            /* The reads-only seat names nobody, so the gate refuses it. A viewer-role sign-in passes the gate on a press route, and the
+               endpoint refuses it because its key maps to no person. */
+            foreach (var (seat, note, error) in new[]
+            {
+                (DarlingWebSeat.ReadsOnly, DarlingWebEndpoints.ProposalPressSignInNote, GateRefusal),
+                (new DarlingWebSeat("viewer.v", CanEdit: false, NewKey()), DarlingWebEndpoints.ProposalPressViewerNotMappedNote,
+                    DarlingWebEndpoints.ProposalPressViewerNotMappedNote),
+            })
             {
                 c.Seats.Seat = seat;
-                Assert.Equal(403, (await web.PressAsync(proposalId, "first-press")).Status);
+                var press = await web.PressAsync(proposalId, "first-press");
+                Assert.Equal(403, press.Status);
+                Assert.Equal(error, (string?)press.Body!["error"]);
                 var read = await web.SendAsync("GET", $"/api/proposals/{proposalId}");
                 Assert.Equal(200, read.Status);
                 Assert.False((bool)read.Body!["can_press"]!);
                 Assert.Null(read.Body["presses_as"]);
-                Assert.Equal(DarlingWebEndpoints.ProposalPressSignInNote, (string?)read.Body["press_note"]);
+                Assert.Equal(note, (string?)read.Body["press_note"]);
             }
 
             Assert.Null(await c.FirstPressByAsync(proposalId));
             Assert.Equal(404, (await web.SendAsync("GET", $"/api/proposals/{Guid.NewGuid()}")).Status);
+        });
+    }
+
+    /// <summary>A viewer-role sign-in mapped to a person who holds <c>approve</c> presses twice over the web, through the host's gate, and the kill
+    /// runs: a grant gives the power to the person whatever the role of the sign-in. Both presses are recorded for that person.</summary>
+    [Fact]
+    public async Task AViewerRoleSignIn_MappedToAPersonWithApprove_PressesTwice_AndTheKillRuns()
+    {
+        await RunAsync(singlePerson: false, async c =>
+        {
+            var (connection, pid, proposalId) = await c.ProposeKillAsync(target);
+            await using var victim = connection;
+            var (personId, seat) = await c.PersonAsync("Viewer V", canEdit: false);
+            Assert.False(seat.CanEdit);
+            await using var web = await c.WebAsync();
+            c.Seats.Seat = seat;
+
+            var read = await web.SendAsync("GET", $"/api/proposals/{proposalId}");
+            Assert.True((bool)read.Body!["can_press"]!);
+            Assert.Equal("person", (string?)read.Body["presses_as"]);
+            Assert.Equal("Viewer V", (string?)read.Body["person_name"]);
+
+            var first = await web.PressAsync(proposalId, "first-press");
+            Assert.True(first.Status == 200, first.Body?.ToJsonString());
+            Assert.Equal("first_pressed", (string?)first.Body!["status"]);
+            Assert.Equal("person:" + personId, await c.FirstPressByAsync(proposalId));
+
+            var confirmed = await web.PressAsync(proposalId, "confirm");
+            Assert.True(confirmed.Status == 200, confirmed.Body?.ToJsonString());
+            Assert.Equal("run", (string?)confirmed.Body!["status"]);
+            Assert.False(await c.AliveAsync(pid));
+            Assert.Equal("run", await c.StateAsync(proposalId));
+            Assert.Equal(personId.ToString(CultureInfo.InvariantCulture), (string?)await c.ScalarAsync(
+                "SELECT detail->'approved_by'->>'person_id' FROM config.investigation_journal WHERE event = 'action_called'"));
+
+            /* The owner key opens the presses only: the same seat is still refused every other write. */
+            Assert.Equal(GateRefusal, (string?)(await web.SendAsync("POST", "/api/people", payload: "{}")).Body!["error"]);
+        });
+    }
+
+    /// <summary>A viewer-role sign-in mapped to a person with no <c>approve</c> grant passes the gate and the endpoint, and the press API refuses
+    /// it on the grant. Nothing is recorded and the backend stays.</summary>
+    [Fact]
+    public async Task AViewerRoleSignIn_MappedToAPersonWithoutTheGrant_IsRefusedByThePressApi()
+    {
+        await RunAsync(singlePerson: false, async c =>
+        {
+            var (connection, pid, proposalId) = await c.ProposeKillAsync(target);
+            await using var victim = connection;
+            var (_, seat) = await c.PersonAsync("Viewer N", grant: false, canEdit: false);
+            await using var web = await c.WebAsync();
+            c.Seats.Seat = seat;
+
+            var first = await web.PressAsync(proposalId, "first-press");
+            Assert.Equal(409, first.Status);
+            Assert.Equal("refused", (string?)first.Body!["status"]);
+            Assert.Equal(InvestigationRequestStore.ProposalPressCodes.NotApprover, (string?)first.Body["code"]);
+
+            Assert.Null(await c.FirstPressByAsync(proposalId));
+            Assert.Equal("pending", await c.StateAsync(proposalId));
+            Assert.True(await c.AliveAsync(pid, polls: 5));
+        });
+    }
+
+    /// <summary>A viewer-role sign-in that maps to no enabled person never presses as an administrator, even on a single-person route where an
+    /// administrator press would run: an unmapped key and a disabled person are refused by the endpoint, before the press API, with the
+    /// sentence that says how to be mapped. Nothing is recorded and the backend stays.</summary>
+    [Fact]
+    public async Task AViewerRoleSignIn_MappedToNobody_IsRefusedBeforeThePressApi_EvenOnASinglePersonRoute()
+    {
+        await RunAsync(singlePerson: true, async c =>
+        {
+            var (connection, pid, proposalId) = await c.ProposeKillAsync(target);
+            await using var victim = connection;
+            var (_, disabled) = await c.PersonAsync("Viewer D", enabled: false, canEdit: false);
+            await using var web = await c.WebAsync();
+
+            foreach (var seat in new[] { new DarlingWebSeat("viewer.u", CanEdit: false, NewKey()), disabled })
+            {
+                c.Seats.Seat = seat;
+                foreach (var verb in new[] { "first-press", "confirm" })
+                {
+                    var press = await web.PressAsync(proposalId, verb);
+                    Assert.Equal(403, press.Status);
+                    Assert.Equal(DarlingWebEndpoints.ProposalPressViewerNotMappedNote, (string?)press.Body!["error"]);
+                }
+            }
+
+            Assert.Null(await c.FirstPressByAsync(proposalId));
+            Assert.Equal("pending", await c.StateAsync(proposalId));
+            Assert.True(await c.AliveAsync(pid, polls: 5));
         });
     }
 
