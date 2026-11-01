@@ -12,6 +12,11 @@
          ambient token through every call. -->
     <!-- NU1701: CredentialManagement and SkiaSharp.Views.WPF (reached through the app projects) have no .NET 10 build. -->
     <NoWarn>$(NoWarn);CS4014;NU1701;xUnit1051</NoWarn>
+    <!-- #7065: a warning fails this project's build, so a new one cannot sit unnoticed. The suppressions above are the
+         only rules held back. The NuGet audit codes (NU1901 to NU1904) stay warnings: an advisory published against a
+         package we already use would otherwise turn every build red on a day nothing in the repo changed. -->
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <WarningsNotAsErrors>$(WarningsNotAsErrors);NU1901;NU1902;NU1903;NU1904</WarningsNotAsErrors>
   </PropertyGroup>
 
   <ItemGroup>
