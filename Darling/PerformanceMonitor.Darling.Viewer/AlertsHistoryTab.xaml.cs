@@ -482,9 +482,24 @@ public partial class AlertsHistoryTab : UserControl
         ShowDetail(item);
     }
 
-    private void ShowDetail(ViewerAlertRow item)
+    private async void ShowDetail(ViewerAlertRow item)
     {
-        var detailWindow = new AlertDetailWindow(item, FullChainOpener?.Invoke(item), DetailWindowSizeStore);
+        /* #7084 part 4: an engine alert's detail lists the findings that attached to it instead of paging, read when it
+           opens. A failed read leaves the list off: the rest of the detail is the row's own and is complete without it. */
+        IReadOnlyList<string>? attached = null;
+        if (_dataService is { } data && OpenEngineAlerts.IsAttachable(item.MetricName))
+        {
+            try
+            {
+                attached = await data.GetAttachedFindingsAsync(item);
+            }
+            catch (Exception ex)
+            {
+                ViewerLogger.Error("AlertsHistoryTab", "Could not read the findings attached to " + item.MetricName, ex);
+            }
+        }
+
+        var detailWindow = new AlertDetailWindow(item, FullChainOpener?.Invoke(item), DetailWindowSizeStore, attached);
         var owner = Window.GetWindow(this);
         if (owner != null)
         {

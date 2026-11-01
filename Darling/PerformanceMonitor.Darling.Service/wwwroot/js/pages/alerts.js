@@ -247,6 +247,14 @@ function detailCell(a) {
       mount(placeholder, detailBody(a, items));
       return;
     }
+    /* #7084 part 4: an engine alert that analysis findings attach to (instead of paging) lists them here, read on the first open
+     * for this one row, like the advice above. A failed or empty read leaves the list off. */
+    if (isAttachableEngineAlert(a)) {
+      mount(placeholder, [loadingStrip()]);
+      const read = await alertDetailRead(a);
+      mount(placeholder, detailBody(a, null, read?.attached_findings));
+      return;
+    }
     mount(placeholder, detailBody(a));
   });
   return node;
@@ -261,12 +269,20 @@ function isAnalysisAlert(a) {
   return typeof a.metric_name === "string" && a.metric_name.startsWith("Analysis:");
 }
 
-function alertAdvice(a) {
+/* The engine alerts a finding attaches to instead of paging (#7084 part 4): the metrics OpenEngineAlerts.Families lists. */
+const ATTACHABLE_ENGINE_METRICS = new Set(["High CPU", "Blocking Detected", "Blocking Wait Time", "Deadlocks Detected"]);
+
+function isAttachableEngineAlert(a) {
+  return ATTACHABLE_ENGINE_METRICS.has(a.metric_name);
+}
+
+/* get_alert_details for one row: { details, attached_findings }, or null when it could not be read. Cached like the advice. */
+function alertDetailRead(a) {
   const key = alertKey(a);
   if (!adviceCache.has(key)) {
     const pending = readTool("get_alert_details", { server_id: a.server_id, metric_name: a.metric_name, alert_time: a.alert_time })
       .then((res) => {
-        if (res.kind === "data") return Array.isArray(res.data?.details) && res.data.details.length > 0 ? res.data.details : null;
+        if (res.kind === "data") return res.data ?? null;
         if (res.kind === "empty") return null;
         adviceCache.delete(key);
         return null;
@@ -274,6 +290,11 @@ function alertAdvice(a) {
     adviceCache.set(key, pending);
   }
   return adviceCache.get(key);
+}
+
+async function alertAdvice(a) {
+  const read = await alertDetailRead(a);
+  return Array.isArray(read?.details) && read.details.length > 0 ? read.details : null;
 }
 
 /* #5642: "Newest Query Store sample: 15:43:29 UTC, 5m 20s old", or "CPU reading: 15:43:29 UTC, 5m 20s old" for a source that
@@ -297,7 +318,7 @@ function sampleAgeLine(sample) {
 }
 
 /* The expansion body: unchanged shape from the pre-#4194 eager version (see detailCell above), just built lazily. */
-function detailBody(a, details) {
+function detailBody(a, details, attached) {
   const hasDetail = a.detail_text != null && String(a.detail_text).trim().length > 0;
   /* #5241: an Analysis row's stored context holds advice; opening the row fetches it (detailCell) as `details`: the
    * structured items the desktop's Alert Detail window shows - heading, labelled fields, the advice prose and
@@ -321,6 +342,13 @@ function detailBody(a, details) {
     body.push(el("div", { class: "detail-fields" }, fields.map(fieldRow)));
   } else if (hasDetail) {
     body.push(el("div", { class: "detail-raw", text: shownDetail }));
+  }
+  /* #7084 part 4: the analysis findings held back from paging because this engine alert was open (get_alert_details'
+   * attached_findings, read when the row opened): each finding's time and story. */
+  if (Array.isArray(attached) && attached.length > 0) {
+    const rows = [["", "Attached findings"]];
+    for (const f of attached) rows.push([parseUtc(f.alert_time)?.toLocaleString() ?? String(f.alert_time), f.metric_name]);
+    body.push(el("div", { class: "detail-fields" }, rows.map(fieldRow)));
   }
   /* #5825: what a resolution row's send did. get_alert_history sets the three fields on such a row only. */
   if (a.resolution_outcome) {

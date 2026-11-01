@@ -80,6 +80,7 @@ public sealed class AnalysisNotificationService : IDisposable
     private readonly Action<string, string>? _showTrayNotification;
     private readonly Func<int, string, Task<bool>>? _isStoryMuted;
     private readonly TimeSpan _holdBack;
+    private readonly Func<string, DateTime, Task<AlertAttachedToDto?>>? _findOpenEngineAlert;
 
     /// <summary>
     /// The page road's hold-back queue (#3916), keyed by the LEAD's page bucket key: a re-report of a
@@ -183,6 +184,13 @@ public sealed class AnalysisNotificationService : IDisposable
     /// pipeline's own mute filter would have dropped the finding had the rule existed a pass earlier. Null
     /// means no re-check (the pipeline's filter is the only one).
     /// </param>
+    /// <param name="findOpenEngineAlert">
+    /// Optional <c>(serverId, nowUtc)</c> read (#7084 part 4): the newest delivered High CPU, Blocking Detected, Blocking Wait
+    /// Time or Deadlocks Detected row on that server in the last <see cref="OpenEngineAlerts.Window"/> that no resolution row
+    /// followed, or null. A page-routed incident that finds one is recorded as a digest row naming it instead of paging. Null
+    /// means no attach (the finding pages as the gate routed it); a read that throws also pages, because a missed attach
+    /// costs one extra page and a swallowed page costs the operator the finding.
+    /// </param>
     public AnalysisNotificationService(
         IFindingAlertSender sender,
         IAlertSettings settings,
@@ -190,9 +198,10 @@ public sealed class AnalysisNotificationService : IDisposable
         ILogger<AnalysisNotificationService> logger,
         Func<string, bool>? isServerSilenced = null,
         Action<string, string>? showTrayNotification = null,
-        Func<int, string, Task<bool>>? isStoryMuted = null)
+        Func<int, string, Task<bool>>? isStoryMuted = null,
+        Func<string, DateTime, Task<AlertAttachedToDto?>>? findOpenEngineAlert = null)
         : this(sender, settings, serverIdResolver, logger, PageHoldBackWindow,
-               isServerSilenced, showTrayNotification, isStoryMuted)
+               isServerSilenced, showTrayNotification, isStoryMuted, findOpenEngineAlert)
     {
     }
 
@@ -206,7 +215,8 @@ public sealed class AnalysisNotificationService : IDisposable
         TimeSpan holdBack,
         Func<string, bool>? isServerSilenced = null,
         Action<string, string>? showTrayNotification = null,
-        Func<int, string, Task<bool>>? isStoryMuted = null)
+        Func<int, string, Task<bool>>? isStoryMuted = null,
+        Func<string, DateTime, Task<AlertAttachedToDto?>>? findOpenEngineAlert = null)
     {
         _sender = sender;
         _settings = settings;
@@ -216,6 +226,7 @@ public sealed class AnalysisNotificationService : IDisposable
         _isServerSilenced = isServerSilenced;
         _showTrayNotification = showTrayNotification;
         _isStoryMuted = isStoryMuted;
+        _findOpenEngineAlert = findOpenEngineAlert;
     }
 
     /// <summary>
@@ -325,6 +336,26 @@ public sealed class AnalysisNotificationService : IDisposable
 
             var anyPage = members.Any(m => decisions[m].Route == FindingRoute.Page);
             var route = anyPage ? FindingRoute.Page : FindingRoute.Digest;
+
+            /* #7084 part 4: an engine alert already open on this server reached the operator, so a finding that would
+               page attaches to it instead. The incident then takes the DIGEST road, which is exactly a held row: no channel,
+               its own cooldown namespace (so the page buckets stay untouched and the finding pages as new the day the engine
+               alert resolves), and one row per cooldown. */
+            AlertAttachedToDto? attachedTo = null;
+            if (route == FindingRoute.Page && _findOpenEngineAlert is not null)
+            {
+                try
+                {
+                    attachedTo = await _findOpenEngineAlert(serverId, now);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning($"AnalysisNotificationService: could not read the open engine alerts for {members[0].ServerName}: {ex.GetType().Name}: {ex.Message}");
+                }
+
+                if (attachedTo is not null)
+                    route = FindingRoute.Digest;
+            }
 
             /* Per-member re-notification bucket (escalate-on-CRITICAL): a CRITICAL-band member
                (severity >= the shared >= 1.5 cutoff) gets its OWN per-finding bucket keyed on its
@@ -456,6 +487,11 @@ public sealed class AnalysisNotificationService : IDisposable
                    channel: BuildContext's card is unchanged, and the digest road reaches no card. */
                 var decision = decisions[lead];
                 context.Routing = new AlertRoutingDto(decision.RouteText, decision.Reason);
+                if (attachedTo is not null)
+                {
+                    context.Routing = new AlertRoutingDto(FindingRouting.RouteText(FindingRoute.Digest), OpenEngineAlerts.Reason(attachedTo));
+                    context.AttachedTo = attachedTo;
+                }
 
                 /* Name the OTHER findings that co-fired in THIS incident, in the one message, so the
                    single alert still accounts for everything the incident surfaced. Reuses the shared

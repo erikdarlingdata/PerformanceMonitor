@@ -361,6 +361,58 @@ LIMIT $4", connection) { CommandTimeout = _commandTimeoutSeconds };
         return firstFired is { } first ? new DeliveredFireHistory(first, rows) : null;
     }
 
+    /// <summary>
+    /// #7084 part 4: the newest engine alert still open on a server, for an analysis finding that would page. One of the
+    /// <see cref="OpenEngineAlerts.Families"/>' metrics with a DELIVERED fire (<c>alert_sent</c>, not muted, not a digest) in the
+    /// <see cref="OpenEngineAlerts.Window"/> before <paramref name="nowUtc"/> and no resolution row after it. Null for none, and
+    /// for a key that is not a server id. A failed read THROWS: the caller pages, because "could not read" must not look like
+    /// "an alert is open". One seek on <c>idx_config_alert_log_time</c> (server_id, metric_name, alert_time) per family.
+    /// </summary>
+    public async Task<AlertAttachedToDto?> FindOpenEngineAlertAsync(string serverId, DateTime nowUtc)
+    {
+        var sid = AlertHistoryServerIdentity.SeedScope(serverId);
+        if (sid is null)
+        {
+            return null;
+        }
+
+        var since = DateTime.SpecifyKind(AlertHistoryEscalationSeed.TruncateToMicroseconds(nowUtc - OpenEngineAlerts.Window), DateTimeKind.Unspecified);
+        var until = DateTime.SpecifyKind(AlertHistoryEscalationSeed.TruncateToMicroseconds(nowUtc), DateTimeKind.Unspecified);
+        AlertAttachedToDto? newest = null;
+        await using var connection = await _postgres.OpenConnectionAsync();
+        foreach (var (metric, resolutionTitle) in OpenEngineAlerts.Families)
+        {
+            using var command = new NpgsqlCommand(@"
+SELECT MAX(f.alert_time)
+FROM config_alert_log AS f
+WHERE f.server_id = $1
+AND   f.metric_name = $2
+AND   f.alert_sent
+AND   NOT f.muted
+AND   f.notification_type <> '" + AlertDelivery.ChannelDigest + @"'
+AND   f.alert_time > $3
+AND   f.alert_time <= $4
+AND   NOT EXISTS (SELECT 1 FROM config_alert_log AS r
+                  WHERE r.server_id = f.server_id AND r.metric_name = $5 AND r.alert_time > f.alert_time)", connection) { CommandTimeout = _commandTimeoutSeconds };
+            command.Parameters.AddWithValue(sid.Value);
+            command.Parameters.AddWithValue(metric);
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = since });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = until });
+            command.Parameters.AddWithValue(resolutionTitle);
+            var result = await command.ExecuteScalarAsync();
+            if (result is DateTime at)
+            {
+                var utc = DateTime.SpecifyKind(at, DateTimeKind.Utc);
+                if (newest is null || utc > newest.AlertTimeUtc)
+                {
+                    newest = new AlertAttachedToDto(metric, utc);
+                }
+            }
+        }
+
+        return newest;
+    }
+
     /// <summary>The #3712 seed exclusion, as SQL text. A literal rather than a parameter for the reason the
     /// email/webhook filters above are: <see cref="AlertDelivery.ChannelDigest"/> is a compile-time constant
     /// of this codebase, and spelling it through the constant is what keeps the writer's value and the
