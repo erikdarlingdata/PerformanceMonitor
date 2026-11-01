@@ -260,6 +260,26 @@ public sealed class DarlingMcpQueryTagRollupTools
             /* Data, or an empty answer: no served section held figures (nothing collected, or nothing carrying the requested tag), so the status
                is "empty", and the sections ride along (Lite does the same) so each section's own status and any unserved section's reason are
                there to read. */
+            /* #7010: one window-floor notice for the whole answer, the LATEST of the six section floors (a roll-up is only as complete as its
+               least-covered section, and a section's floor is where its own relation's coverage starts). One fleet-form probe per section relation
+               (six a call, run one after the other), scoped to the server when one is named, never one per relation per server. A relation the
+               window holds nothing in answers null and gives way to the others. */
+            var noticeNames = fleet ? null : new[] { scope[0].ServerName };
+            var noticeSources = new[] { "query_stats", "query_store_stats", "procedure_stats", "blocked_process_reports", "dmv_blocking_snapshots", "deadlocks" }
+                .Select(DataWindowFloor.Source.ForCollectorTable).ToArray();
+            var notice = await DarlingMcpWindowNotice.ReadAsync(
+                async () =>
+                {
+                    DateTime? latest = null;
+                    foreach (var source in noticeSources)
+                    {
+                        latest = DarlingMcpWindowNotice.Later(latest, await DarlingMcpWindowNotice.ProbeScoped(postgres, [source], noticeNames, windowStart, windowEnd, cancellationToken));
+                    }
+
+                    return latest;
+                },
+                windowStart, windowEnd, "query tag source tables", emptyAnswer: !anyData, logger: logger, cancellationToken: cancellationToken);
+
             var payload = new Dictionary<string, object?>();
             if (!anyData)
             {
@@ -271,6 +291,13 @@ public sealed class DarlingMcpQueryTagRollupTools
             payload["hours_back"] = hours_back;
             payload["window_start"] = windowStart.ToString("o", CultureInfo.InvariantCulture);
             payload["window_end"] = windowEnd.ToString("o", CultureInfo.InvariantCulture);
+            if (!notice.IsUnavailable)
+            {
+                payload["effective_start"] = notice.EffectiveStart;
+                payload["window_truncated"] = notice.WindowTruncated;
+                payload["truncation_note"] = notice.TruncationNote;
+            }
+
             payload["tag"] = tagFilter is int id ? tags.First(t => t.Id == id).Name : null;
             /* The sections never add up: the plan cache and Query Store count the same executions and procedures overlap both. */
             payload["sections_additive"] = false;

@@ -161,7 +161,7 @@ ORDER BY latest.object_kind, latest.object_name";
     /// those sizes as a catalog estimate and one sweep a day writes them exact (<c>size_estimated</c>), so a
     /// day's point is its newest EXACT row when it holds one (an estimate only when it holds none), and a growth
     /// over the series never subtracts an estimate from an exact size. Every other kind's rows have no
-    /// estimate flag (NULL), so for them nothing changes. A last snapshot and not a per-day maximum: the tiebreak takes the newest row
+    /// estimate flag (NULL), so for them nothing changes (the catch-all rows' exact daily form has none either, #6971). A last snapshot and not a per-day maximum: the tiebreak takes the newest row
     /// in the bucket, so the day's largest value is discarded unless it happens to be the last one, and
     /// <c>get_store_metrics</c>' description says so where a caller reads it (#3119). The last column is
     /// that kept row's own <c>metric_time</c> (#4734), the day's last snapshot time, beside <c>day</c>, the
@@ -193,7 +193,7 @@ ORDER BY object_kind, object_name, date_trunc('day', metric_time), (size_estimat
     /// The newest ESTIMATE row of each object per day (#5857), beside <see cref="StoreMetricsDailySql"/>, which keeps
     /// the day's exact row when it has one. A growth must subtract like from like (an estimate reads a little low), and
     /// the window's end is the NEWEST row, so a day whose kept point is exact can still need its estimate row to be
-    /// the other end of a growth that ends on an estimate. Only hypertable and aggregate rows are ever estimates.
+    /// the other end of a growth that ends on an estimate. Only hypertable, aggregate and the two catch-all rows (#6971) are ever estimates.
     /// $1 window start (naive UTC).
     /// </summary>
     public const string StoreMetricsDailyEstimatesSql = @"

@@ -7,6 +7,8 @@
  */
 
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
 using PerformanceMonitor.Notifications;
@@ -34,9 +36,17 @@ public partial class MuteRuleEditDialog : Window
 
     public MuteRule Rule { get; private set; }
 
-    public MuteRuleEditDialog(MuteRule? existingRule = null)
+    /// <summary>The schedule fields, Monday first, one box per day. Each box's tag is its <see cref="DayOfWeek"/>.</summary>
+    private readonly List<CheckBox> _dayBoxes = new();
+
+    /// <summary>Whether the store keeps a recurring schedule (V231, #7040). False hides the fields, and the rule is saved with none.</summary>
+    private readonly bool _scheduleSupported;
+
+    public MuteRuleEditDialog(MuteRule? existingRule = null, bool scheduleSupported = true)
     {
         InitializeComponent();
+        _scheduleSupported = scheduleSupported;
+        BuildScheduleSection();
 
         if (existingRule != null)
         {
@@ -66,7 +76,7 @@ public partial class MuteRuleEditDialog : Window
     }
 
     /// <summary>Creates a dialog pre-populated for muting from an alert context (Lite parity).</summary>
-    public MuteRuleEditDialog(AlertMuteContext context) : this()
+    public MuteRuleEditDialog(AlertMuteContext context, bool scheduleSupported = true) : this((MuteRule?)null, scheduleSupported)
     {
         if (context is null)
         {
@@ -89,8 +99,95 @@ public partial class MuteRuleEditDialog : Window
             ClientAppPatternBox.Text = context.ClientAppName;
     }
 
+    private static readonly DayOfWeek[] DisplayDays =
+        [DayOfWeek.Monday, DayOfWeek.Tuesday, DayOfWeek.Wednesday, DayOfWeek.Thursday, DayOfWeek.Friday, DayOfWeek.Saturday, DayOfWeek.Sunday];
+
+    private void BuildScheduleSection()
+    {
+        if (!_scheduleSupported)
+        {
+            ScheduleSection.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        foreach (var day in DisplayDays)
+        {
+            var box = new CheckBox
+            {
+                Content = MuteRecurrence.DayNames(MuteRecurrence.Bit(day))[0],
+                Tag = day,
+                Margin = new Thickness(0, 0, 12, 0),
+            };
+            _dayBoxes.Add(box);
+            DaysPanel.Children.Add(box);
+        }
+
+        /* The zone starts as this computer's, as an IANA id, the same default the service gives a schedule with no zone. */
+        RecurZoneBox.Text = MuteRecurrence.HostZoneIana();
+    }
+
+    private void PopulateSchedule(MuteRule rule)
+    {
+        if (!_scheduleSupported || !rule.RecurStartTime.HasValue || !rule.RecurEndTime.HasValue)
+        {
+            return;
+        }
+
+        RecurStartBox.Text = MuteRecurrence.FormatTime(rule.RecurStartTime.Value);
+        RecurEndBox.Text = MuteRecurrence.FormatTime(rule.RecurEndTime.Value);
+        if (!string.IsNullOrEmpty(rule.RecurTimeZone))
+        {
+            RecurZoneBox.Text = rule.RecurTimeZone;
+        }
+
+        /* A null mask is every day, which the form says as no day ticked. */
+        if (rule.RecurDays.HasValue)
+        {
+            foreach (var box in _dayBoxes)
+            {
+                box.IsChecked = MuteRecurrence.IncludesDay(rule.RecurDays, (DayOfWeek)box.Tag);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Reads the schedule fields into <paramref name="rule"/> and runs the shared check. Returns the refusal to show, or null when the
+    /// fields are valid. Blank times with no day ticked is a one-off rule, so the zone the box starts with never makes one look scheduled.
+    /// </summary>
+    internal static string? ApplySchedule(MuteRule rule, IEnumerable<DayOfWeek> checkedDays, string? startText, string? endText, string? zoneText)
+    {
+        var mask = 0;
+        foreach (var day in checkedDays)
+        {
+            mask |= MuteRecurrence.Bit(day);
+        }
+
+        var hasStart = !string.IsNullOrWhiteSpace(startText);
+        var hasEnd = !string.IsNullOrWhiteSpace(endText);
+        TimeOnly start = default, end = default;
+        if (hasStart && !MuteRecurrence.TryParseTime(startText, out start))
+        {
+            return "Enter the start time as HH:mm, for example 22:00.";
+        }
+
+        if (hasEnd && !MuteRecurrence.TryParseTime(endText, out end))
+        {
+            return "Enter the end time as HH:mm, for example 02:00.";
+        }
+
+        rule.RecurStartTime = hasStart ? start : null;
+        rule.RecurEndTime = hasEnd ? end : null;
+        /* No day ticked is every day. Days ticked with no times reach the check below, which refuses them. */
+        rule.RecurDays = mask == 0 ? null : mask;
+        /* A one-off rule has no zone, even though the box starts with the computer's. */
+        rule.RecurTimeZone = (hasStart || hasEnd) && !string.IsNullOrWhiteSpace(zoneText) ? zoneText.Trim() : null;
+
+        return rule.TryNormalizeRecurrence(out var error) ? null : error;
+    }
+
     private void PopulateFromRule(MuteRule rule)
     {
+        PopulateSchedule(rule);
         ReasonBox.Text = rule.Reason ?? "";
         ServerNameBox.Text = rule.ServerName ?? "";
         DatabasePatternBox.Text = rule.DatabasePattern ?? "";
@@ -171,6 +268,18 @@ public partial class MuteRuleEditDialog : Window
         {
             MessageBox.Show(windowProblem, "Mute Rule", MessageBoxButton.OK, MessageBoxImage.Warning);
             return;
+        }
+
+        if (_scheduleSupported)
+        {
+            var scheduleProblem = ApplySchedule(Rule,
+                _dayBoxes.Where(b => b.IsChecked == true).Select(b => (DayOfWeek)b.Tag),
+                RecurStartBox.Text, RecurEndBox.Text, RecurZoneBox.Text);
+            if (scheduleProblem is not null)
+            {
+                MessageBox.Show(scheduleProblem, "Mute Rule", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
         }
 
         if (Rule.ServerName == null && Rule.MetricName == null && Rule.DatabasePattern == null

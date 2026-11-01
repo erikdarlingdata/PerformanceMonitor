@@ -75,7 +75,7 @@ public sealed class McpToolGuideHeadsInvestigationsTests
         var claim = McpToolGuideTests.Served("claim_investigation_request").Tail!;
         Assert.Contains("at most three claims", claim, StringComparison.Ordinal);
         Assert.Contains("claims afresh, with a new claim_id", claim, StringComparison.Ordinal);
-        Assert.Contains("masked at mcp.dataDetail", claim, StringComparison.Ordinal);
+        Assert.Contains("masked at your data detail level", claim, StringComparison.Ordinal);
         Assert.Contains("released (it stays counted)", claim, StringComparison.Ordinal);
 
         var submit = McpToolGuideTests.Served("submit_investigation_report").Tail!;

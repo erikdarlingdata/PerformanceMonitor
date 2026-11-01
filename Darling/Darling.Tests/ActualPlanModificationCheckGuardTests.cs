@@ -59,7 +59,9 @@ public sealed class ActualPlanModificationCheckGuardTests
     /// </summary>
     private static readonly Dictionary<string, string[]> s_serviceHandlers = new(StringComparer.Ordinal)
     {
-        ["Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs"] = new[] { "RunExecuteActualPlanAsync", "ExecuteActualPlanAsync" },
+        /* #7024: the handler and the nested command host that calls it now sit in different DarlingWorker.<Area>.cs files. */
+        ["Darling/PerformanceMonitor.Darling.Service/DarlingWorker.Targets.cs"] = new[] { "RunExecuteActualPlanAsync" },
+        ["Darling/PerformanceMonitor.Darling.Service/DarlingWorker.Passes.cs"] = new[] { "ExecuteActualPlanAsync" },
         ["Darling/PerformanceMonitor.Darling.Service/DarlingCommandExecutor.cs"] = new[] { "RunAsync", "ResolvePlan" },
     };
 
@@ -110,7 +112,7 @@ public sealed class ActualPlanModificationCheckGuardTests
     [InlineData(ServerTabPlans, "GetActualPlan_Click")]
     public void EveryGate_ChecksThenPromptsFromTheCheckResult_ThenAsksBeforeItRuns(string relative, string method)
     {
-        var body = MethodBody(StripComments(File.ReadAllText(Path.Combine(RepoRoot(), relative))), method);
+        var body = MethodBody(StripComments(RepoFile.ReadRepoFile(Path.Combine(RepoRoot(), relative))), method);
 
         var detect = Regex.Match(body, @"var\s+(\w+)\s*=\s*QueryModificationDetector\.Detect\(", RegexOptions.CultureInvariant);
         Assert.True(detect.Success, $"{relative} {method} never calls QueryModificationDetector.Detect into a variable");
@@ -545,7 +547,7 @@ public sealed class ActualPlanModificationCheckGuardTests
 
     /// <summary>(e) In the service's two handler files only the named handler methods may run the executor or name the command.</summary>
     [Theory]
-    [InlineData("Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs", "RunExecuteActualPlanAsync")]
+    [InlineData("Darling/PerformanceMonitor.Darling.Service/DarlingWorker.Targets.cs", "RunExecuteActualPlanAsync")]
     [InlineData("Darling/PerformanceMonitor.Darling.Service/DarlingCommandExecutor.cs", "RunAsync")]
     public void TheCensus_AllowsOnlyTheNamedHandlerMethodsInTheServiceFiles(string relative, string handler)
     {

@@ -149,6 +149,12 @@ public sealed class StoreDatabaseSizeEstimateLiveTests
                 Assert.True(storedReader.GetBoolean(2));
             }
 
+            /* #6971: the two catch-all rows follow the same split on both store shapes (the plain shape runs the plain twin
+               of the estimate statement): exact on the first sweep, estimated an hour later, and the estimate counts a relation
+               that is mostly TOAST, with its TOAST table and indexes. */
+            await CatchAllEstimateChecks.AssertHourlyRowsAgainstExactAsync(connection, first, hourly, ct);
+            await CatchAllEstimateChecks.AssertEstimateCountsTheToastedRelationAsync(connection, timescale, hourly, ct);
+
             /* 24 hours after the first: no exact row in the last 23 hours, so exact again, with one more call. */
             var daily = first.AddHours(24);
             await StoreSelfMetrics.SweepAsync(connection, timescale, daily, null, null, null, ct);
@@ -157,6 +163,7 @@ public sealed class StoreDatabaseSizeEstimateLiveTests
             Assert.True(dailyRow.TotalBytes > 0);
             Assert.True(await CountPgDatabaseSizeCallsAsync(scratch.ConnectionString, dbId, ct) > callsAfterFirst,
                 "the daily sweep calls pg_database_size again");
+            await CatchAllEstimateChecks.AssertDailyRowsAreExactAsync(connection, daily, ct);
 
             bodySucceeded = true;
         }

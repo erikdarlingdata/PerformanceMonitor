@@ -927,6 +927,8 @@ public partial class SettingsWindow : Window
         BandBlockingCriticalPerHourBox.Text = r.BlockingCriticalPerHour.ToString("0.0", CultureInfo.InvariantCulture);
         BandBlockingWarnWaitSecondsBox.Text = r.BlockingWarnWaitSeconds.ToString("0.0", CultureInfo.InvariantCulture);
         BandBlockingCriticalWaitSecondsBox.Text = r.BlockingCriticalWaitSeconds.ToString("0.0", CultureInfo.InvariantCulture);
+        BandBlockingWarnSnapshotWaitSecondsBox.Text = r.BlockingWarnSnapshotWaitSeconds.ToString("0.0", CultureInfo.InvariantCulture);
+        BandBlockingCriticalSnapshotWaitSecondsBox.Text = r.BlockingCriticalSnapshotWaitSeconds.ToString("0.0", CultureInfo.InvariantCulture);
         AlertPvsCheckBox.IsChecked = r.PvsEnabled;
         AlertPvsThresholdPercentBox.Text = r.PvsThresholdPercent.ToString(CultureInfo.InvariantCulture);
         AlertPvsFloorGbBox.Text = r.PvsFloorGb.ToString(CultureInfo.InvariantCulture);
@@ -964,6 +966,13 @@ public partial class SettingsWindow : Window
            enable/disable group: sweeps keep running under a fleet-wide mute by contract. */
         FleetSweepEnabledCheckBox.IsChecked = r.FleetSweepEnabled;
         FleetSweepIntervalBox.Text = r.FleetSweepIntervalMinutes.ToString(CultureInfo.InvariantCulture);
+        /* #7041 (V232): the Daily Health Report, outside the master-toggle group like the fleet sweep. A report that is off with no zone yet
+           starts at this machine's zone, the way the web editor starts at the browser's: the person setting it up is most likely in the
+           zone they want. A saved zone, or a blank on a report that is already on, is left as it is. */
+        DailyReportEnabledCheckBox.IsChecked = r.DailyReportEnabled;
+        DailyReportSendAtBox.Text = r.DailyReportSendAt;
+        DailyReportTimeZoneBox.Text = r.DailyReportTimeZone ?? (r.DailyReportEnabled ? "" : ViewerDataService.DefaultKnownPatternTimeZone());
+        DailyReportTitleBox.Text = r.DailyReportTitle ?? "";
         /* #1141/#1236: the delivery mode + per-event cap are now STORE-backed (the service honors them),
            seeded from the row like every other alert-engine control. */
         AlertDeliveryModeBox.SelectedIndex = r.DeliveryMode == "PerEvent" ? 1 : 0;
@@ -985,6 +994,23 @@ public partial class SettingsWindow : Window
         value = null;
         errors.Add(
             $"{label} must be a number between {min.ToString("0.0", CultureInfo.InvariantCulture)} and {max.ToString("0.0", CultureInfo.InvariantCulture)}.",
+            box);
+    }
+
+    /// <summary>Parses one optional blocking band box (#7028): 0 turns the tier off, otherwise the named bounds the classifier clamps to.
+    /// A value between 0 and the floor is refused, because the clamp would rewrite it to the floor and the setting would not stick.</summary>
+    private static void BlockingBandOptionalBox(
+        System.Windows.Controls.TextBox box, double min, double max, string label, SettingsValidationErrors errors, out double? value)
+    {
+        if (double.TryParse(box.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed) && (parsed == 0 || (parsed >= min && parsed <= max)))
+        {
+            value = parsed;
+            return;
+        }
+
+        value = null;
+        errors.Add(
+            $"{label} must be 0 (that tier is off) or a number between {min.ToString("0.0", CultureInfo.InvariantCulture)} and {max.ToString("0.0", CultureInfo.InvariantCulture)}.",
             box);
     }
 
@@ -1047,6 +1073,7 @@ public partial class SettingsWindow : Window
                the bind normalises the spelling. */
             AnalysisUncorroboratedRoute = SelectedAnalysisUncorroboratedRoute(),
             FleetSweepEnabled = FleetSweepEnabledCheckBox.IsChecked == true,
+            DailyReportEnabled = DailyReportEnabledCheckBox.IsChecked == true,
             ExcludedDatabases = SettingsListText.SplitLines(AlertExcludedDatabasesBox.Text),
             ExcludedVolumes = VolumeExclusions.Normalize(SettingsListText.SplitLinesAndCommas(AlertExcludedVolumesBox.Text)).ToList(),
         };
@@ -1214,6 +1241,21 @@ public partial class SettingsWindow : Window
                 row.BlockingCriticalWaitSeconds = blCriticalWait.Value;
             }
         }
+        /* #7028: the snapshot arm. 0 turns a tier off, so the order only binds when both are above 0. */
+        BlockingBandOptionalBox(BandBlockingWarnSnapshotWaitSecondsBox, ServerHealthThresholds.BlockingWaitSecondsFloor, ServerHealthThresholds.BlockingWaitSecondsCeiling,
+            "Blocking snapshot warn seconds", errors, out var blWarnSnapshot);
+        BlockingBandOptionalBox(BandBlockingCriticalSnapshotWaitSecondsBox, ServerHealthThresholds.BlockingWaitSecondsFloor, ServerHealthThresholds.BlockingWaitSecondsCeiling,
+            "Blocking snapshot critical seconds", errors, out var blCriticalSnapshot);
+        if (blWarnSnapshot.HasValue && blCriticalSnapshot.HasValue)
+        {
+            if (blWarnSnapshot.Value > 0 && blCriticalSnapshot.Value > 0 && blCriticalSnapshot.Value < blWarnSnapshot.Value)
+                errors.Add("Blocking snapshot critical seconds must not be lower than blocking snapshot warn seconds.", BandBlockingCriticalSnapshotWaitSecondsBox);
+            else
+            {
+                row.BlockingWarnSnapshotWaitSeconds = blWarnSnapshot.Value;
+                row.BlockingCriticalSnapshotWaitSeconds = blCriticalSnapshot.Value;
+            }
+        }
         if (int.TryParse(AlertPvsThresholdPercentBox.Text, out var pvsPct) && pvsPct is >= 0 and <= 100)
             row.PvsThresholdPercent = pvsPct;
         if (int.TryParse(AlertPvsFloorGbBox.Text, out var pvsFloor) && pvsFloor >= 0)
@@ -1260,6 +1302,27 @@ public partial class SettingsWindow : Window
             row.FleetSweepIntervalMinutes = fleetSweepInterval;
         else
             errors.Add($"Fleet sweep interval must be between {FleetSweepCadence.IntervalMinutesFloor} and {FleetSweepCadence.IntervalMinutesCeiling} minutes.", FleetSweepIntervalBox);
+
+        /* #7041 (V232): the same rules update_alert_settings enforces (ViewerDailyReportRules mirrors the service's), so the two writers
+           cannot disagree. A blank zone or title is stored as NULL: the host's zone, the default title. */
+        if (ViewerDailyReportRules.TryParseSendAt(DailyReportSendAtBox.Text, out var dailyReportSendAt))
+            row.DailyReportSendAt = ViewerDailyReportRules.FormatSendAt(dailyReportSendAt);
+        else
+            errors.Add("Daily health report send time must be a time of day written HH:mm, for example 07:00.", DailyReportSendAtBox);
+
+        var dailyReportZone = DailyReportTimeZoneBox.Text.Trim();
+        if (ViewerDailyReportRules.IsKnownZone(dailyReportZone))
+            row.DailyReportTimeZone = dailyReportZone.Length == 0 ? null : dailyReportZone;
+        else
+            errors.Add($"Daily health report time zone \"{dailyReportZone}\" is not a time zone this machine knows. Use an IANA id such as America/New_York, or leave it blank for the service host's zone.", DailyReportTimeZoneBox);
+
+        var dailyReportTitle = DailyReportTitleBox.Text.Trim();
+        if (dailyReportTitle.Length == 0)
+            row.DailyReportTitle = null;
+        else if (ViewerDailyReportRules.TryValidateTitle(dailyReportTitle, out var dailyReportTitleError))
+            row.DailyReportTitle = dailyReportTitle;
+        else
+            errors.Add($"Daily health report title {dailyReportTitleError}", DailyReportTitleBox);
 
         /* #1141/#1236: delivery mode + per-event cap (store-backed). */
         row.DeliveryMode = AlertDeliveryModeBox.SelectedIndex == 1 ? "PerEvent" : "Summary";
@@ -1352,6 +1415,9 @@ public partial class SettingsWindow : Window
             ServerHealthThresholds.BlockingWarnWaitSeconds.ToString("0.0", CultureInfo.InvariantCulture);
         BandBlockingCriticalWaitSecondsBox.Text =
             ServerHealthThresholds.BlockingCriticalWaitSeconds.ToString("0.0", CultureInfo.InvariantCulture);
+        /* #7028: both snapshot tiers default to 0, which is off. */
+        BandBlockingWarnSnapshotWaitSecondsBox.Text = "0.0";
+        BandBlockingCriticalSnapshotWaitSecondsBox.Text = "0.0";
         AnalysisNotifyCooldownBox.Text = "360";
         AlertPvsThresholdPercentBox.Text = "40";
         AlertPvsFloorGbBox.Text = "1";
@@ -1376,6 +1442,11 @@ public partial class SettingsWindow : Window
            leave this button writing a cadence nobody chose. The checkbox resets to the shipped ON. */
         FleetSweepEnabledCheckBox.IsChecked = true;
         FleetSweepIntervalBox.Text = FleetSweepCadence.DefaultIntervalMinutes.ToString(CultureInfo.InvariantCulture);
+        /* #7041 (V232): the report ships off, at 07:00, in the host's zone, with the default title. */
+        DailyReportEnabledCheckBox.IsChecked = false;
+        DailyReportSendAtBox.Text = ViewerDailyReportRules.DefaultSendAt;
+        DailyReportTimeZoneBox.Text = "";
+        DailyReportTitleBox.Text = "";
         AlertExcludedDatabasesBox.Text = "";
         AlertExcludedVolumesBox.Text = "";
         MuteRuleDefaultExpirationCombo.SelectedIndex = 1; // 24 hours

@@ -64,25 +64,47 @@ public sealed class DarlingMcpClientTimeoutTools
             var (window, samples) = await ReadRangeAsync(postgres, resolved.ServerId, windowStart, windowEnd, limit, cancellationToken);
             var (kind, reading) = ClientTimeoutsRead.Classify(window, windowEnd);
 
+            /* #7010: the window-floor notice of attention_events (Lite's twin reads the same relation). A precondition carries none, it says its own
+               cause; the generic unavailable and the quiet answers carry it under hints, because a window the store does not reach back to is not a
+               true negative. The unmet-engine answer above stays bare, so a collector that never ran here is not read as a quiet window. */
+            Task<McpWindowNotice> NoticeAsync(bool emptyAnswer) => DarlingMcpWindowNotice.ReadAsync(
+                () => DarlingMcpWindowNotice.Probe(postgres, "attention_events", resolved.ServerName, windowStart, windowEnd, cancellationToken),
+                windowStart, windowEnd, "attention_events", emptyAnswer: emptyAnswer, logger: logger, cancellationToken: cancellationToken);
+
             if (kind == ClientTimeoutsKind.NotObserved)
             {
                 /* A collector that recorded a denial or a missing session on its latest run has a specific sentence, which is better
                    evidence than the generic one. */
-                return await DarlingRuntimePrecondition.StatusAsync(postgres, resolved.ServerId, resolved.DisplayName, Collector, cancellationToken)
-                    ?? McpHelpers.Status("unavailable", ClientTimeoutsRead.UnavailableMessage(resolved.DisplayName, window, windowEnd, hours_back));
+                var precondition = await DarlingRuntimePrecondition.StatusAsync(postgres, resolved.ServerId, resolved.DisplayName, Collector, cancellationToken);
+                if (precondition is not null)
+                {
+                    return precondition;
+                }
+
+                var unavailableNotice = await NoticeAsync(emptyAnswer: true);
+                return DarlingMcpWindowNotice.FinishEmpty(
+                    McpHelpers.Status("unavailable", ClientTimeoutsRead.UnavailableMessage(resolved.DisplayName, window, windowEnd, hours_back), unavailableNotice.AsHints()),
+                    unavailableNotice);
             }
 
             if (kind == ClientTimeoutsKind.Quiet)
             {
-                return McpHelpers.Status("empty", ClientTimeoutsRead.EmptyMessage(resolved.DisplayName, reading!, hours_back));
+                var quietNotice = await NoticeAsync(emptyAnswer: true);
+                return DarlingMcpWindowNotice.FinishEmpty(
+                    McpHelpers.Status("empty", ClientTimeoutsRead.EmptyMessage(resolved.DisplayName, reading!, hours_back), quietNotice.AsHints()),
+                    quietNotice);
             }
 
-            return JsonSerializer.Serialize(new
+            var notice = await NoticeAsync(emptyAnswer: false);
+            return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
                 hours_back,
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 client_timeouts = ClientTimeoutsRead.Payload(reading!, window, samples, limit, 2000),
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions), notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -137,7 +159,9 @@ public sealed class DarlingMcpClientTimeoutTools
                 r.GetDateTime(0),
                 r.IsDBNull(1) ? null : r.GetString(1),
                 r.IsDBNull(2) ? null : r.GetString(2),
-                r.GetInt64(3)));
+                r.GetInt64(3),
+                r.GetInt64(4),
+                r.GetInt64(5)));
 
         /* No span (fewer than two runs) is "not observed": the answer never shows the detail, so it is not read. */
         var span = ClientTimeoutsRead.DetailSpan(runs);
@@ -167,7 +191,9 @@ public sealed class DarlingMcpClientTimeoutTools
                 r.IsDBNull(5) ? null : r.GetInt32(5),
                 r.IsDBNull(6) ? null : r.GetInt64(6),
                 r.IsDBNull(7) ? null : r.GetString(7),
-                r.IsDBNull(8) ? null : r.GetString(8)));
+                r.IsDBNull(8) ? null : r.GetString(8),
+                r.GetBoolean(9),
+                r.GetBoolean(10)));
 
         return (new AttentionWindow(runs, counts, groups, statements, databases, applications, TopHosts: hosts), samples);
     }

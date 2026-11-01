@@ -138,16 +138,26 @@ public sealed partial class DarlingMcpAlertTools
                 ? 0L
                 : await DarlingAlertReader.CountDismissedAlertsAsync(postgres, since, windowEnd, serverId, filter, cancellationToken);
 
+            /* #7010: the window-floor notice. The floor is the fleet's wait_stats floor (the collector every collecting server runs each cycle,
+               the data the store holds), never the oldest alert: a window that holds no alert is not truncation, a window that starts before
+               the data is. Lite's twin probes the same relation. An empty page carries it under hints, because a window the store does not
+               reach back to is not a true negative. */
+            var waitStats = DataWindowFloor.Source.ForCollectorTable("wait_stats");
+            var notice = await DarlingMcpWindowNotice.ReadAsync(
+                () => DarlingMcpWindowNotice.ProbeScoped(postgres, [waitStats], null, since, windowEnd, cancellationToken),
+                since, windowEnd, "wait_stats", emptyAnswer: page.Count == 0, cancellationToken: cancellationToken);
+
             if (page.Count == 0)
             {
                 /* An empty default page over a window that DOES hold dismissed rows is not "no alerts": it is
                    "every alert here was acknowledged", and the one-sentence quiet-window answer would send
                    the caller off widening a window whose contents they were never shown. */
-                return dismissedExcludedCount > 0
+                return DarlingMcpWindowNotice.FinishEmpty(dismissedExcludedCount > 0
                     ? McpHelpers.Status(
                         "empty",
-                        $"No undismissed alerts found in the specified time range{filterSentence}, but {dismissedExcludedCount} dismissed {(dismissedExcludedCount == 1 ? "alert was" : "alerts were")} excluded by the default filter. Re-run with include_dismissed = true to see them — a dismissed alert still fired.")
-                    : McpHelpers.Status("empty", $"No alerts found in the specified time range{filterSentence}.");
+                        $"No undismissed alerts found in the specified time range{filterSentence}, but {dismissedExcludedCount} dismissed {(dismissedExcludedCount == 1 ? "alert was" : "alerts were")} excluded by the default filter. Re-run with include_dismissed = true to see them — a dismissed alert still fired.",
+                        notice.AsHints())
+                    : McpHelpers.Status("empty", $"No alerts found in the specified time range{filterSentence}.", notice.AsHints()), notice);
             }
 
             /* #6334: the known-pattern entries, loaded ONCE for the page and matched in memory (no query per row). */
@@ -232,10 +242,13 @@ public sealed partial class DarlingMcpAlertTools
                 }).ToList();
             }
 
-            return JsonSerializer.Serialize(new
+            return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new
             {
                 server = scope,
                 hours_back,
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 /* #3541 A3: `total_alerts` is gone — it was the page count under a name that promised the
                    window. What is published is what was measured: the page, whether the window held more,
                    the span the page covers (newest-first, so the oldest stamp IS the reach), and the filter
@@ -250,7 +263,7 @@ public sealed partial class DarlingMcpAlertTools
                 dismissed_excluded = !include_dismissed,
                 dismissed_excluded_count = dismissedExcludedCount,
                 alerts
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions), notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -337,7 +350,7 @@ public sealed partial class DarlingMcpAlertTools
         }).ToArray());
     }
 
-    [McpServerTool(Name = "get_alert_settings"), Description("Gets the alert configuration currently in effect: enabled flags, thresholds, cooldowns, delivery mode, and cadences. cooldown_minutes gates whether an alert FIRES; delivery.cooldown_minutes separately bounds the resulting post, per alert fingerprint and, for a re-notification, per metric across every monitored server. Darling: an unseeded store answers status unavailable and darling.json's defaults still govern until it seeds. Lite always answers its live in-memory settings. An empty knob list (e.g. long_running_query's exclusions) means cleared, not a default in force.<<GUIDE>>Gets the current alert configuration the service is using: which alerts are enabled and their thresholds (CPU, blocking, deadlocks, poison waits, runnable queue (runnable tasks per scheduler), client timeouts (attentions per minute), long-running queries/jobs, tempdb, low disk, failed jobs, database state, Availability Group health, connection loss), the cooldown, excluded databases, the deadlock/blocking delivery mode and cooldown, the scheduled-analysis cadence, and the fleet-sweep cadence. TWO different cooldowns are reported and they govern different stages: top-level cooldown_minutes gates whether the alert engine FIRES at all, while delivery.cooldown_minutes bounds the resulting Slack/Teams/PagerDuty/webhook/email post twice over: once per alert FINGERPRINT, and once per METRIC across the whole fleet for a RE-notification. The second bound is why one fault on forty servers does not cost forty posts an hour; the servers it holds back are named on the post that does go out, under an 'Other Servers Affected' section. A first notice is never held back by either bound, and PerEvent delivery mode opts out of the per-metric one. A channel going quiet with alerts still in get_alert_history is delivery.cooldown_minutes, not cooldown_minutes. The self_alerts group holds the thresholds for alerts about the MONITOR STORE itself rather than a monitored server — those arrive with Server: 'Monitor Store' by default, or with the store's own peers.storeName label when the operator set that file-only field (a multi-store estate names each store on its own self-alerts), so an alert naming either spelling is tuned here and nowhere else, including Retention Held's warn/critical ratios. Mute rules match the alert row's server spelling, so on a store with storeName set, scope self-alert mutes to that label, not to 'Monitor Store'. The health_bands group is NOT an alert: its two tiers decide what band a server's card, the worst-first ranking and get_fleet_overview's counts read, in deadlocks per HOUR normalised over whatever window was asked for — so the same pair means the same condition on a 1-hour read and a 24-hour one. Tuning deadlocks.count_threshold does not move the band and tuning health_bands does not move the alert. The file_growth group's rise_mb is megabytes per HOUR, averaged over file_growth.lookback_minutes — a rate, not a total for the window: 10240 means 10 GB/hr whether the lookback is 5 minutes or 24 hours, and the engine scales it to the window (a 5-minute lookback asks for 853 MB inside it, a 24-hour one for 240 GB). The fleet_sweep group is NOT an alert family either, and its cadence is a SECOND cadence, separate from the scheduled-analysis one: fleet_sweep.enabled turns the scheduled whole-fleet sweep report on or off, and fleet_sweep.interval_minutes (15–1440, default 60 — hourly) is how often it runs. The alerts_enabled master switch deliberately does not govern sweep production, only delivery: sweeps keep running under alerts_enabled: false — that is when they carry the would-have-paged ledger — so muting the fleet does not blind the report surface. Separately, deadlocks.pg_count_threshold and blocking.pg_count_threshold are the PostgreSQL versions of those two alerts' count gates, reported inside those same groups, and they are deliberately NOT the same numbers as the count_threshold beside them: the two engines count with different instruments (captured deadlock graphs versus deadlocks parsed from the server log; engine-recorded blocked-process reports versus a periodic SAMPLE of pg_stat_activity), and while both engines' cards now band deadlocks through the same health_bands tiers, a PostgreSQL server still has no blocking band to calibrate against. The enabled switch in each group governs BOTH engines; the two thresholds do not move each other. On a store with no PostgreSQL targets both PostgreSQL keys are inert. poison_wait.threshold_ms is RETIRED: since the Poison Wait alert grades ACCUMULATED wait over a ten-minute window, this value is stored and reported for compatibility but consulted by nothing; poison_wait.threshold_ms_note says so beside it on every read, and update_alert_settings accepts it with a warning rather than refusing a round-tripped payload. poison_wait.enabled is the live switch. client_timeouts.enabled is the Client Timeouts alert's switch (ON by default since V216), and the alert's bars are RELATIVE to each server's own normal rate: client_timeouts.warning_per_minute and client_timeouts.critical_per_minute are the FLOORS (client attentions, a client cancelled a query or its timeout expired, per minute over the attention collector's last runs, about 3 minutes; Warning at least 1, Critical never below Warning), and client_timeouts.warning_multiple and client_timeouts.critical_multiple (defaults 3 and 10) scale the server's baseline, the p99.9 of its own 3-minute average attention rate over the last 7 days, read about once a day. The Warning bar is the higher of the Warning floor and warning_multiple x baseline, the Critical bar the higher of the Critical floor and critical_multiple x baseline, and a server with under a day of capture, or under 720 minutes with a successful collector run, has no baseline and uses the floors alone. The fired alert names the baseline, the multiple and the bar crossed. analysis.uncorroborated_route is where a notify-worthy but UNCORROBORATED finding goes — one fact in its chain and no matched co-fire check: 'digest' (the default) keeps it off every paging channel and puts it in the daily Analysis Singles Digest and the web/MCP surfaces, 'page' restores the earlier paging of every notify-worthy finding; a corroborated finding pages under either. It is the EFFECTIVE route, never null, resolved from the knob's two homes with the STORE winning: the settings row's analysis_uncorroborated_route column (V137) when it holds a route, else darling.json's analysis.uncorroboratedRoute (read once at service start), else the shipped 'digest'. analysis.uncorroborated_route_source says which home decided — 'store', 'file' or 'default' — and analysis.uncorroborated_route_note restates the precedence beside it; a store column left NULL (every store the morning after the V137 upgrade, and every fresh seed) reads 'file'. Set it with update_alert_settings or the Viewer's Settings window (Notifications > Automated Analysis): live in the running service within one collection sweep, consulted on the next scheduled-analysis delivery, no restart; send null through update_alert_settings to clear the column and hand the decision back to the file. long_running_query.excluded_program_name_prefixes and long_running_query.excluded_logins are the Long-Running Query alert's OPT-OUT knob: a session whose program_name STARTS WITH an entry of the first list, or whose login_name IS an entry of the second (both case-insensitive, no wildcard grammar), is NOT EVALUATED by that alert at all — not read into the decision, not counted, not fingerprinted — which is the opposite of a mute rule (a mute silences a fire already decided; an exclusion means the session never reaches the decision, and excluding a paging program resolves the open incident). The exclusion is applied in the read ahead of long_running_query.max_results, so an excluded session never consumes a result slot, and the fired alert's card carries Excluded Count / Excluded By Program Prefix / Excluded By Login items saying how many SESSIONS each list removed on that evaluation (a session matching both counts once, under the prefix). The lists ship SEEDED from a 7-day read of one large production store, whose long-running population fell into four classes: (1) SQL Agent job steps — program_name prefix 'SQLAgent - TSQL JobStep', ~460 sessions a week across 11 jobs, medians 35–62 min — the default prefix; (2) the NT AUTHORITY\\SYSTEM and NT AUTHORITY\\NETWORK SERVICE logins — the permanent multi-day CDC-shaped background — the default logins; (3) the application's admin login — deliberately NOT a default, because it runs the job wave but also real ad-hoc long-runners, and the job-step prefix already covers its share; (4) named humans — never excluded, they are what the page is for. The seeds are DEFAULTS: an empty list here means the operator cleared it and that arm excludes nothing. SMTP/webhook delivery credentials are managed separately and are not reported here. delivery.send_resolutions says, per channel (slack, teams, webhook for the generic webhook, email), whether the message that an alert has cleared is also sent to the destinations its fire reached; all four are off by default, and a notification route can override them (get_notification_routes, send_resolutions). The credentials themselves are not reported — configure them in the standalone Darling Viewer app's Settings window (Notifications section), which connects to this store (including remotely, not just localhost) rather than requiring desktop access to this specific box.")]    public static async Task<string> GetAlertSettings(        NpgsqlDataSource postgres,
+    [McpServerTool(Name = "get_alert_settings"), Description("Gets the alert configuration currently in effect: enabled flags, thresholds, cooldowns, delivery mode, and cadences. cooldown_minutes gates whether an alert FIRES; delivery.cooldown_minutes separately bounds the resulting post, per alert fingerprint and, for a re-notification, per metric across every monitored server. Darling: an unseeded store answers status unavailable and darling.json's defaults still govern until it seeds. Lite always answers its live in-memory settings. An empty knob list (e.g. long_running_query's exclusions) means cleared, not a default in force.<<GUIDE>>Gets the current alert configuration the service is using: which alerts are enabled and their thresholds (CPU, blocking, deadlocks, poison waits, runnable queue (runnable tasks per scheduler), client timeouts (attentions per minute), long-running queries/jobs, tempdb, low disk, failed jobs, database state, Availability Group health, connection loss), the cooldown, excluded databases, the deadlock/blocking delivery mode and cooldown, the scheduled-analysis cadence, and the fleet-sweep cadence. TWO different cooldowns are reported and they govern different stages: top-level cooldown_minutes gates whether the alert engine FIRES at all, while delivery.cooldown_minutes bounds the resulting Slack/Teams/PagerDuty/webhook/email post twice over: once per alert FINGERPRINT, and once per METRIC across the whole fleet for a RE-notification. The second bound is why one fault on forty servers does not cost forty posts an hour; the servers it holds back are named on the post that does go out, under an 'Other Servers Affected' section. A first notice is never held back by either bound, and PerEvent delivery mode opts out of the per-metric one. A channel going quiet with alerts still in get_alert_history is delivery.cooldown_minutes, not cooldown_minutes. The self_alerts group holds the thresholds for alerts about the MONITOR STORE itself rather than a monitored server — those arrive with Server: 'Monitor Store' by default, or with the store's own peers.storeName label when the operator set that file-only field (a multi-store estate names each store on its own self-alerts), so an alert naming either spelling is tuned here and nowhere else, including Retention Held's warn/critical ratios. Mute rules match the alert row's server spelling, so on a store with storeName set, scope self-alert mutes to that label, not to 'Monitor Store'. The health_bands group is NOT an alert: its two tiers decide what band a server's card, the worst-first ranking and get_fleet_overview's counts read, in deadlocks per HOUR normalised over whatever window was asked for — so the same pair means the same condition on a 1-hour read and a 24-hour one. Tuning deadlocks.count_threshold does not move the band and tuning health_bands does not move the alert. The blocking count tiers in that group are blocked WAITS per hour, the unit blocking.count_threshold counts in, and the group reports blocking_band_unit: waits_per_hour. The file_growth group's rise_mb is megabytes per HOUR, averaged over file_growth.lookback_minutes — a rate, not a total for the window: 10240 means 10 GB/hr whether the lookback is 5 minutes or 24 hours, and the engine scales it to the window (a 5-minute lookback asks for 853 MB inside it, a 24-hour one for 240 GB). The fleet_sweep group is NOT an alert family either, and its cadence is a SECOND cadence, separate from the scheduled-analysis one: fleet_sweep.enabled turns the scheduled whole-fleet sweep report on or off, and fleet_sweep.interval_minutes (15–1440, default 60 — hourly) is how often it runs. The alerts_enabled master switch deliberately does not govern sweep production, only delivery: sweeps keep running under alerts_enabled: false — that is when they carry the would-have-paged ledger — so muting the fleet does not blind the report surface. Separately, deadlocks.pg_count_threshold and blocking.pg_count_threshold are the PostgreSQL versions of those two alerts' count gates, reported inside those same groups, and they are deliberately NOT the same numbers as the count_threshold beside them: the two engines count with different instruments (captured deadlock graphs versus deadlocks parsed from the server log; engine-recorded blocked-process reports versus a periodic SAMPLE of pg_stat_activity), and while both engines' cards now band deadlocks through the same health_bands tiers, a PostgreSQL server still has no blocking band to calibrate against. The enabled switch in each group governs BOTH engines; the two thresholds do not move each other. On a store with no PostgreSQL targets both PostgreSQL keys are inert. poison_wait.threshold_ms is RETIRED: since the Poison Wait alert grades ACCUMULATED wait over a ten-minute window, this value is stored and reported for compatibility but consulted by nothing; poison_wait.threshold_ms_note says so beside it on every read, and update_alert_settings accepts it with a warning rather than refusing a round-tripped payload. poison_wait.enabled is the live switch. client_timeouts.enabled is the Client Timeouts alert's switch (ON by default since V216), and the alert's bars are RELATIVE to each server's own normal rate: client_timeouts.warning_per_minute and client_timeouts.critical_per_minute are the FLOORS (client attentions, a client cancelled a query or its timeout expired, per minute over the attention collector's last runs, about 3 minutes; Warning at least 1, Critical never below Warning), and client_timeouts.warning_multiple and client_timeouts.critical_multiple (defaults 3 and 10) scale the server's baseline, the p99.9 of its own 3-minute average attention rate over the last 7 days, read about once a day. The Warning bar is the higher of the Warning floor and warning_multiple x baseline, the Critical bar the higher of the Critical floor and critical_multiple x baseline, and a server with under a day of capture, or under 720 minutes with a successful collector run, has no baseline and uses the floors alone. The fired alert names the baseline, the multiple and the bar crossed. analysis.uncorroborated_route is where a notify-worthy but UNCORROBORATED finding goes — one fact in its chain and no matched co-fire check: 'digest' (the default) keeps it off every paging channel and puts it in the daily Analysis Singles Digest and the web/MCP surfaces, 'page' restores the earlier paging of every notify-worthy finding; a corroborated finding pages under either. It is the EFFECTIVE route, never null, resolved from the knob's two homes with the STORE winning: the settings row's analysis_uncorroborated_route column (V137) when it holds a route, else darling.json's analysis.uncorroboratedRoute (read once at service start), else the shipped 'digest'. analysis.uncorroborated_route_source says which home decided — 'store', 'file' or 'default' — and analysis.uncorroborated_route_note restates the precedence beside it; a store column left NULL (every store the morning after the V137 upgrade, and every fresh seed) reads 'file'. Set it with update_alert_settings or the Viewer's Settings window (Notifications > Automated Analysis): live in the running service within one collection sweep, consulted on the next scheduled-analysis delivery, no restart; send null through update_alert_settings to clear the column and hand the decision back to the file. long_running_query.excluded_program_name_prefixes and long_running_query.excluded_logins are the Long-Running Query alert's OPT-OUT knob: a session whose program_name STARTS WITH an entry of the first list, or whose login_name IS an entry of the second (both case-insensitive, no wildcard grammar), is NOT EVALUATED by that alert at all — not read into the decision, not counted, not fingerprinted — which is the opposite of a mute rule (a mute silences a fire already decided; an exclusion means the session never reaches the decision, and excluding a paging program resolves the open incident). The exclusion is applied in the read ahead of long_running_query.max_results, so an excluded session never consumes a result slot, and the fired alert's card carries Excluded Count / Excluded By Program Prefix / Excluded By Login items saying how many SESSIONS each list removed on that evaluation (a session matching both counts once, under the prefix). The lists ship SEEDED from a 7-day read of one large production store, whose long-running population fell into four classes: (1) SQL Agent job steps — program_name prefix 'SQLAgent - TSQL JobStep', ~460 sessions a week across 11 jobs, medians 35–62 min — the default prefix; (2) the NT AUTHORITY\\SYSTEM and NT AUTHORITY\\NETWORK SERVICE logins — the permanent multi-day CDC-shaped background — the default logins; (3) the application's admin login — deliberately NOT a default, because it runs the job wave but also real ad-hoc long-runners, and the job-step prefix already covers its share; (4) named humans — never excluded, they are what the page is for. The seeds are DEFAULTS: an empty list here means the operator cleared it and that arm excludes nothing. SMTP/webhook delivery credentials are managed separately and are not reported here. delivery.send_resolutions says, per channel (slack, teams, webhook for the generic webhook, email), whether the message that an alert has cleared is also sent to the destinations its fire reached; all four are off by default, and a notification route can override them (get_notification_routes, send_resolutions). The credentials themselves are not reported — configure them in the standalone Darling Viewer app's Settings window (Notifications section), which connects to this store (including remotely, not just localhost) rather than requiring desktop access to this specific box.")]    public static async Task<string> GetAlertSettings(        NpgsqlDataSource postgres,
         [Description("Optional: a server name. Adds server_view: each tunable threshold with its global value, effective value and source, plus that server's database overrides.")] string? server_name = null,
         CancellationToken cancellationToken = default)
     {
@@ -478,11 +491,16 @@ public sealed partial class DarlingMcpAlertTools
         {
             deadlock_warn_per_hour = s.DeadlockWarnPerHour,
             deadlock_critical_per_hour = s.DeadlockCriticalPerHour,
-            /* #6927 (V228): the blocking band, beside the deadlock one: reports per hour and the longest single block in seconds. */
+            /* #6927 (V228): the blocking band, beside the deadlock one: waits per hour (#7028) and the longest single block in seconds. */
             blocking_warn_per_hour = s.BlockingWarnPerHour,
             blocking_critical_per_hour = s.BlockingCriticalPerHour,
             blocking_warn_wait_seconds = s.BlockingWarnWaitSeconds,
-            blocking_critical_wait_seconds = s.BlockingCriticalWaitSeconds
+            blocking_critical_wait_seconds = s.BlockingCriticalWaitSeconds,
+            /* #7028 (V230): the snapshot arm, the longest total blocked wait in one sampled snapshot, seconds, 0 = that tier is off. */
+            blocking_warn_snapshot_wait_seconds = s.BlockingWarnSnapshotWaitSeconds,
+            blocking_critical_snapshot_wait_seconds = s.BlockingCriticalSnapshotWaitSeconds,
+            /* #7028: the unit of the two count tiers above: blocked waits per hour, the unit blocking.count_threshold counts in. */
+            blocking_band_unit = "waits_per_hour"
         },
         poison_wait = new
         {
@@ -596,6 +614,8 @@ public sealed partial class DarlingMcpAlertTools
         identity_capacity = new { enabled = s.IdentityCapacityEnabled, warning_percent = s.IdentityCapacityWarningPercent, critical_percent = s.IdentityCapacityCriticalPercent },
         /* #6874: the Agent Alert Gaps alert (SQL Server Agent alert setup has a gap). Off by default. */
         agent_alert_gaps = new { enabled = s.AgentAlertGapsEnabled },
+        /* #7041: the scheduled Daily Health Report. Off by default. send_at is a local time of day (HH:mm) in time_zone; time_zone null is the service host's zone; title null is "Daily Health Report". */
+        daily_report = new { enabled = s.DailyReportEnabled, send_at = s.DailyReportSendAt, time_zone = s.DailyReportTimeZone, title = s.DailyReportTitle },
         /* #6873: the database protection alerts (a full backup, a log backup or a CHECKDB older than its threshold). Off by default. */
         backup_overdue = new { enabled = s.BackupOverdueEnabled },
         log_backup_overdue = new { enabled = s.LogBackupOverdueEnabled },
@@ -979,6 +999,7 @@ public sealed partial class DarlingMcpAlertTools
             ["enabled"] = route.Enabled,
             ["send_resolutions"] = route.SendResolutions switch { true => "always", false => "never", _ => "inherit" },
             ["severities"] = route.Severities,
+            ["report_notice"] = route.ReportNotice,
         };
         if (route.ScopeServerId.HasValue)
         {
@@ -1045,6 +1066,8 @@ public sealed partial class DarlingMcpAlertTools
         send_resolutions = r.SendResolutions,
         /* #6928 (V229): which alerts the route takes by severity: both, critical or warning. */
         severities = r.Severities,
+        /* #6979 (V233): whether the route posts a chat notice when an agent files a report: off, needs_person_or_change or all. */
+        report_notice = r.ReportNotice,
         /* #6036 (D8 of #5632 Phase C): the route an expired investigation request goes to first. Null = none; the name is the
            fallback route's metric_match. */
         fallback_route_id = r.FallbackRouteId,
@@ -1115,7 +1138,7 @@ public sealed partial class DarlingMcpAlertTools
                 "Turn it off or delete it in the Viewer's Settings window (Notifications, routes) or on the web dashboard's admin notification routes page. Turning it on can still be done here.")
             : null;
 
-    [McpServerTool(Name = "get_mute_rules"), Description("Gets the configured alert mute rules. Mute rules suppress specific recurring alerts (by server, metric, database, query text, wait type, or job name) while still logging them — so an agent can tell a genuinely healthy-quiet server from one whose alerts are being suppressed.")]
+    [McpServerTool(Name = "get_mute_rules"), Description("Gets the configured alert mute rules. Mute rules suppress specific recurring alerts (by server, metric, database, query text, wait type, or job name) while still logging them — so an agent can tell a genuinely healthy-quiet server from one whose alerts are being suppressed. A rule that repeats on a schedule (#7040) also carries its recur_days (day names; null is every day), recur_start_time, recur_end_time and recur_time_zone, plus schedule (one line), in_window_now (true when the rule is inside a window right now, so it is muting) and next_window_start_utc (when the next window opens); a repeating rule that is active but outside its window mutes nothing at this moment.")]
     public static async Task<string> GetMuteRules(
         NpgsqlDataSource postgres,
         [Description("Include only enabled, non-expired rules. Default true.")] bool enabled_only = true,
@@ -1165,7 +1188,11 @@ public sealed partial class DarlingMcpAlertTools
     /// <summary>The mute rule's wire shape, and the image the Level 2 mute tools journal: <see cref="MuteRuleImage"/> (#5917), one type for both.</summary>
     internal static MuteRuleImage BuildMuteRulePayload(MuteRule r) => new(
         r.Id, r.Enabled, r.CreatedAtUtc.ToString("o"), r.ExpiresAtUtc?.ToString("o"), r.StartsAtUtc?.ToString("o"), r.Reason, r.ServerName, r.ServerId, r.MetricName,
-        r.ExternalSource, r.DatabasePattern, r.QueryTextPattern, r.WaitTypePattern, r.JobNamePattern, r.ClientAppPattern, r.Summary);
+        r.ExternalSource, r.DatabasePattern, r.QueryTextPattern, r.WaitTypePattern, r.JobNamePattern, r.ClientAppPattern,
+        r.IsRecurring && r.RecurDays is not null ? MuteRecurrence.DayNames(r.RecurDays).ToArray() : null,
+        r.RecurStartTime is { } recurStart ? MuteRecurrence.FormatTime(recurStart) : null,
+        r.RecurEndTime is { } recurEnd ? MuteRecurrence.FormatTime(recurEnd) : null,
+        r.RecurTimeZone, r.Summary);
 
     /// <summary>The rule's wire shape plus its <c>state</c> as of <paramref name="nowUtc"/> (#6231): <c>active</c>, <c>upcoming</c> (its
     /// <c>starts_at_utc</c> is ahead, so it mutes nothing yet), <c>expired</c> or <c>disabled</c>. The state is a reading of the clock, not
@@ -1174,6 +1201,15 @@ public sealed partial class DarlingMcpAlertTools
     {
         var node = (JsonObject)JsonSerializer.SerializeToNode(BuildMuteRulePayload(r), McpHelpers.JsonOptions)!;
         node["state"] = r.StateAt(nowUtc);
+        /* #7040: a repeating rule also says what its schedule reads as, whether it is inside a window right now, and when the next
+           window opens (UTC, inside the rule's own span). A rule with no schedule adds none of these. */
+        if (r.IsRecurring)
+        {
+            node["schedule"] = r.ScheduleText;
+            node["in_window_now"] = r.IsInWindowAt(nowUtc);
+            node["next_window_start_utc"] = r.NextWindowStartUtc(nowUtc)?.ToString("o", CultureInfo.InvariantCulture);
+        }
+
         return node;
     }
 
@@ -1214,11 +1250,16 @@ public sealed partial class DarlingMcpAlertTools
         "per hour is the tightest setting that is still a rate, so no value here can restore the 'any deadlock " +
         "is Critical' reading these tiers replaced. Setting critical BELOW warn is accepted and means every " +
         "banded rate is Critical. " +
-        "health_bands.blocking_warn_per_hour and health_bands.blocking_critical_per_hour are the blocking band's tiers in blocked-process reports per HOUR " +
-        "(accepting 1 to 10000), and health_bands.blocking_warn_wait_seconds and health_bands.blocking_critical_wait_seconds are its bars on the longest " +
-        "single block in seconds (accepting 1 to 86400). They default to 5 and 20 reports per hour and 10 and 60 seconds, and they decide the colour " +
-        "of the fleet cards, the Overview tab, the Daily Health Calendar and get_fleet_overview, so set them to match the blocking alert's own " +
-        "threshold. Unlike the deadlock tiers, each blocking pair must keep critical at or above warn, and a write that would leave it below is refused. " +
+        "health_bands.blocking_warn_per_hour and health_bands.blocking_critical_per_hour are the blocking band's tiers in blocked WAITS per HOUR, " +
+        "the same unit as blocking.count_threshold (accepting 1 to 10000; one wait is one or more blocked-process report rows, so a count that was read as reports now reads as waits). " +
+        "health_bands.blocking_warn_wait_seconds and health_bands.blocking_critical_wait_seconds are its bars on the longest " +
+        "single block in seconds (accepting 1 to 86400). They default to 5 and 20 waits per hour and 10 and 60 seconds. " +
+        "health_bands.blocking_warn_snapshot_wait_seconds and health_bands.blocking_critical_snapshot_wait_seconds are a third arm: the longest total " +
+        "blocked wait in one sampled snapshot, in seconds, held for the same consecutive samples the Blocking Wait Time alert holds it for, accepting 0 or 1 to 86400. " +
+        "Both default to 0, which turns that tier off, as blocking.wait_threshold_seconds does at 0; set them to blocking.wait_threshold_seconds to colour a card on the same measure that alert fires on. " +
+        "These tiers decide the colour of the fleet cards, the Overview tab, the Daily Health Calendar and get_fleet_overview, so set them to match the blocking alerts' own " +
+        "thresholds (blocking.count_threshold and blocking.wait_threshold_seconds). get_alert_settings reports blocking_band_unit: waits_per_hour, a read-only label that update_alert_settings accepts and ignores. " +
+        "Unlike the deadlock tiers, each blocking pair must keep critical at or above warn (the snapshot pair only when both are above 0), and a write that would leave it below is refused. " +
         "file_growth.rise_mb is megabytes per HOUR averaged over file_growth.lookback_minutes (a rate — the same 10240 is 10 GB/hr on any lookback; the engine scales it to the window), so shortening the lookback does not tighten the rise gate and lengthening it does not loosen it; only the rate does. " +
         "Two keys govern the PostgreSQL versions of the two count alerts and are NOT the same numbers as their SQL Server neighbours: deadlocks.pg_count_threshold and blocking.pg_count_threshold, both accepting 1 upward. They sit inside those groups rather than a section of their own so both engines' figures are visible together, but tuning deadlocks.count_threshold does NOT move the PostgreSQL gate and tuning deadlocks.pg_count_threshold does NOT move the SQL Server one. The enabled switch in each group DOES govern both engines. They are separate because the two engines count with different instruments - SQL Server's figure is captured deadlock graphs, the PostgreSQL one is deadlocks parsed from the server log (get_pg_deadlocks) - and an operator tuning one should not silently move the other. Both engines' fleet cards now band deadlocks through the SAME health_bands.deadlock_warn_per_hour tiers (the PostgreSQL card differences the server's own pg_stat_database.deadlocks counter over the window), so the move - raising a fire gate to meet the band's Warning bar so a page and an amber dot describe the same server - is available on either knob. On the blocking side the SQL Server count is engine-recorded blocked-process reports and the PostgreSQL one is distinct root blockers in a periodic SAMPLE of pg_stat_activity. Both PostgreSQL keys are ignored on a store with no PostgreSQL targets. " +
         "The fleet_sweep group is NOT an alert family and the alerts_enabled master switch does not govern it: " +
@@ -1247,6 +1288,8 @@ public sealed partial class DarlingMcpAlertTools
         "the same two-bars rule as runnable_queue, with the same status invalid and nothing written. client_timeouts.warning_multiple (at least 1, default 3) and client_timeouts.critical_multiple (default 10) " +
         "scale each server's own baseline (the p99.9 of its 3-minute average attention rate over the last 7 days): the Warning bar is the higher of the Warning floor and warning_multiple x baseline, the Critical bar the higher of the " +
         "Critical floor and critical_multiple x baseline, and a server with under a day of capture is graded on the floors alone. The multiples follow the same order rule. " +
+        "daily_report is the scheduled Daily Health Report (off by default): enabled, send_at (a local time of day written HH:mm, default 07:00), time_zone (an IANA id the service host knows, for example America/New_York; null is the host's own zone) " +
+        "and title (up to 100 characters; null is \"Daily Health Report\"). A bad time, an unknown zone or a blank title is refused and nothing is written. " +
         "analysis.uncorroborated_route is WRITABLE since V137: 'digest' or 'page' (case-insensitive; stored lower-case) writes " +
         "config_alert_settings.analysis_uncorroborated_route, which the running service reads OVER darling.json's analysis.uncorroboratedRoute " +
         "from its next collection sweep and consults on the next scheduled-analysis delivery — no restart, no file edit; null CLEARS the column " +
@@ -1399,9 +1442,9 @@ public sealed partial class DarlingMcpAlertTools
             }
 
             /* #6927: the same lone-bar rule for the two blocking band pairs. */
-            if (updates.Any(u => u.Column is BlockingWarnPerHourColumn or BlockingCriticalPerHourColumn or BlockingWarnWaitColumn or BlockingCriticalWaitColumn))
+            if (updates.Any(u => u.Column is BlockingWarnPerHourColumn or BlockingCriticalPerHourColumn or BlockingWarnWaitColumn or BlockingCriticalWaitColumn or BlockingWarnSnapshotColumn or BlockingCriticalSnapshotColumn))
             {
-                const string blockingBandSql = "SELECT blocking_warn_per_hour, blocking_critical_per_hour, blocking_warn_wait_seconds, blocking_critical_wait_seconds FROM config_alert_settings WHERE id = 1";
+                const string blockingBandSql = "SELECT blocking_warn_per_hour, blocking_critical_per_hour, blocking_warn_wait_seconds, blocking_critical_wait_seconds, blocking_warn_snapshot_wait_seconds, blocking_critical_snapshot_wait_seconds FROM config_alert_settings WHERE id = 1";
                 await using var blockingBandCommand = new NpgsqlCommand(blockingBandSql, connection) { Transaction = transaction };
                 blockingBandCommand.CommandTimeout = McpCommandDeadlines.ReadSeconds;
                 await using var blockingBandReader = await blockingBandCommand.ExecuteReaderAsync();
@@ -1417,6 +1460,14 @@ public sealed partial class DarlingMcpAlertTools
                     {
                         return Outcome("invalid", BlockingWaitBarsOrderMessage
                             + $" (stored after this write: warn {blockingBandReader.GetDouble(2).ToString("0.###", CultureInfo.InvariantCulture)}, critical {blockingBandReader.GetDouble(3).ToString("0.###", CultureInfo.InvariantCulture)}; nothing was written.)");
+                    }
+
+                    /* #7028: the snapshot pair, where 0 means off, so the order only binds when both are above 0. */
+                    if (blockingBandReader.GetDouble(4) > 0 && blockingBandReader.GetDouble(5) > 0
+                        && blockingBandReader.GetDouble(5) < blockingBandReader.GetDouble(4))
+                    {
+                        return Outcome("invalid", BlockingSnapshotBarsOrderMessage
+                            + $" (stored after this write: warn {blockingBandReader.GetDouble(4).ToString("0.###", CultureInfo.InvariantCulture)}, critical {blockingBandReader.GetDouble(5).ToString("0.###", CultureInfo.InvariantCulture)}; nothing was written.)");
                     }
                 }
             }
@@ -1503,7 +1554,16 @@ public sealed partial class DarlingMcpAlertTools
         "already mid-flight can still be delivered once. server_id keys the rule on that server's store id: it " +
         "then matches only that server, whatever its name, and server_name only labels it (filled from the " +
         "registry when omitted). Two servers can share a display name (a blank name falls back to the host), so " +
-        "server_id is the way to silence one of them. An id that is not a monitored server is refused.")]
+        "server_id is the way to silence one of them. An id that is not a monitored server is refused. " +
+        "REPEAT SCHEDULE (optional): recur_start and recur_end (24-hour HH:mm, both or neither, different) make the rule apply only inside a " +
+        "daily window, read in recur_time_zone (an IANA id such as America/New_York, or a Windows id; omitted, the service host's own zone), " +
+        "and recur_days (day names such as [\"Mon\",\"Tue\"] or [\"Saturday\",\"Sunday\"], any case; omitted, every day) limits it to those days. " +
+        "A window may cross midnight (22:00 to 02:00); it belongs to the day it starts on, so Friday 22:00-02:00 runs into Saturday morning. " +
+        "The schedule combines with everything else: the rule mutes only inside the window AND between starts_at and expires_at AND when its " +
+        "scope matches. Times are wall-clock times in the zone, so the window follows daylight saving. Days or a zone without times are refused. " +
+        "Both shapes work: one metric on one or more servers (one rule per server, with server_name or server_id), or every alert on one server " +
+        "(server_name or server_id alone). get_mute_rules shows the schedule, in_window_now and the next window's start. During an investigation (Level 2) " +
+        "a mute is a one-off: the schedule is refused.")]
     public static Task<string> CreateMuteRule(
         NpgsqlDataSource postgres,
         [Description("Scope the rule to this server (its display name, as get_alert_history reports). Omit for all servers.")] string? server_name = null,
@@ -1520,12 +1580,18 @@ public sealed partial class DarlingMcpAlertTools
         [Description("Level 2 only: under mcp.allowInvestigations this change needs agent_action (request_id, claim_id, agent_id, reason, evidence); see the tool guide. Ignored when mcp.allowWrites is on.")] string? agent_action = null,
         DarlingAgentActionSeat? agentSeat = null,
         ILogger? logger = null,
-        [Description("Optional ISO-8601 UTC start (e.g. 2026-08-01T00:00:00Z): the rule is stored now but mutes nothing until this moment. Must be before expires_at. Omit for a rule that applies at once.")] string? starts_at = null) =>
+        [Description("Optional ISO-8601 UTC start (e.g. 2026-08-01T00:00:00Z): the rule is stored now but mutes nothing until this moment. Must be before expires_at. Omit for a rule that applies at once.")] string? starts_at = null,
+        [Description("Optional repeat schedule (#7040): the days of the week the rule applies on, as day names (Mon..Sun or Monday..Sunday, any case). Omit for every day. Needs recur_start and recur_end.")] string[]? recur_days = null,
+        [Description("Optional daily start time of the repeating window, 24-hour HH:mm in recur_time_zone (e.g. 22:00). Set with recur_end. A window may cross midnight (22:00 to 02:00).")] string? recur_start = null,
+        [Description("Optional daily end time of the repeating window, 24-hour HH:mm in recur_time_zone (exclusive). Set with recur_start; it must differ from recur_start.")] string? recur_end = null,
+        [Description("Optional time zone for recur_start and recur_end: an IANA id (America/New_York) or a Windows id. Omit for the service host's own zone.")] string? recur_time_zone = null) =>
         DarlingAgentActionSeat.IsGated(agentSeat)
-            ? DarlingMcpAgentActions.CreateMuteAsync(agentSeat!, postgres, logger, agent_action, server_name, metric_name, database_pattern,
+            ? (recur_days is not null || recur_start is not null || recur_end is not null || recur_time_zone is not null)
+                ? Task.FromResult(Outcome("invalid", DarlingMcpAgentActions.RecurrenceRefusal))
+                : DarlingMcpAgentActions.CreateMuteAsync(agentSeat!, postgres, logger, agent_action, server_name, metric_name, database_pattern,
                 query_text_pattern, wait_type_pattern, job_name_pattern, reason, expires_at, server_id, client_app_pattern, external_source, starts_at)
             : CreateMuteRuleOver(new PgMuteRuleStore(postgres), server_name, metric_name, database_pattern, query_text_pattern,
-            wait_type_pattern, job_name_pattern, reason, expires_at, server_id, id => MonitoredServerDisplayNameAsync(postgres, id), client_app_pattern, external_source, starts_at);
+            wait_type_pattern, job_name_pattern, reason, expires_at, server_id, id => MonitoredServerDisplayNameAsync(postgres, id), client_app_pattern, external_source, starts_at, recur_days: recur_days, recur_start: recur_start, recur_end: recur_end, recur_time_zone: recur_time_zone);
 
     /// <summary>The refusal for a <c>server_id</c> no registered server has: a rule keyed on it would mute
     /// nothing while reading as if it muted something.</summary>
@@ -1571,7 +1637,11 @@ public sealed partial class DarlingMcpAlertTools
         string? client_app_pattern = null,
         string? external_source = null,
         string? starts_at = null,
-        DateTime? nowUtc = null)
+        DateTime? nowUtc = null,
+        string[]? recur_days = null,
+        string? recur_start = null,
+        string? recur_end = null,
+        string? recur_time_zone = null)
     {
         try
         {
@@ -1627,6 +1697,40 @@ public sealed partial class DarlingMcpAlertTools
                 return Outcome("invalid", $"expires_at ({expiresAtUtc.Value:o}) must be after starts_at ({startsAtUtc.Value:o}). Nothing was written.");
             }
 
+            /* #7040: the repeat schedule, held to the one check every write path runs (MuteRule.TryNormalizeRecurrence). */
+            int? recurDays = null;
+            TimeOnly? recurStartTime = null;
+            TimeOnly? recurEndTime = null;
+            if (recur_days is not null && !MuteRecurrence.TryParseDays(recur_days, out recurDays, out var dayProblem))
+            {
+                return Outcome("invalid", dayProblem!);
+            }
+
+            if (recur_days is { Length: > 0 } && recurDays is null)
+            {
+                return Outcome("invalid", "'recur_days' holds no day names. Omit it for every day.");
+            }
+
+            if (!string.IsNullOrWhiteSpace(recur_start))
+            {
+                if (!MuteRecurrence.TryParseTime(recur_start, out var parsedRecurStart))
+                {
+                    return Outcome("invalid", $"'recur_start' must be a 24-hour time such as 22:00 (got '{recur_start}').");
+                }
+
+                recurStartTime = parsedRecurStart;
+            }
+
+            if (!string.IsNullOrWhiteSpace(recur_end))
+            {
+                if (!MuteRecurrence.TryParseTime(recur_end, out var parsedRecurEnd))
+                {
+                    return Outcome("invalid", $"'recur_end' must be a 24-hour time such as 02:00 (got '{recur_end}').");
+                }
+
+                recurEndTime = parsedRecurEnd;
+            }
+
             /* A server_id keys the rule on the store id; it must be a monitored server's, or the rule would mute
                nothing and look like it muted something. server_name then only labels the rule, so an omitted
                one is filled from the registry. Without a server_id the rule is name-keyed, as it always was. */
@@ -1657,8 +1761,23 @@ public sealed partial class DarlingMcpAlertTools
                 QueryTextPattern = Trimmed(query_text_pattern),
                 WaitTypePattern = Trimmed(wait_type_pattern),
                 JobNamePattern = Trimmed(job_name_pattern),
-                ClientAppPattern = Trimmed(client_app_pattern)
+                ClientAppPattern = Trimmed(client_app_pattern),
+                RecurDays = recurDays,
+                RecurStartTime = recurStartTime,
+                RecurEndTime = recurEndTime,
+                RecurTimeZone = Trimmed(recur_time_zone)
             };
+
+            if (!rule.TryNormalizeRecurrence(out var recurrenceProblem))
+            {
+                return Outcome("invalid", recurrenceProblem + " Nothing was written.");
+            }
+
+            /* #7040: the store's own zone check, on top of the host's: a zone its tzdata lacks reads as outside the window, so it is refused here. */
+            if (await store.RecurrenceRefusalAsync(rule) is { } zoneProblem)
+            {
+                return Outcome("invalid", zoneProblem);
+            }
 
             var existing = await InsertUnlessDuplicateAsync(store, rule, now);
             if (existing != null)
@@ -1745,6 +1864,17 @@ public sealed partial class DarlingMcpAlertTools
             if (WindowRefusal(rule) is { } coreWindowProblem)
             {
                 return Outcome("invalid", coreWindowProblem);
+            }
+
+            if (!rule.TryNormalizeRecurrence(out var coreRecurrenceProblem))
+            {
+                return Outcome("invalid", coreRecurrenceProblem + " Nothing was written.");
+            }
+
+            /* #7040: the store's own zone check, on top of the host's: a zone its tzdata lacks reads as outside the window, so it is refused here. */
+            if (await store.RecurrenceRefusalAsync(rule) is { } coreZoneProblem)
+            {
+                return Outcome("invalid", coreZoneProblem);
             }
 
             /* The web route creates through here, so a server_id in its body is held to the create tool's rule:
@@ -2024,7 +2154,12 @@ public sealed partial class DarlingMcpAlertTools
         "makes the rule stop being limited to one source, and a blank string is refused). Editable fields: server_name, server_id, " +
         "metric_name, external_source, database_pattern, query_text_pattern, wait_type_pattern, job_name_pattern, client_app_pattern, reason, " +
         "starts_at_utc (null clears it; it must stay before expires_at_utc), expires_at_utc (create_mute_rule's expires_at spelling is accepted as a write-only alias; send only " +
-        "one). enabled is NOT editable here — use set_mute_rule_enabled, the dedicated reversible verb. USE THIS " +
+        "one), and the repeat schedule: recur_days (a list of day names such as [\"Mon\",\"Fri\"]; null means every day), recur_start and recur_end " +
+        "(24-hour HH:mm; the read spells them recur_start_time and recur_end_time, accepted too) and recur_time_zone (IANA or Windows id). The schedule is " +
+        "checked as a whole after your changes: start and end go together and differ, and days or a zone need times. " +
+        "{\"recur_start\":null,\"recur_end\":null} clears the whole schedule (days and zone with it); the rule then applies at all times again. " +
+        "Changing a schedule moves the rule to a different window, so a rule that repeated on weekdays stops muting on weekends. During an investigation (Level 2) " +
+        "the schedule cannot be set or changed. enabled is NOT editable here — use set_mute_rule_enabled, the dedicated reversible verb. USE THIS " +
         "rather than delete_mute_rule followed by create_mute_rule: a re-created rule is a NEW rule with a new " +
         "id and a new creation date, and the Stale Mute Rules self-alert ages a rule from its creation date — so " +
         "a rule re-created on every edit never becomes stale and is never reported, while an edited one is " +
@@ -2137,6 +2272,17 @@ public sealed partial class DarlingMcpAlertTools
             if (WindowRefusal(merged) is { } windowProblem)
             {
                 return Outcome("invalid", windowProblem);
+            }
+
+            if (!merged.TryNormalizeRecurrence(out var mergedRecurrenceProblem))
+            {
+                return Outcome("invalid", mergedRecurrenceProblem + " Nothing was written.");
+            }
+
+            /* #7040: the store's own zone check, on top of the host's: a zone its tzdata lacks reads as outside the window, so it is refused here. */
+            if (await store.RecurrenceRefusalAsync(merged) is { } mergedZoneProblem)
+            {
+                return Outcome("invalid", mergedZoneProblem);
             }
 
             if (merged.ServerId.HasValue && merged.ServerId != existing.ServerId
@@ -2290,6 +2436,14 @@ public sealed partial class DarlingMcpAlertTools
         Add("reason", rule.Reason);
         Add("starts_at", rule.StartsAtUtc?.ToString("o"));
         Add("expires_at", rule.ExpiresAtUtc?.ToString("o"));
+        if (rule.IsRecurring)
+        {
+            Add("recur_days", rule.RecurDays is null ? null : MuteRecurrence.DayNames(rule.RecurDays).ToArray());
+            Add("recur_start", MuteRecurrence.FormatTime(rule.RecurStartTime!.Value));
+            Add("recur_end", MuteRecurrence.FormatTime(rule.RecurEndTime!.Value));
+            Add("recur_time_zone", rule.RecurTimeZone);
+        }
+
         return arguments;
     }
 
@@ -2438,11 +2592,87 @@ public sealed partial class DarlingMcpAlertTools
             }
         }
 
+        /* #7040: the repeat schedule. recur_days is a list of day names (a comma-separated string is read the same way), null clears it
+           (every day); recur_start / recur_end are HH:mm, null clears; recur_time_zone is an IANA or Windows id. The read spells the times
+           recur_start_time / recur_end_time, accepted here as aliases so a read row can be sent back. The schedule as a whole is checked
+           on the merged rule by the caller, not field by field. */
+        void AddRecurDays(JsonNode? node)
+        {
+            if (error != null) return;
+            if (node is null)
+            {
+                changes.Add(new MuteRuleFieldChange("recur_days", r => r.RecurDays = null));
+                return;
+            }
+
+            List<string?> names = [];
+            if (node is JsonArray array)
+            {
+                foreach (var item in array)
+                {
+                    if (item is JsonValue iv && iv.TryGetValue<string>(out var dayName))
+                    {
+                        names.Add(dayName);
+                    }
+                    else
+                    {
+                        error = "'recur_days' must be a list of day names (Mon..Sun or Monday..Sunday), or null for every day.";
+                        return;
+                    }
+                }
+            }
+            else if (node is JsonValue sv && sv.TryGetValue<string>(out var dayText))
+            {
+                names.AddRange(dayText.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries));
+            }
+            else
+            {
+                error = "'recur_days' must be a list of day names (Mon..Sun or Monday..Sunday), or null for every day.";
+                return;
+            }
+
+            if (!MuteRecurrence.TryParseDays(names, out var mask, out var dayProblem))
+            {
+                error = dayProblem;
+            }
+            else if (mask is null)
+            {
+                error = "'recur_days' holds no day names. Send null for every day.";
+            }
+            else
+            {
+                changes.Add(new MuteRuleFieldChange("recur_days", r => r.RecurDays = mask));
+            }
+        }
+
+        void AddRecurTime(string spelling, string field, JsonNode? node, Action<MuteRule, TimeOnly?> set)
+        {
+            if (error != null) return;
+            if (node is null)
+            {
+                changes.Add(new MuteRuleFieldChange(field, r => set(r, null)));
+            }
+            else if (node is JsonValue tv && tv.TryGetValue<string>(out var timeText) && MuteRecurrence.TryParseTime(timeText, out var time))
+            {
+                changes.Add(new MuteRuleFieldChange(field, r => set(r, time)));
+            }
+            else
+            {
+                error = $"'{spelling}' must be a 24-hour time such as 22:00, or null.";
+            }
+        }
+
         foreach (var prop in body)
         {
             if (error != null) break;
             switch (prop.Key)
             {
+                case "recur_days": AddRecurDays(prop.Value); break;
+                case "recur_start": AddRecurTime("recur_start", "recur_start_time", prop.Value, (r, t) => r.RecurStartTime = t); break;
+                case "recur_start_time": AddRecurTime("recur_start_time", "recur_start_time", prop.Value, (r, t) => r.RecurStartTime = t); break;
+                case "recur_end": AddRecurTime("recur_end", "recur_end_time", prop.Value, (r, t) => r.RecurEndTime = t); break;
+                case "recur_end_time": AddRecurTime("recur_end_time", "recur_end_time", prop.Value, (r, t) => r.RecurEndTime = t); break;
+                case "recur_time_zone": AddText("recur_time_zone", prop.Value, (r, v) => r.RecurTimeZone = v); break;
                 case "starts_at_utc": AddStart("starts_at_utc", prop.Value); break;
                 case "starts_at": AddStart("starts_at", prop.Value); break;
                 case "server_name": AddText("server_name", prop.Value, (r, v) => r.ServerName = v); break;
@@ -2474,7 +2704,7 @@ public sealed partial class DarlingMcpAlertTools
                     error = "'summary' is derived from the scope fields and is not stored — edit the fields it summarizes instead.";
                     break;
                 default:
-                    error = $"Unknown field '{prop.Key}'. Editable fields: server_name, server_id, metric_name, external_source, database_pattern, query_text_pattern, wait_type_pattern, job_name_pattern, client_app_pattern, reason, expires_at_utc.";
+                    error = $"Unknown field '{prop.Key}'. Editable fields: server_name, server_id, metric_name, external_source, database_pattern, query_text_pattern, wait_type_pattern, job_name_pattern, client_app_pattern, reason, expires_at_utc, recur_days, recur_start, recur_end, recur_time_zone.";
                     break;
             }
         }
@@ -2484,7 +2714,24 @@ public sealed partial class DarlingMcpAlertTools
            tell the caller both applied. */
         if (error == null && changes.GroupBy(c => c.Field, StringComparer.Ordinal).Any(g => g.Count() > 1))
         {
-            error = "'expires_at' and 'expires_at_utc' are two names for the same field (and 'starts_at' and 'starts_at_utc' likewise); send only one of each pair.";
+            error = "'expires_at' and 'expires_at_utc' are two names for the same field (and 'starts_at' and 'starts_at_utc', 'recur_start' and 'recur_start_time', 'recur_end' and 'recur_end_time' likewise); send only one of each pair.";
+        }
+
+        /* #7040: clearing both times clears the whole schedule. The days and the zone mean nothing without times and the schedule
+           check refuses them alone, so a call that sends only recur_start:null and recur_end:null takes them with it. */
+        if (error == null
+            && body.Any(p => p.Key is "recur_start" or "recur_start_time" && p.Value is null)
+            && body.Any(p => p.Key is "recur_end" or "recur_end_time" && p.Value is null))
+        {
+            if (!body.ContainsKey("recur_days"))
+            {
+                changes.Add(new MuteRuleFieldChange("recur_days", r => r.RecurDays = null));
+            }
+
+            if (!body.ContainsKey("recur_time_zone"))
+            {
+                changes.Add(new MuteRuleFieldChange("recur_time_zone", r => r.RecurTimeZone = null));
+            }
         }
 
         return (changes, error);
@@ -2514,7 +2761,8 @@ public sealed partial class DarlingMcpAlertTools
         && string.Equals(a.ClientAppPattern, b.ClientAppPattern, StringComparison.Ordinal)
         && string.Equals(a.Reason, b.Reason, StringComparison.Ordinal)
         && a.ExpiresAtUtc == b.ExpiresAtUtc
-        && a.StartsAtUtc == b.StartsAtUtc;
+        && a.StartsAtUtc == b.StartsAtUtc
+        && a.HasSameSchedule(b);
 
     /// <summary>One rule by id, or null — an ordinal id match over the store's full read, which is the only
     /// read <see cref="IMuteRuleStore"/> offers.</summary>
@@ -2585,7 +2833,8 @@ public sealed partial class DarlingMcpAlertTools
         && string.Equals(a.JobNamePattern, b.JobNamePattern, StringComparison.Ordinal)
         && string.Equals(a.ClientAppPattern, b.ClientAppPattern, StringComparison.Ordinal)
         && SameExpiry(a.ExpiresAtUtc, b.ExpiresAtUtc)
-        && SameExpiry(a.StartsAtUtc, b.StartsAtUtc);
+        && SameExpiry(a.StartsAtUtc, b.StartsAtUtc)
+        && a.HasSameSchedule(b);
 
     /// <summary>Two expiries are the same instant to the store's precision. Postgres keeps microseconds and a .NET
     /// tick is 100 ns, so an expiry sent with seven fractional digits comes back from the store truncated: compared
@@ -2627,6 +2876,10 @@ public sealed partial class DarlingMcpAlertTools
     private const string BlockingCriticalPerHourColumn = "blocking_critical_per_hour";
     private const string BlockingWarnWaitColumn = "blocking_warn_wait_seconds";
     private const string BlockingCriticalWaitColumn = "blocking_critical_wait_seconds";
+    private const string BlockingWarnSnapshotColumn = "blocking_warn_snapshot_wait_seconds";
+    private const string BlockingCriticalSnapshotColumn = "blocking_critical_snapshot_wait_seconds";
+    private const string BlockingSnapshotBarsOrderMessage =
+        "'health_bands.blocking_critical_snapshot_wait_seconds' must not be lower than 'health_bands.blocking_warn_snapshot_wait_seconds' when both are above 0 (the Critical bar can never sit below the Warning bar; 0 turns a tier off).";
     private const string BlockingRateBarsOrderMessage =
         "'health_bands.blocking_critical_per_hour' must not be lower than 'health_bands.blocking_warn_per_hour' (the Critical bar can never sit below the Warning bar).";
     private const string BlockingWaitBarsOrderMessage =
@@ -2758,6 +3011,21 @@ public sealed partial class DarlingMcpAlertTools
             }
         }
 
+        /* #7028: a bar where 0 means the tier is off. Anything between 0 and the floor is refused, because the band's clamp would
+           rewrite it to the floor and the setting would not stick. */
+        void AddOptionalDouble(string column, JsonNode? node, string field, double min, double max)
+        {
+            if (error != null) return;
+            if (node is JsonValue v && v.TryGetValue<double>(out var d) && (d == 0 || (d >= min && d <= max)))
+            {
+                updates.Add(new UpdateTarget(AlertSettingsTable, column, field, new NpgsqlParameter<double> { TypedValue = d }));
+            }
+            else
+            {
+                error = $"'{field}' must be 0 (that tier is off) or a number between {min.ToString("0.0", CultureInfo.InvariantCulture)} and {max.ToString("0.0", CultureInfo.InvariantCulture)}.";
+            }
+        }
+
         void AddEnum(string column, JsonNode? node, string field, params string[] allowed)
         {
             if (error != null) return;
@@ -2842,6 +3110,68 @@ public sealed partial class DarlingMcpAlertTools
             }
 
             error = $"'{field}' must be '{FindingRouting.DigestText}', '{FindingRouting.PageText}', or null (null clears the store column so darling.json's analysis.uncorroboratedRoute governs again).";
+        }
+
+        /* #7041: the Daily Health Report's send time, a local time of day as HH:mm. */
+        void AddSendAt(string column, JsonNode? node, string field)
+        {
+            if (error != null) return;
+            if (node is JsonValue v && v.TryGetValue<string>(out var text)
+                && Reports.DailyHealthReportSettings.TryParseSendAt(text, out var sendAt))
+            {
+                updates.Add(new UpdateTarget(AlertSettingsTable, column, field,
+                    new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Time, Value = sendAt.ToTimeSpan() }));
+                return;
+            }
+
+            error = $"'{field}' must be a time of day written HH:mm, for example \"07:00\".";
+        }
+
+        /* #7041: the report's time zone. null clears the column (the service host's zone); anything else must be an id the host resolves. */
+        void AddNullableZone(string column, JsonNode? node, string field)
+        {
+            if (error != null) return;
+            if (node is null)
+            {
+                updates.Add(new UpdateTarget(AlertSettingsTable, column, field,
+                    new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = DBNull.Value }));
+                return;
+            }
+
+            if (node is JsonValue v && v.TryGetValue<string>(out var text)
+                && !string.IsNullOrWhiteSpace(text) && Reports.DailyHealthReportSettings.TryResolveZone(text, out _))
+            {
+                updates.Add(new UpdateTarget(AlertSettingsTable, column, field, new NpgsqlParameter<string> { TypedValue = text.Trim() }));
+                return;
+            }
+
+            error = $"'{field}' must be a time zone id this host knows (an IANA id such as \"America/New_York\"), or null for the service host's zone.";
+        }
+
+        /* #7041: the report's title. null clears the column (the shipped title); anything else is checked for length and control characters. */
+        void AddNullableTitle(string column, JsonNode? node, string field)
+        {
+            if (error != null) return;
+            if (node is null)
+            {
+                updates.Add(new UpdateTarget(AlertSettingsTable, column, field,
+                    new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = DBNull.Value }));
+                return;
+            }
+
+            if (node is JsonValue v && v.TryGetValue<string>(out var text))
+            {
+                if (Reports.DailyHealthReportSettings.TryValidateTitle(text, out var titleError))
+                {
+                    updates.Add(new UpdateTarget(AlertSettingsTable, column, field, new NpgsqlParameter<string> { TypedValue = text.Trim() }));
+                    return;
+                }
+
+                error = $"'{field}' {titleError}";
+                return;
+            }
+
+            error = $"'{field}' must be a string, or null for the shipped title.";
         }
 
         /* #3712: the route knob's provenance echo. get_alert_settings emits the EFFECTIVE route under
@@ -3026,6 +3356,19 @@ public sealed partial class DarlingMcpAlertTools
                                 break;
                             case "blocking_critical_wait_seconds":
                                 AddDouble("blocking_critical_wait_seconds", n, "health_bands.blocking_critical_wait_seconds",
+                                    ServerHealthThresholds.BlockingWaitSecondsFloor,
+                                    ServerHealthThresholds.BlockingWaitSecondsCeiling);
+                                break;
+                            /* #7028: the read-only unit label coming home from a get_alert_settings round-trip. Our own text, claims no column, not validated. */
+                            case "blocking_band_unit": break;
+                            /* #7028 (V230): the snapshot arm. 0 turns the tier off, otherwise the bounds the band clamps to. */
+                            case "blocking_warn_snapshot_wait_seconds":
+                                AddOptionalDouble("blocking_warn_snapshot_wait_seconds", n, "health_bands.blocking_warn_snapshot_wait_seconds",
+                                    ServerHealthThresholds.BlockingWaitSecondsFloor,
+                                    ServerHealthThresholds.BlockingWaitSecondsCeiling);
+                                break;
+                            case "blocking_critical_snapshot_wait_seconds":
+                                AddOptionalDouble("blocking_critical_snapshot_wait_seconds", n, "health_bands.blocking_critical_snapshot_wait_seconds",
                                     ServerHealthThresholds.BlockingWaitSecondsFloor,
                                     ServerHealthThresholds.BlockingWaitSecondsCeiling);
                                 break;
@@ -3278,6 +3621,22 @@ public sealed partial class DarlingMcpAlertTools
                     });
                     break;
 
+                /* #7041: the Daily Health Report. send_at is HH:mm and must parse; time_zone and title take null (the host's zone, the shipped title) and
+                   are otherwise validated here so a bad id or a blank title is refused with a message instead of being stored and silently replaced at the first tick. */
+                case "daily_report":
+                    Group(prop.Value, "daily_report", (k, n) =>
+                    {
+                        switch (k)
+                        {
+                            case "enabled": AddBool("daily_report_enabled", n, "daily_report.enabled"); break;
+                            case "send_at": AddSendAt("daily_report_send_at", n, "daily_report.send_at"); break;
+                            case "time_zone": AddNullableZone("daily_report_time_zone", n, "daily_report.time_zone"); break;
+                            case "title": AddNullableTitle("daily_report_title", n, "daily_report.title"); break;
+                            default: error = $"Unknown field 'daily_report.{k}'."; break;
+                        }
+                    });
+                    break;
+
                 case "agent_alert_gaps":
                     Group(prop.Value, "agent_alert_gaps", (k, n) =>
                     {
@@ -3457,6 +3816,17 @@ public sealed partial class DarlingMcpAlertTools
             && blockCriticalWait.TypedValue < blockWarnWait.TypedValue)
         {
             error = BlockingWaitBarsOrderMessage;
+        }
+
+        /* #7028: the snapshot pair, where 0 means off, so the order only binds when both are above 0. */
+        if (error == null
+            && updates.FirstOrDefault(u => u.Column == BlockingWarnSnapshotColumn) is { Param: NpgsqlParameter<double> blockWarnSnapshot }
+            && updates.FirstOrDefault(u => u.Column == BlockingCriticalSnapshotColumn) is { Param: NpgsqlParameter<double> blockCriticalSnapshot }
+            && blockWarnSnapshot.TypedValue > 0
+            && blockCriticalSnapshot.TypedValue > 0
+            && blockCriticalSnapshot.TypedValue < blockWarnSnapshot.TypedValue)
+        {
+            error = BlockingSnapshotBarsOrderMessage;
         }
 
         /* #5640: both Client Timeouts bars in one body must already be in order; a lone bar is compared with the stored other one. */

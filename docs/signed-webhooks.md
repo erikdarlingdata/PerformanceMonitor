@@ -110,6 +110,8 @@ When a request expires and no agent was working on it, Darling tells a person in
 2. The agent route's own email, Teams and Slack.
 3. The service's own alert, "Investigation Not Picked Up".
 
+A route can also post a notice when an agent files a report. That notice is separate from the event posts and from this fallback. See "Report notices" in [Alerts and notifications](darling/alerts-and-notifications.md).
+
 ## Key rotation
 
 When you make a new key for a URL that already has one, Darling keeps the old key for 7 days. During those 7 days, each post carries two signatures: one from the new key and one from the old key. A receiver that still has the old key continues to accept posts. Put the new key into your receiver during those 7 days. After 7 days, Darling stops using the old key.

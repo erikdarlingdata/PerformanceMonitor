@@ -75,7 +75,12 @@ internal static partial class AlertNotebookEndpoint
 
         if (!string.IsNullOrEmpty(finding.DatabaseName))
         {
-            lines.Add($"**Database:** {finding.DatabaseName}");
+            /* A database name comes from the monitored server: shown as literal text, so a name written as a markdown
+               link is not a clickable link in the notebook. */
+            lines.Add(finding.DatabaseName.Contains('`', StringComparison.Ordinal) || finding.DatabaseName.Contains('\n', StringComparison.Ordinal)
+                || finding.DatabaseName.Contains('\r', StringComparison.Ordinal)
+                ? "**Database:**\n" + LiteralBlock(finding.DatabaseName)
+                : $"**Database:** `{finding.DatabaseName}`");
         }
 
         if (finding.TimeRangeStart is DateTime start && finding.TimeRangeEnd is DateTime end)
@@ -91,10 +96,30 @@ internal static partial class AlertNotebookEndpoint
         if (!string.IsNullOrEmpty(finding.StoryText))
         {
             lines.Add(string.Empty);
-            lines.Add(finding.StoryText);
+            lines.Add(LiteralBlock(finding.StoryText, "text"));
         }
 
         return string.Join("\n\n", lines);
+    }
+
+    /// <summary>
+    /// Text from the monitored server as a markdown code block: the notebook renders a fenced block verbatim, so a link, bold
+    /// or heading written in the text stays as typed. The fence is one backtick longer than the longest run of backticks in the
+    /// text (three at least), so the text cannot close it. An <paramref name="info"/> of "text" makes the page wrap the block
+    /// as prose in the body font instead of scrolling it sideways in monospace; the text is still shown as typed.
+    /// </summary>
+    private static string LiteralBlock(string text, string info = "")
+    {
+        var longest = 0;
+        var run = 0;
+        foreach (var ch in text)
+        {
+            run = ch == '`' ? run + 1 : 0;
+            longest = Math.Max(longest, run);
+        }
+
+        var fence = new string('`', Math.Max(3, longest + 1));
+        return fence + info + "\n" + text + "\n" + fence;
     }
 
     /// <summary>The note a finding that could not be matched gets — never an error (#2710's degrade rule):

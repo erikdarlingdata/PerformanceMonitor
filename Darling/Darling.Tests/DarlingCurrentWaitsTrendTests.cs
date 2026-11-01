@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -55,6 +56,8 @@ public sealed class DarlingCurrentWaitsTrendTests
         try
         {
             await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            /* #7010: the server was registered days ago, so a window of a few hours is inside what the store can cover (the window floor of a server with no collection log runs is its registration time). */
+            await DarlingMcpTestData.ExecAsync(connection, ct, "UPDATE servers SET created_date = $2 WHERE server_id = $1", ServerId, DarlingMcpTestData.Naive(DateTime.UtcNow.AddDays(-3)));
 
             /* ── never sampled: NOT an all-clear, and it must refuse to read as one ── */
             var never = await DarlingMcpDataTools.GetCurrentWaitsTrend(dataSource, ServerName, 4, null);
@@ -66,6 +69,7 @@ public sealed class DarlingCurrentWaitsTrendTests
 
             /* ── sampled, but everything outside the window: a genuine all-clear ── */
             await SeedWaitAsync(connection, ct, HoursAgo(48), "LCK_M_X", 500, blockingSessionId: 99, database: "AppDb");
+            await RecordRunAsync(connection, ct, "waiting_tasks");
 
             var clear = await DarlingMcpDataTools.GetCurrentWaitsTrend(dataSource, ServerName, 1, null);
             var clearDoc = JsonDocument.Parse(clear);
@@ -196,6 +200,17 @@ INSERT INTO waiting_tasks
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
             CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(collectionTimeUtc),
             ServerId, ServerName, 55, waitType, waitMs, blockingSessionId, null, database);
+
+    /// <summary>
+    /// #7010: one clean collector run for the table's collector half an hour ago. A running collector logs a run every cycle, and the window floor counts a
+    /// server in a window when it holds a row there or the collection log records a run there: a sparse table's quiet window has the runs and no rows.
+    /// </summary>
+    private static Task RecordRunAsync(NpgsqlConnection connection, CancellationToken ct, string table) =>
+        DarlingMcpTestData.ExecAsync(connection, ct,
+            @"INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected)
+VALUES ($1,$2,$3,$4,$5,100,'SUCCESS',0)",
+            CollectionIdGenerator.Next(), ServerId, ServerName, CollectorCatalog.All.First(c => c.TargetTable == table).Name,
+            DarlingMcpTestData.Naive(DateTime.UtcNow.AddMinutes(-30)));
 
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {

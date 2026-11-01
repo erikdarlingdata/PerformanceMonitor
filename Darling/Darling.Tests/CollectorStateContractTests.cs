@@ -188,7 +188,7 @@ public sealed class CollectorStateContractTests
 
         foreach (var host in hosts)
         {
-            var source = File.ReadAllText(host);
+            var source = RepoFile.ReadRepoFile(host);
             var name = Path.GetFileName(host);
 
             var load = Regex.Match(
@@ -235,7 +235,7 @@ public sealed class CollectorStateContractTests
 
         foreach (var host in hosts)
         {
-            var source = File.ReadAllText(host);
+            var source = RepoFile.ReadRepoFile(host);
             var name = Path.GetFileName(host);
 
             /* Loaded only for the collectors that declare keys — the other 37 must not pay a query. */
@@ -362,7 +362,7 @@ public sealed class CollectorStateContractTests
         var root = FindRepoRoot();
         Assert.True(root is not null, RepoRootNotFound);
 
-        var darling = File.ReadAllText(Path.Combine(
+        var darling = RepoFile.ReadRepoFile(Path.Combine(
             root!, "Darling", "PerformanceMonitor.Darling.Service", "DarlingCollectorRunner.cs"));
 
         Assert.Contains("PrunePgPerDatabaseStateAsync(", darling, StringComparison.Ordinal);

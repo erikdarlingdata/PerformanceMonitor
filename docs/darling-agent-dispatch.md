@@ -51,7 +51,7 @@ With `mcp.tokens` set, it also prints its findings about named tokens, whether o
 
 The service log says the same at start-up. None of these changes the exit code of `--validate-config`, and none stops the service from starting. The first three keep the investigation tools from working. The route note does not stop anything.
 
-## Named tokens: an operator and agents on one service
+## Named tokens: an operator, agents and readers on one service
 
 One bearer token cannot tell a person from an agent. So with `mcp.allowWrites` and `mcp.allowInvestigations` you serve the write tools or the investigation tools, never both. Named tokens remove that limit. Each token has a name and a role, and the token on a request decides which tools that request sees.
 
@@ -62,7 +62,8 @@ Set them in `darling.json`:
   "enabled": true,
   "tokens": [
     { "name": "ops-lead",   "encryptedToken": "...", "role": "operator" },
-    { "name": "triage-bot", "encryptedToken": "...", "role": "agent" }
+    { "name": "triage-bot", "encryptedToken": "...", "role": "agent" },
+    { "name": "dev-a",      "token": "file:/run/secrets/darling/mcp-dev-a", "role": "reader", "dataDetail": "maskLiterals" }
   ]
 }
 ```
@@ -71,7 +72,8 @@ Set them in `darling.json`:
 |---|---|
 | `name` | 1 to 64 characters from `A-Za-z0-9._:-`. Each name is used once. |
 | `encryptedToken` or `token` | The same rules as the `mcp.network` token. At least 16 characters, and at least 6 of them different. Each value is used once. |
-| `role` | `operator` or `agent`. |
+| `role` | `operator`, `agent` or `reader`. |
+| `dataDetail` | Optional: `full`, `maskLiterals` or `metadataOnly`. It can only narrow `mcp.dataDetail`: the token is served the stricter of the two. Without it the token is served `mcp.dataDetail`. An unknown value leaves the token unserved, and the start logs a Critical line that names `mcp.tokens[<name>].dataDetail`. |
 
 What each role sees:
 
@@ -79,22 +81,29 @@ What each role sees:
 |---|---|---|
 | `operator` | The reads and the write tools. The four server admin tools (`add_servers`, `edit_server`, `remove_server` and `set_server_action`) only when `mcp.allowWrites` and `mcp.allowServerAdmin` are both on. | `claim_investigation_request` and `submit_investigation_report`. |
 | `agent` | The reads, the two investigation tools, and the Level 2 action tools through the `agent_action` gate. | Every tool in the never-agent list: the route tools, alert settings, Custom Views, tags, collector and server controls. |
+| `reader` | The read tools only. | Every write tool, the server admin tools, the two investigation tools and the Level 2 action tools. `mcp.allowWrites`, `mcp.allowServerAdmin` and `mcp.allowInvestigations` never widen it. |
+
+A reader is not an agent: it has no identity in the journal and cannot claim or submit. Give each person their own `reader` entry, so the log names who called and one token can be removed without rotating the rest. One write stays open to a reader. `analyze_server` with no `as_of` saves its findings to the store. It does this for every token, the legacy read-only token included.
+
+Behind a [front door](darling/front-door.md), the front door sends the level it serves its caller to each store with the call. The store serves the stricter of that level and its own. A `maskLiterals` reader gets masked free text (a report's `root_cause`, a known pattern's `note`) even when the store is at `full`. A store from an older build ignores the level.
+
+A key in a token entry that is not a field, such as `data_detail`, is reported at start like any other unknown key in `darling.json`. A web token is refused for web sign-in when it has the value of any MCP token in `darling.json`. That means the legacy token or any named entry. It includes an entry that is not served because of a problem such as a role typo. The start warning and `--validate-config` say the same.
 
 `tools/list` shows only that set. A call to a tool outside it fails as an unknown tool. An unknown token gets 401, and so does a request with no token, loopback included.
 
 An agent's name is its identity. `agent_id` must equal the name of the agent token. A different `agent_id` is refused as `agent_id_not_token`, and the refusal is journaled under the token's name. The log names a named token by its name. It never logs a token value. The legacy token still shows as a short fingerprint.
 
-The old single token (`mcp.network.token` or `mcp.network.encryptedToken`) works as before. Its role still comes from `mcp.allowWrites` and `mcp.allowInvestigations`. With no `mcp.tokens`, nothing changes. You can set both, but give the legacy token a name and a role in `mcp.tokens` and remove it from `mcp.network` instead.
+The old single token (`mcp.network.token` or `mcp.network.encryptedToken`) works as before. Its role still comes from `mcp.allowWrites` and `mcp.allowInvestigations`. With no `mcp.tokens`, nothing changes. You can set both, but give the legacy token a name and a role in `mcp.tokens` and remove it from `mcp.network` instead. A read-only legacy token moves to a `reader` entry.
 
 A named token that cannot be served is left out, and the start logs one Critical line that names the token and never its value. This covers a bad name or role, an unreadable value, a value that is too short, and a name or value shared with another token. If you set `mcp.tokens` and none can be served, and no legacy token is set, the MCP server does not start. `--validate-config` prints the same problems as `WARNING:` lines whenever `mcp.tokens` is set. It also warns when an enabled route has an agent level and no agent token can be served.
 
 Darling reads `mcp.tokens` once, at start.
 
-Route agent fields over MCP (the agent level and its limits on `create_notification_route` and `update_notification_route`, for the operator role only) come in a later change. Until then you set agent routes in the Viewer.
+Route agent fields over MCP (the agent level and its limits on `create_notification_route` and `update_notification_route`, for the operator role only) are available. The fields are `agent_level`, `agent_max_per_hour`, `agent_max_per_day`, `agent_lease_minutes` and `agent_expiry_minutes`. `update_notification_route` also takes `clear_agent_level`.
 
 ## Create an agent route
 
-You create and edit agent routes in the Viewer's route editor. The web dashboard shows routes but does not edit them. No MCP tool changes an agent route.
+You create and edit agent routes in the Viewer's route editor or on the web dashboard. The operator role can also change them with `create_notification_route` and `update_notification_route`.
 
 Set **Agent investigation** on the route to one of these:
 
@@ -303,7 +312,7 @@ To undo a change, select **Undo** on its row. Undo restores what the setting was
 
 To stop all agent changes at once, use **Turn off agent changes** in the Viewer or the web. The gate then refuses every change as `actions_off`. Nothing already made is undone. Over MCP, `set_agent_actions_enabled` can turn the switch off but never back on. A person turns it on in the Viewer or the web.
 
-The web can undo and switch only under the store's admin login. On a managed or compose store, the web signs in as the viewer role, so use the Viewer app there.
+The web can undo and switch only under the store's admin login. On a managed or compose store, the web signs in as the `web` role, so use the Viewer app there.
 
 ## Agent notes
 

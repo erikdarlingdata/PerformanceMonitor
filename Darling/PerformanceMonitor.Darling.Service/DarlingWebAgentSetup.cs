@@ -56,7 +56,7 @@ internal static class DarlingWebAgentSetup
     private static readonly string[] s_routeKeys =
     [
         "metric_match", "enabled", "scope_server_id", "scope_tag_id", "agent_level", "agent_max_per_hour", "agent_max_per_day",
-        "agent_lease_minutes", "agent_expiry_minutes", "send_resolutions", "fallback_route_id", "severities",
+        "agent_lease_minutes", "agent_expiry_minutes", "send_resolutions", "fallback_route_id", "severities", "report_notice",
         "teams_webhook_url", "slack_webhook_url", "generic_webhook_url", "pagerduty_routing_key", "email_recipients",
         "expected_modified_at",
     ];
@@ -329,6 +329,17 @@ SELECT has_table_privilege(current_user, 'config_notification_routes', 'INSERT')
             }
 
             draft.Severities = severities.GetValue<string>();
+        }
+
+        /* #6979: the report notice setting. A word other than off, needs_person_or_change or all is refused by the writer's validation with its sentence. */
+        if (body.ContainsKey("report_notice"))
+        {
+            if (body["report_notice"] is not JsonValue reportNotice || reportNotice.GetValueKind() != JsonValueKind.String)
+            {
+                return "report_notice must be text.";
+            }
+
+            draft.ReportNotice = reportNotice.GetValue<string>();
         }
 
         if (!TryInt(body, "scope_server_id", out var hasServer, out var server, out var error)

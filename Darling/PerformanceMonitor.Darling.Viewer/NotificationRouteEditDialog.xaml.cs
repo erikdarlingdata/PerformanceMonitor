@@ -38,6 +38,11 @@ public partial class NotificationRouteEditDialog : Window
     internal const string SeveritiesBothChoice = "Both (Warning and Critical)";
     internal const string SeveritiesCriticalChoice = "Critical only";
     internal const string SeveritiesWarningChoice = "Warning only";
+
+    /* #6979: the report notice setting's three choices, in the order they are offered. */
+    internal const string ReportNoticeOffChoice = "Off";
+    internal const string ReportNoticeNeedsPersonOrChangeChoice = "Needs a person or made a change";
+    internal const string ReportNoticeAllChoice = "All reports";
     private const string AgentOffChoice = "Off";
     /* #5912: shown only on a route already stored at Level 2, and never chosen from here (the write path for Act is a later slice). */
     private const string AgentActChoice = "Act (Level 2: investigate and change alert settings)";
@@ -104,6 +109,12 @@ public partial class NotificationRouteEditDialog : Window
         SeveritiesCombo.Items.Add(new ComboBoxItem { Content = SeveritiesWarningChoice, Tag = NotificationRouteKinds.SeveritiesWarning });
         var storedSeverities = NotificationRouteKinds.NormalizeSeverities(existing?.Severities);
         SeveritiesCombo.SelectedItem = SeveritiesCombo.Items.Cast<ComboBoxItem>().First(i => Equals(i.Tag, storedSeverities));
+
+        ReportNoticeCombo.Items.Add(new ComboBoxItem { Content = ReportNoticeOffChoice, Tag = NotificationRouteKinds.ReportNoticeOff });
+        ReportNoticeCombo.Items.Add(new ComboBoxItem { Content = ReportNoticeNeedsPersonOrChangeChoice, Tag = NotificationRouteKinds.ReportNoticeNeedsPersonOrChange });
+        ReportNoticeCombo.Items.Add(new ComboBoxItem { Content = ReportNoticeAllChoice, Tag = NotificationRouteKinds.ReportNoticeAll });
+        var storedReportNotice = NotificationRouteKinds.NormalizeReportNotice(existing?.ReportNotice);
+        ReportNoticeCombo.SelectedItem = ReportNoticeCombo.Items.Cast<ComboBoxItem>().First(i => Equals(i.Tag, storedReportNotice));
 
         /* #6036: the fallback picker lists every OTHER route, with a none choice; the route being edited is never offered. */
         FallbackRouteCombo.Items.Add(new ComboBoxItem { Content = FallbackNoneChoice, Tag = null });
@@ -172,7 +183,7 @@ public partial class NotificationRouteEditDialog : Window
         {
             NotificationRoute.WildcardMatch => "Every alert for this scope that no more specific route of the same scope matches. Offered only with a server or a tag.",
             AlertFamily.SelfMonitor => "Alerts about the monitoring tool itself: its store, collectors, jobs and certificates (Compression Job Stuck, Collection Stopped, Store Disk Pressure, Retention Held, …).",
-            AlertFamily.Reports => "Scheduled prose — the Collector Cost Digest, the Fleet Sweep Rollup and the Analysis Singles Digest. Reports to read, not pages.",
+            AlertFamily.Reports => "Scheduled prose — the Collector Cost Digest, the Fleet Sweep Rollup, the Analysis Singles Digest and the Daily Health Report. Reports to read, not pages.",
             AlertFamily.AgentJobs => "SQL Server Agent: Failed Agent Job, Long-Running Job, Agent Not Running, Agent Alert Gaps.",
             AlertFamily.Performance => "A monitored server's health: blocking, deadlocks, CPU, long-running queries, space, availability groups, connection loss, custom rules and analysis findings — and any alert the taxonomy does not name.",
             _ => "One alert by its exact metric_name (as shown in Alert History). Wins over the family route; a recovery (Server Restored, AG Replica Reconnected) routes as the alert it clears.",
@@ -238,6 +249,7 @@ public partial class NotificationRouteEditDialog : Window
         Route.SmtpRecipients = SmtpRecipientsBox.Text.Trim();
         Route.Enabled = EnabledCheckBox.IsChecked == true;
         Route.Severities = NotificationRouteKinds.NormalizeSeverities((SeveritiesCombo.SelectedItem as ComboBoxItem)?.Tag as string);
+        Route.ReportNotice = NotificationRouteKinds.NormalizeReportNotice((ReportNoticeCombo.SelectedItem as ComboBoxItem)?.Tag as string);
 
         var error = ReadAgent();
         error ??= ViewerDataService.ValidateNotificationRoute(Route);
@@ -443,6 +455,11 @@ public partial class NotificationRouteEditDialog : Window
         AgentMaxPerDayBox.IsEnabled = investigates;
         AgentLeaseMinutesBox.IsEnabled = investigates;
         AgentExpiryMinutesBox.IsEnabled = investigates;
+
+        /* #6979: only a route with its own agent level owns requests, so a report notice can fire only there. The stored value is kept
+           and still saved while the setting is disabled. */
+        ReportNoticeCombo.IsEnabled = investigates;
+        ReportNoticeHint.Visibility = investigates ? Visibility.Collapsed : Visibility.Visible;
     }
 
     private void AgentLevelCombo_SelectionChanged(object sender, SelectionChangedEventArgs e) => UpdateAgentLimitsEnabled();

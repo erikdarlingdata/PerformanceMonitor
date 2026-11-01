@@ -44,8 +44,8 @@ public sealed class ViewerStoreLoginRawReadLiveTests
             ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp, 15);
 
         /* The shipped statements that give viewer its read of the collect schema, lifted verbatim and retargeted. */
-        var usage = Regex.Match(managed, @"GRANT USAGE ON SCHEMA [^;]*? TO admin, viewer;");
-        var select = Regex.Match(managed, @"GRANT SELECT ON ALL TABLES IN SCHEMA collect TO admin, viewer;");
+        var usage = Regex.Match(managed, @"GRANT USAGE ON SCHEMA [^;]*? TO admin, viewer, web;");
+        var select = Regex.Match(managed, @"GRANT SELECT ON ALL TABLES IN SCHEMA collect TO admin, viewer, web;");
         Assert.True(usage.Success, "the managed provisioning SQL no longer grants viewer USAGE on the schemas");
         Assert.True(select.Success, "the managed provisioning SQL no longer grants viewer SELECT on the collect tables");
 
@@ -58,8 +58,8 @@ public sealed class ViewerStoreLoginRawReadLiveTests
         try
         {
             await ExecAsync(owner, $"CREATE ROLE {Role} LOGIN NOSUPERUSER PASSWORD '{RolePassword}'", ct);
-            await ExecAsync(owner, usage.Value.Replace("TO admin, viewer;", "TO " + Role + ";", StringComparison.Ordinal), ct);
-            await ExecAsync(owner, select.Value.Replace("TO admin, viewer;", "TO " + Role + ";", StringComparison.Ordinal), ct);
+            await ExecAsync(owner, usage.Value.Replace("TO admin, viewer, web;", "TO " + Role + ";", StringComparison.Ordinal), ct);
+            await ExecAsync(owner, select.Value.Replace("TO admin, viewer, web;", "TO " + Role + ";", StringComparison.Ordinal), ct);
 
             var roleString = new NpgsqlConnectionStringBuilder(scratch.ConnectionString)
             {

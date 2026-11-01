@@ -176,7 +176,7 @@ VALUES ($1, $2, 7, 'srv-7', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
             Assert.NotNull(done["after"]!["message"]);
             Assert.Equal((long)json["journal_id"]!, (long)done["called_id"]!);
 
-            var list = await new AgentChangeUndo(c.Source, 30).ReadAsync(50, c.Ct);
+            var list = await new AgentChangeUndo(c.Source, 30).ReadAsync(50, cancellationToken: c.Ct);
             var change = Assert.Single(list.Changes);
             Assert.Equal(EvictKind, change.Kind);
             Assert.Equal(AgentChangeResult.Done, change.Result);

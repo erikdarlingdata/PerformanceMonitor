@@ -14,13 +14,13 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 
 ## Limits
 
-- The page matches the `dev` branch at the commit that added it, with the store at schema version 221. The `tools/list` call on a running server gives the full list for that build.
+- The page matches the `dev` branch at the commit that last changed it, with the store at schema version 232. The `tools/list` call on a running server gives the full list for that build.
 - A tool that has no row here was added after this page. A changed tool can read other tables than the ones shown here.
 - Which tools a server serves depends on the `mcp` switches. See [MCP configuration](configuration-mcp.md#mcp).
 - The page was made by reading each tool's code down to the SQL that runs. It was not made from a store trace.
 
 
-## Tools that read collected data (147)
+## Tools that read collected data (151)
 
 | Tool | Store objects |
 |---|---|
@@ -50,6 +50,7 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 | `get_cpu_scheduler_pressure` | `collect.cpu_scheduler_stats` (through the view `collect.v_cpu_scheduler_stats`) |
 | `get_cpu_utilization` | `collect.cpu_utilization_stats` |
 | `get_current_waits_trend` | `collect.waiting_tasks` |
+| `get_daily_health_report` | `collect.servers`<br>`collect.cpu_utilization_stats`<br>`collect.pg_cpu_utilization`<br>`collect.memory_stats`<br>`collect.memory_grant_stats`<br>`collect.cpu_scheduler_stats`<br>`collect.blocked_process_reports` (through a view)<br>`collect.dmv_blocking_snapshots` (through a view)<br>`collect.deadlocks` (through a view)<br>`collect.pg_database_stats`<br>`collect.collection_log`<br>`collect.collection_log` (through the continuous aggregate `collect.collection_health_hourly`)<br>`config.config_mute_rules`<br>`config.config_alert_settings`<br>`config.server_tags`<br>`config.server_tag_map`<br>`config.config_service`<br>`config.config_command`<br>`collect.v_cpu_utilization_stats`<br>`collect.v_memory_stats`<br>`collect.v_memory_grant_stats`<br>`collect.v_cpu_scheduler_stats`<br>`collect.v_collection_log`<br>`config.config_alert_log`<br>`collect.job_history`<br>`collect.server_properties`<br>`collect.agent_status`<br>`collect.database_size_stats` |
 | `get_daily_summary` | `collect.wait_stats` (through the view `collect.v_wait_stats`)<br>`collect.query_stats` (through the view `collect.v_query_stats`)<br>`collect.deadlocks` (through the view `collect.v_deadlocks`)<br>`collect.blocked_process_reports` (through the view `collect.v_blocked_process_reports`)<br>`collect.dmv_blocking_snapshots` (through the view `collect.v_dmv_blocking_snapshots`)<br>`collect.cpu_utilization_stats` (through the view `collect.v_cpu_utilization_stats`)<br>`collect.collection_log` (through the view `collect.v_collection_log`)<br>`collect.memory_pressure_events` (through the view `collect.v_memory_pressure_events`)<br>`config.config_alert_log`<br>`config.config_alert_settings`<br>`config.config_collector_schedules`<br>`collect.query_stats_hourly`<br>`collect.query_stats_interval_hourly`<br>`collect.query_stats_daily` |
 | `get_daily_summary_range` | `collect.wait_stats` (through the view `collect.v_wait_stats`)<br>`collect.query_stats` (through the view `collect.v_query_stats`)<br>`collect.deadlocks` (through the view `collect.v_deadlocks`)<br>`collect.blocked_process_reports` (through the view `collect.v_blocked_process_reports`)<br>`collect.dmv_blocking_snapshots` (through the view `collect.v_dmv_blocking_snapshots`)<br>`collect.cpu_utilization_stats` (through the view `collect.v_cpu_utilization_stats`)<br>`collect.collection_log` (through the view `collect.v_collection_log`)<br>`collect.memory_pressure_events` (through the view `collect.v_memory_pressure_events`)<br>`config.config_alert_log`<br>`config.config_alert_settings`<br>`config.config_collector_schedules`<br>`collect.query_stats_hourly`<br>`collect.query_stats_interval_hourly`<br>`collect.query_stats_daily` |
 | `get_database_config` | `collect.database_config`<br>`collect.v_database_config` |
@@ -220,7 +221,7 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 | `validate_custom_view` | None. It checks the definition that you pass in. |
 | `wait_for_investigation_requests` | `config.investigation_journal`<br>`config.investigation_requests`<br>`config.investigation_request_alerts`<br>`collect.servers` |
 
-## Tools that change something (86)
+## Tools that change something (87)
 
 | Tool | Store objects |
 |---|---|
@@ -276,6 +277,7 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 | `resume_collection` | `config.config_command`<br>`config.config_service` |
 | `run_collectors_now` | `config.config_command` |
 | `save_environment_profile` | `config.agent_environment_profiles` (upsert/delete)<br>`config.server_tags` (tag exists check)<br>`config.config_monitored_servers` (server exists check)<br>`config.investigation_journal` |
+| `send_daily_health_report_now` | `config.config_alert_log` (insert, the alert history row)<br>`config.config_alert_settings` (read)<br>`config.config_notification_routes` (read)<br>`config.config_mute_rules` (read)<br>The objects that `get_daily_health_report` reads. |
 | `set_agent_actions_enabled` | `config.config_service` |
 | `set_alert_threshold_override` | `config.config_threshold_overrides` |
 | `set_collector_databases` | `config.config_collector_schedules` |

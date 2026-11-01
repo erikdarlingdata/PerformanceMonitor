@@ -75,7 +75,7 @@ internal static class DarlingMcpAgentActions
     internal const string SelfMonitorMetric = "self_monitor_metric";
     internal const string RuleScope = "rule_scope";
 
-    /// <summary>The self alerts an agent may still mute: the five availability group metrics, Agent Not Running, Agent Alert Gaps, the three database-protection overdue alerts (#6873), Identity Capacity (#6875) and the three report digests.</summary>
+    /// <summary>The self alerts an agent may still mute: the five availability group metrics, Agent Not Running, Agent Alert Gaps, the three database-protection overdue alerts (#6873), Identity Capacity (#6875) and the four scheduled report documents (the collector cost digest, the fleet sweep rollup, the analysis singles digest and the Daily Health Report).</summary>
     private static readonly HashSet<string> UnprotectedConstantNames = new(StringComparer.Ordinal)
     {
         nameof(DarlingSelfAlertEvaluator.AgFailoverMetric),
@@ -92,6 +92,7 @@ internal static class DarlingMcpAgentActions
         nameof(DarlingSelfAlertEvaluator.CollectorCostDigestMetric),
         nameof(DarlingSelfAlertEvaluator.FleetSweepRollupMetric),
         nameof(DarlingSelfAlertEvaluator.AnalysisSinglesDigestMetric),
+        nameof(DarlingSelfAlertEvaluator.DailyHealthReportMetric),
     };
 
     /// <summary>Every <c>*Metric</c> constant of <see cref="DarlingSelfAlertEvaluator"/> an agent may not mute (read by reflection, so a new one is protected without an edit here).</summary>
@@ -203,6 +204,10 @@ internal static class DarlingMcpAgentActions
 
     /* ------------------------------------------------------------------ mute rules */
 
+    /// <summary>#7040: an agent's mute stays a one-off. A repeating schedule is a standing change to what an operator hears about, so it is left to a person.</summary>
+    internal const string RecurrenceRefusal =
+        "A repeat schedule (recur_days, recur_start, recur_end, recur_time_zone) is not available during an investigation: a mute made here is a one-off, and a rule that repeats is left to an operator. Nothing was written.";
+
     /// <summary>What an investigating agent is told when it sends a mute start (#6231): its mute applies at once.</summary>
     internal const string StartsAtRefusal =
         "starts_at is not available during an investigation: a mute made here applies at once, so a window set ahead of planned work is left to an operator. Nothing was written.";
@@ -281,6 +286,8 @@ internal static class DarlingMcpAgentActions
 
         if (body is not null && (body.ContainsKey("starts_at") || body.ContainsKey("starts_at_utc")))
             return DarlingMcpAlertTools.Outcome("invalid", StartsAtRefusal);
+        if (body is not null && body.Any(p => p.Key.StartsWith("recur_", StringComparison.Ordinal)))
+            return DarlingMcpAlertTools.Outcome("invalid", RecurrenceRefusal);
 
         var (before, notFound) = await FindMuteAsync(postgres, rule_id);
         var parsed = InvestigationToolCore.ParseAgentAction(agentAction, out var action);

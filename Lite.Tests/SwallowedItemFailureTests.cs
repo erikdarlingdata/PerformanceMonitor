@@ -422,7 +422,7 @@ public sealed class SwallowedItemFailureTests
     /// <summary>The source with line endings normalised to LF, so a multi-line pin reads the same on a
     /// CRLF checkout (this repo's .gitattributes) and on any other.</summary>
     private static string ReadLf(string relativePath) =>
-        File.ReadAllText(FindRepoFile(relativePath)).Replace("\r\n", "\n", StringComparison.Ordinal);
+        SplitRepoFile.ReadAllText(FindRepoFile(relativePath)).Replace("\r\n", "\n", StringComparison.Ordinal);
 
     private static string FindRepoFile(string relativePath)
     {

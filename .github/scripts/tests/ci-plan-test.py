@@ -37,14 +37,8 @@ jobs:
               - 'global.json'
             core:
               - 'PerformanceMonitor.Common/**/!(*.md)'
-            installer_core:
-              - 'PerformanceMonitor.Installer/**/!(*.md)'
-            dashboard:
-              - 'deprecated/Dashboard/**/!(*.md)'
             lite:
               - 'Lite/**/!(*.md)'
-            installer:
-              - 'deprecated/Installer/**/!(*.md)'
             darling:
               - 'Darling/**/!(*.md)'
               - 'Lite/**/*.xaml'
@@ -172,14 +166,6 @@ check("shared library: all", r["areas"], "all")
 r = run(["global.json"])
 check("root build file: all", r["areas"], "all")
 
-r = run(["deprecated/Installer/X.cs"])
-check("deprecated only: no area", r["areas"], "none")
-check("deprecated only: builds, no legs", (r["build"], r["legs"]), ("true", "0"))
-check("deprecated only: installer tests", r["deprecated_tests"], "true")
-check("deprecated file in an all-area change", run(["deprecated/Installer/X.cs", "Darling/X.cs"])["deprecated_tests"],
-      "true")
-check("no deprecated file, no installer tests", run(["Darling/X.cs"])["deprecated_tests"], "false")
-
 # --- all areas -------------------------------------------------------------------------------------------------
 r = run(["tools/odd.txt"])
 check("unknown path: all", (r["areas"], r["darling_scope"], r["lite_scope"]), ("all", "full", "full"))
@@ -236,6 +222,14 @@ check("web js: other Service file", run(["Darling/PerformanceMonitor.Darling.Ser
 check("web js: a root-level wwwroot/js path", run(["wwwroot/js/a.js"])["check_web_js"], "true")
 check("web js: not on a skipped run", run([js], draft=True)["check_web_js"], "false")
 check("actionlint: not on a skipped run", run([".github/workflows/pr.yml"], draft=True)["actionlint"], "false")
+check("pg old targets: a collector file", run(["PerformanceMonitor.Collectors/PgVersionSql.cs"])["pg_old_targets"], "true")
+check("pg old targets: the catalog", run(["PerformanceMonitor.Collectors/CollectorCatalog.cs"])["pg_old_targets"], "true")
+check("pg old targets: the fetch script", run(["Darling/tools/fetch-pg-target.ps1"])["pg_old_targets"], "true")
+check("pg old targets: the start script", run([".github/scripts/start-test-pg.ps1"])["pg_old_targets"], "true")
+check("pg old targets: the test class", run(["Darling/Darling.Tests/PgCollectorsOnOldTargetsLiveTests.cs"])["pg_old_targets"], "true")
+check("pg old targets: a SQL Server collector", run(["PerformanceMonitor.Collectors/WaitStatsCollector.cs"])["pg_old_targets"], "false")
+check("pg old targets: not on a push", run(["PerformanceMonitor.Collectors/PgVersionSql.cs"], event="push")["pg_old_targets"], "false")
+check("pg old targets: not on a draft", run(["PerformanceMonitor.Collectors/PgVersionSql.cs"], draft=True)["pg_old_targets"], "false")
 
 # --- parsing ---------------------------------------------------------------------------------------------------
 check("labels: JSON", cp.parse_labels('["ci-next", "bug"]'), ["ci-next", "bug"])

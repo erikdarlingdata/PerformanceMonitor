@@ -8,6 +8,7 @@
 
 using System;
 using System.Linq;
+using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Storage;
@@ -90,18 +91,22 @@ public static class DailySummarySql
         ),
         /*blocking-waits*/
         bpr AS (
-            /* #5644: counts WAITS, not report rows (BlockingWaits.WaitsCteSql, the one definition the alert, the
-               fleet tile and the MCP counts share), bucketed on the day of the wait's longest report. */
+            /* #7028: the day's blocking WAITS, chosen per hour as the blocking alerts choose them for their rolling
+               hour (BlockingWaits.HourlyChosenWaitsSql): each hour takes its blocked-process-report waits when it has
+               any, else its DMV snapshot waits, so an hour that paged on DMV waits alone still counts in a day that
+               holds reports in another hour. c is the count the band bands and every surface shows, max_wait_ms
+               the longest of those waits. A wait lands on the day of its representative report (XE: event_time,
+               DMV: collection_time). xe_c counts the waits that came from reports: an hour that holds any report
+               waits chooses them, so a day holds blocked-process reports exactly when xe_c > 0, whatever else the
+               hour-choice picked. */
             SELECT date_trunc('day', event_time) AS d, COUNT(*) AS c, MAX(wait_time_ms) AS max_wait_ms,
-                   SUM(wait_reports)::bigint AS reports
-            FROM bpr_waits
+                   COUNT(*) FILTER (WHERE from_xe) AS xe_c
+            FROM blk
             GROUP BY 1
         ),
         dmv AS (
-            SELECT date_trunc('day', collection_time) AS d, COUNT(*) AS c, MAX(wait_time_ms) AS max_wait_ms,
-                   SUM(wait_reports)::bigint AS reports
-            FROM dmv_waits
-            GROUP BY 1
+            /* #7028: the snapshot arm's value per day, from the gated chain above (dmv_gated). */
+            SELECT d, peak_snapshot_wait_ms FROM dmv_gated
         ),
         cpu AS (
             /* Total host CPU = SQL + other-process (NULL on Linux -> 0), matching the Overview headline. The
@@ -178,16 +183,15 @@ public static class DailySummarySql
                is an instance of it. The readers keep the NULL (long?) and name the day in days_missing[]. */
             CASE WHEN q.d IS NULL THEN 0 ELSE q.c END AS unique_queries,
             COALESCE(dl.c, 0) AS deadlock_count,
-            COALESCE(NULLIF(b.c, 0), dm.c, 0) AS blocking_events,
+            COALESCE(b.c, 0) AS blocking_events,
             COALESCE(cp.c, 0) AS high_cpu_events,
             COALESCE(cl.errs, 0) AS collection_errors,
             COALESCE(m.pressure, 0) AS memory_pressure_events,
             COALESCE(m.critical, 0) AS memory_critical_events,
             COALESCE(al.c, 0) AS alert_count,
-            /* Peak block wait (ms) from the SAME source the blocking count came from (BPR preferred, DMV-snapshot
-               fallback), so the day-detail blocking reason ('N blocking events (peak block X)') reconciles with
-               the count. 0 when the blocking came from a source without a wait time. */
-            COALESCE(CASE WHEN COALESCE(b.c, 0) > 0 THEN b.max_wait_ms ELSE dm.max_wait_ms END, 0) AS peak_block_wait_ms,
+            /* Peak block wait (ms): the longest of the waits blocking_events counts (#7028), so the day-detail blocking
+               reason ('N blocking events (peak block X)') reconciles with the count. 0 when the day has none. */
+            COALESCE(b.max_wait_ms, 0) AS peak_block_wait_ms,
             /* Every collector run in the window (#3539 A2): the denominator that turns collection_errors
                into a share. Appended after peak_block_wait_ms so every existing ordinal read stays where it was. */
             COALESCE(cl.runs, 0) AS collection_runs,
@@ -208,16 +212,21 @@ public static class DailySummarySql
             (CASE WHEN w.d IS NULL THEN 0 ELSE 1 END)
               + (CASE WHEN q.c IS NULL THEN 0 ELSE 1 END)
               + (CASE WHEN dl.d IS NULL THEN 0 ELSE 1 END)
-              + (CASE WHEN b.d IS NULL THEN 0 ELSE 1 END)
+              /* Blocking is TWO sources, as the retention notes' "N of 7" counts them: the blocked-process reports and the
+                 DMV snapshots are separate tables with their own retention (#7028). The chosen waits (b.d) can come from
+                 either side, so the reports arm reads xe_c, the report-sourced waits, and a DMV-only day does not count
+                 as holding reports. dm.d is non-null on every day that holds a snapshot, whatever its gated value (the
+                 gate keeps one row per day with an in-window snapshot, and a low value is 0, not no row). */
+              + (CASE WHEN COALESCE(b.xe_c, 0) = 0 THEN 0 ELSE 1 END)
               + (CASE WHEN dm.d IS NULL THEN 0 ELSE 1 END)
               + (CASE WHEN cp.d IS NULL THEN 0 ELSE 1 END)
               + (CASE WHEN m.d IS NULL THEN 0 ELSE 1 END) AS signal_sources_present,
-            /* #5644: the day's blocked-process REPORT rows (DMV snapshot rows on the fallback), from the SAME source
-               and day bucket as blocking_events, which counts WAITS. The health band's count tiers
-               (ServerHealthThresholds.BlockingWarnPerHour/CriticalPerHour) were measured in reports per server-hour,
-               so the band reads this column; every displayed count stays blocking_events. Appended LAST, after
-               signal_sources_present, so every existing ordinal read stays where it was. */
-            CASE WHEN COALESCE(b.c, 0) > 0 THEN b.reports ELSE COALESCE(dm.reports, 0) END AS blocking_reports
+            /* #7028: the blocking band's snapshot arm, the Blocking Wait Time alert's own measure: the largest total
+               blocked wait of one DMV snapshot in the day after the alert's persistence gate (three adjacent snapshots,
+               or one at three times the bar), in milliseconds, 0 when the day has no snapshot. Replaces
+               blocking_reports (#5644), which the band no longer reads: it bands on blocking_events (waits). Appended
+               LAST, after signal_sources_present, so every existing ordinal read stays where it was. */
+            COALESCE(CAST(ROUND(dm.peak_snapshot_wait_ms) AS bigint), 0) AS peak_snapshot_wait_ms
         FROM day_spine s
         LEFT JOIN waits w ON w.d = s.d
         LEFT JOIN queries q ON q.d = s.d
@@ -232,22 +241,90 @@ public static class DailySummarySql
         """;
 
     /// <summary>
-    /// <see cref="RangeSqlTemplate"/> with the two blocking-wait chains spliced in (#5644): the day's
-    /// <c>blocking_events</c> counts blocking WAITS, as the alert value, the fleet "Blocking" tile and the MCP counts
-    /// do (<see cref="BlockingWaits.WaitsCteSql"/>), not blocked-process report rows (SQL Server writes about eleven
-    /// per one-minute wait). The blocked-process side carries <c>database_name</c> for
+    /// <see cref="RangeSqlTemplate"/> with the blocking chains spliced in. The day's <c>blocking_events</c> counts
+    /// blocking WAITS, as the alert value, the fleet "Blocking" tile and the MCP counts do
+    /// (<see cref="BlockingWaits.WaitsCteSql"/>), not blocked-process report rows (SQL Server writes about eleven per
+    /// one-minute wait). #7028: the waits are chosen per HOUR (<see cref="BlockingWaits.HourlyChosenWaitsSql"/>,
+    /// buckets anchored at the day start), the way the blocking alerts choose them for their rolling hour, and the
+    /// day also carries the <c>Blocking Wait Time</c> alert's measure, the largest gated DMV snapshot total
+    /// (<see cref="BlockingWaits.GatedSnapshotWaitSql"/>). The blocked-process side carries <c>database_name</c> for
     /// <see cref="DailySummaryAzureMasterScope"/>'s filter; the DMV side keeps its collected-day bucket.
     /// </summary>
     public static readonly string RangeSql = RangeSqlTemplate.Replace(
         "/*blocking-waits*/",
-        BlockingWaits.WaitsCteSql(
+        /* The DMV rows are read once, from the lookback floor (a streak that began before $2 is seen), and the waits
+           and the gate both take them from here. */
+        @"dmv_src AS (
+    SELECT server_id, blocked_spid, blocking_spid, event_time, collection_time, wait_time_ms FROM v_dmv_blocking_snapshots
+    WHERE server_id = $1 AND collection_time >= " + BlockingSnapshotFloorSql("$2", "$1") + @" AND collection_time < $3
+),"
+        + BlockingWaits.WaitsCteSql(
             BlockingWaits.SqlDialect.Postgres, "bpr_waits",
             @"SELECT blocked_spid, blocking_spid, event_time, wait_time_ms, database_name FROM v_blocked_process_reports
-    WHERE server_id = $1 AND event_time >= $2 AND event_time < $3 AND collection_time >= $4", reportCount: true) + "," + BlockingWaits.WaitsCteSql(
+    " + BprSourceWhere) + "," + BlockingWaits.WaitsCteSql(
             BlockingWaits.SqlDialect.Postgres, "dmv_waits",
-            @"SELECT blocked_spid, blocking_spid, event_time, collection_time, wait_time_ms FROM v_dmv_blocking_snapshots
-    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3", reportCount: true) + ",",
+            @"SELECT blocked_spid, blocking_spid, event_time, collection_time, wait_time_ms FROM dmv_src
+    WHERE collection_time >= $2") + ","
+        /* Hourly buckets from a fixed midnight, so every bucket lies inside one day (date_bin on a day-aligned origin
+           is date_trunc('hour')); the DMV side buckets on collection_time, as this statement always has. */
+        + BlockingWaits.HourlyChosenWaitsSql(
+            "blk", "bpr_waits", "dmv_waits", "TIMESTAMP '2000-01-01'", false, null, "event_time", "collection_time") + ","
+        + BlockingWaits.GatedSnapshotWaitSql(
+            "dmv_gated", "SELECT server_id, collection_time, wait_time_ms, blocked_spid, blocking_spid FROM dmv_src",
+            "$2", "$3", false,
+            AlertEngine.BlockingWaitBreachSamples, AlertEngine.BlockingWaitSingleSnapshotMultiplier,
+            AlertEngine.BlockingWaitEpisodeGapFactor, DefaultSnapshotCadenceMinutes, byDay: true) + ",",
         StringComparison.Ordinal);
+
+    /// <summary>The blocked-process-report source's window, one line: <see cref="DailySummaryAzureMasterScope"/> appends
+    /// its keep predicate to it.</summary>
+    internal const string BprSourceWhere =
+        "WHERE server_id = $1 AND event_time >= $2 AND event_time < $3 AND collection_time >= $4";
+
+    /* A property, not a static readonly field: RangeSql is initialised above it and would read a zero. */
+    private static int DefaultSnapshotCadenceMinutes =>
+        PerformanceMonitor.Collectors.CollectorScheduleDefaults.All["dmv_blocking_snapshot"].FrequencyMinutes;
+
+    /// <summary>
+    /// #7028: where the snapshot reads start for a window that starts at <paramref name="windowStartSql"/>, so a streak
+    /// that began before the window is seen (<see cref="BlockingWaits.SnapshotLookbackFloorSql"/> with the alert's own
+    /// constants). <paramref name="serverIdSql"/> is the one server's id, or null for the fleet.
+    /// </summary>
+    public static string BlockingSnapshotFloorSql(string windowStartSql, string? serverIdSql) =>
+        BlockingWaits.SnapshotLookbackFloorSql(
+            windowStartSql, serverIdSql, AlertEngine.BlockingWaitBreachSamples, AlertEngine.BlockingWaitEpisodeGapFactor,
+            DefaultSnapshotCadenceMinutes);
+
+    /// <summary>
+    /// #7028: the snapshot arm for a window with the alert's own gate constants and the shipped default cadence, one
+    /// definition for the fleet reads and the Viewer Overview (<see cref="BlockingWaits.GatedSnapshotWaitSql"/>).
+    /// <paramref name="serverIdSql"/> is the one server's id (<c>$1</c>), or null for every server. The snapshots are read
+    /// from the lookback floor up to the window end when one is given (the gate only looks backwards, so a snapshot after
+    /// the window can never change a value inside it, and a window in the past would otherwise read every snapshot
+    /// through now), bounded the way the gate keeps its rows (<c>&lt;=</c> with <paramref name="endInclusive"/>, else
+    /// <c>&lt;</c>). <paramref name="floorSql"/> is the statement's partition-column floor for the
+    /// window start (<see cref="EventWindowFloor"/>), which the lookback floor never goes below.
+    /// <paramref name="sourceRelation"/> names a relation the caller already reads the snapshots into (<c>server_id</c>,
+    /// <c>collection_time</c>, <c>wait_time_ms</c>, <c>blocked_spid</c>, <c>blocking_spid</c>, already scoped to the server
+    /// and read from at or before <paramref name="floorSql"/>), so the statement's wait count and this gate share one scan
+    /// of the snapshots instead of reading them twice (#7028: the second scan took the fleet card to 1.7 times the
+    /// buffers of the statement before the gate).
+    /// </summary>
+    public static string BlockingSnapshotGateSql(
+        string name, string windowStartSql, string? windowEndSql, bool endInclusive, string? serverIdSql, string floorSql,
+        string? sourceRelation = null) =>
+        BlockingWaits.GatedSnapshotWaitSql(
+            name,
+            (sourceRelation is null
+                ? @"SELECT server_id, collection_time, wait_time_ms, blocked_spid, blocking_spid FROM v_dmv_blocking_snapshots
+    WHERE collection_time >= " + floorSql + " AND collection_time >= " + BlockingSnapshotFloorSql(windowStartSql, serverIdSql)
+                    + (serverIdSql is null ? string.Empty : " AND server_id = " + serverIdSql)
+                : "SELECT server_id, collection_time, wait_time_ms, blocked_spid, blocking_spid FROM " + sourceRelation
+                    + " WHERE collection_time >= " + BlockingSnapshotFloorSql(windowStartSql, serverIdSql))
+            + (windowEndSql is null ? string.Empty : " AND collection_time " + (endInclusive ? "<=" : "<") + " " + windowEndSql),
+            windowStartSql, windowEndSql, endInclusive,
+            AlertEngine.BlockingWaitBreachSamples, AlertEngine.BlockingWaitSingleSnapshotMultiplier,
+            AlertEngine.BlockingWaitEpisodeGapFactor, DefaultSnapshotCadenceMinutes);
 
     /// <summary>
     /// The <c>queries</c> CTE exactly as it appears in <see cref="RangeSql"/> — the ONE part of the

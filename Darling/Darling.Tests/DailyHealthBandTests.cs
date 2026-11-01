@@ -283,7 +283,7 @@ public class DailyHealthBandTests
 
         /* Still countable: the drill is offered and the tooltip lists it with its rate. */
         Assert.Contains(DayDrillTarget.Blocking, DailyHealthBandCalculator.AvailableDrills(day));
-        Assert.Contains("11 blocking events (0.5/hr)", DailyHealthBandCalculator.Describe(day));
+        Assert.Contains("11 blocking events (0.5 waits/hr)", DailyHealthBandCalculator.Describe(day));
     }
 
     /// <summary>The day's peak block is the wait arm: a 60-second block is a Critical day and a 10-second

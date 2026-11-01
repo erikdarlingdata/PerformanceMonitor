@@ -89,7 +89,7 @@ Point an uptime check at this route and alert on the status code. In the two 503
 
 ## What it does and does not do
 
-Read this section before you file a bug. The web dashboard reads the store as the least-privilege `viewer` role. Its `/api/read/*` surface comes from the MCP tool catalog, minus an explicit exclusion list. These exclusions matter to you:
+Read this section before you file a bug. The web dashboard connects to the store as its own least-privilege `web` role. Its `/api/read/*` surface comes from the MCP tool catalog, minus an explicit exclusion list. These exclusions matter to you:
 
 - No plan analysis. The whole `analyze_query_plan`, `analyze_procedure_plan`, `analyze_query_store_plan` and `analyze_plan_xml` family is excluded. Use the [WPF viewer](viewer.md) for plans. It has the graphical plan viewer, the block-chain reconstruction and the deadlock-graph renderer.
 - No `analyze_server`. That tool makes a live outbound connection to a monitored server, and the web host does not.
@@ -98,7 +98,7 @@ Read this section before you file a bug. The web dashboard reads the store as th
 The web host also writes to the monitoring store. Everything below changes monitoring configuration or monitoring state. This page does not cover which seats can use each one.
 
 - Custom Views: create, edit and delete, and preview one with `POST /api/compose/run`.
-- Mute rules: add, edit, enable or disable, and delete.
+- Mute rules: add, edit, enable or disable, and delete. A rule can repeat on a schedule (#7040). Tick the days (none ticked is every day), then set a daily From and To time and a time zone, which starts as the browser's. Leave the times blank for a one-off rule. The list shows each rule's schedule and whether a window is open now. A message from the service about a bad schedule shows under the field it names.
 - Alert rules: custom alert rules (add, edit, delete, validate and test), threshold overrides, environment profiles, and notification routes (add, edit and delete).
 - Alert History: dismiss alerts.
 - Servers: add a server and edit the connection of a server. The web host has no route that removes a server.
@@ -192,7 +192,7 @@ One consequence: a SQL Server read that targets a PostgreSQL server now answers 
 
 Custom Views are the saved dashboards and notebooks in `config.custom_views`. You create and edit them in the built-in composer. The write routes listed above are the reason that the loopback token exemption went away (see [Reach it from a browser on another machine](#reach-it-from-a-browser-on-another-machine)).
 
-The `viewer` role has one more narrow grant: `config.database_state_expected`. It is behind the per-database state-override editor of the WPF viewer. No web route reaches it. The WPF editor gates itself on the same read-only probe (see [Read-only versus read-write seats](viewer.md#read-only-versus-read-write-seats)), which a `viewer`-role seat fails. So no surface currently uses this grant.
+The `web` role has one more narrow grant: `config.database_state_expected`. It is behind the per-database state-override editor of the WPF viewer. No web route reaches it. The WPF editor gates itself on the same read-only probe (see [Read-only versus read-write seats](viewer.md#read-only-versus-read-write-seats)), which a `viewer`-role seat fails. So no surface currently uses this grant.
 
 ## Reach it from a browser on another machine
 

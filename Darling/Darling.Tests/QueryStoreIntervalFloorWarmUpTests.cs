@@ -207,33 +207,61 @@ public sealed class QueryStoreIntervalFloorWarmUpTests
             await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
             var log = new CapturingTestLogger();
 
-            var summary = await DarlingRetention.PurgeAsync(postgres, timescaleAvailable: false, log, ct);
+            /* #7007: the premise of this test needs the drain's DELETEs to commit synchronously. PostgreSQL sets a heap
+               tuple's XMAX_COMMITTED hint bit only once the deleter's commit record is flushed, and an index scan marks an
+               entry dead only when it sees that hint (HeapTupleIsSurelyDead). On a cluster running synchronous_commit = off
+               (the throwaway CI and rig clusters did, #6972) the warm-up runs inside the ~200 ms before the WAL writer
+               flushes the last commit, sets no hint, marks nothing, and the test's own read pays the whole walk. The
+               scratch database sets it on (OpenSeededAsync), and the drain's product connections below inherit that. */
+            await using (var probe = await postgres.OpenConnectionAsync(ct))
+            await using (var show = new NpgsqlCommand("SHOW synchronous_commit", probe))
+            {
+                var setting = (string)(await show.ExecuteScalarAsync(ct))!;
+                Assert.True(
+                    setting == "on",
+                    $"synchronous_commit is '{setting}' on the drain's connections; with it off the warm-up cannot set the deleted rows' commit hint bits, so it marks no index entry dead (#7007)");
+            }
+
+            /* #7007: wait, before the warm-up, until no transaction or snapshot older than the drain is open (see the
+               logger), so the warm-up can mark the entries. */
+            var horizonWait = new HorizonWaitLogger(log, scratch.ConnectionString);
+            var summary = await DarlingRetention.PurgeAsync(postgres, timescaleAvailable: false, horizonWait, ct);
 
             Assert.True(summary.RowsDeleted >= ExpiredPerServer * ServerIds.Length, log.Joined);
-            Assert.Equal(KeptPerServer * ServerIds.Length, await CountAsync(connection, table.Qualified, ct));
             Assert.Contains(
                 $"Interval floor warm-up for {table.Kind.ToString().ToLowerInvariant()}: {ServerIds.Length} server(s) warmed, 0 skipped on a lock, 0 failed",
                 log.Joined, StringComparison.Ordinal);
             Assert.Contains("slowest server", log.Joined, StringComparison.Ordinal);
 
+            /* #7007: nothing may read the table between the warm-up and the first floor read below. A SELECT COUNT(*)
+               here is an index-only scan on the same idx_..._first_exec index the floor read walks (40,032 heap
+               fetches on the wide table, measured with the warm-up removed), so it marks the dead entries itself:
+               the first read stays cheap with or without the warm-up, and the test proved nothing. The row count is
+               asserted after the reads. */
             foreach (var serverId in ServerIds)
             {
                 var read = await FirstReadAsync(connection, table, serverId, ct);
                 var holders = read.Buffers > 1_000 ? await HorizonHoldersAsync(connection, ct) : string.Empty;
-                if (read.Buffers > 1_000 && !holders.EndsWith(":: none", StringComparison.Ordinal))
+                var holderStillOpen = !holders.EndsWith(":: none", StringComparison.Ordinal);
+                if (read.Buffers > 1_000 && (holderStillOpen || horizonWait.TimedOutHolders is not null))
                 {
                     /* PostgreSQL marks an index entry dead only when its row is dead to every open snapshot, and the
                        suite runs other classes against this cluster: one of them has a transaction open that predates
                        the drain, so the entries stay live and no read can mark them. That is the documented limit of
-                       the warm-up (#5581), not a defect; the premise and wiring tests above still ran. */
+                       the warm-up (#5581), not a defect; the premise and wiring tests above still ran. The wait before
+                       the warm-up gives such a holder 30 seconds to end; one that outlasts it, or that ended after the
+                       warm-up ran (the read then finds the warm-up has marked nothing: measured, #7007), skips here. */
                     bodySucceeded = true;
-                    Assert.Skip("A transaction open on this cluster predates the drain, so no read can mark its dead entries: " + holders);
+                    Assert.Skip("A transaction open on this cluster predates the drain, so no read can mark its dead entries: "
+                        + (holderStillOpen ? holders : horizonWait.TimedOutHolders));
                 }
 
                 Assert.True(
                     read.Buffers <= 1_000 && (read.HeapFetches ?? 0) <= 1_000,
                     $"server {serverId}: the first read after the warm-up should touch a handful of pages, not the {ExpiredPerServer} dead entries the drain left ({read}); horizon holders: {holders}; {string.Join(" | ", log.Lines.Where(l => l.Contains("warm-up", StringComparison.Ordinal)))}");
             }
+
+            Assert.Equal(KeptPerServer * ServerIds.Length, await CountAsync(connection, table.Qualified, ct));
 
             bodySucceeded = true;
         }
@@ -463,6 +491,13 @@ public sealed class QueryStoreIntervalFloorWarmUpTests
     {
         var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
+
+        /* #7007: synchronous commits, whatever the cluster's default is (see the warm-up test). The database setting
+           is what the drain's product connections get; the session setting is this connection's, which seeds, vacuums
+           and deletes, so VACUUM finds each commit flushed and sets the visibility map the premise relies on. */
+        await ExecuteAsync(connection, $"ALTER DATABASE \"{scratch.DatabaseName}\" SET synchronous_commit = on", ct);
+        await ExecuteAsync(connection, "SET synchronous_commit = on", ct);
+
         await PgMigrations.MigrateAsync(connection, ct);
 
         foreach (var serverId in ServerIds)
@@ -602,6 +637,55 @@ FROM generate_series(1, $2) AS g;";
         }
 
         throw new System.IO.FileNotFoundException(file + " not found above " + thisFile);
+    }
+
+    /// <summary>
+    /// #7007: at the sweep's summary line (after the last purge, before the warm-up) waits up to 30 seconds, on its own
+    /// connection, until no open transaction or snapshot older than the drain is left, then goes on whether or not that
+    /// happened. A warm-up that runs while one is open marks nothing (the entries are not yet dead to it), and the
+    /// holder ending a moment later leaves the first real read to pay the whole walk. Measured on a throwaway rig: a
+    /// transaction with an xid in another database, or a read-only REPEATABLE READ transaction in this one, ended
+    /// right after the warm-up, gave 40,221 buffers on the first read in 3 of 3 runs on each table. Two conditions:
+    /// the xmin of a fresh snapshot (running xids of every database) has reached the xmax taken at the summary line,
+    /// and no other backend of this database has a snapshot xmin older than that xmax.
+    /// </summary>
+    private sealed class HorizonWaitLogger(ILogger inner, string connectionString) : ILogger
+    {
+        private bool _waited;
+
+        /// <summary>The holders seen when the wait ran out, or null when none was left in time.</summary>
+        public string? TimedOutHolders { get; private set; }
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => inner.BeginScope(state);
+
+        public bool IsEnabled(LogLevel logLevel) => inner.IsEnabled(logLevel);
+
+        public void Log<TState>(
+            LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            inner.Log(logLevel, eventId, state, exception, formatter);
+            if (_waited || !formatter(state, exception).Contains("table(s) purged", StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            _waited = true;
+            using var watcher = new NpgsqlConnection(connectionString);
+            watcher.Open();
+            using var xmax = new NpgsqlCommand("SELECT pg_snapshot_xmax(pg_current_snapshot())::text", watcher);
+            var drainXmax = ulong.Parse((string)xmax.ExecuteScalar()!, CultureInfo.InvariantCulture)
+                .ToString(CultureInfo.InvariantCulture);
+            using var check = new NpgsqlCommand(
+                $"SELECT pg_snapshot_xmin(pg_current_snapshot()) >= '{drainXmax}'::xid8 AND NOT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid() AND backend_xmin IS NOT NULL AND age(backend_xmin) > age('{drainXmax}'::xid8::xid))",
+                watcher);
+            if (!TestWait.TryWaitUntil(() => (bool)check.ExecuteScalar()!, TimeSpan.FromSeconds(30), TimeSpan.FromMilliseconds(50)))
+            {
+                using var holders = new NpgsqlCommand(
+                    "SELECT current_database() || ' :: ' || coalesce(string_agg(format('%s/%s/%s/%s/%s', datname, state, backend_xmin, now() - xact_start, left(query, 60)), ' ## '), 'none') FROM pg_stat_activity WHERE backend_xmin IS NOT NULL AND pid <> pg_backend_pid()",
+                    watcher);
+                TimedOutHolders = (string)holders.ExecuteScalar()! + " (still open 30 s after the drain)";
+            }
+        }
     }
 
     /// <summary>

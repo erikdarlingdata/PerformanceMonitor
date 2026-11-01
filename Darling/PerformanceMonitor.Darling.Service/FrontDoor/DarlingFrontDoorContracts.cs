@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Protocol;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.FrontDoor;
@@ -96,6 +97,8 @@ internal interface IFrontDoorDirectory
 /// <summary>Calls one tool on a store's MCP endpoint with that store's token.</summary>
 internal interface IFrontDoorMcpPeers
 {
-    /// <summary>Forwards <paramref name="call"/> to <paramref name="store"/>, using its agent-role token when <paramref name="agentRole"/>.</summary>
-    Task<CallToolResult> CallAsync(string store, CallToolRequestParams call, bool agentRole, CancellationToken ct);
+    /// <summary>Forwards <paramref name="call"/> to <paramref name="store"/>, using its agent-role token when <paramref name="agentRole"/>.
+    /// <paramref name="detail"/> is the data detail level the caller is served (#7023): below <c>full</c> it goes to the store in a header,
+    /// and the store serves the stricter of that and its own level for this call.</summary>
+    Task<CallToolResult> CallAsync(string store, CallToolRequestParams call, bool agentRole, CancellationToken ct, McpDataDetail detail = McpDataDetail.Full);
 }

@@ -314,32 +314,6 @@ SELECT DISTINCT ON (server_id)
 FROM v_cpu_scheduler_stats
 ORDER BY server_id, collection_time DESC";
 
-    private const string OldBlockingSql = @"
-SELECT
-    COALESCE(xe.server_id, dmv.server_id) AS server_id,
-    COALESCE(xe.cnt, 0) AS xe_count,
-    COALESCE(xe.max_wait, 0) AS xe_max_wait,
-    COALESCE(dmv.cnt, 0) AS dmv_count,
-    COALESCE(dmv.max_wait, 0) AS dmv_max_wait,
-    COALESCE(xe.cnt, 0) AS xe_reports,
-    COALESCE(dmv.cnt, 0) AS dmv_reports
-FROM
-(
-    SELECT server_id, COUNT(*) AS cnt, MAX(wait_time_ms) AS max_wait
-    FROM v_blocked_process_reports
-    WHERE event_time >= $1
-    AND   event_time <= $2
-    GROUP BY server_id
-) AS xe
-FULL OUTER JOIN
-(
-    SELECT server_id, COUNT(*) AS cnt, MAX(wait_time_ms) AS max_wait
-    FROM v_dmv_blocking_snapshots
-    WHERE event_time >= $1
-    AND   event_time <= $2
-    GROUP BY server_id
-) AS dmv ON xe.server_id = dmv.server_id";
-
     private const string OldDeadlockSql = @"
 SELECT server_id, COUNT(*) AS cnt, MAX(deadlock_time) AS last_seen
 FROM v_deadlocks
@@ -427,9 +401,21 @@ GROUP BY server_id";
             var windowStart = now.AddHours(-1);
             var oldArgs = new object[] { windowStart, now };
             var newArgs = new object[] { windowStart, now, EventWindowFloor.For(windowStart) };
-            Assert.Equal(
-                Scoped(await ReadRowsAsync(connection, OldBlockingSql, oldArgs, ct), s_all),
-                Scoped(await ReadRowsAsync(connection, DarlingFleetReader.FleetBlockingSql, newArgs, ct), s_all));
+            /* Blocking (#7028): the measure is the hour-chosen waits plus the gated snapshot peak, so the oracle is the
+               SAME statement with the floor genuinely off, $3 an instant before any row the store holds. It cannot drift
+               from the statement the way a hand-copied older shape did, and what it checks is the floor's job: it drops no
+               row the window wants. The one-hour statement is the one the default window runs, the general one the
+               longer windows. */
+            var noFloor = new DateTime(2000, 1, 1, 0, 0, 0, DateTimeKind.Unspecified);
+            var unboundedArgs = new object[] { windowStart, now, noFloor };
+            var unboundedBlocking = Scoped(await ReadRowsAsync(connection, DarlingFleetReader.FleetBlockingOneHourSql, unboundedArgs, ct), s_all);
+            Assert.Equal(unboundedBlocking, Scoped(await ReadRowsAsync(connection, DarlingFleetReader.FleetBlockingSqlFor(now - windowStart), newArgs, ct), s_all));
+            Assert.Equal(unboundedBlocking, Scoped(await ReadRowsAsync(connection, DarlingFleetReader.FleetBlockingOneHourSql, newArgs, ct), s_all));
+            Assert.Equal(unboundedBlocking, Scoped(await ReadRowsAsync(connection, DarlingFleetReader.FleetBlockingSql, newArgs, ct), s_all));
+            Assert.Equal(unboundedBlocking, Scoped(await ReadRowsAsync(connection, DarlingFleetReader.FleetBlockingSql, unboundedArgs, ct), s_all));
+            /* Not vacuous: A's two blocked-process waits, the ordinary one and the one collected 56 minutes after it
+               happened, both count (count 2, longest wait 1500) and A has no gated DMV snapshot. */
+            Assert.Contains(Id(CollectingA) + "2|1500|null", unboundedBlocking);
             Assert.Equal(
                 Scoped(await ReadRowsAsync(connection, OldDeadlockSql, oldArgs, ct), s_all),
                 Scoped(await ReadRowsAsync(connection, DarlingFleetReader.FleetDeadlockSql, newArgs, ct), s_all));

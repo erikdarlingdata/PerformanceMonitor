@@ -1,6 +1,7 @@
 <Window x:Class="PerformanceMonitor.Darling.Viewer.MuteRulesWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:PerformanceMonitor.Darling.Viewer"
         Title="Manage Mute Rules"
         Height="500" Width="820"
         WindowStartupLocation="CenterOwner"
@@ -16,6 +17,7 @@
             <ResourceDictionary.MergedDictionaries>
                 <ResourceDictionary Source="ViewerDarkTheme.xaml"/>
             </ResourceDictionary.MergedDictionaries>
+            <local:MuteScheduleConverter x:Key="ScheduleConverter"/>
         </ResourceDictionary>
     </Window.Resources>
 
@@ -50,6 +52,7 @@
                     <DataGridTextColumn Header="Metric" Binding="{Binding MetricName}" Width="130"/>
                     <DataGridTextColumn Header="Server" Binding="{Binding ServerName}" Width="130"/>
                     <DataGridTextColumn Header="Reason" Binding="{Binding Reason}" Width="*"/>
+                    <DataGridTextColumn Header="Schedule" Binding="{Binding Converter={StaticResource ScheduleConverter}, Mode=OneWay}" Width="200"/>
                     <DataGridTextColumn Header="Starts" Binding="{Binding StartsDisplay}" Width="140" SortMemberPath="StartsAtUtc"/>
                     <DataGridTextColumn Header="Expires" Binding="{Binding ExpiresDisplay}" Width="140" SortMemberPath="ExpiresAtUtc"/>
                 </DataGrid.Columns>

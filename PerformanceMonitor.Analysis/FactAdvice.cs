@@ -1535,12 +1535,24 @@ public static class FactAdvice
         var stall = FactMeta(facts, key, read ? "total_stall_read_ms" : "total_stall_write_ms");
         var verb = read ? "reads" : "writes";
 
-        var inv = new StringBuilder($"Average {(read ? "read" : "write")} latency was {avg.Value:0.#} ms this window");
+        // #6959: the write figure covers log files and tempdb data files only, so the card says so, and the
+        // user data files' own write latency (unscored metadata on the fact) gets its own sentence.
+        var scope = read ? "" : " on log files and tempdb";
+        var inv = new StringBuilder($"Average {(read ? "read" : "write")} latency{scope} was {avg.Value:0.#} ms this window");
         if (totalOps is > 0)
             inv.Append($" across {totalOps.Value:N0} {verb}");
         if (stall is > 0)
             inv.Append($", {Duration(stall.Value)} of total stall");
-        inv.Append($". Latency in the tens of milliseconds is slow enough to surface as query latency, and this is a server-wide average — a single hot file can be worse than the number suggests.");
+        inv.Append(read
+            ? ". Latency in the tens of milliseconds is slow enough to surface as query latency, and this is a server-wide average — a single hot file can be worse than the number suggests."
+            : ". Latency in the tens of milliseconds is slow enough to surface as query latency, and this is an average over the log files and tempdb only — a single hot file can be worse than the number suggests.");
+        if (!read)
+        {
+            var dataLatency = FactMeta(facts, key, "data_file_write_latency_ms");
+            var dataWrites = FactMeta(facts, key, "data_file_writes");
+            if (dataLatency is not null && dataWrites is > 0)
+                inv.Append($" User data files averaged {dataLatency.Value:0.#} ms across {dataWrites.Value:N0} writes this window, which is not part of the figure above because checkpoint and lazy-writer writes are not something a session waits on.");
+        }
 
         var rem = new StringBuilder();
         if (read)
@@ -1563,7 +1575,9 @@ public static class FactAdvice
 
         return fallback with
         {
-            Headline = $"Storage {verb} averaged {avg.Value:0.#} ms this window — slow enough to surface as query latency",
+            Headline = read
+                ? $"Storage reads averaged {avg.Value:0.#} ms this window — slow enough to surface as query latency"
+                : $"Log and tempdb writes averaged {avg.Value:0.#} ms this window — slow enough to surface as query latency",
             Investigation = inv.ToString(),
             Remediation = rem.ToString()
         };
@@ -3066,9 +3080,9 @@ public static class FactAdvice
 
         t["IO_WRITE_LATENCY_MS"] = new AdviceBlock(
             Headline:
-                "Average write latency is above the storage-health threshold — disk writes are slow",
+                "Average log and tempdb write latency is above the storage-health threshold — disk writes are slow",
             Investigation:
-                "The per-database, per-file-type write-latency breakdown is attached, ranked. The transaction log is the usual suspect — every commit blocks on WRITELOG, so even modest log latency directly hurts throughput. Above 10 ms on data files is concerning, 2 ms on log is the OLTP target. Open File I/O → File I/O Latency for the write series over time. WRITELOG co-elevation confirms log is the bottleneck; PAGEIOLATCH_EX co-elevation means data file writes are slow under modification load.",
+                "The per-database, per-file-type write-latency breakdown is attached, ranked. The transaction log is the usual suspect — every commit blocks on WRITELOG, so even modest log latency directly hurts throughput. Above 10 ms on tempdb data files is concerning, 2 ms on log is the OLTP target. Open File I/O → File I/O Latency for the write series over time. WRITELOG co-elevation confirms log is the bottleneck; PAGEIOLATCH_EX co-elevation means data file writes are slow under modification load.",
             Remediation:
                 "Move the transaction log to its own low-latency device (NVMe, log-tier SAN), and never share that device with non-database workloads. For data-file write pressure, look at the modification workload — bulk inserts and large updates are the usual drivers, and batching them so the buffer pool can flush between batches helps. A too-wide index set inflates write I/O: every INSERT and DELETE maintains all nonclustered indexes, and an UPDATE maintains every index that includes one of the changed columns — so dropping unused or redundant indexes directly cuts modification cost. The plans of the modification queries will surface specific opportunities.");
 

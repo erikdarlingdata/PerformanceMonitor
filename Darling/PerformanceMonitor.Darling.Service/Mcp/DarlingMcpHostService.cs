@@ -681,7 +681,8 @@ public sealed class DarlingMcpHostService : BackgroundService
             {
                 _logger.LogWarning(
                     "MCP named tokens are served: {Tokens}. Each request's tools follow its token's role; every MCP request, loopback included, must present a token.",
-                    string.Join(", ", tokenSet.Named.Select(t => t.Name + " (" + t.Role + ")")));
+                    string.Join(", ", tokenSet.Named.Select(t => t.Name + " (" + t.Role + ", " +
+                        McpDataDetailModes.Word(DarlingMcpTokenSet.DetailFor(McpDataDetailModes.Resolve(config.Mcp.DataDetail), new McpCaller(t.Name, default, t.DataDetail))) + ")")));
                 writes = tokenSet.Union;
             }
 
@@ -872,7 +873,10 @@ public sealed class DarlingMcpHostService : BackgroundService
             builder.Logging.ClearProviders();
             builder.Logging.SetMinimumLevel(LogLevel.Warning);
 
-            RegisterToolServices(builder.Services, postgres, _registryState, config.Postgres, config.Analyzer, planFetcher, _logger, _baselineCache, _ownerSource, _pseudonymKeys);
+            /* #7041: send_daily_health_report_now sends through the worker's alert evaluator, published on this hub. A host without the
+               process services (a test-constructed one) gets an empty hub, so the tool answers not_ready. */
+            RegisterToolServices(builder.Services, postgres, _registryState, config.Postgres, config.Analyzer, planFetcher, _logger, _baselineCache, _ownerSource, _pseudonymKeys,
+                _processServices?.GetService<DailyHealthReportHub>());
 
             /* #2339: publish the declared peer stores before the instructions are rendered, so the same
                snapshot feeds the instructions section, list_servers' peer_fleets block, and the
@@ -914,9 +918,10 @@ public sealed class DarlingMcpHostService : BackgroundService
             }
 
             /* #5632: mcp.dataDetail, read once per start (file-only, restart-only). McpDataDetailFilter reads the level
-               from this singleton on every call; an unrecognized value runs as metadataOnly, the strictest level, and
+               from the setting registered here on every call (per request: a named token's dataDetail can narrow it, #7023); an unrecognized value runs as metadataOnly, the strictest level, and
                says so once here. */
-            builder.Services.AddSingleton(new McpDataDetailSetting(ResolveDataDetail(config.Mcp.DataDetail, _logger)));
+            var serviceDataDetail = ResolveDataDetail(config.Mcp.DataDetail, _logger);
+            RegisterDataDetail(builder.Services, serviceDataDetail);
 
             /* Register MCP server with the analysis tool class. */
             ConfigureMcpServices(
@@ -1231,8 +1236,12 @@ public sealed class DarlingMcpHostService : BackgroundService
         ILogger logger,
         BaselineCache baselineCache,
         StoreOwnerSource? ownerSource = null,
-        IPseudonymKeySource? pseudonymKeys = null)
+        IPseudonymKeySource? pseudonymKeys = null,
+        DailyHealthReportHub? dailyReportHub = null)
     {
+        /* #7041: send_daily_health_report_now takes the hub as a service parameter. Always registered, so the MCP SDK never advertises it as a
+           schema property (and the front door's schema stays the tool's own plus store). */
+        services.AddSingleton(dailyReportHub ?? new DailyHealthReportHub());
         /* #6066: the store's pseudonym key, for the data-detail filter and the brief composer at metadataOnly. None: logins are numbered per answer. */
         if (pseudonymKeys is not null) services.AddSingleton<IPseudonymKeySource>(pseudonymKeys);
         /* #5632 step 7: force_query_store_plan and unforce_query_store_plan take this as a service parameter. Empty until the worker publishes. */
@@ -1341,11 +1350,12 @@ public sealed class DarlingMcpHostService : BackgroundService
 
         /* #5632 Phase A: claim_investigation_request composes the brief at claim time through this composer, a service
            parameter, so it must be registered wherever the tools are. The reader reads the store the host registered;
-           the composer masks at the host's mcp.dataDetail level (none registered: full, as the host filter passes
-           through). */
+           the composer masks at the calling token's level (the setting, per request; none registered: full, as the host filter
+           passes through). */
         services.AddSingleton<IInvestigationBriefSourceReader>(sp =>
             new PgInvestigationBriefSourceReader(sp.GetRequiredService<NpgsqlDataSource>(), readLatencyLogger, publicBaseUrl: publicBaseUrl));
-        services.AddSingleton<InvestigationBriefComposer>(sp => new InvestigationBriefComposer(
+        /* #7023: transient, not a singleton: the composer holds the request's setting, and a named token's dataDetail can narrow it per caller. */
+        services.AddTransient<InvestigationBriefComposer>(sp => new InvestigationBriefComposer(
             sp.GetRequiredService<IInvestigationBriefSourceReader>(),
             sp.GetService<McpDataDetailSetting>() ?? new McpDataDetailSetting(McpDataDetail.Full),
             DarlingInvestigationBriefTools.Tools,
@@ -1752,6 +1762,8 @@ public sealed class DarlingMcpHostService : BackgroundService
                routes serve — one reader, one shape, the zero-drift rule get_fleet_overview and /api/fleet
                established, applied to the sweep rows. */
             .WithGeminiCompatibleTools<DarlingMcpFleetSweepTools>()
+            /* The Daily Health Report read - get_daily_health_report (#7041) - the report the scheduler sends, built on demand and never sent. */
+            .WithGeminiCompatibleTools<DarlingMcpDailyReportTools>()
             /* The change watch read - get_change_watches (#6234) - a server's watch windows, each with its changes, its measures and
                its result, over the same ChangeWatchStore the worker pass writes. A read of the monitoring store: the investigation
                agent may call it. */
@@ -1761,6 +1773,8 @@ public sealed class DarlingMcpHostService : BackgroundService
             /* The known-pattern writes - create_known_pattern / update_known_pattern / delete_known_pattern (#6398) - admin writes over the same store
                functions the web editor calls; write tools (mcp.allowWrites), never offered to an investigation agent. */
             .WithGeminiCompatibleTools<DarlingMcpKnownPatternWriteTools>()
+            /* The manual Daily Health Report send - send_daily_health_report_now (#7041) - a write tool (mcp.allowWrites), never offered to an investigation agent. */
+            .WithGeminiCompatibleTools<DarlingMcpDailyHealthReportTools>()
             /* The system_health parse-on-read family — get_health_parser_cpu_tasks / _io_issues /
                _memory_broker / _memory_conditions / _memory_node_oom / _scheduler_issues /
                _severe_errors / _significant_waits / _system_health — the same names the Dashboard
@@ -1915,7 +1929,7 @@ public sealed class DarlingMcpHostService : BackgroundService
 
                The mcp.dataDetail filter (#5632, McpDataDetailFilter) sits just outside the statement filter, so it
                reads the statement filter's output as plain JSON before GCF re-encodes it, and masks every tool answer
-               at the level the host registered (a McpDataDetailSetting singleton; none, or full, passes through). */
+               at the level the request is served (the McpDataDetailSetting RegisterDataDetail resolves per request; none, or full, passes through). */
             .WithRequestFilters(filters =>
             {
                 /* #6840: a front door drops the unknown-argument guard (it would refuse the store argument, and the store runs its own guard on
@@ -1932,6 +1946,21 @@ public sealed class DarlingMcpHostService : BackgroundService
                 filters.AddCallToolFilter(SensitiveStatementOutputFilter.Instance);
             });
     }
+
+    /// <summary>
+    /// Registers the data detail setting (#7023): a named token's own <c>dataDetail</c> can narrow <paramref name="serviceLevel"/>, so the
+    /// setting is resolved per request from the matched caller (the bearer gate stored it). The call filter and every tool that takes the
+    /// setting read the caller's level, never a level fixed at start. A request with no matched caller (the legacy token, the start without
+    /// named tokens) gets the service's level, as before. A front door passes its own caller's level in <see cref="DarlingMcpTokenSet.DataDetailHeader"/>,
+    /// and the store serves the stricter of that and the level above (a missing or unrecognized header narrows nothing).
+    /// </summary>
+    internal static void RegisterDataDetail(IServiceCollection services, McpDataDetail serviceLevel) =>
+        services.AddTransient(sp =>
+        {
+            var accessor = sp.GetService<IHttpContextAccessor>();
+            var header = accessor?.HttpContext?.Request.Headers[DarlingMcpTokenSet.DataDetailHeader].ToString();
+            return new McpDataDetailSetting(DarlingMcpTokenSet.DetailFor(serviceLevel, DarlingMcpTokenSet.CallerOf(accessor), header));
+        });
 
     /// <summary>
     /// The <c>mcp.dataDetail</c> level this listener serves (#5632). An unrecognized value runs as

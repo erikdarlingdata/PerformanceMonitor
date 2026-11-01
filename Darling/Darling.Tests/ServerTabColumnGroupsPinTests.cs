@@ -22,7 +22,7 @@ namespace Darling.Tests;
 [Trait("Stage", "Guard")]
 public sealed class ServerTabColumnGroupsPinTests
 {
-    private static string Js() => File.ReadAllText(PathTo("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js"));
+    private static string Js() => RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js");
 
     [Theory]
     [InlineData("Memory Conditions", "MEMORY_CONDITION_COLUMNS", "MEMORY_CONDITION_GROUPS")]
@@ -40,8 +40,8 @@ public sealed class ServerTabColumnGroupsPinTests
         Assert.NotEmpty(defaults);
         Assert.All(defaults, d => Assert.Contains(d, listed));
         Assert.Contains("group: ", cols);
-        // The constant is the last argument of THIS grid's own table() call, next to its own columns constant.
-        var call = Regex.Match(js, "table\\(\\s*\"" + title + "\",(?:(?!\\btable\\().)*?\\b" + columns + @",(?:(?!\btable\().)*?,\s*" + groups + @"\s*\)", RegexOptions.Singleline);
-        Assert.True(call.Success, title + "'s table() call must pass " + groups + " as its last argument.");
+        // The constant is the last argument of THIS grid's own tablePanel() call, next to its own columns constant.
+        var call = Regex.Match(js, "tablePanel\\(\\s*\"" + title + "\",(?:(?!\\btablePanel\\().)*?\\b" + columns + @",(?:(?!\btablePanel\().)*?,\s*" + groups + @"\s*\)", RegexOptions.Singleline);
+        Assert.True(call.Success, title + "'s tablePanel() call must pass " + groups + " as its last argument.");
     }
 }

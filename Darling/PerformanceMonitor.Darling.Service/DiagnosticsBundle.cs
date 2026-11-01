@@ -21,6 +21,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Hosting;
+using PerformanceMonitor.Darling.Service.Investigations;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 
@@ -1247,7 +1248,8 @@ internal static class DiagnosticsBundle
     /// <para>With <paramref name="restricted"/> set, on Windows, the temp file is created with its access already
     /// limited to SYSTEM, Administrators and the account running the command (<see cref="DarlingFileSecurity.CreateHardenedFile"/>),
     /// instead of taking the output folder's inherited access, and the move keeps that access. The alias map is
-    /// written this way: it names the real server or host behind every alias.</para>
+    /// written this way: it names the real server or host behind every alias. Elsewhere the temp file is created with
+    /// owner read and write only (<see cref="InvestigationExportFile.CreateOwnerOnly"/>), whatever the umask.</para>
     /// </summary>
     internal static string? WriteAtomically(string path, string text, bool force, bool restricted = false)
     {
@@ -1265,8 +1267,10 @@ internal static class DiagnosticsBundle
         var moved = false;
         try
         {
-            using (var stream = restricted && OperatingSystem.IsWindows()
-                ? DarlingFileSecurity.CreateHardenedFile(temp, allowInteractiveRead: false)
+            using (var stream = restricted
+                ? (OperatingSystem.IsWindows()
+                    ? DarlingFileSecurity.CreateHardenedFile(temp, allowInteractiveRead: false)
+                    : InvestigationExportFile.CreateOwnerOnly(temp))
                 : new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None))
             {
                 var bytes = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false).GetBytes(text);

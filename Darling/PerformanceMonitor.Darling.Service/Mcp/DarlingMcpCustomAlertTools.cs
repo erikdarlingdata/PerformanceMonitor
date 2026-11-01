@@ -556,7 +556,7 @@ public sealed class DarlingMcpCustomAlertTools
         "once per step, so with breachSamples above 1 a sustained breach takes breachSamples x step_seconds here against " +
         "breachSamples x evaluationIntervalSeconds live - read a replay of a multi-sample rule as a floor on the live fires, and " +
         "do the arithmetic from step_seconds and breach_samples in the answer. " +
-        "ANSWER: {status, rule_id, name, span_hours, start_utc, end_utc, breach_samples, clear_samples, queries_run, elapsed_ms, servers:[{server, status, reason, " +
+        "ANSWER: {status, rule_id, name, span_hours, start_utc, end_utc, effective_start, window_truncated, truncation_note, breach_samples, clear_samples, queries_run, elapsed_ms, servers:[{server, status, reason, " +
         "step_seconds, steps, steps_run, samples_evaluated, no_data_steps, breaching_samples, fire_count, clear_count, fires:[{at_utc, " +
         "value, severity}], clears:[{at_utc, value}], firing_at_end, covered_from_utc, covered_to_utc}]}. status is ok when every " +
         "step of every server ran. partial when a cap stopped it: stopped_at {cap: servers|queries|time|error, at_utc, reason} names " +
@@ -566,7 +566,8 @@ public sealed class DarlingMcpCustomAlertTools
         "samples for it in the span (or the metric no longer compiles), which is not the same as zero fires. A read that FAILS " +
         "(a statement timeout, a dropped connection) ends only that server's replay and keeps its steps already replayed: that " +
         "server is partial (unavailable when nothing was replayed) with the error as its reason, and when no cap stopped the call " +
-        "stopped_at.cap is error. Top-level " +
+        "stopped_at.cap is error. window_truncated is true when the span reaches back before the store's raw samples of the rule's source " +
+        "(effective_start is where they start, for the least-covered server; the keys are absent when no coverage probe could run). Top-level " +
         "status is unavailable when every server is; empty when no monitored server is in scope; invalid for a bad input or a " +
         "span over 168 hours.")]
     public static async Task<string> BacktestCustomAlertRule(
@@ -713,7 +714,10 @@ public sealed class DarlingMcpCustomAlertTools
                 CustomAlertBacktest.MaxElapsed,
                 cancellationToken);
 
-            return FormatBacktest(def, resolvedId, ruleName, span, windowEnd, run, notCovered);
+            /* #7015: where the store's raw samples of the rule's source start, in the three window-floor keys the other
+               windowed tools write. Probed on the collector table the rule's metric reads, once per replayed server. */
+            var notice = await ReadBacktestNoticeAsync(postgres, def.Plan.Measure.SourceTable, run, windowEnd - span, windowEnd, cancellationToken);
+            return FormatBacktest(def, resolvedId, ruleName, span, windowEnd, run, notCovered, notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
@@ -721,10 +725,60 @@ public sealed class DarlingMcpCustomAlertTools
         }
     }
 
+    /// <summary>
+    /// The window-floor notice of a backtest (#7015): one coverage probe per replayed server on <paramref name="sourceTable"/>, the
+    /// collector the rule's metric reads, over [<paramref name="start"/>, <paramref name="end"/>]. A server that returned no sample
+    /// in the span is probed as an empty answer (its null floor reads as "no collection in this window"). The answer says ONE thing,
+    /// from the least-covered server: a truncated server beats a covered one, and the later start beats the earlier. Null (no keys)
+    /// when nothing was replayed, the table is not one the probe reads by index, or every probe failed: a failed probe costs the
+    /// notice, never the replay.
+    /// </summary>
+    internal static async Task<McpWindowNotice?> ReadBacktestNoticeAsync(
+        NpgsqlDataSource postgres, string sourceTable, CustomAlertBacktest.Run run, DateTime start, DateTime end, CancellationToken cancellationToken)
+    {
+        if (!DataWindowFloor.Source.TryForCollectorTable(sourceTable, out var source))
+        {
+            return null;
+        }
+
+        var notices = new List<McpWindowNotice>();
+        foreach (var server in run.Servers.Where(s => !s.Failed))
+        {
+            var notice = await DarlingMcpWindowNotice.ReadAsync(
+                () => DarlingMcpWindowNotice.Probe(postgres, source, server.Target.StorageName, start, end, cancellationToken),
+                start, end, sourceTable, emptyAnswer: server.SamplesEvaluated == 0, cancellationToken: cancellationToken);
+            if (!notice.IsUnavailable)
+            {
+                notices.Add(notice);
+            }
+        }
+
+        if (notices.Count == 0)
+        {
+            return null;
+        }
+
+        return LeastCovered(notices);
+    }
+
+    /// <summary>
+    /// The one notice a backtest answers with, out of one per replayed server: a truncated server beats a covered one, a server with no
+    /// start at all (no coverage anywhere in the span) is the least covered, and otherwise the later start beats the earlier. An ordinal
+    /// descending sort alone would put the null start (read as "") last (#7015).
+    /// </summary>
+    internal static McpWindowNotice LeastCovered(IReadOnlyList<McpWindowNotice> notices)
+    {
+        var truncated = notices.Where(n => n.WindowTruncated).ToList();
+        return (truncated.Count > 0 ? truncated : notices.ToList())
+            .OrderBy(n => n.EffectiveStart is null ? 0 : 1)
+            .ThenByDescending(n => n.EffectiveStart, StringComparer.Ordinal)
+            .First();
+    }
+
     /// <summary>The backtest's answer (#5911), split out so a test can hold its shape over a run it built itself.</summary>
     internal static string FormatBacktest(
         CustomAlertRuleDefinition def, long? ruleId, string? ruleName, TimeSpan span, DateTime endUtc,
-        CustomAlertBacktest.Run run, IReadOnlyList<string> serversNotCovered)
+        CustomAlertBacktest.Run run, IReadOnlyList<string> serversNotCovered, McpWindowNotice? notice = null)
     {
         static string Utc(DateTime? value) => value is DateTime v
             ? DateTime.SpecifyKind(v, DateTimeKind.Utc).ToString("o", System.Globalization.CultureInfo.InvariantCulture)
@@ -800,7 +854,7 @@ public sealed class DarlingMcpCustomAlertTools
             _ => null,
         };
 
-        return JsonSerializer.Serialize(new
+        var json = JsonSerializer.Serialize(new
         {
             status,
             message = status == "unavailable" && firstFailed is not null
@@ -813,6 +867,9 @@ public sealed class DarlingMcpCustomAlertTools
             span_hours = span.TotalHours,
             start_utc = Utc(endUtc - span),
             end_utc = Utc(endUtc),
+            effective_start = notice?.EffectiveStart,
+            window_truncated = notice?.WindowTruncated,
+            truncation_note = notice?.TruncationNote,
             breach_samples = def.BreachSamples,
             clear_samples = def.ClearSamples,
             queries_run = run.QueriesRun,
@@ -821,6 +878,7 @@ public sealed class DarlingMcpCustomAlertTools
             servers_not_covered = serversNotCovered.Count > 0 ? serversNotCovered : null,
             servers,
         }, McpHelpers.JsonOptions);
+        return notice is null ? DarlingMcpWindowNotice.WithoutKeys(json) : json;
     }
 
     [McpServerTool(Name = "list_custom_alert_templates"), Description(

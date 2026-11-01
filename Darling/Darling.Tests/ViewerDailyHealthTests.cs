@@ -49,16 +49,18 @@ public sealed class ViewerDailySummarySqlTests
         Assert.Contains("FROM v_query_stats", sql, StringComparison.Ordinal);
         Assert.Contains("FROM v_deadlocks", sql, StringComparison.Ordinal);
 
-        /* Blocking events: XE blocked-process reports, falling back to the DMV snapshot count when the
-           XE count is zero (NULLIF → COALESCE). */
-        Assert.Contains("COALESCE(NULLIF(b.c, 0), dm.c, 0)", sql, StringComparison.Ordinal);
+        /* Blocking events (#7028): XE blocked-process waits, with the DMV snapshot waits standing in for an hour
+           that holds no XE wait (the anti-join in HourlyChosenWaitsSql, which replaced the day-level
+           NULLIF → COALESCE), counted per day from the chosen set. */
+        Assert.Contains("WHERE NOT EXISTS (SELECT 1 FROM blk_xe_hours AS x WHERE x.bucket = d.bucket)", sql, StringComparison.Ordinal);
+        Assert.Contains("SELECT date_trunc('day', event_time) AS d, COUNT(*) AS c, MAX(wait_time_ms) AS max_wait_ms", sql, StringComparison.Ordinal);
         Assert.Contains("FROM v_blocked_process_reports", sql, StringComparison.Ordinal);
         Assert.Contains("FROM v_dmv_blocking_snapshots", sql, StringComparison.Ordinal);
 
-        /* Peak block wait (ms) for the day-detail blocking reason: MAX(wait_time_ms) per source, taken from
-           the SAME source the count came from (BPR preferred, DMV fallback) so it reconciles with the count. */
+        /* Peak block wait (ms) for the day-detail blocking reason: the MAX(wait_time_ms) of the SAME chosen waits the
+           count came from (#7028: XE waits, DMV waits for an hour without any), so it reconciles with the count. */
         Assert.Contains("MAX(wait_time_ms) AS max_wait_ms", sql, StringComparison.Ordinal);
-        Assert.Contains("CASE WHEN COALESCE(b.c, 0) > 0 THEN b.max_wait_ms ELSE dm.max_wait_ms END", sql, StringComparison.Ordinal);
+        Assert.Contains("COALESCE(b.max_wait_ms, 0) AS peak_block_wait_ms", sql, StringComparison.Ordinal);
 
         /* High-CPU count uses total host CPU = SQL + other-process (Linux NULL → 0), threshold 80, via FILTER.
            The 80 is the card band's Warning bar restated as a SQL literal (#3539 A2) — pinned against the
@@ -574,7 +576,7 @@ public sealed class ViewerDailyHealthLivePostgresTests
             Assert.Equal(2, summary!.BlockingEvents);
             Assert.Equal(0, summary.DeadlockCount);
             Assert.Equal("Healthy", summary.OverallHealth);
-            Assert.Contains("2 blocking events (0.1 reports/hr)", summary.SignalsTooltip, StringComparison.Ordinal);
+            Assert.Contains("2 blocking events (0.1 waits/hr)", summary.SignalsTooltip, StringComparison.Ordinal);
 
             bodySucceeded = true;
         }

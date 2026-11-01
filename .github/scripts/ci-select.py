@@ -271,12 +271,10 @@ def decide(files: list[str], event: str, rules: Rules) -> dict:
     release = event == "release"
     all_count, docs_count = a["all_count"], a["docs_count"]
     docs_only = all_count > 0 and all_count == docs_count
-    area_names = ("root", "core", "installer_core", "dashboard", "lite", "installer", "darling")
+    area_names = ("root", "core", "lite", "darling")
     fastpath = (not release) and docs_only and not any(a[n] for n in area_names)
 
     build_lite = release or a["lite"] or a["core"] or a["root"]
-    build_installer = release or a["installer"] or a["installer_core"] or a["root"]
-    build_dashboard = release or a["dashboard"] or a["core"] or a["installer_core"] or a["root"]
     build_darling = release or a["darling"] or a["core"] or a["root"]
 
     pg_run = (not release) and a["gate_darling"]
@@ -290,8 +288,6 @@ def decide(files: list[str], event: str, rules: Rules) -> dict:
         "guard_run": (not release) and not docs_only,
         "docs_fastpath": fastpath,
         "build_lite_tests": build_lite,
-        "build_installer_tests": build_installer,
-        "build_dashboard_tests": build_dashboard,
         "build_darling_tests": build_darling,
         "darling_scope": darling_scope(
             event, build_darling, pg_run, release or a["darling_full"] or a["core"] or a["root"]),
@@ -377,16 +373,12 @@ GATE_ENV_LITERAL = re.compile(r'"DARLING_TEST_PG(?:RUNTIME)?_[A-Z0-9_]+"')
 SUITE_DIRS = {
     "darling": os.path.join("Darling", "Darling.Tests"),
     "lite": "Lite.Tests",
-    "dashboard": os.path.join("deprecated", "Dashboard.Tests"),
-    "installer": os.path.join("deprecated", "Installer.Tests"),
 }
 SUITE_BY_PREFIX = {
     "Darling.Tests": "darling",
     "PerformanceMonitor.Darling.Tests": "darling",
     "Lite.Tests": "lite",
     "PerformanceMonitorLite.Tests": "lite",
-    "Dashboard.Tests": "dashboard",
-    "Installer.Tests": "installer",
 }
 
 
@@ -557,10 +549,6 @@ def class_selected(suite: str, traits: set[str], d: dict) -> bool:
         if d["lite_mode"] in ("full", "release"):
             return True
         return d["lite_mode"] == "reads" and "Reads=Darling" in traits
-    if suite == "dashboard":
-        return d["build_dashboard_tests"]
-    if suite == "installer":
-        return d["build_installer_tests"]
     return True
 
 
@@ -1568,7 +1556,7 @@ def git_drift(map_sha: str, base: str, root: str = ROOT) -> "list[str] | None":
 def selection_args(rules: Rules) -> dict:
     """The keep-full and documentation patterns, read from the same filters the workflow evaluates."""
     keep = list(KEEP_FULL)
-    for name in ("root", "core", "installer_core"):
+    for name in ("root", "core"):
         # #5951: the shared projects are judged by map_select()'s shared_change_reason(), not as keep-full wholesale.
         keep.extend(p for p in rules.build.get(name, []) if not p.startswith(SHARED_PROJECT_DIRS))
     return {"keep_full": tuple(dict.fromkeys(keep)), "doc_patterns": tuple(rules.build["docs"])}

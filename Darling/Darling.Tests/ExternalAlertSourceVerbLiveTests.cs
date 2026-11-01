@@ -156,7 +156,7 @@ public sealed class ExternalAlertSourceVerbLiveTests
         finally
         {
             await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
-                await new LiveCleanupBatch(cleanup).RemoveRolesAsync(["admin", "viewer", "mcp", GroupName], RunSuffix, cleanupCt));
+                await new LiveCleanupBatch(cleanup).RemoveRolesAsync(["admin", "viewer", "web", "mcp", GroupName], RunSuffix, cleanupCt));
         }
     }
 
@@ -355,7 +355,7 @@ public sealed class ExternalAlertSourceVerbLiveTests
         finally
         {
             await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
-                await new LiveCleanupBatch(cleanup).RemoveRolesAsync(["admin", "viewer", "mcp", RoleName, StrayName, GroupName], RunSuffix, cleanupCt));
+                await new LiveCleanupBatch(cleanup).RemoveRolesAsync(["admin", "viewer", "web", "mcp", RoleName, StrayName, GroupName], RunSuffix, cleanupCt));
         }
     }
 }

@@ -169,19 +169,31 @@ public sealed partial class DarlingMcpFinOpsTools
         if (gates.All(g => g != null))
             return idleGate!;
         var counts = new[] { idle.Count, tempdb.Count, waits.Count, queries.Count, grants.Count };
+        /* #7010: the hours_back window reads wait_stats (wait categories) and query_stats (expensive queries); the other sections read their own fixed
+           spans (7 days, the tempdb and memory-grant hours) and say so in their window fields. The notice is the LATEST of the two floors. The
+           not_collected answer above stays bare. */
+        string[] windowedTables = ["wait_stats", "query_stats"];
         if (IsBareEmpty(counts, gates))
-            return McpHelpers.Status("empty",
-                "No idle-database, tempdb, wait, query or memory-grant data was found for this server in the windows read, so there is no optimization data to show.");
+        {
+            var noRows = await ViewWindowNoticeAsync(postgres, resolved.ServerName, hoursBack, windowedTables, "wait_stats and query_stats", true, ct);
+            return DarlingMcpWindowNotice.FinishEmpty(McpHelpers.Status("empty",
+                "No idle-database, tempdb, wait, query or memory-grant data was found for this server in the windows read, so there is no optimization data to show.", noRows.AsHints()), noRows);
+        }
+
+        var notice = await ViewWindowNoticeAsync(postgres, resolved.ServerName, hoursBack, windowedTables, "wait_stats and query_stats", false, ct);
 
         var monthly = await FinOpsUtilizationFigures.GetMonthlyCostUsdAsync(postgres, resolved.ServerId, timeout, ct);
         var hasCost = monthly > 0m;
 
         var idleOrdered = OrderIdleDatabases(idle);
-        return JsonSerializer.Serialize(new
+        return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new
         {
             server = resolved.DisplayName,
             view = OptimizationView,
             hours_back = hoursBack,
+            effective_start = notice.EffectiveStart,
+            window_truncated = notice.WindowTruncated,
+            truncation_note = notice.TruncationNote,
             monthly_cost_usd = hasCost ? monthly : (decimal?)null,
             cost_reason = hasCost ? null : "monthly cost not set",
             idle_databases = new
@@ -223,7 +235,7 @@ public sealed partial class DarlingMcpFinOpsTools
                 window_hours = MemoryGrantWindowHours,
                 rows = MemoryGrantRows(grants),
             },
-        }, McpHelpers.JsonOptions);
+        }, McpHelpers.JsonOptions), notice);
     }
 
     /// <summary>

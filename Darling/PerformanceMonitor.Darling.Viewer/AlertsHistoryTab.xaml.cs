@@ -539,7 +539,7 @@ public partial class AlertsHistoryTab : UserControl
             return;
         }
 
-        var dialog = new MuteRuleEditDialog(context) { Owner = Window.GetWindow(this) };
+        var dialog = new MuteRuleEditDialog(context, await _dataService.SupportsMuteRecurrenceAsync()) { Owner = Window.GetWindow(this) };
         if (dialog.ShowDialog() != true)
         {
             return;
