@@ -1896,7 +1896,7 @@ jobs:
       # The v4 action installs cosign v3, which stores the signature as a Sigstore bundle referrer (#7037).
       # Checked: cosign 2.6.5 and 3.0.6 both verify it with the command above.
       - name: Install cosign
-        uses: sigstore/cosign-installer@v4
+        uses: sigstore/cosign-installer@v4.1.2
 
       - name: Sign container image (keyless, Sigstore)
         shell: bash
