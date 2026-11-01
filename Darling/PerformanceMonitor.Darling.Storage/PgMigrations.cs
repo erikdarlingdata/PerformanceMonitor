@@ -3255,7 +3255,7 @@ ALTER TABLE config.config_alert_log
     /// roles, as for <c>config.config_server_actions</c>, and give SELECT back. The rung itself takes the writes back too, as V198 does, so a
     /// store whose provisioning has not run again since the upgrade does not leave <c>admin</c> the default privileges' INSERT, UPDATE and
     /// DELETE: every write privilege on the three tables, and every privilege on their identity sequences (a table's <c>REVOKE</c> does not
-    /// reach them), from <c>PUBLIC</c> and each of the four roles that exists. SELECT stays as the default privileges gave it. The journal
+    /// reach them, and their names are PostgreSQL's own for an identity column of a table made here), from <c>PUBLIC</c> and each of the four roles that exists. SELECT stays as the default privileges gave it. The journal
     /// trigger's owner-only list is not in any rung (provisioning writes it), so the eight people events reach it when provisioning next
     /// runs. Every statement is idempotent. <b>No Lite twin</b>: Lite has
     /// no people.</para>
@@ -3325,35 +3325,26 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_person_grant_fleet
     ON config.person_grant (person_id, capability) WHERE scope_server_id IS NULL AND scope_tag_id IS NULL;
 
 REVOKE ALL ON config.person, config.person_identity, config.person_grant FROM PUBLIC;
+REVOKE ALL ON SEQUENCE config.person_person_id_seq, config.person_identity_identity_id_seq, config.person_grant_grant_id_seq FROM PUBLIC;
 
 DO $do$
-DECLARE
-    role_name text;
-    sequence_name text;
 BEGIN
-    FOREACH sequence_name IN ARRAY ARRAY[
-        pg_catalog.pg_get_serial_sequence('config.person', 'person_id'),
-        pg_catalog.pg_get_serial_sequence('config.person_identity', 'identity_id'),
-        pg_catalog.pg_get_serial_sequence('config.person_grant', 'grant_id')]
-    LOOP
-        EXECUTE pg_catalog.format('REVOKE ALL ON SEQUENCE %s FROM PUBLIC', sequence_name);
-    END LOOP;
-
-    FOREACH role_name IN ARRAY ARRAY['admin', 'viewer', 'web', 'mcp']
-    LOOP
-        IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles AS r WHERE r.rolname = role_name) THEN
-            EXECUTE pg_catalog.format(
-                'REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON config.person, config.person_identity, config.person_grant FROM %I',
-                role_name);
-            FOREACH sequence_name IN ARRAY ARRAY[
-                pg_catalog.pg_get_serial_sequence('config.person', 'person_id'),
-                pg_catalog.pg_get_serial_sequence('config.person_identity', 'identity_id'),
-                pg_catalog.pg_get_serial_sequence('config.person_grant', 'grant_id')]
-            LOOP
-                EXECUTE pg_catalog.format('REVOKE ALL ON SEQUENCE %s FROM %I', sequence_name, role_name);
-            END LOOP;
-        END IF;
-    END LOOP;
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles AS r WHERE r.rolname = 'admin') THEN
+        REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON config.person, config.person_identity, config.person_grant FROM admin;
+        REVOKE ALL ON SEQUENCE config.person_person_id_seq, config.person_identity_identity_id_seq, config.person_grant_grant_id_seq FROM admin;
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles AS r WHERE r.rolname = 'viewer') THEN
+        REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON config.person, config.person_identity, config.person_grant FROM viewer;
+        REVOKE ALL ON SEQUENCE config.person_person_id_seq, config.person_identity_identity_id_seq, config.person_grant_grant_id_seq FROM viewer;
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles AS r WHERE r.rolname = 'web') THEN
+        REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON config.person, config.person_identity, config.person_grant FROM web;
+        REVOKE ALL ON SEQUENCE config.person_person_id_seq, config.person_identity_identity_id_seq, config.person_grant_grant_id_seq FROM web;
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles AS r WHERE r.rolname = 'mcp') THEN
+        REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON config.person, config.person_identity, config.person_grant FROM mcp;
+        REVOKE ALL ON SEQUENCE config.person_person_id_seq, config.person_identity_identity_id_seq, config.person_grant_grant_id_seq FROM mcp;
+    END IF;
 END
 $do$;";
 
