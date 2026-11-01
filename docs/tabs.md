@@ -54,7 +54,7 @@ Opening a server from the Overview cards shows these tabs. This list is Lite's. 
 | **Perfmon** | Selectable SQL Server performance counters over time |
 | **Running Jobs** | SQL Agent jobs that are running now, with start time, current duration, average and P95 duration, and percent of average. It needs access to `msdb` |
 | **Configuration** | Sub-tabs: Server Configuration, Database Configuration, Scoped Configuration, Query Store, Automatic Tuning, and Trace Flags |
-| **Daily Summary** | A composite health summary for each day (times in UTC). Click a day for detail and drill-in |
+| **Daily Summary** | A composite health summary for each day (times in UTC). Click a day for detail and drill-in. Its alert count is the alerts that paged someone: alerts held back from paging (including the analysis singles in the Daily Digest), dismissed alerts and resolution notices are not in it |
 | **Latches & Spinlocks** | Latch classes from the latest snapshot, with wait deltas and wait times |
 | **CPU Scheduler** | A scheduler chart and a table of the latest scheduler metrics, with warning rows highlighted |
 | **Plan Cache** | Total plans, oldest plan age, and a plan cache bloat level |

@@ -478,6 +478,15 @@ internal sealed class DarlingSelfAlertEvaluator
     /// </summary>
     internal const string AnalysisSinglesDigestMetric = "Analysis Singles Digest";
 
+    /// <summary>
+    /// The title the digest shows on every channel (#7086): "Daily Digest". The document now carries the alerts held back
+    /// from paging as well as the analysis singles, so the old name undersold it. It rides <see cref="AlertOutcome.DisplayName"/>
+    /// like the Daily Health Report's title, which changes what email, Slack and Teams render and nothing else: the metric name
+    /// stays <see cref="AnalysisSinglesDigestMetric"/> for the generic webhook's <c>{{metric}}</c>, notification routes, mute
+    /// rules and the history grids.
+    /// </summary>
+    internal const string AnalysisSinglesDigestTitle = "Daily Digest";
+
     /// <summary>Fleet-level key, non-numeric so it never collides with a real server_id (the
     /// <see cref="DiskKey"/> shape).</summary>
     private const string AnalysisSinglesDigestKey = "singlesdigest";
@@ -501,6 +510,9 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <summary>How many top movers the singles digest spells out, on <see cref="MaxListedCostMovers"/>'
     /// reasoning — one bounded message that states the population it selected from.</summary>
     private const int MaxListedSinglesMovers = 10;
+
+    /// <summary>How many held-alert groups the digest lists by name before it states the remainder (#7086).</summary>
+    private const int MaxListedHeldGroups = 40;
 
     /// <summary>How many servers a family block names before eliding, and how many singles a server line
     /// names — the ledger block's <see cref="MaxListedRollupLedgerServers"/> reasoning: readable on the
@@ -2893,13 +2905,51 @@ internal sealed class DarlingSelfAlertEvaluator
     {
         var context = new AlertContext();
 
+        if (facts.Held > 0)
+        {
+            context.Details.Add(new AlertDetailItem
+            {
+                Heading = "Held back from paging",
+                Fields =
+                {
+                    ("Held alerts", string.Create(CultureInfo.InvariantCulture, $"{facts.Held:N0}")),
+                    ("Groups", string.Create(CultureInfo.InvariantCulture, $"{facts.HeldGroups.Count:N0}")),
+                }
+            });
+            /* One record-shaped detail, one record per group (#7086): 40 groups as 40 field items cost 80 of a Slack
+               message's 50 blocks and pushed the singles off it, while records pack into a few sections under the
+               3,000 character cap (and into one fact per group on a Teams card, the same line an email shows). The line
+               is the one the prose document uses, so the two cannot drift. */
+            var heldRecords = new AlertDetailItem { Heading = "Held groups" };
+            var ordinal = 0;
+            foreach (var group in facts.HeldGroups.Take(MaxListedHeldGroups))
+            {
+                ordinal++;
+                heldRecords.Records.Add(new AlertDetailRecord(ordinal, HeldGroupLine(group), new List<(string Label, string Text)>()));
+            }
+            context.Details.Add(heldRecords);
+            if (facts.HeldGroups.Count > MaxListedHeldGroups)
+            {
+                context.Details.Add(new AlertDetailItem
+                {
+                    Heading = string.Create(CultureInfo.InvariantCulture,
+                        $"+{facts.HeldGroups.Count - MaxListedHeldGroups:N0} more held groups, not listed")
+                });
+            }
+        }
+
+        if (facts.Singles == 0)
+        {
+            return context;
+        }
+
         context.Details.Add(new AlertDetailItem
         {
             Heading = "Singles summary",
             Fields =
             {
                 ("Singles", string.Create(CultureInfo.InvariantCulture, $"{facts.Singles:N0}")),
-                ("Servers", string.Create(CultureInfo.InvariantCulture, $"{facts.Servers:N0}")),
+                ("Servers", string.Create(CultureInfo.InvariantCulture, $"{facts.SingleServers:N0}")),
                 ("Ledger rows", string.Create(CultureInfo.InvariantCulture, $"{facts.Rows:N0}")),
                 ("Families", string.Create(CultureInfo.InvariantCulture, $"{facts.Families.Count:N0}")),
             }
@@ -3759,7 +3809,7 @@ internal sealed class DarlingSelfAlertEvaluator
         }
 
         var facts = ExtractSinglesDigestFacts(rows);
-        if (facts.Singles == 0)
+        if (facts.Singles == 0 && facts.Held == 0)
         {
             return;
         }
@@ -3769,7 +3819,7 @@ internal sealed class DarlingSelfAlertEvaluator
         /* #3580: stamped after the fire, and only on a delivery not reported failed — the digest's rule. */
         var delivery = await FireAsync(
             StoreKey(AnalysisSinglesDigestKey), _storeLabel, AnalysisSinglesDigestMetric,
-            currentValue: facts.Singles.ToString(CultureInfo.InvariantCulture),
+            currentValue: (facts.Singles + facts.Held).ToString(CultureInfo.InvariantCulture),
             /* There is no threshold — the digest's exact posture, stated in the string because the NOT NULL
                column demands a value and "report" is the honest one. */
             thresholdValue: "no threshold (report)",
@@ -3777,16 +3827,17 @@ internal sealed class DarlingSelfAlertEvaluator
             /* No override: the per-metric map's declared INFO arm decides. */
             severity: null,
             shortMessage: shortMessage,
-            /* The count of distinct singles the digest covers — a genuine whole number (AlertMetricClassifier
-               renders it as a count, the digest's shape). */
-            numericCurrentValue: facts.Singles,
+            /* The count of distinct singles plus held alerts the digest covers — a genuine whole number
+               (AlertMetricClassifier renders it as a count, the digest's shape). */
+            numericCurrentValue: facts.Singles + facts.Held,
             numericThresholdValue: 0,
             cancellationToken,
             /* #3834: the digest's structured rows, on the same terms — see
                BuildAnalysisSinglesDigestContext, including why the dedup keys ride as a field rather than
                as Incidents. */
             context: BuildAnalysisSinglesDigestContext(facts),
-            scheduledReport: true);
+            scheduledReport: true,
+            displayName: AnalysisSinglesDigestTitle);
 
         await RecordDocumentDeliveredAsync(
             _lastSinglesDigest, AnalysisSinglesDigestKey, PgSelfAlertDeliveryStampStore.AnalysisSinglesDigestStateKey,
@@ -3811,15 +3862,28 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <summary>
     /// Everything one singles digest says, extracted pure from the span's ledger rows — so the empty
     /// decision and the render read one value and the tests drive both with fixtures. <see cref="Singles"/>
-    /// and <see cref="Servers"/> are distinct counts over the deduplicated population; <see cref="Rows"/> is
-    /// the raw row count, stated in the document when it differs so a reader can see the dedup happened.
+    /// is a distinct count over the deduplicated analysis findings; <see cref="Rows"/> is their raw row count,
+    /// stated in the document when it differs so a reader can see the dedup happened. <see cref="Held"/> counts
+    /// the held-alert rows (#7086) and <see cref="HeldGroups"/> groups them by server and metric.
+    /// <see cref="Servers"/> is the distinct servers over both kinds and <see cref="SingleServers"/> over the
+    /// singles alone.
     /// </summary>
     internal sealed record AnalysisSinglesDigestFacts(
         int Singles,
         int Servers,
         int Rows,
         IReadOnlyList<AnalysisSingle> TopMovers,
-        IReadOnlyList<SinglesFamily> Families);
+        IReadOnlyList<SinglesFamily> Families,
+        int Held,
+        IReadOnlyList<HeldAlertGroup> HeldGroups,
+        int SingleServers);
+
+    /// <summary>One group of alerts held back from paging (#7086): every digest row of one metric on one server in the
+    /// span. <see cref="Count"/> is the number of held rows, <see cref="FirstUtc"/> and <see cref="LastUtc"/> bound them,
+    /// and <see cref="Reason"/> is the routing reason stored on the NEWEST of them, so the line says why the latest one
+    /// was held without any caller having to register a formatter.</summary>
+    internal sealed record HeldAlertGroup(
+        string Server, string Metric, int Count, DateTime FirstUtc, DateTime LastUtc, string Reason);
 
     /// <summary>
     /// Extracts the digest's facts from the span's digest-routed rows — PURE (no clock, no I/O). Rows are
@@ -3840,6 +3904,9 @@ internal sealed class DarlingSelfAlertEvaluator
 
         /* Oldest-first input (the reader's ORDER BY), so the LAST write for a key is the newest row. */
         var byKey = new Dictionary<(int ServerId, string Key), AnalysisSingle>();
+        var heldByKey = new Dictionary<(int ServerId, string Server, string Metric), HeldAlertGroup>();
+        var analysisRows = 0;
+        var heldRows = 0;
         foreach (var row in rows)
         {
             if (row is null || string.IsNullOrEmpty(row.MetricName))
@@ -3848,6 +3915,29 @@ internal sealed class DarlingSelfAlertEvaluator
             }
 
             var reason = AlertContextSerializer.TryReadRouting(row.ContextJson)?.Reason ?? string.Empty;
+
+            /* #7086: a digest row that is not an analysis finding is an alert the engine HELD back from paging. It is
+               grouped, not deduplicated: ten held rows of one metric on one server are ten events, and the line says ten. */
+            if (!row.MetricName.StartsWith(AnalysisMetricPrefix, StringComparison.Ordinal))
+            {
+                heldRows++;
+                var heldServer = string.IsNullOrEmpty(row.ServerName)
+                    ? row.ServerId.ToString(CultureInfo.InvariantCulture)
+                    : row.ServerName;
+                var heldKey = (row.ServerId, heldServer, row.MetricName);
+                heldByKey[heldKey] = heldByKey.TryGetValue(heldKey, out var prior)
+                    ? prior with
+                    {
+                        Count = prior.Count + 1,
+                        FirstUtc = row.AlertTime < prior.FirstUtc ? row.AlertTime : prior.FirstUtc,
+                        LastUtc = row.AlertTime > prior.LastUtc ? row.AlertTime : prior.LastUtc,
+                        Reason = row.AlertTime >= prior.LastUtc ? reason : prior.Reason
+                    }
+                    : new HeldAlertGroup(heldServer, row.MetricName, 1, row.AlertTime, row.AlertTime, reason);
+                continue;
+            }
+
+            analysisRows++;
             var dedupKeys = ReadDedupKeys(row.ContextJson);
             var server = string.IsNullOrEmpty(row.ServerName)
                 ? row.ServerId.ToString(CultureInfo.InvariantCulture)
@@ -3883,13 +3973,26 @@ internal sealed class DarlingSelfAlertEvaluator
             .ThenBy(f => f.Family, StringComparer.Ordinal)
             .ToList();
 
+        var heldGroups = heldByKey.Values
+            .OrderByDescending(g => g.Count)
+            .ThenBy(g => g.Server, StringComparer.Ordinal)
+            .ThenBy(g => g.Metric, StringComparer.Ordinal)
+            .ToList();
+
+        var singleServers = singles.Select(s => s.Server).Distinct(StringComparer.Ordinal).Count();
         return new AnalysisSinglesDigestFacts(
             singles.Count,
-            singles.Select(s => s.Server).Distinct(StringComparer.Ordinal).Count(),
-            rows.Count,
+            singles.Select(s => s.Server).Concat(heldGroups.Select(g => g.Server)).Distinct(StringComparer.Ordinal).Count(),
+            analysisRows,
             topMovers,
-            families);
+            families,
+            heldRows,
+            heldGroups,
+            singleServers);
     }
+
+    /// <summary>The prefix every analysis finding's alert-history metric name carries (<c>Analysis: {category} [{hash8}]</c>).</summary>
+    private const string AnalysisMetricPrefix = "Analysis: ";
 
     /// <summary>The finding's category out of <c>Analysis: {category} [{hash8}]</c>, or the whole name when
     /// it is not that shape.</summary>
@@ -3933,19 +4036,31 @@ internal sealed class DarlingSelfAlertEvaluator
     internal static (string ShortMessage, string Detail) RenderAnalysisSinglesDigest(
         AnalysisSinglesDigestFacts facts, DateTime spanStartUtc, DateTime spanEndUtc)
     {
-        var shortMessage = string.Create(CultureInfo.InvariantCulture,
-            $"Anomaly singles: {facts.Singles} across {facts.Servers} servers — uncorroborated findings routed to this digest, not paged");
+        var shortMessage = DigestShortMessage(facts);
 
         var sb = new StringBuilder();
         sb.Append(shortMessage).Append('.');
         sb.Append(string.Create(CultureInfo.InvariantCulture,
-            $" This is a REPORT, not an incident (#3712): the once-a-day channel copy of the analysis findings"
-            + $" the corroboration gate kept off the paging channels between {spanStartUtc:o} and {spanEndUtc:o}"
-            + $" — the trailing day only. A single is a finding at or above the notify severity with ONE fact in"
-            + $" its chain and no matched co-fire check; it was persisted the instant it fired and is readable now"
-            + $" in get_analysis_findings (by the story hash in its key) and get_alert_history (notification_type"
-            + $" 'digest', with routing_reason). A single that gains corroboration pages at that moment as a new"
-            + $" firing; nothing here waits on this digest."));
+            $" This is a REPORT, not an incident (#3712, #7086): the once-a-day copy of what the monitor recorded"
+            + $" but did not page between {spanStartUtc:o} and {spanEndUtc:o}, the trailing day only."
+            + $" Every item is already readable in get_alert_history (notification_type 'digest', with routing_reason)."
+            + $" Nothing here waits on this digest: a condition that later meets its paging bar pages then, as its own alert."));
+
+        if (facts.Held > 0)
+        {
+            AppendHeldSection(sb, facts);
+        }
+
+        if (facts.Singles == 0)
+        {
+            return (shortMessage, sb.ToString());
+        }
+
+        sb.Append(string.Create(CultureInfo.InvariantCulture,
+            $"\nAnalysis singles ({facts.Singles} across {facts.SingleServers} servers)."
+            + $" A single is a finding at or above the notify severity with ONE fact in its chain and no matched co-fire check."
+            + $" It was persisted the instant it fired and is readable now in get_analysis_findings (by the story hash in its key)."
+            + $" A single that gains corroboration pages at that moment as a new firing."));
 
         if (facts.Rows != facts.Singles)
         {
@@ -4009,6 +4124,53 @@ internal sealed class DarlingSelfAlertEvaluator
             + " which governs only while the column is NULL.");
 
         return (shortMessage, sb.ToString());
+    }
+
+    /// <summary>
+    /// The digest's headline (#7086), counting both kinds: "12 held alerts and 30 analysis singles across 9 servers".
+    /// A kind with nothing in it is left out, so a day of held alerts only reads "3 held alerts across 1 server".
+    /// </summary>
+    internal static string DigestShortMessage(AnalysisSinglesDigestFacts facts)
+    {
+        var parts = new List<string>(2);
+        if (facts.Held > 0)
+        {
+            parts.Add(string.Create(CultureInfo.InvariantCulture, $"{facts.Held} held {(facts.Held == 1 ? "alert" : "alerts")}"));
+        }
+        if (facts.Singles > 0)
+        {
+            parts.Add(string.Create(CultureInfo.InvariantCulture, $"{facts.Singles} analysis {(facts.Singles == 1 ? "single" : "singles")}"));
+        }
+
+        return string.Create(CultureInfo.InvariantCulture,
+            $"{string.Join(" and ", parts)} across {facts.Servers} {(facts.Servers == 1 ? "server" : "servers")}");
+    }
+
+    /// <summary>One held group as one line (#7086): server, metric, how many were held, the first and last time and the latest
+    /// reason. Built from the reason the hold stored on its row, so a caller's hold text is all the digest needs.</summary>
+    internal static string HeldGroupLine(HeldAlertGroup group)
+    {
+        var when = group.Count == 1
+            ? string.Create(CultureInfo.InvariantCulture, $"at {group.LastUtc:yyyy-MM-dd HH:mm} UTC")
+            : string.Create(CultureInfo.InvariantCulture,
+                $"first {group.FirstUtc:yyyy-MM-dd HH:mm} UTC, last {group.LastUtc:yyyy-MM-dd HH:mm} UTC");
+        var line = string.Create(CultureInfo.InvariantCulture, $"{group.Server} - {group.Metric}: {group.Count} held, {when}");
+        return string.IsNullOrEmpty(group.Reason) ? line : line + ". " + group.Reason;
+    }
+
+    private static void AppendHeldSection(StringBuilder sb, AnalysisSinglesDigestFacts facts)
+    {
+        sb.Append(string.Create(CultureInfo.InvariantCulture,
+            $"\nHeld back from paging ({facts.Held} {(facts.Held == 1 ? "alert" : "alerts")} in {facts.HeldGroups.Count} {(facts.HeldGroups.Count == 1 ? "group" : "groups")}):"));
+        foreach (var group in facts.HeldGroups.Take(MaxListedHeldGroups))
+        {
+            sb.Append("\n- ").Append(HeldGroupLine(group));
+        }
+        if (facts.HeldGroups.Count > MaxListedHeldGroups)
+        {
+            sb.Append(string.Create(CultureInfo.InvariantCulture,
+                $"\n+ {facts.HeldGroups.Count - MaxListedHeldGroups} more groups, not listed (get_alert_history has every row)."));
+        }
     }
 
     /* ------------------------- #3580: the daily documents' delivered-today gate ------------------------- */
@@ -7158,6 +7320,7 @@ WHERE c.is_enabled";
             _activeFleetGate.TryRemove(FleetGateKey, out _);
             _fleetGateQuietSince.TryRemove(FleetGateKey, out _);
             EndStateAlert(_lastFleetGateAlert, FleetGateKey, FleetGateMetric, FleetGateKey);
+            EndSelfHoldEpisode(FleetGateMetric, FleetGateKey);
             await RecordResolutionAsync(new AlertResolution(
                 StoreKey(FleetGateKey), _storeLabel, FleetGateMetric, FleetGateClearedMetric,
                 $"Collection has kept up with its schedule: under {FleetGateQuietPercent}% of the slots that came due were skipped for the last hour"),
@@ -7177,26 +7340,49 @@ WHERE c.is_enabled";
 
         /* #5493: a state alert (see ApplyCaptureDownAsync): one alert on entry, a repeat only per
            connection_refire_minutes. */
-        var decision = DecideStateAlert(_lastFleetGateAlert, FleetGateKey, FleetGateMetric, FleetGateKey, now, out var refire);
-        if (decision is not (ConnectionAlertDecision.Lost or ConnectionAlertDecision.StillDown))
+        /* #7086 part 4: the condition pages once it has stood 30 minutes. The episode's first breach writes one held row (no page,
+           no stamp, no retry state); the evaluations after it, up to the 30th minute, write nothing. An episode already paged
+           (a stamp in memory, or seeded above from a delivered fire in history after a restart) is not held again. */
+        var pagedAlready = LastFiredStamp.TryGet(_lastFleetGateAlert, FleetGateKey, now, out _);
+        var hold = JudgeSelfHold(FleetGateMetric, FleetGateKey, now, pagedAlready, byEvaluations: false, out var firstOfEpisode);
+        /* One send serves both roads: a held fire (the episode's first breach) records the digest row and stamps nothing;
+           a page decides on the repeat policy as before and hands its answer to NoteStateSend. */
+        var decision = ConnectionAlertDecision.Lost;
+        var refire = 0;
+        if (hold is not null)
         {
-            return;
+            if (!firstOfEpisode)
+            {
+                return;
+            }
         }
+        else
+        {
+            decision = DecideStateAlert(_lastFleetGateAlert, FleetGateKey, FleetGateMetric, FleetGateKey, now, out refire);
+            if (decision is not (ConnectionAlertDecision.Lost or ConnectionAlertDecision.StillDown))
+            {
+                return;
+            }
 
-        _lastFleetGateAlert[FleetGateKey] = now;
+            _lastFleetGateAlert[FleetGateKey] = now;
+        }
 
         var (shortMessage, detail, currentValue) = RenderFleetGate(report);
         var delivery = await FireAsync(
             StoreKey(FleetGateKey), _storeLabel, FleetGateMetric,
             currentValue: currentValue,
             thresholdValue: string.Create(CultureInfo.InvariantCulture, $"{FleetGateBehindPercent}% and at least {FleetGateBehindMinSkipped} slots"),
-            detail: StateRepeatNote(decision, refire) + detail,
+            detail: (hold is null ? StateRepeatNote(decision, refire) : string.Empty) + detail,
             severity: AlertSeverityLevel.Warning,
             shortMessage: shortMessage,
             /* A real measurement: the share of due slots skipped, against the share that fires. */
             numericCurrentValue: Math.Round(report.SkippedPercent, 1), numericThresholdValue: FleetGateBehindPercent,
-            cancellationToken);
-        NoteStateSend(FleetGateMetric, FleetGateKey, delivery);
+            cancellationToken,
+            hold: hold);
+        if (hold is null)
+        {
+            NoteStateSend(FleetGateMetric, FleetGateKey, delivery);
+        }
     }
 
     /// <summary>Renders the (shortMessage, detail, currentValue) for the "Collection Falling Behind" alert: the counts,
@@ -8462,9 +8648,19 @@ WHERE c.is_enabled";
         if (reading.IsPressure)
         {
             _activeCheckpointerPressure[CheckpointerKey] = true;
-            if (CooldownElapsed(_lastCheckpointerPressureAlert, CheckpointerKey, now))
+
+            /* #7086 part 4: the check rides the hourly tick, so the hold is 3 evaluations in a row, not 30 minutes. The first
+               breach of an episode writes one held row (no page, no cooldown stamp); the later held evaluations write nothing;
+               the third pages, and after that the shared cooldown re-fires as it always did. */
+            var hold = JudgeSelfHold(
+                CheckpointerPressureMetric, CheckpointerKey, now, alreadyPaged: false, byEvaluations: true, out var firstOfEpisode);
+            if (hold is null ? CooldownElapsed(_lastCheckpointerPressureAlert, CheckpointerKey, now) : firstOfEpisode)
             {
-                _lastCheckpointerPressureAlert[CheckpointerKey] = now;
+                if (hold is null)
+                {
+                    _lastCheckpointerPressureAlert[CheckpointerKey] = now;
+                }
+
                 var writeSeconds = (writeMs / 1000.0).ToString("0.0", CultureInfo.InvariantCulture);
                 var averageOverBar = averageSyncMs is double avg && avg > CheckpointSyncBarMs;
                 var averageSecondsText = averageSyncMs is double a ? (a / 1000.0).ToString("0.0", CultureInfo.InvariantCulture) : "unmeasured";
@@ -8543,12 +8739,17 @@ WHERE c.is_enabled";
                     shortMessage: $"store checkpointer: {arms} over {checkpointCount} {(checkpointCount == 1 ? "checkpoint" : "checkpoints")} in the last {intervalMinutes} min",
                     numericCurrentValue: currentValue,
                     numericThresholdValue: CheckpointSyncBarMs,
-                    cancellationToken);
-                AfterSelfFire(CheckpointerPressureMetric, _lastCheckpointerPressureAlert, CheckpointerKey, now, SharedCooldown, delivery);
+                    cancellationToken,
+                    hold: hold);
+                if (hold is null)
+                {
+                    AfterSelfFire(CheckpointerPressureMetric, _lastCheckpointerPressureAlert, CheckpointerKey, now, SharedCooldown, delivery);
+                }
             }
         }
         else if (_activeCheckpointerPressure.TryRemove(CheckpointerKey, out var was) && was)
         {
+            EndSelfHoldEpisode(CheckpointerPressureMetric, CheckpointerKey);
             var recoveredAverageText = averageSyncMs is double recoveredAvg
                 ? (recoveredAvg / 1000.0).ToString("0.0", CultureInfo.InvariantCulture) + "s average sync per checkpoint"
                 : "an unmeasured average sync per checkpoint";
@@ -9824,7 +10025,8 @@ ORDER BY ag_name, database_name, replica_server_name";
         string serverKey, string serverName, string metricName, string currentValue, string thresholdValue,
         string detail, AlertSeverityLevel? severity, string shortMessage,
         double? numericCurrentValue, double? numericThresholdValue, CancellationToken cancellationToken,
-        AlertContext? context = null, bool? muted = null, bool scheduledReport = false, string? displayName = null)
+        AlertContext? context = null, bool? muted = null, bool scheduledReport = false, string? displayName = null,
+        AlertHold? hold = null)
     {
         /* Same mute treatment as the engine: a muted self-alert is still recorded (flagged muted) but its
            channels are skipped — the deliverer honors AlertOutcome.Muted. A caller that brought its own
@@ -9860,14 +10062,15 @@ ORDER BY ag_name, database_name, replica_server_name";
             _logger?.LogWarning(
                 "{Line}",
                 AlertFiringLog.Fired(
-                    serverName, metricName, severity?.ToString() ?? "Warning", shortMessage, isMuted));
+                    serverName, metricName, severity?.ToString() ?? "Warning", shortMessage, isMuted, hold is not null));
         }
 
         return await _deliverer.DeliverAndReportAsync(new AlertOutcome(
             serverKey, serverName, metricName, currentValue, thresholdValue,
             Context: context, DetailText: detail,
             NumericCurrentValue: numericCurrentValue, NumericThresholdValue: numericThresholdValue,
-            Muted: isMuted, Severity: severity, ShortMessage: shortMessage, DisplayName: displayName), cancellationToken);
+            Muted: isMuted, Severity: severity, ShortMessage: shortMessage, DisplayName: displayName,
+            Hold: hold), cancellationToken);
     }
 
     private async Task RecordResolutionAsync(AlertResolution resolution, CancellationToken cancellationToken)
@@ -9906,6 +10109,89 @@ ORDER BY ag_name, database_name, replica_server_name";
     /// compares against it and the arms that report a send's answer to <see cref="AfterSelfFire"/> pass it, so the
     /// gate and the back-dated stamp cannot disagree about how long the cooldown is.</summary>
     private TimeSpan SharedCooldown => TimeSpan.FromMinutes(_settings.CooldownMinutes);
+
+    /* ---------------- self-health hold (#7086 part 4) ---------------- */
+
+    /// <summary>How long a store self-health condition (Store Checkpointer Pressure, Collection Falling Behind) must have
+    /// stood before it pages (#7086). Until then the episode's first breach writes one held (digest) row and nothing pages.</summary>
+    internal static readonly TimeSpan SelfHealthHold = TimeSpan.FromMinutes(30);
+
+    /// <summary>The same bar for a check that is evaluated less often than every 10 minutes (Store Checkpointer Pressure
+    /// rides the hourly store self-metrics tick): the condition must breach this many evaluations in a row. Three hourly
+    /// evaluations is longer than 30 minutes by design, because one evaluation cannot tell a blip from a standing condition.</summary>
+    internal const int SelfHealthHoldEvaluations = 3;
+
+    /// <summary>Test seam: false lets a first breach page at once, the behavior before #7086, so a test that pins something other
+    /// than the hold does not have to run the evaluator through a held episode first. Always true in the service.</summary>
+    internal bool HoldSelfHealth { get; set; } = true;
+
+    private sealed class HoldEpisode
+    {
+        public HoldEpisode(DateTime startedUtc) => StartedUtc = startedUtc;
+
+        public DateTime StartedUtc { get; }
+
+        public int Evaluations { get; set; }
+
+        /// <summary>True once the episode earned its page (or was already paged before this process started): later breaches
+        /// in the same episode follow the family's own cooldown, unheld.</summary>
+        public bool Released { get; set; }
+    }
+
+    /// <summary>The open self-health episodes by metric and key, in memory only. A service restart forgets them: an episode
+    /// that was still held starts again (one more held row, a fresh 30 minutes or 3 evaluations), and one that had already
+    /// paged is seeded from the delivered fire in history where its family seeds, and is not held again.</summary>
+    private readonly ConcurrentDictionary<string, HoldEpisode> _holdEpisodes = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Judges one breaching evaluation of a self-health condition against the hold (#7086). Returns null when the page may go
+    /// out (the episode has stood long enough, or was already paged), else the <see cref="AlertHold"/> to fire under.
+    /// <paramref name="firstOfEpisode"/> is true on the breach that opens the episode: the only held evaluation that writes a
+    /// row, so an episode is one held row however long it is held. Call it once per breaching evaluation.
+    /// </summary>
+    private AlertHold? JudgeSelfHold(
+        string metric, string key, DateTime now, bool alreadyPaged, bool byEvaluations, out bool firstOfEpisode)
+    {
+        firstOfEpisode = false;
+        if (!HoldSelfHealth)
+        {
+            return null;
+        }
+
+        var holdKey = StateRetryKey(metric, key);
+        if (!_holdEpisodes.TryGetValue(holdKey, out var episode))
+        {
+            episode = new HoldEpisode(now);
+            _holdEpisodes[holdKey] = episode;
+            firstOfEpisode = true;
+        }
+
+        episode.Evaluations++;
+        if (episode.Released || alreadyPaged)
+        {
+            episode.Released = true;
+            return null;
+        }
+
+        var stood = byEvaluations
+            ? episode.Evaluations >= SelfHealthHoldEvaluations
+            : now - episode.StartedUtc >= SelfHealthHold;
+        if (stood)
+        {
+            episode.Released = true;
+            return null;
+        }
+
+        return new AlertHold(byEvaluations
+            ? string.Create(CultureInfo.InvariantCulture,
+                $"Held for the digest: {metric} breached {episode.Evaluations} of {SelfHealthHoldEvaluations} evaluations in a row. It pages once it breaches {SelfHealthHoldEvaluations} in a row.")
+            : string.Create(CultureInfo.InvariantCulture,
+                $"Held for the digest: {metric} has stood {(int)(now - episode.StartedUtc).TotalMinutes} of {(int)SelfHealthHold.TotalMinutes} minutes. It pages once it has stood {(int)SelfHealthHold.TotalMinutes} minutes."));
+    }
+
+    /// <summary>Forgets an episode when its condition clears.</summary>
+    private void EndSelfHoldEpisode(string metric, string key) =>
+        _holdEpisodes.TryRemove(StateRetryKey(metric, key), out _);
 
     /// <summary>
     /// The shared cooldown gate: no prior fire, or <see cref="SharedCooldown"/> has elapsed. #4732: a stamp AHEAD of

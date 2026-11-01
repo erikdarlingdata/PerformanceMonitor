@@ -291,4 +291,39 @@ public sealed class DailyHealthReportTests
         Assert.Equal(new DateOnly(2026, 10, 31), DailyHealthReportPeriod.LatestEndedDate(new DateTime(2026, 10, 31, 7, 0, 0, DateTimeKind.Utc), sendAt, zone));
         Assert.Equal(new DateOnly(2026, 10, 30), DailyHealthReportPeriod.LatestEndedDate(new DateTime(2026, 10, 31, 6, 59, 0, DateTimeKind.Utc), sendAt, zone));
     }
+
+    /* ---------------- #7086: held counts ---------------- */
+
+    [Fact]
+    public void Text_AndHtml_ShowHeldCountsOnlyForAMetricWithHeldRows()
+    {
+        var server = Server(
+            "pm-server-1",
+            "Warning",
+            alerts: [new DailyHealthAlertCount("Blocking Detected", 12, 9), new DailyHealthAlertCount("High CPU", 3)]);
+
+        var text = DailyHealthReportRenderer.Text(Data(server));
+        var html = DailyHealthReportRenderer.Html(Data(server));
+
+        Assert.Contains("Alerts: Blocking Detected x12 (9 held), High CPU x3", text, StringComparison.Ordinal);
+        Assert.Contains("Blocking Detected x12 (9 held)", html, StringComparison.Ordinal);
+        Assert.Contains("High CPU x3", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("High CPU x3 (", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("High CPU x3 (", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CountAlerts_SumsHeldWithTheCount_AcrossSpellingsOfOneMetric()
+    {
+        var counts = DailyHealthReportBuilder.CountAlerts(
+        [
+            (1, "Blocking Detected", 5L, 4L),
+            (1, "blocking detected", 2L, 1L),
+            (1, "High CPU", 3L, 0L),
+        ]);
+
+        var alerts = counts[1];
+        Assert.Equal(("Blocking Detected", 7, 5), (alerts[0].Metric, alerts[0].Count, alerts[0].Held));
+        Assert.Equal(("High CPU", 3, 0), (alerts[1].Metric, alerts[1].Count, alerts[1].Held));
+    }
 }
