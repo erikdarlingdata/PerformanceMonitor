@@ -59,9 +59,26 @@ jobs:
         with:
           ref: ${{ github.sha }}
 
+      # #7100: the build ran with no layer cache, 92 s a run. buildx keeps the layers in the Actions cache (no paid service,
+      # no secret), so a run reuses every layer whose inputs did not change: the restored packages (the Dockerfile restores
+      # before it copies the source) and the runtime stage's apt layer. A changed Dockerfile line or a changed COPY input
+      # invalidates its layer and the ones after it as usual, so the cache never serves an image the files would not build.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
       - name: Build container image
         timeout-minutes: 12
-        run: docker build -f Darling/Dockerfile -t "${DARLING_IMAGE}" .
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Darling/Dockerfile
+          tags: ${{ env.DARLING_IMAGE }}
+          load: true
+          cache-from: type=gha
+          # A pull request only reads. Writing the max-mode cache took 87 s of the first run (every build layer is
+          # exported), more than a pull request can win back, and its publish layer changes with every source edit anyway.
+          # The nightly and a manual dispatch run on dev and write it; a pull request against dev reads dev's cache.
+          cache-to: ${{ github.event_name != 'pull_request' && 'type=gha,mode=max' || '' }}
 
       # #5479: the guard's reader on the real /proc and cgroup files. `--memory 512m` makes the limit the cgroup's; the verb
       # fails unless the guard measures resident memory and reads 512 MiB as its limit (cgroup v2 on ubuntu-latest).

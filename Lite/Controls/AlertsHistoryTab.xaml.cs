@@ -598,8 +598,31 @@ public partial class AlertsHistoryTab : UserControl
         if (source is not DataGridRow row) return;
         if (row.DataContext is not AlertHistoryRow item) return;
 
+        ShowDetail(item);
+    }
+
+    /// <summary>
+    /// Opens the Alert Details window. #7084 part 4: an engine alert's detail lists the findings that attached to it instead of
+    /// paging, read when it opens. A failed read leaves the list off: the rest of the detail is the row's own and is complete
+    /// without it.
+    /// </summary>
+    private async void ShowDetail(AlertHistoryRow item)
+    {
+        IReadOnlyList<string>? attached = null;
+        if (_dataService is { } data && OpenEngineAlerts.IsAttachable(item.MetricName))
+        {
+            try
+            {
+                attached = await data.GetAttachedFindingsAsync(item);
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Error("AlertDetail", $"Could not read the findings attached to {item.MetricName}: {ex.Message}");
+            }
+        }
+
         var owner = Window.GetWindow(this);
-        var detailWindow = new Windows.AlertDetailWindow(item, FullChainOpener?.Invoke(item), DetailWindowSizeStore);
+        var detailWindow = new Windows.AlertDetailWindow(item, FullChainOpener?.Invoke(item), DetailWindowSizeStore, attached);
         if (owner != null) detailWindow.Owner = owner;
         detailWindow.ShowDialog();
     }
@@ -610,10 +633,7 @@ public partial class AlertsHistoryTab : UserControl
         var dataGrid = FindParentDataGrid(menuItem);
         if (dataGrid?.SelectedItem is not AlertHistoryRow item) return;
 
-        var owner = Window.GetWindow(this);
-        var detailWindow = new Windows.AlertDetailWindow(item, FullChainOpener?.Invoke(item), DetailWindowSizeStore);
-        if (owner != null) detailWindow.Owner = owner;
-        detailWindow.ShowDialog();
+        ShowDetail(item);
     }
 
     private async void MuteThisAlert_Click(object sender, RoutedEventArgs e)

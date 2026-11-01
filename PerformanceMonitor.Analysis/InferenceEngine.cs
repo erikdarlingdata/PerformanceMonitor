@@ -131,6 +131,8 @@ public class InferenceEngine
             var sideLeafKeys = SweepSideLeaves(path, factsByKey, consumed);
 
             var story = BuildStory(path, factsByKey, sideLeafKeys);
+            /* #7084: the window figures the page floor reads, taken from ALL facts (a CPU fact under the scoring bar is not in factsByKey). */
+            story.PageEvidence = FindingPageFloor.Evidence(path, facts);
             stories.Add(story);
         }
 

@@ -568,6 +568,10 @@ public sealed class NotificationRoutingTests
             DarlingSelfAlertEvaluator.CheckDbOverdueMetric,
             /* #6875: the Identity Capacity alert fires through DarlingSelfAlertEvaluator.IdentityCapacityMetric, a constant the FireAsync literal scan cannot see. */
             DarlingSelfAlertEvaluator.IdentityCapacityMetric,
+            /* #7084: the engine's High CPU, Blocking and Deadlocks alerts fire through the OpenEngineAlerts constants,
+               which the AlertOutcome literal scan below cannot see. */
+            OpenEngineAlerts.HighCpuMetric, OpenEngineAlerts.BlockingDetectedMetric,
+            OpenEngineAlerts.BlockingWaitTimeMetric, OpenEngineAlerts.DeadlocksDetectedMetric,
         };
 
         /* The literals: the third argument of every `new AlertOutcome(` in the shared engine and the worker
@@ -589,8 +593,8 @@ public sealed class NotificationRoutingTests
             names.Add(m.Groups[1].Value);
         }
 
-        /* Two literals the scans above cannot see: "Blocking Wait Time" and "Blocking Detected" are fired via
-           a `metricName` local in the worker, which the const scan catches through the engine constants;
+        /* Two literals the scans above cannot see: "Blocking Wait Time" and "Blocking Detected" come from the
+           OpenEngineAlerts constants listed above;
            "Capture Down" / "Agent Not Running" / "Collection Stopped" / "Server Unreachable" / "Server
            Restored" / "Collector Cost Regression" are FireAsync literals the regex above reads. Assert the
            scan really found the self-alert literals so a regex drift fails here, not in the census. */
