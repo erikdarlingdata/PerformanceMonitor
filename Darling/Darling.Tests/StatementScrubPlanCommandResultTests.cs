@@ -30,6 +30,10 @@ namespace Darling.Tests;
 [Collection("live-postgres")]
 public sealed class StatementScrubPlanCommandResultTests
 {
+    /// <summary>Runs the statement filter's start-up warm-up first, as the service does: the first plan or JSON judged in a
+    /// fresh test process would otherwise pay for cold code inside the 1.5 s read budget (#7134).</summary>
+    public StatementScrubPlanCommandResultTests() => StatementFilterWarmUp.Ensure();
+
     /// <summary>Distinctive sentinel, like the other command round-trip tests: a real server_id is a hash.</summary>
     private const int SentinelServerId = -515152;
 
