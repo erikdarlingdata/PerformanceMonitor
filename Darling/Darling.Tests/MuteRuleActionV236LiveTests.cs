@@ -50,7 +50,7 @@ public sealed class MuteRuleActionV236LiveTests
         Assert.Equal(0, await CountAsync(connection,
             "SELECT count(*) FROM information_schema.columns WHERE table_schema = 'config' AND table_name = 'config_mute_rules' AND column_name = 'action'", ct));
 
-        Assert.Equal(1, await PgMigrations.MigrateAsync(connection, ct)); /* V236 */
+        Assert.Equal(StorageVersion.SchemaVersion - 235, await PgMigrations.MigrateAsync(connection, ct)); /* V236 and every rung above it */
 
         Assert.Equal("old=mute", await ActionsAsync(connection, ct));
 
