@@ -386,6 +386,9 @@ public class AlertDetailItem
 /// </summary>
 public sealed record AlertDetailRecord(int Ordinal, string Summary, List<(string Label, string Text)> Texts);
 
+/// <summary>One file a Database File Growth firing is about (#7068): the database and file name, matched by exact equality. Doubles as the persisted shape.</summary>
+public record AlertFileIdentity(string Database, string File);
+
 /// <summary>
 /// Serialization DTO for persisting <see cref="AlertContext"/> as JSON.
 /// <see cref="AlertDetailItem.Fields"/> is a <c>List&lt;(string,string)&gt;</c>
@@ -402,9 +405,6 @@ public sealed record AlertDetailRecord(int Ordinal, string Summary, List<(string
 /// meaning the day a member is inserted ahead of it, where <c>"Critical"</c> cannot.
 /// </para>
 /// </summary>
-/// <summary>One file a Database File Growth firing is about (#7068): the database and file name, matched by exact equality. Doubles as the persisted shape.</summary>
-public record AlertFileIdentity(string Database, string File);
-
 public record AlertContextDto(
     List<AlertDetailItemDto> Details,
     List<AlertIncidentDto>? Incidents = null,
@@ -1170,12 +1170,12 @@ public static class AlertContextSerializer
                     TimeSpan.FromSeconds(Math.Max(0, newest.AgeSeconds)))
                 : null;
 
-            /* #5654: the external source that raised this firing, null on every alert not raised through the store's
-               submission function and every row written before this member existed. */
             /* #7068: the files a file growth firing is about, null on every other alert and every row written before this
                member existed. */
             context.FileGrowthFiles = dto.FileGrowthFiles;
 
+            /* #5654: the external source that raised this firing, null on every alert not raised through the store's
+               submission function and every row written before this member existed. */
             context.External = dto.External is { } external && !string.IsNullOrWhiteSpace(external.Source)
                 ? new AlertExternalOrigin(external.Source, external.Key, external.PendingId)
                 : null;
