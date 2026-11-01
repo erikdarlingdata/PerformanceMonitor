@@ -933,9 +933,10 @@ public sealed class AlertReadFailureSurfaceTests
         /* 19th counted since #7068: the standing-incident seed read ("standing incident seed"), the history read that tells a standing alert it was already announced before a restart. */
         /* 19th and 20th counted in DarlingSelfAlertEvaluator since #7068: the same seed for the state alerts ("standing incident seed self-alert") and for Capture Down ("capture-down standing seed self-alert"). */
         /* 21st counted in DarlingSelfAlertEvaluator since #7076: the same seed read for a stuck TimescaleDB policy job on the first pass after a restart ("policy job standing seed self-alert"). */
+        /* 22nd counted in DarlingSelfAlertEvaluator since #7076: the history read that finds an open row of a policy job that is healthy again, to close an episode that ended while the service was down ("policy job ended-episode close self-alert"). */
         /* 16th counted since #6875: the identity-capacity self-alert read in the per-server sweep, counted as "identity-capacity self-alert". */
         /* 22nd exempt since #7041: the daily health report's delivery-stamp WRITE, a write whose loss costs one re-send at the next restart and never a missed delivery, like the other daily documents' stamp write. */
-        (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 21, 22),
+        (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 22, 22),
     };
 
     /// <summary>
@@ -1056,8 +1057,9 @@ public sealed class AlertReadFailureSurfaceTests
     /// And a FIFTIETH since #7068: the standing-incident seed read ("standing incident seed"), counted because a swallowed read leaves a standing alert unannounced-to-history, so it is announced again after a restart, and a nonzero count says the restart seed is not working.
     /// And a FIFTY-FIRST and FIFTY-SECOND since #7068: the same seed read in the self-alert evaluator ("standing incident seed self-alert" for the state alerts, "capture-down standing seed self-alert" for Capture Down), counted for the same reason.
     /// And a FIFTY-THIRD since #7076: the same seed read for a stuck TimescaleDB policy job found on the first pass after a restart ("policy job standing seed self-alert"), counted for the same reason.
+    /// And a FIFTY-FOURTH since #7076: the read that closes an ended policy job episode ("policy job ended-episode close self-alert"), counted because a swallowed failure leaves the old row open for the next restart to seed from.
     /// </summary>
-    private const int CountedSites = 53;
+    private const int CountedSites = 54;
 
     /// <summary>
     /// Log-message fragments that identify a catch block DELIBERATELY not counted, each paired with the

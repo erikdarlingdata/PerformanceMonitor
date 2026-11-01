@@ -74,6 +74,15 @@ public sealed class StoreWideAlertKeyRestartLiveTests
             stuck.Select(j => new PolicyJobRunReading(j.JobId, j.Family, j.HypertableName, Held: false, LastRunStatus: null, TotalFailures: 0)).ToList());
     }
 
+    /// <summary>One pass that reads <paramref name="stuckIds"/> as stuck and <paramref name="healthyIds"/> as running on schedule, the way the real reader lists every job it looked at.</summary>
+    private static StorePolicyJobHealth StuckAmongHealthy(long[] stuckIds, params long[] healthyIds)
+    {
+        var reading = Stuck(stuckIds);
+        var healthy = healthyIds.Select(id => new PolicyJobRunReading(
+            id, TimescaleSupport.StorePolicyJobFamily.Compression, "wait_stats", Held: false, LastRunStatus: null, TotalFailures: 0));
+        return new StorePolicyJobHealth(reading.Stuck, reading.Jobs.Concat(healthy).ToList());
+    }
+
     private static StorePolicyJobHealth NoneStuck() => new(new List<StuckPolicyJob>(), new List<PolicyJobRunReading>());
 
     private static async Task<NpgsqlConnection> OpenAsync(ScratchPostgres scratch)
@@ -148,10 +157,13 @@ public sealed class StoreWideAlertKeyRestartLiveTests
             await using (var second = new Process(scratch.ConnectionString, start.AddMinutes(1)))
             {
                 /* Restart. Job A is still stuck and was escalated: no re-arm, no new row. Job B cleared while the service was down. */
-                await second.Evaluator.ApplyPolicyJobsStuckAsync(Stuck(JobA), id => { secondRearms.Add(id); return Task.FromResult(true); }, Ct);
-                await second.Evaluator.ApplyPolicyJobsStuckAsync(Stuck(JobA), id => { secondRearms.Add(id); return Task.FromResult(true); }, Ct);
+                await second.Evaluator.ApplyPolicyJobsStuckAsync(StuckAmongHealthy(new[] { JobA }, JobB), id => { secondRearms.Add(id); return Task.FromResult(true); }, Ct);
+                await second.Evaluator.ApplyPolicyJobsStuckAsync(StuckAmongHealthy(new[] { JobA }, JobB), id => { secondRearms.Add(id); return Task.FromResult(true); }, Ct);
                 Assert.Empty(secondRearms);
                 Assert.Equal(2, await CountAsync(connection, $"metric_name = 'Compression Job Stuck' AND alert_key = 'compressjob:{JobA}'"));
+
+                /* The first pass saw job B healthy with its episode still open in the history, so it closed that episode with its resolution row. */
+                Assert.Equal(1, await CountAsync(connection, $"metric_name = 'Compression Job Recovered' AND alert_key = 'compressjob:{JobB}'"));
 
                 /* Job B sticks again: a new episode, so it is re-armed and announced once more. */
                 await second.Evaluator.ApplyPolicyJobsStuckAsync(Stuck(JobA, JobB), id => { secondRearms.Add(id); return Task.FromResult(true); }, Ct);
@@ -223,6 +235,51 @@ public sealed class StoreWideAlertKeyRestartLiveTests
 
             Assert.Equal(new[] { JobA }, rearms);
             Assert.Equal(2, await CountAsync(connection, StuckRows));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(ConnectionString!, bodySucceeded, (_, _) => Task.CompletedTask);
+        }
+    }
+
+    [Fact]
+    public async Task AJobStuckHealthyAndStuckAcrossTwoRestarts_IsReArmedAndAnnouncedAsANewEpisode()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the V234 live restart seed test (it mints its own scratch database).");
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, Ct);
+        await using var connection = await OpenAsync(scratch);
+        var bodySucceeded = false;
+        try
+        {
+            const string StuckRows = "metric_name = 'Compression Job Stuck' AND alert_key = 'compressjob:900761'";
+            var start = DateTime.UtcNow;
+            var rearms = new List<long>();
+            await using (var first = new Process(scratch.ConnectionString, start))
+            {
+                /* Process 1: the job sticks, is re-armed, and announces the re-arm. The re-arm fixes it. */
+                await first.Evaluator.ApplyPolicyJobsStuckAsync(Stuck(JobA), id => { rearms.Add(id); return Task.FromResult(true); }, Ct);
+            }
+
+            Assert.Equal(new[] { JobA }, rearms);
+
+            await using (var second = new Process(scratch.ConnectionString, start.AddMinutes(1)))
+            {
+                /* Restart before the next hourly pass: the job is healthy on this process's first pass, so its open row is closed. */
+                await second.Evaluator.ApplyPolicyJobsStuckAsync(StuckAmongHealthy(Array.Empty<long>(), JobA), id => { rearms.Add(id); return Task.FromResult(true); }, Ct);
+            }
+
+            Assert.Equal(1, await CountAsync(connection, "metric_name = 'Compression Job Recovered' AND alert_key = 'compressjob:900761'"));
+
+            await using (var third = new Process(scratch.ConnectionString, start.AddMinutes(2)))
+            {
+                /* Restart again, the job has hung again: a new episode, so it is re-armed and announced as a first detection, not as a re-hang. */
+                await third.Evaluator.ApplyPolicyJobsStuckAsync(Stuck(JobA), id => { rearms.Add(id); return Task.FromResult(true); }, Ct);
+            }
+
+            Assert.Equal(new[] { JobA, JobA }, rearms);
+            Assert.Equal(2, await CountAsync(connection, StuckRows));
+            Assert.Equal(2, await CountAsync(connection, StuckRows + " AND context_json::jsonb ->> 'PolicyJobStep' = 'ReArmed'"));
             bodySucceeded = true;
         }
         finally

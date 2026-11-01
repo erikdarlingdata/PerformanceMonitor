@@ -863,9 +863,13 @@ internal sealed class DarlingSelfAlertEvaluator
     private readonly ConcurrentDictionary<string, PolicyJobEpisode> _policyJobState = new(StringComparer.Ordinal);
 
     /// <summary>#7076: true once the first policy job pass of this process has run. Only that pass may seed a stuck job's escalation
-    /// from the alert history: a job that was not stuck on it cleared while the service was down (nothing wrote the resolution), so
-    /// when it sticks again later it is a new episode and announces.</summary>
+    /// from the alert history: a job that was not stuck on it cleared while the service was down, so its open row is closed by
+    /// <see cref="CloseEndedPolicyJobEpisodesAsync"/> and when it sticks again later it is a new episode and announces.</summary>
     private bool _policyJobFirstPassDone;
+
+    /// <summary>#7076: the healthy policy jobs this process has already checked the alert history for an open fire row of an ended
+    /// episode, so each is read once.</summary>
+    private readonly HashSet<string> _policyJobEndedChecked = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, DateTime> _lastPolicyJobAlert = new(StringComparer.Ordinal);
 
     /// <summary>The alert metric name every compression-job self-alert fires under (first-detection + escalation
@@ -8869,6 +8873,8 @@ WHERE c.is_enabled";
             }
         }
 
+        await CloseEndedPolicyJobEpisodesAsync(reading, stillStuck, cancellationToken);
+
         /* Recovery: any job we were tracking that is no longer stuck has recovered — drop its state and write
            one resolution row (the sibling conditions' edge shape). ToList() so the removal does not mutate the
            collection under enumeration. */
@@ -8901,10 +8907,7 @@ WHERE c.is_enabled";
                 continue;
             }
 
-            await RecordResolutionAsync(new AlertResolution(
-                StoreKey(band.KeyPrefix + key), _storeLabel, band.Metric,
-                band.RecoveredMetric,
-                $"TimescaleDB {band.Noun} {key} is running on schedule again"), cancellationToken);
+            await RecordPolicyJobRecoveredAsync(band, key, cancellationToken);
         }
 
         _policyJobFirstPassDone = true;
@@ -10120,6 +10123,65 @@ ORDER BY ag_name, database_name, replica_server_name";
     /// </summary>
     internal static string? StoredAlertKey(string serverKey, string firingMetric) =>
         KeyedFleetMetrics.Contains(firingMetric) && !string.IsNullOrEmpty(serverKey) ? serverKey : null;
+
+    private Task RecordPolicyJobRecoveredAsync(PolicyJobBand band, string key, CancellationToken cancellationToken) =>
+        RecordResolutionAsync(new AlertResolution(
+            StoreKey(band.KeyPrefix + key), _storeLabel, band.Metric,
+            band.RecoveredMetric,
+            $"TimescaleDB {band.Noun} {key} is running on schedule again"), cancellationToken);
+
+    /// <summary>
+    /// #7076: a job that is healthy now but whose last fire row is still open in the alert history ended its episode while no process
+    /// was watching it (it cleared while the service was down, so no in-memory state existed for the recovery loop to resolve). Its
+    /// resolution row is written here, once per job per process, so a later restart cannot seed a new stuck episode from the old row and
+    /// skip the auto-re-arm. A job this process already tracks is left to the recovery loop. A failed read is logged and counted, and the
+    /// jobs not yet checked are tried again on the next pass.
+    /// </summary>
+    private async Task CloseEndedPolicyJobEpisodesAsync(
+        StorePolicyJobHealth reading, HashSet<string> stillStuck, CancellationToken cancellationToken)
+    {
+        foreach (var job in reading.Jobs)
+        {
+            var key = job.JobId.ToString(CultureInfo.InvariantCulture);
+            if (stillStuck.Contains(key) || job.Family == TimescaleSupport.StorePolicyJobFamily.Other || _policyJobEndedChecked.Contains(key))
+            {
+                continue;
+            }
+
+            if (_policyJobState.ContainsKey(key))
+            {
+                _policyJobEndedChecked.Add(key);
+                continue;
+            }
+
+            var band = PolicyJobBand.For(job.Family);
+            var historyKey = StoreKey(band.KeyPrefix + key);
+            bool episodeStillOpen;
+            var readClock = Stopwatch.StartNew();
+            try
+            {
+                var rows = await _historyStore.GetKeyedStandingAsync(
+                    historyKey, band.Metric, new[] { band.RecoveredMetric }, null, _serviceStartUtc);
+                _policyJobEndedChecked.Add(key);
+                episodeStillOpen = rows.OpenFor(_ => true, null) is not null;
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning("Could not read the open {Metric} incident for {Key} from alert history after {ElapsedMs} ms; an ended incident may stay open until the next pass: {Message}", band.Metric, historyKey, readClock.ElapsedMilliseconds, ex.Message);
+                _readFailures?.RecordReadFailure(null, "policy job ended-episode close self-alert", readClock.ElapsedMilliseconds);
+                return;
+            }
+
+            if (episodeStillOpen)
+            {
+                await RecordPolicyJobRecoveredAsync(band, key, cancellationToken);
+            }
+        }
+    }
 
     /// <summary>
     /// #7076: a stuck policy job found on this process's first pass is seeded at its last announced step when the alert history holds an
