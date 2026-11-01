@@ -8183,6 +8183,12 @@ AND   j.hypertable_name = '{relation}'";
     /// this rule a held source that outlived its consumer's own retention stayed Short forever: the consumer
     /// trimmed itself to now - R on every run while the held source's oldest row never moved.</para>
     ///
+    /// <para>The horizon rule also needs the consumer's OWN gate to be Covered on this same measure (its entry in
+    /// <see cref="RetentionPolicies"/>, measured with the same "now"). A consumer whose own gate is Short or
+    /// Unknown is about to be held, or cannot be shown to keep running, so the days below its horizon may still
+    /// be needed for a backfill. The sweep judges a source before its consumer, so the scheduled flag alone
+    /// could be stale by the time the consumer is judged later in the same pass.</para>
+    ///
     /// <para>A consumer with no retention policy, or whose policy is not scheduled (held by this same gate, or
     /// paused by hand), keeps the strict rule: its oldest bucket must reach the source's oldest row. So does a
     /// consumer that holds nothing, and one this code knows no bucket width for (it is not in
@@ -8299,8 +8305,13 @@ AND   j.scheduled";
             /* #6081: EVERY short consumer, in the order the coverage list names them (dependency order), not
                the first one found. The verdict is still an AND, so the safe direction is unchanged; what changed
                is that the operator line and the bounded fill can see the second short consumer in the same
-               pass instead of one round later. */
-            var shortConsumers = new List<string>();
+               pass instead of one round later. Marked per slot and listed at the end, so a consumer the horizon
+               check below finds short keeps its place in that order. */
+            var slotShort = new bool[coverageRelations.Count];
+
+            /* #7114: the slots that cover only within their consumer's own armed horizon. Judged after this
+               reader closes, because each needs that consumer's own gate measured on this connection. */
+            var horizonCandidates = new List<(int Slot, HorizonCoveredConsumer Consumer)>();
 
             /* Column 0 is the shared, unfiltered source_oldest (the empty-store check above). From column
                1 the shape is pairs — (source_oldest_i, coverage_oldest_i) — one pair per coverage relation,
@@ -8326,7 +8337,7 @@ AND   j.scheduled";
                    newly-added consumer is born in on an upgrading store (#1877). */
                 if (await reader.IsDBNullAsync(coverageOldestColumn, cancellationToken))
                 {
-                    shortConsumers.Add(coverageRelations[i]);
+                    slotShort[i] = true;
                     continue;
                 }
 
@@ -8337,15 +8348,52 @@ AND   j.scheduled";
                 }
 
                 /* #7114: short of the source, but not of what its own armed retention keeps. The rows below its
-                   oldest bucket are rows it drops anyway (see the summary for the one-bucket slack). */
+                   oldest bucket are rows it drops anyway (see the summary for the one-bucket slack), as long as
+                   that retention stays armed, which the check after this loop decides. */
                 if (horizonFloors.TryGetValue(coverageRelations[i], out var horizon) && coverageOldest <= horizon.Floor)
                 {
-                    horizonCovered.Add(horizon.Consumer);
+                    horizonCandidates.Add((i, horizon.Consumer));
                     continue;
                 }
 
-                shortConsumers.Add(coverageRelations[i]);
+                slotShort[i] = true;
             }
+
+            await reader.CloseAsync();
+
+            /* #7114 (review of #7115): the horizon rule holds only while the consumer's own retention keeps
+               running, and the sweep goes source-first, so it can hold that consumer later in this same pass
+               (its own consumer went short: the rebuilt day-grain daily of #1869/#1877). Trusting the job's
+               scheduled flag alone would let this source drop the days below the consumer's horizon just before
+               the hold that keeps them for a backfill. So the consumer's own gate is measured here, from the
+               same policy table the sweep walks and on the same clock: only Covered keeps the horizon rule.
+               Short, Unknown, or no entry in that table puts the consumer back on the strict rule, which it
+               already failed above. This makes the verdict independent of the order the sweep runs in. The
+               recursion ends at a consumer with no armed retention, which never becomes a candidate. */
+            foreach (var (slot, consumer) in horizonCandidates)
+            {
+                var ownCovered = false;
+                foreach (var (ownRelation, _, ownTimeColumn, ownCoverage) in RetentionPolicies)
+                {
+                    if (string.Equals(ownRelation, consumer.Consumer, StringComparison.Ordinal))
+                    {
+                        var own = await MeasureRetentionCoverageAsync(connection, ownRelation, ownTimeColumn, ownCoverage, utcNow, cancellationToken);
+                        ownCovered = own.Verdict == RetentionCoverage.Covered;
+                        break;
+                    }
+                }
+
+                if (ownCovered)
+                {
+                    horizonCovered.Add(consumer);
+                }
+                else
+                {
+                    slotShort[slot] = true;
+                }
+            }
+
+            var shortConsumers = coverageRelations.Where((_, i) => slotShort[i]).ToList();
 
             return shortConsumers.Count > 0
                 ? new RetentionCoverageMeasure(RetentionCoverage.Short, shortConsumers, horizonCovered)

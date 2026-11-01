@@ -53,12 +53,84 @@ public sealed class RetentionConsumerHorizonLiveTests
             await CreateSourceAsync(connection, Now.AddDays(-27));
             await CreateConsumerAsync(connection, IntervalDaily, Now.AddDays(-10), retention: "10 days", scheduled: true);
 
+            /* The consumer's own consumer, as in the field: the day-grain daily keeps every day and reaches
+               interval_daily's oldest bucket, so interval_daily's own gate is Covered on this measure. */
+            await CreateConsumerAsync(connection, DayGrainDaily, Now.AddDays(-10), retention: null, scheduled: false);
+
             var measure = await MeasureAsync(connection, IntervalDaily);
 
             Assert.True(measure.Verdict == TimescaleSupport.RetentionCoverage.Covered,
                 $"a consumer holding from its own armed 10-day horizon keeps everything it would keep, so the source must read Covered; got {measure.Verdict}, short: {string.Join(", ", measure.ShortConsumers)}");
             Assert.Equal(", checked within query_store_stats_interval_daily's 10-day retention", TimescaleSupport.DescribeHorizonCoverage(measure.HorizonCovered));
         });
+    }
+
+    /// <summary>The consumer covers from its own horizon, but its own gate is Short on this same measure: its
+    /// day-grain consumer (no retention, keeps every day) starts five days later than it, the rebuilt-consumer
+    /// shape of #1869/#1877. The sweep goes source-first, so it judges the hourly source before it re-holds
+    /// interval_daily. The horizon rule must not apply here: interval_daily is about to be held, and the days
+    /// the hourly source would drop below its horizon are the days a backfill needs to rebuild the day-grain
+    /// daily. Short, naming interval_daily. RED on the first #7114 rule (092e9e3f8): Covered.</summary>
+    [Fact]
+    public async Task HorizonCoveredConsumer_WhoseOwnGateIsShort_KeepsTheStrictRule()
+    {
+        await RunAsync(async connection =>
+        {
+            await CreateSourceAsync(connection, Now.AddDays(-27));
+            await CreateConsumerAsync(connection, IntervalDaily, Now.AddDays(-10), retention: "10 days", scheduled: true);
+            await CreateConsumerAsync(connection, DayGrainDaily, Now.AddDays(-5), retention: null, scheduled: false);
+
+            var measure = await MeasureAsync(connection, IntervalDaily);
+
+            Assert.True(measure.Verdict == TimescaleSupport.RetentionCoverage.Short,
+                $"interval_daily's own gate is Short (its day-grain consumer starts later than it), so its retention is about to be held and the hourly source must keep the strict rule; got {measure.Verdict}");
+            Assert.Equal(new[] { IntervalDaily }, measure.ShortConsumers);
+            Assert.Empty(measure.HorizonCovered);
+        });
+    }
+
+    /// <summary>The job lookup on a real store: migrated by <see cref="PgMigrations"/>, with its real
+    /// continuous aggregates and the real retention policies the sweep creates and arms (an empty store arms
+    /// every policy). TimescaleDB reports a policy on an aggregate under the aggregate's view name (#3610), and
+    /// <see cref="TimescaleSupport.ConsumerRetentionHorizonSql"/> matches the consumer names the coverage lists
+    /// carry, which are view names. If the catalog named the materialization hypertable instead, the lookup
+    /// would return nothing and the horizon rule would never apply to an aggregate.</summary>
+    [Fact]
+    public async Task ConsumerRetentionHorizonSql_OnAMigratedStore_FindsIntervalDailyUnderItsViewName()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #7114 consumer-horizon tests.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        var bodySucceeded = false;
+        try
+        {
+            await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, ct);
+            Assert.SkipWhen(!await TimescaleSupport.TryEnableAsync(connection, null, ct), "The live #7114 consumer-horizon tests need TimescaleDB.");
+            await ExecuteAsync(connection, "SELECT _timescaledb_functions.stop_background_workers()");
+            await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+            await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+            await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, null, TimescaleSupport.RetentionSweepPass.Startup, null, ct);
+
+            await using var read = new NpgsqlCommand(TimescaleSupport.ConsumerRetentionHorizonSql, connection) { CommandTimeout = SetupTimeoutSeconds };
+            read.Parameters.AddWithValue(new[] { IntervalDaily });
+            await using var reader = await read.ExecuteReaderAsync(ct);
+            Assert.True(await reader.ReadAsync(ct),
+                $"no scheduled retention job was found under the view name {IntervalDaily}, so the horizon rule could never apply to it");
+            Assert.Equal(IntervalDaily, reader.GetString(0));
+            Assert.Equal(TimescaleSupport.IntervalDailyRetentionInterval, reader.GetString(1));
+            Assert.Equal(TimeSpan.FromDays(10).TotalSeconds, reader.GetDouble(2));
+            Assert.False(await reader.ReadAsync(ct));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, (_, _) => Task.CompletedTask);
+        }
     }
 
     /// <summary>A real gap inside the consumer's horizon: it holds only from now minus 8 days, so two days it

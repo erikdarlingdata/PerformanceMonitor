@@ -15,8 +15,11 @@ not hold. So the coverage gate (#1680/#1877) pauses the retention policy instead
 A rollup that has its own armed retention is checked only as far back as it keeps (#7114). Say the
 rollup keeps 10 days and its retention is armed. Then it counts as caught up when its oldest bucket is no
 later than 10 days ago plus one bucket. That holds even when the tier it reads holds 27 days. The rollup
-drops the older days on its own, so dropping them from its source loses nothing it keeps. A
-rollup with no retention, or whose own retention is paused, must still reach the source's oldest row. When
+drops the older days on its own, so dropping them from its source loses nothing it keeps. This applies
+only while the rollup's own gate passes in the same check. If a rollup it feeds is short of it, its own
+retention is about to be paused, and the older days may still be needed to backfill that rollup. Then it
+must reach the source's oldest row. So must a
+rollup with no retention, or whose own retention is paused. When
 this rule decides it, the `ARMED` line says so, for example `checked within
 query_store_stats_interval_daily's 10-day retention`.
 
