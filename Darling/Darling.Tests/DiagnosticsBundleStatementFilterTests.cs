@@ -22,6 +22,14 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class DiagnosticsBundleStatementFilterTests
 {
+    /// <summary>#7134: every string the bundle writes is judged under a 1.5 second wall-clock budget (the filter's
+    /// <c>ReadBudget</c>), and the first plan judged in a test process pays for cold, unoptimized filter and XML code.
+    /// On a loaded CI runner that used the whole budget, and the budget being spent withholds the whole document, so the
+    /// plain statement in the canary plan went missing. The service runs the filter's start-up warm-up before it serves
+    /// anything, and a test process never does, so this gives the class the same start path (see
+    /// <see cref="StatementFilterWarmUp"/>). No limit or assertion differs.</summary>
+    public DiagnosticsBundleStatementFilterTests() => StatementFilterWarmUp.Ensure();
+
     private static string AssembleOne(string section, JsonNode node)
     {
         var (text, leaks, _) = DiagnosticsBundle.Assemble(
