@@ -124,7 +124,7 @@ public sealed partial class PlanForceToolLiveTests
                 Assert.Equal("@p int", (string?)journaled["params"]);
             Assert.Single(await RowsAsync(c, "action_done"));
 
-            var change = Assert.Single((await new AgentChangeUndo(c.Source, 30).ReadAsync(50, c.Ct)).Changes);
+            var change = Assert.Single((await new AgentChangeUndo(c.Source, 30).ReadAsync(50, cancellationToken: c.Ct)).Changes);
             Assert.Equal(DropKind, change.Kind);
             Assert.True(change.CanTryUndo(DateTime.UtcNow), "a plan guide drop can be undone");
 

@@ -76,6 +76,56 @@ VALUES ($1, $2, 'Srv', $3, 0, 0, $4, $5, $6, $7, $8)";
     }
 
     [Fact]
+    public async Task GetOpenFire_HasNoLowerBound_ReadsTheValue_AndAnyResolutionTitleClosesIt()
+    {
+        // #7068: the same cases as the Darling store's live test, so the two stores answer alike.
+        await InsertAsync(Now.AddDays(-40), Fire, Warning);
+        using (var set = _conn!.CreateCommand())
+        {
+            set.CommandText = "UPDATE config_alert_log SET current_value = 1.5 WHERE server_id = 7";
+            await set.ExecuteNonQueryAsync();
+        }
+
+        var titles = new[] { "Capture Restored", Resolution };
+        var open = await _store.GetOpenFireAsync("7", Fire, titles, null, Now);
+        Assert.NotNull(open);
+        Assert.Equal(1.5, open!.CurrentValue);
+        Assert.Equal(Warning, open.ContextJson);
+        Assert.Equal(Now.AddDays(-40), open.FireAtUtc);
+
+        Assert.Null(await _store.GetOpenFireAsync("7", Fire, titles, null, Now.AddDays(-40)));
+        Assert.Null(await _store.GetOpenFireAsync("7", Fire, titles, Now.AddDays(-1), Now));
+
+        await InsertAsync(Now.AddDays(-39), "Capture Restored", null, sent: false, type: "none");
+        Assert.Null(await _store.GetOpenFireAsync("7", Fire, titles, null, Now));
+        Assert.NotNull(await _store.GetOpenFireAsync("7", Fire, new[] { Resolution }, null, Now));
+
+        await InsertAsync(Now.AddDays(-2), Fire, Critical);
+        Assert.Equal(Critical, (await _store.GetOpenFireAsync("7", Fire, titles, null, Now))!.ContextJson);
+    }
+
+    [Fact]
+    public async Task GetStanding_WhenTheResolutionReadHitsItsCap_DoesNotReadAnOlderFireAsOpen()
+    {
+        // #7068: grain A's fire was closed by a resolution that fell outside the newest StandingRowCap resolution rows (grain B
+        // wrote the rest). Read without that row, grain A's fire would look open and the grain would be silenced.
+        await InsertAsync(Now.AddDays(-40), Fire, "grainA");
+        await InsertAsync(Now.AddDays(-39), Resolution, "grainA", sent: false, type: "none");
+        for (var i = 0; i < DuckDbAlertHistoryStore.StandingRowCap; i++)
+        {
+            await InsertAsync(Now.AddDays(-30).AddMinutes(i), Resolution, "grainB", sent: false, type: "none");
+        }
+
+        var standing = await _store.GetStandingAsync("7", Fire, new[] { Resolution }, null, Now);
+        Assert.Null(standing.OpenFor(f => f.ContextJson == "grainA", c => c.ContextJson == "grainA"));
+
+        // A fire newer than every resolution row read is still open.
+        await InsertAsync(Now.AddHours(-1), Fire, "grainA");
+        standing = await _store.GetStandingAsync("7", Fire, new[] { Resolution }, null, Now);
+        Assert.Equal(Now.AddHours(-1), standing.OpenFor(f => f.ContextJson == "grainA", c => c.ContextJson == "grainA")!.FireAtUtc);
+    }
+
+    [Fact]
     public async Task NewestFireWins()
     {
         await InsertAsync(Now.AddMinutes(-5), Fire, Warning);

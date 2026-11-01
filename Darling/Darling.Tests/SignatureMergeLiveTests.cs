@@ -170,7 +170,7 @@ public sealed class SignatureMergeLiveTests
         {
             Assert.Equal("merged", (string?)Parse(await Merge(c, SigA, SigB))["status"]);
 
-            var read = await c.Undo.ReadAsync(200, c.Ct);
+            var read = await c.Undo.ReadAsync(200, cancellationToken: c.Ct);
             var change = Assert.Single(read.Changes, ch => ch.Tool == "merge_deadlock_signatures");
             Assert.Equal(AgentChangeKinds.SignatureMerge, change.Kind);
             Assert.Equal("agent:agent-a", change.Actor);

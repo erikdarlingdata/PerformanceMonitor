@@ -914,7 +914,7 @@ public sealed class AlertReadFailureSurfaceTests
     /// </summary>
     private static readonly (string Path, int Counted, int Exempt)[] s_wholeFileScopes =
     {
-        (Path.Combine("PerformanceMonitor.Alerting", "AlertEngine.cs"), 18, 8),
+        (Path.Combine("PerformanceMonitor.Alerting", "AlertEngine.cs"), 19, 8),
         /* 7th AlertEngine exempt since #5910: the threshold-override fallback in Threshold(), an in-memory lookup and
            not a read; the check it serves still reads, and counts, exactly as before. 8th since #6005: the deadlock
            rollup's catch, a write after the deadlock read, which counts its own failure. */
@@ -930,9 +930,11 @@ public sealed class AlertReadFailureSurfaceTests
            with the read exempt in DarlingWorker (it holds the alert on a failed read). */
         /* 21st exempt since #6912: the capture-down engine facts catch, whose read goes through the retry adapter that already records the failure. */
         /* 17th and 18th counted since #7041: the daily health report's build read ("daily-health-report self-alert") and its delivery-stamp read ("daily-health-report delivery-stamp self-alert"). */
+        /* 19th counted since #7068: the standing-incident seed read ("standing incident seed"), the history read that tells a standing alert it was already announced before a restart. */
+        /* 19th and 20th counted in DarlingSelfAlertEvaluator since #7068: the same seed for the state alerts ("standing incident seed self-alert") and for Capture Down ("capture-down standing seed self-alert"). */
         /* 16th counted since #6875: the identity-capacity self-alert read in the per-server sweep, counted as "identity-capacity self-alert". */
         /* 22nd exempt since #7041: the daily health report's delivery-stamp WRITE, a write whose loss costs one re-send at the next restart and never a missed delivery, like the other daily documents' stamp write. */
-        (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 18, 22),
+        (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 20, 22),
     };
 
     /// <summary>
@@ -1050,8 +1052,10 @@ public sealed class AlertReadFailureSurfaceTests
     /// And a FORTY-SIXTH since #6873: the database-protection read ("database-protection self-alert"), counted because a swallowed read leaves the Backup Overdue, Log Backup Overdue and CHECKDB Overdue alerts unjudged.
     /// And a FORTY-SEVENTH since #6875: the Identity Capacity window read ("identity-capacity self-alert"), counted because a swallowed read neither fires nor clears the alert, so a population of them would leave a nearly exhausted identity column unreported for as long as the store stayed unreadable.
     /// And a FORTY-EIGHTH and FORTY-NINTH since #7041: the scheduled daily health report's build read ("daily-health-report self-alert") and its delivery-stamp read ("daily-health-report delivery-stamp self-alert"), counted because a swallowed failure leaves the report unsent until the next attempt and a nonzero count says the report is not being produced.
+    /// And a FIFTIETH since #7068: the standing-incident seed read ("standing incident seed"), counted because a swallowed read leaves a standing alert unannounced-to-history, so it is announced again after a restart, and a nonzero count says the restart seed is not working.
+    /// And a FIFTY-FIRST and FIFTY-SECOND since #7068: the same seed read in the self-alert evaluator ("standing incident seed self-alert" for the state alerts, "capture-down standing seed self-alert" for Capture Down), counted for the same reason.
     /// </summary>
-    private const int CountedSites = 49;
+    private const int CountedSites = 52;
 
     /// <summary>
     /// Log-message fragments that identify a catch block DELIBERATELY not counted, each paired with the

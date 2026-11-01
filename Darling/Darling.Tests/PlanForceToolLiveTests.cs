@@ -287,7 +287,7 @@ public sealed partial class PlanForceToolLiveTests
             Assert.Equal(planA, (long)done["after"]!["state"]!["forced_plan"]!["plan_id"]!);
             Assert.Equal((long)json["journal_id"]!, long.Parse(await PgScalarAsync(c.Connection, "SELECT journal_id FROM config.investigation_journal WHERE event = 'action_called'", c.Ct) ?? "0", CultureInfo.InvariantCulture));
 
-            var list = await new AgentChangeUndo(c.Source, 30).ReadAsync(50, c.Ct);
+            var list = await new AgentChangeUndo(c.Source, 30).ReadAsync(50, cancellationToken: c.Ct);
             var change = Assert.Single(list.Changes);
             Assert.Equal(ForceKind, change.Kind);
             Assert.Equal(AgentChangeResult.Done, change.Result);
@@ -317,7 +317,7 @@ public sealed partial class PlanForceToolLiveTests
             var called = Assert.Single(await RowsAsync(c, "action_called"));
             Assert.Equal(UnforceKind, (string?)called["kind"]);
             Assert.Equal(planA, (long)called["before"]!["forced_plan"]!["plan_id"]!);
-            var list = await new AgentChangeUndo(c.Source, 30).ReadAsync(50, c.Ct);
+            var list = await new AgentChangeUndo(c.Source, 30).ReadAsync(50, cancellationToken: c.Ct);
             Assert.Equal(UnforceKind, Assert.Single(list.Changes).Kind);
             AssertNoSecret(c, answer, await JournalTextAsync(c));
         });
