@@ -2687,6 +2687,24 @@ function Test-DarlingManifestPathIsPreserved([string]$relativePath) {
 # Returns an Ok/Files/Reason object rather than a bare array on purpose. PowerShell unrolls an empty array
 # returned from a function into $null, so "read nothing" and "failed to read" would arrive at the caller
 # looking identical - and those two have to be told apart here more than anywhere else in this script.
+# Does a build carry its own .NET runtime? A self-contained build has hostfxr.dll in its root, next to the exe. A
+# framework-dependent one (a plain dotnet publish) has none. Returns $true or $false, or throws when a zip cannot be read.
+# Only the root counts: the viewer\ folder carries a runtime of its own, and says nothing about the service.
+function Test-DarlingBuildShipsRuntime([string]$source, [bool]$sourceIsZip) {
+    if ($sourceIsZip) {
+        Add-Type -AssemblyName 'System.IO.Compression.FileSystem' -ErrorAction SilentlyContinue
+        $archive = [IO.Compression.ZipFile]::OpenRead($source)
+        try {
+            foreach ($entry in $archive.Entries) {
+                if ((ConvertTo-DarlingManifestPath $entry.FullName) -ieq 'hostfxr.dll') { return $true }
+            }
+            return $false
+        }
+        finally { $archive.Dispose() }
+    }
+    return (Test-Path -LiteralPath (Join-Path $source 'hostfxr.dll') -PathType Leaf)
+}
+
 function Get-DarlingPayloadFiles([string]$source, [bool]$sourceIsZip) {
     if ([string]::IsNullOrWhiteSpace($source)) {
         return [pscustomobject]@{ Ok = $false; Files = @(); Reason = 'no source path was given' }
@@ -3441,6 +3459,20 @@ If this folder is deliberately writable (a dev loop) and you accept the risk, re
     else {
         Warn '-AcceptWritableExtraction - not checking whether the source folder was already writable by other local users.'
     }
+}
+
+# ============================ the runtime shape (#7063) ============================
+#
+# A release zip is self-contained: hostfxr.dll and the rest of the .NET runtime sit beside the exe. A plain dotnet
+# publish is framework-dependent and ships none. Laying a framework-dependent build over a self-contained install
+# leaves the old hostfxr.dll in the folder. The new exe finds it, takes the folder as its .NET location, finds no
+# framework there, and the service does not start. Refused here, before the service is stopped, so a refused
+# upgrade changes nothing. The other direction (a self-contained build over a framework-dependent install) is
+# allowed: the exe finds the hostfxr.dll that arrives with it.
+try { $sourceShipsRuntime = Test-DarlingBuildShipsRuntime $Source $sourceIsZip }
+catch { Fail "The source '$Source' could not be read to check whether it carries a .NET runtime: $($_.Exception.Message) NOTHING has been stopped or copied." }
+if (-not $sourceShipsRuntime -and (Test-Path -LiteralPath (Join-Path $InstallRoot 'hostfxr.dll') -PathType Leaf)) {
+    Fail "The source is a framework-dependent build (it has no hostfxr.dll, so it ships no .NET runtime) and '$InstallRoot' is a self-contained install (it has hostfxr.dll). Laying the first over the second leaves the old runtime files in place, the new exe takes that folder as its .NET location, finds no framework there, and the service does not start. Use the release zip, or publish with --runtime win-x64 --self-contained. NOTHING has been stopped or copied."
 }
 
 # ============================ the service has to exist ============================
