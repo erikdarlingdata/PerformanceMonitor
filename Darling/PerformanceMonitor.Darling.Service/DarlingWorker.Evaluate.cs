@@ -1738,14 +1738,14 @@ public sealed partial class DarlingWorker
                 if (dataDetailMode != McpDataDetail.MetadataOnly && worst.QueryId is { } worstQueryId)
                 {
                     /* The statement annotates the page and never decides it: a failed lookup costs the card its
-                       statement line and nothing else. */
+                       statement line and nothing else. It is its own counted read, with its own clock, so a fault here
+                       records this lookup's elapsed and not the capture read's. */
+                    var statementReadClock = Stopwatch.StartNew();
                     try
                     {
-                        worst = worst with
-                        {
-                            StatementText = await DarlingPgSessionStatesReader.GetStatementTextAsync(
-                                _postgres, runtime.ServerId, worstQueryId, cancellationToken),
-                        };
+                        var statementText = await DarlingPgSessionStatesReader.GetStatementTextAsync(
+                            _postgres, runtime.ServerId, worstQueryId, cancellationToken);
+                        worst = worst with { StatementText = statementText };
                     }
                     catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                     {
@@ -1753,9 +1753,13 @@ public sealed partial class DarlingWorker
                     }
                     catch (Exception ex)
                     {
-                        _logger.LogWarning("[{Server}] Long-Running Query statement lookup failed, the page goes without it: {Message}",
-                            runtime.Config.DisplayName, ex.Message);
+                        _logger.LogWarning("[{Server}] Long-Running Query statement lookup failed after {ElapsedMs} ms, the page goes without it: {Message}",
+                            runtime.Config.DisplayName, statementReadClock.ElapsedMilliseconds, ex.Message);
+                        _readFailures.RecordReadFailure(
+                            snapshot.ServerKey, "PostgreSQL long-running-query statement lookup", statementReadClock.ElapsedMilliseconds);
                     }
+
+                    readClock.Restart();
                 }
 
                 var longRunningContext = AlertSampleAge.Stamp(

@@ -12,8 +12,9 @@ using System.Linq;
 
 namespace PerformanceMonitor.Darling.Service.Reports;
 
-/// <summary>One metric's alert count for a server over the report period (#7041).</summary>
-internal sealed record DailyHealthAlertCount(string Metric, int Count);
+/// <summary>One metric's alert count for a server over the report period (#7041). <paramref name="Held"/> is how many of those
+/// <paramref name="Count"/> rows were held back from paging and went to the Daily Digest instead (#7086).</summary>
+internal sealed record DailyHealthAlertCount(string Metric, int Count, int Held = 0);
 
 /// <summary>A job that failed on a server in the period: how often, when it last failed, and the last message (#7041).</summary>
 internal sealed record DailyHealthFailedJob(string JobName, int Failures, DateTime LastFailureUtc, string? Message);

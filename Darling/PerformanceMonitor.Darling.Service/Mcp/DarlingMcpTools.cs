@@ -1559,7 +1559,7 @@ public sealed class DarlingMcpTools
                 {
                     status = "error",
                     message = removed == 0
-                        ? "The unmute could not be written to the monitoring store (see the service log); the mute is still in force. If the log says permission denied, the mcp role lacks DELETE on config.analysis_muted: re-run provision-roles.sql, or restart a managed store so its roles are re-provisioned."
+                        ? "The unmute could not be written to the monitoring store (see the service log); the mute is still in force. If the log says permission denied, the mcp role lacks DELETE on config.analysis_muted: re-run " + DarlingManagedRoles.ProvisionRolesScriptPath + ", or restart a managed store so its roles are re-provisioned."
                         : $"The unmute removed {removed} mute row(s) and then failed on {write.Failed} more (see the service log); the rest of the mute is still in force. Call again to retry.",
                     story_path_hash,
                     server = scope.Label,

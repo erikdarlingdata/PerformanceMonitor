@@ -1990,11 +1990,12 @@ public sealed class AlertEngine
                    and the fired alert's context (:249) — class remarks adaptation (1). */
                 deadlockRows = await _readAdapter.GetRecentDeadlocksAsync(key, hoursBack: RollingCountWindowHours, ct);
 
-                /* #7086: a deadlock with the monitor's own session in it (its collectors connect as the Darling or
+                /* #7086: a deadlock whose VICTIM is the monitor's own session (its collectors connect as the Darling or
                    Lite application name) is stored and shown but is not the operator's to act on. It leaves the
-                   count, the rollup, the occurrence tally and the card. */
+                   count, the rollup, the occurrence tally and the card. A deadlock where a user session was the
+                   victim stays in, even with a monitor session in the graph: the monitor cost the operator work. */
                 deadlockRows = deadlockRows
-                    .Where(r => !PerformanceMonitor.Common.MonitorApplicationNames.GraphHasMonitorSession(r.DeadlockGraphXml))
+                    .Where(r => !PerformanceMonitor.Common.MonitorApplicationNames.VictimIsMonitorSession(r.DeadlockGraphXml, r.VictimProcessId))
                     .ToList();
                 effectiveDeadlockCount = deadlockRows.Count;
 
@@ -3521,8 +3522,10 @@ public sealed class AlertEngine
                     DateTime? newestSeed = null;
                     foreach (var f in breached)
                     {
-                        if (standing.OpenFor(fire => AlertContextSerializer.ContextJsonHasDetailFields(
-                            fire.ContextJson, ("Database", f.DatabaseName), ("File", f.FileName))) is { } standingFire)
+                        /* The stored file list answers for files past the five the card shows; a row from before the list
+                           existed is answered from its details. */
+                        if (standing.OpenFor(fire => AlertContextSerializer.ContextJsonNamesFile(
+                            fire.ContextJson, f.DatabaseName, f.FileName)) is { } standingFire)
                         {
                             alertedObservations.TryAdd(FileGrowthObservationKey(f), standingFire.FireAtUtc);
                             if (newestSeed is not { } seen || standingFire.FireAtUtc > seen)
@@ -4301,7 +4304,9 @@ public sealed class AlertEngine
                 plan.IsRepeat = true;
             }
 
-            if (!suppressed && !plan.IsRepeat
+            /* An observation the plan's standing fire already covers (a restart seeded it from the open row) is neither
+               held nor paged: that card is the operator's, and a second digest line for it would be noise. */
+            if (!suppressed && !plan.IsRepeat && !sameObservation
                 && (plan.LastHeldObservedAtUtc is not { } lastHeld || failure.ObservedAtUtc > lastHeld))
             {
                 plan.LastHeldObservedAtUtc = failure.ObservedAtUtc;

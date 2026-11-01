@@ -103,10 +103,10 @@ public sealed class LiteSampleAgeDeliveryTests
     [Fact]
     public void TheDelivererRoutesBothSendsThroughTheSharedLineHelper()
     {
-        /* Source shape: both the single send and the per-event split run the text through WithSampleAge, so a
-           surface added later cannot skip it. */
+        /* Source shape: the single send, the per-event split and the held digest row (#7086) all run the text through
+           WithSampleAge, so a surface added later cannot skip it. */
         var source = File.ReadAllText(RepoFile("Lite/Services/LiteAlertDeliverer.cs"));
-        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(source, @"AlertDetailText\.WithSampleAge\(").Count);
+        Assert.Equal(3, System.Text.RegularExpressions.Regex.Matches(source, @"AlertDetailText\.WithSampleAge\(").Count);
     }
 
     internal static string RepoFile(string relative)

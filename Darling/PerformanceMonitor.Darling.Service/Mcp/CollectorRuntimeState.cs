@@ -380,7 +380,7 @@ public sealed class CollectorRuntimeState
         }
 
         _logger?.LogWarning(
-            "Could not {Action} the stopped-collection marker {Path} ({Message}). The compose healthcheck tests for that file, so the container's health may not show whether collection has stopped (#4733).",
+            "Could not {Action} the stopped-collection marker {Path} ({Message}). The compose healthcheck tests for that file, so the container's health may not show whether collection has stopped.",
             action, _stoppedMarkerPath, ex.Message);
     }
 

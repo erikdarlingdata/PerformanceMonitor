@@ -217,7 +217,7 @@ public partial class ProcedureHistoryWindow : Window
         }
         catch (Exception ex)
         {
-            MessageBox.Show(this, $"Failed to retrieve plan: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show(this, $"Could not read the plan for this procedure from the store: {ex.Message}. If this repeats, check the Viewer log (sidebar: View Log).", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
         }
         finally
         {
@@ -239,7 +239,7 @@ public partial class ProcedureHistoryWindow : Window
         }
         catch (Exception ex)
         {
-            MessageBox.Show(this, $"Failed to retrieve plan: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show(this, $"Could not read the plan for this procedure from the store: {ex.Message}. If this repeats, check the Viewer log (sidebar: View Log).", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
             return;
         }
 
@@ -297,13 +297,14 @@ public partial class ProcedureHistoryWindow : Window
         }
         catch (ViewerReadOnlyException)
         {
-            MessageBox.Show(this, "This is a read-only viewer seat, which cannot ask the service to fetch a live plan.",
+            MessageBox.Show(this, "This viewer is connected with a read-only store login, so it cannot ask the service to fetch a live plan. " +
+                ViewerReadOnlyException.HowToConnectAsAdmin,
                 "Read-Only", MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
         catch (Exception ex)
         {
-            MessageBox.Show(this, $"Failed to fetch the live plan: {ex.Message}", "Cached Plan Error",
+            MessageBox.Show(this, $"The service could not fetch the live plan: {ex.Message}", "Cached Plan Error",
                 MessageBoxButton.OK, MessageBoxImage.Error);
             return;
         }

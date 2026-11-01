@@ -990,7 +990,9 @@ public sealed class AlertReadFailureSurfaceTests
     /* 11th since #4215: ReadRejectedManagedConfSettingNamesAsync's catch — COUNTED,
        not exempt, because a RejectedValue row is judgeable evidence for the alert, not context for its text. */
     /* 13th since #5916: LoadThresholdOverridesAsync's catch, the threshold-override reload. */
-    private const int WorkerCountedSites = 13;
+    /* 14th since #7086: EvaluatePgLongRunningQueryAsync's statement lookup catch ("PostgreSQL long-running-query statement lookup"),
+       counted because a swallowed lookup sends the page without its statement line, and a nonzero count says why. */
+    private const int WorkerCountedSites = 14;
     /* 13th: the deadlock text repair pass's catch in SweepStoreSelfMetricsAsync, exempt like the re-mask pass beside it.
        14th: the collection log hourly rollup's catch there (#5810), a maintenance write no alert is judged on.
        15th: EvaluateComposeHoursStuckAsync's catch (#5867), the compose builder's failure record read for its self-alert, which
@@ -1055,8 +1057,9 @@ public sealed class AlertReadFailureSurfaceTests
     /// And a FORTY-EIGHTH and FORTY-NINTH since #7041: the scheduled daily health report's build read ("daily-health-report self-alert") and its delivery-stamp read ("daily-health-report delivery-stamp self-alert"), counted because a swallowed failure leaves the report unsent until the next attempt and a nonzero count says the report is not being produced.
     /// And a FIFTIETH since #7068: the standing-incident seed read ("standing incident seed"), counted because a swallowed read leaves a standing alert unannounced-to-history, so it is announced again after a restart, and a nonzero count says the restart seed is not working.
     /// And a FIFTY-FIRST and FIFTY-SECOND since #7068: the same seed read in the self-alert evaluator ("standing incident seed self-alert" for the state alerts, "capture-down standing seed self-alert" for Capture Down), counted for the same reason.
+    /// And a FIFTY-THIRD since #7086: the PostgreSQL Long-Running Query alert's statement lookup ("PostgreSQL long-running-query statement lookup"), counted because a swallowed lookup sends the page without its statement line.
     /// </summary>
-    private const int CountedSites = 52;
+    private const int CountedSites = 53;
 
     /// <summary>
     /// Log-message fragments that identify a catch block DELIBERATELY not counted, each paired with the

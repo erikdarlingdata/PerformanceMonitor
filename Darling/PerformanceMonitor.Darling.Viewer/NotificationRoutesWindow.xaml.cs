@@ -46,6 +46,7 @@ public partial class NotificationRoutesWindow : Window
         if (dataService.IsReadOnly)
         {
             ActionButtonsPanel.Visibility = Visibility.Collapsed;
+            ReadOnlyBanner.Text = "Read-only connection: routes can be viewed but not changed here, and their destination URLs are not shown. " + ViewerReadOnlyException.HowToConnectAsAdmin;
             ReadOnlyBanner.Visibility = Visibility.Visible;
         }
 

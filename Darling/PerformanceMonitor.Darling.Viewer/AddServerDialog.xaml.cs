@@ -203,7 +203,7 @@ public partial class AddServerDialog : Window
             /* Test Connection enqueues a command (a config write), so a read-only seat can't run it either. */
             TestConnectionButton.IsEnabled = false;
             StatusText.Text = "This viewer is connected read-only, so servers can't be added or changed. " +
-                "Set postgres.connectAs to \"admin\" in darling.json and restart.";
+                ViewerReadOnlyException.HowToConnectAsAdmin;
         }
     }
 

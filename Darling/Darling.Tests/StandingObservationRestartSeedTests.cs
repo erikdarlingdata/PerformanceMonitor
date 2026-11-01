@@ -43,7 +43,12 @@ public sealed class StandingObservationRestartSeedTests
         {
             foreach (var fire in _h.Deliverer.Outcomes.Skip(_seenFires))
             {
-                _fires.Add((_h.Now, fire));
+                /* #7086: a held fire is a digest row, and the stores' standing-fire reads leave digest rows out, so it
+                   seeds no open fire. Only a page does. */
+                if (fire.Hold is null)
+                {
+                    _fires.Add((_h.Now, fire));
+                }
             }
 
             _seenFires = _h.Deliverer.Outcomes.Count;
@@ -152,6 +157,26 @@ public sealed class StandingObservationRestartSeedTests
         }
     }
 
+    /// <summary>The first process's life, up to the point it has PAGED the condition. A file is paged by its first sweep. A plan
+    /// is held on its first failure and pages on the next collection (#7086), so it takes a second, newer observation. Returns
+    /// the outcomes delivered so far (held ones count), which each test compares its second process against.</summary>
+    private static async Task<int> FirstLifeAsync(Alert alert, AlertEngineTests.Harness h, AlertEngine engine, History history)
+    {
+        Set(alert, h, SeenAt);
+        await SweepAsync(h, engine, history);
+        if (alert == Alert.ForcePlan)
+        {
+            Assert.Equal(1, Fires(h, MetricOf(alert)));
+            Assert.NotNull(h.Deliverer.Outcomes.Single(o => o.MetricName == MetricOf(alert)).Hold);
+            Set(alert, h, SeenAt.AddMinutes(1));
+            await SweepAsync(h, engine, history);
+        }
+
+        var delivered = Fires(h, MetricOf(alert));
+        Assert.Null(h.Deliverer.Outcomes.Last(o => o.MetricName == MetricOf(alert)).Hold);
+        return delivered;
+    }
+
     [Theory]
     [InlineData(Alert.ForcePlan)]
     [InlineData(Alert.FileGrowth)]
@@ -159,15 +184,13 @@ public sealed class StandingObservationRestartSeedTests
     {
         var h = Armed();
         var history = new History(h);
-        Set(alert, h, SeenAt);
-        await SweepAsync(h, h.Build(), history);
-        Assert.Equal(1, Fires(h, MetricOf(alert)));
+        var before = await FirstLifeAsync(alert, h, h.Build(), history);
 
         var engine = Restart(h, history, seeded: true);
         await SweepAsync(h, engine, history);
         await SweepAsync(h, engine, history);
 
-        Assert.Equal(1, Fires(h, MetricOf(alert)));
+        Assert.Equal(before, Fires(h, MetricOf(alert)));
     }
 
     [Theory]
@@ -177,13 +200,13 @@ public sealed class StandingObservationRestartSeedTests
     {
         var h = Armed();
         var history = new History(h);
-        Set(alert, h, SeenAt);
-        await SweepAsync(h, h.Build(), history);
+        var before = await FirstLifeAsync(alert, h, h.Build(), history);
 
         var engine = Restart(h, history, seeded: false);
         await SweepAsync(h, engine, history);
 
-        Assert.Equal(2, Fires(h, MetricOf(alert)));
+        /* A file pages again. A plan's first failure in the new process is held (#7086). */
+        Assert.Equal(before + 1, Fires(h, MetricOf(alert)));
     }
 
     [Theory]
@@ -193,15 +216,17 @@ public sealed class StandingObservationRestartSeedTests
     {
         var h = Armed();
         var history = new History(h);
-        Set(alert, h, SeenAt);
-        await SweepAsync(h, h.Build(), history);
+        var before = await FirstLifeAsync(alert, h, h.Build(), history);
 
         var engine = Restart(h, history, seeded: true);
         await SweepAsync(h, engine, history);
+        Assert.Equal(before, Fires(h, MetricOf(alert)));
         Set(alert, h, h.Now);
         await SweepAsync(h, engine, history);
 
-        Assert.Equal(2, Fires(h, MetricOf(alert)));
+        /* News after the restart: a file pages, a plan is held as the first failure the new process has seen (#7086). */
+        Assert.Equal(before + 1, Fires(h, MetricOf(alert)));
+        Assert.Equal(alert == Alert.ForcePlan, h.Deliverer.Outcomes.Last(o => o.MetricName == MetricOf(alert)).Hold is not null);
     }
 
     [Theory]
@@ -212,8 +237,7 @@ public sealed class StandingObservationRestartSeedTests
         var h = Armed();
         var history = new History(h);
         var first = h.Build();
-        Set(alert, h, SeenAt);
-        await SweepAsync(h, first, history);
+        var before = await FirstLifeAsync(alert, h, first, history);
         h.Adapter.ForcePlanFailures.Clear();
         h.Adapter.Files.Clear();
         await SweepAsync(h, first, history);
@@ -223,7 +247,7 @@ public sealed class StandingObservationRestartSeedTests
         Set(alert, h, h.Now);
         await SweepAsync(h, engine, history);
 
-        Assert.Equal(2, Fires(h, MetricOf(alert)));
+        Assert.Equal(before + 1, Fires(h, MetricOf(alert)));
     }
 
     [Theory]
@@ -233,8 +257,7 @@ public sealed class StandingObservationRestartSeedTests
     {
         var h = Armed();
         var history = new History(h);
-        Set(alert, h, SeenAt);
-        await SweepAsync(h, h.Build(), history);
+        var before = await FirstLifeAsync(alert, h, h.Build(), history);
 
         /* No resolution row: the service was not running when it cleared. The new process sees it healthy first. */
         var engine = Restart(h, history, seeded: true);
@@ -244,7 +267,7 @@ public sealed class StandingObservationRestartSeedTests
         Set(alert, h, h.Now);
         await SweepAsync(h, engine, history);
 
-        Assert.Equal(2, Fires(h, MetricOf(alert)));
+        Assert.Equal(before + 1, Fires(h, MetricOf(alert)));
     }
 
     [Theory]
@@ -254,14 +277,13 @@ public sealed class StandingObservationRestartSeedTests
     {
         var h = Armed();
         var history = new History(h);
-        Set(alert, h, SeenAt);
-        await SweepAsync(h, h.Build(), history);
+        var before = await FirstLifeAsync(alert, h, h.Build(), history);
 
         var engine = Restart(h, history, seeded: true);
         Set(alert, h, SeenAt, name: "b");
         await SweepAsync(h, engine, history);
 
-        Assert.Equal(2, Fires(h, MetricOf(alert)));
+        Assert.Equal(before + 1, Fires(h, MetricOf(alert)));
     }
 
     [Theory]
@@ -271,15 +293,14 @@ public sealed class StandingObservationRestartSeedTests
     {
         var h = Armed();
         var history = new History(h);
-        Set(alert, h, SeenAt);
-        await SweepAsync(h, h.Build(), history);
+        var before = await FirstLifeAsync(alert, h, h.Build(), history);
 
         history.Throws = true;
         var engine = Restart(h, history, seeded: true);
         await SweepAsync(h, engine, history);
         await SweepAsync(h, engine, history);
 
-        Assert.Equal(2, Fires(h, MetricOf(alert)));
+        Assert.Equal(before + 1, Fires(h, MetricOf(alert)));
         Assert.Equal(1, history.ReadsAsked);
     }
 }

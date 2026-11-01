@@ -257,7 +257,7 @@ public partial class ViewerServerTab
         }
         catch (Exception ex)
         {
-            MessageBox.Show($"Failed to retrieve plan: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show($"Could not read the plan for this query from server {_server.DisplayName}: {ex.Message}. If this repeats, check the Viewer log (sidebar: View Log).", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
         }
         finally
         {
@@ -295,7 +295,7 @@ public partial class ViewerServerTab
         }
         catch (Exception ex)
         {
-            MessageBox.Show($"Failed to retrieve plan: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show($"Could not read this Query Store plan from server {_server.DisplayName}: {ex.Message}. If this repeats, check the Viewer log (sidebar: View Log).", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
         }
         finally
         {
@@ -332,7 +332,7 @@ public partial class ViewerServerTab
         }
         catch (Exception ex)
         {
-            MessageBox.Show($"Failed to retrieve plan: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show($"Could not read the plan for this procedure from server {_server.DisplayName}: {ex.Message}. If this repeats, check the Viewer log (sidebar: View Log).", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
         }
         finally
         {

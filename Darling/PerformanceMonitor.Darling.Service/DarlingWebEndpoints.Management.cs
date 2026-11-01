@@ -109,7 +109,7 @@ public static partial class DarlingWebEndpoints
         {
             if (!DarlingWebSeat.FromContext(context).CanEdit)
             {
-                return ErrorResult("This account has read-only access.", StatusCodes.Status403Forbidden);
+                return ErrorResult(ReadOnlyAccountText, StatusCodes.Status403Forbidden);
             }
 
             if (!IsJsonContentType(context.Request.ContentType))
@@ -124,7 +124,7 @@ public static partial class DarlingWebEndpoints
             }
             catch (InvalidDataException)
             {
-                return ErrorResult("Request body is too large.", StatusCodes.Status400BadRequest);
+                return ErrorResult(BodyTooLargeText(MaxServerAddBodyBytes), StatusCodes.Status400BadRequest);
             }
 
             if (!TryReadServerAddBody(body, out var entries, out var refusal))
@@ -172,7 +172,7 @@ public static partial class DarlingWebEndpoints
         {
             if (!DarlingWebSeat.FromContext(context).CanEdit)
             {
-                return ErrorResult("This account has read-only access.", StatusCodes.Status403Forbidden);
+                return ErrorResult(ReadOnlyAccountText, StatusCodes.Status403Forbidden);
             }
 
             if (!IsJsonContentType(context.Request.ContentType))
@@ -187,7 +187,7 @@ public static partial class DarlingWebEndpoints
             }
             catch (InvalidDataException)
             {
-                return ErrorResult("Request body is too large.", StatusCodes.Status400BadRequest);
+                return ErrorResult(BodyTooLargeText(MaxServerEditBodyBytes), StatusCodes.Status400BadRequest);
             }
 
             if (!TryReadServerEditBody(body, out var changes, out var refusal))
@@ -252,7 +252,7 @@ public static partial class DarlingWebEndpoints
                (DarlingAdminServersReader) withholds from every seat. Only a seat that can submit the edit may read it. */
             if (!DarlingWebSeat.FromContext(context).CanEdit)
             {
-                return ErrorResult("This account has read-only access.", StatusCodes.Status403Forbidden);
+                return ErrorResult(ReadOnlyAccountText, StatusCodes.Status403Forbidden);
             }
 
             var stopwatch = Stopwatch.StartNew();
