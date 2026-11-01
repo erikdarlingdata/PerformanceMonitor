@@ -444,6 +444,9 @@ public static class AlertContextBuilders
 
         var context = new AlertContext();
         var shown = files.GetRange(0, Math.Min(5, files.Count));
+        /* #7068: the card lists five, but every breached file was announced by this fire. The standing-state seed after
+           a restart reads this list, so file six of eight is not announced again. */
+        context.FileGrowthFiles = files.ConvertAll(f => new AlertFileIdentity(f.DatabaseName, f.FileName));
         foreach (var f in shown)
         {
             var fields = new List<(string, string)>

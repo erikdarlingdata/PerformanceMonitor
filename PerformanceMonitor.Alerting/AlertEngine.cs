@@ -3438,8 +3438,10 @@ public sealed class AlertEngine
                     DateTime? newestSeed = null;
                     foreach (var f in breached)
                     {
-                        if (standing.OpenFor(fire => AlertContextSerializer.ContextJsonHasDetailFields(
-                            fire.ContextJson, ("Database", f.DatabaseName), ("File", f.FileName))) is { } standingFire)
+                        /* The stored file list answers for files past the five the card shows; a row from before the list
+                           existed is answered from its details. */
+                        if (standing.OpenFor(fire => AlertContextSerializer.ContextJsonNamesFile(
+                            fire.ContextJson, f.DatabaseName, f.FileName)) is { } standingFire)
                         {
                             alertedObservations.TryAdd(FileGrowthObservationKey(f), standingFire.FireAtUtc);
                             if (newestSeed is not { } seen || standingFire.FireAtUtc > seen)
