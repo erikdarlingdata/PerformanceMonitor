@@ -274,43 +274,15 @@ public sealed partial class DarlingMcpPlanForceTools
             var permit = decision.Permit!;
             _ = InvestigationToolCore.ParseAgentAction(agent_action, out var action);
 
-            /* 3: the server row through the owner data source, and the executor built from it. */
-            var row = await ReadServerRowAsync(owner, resolved.ServerId, ct);
-            if (row is null)
-                return Answer("failed", "server_row_missing", $"{resolved.DisplayName} has no row in the monitored-server settings.");
-
-            /* 3b: a database the server's entry excludes is one Darling does not act in (#5632), the same refusal recompile_module and the plan guide tools make. Refused before the dry run reads anything. */
-            if (IsExcludedDatabase(row.ExcludedDatabases, database_name.Trim()))
-            {
-                await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, AzureDatabaseExcluded, agentTokenName, ct);
-                return DarlingAgentActionGate.RefusalAnswer(ExcludedDatabaseRefusal(database_name.Trim()));
-            }
-
-            var executor = new SqlServerRemediationExecutor(resolved.ServerId, row.Server, row.UserName, row.SecretSlot, logger);
-
-            /* 4: the before state, read on the server. */
-            var before = await executor.ReadPlanStateAsync(permit, query_id, plan_id, ct);
-            if (before.State is not { } beforeState)
-                return await NotRunAsync(store, action!, tool, before.Outcome, before.Reason, before.Message, agentTokenName, ct);
-
-            if (BlockReason(beforeState, force) is { } block)
-            {
-                await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, block.Reason, agentTokenName, ct);
-                return Answer("refused", block.Reason, block.Message, new { dry_run, before = beforeState });
-            }
-
-            var statement = PlanForceStatement.For(beforeState.Database, query_id, plan_id, force);
-
-            /* 5: a dry run runs the executor's own checks and journals nothing. */
-            if (dry_run)
-            {
-                var dry = force
-                    ? await executor.ForcePlanAsync(permit, query_id, plan_id, dryRun: true, ct)
-                    : await executor.UnforcePlanAsync(permit, query_id, plan_id, dryRun: true, ct);
-                return dry.Outcome == RemediationOutcome.Done
-                    ? Answer("dry_run", null, dry.Message, new { dry_run = true, statement = dry.Statement ?? statement, before = beforeState })
-                    : Answer(dry.Outcome == RemediationOutcome.Refused ? "refused" : "failed", dry.Reason, dry.Message, new { dry_run = true, statement, before = beforeState });
-            }
+            /* 3: the prepare step: the server row, the excluded database, the before state, the block reason and, on a dry run, the executor's own checks. */
+            var prepared = await PrepareForcePlanAsync(owner, logger, permit, resolved.ServerId, resolved.DisplayName, force, database_name.Trim(), query_id, plan_id, dry_run,
+                (reason, token) => store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, reason, agentTokenName, token), ct);
+            if (prepared.Answer is { } preparedAnswer)
+                return preparedAnswer;
+            var facts = prepared.Facts!;
+            var executor = prepared.Executor!;
+            var beforeState = facts.Before;
+            var statement = facts.Statement;
 
             /* 6: the write, journaled. */
             PlanForceState? after = null;
@@ -326,9 +298,7 @@ public sealed partial class DarlingMcpPlanForceTools
                     ReadBefore = (_, _, _) => Task.FromResult<string?>(JsonSerializer.Serialize(beforeState)),
                     Write = async (_, _, token) =>
                     {
-                        var written = force
-                            ? await executor.ForcePlanAsync(permit, query_id, plan_id, dryRun: false, token)
-                            : await executor.UnforcePlanAsync(permit, query_id, plan_id, dryRun: false, token);
+                        var written = await WriteForcePlanAsync(executor, permit, facts, token);
                         /* The executor says the server accepted the write: from here the store's journal never says failed (#5632, step 13). */
                         if (written.Wrote)
                             changed.MarkServerChanged();
@@ -458,29 +428,17 @@ public sealed partial class DarlingMcpPlanForceTools
             var permit = decision.Permit!;
             _ = InvestigationToolCore.ParseAgentAction(agent_action, out var action);
 
-            var row = await ReadServerRowAsync(owner, resolved.ServerId, ct);
-            if (row is null)
-                return Answer("failed", "server_row_missing", $"{resolved.DisplayName} has no row in the monitored-server settings.");
-            var executor = new SqlServerRemediationExecutor(resolved.ServerId, row.Server, row.UserName, row.SecretSlot, logger);
-
-            /* 4: the before image comes from the store, not the server: what Darling collected for this handle in the last 24 hours. */
-            var (statements, objectName) = await DarlingPlanEvictStore.ReadBeforeAsync(postgres, resolved.ServerId, handle, DateTime.UtcNow, ct);
-            var warnings = EvictWarnings(statements.Count);
-            var before = new { plan_handle = handle, object_name = objectName, statements };
-            var statement = PlanEvictStatement.For(handle);
-
-            /* 5: the executor's own checks run on a dry run and before a write: edition, the grant, and that the handle is cached now. */
-            var dry = await executor.EvictPlanAsync(permit, handle, dryRun: true, ct);
-            if (dry.Outcome != RemediationOutcome.Done)
-            {
-                if (dry.Outcome == RemediationOutcome.Refused && dry.Reason is not null)
-                    await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, dry.Reason, agentTokenName, ct);
-                return Answer(dry.Outcome == RemediationOutcome.Refused ? "refused" : "failed", dry.Reason, dry.Message,
-                    new { dry_run, statement = dry.Statement ?? statement, before, warnings });
-            }
-
-            if (dry_run)
-                return Answer("dry_run", null, dry.Message + " An eviction has no undo.", new { dry_run = true, statement = dry.Statement ?? statement, before, warnings });
+            /* 4: the prepare step: the server row, the before image from the store (what Darling collected for this handle in the last 24 hours), and the executor's own checks
+               (edition, the grant, and that the handle is cached now). */
+            var prepared = await PrepareEvictPlanAsync(postgres, owner, logger, permit, resolved.ServerId, resolved.DisplayName, handle, dry_run,
+                (reason, token) => store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, reason, agentTokenName, token), ct);
+            if (prepared.Answer is { } preparedAnswer)
+                return preparedAnswer;
+            var facts = prepared.Facts!;
+            var executor = prepared.Executor!;
+            var before = facts.Before;
+            var warnings = facts.Warnings;
+            var statement = facts.Statement;
 
             /* 6: the write, journaled. action_called holds the store's before image; action_done holds the statement and the message. */
             try
@@ -493,7 +451,7 @@ public sealed partial class DarlingMcpPlanForceTools
                     ReadBefore = (_, _, _) => Task.FromResult<string?>(JsonSerializer.Serialize(before, McpHelpers.JsonOptions)),
                     Write = async (_, _, token) =>
                     {
-                        var written = await executor.EvictPlanAsync(permit, handle, dryRun: false, token);
+                        var written = await WriteEvictPlanAsync(executor, permit, facts, token);
                         if (written.Wrote)
                             changed.MarkServerChanged();
                         if (written.Outcome != RemediationOutcome.Done || !written.Wrote)
