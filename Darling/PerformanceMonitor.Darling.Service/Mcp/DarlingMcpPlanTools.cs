@@ -379,7 +379,7 @@ public sealed class DarlingMcpPlanTools
     /// #4348: said when the statement filter withheld a plan whole, so the analysis is skipped instead of reading the
     /// placeholder as XML and reporting a parse error. Worded once for the four analysis tools.
     /// </summary>
-    internal const string WithheldPlanMessage = "This plan was withheld by the statement filter (#4348), so it was not analysed.";
+    internal const string WithheldPlanMessage = "This plan was withheld by the statement filter, which hides text it treats as sensitive, so it was not analysed.";
 
     /// <summary>
     /// #4348: the one way every plan-analysis tool here turns plan XML into its result. The statement filter runs on

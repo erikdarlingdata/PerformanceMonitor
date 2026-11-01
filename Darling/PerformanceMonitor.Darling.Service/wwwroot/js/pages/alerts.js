@@ -24,7 +24,7 @@
  */
 
 import { el, mount, readTool, apiSend, buildQuery, loadingStrip, errorStrip, emptyStrip, noticeStrip, disclosure,
-         ALERT_STATE_LABELS, alertDeliveryState, parseUtc, localizeAlertDetail, rowsUnder, storeHash } from "../util.js";
+         ALERT_STATE_LABELS, alertDeliveryState, parseUtc, localizeAlertDetail, rowsUnder, storeHash, NO_MESSAGE_TEXT_PREFIX } from "../util.js";
 import { VIZ, reapplyGridSort, gridRowOf } from "../panels.js";
 import { copyText } from "../grid-tools.js";
 import { pageRangePicker, windowResultOfSpec } from "../page-range.js";
@@ -645,7 +645,7 @@ async function dismissRows(state, rows) {
     if (res.kind === "data" && res.data && typeof res.data === "object") {
       for (const k of Object.keys(totals)) totals[k] += Number(res.data[k]) || 0;
     } else if (res.status === 403) {
-      failure = res.message && !/^Request failed/.test(res.message) ? res.message : "This session is read-only, so nothing was dismissed.";
+      failure = res.message && !res.message.startsWith(NO_MESSAGE_TEXT_PREFIX) ? res.message : "This session is read-only, so nothing was dismissed.";
     } else if (res.kind === "auth") {
       failure = res.message || "Your session has expired. Sign in again.";
     } else {

@@ -205,9 +205,12 @@ GROUP BY d.server_id, d.volume_mount_point";
     /// The period's alert counts per (server, metric): $1 window start, $2 window end (naive UTC), $3 the report's own delivery row,
     /// which is left out. An aggregate over the whole window with no page, so a busy fleet is counted in full (the report's counts are
     /// not a fact about a capped page). Dismissed rows count: they fired. Resolution rows are dropped in code by their name.
+    /// <c>held</c> is the part of <c>fired</c> that was held back from paging (the Daily Digest carries it, #7086), so the report can say
+    /// how much of a metric's count never paged anyone.
     /// </summary>
     internal const string PeriodAlertCountsSql = @"
-SELECT a.server_id, a.metric_name, COUNT(*) AS fired
+SELECT a.server_id, a.metric_name, COUNT(*) AS fired,
+       COUNT(*) FILTER (WHERE a.notification_type = 'digest') AS held
 FROM config_alert_log AS a
 WHERE a.alert_time >= $1
 AND   a.alert_time <= $2
@@ -216,7 +219,7 @@ GROUP BY a.server_id, a.metric_name";
 
     private async Task<Dictionary<int, IReadOnlyList<DailyHealthAlertCount>>> ReadAlertCountsAsync(DateTime start, DateTime end, CancellationToken ct)
     {
-        var rows = new List<(int ServerId, string Metric, long Count)>();
+        var rows = new List<(int ServerId, string Metric, long Count, long Held)>();
         await using (var command = _postgres.CreateCommand(PeriodAlertCountsSql))
         {
             command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
@@ -226,7 +229,7 @@ GROUP BY a.server_id, a.metric_name";
             await using var reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
             while (await reader.ReadAsync(ct).ConfigureAwait(false))
             {
-                rows.Add((reader.IsDBNull(0) ? 0 : reader.GetInt32(0), reader.IsDBNull(1) ? "" : reader.GetString(1), reader.GetInt64(2)));
+                rows.Add((reader.IsDBNull(0) ? 0 : reader.GetInt32(0), reader.IsDBNull(1) ? "" : reader.GetString(1), reader.GetInt64(2), reader.GetInt64(3)));
             }
         }
 
@@ -235,7 +238,7 @@ GROUP BY a.server_id, a.metric_name";
 
     /// <summary>Folds (server, metric, count) rows into each server's counts: resolutions dropped, metric names that differ only by
     /// case summed under the first spelling, most frequent first.</summary>
-    internal static Dictionary<int, IReadOnlyList<DailyHealthAlertCount>> CountAlerts(IEnumerable<(int ServerId, string Metric, long Count)> rows) =>
+    internal static Dictionary<int, IReadOnlyList<DailyHealthAlertCount>> CountAlerts(IEnumerable<(int ServerId, string Metric, long Count, long Held)> rows) =>
         rows
             .Where(a => !AlertMetricClassifier.IsResolution(a.Metric)
                         && !string.Equals(a.Metric, DeliveryMetricName, StringComparison.OrdinalIgnoreCase))
@@ -244,7 +247,8 @@ GROUP BY a.server_id, a.metric_name";
                 g => g.Key,
                 g => (IReadOnlyList<DailyHealthAlertCount>)g
                     .GroupBy(a => a.Metric, StringComparer.OrdinalIgnoreCase)
-                    .Select(m => new DailyHealthAlertCount(m.First().Metric, (int)Math.Min(int.MaxValue, m.Sum(r => r.Count))))
+                    .Select(m => new DailyHealthAlertCount(
+                        m.First().Metric, (int)Math.Min(int.MaxValue, m.Sum(r => r.Count)), (int)Math.Min(int.MaxValue, m.Sum(r => r.Held))))
                     .OrderByDescending(m => m.Count).ThenBy(m => m.Metric, StringComparer.OrdinalIgnoreCase)
                     .ToList());
 

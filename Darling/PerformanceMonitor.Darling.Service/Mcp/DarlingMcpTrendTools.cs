@@ -854,7 +854,7 @@ public sealed class DarlingMcpTrendTools
                 {
                     return EmptyStatus(
                         "empty",
-                        $"The requested window ends before {floor:o}, the oldest hour the corrected Query Store rollup has materialized. This read serves history from query_store_stats_corrected_hourly rather than ranking the raw Query Store slab (#2736), so windows before that floor come back empty even when rows were collected — run --backfill-rollups to materialize deeper history.",
+                        $"The requested window ends before {floor:o}, the oldest hour the corrected Query Store rollup has materialized. Query Store history older than that is not summarized yet, so this window is empty even though rows were collected. To fill it in, an operator runs PerformanceMonitor.Darling.Service.exe --backfill-rollups.",
                         disclosure, databases);
                 }
 

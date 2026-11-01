@@ -148,7 +148,20 @@ Scheduled analysis: the triage engine runs per server on a cadence, persists its
 | Plan-regression chain (any story with `PLAN_REGRESSION` on its path) | The server's average CPU in the window is 50% or more, or queries' timeouts rose. | `avg_total_cpu` of the CPU fact, and `timeout_offender_count` on the `PLAN_REGRESSION` fact (Query Store Aborted runs, which a client timeout produces). No CPU fact counts as 0%. |
 | PostgreSQL wait profile (`ANOMALY_PG_WAIT_PROFILE`, `ANOMALY_PG_SAMPLED_WAIT_PROFILE`) | The window's mean wait rate is 1.0 or more waiting backends. Also no page for the same story went out on that server in the last 24 hours. | `mean_ms_per_sec` divided by 1000. 1.0 is Poison Wait's Warning bar. The 24-hour clock lives in memory. After a restart it is read back from the alert history's last delivered page of that story, so a restart does not open a second page. |
 
-**The Analysis Singles Digest** is the third daily document beside the Collector Cost Digest and the Fleet Sweep Rollup (family `reports`, INFO, one post per trailing day, delivered-today gate in the store, empty day posts nothing): "Anomaly singles: N across M servers", the top movers by severity and a by-family, by-server breakdown, each line carrying the same alert-history key (`Analysis: <category> [<hash>]`) and #1140 dedup fingerprints a page would have carried, so any single can be promoted to a full drill-down without archaeology.
+**The Daily Digest** is the third daily document beside the Collector Cost Digest and the Fleet Sweep Rollup. It is where an alert that was held back from paging reaches a person. Its metric name is `Analysis Singles Digest`. Notification routes, mute rules and webhook automations match on that name, so it stays as it was before the digest also carried held alerts. Its title on email, Slack and Teams is "Daily Digest".
+
+The digest goes out through the `reports` family at INFO, once per trailing day, whenever alerts are on. A delivered-today stamp in the store keeps it to one per day, and a day with nothing to report posts nothing.
+
+An alert can be held back instead of paged: a first failure that has not repeated, or a small event below the paging bar. A held alert is recorded in Alert History with the status Digest and the reason on the row (`routing_reason`). Nothing is sent. The digest has two sections.
+
+- **Held back from paging.** One line per server and metric. It gives how many were held, the first and last time (UTC), and the reason stored with the newest one. Example: `Prod-1 - Runnable Queue Warning: 3 held, first 2026-11-01 02:10 UTC, last 2026-11-01 09:40 UTC. <reason>`.
+- **Analysis singles.** The top movers by severity, then a breakdown by family and server. Each line carries the alert-history key (`Analysis: <category> [<hash>]`) and the #1140 dedup fingerprints of the finding. Use them to open the full drill-down.
+
+The short message counts both, for example "12 held alerts and 30 analysis singles across 9 servers". A day with only one kind shows only that section. A condition that later meets its paging bar pages at that moment as its own alert, so nothing in the digest waits on it.
+
+A mute rule wins over a hold: a muted alert is recorded as muted and is not in the digest. To keep one metric out of the digest, mute it. To change where the digest goes, edit the route for the `reports` family. Lite has no daily digest, and its Daily Summary leaves held alerts out of its count.
+
+The Daily Health Report shows the held part of a metric's count, as in `Blocking Detected x12 (9 held)`. A metric with no held alerts reads as before.
 
 ## Daily Health Report
 
@@ -298,7 +311,7 @@ A route names what it matches and a destination per channel type, and **an empty
 | Family | Owns |
 |---|---|
 | `self-monitor` | The monitor about itself: `Collection Stopped`, `Capture Down`, `Compression Job Stuck`, `Refresh Job Stuck`, `Retention Job Stuck`, `Store Job Failing`, `Store Disk Pressure`, `Store Runtime Upgrade`, `Store Job Over Cadence`, `Retention Held`, `Custom Alert Rules Unhealthy`, `Stale Mute Rules`, `Web TLS Certificate Expiring`, `MCP TLS Certificate Expiring`, `Store Settings Need Attention`, `Collector Cost Regression`, `Collection Falling Behind`, `Collection Gap At Start` (once per start, when the service was not collecting for 15 minutes or more before it started), `Collection Gaps In History` (once a day, after 03:00Z, for the previous UTC day: an hour whose servers, or perfmon collection passes, fell below half of the usual for that hour; changing the perfmon collection schedule can trigger it for a few days) |
-| `reports` | Scheduled prose, never a page: `Collector Cost Digest`, `Fleet Sweep Rollup`, `Analysis Singles Digest`, `Daily Health Report` |
+| `reports` | Scheduled prose, never a page: `Collector Cost Digest`, `Fleet Sweep Rollup`, `Analysis Singles Digest` (titled Daily Digest), `Daily Health Report` |
 | `agent-jobs` | `Failed Agent Job`, `Long-Running Job`, `Agent Not Running`, `Agent Alert Gaps` |
 | `performance` | Everything about a monitored server the on-call is paged for: `High CPU`, `Blocking Detected`, `Blocking Wait Time`, `Deadlocks Detected`, `Poison Wait`, `Runnable Queue`, `Client Timeouts`, `Identity Capacity`, `Long-Running Query`, `tempdb Space`, `Volume Free Space`, `Version Store (PVS)`, `Database File Growth`, `Database State`, `Forced Plan Failing`, the three PostgreSQL outage predictors, the five `AG …` alerts, `Server Unreachable` / `Server Restored`, every `Custom:<id>` rule and every `Analysis: …` finding — and any metric the taxonomy does not name, so an unclassified alert lands where every alert landed before routes existed |
 | `external` | Alerts another service raised through its own database login, named `External:<source>:<key>`. With no route they go to the parent channels like any other alert. |

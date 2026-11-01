@@ -372,7 +372,7 @@ public partial class WaitDrillDownWindow : Window
             /* #4239: FetchSnapshotPlanAsync is a Postgres round-trip inside an async void handler — an
                unguarded await here would let a store error (connection drop, timeout) reach the dispatcher
                as an unhandled exception. Same fetch-failure idiom as ViewerServerTab.Plans.cs. */
-            MessageBox.Show(this, $"Failed to retrieve plan: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show(this, $"Could not read the plan for this query from server {_serverName}: {ex.Message}. If this repeats, check the Viewer log (sidebar: View Log).", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
             return;
         }
 
@@ -458,7 +458,7 @@ public partial class WaitDrillDownWindow : Window
         }
         catch (Exception ex)
         {
-            MessageBox.Show(this, $"Failed to retrieve plan: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show(this, $"Could not read the plan for this query from server {_serverName}: {ex.Message}. If this repeats, check the Viewer log (sidebar: View Log).", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
             return;
         }
         var argsJson = ViewerDataService.BuildActualPlanArgsForSnapshot(row.CollectionTime, row.SessionId, row.DatabaseName);

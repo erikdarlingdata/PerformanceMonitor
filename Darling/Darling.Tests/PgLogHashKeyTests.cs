@@ -528,7 +528,7 @@ public sealed class PgLogHashKeyTests
                 Assert.Equal("700", modes.Octal(directory));
                 Assert.False(File.Exists(path), "the planted key outlived the look that found its directory open");
                 Assert.Contains("was open to other users until now (its mode was 0777", log.Joined, StringComparison.Ordinal);
-                Assert.Contains($"{DarlingLogHashKeyFile.FileName} discarded (#4004)", log.Joined, StringComparison.Ordinal);
+                Assert.Contains($"{DarlingLogHashKeyFile.FileName} discarded.", log.Joined, StringComparison.Ordinal);
 
                 load = DarlingLogHashKeyFile.Load(directory, NullLogger.Instance);
             }

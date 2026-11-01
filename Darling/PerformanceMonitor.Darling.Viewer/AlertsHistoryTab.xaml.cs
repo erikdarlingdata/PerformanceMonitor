@@ -94,7 +94,7 @@ public partial class AlertsHistoryTab : UserControl
            the read-only message via StatusChanged if used — the reactive backstop. */
         if (dataService.IsReadOnly)
         {
-            const string readOnlyTip = "This viewer is connected read-only (postgres.connectAs = \"viewer\"); alert dismissal is disabled.";
+            const string readOnlyTip = "This viewer is connected read-only, so alert dismissal is disabled. " + ViewerReadOnlyException.HowToConnectAsAdmin;
             DismissAllButton.IsEnabled = false;
             DismissAllButton.ToolTip = readOnlyTip;
             DismissSelectedButton.ToolTip = readOnlyTip;
