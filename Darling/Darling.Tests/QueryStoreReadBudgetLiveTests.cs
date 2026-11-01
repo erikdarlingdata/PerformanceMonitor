@@ -333,7 +333,7 @@ public sealed class QueryStoreReadBudgetLiveTests
            tick, so at Windows' default 15.6 ms tick a 1,000 ms budget can cut the read a few milliseconds short of 1,000
            by the slice's stopwatch (Lite's twin read 999 on CI, at its 1 s budget). Load only lengthens the slice, so half the budget
            separates the two shapes with no clock in the test. */
-        Assert.True(cut.SqlMs >= (long)(SiblingBudget.TotalMilliseconds / 2),$"SqlMs {cut.SqlMs} holds the timed-out slice");
+        Assert.True(cut.SqlMs >= (long)(SiblingBudget.TotalMilliseconds / 2), $"SqlMs {cut.SqlMs} holds the timed-out slice");
         Assert.Contains("timed out", cut.HostNote ?? string.Empty, StringComparison.Ordinal);
         Assert.Equal(1, rig.Log.TimedOutWarnings(Alpha));
 
