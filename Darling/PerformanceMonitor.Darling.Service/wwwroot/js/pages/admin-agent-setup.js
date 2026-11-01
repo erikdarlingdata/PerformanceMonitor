@@ -60,6 +60,13 @@ export function routeUseText(r) {
   return `${r.agent_requests_last_hour} of ${r.agent_max_per_hour} this hour, ${r.agent_requests_last_day} of ${r.agent_max_per_day} today`;
 }
 
+/** #7109: one strip for each route where nobody can approve a proposal (GET /api/notification-routes/nobody-can-approve answers
+    {route_ids, message}). A failed read shows nothing: the routes below are the page. */
+export function nobodyCanApproveNodes(res) {
+  if (!res || res.kind !== "data" || !res.data || !Array.isArray(res.data.route_ids)) return [];
+  return res.data.route_ids.map((id) => noticeStrip("Route " + id + ": " + res.data.message));
+}
+
 /** The editor's entries for a route, from a routes read row (or the defaults for a new one). */
 export function entriesFromRoute(r) {
   if (!r) {
