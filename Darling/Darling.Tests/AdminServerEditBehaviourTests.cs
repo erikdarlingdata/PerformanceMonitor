@@ -899,7 +899,7 @@ public sealed class AdminServerEditBehaviourTests
     [Theory]
     [InlineData("403", "This account has read-only access.")]
     [InlineData("500", "admin server read failed (InvalidOperationException)")]
-    [InlineData("network", "Network error: connection refused")]
+    [InlineData("network", "Could not reach the Darling service (connection refused). Check that the service is running and that you can open this address, then reload.")]
     public void AFailedEditRead_ShowsTheSentence_OpensNoForm_AndKeepsTheList(string kind, string sentence)
     {
         var page = Run("byIdFails:" + kind);
@@ -1269,7 +1269,7 @@ public sealed class AdminServerEditBehaviourTests
     [InlineData("limited", "Another server change is in progress. Try again in a moment.")]
     [InlineData("broken", "admin server edit failed (InvalidOperationException)")]
     [InlineData("collides", "Another server already uses the address alpha.")]
-    [InlineData("network", "Network error: connection refused")]
+    [InlineData("network", "Could not reach the Darling service (connection refused). Check that the service is running and that you can open this address, then reload.")]
     [InlineData("conflict", "This server was changed since you opened it. Nothing was saved.")]
     public void AnAnswerThatKeepsTheForm_ShowsItsSentenceInTheBanner_ClearsThePassword_AndEnablesSaveAgain(string kind, string sentence)
     {

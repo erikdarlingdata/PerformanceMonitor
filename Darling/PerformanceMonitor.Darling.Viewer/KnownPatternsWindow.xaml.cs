@@ -36,7 +36,7 @@ public partial class KnownPatternsWindow : Window
 
         if (dataService.IsReadOnly)
         {
-            ShowOnly("Read-only connection (postgres.connectAs = \"viewer\"): known patterns can be viewed but not changed here. Set connectAs to \"admin\" and restart the viewer to edit them.");
+            ShowOnly("Read-only connection: known patterns can be viewed but not changed here. " + ViewerReadOnlyException.HowToConnectAsAdmin);
         }
 
         Loaded += async (_, _) => await LoadAsync();

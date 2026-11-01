@@ -353,7 +353,7 @@ LIMIT $2";
     internal static string? PreconditionReason(StatsState state)
     {
         const string Cadence = "The service builds the store's statement statistics at every start and again every hour.";
-        const string ByoSetup = "A store you run yourself needs pg_stat_statements in shared_preload_libraries with pg_stat_statements.track_utility = off (a restart loads it), then CREATE EXTENSION pg_stat_statements run by a superuser in this database; Darling/tools/provision-roles.sql carries the steps.";
+        const string ByoSetup = "A store you run yourself needs pg_stat_statements in shared_preload_libraries with pg_stat_statements.track_utility = off (a restart loads it), then CREATE EXTENSION pg_stat_statements run by a superuser in this database; " + DarlingManagedRoles.ProvisionRolesScriptPath + " carries the steps.";
 
         if (state.ExtensionVersion is null)
         {

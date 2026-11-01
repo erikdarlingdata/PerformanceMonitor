@@ -224,7 +224,7 @@ public partial class QueryStatsHistoryWindow : Window
         }
         catch (Exception ex)
         {
-            MessageBox.Show($"Failed to retrieve plan: {DuckDbMemoryLimitSetting.Describe(ex)}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show($"Could not read the plan from the collected data: {DuckDbMemoryLimitSetting.Describe(ex)}. If this repeats, check the Lite log.", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
         }
         finally
         {

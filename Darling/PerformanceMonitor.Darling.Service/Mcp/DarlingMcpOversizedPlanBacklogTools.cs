@@ -109,9 +109,9 @@ public sealed class DarlingMcpOversizedPlanBacklogTools
                     + $"{QueryPlanXmlCaptureLimits.MaxCapturedPlanXmlBytes} bytes as measured on the monitored "
                     + "server, which on the measured population is a handful of long-lived plan-cache "
                     + "residents per server rather than a stream. It is also permanently empty on a store "
-                    + "below schema V121, and on any store whose service build predates the sweep — check "
-                    + "get_store_metrics or the service version before reading this as an all-clear on a "
-                    + "store you have not confirmed the rung of.");
+                    + "with an older schema, and on any store whose service build predates the sweep. Before "
+                    + "reading this as an all-clear, confirm the store's schema version "
+                    + "(get_store_metrics reports it) and the service version.");
             }
 
             var servers = await DarlingOversizedPlanBacklogReader.GetPerServerRollupAsync(postgres, serverId, cancellationToken);

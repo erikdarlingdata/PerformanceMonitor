@@ -309,11 +309,11 @@ If the block itself is bad, the service is loud, and it fails closed. A missing 
 
 ```
 MCP network exposure requested (mcp.network.listen is non-loopback) but no bearer token is set — refusing to expose; binding loopback-only. Set mcp.network.encryptedToken (via --encrypt-password) or mcp.network.token.
-MCP network token could not be decrypted (...); MCP server not started.
+MCP network token (mcp.network.encryptedToken) could not be decrypted (...). MCP server not started. A token made on another machine or account cannot be read here. Run PerformanceMonitor.Darling.Service.exe --encrypt-password on this machine and put the new value in mcp.network.encryptedToken. On another OS, remove it and set mcp.network.token to an env: or file: reference.
 MCP network token (mcp.network.token / mcp.network.encryptedToken) is shorter than 16 characters, and at least 16 are required for an exposed surface (...) — refusing to expose; binding loopback-only.
 MCP bearer token (mcp.network.token / mcp.network.encryptedToken) is shorter than 16 characters, and at least 16 are required for an exposed surface (...) — the MCP write tools stay off.
 MCP network exposure requested but mcp.network.allowFrom '...' is not a valid CIDR list or an entry's address family does not match mcp.network.listen — refusing to expose; binding loopback-only. Use one CIDR (e.g. 192.168.1.0/24) or several, separated by commas (e.g. 10.8.0.0/16,192.168.1.5/32): every entry in CIDR form (/32 for one address), with each IPv4 address written as four plain decimal numbers (no leading zeros) and no IPv6 zone index, and of the same family as listen (a :: listen takes IPv6 entries only). Host bits are masked (192.168.1.5/24 means 192.168.1.0/24).
-mcp.network.* is set but postgres.managed = false — MCP network exposure is managed-mode (or container) only and is ignored ...
+mcp.network.* is set but postgres.managed = false. MCP network exposure is available only with the bundled store (postgres.managed = true) or the container distribution, so listen and allowFrom are ignored. Use your own reverse proxy to expose it. Binding loopback-only. A token in the block (mcp.network.encryptedToken / token) still gates the loopback listener.
 ```
 
 The MCP token must have at least 16 characters. In network mode, a shorter token keeps MCP loopback-only, with the "shorter than 16 characters" line above that ends in "refusing to expose". With `mcp.allowWrites` on, a shorter token leaves the write tools off, with the "shorter than 16 characters" line that ends in "the MCP write tools stay off".

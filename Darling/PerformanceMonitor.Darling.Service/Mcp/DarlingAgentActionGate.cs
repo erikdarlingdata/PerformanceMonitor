@@ -62,7 +62,7 @@ internal static class DarlingAgentActionGate
             return AgentActionGateOutcome.Ungated;
         if (!policy.Investigations)
             return AgentActionGateOutcome.Refused(new AgentActionRefusal(NotServed,
-                $"{tool} is not served: it needs mcp.allowInvestigations (with mcp.allowWrites off) or mcp.allowWrites, with a token."));
+                $"{tool} is not available on this service. An operator must set mcp.allowWrites (or mcp.allowInvestigations with mcp.allowWrites off) in darling.json, set an MCP token, and restart the service. Do not retry."));
 
         var problem = InvestigationToolCore.ParseAgentAction(agentAction, out var action);
         if (problem is not null)
