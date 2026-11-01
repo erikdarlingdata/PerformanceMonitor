@@ -66,7 +66,7 @@ public sealed class TwoTierEscalationTests
     /// <summary>One evaluation of <paramref name="metric"/> at <paramref name="at"/> showing <paramref name="level"/>;
     /// returns how many of THAT alert's outcomes it delivered. <paramref name="step"/> only has to grow from call to
     /// call: it makes a Critical deadlock count, a poison collection time or a free-space level newer than the last.</summary>
-    private static async Task<int> StepAsync(string metric, AlertEngineTests.Harness h, AlertEngine engine, DateTime at, Level level, int step, int cpuSamples = 3)
+    private static async Task<int> StepAsync(string metric, AlertEngineTests.Harness h, AlertEngine engine, DateTime at, Level level, int step, int? cpuSamples = null)
     {
         h.Now = at;
         var before = h.Deliverer.Outcomes.Count(o => o.MetricName == metric);
@@ -74,10 +74,14 @@ public sealed class TwoTierEscalationTests
         {
             case "High CPU":
             {
-                /* The persistence gate wants three consecutive samples to open and two clear samples to close; three
-                   per call serves both, and the cooldown is what holds the extra fires of a call. A test that counts retries passes 1. */
+                /* #7085: the SQL Server gate opens on SqlCpuBreachSamples consecutive samples at or over the bar and clears only
+                   after SqlCpuClearHold of sample time under it, so a Warning or Critical call feeds the opening count and a Clear
+                   call feeds enough samples to span the hold (the hold in minutes plus the sample that completes it). Every
+                   Snapshot carries a sample time one minute after the last. Extra fires in a call are held back by the incident
+                   rule or the cooldown. A test that counts retries passes 1. */
                 double? value = level switch { Level.Warning => 90, Level.Critical => 97, _ => 10 };
-                for (var i = 0; i < cpuSamples; i++)
+                var samples = cpuSamples ?? (level == Level.Clear ? (int)AlertEngine.SqlCpuClearHold.TotalMinutes + 1 : AlertEngine.SqlCpuBreachSamples);
+                for (var i = 0; i < samples; i++)
                 {
                     await engine.EvaluateServerAsync(AlertEngineTests.Harness.Snapshot(sqlCpu: value, totalCpu: value));
                 }
@@ -198,6 +202,16 @@ public sealed class TwoTierEscalationTests
         /* The cooldown counts from the Critical (T0 + 1 minute), not from the Warning. */
         var due = T0.AddMinutes(1).Add(TimeSpan.FromMinutes(h.Settings.CooldownMinutes));
         Assert.Equal(0, await StepAsync(metric, h, engine, due.AddSeconds(-30), Level.Critical, 2));
+        if (metric == "High CPU")
+        {
+            /* #7085: High CPU holds an open incident to escalations only, so the repeat after the cooldown pages nothing and
+               the Critical that escalated stays the last page. The cooldown no longer decides a High CPU repeat. */
+            Assert.Equal(0, await StepAsync(metric, h, engine, due, Level.Critical, 3));
+            Assert.Equal(0, await StepAsync(metric, h, engine, due.AddMinutes(h.Settings.CooldownMinutes), Level.Critical, 4));
+            Assert.True(Flag(metric, h));
+            return;
+        }
+
         Assert.Equal(1, await StepAsync(metric, h, engine, due, Level.Critical, 3));
         Assert.False(Flag(metric, h));
     }

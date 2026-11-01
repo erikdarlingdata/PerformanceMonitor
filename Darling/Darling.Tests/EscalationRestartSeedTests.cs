@@ -64,7 +64,10 @@ public sealed class EscalationRestartSeedTests
             case "High CPU":
             {
                 double? value = level switch { Level.Warning => 90, Level.Critical => 97, _ => 10 };
-                for (var i = 0; i < 3; i++)
+                /* #7085: five breaching samples open the SQL Server gate, and a clear call spans the 15 minute hold
+                   (one-minute samples: the hold plus the sample that completes it). */
+                var samples = level == Level.Clear ? (int)AlertEngine.SqlCpuClearHold.TotalMinutes + 1 : AlertEngine.SqlCpuBreachSamples;
+                for (var i = 0; i < samples; i++)
                 {
                     await engine.EvaluateServerAsync(AlertEngineTests.Harness.Snapshot(sqlCpu: value, totalCpu: value));
                 }
@@ -302,7 +305,7 @@ public sealed class EscalationRestartSeedTests
         var reads = 0;
         h.EscalationSeedReader = (q, _) =>
         {
-            if (q.MetricName == "High CPU" && ++reads <= 3)
+            if (q.MetricName == "High CPU" && ++reads <= AlertEngine.SqlCpuBreachSamples)
             {
                 throw new InvalidOperationException("transient");
             }
@@ -311,14 +314,14 @@ public sealed class EscalationRestartSeedTests
         };
         var engine = h.Build();
 
-        /* The first three reads fail (the CPU gate needs three samples to open), so the Warning fires in process. */
+        /* The first reads fail, one per sample (the CPU gate needs SqlCpuBreachSamples samples to open), so the Warning fires in process. */
         Assert.Equal(1, await StepAsync("High CPU", h, engine, T0, Level.Warning, 0));
 
         Assert.Equal(1, await StepAsync("High CPU", h, engine, T0.AddMinutes(1), Level.Critical, 1));
         Assert.True(Last("High CPU", h).Context!.EscalationBypassesCooldown);
 
-        /* The process Recorded the Warning, so the fourth read never happens. */
-        Assert.Equal(3, reads);
+        /* The process Recorded the Warning, so the next read never happens. */
+        Assert.Equal(AlertEngine.SqlCpuBreachSamples, reads);
     }
 
     /// <summary>A store whose only live member is the tier read, answering from rows it holds the way the real stores

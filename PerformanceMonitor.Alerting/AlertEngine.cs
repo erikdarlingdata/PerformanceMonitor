@@ -797,9 +797,13 @@ public sealed class AlertEngine
                    because Record keeps the higher tier, could only cancel the NEXT incident's Warning-to-Critical one. A
                    repeated Critical after a restart is a plain first fire, which the history-seeded email and webhook
                    cooldowns already hold. The engine drops anything else here, whatever the reader hands back. */
-                if (tier == AlertSeverityLevel.Warning && !escalation.IsTouched(key))
+                /* #7085: High CPU is the exception. It no longer repeats after a cooldown, so an incident whose Critical went out
+                   before the restart must remember it, or a dip to Warning and a return to Critical would page that Critical twice. */
+                if (tier is { } seeded
+                    && (seeded == AlertSeverityLevel.Warning || (seeded == AlertSeverityLevel.Critical && metric == "High CPU"))
+                    && !escalation.IsTouched(key))
                 {
-                    escalation.Restore(key, AlertSeverityLevel.Warning);
+                    escalation.Restore(key, seeded);
                 }
 
                 _escalationSeeded[(key, metric)] = true;
@@ -1296,8 +1300,9 @@ public sealed class AlertEngine
         }
 
         bool incidentPaged = _cpuEscalation.Highest(key) is not null;
+        /* An escalation whose every channel failed waits out the back-dated stamp (#5715), the same backoff as any failed send. */
         bool opensGate = incidentPaged
-            ? escalation && !_failedSends.HasOpenStreak("High CPU", key, now)
+            ? escalation && EscalationOpensGate("High CPU", key, escalation, _lastCpuAlert, now, alertCooldown)
             : EscalationOpensGate("High CPU", key, escalation, _lastCpuAlert, now, alertCooldown);
 
         if (!suppressed && opensGate) /* :72 */
