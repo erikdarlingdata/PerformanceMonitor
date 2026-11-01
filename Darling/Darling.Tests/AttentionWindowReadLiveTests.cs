@@ -170,6 +170,11 @@ public sealed class AttentionWindowReadLiveTests
         "vscode-mssql-GeneralConnection",
         "VSCODE-MSSQL-GENERALCONNECTION-LANGUAGESERVICE",
         "  vscode-mssql-ObjectExplorer  ",
+        /* #7061: trim and rtrim strip only spaces in both stores, so the C# rule strips only spaces too. A tab is part of the name. */
+        "vscode-mssql-ObjectExplorer\t",
+        "vscode-mssql-ObjectExplorer ",
+        "Microsoft SQL Server Management Studio - Transact-SQL IntelliSense ",
+        "Microsoft SQL Server Management Studio - Transact-SQL IntelliSense\t",
         "vscode-mssql-ObjectExplorer-languageService",
         "vscode-mssql-languageService",
         "vscode-mssql",

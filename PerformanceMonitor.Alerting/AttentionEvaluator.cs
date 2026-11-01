@@ -193,7 +193,7 @@ public static class AttentionEvaluator
     public static bool IsSsmsIntelliSense(string? clientAppName) =>
         clientAppName is not null
         && clientAppName.StartsWith(AttentionWindowSql.SsmsIntelliSensePrefix, StringComparison.OrdinalIgnoreCase)
-        && clientAppName.TrimEnd().EndsWith(AttentionWindowSql.SsmsIntelliSenseSuffix, StringComparison.OrdinalIgnoreCase);
+        && clientAppName.TrimEnd(' ').EndsWith(AttentionWindowSql.SsmsIntelliSenseSuffix, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// The tool-naming part of every sentence that says where the left-out cancels came from (#6856): the alert summary, the alert context
@@ -220,7 +220,7 @@ public static class AttentionEvaluator
             return false;
         }
 
-        var name = clientAppName.Trim();
+        var name = clientAppName.Trim(' ');
         foreach (var known in AttentionWindowSql.VsCodeMetadataApps)
         {
             if (string.Equals(name, known, StringComparison.OrdinalIgnoreCase))

@@ -208,8 +208,8 @@ public static class ClientTimeoutsRead
                 ? Math.Round(judgedCount / reading.CoveredMinutes, 2, MidpointRounding.AwayFromZero)
                 : rate,
             note = AttentionEvaluator.ExcludedToolNames(true, true) + " cancel their own metadata queries (language service, Object Explorer, general connection) when the user keeps typing. client_apps lists the exact client_app_name values in this range that the alert leaves out, most sampled events first. It has no cap, so it can name an application that top_client_apps (the top five) or the paged sampled_events do not show. The Client Timeouts alert also leaves out sampled events that lasted under 1 ms (below_duration_floor_events, a cancel on a command that had already finished) and Azure Data Studio's own metadata statements (azdata_metadata_events, told apart by statement shape because its query editor uses the same application name). The alert leaves these " +
-                   "sampled events out of the rate it judges (count_judged is an estimate from the sampled share); they stay listed here, " +
-                   "marked excluded.",
+                   "sampled events out of the rate it judges (count_judged is an estimate from the sampled share); they stay listed in sampled_events. " +
+                   "An SSMS IntelliSense or VS Code event shows excluded: true. A sub-1 ms event shows below_duration_floor: true and an azdata metadata event shows azdata_metadata: true, both with excluded: false.",
         };
     }
 
