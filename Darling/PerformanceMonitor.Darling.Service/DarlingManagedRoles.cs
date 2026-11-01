@@ -99,6 +99,13 @@ namespace PerformanceMonitor.Darling.Service;
 public static class DarlingManagedRoles
 {
     /// <summary>
+    /// The path every refusal and log line gives for the role-provisioning script. The script is in the project repository
+    /// under <c>Darling/tools</c>. The release zip and the service folder do not carry it. The managed store and the compose
+    /// store never run it by hand, because the service provisions their roles at every start.
+    /// </summary>
+    public const string ProvisionRolesScriptPath = "Darling/tools/provision-roles.sql";
+
+    /// <summary>
     /// The comment stamped on every Darling-created login role (<c>COMMENT ON ROLE … IS</c>, read back
     /// via <c>shobj_description(oid, 'pg_authid')</c>). Because the role names are the bare, un-prefixed
     /// <c>admin</c>/<c>viewer</c> (Erik's decision — no <c>darling_</c> namespace), provisioning must not

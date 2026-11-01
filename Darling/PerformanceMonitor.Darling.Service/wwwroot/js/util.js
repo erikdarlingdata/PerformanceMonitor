@@ -193,7 +193,7 @@ export function emptyStrip(message) {
     store whose web.allowAdminWrites is off, and then the note also names that switch, in the 403's words. */
 export function listOnlyNote(managedStore, lists, toChange, adminWritesOff) {
   return managedStore === true
-    ? "This dashboard lists only on this store, so " + lists + ". " + toChange + ", use the Viewer app." +
+    ? "This dashboard has read-only access to the bundled store, so " + lists + ". " + toChange + ", use the Viewer app." +
       (adminWritesOff === true ? " To let a signed-in admin make it here, set web.allowAdminWrites to true in darling.json and restart the service." : "")
     : "This dashboard's store login cannot make changes, so " + lists + ". " + toChange +
       ", use the Viewer app, or give the web an admin store login (set postgres.webConnectionString to an admin login).";
