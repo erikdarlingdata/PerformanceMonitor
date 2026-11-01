@@ -20,6 +20,7 @@ using System.Security.Cryptography.X509Certificates;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Common;
@@ -213,6 +214,15 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
                 omitPid ? null : session ?? (PostgresBackendId.TryUnpack(backendId, out var pid, out _) ? pid : null),
                 null, backendId, Arg, dryRun, Ct);
 
+        /// <summary>The permit the gate issues for a kill of <paramref name="pid"/> on server 7, as the tool gets it before the prepare step (#7108).</summary>
+        public async Task<ServerActionPermit> PermitAsync(int pid)
+        {
+            var store = new InvestigationRequestStore(Source, 30, agentActionSource: Source);
+            var decision = await ServerActionGate.AuthorizeAsync(store, Source, NullLogger.Instance, DarlingMcpPlanForceTools.KillToolName, ServerActionNames.KillSession,
+                Arg, new AgentActionTarget(7, "pg-7", pid.ToString(CultureInfo.InvariantCulture), null), Ct);
+            return decision.Permit!;
+        }
+
         public async Task<(NpgsqlConnection Connection, int Pid, string BackendId)> OpenVictimAsync(string? role = null, string? password = null, string? application = null)
         {
             var builder = new NpgsqlConnectionStringBuilder(Target.ConnectionString(role ?? Roles.Victim, password ?? VictimPassword)) { ApplicationName = application ?? "pm5632-victim" };
@@ -348,6 +358,64 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
             Assert.Equal(0, await c.JournalAsync("action_called"));
             var parameter = typeof(DarlingMcpPlanForceTools).GetMethod(nameof(DarlingMcpPlanForceTools.KillSession))!.GetParameters().Single(p => p.Name == "dry_run");
             Assert.True((bool)parameter.DefaultValue!);
+        });
+    }
+
+    [Fact]
+    public async Task ThePrepareStep_ReturnsTheBindingFacts_KillsNothing_AndTheWriteStepEndsTheBackend()
+    {
+        await RunAsync(Grants.SignalAndStats, Without.Nothing, async c =>
+        {
+            var (connection, pid, id) = await c.OpenVictimAsync();
+            await using var victimConnection = connection;
+            await using (var open = new NpgsqlCommand("BEGIN; CREATE TEMP TABLE kill_probe (a int);", connection))
+                await open.ExecuteNonQueryAsync(c.Ct);
+            Assert.True(PostgresBackendId.TryUnpack(id, out _, out var epoch));
+            await using var read = new NpgsqlCommand("SELECT xact_start, state_change, state FROM pg_stat_activity WHERE pid = $1", c.Admin);
+            read.Parameters.Add(new NpgsqlParameter { Value = pid, NpgsqlDbType = NpgsqlDbType.Integer });
+            await using var reader = await read.ExecuteReaderAsync(c.Ct);
+            Assert.True(await reader.ReadAsync(c.Ct));
+            var xactStart = reader.GetDateTime(0);
+            var stateChange = reader.GetDateTime(1);
+            var state = reader.GetString(2);
+            await reader.CloseAsync();
+
+            var permit = await c.PermitAsync(pid);
+            var prepared = await DarlingMcpPlanForceTools.PrepareKillBackendAsync(c.Source, NullLogger.Instance, permit, 7, "pg-7", pid, epoch, c.Ct);
+            Assert.True(prepared.Proceed);
+            var binding = prepared.Binding!;
+            Assert.Equal(pid, binding.Pid);
+            Assert.Equal(id, binding.BackendId);
+            Assert.Equal(epoch, binding.BackendStartEpoch);
+            Assert.Equal(xactStart.Ticks, binding.XactStartUtc!.Value.Ticks);
+            Assert.Equal(stateChange.Ticks, binding.StateChangeUtc!.Value.Ticks);
+            Assert.Equal(state, binding.State);
+            Assert.Equal("idle in transaction", binding.State);
+            Assert.True(await c.StillAliveAsync(pid));
+
+            var written = await DarlingMcpPlanForceTools.WriteKillBackendAsync(prepared.Executor!, permit, binding, c.Ct);
+            Assert.Equal(RemediationOutcome.Done, written.Outcome);
+            Assert.True(written.Wrote);
+            Assert.False(await c.AliveAsync(pid));
+        });
+    }
+
+    [Fact]
+    public async Task ThePrepareStep_OfASessionThatIsGone_StopsWithTheReasonToRecord_AndNoBinding()
+    {
+        await RunAsync(Grants.SignalAndStats, Without.Nothing, async c =>
+        {
+            var (connection, pid, id) = await c.OpenVictimAsync();
+            Assert.True(PostgresBackendId.TryUnpack(id, out _, out var epoch));
+            await connection.DisposeAsync();
+            Assert.False(await c.AliveAsync(pid));
+
+            var permit = await c.PermitAsync(pid);
+            var prepared = await DarlingMcpPlanForceTools.PrepareKillBackendAsync(c.Source, NullLogger.Instance, permit, 7, "pg-7", pid, epoch, c.Ct);
+            Assert.False(prepared.Proceed);
+            Assert.Null(prepared.Binding);
+            Assert.Equal(RemediationResult.Reasons.SessionGone, prepared.RecordReason);
+            Assert.NotNull(prepared.NotDone);
         });
     }
 

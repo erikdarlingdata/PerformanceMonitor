@@ -99,39 +99,15 @@ public sealed partial class DarlingMcpPlanForceTools
             var permit = decision.Permit!;
             _ = InvestigationToolCore.ParseAgentAction(agent_action, out var action);
 
-            var row = await ReadServerRowAsync(owner, resolved.ServerId, ct);
-            if (row is null)
-                return Answer("failed", "server_row_missing", $"{resolved.DisplayName} has no row in the monitored-server settings.");
-
-            /* 3b: a database the server's entry excludes is one Darling does not act in. */
-            if (IsExcludedDatabase(row.ExcludedDatabases, database))
-            {
-                await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, AzureDatabaseExcluded, agentTokenName, ct);
-                return DarlingAgentActionGate.RefusalAnswer(ExcludedDatabaseRefusal(database));
-            }
-
-            var executor = new SqlServerRemediationExecutor(resolved.ServerId, row.Server, row.UserName, row.SecretSlot, logger);
-            var statementText = PlanGuideStatement.Create(database, definition);
-
-            /* 4: the executor's own checks run on a dry run and before a write: the name is free, an OBJECT guide's module resolves and holds the statement, the grants. */
-            var dry = await executor.CreatePlanGuideAsync(permit, definition, dryRun: true, ct);
-            var before = new
-            {
-                database,
-                guide = GuideCreateImage(definition),
-                cached_matches = dry.CachedMatches,
-            };
-            if (dry.Outcome != RemediationOutcome.Done)
-            {
-                if (dry.Outcome == RemediationOutcome.Refused && dry.Reason is not null)
-                    await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, dry.Reason, agentTokenName, ct);
-                return Answer(dry.Outcome == RemediationOutcome.Refused ? "refused" : "failed", dry.Reason, dry.Message,
-                    new { dry_run, statement = dry.Statement ?? statementText, before });
-            }
-
-            if (dry_run)
-                return Answer("dry_run", null, dry.Message + " A person can undo the create from Agent changes: the undo drops the guide.",
-                    new { dry_run = true, statement = dry.Statement ?? statementText, before, matches = dry.CachedMatches });
+            /* 4: the prepare step: the server row, the excluded database and the executor's own checks (the name is free, an OBJECT guide's module resolves and holds the statement, the grants). */
+            var prepared = await PrepareCreatePlanGuideAsync(owner, logger, permit, resolved.ServerId, resolved.DisplayName, database, definition, dry_run,
+                (reason, token) => store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, reason, agentTokenName, token), ct);
+            if (prepared.Answer is { } preparedAnswer)
+                return preparedAnswer;
+            var facts = prepared.Facts!;
+            var executor = prepared.Executor!;
+            var before = facts.Before;
+            var statementText = facts.Statement;
 
             /* 5: the write, journaled. action_called holds the definition; action_done holds the statement and the message; a guide that fails validation is dropped in the batch and journaled action_failed. */
             RemediationResult? unknown = null;
@@ -146,7 +122,7 @@ public sealed partial class DarlingMcpPlanForceTools
                     ReadBefore = (_, _, _) => Task.FromResult<string?>(JsonSerializer.Serialize(before, McpHelpers.JsonOptions)),
                     Write = async (_, _, token) =>
                     {
-                        var written = await executor.CreatePlanGuideAsync(permit, definition, dryRun: false, token);
+                        var written = await WriteCreatePlanGuideAsync(executor, permit, facts, token);
                         if (written.Wrote)
                             changed.MarkServerChanged();
                         if (written.Outcome == RemediationOutcome.Unknown)
@@ -359,48 +335,16 @@ public sealed partial class DarlingMcpPlanForceTools
             var permit = decision.Permit!;
             _ = InvestigationToolCore.ParseAgentAction(agent_action, out var action);
 
-            var row = await ReadServerRowAsync(owner, resolved.ServerId, ct);
-            if (row is null)
-                return Answer("failed", "server_row_missing", $"{resolved.DisplayName} has no row in the monitored-server settings.");
-
-            /* 3b: a database the server's entry excludes is one Darling does not act in. */
-            if (IsExcludedDatabase(row.ExcludedDatabases, database))
-            {
-                await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, AzureDatabaseExcluded, agentTokenName, ct);
-                return DarlingAgentActionGate.RefusalAnswer(ExcludedDatabaseRefusal(database));
-            }
-
-            var executor = new SqlServerRemediationExecutor(resolved.ServerId, row.Server, row.UserName, row.SecretSlot, logger);
-            var statementText = PlanGuideStatement.Drop(database, guideName);
-
-            /* 4: one batch in the request's database reads the guide, and the executor refuses a missing guide and a missing grant before anything is dropped. */
-            var dry = await executor.DropPlanGuideAsync(permit, guideName, expected: null, dryRun: true, ct);
-            if (dry.Outcome != RemediationOutcome.Done || dry.Guide is null)
-            {
-                if (dry.Outcome == RemediationOutcome.Refused && dry.Reason is not null)
-                    await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, dry.Reason, agentTokenName, ct);
-                return Answer(dry.Outcome == RemediationOutcome.Refused ? "refused" : "failed", dry.Reason, dry.Message,
-                    new { dry_run, statement = dry.Statement ?? statementText, before = new { database } });
-            }
-
-            var read = dry.Guide;
-
-            /* 4b: the Undo re-creates the guide through the create's own checks, so a guide that would not pass them (hints or statement over the 4,000,000-character cap,
-               an OBJECT guide on a module name that does not normalize) is not dropped: the drop could not be undone. Refused on a dry run as well as a write, before the gate's permit is used. */
-            var (undoable, _, undoMessage) = PlanGuideDefinition.TryCreate(read.Name, read.Statement, read.Type, read.ModuleOrBatch, read.Params, read.Hints);
-            if (undoable is null)
-            {
-                var notUndoable = "Plan guide " + guideName + " was not dropped: its definition does not pass the checks a create makes ("
-                    + undoMessage!.Replace(" Nothing was run.", "", StringComparison.Ordinal) + "), so the Undo could not re-create it. Nothing was run.";
-                await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, GuideNotUndoable, agentTokenName, ct);
-                return Answer("refused", GuideNotUndoable, notUndoable, new { dry_run, statement = dry.Statement ?? statementText, before = new { database } });
-            }
-
-            var disabled = dry.GuideDisabled == true;
-            var before = new { database, guide = GuideImage(read, disabled) };
-            if (dry_run)
-                return Answer("dry_run", null, dry.Message + " A person can undo the drop from Agent changes: the undo re-creates the guide from the definition journaled with the drop.",
-                    new { dry_run = true, statement = dry.Statement ?? statementText, before });
+            /* 4: the prepare step: the server row, the excluded database, the one batch that reads the guide and the executor's refusals of a missing guide and a missing grant,
+               and the refusal of a guide the Undo could not re-create. */
+            var prepared = await PrepareDropPlanGuideAsync(owner, logger, permit, resolved.ServerId, resolved.DisplayName, database, guideName, dry_run,
+                (reason, token) => store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, reason, agentTokenName, token), ct);
+            if (prepared.Answer is { } preparedAnswer)
+                return preparedAnswer;
+            var facts = prepared.Facts!;
+            var executor = prepared.Executor!;
+            var before = facts.Before;
+            var statementText = facts.Statement;
 
             /* 5: the write, journaled. action_called holds the definition; the drop runs only while the guide still holds the statement and hints read above (guide_changed otherwise). */
             RemediationResult? unknown = null;
@@ -415,7 +359,7 @@ public sealed partial class DarlingMcpPlanForceTools
                     ReadBefore = (_, _, _) => Task.FromResult<string?>(JsonSerializer.Serialize(before, McpHelpers.JsonOptions)),
                     Write = async (_, _, token) =>
                     {
-                        var written = await executor.DropPlanGuideAsync(permit, guideName, read, dryRun: false, token);
+                        var written = await WriteDropPlanGuideAsync(executor, permit, facts, token);
                         if (written.Wrote)
                             changed.MarkServerChanged();
                         if (written.Outcome == RemediationOutcome.Unknown)
