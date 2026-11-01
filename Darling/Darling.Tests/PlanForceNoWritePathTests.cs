@@ -267,7 +267,7 @@ public sealed class PlanForceNoWritePathTests
             })
             .Select(Path.GetFileName)
             .ToArray();
-        Assert.Equal(new[] { "DarlingMcpPlanForceTools.cs", "DarlingMcpPlanForceTools.PlanGuide.cs", "DarlingMcpPlanForceTools.PrepareWrite.cs", "DarlingMcpPlanForceTools.RecompileModule.cs" }, naming);
+        Assert.Equal(new[] { "DarlingMcpPlanForceTools.cs", "DarlingMcpPlanForceTools.Kill.cs", "DarlingMcpPlanForceTools.PlanGuide.cs", "DarlingMcpPlanForceTools.PrepareWrite.cs", "DarlingMcpPlanForceTools.RecompileModule.cs" }, naming);
         Assert.DoesNotContain("PlanForceBot.cs", naming);
     }
 
