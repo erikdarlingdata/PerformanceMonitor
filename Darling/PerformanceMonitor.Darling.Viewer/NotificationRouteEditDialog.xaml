@@ -53,6 +53,12 @@
                 <ComboBox x:Name="SeveritiesCombo" Width="180"
                           ToolTip="Which alerts this route takes. Both: Warning and Critical. Critical only, or Warning only: an alert of the other severity skips this route and goes to the next matching route, then to the default channels."/>
             </StackPanel>
+            <!-- #6979: whether the route posts a Slack or Teams notice when an agent files a report on one of its requests. -->
+            <StackPanel Orientation="Horizontal" Margin="0,4,0,4">
+                <TextBlock Text="Report notice" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                <ComboBox x:Name="ReportNoticeCombo" Width="260"
+                          ToolTip="Whether this route posts a notice to its Slack or Teams channel when an agent files a report. Off: no notice (the default). Needs a person or made a change: only a report that says a person is needed, or whose request changed something. All reports: every report. An empty Slack or Teams channel on the route uses the channel from Settings."/>
+            </StackPanel>
             <TextBlock x:Name="ScopeNoteText" Foreground="{DynamicResource ForegroundMutedBrush}"
                        TextWrapping="Wrap" HorizontalAlignment="Left"
                        Text="Generic webhook headers and the body template stay app-wide: set them in Notifications. A route changes only where the post goes."/>

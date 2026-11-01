@@ -94,6 +94,7 @@ export const ROUTE_COLUMNS = [
   { key: "family", label: "Family" },
   { key: "applies_to", label: "Applies to" },
   { key: "severities", label: "Severity" },
+  { key: "report_notice", label: "Report notice" },
   { key: "status", label: "Status" },
   { key: "channels", label: "Channels set", wrap: true },
   { key: "agent", label: "Agent" },
@@ -320,6 +321,13 @@ export function routeSeveritiesText(r) {
   return word === "critical" ? "Critical only" : word === "warning" ? "Warning only" : "Both";
 }
 
+/** The Report notice column (#6979), in the route dialog's words: whether the route posts a chat notice when an agent files a report. A
+    route read without the field, or with a word this page does not know, reads as Off, the same as the service. */
+export function routeReportNoticeText(r) {
+  const word = r && typeof r.report_notice === "string" ? r.report_notice.trim().toLowerCase() : "";
+  return word === "needs_person_or_change" ? "Needs a person or made a change" : word === "all" ? "All reports" : "Off";
+}
+
 /** The Send resolutions column (#5825), in the route dialog's words: send_resolutions null follows each channel's own
     "Send resolutions" setting, true always sends the cleared message to this route's destinations, false never does. A
     route read without the field reads as the channel setting, the same as null. */
@@ -339,6 +347,7 @@ export function routeRows(data) {
     family: r.family,
     applies_to: routeScopeText(r),
     severities: routeSeveritiesText(r),
+    report_notice: routeReportNoticeText(r),
     status: routeStatusText(r),
     channels: Array.isArray(r.configured_channels) ? r.configured_channels.filter((c) => !isSecretKey(c)).join(", ") : null,
     agent: routeAgentText(r),
