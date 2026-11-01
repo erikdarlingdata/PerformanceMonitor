@@ -169,7 +169,7 @@ public sealed class NotificationRoutesRungTests
         }
 
         /* Every column in the DDL is in exactly one list. */
-        var ddlColumns = new[] { "route_id", "metric_match" }.Concat(DestinationColumns).Concat(new[] { "configured_channels", "enabled", "modified_at", "scope_server_id", "scope_tag_id" }).Concat(AgentColumns).Concat(new[] { "signing_key", "previous_signing_key", "previous_signing_key_until", "fallback_route_id", "severities", "report_notice" }).ToList();
+        var ddlColumns = new[] { "route_id", "metric_match" }.Concat(DestinationColumns).Concat(new[] { "configured_channels", "enabled", "modified_at", "scope_server_id", "scope_tag_id" }).Concat(AgentColumns).Concat(new[] { "signing_key", "previous_signing_key", "previous_signing_key_until", "fallback_route_id", "severities", "report_notice", "action_approval", "approval_single_person" }).ToList();
         var classified = acl.SecretColumns.Concat(acl.NonSecretColumns).ToList();
         Assert.Equal(ddlColumns.OrderBy(c => c, StringComparer.Ordinal), classified.OrderBy(c => c, StringComparer.Ordinal));
         Assert.Equal(classified.Count, classified.Distinct(StringComparer.Ordinal).Count());
@@ -257,7 +257,7 @@ public sealed class NotificationRoutesRungTests
             ColumnsOf(ViewerDataService.NotificationRoutesSelectNoSecretSql, "SELECT", "FROM"));
 
         var insert = ColumnsOf(ViewerDataService.NotificationRouteInsertSql, "(", ")");
-        Assert.Equal(new[] { "metric_match" }.Concat(DestinationColumns).Concat(new[] { "enabled", "scope_server_id", "scope_tag_id" }).Concat(AgentColumns).Concat(new[] { "fallback_route_id", "severities", "report_notice", "modified_at" }), insert);
+        Assert.Equal(new[] { "metric_match" }.Concat(DestinationColumns).Concat(new[] { "enabled", "scope_server_id", "scope_tag_id" }).Concat(AgentColumns).Concat(new[] { "fallback_route_id", "severities", "report_notice", "action_approval", "approval_single_person", "modified_at" }), insert);
         Assert.DoesNotContain("route_id", insert);
         Assert.Contains("RETURNING route_id", ViewerDataService.NotificationRouteInsertSql, StringComparison.Ordinal);
 
@@ -473,6 +473,8 @@ public sealed class NotificationRoutesLivePostgresTests
                 insert.Parameters.Add(new NpgsqlParameter { Value = DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer }); /* fallback_route_id (#6036) */
                 insert.Parameters.Add(new NpgsqlParameter<string> { TypedValue = "both" }); /* severities (V229, #6928) */
                 insert.Parameters.Add(new NpgsqlParameter<string> { TypedValue = "off" }); /* report_notice (V233, #6979) */
+                insert.Parameters.Add(new NpgsqlParameter<string> { TypedValue = "required" }); /* action_approval (V238, #7109) */
+                insert.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = false }); /* approval_single_person (V238, #7109) */
                 routeId = Convert.ToInt32(await insert.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture);
             }
 
@@ -545,5 +547,52 @@ public sealed class NotificationRoutesLivePostgresTests
     {
         using var command = new NpgsqlCommand(sql, connection);
         await command.ExecuteNonQueryAsync(ct);
+    }
+}
+
+/// <summary>
+/// V238 (#7109): a route stored before the rung that ran at Level 3 acted on its own, so it reads <c>off</c> after the upgrade and keeps
+/// doing so. Every other route reads <c>required</c>, and single-person approval starts false for all of them. The rung applies once: a
+/// route set back to <c>required</c> after the upgrade keeps it when the ladder runs again.
+/// </summary>
+/* #1776 own-store: deliberately NOT [Collection("live-postgres")]. It reaches DARLING_TEST_PG only to create and drop its own database. */
+public sealed class NotificationRoutesApprovalBackfillLiveTests
+{
+    [Fact]
+    public async Task ARouteStoredAtLevel3BeforeV238_ReadsOff_AndAnyOtherLevelReadsRequired_AndItAppliesOnce()
+    {
+        var baseCs = QueryStoreIntervalRetentionTestKit.BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), QueryStoreIntervalRetentionTestKit.SkipText);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = await QueryStoreIntervalRetentionTestKit.OpenStoreAsync(scratch, ct);
+
+        /* Back to V237: the two columns are gone, and so is the version stamp. */
+        await RungRewindArtifacts.DropSentinelsAboveAsync(connection, 237, ct);
+        await QueryStoreIntervalRetentionTestKit.ExecAsync(connection, "DELETE FROM darling_schema_version WHERE version >= 238", ct);
+        await QueryStoreIntervalRetentionTestKit.ExecAsync(connection, @"
+INSERT INTO config.config_notification_routes (metric_match, smtp_recipients, agent_level)
+VALUES ('Level inherit', 'a@example.invalid', NULL), ('Level 0', 'a@example.invalid', 0), ('Level 1', 'a@example.invalid', 1),
+       ('Level 2', 'a@example.invalid', 2), ('Level 3', 'a@example.invalid', 3)", ct);
+
+        Assert.Equal(StorageVersion.SchemaVersion - 237, await PgMigrations.MigrateAsync(connection, ct)); /* V238 and every rung above it */
+
+        Assert.Equal(
+            "Level inherit=required/false, Level 0=required/false, Level 1=required/false, Level 2=required/false, Level 3=off/false",
+            await ReadAsync(connection, ct));
+
+        /* Applies once: a route a person set back to required stays required when the ladder runs again. */
+        await QueryStoreIntervalRetentionTestKit.ExecAsync(
+            connection, "UPDATE config.config_notification_routes SET action_approval = 'required' WHERE metric_match = 'Level 3'", ct);
+        Assert.Equal(0, await PgMigrations.MigrateAsync(connection, ct));
+        Assert.Contains("Level 3=required/false", await ReadAsync(connection, ct), StringComparison.Ordinal);
+    }
+
+    private static async Task<string> ReadAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(
+            "SELECT string_agg(metric_match || '=' || action_approval || '/' || approval_single_person::text, ', ' ORDER BY route_id) FROM config.config_notification_routes",
+            connection);
+        return (string)(await command.ExecuteScalarAsync(ct))!;
     }
 }
