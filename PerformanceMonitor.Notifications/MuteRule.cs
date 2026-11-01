@@ -12,6 +12,27 @@ using PerformanceMonitor.Analysis;
 
 namespace PerformanceMonitor.Notifications;
 
+/// <summary>What a mute rule does to an alert it matches (#7083): <see cref="Mute"/> records the alert as muted and sends nothing,
+/// <see cref="Digest"/> records it as a digest row and sends nothing, so it reaches the daily digest instead of a page. Stored as text.</summary>
+public static class MuteRuleActions
+{
+    public const string Mute = "mute";
+    public const string Digest = "digest";
+
+    /// <summary>The stored word for <paramref name="action"/>: <see cref="Digest"/> when it says so (any case), else <see cref="Mute"/>.
+    /// A value no build knows reads as a mute, the effect every rule had before the action existed.</summary>
+    public static string Normalize(string? action) =>
+        string.Equals(action?.Trim(), Digest, StringComparison.OrdinalIgnoreCase) ? Digest : Mute;
+
+    /// <summary>Whether <paramref name="action"/> is one of the two words a write may carry (blank counts as the default, a mute).</summary>
+    public static bool IsValid(string? action) =>
+        string.IsNullOrWhiteSpace(action)
+        || string.Equals(action.Trim(), Mute, StringComparison.OrdinalIgnoreCase)
+        || string.Equals(action.Trim(), Digest, StringComparison.OrdinalIgnoreCase);
+
+    public const string InvalidActionMessage = "action must be 'mute' or 'digest'.";
+}
+
 public class MuteRule
 {
     public string Id { get; set; } = Guid.NewGuid().ToString();
@@ -24,6 +45,14 @@ public class MuteRule
     /// the start passes, <see cref="MatchesAt"/> declines every alert, so the rule is stored and listed but mutes nothing. Lite's
     /// store does not persist it, so a Lite rule never carries one.</summary>
     public DateTime? StartsAtUtc { get; set; }
+
+    /// <summary>What the rule does to a matching alert (#7083): <c>mute</c> (the default, and every rule stored before this field) or
+    /// <c>digest</c>, which holds the alert back from paging and records it as a digest row. A digest rule is meant for a scheduled
+    /// window (a nightly delete job), so it normally carries a recurring schedule. Darling only; Lite never sets it. See <see cref="MuteRuleActions"/>.</summary>
+    public string Action { get; set; } = MuteRuleActions.Mute;
+
+    /// <summary>Whether the rule sends a matching alert to the digest rather than muting it.</summary>
+    public bool IsDigestAction => string.Equals(Action, MuteRuleActions.Digest, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>The days of the week a recurring schedule (#7040) runs on, as a bit mask (bit n = <see cref="DayOfWeek"/> value n,
     /// Sunday = bit 0), or null for every day. Meaningful only with <see cref="RecurStartTime"/> and <see cref="RecurEndTime"/>.
@@ -174,6 +203,7 @@ public class MuteRule
     public MuteRule Clone() => new()
     {
         Id = Id,
+        Action = Action,
         Enabled = Enabled,
         CreatedAtUtc = CreatedAtUtc,
         ExpiresAtUtc = ExpiresAtUtc,
@@ -267,11 +297,29 @@ public class MuteRule
 
     public bool Matches(AlertMuteContext context) => MatchesAt(context, DateTime.UtcNow);
 
+    /// <summary>Whether this is a digest rule (#7083) that applies to <paramref name="context"/> at <paramref name="nowUtc"/>:
+    /// <see cref="MatchesAt"/>'s test, for the rules <see cref="MatchesAt"/> declines because they send to the digest instead of muting.</summary>
+    public bool MatchesDigestAt(AlertMuteContext context, DateTime nowUtc) => IsDigestAction && MatchesDimensions(context, nowUtc);
+
+    /// <summary>The line a held fire's history row carries as its reason: which digest rule held it, and the window it was in.</summary>
+    public string DigestHoldReason()
+    {
+        var name = string.IsNullOrWhiteSpace(Reason) ? Summary : Reason.Trim();
+        var window = ScheduleText;
+        return window is null
+            ? $"Held for the daily digest by a digest rule ({name})"
+            : $"Held for the daily digest by a digest rule ({name}) inside its window {window}";
+    }
+
     /// <summary>
     /// <see cref="Matches"/> judged against a caller-supplied instant rather than the ambient clock, so a
     /// caller that already holds one decides the whole question on a single "now". Pure: no clock, no I/O.
     /// </summary>
-    public bool MatchesAt(AlertMuteContext context, DateTime nowUtc)
+    public bool MatchesAt(AlertMuteContext context, DateTime nowUtc) => !IsDigestAction && MatchesDimensions(context, nowUtc);
+
+    /* The rule's own test, whatever its action: in effect now, and every dimension it constrains matches. A digest rule (#7083) is
+       judged by MatchesDigestAt and never by MatchesAt, so the one check that mutes cannot be reached by a rule that does not mute. */
+    private bool MatchesDimensions(AlertMuteContext context, DateTime nowUtc)
     {
         if (!IsInEffectAt(nowUtc)) return false;
 

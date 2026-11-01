@@ -1,0 +1,22 @@
+{
+  "solution": {
+    "path": "PerformanceMonitor.sln",
+    "projects": [
+      "Darling\\Darling.Tests\\Darling.Tests.csproj",
+      "Darling\\PerformanceMonitor.Darling.Analysis\\PerformanceMonitor.Darling.Analysis.csproj",
+      "Darling\\PerformanceMonitor.Darling.Remediation\\PerformanceMonitor.Darling.Remediation.csproj",
+      "Darling\\PerformanceMonitor.Darling.Service\\PerformanceMonitor.Darling.Service.csproj",
+      "Darling\\PerformanceMonitor.Darling.Storage\\PerformanceMonitor.Darling.Storage.csproj",
+      "Darling\\PerformanceMonitor.Darling.Viewer\\PerformanceMonitor.Darling.Viewer.csproj",
+      "Lite\\PerformanceMonitorLite.csproj",
+      "Lite.Tests\\Lite.Tests.csproj",
+      "PerformanceMonitor.Alerting\\PerformanceMonitor.Alerting.csproj",
+      "PerformanceMonitor.Analysis\\PerformanceMonitor.Analysis.csproj",
+      "PerformanceMonitor.Collectors\\PerformanceMonitor.Collectors.csproj",
+      "PerformanceMonitor.Common\\PerformanceMonitor.Common.csproj",
+      "PerformanceMonitor.Notifications\\PerformanceMonitor.Notifications.csproj",
+      "PerformanceMonitor.PlanAnalysis\\PerformanceMonitor.PlanAnalysis.csproj",
+      "PerformanceMonitor.Ui\\PerformanceMonitor.Ui.csproj"
+    ]
+  }
+}

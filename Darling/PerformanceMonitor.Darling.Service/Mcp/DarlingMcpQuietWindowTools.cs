@@ -47,6 +47,7 @@ public sealed class DarlingMcpQuietWindowTools
     internal static bool IsQuietWindow(MuteRule rule) =>
         rule.ExpiresAtUtc.HasValue
         && !rule.IsRecurring
+        && !rule.IsDigestAction
         && rule.MetricName is null
         && rule.DatabasePattern is null
         && rule.QueryTextPattern is null

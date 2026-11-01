@@ -86,6 +86,7 @@ public sealed partial class DarlingWorker
             stateStore,
             deliverer,
             muteRuleService.IsAlertMuted,
+            digestWindowReason: muteRuleService.DigestWindowReason,
             /* #5642: served from the cache the collection body fills, so the alert pass reads the store and nothing
                else. The live read itself is FetchFailedJobsAsync, called by RefreshMsdbCacheAsync. */
             failedJobsFetcher: (serverKey, lookbackMinutes, ct) =>
@@ -454,7 +455,7 @@ public sealed partial class DarlingWorker
                    so unmuting does not produce a backlog. */
                 _lastPostgresAlert[cooldownKey] = now;
 
-                var muted = _isAlertMuted?.Invoke(new AlertMuteContext
+                var mute = JudgeMute(new AlertMuteContext
                 {
                     ServerName = snapshot.ServerName,
                     ServerId = snapshot.ServerId,
@@ -462,7 +463,7 @@ public sealed partial class DarlingWorker
                     /* The subject is the database for wraparound and the slot/holder for the others, which is
                        what a DatabaseName mute rule is written against. */
                     DatabaseName = finding.Subject,
-                }) ?? false;
+                });
 
                 var delivery = await _alertDeliverer.DeliverAndReportAsync(
                     new AlertOutcome(
@@ -494,9 +495,10 @@ public sealed partial class DarlingWorker
                         DetailText: null,
                         finding.NumericCurrentValue,
                         finding.NumericThresholdValue,
-                        Muted: muted,
-                        finding.Severity,
-                        finding.ShortMessage),
+                        Muted: mute.Muted,
+                        Severity: finding.Severity,
+                        ShortMessage: finding.ShortMessage,
+                        Hold: mute.Hold),
                     cancellationToken);
                 readClock.Restart();
 
@@ -897,12 +899,12 @@ public sealed partial class DarlingWorker
 
                 _lastPgCpuAlert[key] = now;
 
-                var muted = _isAlertMuted?.Invoke(new AlertMuteContext
+                var mute = JudgeMute(new AlertMuteContext
                 {
                     ServerName = snapshot.ServerName,
                     ServerId = snapshot.ServerId,
                     MetricName = metricName,
-                }) ?? false;
+                });
 
                 /* The ACU line only when both halves were sampled: "N of M ACU" with either missing
                    would be a fabricated pair, and the percentage above already carries the answer. */
@@ -951,7 +953,7 @@ public sealed partial class DarlingWorker
                                 + $"  Sustained: {AlertEngine.CpuBreachSamples} consecutive samples",
                         NumericCurrentValue: lastCapacityPercent ?? reading.CpuPercent,
                         NumericThresholdValue: alertSettings.CpuThresholdPercent,
-                        Muted: muted,
+                        Muted: mute.Muted, Hold: mute.Hold,
                         Severity: grade,
                         ShortMessage: lastCapacityPercent.HasValue
                             ? $"Capacity at {lastCapacityPercent.Value:F0}% {FleetCpuProvenance.CapacityDenominator} "
@@ -1104,12 +1106,12 @@ public sealed partial class DarlingWorker
                     _lastPgDeadlockAlert[key] = now;
                 }
 
-                var muted = _isAlertMuted?.Invoke(new AlertMuteContext
+                var mute = JudgeMute(new AlertMuteContext
                 {
                     ServerName = snapshot.ServerName,
                     ServerId = snapshot.ServerId,
                     MetricName = metricName,
-                }) ?? false;
+                });
 
                 var deadlockDetail = BuildPgDeadlockDetailText(rows, patterns);
                 var heldDeadlock = pageWorthy
@@ -1166,10 +1168,11 @@ public sealed partial class DarlingWorker
                         DetailText: deadlockDetail,
                         NumericCurrentValue: count,
                         NumericThresholdValue: threshold,
-                        Muted: muted,
+                        Muted: mute.Muted,
                         Severity: AlertEngine.GradeDeadlockFire(count, rateTiers),
                         ShortMessage: $"{count} {(count == 1 ? "deadlock" : "deadlocks")} in the last hour",
-                        Hold: heldDeadlock),
+                        /* A mute rule's digest action (#7083) holds the row the same as a known pair does. */
+                        Hold: mute.Hold ?? heldDeadlock),
                     cancellationToken);
                 readClock.Restart();
 
@@ -1536,8 +1539,14 @@ public sealed partial class DarlingWorker
             var threshold = _thresholdOverrides.ResolveWire(
                 DarlingThresholdKeys.PgBlockingCount, snapshot.ServerKey, null, alertSettings.PgBlockingCountThreshold);
 
-            var decision = RollingCountAlertGate.Evaluate(
-                count, threshold, watermark, cooldownElapsed, suppressed: false);
+            /* #7083: the same page rule as the SQL Server path. A root's event is its chain's worst victim wait;
+               the wait bar is the shared blockingWaitSecondsThreshold (and its per-server override). */
+            var waitBarSeconds = _thresholdOverrides.ResolveWire(
+                "blocking.wait_threshold_seconds", snapshot.ServerKey, null, alertSettings.BlockingWaitSecondsThreshold);
+            var worstWaitMs = worstPerRoot.Count == 0 ? 0 : worstPerRoot.Max(r => r.WorstVictimWaitMs);
+            var wasActiveBefore = _activePgBlockingAlert.TryGetValue(key, out var activeNow) && activeNow;
+            var decision = BlockingPageRule.Evaluate(
+                count, threshold, worstWaitMs, waitBarSeconds, watermark, cooldownElapsed, suppressed: false, wasActiveBefore);
             _lastAlertedPgBlockingCount[key] = decision.Watermark;
             if (decision.Watermark != watermark)
             {
@@ -1545,25 +1554,28 @@ public sealed partial class DarlingWorker
                 readClock.Restart();
             }
 
-            var wasActive = _activePgBlockingAlert.TryGetValue(key, out var activeBefore) && activeBefore;
+            var wasActive = wasActiveBefore;
             _activePgBlockingAlert[key] = decision.Active;
 
             if (decision.Fire)
             {
                 _lastPgBlockingAlert[key] = now;
 
-                var muted = _isAlertMuted?.Invoke(new AlertMuteContext
+                var mute = JudgeMute(new AlertMuteContext
                 {
                     ServerName = snapshot.ServerName,
                     ServerId = snapshot.ServerId,
                     MetricName = metricName,
-                }) ?? false;
+                });
 
                 /* #3653 (A8e, the PostgreSQL host): an explicit tier in place of Severity: null, so the row
                    carries what it fired at (through the deliverer's #2090 fold, as the deadlock arm above
                    explains) rather than leaving #3635's by-name replay arm to imply it. Warning, and only
                    Warning — PgBlockingFireSeverity's doc says which bars were considered and why none
                    qualifies as a Critical tier tonight. */
+                var pgBlockingContext = AlertSampleAge.Stamp(
+                    BuildPgBlockingContext(worstPerRoot),
+                    "blocking capture", AlertSampleAge.Newest(worstPerRoot.Select(r => r.CapturedAt)), now);
                 var delivery = await _alertDeliverer.DeliverAndReportAsync(
                     new AlertOutcome(
                         key,
@@ -1571,16 +1583,11 @@ public sealed partial class DarlingWorker
                         metricName,
                         count.ToString(CultureInfo.InvariantCulture),
                         threshold.ToString(CultureInfo.InvariantCulture),
-                        Context: AlertSampleAge.Stamp(
-                            new AlertContext
-                            {
-                                Incidents = worstPerRoot.Select(BuildPgBlockingIncident).ToList(),
-                            },
-                            "blocking capture", AlertSampleAge.Newest(worstPerRoot.Select(r => r.CapturedAt)), now),
-                        DetailText: null,
+                        Context: pgBlockingContext,
+                        DetailText: AlertContextBuilders.ContextToDetailText(pgBlockingContext),
                         NumericCurrentValue: count,
                         NumericThresholdValue: threshold,
-                        Muted: muted,
+                        Muted: mute.Muted, Hold: mute.Hold,
                         Severity: PgBlockingFireSeverity,
                         ShortMessage: $"{count} blocking {(count == 1 ? "session" : "sessions")}"),
                     cancellationToken);
@@ -1603,7 +1610,28 @@ public sealed partial class DarlingWorker
             else if (!decision.Active && wasActive)
             {
                 await NotifyPgResolutionAsync(key, snapshot.ServerName, metricName, OpenEngineAlerts.BlockingClearedTitle,
-                    $"{snapshot.ServerName}: No active blocking");
+                    BlockingPageRule.ClearedMessage(snapshot.ServerName, threshold, waitBarSeconds));
+                readClock.Restart();
+            }
+            else if (BlockingPageRule.IsHeldBack(count, threshold, worstWaitMs, waitBarSeconds, wasActive, suppressed: false))
+            {
+                /* #7083 part 2: the count reached the bar and nothing pages. One held row for the digest per cooldown, and only when the window holds a
+                   capture newer than the last held row's (one burst is one row), on its own stamp (never _lastPgBlockingAlert), with no escalation tier, so a real page right after goes out at once. A mute rule
+                   still wins: a muted server gets no digest line. */
+                var holdMute = JudgeMute(new AlertMuteContext
+                {
+                    ServerName = snapshot.ServerName,
+                    ServerId = snapshot.ServerId,
+                    MetricName = metricName,
+                });
+                if (!holdMute.Muted
+                    && BlockingPageRule.TryHold(_lastPgBlockingHold, _lastPgBlockingHoldObservation, key, now, cooldown,
+                        worstPerRoot.Max(r => r.CapturedAt), count, threshold, worstWaitMs, waitBarSeconds, wasActive, suppressed: false))
+                {
+                    await _alertDeliverer.DeliverAndReportAsync(
+                        PgBlockingHoldOutcome(key, snapshot.ServerName, worstPerRoot, threshold, now), cancellationToken);
+                    readClock.Restart();
+                }
             }
         }
         catch (OperationCanceledException)
@@ -1616,6 +1644,36 @@ public sealed partial class DarlingWorker
                 runtime.Config.DisplayName, readClock.ElapsedMilliseconds, ex.Message);
             _readFailures.RecordReadFailure(snapshot.ServerKey, "PostgreSQL blocking alert read", readClock.ElapsedMilliseconds);
         }
+    }
+
+    /// <summary>
+    /// #7083 part 2: the held Blocking Detected fire of the PostgreSQL path. The count of root blockers reached the bar and
+    /// no page is due, so the row goes to the digest: "N root blockers, worst wait X s, longest chain Y", where the chain
+    /// is the deepest <c>MaxDepth</c> among the roots. Pure, so a test can read what would be recorded.
+    /// </summary>
+    internal static AlertOutcome PgBlockingHoldOutcome(
+        string key, string serverName, IReadOnlyList<DarlingPgBlockingReader.PgBlockingChainRow> worstPerRoot,
+        int threshold, DateTime now)
+    {
+        var count = worstPerRoot.Count;
+        var worstWaitMs = count == 0 ? 0 : worstPerRoot.Max(r => r.WorstVictimWaitMs);
+        var chain = count == 0 ? 0 : worstPerRoot.Max(r => r.MaxDepth);
+        var reason = BlockingPageRule.HoldReason(count, worstWaitMs, chain, rootBlockers: true);
+        var context = AlertSampleAge.Stamp(
+            BuildPgBlockingContext(worstPerRoot),
+            "blocking capture", AlertSampleAge.Newest(worstPerRoot.Select(r => r.CapturedAt)), now);
+        return new AlertOutcome(
+            key, serverName, "Blocking Detected",
+            count.ToString(CultureInfo.InvariantCulture),
+            threshold.ToString(CultureInfo.InvariantCulture),
+            Context: context,
+            DetailText: AlertContextBuilders.ContextToDetailText(context),
+            NumericCurrentValue: count,
+            NumericThresholdValue: threshold,
+            Muted: false,
+            Severity: PgBlockingFireSeverity,
+            ShortMessage: reason,
+            Hold: new AlertHold(reason));
     }
 
     /// <summary>
@@ -1843,13 +1901,13 @@ public sealed partial class DarlingWorker
                     longRunningContext!.Details.Insert(0, statementDetail);
                 }
 
-                var muted = _isAlertMuted?.Invoke(new AlertMuteContext
+                var mute = JudgeMute(new AlertMuteContext
                 {
                     ServerName = snapshot.ServerName,
                     ServerId = snapshot.ServerId,
                     MetricName = metricName,
                     DatabaseName = worst.DatabaseName,
-                }) ?? false;
+                });
 
                 /* #3653 (A8e, the PostgreSQL host): an explicit tier in place of Severity: null, for the
                    reason the blocking arm above gives. Warning, and only Warning —
@@ -1865,7 +1923,7 @@ public sealed partial class DarlingWorker
                         DetailText: AlertContextBuilders.ContextToDetailText(longRunningContext),
                         NumericCurrentValue: elapsedMinutes,
                         NumericThresholdValue: thresholdMinutes,
-                        Muted: muted,
+                        Muted: mute.Muted, Hold: mute.Hold,
                         Severity: PgLongRunningQueryFireSeverity,
                         ShortMessage: $"pid {worst.Pid} running {elapsedMinutes}m — {worst.CommandTag ?? "(unknown)"}"
                             + (worst.DatabaseName is null ? "" : $" on {worst.DatabaseName}")),
@@ -2182,7 +2240,7 @@ public sealed partial class DarlingWorker
                 _lastPgPoisonWaitAlert[cooldownKey] = now;
                 _lastPgPoisonWaitCollectionTime[cooldownKey] = newestCollection;
 
-                var muted = _isAlertMuted?.Invoke(new AlertMuteContext
+                var mute = JudgeMute(new AlertMuteContext
                 {
                     ServerName = snapshot.ServerName,
                     ServerId = snapshot.ServerId,
@@ -2191,7 +2249,7 @@ public sealed partial class DarlingWorker
                        mute rules key on the wait type — the parity metric name only helps if the mute
                        dimension matches too. */
                     WaitType = finding.Subject,
-                }) ?? false;
+                });
 
                 /* #7082: the top wait events and the statements waiting on this one, so a reader can judge the
                    page. Read only for a page that is about to go out (after the cooldown and fresh-row gates),
@@ -2244,9 +2302,10 @@ public sealed partial class DarlingWorker
                         DetailText: poisonDetailText,
                         finding.NumericCurrentValue,
                         finding.NumericThresholdValue,
-                        Muted: muted,
-                        finding.Severity,
-                        finding.ShortMessage),
+                        Muted: mute.Muted,
+                        Severity: finding.Severity,
+                        ShortMessage: finding.ShortMessage,
+                        Hold: mute.Hold),
                     cancellationToken);
                 readClock.Restart();
 
@@ -2531,7 +2590,68 @@ public sealed partial class DarlingWorker
                         ? string.Empty
                         : $": {AlertContextBuilders.TruncateText(row.RootQuery!)}"),
             },
+            WaitRange: row.WorstVictimWaitMs > 0
+                ? (row.WorstVictimWaitMs / 1000.0).ToString("F1", CultureInfo.InvariantCulture) + "s"
+                : null,
+            /* #7083: the blocker's statement, the worst victim's statement and (above) the victim's wait, under the
+               labels the SQL Server blocking incident uses, so the per-event card, the history row, the sensitive
+               statement filter (it judges DetailFields) and the MCP dataDetail masker (it keys on these labels) treat
+               them the same way. The root line in InvolvedObjects is kept as it was. */
+            DetailFields: BuildPgBlockingDetailFields(row),
             Database: row.Databases.Length > 0 ? row.Databases[0] : null);
+
+    private static List<AlertIncidentField> BuildPgBlockingDetailFields(DarlingPgBlockingReader.PgBlockingChainRow row)
+    {
+        var fields = new List<AlertIncidentField>();
+        if (row.Databases.Length > 0)
+        {
+            fields.Add(new AlertIncidentField("Database", row.Databases[0]));
+        }
+
+        if (!string.IsNullOrWhiteSpace(row.WorstVictimQuery))
+        {
+            fields.Add(new AlertIncidentField("Blocked Query", AlertContextBuilders.TruncateText(row.WorstVictimQuery!)));
+        }
+
+        if (!string.IsNullOrWhiteSpace(row.RootQuery))
+        {
+            fields.Add(new AlertIncidentField("Blocking Query", AlertContextBuilders.TruncateText(row.RootQuery!)));
+        }
+
+        return fields;
+    }
+
+    /// <summary>
+    /// The PostgreSQL "Blocking Detected" context (#7083): one self-contained detail item per root blocker (the first
+    /// ten, like the SQL Server builder, then a "+N more" line), each carrying the database, the worst victim's
+    /// statement, the blocker's statement and the victim's wait, so the detail text names them. <c>Incidents</c> keeps
+    /// every root, which is what the per-fingerprint cooldown and the delivery filter key on.
+    /// </summary>
+    internal static AlertContext BuildPgBlockingContext(IReadOnlyList<DarlingPgBlockingReader.PgBlockingChainRow> worstPerRoot)
+    {
+        const int maxShown = 10;
+        var incidents = worstPerRoot.Select(BuildPgBlockingIncident).ToList();
+        var context = new AlertContext { Incidents = incidents };
+        for (var n = 0; n < incidents.Count && n < maxShown; n++)
+        {
+            context.Details.Add(AlertIncidentRenderer.BuildItem(
+                incidents[n],
+                incidents.Count == 1 ? "Blocking chain" : $"Blocking chain {n + 1} of {incidents.Count}",
+                includeDetailFields: true));
+        }
+
+        if (incidents.Count > maxShown)
+        {
+            var more = incidents.Count - maxShown;
+            context.Details.Add(new AlertDetailItem
+            {
+                Heading = $"+{more} more distinct blocking {(more == 1 ? "chain" : "chains")}",
+                Fields = new(),
+            });
+        }
+
+        return context;
+    }
 
     /// <summary>
     /// The newest collected CPU sample for one server, the read that gates CPU alerting. $1 server_id.

@@ -819,6 +819,7 @@ public sealed partial class DarlingWorker
         /* Same instance the engine binds, so a mute-rule reload mutes the PostgreSQL predictors on the next
            sweep exactly as it mutes every SQL Server family. */
         _isAlertMuted = muteRuleService.IsAlertMuted;
+        _digestWindowReason = muteRuleService.DigestWindowReason;
         _alertCooldownMinutes = alertSettings.CooldownMinutes;
 
         /* #3285: the user-authored custom-alert evaluator. A rule's compose metric runs on a dedicated
@@ -859,7 +860,8 @@ public sealed partial class DarlingWorker
                 historyStore,
                 (int)s_customAlertSweepInterval.TotalSeconds,
                 s_customAlertSweepInterval,
-                _loggerFactory.CreateLogger<CustomAlertEvaluator>());
+                _loggerFactory.CreateLogger<CustomAlertEvaluator>(),
+                muteRuleService.DigestWindowReason);
             _logger.LogInformation(
                 "Custom alert evaluator ready (#3285) — evaluating user rules on the viewer-role pool every {Seconds}s.",
                 (int)s_customAlertSweepInterval.TotalSeconds);
@@ -889,6 +891,7 @@ public sealed partial class DarlingWorker
             identityCapacityWarningPercent: () => alertSettings.IdentityCapacityWarningPercent,
             identityCapacityCriticalPercent: () => alertSettings.IdentityCapacityCriticalPercent,
             resolveThreshold: (wire, serverKey, database, global) => _thresholdOverrides.ResolveWire(wire, serverKey, database, global),
+            digestWindowReason: muteRuleService.DigestWindowReason,
             /* #6874: the Agent Alert Gaps switch, read live. Off until an operator turns it on. */
             agentAlertSetupEnabled: () => alertSettings.AgentAlertGapsEnabled,
             /* #6873: the three database protection switches, read live. Off until an operator turns each on. */

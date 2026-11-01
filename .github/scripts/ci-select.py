@@ -931,7 +931,7 @@ _BUILD_INPUT_PATHS = {".github/workflows/build.yml", ".github/scripts/ci-select.
                       ".github/lite-paths-filter.yml", ".github/scripts/run-darling-pg-shard.ps1", ".github/scripts/run-lite-shard.ps1",
                       ".github/scripts/darling-shard-pack.py", ".github/scripts/darling-shard-weights.json",
                       ".github/scripts/lite-shard-pack.py"}
-_BUILD_INPUT_SUFFIXES = (".csproj", ".props", ".targets", ".sln", ".slnx")
+_BUILD_INPUT_SUFFIXES = (".csproj", ".props", ".targets", ".sln", ".slnx", ".slnf")
 _WEB_SUFFIXES = (".js", ".mjs", ".css", ".html")
 
 

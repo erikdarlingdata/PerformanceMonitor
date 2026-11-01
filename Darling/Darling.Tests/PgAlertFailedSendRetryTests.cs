@@ -381,19 +381,19 @@ public sealed class PgAlertFailedSendRetryTests
     }
 
     [Fact]
-    public void DarlingWorker_HasNoDiscardingSend_AndExactlySixReportingSends()
+    public void DarlingWorker_HasNoDiscardingSend_AndExactlySixRetryingSends_PlusTheOneHeldRowSend()
     {
         /* Census: a seventh PostgreSQL arm has to choose a send and wire the same report, and an arm turned
            back to the discarding send fails the per-arm pins above and this count. */
         var worker = Worker();
 
         Assert.DoesNotContain("_alertDeliverer.DeliverAsync(", worker, StringComparison.Ordinal);
-        /* Eight sends: the six pages above, plus the two held-back rows #7082 writes (the capacity-at-the-ceiling High CPU
-           row and the held Poison Wait Warning). A held row is a digest row, not a page, so it has no failed-send retry
+        /* Nine sends: the six pages above, plus three held-back rows: the held Blocking Detected row (#7083 part 2) and the two
+           #7082 writes (the capacity-at-the-ceiling High CPU row and the held Poison Wait Warning). A held row is a digest row, not a page, so it has no failed-send retry
            and no AfterPgFire; the AfterPgFire count below stays at the six pages. */
-        Assert.Equal(8, CountOccurrences(worker, "_alertDeliverer.DeliverAndReportAsync("));
+        Assert.Equal(9, CountOccurrences(worker, "_alertDeliverer.DeliverAndReportAsync("));
 
-        /* The definition is "bool AfterPgFire(" and "AfterPgFireCore(" does not match; the rest are the six calls. */
+        /* The definition is "bool AfterPgFire(" and "AfterPgFireCore(" does not match; the rest are the six retrying calls. */
         Assert.Equal(6, CountOccurrences(worker, "AfterPgFire(") - CountOccurrences(worker, "bool AfterPgFire("));
     }
 

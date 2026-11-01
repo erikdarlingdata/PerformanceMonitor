@@ -272,6 +272,23 @@ public sealed class MuteRulesBehaviourTests
     }
 
     [Fact]
+    public void TheAction_RidesACreateOnlyAsADigest_APatchOnlyWhenChanged_AndTheFormLoadsItFromTheRule()
+    {
+        if (!TryRun("action", out var r)) return;
+
+        Assert.False(JsonNode.Parse(r.GetProperty("muteCreate").GetRawText())!.AsObject().ContainsKey("action"));
+        Assert.False(JsonNode.Parse(r.GetProperty("muteCreateExplicit").GetRawText())!.AsObject().ContainsKey("action"));
+        Assert.Equal("digest", r.GetProperty("digestCreate").GetProperty("action").GetString());
+        Assert.Equal("{\"action\":\"digest\"}", r.GetProperty("toDigest").GetRawText());
+        Assert.Equal("{\"action\":\"mute\"}", r.GetProperty("toMute").GetRawText());
+        Assert.Equal("{}", r.GetProperty("unchanged").GetRawText());
+        Assert.Equal("{}", r.GetProperty("olderServerRule").GetRawText());
+        Assert.Equal("digest", r.GetProperty("loadsDigest").GetString());
+        Assert.Equal("mute", r.GetProperty("loadsMissing").GetString());
+        Assert.Equal("mute", r.GetProperty("stray").GetString());
+    }
+
+    [Fact]
     public void CancellingTheForm_LetsTheSameMuteLinkReopenIt()
     {
         if (!TryRun("reopen", out var r)) return;
