@@ -50,6 +50,7 @@ public sealed class CustomAlertEvaluator
     private readonly NpgsqlDataSource _viewer;
     private readonly IAlertDeliverer _deliverer;
     private readonly Func<AlertMuteContext, bool>? _isAlertMuted;
+    private readonly Func<AlertMuteContext, string?>? _digestWindowReason;
 
     /// <summary>#3464: the master alerts switch, read live per sweep (the worker passes a closure over the
     /// same <c>config.Alerts.Enabled</c> every other family consults). REQUIRED, not optional-defaulting-on:
@@ -150,8 +151,10 @@ public sealed class CustomAlertEvaluator
         PgAlertHistoryStore historyStore,
         int defaultIntervalSeconds,
         TimeSpan cacheTtl,
-        ILogger logger)
+        ILogger logger,
+        Func<AlertMuteContext, string?>? digestWindowReason = null)
     {
+        _digestWindowReason = digestWindowReason;
         _ruleStore = ruleStore ?? throw new ArgumentNullException(nameof(ruleStore));
         _stateStore = stateStore ?? throw new ArgumentNullException(nameof(stateStore));
         _viewer = viewerDataSource ?? throw new ArgumentNullException(nameof(viewerDataSource));
@@ -555,10 +558,12 @@ public sealed class CustomAlertEvaluator
     {
         var metricName = MetricNameFor(row.Id);
         var serverKey = serverId.ToString(CultureInfo.InvariantCulture);
-        var muted = _isAlertMuted?.Invoke(new AlertMuteContext { ServerName = displayName, ServerId = serverId, MetricName = metricName }) ?? false;
+        /* #7083: a mute rule wins; else a digest rule's open window holds the fire for the daily digest. */
+        var mute = MuteJudgment.Judge(_isAlertMuted ?? (_ => false), _digestWindowReason,
+            new AlertMuteContext { ServerName = displayName, ServerId = serverId, MetricName = metricName });
 
         return await _deliverer.DeliverAndReportAsync(
-            BuildFireOutcome(row, def, serverKey, displayName, value, severity, muted),
+            BuildFireOutcome(row, def, serverKey, displayName, value, severity, mute.Muted, mute.Hold),
             cancellationToken);
     }
 
@@ -572,7 +577,7 @@ public sealed class CustomAlertEvaluator
     /// <param name="serverDisplayName">The monitored server's display name (<see cref="AlertOutcome.ServerName"/>).</param>
     public static AlertOutcome BuildFireOutcome(
         CustomAlertRule row, CustomAlertRuleDefinition def, string serverKey, string serverDisplayName,
-        double value, AlertSeverityLevel severity, bool muted)
+        double value, AlertSeverityLevel severity, bool muted, AlertHold? hold = null)
     {
         var metricName = MetricNameFor(row.Id);
         var currentText = value.ToString("0.###", CultureInfo.InvariantCulture);
@@ -605,7 +610,8 @@ public sealed class CustomAlertEvaluator
             Muted: muted,
             Severity: severity,
             ShortMessage: shortMessage,
-            DisplayName: safeName);
+            DisplayName: safeName,
+            Hold: hold);
     }
 
     /// <summary>A rule's operator-typed name, judged by the statement filter (#5320); the body lives in

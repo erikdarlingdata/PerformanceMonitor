@@ -20,7 +20,7 @@ const context = vm.createContext({
   reportSessionExpired: () => { expiredCalls++; },
   storeHeaders: (h) => h, /* util.js: adds X-Darling-Store behind a front door (#6840); a store is not behind one */
 });
-vm.runInContext(source + "\nglobalThis.__p = { TEXT_FIELDS, scheduleOf, scheduleCell, valuesOf, browserZone, formToCreateBody, buildPatch, isEmptyCreate, interpretWrite, EMPTY_CREATE_WARNING, send, closeForm, parsePrefill, openForm: (f) => { form = { errors: {}, ...f }; }, setLast: (v) => { lastPrefillQuery = v; }, getLast: () => lastPrefillQuery };", context);
+vm.runInContext(source + "\nglobalThis.__p = { TEXT_FIELDS, actionOf, scheduleOf, scheduleCell, valuesOf, browserZone, formToCreateBody, buildPatch, isEmptyCreate, interpretWrite, EMPTY_CREATE_WARNING, send, closeForm, parsePrefill, openForm: (f) => { form = { errors: {}, ...f }; }, setLast: (v) => { lastPrefillQuery = v; }, getLast: () => lastPrefillQuery };", context);
 const ctx2 = vm.createContext({});
 vm.runInContext(ctxSource + "\nglobalThis.__c = { mutePrefillParams, parseDetailContext };", ctx2);
 const c = ctx2.__c;
@@ -133,6 +133,19 @@ const scenarios = {
       ],
     };
   },
+  /* #7083: the action travels on a create only when it is a digest, on a patch only when it changed, and the form loads it from the rule. */
+  action: () => ({
+    muteCreate: j(p.formToCreateBody(formOf({}))),
+    muteCreateExplicit: j(p.formToCreateBody(formOf({ action: "mute" }))),
+    digestCreate: j(p.formToCreateBody(formOf({ action: "digest" }))),
+    toDigest: j(p.buildPatch(original, formOf({ action: "digest" }))),
+    toMute: j(p.buildPatch({ ...original, action: "digest" }, formOf({ action: "mute" }))),
+    unchanged: j(p.buildPatch({ ...original, action: "digest" }, formOf({ action: "digest" }))),
+    olderServerRule: j(p.buildPatch(original, formOf({ action: "mute" }))),
+    loadsDigest: p.valuesOf({ ...original, action: "digest" }).action,
+    loadsMissing: p.valuesOf(original).action,
+    stray: p.actionOf("snooze"),
+  }),
   writes: () => ({
     exists: j(p.interpretWrite(409, { status: "already_exists", message: "dup", rule_id: "abc" })),
     invalid: j(p.interpretWrite(400, { status: "invalid", message: "'expires_at_utc' must be an ISO-8601 UTC timestamp" })),

@@ -193,6 +193,13 @@ public class AnalysisStory
     public Dictionary<string, double>? RootFactMetadata { get; set; }
 
     /// <summary>
+    /// The window figures a paging floor reads for a chain through PLAN_REGRESSION (#7084): the server's average CPU in the
+    /// window and how many queries' timeouts rose. Read off the pass's facts in <see cref="FindingPageFloor.Evidence"/>, because
+    /// a CPU fact that scored 0 is not on the story. Null for every other story. Ephemeral like <see cref="RootFactMetadata"/>.
+    /// </summary>
+    public Dictionary<string, double>? PageEvidence { get; set; }
+
+    /// <summary>
     /// The root fact's <see cref="Fact.Ranked"/> list, carried through so <c>analyze_server</c>'s
     /// <c>root_fact</c> can name the objects the card's prose names (#3691 lane 43). Ephemeral like
     /// <see cref="RootFactMetadata"/> beside it and for the same reason: <c>Fact</c> lives for one pass, the
@@ -341,6 +348,10 @@ public class AnalysisFinding
     /// In practice this is anomaly-detector baseline context: mean, stddev, tier, hour, dow.
     /// </summary>
     public Dictionary<string, double>? RootFactMetadata { get; set; }
+
+    /// <summary>The window figures a paging floor reads, carried in from <see cref="AnalysisStory.PageEvidence"/> (#7084).
+    /// Ephemeral, not persisted: a finding read back from the store carries none and is never held by a floor.</summary>
+    public Dictionary<string, double>? PageEvidence { get; set; }
 
     /// <summary>
     /// The root fact's ranked objects, carried in from <see cref="AnalysisStory.RootFactRanked"/> (#3691 lane

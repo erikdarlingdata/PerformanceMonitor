@@ -2983,8 +2983,36 @@ $rung$;";
         new Migration(232, "daily-health-report", V232Sql),
         new Migration(233, "notification-route-report-notice", V233Sql),
         new Migration(234, "alert-log-alert-key", V234Sql),
+        new Migration(235, "blocking-pages-on-wait-time-defaults", V235Sql),
+        new Migration(236, "mute-rule-action", V236Sql),
         new Migration(237, "people-identities-grants", V237Sql),
     };
+
+    /// <summary>
+    /// V235 (#7083): the blocking alert pages on blocked wait time. The shipped bars move: <c>blocking_count_threshold</c> 1 to 3,
+    /// <c>blocking_wait_seconds_threshold</c> 0 (off) to 60 seconds, and <c>pg_blocking_count_threshold</c> 1 to 3. Four statements. The three
+    /// column defaults change, so a store with no row yet (or a new one) starts on the new bars, and the one row a store has is moved only where
+    /// a column still holds the OLD shipped default.
+    ///
+    /// <para><b>Why moving the row is right, and who it moves that it should not.</b> Nothing recorded a chosen 1 or 0 as distinct from the
+    /// default, and a Settings save sends the whole row back, so a stored 1 or 0 is usually the old default and not a choice. A store cannot tell
+    /// that apart from an operator who set 1 on purpose, so that operator is moved too and sets the value back once (Settings window, the web
+    /// settings page or <c>update_alert_settings</c>). Any other stored value is a choice and is kept. A column is moved on its own: a store
+    /// at 5 for the count and 0 for the wait keeps the 5 and gets the 60. The UPDATE fires V17's statement trigger, which bumps
+    /// <c>config_version</c>, so a running service reloads the bars at once. <c>config_alert_settings</c> is the one-row singleton, so the
+    /// UPDATE touches at most one row and the SET DEFAULT is catalog-only. Written as literals because a migration's text is frozen at the
+    /// version it ships in. An older build reads the same integer columns and is unaffected, apart from paging on the older rule.</para>
+    /// </summary>
+    private const string V235Sql = @"
+ALTER TABLE config.config_alert_settings
+    ALTER COLUMN blocking_count_threshold SET DEFAULT 3,
+    ALTER COLUMN blocking_wait_seconds_threshold SET DEFAULT 60,
+    ALTER COLUMN pg_blocking_count_threshold SET DEFAULT 3;
+UPDATE config.config_alert_settings SET
+    blocking_count_threshold = CASE WHEN blocking_count_threshold = 1 THEN 3 ELSE blocking_count_threshold END,
+    blocking_wait_seconds_threshold = CASE WHEN blocking_wait_seconds_threshold = 0 THEN 60 ELSE blocking_wait_seconds_threshold END,
+    pg_blocking_count_threshold = CASE WHEN pg_blocking_count_threshold = 1 THEN 3 ELSE pg_blocking_count_threshold END
+WHERE blocking_count_threshold = 1 OR blocking_wait_seconds_threshold = 0 OR pg_blocking_count_threshold = 1;";
 
     /// <summary>
     /// V227 (#6926): a threshold override can be held for a server tag. <c>config.config_threshold_overrides</c> gains the nullable
@@ -3113,6 +3141,26 @@ ALTER TABLE config.config_alert_settings
     ADD COLUMN IF NOT EXISTS blocking_warn_snapshot_wait_seconds double precision NOT NULL DEFAULT 0;
 ALTER TABLE config.config_alert_settings
     ADD COLUMN IF NOT EXISTS blocking_critical_snapshot_wait_seconds double precision NOT NULL DEFAULT 0;";
+
+    /// <summary>
+    /// V236 (#7083): what a mute rule does, on <c>config.config_mute_rules</c>. <c>action</c> is <c>mute</c> (the default, and the value every
+    /// stored rule takes, so each keeps exactly its effect) or <c>digest</c>, which holds a matching alert back from paging and records it as a
+    /// digest row for the daily digest. The ADD COLUMN with a constant default is catalog-only, and a CHECK holds the two words. Needs no GRANT
+    /// (the roles' table-level grants cover a new column) and no trigger (the V117 reload beacon fires on any change to the table). An older
+    /// build ignores the column and would MUTE a digest rule's matches, so a rolled-back build silences what the operator meant to see in the digest.
+    /// </summary>
+    private const string V236Sql = @"
+ALTER TABLE config.config_mute_rules ADD COLUMN IF NOT EXISTS action text NOT NULL DEFAULT 'mute';
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_config_mute_rules_action'
+                   AND conrelid = 'config.config_mute_rules'::regclass) THEN
+        ALTER TABLE config.config_mute_rules
+            ADD CONSTRAINT ck_config_mute_rules_action
+            CHECK (action IN ('mute', 'digest'));
+    END IF;
+END
+$$;";
 
     /// <summary>
     /// V231 (#7040): the repeat schedule of a mute rule, on <c>config.config_mute_rules</c>. <c>recur_days</c> is a smallint bit mask

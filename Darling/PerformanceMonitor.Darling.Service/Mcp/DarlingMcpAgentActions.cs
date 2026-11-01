@@ -208,6 +208,10 @@ internal static class DarlingMcpAgentActions
     internal const string RecurrenceRefusal =
         "A repeat schedule (recur_days, recur_start, recur_end, recur_time_zone) is not available during an investigation: a mute made here is a one-off, and a rule that repeats is left to an operator. Nothing was written.";
 
+    /// <summary>#7083: what an investigating agent is told when it sends an <c>action</c>. A digest rule holds a matching alert back from paging, a standing change to what an operator hears about, so a mute made here stays a plain mute.</summary>
+    internal const string ActionRefusal =
+        "action is not available during an investigation: a mute made here always mutes, and a rule that sends matching alerts to the daily digest instead of paging is left to an operator. Nothing was written.";
+
     /// <summary>What an investigating agent is told when it sends a mute start (#6231): its mute applies at once.</summary>
     internal const string StartsAtRefusal =
         "starts_at is not available during an investigation: a mute made here applies at once, so a window set ahead of planned work is left to an operator. Nothing was written.";
@@ -288,6 +292,8 @@ internal static class DarlingMcpAgentActions
             return DarlingMcpAlertTools.Outcome("invalid", StartsAtRefusal);
         if (body is not null && body.Any(p => p.Key.StartsWith("recur_", StringComparison.Ordinal)))
             return DarlingMcpAlertTools.Outcome("invalid", RecurrenceRefusal);
+        if (body is not null && body.ContainsKey("action"))
+            return DarlingMcpAlertTools.Outcome("invalid", ActionRefusal);
 
         var (before, notFound) = await FindMuteAsync(postgres, rule_id);
         var parsed = InvestigationToolCore.ParseAgentAction(agentAction, out var action);

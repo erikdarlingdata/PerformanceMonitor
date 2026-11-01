@@ -229,6 +229,25 @@ public sealed class AgentMuteStartRefusalTests
         Assert.Contains("starts_at is not available", create, StringComparison.Ordinal);
         Assert.Contains("starts_at is not available", update, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public async Task AnAgentMute_WithAnAction_IsRefusedWithTextThatNamesTheAction_NotTheSchedule()
+    {
+        await using var unused = NpgsqlDataSource.Create("Host=127.0.0.1;Port=1;Database=none;Username=none;Timeout=1");
+
+        var create = await DarlingMcpAlertTools.CreateMuteRule(unused, metric_name: "Blocking Detected", server_id: 7,
+            agentSeat: Seat, action: "digest");
+        var update = await DarlingMcpAgentActions.UpdateMuteAsync(Seat, unused, null, null, "rule-1",
+            "{\"action\":\"digest\"}", TestContext.Current.CancellationToken);
+        var schedule = await DarlingMcpAlertTools.CreateMuteRule(unused, metric_name: "Blocking Detected", server_id: 7,
+            agentSeat: Seat, recur_start: "22:00");
+
+        Assert.Equal("invalid", System.Text.Json.Nodes.JsonNode.Parse(create)!["status"]!.GetValue<string>());
+        Assert.Contains("action is not available", create, StringComparison.Ordinal);
+        Assert.DoesNotContain("recur_days", create, StringComparison.Ordinal);
+        Assert.Contains("action is not available", update, StringComparison.Ordinal);
+        Assert.Contains("repeat schedule", schedule, StringComparison.Ordinal);
+    }
 }
 
 /* #1776 own-store: every fact mints its own scratch database through ScratchPostgres, so the class is deliberately NOT

@@ -8,6 +8,7 @@
 
 using System;
 using System.Globalization;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -84,7 +85,7 @@ public sealed class ClientTimeoutsOnByDefaultV216LiveTests
 
         var applied = await PgMigrations.MigrateAsync(connection, ct);
 
-        Assert.Equal(StorageVersion.SchemaVersion - 215, applied);
+        Assert.Equal(PgMigrations.Scripts.Count(m => m.Version > 215), applied);
         Assert.True(await ScalarAsync<bool>(connection, EnabledSql, ct));
         Assert.Equal("true", await ScalarAsync<string>(connection, DefaultSql, ct));
         Assert.Equal(7, await ScalarAsync<int>(connection, "SELECT client_timeouts_warning_per_minute FROM config.config_alert_settings WHERE id = 1", ct));

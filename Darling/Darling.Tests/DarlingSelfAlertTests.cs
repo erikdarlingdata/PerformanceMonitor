@@ -3834,9 +3834,10 @@ public sealed class DarlingSelfAlertTests
 
         /* Not a match dimension: the rule's identity and the operator's note. RecurTimeZone is not one either:
            it names the clock a recurring window reads (#7040) and narrows when a rule applies, not which alerts
-           it matches. Everything else that is a writable string IS one, which is what makes this loop cover a
-           dimension added later. */
-        var notDimensions = new[] { nameof(MuteRule.Id), nameof(MuteRule.Reason), nameof(MuteRule.RecurTimeZone) };
+           it matches. Action (#7083) is not one either: it says what a matching alert is handed to (a mute or the
+           daily digest), not which alerts match. Everything else that is a writable string IS one, which is what
+           makes this loop cover a dimension added later. */
+        var notDimensions = new[] { nameof(MuteRule.Id), nameof(MuteRule.Reason), nameof(MuteRule.RecurTimeZone), nameof(MuteRule.Action) };
         var dimensions = typeof(MuteRule).GetProperties()
             .Where(p => p.PropertyType == typeof(string) && p.CanWrite && p.CanRead)
             .Where(p => !notDimensions.Contains(p.Name, StringComparer.Ordinal))

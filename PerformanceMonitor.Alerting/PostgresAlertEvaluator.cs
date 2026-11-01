@@ -144,8 +144,10 @@ public static class PostgresAlertEvaluator
 
     /// <summary>
     /// #3444 (V122): the shipped default for <c>blocking.pg_count_threshold</c> — how many distinct ROOT
-    /// blockers inside the rolling window fire the PostgreSQL Blocking alert. 1, for the same
-    /// reproduce-today's-behaviour reason as <see cref="DeadlockCountThresholdDefault"/>.
+    /// blockers inside the rolling window fire the PostgreSQL Blocking alert. 1 when
+    /// shipped, for the same reproduce-today's-behaviour reason as <see cref="DeadlockCountThresholdDefault"/>;
+    /// 3 since #7083, with the same 15-second worst-wait floor and one-event wait bar as SQL Server
+    /// (<see cref="BlockingPageRule"/>).
     ///
     /// <para><b>The denominators differ, which is the second reason this is not SQL Server's
     /// <c>blocking.count_threshold</c>.</b> That figure counts engine-recorded blocked-process reports and
@@ -153,7 +155,7 @@ public static class PostgresAlertEvaluator
     /// <c>pg_stat_activity</c> — PostgreSQL records nothing unless asked, so the same numeral is a bar
     /// against two different measurement processes.</para>
     /// </summary>
-    public const int BlockingCountThresholdDefault = 1;
+    public const int BlockingCountThresholdDefault = 3;
 
     /// <summary>
     /// The FLOOR both #3444 count knobs clamp to on read, and the lower write bound
