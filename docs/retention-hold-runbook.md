@@ -9,13 +9,13 @@ Critical at 4.0x; both are settable — see [Adjusting the thresholds](#adjustin
 ## What the alert is telling you
 
 Raw data is rolled up into continuous aggregates, and retention may only drop raw history once a rollup has
-actually materialized it. If a rollup has not caught up, dropping raw would destroy history that rollup
-does not hold, so the coverage gate (#1680/#1877) pauses the retention policy instead.
+actually materialized it. If a rollup has not caught up, dropping raw destroys history that rollup does
+not hold. So the coverage gate (#1680/#1877) pauses the retention policy instead.
 
 A rollup that has its own armed retention is checked only as far back as it keeps (#7114). Say the
 rollup keeps 10 days and its retention is armed. Then it counts as caught up when its oldest bucket is no
-later than 10 days ago plus one bucket, even when the tier it reads holds 27 days. The days older than that
-are days the rollup drops on its own, so dropping them from its source loses nothing it would keep. A
+later than 10 days ago plus one bucket. That holds even when the tier it reads holds 27 days. The rollup
+drops the older days on its own, so dropping them from its source loses nothing it keeps. A
 rollup with no retention, or whose own retention is paused, must still reach the source's oldest row. When
 this rule decides it, the `ARMED` line says so, for example `checked within
 query_store_stats_interval_daily's 10-day retention`.
@@ -100,9 +100,9 @@ check, at :30 past the minute), so the hold clears by itself within about an hou
 completing. A restart still runs the same gate on the start path; it is the hurry-up option, not the
 remedy.
 
-A rollup's own retention trimming the backfill's older days before the re-evaluation runs does not undo
-it. Those days are older than that rollup keeps, and the gate checks a rollup with armed retention only
-as far back as it keeps (#7114), so the trim cannot put the hold back.
+A rollup's own retention can trim the backfill's older days before the re-evaluation runs. That does not
+undo the backfill. Those days are older than the rollup keeps. The gate checks a rollup with armed
+retention only as far back as it keeps (#7114), so the trim cannot put the hold back.
 
 ## How you know it worked
 

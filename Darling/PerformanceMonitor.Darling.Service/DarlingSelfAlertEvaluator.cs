@@ -8023,7 +8023,8 @@ WHERE c.is_enabled";
                             RetentionHoldRemedy(OperatingSystem.IsWindows()) + " - and the hold clears by itself within about an " +
                             "hour of the backfill completing. Restart the service only if you want it armed " +
                             "immediately; this alert resolves on the tick after the one that arms it. Do NOT arm " +
-                            "the policy by hand: arming drops history the short consumer named in that log line has " +
+                            "the policy by hand: arming drops history that the short consumer named in the service log's " +
+                            "'HELD PAUSED' line has " +
                             "not materialized, which is precisely what the gate prevents - and the hourly pass re-holds a " +
                             "hand-armed policy whose coverage is still short. Check the service log for the " +
                             "'HELD PAUSED' line at startup naming every short consumer and the remedy for each " +

@@ -195,7 +195,7 @@ public sealed class RetentionReevaluationTests
            non-raw statement name still has to appear in that ternary for this pin to mean anything. */
         var sweep = MethodBody(ReadStorageSource(), "public static async Task<RetentionPolicySweepSummary> EnsureRetentionPoliciesAsync(");
         var readAt = sweep.IndexOf("isRawRelation ? RawArmedStateSql(relation) : RetentionPolicyScheduledSql(relation)", StringComparison.Ordinal);
-        var measureAt = sweep.IndexOf("await MeasureRetentionCoverageAsync(connection, relation, timeColumn, coverage, cancellationToken);", StringComparison.Ordinal);
+        var measureAt = sweep.IndexOf("await MeasureRetentionCoverageAsync(connection, relation, timeColumn, coverage, DateTime.UtcNow, cancellationToken);", StringComparison.Ordinal);
         var armAt = sweep.IndexOf("new NpgsqlCommand(ArmRetentionPolicySql(relation), connection)", StringComparison.Ordinal);
         var holdAt = sweep.IndexOf("new NpgsqlCommand(HoldRetentionPolicySql(relation), connection)", StringComparison.Ordinal);
         Assert.True(readAt > 0 && measureAt > readAt && armAt > measureAt && holdAt > armAt,
