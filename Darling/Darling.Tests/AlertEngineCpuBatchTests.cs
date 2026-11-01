@@ -89,6 +89,28 @@ public sealed class AlertEngineCpuBatchTests
     }
 
     [Fact]
+    public async Task AFailedIncidentOpenedWatermarkSave_StillSendsTheOpeningPage()
+    {
+        /* #7085: the opened-at instant is saved at the rising edge, between the persisted gate edge and the queued fire. A store
+           write that throws there must be logged and skipped: the opening page still goes out, and the incident is held (no
+           second page on the next sweep). Only the restart seed loses the instant, and it reads unbounded as for a legacy incident. */
+        var h = NewHarness();
+        h.StateStore.ThrowOnSaveEdgeMetric = AlertEngine.CpuIncidentOpenedMetric;
+        var engine = h.Build();
+        var t = Noon.AddMinutes(-10);
+
+        await engine.EvaluateServerAsync(Batch(Noon.AddMinutes(-30), Hots(t, AlertEngine.SqlCpuBreachSamples)));
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("High CPU", fired.MetricName);
+        Assert.DoesNotContain(h.StateStore.SavedEdge, e => e.Metric == AlertEngine.CpuIncidentOpenedMetric);
+
+        h.Now = Noon.AddSeconds(30);
+        await engine.EvaluateServerAsync(Batch(Noon.AddMinutes(-30), Hots(t, AlertEngine.SqlCpuBreachSamples)));
+        Assert.Single(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
     public async Task FourSamplesThenOneMore_FiresOnTheFifth_WhateverTheBatching()
     {
         var h = NewHarness();

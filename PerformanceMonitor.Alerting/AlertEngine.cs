@@ -746,8 +746,8 @@ public sealed class AlertEngine
                     _lastCpuAlert[key] = _utcNow();
                     _cpuRestoredOpen[key] = true;
 
-                    var openedMinutes = await _stateStore.LoadEdgeTriggerWatermarkAsync(key, CpuIncidentOpenedMetric);
                     readClock.Restart();
+                    var openedMinutes = await _stateStore.LoadEdgeTriggerWatermarkAsync(key, CpuIncidentOpenedMetric);
                     if (openedMinutes is > 0)
                     {
                         _cpuIncidentOpenedUtc[key] = DateTime.UnixEpoch.AddMinutes(openedMinutes.Value);
@@ -1172,8 +1172,22 @@ public sealed class AlertEngine
                    previous incident's last fire row is at least the 15 minute clear hold older than this edge. */
                 var openedAt = now;
                 _cpuIncidentOpenedUtc[key] = openedAt;
-                await _stateStore.SaveEdgeTriggerWatermarkAsync(
-                    key, CpuIncidentOpenedMetric, (int)Math.Floor((openedAt - DateTime.UnixEpoch).TotalMinutes));
+                try
+                {
+                    await _stateStore.SaveEdgeTriggerWatermarkAsync(
+                        key, CpuIncidentOpenedMetric, (int)Math.Floor((openedAt - DateTime.UnixEpoch).TotalMinutes));
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    /* The save sits between the gate's persisted rising edge and the queued fire, so a store write that throws here
+                       would lose the opening page for good: the gate already holds Firing and never produces that edge again. Log and
+                       carry on. With no stored instant a restart seeds this incident unbounded, as for a legacy one. */
+                    _logger?.LogError("Could not save the High CPU incident's opening instant for {ServerKey}; the opening page still goes out, and a restart will read this incident unbounded: {Message}", key, ex.Message);
+                }
             }
 
             if (incidentOpen && breaching)

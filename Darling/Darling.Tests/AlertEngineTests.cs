@@ -351,8 +351,16 @@ public sealed class AlertEngineTests
         public Task<int?> LoadEdgeTriggerWatermarkAsync(string serverKey, string metricName) =>
             Task.FromResult(EdgeWatermarks.TryGetValue((serverKey, metricName), out var w) ? (int?)w : null);
 
+        /* #7085: a metric name whose edge-watermark save throws, to pin that a failed save does not cost the page. */
+        public string? ThrowOnSaveEdgeMetric { get; set; }
+
         public Task SaveEdgeTriggerWatermarkAsync(string serverKey, string metricName, int watermark)
         {
+            if (metricName == ThrowOnSaveEdgeMetric)
+            {
+                throw new InvalidOperationException("edge watermark store write failed");
+            }
+
             EdgeWatermarks[(serverKey, metricName)] = watermark;
             SavedEdge.Add((serverKey, metricName, watermark));
             return Task.CompletedTask;
