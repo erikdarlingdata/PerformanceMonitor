@@ -14,6 +14,7 @@ using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Text;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.Investigations;
 using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
 
@@ -241,7 +242,9 @@ public sealed class PlanForceNoWritePathTests
                 offenders.Add(Owner(type).Name);
         }
 
-        Assert.Equal(new[] { nameof(DarlingMcpPlanForceTools) }, offenders);
+        /* #7109: the approval press is the second door. It runs the plan tool class's own prepare and write steps after a person's two presses,
+           and holds the executor only in the closure that calls the tool's write step. */
+        Assert.Equal(new[] { nameof(ActionProposalPress), nameof(DarlingMcpPlanForceTools) }, offenders);
 
         var botTypes = service.GetTypes().Where(t => Owner(t) == typeof(PlanForceBot)).ToList();
         Assert.NotEmpty(botTypes);
@@ -267,7 +270,8 @@ public sealed class PlanForceNoWritePathTests
             })
             .Select(Path.GetFileName)
             .ToArray();
-        Assert.Equal(new[] { "DarlingMcpPlanForceTools.cs", "DarlingMcpPlanForceTools.Kill.cs", "DarlingMcpPlanForceTools.PlanGuide.cs", "DarlingMcpPlanForceTools.PrepareWrite.cs", "DarlingMcpPlanForceTools.Proposal.cs", "DarlingMcpPlanForceTools.RecompileModule.cs" }, naming);
+        /* #7109: ActionProposalPress.cs is the approval path, which runs the plan tool class's prepare and write steps. */
+        Assert.Equal(new[] { "ActionProposalPress.cs", "DarlingMcpPlanForceTools.cs", "DarlingMcpPlanForceTools.Kill.cs", "DarlingMcpPlanForceTools.PlanGuide.cs", "DarlingMcpPlanForceTools.PrepareWrite.cs", "DarlingMcpPlanForceTools.Proposal.cs", "DarlingMcpPlanForceTools.RecompileModule.cs" }, naming);
         Assert.DoesNotContain("PlanForceBot.cs", naming);
     }
 
