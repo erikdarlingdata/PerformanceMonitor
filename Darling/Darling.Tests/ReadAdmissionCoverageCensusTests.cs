@@ -234,6 +234,8 @@ public sealed class ReadAdmissionCoverageCensusTests
         [WebFile + "PUT \"/api/agent-changes/switch\""] = "write",
         [WebFile + "GET \"/api/server-actions\""] = "definition read: every server with its three action switches (one registry join, small; #6269)",
         [WebFile + "PUT \"/api/servers/{id:int}/actions/{action}\""] = "write",
+        [WebFile + "GET \"/api/people\""] = "definition read: the people with their sign-ins and grants, three small config tables (#7107)",
+        [WebFile + "PUT \"/api/people/{command}\""] = "write",
         [WebFile + "PUT \"/api/investigation-notes/{id:long}/approve\""] = "write",
         [WebFile + "PUT \"/api/investigation-notes/{id:long}/reject\""] = "write",
         [WebFile + "PUT \"/api/investigation-requests/{requestId}/close\""] = "write",
