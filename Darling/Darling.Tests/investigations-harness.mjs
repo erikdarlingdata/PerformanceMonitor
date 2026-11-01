@@ -83,6 +83,7 @@ globalThis.fetch = async (url, init) => {
   fetches.push(u);
   /* The seat the page learns from /api/session: can edit, but not signed in as an admin (#6265). */
   if (u.split("?")[0].endsWith("/api/session")) return { status: 200, ok: true, text: async () => JSON.stringify(bodies.session) };
+  if (u.split("?")[0] === "/api/agent-changes") return { status: 200, ok: true, text: async () => JSON.stringify(bodies.agentChanges) };
   const tool = u.split("/api/read/")[1].split("?")[0];
   const b = bodies[tool];
   if (b && b.fail) return { status: 500, ok: false, text: async () => JSON.stringify({ error: "the store is down" }) };
@@ -111,7 +112,7 @@ try {
       'export function zoomableLineChart() { return el("div", {}); }\nexport function chartZoomScope() { return ""; }\n'
   );
   const mod = await import(pathToFileURL(path.join(scratch, "pages", "investigations.js")).href);
-  const { renderInvestigations, REQUEST_COLUMNS, JOURNAL_COLUMNS, claimedAt, listParams } = mod;
+  const { renderInvestigations, REQUEST_COLUMNS, JOURNAL_COLUMNS, claimedAt, listParams, requestIdFromQuery } = mod;
 
   const A = "11111111-1111-1111-1111-111111111111";
   const B = "22222222-2222-2222-2222-222222222222";
@@ -217,6 +218,38 @@ try {
   renderInvestigations(main);
   await settle();
   out.error = main.textContent.includes("the store is down");
+
+  // #6979: #/investigations?request=<id> opens one request: its report and journal and only its own agent changes, without the list.
+  bodies.get_investigation_reports = { ...reportsA, requests: [list(false).requests[0]] };
+  bodies.agentChanges = {
+    enabled: true, can_decide: false, refusals: [],
+    changes: [
+      { called_id: 5, called_at_utc: "2026-10-14T10:08:00Z", request_id: A.toUpperCase(), tool: "set_config", kind: "config", result: "done", undone_by: null },
+      { called_id: 6, called_at_utc: "2026-10-14T09:08:00Z", request_id: "33333333-3333-3333-3333-333333333333", tool: "other_tool", kind: "config", result: "failed", undone_by: null },
+    ],
+  };
+  fetches.length = 0;
+  renderInvestigations(main, A);
+  await settle();
+  out.one = {
+    listCalls: calls("list_investigation_requests"),
+    reportCalls: calls("get_investigation_reports"),
+    agentChangeReads: fetches.filter((f) => f.split("?")[0] === "/api/agent-changes").length,
+    text: slotText(),
+    links: all(main, "a").map((a) => a.attrs.href),
+    closeButtons: all(main, "button").filter((b) => b.textContent === "Close").length,
+  };
+  // An id that is not a request says so plainly, and draws no report.
+  bodies.get_investigation_reports = { status: "not_found", message: "No investigation request has id 99999999-9999-9999-9999-999999999999." };
+  renderInvestigations(main, "99999999-9999-9999-9999-999999999999");
+  await settle();
+  out.oneMissing = slotText();
+  // A request with no change in the newest calls says so, and still links to the tab.
+  bodies.get_investigation_reports = { ...reportsA, requests: [list(false).requests[1]] };
+  renderInvestigations(main, B);
+  await settle();
+  out.oneNoChange = { text: slotText(), links: all(main, "a").map((a) => a.attrs.href) };
+  out.queryIds = [requestIdFromQuery("request=" + A), requestIdFromQuery("request=%20" + B + "%20&x=1"), requestIdFromQuery(""), requestIdFromQuery("request="), requestIdFromQuery("other=1")];
 
   out.columns = REQUEST_COLUMNS.map((c) => c.key);
   out.claimedAt = claimedAt(reportsA.journal, A);
