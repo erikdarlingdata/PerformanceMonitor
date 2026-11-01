@@ -406,22 +406,28 @@ public sealed class TimeHonestyRungReadTests : IClassFixture<SharedDuckDbFixture
     }
 
     /// <summary>
-    /// Four rows against a one-hour window ending now, the store holding the EDT offset (-240):
+    /// Four rows against a one-hour window ending at a pinned instant, the store holding the offset the server's
+    /// own zone has at that instant (-240 in July, -300 in January). The MCP tool resolves the server's clock from
+    /// the stored zone id and lets it win over the stored offset, so a fixture whose offset disagrees with its
+    /// zone at the instant describes no real server and only passes while the real date happens to agree (#7078).
+    /// The offsets below are written for July; January shifts every one of them by -60 m:
     /// <list type="bullet">
-    /// <item>A — pre-rung (NULL twin), taken 30 minutes ago under EDT: local = now - 30 m - 240 m. Selected by
+    /// <item>A — pre-rung (NULL twin), taken 30 minutes ago under the stored offset: local = now - 30 m - 240 m. Selected by
     /// the fallback arm exactly as the old read selected it.</item>
-    /// <item>B — post-rung, taken 30 minutes ago under EST (-300): local = now - 30 m - 300 m, twin = now - 30 m.
+    /// <item>B — post-rung, taken 30 minutes ago with a stamp one hour behind it (-300): local = now - 30 m - 300 m, twin = now - 30 m.
     /// Its local stamp sits OUTSIDE the offset-shifted window [now - 60 m - 240 m, now - 240 m] — the old read
     /// missed it — and its twin sits inside the UTC window, so the new read takes it.</item>
-    /// <item>C — pre-rung, taken 100 minutes ago under EDT: outside either way.</item>
-    /// <item>D — post-rung, taken 100 minutes ago under EST: twin outside the UTC window, and its local stamp
+    /// <item>C — pre-rung, taken 100 minutes ago under the stored offset: outside either way.</item>
+    /// <item>D — post-rung, taken 100 minutes ago with the stamp one hour behind: twin outside the UTC window, and its local stamp
     /// (now - 400 m) outside the shifted one too. Excluded, and by the twin rather than by luck.</item>
     /// </list>
     /// The projected <c>SampleTime</c> is the LOCAL stamp for every returned row — the frame the chart plots
     /// and the MCP tool has always published.
     /// </summary>
-    [Fact]
-    public async Task TheCpuWindow_PrefersTheStoredUtcInstant_AndFallsBackToTheServerLocalStampForPreRungRows()
+    [Theory]
+    [InlineData(2026, 7, 15)]
+    [InlineData(2026, 1, 15)]
+    public async Task TheCpuWindow_PrefersTheStoredUtcInstant_AndFallsBackToTheServerLocalStampForPreRungRows(int year, int month, int day)
     {
         var savedOffset = ServerTimeHelper.UtcOffsetMinutes;
         try
@@ -430,30 +436,35 @@ public sealed class TimeHonestyRungReadTests : IClassFixture<SharedDuckDbFixture
                window on the wrong clock and fail. */
             ServerTimeHelper.UtcOffsetMinutes = 720;
 
-            var now = Truncate(DateTime.UtcNow);
-            await SeedServerPropertiesAsync(_serverId, "TimeHonestySrv", CollectedOffset, "Eastern Standard Time");
+            /* Pinned, so the zone's offset at the instant is known: -240 (EDT) in July, -300 (EST) in January. The
+               stored offset is that same figure, and B's stamp sits one hour behind it. */
+            var now = new DateTime(year, month, day, 18, 0, 0, DateTimeKind.Utc);
+            var collectedOffset = ServerClock.Resolve(EasternZone, null).OffsetMinutesAt(now);
+            Assert.Equal(month == 7 ? -240 : -300, collectedOffset);
+            var sampleOffset = collectedOffset - 60;
+            await SeedServerPropertiesAsync(_serverId, "TimeHonestySrv", collectedOffset, EasternZone);
 
             var utcA = now.AddMinutes(-30);
             var utcB = now.AddMinutes(-30);
             var utcC = now.AddMinutes(-100);
             var utcD = now.AddMinutes(-100);
 
-            await SeedCpuAsync(_serverId, "TimeHonestySrv", utcA.AddMinutes(CollectedOffset), null, 11);
-            await SeedCpuAsync(_serverId, "TimeHonestySrv", utcB.AddMinutes(SampleOffsetAtTheInstant), utcB, 22);
-            await SeedCpuAsync(_serverId, "TimeHonestySrv", utcC.AddMinutes(CollectedOffset), null, 33);
-            await SeedCpuAsync(_serverId, "TimeHonestySrv", utcD.AddMinutes(SampleOffsetAtTheInstant), utcD, 44);
+            await SeedCpuAsync(_serverId, "TimeHonestySrv", utcA.AddMinutes(collectedOffset), null, 11);
+            await SeedCpuAsync(_serverId, "TimeHonestySrv", utcB.AddMinutes(sampleOffset), utcB, 22);
+            await SeedCpuAsync(_serverId, "TimeHonestySrv", utcC.AddMinutes(collectedOffset), null, 33);
+            await SeedCpuAsync(_serverId, "TimeHonestySrv", utcD.AddMinutes(sampleOffset), utcD, 44);
 
-            var rows = await _dataService.GetCpuUtilizationAsync(_serverId, hoursBack: 1, asOfUtc: now, serverClock: ServerClock.FixedOffset(CollectedOffset));
+            var rows = await _dataService.GetCpuUtilizationAsync(_serverId, hoursBack: 1, asOfUtc: now, serverClock: ServerClock.FixedOffset(collectedOffset));
 
             Assert.Equal(new[] { 22, 11 }, rows.Select(r => r.SqlServerCpu).ToArray());   /* ordered on the local stamp: B's EST stamp sorts first */
 
             /* The frame of the projected value did not move: each returned SampleTime is the row's LOCAL stamp. */
-            Assert.Equal(utcB.AddMinutes(SampleOffsetAtTheInstant), rows[0].SampleTime);
-            Assert.Equal(utcA.AddMinutes(CollectedOffset), rows[1].SampleTime);
+            Assert.Equal(utcB.AddMinutes(sampleOffset), rows[0].SampleTime);
+            Assert.Equal(utcA.AddMinutes(collectedOffset), rows[1].SampleTime);
 
             /* Why B is the whole point: its local stamp lies outside the window the pre-rung read built
                (GetTimeRangeServerLocal: [asOf - 1 h + offset, asOf + offset]), so that read returned only A. */
-            var oldLocalStart = now.AddHours(-1).AddMinutes(CollectedOffset);
+            var oldLocalStart = now.AddHours(-1).AddMinutes(collectedOffset);
             Assert.True(rows[0].SampleTime < oldLocalStart, "the fixture must place B's local stamp where the offset-shifted window could not see it");
 
             /* The MCP tool comes through the same read with the STORED offset, and emits the local stamps. */
@@ -463,7 +474,7 @@ public sealed class TimeHonestyRungReadTests : IClassFixture<SharedDuckDbFixture
             Assert.Equal(new[] { 22, 11 }, samples.Select(s => s.GetProperty("sql_server_cpu").GetInt32()).ToArray());
             /* The tool buckets to the minute (its own downsample), so the emitted stamp is B's LOCAL stamp at
                minute grain — the server's frame, not the twin. */
-            var localB = utcB.AddMinutes(SampleOffsetAtTheInstant);
+            var localB = utcB.AddMinutes(sampleOffset);
             Assert.Equal(
                 new DateTime(localB.Year, localB.Month, localB.Day, localB.Hour, localB.Minute, 0),
                 DateTime.Parse(samples[0].GetProperty("sample_time").GetString()!, null, System.Globalization.DateTimeStyles.RoundtripKind));
