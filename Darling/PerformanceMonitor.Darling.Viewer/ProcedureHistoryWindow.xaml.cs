@@ -188,11 +188,14 @@ public partial class ProcedureHistoryWindow : Window
         if (sender is not Button btn) return;
         if (string.IsNullOrEmpty(_objectName)) return;
 
+        /* #7175: the clicked row's own compiled plan, not the newest plan for the procedure. */
+        var row = HistoryRowPlanTarget.Resolve<ViewerProcedureStatsHistoryRow>(sender, HistoryDataGrid);
+
         btn.IsEnabled = false;
         btn.Content = "...";
         try
         {
-            var plan = await _dataService.GetProcedureStatsPlanXmlAsync(_serverId, _databaseName, _schemaName, _objectName);
+            var plan = await _dataService.GetProcedureStatsPlanXmlAsync(_serverId, _databaseName, _schemaName, _objectName, row?.PlanHandle);
             if (string.IsNullOrEmpty(plan))
             {
                 MessageBox.Show(this, "No plan was captured in the collected data for this procedure.",
@@ -207,7 +210,9 @@ public partial class ProcedureHistoryWindow : Window
             {
                 Filter = "SQL Plan files (*.sqlplan)|*.sqlplan|All files (*.*)|*.*",
                 DefaultExt = ".sqlplan",
-                FileName = $"proc_plan_{_objectName}_{DateTime.Now:yyyyMMdd_HHmmss}.sqlplan"
+                FileName = row is null
+                    ? $"proc_plan_{_objectName}_{DateTime.Now:yyyyMMdd_HHmmss}.sqlplan"
+                    : $"proc_plan_{_objectName}_{row.CollectionTime:yyyyMMdd_HHmmss}Z.sqlplan"
             };
 
             if (dialog.ShowDialog() != true) return;
@@ -233,9 +238,10 @@ public partial class ProcedureHistoryWindow : Window
     {
         var fullName = string.IsNullOrEmpty(_schemaName) ? _objectName : $"{_schemaName}.{_objectName}";
         string? planXml;
+        var row = HistoryRowPlanTarget.Resolve<ViewerProcedureStatsHistoryRow>(sender, HistoryDataGrid);
         try
         {
-            planXml = await _dataService.GetProcedureStatsPlanXmlAsync(_serverId, _databaseName, _schemaName, _objectName);
+            planXml = await _dataService.GetProcedureStatsPlanXmlAsync(_serverId, _databaseName, _schemaName, _objectName, row?.PlanHandle);
         }
         catch (Exception ex)
         {
@@ -250,7 +256,7 @@ public partial class ProcedureHistoryWindow : Window
             return;
         }
 
-        var label = $"Est Plan - {fullName}";
+        var label = row is null ? $"Est Plan - {fullName}" : $"Est Plan - {fullName} ({row.CollectionTime:yyyy-MM-dd HH:mm}Z)";
         var viewer = new PlanViewerControl();
         viewer.AnalyzerConfig = ViewerSettings.CurrentAnalyzerConfig;
         try

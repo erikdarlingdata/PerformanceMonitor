@@ -49,7 +49,7 @@ public sealed class ViewerPlanHostSqlTests
         /* The presence guard must accept EITHER form — on the text column alone it discards every
            post-V54 plan silently (zero rows, no error), the #1767 bare-column regression re-run. */
         Assert.Contains("(query_plan_xml IS NOT NULL OR query_plan_gz IS NOT NULL)", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY collection_time DESC", sql, StringComparison.Ordinal); /* most-recent plan for the key */
+        Assert.Contains("collection_time DESC", sql, StringComparison.Ordinal); /* most-recent plan for the key */
         Assert.Contains("LIMIT 1", sql, StringComparison.Ordinal);
     }
 
@@ -95,7 +95,7 @@ public sealed class ViewerPlanHostSqlTests
         Assert.Contains("AND   (COALESCE(ps.query_plan_xml, qpd.query_plan_xml) IS NOT NULL OR qpd.query_plan_gz IS NOT NULL)", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("AND   ps.query_plan_xml IS NOT NULL", sql, StringComparison.Ordinal);
 
-        Assert.Contains("ORDER BY ps.collection_time DESC", sql, StringComparison.Ordinal); /* most-recent plan for the key */
+        Assert.Contains("ps.collection_time DESC", sql, StringComparison.Ordinal); /* most-recent plan for the key */
         Assert.Contains("LIMIT 1", sql, StringComparison.Ordinal);
     }
 
@@ -202,6 +202,7 @@ public sealed class ViewerPlanHostLivePostgresTests
     private const int QueryStatsPlanServerId = -970811;
     private const int QueryStatsNoPlanServerId = -970812;
     private const int QueryStorePlanServerId = -970813;
+    private const int QueryStatsRegressedPlanServerId = -971176;
 
     /* A small but well-formed ShowPlanXML — the reads only round-trip the text (the WPF host parses it),
        so any stable string proves the fetch; a realistic plan keeps the fixture honest. */
@@ -261,6 +262,55 @@ public sealed class ViewerPlanHostLivePostgresTests
         {
             await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
                 await DeleteRowsAsync(cleanup, "query_stats", QueryStatsPlanServerId, cleanupCt));
+        }
+    }
+
+    /// <summary>
+    /// #7175: the history window's per-row Download and View Stored Plan pass the row's own plan hash. A query that
+    /// regressed has an old plan on its old snapshot rows and a new plan on the newest, and the read must hand back
+    /// the plan the clicked row names, not the newest one. A hash with no stored text falls back to the newest plan.
+    /// </summary>
+    [Fact]
+    public async Task QueryStatsPlan_RowPlanHash_ReturnsThatRowsPlan_NotTheNewest_AgainstDevPostgres()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live row-plan test.");
+
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
+        await DeleteRowsAsync(connection, "query_stats", QueryStatsRegressedPlanServerId, TestContext.Current.CancellationToken);
+
+        await using var viewer = new ViewerDataService(cs!);
+        var t = TruncateToSeconds(DateTime.UtcNow).AddHours(-3);
+
+        var bodySucceeded = false;
+        try
+        {
+            /* Same query_hash, two plans: the old plan on the first two snapshots, the regressed plan on the newest. */
+            await InsertQueryStatsWithPlanAsync(connection, QueryStatsRegressedPlanServerId, t, "StackOverflow", "0xREGRESSED",
+                deltaExec: 1, deltaWorker: 10_000, deltaElapsed: 20_000, queryText: "SELECT r", planXml: SamplePlanXml, planHash: "0xOLDPLAN");
+            await InsertQueryStatsWithPlanAsync(connection, QueryStatsRegressedPlanServerId, t.AddMinutes(10), "StackOverflow", "0xREGRESSED",
+                deltaExec: 1, deltaWorker: 10_000, deltaElapsed: 20_000, queryText: "SELECT r", planXml: SamplePlanXml, planHash: "0xOLDPLAN");
+            await InsertQueryStatsWithPlanAsync(connection, QueryStatsRegressedPlanServerId, t.AddMinutes(20), "StackOverflow", "0xREGRESSED",
+                deltaExec: 1, deltaWorker: 10_000, deltaElapsed: 20_000, queryText: "SELECT r", planXml: NewerPlanXml, planHash: "0xNEWPLAN");
+
+            Assert.Equal(SamplePlanXml,
+                await viewer.GetQueryStatsPlanXmlAsync(QueryStatsRegressedPlanServerId, "StackOverflow", "0xREGRESSED", "0xOLDPLAN"));
+            Assert.Equal(NewerPlanXml,
+                await viewer.GetQueryStatsPlanXmlAsync(QueryStatsRegressedPlanServerId, "StackOverflow", "0xREGRESSED", "0xNEWPLAN"));
+            /* No hash (the Top Queries row) and a hash with no stored plan both read the newest plan. */
+            Assert.Equal(NewerPlanXml,
+                await viewer.GetQueryStatsPlanXmlAsync(QueryStatsRegressedPlanServerId, "StackOverflow", "0xREGRESSED"));
+            Assert.Equal(NewerPlanXml,
+                await viewer.GetQueryStatsPlanXmlAsync(QueryStatsRegressedPlanServerId, "StackOverflow", "0xREGRESSED", "0xNEVERSTORED"));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, "query_stats", QueryStatsRegressedPlanServerId, cleanupCt));
         }
     }
 
@@ -345,7 +395,7 @@ public sealed class ViewerPlanHostLivePostgresTests
 
     private static async Task InsertQueryStatsWithPlanAsync(
         NpgsqlConnection connection, int serverId, DateTime collectionTimeUtc, string databaseName, string queryHash,
-        long deltaExec, long deltaWorker, long deltaElapsed, string queryText, string? planXml)
+        long deltaExec, long deltaWorker, long deltaElapsed, string queryText, string? planXml, string planHash = "0xPLANHASH")
     {
         using var command = new NpgsqlCommand(@"
 INSERT INTO query_stats
@@ -362,7 +412,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         command.Parameters.AddWithValue("viewer-plan-e2e");
         command.Parameters.AddWithValue(databaseName);
         command.Parameters.AddWithValue(queryHash);
-        command.Parameters.AddWithValue("0xPLANHASH");
+        command.Parameters.AddWithValue(planHash);
         command.Parameters.AddWithValue("0xSQLHANDLE");
         command.Parameters.AddWithValue("0xPLANHANDLE");
         command.Parameters.AddWithValue(DateTime.SpecifyKind(collectionTimeUtc, DateTimeKind.Unspecified));

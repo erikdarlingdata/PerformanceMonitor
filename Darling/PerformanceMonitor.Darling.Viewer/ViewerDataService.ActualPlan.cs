@@ -90,7 +90,7 @@ public sealed partial class ViewerDataService
             return null;
         }
 
-        planXml ??= await GetQueryStatsPlanXmlAsync(serverId, NullIfBlank(databaseName) ?? "", queryHash, cancellationToken);
+        planXml ??= await GetQueryStatsPlanXmlAsync(serverId, NullIfBlank(databaseName) ?? "", queryHash, cancellationToken: cancellationToken);
         return new StoredActualPlanQuery(queryText, planXml);
     }
 
