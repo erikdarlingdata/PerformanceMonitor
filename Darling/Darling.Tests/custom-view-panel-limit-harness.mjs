@@ -77,6 +77,7 @@ const BUSY_TEXT = "The service is running as many long reads as it allows (2), a
 const reply = (status, body, headers = {}) => ({ status, ok: status >= 200 && status < 300, headers: { get: (h) => headers[h.toLowerCase()] ?? null }, text: async () => JSON.stringify(body) });
 const okBody = () => ({ columns: [{ name: "n", label: "n" }], rows: [{ n: 1 }], row_count: 1 });
 function answer(call, status) {
+  if (!call) return; /* a read the page never sent: the test then sees the missing call in what it recorded */
   call.answered = status;
   call.resolve(status === 429 ? reply(429, { error: BUSY_TEXT }, { "retry-after": "1" }) : status === 500 ? reply(500, { error: "The read failed." }) : reply(200, okBody()));
 }
@@ -186,7 +187,7 @@ const out = {};
   out.busyTwiceCalls = sourcesOf(calls);
   out.busyTwiceErrors = stripsOf(main).filter((s) => /\berror\b/.test(s.cls)).map((s) => s.text);
   out.busyTwiceRetryButtons = retryButtons(main).length;
-  retryButtons(main)[0].fire("click");
+  retryButtons(main)[0]?.fire("click");
   await flush();
   out.retryCalls = sourcesOf(calls);
   out.retryWaiting = stripsOf(main).map((s) => s.text);
@@ -202,7 +203,7 @@ const out = {};
   answer(calls[0], 500);
   await flush();
   out.serverErrorRetryButtons = retryButtons(main).length;
-  retryButtons(main)[0].fire("click");
+  retryButtons(main)[0]?.fire("click");
   await flush();
   out.serverErrorRetryCallsWhileFull = sourcesOf(calls);
   out.serverErrorRetryStrips = stripsOf(main).map((s) => s.text);
