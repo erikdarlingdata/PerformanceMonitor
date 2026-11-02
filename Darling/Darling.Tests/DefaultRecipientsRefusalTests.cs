@@ -16,8 +16,8 @@ namespace Darling.Tests;
 
 /// <summary>
 /// #7184: the default email recipients saved from the Viewer's and Lite's settings were never checked, so one entry the send
-/// cannot parse (an Outlook-style <c>a@x.com; b@x.com</c>) made <c>MailAddressCollection.Add</c> throw and every email on the
-/// default route failed, valid recipients included. The settings windows now refuse such a list with
+/// cannot parse (an Outlook-style <c>a@x.com;b@x.com</c>) made <c>MailAddressCollection.Add</c> throw and every email on the
+/// default route failed, valid recipients included (<c>a@x.com; b@x.com</c> does not throw: it sends to <c>b@x.com</c> only). The settings windows now refuse such a list with
 /// <see cref="EmailSendCore.RecipientsRefusal"/>, the one rule the route window and the MCP tools already use.
 /// </summary>
 public sealed class DefaultRecipientsRefusalTests
@@ -36,8 +36,18 @@ public sealed class DefaultRecipientsRefusalTests
         Assert.DoesNotContain(recipients, refusal, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void ASemicolonWithASpace_IsRefused_BecauseTheSendKeepsOnlyTheSecondAddress()
+    {
+        using var message = new MailMessage();
+        message.To.Add("a@x.com; b@x.com");
+
+        // No throw, but one recipient: the first address became a display name and is never sent to.
+        var recipient = Assert.Single(message.To);
+        Assert.Equal("b@x.com", recipient.Address);
+    }
+
     [Theory]
-    [InlineData("a@x.com; b@x.com")]
     [InlineData("a@x.com;b@x.com")]
     [InlineData("dba.corp.com")]
     public void TheListsTheSettingsRefuse_AreTheOnesTheSendThrowsOn(string recipients)

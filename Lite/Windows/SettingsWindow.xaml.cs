@@ -1478,8 +1478,8 @@ public partial class SettingsWindow : Window
         App.SmtpUsername = SmtpUsernameBox.Text?.Trim() ?? "";
         App.SmtpFromAddress = SmtpFromBox.Text?.Trim() ?? "";
 
-        /* #7184: one recipient the send cannot parse (an Outlook-style "a@x.com; b@x.com") fails every alert email, valid
-           addresses included. An enabled channel keeps its stored recipients and says so, like the other writers do. */
+        /* #7184: one recipient the send cannot parse (an Outlook-style "a@x.com;b@x.com") fails every alert email, valid
+           addresses included, and "a@x.com; b@x.com" silently drops the first. An enabled channel keeps its stored recipients and says so, like the other writers do. */
         var recipientsValid = true;
         var typedRecipients = SmtpRecipientsBox.Text?.Trim() ?? "";
         if (App.SmtpEnabled && EmailSendCore.RecipientsRefusal(typedRecipients) is { } recipientsRefusal)

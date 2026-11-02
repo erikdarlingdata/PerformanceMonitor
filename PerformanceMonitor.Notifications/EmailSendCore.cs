@@ -37,7 +37,8 @@ public sealed class EmailSendCore
     /// The refusal for a recipient list, or null when it is fine or blank (#6231, #7184). The list is comma separated, as the send
     /// splits it, and each entry must be one plain address (no display name, no group). One copy for the Viewer's and Lite's SMTP
     /// settings, the Viewer's route window and the MCP tools: a single entry the send cannot parse (an Outlook-style
-    /// <c>a@x.com; b@x.com</c>) makes <c>MailAddressCollection.Add</c> throw and the whole message fails. The text never carries an address.
+    /// <c>a@x.com;b@x.com</c>) makes <c>MailAddressCollection.Add</c> throw and the whole message fails, and <c>a@x.com; b@x.com</c> parses
+    /// as one recipient, <c>b@x.com</c>, with the first address as its display name, so the first is silently dropped. The text never carries an address.
     /// </summary>
     public static string? RecipientsRefusal(string? recipients)
     {
