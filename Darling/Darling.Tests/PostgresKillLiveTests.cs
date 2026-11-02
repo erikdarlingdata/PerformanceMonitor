@@ -205,7 +205,7 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
             await cleanup(fresh);
         });
 
-    private sealed record Ctx(NpgsqlDataSource Source, NpgsqlConnection Store, NpgsqlConnection Admin, ScramTlsCluster Target, Roles Roles, string Arg, CancellationToken Ct)
+    private sealed record Ctx(NpgsqlDataSource Source, NpgsqlConnection Store, NpgsqlConnection Admin, ScramTlsCluster Target, Roles Roles, string Arg, CancellationToken Ct, string StoreConnectionString)
     {
         public Task CleanupAsync(bool bodySucceeded, Func<NpgsqlConnection, Task> cleanup) => AdminCleanupAsync(Admin, Target, bodySucceeded, cleanup);
 
@@ -317,7 +317,7 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
             var opened = await requests.OpenOrJoinAsync(alert, ct);
             var claim = await requests.ClaimAsync(opened.RequestId!.Value, "agent-a", ct);
             var arg = AgentActionArgumentTests.Arg(opened.RequestId.Value.ToString(), claim.ClaimId!.Value.ToString(), reason: "the blocker holds a transaction open");
-            await body(new Ctx(source, store, admin, target, roles, arg, ct));
+            await body(new Ctx(source, store, admin, target, roles, arg, ct, builder.ConnectionString));
             bodySucceeded = true;
         }
         finally
@@ -527,6 +527,73 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
             Assert.Equal(1L, await new NpgsqlCommand("SELECT count(*) FROM config.agent_action_proposals", c.Store).ExecuteScalarAsync(c.Ct));
             Assert.True(await c.StillAliveAsync(pid));
             Assert.Equal(0, await c.JournalAsync("action_called"));
+        }, approval: "required");
+    }
+
+    /// <summary>
+    /// #7109, "the agent cannot approve", on a live MCP host with an agent token: a real kill on a route that requires approval answers
+    /// <c>proposed</c>, the same call again answers the same proposal id, and the proposal stays <c>pending</c> with no first press and no
+    /// approval in the journal. The backend lives. It fails if any path from the agent's call decides the proposal.
+    /// </summary>
+    [Fact]
+    public async Task AnAgentTokenOnTheHost_AsksTwice_GetsTheSameProposal_AndNothingIsPressedApprovedOrKilled()
+    {
+        await RunAsync(Grants.SignalAndStats, Without.Nothing, async c =>
+        {
+            var (connection, pid, id) = await c.OpenVictimAsync();
+            await using var victimConnection = connection;
+            await using (var open = new NpgsqlCommand("BEGIN; CREATE TEMP TABLE kill_probe (a int);", connection))
+                await open.ExecuteNonQueryAsync(c.Ct);
+
+            const string agentBearer = "agent-token-value-proposal-7109-aaaa-1";
+            var mcp = new McpConfig
+            {
+                Tokens = new List<McpTokenEntry> { new() { Name = "agent-a", Token = agentBearer, Role = "agent" } },
+            };
+            var legacy = DarlingMcpWritePolicy.ResolveForStart(mcp, "", out _);
+            var tokens = DarlingMcpTokenSet.Resolve(mcp, "", legacy, null);
+            var owner = new StoreOwnerSource();
+            owner.Publish(c.Source);
+            using var server = await DarlingMcpWritePolicyTests.BuildServer(mcp, "", c.StoreConnectionString, tokens, owner: owner);
+
+            var arguments = new JsonObject
+            {
+                ["server_name"] = "pg-7",
+                ["backend_id"] = id,
+                ["session_id"] = pid,
+                ["agent_action"] = c.Arg,
+                ["dry_run"] = false,
+            }.ToJsonString();
+
+            async Task<JsonObject> AskAsync()
+            {
+                var (status, body) = await DarlingMcpWritePolicyTests.ToolsCallAsync(server, DarlingMcpPlanForceTools.KillToolName, arguments, agentBearer);
+                Assert.Equal(200, status);
+                var dataLine = body.Split('\n').FirstOrDefault(l => l.StartsWith("data:", StringComparison.Ordinal));
+                using var document = System.Text.Json.JsonDocument.Parse(dataLine is null ? body : dataLine["data:".Length..].Trim());
+                var text = document.RootElement.GetProperty("result").GetProperty("content")[0].GetProperty("text").GetString()!;
+                return Parse(text);
+            }
+
+            var first = await AskAsync();
+            Assert.Equal("proposed", (string?)first["status"]);
+            Assert.True(Guid.TryParse((string?)first["proposal_id"], out var proposalId));
+            var second = await AskAsync();
+            Assert.Equal("proposed", (string?)second["status"]);
+            Assert.Equal(proposalId.ToString(), (string?)second["proposal_id"]);
+
+            Assert.Equal(1L, await new NpgsqlCommand("SELECT count(*) FROM config.agent_action_proposals", c.Store).ExecuteScalarAsync(c.Ct));
+            await using (var read = new NpgsqlCommand("SELECT state FROM config.agent_action_proposals WHERE proposal_id = $1", c.Store))
+            {
+                read.Parameters.Add(new NpgsqlParameter { Value = proposalId, NpgsqlDbType = NpgsqlDbType.Uuid });
+                Assert.Equal("pending", (string?)await read.ExecuteScalarAsync(c.Ct));
+            }
+
+            Assert.Equal(1, await c.JournalAsync("proposal_created"));
+            Assert.Equal(0, await c.JournalAsync("proposal_first_press"));
+            Assert.Equal(0, await c.JournalAsync("proposal_approved"));
+            Assert.Equal(0, await c.JournalAsync("action_called"));
+            Assert.True(await c.StillAliveAsync(pid));
         }, approval: "required");
     }
 

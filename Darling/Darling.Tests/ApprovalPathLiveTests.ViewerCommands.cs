@@ -79,12 +79,22 @@ public sealed partial class ApprovalPathLiveTests
         {
             var (connection, pid, proposalId) = await c.ProposeKillAsync();
             await using var victim = connection;
+            /* A second pending proposal on the same request and server: the read asks the route and approver checks once for both rows. */
+            var (secondConnection, _, secondId) = await c.ProposeKillAsync();
+            await using var secondVictim = secondConnection;
 
             var list = await ProposalCommands.ReadAsync(c.Source, NullLogger.Instance, null, null, McpDataDetail.Full, "https://dash.example", c.Ct);
-            var row = Assert.Single(JsonNode.Parse(list.ResultJson!)!["proposals"]!.AsArray())!;
-            Assert.False((bool)row["can_approve_here"]!);
-            Assert.True((bool)row["nobody_can_approve"]!);
+            var rows = JsonNode.Parse(list.ResultJson!)!["proposals"]!.AsArray();
+            Assert.Equal(2, rows.Count);
+            foreach (var each in rows)
+            {
+                Assert.False((bool)each!["can_approve_here"]!);
+                Assert.True((bool)each["nobody_can_approve"]!);
+            }
+
+            var row = Assert.Single(rows, r => (string?)r!["proposal_id"] == proposalId.ToString("D"))!;
             Assert.Equal($"https://dash.example/#/proposals?proposal={proposalId:D}", (string?)row["link"]);
+            Assert.Contains(rows, r => (string?)r!["proposal_id"] == secondId.ToString("D"));
 
             foreach (var type in new[] { ProposalCommands.FirstPressType, ProposalCommands.ConfirmType })
             {
@@ -95,6 +105,13 @@ public sealed partial class ApprovalPathLiveTests
 
             Assert.True(await c.AliveAsync(pid, polls: 5));
             Assert.Equal("pending", await c.StateAsync(proposalId));
+
+            /* A mapped person who can approve kills still leaves two rows, and the sentence is gone from both. */
+            await c.PersonAsync("Approver B");
+            var after = await ProposalCommands.ReadAsync(c.Source, NullLogger.Instance, null, null, McpDataDetail.Full, "https://dash.example", c.Ct);
+            var afterRows = JsonNode.Parse(after.ResultJson!)!["proposals"]!.AsArray();
+            Assert.Equal(2, afterRows.Count);
+            Assert.All(afterRows, r => Assert.False((bool)r!["nobody_can_approve"]!));
         });
     }
 

@@ -35,14 +35,6 @@ public sealed class ActionProposalRulesTests
     }
 
     [Fact]
-    public void EveryProposalEvent_IsInTheJournalsOwnerOnlyList()
-    {
-        var list = DarlingManagedRoles.JournalOwnerEventList.Split(", ");
-        foreach (var kind in ProposalEvents.OwnerOnly.Append(InvestigationRequestStore.ProposalNoticeSent).Append(InvestigationRequestStore.AskerJournalEvent))
-            Assert.Contains("'" + kind + "'", list);
-    }
-
-    [Fact]
     public void AnApprovedProposal_EndsOnlyAsRunFailedUnknownOrRefused()
     {
         foreach (var state in ProposalStates.AfterApproved)

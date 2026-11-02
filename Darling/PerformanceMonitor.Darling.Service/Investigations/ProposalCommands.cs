@@ -20,6 +20,7 @@ using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitor.Darling.Service.Investigations;
 
@@ -117,20 +118,34 @@ internal static class ProposalCommands
         var names = await ServerNamesAsync(owner, rows.Select(r => r.ServerId).Distinct().ToArray(), cancellationToken);
         var people = await ProposalDisplay.PeopleAsync(owner, rows.Select(r => r.FirstPressBy), cancellationToken);
         var approvals = new Dictionary<Guid, ActionApprovalState?>();
+        var nobodyAnswers = new Dictionary<(int ServerId, string Action, bool SinglePerson), bool>();
+        /* The routes are read once for the whole call: every request resolves its metrics against the same list. */
+        Func<string, int, AlertSeverityLevel?, NotificationRoute?>? routeResolver = null;
         var list = new JsonArray();
         foreach (var row in rows)
         {
             if (!approvals.TryGetValue(row.RequestId, out var approval))
             {
                 approval = await store.RequestApprovalAsync(row.RequestId,
-                    (connection, _, token) => DarlingAgentActionGate.LoadRoutesAsync(connection, effectiveLogger, token), cancellationToken);
+                    async (connection, _, token) => routeResolver ??= await DarlingAgentActionGate.LoadRoutesAsync(connection, effectiveLogger, token), cancellationToken);
                 approvals[row.RequestId] = approval;
             }
 
             var singlePerson = approval?.SinglePerson ?? false;
             var pending = row.State == ProposalStates.Pending;
-            var nobody = pending && approval is not null
-                && await store.NobodyCanApproveAsync(row.ServerId, InvestigationRequestStore.ServerActionForTool(row.Tool), singlePerson, cancellationToken);
+            var nobody = false;
+            if (pending && approval is not null)
+            {
+                /* The answer depends on the server, the kind and the single-person flag only: ask once for each. */
+                var action = InvestigationRequestStore.ServerActionForTool(row.Tool);
+                var key = (row.ServerId, action, singlePerson);
+                if (!nobodyAnswers.TryGetValue(key, out nobody))
+                {
+                    nobody = await store.NobodyCanApproveAsync(row.ServerId, action, singlePerson, cancellationToken);
+                    nobodyAnswers[key] = nobody;
+                }
+            }
+
             var target = MaskedJson(JsonNode.Parse(row.TargetJson), masker);
             list.Add(new JsonObject
             {
