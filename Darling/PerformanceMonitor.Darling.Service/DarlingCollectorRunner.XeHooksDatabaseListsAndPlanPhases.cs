@@ -358,29 +358,7 @@ public sealed partial class DarlingCollectorRunner
 
         cache.Prune(now - QueryStatsPlanCacheMaxAge);
 
-        var misses = new List<(QueryStatsPlanKey Key, QueryStatsCollector.Row Row)>();
-        foreach (var row in rows)
-        {
-            if (QueryStatsPlanKey.TryCreate(server.ServerId, row) is not { } key)
-            {
-                continue;
-            }
-
-            if (cache.TryGet(key, now, out var hit))
-            {
-                /* The cached size rides along with the digest, so a reused row is the row it always was. A null
-                   digest is an over-cap plan: the size and no plan, the pairing the inline capture produces. */
-                row.KnownPlanDigest = hit.Digest;
-                row.QueryPlanXmlBytes = hit.Bytes;
-            }
-            else if (misses.Count < QueryStatsCollector.MaxPlansPerRun)
-            {
-                /* #7156: the main query returns every statement that ran in the window, in rank order, and the plan work
-                   stays bounded at the old 200: a miss past the cap ships without a plan, is not cached, and is fetched
-                   on a later run once it ranks (or once the rows above it go idle). */
-                misses.Add((key, row));
-            }
-        }
+        var misses = PartitionDeferredQueryStatsPlans(server.ServerId, rows, cache, now);
 
         if (BetweenPlanPhasesForTests is { } hook)
         {
@@ -469,6 +447,46 @@ public sealed partial class DarlingCollectorRunner
         }
 
         return pending;
+    }
+
+    /// <summary>
+    /// The hit-or-miss split of <see cref="FetchDeferredQueryStatsPlansAsync"/>, pulled out so the cap is testable
+    /// without a target (#7156). A row with a cached digest takes it (and the cached size) and is not a miss; a row
+    /// with no usable plan handle is skipped; the first <see cref="QueryStatsCollector.MaxPlansPerRun"/> remaining
+    /// rows, in input (rank) order, are the misses the caller fetches. A miss past the cap is neither fetched nor
+    /// cached: it ships without a plan and is fetched on a later run once it ranks.
+    /// </summary>
+    internal static List<(QueryStatsPlanKey Key, QueryStatsCollector.Row Row)> PartitionDeferredQueryStatsPlans(
+        int serverId,
+        IEnumerable<QueryStatsCollector.Row> rows,
+        PlanDigestCache<QueryStatsPlanKey> cache,
+        DateTime now)
+    {
+        var misses = new List<(QueryStatsPlanKey Key, QueryStatsCollector.Row Row)>();
+        foreach (var row in rows)
+        {
+            if (QueryStatsPlanKey.TryCreate(serverId, row) is not { } key)
+            {
+                continue;
+            }
+
+            if (cache.TryGet(key, now, out var hit))
+            {
+                /* The cached size rides along with the digest, so a reused row is the row it always was. A null
+                   digest is an over-cap plan: the size and no plan, the pairing the inline capture produces. */
+                row.KnownPlanDigest = hit.Digest;
+                row.QueryPlanXmlBytes = hit.Bytes;
+            }
+            else if (misses.Count < QueryStatsCollector.MaxPlansPerRun)
+            {
+                /* #7156: the main query returns every statement that ran in the window, in rank order, and the plan work
+                   stays bounded at the old 200: a miss past the cap ships without a plan, is not cached, and is fetched
+                   on a later run once it ranks (or once the rows above it go idle). */
+                misses.Add((key, row));
+            }
+        }
+
+        return misses;
     }
 
     /// <summary>
