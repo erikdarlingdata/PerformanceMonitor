@@ -120,6 +120,33 @@ public sealed class CustomViewPanelLimitBehaviourTests
     }
 
     [Fact]
+    public void AReadPanelRefusedBusyThenAnswered_ShowsTheRetryStrip_ThenDraws_WithTwoReadsSent_AndTheSlotKept()
+    {
+        var run = Result.Value;
+        Assert.Contains(Strings(run.GetProperty("readBusyOnceStrips")), s => s.StartsWith("The service is running as many long reads as it allows. Retrying in 1 second"));
+        Assert.Equal(new[] { "r1", "r2" }, Strings(run.GetProperty("readBusyOnceCallsWhileWaiting")));
+        Assert.Equal(new[] { "r1", "r2", "r1" }, Strings(run.GetProperty("readBusyOnceCallsAfterWait")));
+        Assert.Equal(new[] { "r1", "r2", "r1", "r3" }, Strings(run.GetProperty("readBusyOnceCallsAtEnd")));
+        Assert.Equal(0, run.GetProperty("readBusyOnceLoadingAtEnd").GetInt32());
+        Assert.Equal(0, run.GetProperty("readBusyOnceErrorsAtEnd").GetInt32());
+    }
+
+    [Fact]
+    public void AReadPanelRefusedBusyTwice_ShowsTheErrorAndARetryButton_AndRetryRunsThatPanelAgain_AnUnknownReadHasNoButton()
+    {
+        var run = Result.Value;
+        Assert.Equal(0, run.GetProperty("readUnknownRetryButtons").GetInt32());
+        Assert.Equal(new[] { "r1", "r2", "r1" }, Strings(run.GetProperty("readBusyTwiceCalls")));
+        Assert.Contains(Strings(run.GetProperty("readBusyTwiceErrors")), e => e.Contains("Try again in about 48 seconds."));
+        Assert.Equal(1, run.GetProperty("readBusyTwiceRetryButtons").GetInt32());
+        Assert.Equal(new[] { "r1", "r2", "r1", "r1" }, Strings(run.GetProperty("readRetryCalls")));
+        Assert.Equal(0, run.GetProperty("readRetryLoadingAtEnd").GetInt32());
+        Assert.Equal(0, run.GetProperty("readRetryButtonsAtEnd").GetInt32());
+        // The unknown read's own catalog error is the only error left.
+        Assert.Equal(1, run.GetProperty("readRetryErrorsAtEnd").GetInt32());
+    }
+
+    [Fact]
     public void AMarkdownCell_AndAPanelWithAnUnknownSource_TakeNoSlot_AndGetNoRetryButton()
     {
         var run = Result.Value;

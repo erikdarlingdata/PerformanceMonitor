@@ -28,6 +28,9 @@ import {
   mount,
   loadingStrip,
   waitingStrip,
+  retryButton,
+  retryOnceWhenBusy,
+  busyRetryStrip,
   errorStrip,
   readErrorStrip,
   emptyStrip,
@@ -147,8 +150,16 @@ export function renderPanel(desc, onSettled, gate = null) {
   /* #6933: the key a poll matches this panel by, so it keeps the panel on screen while the same read runs again. */
   notePanelKey(panel, JSON.stringify([desc.read || desc.path || null, desc.params || null]));
   /* #7257: a saved view's `gate` starts the read when the page's long-read slots allow it. */
-  if (gate) gate(() => loadPanel(desc, body, signal, onSettled));
-  else loadPanel(desc, body, signal, onSettled);
+  if (gate) {
+    /* A failed read gets a Retry button that runs this one panel again through the same gate, and a busy refusal is sent once more. */
+    const retry = () => {
+      mount(body, waitingStrip());
+      gate(() => loadPanel(desc, body, signal, null, retry), true);
+    };
+    gate(() => loadPanel(desc, body, signal, onSettled, retry));
+  } else {
+    loadPanel(desc, body, signal, onSettled);
+  }
   return panel;
 }
 
@@ -156,19 +167,23 @@ export function renderPanel(desc, onSettled, gate = null) {
    terminal state (data, empty, error, aborted, or auth) — every renderPanel caller today omits it (a no-op), but
    it is what lets a caller with its OWN concurrency budget (the alert-notebook doc's max-3 in-flight cell loader,
    views.js) know when a slot frees, since renderPanel itself returns synchronously with the fetch still in flight. */
-async function loadPanel(desc, body, signal, onSettled) {
+async function loadPanel(desc, body, signal, onSettled, onRetry = null) {
   try {
-    await loadPanelBody(desc, body, signal);
+    await loadPanelBody(desc, body, signal, onRetry);
   } finally {
     if (onSettled) onSettled();
   }
 }
 
-async function loadPanelBody(desc, body, signal) {
+async function loadPanelBody(desc, body, signal, onRetry = null) {
   /* A read that keeps less history than the page's Range is asked again for what it keeps, and the panel says
      so through keptWindowStrip (readWithinKeptHistory in util.js, shared with the server-tab composites). */
+  /* #7257: a panel of a saved view (it has onRetry) sends a read the service refused busy (429) once more after its Retry-After. */
+  const readOnce = (tool, params) => onRetry
+    ? retryOnceWhenBusy(() => readTool(tool, params, signal), (seconds) => mount(body, busyRetryStrip(seconds)), signal)
+    : readTool(tool, params, signal);
   const res = await readWithinKeptHistory(
-    (params) => (desc.read ? readTool(desc.read, params, signal) : apiGet(desc.path + buildQuery(params), signal)),
+    (params) => (desc.read ? readOnce(desc.read, params) : apiGet(desc.path + buildQuery(params), signal)),
     desc.params
   );
 
@@ -183,7 +198,7 @@ async function loadPanelBody(desc, body, signal) {
     /* readErrorStrip degrades the "window too wide" validation error to a notice; every other error stays red
        (#2780). Shared with the server-tab composites so the whole page degrades the same way. A window refusal
        only reaches it now when the one retry above could not settle it. */
-    mount(body, readErrorStrip(res.message));
+    mount(body, onRetry ? [readErrorStrip(res.message), retryButton(onRetry)] : readErrorStrip(res.message));
     return;
   }
   const kept = keptWindowStrip(res);

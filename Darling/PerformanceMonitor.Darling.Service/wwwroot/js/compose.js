@@ -20,7 +20,7 @@
  * inert. The chart SVG lives entirely in charts.js (one SVG_NS occurrence, the air-gap allowlist); this file has no SVG.
  */
 
-import { el, mount, loadingStrip, waitingStrip, retryOnceWhenBusy, busyRetryStrip, errorStrip, emptyStrip, disclosure, fmtInt, fmtNum, fmtSize, tickDecimals, apiSendRead, noticeStrip, parseUtc, windowNoteText } from "./util.js";
+import { el, mount, loadingStrip, waitingStrip, retryButton, retryOnceWhenBusy, busyRetryStrip, errorStrip, emptyStrip, disclosure, fmtInt, fmtNum, fmtSize, tickDecimals, apiSendRead, noticeStrip, parseUtc, windowNoteText } from "./util.js";
 import { renderLineChart, zoomChip, getChartHidden, setChartHidden, nextHiddenKeys, chartZoomScope, renderBarChart, renderPieChart, renderScatterChart, CATEGORICAL_COLORS } from "./charts.js";
 import { navigateServer, gridTable } from "./panels.js";
 import { getCatalog } from "./views-api.js";
@@ -259,13 +259,6 @@ export function composedNoticeText(data) {
     window_end_utc: data.window_end_utc,
   });
   return typeof local === "string" && local ? notice.split(sentence).join(local) : notice;
-}
-
-/** #7257: the Retry button under a panel's read error. */
-function retryButton(onRetry) {
-  const btn = el("button", { class: "btn small", type: "button", text: "Retry" });
-  btn.addEventListener("click", () => onRetry());
-  return btn;
 }
 
 /** Run a composed panel and fill `body` with the chart (or the empty/error state). Used by the card + the live

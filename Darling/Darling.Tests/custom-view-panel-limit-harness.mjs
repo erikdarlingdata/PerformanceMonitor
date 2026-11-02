@@ -70,6 +70,7 @@ globalThis.location = { hash: "#/view/v1" };
 /* The scripted service. A view is a list of panels (or notebook cells) by id. Every compose run is held until the test answers it:
    `calls` is every run the page sent, in order, and `answer(call, status)` settles one (200 with a one-row table, or 429 with Retry-After 1). */
 const SOURCES = ["s1", "s2", "s3", "s4", "s5", "s6", "s7"];
+const READS = ["r1", "r2", "r3", "r4"];
 let view = null;
 const calls = [];
 let autoAnswer = false;
@@ -79,16 +80,24 @@ const okBody = () => ({ columns: [{ name: "n", label: "n" }], rows: [{ n: 1 }], 
 function answer(call, status) {
   if (!call) return; /* a read the page never sent: the test then sees the missing call in what it recorded */
   call.answered = status;
-  call.resolve(status === 429 ? reply(429, { error: BUSY_TEXT }, { "retry-after": "1" }) : status === 500 ? reply(500, { error: "The read failed." }) : reply(200, okBody()));
+  call.resolve(status === 429 ? reply(429, { error: BUSY_TEXT }, { "retry-after": "1" }) : status === 500 ? reply(500, { error: "The read failed." }) : reply(200, call.source.startsWith("r") ? { rows: [{ n: 1 }] } : okBody()));
 }
 globalThis.fetch = async (url, init) => {
   const u = new URL(String(url), "http://viewer.test");
   if (u.pathname === "/api/session") return reply(200, { can_edit: true });
   if (u.pathname === "/api/catalog") {
-    return reply(200, { reads: [], viz: [], compose: { measures: SOURCES.map((s) => ({ source: s, measure: "m", label: s })), dimensions: [], annotationSources: [] } });
+    return reply(200, { reads: READS.map((r) => ({ name: r })), viz: [], compose: { measures: SOURCES.map((s) => ({ source: s, measure: "m", label: s })), dimensions: [], annotationSources: [] } });
   }
   if (u.pathname === "/api/fleet") return reply(200, { cards: [{ server_name: "a", display_name: "Server A" }, { server_name: "b", display_name: "Server B" }] });
   if (u.pathname === "/api/views/v1") return reply(200, view);
+  if (u.pathname.startsWith("/api/read/")) {
+    /* A read panel's read, held and answered like a compose run: `source` carries the read's name. */
+    const call = { source: u.pathname.slice("/api/read/".length), server: JSON.stringify(null), answered: null };
+    calls.push(call);
+    const settled = new Promise((resolve) => { call.resolve = resolve; });
+    if (autoAnswer) answer(call, 200);
+    return settled;
+  }
   if (u.pathname === "/api/compose/run") {
     const body = JSON.parse(init.body);
     const call = { source: body.panel.source, server: JSON.stringify(body.server ?? null), answered: null };
@@ -116,6 +125,7 @@ const all = (n, out = []) => { out.push(n); for (const c of n.children) all(c, o
 const flush = async () => { for (let i = 0; i < 30; i++) await new Promise((r) => setTimeout(r, 0)); };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const panel = (source, extra = {}) => ({ title: "Panel " + source, source, viz: "table", measure: "m", ...extra });
+const rpanel = (read, extra = {}) => ({ title: "Read " + read, read, viz: "table", columns: [{ key: "n", label: "n" }], rowsKey: "rows", ...extra });
 const dashboard = (panels) => ({ id: "v1", name: "V", definition: { panels } });
 const notebook = (cells) => ({ id: "v1", name: "N", definition: { kind: "notebook", cells } });
 const cls = (n) => n.attrs.class || n.className || "";
@@ -272,6 +282,51 @@ const out = {};
   answer(calls[0], 200);
   await flush();
   out.noSlotStartedAfterOne = sourcesOf(calls);
+}
+
+/* A read panel answered 429 then 200: the busy strip, then its data, and the panel holds its slot while it waits. */
+{
+  const main = await open(dashboard([rpanel("r1"), rpanel("r2"), rpanel("r3")]));
+  answer(calls[0], 429);
+  await flush();
+  out.readBusyOnceStrips = stripsOf(main).map((s) => s.text);
+  out.readBusyOnceCallsWhileWaiting = sourcesOf(calls);
+  await sleep(1300);
+  await flush();
+  out.readBusyOnceCallsAfterWait = sourcesOf(calls);
+  answer(calls[2], 200);
+  answer(calls[1], 200);
+  await flush();
+  answer(calls[3], 200);
+  await flush();
+  out.readBusyOnceCallsAtEnd = sourcesOf(calls);
+  out.readBusyOnceLoadingAtEnd = loadingCount(main);
+  out.readBusyOnceErrorsAtEnd = stripsOf(main).filter((s) => /\berror\b/.test(s.cls)).length;
+}
+
+/* A read panel answered 429 twice: the error and a Retry button. Retry sends one more read for that panel only, through the limiter.
+   A panel naming an unknown read has no button. */
+{
+  const main = await open(dashboard([rpanel("r1"), rpanel("r2"), rpanel("nope")]));
+  out.readUnknownRetryButtons = retryButtons(main).length;
+  answer(calls[1], 200);
+  await flush();
+  answer(calls[0], 429);
+  await sleep(1300);
+  await flush();
+  answer(calls[2], 429);
+  await flush();
+  out.readBusyTwiceCalls = sourcesOf(calls);
+  out.readBusyTwiceErrors = stripsOf(main).filter((s) => /\berror\b/.test(s.cls)).map((s) => s.text);
+  out.readBusyTwiceRetryButtons = retryButtons(main).length;
+  retryButtons(main)[0]?.fire("click");
+  await flush();
+  out.readRetryCalls = sourcesOf(calls);
+  answer(calls[3], 200);
+  await flush();
+  out.readRetryLoadingAtEnd = loadingCount(main);
+  out.readRetryButtonsAtEnd = retryButtons(main).length;
+  out.readRetryErrorsAtEnd = stripsOf(main).filter((s) => /\berror\b/.test(s.cls)).length;
 }
 
 console.log(JSON.stringify(out));

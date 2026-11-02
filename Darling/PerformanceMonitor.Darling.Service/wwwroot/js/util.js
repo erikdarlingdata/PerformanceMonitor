@@ -572,6 +572,13 @@ export function loadingStrip(label) {
   return el("div", { class: "strip loading" }, [label || "Loading…"]);
 }
 
+/** #7257: the Retry button under a failed panel read. `onRetry` runs that one panel again. */
+export function retryButton(onRetry) {
+  const btn = el("button", { class: "btn small", type: "button", text: "Retry" });
+  btn.addEventListener("click", () => onRetry());
+  return btn;
+}
+
 /** #7257: what a panel shows while it waits for one of the page's long-read slots (a loading strip, so a poll waits for it too). */
 export function waitingStrip() {
   return loadingStrip("Waiting for the panels above to finish…");
