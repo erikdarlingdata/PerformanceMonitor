@@ -342,14 +342,14 @@ AND   dismissed = TRUE";
     /// If alerts only exist in archived parquet, inserts into dismissed_archive_alerts instead.
     /// Logs structured telemetry and verifies dismissal success.
     /// </summary>
-    public async Task<int> DismissAlertsAsync(List<AlertHistoryRow> alerts)
+    public async Task<int> DismissAlertsAsync(List<AlertHistoryRow> alerts, string action = "DismissSelected")
     {
         if (alerts.Count == 0) return 0;
 
         var sw = System.Diagnostics.Stopwatch.StartNew();
 
         if (App.LogAlertDismissals)
-            AppLogger.Info("AlertDismiss", $"Action=DismissSelected, Requested={alerts.Count}");
+            AppLogger.Info("AlertDismiss", $"Action={action}, Requested={alerts.Count}");
 
         using var connection = await OpenUserWriteConnectionAsync();
         PreservedTableRestore.ThrowIfRestorePending(_duckDb.ArchivePath, "dismissed_archive_alerts");
@@ -418,7 +418,7 @@ AND NOT EXISTS (
             sw.Stop();
 
             if (App.LogAlertDismissals)
-                AppLogger.Info("AlertDismiss", $"Action=DismissSelected, Result=Complete, Requested={alerts.Count}, LiveUpdated={totalAffected}, ArchivedDismissed={archivedDismissed}, Duration={sw.ElapsedMilliseconds}ms");
+                AppLogger.Info("AlertDismiss", $"Action={action}, Result=Complete, Requested={alerts.Count}, LiveUpdated={totalAffected}, ArchivedDismissed={archivedDismissed}, Duration={sw.ElapsedMilliseconds}ms");
 
             // Post-dismiss verification: confirm the dismissed rows are no longer visible
             if (totalAffected > 0)
