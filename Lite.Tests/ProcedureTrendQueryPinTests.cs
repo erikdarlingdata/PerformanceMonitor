@@ -7,6 +7,8 @@
  */
 
 using System;
+using System.Security.Cryptography;
+using System.Text;
 using PerformanceMonitorLite.Services;
 using Xunit;
 
@@ -14,15 +16,34 @@ namespace Lite.Tests;
 
 /// <summary>
 /// #5449: the procedure grain's duration trend moved to the run-based model (<see cref="LocalDataService.ProcedureCollectionsSql"/>),
-/// and the query grain's did not. These pin the procedure statements' shape: both tables read from an hour before the window, and
-/// none of the removed span term. (The byte-for-byte pins of the query grain's two statements were removed in #7161, which changes
-/// that grain on purpose; their rule was the spelling of the text, and the behaviour is covered by PerformanceTrendDurationBucketingTests.)
+/// and the query grain's did not. These pin the query grain's two statements byte for byte (SHA-256 of the text as it stood before
+/// #5449, line endings normalised) so a change to the shared builders cannot move <c>v_query_stats</c>, and pin the procedure
+/// statements' shape: both tables read from an hour before the window, and none of the removed span term.
+/// #7161 changed the query grain's rating on purpose (a gap to the previous collection replaces MAX of the stored intervals) and
+/// updated these four hashes with that reason.
 /// </summary>
 [Trait("Stage", "Guard")]
 public sealed class ProcedureTrendQueryPinTests
 {
+    private static string Sha(string sql) =>
+        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(sql.Replace("\r\n", "\n"))));
+
     private static string Clause(int firstIndex) =>
         LocalDataService.BuildDbInClause(new[] { "A", "B" }, "database_name", firstIndex, out _);
+
+    [Fact]
+    public void QueryStatsChartSql_IsByteIdenticalToItsTextBeforeTheProcedureChange()
+    {
+        Assert.Equal("23C4F74C5F3AD584284208E4C30F6EB6C27CBFCF1C3089452CE027C7A146820A", Sha(LocalDataService.DurationTrendChartSql("v_query_stats", "", 4)));
+        Assert.Equal("8DE9CEBFC140992610ED6F3B21FCBF490E33BFF6B7F720606B81EC32F5CE4B2D", Sha(LocalDataService.DurationTrendChartSql("v_query_stats", Clause(4), 6)));
+    }
+
+    [Fact]
+    public void QueryStatsBucketedSql_IsByteIdenticalToItsTextBeforeTheProcedureChange()
+    {
+        Assert.Equal("A0D6527AAD23AF109160775690EC526B73CAC8869B9C5439B6CB61C5ABF43A25", Sha(LocalDataService.BucketedDurationTrendSql("v_query_stats", "")));
+        Assert.Equal("3D38B78AD063E73640C1AF78A098B681C8BE25A1E7B6F48D30FF47A7FFA2979A", Sha(LocalDataService.BucketedDurationTrendSql("v_query_stats", Clause(5))));
+    }
 
     [Theory]
     [InlineData(false)]
