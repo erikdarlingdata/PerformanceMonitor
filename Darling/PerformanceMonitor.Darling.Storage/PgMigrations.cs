@@ -2492,6 +2492,21 @@ CREATE INDEX IF NOT EXISTS idx_job_history_job_success
         "SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + "s';\n" + QueryStoreComposeStamp.HashHourlyCreateSql;
 
     /// <summary>
+    /// V239 (#7146, part 3 of #5506): <c>collect.query_store_compose_fleet</c>, the fleet rollup of the Query Store compose stamp (the
+    /// stamp's partials combined across servers, databases and modules, one row per exact stamp time and <c>query_hash</c>), its
+    /// <c>(collection_time)</c> index, and <c>fleet_built_seq</c> on <c>collect.query_store_compose_stamp_built</c>. The text and the
+    /// reasoning are on <see cref="QueryStoreComposeStamp.FleetCreateSql"/>. The service's hourly tick fills the table in the stamp's
+    /// transaction and rebuilds every hour whose <c>fleet_built_seq</c> differs from <c>late_seq</c>, which is every hour built before
+    /// this rung (NULL), so the backfill is the ordinary tick, newest first. <b>The rung scans nothing</b>: one new empty plain table, one
+    /// index on it, and a nullable column with no default on the small ledger. The column needs an ACCESS EXCLUSIVE lock on that ledger,
+    /// which the wide table's late-row triggers take row locks on, so the lock timeout is <see cref="MigrationCommandTimeoutSeconds"/>
+    /// less 20 s, as V173's and V221's. Additive: an older build never reads the table, and a build that rebuilds a stamp hour without
+    /// writing it leaves the pair stale for the table, which this build then rebuilds. <b>No Lite twin:</b> Lite has no compose stamp.
+    /// </summary>
+    private static readonly string V239Sql =
+        "SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + "s';\n" + QueryStoreComposeStamp.FleetCreateSql;
+
+    /// <summary>
     /// V223 (#6873) - <c>collect.database_protection</c>: per database, the last good CHECKDB and the last full and log backup, read by
     /// <c>DatabaseProtectionCollector</c> every 60 minutes (Darling only). One row per database per pass: the raw times (UTC), the
     /// recovery model, the database state and replica role, a per-row platform label (native, platform_managed, native_only) and a state
@@ -2987,6 +3002,7 @@ $rung$;";
         new Migration(236, "mute-rule-action", V236Sql),
         new Migration(237, "people-identities-grants", V237Sql),
         new Migration(238, "action-approval-proposals", V238Sql),
+        new Migration(239, "compose-fleet-rollup", V239Sql),
     };
 
     /// <summary>
