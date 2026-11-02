@@ -284,14 +284,16 @@ public sealed class ExternalAlertDrain
             ExternalSource = row.SourceName,
         });
 
-        /* #7158: a firing alert that rises from Warning to Critical goes through the delivery cooldowns, as an engine alert's
-           tier rise does (#5641): the email and webhook cooldowns key on server and metric, not severity, so without the bypass a
-           Critical that follows a Warning inside the cooldown is held back and the operator never hears it. */
+        /* #7158: a firing alert that rises to Critical goes through the delivery cooldowns, as an engine alert's tier rise
+           does (#5641): the email and webhook cooldowns key on server and metric, not severity, so without the bypass a
+           Critical that follows a Warning inside the cooldown is held back and the operator never hears it. The previous severity
+           is the confirmed one. The cooldown survives a resolve, so a new episode's opening Warning can be held back inside the old
+           window and stay unconfirmed: the Critical after it has a null previous severity and still bypasses. */
         var context = new AlertContext
         {
             External = new AlertExternalOrigin(row.SourceName, row.AlertKey, row.PendingId),
             EscalationBypassesCooldown = wasFiring && severity == AlertSeverityLevel.Critical
-                && string.Equals(previousSeverity, "warning", StringComparison.OrdinalIgnoreCase),
+                && !string.Equals(previousSeverity, "critical", StringComparison.OrdinalIgnoreCase),
         };
         var currentText = row.Value is { } value
             ? value.ToString("0.###", CultureInfo.InvariantCulture)
