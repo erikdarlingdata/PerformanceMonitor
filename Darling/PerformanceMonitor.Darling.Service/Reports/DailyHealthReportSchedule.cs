@@ -32,23 +32,8 @@ public readonly record struct DailyHealthReportSchedule(bool Enabled, TimeOnly S
     /// <summary>
     /// The UTC instant of the most recent <see cref="SendAt"/> at or before <paramref name="nowUtc"/>: today's when it has passed in the
     /// zone, otherwise yesterday's. The 24 hours that end here are the period the report covers. A send time that does not exist on its
-    /// day (a spring-forward gap) is moved an hour later, the first valid local time after the gap.
+    /// day (a spring-forward gap) ends at the end of the gap, the first valid local time after it, the same instant <see cref="IsDue"/> turns true (#7201).
     /// </summary>
-    public DateTime MostRecentSendAtUtc(DateTime nowUtc)
-    {
-        var local = LocalNow(nowUtc);
-        var day = local.Date;
-        if (TimeOnly.FromDateTime(local) < SendAt)
-        {
-            day = day.AddDays(-1);
-        }
-
-        var slot = DateTime.SpecifyKind(day + SendAt.ToTimeSpan(), DateTimeKind.Unspecified);
-        if (Zone.IsInvalidTime(slot))
-        {
-            slot = slot.AddHours(1);
-        }
-
-        return DailyHealthReportPeriod.LocalToUtc(slot, Zone);
-    }
+    public DateTime MostRecentSendAtUtc(DateTime nowUtc) =>
+        DailyHealthReportPeriod.EndUtcFor(DailyHealthReportPeriod.LatestEndedDate(nowUtc, SendAt, Zone), SendAt, Zone);
 }

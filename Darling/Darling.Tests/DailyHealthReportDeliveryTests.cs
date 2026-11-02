@@ -82,8 +82,14 @@ public class DailyHealthReportDeliveryTests
         Assert.False(s.IsDue(new DateTime(2026, 3, 8, 6, 59, 0, DateTimeKind.Utc)));
         Assert.True(s.IsDue(new DateTime(2026, 3, 8, 7, 0, 0, DateTimeKind.Utc)));
 
-        /* The period still ends at a real instant: the same minute an hour later, 03:30 EDT = 07:30Z. */
-        Assert.Equal(new DateTime(2026, 3, 8, 7, 30, 0, DateTimeKind.Utc), s.MostRecentSendAtUtc(new DateTime(2026, 3, 8, 12, 0, 0, DateTimeKind.Utc)));
+        /* The period ends where the gap ends, 03:00 EDT = 07:00Z, the instant it turns due: not an hour past the send time (03:30 EDT),
+           which put the end up to 59 minutes in the future (#7201). get_daily_health_report agrees with it. */
+        var gapEnd = new DateTime(2026, 3, 8, 7, 0, 0, DateTimeKind.Utc);
+        Assert.Equal(gapEnd, s.MostRecentSendAtUtc(gapEnd));
+        Assert.Equal(gapEnd, s.MostRecentSendAtUtc(new DateTime(2026, 3, 8, 12, 0, 0, DateTimeKind.Utc)));
+        Assert.Equal(gapEnd, DailyHealthReportPeriod.EndUtcFor(new DateOnly(2026, 3, 8), s.SendAt, zone));
+        Assert.Equal(new DateOnly(2026, 3, 8), DailyHealthReportPeriod.LatestEndedDate(gapEnd, s.SendAt, zone));
+        Assert.Equal(new DateTime(2026, 3, 7, 7, 30, 0, DateTimeKind.Utc), s.MostRecentSendAtUtc(gapEnd.AddMinutes(-1)));
     }
 
     [Fact]
