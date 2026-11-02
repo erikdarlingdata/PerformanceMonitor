@@ -175,4 +175,94 @@ public sealed class ViewerProfileStoreTests : IDisposable
 
         public void Delete(string id) => _map.Remove(id);
     }
+
+    /* #7209: an unreadable profile file used to load as an empty list, and the first Add wrote a
+       one-profile list straight over it. Each test gets its own folder so the quarantine copy is findable
+       and cleaned up. */
+    private static string NewScratchFolder()
+    {
+        var folder = Path.Combine(Path.GetTempPath(), $"viewer-profiles-7209-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(folder);
+        return folder;
+    }
+
+    [Fact]
+    public void AddProfile_AfterUnreadableFile_KeepsTheOriginalBytesInACopy()
+    {
+        var folder = NewScratchFolder();
+        try
+        {
+            var path = Path.Combine(folder, "viewer-profiles.json");
+            const string original = "[ { \"Id\": \"a1\", \"Name\": \"prod\" }, ";   /* torn write */
+            File.WriteAllText(path, original);
+            var store = new ViewerProfileStore(NewServerStore(), path, _profileSecrets);
+            Assert.Empty(store.GetAll());
+
+            store.AddProfile(new ViewerCredentialProfile { Name = "new", AuthType = AuthenticationTypes.ManagedIdentity });
+
+            Assert.Contains(Directory.GetFiles(folder), f => f != path && File.ReadAllText(f) == original);
+            Assert.Single(new ViewerProfileStore(NewServerStore(), path, _profileSecrets).GetAll());
+        }
+        finally
+        {
+            Directory.Delete(folder, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void AddProfile_WhenUnreadableFileCannotBeCopiedAside_RefusesAndLeavesItAlone()
+    {
+        var folder = NewScratchFolder();
+        try
+        {
+            var path = Path.Combine(folder, "viewer-profiles.json");
+            const string original = "[ { \"Id\": \"a1\", \"Name\": \"prod\" }, ";
+            File.WriteAllText(path, original);
+            var store = new ViewerProfileStore(NewServerStore(), path, _profileSecrets);
+            var profile = new ViewerCredentialProfile { Name = "new", AuthType = AuthenticationTypes.ManagedIdentity };
+
+            /* An exclusive handle (a backup or antivirus lock) stops the copy, so no permit is given. */
+            using (new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.None))
+            {
+                Assert.Throws<IOException>(() => store.AddProfile(profile));
+            }
+
+            Assert.Equal(original, File.ReadAllText(path));
+            Assert.Empty(store.GetAll());
+
+            /* The refused profile is not left half-added: the same name is accepted once the lock is gone. */
+            store.AddProfile(new ViewerCredentialProfile { Name = "new", AuthType = AuthenticationTypes.ManagedIdentity });
+            Assert.Single(store.GetAll());
+        }
+        finally
+        {
+            Directory.Delete(folder, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Save_WritesATempFileAndMovesIt_SoAFailedWriteLeavesThePreviousFileWhole()
+    {
+        var folder = NewScratchFolder();
+        try
+        {
+            var path = Path.Combine(folder, "viewer-profiles.json");
+            var store = new ViewerProfileStore(NewServerStore(), path, _profileSecrets);
+            store.AddProfile(new ViewerCredentialProfile { Name = "first", AuthType = AuthenticationTypes.ManagedIdentity });
+            var before = File.ReadAllText(path);
+            Assert.False(File.Exists(path + ".tmp"));
+
+            /* A folder where the temp file goes makes the write fail. An in-place write would not notice. */
+            Directory.CreateDirectory(path + ".tmp");
+            Assert.Throws<IOException>(() =>
+                store.AddProfile(new ViewerCredentialProfile { Name = "second", AuthType = AuthenticationTypes.ManagedIdentity }));
+
+            Assert.Equal(before, File.ReadAllText(path));
+            Assert.Single(store.GetAll());
+        }
+        finally
+        {
+            Directory.Delete(folder, recursive: true);
+        }
+    }
 }
