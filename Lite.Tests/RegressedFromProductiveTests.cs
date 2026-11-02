@@ -106,11 +106,13 @@ public sealed class RegressedFromProductiveTests
     /// Database serverless or Hyperscale database nobody queries) records SUCCESS with zero rows run after run. Through
     /// the Lite row it reads HEALTHY five hours after the last busy cycle, and WARNING once the quiet passes the
     /// 72 hour bar. memory_grant_stats, a dense collector, keeps the three-run rule.
+    /// #7242: the quiet is observed time, the trailing zero-row runs times the interval, so a stretch the service was
+    /// stopped through does not count toward the bar.
     /// </summary>
     [Fact]
     public void QueryStats_OnAnIdleTarget_ReadsHealthy_AndIsFlaggedPastTheBar()
     {
-        CollectorHealthRow Zeros(string name, double hoursSinceProductive) => new()
+        CollectorHealthRow Zeros(string name, double hoursSinceProductive, long trailingRuns) => new()
         {
             CollectorName = name,
             TotalRuns = 10_080,
@@ -122,19 +124,25 @@ public sealed class RegressedFromProductiveTests
             CurrentStatus = "SUCCESS",
             LastNonSkipTime = Now.AddMinutes(-1),
             LastProductiveTime = Now.AddHours(-hoursSinceProductive),
-            TrailingZeroRowSuccessRuns = 28,
+            TrailingZeroRowSuccessRuns = trailingRuns,
+            EffectiveFrequencyMinutes = 1,
         };
 
-        var idle = Zeros("query_stats", 5);
+        var idle = Zeros("query_stats", 5, 5 * 60);
         Assert.False(idle.ProducedThenStopped);
         Assert.False(idle.AnyRegression);
         Assert.Equal(CollectorHealthClassifier.Healthy, idle.HealthStatus);
 
-        var stopped = Zeros("query_stats", 73);
+        var stopped = Zeros("query_stats", 73, 73 * 60);
         Assert.True(stopped.ProducedThenStopped);
         Assert.Equal(CollectorHealthClassifier.Warning, stopped.HealthStatus);
 
-        Assert.True(Zeros("memory_grant_stats", 5).ProducedThenStopped);
+        // #7242: 73 hours on the wall clock, but the service watched only 19 of them.
+        var stoppedService = Zeros("query_stats", 73, 19 * 60);
+        Assert.False(stoppedService.ProducedThenStopped);
+        Assert.Equal(CollectorHealthClassifier.Healthy, stoppedService.HealthStatus);
+
+        Assert.True(Zeros("memory_grant_stats", 5, 28).ProducedThenStopped);
     }
 
     /// <summary>The second direction: the same status with nothing ever produced keeps the benign band.</summary>
