@@ -225,7 +225,8 @@ export function dailyHealthCalendar({ server, initial, read, renderTable, openDa
     if (res.kind === "error") entry = { failure: res.message };
     /* "empty" is a month with no collected day while the server has history elsewhere: a month of "no data" cells, which is the
        true answer, and the read's sentence says so under it. "unavailable" is a server nothing was ever collected for. */
-    else if (res.kind === "empty") entry = { ...monthDays([], [], month), note: res.message, neverCollected: res.status === "unavailable" };
+    /* "not_collected" (#7159) is a PostgreSQL target: it has no SQL Server signals to band, so the same strip carries the read's sentence. */
+    else if (res.kind === "empty") entry = { ...monthDays([], [], month), note: res.message, neverCollected: res.status === "unavailable" || res.status === "not_collected" };
     else entry = monthDays((res.data || {}).days, (res.data || {}).days_missing, month);
     if (!entry.failure) loaded.set(key, entry);
     return entry;
@@ -265,7 +266,7 @@ export function dailyHealthCalendar({ server, initial, read, renderTable, openDa
     if (res.kind === "error") return swap(detail, title, errorStrip(res.message));
     if (res.kind === "empty") {
       /* No row, or a purged day: said in the page's words for the first, the service's for the second (it names the horizon). */
-      const purged = res.status === "unavailable";
+      const purged = res.status === "unavailable" || res.status === "not_collected"; /* #7159: a PostgreSQL target's sentence says why no day has a band */
       return swap(detail, title, el("div", { class: "daycal-band band-NoData", text: "No Data" }), emptyStrip(purged ? res.message : "No collection this day."));
     }
     const d = res.data || {};

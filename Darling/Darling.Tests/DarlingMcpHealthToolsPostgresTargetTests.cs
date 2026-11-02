@@ -89,7 +89,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
             Assert.Equal("not_collected", doc.RootElement.GetProperty("status").GetString());
             Assert.Contains("get_pg_", json, StringComparison.Ordinal);
             Assert.DoesNotContain("blocking_count", json, StringComparison.Ordinal);
-            Assert.DoesNotContain("Healthy", json, StringComparison.Ordinal);
+            Assert.DoesNotContain("health_band", json, StringComparison.Ordinal);
         }
 
         /* A SQL Server target is untouched: its collection_log-only day is still a collected, banded day. */

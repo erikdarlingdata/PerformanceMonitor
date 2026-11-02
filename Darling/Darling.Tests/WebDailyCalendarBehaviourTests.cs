@@ -136,6 +136,19 @@ public sealed class WebDailyCalendarBehaviourTests
     }
 
     [Fact]
+    public void ANotCollectedAnswer_ForAPostgresTarget_SaysWhy_InTheMonthAndTheDay_AndBandsNothingHealthy()
+    {
+        // #7159: the service answers not_collected for a PostgreSQL target; the page must show the sentence, never a Healthy cell or "No collection this day."
+        var r = Run("notcollected");
+        var strips = r.GetProperty("monthStrips").EnumerateArray().Select(e => e.GetString()!).ToList();
+        Assert.Contains(strips, s => s.StartsWith("strip empty|", StringComparison.Ordinal) && s.Contains("SRV1 runs PostgreSQL", StringComparison.Ordinal));
+        Assert.All(r.GetProperty("monthBands").EnumerateArray(), b => Assert.NotEqual("Healthy", b.GetString()));
+        var detail = r.GetProperty("detailText").GetString()!;
+        Assert.Contains("SRV1 runs PostgreSQL", detail, StringComparison.Ordinal);
+        Assert.DoesNotContain("No collection this day", detail, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void TheCalendar_DrawsBands_ShowsNoRowAsNoData_StepsMonths_AndOpensADaysDetail()
     {
         var r = Run("calendar");

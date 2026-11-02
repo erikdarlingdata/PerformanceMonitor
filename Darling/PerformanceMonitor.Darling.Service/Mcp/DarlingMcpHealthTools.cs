@@ -48,9 +48,9 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 public sealed class DarlingMcpHealthTools
 {
     /// <summary>get_server_summary's description, VERBATIM Lite's (#3541 A10); the cross-SKU census pins them
-    /// equal. Names the three clocks the payload carries, because the payload used to carry one.</summary>
+    /// equal (so the PostgreSQL not_collected answer, #7159, is not named here: Lite has no PostgreSQL targets; the envelope itself says it). Names the three clocks the payload carries, because the payload used to carry one.</summary>
     internal const string ServerSummaryDescription =
-        "Gets a quick health overview for a SQL Server instance (a PostgreSQL target answers not_collected, since every figure here comes from SQL Server collectors; use get_fleet_overview or the get_pg_* reads there): current CPU %, memory usage, recent blocking count, and deadlock count. Use this for a fast health check before drilling into specific areas. THREE CLOCKS, NAMED: cpu_percent is the newest CPU snapshot and cpu_captured_at is its instant; memory_mb is the newest memory snapshot and memory_captured_at is its instant; last_collection is the newest collection of ANY collector for this server - the store's freshness, NOT the age of the two figures above, which can be far older when their own collectors have stopped. blocking_count and deadlock_count cover the counts_window_hours ending now.";
+        "Gets a quick health overview for a SQL Server instance: current CPU %, memory usage, recent blocking count, and deadlock count. Use this for a fast health check before drilling into specific areas. THREE CLOCKS, NAMED: cpu_percent is the newest CPU snapshot and cpu_captured_at is its instant; memory_mb is the newest memory snapshot and memory_captured_at is its instant; last_collection is the newest collection of ANY collector for this server - the store's freshness, NOT the age of the two figures above, which can be far older when their own collectors have stopped. blocking_count and deadlock_count cover the counts_window_hours ending now.";
 
     [McpServerTool(Name = "get_server_summary"), Description(ServerSummaryDescription)]
     public static async Task<string> GetServerSummary(
