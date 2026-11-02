@@ -425,7 +425,7 @@ public sealed partial class DarlingWorker
                 /* #2716: this cooldown has no in-memory entry for a subject this process has never
                    evaluated, which includes every subject after a restart even if it was alerted on
                    moments before. Seed it ONCE per key from history before trusting its absence —
-                   finding.Subject IS the #1140 dedup fingerprint this alert already fires with, so
+                   PgSubjectDedupKey is the #1140 dedup fingerprint this alert already fires with, so
                    GetLastAlertTimeAsync's existing #1154 filter reconstructs exactly the per-subject
                    time this cooldown needs, no new schema required. Guarded by
                    _postgresAlertHistorySeeded so a subject that has never alerted (the common case —
@@ -436,7 +436,8 @@ public sealed partial class DarlingWorker
                     && _postgresAlertHistorySeeded.TryAdd(cooldownKey, true))
                 {
                     var seeded = await _historyStore.GetLastAlertTimeAsync(
-                        snapshot.ServerKey, finding.MetricName, dedupKey: finding.Subject);
+                        snapshot.ServerKey, finding.MetricName,
+                        dedupKey: PgSubjectDedupKey(snapshot.FingerprintServerName, finding.MetricName, finding.Subject));
                     readClock.Restart();
                     if (seeded.HasValue)
                     {
@@ -484,7 +485,7 @@ public sealed partial class DarlingWorker
                             {
                                 Incidents = new List<AlertIncident>
                                 {
-                                    new(finding.Subject, new[] { finding.Subject }),
+                                    BuildPgSubjectIncident(snapshot.FingerprintServerName, finding.MetricName, finding.Subject, finding.Subject),
                                 },
                             },
                             /* #5642, ruling 6: the age of the row this finding was judged on, counted once at fire
@@ -1954,6 +1955,24 @@ public sealed partial class DarlingWorker
     }
 
     /// <summary>
+    /// The dedup key for a PostgreSQL Tier 0 or Poison Wait incident, keyed on the subject (a database, a slot,
+    /// a wait event). The bare subject was the key before, with no server in it: two servers with a database
+    /// named <c>app</c> past the wraparound line, or two Aurora instances in one <c>IPC:BufferIo</c> episode,
+    /// sent one PagerDuty dedup_key, so the second page merged into the first incident and the first server's
+    /// Cleared resolved it while the other still breached. This hashes the server in, as every SQL Server
+    /// incident does, and the metric name is the incident type so a slot and a database that share a name stay
+    /// apart. The history cooldown seed reads the same key (<see cref="PgSubjectDedupKey"/>).
+    /// </summary>
+    internal static AlertIncident BuildPgSubjectIncident(
+        string fingerprintServerName, string metricName, string subject, string displayObject) =>
+        AlertFingerprint.ForKey(fingerprintServerName, metricName, subject, new[] { displayObject })
+        ?? new AlertIncident(subject, new[] { displayObject });
+
+    /// <summary>The dedup key <see cref="BuildPgSubjectIncident"/> fires with, for the cooldown history seed.</summary>
+    internal static string PgSubjectDedupKey(string fingerprintServerName, string metricName, string subject) =>
+        BuildPgSubjectIncident(fingerprintServerName, metricName, subject, subject).DedupKey;
+
+    /// <summary>
     /// Pure mapping, pulled out of <see cref="EvaluatePgLongRunningQueryAsync"/> for the same testability
     /// reason as <see cref="BuildPgDeadlockIncident"/>. Dedup key is the synthetic backend id (stable across
     /// samples of the same backend, unlike a reused pid), matching <see cref="BuildPgBlockingIncident"/>'s
@@ -2192,7 +2211,7 @@ public sealed partial class DarlingWorker
                    phantom Cleared next sweep. */
                 _activePgPoisonWaitAlert[cooldownKey] = true;
 
-                /* #2716: seed the cooldown from history once per key — finding.Subject is the #1140 dedup
+                /* #2716: seed the cooldown from history once per key — PgSubjectDedupKey is the #1140 dedup
                    fingerprint this alert fires with, so GetLastAlertTimeAsync's #1154 filter reconstructs
                    the per-subject stamp. The same seed floors the #2704 guard: rows collected before the
                    last recorded fire were already reported by whichever process fired it. */
@@ -2201,7 +2220,8 @@ public sealed partial class DarlingWorker
                     && _pgPoisonWaitCooldownSeeded.TryAdd(cooldownKey, true))
                 {
                     var seeded = await _historyStore.GetLastAlertTimeAsync(
-                        serverKey, finding.MetricName, dedupKey: finding.Subject);
+                        serverKey, finding.MetricName,
+                        dedupKey: PgSubjectDedupKey(snapshot.FingerprintServerName, finding.MetricName, finding.Subject));
                     readClock.Restart();
                     if (seeded.HasValue)
                     {
@@ -2289,7 +2309,7 @@ public sealed partial class DarlingWorker
                             {
                             Incidents = new List<AlertIncident>
                             {
-                                new(finding.Subject, new[] { finding.CurrentValue }),
+                                BuildPgSubjectIncident(snapshot.FingerprintServerName, finding.MetricName, finding.Subject, finding.CurrentValue),
                             },
                             /* #4223: the wait type as structured data, the same string the mute context
                                below already keys on (WaitType = finding.Subject) — an alert-notebook reader
@@ -2349,7 +2369,10 @@ public sealed partial class DarlingWorker
                             Context: AlertSampleAge.Stamp(
                                 new AlertContext
                                 {
-                                    Incidents = new List<AlertIncident> { new(held.Subject, new[] { held.CurrentValue }) },
+                                    Incidents = new List<AlertIncident>
+                                    {
+                                        BuildPgSubjectIncident(snapshot.FingerprintServerName, held.MetricName, held.Subject, held.CurrentValue),
+                                    },
                                     WaitType = held.Subject,
                                 },
                                 "wait stats", newestCollection, now),
