@@ -1408,10 +1408,13 @@ AND   j.hypertable_name = '{relation}'", connection))
     /// <summary>
     /// #7153: flushes the collector-cost and read-latency samples recorded since the last hourly tick, once, at stop, on a new
     /// store connection. Without it a stop or restart lost up to an hour of both. Does nothing when neither accumulator holds a
-    /// sample, so a stop before the store was reached opens no connection. A failure or the budget logs one Warning and the stop
-    /// continues. The service's own token is already cancelled here, so the budget runs on its own source.
-    /// A second flush inside an hour adds rows rather than replacing them: read_latency merges equal keys and collector_cost
-    /// keeps one row per flush that its readers sum.
+    /// sample, which saves a connection on a quiet stop. A stop before the store was reached never gets here at all: a failed store
+    /// or migration returns from the collection loop early, and a stop during the startup retry leaves it by exception. Each
+    /// failure logs one Warning: a collector-cost failure followed by a read-latency failure logs two, and the stop continues. The
+    /// budget wording is used only when the budget ran out. The service's own token is already cancelled here, so the budget runs
+    /// on its own source.
+    /// A second flush inside an hour adds rows rather than replacing them: every flush stamps its own microsecond metric_time, so
+    /// the stop flush and the next hourly flush are separate rows in both tables, and the readers sum them.
     /// </summary>
     internal static async Task FlushSamplesOnStopAsync(
         NpgsqlDataSource postgres, CollectorCostAccumulator collectorCost, ReadLatencyAccumulator readLatency,
@@ -1446,9 +1449,18 @@ AND   j.hypertable_name = '{relation}'", connection))
         }
         catch (Exception ex)
         {
-            logger.LogWarning(
-                "Flushing the collector-cost and read-latency samples at stop did not finish within {Seconds:N0}s, so the samples since the last hourly flush are dropped: {Message}",
-                budgetLimit.TotalSeconds, ex.Message);
+            if (budget.IsCancellationRequested)
+            {
+                logger.LogWarning(
+                    "Flushing the collector-cost and read-latency samples at stop did not finish within {Seconds:N0}s, so the samples since the last hourly flush are dropped: {Message}",
+                    budgetLimit.TotalSeconds, ex.Message);
+            }
+            else
+            {
+                logger.LogWarning(
+                    "Flushing the collector-cost and read-latency samples at stop failed, so the samples since the last hourly flush are dropped: {Message}",
+                    ex.Message);
+            }
         }
     }
 

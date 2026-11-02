@@ -229,8 +229,10 @@ public sealed class ReadLatencyAccumulator
         return rows;
     }
 
-    /// <summary>True when at least one read has been recorded since the last drain (#7153): the stop-time flush opens no
-    /// store connection when nothing was recorded.</summary>
+    /// <summary>True when at least one read has been recorded since the last drain (#7153). It only lets the stop-time flush skip
+    /// opening a store connection on a quiet stop. It does not tell whether the store was reached: reads record Error outcomes
+    /// while the store is down, and a stop before the store was reached never gets to the flush because the collection loop has
+    /// already returned or been cancelled.</summary>
     internal bool HasSamples => !_buckets.IsEmpty;
 
     /// <summary>Drain every accumulated bucket and RESET the window (<c>TryRemove</c>), so the next hour
