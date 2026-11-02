@@ -33,6 +33,8 @@ public sealed class AlertHistoryDismissArchivedTests : IDisposable
     private readonly string _tempDir;
     private readonly string _dbPath;
 
+    private DuckDbInitializer? _initializer;
+
     public AlertHistoryDismissArchivedTests()
     {
         _tempDir = Path.Combine(Path.GetTempPath(), "LiteTests_" + Guid.NewGuid().ToString("N")[..8]);
@@ -42,6 +44,8 @@ public sealed class AlertHistoryDismissArchivedTests : IDisposable
 
     public void Dispose()
     {
+        _initializer?.Dispose();
+
         try
         {
             if (Directory.Exists(_tempDir))
@@ -54,10 +58,10 @@ public sealed class AlertHistoryDismissArchivedTests : IDisposable
     }
 
     /// <summary>Two live CPU alerts on server 1, one live Blocking alert on server 1 and one archived CPU alert on server 2.</summary>
-    private async Task<(DuckDbInitializer Initializer, LocalDataService Service)> SeedAsync()
+    private async Task<LocalDataService> SeedAsync()
     {
-        var initializer = new DuckDbInitializer(_dbPath);
-        await initializer.InitializeFromTemplateAsync();
+        _initializer = new DuckDbInitializer(_dbPath);
+        await _initializer.InitializeFromTemplateAsync();
         var helper = new TestAlertDataHelper(_dbPath);
         using (var connection = new DuckDBConnection($"Data Source={_dbPath}"))
         {
@@ -72,7 +76,7 @@ public sealed class AlertHistoryDismissArchivedTests : IDisposable
         }
 
         await helper.RefreshArchiveViewsAsync();
-        return (initializer, new LocalDataService(initializer));
+        return new LocalDataService(_initializer);
     }
 
     private static async Task<List<AlertHistoryRow>> ReadAsync(LocalDataService service)
@@ -90,8 +94,7 @@ public sealed class AlertHistoryDismissArchivedTests : IDisposable
     [Fact]
     public async Task DismissAll_OverAFilteredGrid_DismissesTheArchivedRowAndAsksAboutEveryRowItDismisses()
     {
-        var (initializer, service) = await SeedAsync();
-        using var _ = initializer;
+        var service = await SeedAsync();
         var rows = await ReadAsync(service);
         Assert.Equal(4, rows.Count);
         Assert.Single(rows, r => r.IsArchived);
@@ -124,8 +127,7 @@ public sealed class AlertHistoryDismissArchivedTests : IDisposable
     [Fact]
     public async Task DismissSelected_DismissesTheArchivedRowWithoutAPrompt()
     {
-        var (initializer, service) = await SeedAsync();
-        using var _ = initializer;
+        var service = await SeedAsync();
         var rows = await ReadAsync(service);
         var archived = Assert.Single(rows, r => r.IsArchived);
         var live = rows.First(r => !r.IsArchived && r.MetricName == "CPU");
