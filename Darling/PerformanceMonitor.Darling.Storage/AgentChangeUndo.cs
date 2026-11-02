@@ -168,7 +168,7 @@ LEFT JOIN LATERAL (
         UNION ALL
         /* #7185: a change with no request (a writes-arm tool's, or a person's unknown undo) keeps its result rows with no request too. */
         SELECT x.journal_id, x.event, x.detail FROM config.investigation_journal AS x
-        WHERE c.request_id IS NULL AND x.request_id IS NULL AND x.event_time >= c.event_time
+        WHERE c.request_id IS NULL AND x.request_id IS NULL
           AND x.event IN ('action_done', 'action_failed')
           AND x.detail->>'called_id' = c.journal_id::text) AS y
     ORDER BY y.journal_id DESC LIMIT 1) AS r ON true
@@ -180,7 +180,7 @@ LEFT JOIN LATERAL (
           AND x.detail->>'called_id' = c.journal_id::text
         UNION ALL
         SELECT x.journal_id, x.event_time, x.actor FROM config.investigation_journal AS x
-        WHERE c.request_id IS NULL AND x.request_id IS NULL AND x.event_time >= c.event_time
+        WHERE c.request_id IS NULL AND x.request_id IS NULL
           AND x.event = 'action_undone'
           AND x.detail->>'called_id' = c.journal_id::text) AS y
     ORDER BY y.journal_id DESC LIMIT 1) AS u ON true
