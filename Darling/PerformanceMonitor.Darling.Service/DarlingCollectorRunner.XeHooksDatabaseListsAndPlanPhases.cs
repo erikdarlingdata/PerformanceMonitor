@@ -373,8 +373,11 @@ public sealed partial class DarlingCollectorRunner
                 row.KnownPlanDigest = hit.Digest;
                 row.QueryPlanXmlBytes = hit.Bytes;
             }
-            else
+            else if (misses.Count < QueryStatsCollector.MaxPlansPerRun)
             {
+                /* #7156: the main query returns every statement that ran in the window, in rank order, and the plan work
+                   stays bounded at the old 200: a miss past the cap ships without a plan, is not cached, and is fetched
+                   on a later run once it ranks (or once the rows above it go idle). */
                 misses.Add((key, row));
             }
         }
