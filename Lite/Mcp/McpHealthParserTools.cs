@@ -672,6 +672,14 @@ public sealed class McpHealthParserTools
     /// </summary>
     private static async Task<string> EmptyAsync(
         LocalDataService dataService, int serverId, string serverName, int hoursBack, DateTime windowEnd, string eventType,
+        string noneQualifiedBecause, int? capturedInWindow, DateTime? lastCapturedAt) =>
+        /* #7167: every rung below that says empty is a true negative only while the server is being collected. */
+        await McpQueryTools.OfflineInsteadOfEmptyAsync(
+            dataService, serverId, windowEnd,
+            await EmptyRungsAsync(dataService, serverId, serverName, hoursBack, windowEnd, eventType, noneQualifiedBecause, capturedInWindow, lastCapturedAt));
+
+    private static async Task<string> EmptyRungsAsync(
+        LocalDataService dataService, int serverId, string serverName, int hoursBack, DateTime windowEnd, string eventType,
         string noneQualifiedBecause, int? capturedInWindow, DateTime? lastCapturedAt)
     {
         var captured = capturedInWindow

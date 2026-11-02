@@ -257,12 +257,12 @@ public sealed class McpWaitTools
                    not_collected), and only then says the CHOSEN database had none, in Darling's words: it is not a
                    verdict on the databases nobody read. */
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "waiting_tasks", awsRdsKind: AwsRdsKind.None)
-                    ?? McpHelpers.Status("empty",
+                    ?? await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, McpHelpers.Status("empty",
                         database == null
                             ? "No waiting tasks captured in the specified time range."
                             : $"No waiting tasks captured in the specified time range{McpDatabaseSelection.ForChosen(new[] { database })}. "
                               + "The filter was applied in SQL over the whole window, so waiting tasks of other databases may well exist; drop it to see what the window holds.",
-                        notice.AsHints());
+                        notice.AsHints()));
             }
 
             var truncated = rows.Count > limit;

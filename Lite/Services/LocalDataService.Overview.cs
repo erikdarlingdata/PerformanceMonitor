@@ -224,6 +224,35 @@ AND   collector_name <> '{CollectionCycleSkip.CollectorName}'";
     /// exactly as before.</para>
     /// </summary>
     private static string[] NewestFirstRelations(string table) => new[] { table, "v_" + table };
+
+    /// <summary>
+    /// #7167: when this server's newest SUCCESSFUL collector run landed (<c>collection_log.status = 'SUCCESS'</c>, the status Collection
+    /// Health counts as a run that reached the server), or null when the store holds none. A server Lite cannot reach logs ERROR,
+    /// PERMISSIONS or SKIPPED rows every cycle, which keep the plain newest-row read of <see cref="GetServerSummaryAsync"/> fresh while
+    /// nothing is being read, so this read leaves them out. The loop's skipped-slots row is not a collector run (#5643).
+    /// </summary>
+    public async Task<DateTime?> GetLastSuccessfulCollectionAsync(int serverId)
+    {
+        using var connection = await OpenConnectionAsync();
+        foreach (var relation in NewestFirstRelations("collection_log"))
+        {
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = @"
+SELECT MAX(collection_time)
+FROM " + relation + $@"
+WHERE server_id = $1
+AND   status = 'SUCCESS'
+AND   collector_name <> '{CollectionCycleSkip.CollectorName}'";
+            cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
+            var result = await cmd.ExecuteScalarAsync();
+            if (result != null && result != DBNull.Value)
+            {
+                return Convert.ToDateTime(result);
+            }
+        }
+
+        return null;
+    }
 }
 
 /// <summary>One tag pill on an Overview card (#2020 2b-i): the tag name plus the brushes to render it,

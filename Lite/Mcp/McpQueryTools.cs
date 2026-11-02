@@ -290,7 +290,7 @@ public sealed class McpQueryTools
             var leftOut = DatabasesLeftOut.Distinct(droppedDatabases);
             if (rows.Count == 0 && tagScope.Active)
             {
-                return McpHelpers.WithDatabasesLeftOut(McpHelpers.Status("empty", $"No procedure on {resolved.DisplayName} in the last {hours_back} hour(s) carries query tag '{tagScope.Requested}'. The tag filter was applied in SQL before the top-{top} ranking."), leftOut)!;
+                return await OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, McpHelpers.WithDatabasesLeftOut(McpHelpers.Status("empty", $"No procedure on {resolved.DisplayName} in the last {hours_back} hour(s) carries query tag '{tagScope.Requested}'. The tag filter was applied in SQL before the top-{top} ranking."), leftOut)!);
             }
 
             if (rows.Count == 0)
@@ -815,6 +815,14 @@ public sealed class McpQueryTools
     /// </summary>
     private static async Task<string> EmptyRegressionsAsync(
         LocalDataService dataService, int serverId, string serverName, int hours_back, DateTime windowEnd, McpWindowNotice notice,
+        string[]? databases, DateTime? floor, DateTime baselineStart, bool replay) =>
+        /* #7167: the all-clear rungs below are true negatives only while the server is being collected. */
+        await OfflineInsteadOfEmptyAsync(
+            dataService, serverId, windowEnd,
+            await EmptyRegressionRungsAsync(dataService, serverId, serverName, hours_back, windowEnd, notice, databases, floor, baselineStart, replay));
+
+    private static async Task<string> EmptyRegressionRungsAsync(
+        LocalDataService dataService, int serverId, string serverName, int hours_back, DateTime windowEnd, McpWindowNotice notice,
         string[]? databases, DateTime? floor, DateTime baselineStart, bool replay)
     {
         /* The anchor is threaded in rather than resolved again: the coverage probe answers "does a BEFORE
@@ -978,7 +986,9 @@ public sealed class McpQueryTools
             if (rows.Count == 0)
                 /* #7005: the never-collected rungs carry the same emptyAnswer notice the in-window rungs carry (WithWindowNotice leaves hints already there). */
                 return WithWindowNotice(
-                    await EmptyHeatmapAsync(dataService, resolved.ServerId, resolved.DisplayName, hours_back, windowEnd, notice, filtered: databases is not null),
+                    await OfflineInsteadOfEmptyAsync(
+                        dataService, resolved.ServerId, windowEnd,
+                        await EmptyHeatmapAsync(dataService, resolved.ServerId, resolved.DisplayName, hours_back, windowEnd, notice, filtered: databases is not null)),
                     notice, requestedStart, windowEnd);
 
             var truncated = rows.Count > limit;
@@ -1201,10 +1211,14 @@ public sealed class McpQueryTools
                     return EmptyStatus("empty", healthyEmpty, startUtc, windowEnd, grain, database);
                 }
 
+                /* #7167: a window the store does not reach back to says nothing was read instead of claiming to be quiet. */
                 return everSampled
                     ? EmptyStatus(
                         "empty",
-                        $"No query samples recorded for {ScopedServer(resolved.DisplayName, database)} in the last {hours_back} hour(s). This server HAS collected query stats before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples.",
+                        await QuietWindowMessageAsync(
+                            dataService, QueryWindowRelation.QueryStats, resolved.ServerId, startUtc, windowEnd, "query_stats",
+                            $"No query samples recorded for {ScopedServer(resolved.DisplayName, database)} in the last {hours_back} hour(s)",
+                            ". This server HAS collected query stats before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples."),
                         startUtc, windowEnd, grain, database)
                     : EmptyStatus(
                         "unavailable",
@@ -1267,6 +1281,7 @@ public sealed class McpQueryTools
                     startUtc, windowEnd, grain,
                     "stored-procedure",
                     "Check that collection is running and that the server is enabled. A server that genuinely runs no stored procedures also lands here, and that is a real answer rather than a fault.",
+                    dataService, QueryWindowRelation.ProcedureStats, resolved.ServerId, "procedure_stats",
                     healthyEmptyProbe: () => McpRuntimePrecondition.HealthyEmptyMessageAsync(
                         dataService, resolved.ServerId, resolved.DisplayName, "procedure_stats", "stored-procedure samples")),
                     dataService, QueryWindowRelation.ProcedureStats, resolved.ServerId, startUtc, windowEnd, "procedure_stats");
@@ -1322,6 +1337,7 @@ public sealed class McpQueryTools
                     startUtc, windowEnd, PerInterval,
                     "Query Store",
                     "Query Store may be OFF on this server's databases — that, not an absence of slow queries, is the usual cause. Check QUERY_STORE = ON per database, then that collection is running for this server.",
+                    dataService, QueryWindowRelation.QueryStoreStats, resolved.ServerId, "query_store_stats",
                     () => McpRuntimePrecondition.QueryStoreFirstIntervalMessageAsync(dataService, resolved.ServerId, resolved.DisplayName, database)),
                     dataService, QueryWindowRelation.QueryStoreStats, resolved.ServerId, startUtc, windowEnd, "query_store_stats");
             }
@@ -1651,12 +1667,69 @@ public sealed class McpQueryTools
     /// data answer, nothing for any other status: the one call a windowed tool wraps its answer in.
     /// </summary>
     internal static async Task<string> WithWindowNoticeAsync(
-        string answer, LocalDataService dataService, QueryWindowRelation relation, int serverId, DateTime requestedStart, DateTime windowEnd, string table) =>
-        McpHelpers.IsEmptyOrUnavailableStatus(answer)
+        string answer, LocalDataService dataService, QueryWindowRelation relation, int serverId, DateTime requestedStart, DateTime windowEnd, string table)
+    {
+        answer = await OfflineInsteadOfEmptyAsync(dataService, serverId, windowEnd, answer);
+        return McpHelpers.IsEmptyOrUnavailableStatus(answer)
             ? (await EmptyWindowNoticeAsync(dataService, relation, serverId, requestedStart, windowEnd, table) is { } emptyNotice
                 ? WithWindowNotice(answer, emptyNotice, requestedStart, windowEnd)
                 : answer)
             : await WithDataWindowNoticeAsync(answer, dataService, relation, serverId, requestedStart, windowEnd, table);
+    }
+
+    /// <summary>
+    /// #7167: <paramref name="answer"/>, when it says <c>empty</c> for a server with no successful collection up to the window's end, as an
+    /// <c>unavailable</c> answer that says so first. Darling's twin is <c>DarlingServerOfflineNote.EmptyAsync</c>, and the rule is the
+    /// same: a server is offline when its newest collection is older than <see cref="ServerHealthThresholds.OfflineThreshold"/> as of the
+    /// read's anchor (<paramref name="windowEnd"/>: its <c>as_of</c>, or now), and an empty read is a true negative only when nothing was
+    /// missing. Lite reads "newest collection" as the newest SUCCESS run (<see cref="LocalDataService.GetLastSuccessfulCollectionAsync"/>),
+    /// since a server it cannot reach still logs failed runs. Any other status, a server that is not offline, a window that ends at or before
+    /// the newest success (an <c>as_of</c> inside collected history stays <c>empty</c>), a server with no success on record
+    /// (never collected: the tools' own "ever recorded" answers speak for it) and a failed read all return <paramref name="answer"/> unchanged.
+    /// The original answer's wording and hints are dropped with its word.
+    /// </summary>
+    internal static async Task<string> OfflineInsteadOfEmptyAsync(LocalDataService dataService, int serverId, DateTime windowEnd, string answer)
+    {
+        if (!IsEmptyStatus(answer))
+        {
+            return answer;
+        }
+
+        DateTime? last;
+        try
+        {
+            last = await dataService.GetLastSuccessfulCollectionAsync(serverId);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return answer;
+        }
+
+        if (last is not { } newest
+            || windowEnd <= newest
+            || ServerHealthClassifier.ClassifyFreshness(newest, windowEnd) != ServerFreshness.Offline)
+        {
+            return answer;
+        }
+
+        return McpHelpers.Status(
+            "unavailable",
+            $"This server is offline: it has had no successful collection since {newest.ToString("yyyy-MM-dd HH:mm", System.Globalization.CultureInfo.InvariantCulture)} UTC, "
+            + "so nothing is arriving to read, whatever the collectors would otherwise report. An empty result here is missing data, not a finding.");
+    }
+
+    private static bool IsEmptyStatus(string answer)
+    {
+        try
+        {
+            return System.Text.Json.Nodes.JsonNode.Parse(answer) is System.Text.Json.Nodes.JsonObject node
+                && node["status"] is System.Text.Json.Nodes.JsonValue status && status.TryGetValue<string>(out var word) && word == "empty";
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
 
     /// <summary>
     /// #7167: the message of a quiet-window <c>empty</c> answer, built from the same probe that writes the window notice under it: a window the
@@ -1672,12 +1745,15 @@ public sealed class McpQueryTools
 
     /// <summary><see cref="WithWindowNotice"/> over <see cref="EmptyWindowNoticeAsync"/>: the probe runs only for an empty or unavailable answer.</summary>
     internal static async Task<string> WithEmptyWindowNoticeAsync(
-        string answer, LocalDataService dataService, QueryWindowRelation relation, int serverId, DateTime requestedStart, DateTime windowEnd, string table) =>
-        McpHelpers.IsEmptyOrUnavailableStatus(answer)
+        string answer, LocalDataService dataService, QueryWindowRelation relation, int serverId, DateTime requestedStart, DateTime windowEnd, string table)
+    {
+        answer = await OfflineInsteadOfEmptyAsync(dataService, serverId, windowEnd, answer);
+        return McpHelpers.IsEmptyOrUnavailableStatus(answer)
             ? (await EmptyWindowNoticeAsync(dataService, relation, serverId, requestedStart, windowEnd, table) is { } emptyNotice
                 ? WithWindowNotice(answer, emptyNotice, requestedStart, windowEnd)
                 : answer)
             : answer;
+    }
 
     /// <summary>
     /// #7005: the one call for a windowed read whose floor is not one collector table's (<c>get_alert_history</c> over the whole store,
@@ -1846,7 +1922,8 @@ public sealed class McpQueryTools
     /// </summary>
     private static async Task<string> EmptyTrendAsync(
         Task<bool> probe, string serverName, string? database, int hours_back, DateTime startUtc, DateTime windowEndUtc, TrendGrain grain,
-        string what, string checkThis, Func<Task<string?>>? neverSampledOverride = null, Func<Task<string?>>? healthyEmptyProbe = null)
+        string what, string checkThis, LocalDataService dataService, QueryWindowRelation relation, int serverId, string table,
+        Func<Task<string?>>? neverSampledOverride = null, Func<Task<string?>>? healthyEmptyProbe = null)
     {
         var everSampled = await probe;
 
@@ -1864,10 +1941,14 @@ public sealed class McpQueryTools
             return EmptyStatus("unavailable", overrideText, startUtc, windowEndUtc, grain, database);
         }
 
+        /* #7167: a window the store does not reach back to says nothing was read instead of claiming to be quiet. */
         return everSampled
             ? EmptyStatus(
                 "empty",
-                $"No {what} samples were recorded for {ScopedServer(serverName, database)} in the last {hours_back} hour(s). This server HAS been sampled before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples.",
+                await QuietWindowMessageAsync(
+                    dataService, relation, serverId, startUtc, windowEndUtc, table,
+                    $"No {what} samples were recorded for {ScopedServer(serverName, database)} in the last {hours_back} hour(s)",
+                    ". This server HAS been sampled before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples."),
                 startUtc, windowEndUtc, grain, database)
             : EmptyStatus(
                 "unavailable",
