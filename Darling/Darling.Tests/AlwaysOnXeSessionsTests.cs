@@ -484,7 +484,68 @@ public sealed class AlwaysOnXeSessionsTests : IAsyncDisposable
             Assert.Null(outcome.Deadlock);
             Assert.Null(outcome.BlockedProcess);
             Assert.True(outcome.TransientFailure);
+            Assert.Equal(deadlock, outcome.DeadlockTransient);
+            Assert.Equal(!deadlock, outcome.BlockedProcessTransient);
         }
+    }
+
+    /* #7164: a transient ensure failure must not throw away the fault an earlier ensure stored. Per capture: the one that failed
+       transiently keeps its old fault, the one that ensured cleanly keeps its own (new) result. */
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void ATransientFailureOnOneCapture_KeepsItsOldFault_AndLeavesTheOtherCapturesNewResultInPlace(bool deadlockFailsTransiently)
+    {
+        var oldDeadlock = DarlingXeSessions.CaptureFaultFor(Denial, "deadlock");
+        var oldBlocked = DarlingXeSessions.CaptureFaultFor(Denial, "blocked process");
+        var previous = new DarlingXeSessions.CaptureEnsureOutcome { Deadlock = oldDeadlock, BlockedProcess = oldBlocked };
+
+        /* The other capture's ensure succeeded this time: it has no fault, and the carry must not bring the old one back. */
+        var next = new DarlingXeSessions.CaptureEnsureOutcome();
+        DarlingXeSessions.RecordOnPremCaptureFault(
+            next, deadlockFailsTransiently, LongQueryTraceReadOnlyIntentTests.SqlExceptionFactory.Create(-2, 11, "Execution Timeout Expired."));
+        next.CarryForwardTransient(previous);
+
+        Assert.Same(deadlockFailsTransiently ? oldDeadlock : null, next.Deadlock);
+        Assert.Same(deadlockFailsTransiently ? null : oldBlocked, next.BlockedProcess);
+        Assert.True(next.TransientFailure);
+
+        /* A clean ensure of both clears both: nothing is carried. */
+        var clean = new DarlingXeSessions.CaptureEnsureOutcome();
+        clean.CarryForwardTransient(previous);
+        Assert.Null(clean.Deadlock);
+        Assert.Null(clean.BlockedProcess);
+    }
+
+    /* #7164: the connection to the server would not open. That says nothing about the sessions, so the stored faults survive, the
+       runs keep recording them, and the ensure is due again in five minutes and not an hour. */
+    [Fact]
+    public async Task AConnectionThatWillNotOpen_KeepsTheStoredFaults_AndIsDueAgainInFiveMinutes()
+    {
+        var rig = BuildRig(azureSqlDatabase: false);
+        rig.Runner.XeEnsureOverrideForTests = null;
+        var runtime = new ServerRuntime
+        {
+            Config = rig.Runtime.Config,
+            ConnectionString = "Server=tcp:127.0.0.1,1;Initial Catalog=master;Encrypt=False;Connect Timeout=3;ConnectRetryCount=0",
+            Target = new CollectorTargetInfo(),
+            StorageName = rig.Runtime.StorageName,
+            ServerId = rig.Runtime.ServerId,
+        };
+        rig.State.Runtime = runtime;
+        rig.State.CaptureEnsure = new DarlingXeSessions.CaptureEnsureOutcome
+        {
+            Deadlock = DarlingXeSessions.CaptureFaultFor(Denial, "deadlock"),
+            BlockedProcess = DarlingXeSessions.CaptureFaultFor(Denial, "blocked process"),
+        };
+        var now = DateTime.UtcNow;
+
+        await DarlingWorker.EnsureAlwaysOnXeSessionsAsync(rig.State, rig.Runner, now, NullLogger.Instance, CancellationToken.None);
+
+        Assert.NotNull(DarlingWorker.CaptureEnsureFaultFor("deadlocks", rig.State));
+        Assert.NotNull(DarlingWorker.CaptureEnsureFaultFor("blocked_process_report", rig.State));
+        Assert.False(AlwaysOnXeSessions.EnsureIsDue(rig.State.XeSessionsEnsuredAtUtc, now.AddMinutes(4)));
+        Assert.True(AlwaysOnXeSessions.EnsureIsDue(rig.State.XeSessionsEnsuredAtUtc, now.AddMinutes(5)));
     }
 
     [Theory]
@@ -518,7 +579,7 @@ public sealed class AlwaysOnXeSessionsTests : IAsyncDisposable
         DarlingWorker.ApplyTransientEnsureRetry(rig.State, new DarlingXeSessions.CaptureEnsureOutcome(), now);
         Assert.False(AlwaysOnXeSessions.EnsureIsDue(rig.State.XeSessionsEnsuredAtUtc, now.AddMinutes(59)));
 
-        DarlingWorker.ApplyTransientEnsureRetry(rig.State, new DarlingXeSessions.CaptureEnsureOutcome { TransientFailure = true }, now);
+        DarlingWorker.ApplyTransientEnsureRetry(rig.State, new DarlingXeSessions.CaptureEnsureOutcome { DeadlockTransient = true }, now);
         Assert.False(AlwaysOnXeSessions.EnsureIsDue(rig.State.XeSessionsEnsuredAtUtc, now.AddMinutes(4)));
         Assert.True(AlwaysOnXeSessions.EnsureIsDue(rig.State.XeSessionsEnsuredAtUtc, now.AddMinutes(5)));
     }

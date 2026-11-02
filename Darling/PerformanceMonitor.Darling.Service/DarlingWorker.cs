@@ -2062,6 +2062,7 @@ LIMIT 1";
         var captureOutcome = new DarlingXeSessions.CaptureEnsureOutcome();
         var attentionFault = await DarlingXeSessions.EnsureAllAsync(server.Runtime, runner, logger, cancellationToken, attentionEnabled, captureOutcome);
         server.AttentionXePermissionFault = attentionFault?.Message;
+        captureOutcome.CarryForwardTransient(server.CaptureEnsure);
         server.CaptureEnsure = captureOutcome;
         ApplyTransientEnsureRetry(server, captureOutcome, utcNow);
     }

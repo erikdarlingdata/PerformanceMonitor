@@ -85,11 +85,41 @@ public static class DarlingXeSessions
         public string? BlockedProcessPartialNote { get; set; }
 
         /// <summary>
-        /// True when an on-premises, Managed Instance or RDS ensure failed with a transient error (a timeout, a dropped connection).
-        /// That is not a fault for the run: the session may well be running, so the runs read it as they did before #6893, and the
-        /// worker asks again after <see cref="TransientRetryInterval"/> instead of waiting out the hour.
+        /// True when the deadlock ensure of an on-premises, Managed Instance or RDS server failed with a transient error (a timeout, a
+        /// dropped connection). That is not a fault for the run: the session may well be running, so the run reads it as it did before
+        /// #6893, and the worker asks again after <see cref="TransientRetryInterval"/> instead of waiting out the hour. Per capture,
+        /// because the two ensures fail independently (#7164).
         /// </summary>
-        public bool TransientFailure { get; set; }
+        public bool DeadlockTransient { get; set; }
+
+        /// <summary>The same for the blocked-process ensure (#7164).</summary>
+        public bool BlockedProcessTransient { get; set; }
+
+        /// <summary>True when either capture's ensure failed transiently: the worker asks again in <see cref="TransientRetryInterval"/>.</summary>
+        public bool TransientFailure => DeadlockTransient || BlockedProcessTransient;
+
+        /// <summary>
+        /// #7164: a transient failure says nothing about the session, so it must not erase what an earlier ensure really found. For
+        /// each capture whose ensure failed transiently, keeps the fault the previous outcome stored; a capture that ensured cleanly
+        /// keeps its own result, so a success still clears an old fault.
+        /// </summary>
+        public void CarryForwardTransient(CaptureEnsureOutcome? previous)
+        {
+            if (previous is null)
+            {
+                return;
+            }
+
+            if (DeadlockTransient)
+            {
+                Deadlock = previous.Deadlock;
+            }
+
+            if (BlockedProcessTransient)
+            {
+                BlockedProcess = previous.BlockedProcess;
+            }
+        }
     }
 
     /// <summary>How long after a transient ensure failure the next sweep ensures again (#7164), instead of the hourly interval.</summary>
@@ -135,7 +165,14 @@ public static class DarlingXeSessions
         {
             if (outcome is not null)
             {
-                outcome.TransientFailure = true;
+                if (deadlock)
+                {
+                    outcome.DeadlockTransient = true;
+                }
+                else
+                {
+                    outcome.BlockedProcessTransient = true;
+                }
             }
 
             return null;
@@ -302,6 +339,14 @@ public static class DarlingXeSessions
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            /* #7164: a connection that would not open says nothing about the sessions, so it is asked again in a few minutes and keeps
+               whatever fault an earlier ensure stored, instead of leaving a fault-less outcome for the hour. */
+            if (outcome is not null)
+            {
+                outcome.DeadlockTransient = true;
+                outcome.BlockedProcessTransient = true;
+            }
+
             logger?.LogError("[{Server}] Failed to ensure XE sessions: {Message} — the deadlock, blocked-process and client-timeout runs will fail to connect to read them until resolved",
                 server.Config.DisplayName, ex.Message);
         }

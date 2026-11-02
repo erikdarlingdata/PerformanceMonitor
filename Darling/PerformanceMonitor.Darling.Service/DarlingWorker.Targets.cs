@@ -481,6 +481,7 @@ public sealed partial class DarlingWorker
                 var captureOutcome = new DarlingXeSessions.CaptureEnsureOutcome();
                 var attentionFault = await DarlingXeSessions.EnsureAllAsync(runtime, runner, _logger, cancellationToken, attentionEnabled, captureOutcome);
                 server.AttentionXePermissionFault = attentionFault?.Message;
+                captureOutcome.CarryForwardTransient(server.CaptureEnsure);
                 server.CaptureEnsure = captureOutcome;
                 server.AttentionXeEnsuredWhileEnabled = attentionEnabled;
                 server.XeSessionsEnsuredAtUtc = DateTime.UtcNow;
