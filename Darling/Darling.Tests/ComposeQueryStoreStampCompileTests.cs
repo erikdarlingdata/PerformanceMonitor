@@ -339,7 +339,7 @@ public sealed class ComposeQueryStoreStampCompileTests
                 WHERE f.collection_time >= $1
                   AND f.collection_time <= $2
                 GROUP BY f.query_hash
-                ORDER BY value DESC NULLS LAST
+                ORDER BY value DESC NULLS LAST, query_hash
                 LIMIT $4
             )
             SELECT * FROM (
