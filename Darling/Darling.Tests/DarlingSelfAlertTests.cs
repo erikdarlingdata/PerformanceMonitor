@@ -3110,6 +3110,42 @@ public sealed class DarlingSelfAlertTests
         Assert.Contains("rule-plain-blanket", blanket.DetailText);
     }
 
+    /// <summary>
+    /// #7183: the validator accepts a recurring window of 00:00-23:59 every day, or 00:01-00:00 across midnight,
+    /// so those schedules mute nearly around the clock with no expiry. They are no bound, so the stale check
+    /// still reports them. A window that leaves an hour a day unmuted, or skips a day, is bounded and is not reported.
+    /// </summary>
+    [Theory]
+    [InlineData(0, 0, 23, 59, null, true)]
+    [InlineData(0, 1, 0, 0, null, true)]
+    [InlineData(0, 0, 23, 59, 0x7F, true)]
+    [InlineData(1, 0, 5, 0, null, false)]
+    [InlineData(0, 0, 23, 59, 0x40, false)]
+    [InlineData(0, 1, 0, 0, 0x3F, false)]
+    [InlineData(0, 0, 22, 59, null, false)]
+    public async Task StaleMute_RecurringWindow_IsReportedOnlyWhenItIsNoRealBound(
+        int startH, int startM, int endH, int endM, int? days, bool reported)
+    {
+        var h = new Harness();
+        var rule = Mute(StaleDays + 30, metric: null, id: "rule-recurring-window");
+        rule.RecurStartTime = new TimeOnly(startH, startM);
+        rule.RecurEndTime = new TimeOnly(endH, endM);
+        rule.RecurDays = days;
+        rule.RecurTimeZone = "UTC";
+
+        await h.Build().ApplyStaleMuteRulesAsync(new[] { rule }, Ct);
+
+        if (reported)
+        {
+            var outcome = Assert.Single(h.Deliverer.Outcomes);
+            Assert.Contains("rule-recurring-window", outcome.DetailText);
+        }
+        else
+        {
+            Assert.Empty(h.Deliverer.Outcomes);
+        }
+    }
+
     private static void MakeRecurring(MuteRule rule)
     {
         rule.RecurStartTime = new TimeOnly(1, 0);
