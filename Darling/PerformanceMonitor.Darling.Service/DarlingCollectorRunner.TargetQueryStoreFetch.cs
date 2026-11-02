@@ -134,9 +134,10 @@ public sealed partial class DarlingCollectorRunner
     /// <para>Not a plain write of the set. The carryover is retried in ascending id order and a pass takes its head,
     /// so an id that makes the fetch throw every time would sit at the front and starve everything behind it, the
     /// stall the uncut-pass cleanup guards against for ids the target no longer has. Each id in
-    /// <paramref name="issued"/> (sent to the target in the throwing pass) therefore counts one attempt, and an id
-    /// that reaches <see cref="MaxFetchThrowAttempts"/> is dropped. An id the pass never reached keeps whatever
-    /// count it had. Returns how many ids were dropped.</para>
+    /// <paramref name="issued"/> (the chunk whose target read threw) therefore counts one attempt, and an id that
+    /// reaches <see cref="MaxFetchThrowAttempts"/> is dropped. An id the throwing read did not hold keeps whatever
+    /// count it had, and a throw from the store write passes an empty <paramref name="issued"/>, so it carries
+    /// the owed set and counts against no id. Returns how many ids were dropped.</para>
     /// </summary>
     internal static int CarryMissingAfterThrow(
         (int ServerId, string Database, string Collector) carryKey,
@@ -192,12 +193,16 @@ public sealed partial class DarlingCollectorRunner
     }
 
     /// <summary>
-    /// #7187: after a pass that did not throw, keeps a throw count only for ids still owed. An id that landed, or that
-    /// the uncut-pass cleanup found gone from the target, no longer needs its count.
+    /// #7187: after a pass that did not throw, keeps a throw count only for ids still owed, and starts the count again
+    /// for every id the pass issued. An id that landed, or that the uncut-pass cleanup found gone from the target, no
+    /// longer needs its count. An id the pass issued that is still owed did not throw this time, so the run of throws
+    /// is broken and its count goes back to zero. An id the pass did not issue (the time budget cut it, or it sat
+    /// past the attempt cap) keeps its count: that pass neither ended nor extended its run.
     /// </summary>
     internal static void PruneThrowAttempts(
         (int ServerId, string Database, string Collector) carryKey,
         SortedSet<long> missing,
+        IEnumerable<long> issued,
         ConcurrentDictionary<(int ServerId, string Database, string Collector), Dictionary<long, int>> throwAttempts)
     {
         if (!throwAttempts.TryGetValue(carryKey, out var prior))
@@ -205,10 +210,11 @@ public sealed partial class DarlingCollectorRunner
             return;
         }
 
+        var tried = new HashSet<long>(issued);
         var kept = new Dictionary<long, int>();
         foreach (var (id, count) in prior)
         {
-            if (missing.Contains(id))
+            if (missing.Contains(id) && !tried.Contains(id))
             {
                 kept[id] = count;
             }
@@ -728,10 +734,15 @@ ORDER BY plan_id, runtime_stats_interval_id, execution_type_desc, replica_role, 
         /* #7187: hoisted (plan and text fetch alike) so the catch can carry what this pass found missing. Null until the probe phase has
            merged this pass's verdicts into the carried debt: a throw before then has no complete set to
            write, and leaves the old carryover as it was. `issued` is how many of `attempt` were sent to the
-           target, which is the set a throw counts an attempt against. */
+           target so far, the set a pass that completes resets the throw counts of. `readingChunk` is the chunk
+           whose target read is in flight: set before the read and cleared when it returns, so it is non-null in
+           the catch only when the TARGET read threw, and it is the only set a throw counts an attempt against.
+           A throw from the store write leaves it null, so a store timeout carries the owed set without
+           counting against any id. */
         SortedSet<long>? missing = null;
         List<long>? attempt = null;
         var issued = 0;
+        long[]? readingChunk = null;
 
         try
         {
@@ -1001,6 +1012,7 @@ ORDER BY plan_id, runtime_stats_interval_id, execution_type_desc, replica_role, 
                 var chunk = attempt.GetRange(offset, Math.Min(width, attempt.Count - offset)).ToArray();
                 offset += chunk.Length;
                 issued = offset;
+                readingChunk = chunk;
                 lastChunkWidth = chunk.Length;
 
                 var query = QueryStoreCollector.Instance.BuildPlanFetchByIdsQuery(
@@ -1047,6 +1059,8 @@ ORDER BY plan_id, runtime_stats_interval_id, execution_type_desc, replica_role, 
                     context.PerItemPlanChunks++;
                     context.PerItemPlanIdsAttempted += chunk.Length;
                 }
+
+                readingChunk = null;
 
                 if (cutOnTime)
                 {
@@ -1146,7 +1160,7 @@ ORDER BY plan_id, runtime_stats_interval_id, execution_type_desc, replica_role, 
                 _planFetchCarryover.TryRemove(carryKey, out _);
             }
 
-            PruneThrowAttempts(carryKey, missing, _planFetchThrowAttempts);
+            PruneThrowAttempts(carryKey, missing, attempt.Take(issued), _planFetchThrowAttempts);
 
             /* #2776: the pass completed — restore full width. Recorded HERE rather than inside Learn
                because Learn runs before the store write, so a pass that threw would otherwise clear its own
@@ -1199,15 +1213,16 @@ ORDER BY plan_id, runtime_stats_interval_id, execution_type_desc, replica_role, 
 
             /* #7187: the ids this pass found missing are owed too. Only a plan referenced again re-enters the
                probe, so a plan that ran once in this cycle's batch would otherwise never get its XML. Each id
-               the pass sent to the target counts an attempt, and one that has now thrown MaxFetchThrowAttempts
-               times is dropped, so a plan that throws every time cannot sit at the head of the sorted retry. */
+               the chunk whose TARGET read threw counts an attempt, and one that has now thrown MaxFetchThrowAttempts
+               times in a row is dropped, so a plan that throws every time cannot sit at the head of the sorted
+               retry. A throw from the store write counts against no id: a slow store is not the id's fault. */
             var droppedPlans = missing is not null && probeStamped
-                ? CarryMissingAfterThrow(carryKey, missing, attempt?.Take(issued) ?? [], _planFetchCarryover, _planFetchThrowAttempts)
+                ? CarryMissingAfterThrow(carryKey, missing, readingChunk ?? [], _planFetchCarryover, _planFetchThrowAttempts)
                 : 0;
             if (droppedPlans > 0)
             {
                 _logger?.LogWarning(
-                    "query_store plan fetch on '{Server}' database [{Database}]: dropped {Dropped} plan id(s) that failed {Attempts} fetch attempts in a row. A plan that runs again is picked up again.",
+                    "query_store plan fetch on '{Server}' database [{Database}]: dropped {Dropped} plan id(s) that failed {Attempts} fetch attempts in a row that threw. A plan that runs again is picked up again.",
                     server.Config.DisplayName, databaseName, droppedPlans, MaxFetchThrowAttempts);
             }
 
@@ -1282,10 +1297,15 @@ ORDER BY plan_id, runtime_stats_interval_id, execution_type_desc, replica_role, 
         /* #7187: hoisted (plan and text fetch alike) so the catch can carry what this pass found missing. Null until the probe phase has
            merged this pass's verdicts into the carried debt: a throw before then has no complete set to
            write, and leaves the old carryover as it was. `issued` is how many of `attempt` were sent to the
-           target, which is the set a throw counts an attempt against. */
+           target so far, the set a pass that completes resets the throw counts of. `readingChunk` is the chunk
+           whose target read is in flight: set before the read and cleared when it returns, so it is non-null in
+           the catch only when the TARGET read threw, and it is the only set a throw counts an attempt against.
+           A throw from the store write leaves it null, so a store timeout carries the owed set without
+           counting against any id. */
         SortedSet<long>? missing = null;
         List<long>? attempt = null;
         var issued = 0;
+        long[]? readingChunk = null;
 
         try
         {
@@ -1499,6 +1519,7 @@ ORDER BY plan_id, runtime_stats_interval_id, execution_type_desc, replica_role, 
                 var chunk = attempt.GetRange(offset, Math.Min(width, attempt.Count - offset)).ToArray();
                 offset += chunk.Length;
                 issued = offset;
+                readingChunk = chunk;
                 lastChunkWidth = chunk.Length;
 
                 var query = QueryStoreCollector.Instance.BuildTextFetchByIdsQuery(
@@ -1540,6 +1561,8 @@ ORDER BY plan_id, runtime_stats_interval_id, execution_type_desc, replica_role, 
                     context.PerItemTextChunks++;
                     context.PerItemTextIdsAttempted += chunk.Length;
                 }
+
+                readingChunk = null;
 
                 if (cutOnTime)
                 {
@@ -1610,7 +1633,7 @@ ORDER BY plan_id, runtime_stats_interval_id, execution_type_desc, replica_role, 
                 _textFetchCarryover.TryRemove(carryKey, out _);
             }
 
-            PruneThrowAttempts(carryKey, missing, _textFetchThrowAttempts);
+            PruneThrowAttempts(carryKey, missing, attempt.Take(issued), _textFetchThrowAttempts);
 
             /* #2776: the pass completed — restore full width. Removing the key rather than zeroing it keeps
                the dictionary to just the databases currently backing off.
@@ -1663,12 +1686,12 @@ ORDER BY plan_id, runtime_stats_interval_id, execution_type_desc, replica_role, 
 
             /* #7187: the plan side's carry on a throw, for the same reason. */
             var droppedTexts = missing is not null && probeStamped
-                ? CarryMissingAfterThrow(carryKey, missing, attempt?.Take(issued) ?? [], _textFetchCarryover, _textFetchThrowAttempts)
+                ? CarryMissingAfterThrow(carryKey, missing, readingChunk ?? [], _textFetchCarryover, _textFetchThrowAttempts)
                 : 0;
             if (droppedTexts > 0)
             {
                 _logger?.LogWarning(
-                    "query_store text fetch on '{Server}' database [{Database}]: dropped {Dropped} query id(s) that failed {Attempts} fetch attempts in a row. A query that runs again is picked up again.",
+                    "query_store text fetch on '{Server}' database [{Database}]: dropped {Dropped} query id(s) that failed {Attempts} fetch attempts in a row that threw. A query that runs again is picked up again.",
                     server.Config.DisplayName, databaseName, droppedTexts, MaxFetchThrowAttempts);
             }
 

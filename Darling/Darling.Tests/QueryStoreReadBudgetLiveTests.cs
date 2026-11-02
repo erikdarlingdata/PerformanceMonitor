@@ -980,6 +980,122 @@ public sealed class QueryStoreReadBudgetLiveTests
         Assert.Empty(rig.Runner.TextFetchCarryoverForTests(LiveServerId, Alpha, collector));
     }
 
+    /// <summary>
+    /// #7187 review: a store-write throw is not an attempt against any id. A trigger on the store table makes every insert
+    /// fail, as a store timeout would, while the target read succeeds. Six passes in a row (one past
+    /// <see cref="DarlingCollectorRunner.MaxFetchThrowAttempts"/>) carry all three ids and drop none, and the next pass
+    /// with a healthy store stores them.
+    /// </summary>
+    [Fact]
+    public async Task APlanStoreWriteThatThrowsEveryPass_CountsNoAttempt_AndDropsNoId()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to run the #7187 plan-fetch carry pin.");
+        var token = TestContext.Current.CancellationToken;
+        await using var rig = await Rig.OpenAsync(token);
+        var collector = QueryStoreCollector.Instance.Name;
+
+        var now = WholeSecondNow();
+        var target = new Target();
+        target.Rows[Alpha] = Enumerable.Range(1, 3).Select(id => Row(id, now.AddMinutes(-8))).ToList();
+        await FailStoreInsertsAsync(rig, "collect.query_store_plan_map", on: true, token);
+
+        for (var pass = 0; pass <= DarlingCollectorRunner.MaxFetchThrowAttempts; pass++)
+        {
+            await PassAsync(rig, target, token, Alpha);
+            Assert.Equal([1L, 2L, 3L], rig.Runner.PlanFetchCarryoverForTests(LiveServerId, Alpha, collector));
+        }
+
+        await FailStoreInsertsAsync(rig, "collect.query_store_plan_map", on: false, token);
+        await PassAsync(rig, target, token, Alpha);
+
+        Assert.Equal([1L, 2L, 3L], await StoredPlansAsync(rig, Alpha, token));
+        Assert.Empty(rig.Runner.PlanFetchCarryoverForTests(LiveServerId, Alpha, collector));
+    }
+
+    /// <summary>#7187 review: the statement-text fetch's twin of the plan store-write case.</summary>
+    [Fact]
+    public async Task ATextStoreWriteThatThrowsEveryPass_CountsNoAttempt_AndDropsNoId()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to run the #7187 text-fetch carry pin.");
+        var token = TestContext.Current.CancellationToken;
+        await using var rig = await Rig.OpenAsync(token);
+        var collector = QueryStoreCollector.Instance.Name;
+
+        var now = WholeSecondNow();
+        var target = new Target();
+        target.Rows[Alpha] = Enumerable.Range(1, 3).Select(id => Row(id, now.AddMinutes(-8))).ToList();
+        await FailStoreInsertsAsync(rig, "collect.query_store_text", on: true, token);
+
+        for (var pass = 0; pass <= DarlingCollectorRunner.MaxFetchThrowAttempts; pass++)
+        {
+            await PassAsync(rig, target, token, Alpha);
+            Assert.Equal([1L, 2L, 3L], rig.Runner.TextFetchCarryoverForTests(LiveServerId, Alpha, collector));
+        }
+
+        await FailStoreInsertsAsync(rig, "collect.query_store_text", on: false, token);
+        await PassAsync(rig, target, token, Alpha);
+
+        Assert.Equal([1L, 2L, 3L], await StoredTextsAsync(rig, Alpha, token));
+        Assert.Empty(rig.Runner.TextFetchCarryoverForTests(LiveServerId, Alpha, collector));
+    }
+
+    /// <summary>
+    /// #7187 review: the count is attempts "in a row". Plan 1 throws on four passes, then a pass the time budget cuts
+    /// issues it without throwing, which starts its count again. It then survives four more throws and is dropped on the
+    /// fifth. Without the reset the cut pass leaves the count at four and the first throw after it drops the plan.
+    /// </summary>
+    [Fact]
+    public async Task APlanThatThrew_ThenWasIssuedInAPassThatDidNotThrow_StartsItsCountAgain()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to run the #7187 plan-fetch carry pin.");
+        var token = TestContext.Current.CancellationToken;
+        await using var rig = await Rig.OpenAsync(token);
+        rig.Runner.QueryStorePlanFetchBudgetSpan = TimeSpan.FromSeconds(2);
+        var collector = QueryStoreCollector.Instance.Name;
+
+        var now = WholeSecondNow();
+        var target = new Target();
+        target.Rows[Alpha] = [Row(1, now.AddMinutes(-8))];
+        target.FailPlanIds.Add(1);
+
+        var cap = DarlingCollectorRunner.MaxFetchThrowAttempts;
+        for (var pass = 0; pass < cap - 1; pass++)
+        {
+            await PassAsync(rig, target, token, Alpha);
+            Assert.Equal([1L], rig.Runner.PlanFetchCarryoverForTests(LiveServerId, Alpha, collector));
+        }
+
+        /* Issued, cut by the time budget before it received anything, and not thrown. */
+        target.FailPlanIds.Clear();
+        target.HoldPlanUntilCut = true;
+        await PassAsync(rig, target, token, Alpha);
+        Assert.Equal([1L], rig.Runner.PlanFetchCarryoverForTests(LiveServerId, Alpha, collector));
+
+        target.HoldPlanUntilCut = false;
+        target.FailPlanIds.Add(1);
+        for (var pass = 0; pass < cap - 1; pass++)
+        {
+            await PassAsync(rig, target, token, Alpha);
+            Assert.Equal([1L], rig.Runner.PlanFetchCarryoverForTests(LiveServerId, Alpha, collector));
+        }
+
+        await PassAsync(rig, target, token, Alpha);
+        Assert.Empty(rig.Runner.PlanFetchCarryoverForTests(LiveServerId, Alpha, collector));
+    }
+
+    /// <summary>Makes every insert into <paramref name="table"/> fail (or stops doing so), standing in for a store write that times out.</summary>
+    private static async Task FailStoreInsertsAsync(Rig rig, string table, bool on, CancellationToken token)
+    {
+        await using var connection = new NpgsqlConnection(rig.Scratch.ConnectionString);
+        await connection.OpenAsync(token);
+        var sql = on
+            ? "CREATE OR REPLACE FUNCTION public.fail_store_insert() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'simulated store write failure'; END $$; "
+              + $"CREATE TRIGGER fail_store_insert BEFORE INSERT ON {table} FOR EACH STATEMENT EXECUTE FUNCTION public.fail_store_insert()"
+            : $"DROP TRIGGER fail_store_insert ON {table}";
+        await using var command = new NpgsqlCommand(sql, connection);
+        await command.ExecuteNonQueryAsync(token);
+    }
+
     private static DateTime WholeSecondNow()
     {
         var now = DateTime.UtcNow;
