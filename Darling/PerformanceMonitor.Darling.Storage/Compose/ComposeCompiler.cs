@@ -80,7 +80,8 @@ public sealed record ComposeRunContext(
     long? QueryStoreGroupMembers = null,
     DateTime? QueryStoreStampThrough = null,
     bool ModuleMapMissing = false,
-    IReadOnlyList<int>? QueryStoreRawServerIds = null)
+    IReadOnlyList<int>? QueryStoreRawServerIds = null,
+    bool QueryStoreFleetReady = false)
 {
     public static readonly IReadOnlyDictionary<string, string?> NoVariables =
         new Dictionary<string, string?>(StringComparer.Ordinal);
@@ -642,7 +643,8 @@ public static class ComposeCompiler
             ? null
             : new StampRelation(stampPlan.Partials, stampThroughParam!,
                 AndScope(hasServerScope ? ServerScope("s.", serverScopeParam!, unregisteredParam) : null, splitRawParam is null ? null : $"s.server_id <> ALL({splitRawParam})"),
-                AndScope(hasServerScope ? ServerScope("b.", serverScopeParam!, null) : null, splitRawParam is null ? null : $"b.server_id <> ALL({splitRawParam})"));
+                AndScope(hasServerScope ? ServerScope("b.", serverScopeParam!, null) : null, splitRawParam is null ? null : $"b.server_id <> ALL({splitRawParam})"),
+                ReadsFleetRollup(plan, context, hasServerScope, splitRawParam is not null));
 
         /* In stamp mode every value is the combine form over the relation's partial columns (single scan: over rank_base's). */
         string PrimaryValue() => singleScan
@@ -816,7 +818,7 @@ public static class ComposeCompiler
                otherwise outrank every REAL winner and silently occupy a series slot. Worse here than in
                the plain Ranked arm below (where the NULL row is at least visible): this ordering decides
                MEMBERSHIP for the whole chart. */
-            sql.Append("    ORDER BY value DESC NULLS LAST\n");
+            sql.Append("    ORDER BY value DESC NULLS LAST").Append(RankTieBreak(plan)).Append('\n');
             sql.Append("    LIMIT ").Append(p.AddInt(plan.TopN)).Append('\n');
             sql.Append(")\n");
         }
@@ -919,7 +921,7 @@ public static class ComposeCompiler
                 /* NULLS LAST for the same reason as the rank CTE above: DESC's default NULLS FIRST put a
                    NULL-aggregate group at the TOP of the ranking, ahead of every real value — and under
                    the LIMIT it evicted a legitimate member. */
-                sql.Append("ORDER BY value DESC NULLS LAST\n");
+                sql.Append("ORDER BY value DESC NULLS LAST").Append(RankTieBreak(plan)).Append('\n');
                 sql.Append("LIMIT ").Append(p.AddInt(plan.TopN));
                 break;
             default: /* Scalar — a single aggregate row. */
@@ -1542,6 +1544,7 @@ public static class ComposeCompiler
 
     private const string StampTable = "query_store_compose_stamp";
     private const string StampBuiltTable = "query_store_compose_stamp_built";
+    private const string FleetTable = "query_store_compose_fleet";
 
     /// <summary>The rollup column for <paramref name="partialExpression"/> (the partial's fact-form text, for example
     /// <c>SUM(f.execution_count)</c>), or null when the rollup does not hold it, in which case the panel compiles the wide-table
@@ -1560,7 +1563,7 @@ public static class ComposeCompiler
 
     /// <summary>The names the stamp relation is spelled with: its partial columns, the bound <c>$stampThrough</c>, and the server
     /// scope predicate over the registry alias <c>s</c> (null for the fleet).</summary>
-    private sealed record StampRelation(IReadOnlyList<StampPartial> Partials, string ThroughParam, string? ScopeSql, string? LedgerScopeSql);
+    private sealed record StampRelation(IReadOnlyList<StampPartial> Partials, string ThroughParam, string? ScopeSql, string? LedgerScopeSql, bool Fleet = false);
 
     /// <summary>
     /// Whether this compile reads the Query Store rollup (#5582 part 3), and the combine-form values it reads it with. Null (the
@@ -1642,6 +1645,29 @@ public static class ComposeCompiler
         return route;
     }
 
+    /// <summary>
+    /// Whether arm 1 of a stamp-mode compile reads the fleet rollup (<see cref="QueryStoreComposeStamp.FleetTable"/>, V239, #7146) in place of
+    /// the stamp (the caller has already established that the compile is a stamp plan, so every measure is read from the stamp's partials).
+    /// All of these hold: the store has the table (<see cref="ComposeRunContext.QueryStoreFleetReady"/>); no server scope; no server on the
+    /// raw route; no filter of any kind (server, database, module, tag, hash); and the only grouping column is <c>query_hash</c> or none,
+    /// because the fleet table keeps no server, database or module. The per-hour validity check is in the statement itself
+    /// (<see cref="BuildStampRelation"/>), so it is decided for the hours the read really takes.
+    /// </summary>
+    private static bool ReadsFleetRollup(PanelPlan plan, ComposeRunContext context, bool hasServerScope, bool hasRawServers) =>
+        context.QueryStoreFleetReady
+        && !hasServerScope
+        && !hasRawServers
+        && plan.Filters.Count == 0
+        && plan.GroupBy.All(d => string.Equals(d.Column, "query_hash", StringComparison.Ordinal));
+
+    /// <summary>
+    /// The second sort of a top-N rank (#7146): the group key columns, ascending, after <c>value DESC NULLS LAST</c>. Without it, several groups that
+    /// tie at the Nth value left the choice of members to the plan, so the fleet path, the stamp path and two runs of the same path could keep
+    /// different members. The names are the select list's own aliases, so the tie-break is the same on every route. Empty when there is no grouping.
+    /// </summary>
+    private static string RankTieBreak(PanelPlan plan) =>
+        plan.GroupBy.Count == 0 ? string.Empty : ", " + string.Join(", ", plan.GroupBy.Select(d => d.Name));
+
     /// <summary>Whether <see cref="Compile"/> would read the Query Store rollup for this panel and context (#5582 part 3). The runner asks
     /// before the guard, so the guard weights the rollup hours only for a panel whose text really reads them: a panel the rollup cannot
     /// serve (a partial with no rollup column, a module-join group) compiles to the wide-table text and counts every hour at 1.0.</summary>
@@ -1694,6 +1720,33 @@ public static class ComposeCompiler
             + $"WHERE f.collection_time >= {wideStartParam} AND f.collection_time < {through} "
             + $"AND EXISTS (SELECT 1 FROM {built} AS b WHERE b.server_id = f.server_id AND b.hour = date_trunc('hour', f.collection_time) AND b.built_seq = b.late_seq)"
             + scopeAndFilters;
+
+        /* #7146: the fleet read. Arm 1 takes an hour's rows from the fleet table when NO pair of that hour is unfit for it, and from the
+           stamp, as above, when one is. A pair is unfit when its build is behind its late writes (the stamp path reads that pair from the
+           wide table in the stale arm), when the fleet table was not built against its current late_seq (fleet_built_seq: NULL on every hour
+           built before V239 until the ordinary tick rebuilds it, so those hours are never read from a table that does not hold them). A removed
+           server needs no clause: removal flips is_enabled and deletes no registry, stamp, ledger or fleet row, so both paths keep its history
+           alike. An hour with no ledger row at all is not read from the fleet table either, as the stamp reads nothing of it (rows left by a build that retired the hour). The check is per hour, so one bad pair costs that hour the stamp path and no other. The hours it sends to the stamp are driven from the ledger,
+           by a lateral probe behind an optimisation fence as the stale arm is, so a store with no unfit pair reads no stamp rows at all.
+           The fleet arm names the same columns as the others; the three it has no value for are NULL, which no group, filter or measure of a
+           fleet-eligible panel reads. */
+        if (stamp.Fleet)
+        {
+            string Unfit(string alias) =>
+                $"({alias}.built_seq IS DISTINCT FROM {alias}.late_seq OR {alias}.fleet_built_seq IS DISTINCT FROM {alias}.late_seq)";
+            var fleetRows = $"SELECT CAST(NULL AS integer) AS server_id, CAST(NULL AS text) AS database_name, CAST(NULL AS text) AS module_name, f.query_hash, f.collection_time, CAST(NULL AS text) AS server_name{rollupPartials} "
+                + $"FROM {schema}.{FleetTable} AS f "
+                + $"WHERE f.collection_time >= {wideStartParam} AND f.collection_time < {through} "
+                + $"AND EXISTS (SELECT 1 FROM {built} AS y WHERE y.hour = date_trunc('hour', f.collection_time)) "
+                + $"AND NOT EXISTS (SELECT 1 FROM {built} AS x WHERE x.hour = date_trunc('hour', f.collection_time) AND {Unfit("x")})";
+            var unfitHoursRollup = $"SELECT {Head}{rollupPartials} FROM "
+                + $"(SELECT DISTINCT x.hour FROM {built} AS x WHERE x.hour >= date_trunc('hour', {wideStartParam}) AND x.hour < {through} AND {Unfit("x")}) AS ih "
+                + $"CROSS JOIN LATERAL (SELECT st.* FROM {schema}.{StampTable} AS st WHERE st.collection_time >= ih.hour AND st.collection_time < ih.hour + interval '1 hour' "
+                + $"AND st.collection_time >= {wideStartParam} AND st.collection_time < {through} "
+                + $"AND EXISTS (SELECT 1 FROM {built} AS b WHERE b.server_id = st.server_id AND b.hour = ih.hour AND b.built_seq = b.late_seq) OFFSET 0) AS f "
+                + $"JOIN {servers} AS s ON s.server_id = f.server_id";
+            rollup = $"{fleetRows} UNION ALL {unfitHoursRollup}";
+        }
 
         /* OFFSET 0 is an optimisation fence (#5582 part 3, found on a live plan): without it the planner pulls the lateral subquery up
            into a plain join and may start from the wide table, scanning every wide row of the window and probing the ledger once per

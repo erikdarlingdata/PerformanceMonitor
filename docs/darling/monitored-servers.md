@@ -102,6 +102,10 @@ The msdb grants live inside a system database SQL Server setup can rewrite — r
 
 **Azure SQL Database:** connect to the one database you monitor (set the server entry's `"database"`), using a contained user with `VIEW DATABASE STATE`, `VIEW DEFINITION` and `ALTER ANY DATABASE EVENT SESSION`, matching the product's existing Azure guidance. The third grant lets the monitor create its Extended Events sessions, which are database-scoped there. A contained user cannot read the tempdb DMVs: `tempdb_stats` shows `NO_PERMISSIONS`, and only a server login in `##MS_ServerStateReader##` fixes that. SQL Agent collectors are skipped automatically.
 
+To use an Entra identity (a Service Principal or a Managed Identity), create its user with `CREATE USER ... FROM EXTERNAL PROVIDER`. The user gets the same three grants. See [Azure SQL Database](../permissions.md#azure-sql-database-lite--darling) for the statements. The interactive Entra ID (MFA) mode is Lite only, so the service uses Service Principal or Managed Identity. See [authentication](../authentication.md).
+
+Entra does not replace a firewall rule. The service still reaches the server over TCP 1433, from an IP address that the server firewall allows. If the server does not allow public IP rules, run the service on an Azure VM. The VM must reach the server through a private endpoint or a service endpoint. A Managed Identity needs an Azure host anyway.
+
 Collectors that hit a permission error (SQL errors 229/297/300, plus 8189 from `sys.traces`) log a `PERMISSIONS` row in `collection_log` and retry on their next scheduled run — one denied collector never stops the rest.
 
 ### Which collectors run on which platform
