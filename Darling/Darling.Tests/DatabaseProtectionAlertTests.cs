@@ -129,6 +129,26 @@ public sealed class DatabaseProtectionAlertTests
     }
 
     [Fact]
+    public async Task AServerWithHundredsOfOverdueDatabases_NamesTheFirstFew_AndCountsTheRest()
+    {
+        /* #7202: every overdue database in one flat sentence put a Teams card past its size ceiling. */
+        var h = AllOn();
+        var late = ReadAt(h.Now, c => Enumerable.Range(0, 600)
+            .Select(i => Db($"Tenant_{i:D4}", c, TimeSpan.FromDays(30), TimeSpan.FromMinutes(5), TimeSpan.FromDays(2)))
+            .ToArray());
+
+        await h.Build().ApplyDatabaseProtectionAsync(ServerId, Name, late, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("600 overdue", fired.CurrentValue);
+        Assert.Contains("on 600 database(s)", fired.DetailText, StringComparison.Ordinal);
+        Assert.Contains("Tenant_0000 (30 days old)", fired.DetailText, StringComparison.Ordinal);
+        Assert.Contains($", and {600 - DarlingSelfAlertEvaluator.OverdueDetailDatabases} more.", fired.DetailText, StringComparison.Ordinal);
+        Assert.DoesNotContain("Tenant_0599", fired.DetailText, StringComparison.Ordinal);
+        Assert.True(fired.DetailText?.Length < 1_000, "the detail stays short however many databases are overdue");
+    }
+
+    [Fact]
     public async Task AStandingOverdue_SendsAgainAfterTheRefireInterval_AndNotBefore()
     {
         var h = AllOn();

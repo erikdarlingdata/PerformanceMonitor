@@ -139,6 +139,49 @@ public partial class WebhookAlertService
                   .Replace("<", "&lt;", StringComparison.Ordinal)
                   .Replace(">", "&gt;", StringComparison.Ordinal);
 
+    /// <summary>#7202: the most UTF-8 bytes the Details prose of a Teams card may carry once escaped. The connector rejects a
+    /// card past about 28 KB, so a long flat detail (a list of hundreds of names) gets 20 KB and the rest of the card keeps
+    /// room for its facts and sections.</summary>
+    internal const int TeamsProseMaxBytes = 20_000;
+
+    /// <summary>
+    /// #7202: cuts already-escaped prose to <see cref="TeamsProseMaxBytes"/> at a line break (else a space) and says so. The cut
+    /// is made on the escaped text, where a break is never inside an escape (an escape is a backslash and one punctuation
+    /// character, or an entity with no space in it) and no backtick span is open (<see cref="TeamsEscape"/> escapes every
+    /// backtick). Prose with no break at all inside the ceiling is dropped for the notice alone, rather than cut mid-token.
+    /// </summary>
+    internal static string CapTeamsProse(string escaped)
+    {
+        if (Encoding.UTF8.GetByteCount(escaped) <= TeamsProseMaxBytes)
+        {
+            return escaped;
+        }
+
+        const string notice = "\n\n_The rest of this detail is cut to fit the Teams size limit._";
+        var budget = TeamsProseMaxBytes - Encoding.UTF8.GetByteCount(notice);
+        var bytes = 0;
+        var end = 0;
+        var cut = -1;
+        while (end < escaped.Length)
+        {
+            var width = char.IsHighSurrogate(escaped[end]) && end + 1 < escaped.Length ? 2 : 1;
+            bytes += Encoding.UTF8.GetByteCount(escaped.AsSpan(end, width));
+            if (bytes > budget)
+            {
+                break;
+            }
+
+            if (width == 1 && escaped[end] is '\n' or ' ')
+            {
+                cut = end;
+            }
+
+            end += width;
+        }
+
+        return (cut > 0 ? escaped[..cut].TrimEnd() : string.Empty) + notice;
+    }
+
     /// <summary>
     /// A MessageCard text and fact value render markdown, so alert text is placed in them with the characters that form
     /// links, images, emphasis and mentions backslash-escaped: <c>[ ] * `</c>, a <c>_</c> that is not inside a
@@ -236,6 +279,8 @@ public partial class WebhookAlertService
     /// drill-downs can surface) — about 210 bytes per incident, so the cap is some fifty incidents away
     /// from any shape a producer can emit. <c>SlackDetailsSizeTests</c> pins the heaviest shape against
     /// the cap so a producer that widens the page finds out there rather than in a lost delivery.</para>
+    /// <para>#7202: that reasoning covers the analysis page only. A flat detail that lists one name per database can run to
+    /// hundreds of kilobytes, so the Details prose is cut by <see cref="CapTeamsProse"/> to <see cref="TeamsProseMaxBytes"/>.</para>
     /// </summary>
     internal static string BuildTeamsPayload(
         string metricName,
@@ -297,7 +342,7 @@ public partial class WebhookAlertService
         /* #3297: ahead of the per-incident sections — it is the actionable half of the alert. */
         if (prose is not null)
         {
-            itemSections.Add(new { activityTitle = "Details", text = TeamsEscape(prose), markdown = true });
+            itemSections.Add(new { activityTitle = "Details", text = CapTeamsProse(TeamsEscape(prose)), markdown = true });
         }
 
         if (context?.Details != null)

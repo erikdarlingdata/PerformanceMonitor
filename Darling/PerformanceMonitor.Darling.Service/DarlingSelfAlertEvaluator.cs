@@ -5080,6 +5080,9 @@ internal sealed class DarlingSelfAlertEvaluator
         }
     }
 
+    /// <summary>The most overdue databases one Backup, Log Backup or CHECKDB Overdue alert names; the rest are counted ("and N more").</summary>
+    internal const int OverdueDetailDatabases = 10;
+
     private async Task ApplyOverdueMetricAsync(
         int serverId, string serverName, string metric, string kind, IReadOnlyList<DatabaseProtectionOverdue> overdue,
         string threshold, string factName, string consequence, int? sweepGeneration, CancellationToken cancellationToken)
@@ -5096,7 +5099,12 @@ internal sealed class DarlingSelfAlertEvaluator
             if (decision is ConnectionAlertDecision.Lost or ConnectionAlertDecision.StillDown)
             {
                 _lastDatabaseProtectionAlert[stateKey] = now;
-                var names = string.Join(", ", items.Select(i => i.Text));
+                /* #7202: capped like Identity Capacity. A server with hundreds of overdue databases would otherwise
+                   put every one in the detail, and a Teams card past its ~28 KB ceiling is rejected on every repeat. */
+                var names = string.Join(", ", items.Take(OverdueDetailDatabases).Select(i => i.Text)) +
+                    (items.Count > OverdueDetailDatabases
+                        ? string.Create(CultureInfo.InvariantCulture, $", and {items.Count - OverdueDetailDatabases} more")
+                        : string.Empty);
                 var delivery = await FireAsync(
                     key, serverName, metric, string.Create(CultureInfo.InvariantCulture, $"{items.Count} overdue"), $"older than {threshold}",
                     detail: StateRepeatNote(decision, refire) + $"The {factName} is older than {threshold} on {items.Count} database(s): {names}." + consequence,
