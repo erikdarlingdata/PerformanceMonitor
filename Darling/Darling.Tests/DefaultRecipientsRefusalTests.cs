@@ -8,7 +8,9 @@
 
 using System;
 using System.Linq;
+using System.Collections.Generic;
 using System.Net.Mail;
+using System.Threading.Tasks;
 using PerformanceMonitor.Notifications;
 using Xunit;
 
@@ -88,5 +90,61 @@ public sealed class DefaultRecipientsRefusalTests
 
         Assert.NotNull(EmailSendCore.RecipientsRefusal(many));
         Assert.Null(EmailSendCore.RecipientsRefusal(atMost));
+    }
+
+    [Theory]
+    [InlineData("a@x.com; b@x.com")]
+    [InlineData("a@x.com;b@x.com")]
+    public async Task TheSend_RefusesABadStoredDefaultList_WithTheSettingsWindowsSentence(string stored)
+    {
+        // A list stored before the settings windows checked it: the send re-checks it and fails with the same sentence,
+        // before any connection (the refusal is thrown ahead of SendMailAsync, so no server is needed).
+        var error = await EmailSendCore.SendTestEmailAsync(new StubSettings(stored, "127.0.0.1", 1), new AlertBranding("Test", null));
+
+        Assert.Equal(EmailSendCore.RecipientsRefusal(stored), error);
+    }
+
+    [Fact]
+    public async Task TheSend_LetsAGoodStoredDefaultListReachTheSendStep()
+    {
+        // Port 0 is never connectable, so the send step fails on the connection, not on the recipient rule.
+        var error = await EmailSendCore.SendTestEmailAsync(new StubSettings("a@x.com, b@x.com", "127.0.0.1", 0), new AlertBranding("Test", null));
+
+        Assert.NotNull(error);
+        Assert.NotEqual(EmailSendCore.RecipientsRefusal("a@x.com; b@x.com"), error);
+        Assert.DoesNotContain("plain addresses", error, StringComparison.Ordinal);
+    }
+
+    private sealed class StubSettings(string recipients, string server, int port) : IAlertSettings
+    {
+        public bool SmtpEnabled => true;
+        public string SmtpServer => server;
+        public int SmtpPort => port;
+        public bool SmtpUseSsl => false;
+        public string SmtpUsername => "";
+        public string SmtpFromAddress => "alerts@x.com";
+        public string SmtpRecipients => recipients;
+        public string? GetSmtpPassword() => null;
+        public int EmailCooldownMinutes => 15;
+        public bool TeamsWebhookEnabled => false;
+        public string TeamsWebhookUrl => "";
+        public string TeamsProxyAddress => "";
+        public bool SlackWebhookEnabled => false;
+        public string SlackWebhookUrl => "";
+        public string SlackProxyAddress => "";
+        public bool GenericWebhookEnabled => false;
+        public string GenericWebhookUrl => "";
+        public string GenericWebhookHeadersJson => "";
+        public string GenericWebhookBodyTemplate => "";
+        public string GenericWebhookProxyAddress => "";
+        public bool PagerDutyEnabled => false;
+        public string PagerDutyRoutingKey => "";
+        public bool PagerDutyUseEuRegion => false;
+        public string PagerDutyProxyAddress => "";
+        public double AnalysisNotifySeverity => 1.5;
+        public int AnalysisNotifyCooldownMinutes => 360;
+        public int AnalysisPageCap => 5;
+        public string TriageBaseUrl => "";
+        public IReadOnlyList<NotificationRoute> NotificationRoutes { get; } = Array.Empty<NotificationRoute>();
     }
 }

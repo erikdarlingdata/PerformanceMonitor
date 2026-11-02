@@ -488,6 +488,15 @@ public sealed class EmailSendCore
     /// parent's <see cref="IAlertSettings.SmtpRecipients"/>.</param>
     private static async Task SendEmailAsync(IAlertSettings settings, string subject, string htmlBody, string plainTextBody, AlertContext? context = null, string? recipients = null)
     {
+        /* #7184: a default list stored before the settings windows checked it is re-checked here. Left alone,
+           "a@x.com; b@x.com" mailed only b@x.com with nothing in alert history, and "a@x.com;b@x.com" failed with the
+           raw FormatException text. The send still fails, now before any message is built and with the sentence the
+           settings windows show. Route lists already pass this rule when they are saved. */
+        if (RecipientsRefusal(recipients ?? settings.SmtpRecipients) is { } recipientsRefusal)
+        {
+            throw new InvalidOperationException(recipientsRefusal);
+        }
+
         using var smtpClient = new SmtpClient(settings.SmtpServer, settings.SmtpPort)
         {
             EnableSsl = settings.SmtpUseSsl,
