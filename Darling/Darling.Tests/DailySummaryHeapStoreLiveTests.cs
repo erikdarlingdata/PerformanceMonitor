@@ -24,7 +24,7 @@ namespace Darling.Tests;
 /// #7147: the 31-day Daily Summary and calendar read on a store WITHOUT TimescaleDB, where there is no rollup and the
 /// raw tier reads a month of <c>query_stats</c> and <c>wait_stats</c>. Two changes: the distinct-query count reads
 /// <c>collect.query_stats</c> directly, because <c>v_query_stats</c> (the payload-resolving view) keeps the planner off
-/// an index-only scan, and <see cref="PgTableTuning"/> builds a covering wait_stats index on a plain store so the
+/// an index-only scan, and <see cref="PgTableTuning"/> builds a covering wait_stats index when wait_stats is a plain table so the
 /// read has an index to scan (the query_stats side takes the composer index every store already has). These run the statement against a real plain store and prove the rows do not move.
 /// </summary>
 /* #1776 own-store: each live fact mints its own scratch database through ScratchPostgres. */
@@ -103,10 +103,47 @@ public sealed class DailySummaryHeapStoreLiveTests
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
 
+        /* Migration alone leaves the tables plain even with the extension (#7152): the service's conversion step is what
+           makes wait_stats a hypertable, so run it as the service does before the tuning pass. */
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+
         await PgTableTuning.ApplyAsync(connection, NullLogger.Instance, ct);
         await PgTableTuning.ApplyAsync(connection, NullLogger.Instance, ct);
 
+        Assert.True(await TableIsHypertableAsync(connection, "wait_stats", ct), "the scratch store converts wait_stats to a hypertable");
         Assert.False(await IndexExistsAsync(connection, PgTableTuning.WaitStatsDailyCoverIndexName, ct));
+    }
+
+    /* #7152: the extension is installed but the service ran in plain-PostgreSQL mode, so wait_stats is a plain heap. The cover
+       is decided by the table, not by the extension, so it is built here. */
+    [Fact]
+    public async Task TheCovers_AreBuilt_OnAStoreWithTimescaleInstalledButAPlainWaitStatsTable()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the heap-store daily summary live test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, plainPostgres: true);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        /* The store was migrated without the extension (plain heaps); the extension arrives afterwards, as on the reporter's store. */
+        Assert.SkipUnless(await LiveTimescaleProbe.TryEnableAsync(scratch.ConnectionString, ct), "TimescaleDB is not available on this cluster.");
+        await using var installed = new NpgsqlCommand("SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'timescaledb')", connection);
+        Assert.True((bool)(await installed.ExecuteScalarAsync(ct))!, "the extension is installed");
+        Assert.False(await TableIsHypertableAsync(connection, "wait_stats", ct), "wait_stats is a plain table");
+
+        await PgTableTuning.ApplyAsync(connection, NullLogger.Instance, ct);
+
+        Assert.True(await IndexExistsAsync(connection, PgTableTuning.WaitStatsDailyCoverIndexName, ct));
+    }
+
+    private static async Task<bool> TableIsHypertableAsync(NpgsqlConnection connection, string table, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(
+            "SELECT EXISTS (SELECT 1 FROM timescaledb_information.hypertables WHERE hypertable_schema = 'collect' AND hypertable_name = $1)", connection);
+        command.Parameters.AddWithValue(table);
+        return (bool)(await command.ExecuteScalarAsync(ct))!;
     }
 
     private static async Task SeedAsync(NpgsqlConnection connection, DateTime end, CancellationToken ct)
