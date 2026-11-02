@@ -577,9 +577,9 @@ Darling needs PowerShell only to install, upgrade and uninstall, and for a few o
 ### Where PowerShell is used
 
 - The scripts `install-darling.ps1`, `upgrade-darling.ps1` and `uninstall-darling.ps1` are PowerShell scripts. `Install-Darling.cmd` only starts `install-darling.ps1` as administrator, with the execution policy bypassed for that one run.
-- The MSI is not a way around PowerShell. Its custom actions run `install-darling.ps1` and `uninstall-darling.ps1` under Windows PowerShell 5.1. An MSI uninstall from Settings, Apps runs it too.
-- The running service reads the firewall rules with `Get-NetFirewallRule` through `powershell.exe`. It does this once for each network surface (store, MCP and web) when the service starts. The check only reads. If `powershell.exe` cannot run, the service logs one warning and carries on. Collection is not affected.
-- These command line verbs use PowerShell: `--configure-firewall`, the offer to restart the service after `--enable-*` and `--disable-*`, and the `Service:` line in the status output. Without PowerShell, the first two print the command for you to run by hand. The status line then reads "not installed (or status unavailable)".
+- The MSI is not a way around PowerShell. Its custom actions run `install-darling.ps1` and `uninstall-darling.ps1` under Windows PowerShell 5.1. A fourth action, the install folder check, runs PowerShell too. An MSI uninstall from Settings, Apps runs it too.
+- The running service reads the firewall rules with `Get-NetFirewallRule` through `powershell.exe`. It does this once for each network surface (store, MCP and web) when the service starts. The check only reads. If `powershell.exe` cannot run, the service logs one warning for each surface it checks, so up to three. A warning is logged again only when the answer for that surface changes. Collection is not affected.
+- These command line verbs use PowerShell: `--configure-firewall`, the offer to restart the service after `--enable-*` and `--disable-*`, and the `Service:` line in the status output. Without PowerShell, `--configure-firewall` and the restart offer print a PowerShell command, which is no help on a machine without it. For the firewall, use the `netsh` rule in [install step 13](#install-by-hand) instead. To restart, use `sc stop` and `sc start`. When `powershell.exe` cannot start, the status line reads "status unavailable". Use `sc query` for the real state. A working PowerShell prints "not installed (or status unavailable)" for a service that does not exist.
 
 PowerShell is not used by the Viewer, and it is not used by collection, the store, alerting, the web dashboard or MCP. The service sets file permissions with Windows calls, not with PowerShell.
 
@@ -587,9 +587,9 @@ PowerShell is not used by the Viewer, and it is not used by collection, the stor
 
 This path is for the default service account `NT SERVICE\PerformanceMonitor Darling`. It does what the three scripts do, with `sc.exe`, `icacls`, `net localgroup`, `netsh`, `certutil` and `tar`. These all ship with Windows. Run every command from an elevated Command Prompt. This path is for a script install. Do not use it on an MSI install.
 
-Two things cannot be done without PowerShell:
+Two things are not done by these commands:
 
-- The Event Log source. The script registers it with a .NET call. Without it, the service writes no Windows Event Log entries. The file log under `C:\ProgramData\PerformanceMonitorDarling\logs` is not affected.
+- The Event Log source. The script registers it with a .NET call. The service registers the source itself on an elevated run. So stop the service and start `PerformanceMonitor.Darling.Service.exe` once from an elevated Command Prompt, as in [Run It, Console Mode](#run-it--console-mode). Stop it with Ctrl+C. Until the source exists, the service writes no Windows Event Log entries. The file log under `C:\ProgramData\PerformanceMonitorDarling\logs` is not affected.
 - The **Darling Viewer** shortcuts. Run `viewer\PerformanceMonitor.Darling.Viewer.exe` from the install folder, or make a shortcut in Explorer.
 
 #### Install by hand
@@ -602,7 +602,7 @@ The commands use `C:\Program Files\PerformanceMonitorDarling` as the install fol
 certutil -hashfile PerformanceMonitorDarling-<version>.zip SHA256
 ```
 
-2. Make the install folder and extract the zip into it.
+2. Make the install folder and extract the zip into it. Do not use a folder under a user profile, such as `C:\Users\<name>\Desktop`. The service account cannot read it, and the script refuses an install root there.
 
 ```
 mkdir "C:\Program Files\PerformanceMonitorDarling"
@@ -618,7 +618,21 @@ tar -xf PerformanceMonitorDarling-<version>.zip -C "C:\Program Files\Performance
 icacls "C:\Program Files\PerformanceMonitorDarling" /T
 ```
 
-If `BUILTIN\Users`, `NT AUTHORITY\Authenticated Users`, `Everyone` or `NT AUTHORITY\INTERACTIVE` has `(F)`, `(M)`, `(W)`, `(WD)` or `(AD)` on any line, stop. Extract to a folder that they cannot write to. A folder made directly under `C:\` is one of these.
+The script allows write rights only to `NT AUTHORITY\SYSTEM`, `BUILTIN\Administrators`, `NT SERVICE\TrustedInstaller`, the administrator who runs it and the other direct members of the Administrators group. The service account `NT SERVICE\PerformanceMonitor Darling` is also allowed, but only on `darling.json`, its `darling.json.bak-` copies, `pg-runtime`, `pg-runtime-prev` and `darling-keys`. A `CREATOR OWNER` line that only inherits is ignored.
+
+If any other principal has one of these rights on any line, stop: `(F)`, `(M)`, `(W)`, `(WD)`, `(AD)`, `(WA)`, `(WEA)`, `(D)`, `(DC)`, `(WDAC)` or `(WO)`. The usual ones are `BUILTIN\Users`, `NT AUTHORITY\Authenticated Users`, `Everyone` and `NT AUTHORITY\INTERACTIVE`. Extract to a folder that they cannot write to. A folder made directly under `C:\` is one of these.
+
+The script also stops for a junction or link anywhere in the tree. This command lists only junctions and links. "File Not Found" means there are none.
+
+```
+dir /s /al "C:\Program Files\PerformanceMonitorDarling"
+```
+
+It also stops for a hard link on `darling.json` or a `darling.json.bak-` copy. A hard link is a file with more than one name. On an upgrade, run this for each of those files. The list must show one name.
+
+```
+fsutil hardlink list "<path>"
+```
 
 4. Lock the install folder. These three commands stop inheritance, remove the broad groups, and give Users read and execute only.
 
@@ -634,23 +648,40 @@ icacls "C:\Program Files\PerformanceMonitorDarling" /remove:g *S-1-5-11 *S-1-5-3
 icacls "C:\Program Files\PerformanceMonitorDarling" /grant "*S-1-5-32-545:(OI)(CI)RX"
 ```
 
-5. Check the owner of every file. Each owner must be `BUILTIN\Administrators`, `NT AUTHORITY\SYSTEM` or `NT SERVICE\TrustedInstaller`.
+5. Check the owner of every file. Each owner must be `BUILTIN\Administrators`, `NT AUTHORITY\SYSTEM` or `NT SERVICE\TrustedInstaller`. The script also accepts the administrator who extracted the zip. A tree the service has run in differs. The service account owns `darling.json`, its `darling.json.bak-` copies and the contents of `pg-runtime`, `pg-runtime-prev` and `darling-keys`. That is correct, so leave it.
 
 ```
 dir /q /s "C:\Program Files\PerformanceMonitorDarling"
 ```
 
-If a path has another owner, run this for that path only. Do not run it on a file that has more than one name (a hard link). Delete that name, or extract the file again.
+If a path has another owner, run these two commands for that path only. Do not run them on a file that has more than one name (a hard link). Delete that name, or extract the file again.
 
 ```
 icacls "<path>" /setowner *S-1-5-32-544 /L
 ```
 
-6. Create `darling.json`. Copy the sample, then edit it as in [step 4](#step-4-write-darlingjson). Use Notepad.
+```
+icacls "<path>" /reset /C
+```
+
+The second command makes the path inherit from its folder again, and removes any entry set on the path itself.
+
+6. Create `darling.json` with Notepad. Do not copy `darling.sample.json`. The sample is a reference for the settings. It names two example servers, and the first start registers them. The script refuses a first install whose `darling.json` is an unedited copy of it. When `darling.json` is missing, the script writes the file below. It has no servers, because you add the first one in the Viewer. It sets `web.allowAdminWrites` to `true`, as the script does for a new file.
 
 ```
-copy "C:\Program Files\PerformanceMonitorDarling\darling.sample.json" "C:\Program Files\PerformanceMonitorDarling\darling.json"
+{
+  "postgres": {
+    "managed": true,
+    "port": 5641
+  },
+  "web": {
+    "allowAdminWrites": true
+  },
+  "servers": []
+}
 ```
+
+Add any other setting you need from [step 4](#step-4-write-darlingjson), such as the `network` blocks that step 13 reads.
 
 7. Run the pre-flight from [step 5](#step-5-pre-flight).
 
@@ -704,11 +735,28 @@ icacls "C:\Program Files\PerformanceMonitorDarling\pg-runtime" /grant "NT SERVIC
 icacls "C:\Program Files\PerformanceMonitorDarling\pg-runtime-prev" /grant "NT SERVICE\PerformanceMonitor Darling:(OI)(CI)M"
 ```
 
-12. Lock the store folder. If `postgres.managed` is `false`, skip this step. This is the folder that holds `postgres.dataDirectory`. By default it is `C:\ProgramData\PerformanceMonitorDarling`. If the folder already exists and you did not make it, delete it first. The commands make Administrators the owner, stop inheritance, and give SYSTEM, Administrators and the service account full control. The operator group can only pass through the folder.
+12. Lock the store folder. If `postgres.managed` is `false`, skip this step. This is the folder that holds `postgres.dataDirectory`. By default it is `C:\ProgramData\PerformanceMonitorDarling`. Do not delete a store that already exists. A reinstall meets the store that the last install or the service made, and deleting it deletes the collected history.
+
+Look at the owner of the folder first. This command lists the owner of the folder. If it prints nothing, the folder does not exist.
+
+```
+dir /q /a "C:\ProgramData" | findstr /C:"PerformanceMonitorDarling"
+```
+
+- The folder is owned by `NT AUTHORITY\SYSTEM`, `BUILTIN\Administrators`, `NT SERVICE\TrustedInstaller`, `NT SERVICE\PerformanceMonitor Darling` or the account the service logs on as. Keep it, skip the `mkdir`, and run the two `icacls` commands below. The script does the same.
+- The folder is owned by anyone else. You did not make it, and the script refuses it. Delete it and make a new one. If it is your own store, for example after you changed the service's Log On account, take ownership first, then run the two `icacls` commands. The first command below makes Administrators the owner of the folder and everything in it.
+
+```
+icacls "C:\ProgramData\PerformanceMonitorDarling" /setowner *S-1-5-32-544 /T /C /L
+```
+
+- The folder does not exist. Make it.
 
 ```
 mkdir "C:\ProgramData\PerformanceMonitorDarling"
 ```
+
+The next two commands make Administrators the owner, stop inheritance, and give SYSTEM, Administrators and the service account full control. The operator group can only pass through the folder.
 
 ```
 icacls "C:\ProgramData\PerformanceMonitorDarling" /setowner *S-1-5-32-544
@@ -718,17 +766,19 @@ icacls "C:\ProgramData\PerformanceMonitorDarling" /setowner *S-1-5-32-544
 icacls "C:\ProgramData\PerformanceMonitorDarling" /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" "NT SERVICE\PerformanceMonitor Darling:(OI)(CI)F" "PerformanceMonitor Darling Operators:(X,S)"
 ```
 
-13. Add the firewall rule, but only when a surface listens beyond this machine. A surface does that when the `listen` setting in its `network` block (`postgres.network`, `mcp.network` or `web.network`) is not loopback. Make one rule for each such surface. Use the port of that surface. For `remoteip`, use the CIDR list from the `allowFrom` setting of that block, with commas and no spaces.
+13. Add the firewall rule. The script does not make the rules itself. It runs `PerformanceMonitor.Darling.Service.exe --configure-firewall`, and the exe makes them. The exe opens a rule for a surface only when three things are true. The surface listens beyond this machine, so its `listen` setting in `postgres.network`, `mcp.network` or `web.network` is not loopback. The surface is enabled. Its `allowFrom` is valid. MCP and web are enabled by `mcp.enabled` and `web.enabled`, or by the Viewer's switch once the store holds one. The store has no switch. It counts when `postgres.managed` is `true`. A surface that is not enabled gets no rule. Make one rule for each surface that meets all three. Use the port of that surface. For `remoteip`, use the `allowFrom` setting of that block. For MCP and web it can be a list of CIDR ranges, with commas and no spaces. For the store (`postgres.network.allowFrom`) it is ONE CIDR range, never a list.
+
+The exe removes a rule of the same name before it adds one. `netsh add` does not, and a second `add` makes a duplicate. So run the delete first. It prints an error when no rule has the name. That is fine.
+
+```
+netsh advfirewall firewall delete rule name="PerformanceMonitor Darling MCP (port <port>)"
+```
 
 ```
 netsh advfirewall firewall add rule name="PerformanceMonitor Darling MCP (port <port>)" dir=in action=allow protocol=TCP localport=<port> remoteip=<allowFrom>
 ```
 
-The rule names for the other two surfaces are `PerformanceMonitor Darling Web (port <port>)` and `PerformanceMonitor Darling store (port <port>)`. The service checks these names at each start, so use them exactly. If you change a port later, delete the old rule by name. `netsh` cannot delete by wildcard.
-
-```
-netsh advfirewall firewall delete rule name="PerformanceMonitor Darling MCP (port <port>)"
-```
+The rule names for the other two surfaces are `PerformanceMonitor Darling Web (port <port>)` and `PerformanceMonitor Darling store (port <port>)`. The service checks these names at each start, so use them exactly. If you change a port later, delete the old rule by name with the delete command. `netsh` cannot delete by wildcard.
 
 14. Start the service.
 
@@ -785,20 +835,22 @@ The script also restricts each `darling.json` and `.dpapi` copy to SYSTEM and Ad
 xcopy "C:\Program Files\PerformanceMonitorDarling-staging\<version>\*" "C:\Program Files\PerformanceMonitorDarling\" /E /H /Y
 ```
 
+The copy leaves behind any file that an earlier build shipped and the new build does not. The script names those files, and `upgrade-darling.ps1 -RemoveStaleFiles` removes them. By hand they stay where they are. To find them, list both zips with `tar -tf` and compare the two lists.
+
 6. Record the hash of `darling.json` again. It must equal the hash from step 3. The zip ships only `darling.sample.json`, so a difference means that something is wrong. Compare with the backup before you start the service.
 
 ```
 certutil -hashfile "C:\Program Files\PerformanceMonitorDarling\darling.json" SHA256
 ```
 
-7. Lock the install folder again. Run the commands from install steps 3 to 5. Then run the two `icacls` commands for `pg-runtime` and `pg-runtime-prev` from install step 11. The copy can add files that inherit from the folder. A build from before the group existed also needs install step 9. If you moved the store, repeat install step 12.
+7. Lock the install folder again. Run the commands from install steps 3 to 5. Step 5 leaves the files owned by the service account alone. Then run the two `icacls` commands for `pg-runtime` and `pg-runtime-prev` from install step 11. If step 5 reset `darling.json`, repeat install step 10. The copy can add files that inherit from the folder. A build from before the group existed also needs install step 9. Repeat the two `icacls` commands of install step 12 on every upgrade. The script locks the store folder again each time, not only after a move.
 8. Start the service, and do [step 7](#step-7-wait-about-two-minutes). Run `--test-connection` as in install step 7.
 
 ```
 sc start "PerformanceMonitor Darling"
 ```
 
-To roll back, stop the service, copy the files from the newest `_rollback_manual_` folder over the install folder, and start it. The notes on [rolling back to an older build](admin.md#rolling-back-to-an-older-build) apply too.
+To roll back, stop the service. The backup holds the files in the root of the install folder only, so it is half of a revert. Extract the previous version's zip over the install folder, then copy the files from the newest `_rollback_manual_` folder over it. Then start the service. The notes on [rolling back to an older build](admin.md#rolling-back-to-an-older-build) apply too.
 
 #### Uninstall by hand
 
@@ -826,10 +878,18 @@ netsh advfirewall firewall show rule name=all | findstr /C:"PerformanceMonitor D
 netsh advfirewall firewall delete rule name="PerformanceMonitor Darling MCP (port <port>)"
 ```
 
-3. If you gave a person a direct entry on `darling.json` or the store folder, remove it. `<account>` is that person.
+3. If you gave a person a direct entry on `darling.json`, `pg-admin-credential.dpapi` or `pg-viewer-credential.dpapi`, remove it. The two `.dpapi` files are in the store folder. `<account>` is that person.
 
 ```
 icacls "C:\Program Files\PerformanceMonitorDarling\darling.json" /remove:g "<account>"
+```
+
+```
+icacls "C:\ProgramData\PerformanceMonitorDarling\pg-admin-credential.dpapi" /remove:g "<account>"
+```
+
+```
+icacls "C:\ProgramData\PerformanceMonitorDarling\pg-viewer-credential.dpapi" /remove:g "<account>"
 ```
 
 4. Delete the **Darling Viewer** shortcuts that you made. The installer script puts them on the all-users Desktop and in the all-users Start Menu.
