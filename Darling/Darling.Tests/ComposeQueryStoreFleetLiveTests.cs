@@ -188,6 +188,44 @@ SELECT count(*) FROM
         }
     }
 
+    /* #7146: the shape an older build's GcAsync leaves after retiring an hour: the ledger and stamp rows are gone and the fleet rows stay
+       (that build does not know the fleet table). The stamp path reads nothing of such an hour, so the fleet path must not read its fleet
+       rows either, before and after the next cleanup. The fleet rows are multiplied so a read that takes any of them shows. */
+    [Fact]
+    public async Task AnHourWithNoLedgerRowsAtAll_IsNotReadFromItsLeftoverFleetRows_TheSameAsTheStampPath()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ComposeStampLiveSupport.BaseConnectionString), ComposeStampLiveSupport.SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, connection, source, hourNow) = await ComposeStampLiveSupport.ArrangeAsync(ct);
+        var bodySucceeded = false;
+        try
+        {
+            var start = hourNow.AddHours(-28).AddMinutes(17);
+            var end = hourNow.AddMinutes(-40);
+            var through = hourNow.AddHours(-2);
+            var old = hourNow.AddHours(-12);
+            var fleetRows = $"SELECT count(*) FROM collect.query_store_compose_fleet WHERE collection_time >= TIMESTAMP '{Hour(old)}' AND collection_time < TIMESTAMP '{Hour(old.AddHours(1))}'";
+
+            await ComposeStampLiveSupport.ExecAsync(connection, $"DELETE FROM collect.query_store_compose_stamp_built WHERE hour = TIMESTAMP '{Hour(old)}'", ct);
+            await ComposeStampLiveSupport.ExecAsync(connection, $"DELETE FROM collect.query_store_compose_stamp WHERE collection_time >= TIMESTAMP '{Hour(old)}' AND collection_time < TIMESTAMP '{Hour(old.AddHours(1))}'", ct);
+            await CorruptFleetAsync(connection, old, old.AddHours(1), ct);
+            Assert.True(await ComposeStampLiveSupport.CountAsync(connection, fleetRows, ct) > 0);
+
+            foreach (var json in new[] { HashPanel, TotalPanel })
+            {
+                var candidate = QueryStoreRankedHarness.WideContext(start, end) with { QueryStoreStampThrough = through, QueryStoreFleetReady = true };
+                var stampOnly = QueryStoreRankedHarness.WideContext(start, end) with { QueryStoreStampThrough = through, QueryStoreFleetReady = false };
+                var viaFleet = await QueryStoreRankedHarness.CompareAsync(connection, json, candidate, QueryStoreRankedHarness.Product, stampOnly, QueryStoreRankedHarness.Product, 0d, ct);
+                Assert.True(viaFleet.Equal, $"fleet against stamp | {json}: {viaFleet.Difference}");
+            }
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await ComposeStampLiveSupport.CleanupAsync(scratch, connection, source, bodySucceeded);
+        }
+    }
+
     /* The stamp's partials combined per (collection_time, query_hash), compared to the fleet rows of the hour in both directions (the rows
        are counted, so a missing, an extra and a wrong row each show). */
     private static Task<long> FleetDiffersFromStampAsync(NpgsqlConnection connection, DateTime hour, CancellationToken ct)

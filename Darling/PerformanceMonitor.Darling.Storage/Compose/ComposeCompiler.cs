@@ -1726,7 +1726,7 @@ public static class ComposeCompiler
            wide table in the stale arm), when the fleet table was not built against its current late_seq (fleet_built_seq: NULL on every hour
            built before V239 until the ordinary tick rebuilds it, so those hours are never read from a table that does not hold them). A removed
            server needs no clause: removal flips is_enabled and deletes no registry, stamp, ledger or fleet row, so both paths keep its history
-           alike. The check is per hour, so one bad pair costs that hour the stamp path and no other. The hours it sends to the stamp are driven from the ledger,
+           alike. An hour with no ledger row at all is not read from the fleet table either, as the stamp reads nothing of it (rows left by a build that retired the hour). The check is per hour, so one bad pair costs that hour the stamp path and no other. The hours it sends to the stamp are driven from the ledger,
            by a lateral probe behind an optimisation fence as the stale arm is, so a store with no unfit pair reads no stamp rows at all.
            The fleet arm names the same columns as the others; the three it has no value for are NULL, which no group, filter or measure of a
            fleet-eligible panel reads. */
@@ -1737,6 +1737,7 @@ public static class ComposeCompiler
             var fleetRows = $"SELECT CAST(NULL AS integer) AS server_id, CAST(NULL AS text) AS database_name, CAST(NULL AS text) AS module_name, f.query_hash, f.collection_time, CAST(NULL AS text) AS server_name{rollupPartials} "
                 + $"FROM {schema}.{FleetTable} AS f "
                 + $"WHERE f.collection_time >= {wideStartParam} AND f.collection_time < {through} "
+                + $"AND EXISTS (SELECT 1 FROM {built} AS y WHERE y.hour = date_trunc('hour', f.collection_time)) "
                 + $"AND NOT EXISTS (SELECT 1 FROM {built} AS x WHERE x.hour = date_trunc('hour', f.collection_time) AND {Unfit("x")})";
             var unfitHoursRollup = $"SELECT {Head}{rollupPartials} FROM "
                 + $"(SELECT DISTINCT x.hour FROM {built} AS x WHERE x.hour >= date_trunc('hour', {wideStartParam}) AND x.hour < {through} AND {Unfit("x")}) AS ih "
