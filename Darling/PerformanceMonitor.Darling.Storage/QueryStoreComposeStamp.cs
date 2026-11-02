@@ -466,6 +466,88 @@ GROUP BY {FactAlias}.server_id, {FactAlias}.query_hash;";
 DELETE FROM collect.query_store_hash_hourly
 WHERE hour < $1;";
 
+    /// <summary>The store schema version that has <see cref="FleetTable"/> (V239, #7146).</summary>
+    public const int FleetRungVersion = 239;
+
+    /// <summary>The fleet rollup of the stamp (V239, #7146): the stamp's partials combined across servers, databases and modules, one
+    /// row per exact stamp time and <c>query_hash</c>.</summary>
+    public const string FleetTable = "collect.query_store_compose_fleet";
+
+    /// <summary>
+    /// V239 (#7146): the fleet rollup of <see cref="Table"/> and the ledger column that says which pairs it covers. A PLAIN table on
+    /// every store, as the stamp and the hash-hourly table are (no hypertable, no compression, no Timescale policy): the builder's
+    /// own cleanup removes it by the retention floor (<see cref="GcFleetSql"/>). Same partial columns, names and types as the stamp
+    /// (<see cref="PartialColumnMap"/>), so the compiler combines them with the expressions it uses on the stamp. The grain is the exact
+    /// stamp time and <c>query_hash</c>, never the hour. No unique index, as the stamp: the grain is held by the builder's GROUP BY and
+    /// its one-transaction DELETE and INSERT. <c>fleet_built_seq</c> is the late_seq this table's pair was built against: NULL on every
+    /// pair built before V239 and on a pair a build that does not know the table rebuilt, so the planner rebuilds those hours through the
+    /// ordinary tick and the read does not trust the table for them. Naive UTC.
+    /// </summary>
+    public const string FleetCreateSql = """
+/* V239 (#7146): the fleet rollup of the compose stamp, one row per exact stamp time and query_hash, the stamp's partials combined with
+   sum(), min() and max(). Built by the hourly pass in the stamp's transaction. Plain table on every store kind. Naive UTC. */
+CREATE TABLE IF NOT EXISTS collect.query_store_compose_fleet
+(
+    collection_time timestamp NOT NULL,
+    wide_rows bigint NOT NULL,
+    ec_count bigint,
+    ec_min bigint,
+    ec_max bigint,
+    maxdur_count bigint,
+    maxdur_min bigint,
+    maxdur_max bigint,
+    maxcpu_count bigint,
+    maxcpu_min bigint,
+    maxcpu_max bigint,
+    query_hash text,
+    ec_sum numeric,
+    maxdur_sum numeric,
+    maxcpu_sum numeric,
+    dur_wsum numeric,
+    cpu_wsum numeric
+);
+
+CREATE INDEX IF NOT EXISTS ix_query_store_compose_fleet_time
+ON collect.query_store_compose_fleet (collection_time);
+
+/* The ledger's third sequence: the late_seq this table's pair was built against. NULL on a pair built before V239. */
+ALTER TABLE collect.query_store_compose_stamp_built
+    ADD COLUMN IF NOT EXISTS fleet_built_seq bigint;
+""";
+
+    /// <summary>Clears the hour's fleet rows before they are rebuilt: $1 the hour. Served by the (collection_time) index.</summary>
+    public const string DeleteFleetHourSql = @"
+DELETE FROM collect.query_store_compose_fleet
+WHERE collection_time >= $1
+  AND collection_time < $1 + interval '1 hour';";
+
+    /// <summary>
+    /// Fills the fleet table for one hour from the hour's NEW stamp rows, in the build's transaction: $1 the hour. Counts and sums combine
+    /// with <c>sum()</c>, minima with <c>min()</c>, maxima with <c>max()</c>, each cast back to the stamp column's type, so a fleet
+    /// column is exactly the aggregate of the stamp column over the same rows. The kind comes from the partial's aggregate in
+    /// <see cref="PartialColumnMap"/>.
+    /// </summary>
+    public static readonly string BuildFleetHourInsertSql = $@"
+INSERT INTO collect.query_store_compose_fleet (collection_time, {string.Join(", ", PartialColumnMap.Select(c => c.Column))}, query_hash)
+SELECT s.collection_time, {string.Join(", ", PartialColumnMap.Select(c => $"({FleetCombine(c)}(s.{c.Column}))::{c.SqlType}"))}, s.query_hash
+FROM collect.query_store_compose_stamp AS s
+WHERE s.collection_time >= $1
+  AND s.collection_time < $1 + interval '1 hour'
+GROUP BY s.collection_time, s.query_hash;";
+
+    /// <summary>The aggregate that combines a stamp column across servers, databases and modules: min for a minimum, max for a maximum,
+    /// sum for a count or a sum.</summary>
+    private static string FleetCombine(PartialColumn column) =>
+        column.FactExpression.StartsWith("MIN(", StringComparison.Ordinal) ? "min"
+        : column.FactExpression.StartsWith("MAX(", StringComparison.Ordinal) ? "max"
+        : "sum";
+
+    /// <summary>Removes every fleet row below the floor: $1 the floor, served by the (collection_time) index. By the floor, as
+    /// <see cref="GcHashHourlySql"/>, so rows of an hour a build that predates the table retired still go.</summary>
+    public const string GcFleetSql = @"
+DELETE FROM collect.query_store_compose_fleet
+WHERE collection_time < $1;";
+
     private static string InsertColumns() =>
         "collection_time, " + string.Join(", ", PartialColumnMap.Select(c => c.Column)) + ", " + string.Join(", ", DimensionColumns);
 
@@ -641,8 +723,8 @@ WHERE collection_time >= $1
     /// <c>hash_built_seq</c> behind, so the pair reads as stale for the hash-hourly table and <see cref="PlanSql"/> rebuilds it.
     /// </summary>
     public const string UpsertBuiltSql = @"
-INSERT INTO collect.query_store_compose_stamp_built AS b (server_id, hour, late_seq, built_seq, hash_built_seq, built_at, source_rows, stamp_rows)
-SELECT x.server_id, $1, 0, COALESCE(l.late_seq, 0), COALESCE(l.late_seq, 0), $2, COALESCE(r.source_rows, 0), COALESCE(r.stamp_rows, 0)
+INSERT INTO collect.query_store_compose_stamp_built AS b (server_id, hour, late_seq, built_seq, hash_built_seq, fleet_built_seq, built_at, source_rows, stamp_rows)
+SELECT x.server_id, $1, 0, COALESCE(l.late_seq, 0), COALESCE(l.late_seq, 0), COALESCE(l.late_seq, 0), $2, COALESCE(r.source_rows, 0), COALESCE(r.stamp_rows, 0)
 FROM
 (
     SELECT u.server_id FROM unnest($3::integer[]) AS u (server_id)
@@ -664,6 +746,7 @@ LEFT JOIN
 ON CONFLICT (server_id, hour) DO UPDATE
 SET built_seq = EXCLUDED.built_seq,
     hash_built_seq = EXCLUDED.hash_built_seq,
+    fleet_built_seq = EXCLUDED.fleet_built_seq,
     built_at = EXCLUDED.built_at,
     source_rows = EXCLUDED.source_rows,
     stamp_rows = EXCLUDED.stamp_rows;";
@@ -734,7 +817,7 @@ stale AS
     JOIN collect.query_store_compose_stamp_hours AS h ON h.hour = b.hour
     CROSS JOIN bounds
     CROSS JOIN cutoff
-    WHERE (b.built_seq IS DISTINCT FROM b.late_seq OR b.hash_built_seq IS DISTINCT FROM b.late_seq)
+    WHERE (b.built_seq IS DISTINCT FROM b.late_seq OR b.hash_built_seq IS DISTINCT FROM b.late_seq OR b.fleet_built_seq IS DISTINCT FROM b.late_seq)
       AND b.hour >= bounds.floor_hour
     GROUP BY b.hour, cutoff.since
 ),
@@ -1092,6 +1175,13 @@ WHERE hour < $1;";
             await hashHourly.ExecuteNonQueryAsync(cancellationToken);
         }
 
+        /* V239 (#7146): the fleet rows below the floor, by the (collection_time) index, in the same transaction. By the floor, as the hash-hourly rows. */
+        await using (var fleet = new NpgsqlCommand(GcFleetSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
+        {
+            fleet.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = floor });
+            await fleet.ExecuteNonQueryAsync(cancellationToken);
+        }
+
         /* V221 (#6800): the day table's rows, ledger rows and failure records of every day whose whole day is below the floor, in the same transaction. */
         await QueryStoreHashDaily.GcAsync(connection, transaction, floor, cancellationToken);
 
@@ -1188,6 +1278,20 @@ WHERE hour < $1;";
         {
             insertHash.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = hourValue });
             await insertHash.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        /* V239 (#7146): the fleet rows of the same hour, from this transaction's new stamp rows. A rebuild of the hour (a stale hour) goes
+           through here too, so the fleet rows are always a fresh aggregate of the hour's stamp rows. fleet_built_seq below is built_seq. */
+        await using (var deleteFleet = NewCommand(DeleteFleetHourSql))
+        {
+            deleteFleet.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = hourValue });
+            await deleteFleet.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await using (var insertFleet = NewCommand(BuildFleetHourInsertSql))
+        {
+            insertFleet.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = hourValue });
+            await insertFleet.ExecuteNonQueryAsync(cancellationToken);
         }
 
         long sourceRows;
