@@ -1149,7 +1149,7 @@ export const SERVER_TABS = [
  * output — so they answer a PostgreSQL target honestly and are the same panels the SQL Server Overview and
  * Collection Health tabs build. Nothing else is shared. get_server_summary and get_daily_summary LOOK
  * engine-neutral and are not: they roll up SQL Server wait types, memory pressure and deadlocks, and at a
- * PostgreSQL target they answer `unavailable` with a sentence about a collector that will never run.
+ * PostgreSQL target they answer `not_collected` (#7159) with a sentence naming the engine, since there are no SQL Server signals to roll up.
  */
 export const POSTGRES_TABS = [
   {

@@ -31,7 +31,11 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// <para><b>Called only on the miss path.</b> Every call site checks capability after its read came back
 /// empty, never before it. That costs nothing in the common case, and — more importantly — a server whose
 /// registry row says one engine while its collected rows say another (a re-registration, a restored
-/// database) still gets its DATA rather than a confident explanation of why it cannot have any.</para>
+/// database) still gets its DATA rather than a confident explanation of why it cannot have any.
+/// The one exception is <see cref="PostgresTargetSqlServerReadStatusAsync"/> (#7159), which runs BEFORE the read: a PostgreSQL target
+/// has collection rows, so <c>get_server_summary</c>, <c>get_daily_summary</c> and <c>get_daily_summary_range</c> never miss there and
+/// would answer zeros and Healthy bands nothing measured. The price is that a <c>server_id</c> re-pointed from SQL Server to PostgreSQL
+/// no longer reads its SQL Server history through those three tools.</para>
 /// </summary>
 internal static class DarlingEngineCapability
 {

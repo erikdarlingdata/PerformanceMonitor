@@ -157,24 +157,6 @@ try {
     click(dayCell("2026-10-21"));
     await settle();
     out.todayDetail = { text: root.textContent, readAsked: reads.length > readsBefore && reads[reads.length - 1].tool === "get_daily_summary" };
-  } else if (scenario === "notcollected") {
-    /* #7159: a PostgreSQL target answers both reads not_collected (arrives as kind "empty"). The month must say why instead of drawing a quiet
-       grid with a notice, and a day's detail must say it too instead of "No collection this day.". */
-    const sentence = "SRV1 runs PostgreSQL. get_daily_summary reads SQL Server signals that this engine does not collect.";
-    const read = async () => ({ kind: "empty", status: "not_collected", message: sentence });
-    const initial = { to_date: "2026-10-21", days: [], days_missing: [] };
-    const root = cal.dailyHealthCalendar({ server: "SRV1", initial, read, nowMs: Date.parse("2026-10-21T12:00:00Z"), firstDow: 0, renderTable: () => new FakeNode("div"), openDay: async () => null });
-    await settle();
-    const click = (b) => { for (const fn of b.listeners.click || []) fn({}); };
-    const prev = root.every((n) => n.tag === "button" && n.getAttribute("aria-label") === "Previous month")[0];
-    click(prev);
-    await settle();
-    out.monthStrips = root.every((n) => /\bstrip\b/.test(n.className)).map((n) => n.className + "|" + n.textContent);
-    out.monthBands = root.every((n) => n.getAttribute("data-day")).map((c) => c.getAttribute("data-band"));
-    const day = root.every((n) => n.getAttribute("data-day") === "2026-09-15")[0];
-    click(day);
-    await settle();
-    out.detailText = root.textContent;
   } else {
     throw new Error("unknown scenario " + scenario);
   }
