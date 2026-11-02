@@ -95,7 +95,7 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ServerId, ServerName);
             Assert.True(perServer[RunningService]);
             Assert.True(perServer[SpacedService]);
 
-            /* The service's fleet card: one regressed collector, the one whose service ran the whole time. */
+            /* The service's fleet card: two regressed collectors, the one whose service ran the whole time and the spaced-out one. */
             var read = typeof(DarlingFleetReader).GetMethod("ReadFailingCollectorCountsAsync", BindingFlags.NonPublic | BindingFlags.Static)
                 ?? throw new InvalidOperationException("ReadFailingCollectorCountsAsync not found");
             var counts = await (Task<Dictionary<int, DarlingFleetReader.CollectorCounts>>)read.Invoke(null, [postgres, DateTime.UtcNow, ct])!;
