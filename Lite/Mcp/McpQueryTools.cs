@@ -1658,6 +1658,18 @@ public sealed class McpQueryTools
                 : answer)
             : await WithDataWindowNoticeAsync(answer, dataService, relation, serverId, requestedStart, windowEnd, table);
 
+    /// <summary>
+    /// #7167: the message of a quiet-window <c>empty</c> answer, built from the same probe that writes the window notice under it: a window the
+    /// store does not reach back to says nothing was read (<see cref="McpHelpers.QuietUnlessCut"/>) instead of claiming it was genuinely quiet.
+    /// A failed or absent probe keeps the covered claim.
+    /// </summary>
+    internal static async Task<string> QuietWindowMessageAsync(
+        LocalDataService dataService, QueryWindowRelation relation, int serverId, DateTime requestedStart, DateTime windowEnd, string table,
+        string factual, string coveredClaim) =>
+        await EmptyWindowNoticeAsync(dataService, relation, serverId, requestedStart, windowEnd, table) is { } notice
+            ? McpHelpers.QuietUnlessCut(notice.WindowTruncated, notice.EffectiveStart, factual, coveredClaim)
+            : factual + coveredClaim;
+
     /// <summary><see cref="WithWindowNotice"/> over <see cref="EmptyWindowNoticeAsync"/>: the probe runs only for an empty or unavailable answer.</summary>
     internal static async Task<string> WithEmptyWindowNoticeAsync(
         string answer, LocalDataService dataService, QueryWindowRelation relation, int serverId, DateTime requestedStart, DateTime windowEnd, string table) =>

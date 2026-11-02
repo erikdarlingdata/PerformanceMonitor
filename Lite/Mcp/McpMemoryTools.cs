@@ -127,7 +127,7 @@ public sealed class McpMemoryTools
                 return await McpQueryTools.WithEmptyWindowNoticeAsync(await dataService.HasAnyMemoryStatAsync(resolved.ServerId)
                     ? McpHelpers.Status(
                         "empty",
-                        $"No memory samples recorded for {resolved.DisplayName} in the last {hours_back} hour(s). This server HAS collected memory stats before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples.")
+                        await McpQueryTools.QuietWindowMessageAsync(dataService, QueryWindowRelation.MemoryStats, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, "memory_stats", $"No memory samples recorded for {resolved.DisplayName} in the last {hours_back} hour(s)", ". This server HAS collected memory stats before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples."))
                     : McpHelpers.Status(
                         "unavailable",
                         $"No memory stats have EVER been recorded for {resolved.DisplayName}. This is not an empty window — the memory_stats collector has stored nothing at all for this server. Check that collection is running and that the server is enabled; get_memory_stats will be equally empty until it does."),
