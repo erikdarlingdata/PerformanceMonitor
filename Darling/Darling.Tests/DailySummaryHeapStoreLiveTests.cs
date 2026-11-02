@@ -24,7 +24,7 @@ namespace Darling.Tests;
 /// #7147: the 31-day Daily Summary and calendar read on a store WITHOUT TimescaleDB, where there is no rollup and the
 /// raw tier reads a month of <c>query_stats</c> and <c>wait_stats</c>. Two changes: the distinct-query count reads
 /// <c>collect.query_stats</c> directly, because <c>v_query_stats</c> (the payload-resolving view) keeps the planner off
-/// an index-only scan, and <see cref="PgTableTuning"/> builds a covering wait_stats index on a plain store so the
+/// an index-only scan, and <see cref="PgTableTuning"/> builds a covering wait_stats index when wait_stats is a plain table so the
 /// read has an index to scan (the query_stats side takes the composer index every store already has). These run the statement against a real plain store and prove the rows do not move.
 /// </summary>
 /* #1776 own-store: each live fact mints its own scratch database through ScratchPostgres. */
@@ -103,10 +103,236 @@ public sealed class DailySummaryHeapStoreLiveTests
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
 
+        /* Migration alone leaves the tables plain even with the extension (#7152): the service's conversion step is what
+           makes wait_stats a hypertable, so run it as the service does before the tuning pass. */
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+
         await PgTableTuning.ApplyAsync(connection, NullLogger.Instance, ct);
         await PgTableTuning.ApplyAsync(connection, NullLogger.Instance, ct);
 
+        Assert.True(await TableIsHypertableAsync(connection, "wait_stats", ct), "the scratch store converts wait_stats to a hypertable");
         Assert.False(await IndexExistsAsync(connection, PgTableTuning.WaitStatsDailyCoverIndexName, ct));
+    }
+
+    /* #7152: the extension is installed but the service ran in plain-PostgreSQL mode, so wait_stats is a plain heap. The cover
+       is decided by the table, not by the extension, so it is built here. */
+    [Fact]
+    public async Task TheCovers_AreBuilt_OnAStoreWithTimescaleInstalledButAPlainWaitStatsTable()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the heap-store daily summary live test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, plainPostgres: true);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        /* The store was migrated without the extension (plain heaps); the extension arrives afterwards, as on the reporter's store. */
+        Assert.SkipUnless(await LiveTimescaleProbe.TryEnableAsync(scratch.ConnectionString, ct), "TimescaleDB is not available on this cluster.");
+        await using var installed = new NpgsqlCommand("SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'timescaledb')", connection);
+        Assert.True((bool)(await installed.ExecuteScalarAsync(ct))!, "the extension is installed");
+        Assert.False(await TableIsHypertableAsync(connection, "wait_stats", ct), "wait_stats is a plain table");
+
+        await PgTableTuning.ApplyAsync(connection, NullLogger.Instance, ct);
+
+        Assert.True(await IndexExistsAsync(connection, PgTableTuning.WaitStatsDailyCoverIndexName, ct));
+    }
+
+    /* #7152: the cover built while wait_stats was plain survives create_hypertable(migrate_data => true) onto the hypertable and
+       its chunks. Once the table is a hypertable the pass drops it, including when a retry comes after a chunk is compressed. */
+    [Fact]
+    public async Task TheCover_IsDropped_WhenWaitStatsBecomesAHypertableAfterItWasBuilt()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the heap-store daily summary live test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, plainPostgres: true);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        Assert.SkipUnless(await LiveTimescaleProbe.TryEnableAsync(scratch.ConnectionString, ct), "TimescaleDB is not available on this cluster.");
+
+        /* An old row and a recent one, so the conversion carries real rows into two chunks and the old chunk can be compressed. */
+        await using (var seed = new NpgsqlCommand(
+            "INSERT INTO collect.wait_stats (collection_id, collection_time, server_id, server_name, wait_type, delta_wait_time_ms) "
+            + "VALUES (1, now() AT TIME ZONE 'UTC' - interval '20 days', 7152, 'srv', 'W', 1), (2, now() AT TIME ZONE 'UTC', 7152, 'srv', 'W', 1)", connection))
+        {
+            await seed.ExecuteNonQueryAsync(ct);
+        }
+
+        await PgTableTuning.ApplyAsync(connection, NullLogger.Instance, ct);
+        Assert.True(await CoverIndexCountAsync(connection, ct) > 0, "the cover is built while wait_stats is a plain table");
+
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+        Assert.True(await TableIsHypertableAsync(connection, "wait_stats", ct), "the conversion makes wait_stats a hypertable");
+        Assert.True(await CoverIndexCountAsync(connection, ct) > 1, "the conversion carries the cover onto the hypertable and its chunks");
+
+        /* The old chunk is compressed before the pass runs again, as on a retry some days later. */
+        await using (var enable = new NpgsqlCommand(TimescaleSupport.EnableCompressionSql("collect.wait_stats"), connection))
+        {
+            await enable.ExecuteNonQueryAsync(ct);
+        }
+
+        await using (var chunks = new NpgsqlCommand(
+            "SELECT format('%I.%I', chunk_schema, chunk_name) FROM timescaledb_information.chunks WHERE hypertable_schema = 'collect' AND hypertable_name = 'wait_stats' AND NOT is_compressed ORDER BY range_start LIMIT 1", connection))
+        {
+            var chunk = (string?)await chunks.ExecuteScalarAsync(ct);
+            Assert.NotNull(chunk);
+            await using var compress = new NpgsqlCommand($"SELECT compress_chunk('{chunk}'::regclass, if_not_compressed => true)", connection);
+            await compress.ExecuteNonQueryAsync(ct);
+        }
+
+        await PgTableTuning.ApplyAsync(connection, NullLogger.Instance, ct);
+
+        Assert.Equal(0, await CoverIndexCountAsync(connection, ct));
+    }
+
+    /* #7152: the hypertable check failing is "unknown", which neither builds nor drops. The check fails for real here: the pass
+       runs as a role that cannot use the timescaledb_information schema, so the catalog read raises permission denied. The store
+       is plain and already has the cover, which a drop on a guessed answer would remove. */
+    [Fact]
+    public async Task TheCover_IsLeftInPlace_WhenTheHypertableCheckFailsOnAPlainWaitStatsTable()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the heap-store daily summary live test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, plainPostgres: true);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        Assert.SkipUnless(await LiveTimescaleProbe.TryEnableAsync(scratch.ConnectionString, ct), "TimescaleDB is not available on this cluster.");
+        Assert.False(await TableIsHypertableAsync(connection, "wait_stats", ct), "wait_stats is a plain table");
+
+        await PgTableTuning.ApplyAsync(connection, NullLogger.Instance, ct);
+        Assert.Equal(1, await CoverIndexCountAsync(connection, ct));
+
+        var role = "denied_7152_" + Guid.NewGuid().ToString("N")[..8];
+        var bodySucceeded = false;
+        try
+        {
+            /* The role owns wait_stats, so it is allowed to drop the cover, but it cannot read the Timescale catalog views. */
+            foreach (var statement in new[]
+            {
+                $"CREATE ROLE {role}",
+                $"GRANT USAGE ON SCHEMA collect TO {role}",
+                $"ALTER TABLE collect.wait_stats OWNER TO {role}",
+                "REVOKE USAGE ON SCHEMA timescaledb_information FROM PUBLIC",
+                $"SET ROLE {role}",
+            })
+            {
+                await using var setup = new NpgsqlCommand(statement, connection);
+                await setup.ExecuteNonQueryAsync(ct);
+            }
+
+            var logger = new CapturingLogger();
+            await PgTableTuning.ApplyAsync(connection, logger, ct);
+
+            await using (var reset = new NpgsqlCommand("RESET ROLE", connection))
+            {
+                await reset.ExecuteNonQueryAsync(ct);
+            }
+
+            Assert.Contains(logger.Warnings, w => w.Contains("is a hypertable", StringComparison.Ordinal) && w.Contains("neither built nor dropped", StringComparison.Ordinal));
+            Assert.Equal(1, await CoverIndexCountAsync(connection, ct));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await using var cleanup = new NpgsqlCommand($"RESET ROLE; REASSIGN OWNED BY {role} TO CURRENT_USER; DROP OWNED BY {role}; DROP ROLE {role}", connection);
+            try
+            {
+                await cleanup.ExecuteNonQueryAsync(CancellationToken.None);
+            }
+            catch (PostgresException) when (!bodySucceeded)
+            {
+                /* The body already failed; its error is the one to report. */
+            }
+        }
+    }
+
+    /* #7152: the cover is on the hypertable and a second session holds the table, so the drop times out on the lock. The line must
+       say the index was not dropped (the cover is still there), not that it was not built. */
+    [Fact]
+    public async Task ABusyTable_ReportsTheCoverAsNotDropped_NotAsNotBuilt()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the heap-store daily summary live test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, plainPostgres: true);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        Assert.SkipUnless(await LiveTimescaleProbe.TryEnableAsync(scratch.ConnectionString, ct), "TimescaleDB is not available on this cluster.");
+
+        await PgTableTuning.ApplyAsync(connection, NullLogger.Instance, ct);
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+        Assert.True(await TableIsHypertableAsync(connection, "wait_stats", ct), "the conversion makes wait_stats a hypertable");
+        Assert.True(await CoverIndexCountAsync(connection, ct) > 0, "the cover is on the hypertable");
+
+        await using var holder = new NpgsqlConnection(scratch.ConnectionString);
+        await holder.OpenAsync(ct);
+        await using var hold = await holder.BeginTransactionAsync(ct);
+        try
+        {
+            await using (var lockTable = new NpgsqlCommand("LOCK TABLE collect.wait_stats IN ACCESS EXCLUSIVE MODE", holder, hold))
+            {
+                await lockTable.ExecuteNonQueryAsync(ct);
+            }
+
+            var logger = new CapturingLogger();
+            await PgTableTuning.ApplyAsync(connection, logger, ct);
+
+            Assert.Contains(logger.Infos, m => m.Contains(PgTableTuning.WaitStatsDailyCoverIndexName, StringComparison.Ordinal)
+                && m.Contains("not dropped this pass", StringComparison.Ordinal));
+            Assert.DoesNotContain(logger.Infos, m => m.Contains(PgTableTuning.WaitStatsDailyCoverIndexName, StringComparison.Ordinal)
+                && m.Contains("not built", StringComparison.Ordinal));
+        }
+        finally
+        {
+            await hold.RollbackAsync(CancellationToken.None);
+        }
+
+        Assert.True(await CoverIndexCountAsync(connection, ct) > 0, "the cover is still on the hypertable after the busy pass");
+    }
+
+    private sealed class CapturingLogger : Microsoft.Extensions.Logging.ILogger
+    {
+        public List<string> Warnings { get; } = new();
+
+        public List<string> Infos { get; } = new();
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(Microsoft.Extensions.Logging.LogLevel logLevel) => true;
+
+        public void Log<TState>(Microsoft.Extensions.Logging.LogLevel logLevel, Microsoft.Extensions.Logging.EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            if (logLevel == Microsoft.Extensions.Logging.LogLevel.Warning)
+            {
+                Warnings.Add(formatter(state, exception));
+            }
+            else if (logLevel == Microsoft.Extensions.Logging.LogLevel.Information)
+            {
+                Infos.Add(formatter(state, exception));
+            }
+        }
+    }
+
+    /// <summary>The cover's indexes in <c>pg_index</c>: the one on <c>collect.wait_stats</c> and the one Timescale names after it on each chunk.</summary>
+    private static async Task<long> CoverIndexCountAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(
+            "SELECT count(*) FROM pg_index i JOIN pg_class ic ON ic.oid = i.indexrelid WHERE ic.relname LIKE '%' || $1", connection);
+        command.Parameters.AddWithValue(PgTableTuning.WaitStatsDailyCoverIndexName);
+        return (long)(await command.ExecuteScalarAsync(ct))!;
+    }
+
+    private static async Task<bool> TableIsHypertableAsync(NpgsqlConnection connection, string table, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(
+            "SELECT EXISTS (SELECT 1 FROM timescaledb_information.hypertables WHERE hypertable_schema = 'collect' AND hypertable_name = $1)", connection);
+        command.Parameters.AddWithValue(table);
+        return (bool)(await command.ExecuteScalarAsync(ct))!;
     }
 
     private static async Task SeedAsync(NpgsqlConnection connection, DateTime end, CancellationToken ct)

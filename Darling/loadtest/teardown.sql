@@ -67,6 +67,35 @@ BEGIN
         END LOOP;
     END LOOP;
 
+    /* 1b. The compose fleet rollup (V239, #7146). It keeps no server column, so a synthetic server's share cannot be
+       taken out of a row. Every hour a synthetic server was built for loses its fleet rows, and the real servers' pairs
+       in those hours get a NULL fleet_built_seq, which reads as stale: the service rebuilds them from the stamp, and the
+       read uses the stamp for those hours until then. This runs before step 2 deletes the built rows it reads. */
+    IF to_regclass('collect.query_store_compose_fleet') IS NOT NULL
+    THEN
+        DELETE FROM collect.query_store_compose_fleet AS f
+        WHERE EXISTS
+        (
+            SELECT 1
+            FROM collect.query_store_compose_stamp_built AS b
+            JOIN loadtest.server_map AS m ON m.synthetic_server_id = b.server_id
+            WHERE b.hour = date_trunc('hour', f.collection_time)
+        );
+        GET DIAGNOSTICS removed = ROW_COUNT;
+        RAISE NOTICE 'collect.query_store_compose_fleet: % rows removed', removed;
+
+        UPDATE collect.query_store_compose_stamp_built AS r
+        SET fleet_built_seq = NULL
+        WHERE r.server_id NOT IN (SELECT m.synthetic_server_id FROM loadtest.server_map AS m)
+        AND   r.hour IN
+        (
+            SELECT b.hour
+            FROM collect.query_store_compose_stamp_built AS b
+            JOIN loadtest.server_map AS m ON m.synthetic_server_id = b.server_id
+        );
+        COMMIT;
+    END IF;
+
     /* 2. What the service's builders wrote for the synthetic servers: their results and their built rows. Each table
        on its own, and only when the store has it. */
     FOREACH t IN ARRAY ARRAY
