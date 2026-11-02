@@ -95,6 +95,46 @@ WHERE server_id = $1";
         collectorName is "query_store" or "query_store_forced_plans" or "query_store_hints" or "plan_correction";
 
     /// <summary>
+    /// #7159: the <c>not_collected</c> envelope for a read whose every figure comes from SQL Server tables (CPU, memory, blocking,
+    /// deadlocks, waits: <c>get_server_summary</c>, <c>get_daily_summary</c>, <c>get_daily_summary_range</c>) when the server is a
+    /// PostgreSQL target, or <c>null</c> on any other engine. Unlike <see cref="NotCollectedStatusAsync"/> this runs BEFORE the read,
+    /// because a PostgreSQL target has collection rows, so those reads never miss: they answer zeros nothing measured and call every
+    /// collected day Healthy. A registry read that fails answers null, for the reason <see cref="NotCollectedStatusAsync"/> gives.
+    /// </summary>
+    public static async Task<string?> PostgresTargetSqlServerReadStatusAsync(
+        NpgsqlDataSource postgres,
+        int serverId,
+        string serverName,
+        string toolName,
+        CancellationToken cancellationToken = default)
+    {
+        string? engineKind;
+        try
+        {
+            (_, engineKind, _) = await ReadServerEngineAsync(postgres, serverId, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return null;
+        }
+
+        return PostgresTargetSqlServerReadStatus(serverName, engineKind, toolName);
+    }
+
+    /// <summary>The pure half of <see cref="PostgresTargetSqlServerReadStatusAsync"/>: the envelope for this engine kind, or <c>null</c> for a SQL Server target or a kind the store does not record.</summary>
+    internal static string? PostgresTargetSqlServerReadStatus(string serverName, string? engineKind, string toolName) =>
+        MonitoredEngineKind.IsPostgres(engineKind)
+            ? McpHelpers.Status(
+                "not_collected",
+                $"{serverName} runs {MonitoredEngineKind.DescribeEngineKind(engineKind)}. {toolName} reads SQL Server signals (CPU, memory, blocking, " +
+                "deadlocks, waits) that this engine does not collect, so it has no figures for this server and never will: any zero or " +
+                "Healthy band would be a guess. Read this server through get_fleet_overview for its health card, and the get_pg_* reads " +
+                "(get_pg_database_stats, get_pg_deadlocks, get_pg_blocking, get_pg_cpu_utilization, get_pg_wait_stats) for the detail. " +
+                "This is a permanent engine capability gap, not a collection outage: checking collection health, " +
+                "enabling a collector or starting a capture cannot change it.")
+            : null;
+
+    /// <summary>
     /// #6439: the <c>not_collected</c> envelope for the tempdb file I/O read on an Azure SQL Database, or <c>null</c> on any other
     /// engine. <c>file_io_stats</c> runs there, but the database sees only its own files, so a tempdb row never exists and no
     /// collector setting can make one. The sentence carries the same engine-gate mark and engine name as
