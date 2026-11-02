@@ -176,8 +176,8 @@ public sealed partial class DarlingMcpFinOpsTools
         if (IsBareEmpty(counts, gates))
         {
             var noRows = await ViewWindowNoticeAsync(postgres, resolved.ServerName, hoursBack, windowedTables, "wait_stats and query_stats", true, ct);
-            return DarlingMcpWindowNotice.FinishEmpty(McpHelpers.Status("empty",
-                "No idle-database, tempdb, wait, query or memory-grant data was found for this server in the windows read, so there is no optimization data to show.", noRows.AsHints()), noRows);
+            return await DarlingMcpWindowNotice.FinishEmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, DateTime.UtcNow, McpHelpers.Status("empty",
+                "No idle-database, tempdb, wait, query or memory-grant data was found for this server in the windows read, so there is no optimization data to show.", noRows.AsHints()), noRows, ct);
         }
 
         var notice = await ViewWindowNoticeAsync(postgres, resolved.ServerName, hoursBack, windowedTables, "wait_stats and query_stats", false, ct);

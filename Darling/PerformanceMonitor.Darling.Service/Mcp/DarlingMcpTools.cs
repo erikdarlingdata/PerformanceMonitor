@@ -1212,11 +1212,11 @@ public sealed class DarlingMcpTools
 
             if (findings.Count == 0)
             {
-                return DarlingMcpWindowNotice.FinishEmpty(McpHelpers.Status(
+                return await DarlingMcpWindowNotice.FinishEmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, McpHelpers.Status(
                     "empty",
                     "No findings in the requested time range. Run analyze_server to generate new findings."
                     + (secondaryReplicaNote is null ? "" : " " + secondaryReplicaNote),
-                    notice.AsHints()), notice);
+                    notice.AsHints()), notice, cancellationToken);
             }
 
             /* #2000: collapse to one entry per (story_path_hash, incident_id). Measured 27.9x

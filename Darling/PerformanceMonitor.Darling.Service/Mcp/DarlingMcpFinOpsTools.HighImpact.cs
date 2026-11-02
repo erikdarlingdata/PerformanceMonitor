@@ -46,8 +46,8 @@ public sealed partial class DarlingMcpFinOpsTools
             if (unmet is not null) return unmet;
 
             var noRows = await NoticeAsync(emptyAnswer: true);
-            return DarlingMcpWindowNotice.FinishEmpty(McpHelpers.Status("empty",
-                $"No query statistics were collected for this server in the last {hoursBack} hours, so there is nothing to rank.", noRows.AsHints()), noRows);
+            return await DarlingMcpWindowNotice.FinishEmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, McpHelpers.Status("empty",
+                $"No query statistics were collected for this server in the last {hoursBack} hours, so there is nothing to rank.", noRows.AsHints()), noRows, ct);
         }
 
         var notice = await NoticeAsync(emptyAnswer: false);

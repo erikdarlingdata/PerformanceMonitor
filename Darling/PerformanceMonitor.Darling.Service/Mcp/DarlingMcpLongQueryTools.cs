@@ -115,12 +115,12 @@ public sealed class DarlingMcpLongQueryTools
                    databases the collector is on, and the answer is about the chosen databases. A failed probe gives no verdict, so a
                    filtered answer leaves the sentence off. */
                 var collectorMayBeOff = (databaseFilter.IsAll && !tagFilter.Active) || (!emptyNotice.IsUnavailable && emptyNotice.EffectiveStart is null);
-                return McpHelpers.StatusForDatabase("empty",
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, McpHelpers.StatusForDatabase("empty",
                     "No long-running query completions found in the specified time range" + DarlingMcpBlockingTools.ForChosenDatabases(databaseFilter)
                         + (tagFilter.Active ? $" for query tag '{tagFilter.Requested}'" : "")
                         + (collectorMayBeOff ? ". The long_query_completions collector is opt-in (default OFF) — enable it in the collector schedule to capture data." : "."),
                     databaseFilter.Describe(), /* #5244 review L2: the echo rides on an empty answer too */
-                    emptyNotice.AsHints());
+                    emptyNotice.AsHints()), cancellationToken);
             }
 
             var truncated = rows.Count > limit;
