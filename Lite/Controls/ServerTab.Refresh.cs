@@ -343,7 +343,7 @@ public partial class ServerTab : UserControl
     }
 
     /// <summary>
-    /// #1591: badges the Collection Health tab header with the number of collectors that were permission-denied.
+    /// #1591: badges the Collection Health tab header with the number of collectors the monitored server refuses now (#7241).
     /// Runs on every refresh, like the alert badge, so an empty tab caused by a missing grant is discoverable
     /// without knowing to go looking for it. Never throws — a failed badge must not break the refresh.
     /// </summary>
@@ -362,7 +362,7 @@ public partial class ServerTab : UserControl
 
         try
         {
-            var denied = await Task.Run(() => _dataService.GetPermissionDeniedCollectorCountAsync(_serverId));
+            var denied = await Task.Run(() => _dataService.GetPermissionDeniedCollectorCountAsync(_serverId, TimeSpan.FromSeconds(App.AutoRefreshIntervalSeconds)));
             CollectionHealthTab.Header = denied > 0
                 ? $"Collection Health ({denied} no permission)"
                 : "Collection Health";

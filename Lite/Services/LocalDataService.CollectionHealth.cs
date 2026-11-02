@@ -19,50 +19,28 @@ namespace PerformanceMonitorLite.Services;
 
 public partial class LocalDataService
 {
-    /// <summary>Re-probe at most this often per server (#4226 lane V1b): measured 46-58 ms on a seeded
-    /// 20-collector/7-day/1-minute-cadence DuckDB (Lite's realistic scale for one server), against a 30 s
-    /// floor on the auto-refresh timer (<c>ServerTab.AutoRefreshSecondsForIndex</c>) — over the ~50 ms bar
-    /// worth memoizing, even though Lite has no fleet fan-out to amortize across. The same "benignly racy"
-    /// TTL shape Darling's <c>GetFleetCollectionHealthByServerAsync</c> uses, not a lock: a refresh racing a
-    /// cold per-server entry may run the scan twice, which is still far cheaper than never caching.</summary>
-    private static readonly TimeSpan PermissionDeniedCountMemoLifetime = TimeSpan.FromSeconds(20);
-
-    private readonly Dictionary<int, (int Count, DateTime AtUtc)> _permissionDeniedCountByServer = new();
-
     /// <summary>
-    /// #1591: how many DISTINCT collectors were permission-denied in the last 7 days — the badge count for the
-    /// Collection Health tab header.
-    ///
-    /// <para>Deliberately its own narrow COUNT rather than reusing <c>GetCollectionHealthAsync</c>: that one is
-    /// per-collector and only runs when its tab is selected, which is exactly why a permission problem stayed
-    /// invisible until someone thought to look. This runs on every refresh alongside the alert-count badge, so a
-    /// denied collector is discoverable from any tab. Counts collectors, not rows, so one collector failing every
-    /// cycle for a week reads as "1" rather than a meaningless four-figure number.</para>
+    /// The Collection Health tab header's count (#1591, #7241): how many collectors the monitored server refuses NOW, the ones
+    /// the Collection Health grid bands NO_PERMISSIONS. It reads the grid's own rows through <see cref="GetCollectionHealthAsync"/>
+    /// and its per-server memo, so the header and the grid share one classifier and one read: a collector refused earlier in the
+    /// 7-day window that has succeeded since is HEALTHY there, and stops counting here at the next read instead of a week later.
+    /// Nothing else is scanned. The tick drops the memo before the refresh pass (<see cref="InvalidateCollectionHealthMemo"/>),
+    /// so the Collection Health tab, when it is the visible one, and this badge share that pass's single read.
     /// </summary>
-    public async Task<int> GetPermissionDeniedCollectorCountAsync(int serverId)
+    /// <param name="memoLifetime">How long the shared memo answers; the tab passes its auto-refresh interval, as its grid does.</param>
+    public async Task<int> GetPermissionDeniedCollectorCountAsync(int serverId, TimeSpan? memoLifetime = null, CancellationToken cancellationToken = default)
     {
-        if (_permissionDeniedCountByServer.TryGetValue(serverId, out var cached) &&
-            DateTime.UtcNow - cached.AtUtc < PermissionDeniedCountMemoLifetime)
+        var rows = await GetCollectionHealthAsync(serverId, allowMemo: true, memoLifetime: memoLifetime, cancellationToken: cancellationToken);
+        var denied = 0;
+        foreach (var row in rows)
         {
-            return cached.Count;
+            if (string.Equals(row.HealthStatus, CollectorHealthClassifier.NoPermissions, StringComparison.Ordinal))
+            {
+                denied++;
+            }
         }
 
-        using var connection = await OpenConnectionAsync();
-        using var command = connection.CreateCommand();
-        command.CommandText = @"
-SELECT COUNT(DISTINCT collector_name)
-FROM v_collection_log
-WHERE server_id = $1
-AND   collection_time >= $2
-AND   status = 'PERMISSIONS'";
-
-        command.Parameters.Add(new DuckDBParameter { Value = serverId });
-        command.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddDays(-7) });
-
-        var scalar = await command.ExecuteScalarAsync();
-        var count = scalar is null or DBNull ? 0 : Convert.ToInt32(scalar);
-        _permissionDeniedCountByServer[serverId] = (count, DateTime.UtcNow);
-        return count;
+        return denied;
     }
 
     /// <summary>

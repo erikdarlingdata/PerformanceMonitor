@@ -299,28 +299,6 @@ public sealed partial class ViewerDataService
         """;
 
     /// <summary>
-    /// #1591: how many DISTINCT collectors were permission-denied in the window — the badge count for the
-    /// Collection Health tab header. Lite's twin, <c>LocalDataService.GetPermissionDeniedCollectorCountAsync</c>,
-    /// still runs this shape directly (DuckDB has no rollup to route through). The Darling viewer's own
-    /// <see cref="GetPermissionDeniedCollectorCountAsync"/> no longer runs it: every server-tab refresh (auto
-    /// default 1 min, plus tab activation) used to issue this as its OWN raw <c>v_collection_log</c> scan per
-    /// open tab; it now filters the shared fleet-by-server rollup read instead (#4226), so this constant is
-    /// kept only as the documented raw shape the pins below hold it to.
-    ///
-    /// <para>Its own narrow COUNT rather than a reuse of <see cref="CollectionHealthSql"/>: that one is
-    /// per-collector and only runs when its tab is selected, which is exactly why a permission problem stayed
-    /// invisible until someone thought to look. Counts collectors, not rows, so one collector failing every cycle
-    /// for a week reads as "1" rather than a meaningless four-figure number.</para>
-    /// </summary>
-    public const string PermissionDeniedCollectorCountSql = """
-        SELECT COUNT(DISTINCT collector_name)
-        FROM v_collection_log
-        WHERE server_id = $1
-        AND   collection_time >= $2
-        AND   status = 'PERMISSIONS'
-        """;
-
-    /// <summary>
     /// #3691 part a2: <c>collect.analysis_collection_caveats</c> (V141, part a1) — the data families the
     /// scheduled analysis pass could not read on this server, as of its most recent run. $1 server_id.
     /// </summary>
@@ -380,18 +358,28 @@ public sealed partial class ViewerDataService
     }
 
     /// <summary>
-    /// #1591's badge count, one server's slice of the same 7-day window the health grid uses — served from the
-    /// shared fleet-by-server rollup read (#4226) instead of its own raw <c>v_collection_log</c> scan. That read
-    /// already carries <see cref="CollectorHealthRow.PermissionDeniedCount"/> per (server, collector), so the
-    /// badge is a filter over rows already in memory (rollup-backed when usable, memoized briefly — see
-    /// <see cref="GetFleetCollectionHealthByServerAsync"/>) rather than a fourth per-tick read of its own.
+    /// The Collection Health tab header's count (#1591, #7241): how many collectors the monitored server refuses NOW. It
+    /// counts <c>BandTally.NoPermission</c> over the rows the status bar tallies (<c>UpdateCollectorHealthTextAsync</c>),
+    /// from the same shared fleet-by-server rollup read (#4226), so the header and the status bar cannot disagree. A
+    /// collector refused earlier in the 7-day window that has succeeded since is not refused now: the ladder bands it
+    /// HEALTHY and the header stops counting it at the next read, instead of keeping the count for a week after the
+    /// grant is added.
     /// </summary>
     public async Task<int> GetPermissionDeniedCollectorCountAsync(int serverId, CancellationToken cancellationToken = default)
     {
         var byServer = await GetFleetCollectionHealthByServerAsync(cancellationToken);
-        return byServer.TryGetValue(serverId, out var rows)
-            ? rows.Count(row => row.PermissionDeniedCount > 0)
-            : 0;
+        if (!byServer.TryGetValue(serverId, out var rows))
+        {
+            return 0;
+        }
+
+        var tally = new CollectorHealthClassifier.BandTally();
+        foreach (var row in rows)
+        {
+            tally = tally.Add(row.CollectorName, row.HealthStatus, row.ServerAlwaysOnOff, row.EngineGated);
+        }
+
+        return tally.NoPermission;
     }
 
     /// <summary>
@@ -670,7 +658,7 @@ LIMIT 1";
     /// The per-(server, collector) breakdown the status bar's old fleet-cumulative read grouped by but did not
     /// project (#4226, #4999): the same eleven aggregates, with <c>server_id</c> added as column 0 so the Overview
     /// cards, the status bar and the server-tab badge can take their per-server counts from ONE fleet-wide
-    /// read instead of one raw <c>CollectionHealthSql</c> / <see cref="PermissionDeniedCollectorCountSql"/>
+    /// read instead of one raw <c>CollectionHealthSql</c>
     /// scan per server. Shaped for <see cref="CollectionHealthRollupSupport.ComposeFleetSql"/> — fourteen
     /// columns (#4812 appended the newest run note), in the order it requires.
     ///
@@ -685,8 +673,8 @@ LIMIT 1";
     /// <c>server_id</c> — the Overview card, the badge, and a per-server status-bar tab all need that
     /// server's exact rows whether or not it is currently enabled, or even registered in
     /// <c>config_monitored_servers</c> yet (the bootstrap window before the config store is seeded, see
-    /// <c>IsConfigSeededAsync</c>), exactly as their old raw per-server scans (<see cref="CollectionHealthSql"/>,
-    /// <see cref="PermissionDeniedCollectorCountSql"/>) never filtered by enable state either. The right
+    /// <c>IsConfigSeededAsync</c>), exactly as their old raw per-server scan (<see cref="CollectionHealthSql"/>)
+    /// never filtered by enable state either. The right
     /// precedent was the service's own by-server fleet read this statement mirrors
     /// (<c>DarlingFleetReader.FleetCollectionHealthSql</c>, moved here via <see cref="CollectionHealthRollupSupport"/>):
     /// <c>server_id &lt;&gt; 0</c> only, same as the aggregate this composes with
