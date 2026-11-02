@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
@@ -515,6 +516,7 @@ ORDER BY h.collector_name";
 
         var items = await TimedReadAsync("GetCollectionHealthAsync", timer => ReadCollectionHealthAsync(serverId, timer, cancellationToken));
         await ApplyReadSourceAsync(items, serverId, cancellationToken);
+        await ApplyObservedQuietGapsAsync(items, serverId, cancellationToken);
 
         if (allowMemo)
         {
@@ -567,6 +569,114 @@ LIMIT 1";
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             System.Diagnostics.Trace.TraceWarning($"#6254 collection health could not read the Query Store read source for server {serverId}; it is shown without one: {ex.GetType().Name}");
+        }
+    }
+
+    /// <summary>
+    /// #7242: the gaps between the runs of the trailing zero-row streak, for the rows the activity quiet bar decides
+    /// (<see cref="CollectorHealthClassifier.NeedsObservedQuietRuns"/>), as <c>(runs, sum of the gaps of an hour or less,
+    /// each longer gap)</c> per collector. The streak starts at the newest run that was not a zero-row SUCCESS (the abandonment
+    /// exclusion is the health read's own) and the first gap starts at that run. $1 server id, $2 window start, then one
+    /// collector name each. The gaps carry no interval, so the rows can be memoized and read at the cadence in force.
+    /// </summary>
+    internal static string ObservedQuietGapsSql(int collectorCount)
+    {
+        var names = string.Join(", ", Enumerable.Range(3, collectorCount).Select(i => "$" + i));
+        var floor = ObservedQuietGaps.GapFloorMinutes.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        return $@"
+WITH w AS
+(
+    SELECT collector_name,
+           collection_time,
+           (status = 'SUCCESS' AND COALESCE(rows_collected, 0) = 0
+            AND NOT {EnumeratedCollectorDriver.AbandonedByNotePredicateSql}) AS is_zero_row_success
+    FROM v_collection_log
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collector_name IN ({names})
+),
+b AS
+(
+    SELECT collector_name,
+           MAX(collection_time) FILTER (WHERE NOT is_zero_row_success) AS break_time
+    FROM w
+    GROUP BY collector_name
+),
+s AS
+(
+    SELECT w.collector_name,
+           w.collection_time,
+           b.break_time
+    FROM w
+    JOIN b ON b.collector_name = w.collector_name
+    WHERE w.collection_time > b.break_time
+),
+g AS
+(
+    SELECT collector_name,
+           date_diff('microsecond', COALESCE(LAG(collection_time) OVER (PARTITION BY collector_name ORDER BY collection_time), break_time), collection_time)::DOUBLE / 60000000.0 AS gap_minutes
+    FROM s
+)
+SELECT collector_name,
+       COUNT(*) AS runs,
+       COALESCE(SUM(gap_minutes) FILTER (WHERE gap_minutes <= {floor}), 0) AS short_minutes,
+       string_agg(CAST(gap_minutes AS VARCHAR), ',') FILTER (WHERE gap_minutes > {floor}) AS long_gaps
+FROM g
+GROUP BY collector_name";
+    }
+
+    /// <summary>
+    /// #7242: stamps <see cref="CollectorHealthRow.ObservedQuietGaps"/> on the rows the activity quiet bar decides, before the rows are
+    /// memoized. No row needs it, no statement. A failed read leaves the rows unstamped, which falls back to runs times the interval.
+    /// A cancellation is not swallowed.
+    /// </summary>
+    private async Task ApplyObservedQuietGapsAsync(List<CollectorHealthRow> rows, int serverId, CancellationToken cancellationToken)
+    {
+        var nowUtc = DateTime.UtcNow;
+        var needing = rows
+            .Where(r => CollectorHealthClassifier.NeedsObservedQuietRuns(r.CollectorName, r.LastProductiveTime, nowUtc))
+            .ToList();
+        if (needing.Count == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            using var connection = await OpenConnectionAsync(timer: null, cancellationToken);
+            using var command = connection.CreateCommand();
+            command.CommandText = ObservedQuietGapsSql(needing.Count);
+            command.Parameters.Add(new DuckDBParameter { Value = serverId });
+            command.Parameters.Add(new DuckDBParameter { Value = nowUtc.AddDays(-7) });
+            foreach (var row in needing)
+            {
+                command.Parameters.Add(new DuckDBParameter { Value = row.CollectorName });
+            }
+
+            var gapsByCollector = new Dictionary<string, ObservedQuietGaps>(StringComparer.Ordinal);
+            using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+            {
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    var longGaps = reader.IsDBNull(3)
+                        ? new List<double>()
+                        : reader.GetString(3).Split(',').Select(g => double.Parse(g, System.Globalization.CultureInfo.InvariantCulture)).ToList();
+                    gapsByCollector[reader.GetString(0)] = new ObservedQuietGaps(
+                        ToInt64(reader.GetValue(1)), Convert.ToDouble(reader.GetValue(2), System.Globalization.CultureInfo.InvariantCulture), longGaps);
+                }
+            }
+
+            foreach (var row in needing)
+            {
+                if (gapsByCollector.TryGetValue(row.CollectorName, out var gaps))
+                {
+                    row.ObservedQuietGaps = gaps;
+                }
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            System.Diagnostics.Trace.TraceWarning($"#7242 collection health could not read the quiet streak's gaps for server {serverId}; the quiet bar uses runs times the interval: {ex.GetType().Name}");
         }
     }
 
@@ -1304,12 +1414,20 @@ public class CollectorHealthRow
     public long TrailingZeroRowSuccessRuns { get; set; }
 
     /// <summary>
+    /// #7242: the gaps between the runs of the trailing zero-row streak, set for the rows the activity quiet bar decides
+    /// (<see cref="CollectorHealthClassifier.NeedsObservedQuietRuns"/>) and null for every other. The observed quiet time is read off it
+    /// at the cadence this row is banded against, each gap counted at most three intervals (an hour at least).
+    /// </summary>
+    internal ObservedQuietGaps? ObservedQuietGaps { get; set; }
+
+    /// <summary>
     /// Whether this collector WAS producing rows and is now recording SUCCESS with zero rows every cycle
     /// (#3885). Event collectors and on-load collectors are excluded inside the shared predicate, so a
     /// fortnight of zeros from a deadlock capture at rest stays HEALTHY.
     /// </summary>
     public bool ProducedThenStopped => CollectorHealthClassifier.ProducedThenStopped(
-        CollectorName, TrailingZeroRowSuccessRuns, LastProductiveTime, FrequencyMinutes);
+        CollectorName, TrailingZeroRowSuccessRuns, LastProductiveTime, FrequencyMinutes,
+        ObservedQuietGaps?.Minutes(FrequencyMinutes));
 
     /// <summary>The sentence a produced-then-stopped collector carries, or null when it is not one
     /// (#3885) — composed from the shared formatter, like <see cref="RegressedFinding"/>.</summary>

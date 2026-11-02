@@ -2427,10 +2427,12 @@ AND   {SqlServerCollectedTargetSql}";
     }
 
     /// <summary>
-    /// #7242: sets the EXACT <see cref="CollectorHealth.TrailingZeroRowSuccessRuns"/> on the rows the activity quiet bar turns on
-    /// (<see cref="CollectorHealthClassifier.NeedsObservedQuietRuns"/>), through <see cref="CollectorObservedQuietRuns"/>. The estimate
-    /// the aggregate allows divides elapsed time by the cadence, which hands the wall clock back, hours the service was stopped
-    /// included, and the bar is measured in observed time. Runs no statement when no row needs it, so a busy fleet pays nothing.
+    /// #7242: sets the EXACT <see cref="CollectorHealth.TrailingZeroRowSuccessRuns"/> and the <see cref="CollectorHealth.ObservedQuietGaps"/>
+    /// on the rows the activity quiet bar turns on (<see cref="CollectorHealthClassifier.NeedsObservedQuietRuns"/>), through
+    /// <see cref="CollectorObservedQuietRuns"/>. The estimate the aggregate allows divides elapsed time by the cadence, which hands the
+    /// wall clock back, hours the service was stopped included, and the bar is measured in observed time. Also the per-server read's
+    /// step, where the run count is already exact and a row with no break time has it looked up. Runs no statement when no row needs
+    /// it, so a busy fleet pays nothing.
     /// </summary>
     internal static async Task ApplyObservedQuietRunsAsync(
         NpgsqlDataSource postgres,
@@ -2439,13 +2441,12 @@ AND   {SqlServerCollectedTargetSql}";
         DateTime nowUtc,
         CancellationToken cancellationToken)
     {
-        var requests = new List<(int ServerId, string CollectorName, DateTime BreakTime)>();
+        var requests = new List<(int ServerId, string CollectorName, DateTime? BreakTime)>();
         foreach (var (serverId, h) in rows)
         {
-            if (h.LastZeroRowStreakBreakTime is { } breakTime
-                && CollectorHealthClassifier.NeedsObservedQuietRuns(h.CollectorName, h.LastProductiveTime, nowUtc))
+            if (CollectorHealthClassifier.NeedsObservedQuietRuns(h.CollectorName, h.LastProductiveTime, nowUtc))
             {
-                requests.Add((serverId, h.CollectorName, breakTime));
+                requests.Add((serverId, h.CollectorName, h.LastZeroRowStreakBreakTime));
             }
         }
 
@@ -2458,9 +2459,13 @@ AND   {SqlServerCollectedTargetSql}";
             postgres, requests, windowStart, McpCommandDeadlines.ReadSeconds, cancellationToken);
         foreach (var (serverId, h) in rows)
         {
-            if (counts.TryGetValue((serverId, h.CollectorName), out var runs))
+            if (counts.TryGetValue((serverId, h.CollectorName), out var gaps))
             {
-                h.TrailingZeroRowSuccessRuns = runs;
+                h.ObservedQuietGaps = gaps;
+                if (h.LastZeroRowStreakBreakTime is not null)
+                {
+                    h.TrailingZeroRowSuccessRuns = gaps.Runs;
+                }
             }
         }
     }

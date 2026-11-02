@@ -1753,12 +1753,15 @@ namespace PerformanceMonitor.Common
         /// until that run ages out of the read's seven-day window. The comparison is strictly greater, like
         /// the interval arm's, so a target sitting exactly on the bar is still read as quiet.</para>
         ///
-        /// <para><b>The bar is observed time, not wall time (#7242).</b> The quiet stretch is the trailing
-        /// zero-row run count times the collector's interval on that server, the time the service actually
-        /// watched the server return nothing. A service that was stopped overnight and over a weekend made no
-        /// runs for those hours, so it cannot say the server was quiet through them, and counting them read
-        /// 19 observed hours (1,141 runs at one minute) as 75 quiet hours. The wall-clock gap since the last
-        /// productive run must also pass the bar, which an observed stretch of that length implies.</para>
+        /// <para><b>The bar is observed time, not wall time (#7242).</b> The quiet stretch is the sum over the
+        /// trailing zero-row streak of the gap from each run to the next (from the run that broke the streak to
+        /// the newest run), a gap counted at most <see cref="ObservedQuietGaps.GapCapMinutes"/>: three intervals,
+        /// an hour at least. A gap longer than the cap is a stretch the service was not watching (stopped or
+        /// down), so it counts only the cap, while runs spaced out by a saturated sweep add up to the real
+        /// elapsed time. A service stopped over a weekend therefore cannot say the server was quiet through
+        /// those hours, and counting them read 19 observed hours (1,141 runs at one minute) as 75 quiet hours.
+        /// Where a surface cannot read the exact streak, runs times the interval stands in. The wall-clock gap
+        /// since the last productive run must also pass the bar, which an observed stretch of that length implies.</para>
         /// </summary>
         public static readonly TimeSpan ActivitySourcedQuietBar = TimeSpan.FromHours(72);
 
@@ -2149,12 +2152,17 @@ namespace PerformanceMonitor.Common
         /// arm reads it, to turn the trailing run count into observed time. Zero or less means the cadence
         /// is unknown, and that arm then falls back to the wall clock alone.
         /// </param>
+        /// <param name="observedQuietMinutes">
+        /// The observed quiet time of the streak in minutes (<see cref="ObservedQuietGaps.Minutes"/>), or null
+        /// where the exact streak was not read, which falls back to runs times the interval.
+        /// </param>
         public static bool ProducedThenStopped(
             string? collectorName,
             long trailingZeroRowSuccessRuns,
             DateTime? lastProductiveTimeUtc,
-            int frequencyMinutes) =>
-            ProducedThenStopped(collectorName, trailingZeroRowSuccessRuns, lastProductiveTimeUtc, DateTime.UtcNow, frequencyMinutes);
+            int frequencyMinutes,
+            double? observedQuietMinutes = null) =>
+            ProducedThenStopped(collectorName, trailingZeroRowSuccessRuns, lastProductiveTimeUtc, DateTime.UtcNow, frequencyMinutes, observedQuietMinutes);
 
         /// <summary>
         /// The clock-aware overload (#4473): for an interval-sourced collector
@@ -2175,17 +2183,23 @@ namespace PerformanceMonitor.Common
         /// semantics.
         /// </param>
         /// <param name="frequencyMinutes">
-        /// The collector's effective interval on this server, in minutes (#7242). The activity-sourced arm
-        /// multiplies it by <paramref name="trailingZeroRowSuccessRuns"/> to get the time the service
-        /// actually observed the server quiet. Zero or less means the cadence is unknown, and that arm then
-        /// falls back to the wall clock alone, as it read before #7242.
+        /// The collector's effective interval on this server, in minutes (#7242). Zero or less means the
+        /// cadence is unknown, and the activity-sourced arm then falls back to the wall clock alone, as it
+        /// read before #7242.
+        /// </param>
+        /// <param name="observedQuietMinutes">
+        /// The time the service actually observed the server quiet, in minutes: the sum over the zero-row
+        /// streak of each gap between runs, a gap counted at most <see cref="ObservedQuietGaps.GapCapMinutes"/>
+        /// (<see cref="ObservedQuietGaps.Minutes"/>). Null where the surface did not read the exact streak (the
+        /// estimate path), which falls back to <paramref name="trailingZeroRowSuccessRuns"/> times the interval.
         /// </param>
         public static bool ProducedThenStopped(
             string? collectorName,
             long trailingZeroRowSuccessRuns,
             DateTime? lastProductiveTimeUtc,
             DateTime nowUtc,
-            int frequencyMinutes)
+            int frequencyMinutes,
+            double? observedQuietMinutes = null)
         {
             if (lastProductiveTimeUtc is null || trailingZeroRowSuccessRuns < ProductiveZeroRunStreak)
             {
@@ -2214,9 +2228,11 @@ namespace PerformanceMonitor.Common
             /* An activity-sourced collector on an idle target returns nothing for hours at a time, which
                the streak alone read as a stop every night (#4620). Same shape as the interval arm: the
                streak AND a quiet longer than anything an idle weekend explains. The quiet is OBSERVED time
-               (#7242): the zero-row runs the service made, times the interval it made them at. Hours the
-               service was stopped produced no runs, so they cannot say the server was quiet, and the wall
-               clock alone would have counted them. The wall-clock gap stays a second condition: a streak
+               (#7242): the gaps between the zero-row runs the service made, each counted at most
+               ObservedQuietGaps.GapCapMinutes. A stretch longer than the cap is time the service was not
+               watching (stopped or down), so only the cap of it counts, while runs spaced out by a
+               saturated sweep still add up to the real elapsed time. Where the exact streak was not read,
+               runs times the interval stands in. The wall-clock gap stays a second condition: a streak
                cannot be longer in observed time than the wall time it sits in, so it only guards a run
                count that is larger than the elapsed time allows. */
             if (IsActivitySourcedCollector(collectorName))
@@ -2227,7 +2243,7 @@ namespace PerformanceMonitor.Common
                 }
 
                 return frequencyMinutes <= 0
-                    || trailingZeroRowSuccessRuns * (double)frequencyMinutes > ActivitySourcedQuietBar.TotalMinutes;
+                    || (observedQuietMinutes ?? trailingZeroRowSuccessRuns * (double)frequencyMinutes) > ActivitySourcedQuietBar.TotalMinutes;
             }
 
             return true;
@@ -3216,6 +3232,39 @@ namespace PerformanceMonitor.Common
                 + "it to report needs a look. "
                 + ZeroOutputCaveat,
                 totalRuns);
+        }
+    }
+
+    /// <summary>
+    /// #7242: the gaps between the runs of one zero-row streak, in the form every store can hand over without knowing the collector's
+    /// interval. The activity quiet bar is OBSERVED time: the sum over the streak of each gap between consecutive runs (starting at the
+    /// run that broke the streak, ending at the newest run), a gap counted at most <see cref="GapCapMinutes"/>. A gap longer than the
+    /// cap is a stretch the service was not watching (stopped or down), so only the cap of it counts, while runs spaced out by a
+    /// saturated sweep still add up to the real elapsed time. Every gap of <see cref="GapFloorMinutes"/> or less is below any cap, so
+    /// the store sums those and lists only the longer ones.
+    /// </summary>
+    /// <param name="Runs">How many runs came after the run that broke the streak.</param>
+    /// <param name="ShortGapMinutes">The sum of the gaps that are <see cref="GapFloorMinutes"/> or shorter.</param>
+    /// <param name="LongGapMinutes">Each gap longer than <see cref="GapFloorMinutes"/>, in minutes.</param>
+    public sealed record ObservedQuietGaps(long Runs, double ShortGapMinutes, IReadOnlyList<double> LongGapMinutes)
+    {
+        /// <summary>No gap is capped below this, so a store sums gaps up to it and lists the longer ones.</summary>
+        public const double GapFloorMinutes = 60;
+
+        /// <summary>The longest a single gap counts for a collector run every <paramref name="frequencyMinutes"/>: three intervals, at least an hour.</summary>
+        public static double GapCapMinutes(int frequencyMinutes) => Math.Max(3.0 * frequencyMinutes, GapFloorMinutes);
+
+        /// <summary>The observed quiet time in minutes for a collector run every <paramref name="frequencyMinutes"/>.</summary>
+        public double Minutes(int frequencyMinutes)
+        {
+            var cap = GapCapMinutes(frequencyMinutes);
+            var total = ShortGapMinutes;
+            foreach (var gap in LongGapMinutes)
+            {
+                total += Math.Min(gap, cap);
+            }
+
+            return total;
         }
     }
 

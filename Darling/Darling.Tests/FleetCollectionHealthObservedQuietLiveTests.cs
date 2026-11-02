@@ -24,7 +24,9 @@ namespace Darling.Tests;
 /// #7242: the activity collectors' 72 hour quiet bar is measured in time the service observed. A server whose service was
 /// stopped for a weekend has a productive run 75 hours back but only 19 hours of zero-row runs since, and must read HEALTHY on
 /// every surface: the per-server read, the service's fleet card and the Viewer's fleet read. A service that ran the whole time
-/// and saw 73 hours of zero-row runs is still flagged on all three.
+/// and saw 73 hours of zero-row runs is still flagged on all three. Observed time follows the real spacing of the runs: a collector
+/// whose runs were spaced out to 2.5 times its interval for the whole 75 hours is flagged too, because no gap between its runs is
+/// longer than the gap cap (three intervals, an hour at least), so its gaps add up to the 75 hours the service watched.
 /// </summary>
 // #1776 own-store: the live tests mint their own scratch database through ScratchPostgres.
 [Collection("live-postgres")]
@@ -34,11 +36,12 @@ public sealed class FleetCollectionHealthObservedQuietLiveTests
     private const string ServerName = "fleet-health-observed-quiet";
     private const string StoppedService = "procedure_stats";
     private const string RunningService = "query_snapshots";
+    private const string SpacedService = "waiting_tasks";
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
     [Fact]
-    public async Task AStoppedService_IsNotFlaggedOnEverySurface_ARunningOneStillIs_AgainstDevPostgres()
+    public async Task AStoppedService_IsNotFlaggedOnEverySurface_ARunningOrSpacedOutOneStillIs_AgainstDevPostgres()
     {
         var cs = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(cs),
@@ -74,6 +77,14 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ServerId, ServerName);
             var runningRuns = 73 * 60 / runningInterval;
             await SeedAsync(connection, ct, RunningService, 4_000_000, now.AddMinutes(-(runningRuns - 1) * runningInterval), runningRuns, runningInterval, rowsCollected: 0);
 
+            /* Runs spaced out to 2.5 times the interval for the whole 75 hours, no gap over the cap. Runs times the interval reads
+               this collector as quiet for under 31 hours, the defect observed time follows the real spacing to fix. */
+            var spacedInterval = IntervalOf(SpacedService);
+            var spacedStep = spacedInterval * 2.5;
+            await SeedAsync(connection, ct, SpacedService, 5_000_000, now.AddHours(-76), runs: 1, spacedStep, rowsCollected: 5);
+            var spacedRuns = (int)(75 * 60 / spacedStep);
+            await SeedAsync(connection, ct, SpacedService, 6_000_000, now.AddMinutes(-(spacedRuns - 1) * spacedStep), spacedRuns, spacedStep, rowsCollected: 0);
+
             var windowStart = DarlingMcpTestData.Naive(DateTime.UtcNow.AddDays(-7));
             await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
 
@@ -82,18 +93,25 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ServerId, ServerName);
                 .ToDictionary(r => r.CollectorName, r => r.ProducedThenStopped);
             Assert.False(perServer[StoppedService]);
             Assert.True(perServer[RunningService]);
+            Assert.True(perServer[SpacedService]);
 
             /* The service's fleet card: one regressed collector, the one whose service ran the whole time. */
             var read = typeof(DarlingFleetReader).GetMethod("ReadFailingCollectorCountsAsync", BindingFlags.NonPublic | BindingFlags.Static)
                 ?? throw new InvalidOperationException("ReadFailingCollectorCountsAsync not found");
             var counts = await (Task<Dictionary<int, DarlingFleetReader.CollectorCounts>>)read.Invoke(null, [postgres, DateTime.UtcNow, ct])!;
-            Assert.Equal(1, counts[ServerId].Regressed);
+            Assert.Equal(2, counts[ServerId].Regressed);
 
             /* The Viewer's fleet read (the Overview cards and the status bar) agrees with both. */
             await using var viewer = new ViewerDataService(scratch.ConnectionString);
             var fleet = (await viewer.GetFleetCollectionHealthByServerAsync(ct))[ServerId]
                 .ToDictionary(r => r.CollectorName, r => r.ProducedThenStopped);
             Assert.Equal(perServer, fleet);
+
+            /* The Viewer's own Collection Health tab read agrees too: it used to estimate the run count from elapsed time and
+               banded the stopped service WARNING while the card and the tool said HEALTHY. */
+            var serverTab = (await viewer.GetCollectionHealthAsync(ServerId, ct))
+                .ToDictionary(r => r.CollectorName, r => r.ProducedThenStopped);
+            Assert.Equal(perServer, serverTab);
 
             bodySucceeded = true;
         }
@@ -108,12 +126,12 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ServerId, ServerName);
 
     /// <summary><paramref name="runs"/> SUCCESS runs, <paramref name="stepMinutes"/> apart, the first at <paramref name="firstUtc"/>.</summary>
     private static Task SeedAsync(
-        NpgsqlConnection c, CancellationToken ct, string collector, long firstLogId, DateTime firstUtc, int runs, int stepMinutes, int rowsCollected) =>
+        NpgsqlConnection c, CancellationToken ct, string collector, long firstLogId, DateTime firstUtc, int runs, double stepMinutes, int rowsCollected) =>
         DarlingMcpTestData.ExecAsync(c, ct, @"
 INSERT INTO collection_log
     (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, error_message,
      rows_collected, sql_duration_ms, duckdb_duration_ms)
-SELECT $1::bigint + g, $2, $3, $4, $5::timestamp + (g * $6) * INTERVAL '1 minute', 100, 'SUCCESS', NULL, $7, 80, 20
+SELECT $1::bigint + g, $2, $3, $4, $5::timestamp + (g * $6::double precision) * INTERVAL '1 minute', 100, 'SUCCESS', NULL, $7, 80, 20
 FROM generate_series(0, $8 - 1) AS g",
             firstLogId, ServerId, ServerName, collector, DarlingMcpTestData.Naive(firstUtc), stepMinutes, rowsCollected, runs);
 

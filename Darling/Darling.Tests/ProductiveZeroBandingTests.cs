@@ -671,6 +671,45 @@ public sealed class ProductiveZeroBandingTests
     }
 
     /// <summary>
+    /// #7242: observed time is the sum of the real gaps between the streak's runs, not runs times the interval. A collector whose runs
+    /// were spaced out to 2.5 times its interval for the whole 75 hours made 360 runs, which times the 5 minute interval reads as 30
+    /// observed hours and hid the stop. Its gaps add up to the 75 hours the service watched. A service stopped for 56 of the 75 hours
+    /// has one gap far over the cap, which counts only the cap.
+    /// </summary>
+    [Fact]
+    public void TheActivityBar_ReadsTheObservedGaps_SpacedRunsAreFlagged_AStoppedStretchIsCapped()
+    {
+        var nowUtc = new DateTime(2026, 11, 2, 16, 57, 0, DateTimeKind.Utc);
+        var lastProductive = nowUtc.AddHours(-75);
+
+        Assert.False(CollectorHealthClassifier.ProducedThenStopped("procedure_stats", 360, lastProductive, nowUtc, frequencyMinutes: 5),
+            "runs times the interval alone reads the spaced collector as 30 quiet hours");
+
+        var spaced = new ObservedQuietGaps(360, 75 * 60 - 10, [10]);
+        Assert.True(CollectorHealthClassifier.ProducedThenStopped(
+            "procedure_stats", spaced.Runs, lastProductive, nowUtc, frequencyMinutes: 5, spaced.Minutes(5)));
+
+        /* 19 hours of one-minute runs after a 56 hour gap: the gap counts 60 minutes, so 20 hours in all. */
+        var stopped = new ObservedQuietGaps(1_141, 19 * 60, [56 * 60]);
+        Assert.Equal(19 * 60 + 60, stopped.Minutes(1), precision: 6);
+        Assert.False(CollectorHealthClassifier.ProducedThenStopped(
+            "procedure_stats", stopped.Runs, lastProductive, nowUtc, frequencyMinutes: 1, stopped.Minutes(1)));
+    }
+
+    /// <summary>#7242: a gap counts at most three intervals, and never less than an hour as its cap.</summary>
+    [Fact]
+    public void ObservedQuietGaps_CountEachGapAtMostThreeIntervals_AnHourAtLeast()
+    {
+        var gaps = new ObservedQuietGaps(5, 100, [60.5, 3_360]);
+
+        Assert.Equal(60, ObservedQuietGaps.GapCapMinutes(5));
+        Assert.Equal(90, ObservedQuietGaps.GapCapMinutes(30));
+        Assert.Equal(100 + 60 + 60, gaps.Minutes(5), precision: 6);
+        Assert.Equal(100 + 60.5 + 90, gaps.Minutes(30), precision: 6);
+        Assert.Equal(100 + 60.5 + 3_360, gaps.Minutes(1_200), precision: 6);
+    }
+
+    /// <summary>
     /// #7242 on the Viewer's fleet rows: the estimate divides elapsed time by the cadence and so hands the wall clock back, which is why a
     /// row the quiet bar turns on carries the exact run count. With it the field case is not flagged. Without it (an estimate alone) the
     /// 75 hours read as a stop, which is the defect.
@@ -709,6 +748,12 @@ public sealed class ProductiveZeroBandingTests
         exact.ObservedQuietRuns = 1_141;
         Assert.Equal(1_141, exact.TrailingZeroRowSuccessRuns);
         Assert.False(exact.ProducedThenStopped);
+
+        /* The gaps decide when the row carries them: 1,141 runs spaced 4 minutes apart for 75 hours is a stop at a 1 minute interval. */
+        var spaced = Row();
+        spaced.ObservedQuietRuns = 1_141;
+        spaced.ObservedQuietGaps = new ObservedQuietGaps(1_141, 75 * 60, []);
+        Assert.True(spaced.ProducedThenStopped);
     }
 
     /// <summary>

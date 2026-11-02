@@ -142,6 +142,17 @@ public sealed class RegressedFromProductiveTests
         Assert.False(stoppedService.ProducedThenStopped);
         Assert.Equal(CollectorHealthClassifier.Healthy, stoppedService.HealthStatus);
 
+        // #7242: observed time follows the real spacing. 1,800 runs spaced 2.5 minutes apart is 75 observed hours at a 1 minute
+        // interval (runs times the interval reads 30), and one 56 hour gap among 19 hours of runs counts only the one hour cap.
+        var spaced = Zeros("query_stats", 76, 1_800);
+        Assert.False(spaced.ProducedThenStopped);
+        spaced.ObservedQuietGaps = new ObservedQuietGaps(1_800, 75 * 60, []);
+        Assert.True(spaced.ProducedThenStopped);
+
+        var gapped = Zeros("query_stats", 75, 19 * 60);
+        gapped.ObservedQuietGaps = new ObservedQuietGaps(19 * 60, 19 * 60, [56 * 60]);
+        Assert.False(gapped.ProducedThenStopped);
+
         Assert.True(Zeros("memory_grant_stats", 5, 28).ProducedThenStopped);
     }
 
