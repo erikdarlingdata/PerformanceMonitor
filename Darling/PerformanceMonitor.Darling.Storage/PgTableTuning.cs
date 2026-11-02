@@ -210,10 +210,11 @@ public static class PgTableTuning
 
     /// <summary>
     /// Whether <paramref name="table"/> is a TimescaleDB hypertable (#7152). The extension being installed says nothing, since a
-    /// store can have it and still run in plain-PostgreSQL mode with plain heap tables. A failed check answers true, so a store
-    /// whose state is unknown is left without the plain-table indexes (they are an optimisation) rather than given an index build.
+    /// store can have it and still run in plain-PostgreSQL mode with plain heap tables. A failed or timed-out check answers null
+    /// (unknown), and an unknown table is neither given an index build nor has its index dropped this start: a drop on a guess
+    /// would remove a valid index from a plain table, and the next start would build it and the next failed check drop it again.
     /// </summary>
-    private static async Task<bool> TableIsHypertableAsync(NpgsqlConnection connection, string table, ILogger? logger, CancellationToken cancellationToken)
+    private static async Task<bool?> TableIsHypertableAsync(NpgsqlConnection connection, string table, ILogger? logger, CancellationToken cancellationToken)
     {
         try
         {
@@ -222,9 +223,9 @@ public static class PgTableTuning
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger?.LogWarning(
-                "Could not tell whether {Table} is a hypertable, so {Index} is skipped this start: {Message}",
+                "Could not tell whether {Table} is a hypertable, so {Index} is neither built nor dropped this start: {Message}",
                 table, WaitStatsDailyCoverIndexName, ex.Message);
-            return true;
+            return null;
         }
     }
 
@@ -605,7 +606,7 @@ public static class PgTableTuning
         var applied = 0;
         var buildIssued = false;
         var buildStartedAt = 0L;
-        Dictionary<string, bool>? hypertableByTable = null;
+        Dictionary<string, bool?>? hypertableByTable = null;
         foreach (var statement in Statements)
         {
             var sql = statement;
@@ -617,14 +618,21 @@ public static class PgTableTuning
                     if (s_plainTableOnly.Contains(indexName))
                     {
                         var indexTable = CreatedIndexTable(statement);
-                        hypertableByTable ??= new Dictionary<string, bool>(StringComparer.Ordinal);
+                        hypertableByTable ??= new Dictionary<string, bool?>(StringComparer.Ordinal);
                         if (!hypertableByTable.TryGetValue(indexTable, out var isHypertable))
                         {
                             isHypertable = await TableIsHypertableAsync(connection, indexTable, logger, cancellationToken);
                             hypertableByTable[indexTable] = isHypertable;
                         }
 
-                        if (isHypertable)
+                        if (isHypertable is null)
+                        {
+                            /* Unknown (the check failed and logged its Warning): neither build nor drop. Counted as applied, as a skip is. */
+                            applied++;
+                            continue;
+                        }
+
+                        if (isHypertable == true)
                         {
                             /* #7152: a cover built while the table was plain survives the conversion (create_hypertable with
                                migrate_data keeps existing indexes) and then only costs every insert, so a hypertable drops it.

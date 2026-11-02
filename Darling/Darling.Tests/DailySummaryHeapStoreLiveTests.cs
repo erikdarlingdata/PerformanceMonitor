@@ -187,6 +187,86 @@ public sealed class DailySummaryHeapStoreLiveTests
         Assert.Equal(0, await CoverIndexCountAsync(connection, ct));
     }
 
+    /* #7152: the hypertable check failing is "unknown", which neither builds nor drops. The check fails for real here: the pass
+       runs as a role that cannot use the timescaledb_information schema, so the catalog read raises permission denied. The store
+       is plain and already has the cover, which a drop on a guessed answer would remove. */
+    [Fact]
+    public async Task TheCover_IsLeftInPlace_WhenTheHypertableCheckFailsOnAPlainWaitStatsTable()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the heap-store daily summary live test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, plainPostgres: true);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        Assert.SkipUnless(await LiveTimescaleProbe.TryEnableAsync(scratch.ConnectionString, ct), "TimescaleDB is not available on this cluster.");
+        Assert.False(await TableIsHypertableAsync(connection, "wait_stats", ct), "wait_stats is a plain table");
+
+        await PgTableTuning.ApplyAsync(connection, NullLogger.Instance, ct);
+        Assert.Equal(1, await CoverIndexCountAsync(connection, ct));
+
+        var role = "denied_7152_" + Guid.NewGuid().ToString("N")[..8];
+        var bodySucceeded = false;
+        try
+        {
+            /* The role owns wait_stats, so it is allowed to drop the cover, but it cannot read the Timescale catalog views. */
+            foreach (var statement in new[]
+            {
+                $"CREATE ROLE {role}",
+                $"GRANT USAGE ON SCHEMA collect TO {role}",
+                $"ALTER TABLE collect.wait_stats OWNER TO {role}",
+                "REVOKE USAGE ON SCHEMA timescaledb_information FROM PUBLIC",
+                $"SET ROLE {role}",
+            })
+            {
+                await using var setup = new NpgsqlCommand(statement, connection);
+                await setup.ExecuteNonQueryAsync(ct);
+            }
+
+            var logger = new CapturingLogger();
+            await PgTableTuning.ApplyAsync(connection, logger, ct);
+
+            await using (var reset = new NpgsqlCommand("RESET ROLE", connection))
+            {
+                await reset.ExecuteNonQueryAsync(ct);
+            }
+
+            Assert.Contains(logger.Warnings, w => w.Contains("is a hypertable", StringComparison.Ordinal) && w.Contains("neither built nor dropped", StringComparison.Ordinal));
+            Assert.Equal(1, await CoverIndexCountAsync(connection, ct));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await using var cleanup = new NpgsqlCommand($"RESET ROLE; REASSIGN OWNED BY {role} TO CURRENT_USER; DROP OWNED BY {role}; DROP ROLE {role}", connection);
+            try
+            {
+                await cleanup.ExecuteNonQueryAsync(CancellationToken.None);
+            }
+            catch (PostgresException) when (!bodySucceeded)
+            {
+                /* The body already failed; its error is the one to report. */
+            }
+        }
+    }
+
+    private sealed class CapturingLogger : Microsoft.Extensions.Logging.ILogger
+    {
+        public List<string> Warnings { get; } = new();
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(Microsoft.Extensions.Logging.LogLevel logLevel) => true;
+
+        public void Log<TState>(Microsoft.Extensions.Logging.LogLevel logLevel, Microsoft.Extensions.Logging.EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            if (logLevel == Microsoft.Extensions.Logging.LogLevel.Warning)
+            {
+                Warnings.Add(formatter(state, exception));
+            }
+        }
+    }
+
     /// <summary>The cover's indexes in <c>pg_index</c>: the one on <c>collect.wait_stats</c> and the one Timescale names after it on each chunk.</summary>
     private static async Task<long> CoverIndexCountAsync(NpgsqlConnection connection, CancellationToken ct)
     {
