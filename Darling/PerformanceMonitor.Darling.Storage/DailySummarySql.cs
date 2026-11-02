@@ -74,7 +74,9 @@ public static class DailySummarySql
             SELECT x.d, COUNT(x.query_hash) AS c
             FROM (
                 SELECT DISTINCT date_trunc('day', collection_time) AS d, query_hash
-                FROM v_query_stats
+                /* #7147: collect.query_stats, not the v_query_stats view: the view's payload joins keep the planner off an
+                   index-only scan even though this read needs only server_id, collection_time and query_hash. */
+                FROM collect.query_stats
                 WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
             ) AS x
             GROUP BY x.d
@@ -357,7 +359,9 @@ public static class DailySummarySql
             SELECT x.d, COUNT(x.query_hash) AS c
             FROM (
                 SELECT DISTINCT date_trunc('day', collection_time) AS d, query_hash
-                FROM v_query_stats
+                /* #7147: collect.query_stats, not the v_query_stats view: the view's payload joins keep the planner off an
+                   index-only scan even though this read needs only server_id, collection_time and query_hash. */
+                FROM collect.query_stats
                 WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
             ) AS x
             GROUP BY x.d

@@ -46,7 +46,7 @@ public sealed class ViewerDailySummarySqlTests
         /* Distinct query count (the distinct day/hash pairs counted, #3905's hashable spelling), deadlock count. */
         Assert.Contains("SELECT DISTINCT date_trunc('day', collection_time) AS d, query_hash", sql, StringComparison.Ordinal);
         Assert.Contains("SELECT x.d, COUNT(x.query_hash) AS c", sql, StringComparison.Ordinal);
-        Assert.Contains("FROM v_query_stats", sql, StringComparison.Ordinal);
+        Assert.Contains("FROM collect.query_stats", sql, StringComparison.Ordinal);   /* #7147: direct, not through the view */
         Assert.Contains("FROM v_deadlocks", sql, StringComparison.Ordinal);
 
         /* Blocking events (#7028): XE blocked-process waits, with the DMV snapshot waits standing in for an hour
