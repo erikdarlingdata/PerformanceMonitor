@@ -73,6 +73,8 @@ Releases before 3.0.0 are not archived: those entries carry no prose to move.
 - **A retention hold no longer outlives its consumer's own retention** ([#7114]) - The coverage gate called a consumer short whenever its oldest bucket was later than the held tier's oldest row, ignoring the consumer's own retention. A hold on `query_store_stats_interval_hourly` that lasted more than 3 days became permanent, because `query_store_stats_interval_daily` trimmed itself to its 10-day horizon every day. A consumer with armed retention, whose own coverage check also passes, is now checked only as far back as it keeps, so such a store arms on the first hourly pass after the upgrade. The Retention Held alert no longer says arming by hand drops the only copy, and the `--backfill-rollups` race warning is gone.
 - **The Viewer's Mute Rules list shows each rule's action, and the rule dialog's text matches it** ([#7122]) - A mute rule that sends matches to the daily digest looked the same as a plain mute in the list, and the dialog still said alerts were suppressed or muted. The list now has an Action column ("Mute" or "Daily digest"). The window's intro line, and the dialog's intro, daily-window text, filter hints and no-filter warning, follow the chosen action. The Mute Rules window opens wider to fit the new column.
 - **The Blocking alert settings now say what they do, in the Viewer and Lite** ([#7123]) - The Settings windows labeled the count "Blocking sessions" and the wait "Total blocked wait". The count is blocking events in the last hour, and it pages only when the longest wait among them is 15 seconds or more. The wait box is also the bar at which one blocked session pages at once. The labels are now "Blocking events" and "Long blocking wait", the help text says so, and the boxes start at the current defaults (3 and 60).
+- **The "Starts" label in the Viewer's mute rule dialog now shows in full** ([#7138]) - It was cut off at the right edge of the dialog. It now wraps onto a second line.
+- **The multiple boxes in Settings, Alert rules, now fit two digits, in the Viewer and Lite** ([#7139]) - The client timeouts warning and critical multiples and the Agent jobs "x historical average" box were narrower than the boxes beside them, so a value like 10 was cut off. They now match.
 
 ## [3.12.0] - 2026-10-30
 
@@ -6355,3 +6357,5 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#7122]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7122
 [#7123]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7123
 [#7124]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7124
+[#7138]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7138
+[#7139]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7139
