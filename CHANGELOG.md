@@ -77,6 +77,7 @@ Releases before 3.0.0 are not archived: those entries carry no prose to move.
 - **The Blocking alert settings now say what they do, in the Viewer and Lite** ([#7123]) - The Settings windows labeled the count "Blocking sessions" and the wait "Total blocked wait". The count is blocking events in the last hour, and it pages only when the longest wait among them is 15 seconds or more. The wait box is also the bar at which one blocked session pages at once. The labels are now "Blocking events" and "Long blocking wait", the help text says so, and the boxes start at the current defaults (3 and 60).
 - **The "Starts" label in the Viewer's mute rule dialog now shows in full** ([#7138]) - It was cut off at the right edge of the dialog. It now wraps onto a second line.
 - **The multiple boxes in Settings, Alert rules, now fit two digits, in the Viewer and Lite** ([#7139]) - The client timeouts warning and critical multiples and the Agent jobs "x historical average" box were narrower than the boxes beside them, so a value like 10 was cut off. They now match.
+- **The 31-day Daily Summary and calendar read far fewer pages on a store without TimescaleDB** ([#7147]) - On a bring-your-own PostgreSQL store with plain tables, the month read scanned every heap page of the month, and its distinct-query count read through a view that kept PostgreSQL from using an index-only scan. On a store with 14.2 M `wait_stats` rows the read timed out at 15 s. The count now reads `collect.query_stats` directly, and the service builds a covering `wait_stats` index once at startup on stores without TimescaleDB. The numbers are the same, and a measured run read about 7 times fewer pages.
 
 ## [3.12.0] - 2026-10-30
 
@@ -6356,6 +6357,7 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#7106]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7106
 [#7107]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7107
 [#7109]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7109
+[#7147]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7147
 [#7114]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7114
 [#7122]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7122
 [#7123]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7123
