@@ -10864,6 +10864,9 @@ LEFT JOIN LATERAL (
         public DateTime? CatalogFailingSince;
         public DateTime? CatalogFailureWarnedAt;
 
+        /// <summary>#7240: when the per-probe watermark read last failed and was logged at Warning (null while it succeeds).</summary>
+        public DateTime? CeilingReadWarnedAt;
+
         /// <summary>#5808: views whose floor measure failed, keyed by view: the identity it failed on, how many times in a
         /// row, when the next try is due (<see cref="RollupFloorRetryDelay"/>), and whether the repeat was logged.</summary>
         public readonly Dictionary<string, RollupFloorFailure> Failing = new(StringComparer.Ordinal);
@@ -10902,11 +10905,13 @@ LEFT JOIN LATERAL (
     /// the OID of the database the floor was measured in, so a database dropped and recreated under the same name
     /// never matches the entry its predecessor left (0 when the catalog read did not return one).
     /// </summary>
-    /// <para><see cref="Ceiling"/> (#4605) is the materialization ceiling measured in the SAME
-    /// cycle as <see cref="Floor"/> — re-read whenever the floor is (the ceiling moves every refresh, so
-    /// piggybacking on the floor's re-measure cadence, rather than a separate TTL, is the cheap answer: a
-    /// view whose floor is trusted from cache almost never has a stale-enough ceiling to matter, and a
-    /// dedicated per-request re-read would be the expensive scan #4539 already exists to avoid).</para>
+    /// <para><see cref="Ceiling"/> (#4605) is the materialization ceiling as of the cycle that measured
+    /// <see cref="Floor"/>. It is no longer what a probe reports (#7240). The ceiling moves with every refresh, and a floor
+    /// is trusted from cache for an hour and then served as it is while the drain re-measures it, so after a quiet spell a
+    /// cached ceiling was hours old and sent a fleet read to raw. Every probe now reads each present rollup's
+    /// <c>cagg_watermark</c> in one catalog statement (<see cref="RollupMaterializationWatermark.GetManyAsync"/>), and this
+    /// value is used only for a view that statement did not return: the whole statement failed, or it returned no watermark
+    /// for that view.</para>
     /// <para><see cref="NoFloor"/> (#5808): the view was measured and holds nothing, so <see cref="Floor"/> means nothing.
     /// Cached like a floor, so an empty view is not measured again until its identity changes.</para>
     internal readonly record struct RollupFloorCacheEntry(string? ChunkName, string? MaterializationHypertable, DateTime Floor, DateTime MeasuredAtUtc, DateTime? Ceiling = null, long DatabaseOid = 0, bool NoFloor = false);
@@ -11430,7 +11435,7 @@ LEFT JOIN LATERAL (
            lands the fresh floor serves it. */
         var floorsPending = cold.Count > 0;
 
-        var ceilings = new Dictionary<string, DateTime>(StringComparer.Ordinal);
+        var withFloors = new Dictionary<string, RollupFloorCacheEntry>(StringComparer.Ordinal);
         foreach (var (view, entry) in served.Concat(newEntries))
         {
             if (entry.NoFloor)
@@ -11439,11 +11444,30 @@ LEFT JOIN LATERAL (
             }
 
             floors[view] = entry.Floor;
-            if (entry.Ceiling is DateTime ceiling)
+            withFloors[view] = entry;
+        }
+
+        /* #7240: the ceiling is read on every probe, for the views served from the cache too. It moves with every refresh,
+           while a cached floor is trusted for an hour and then served as it is, so a ceiling kept with the floor was hours old
+           after a quiet spell and a fleet read of a 24 hour window fell to raw. One catalog statement for all of them. */
+        Dictionary<string, DateTime>? freshCeilings = null;
+        if (withFloors.Count > 0)
+        {
+            try
             {
-                ceilings[view] = ceiling;
+                freshCeilings = await RollupMaterializationWatermark.GetManyAsync(dataSource, withFloors.Keys.ToArray(), JobCatalogReadTimeoutSeconds, cancellationToken);
+                lock (cache.Lock)
+                {
+                    cache.CeilingReadWarnedAt = null;
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                LogRollupCeilingReadFailure(cache, now, ex);
             }
         }
+
+        var ceilings = ComposeRollupCeilings(withFloors, freshCeilings);
 
         var rawOldest = new Dictionary<string, DateTime>(StringComparer.Ordinal);
         foreach (var (table, entry) in rawSnapshot)
@@ -11522,6 +11546,66 @@ LEFT JOIN LATERAL (
             logger?.LogDebug(
                 "Rollup coverage floor measure for {View} failed ({Count} in a row); retrying in {RetryMinutes} min: {ExceptionType}: {Message}",
                 job.View, failure.Count, (long)RollupFloorRetryDelay(failure.Count).TotalMinutes, ex.GetType().Name, ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// #7240: the ceilings a probe reports. A view's ceiling is the watermark this probe read for it
+    /// (<paramref name="fresh"/>). A view that read did not return (<paramref name="fresh"/> is null when the whole statement
+    /// failed) keeps the ceiling cached with its floor, if it has one.
+    /// </summary>
+    internal static Dictionary<string, DateTime> ComposeRollupCeilings(
+        IReadOnlyDictionary<string, RollupFloorCacheEntry> held, IReadOnlyDictionary<string, DateTime>? fresh)
+    {
+        var ceilings = new Dictionary<string, DateTime>(StringComparer.Ordinal);
+        foreach (var (view, entry) in held)
+        {
+            if (fresh is not null && fresh.TryGetValue(view, out var watermark))
+            {
+                ceilings[view] = watermark;
+            }
+            else if (entry.Ceiling is DateTime cached)
+            {
+                ceilings[view] = cached;
+            }
+        }
+
+        return ceilings;
+    }
+
+    /// <summary>
+    /// #7240: logs a failed per-probe watermark read, at Warning on the first failure and again each hour
+    /// (<see cref="RollupFloorMaxReuse"/>) it persists, at Debug in between. A successful read resets it. Each view then reports
+    /// the ceiling cached with its floor.
+    /// </summary>
+    private static void LogRollupCeilingReadFailure(RollupFloorCache cache, DateTime now, Exception ex)
+    {
+        ILogger? logger;
+        bool warn;
+        lock (cache.Lock)
+        {
+            logger = cache.Logger;
+            warn = cache.CeilingReadWarnedAt is not DateTime warnedAt || now - warnedAt >= RollupFloorMaxReuse;
+            if (warn)
+            {
+                cache.CeilingReadWarnedAt = now;
+            }
+        }
+
+        if (logger is null)
+        {
+            return;
+        }
+
+        if (warn)
+        {
+            logger.LogWarning(
+                "Rollup coverage watermark read failed, so each rollup reports the ceiling cached with its floor, which can be hours old (#7240): {ExceptionType}: {Message}",
+                ex.GetType().Name, ex.Message);
+        }
+        else
+        {
+            logger.LogDebug("Rollup coverage watermark read failed again: {ExceptionType}: {Message}", ex.GetType().Name, ex.Message);
         }
     }
 
@@ -17181,6 +17265,47 @@ FROM (SELECT _timescaledb_functions.to_timestamp_without_timezone(_timescaledb_f
       FROM _timescaledb_catalog.continuous_agg
       WHERE user_view_schema = 'collect'
       AND   user_view_name = '" + view + @"') x";
+
+    /// <summary>#7240: the watermarks of every view in <c>$1</c> in one statement, one row per continuous aggregate the catalog
+    /// lists, with the same finite-sentinel guard as <see cref="WatermarkSql"/>. Reads <c>_timescaledb_catalog.continuous_agg</c> only.</summary>
+    public const string WatermarksSql = @"
+SELECT user_view_name, CASE WHEN isfinite(w) AND w >= '2000-01-01'::timestamp THEN w END
+FROM (SELECT user_view_name, _timescaledb_functions.to_timestamp_without_timezone(_timescaledb_functions.cagg_watermark(mat_hypertable_id)) AS w
+      FROM _timescaledb_catalog.continuous_agg
+      WHERE user_view_schema = 'collect'
+      AND   user_view_name = ANY($1)) x";
+
+    /// <summary>
+    /// #7240: <paramref name="views"/>' watermarks from one catalog statement. A view with no row, or a NULL watermark (nothing
+    /// materialized yet), is absent from the answer. Unlike <see cref="GetAsync"/> this has no <c>max(bucket)</c> fallback and it
+    /// throws on a failed statement: the caller decides what a view without a watermark reports.
+    /// </summary>
+    public static async Task<Dictionary<string, DateTime>> GetManyAsync(
+        NpgsqlDataSource dataSource, IReadOnlyCollection<string> views, int commandTimeoutSeconds, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(dataSource);
+        ArgumentNullException.ThrowIfNull(views);
+
+        var watermarks = new Dictionary<string, DateTime>(StringComparer.Ordinal);
+        if (views.Count == 0)
+        {
+            return watermarks;
+        }
+
+        await using var command = dataSource.CreateCommand(WatermarksSql);
+        command.CommandTimeout = commandTimeoutSeconds;
+        command.Parameters.Add(new NpgsqlParameter { Value = views.ToArray(), NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Text });
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            if (!await reader.IsDBNullAsync(1, cancellationToken))
+            {
+                watermarks[reader.GetString(0)] = reader.GetDateTime(1);
+            }
+        }
+
+        return watermarks;
+    }
 
     /// <summary>The fallback: the newest bucket <paramref name="view"/> actually holds a row for. Ordinary
     /// SELECT against the view itself, no catalog access. The caller adds one bucket width (this is the last

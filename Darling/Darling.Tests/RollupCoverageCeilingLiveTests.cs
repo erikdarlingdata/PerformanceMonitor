@@ -112,29 +112,22 @@ public sealed class RollupCoverageCeilingLiveTests
         Assert.NotNull(laterWatermark);
         Assert.True(laterWatermark > engineWatermark, "the second refresh must move the engine's own watermark later");
 
-        /* #4957: past the hour with the oldest chunk unchanged, the caller is served the cached floor AND ceiling and one
-           background re-measure replaces them, so the first call after the hour still reads the old ceiling and the
-           ceiling advances once that re-measure lands. (Before #4957 this call measured inline.) */
+        /* #7240: the ceiling is read on every probe, so a probe that serves the cached floor (inside the hour, with the oldest
+           chunk unchanged) still reports the watermark the refresh just moved, with no re-measure of the floor. */
+        var insideTtl = await TimescaleSupport.DetectRollupCoverageAsync(dataSource, availability, now.AddMinutes(1), ct);
+        Assert.Equal(firstCall.FloorOf(view), insideTtl.FloorOf(view));
+        Assert.Equal(laterWatermark, insideTtl.CeilingOf(view));
+        Assert.True(insideTtl.CeilingOf(view) > firstCall.CeilingOf(view), "the ceiling must advance once the rollup materializes further");
+
+        /* #4957: past the hour the floor is served from the cache and re-measured once in the background. The ceiling is the
+           same fresh watermark on that probe and after the re-measure lands. */
         var pastTtl = now + TimescaleSupport.RollupFloorMaxReuse + TimeSpan.FromMinutes(1);
         var servedFromCache = await TimescaleSupport.DetectRollupCoverageAsync(dataSource, availability, pastTtl, ct);
-        Assert.Equal(firstCall.CeilingOf(view), servedFromCache.CeilingOf(view));
+        Assert.Equal(laterWatermark, servedFromCache.CeilingOf(view));
+        await TimescaleSupport.RollupFloorDrainFor(dataSource);
 
-        var secondCall = servedFromCache;
-        var deadline = DateTime.UtcNow.AddSeconds(30);
-        while (secondCall.CeilingOf(view) != laterWatermark && DateTime.UtcNow < deadline)
-        {
-            await Task.Delay(50, ct);
-            secondCall = await TimescaleSupport.DetectRollupCoverageAsync(dataSource, availability, pastTtl, ct);
-        }
-
-        Assert.Equal(laterWatermark, secondCall.CeilingOf(view));
-        Assert.True(secondCall.CeilingOf(view) > firstCall.CeilingOf(view), "the ceiling must advance once the rollup materializes further");
-
-        /* ── 4. A cycle immediately after (well inside the TTL, same chunk identity) reuses the cached floor
-               — and therefore must answer the SAME ceiling as the call that measured it, with no fresh
-               watermark read for this view. ── */
         var thirdCall = await TimescaleSupport.DetectRollupCoverageAsync(dataSource, availability, pastTtl + TimeSpan.FromSeconds(1), ct);
-        Assert.Equal(secondCall.CeilingOf(view), thirdCall.CeilingOf(view));
+        Assert.Equal(laterWatermark, thirdCall.CeilingOf(view));
     }
 
     private static async Task SeedHourlyQueryStoreStatsAsync(
