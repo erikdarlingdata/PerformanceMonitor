@@ -31,8 +31,13 @@ public sealed class SensitiveStatementHostFilterTests : IDisposable
 {
     private const string Marker = SensitiveStatements.PlaceholderText;
 
-    public SensitiveStatementHostFilterTests() =>
+    /// <summary>Runs the statement filter's start-up warm-up first, as the service does: the first plan or JSON judged in a
+    /// fresh test process would otherwise pay for cold code inside the 1.5 s read budget (#7134).</summary>
+    public SensitiveStatementHostFilterTests()
+    {
+        StatementFilterWarmUp.Ensure();
         Environment.SetEnvironmentVariable("DARLING_OUTPUT_FORMAT", null);
+    }
 
     public void Dispose() => Environment.SetEnvironmentVariable("DARLING_OUTPUT_FORMAT", null);
 

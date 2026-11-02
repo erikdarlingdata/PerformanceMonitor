@@ -76,6 +76,54 @@ public sealed class ViewerMuteRuleActionTests
         });
     }
 
+    [Theory]
+    [InlineData("mute", "Mute")]
+    [InlineData("digest", "Daily digest")]
+    [InlineData("DIGEST", "Daily digest")]
+    public void TheListsActionColumn_SaysWhatTheRuleDoes(string action, string shown)
+    {
+        Assert.Equal(shown, Rule(action).ActionDisplay);
+    }
+
+    [Fact]
+    public void TheDialogText_FollowsTheChosenAction_AndNeverCallsADigestRuleAMute()
+    {
+        StaTestThread.Run(() =>
+        {
+            var dialog = new MuteRuleEditDialog();
+            var combo = (ComboBox)dialog.FindName("ActionBox");
+            var intro = (TextBlock)dialog.FindName("IntroText");
+            var window = (TextBlock)dialog.FindName("WindowText");
+
+            Assert.Contains("suppressed", intro.Text);
+            Assert.StartsWith("Mute only", window.Text);
+
+            combo.SelectedIndex = 1;
+            Assert.Contains("Daily Digest", intro.Text);
+            Assert.DoesNotContain("suppress", intro.Text);
+            Assert.StartsWith("Send to the daily digest only", window.Text);
+            Assert.DoesNotContain("Mute", window.Text);
+
+            combo.SelectedIndex = 0;
+            Assert.Contains("suppressed", intro.Text);
+            Assert.StartsWith("Mute only", window.Text);
+
+            /* A stored digest rule opens on its own text. */
+            var opened = new MuteRuleEditDialog(Rule(MuteRuleActions.Digest));
+            Assert.Contains("Daily Digest", ((TextBlock)opened.FindName("IntroText")).Text);
+        });
+    }
+
+    [Fact]
+    public void TheNoFilterWarning_NamesTheDigest_ForADigestRule()
+    {
+        Assert.Contains("mute ALL", MuteRuleDialogText.NoFilterConfirmation(false));
+        Assert.Equal("Mute All Alerts", MuteRuleDialogText.NoFilterCaption(false));
+        Assert.DoesNotContain("mute", MuteRuleDialogText.NoFilterConfirmation(true), StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Daily Digest", MuteRuleDialogText.NoFilterConfirmation(true));
+        Assert.DoesNotContain("Mute", MuteRuleDialogText.NoFilterCaption(true));
+    }
+
     [Fact]
     public void TheProbeSentinel_MapsTheActionColumn_ToV236_AndItsAbsence_ToAnOlderVersion()
     {

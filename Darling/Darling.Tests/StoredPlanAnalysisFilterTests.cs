@@ -29,6 +29,10 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class StoredPlanAnalysisFilterTests
 {
+    /// <summary>Runs the statement filter's start-up warm-up first, as the service does: the first plan or JSON judged in a
+    /// fresh test process would otherwise pay for cold code inside the 1.5 s read budget (#7134).</summary>
+    public StoredPlanAnalysisFilterTests() => StatementFilterWarmUp.Ensure();
+
     [Theory]
     [InlineData("query_stats", "abc123")]
     [InlineData("procedure_stats", "0x0200abcd")]

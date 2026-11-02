@@ -210,22 +210,26 @@
                                     </ComboBox>
                                 </WrapPanel>
                                 <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
-                                    <CheckBox x:Name="AlertBlockingCheckBox" Content="Blocking sessions &#x2265;" VerticalAlignment="Center"
+                                    <CheckBox x:Name="AlertBlockingCheckBox" Content="Blocking events &#x2265;" VerticalAlignment="Center"
                                               Foreground="{DynamicResource ForegroundBrush}"/>
-                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AlertBlockingCheckBox}" x:Name="AlertBlockingThresholdBox" Width="45" Text="1" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AlertBlockingCheckBox}" x:Name="AlertBlockingThresholdBox" Width="45" Text="3" Margin="6,0,0,0" VerticalAlignment="Center"/>
                                 </WrapPanel>
+                                <TextBlock TextWrapping="Wrap" Margin="44,2,0,0" Foreground="{DynamicResource ForegroundMutedBrush}"
+                                           Text="Pages when this many blocking events land in the last hour and the longest wait among them is 15 seconds or more (the 15 is fixed). Each blocked session counts as one event, at its longest wait."/>
                                 <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
-                                    <TextBlock x:Name="AlertBlockingWaitSecondsLabel" TextWrapping="Wrap" Text="Total blocked wait &#x2265;" VerticalAlignment="Center" Margin="24,0,0,0"
+                                    <TextBlock x:Name="AlertBlockingWaitSecondsLabel" TextWrapping="Wrap" Text="Long blocking wait &#x2265;" VerticalAlignment="Center" Margin="24,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
-                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AlertBlockingWaitSecondsLabel}" x:Name="AlertBlockingWaitSecondsBox" Width="45" Text="0" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AlertBlockingWaitSecondsLabel}" x:Name="AlertBlockingWaitSecondsBox" Width="45" Text="60" Margin="6,0,0,0" VerticalAlignment="Center"/>
                                     <TextBlock Text="seconds (0 = off)" VerticalAlignment="Center" Margin="4,0,0,0"
                                                Foreground="{DynamicResource ForegroundMutedBrush}"/>
                                 </WrapPanel>
+                                <TextBlock TextWrapping="Wrap" Margin="44,2,0,0" Foreground="{DynamicResource ForegroundMutedBrush}"
+                                           Text="One blocked session that waits this long pages at once, whatever the count above. It is also the bar for the total blocked wait across the latest blocking snapshot (the Blocking Wait Time alert). 0 turns both off."/>
                                 <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
                                     <TextBlock x:Name="AlertPgBlockingThresholdLabel" TextWrapping="Wrap" Text="PostgreSQL blocking roots &#x2265;" VerticalAlignment="Center" Margin="24,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
-                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AlertPgBlockingThresholdLabel}" x:Name="AlertPgBlockingThresholdBox" Width="45" Text="1" Margin="6,0,0,0" VerticalAlignment="Center"/>
-                                    <TextBlock TextWrapping="Wrap" Text="(sampled root blockers; the checkbox above covers both engines)" VerticalAlignment="Center" Margin="4,0,0,0"
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AlertPgBlockingThresholdLabel}" x:Name="AlertPgBlockingThresholdBox" Width="45" Text="3" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                                    <TextBlock TextWrapping="Wrap" Text="(sampled root blockers in the last hour, with the same 15-second worst-wait floor and the long blocking wait above; the checkbox above covers both engines)" VerticalAlignment="Center" Margin="4,0,0,0"
                                                Foreground="{DynamicResource ForegroundMutedBrush}"/>
                                 </WrapPanel>
                                 <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
