@@ -174,7 +174,10 @@ SELECT server_id, DATE '2026-01-10' AS day, database_name, query_id, plan_id, qu
        sum(avg_logical_io_writes::numeric) AS avg_logical_io_writes_sum, count(avg_logical_io_writes) AS avg_logical_io_writes_n,
        sum(avg_physical_io_reads::numeric) AS avg_physical_io_reads_sum, count(avg_physical_io_reads) AS avg_physical_io_reads_n,
        sum(avg_rowcount::numeric) AS avg_rowcount_sum, count(avg_rowcount) AS avg_rowcount_n,
-       max(last_execution_time) AS last_execution_time_max, max(query_plan_hash) AS query_plan_hash_max, min(first_execution_time) AS first_execution_time_min
+       max(last_execution_time) AS last_execution_time_max, max(query_plan_hash) AS query_plan_hash_max, min(first_execution_time) AS first_execution_time_min,
+       sum(avg_duration_us::numeric * execution_count) AS avg_duration_us_wsum, sum(avg_cpu_time_us::numeric * execution_count) AS avg_cpu_time_us_wsum,
+       sum(avg_logical_io_reads::numeric * execution_count) AS avg_logical_io_reads_wsum, sum(avg_logical_io_writes::numeric * execution_count) AS avg_logical_io_writes_wsum,
+       sum(avg_physical_io_reads::numeric * execution_count) AS avg_physical_io_reads_wsum, sum(avg_rowcount::numeric * execution_count) AS avg_rowcount_wsum
 FROM collect.query_store_interval_wide
 WHERE server_id = 1 AND collection_time >= TIMESTAMP '2026-01-10' AND collection_time < TIMESTAMP '2026-01-11'
 GROUP BY server_id, database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role, module_name";
@@ -186,9 +189,9 @@ GROUP BY server_id, database_name, query_id, plan_id, query_hash, execution_type
 
             /* The all-NULL group keeps its row: _n = 0, _sum NULL; and the key's NULLs stay NULL. */
             Assert.Equal(1L, await ScalarAsync(connection,
-                "SELECT count(*) FROM collect.query_store_top_daily WHERE server_id = 1 AND query_id = 2 AND avg_duration_us_n = 0 AND avg_duration_us_sum IS NULL AND avg_rowcount_n = 0 AND replica_role IS NULL AND module_name IS NULL AND execution_count_sum = 11 AND interval_rows = 2", ct));
+                "SELECT count(*) FROM collect.query_store_top_daily WHERE server_id = 1 AND query_id = 2 AND avg_duration_us_n = 0 AND avg_duration_us_sum IS NULL AND avg_rowcount_n = 0 AND avg_duration_us_wsum IS NULL AND avg_rowcount_wsum IS NULL AND replica_role IS NULL AND module_name IS NULL AND execution_count_sum = 11 AND interval_rows = 2", ct));
             Assert.Equal(1L, await ScalarAsync(connection,
-                "SELECT count(*) FROM collect.query_store_top_daily WHERE server_id = 1 AND query_id = 1 AND avg_duration_us_sum = 300 AND avg_duration_us_n = 2 AND interval_rows = 3 AND execution_count_sum = 12 AND query_plan_hash_max = 'b'", ct));
+                "SELECT count(*) FROM collect.query_store_top_daily WHERE server_id = 1 AND query_id = 1 AND avg_duration_us_sum = 300 AND avg_duration_us_wsum = 1900 AND avg_cpu_time_us_wsum = 260 AND avg_rowcount_wsum = 50 AND avg_duration_us_n = 2 AND interval_rows = 3 AND execution_count_sum = 12 AND query_plan_hash_max = 'b'", ct));
 
             Assert.Equal((short)1, (await BuiltRowAsync(connection, 1, Day, ct))!.Value.Pass);
             Assert.Equal(6L, (await BuiltRowAsync(connection, 1, Day, ct))!.Value.SourceRows);

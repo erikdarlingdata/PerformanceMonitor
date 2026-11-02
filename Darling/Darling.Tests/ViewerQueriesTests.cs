@@ -197,7 +197,7 @@ public sealed class ViewerQueriesSqlTests
         Assert.Contains("GROUP BY database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("MAX(execution_type_desc)", sql, StringComparison.Ordinal);
         /* Rank by total duration = executions * avg duration, candidate limit (top + 5 on the first round, #5313), cap at top (Lite's shape). */
-        Assert.Contains("ORDER BY SUM(execution_count) * AVG(CAST(avg_duration_us AS double precision)) DESC", sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY " + QueryStoreWeightedAverage.RankByDuration + " DESC", sql, StringComparison.Ordinal);  /* #7169: total duration, not SUM x AVG */
         Assert.Contains("LIMIT $6", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("+ 5", sql, StringComparison.Ordinal);
         /* #5815: the page sorts the candidates before the text lateral, on sort_cost (executions * avg duration),
@@ -215,11 +215,11 @@ public sealed class ViewerQueriesSqlTests
     {
         var sql = ViewerDataService.QueryStoreTopSql;
         Assert.Contains("CAST(SUM(execution_count) AS bigint)", sql, StringComparison.Ordinal);
-        Assert.Contains("AVG(CAST(avg_duration_us AS double precision)) / 1000.0", sql, StringComparison.Ordinal);
+        Assert.Contains(QueryStoreWeightedAverage.DurationUs + " / 1000.0", sql, StringComparison.Ordinal);
         /* Postgres has no MAX(boolean); the forced-plan flag folds through bool_or. */
         Assert.Contains("bool_or(is_forced_plan)", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("MAX(CASE WHEN is_forced_plan", sql, StringComparison.Ordinal);
-        Assert.Contains("AVG(CAST(avg_query_max_used_memory AS double precision)) * 8.0 / 1024.0", sql, StringComparison.Ordinal);
+        Assert.Contains(QueryStoreWeightedAverage.QueryMaxUsedMemory + " * 8.0 / 1024.0", sql, StringComparison.Ordinal);
         /* View-Plan deferred: the collected query_plan_text column is not read this wave. */
         Assert.DoesNotContain("query_plan_text", sql, StringComparison.Ordinal);
     }

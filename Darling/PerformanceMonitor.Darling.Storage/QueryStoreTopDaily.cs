@@ -23,9 +23,10 @@ namespace PerformanceMonitor.Darling.Storage;
 /// <c>collect.query_store_top_daily</c> (#5094), the table <c>get_query_store_top</c>'s long windows will read whole
 /// days from.
 ///
-/// <para><b>The summary is APPROXIMATE by design.</b> It stores exactly recombinable parts (row counts, sums, and the
-/// counts of non-NULL values behind each average), so a built day reproduces the unweighted mean of the interval
-/// averages and the sum of <c>execution_count</c> for that day. The only approximation is staleness: a day is summarized
+/// <para><b>The summary is APPROXIMATE by design.</b> It stores exactly recombinable parts (row counts, sums, the
+/// counts of non-NULL values behind each average, and V240's execution-weighted sums <c>sum(avg_x * execution_count)</c>),
+/// so a built day reproduces the execution-weighted mean of the interval averages (#7169) and the sum of
+/// <c>execution_count</c> for that day. The only approximation is staleness: a day is summarized
 /// once it has ended, and a wide-table row that changes after that is missed (a backfill or a replayed batch into a
 /// built day) or, for a row whose <c>collection_time</c> moves from day D to D+1 after D was built, counted in both
 /// days. Rebuilding every day a second time, a day later, clears the second case, so the window in which a total can be
@@ -114,7 +115,9 @@ WITH built AS
         avg_logical_io_writes_sum, avg_logical_io_writes_n,
         avg_physical_io_reads_sum, avg_physical_io_reads_n,
         avg_rowcount_sum, avg_rowcount_n,
-        last_execution_time_max, query_plan_hash_max, first_execution_time_min
+        last_execution_time_max, query_plan_hash_max, first_execution_time_min,
+        avg_duration_us_wsum, avg_cpu_time_us_wsum, avg_logical_io_reads_wsum, avg_logical_io_writes_wsum,
+        avg_physical_io_reads_wsum, avg_rowcount_wsum
     )
     SELECT
         w.server_id, $2, w.database_name, w.query_id, w.plan_id, w.query_hash, w.execution_type_desc, w.replica_role, w.module_name,
@@ -125,7 +128,10 @@ WITH built AS
         sum(w.avg_logical_io_writes::numeric), count(w.avg_logical_io_writes),
         sum(w.avg_physical_io_reads::numeric), count(w.avg_physical_io_reads),
         sum(w.avg_rowcount::numeric), count(w.avg_rowcount),
-        max(w.last_execution_time), max(w.query_plan_hash), min(w.first_execution_time)
+        max(w.last_execution_time), max(w.query_plan_hash), min(w.first_execution_time),
+        sum(w.avg_duration_us::numeric * w.execution_count), sum(w.avg_cpu_time_us::numeric * w.execution_count),
+        sum(w.avg_logical_io_reads::numeric * w.execution_count), sum(w.avg_logical_io_writes::numeric * w.execution_count),
+        sum(w.avg_physical_io_reads::numeric * w.execution_count), sum(w.avg_rowcount::numeric * w.execution_count)
     FROM collect.query_store_interval_wide AS w
     WHERE w.server_id = $1
       AND w.collection_time >= $2::timestamp

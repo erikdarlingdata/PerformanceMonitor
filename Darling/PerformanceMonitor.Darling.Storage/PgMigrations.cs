@@ -2507,6 +2507,35 @@ CREATE INDEX IF NOT EXISTS idx_job_history_job_success
         "SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + "s';\n" + QueryStoreComposeStamp.FleetCreateSql;
 
     /// <summary>
+    /// V240 (#7169): the execution-weighted sums <c>collect.query_store_top_daily</c> needs so the long-window read of
+    /// <c>get_query_store_top</c> averages Query Store intervals by how often each ran. Six nullable <c>numeric</c> columns, one per
+    /// averaged column V161 summarizes: <c>avg_duration_us_wsum</c>, <c>avg_cpu_time_us_wsum</c>, <c>avg_logical_io_reads_wsum</c>,
+    /// <c>avg_logical_io_writes_wsum</c>, <c>avg_physical_io_reads_wsum</c> and <c>avg_rowcount_wsum</c>, each
+    /// <c>sum(avg_x * execution_count)</c> over the day's wide-table rows. A reader divides <c>SUM(_wsum)</c> by
+    /// <c>SUM(execution_count_sum)</c> and ranks on <c>SUM(avg_duration_us_wsum)</c>, which is the table read's weighted answer. V161's
+    /// <c>_sum</c> and <c>_n</c> (the unweighted mean of interval averages, a 1-execution interval counting as much as a
+    /// 10,000-execution one) stay and are still written, but no reader uses them.
+    ///
+    /// <para><b>The rung empties both summary tables.</b> The summary is derived from <c>collect.query_store_interval_wide</c> and
+    /// the service's tick rebuilds a day with no built row (oldest day first, <see cref="QueryStoreTopDaily.MaxBuildsPerTick"/> a
+    /// tick), so a day built before this rung, which has no weighted sum, is simply rebuilt. Until it is, the reader finds no built
+    /// day for it and reads it from the wide table (exact, slower), so no answer is wrong while the backfill runs. Both tables go
+    /// together, because the cleanup removes summary rows by the built table's keys and would never remove an orphan.
+    /// <c>TRUNCATE</c> needs an ACCESS EXCLUSIVE lock the builder's transaction also holds, so the lock timeout is
+    /// <see cref="MigrationCommandTimeoutSeconds"/> less 20 s, as V239's. The columns are nullable with no default, catalog-only. An older build ignores them.</para>
+    /// </summary>
+    private static readonly string V240Sql =
+        "SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + "s';\n" + @"
+ALTER TABLE collect.query_store_top_daily
+    ADD COLUMN IF NOT EXISTS avg_duration_us_wsum numeric,
+    ADD COLUMN IF NOT EXISTS avg_cpu_time_us_wsum numeric,
+    ADD COLUMN IF NOT EXISTS avg_logical_io_reads_wsum numeric,
+    ADD COLUMN IF NOT EXISTS avg_logical_io_writes_wsum numeric,
+    ADD COLUMN IF NOT EXISTS avg_physical_io_reads_wsum numeric,
+    ADD COLUMN IF NOT EXISTS avg_rowcount_wsum numeric;
+TRUNCATE collect.query_store_top_daily, collect.query_store_top_daily_built;";
+
+    /// <summary>
     /// V223 (#6873) - <c>collect.database_protection</c>: per database, the last good CHECKDB and the last full and log backup, read by
     /// <c>DatabaseProtectionCollector</c> every 60 minutes (Darling only). One row per database per pass: the raw times (UTC), the
     /// recovery model, the database state and replica role, a per-row platform label (native, platform_managed, native_only) and a state
@@ -3003,6 +3032,7 @@ $rung$;";
         new Migration(237, "people-identities-grants", V237Sql),
         new Migration(238, "action-approval-proposals", V238Sql),
         new Migration(239, "compose-fleet-rollup", V239Sql),
+        new Migration(240, "query-store-top-daily-weighted", V240Sql),
     };
 
     /// <summary>
