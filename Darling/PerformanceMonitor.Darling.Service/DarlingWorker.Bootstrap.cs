@@ -289,16 +289,6 @@ public sealed partial class DarlingWorker
         /* #3908: what this start did to the store's TimescaleDB extension, alerted beside the upgrade report. */
         DarlingSelfAlertEvaluator.StoreTimescaleReport? storeTimescaleReport = null;
 
-        if (config.Postgres.Managed && !OperatingSystem.IsWindows())
-        {
-            // install-darling.ps1 waits for this text (#6470): reword both together.
-            _logger.LogCritical(
-                "postgres.managed = true requires Windows (the bundled runtime and the DPAPI-protected credential); " +
-                "set postgres.managed = false and point postgres.connectionString at your own PostgreSQL instead.");
-            _collectorState.PublishManagedStoreNeedsWindows();
-            return;
-        }
-
         /* #7162: this try/finally opens BEFORE the bootstrap, not after it. EnsureRunningAsync sets its
            started-by-this-process flag part way through and then still creates the database, runs the
            post-upgrade analyze staging (up to 2 h) and verifies TimescaleDB. A cancel (service stop) or a
@@ -307,8 +297,18 @@ public sealed partial class DarlingWorker
            ever stops it, and upgrade-darling.ps1 refuses while a process runs under the install tree. */
         try
         {
-            if (config.Postgres.Managed && OperatingSystem.IsWindows())
+            if (config.Postgres.Managed)
             {
+                if (!OperatingSystem.IsWindows())
+                {
+                    // install-darling.ps1 waits for this text (#6470): reword both together.
+                    _logger.LogCritical(
+                        "postgres.managed = true requires Windows (the bundled runtime and the DPAPI-protected credential); " +
+                        "set postgres.managed = false and point postgres.connectionString at your own PostgreSQL instead.");
+                    _collectorState.PublishManagedStoreNeedsWindows();
+                    return;
+                }
+
                 managedPostgres = ManagedPostgresFactoryOverride is { } factory
                     ? factory(config.Postgres, _logger)
                     : new DarlingManagedPostgres(config.Postgres, _logger);
@@ -330,7 +330,6 @@ public sealed partial class DarlingWorker
                    NOTE this refines a contract DarlingManagedPostgres' own comments still state as
                    "throw => service-exit": for a classified-transient throw it is now retry-then-service-exit.
                    Terminal throws behave exactly as before. */
-#pragma warning disable CA1416 // guarded by the IsWindows() test on the enclosing if; the analyzer loses it inside the nested try/finally (#7162)
                 var bootstrapRetryBudget = System.Diagnostics.Stopwatch.StartNew();
                 /* #4508: set once, the first time the fast budget above runs out on a failure that is still
                    retryable — see the sustained arm below. Same gating shape as the store site's
@@ -341,9 +340,15 @@ public sealed partial class DarlingWorker
                 {
                     try
                     {
-                        storeConnectionString = await managedPostgres.EnsureRunningAsync(stoppingToken);
-                        storeUpgradeReport = BuildStoreUpgradeReport(managedPostgres.LastUpgradeOutcome);
-                        storeTimescaleReport = BuildStoreTimescaleReport(managedPostgres.LastTimescaleOutcome);
+                        /* The IsWindows re-check is a CA1416 guard only: the analyzer loses the early-return guard
+                           above once this loop sits inside the outer try/finally (#7162). */
+                        if (OperatingSystem.IsWindows())
+                        {
+                            storeConnectionString = await managedPostgres.EnsureRunningAsync(stoppingToken);
+                            storeUpgradeReport = BuildStoreUpgradeReport(managedPostgres.LastUpgradeOutcome);
+                            storeTimescaleReport = BuildStoreTimescaleReport(managedPostgres.LastTimescaleOutcome);
+                        }
+
                         break;
                     }
                     catch (OperationCanceledException)
@@ -410,7 +415,6 @@ public sealed partial class DarlingWorker
                         return;
                     }
                 }
-#pragma warning restore CA1416
             }
 
             /* #4215: this start's darling-managed.conf write result, carried past the

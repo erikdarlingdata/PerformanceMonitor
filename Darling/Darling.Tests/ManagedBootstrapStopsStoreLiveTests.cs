@@ -5,7 +5,9 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.Hosting;
 using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
 
@@ -36,7 +38,14 @@ public sealed class ManagedBootstrapStopsStoreLiveTests
     [Fact]
     public Task ATerminalBootstrapFailure_AfterTheStoreStarted_StopsTheStore_Gated() => RunAsync(cancel: false);
 
-    private static async Task RunAsync(bool cancel)
+    /* The other direction (#7162): a bootstrap that succeeds must leave the store running while the service is
+       healthy, and stop it only when the service itself stops. */
+    [Fact]
+    public Task AHealthyBootstrap_KeepsTheStoreRunning_UntilTheServiceStops_Gated() => RunAsync(cancel: false, healthy: true);
+
+    private static Task RunAsync(bool cancel) => RunAsync(cancel, healthy: false);
+
+    private static async Task RunAsync(bool cancel, bool healthy)
     {
         var runtimeRoot = Environment.GetEnvironmentVariable("DARLING_TEST_PGRUNTIME");
         Assert.SkipWhen(string.IsNullOrWhiteSpace(runtimeRoot), RuntimeGateMessage);
@@ -63,8 +72,20 @@ public sealed class ManagedBootstrapStopsStoreLiveTests
             stop.CancelAfter(TimeSpan.FromMinutes(5));
 
             var startedWhenBroken = false;
+            var storeReady = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var logger = new HookLogger(message =>
             {
+                if (healthy)
+                {
+                    /* Logged by the collection loop once the store's migrations ran. */
+                    if (message.StartsWith("Postgres store ready", StringComparison.Ordinal))
+                    {
+                        storeReady.TrySetResult();
+                    }
+
+                    return;
+                }
+
                 /* EnsureDatabaseAsync logs this line AFTER the server is up and the started-by-this-process flag is
                    set, and before it issues CREATE DATABASE: the exact window the bug lives in. */
                 if (message.StartsWith("Creating the '", StringComparison.Ordinal) && cluster is not null)
@@ -91,10 +112,21 @@ public sealed class ManagedBootstrapStopsStoreLiveTests
             };
 
             await worker.StartAsync(stop.Token);
+
+            if (healthy)
+            {
+                await storeReady.Task.WaitAsync(TimeSpan.FromMinutes(5), TestContext.Current.CancellationToken);
+                Assert.NotNull(cluster);
+                Assert.True(cluster!.StartedByThisProcess, "the healthy bootstrap did not leave the started store owned by this process");
+                Assert.True(File.Exists(Path.Combine(dataDirectory, "postmaster.pid")), "the store was stopped while the service was healthy");
+                Assert.True(await Listening(port), "nothing listens on the store's port while the service is healthy");
+                stop.Cancel();
+            }
+
             await worker.ExecuteTask!.WaitAsync(TimeSpan.FromMinutes(5), TestContext.Current.CancellationToken);
 
             Assert.NotNull(cluster);
-            Assert.True(startedWhenBroken, "the bootstrap was not broken while this process owned a running store");
+            Assert.True(healthy || startedWhenBroken, "the bootstrap was not broken while this process owned a running store");
             Assert.False(cluster!.StartedByThisProcess, "the worker returned without stopping the store it started");
             Assert.False(
                 File.Exists(Path.Combine(dataDirectory, "postmaster.pid")),
