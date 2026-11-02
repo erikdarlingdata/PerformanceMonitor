@@ -225,10 +225,11 @@ public sealed class RdsPlanIngestor
            before, so a crash between the two re-reads a window (rows dedupe on their identity hash) rather than
            resuming past one.
 
-           NOT while a plan is held (#7186), for the reason RdsDeadlockIngestor gives: the held head lives in memory only,
-           so a position saved past this chunk would start a restarted process in the middle of the plan, with no header
-           left to find. A restart reads this chunk again instead. */
-        if (_resume is not null && nextPlan.Length == 0)
+           Saved on every pass, also while a plan is held (#7186). This follows the csvlog carry's rule, not
+           RdsDeadlockIngestor's. A deadlock is rarely cut at a portion end, but on a dense auto_explain stderr log nearly
+           every portion ends inside a plan. Holding the position back would then stop it advancing, and a restart would
+           read hours of portions again. The held plan lives in memory only, so a restart loses at most that one plan. */
+        if (_resume is not null)
         {
             await _resume.SaveAsync(serverId, kind, chunk.Value.Resume, cancellationToken);
         }
