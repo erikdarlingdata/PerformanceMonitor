@@ -6393,6 +6393,14 @@ internal sealed class DarlingSelfAlertEvaluator
                 continue;
             }
 
+            /* #7183: a recurring window (#7040) is bounded by its schedule, so a missing expiry is the design
+               and not a forgotten rule. A digest rule (#7083) holds alerts for the daily digest and suppresses
+               nothing, so it is no blind spot. Neither belongs in the stale set. */
+            if (rule.IsRecurring || rule.IsDigestAction)
+            {
+                continue;
+            }
+
             if (now - rule.CreatedAtUtc >= StaleMuteAge)
             {
                 stale.Add(rule);
