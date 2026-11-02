@@ -90,6 +90,10 @@ public sealed class PgPlanCaptureCsvLiveTests
             }
         }
 
+        /* The plan record reaches the file a moment after the SELECT returned (#7142), so wait for the SELECT's own
+           plan (the table name and its Seq Scan node, which the INSERT before it does not carry) before reading. */
+        await PgLogLiveWait.WaitForTextAsync(connection, "csv", ct, "plan_capture_csv_live_4053b2", "Seq Scan");
+
         foreach (var binaryRoute in new[] { false, true })
         {
             var context = new CollectorContext

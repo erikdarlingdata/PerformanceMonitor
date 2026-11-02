@@ -102,7 +102,7 @@ public sealed class PgLogEventsJsonlogLiveTests
             await using var targetConnection = new NpgsqlConnection(target);
             await targetConnection.OpenAsync(ct);
 
-            await WaitForLogGrowthAsync(targetConnection, ct);
+            await PgLogLiveWait.WaitForTextAsync(targetConnection, "json", ct, "UTC [1] LOG:  forged");
 
             var usesJsonlog = await PgLogFormatCapability.IsJsonlogEnabledAsync(targetConnection, target!, ct);
             Assert.True(usesJsonlog, "the rig's log_destination must include jsonlog for this route to be exercised.");
@@ -206,36 +206,5 @@ public sealed class PgLogEventsJsonlogLiveTests
         buffer[offset + 1] = (byte)(value >> 16);
         buffer[offset + 2] = (byte)(value >> 8);
         buffer[offset + 3] = (byte)value;
-    }
-
-    /// <summary>
-    /// Polls <c>pg_ls_logdir()</c> for a <c>.json</c> file whose size has grown since the call started, up to
-    /// 5 seconds — the syslogger flushes asynchronously, so the forged line is not guaranteed to be on disk
-    /// the instant the TCP round trip above returns.
-    /// </summary>
-    private static async Task WaitForLogGrowthAsync(NpgsqlConnection connection, CancellationToken ct)
-    {
-        long before = 0;
-        await using (var command = new NpgsqlCommand(
-            "SELECT coalesce(max(size), 0) FROM pg_catalog.pg_ls_logdir() WHERE name ~* '\\.json$'", connection))
-        {
-            before = (long)(await command.ExecuteScalarAsync(ct))!;
-        }
-
-        var deadline = DateTime.UtcNow.AddSeconds(5);
-        while (DateTime.UtcNow < deadline)
-        {
-            await using (var command = new NpgsqlCommand(
-                "SELECT coalesce(max(size), 0) FROM pg_catalog.pg_ls_logdir() WHERE name ~* '\\.json$'", connection))
-            {
-                var after = (long)(await command.ExecuteScalarAsync(ct))!;
-                if (after > before)
-                {
-                    return;
-                }
-            }
-
-            await Task.Delay(200, ct);
-        }
     }
 }

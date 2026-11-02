@@ -115,7 +115,7 @@ public sealed class PgDeadlocksCsvlogLiveTests
                 }
             }
 
-            await WaitForLogGrowthAsync(targetConnection, ct);
+            await PgLogLiveWait.WaitForTextAsync(targetConnection, "csv", ct, "deadlock_forge_check_4053b1");
 
             var context = new CollectorContext
             {
@@ -260,36 +260,5 @@ public sealed class PgDeadlocksCsvlogLiveTests
 
         Assert.NotNull(victimPid);
         return victimPid!.Value;
-    }
-
-    /// <summary>
-    /// Polls <c>pg_ls_logdir()</c> for a <c>.csv</c> file whose size has grown since the call started, up to
-    /// 10 seconds — the syslogger flushes asynchronously and a deadlock report is larger than the forged
-    /// login lines <see cref="PgLogEventsCsvlogLiveTests"/> waits on, so this test gives it a longer budget.
-    /// </summary>
-    private static async Task WaitForLogGrowthAsync(NpgsqlConnection connection, CancellationToken ct)
-    {
-        long before;
-        await using (var command = new NpgsqlCommand(
-            "SELECT coalesce(max(size), 0) FROM pg_catalog.pg_ls_logdir() WHERE name ~* '\\.csv$'", connection))
-        {
-            before = (long)(await command.ExecuteScalarAsync(ct))!;
-        }
-
-        var deadline = DateTime.UtcNow.AddSeconds(10);
-        while (DateTime.UtcNow < deadline)
-        {
-            await using (var command = new NpgsqlCommand(
-                "SELECT coalesce(max(size), 0) FROM pg_catalog.pg_ls_logdir() WHERE name ~* '\\.csv$'", connection))
-            {
-                var after = (long)(await command.ExecuteScalarAsync(ct))!;
-                if (after > before)
-                {
-                    return;
-                }
-            }
-
-            await Task.Delay(200, ct);
-        }
     }
 }
