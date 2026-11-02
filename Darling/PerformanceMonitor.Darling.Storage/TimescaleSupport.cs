@@ -11449,7 +11449,10 @@ LEFT JOIN LATERAL (
 
         /* #7240: the ceiling is read on every probe, for the views served from the cache too. It moves with every refresh,
            while a cached floor is trusted for an hour and then served as it is, so a ceiling kept with the floor was hours old
-           after a quiet spell and a fleet read of a 24 hour window fell to raw. One catalog statement for all of them. */
+           after a quiet spell and a fleet read of a 24 hour window fell to raw. One catalog statement for all of them. A store
+           where that statement does not resolve (a TimescaleDB older than 2.12 has no _timescaledb_functions schema, or the
+           role cannot use it) is read view by view the way GetAsync always read it, max(bucket) plus the bucket width, which is
+           still fresh on every probe. Only a store where that fails too falls back to the ceiling cached with the floor. */
         Dictionary<string, DateTime>? freshCeilings = null;
         if (withFloors.Count > 0)
         {
@@ -11460,6 +11463,10 @@ LEFT JOIN LATERAL (
                 {
                     cache.CeilingReadWarnedAt = null;
                 }
+            }
+            catch (PostgresException batchFailure)
+            {
+                freshCeilings = await ReadRollupCeilingsPerViewAsync(dataSource, cache, withFloors.Keys, now, batchFailure, cancellationToken);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -11570,6 +11577,66 @@ LEFT JOIN LATERAL (
             }
         }
 
+        return ceilings;
+    }
+
+    /// <summary>
+    /// #7240: the fallback for a store where the one-statement watermark read (<see cref="RollupMaterializationWatermark.GetManyAsync"/>)
+    /// fails with a <see cref="PostgresException"/>: each view's ceiling from <see cref="RollupMaterializationWatermark.GetAsync"/>,
+    /// which answers <c>max(bucket)</c> plus the bucket width when <c>cagg_watermark</c> does not resolve. That is an expected store
+    /// shape and the answer is fresh, so it logs at Debug. A view that read does not answer keeps the ceiling cached with its floor,
+    /// and when none answers the original failure is logged at Warning as it was before.
+    /// </summary>
+    private static async Task<Dictionary<string, DateTime>?> ReadRollupCeilingsPerViewAsync(
+        NpgsqlDataSource dataSource, RollupFloorCache cache, IEnumerable<string> views, DateTime now,
+        PostgresException batchFailure, CancellationToken cancellationToken)
+    {
+        var widths = new Dictionary<string, TimeSpan>(StringComparer.Ordinal);
+        foreach (var (view, _, _, _, width) in RollupViews)
+        {
+            widths[view] = width;
+        }
+
+        var ceilings = new Dictionary<string, DateTime>(StringComparer.Ordinal);
+        var asked = 0;
+        try
+        {
+            foreach (var view in views)
+            {
+                if (!widths.TryGetValue(view, out var width))
+                {
+                    continue;
+                }
+
+                asked++;
+                if (await RollupMaterializationWatermark.GetAsync(dataSource, view, width, JobCatalogReadTimeoutSeconds, cancellationToken) is DateTime ceiling)
+                {
+                    ceilings[view] = ceiling;
+                }
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            LogRollupCeilingReadFailure(cache, now, ex);
+            return null;
+        }
+
+        if (asked > 0 && ceilings.Count == 0)
+        {
+            LogRollupCeilingReadFailure(cache, now, batchFailure);
+            return null;
+        }
+
+        ILogger? logger;
+        lock (cache.Lock)
+        {
+            cache.CeilingReadWarnedAt = null;
+            logger = cache.Logger;
+        }
+
+        logger?.LogDebug(
+            "Rollup coverage watermark batch read failed, so the ceilings are read per view as max(bucket) plus the bucket width: {ExceptionType}: {Message}",
+            batchFailure.GetType().Name, batchFailure.Message);
         return ceilings;
     }
 

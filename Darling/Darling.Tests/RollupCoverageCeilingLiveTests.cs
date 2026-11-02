@@ -130,6 +130,101 @@ public sealed class RollupCoverageCeilingLiveTests
         Assert.Equal(laterWatermark, thirdCall.CeilingOf(view));
     }
 
+    /// <summary>
+    /// #7240: a store where the one-statement watermark read does not resolve (a TimescaleDB older than 2.12 has no
+    /// <c>_timescaledb_functions</c> schema, or the role cannot use it) still reports the fresh ceiling, <c>max(bucket)</c> plus
+    /// the bucket width, not the one cached with the floor. The role here has SELECT on the rollup views and no EXECUTE on
+    /// <c>cagg_watermark</c> (revoked from PUBLIC in this scratch database only). Revoking USAGE on the whole schema breaks every
+    /// other read the probe makes, so it would not isolate the batch statement.
+    /// </summary>
+    [Fact]
+    public async Task DetectRollupCoverageAsync_WhenTheWatermarkFunctionIsOutOfReach_ReportsTheFreshMaxBucketCeiling()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #7240 fallback test (it mints its own scratch database).");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        Assert.True(await LiveTimescaleProbe.TryEnableAsync(scratch.ConnectionString, ct), "TimescaleDB must be available on CI for the live #7240 fallback test");
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+        await ExecAsync(connection, "SELECT _timescaledb_functions.stop_background_workers()", ct);
+
+        var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+        var oldest = now.AddHours(-6);
+        var view = TimescaleSupport.QueryStoreStatsIntervalHourlyView;
+
+        await SeedHourlyQueryStoreStatsAsync(connection, oldest, now, ct);
+        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+        await ExecAsync(connection, TimescaleSupport.SetMaterializationChunkIntervalSql(view), ct);
+        await RefreshAsync(connection, view, oldest, now.AddHours(-2), ct);
+
+        /* Roles are cluster-wide, so the name is unique to this run and dropped below. */
+        var role = "darling_7240_" + Guid.NewGuid().ToString("N")[..8];
+        const string password = "Pw-7240-nofn";
+        await ExecAsync(connection, $"CREATE ROLE {role} LOGIN NOSUPERUSER PASSWORD '{password}'", ct);
+        try
+        {
+            await ExecAsync(connection, $"GRANT USAGE ON SCHEMA collect TO {role}", ct);
+            await ExecAsync(connection, $"GRANT SELECT ON ALL TABLES IN SCHEMA collect TO {role}", ct);
+            await ExecAsync(connection, "REVOKE EXECUTE ON FUNCTION _timescaledb_functions.cagg_watermark(integer) FROM PUBLIC", ct);
+
+            var roleConnectionString = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { Username = role, Password = password }.ConnectionString;
+            await using var dataSource = new NpgsqlDataSourceBuilder(roleConnectionString).Build();
+
+            /* The setup must really put the watermark function out of reach, or nothing below tests the fallback. */
+            await Assert.ThrowsAsync<PostgresException>(() => RollupMaterializationWatermark.GetManyAsync(dataSource, new[] { view }, 30, ct));
+
+            var availability = await TimescaleSupport.DetectRollupsAsync(dataSource, ct);
+            Assert.True(availability.Has(view), "the role must see the hourly rollup");
+
+            var first = await TimescaleSupport.DetectRollupCoverageAsync(dataSource, availability, now, ct);
+            var firstCeiling = first.CeilingOf(view);
+            Assert.NotNull(firstCeiling);
+            Assert.NotNull(first.FloorOf(view));
+
+            /* The rollup catches up after the floor was cached. */
+            await RefreshAsync(connection, view, oldest, now.AddHours(-1), ct);
+            var expected = (DateTime)(await ScalarAsync(connection, $"SELECT max(bucket) + interval '1 hour' FROM collect.{view}", ct))!;
+            Assert.True(expected > firstCeiling, "the second refresh must move the newest bucket");
+
+            var second = await TimescaleSupport.DetectRollupCoverageAsync(dataSource, availability, now.AddMinutes(1), ct);
+            Assert.Equal(first.FloorOf(view), second.FloorOf(view));
+            Assert.Equal(expected, second.CeilingOf(view));
+        }
+        finally
+        {
+            await ExecAsync(connection, $"DROP OWNED BY {role}", CancellationToken.None);
+            await ExecAsync(connection, $"DROP ROLE {role}", CancellationToken.None);
+        }
+    }
+
+    private static async Task RefreshAsync(NpgsqlConnection connection, string view, DateTime from, DateTime to, CancellationToken ct)
+    {
+        await using var refresh = new NpgsqlCommand(
+            $"CALL refresh_continuous_aggregate('collect.{view}'::regclass, $1::timestamp, $2::timestamp, true)", connection);
+        refresh.Parameters.AddWithValue(from);
+        refresh.Parameters.AddWithValue(to);
+        await refresh.ExecuteNonQueryAsync(ct);
+    }
+
+    private static async Task ExecAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(sql, connection);
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    private static async Task<object?> ScalarAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(sql, connection);
+        return await command.ExecuteScalarAsync(ct);
+    }
+
     private static async Task SeedHourlyQueryStoreStatsAsync(
         NpgsqlConnection connection, DateTime from, DateTime to, CancellationToken cancellationToken)
     {
