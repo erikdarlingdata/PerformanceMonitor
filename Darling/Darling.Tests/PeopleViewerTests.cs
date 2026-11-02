@@ -340,12 +340,9 @@ public sealed class PeopleViewerLiveTests
             await using var connection = new NpgsqlConnection(scratch.ConnectionString);
             await connection.OpenAsync(ct);
             await PgMigrations.MigrateAsync(connection, ct);
-            /* The proposals table (V238, #7109) is the newest probe sentinel, so a store that still has it reads as V238 whatever else is
-               gone. A store below V237 has none of the four. */
-            await using (var drop = new NpgsqlCommand("DROP TABLE config.agent_action_proposals; DROP TABLE config.person_grant; DROP TABLE config.person_identity; DROP TABLE config.person", connection))
-            {
-                await drop.ExecuteNonQueryAsync(ct);
-            }
+            /* The probe answers with the newest sentinel left on disk (the V239 fleet table, #7146, then the V238 proposals table, #7109), so a
+               store below V237 has none of them: the ladder's own rewind removes every sentinel above V236, newest first. */
+            await RungRewindArtifacts.DropSentinelsAboveAsync(connection, 236, ct);
 
             await using var viewer = new ViewerDataService(scratch.ConnectionString);
             var below = await viewer.ReadPeopleAsync(ct);

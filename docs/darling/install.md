@@ -358,6 +358,8 @@ It prompts for the password on stdin (so the plaintext never lands in your shell
 }
 ```
 
+Each Entra identity needs a user in the database, and the service host needs a network route to the server. See [Azure SQL Database](monitored-servers.md#permissions-on-monitored-servers).
+
 **excludedDatabases** (per server) removes databases from collection: per-database collectors skip them and the exclusion is spliced into the collector queries — the same filter Lite applies. There is a second, separate `alerts.excludedDatabases` list that excludes databases from blocking/deadlock/long-running-query **alert evaluation** without affecting collection.
 
 ### Validate the Config (Pre-flight)
