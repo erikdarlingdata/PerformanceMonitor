@@ -529,6 +529,77 @@ public sealed class ExternalAlertDrainLiveTests
         });
     }
 
+    /// <summary>#7158: only a rise from Warning to Critical asks the delivery cooldowns to step aside. A first fire, a repeat at the
+    /// same severity and a fall back to Warning are held by the cooldown as before.</summary>
+    [Fact]
+    public async Task OnlyAWarningThatRisesToCritical_AsksTheDeliveryCooldownsToStepAside()
+    {
+        await WithDrainAsync(async rig =>
+        {
+            await rig.SubmitAsync("fire", "disk", server: "SQL01", severity: "warning");
+            await rig.SubmitAsync("fire", "disk", server: "SQL01", severity: "warning");
+            await rig.SubmitAsync("fire", "disk", server: "SQL01", severity: "critical");
+            await rig.SubmitAsync("fire", "disk", server: "SQL01", severity: "critical");
+            await rig.SubmitAsync("fire", "disk", server: "SQL01", severity: "warning");
+            for (var pass = 0; pass < 5; pass++)
+            {
+                await rig.Drain.RunPassAsync(rig.Ct);
+            }
+
+            Assert.Equal(5, rig.Sent.Count);
+            Assert.Equal(
+                new[] { false, false, true, false, false },
+                rig.Sent.Select(o => o.Context!.EscalationBypassesCooldown).ToArray());
+        });
+    }
+
+    /// <summary>#7158: a Critical the delivery cooldown held back was never told to the operator, so the state keeps Warning as the
+    /// severity they heard, the next Critical repeat is still a rise, and the clear closes only the tier that went out.</summary>
+    [Fact]
+    public async Task ACriticalTheCooldownHeldBack_IsNotRecordedAsTheSeverityTheOperatorWasTold()
+    {
+        await WithDrainAsync(async rig =>
+        {
+            await rig.SubmitAsync("fire", "disk", server: "SQL01", severity: "warning");
+            await rig.Drain.RunPassAsync(rig.Ct);
+
+            rig.Answer = AlertDelivery.FromLegacyStoredColumns(false, AlertDelivery.ChannelThrottled, null);
+            var held = await rig.SubmitAsync("fire", "disk", server: "SQL01", severity: "critical");
+            await rig.Drain.RunPassAsync(rig.Ct);
+            Assert.Equal("delivered", await rig.StatusAsync(held));
+            Assert.Equal("warning", await rig.ScalarAsync("SELECT fired_severity FROM config.external_alert_state WHERE alert_key = 'disk'"));
+            Assert.Equal("warning", await rig.ScalarAsync("SELECT fired_severities FROM config.external_alert_state WHERE alert_key = 'disk'"));
+
+            rig.Answer = AlertDelivery.FromLegacyStoredColumns(true, "webhook", null);
+            await rig.SubmitAsync("fire", "disk", server: "SQL01", severity: "critical");
+            await rig.Drain.RunPassAsync(rig.Ct);
+            Assert.True(rig.Sent[^1].Context!.EscalationBypassesCooldown);
+            Assert.Equal("critical", await rig.ScalarAsync("SELECT fired_severity FROM config.external_alert_state WHERE alert_key = 'disk'"));
+        });
+    }
+
+    /// <summary>#7158: the delivery cooldown survives a resolve, so a new episode's opening Warning can be held back inside the old
+    /// window. It is then unconfirmed (no severity recorded), and the Critical that follows still asks the cooldowns to step aside
+    /// and is recorded as told.</summary>
+    [Fact]
+    public async Task ACriticalAfterAnOpeningWarningTheCooldownHeldBack_StillBypassesTheCooldown()
+    {
+        await WithDrainAsync(async rig =>
+        {
+            rig.Answer = AlertDelivery.FromLegacyStoredColumns(false, AlertDelivery.ChannelThrottled, null);
+            await rig.SubmitAsync("fire", "disk", server: "SQL01", severity: "warning");
+            await rig.Drain.RunPassAsync(rig.Ct);
+            Assert.False(rig.Sent[^1].Context!.EscalationBypassesCooldown);
+            Assert.Null(await rig.ScalarAsync("SELECT fired_severity FROM config.external_alert_state WHERE alert_key = 'disk'"));
+
+            rig.Answer = AlertDelivery.FromLegacyStoredColumns(true, "webhook", null);
+            await rig.SubmitAsync("fire", "disk", server: "SQL01", severity: "critical");
+            await rig.Drain.RunPassAsync(rig.Ct);
+            Assert.True(rig.Sent[^1].Context!.EscalationBypassesCooldown);
+            Assert.Equal("critical", await rig.ScalarAsync("SELECT fired_severity FROM config.external_alert_state WHERE alert_key = 'disk'"));
+        });
+    }
+
     [Fact]
     public async Task AFireOpenedByARetryThatSucceeds_IsConfirmed_AndItsClearResolvesIt()
     {
