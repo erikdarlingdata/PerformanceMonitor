@@ -1341,7 +1341,7 @@ public sealed partial class DarlingWorker : BackgroundService
     private PerformanceMonitor.Darling.Service.Investigations.DarlingDeadlockRollup? _deadlockRollup;
     private readonly ConcurrentDictionary<string, DateTime> _lastPgPoisonWaitCollectionTime = new(StringComparer.Ordinal);
     /* #2716's restart-survival shape for the poison cooldown: seeded once per key from
-       IAlertHistoryStore.GetLastAlertTimeAsync (the subject IS the #1140 dedup fingerprint the alert
+       IAlertHistoryStore.GetLastAlertTimeAsync (PgSubjectDedupKey is the #1140 dedup fingerprint the alert
        fires with), exactly like _postgresAlertHistorySeeded below. The seed also floors the #2704
        collection-time guard: rows collected before the last recorded fire were, by definition, already
        reported by the process that fired it. */
@@ -1381,7 +1381,7 @@ public sealed partial class DarlingWorker : BackgroundService
     /* #2716: the three Tier 0 predictors' cooldown (_lastPostgresAlert, keyed per server|metric|subject)
        has the same restart gap, but no watermark COUNT to seed — it is a plain last-alerted TIME per
        subject, so IAlertStateStore's int-watermark shape does not fit it. Seeded instead from
-       IAlertHistoryStore.GetLastAlertTimeAsync's existing #1154 dedup-key filter (finding.Subject IS
+       IAlertHistoryStore.GetLastAlertTimeAsync's existing #1154 dedup-key filter (PgSubjectDedupKey is
        the #1140 dedup fingerprint these alerts already fire with), which already reconstructs a
        per-fingerprint last-alerted time for the email/webhook cooldowns and needs no new schema.
        Guards one history read per (server, metric, subject) for the life of the process — see the call
