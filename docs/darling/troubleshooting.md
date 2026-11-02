@@ -18,6 +18,10 @@ For a table of what you see, the likely cause and the fix, start with [docs/trou
 
 **DPAPI decrypt fails after moving darling.json** — `encryptedPassword` blobs are machine-bound (DPAPI LocalMachine). Re-run `--encrypt-password` on the new machine.
 
+**Azure SQL Database error 40615.** The server firewall did not allow the IP address of the service host. Add a firewall rule for that address, or run the service on an Azure VM that reaches the server through a private endpoint. Entra authentication does not replace the firewall rule. See [Azure SQL Database](monitored-servers.md#permissions-on-monitored-servers).
+
+**An `AADSTS` error on a Service Principal server.** Microsoft Entra refused the sign-in. Check the tenant. Check that the client secret has not expired. Check that the identity has a user in the database. See [authentication](../authentication.md).
+
 **"Failed to ensure XE sessions"** — the login lacks `ALTER ANY EVENT SESSION` (or the database-scoped equivalent on Azure SQL Database). Deadlock and blocked-process collection read zero rows until the sessions exist, and client-timeout collection records a missing session; grant the permission or have an administrator create/start `PerformanceMonitor_Deadlock`, `PerformanceMonitor_BlockedProcess` and `PerformanceMonitor_Attention`. "Already exists / already started" XE errors are logged as benign and mean the sessions are up.
 
 **Blocked-process reports empty** — the blocked-process threshold may still be 0. On AWS RDS set `blocked process threshold (s)` via a Parameter Group (the `sp_configure` bootstrap cannot run there); on Azure SQL Database the threshold is fixed at 20 seconds. Blocking stays visible either way through the always-on DMV blocking snapshot.
