@@ -496,6 +496,11 @@ public partial class AlertsHistoryTab : UserControl
         }
     }
 
+    /// <summary>Whether Dismiss All must dismiss the rows on screen by key (a column filter is set or the last read hit the
+    /// cap) rather than the whole window (#7160).</summary>
+    internal bool DismissAllUsesShownRows()
+        => AlertDismissScope.UseShownRows(_filterManager?.AnyFilterActive == true, _lastReadRowCount, RowCap);
+
     private async void DismissAll_Click(object sender, RoutedEventArgs e)
     {
         if (_dataService == null || _dismissInFlight) return;
@@ -516,6 +521,10 @@ public partial class AlertsHistoryTab : UserControl
             return;
         }
 
+        /* #7160: the window write ignores column filters and the row cap, so with either in play it would dismiss alerts
+           the grid never showed. Then dismiss the rows on screen by key, the way Dismiss Selected does. */
+        var dismissShownRows = DismissAllUsesShownRows();
+
         var message = $"Dismiss {liveCount} alert(s)?";
         if (archivedCount > 0)
             message += $"\n\n{archivedCount} archived alert(s) will remain visible.";
@@ -535,7 +544,10 @@ public partial class AlertsHistoryTab : UserControl
             /* The same window the grid read (#5562): a range that ended in the past dismisses only the rows up to its end. */
             var (sinceUtc, untilUtc) = GetSelectedWindow();
             int? serverId = GetSelectedServerId();
-            var affected = await System.Threading.Tasks.Task.Run(() => _dataService.DismissAllVisibleAlertsWindowAsync(sinceUtc, untilUtc, serverId));
+            var shownLive = dismissShownRows ? allAlerts.Where(a => !a.IsArchived).ToList() : null;
+            var affected = await System.Threading.Tasks.Task.Run(() => shownLive != null
+                ? _dataService.DismissAlertsAsync(shownLive)
+                : _dataService.DismissAllVisibleAlertsWindowAsync(sinceUtc, untilUtc, serverId));
             if (affected < liveCount && App.LogAlertDismissals)
             {
                 AppLogger.Warn("AlertsHistory", $"Dismiss all: only {affected} of {liveCount} live alert(s) were updated");
@@ -543,7 +555,15 @@ public partial class AlertsHistoryTab : UserControl
             await LoadAlertsAsync();
 
             /* Clear the matching server tab badge(s) so the indicator matches the cleared list (issue #1092). */
-            AlertsDismissed?.Invoke(serverId);
+            if (shownLive != null)
+            {
+                foreach (var dismissedServerId in shownLive.Select(a => a.ServerId).Distinct())
+                    AlertsDismissed?.Invoke(dismissedServerId);
+            }
+            else
+            {
+                AlertsDismissed?.Invoke(serverId);
+            }
         }
         catch (TimeoutException ex)
         {
