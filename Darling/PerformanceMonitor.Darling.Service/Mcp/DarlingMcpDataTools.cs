@@ -373,7 +373,8 @@ public sealed class DarlingMcpDataTools
                 /* #7010: an empty or unavailable miss over a window the store does not reach back to is not a true negative, so it carries
                    the window floor under hints (merged into the collected_wait_types hint); not_collected is permanent and carries none. */
                 var missNotice = await TableNoticeAsync(postgres, "wait_stats", resolved.ServerName, start, now, emptyAnswer: true, cancellationToken);
-                return WithWindowHints(miss, missNotice);
+                /* #7167: an empty miss from an offline server answers unavailable, as the get_pg_* reads do. */
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, WithWindowHints(miss, missNotice), cancellationToken);
             }
 
             var waitNotice = await TableNoticeAsync(postgres, "wait_stats", resolved.ServerName, start, now, emptyAnswer: false, cancellationToken);
@@ -991,7 +992,8 @@ public sealed class DarlingMcpDataTools
             }
 
             if (rows.Count == 0)
-                return WithWindowHints(await EmptyPageAsync(), DarlingMcpWindowNotice.Build(floor, requestedStart, "query_stats", emptyAnswer: true));
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now,
+                    WithWindowHints(await EmptyPageAsync(), DarlingMcpWindowNotice.Build(floor, requestedStart, "query_stats", emptyAnswer: true)), cancellationToken);
 
             /* #2320: what fraction of the box's measured CPU the RETURNED rows explain — numerator is
                the caller-visible ranking (post top-N, post filters), denominator is measured, and the
@@ -1317,8 +1319,8 @@ public sealed class DarlingMcpDataTools
                         : EmptyProcedureStatsStatus(
                             await DarlingCollectorRunFactsReader.ReadAsync(postgres, resolved.ServerId, "procedure_stats", requestedStart, now, cancellationToken),
                             hours_back, leftOut?.Count ?? 0));
-                return McpHelpers.WithDatabasesLeftOut(
-                    WithWindowHints(emptyPage!, DarlingMcpWindowNotice.Build(emptyFloor, requestedStart, "procedure_stats", emptyAnswer: true)), leftOut)!;
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, McpHelpers.WithDatabasesLeftOut(
+                    WithWindowHints(emptyPage!, DarlingMcpWindowNotice.Build(emptyFloor, requestedStart, "procedure_stats", emptyAnswer: true)), leftOut)!, cancellationToken);
             }
 
             /* #4231: what the raw tier actually held, beside what was asked for — same probe and disclosure as
@@ -1710,9 +1712,9 @@ public sealed class DarlingMcpDataTools
             }
 
             if (rows.Count == 0)
-                return await DarlingRuntimePrecondition.WithQueryStoreNotWritingHintAsync(
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, await DarlingRuntimePrecondition.WithQueryStoreNotWritingHintAsync(
                     /* #7010: the empty answer carries the window floor under hints (a null floor: the store holds no row in the window). */
-                    WithWindowHints(await EmptyAnswerAsync(), DarlingMcpWindowNotice.Build(coverageFloor, requestedStart, "query_store_stats", emptyAnswer: true)), postgres, resolved.ServerId, resolved.DisplayName, databases, cancellationToken);
+                    WithWindowHints(await EmptyAnswerAsync(), DarlingMcpWindowNotice.Build(coverageFloor, requestedStart, "query_store_stats", emptyAnswer: true)), postgres, resolved.ServerId, resolved.DisplayName, databases, cancellationToken), cancellationToken);
 
             var approximate = read.DailyDaysUsed > 0 && read.DailySpan is not null;
             var result = rows.Select(r => new

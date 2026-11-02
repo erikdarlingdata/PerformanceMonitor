@@ -477,13 +477,13 @@ public sealed class DarlingMcpTrendTools
                 var emptyNotice = history.Source == "raw"
                     ? await TrendNoticeAsync(postgres, "query_stats", resolved.ServerName, now.AddHours(-hours_back), now, emptyAnswer: true, cancellationToken)
                     : McpWindowNotice.Unavailable;
-                return McpHelpers.Status(
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, McpHelpers.Status(
                         "empty",
                         $"No history found for query_hash '{query_hash}' in database '{database_name}' in the " +
                         $"{history.Source} tier over the last {hours_back} hours. This means nothing was recorded " +
                         "for that query_hash in that window in the tier searched — confirm the hash and database " +
                         "with get_top_queries_by_cpu before concluding the query did not run.",
-                        emptyNotice.AsHints());
+                        emptyNotice.AsHints()), cancellationToken);
             }
 
             /* The hourly rollup keeps executions, CPU and elapsed and nothing else. Those columns arrive as
@@ -865,10 +865,10 @@ public sealed class DarlingMcpTrendTools
                 */
                 if (route.UseRollup && route.RollupFloorUtc is DateTime floor && now < floor)
                 {
-                    return EmptyStatus(
+                    return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, EmptyStatus(
                         "empty",
                         $"The requested window ends before {floor:o}, the oldest hour the corrected Query Store rollup has materialized. Query Store history older than that is not summarized yet, so this window is empty even though rows were collected. To fill it in, an operator runs PerformanceMonitor.Darling.Service.exe --backfill-rollups.",
-                        disclosure, databases);
+                        disclosure, databases), cancellationToken);
                 }
 
                 var everSampled = await DarlingTrendReader.HasAnyQueryStoreStatAsync(postgres, resolved.ServerId, cancellationToken);
@@ -899,13 +899,13 @@ public sealed class DarlingMcpTrendTools
                 */
                 if (route.UseRollup && route.RollupFloorUtc is DateTime head && head > startUtc)
                 {
-                    return EmptyStatus(
+                    return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, EmptyStatus(
                         "empty",
                         $"No Query Store samples were recorded for {ScopedServer(resolved.DisplayName, databases)} between {head:o} — the oldest hour the corrected rollup has materialized — and the end of the window. This server HAS been sampled before, so that stretch is genuinely quiet; the part of the window before {head:o} is unserved rather than quiet (the rollup has not materialized it and this read no longer ranks the raw slab for it, #2736) — run --backfill-rollups to materialize it. Widening hours_back finds newer samples only; it cannot reach the unserved head.",
-                        disclosure, databases);
+                        disclosure, databases), cancellationToken);
                 }
 
-                return EmptyStatus("empty", QuietWindowMessage(ScopedServer(resolved.DisplayName, databases), hours_back, "Query Store"), disclosure, databases);
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, EmptyStatus("empty", QuietWindowMessage(ScopedServer(resolved.DisplayName, databases), hours_back, "Query Store"), disclosure, databases), cancellationToken);
             }
 
             return SerializeTrend(resolved.DisplayName, hours_back, points, disclosure,
@@ -1258,7 +1258,17 @@ public sealed class DarlingMcpTrendTools
     private static async Task<string> EmptyRoutedTrendAsync(
         Task<bool> rawProbe, NpgsqlDataSource postgres, int serverId, string serverName, string probeServerName, int hours_back,
         DateTime startUtc, DateTime windowEndUtc, DarlingTrendReader.DurationTrendRoute route,
-        string what, string collectorName, string checkThis, BucketChoice bucket, DatabaseFilter databases, CancellationToken cancellationToken = default)
+        string what, string collectorName, string checkThis, BucketChoice bucket, DatabaseFilter databases, CancellationToken cancellationToken = default) =>
+        /* #7167: an empty answer from a server the store has had no collection from answers unavailable, as the get_pg_* reads do. */
+        await DarlingServerOfflineNote.EmptyAsync(
+            postgres, serverId, serverName, windowEndUtc,
+            await EmptyRoutedTrendCoreAsync(rawProbe, postgres, serverId, serverName, probeServerName, hours_back, startUtc, windowEndUtc, route, what, collectorName, checkThis, bucket, databases, cancellationToken),
+            cancellationToken);
+
+    private static async Task<string> EmptyRoutedTrendCoreAsync(
+        Task<bool> rawProbe, NpgsqlDataSource postgres, int serverId, string serverName, string probeServerName, int hours_back,
+        DateTime startUtc, DateTime windowEndUtc, DarlingTrendReader.DurationTrendRoute route,
+        string what, string collectorName, string checkThis, BucketChoice bucket, DatabaseFilter databases, CancellationToken cancellationToken)
     {
         var disclosure = DescribeEmptyRoute(route, startUtc, windowEndUtc, bucket);
         /* #7010: the raw route's empty answer judged its own coverage from the table's oldest row, and an empty table has none, so it said
