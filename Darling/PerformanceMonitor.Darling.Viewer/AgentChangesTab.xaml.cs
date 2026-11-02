@@ -43,6 +43,11 @@ public partial class AgentChangesTab : UserControl
         _login = login;
         UndoPanel.Visibility = readOnly ? Visibility.Collapsed : Visibility.Visible;
         SwitchButton.Visibility = readOnly ? Visibility.Collapsed : Visibility.Visible;
+        /* #7109: a read-only seat cannot ask the service for anything, so it sees no proposals. */
+        var proposals = readOnly ? Visibility.Collapsed : Visibility.Visible;
+        ProposalsLabel.Visibility = proposals;
+        ProposalsGrid.Visibility = proposals;
+        ProposalsPanel.Visibility = proposals;
     }
 
     /// <summary>Reads the list and the switch from the store.</summary>
@@ -61,6 +66,76 @@ public partial class AgentChangesTab : UserControl
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             Status?.Invoke("Could not read agent changes: " + ex.Message);
+        }
+
+        await LoadProposalsAsync();
+    }
+
+    /// <summary>Reads the proposals through the service (#7109). A service that does not answer leaves the list as it was and says so.</summary>
+    internal async Task LoadProposalsAsync()
+    {
+        if (_dataService is null || _readOnly)
+            return;
+        try
+        {
+            var rows = await _dataService.ReadProposalsAsync(null, _login);
+            if (rows is null)
+                Status?.Invoke("The service has not listed the proposals yet. Reload the tab to read them again.");
+            else
+                ProposalsGrid.ItemsSource = rows;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            Status?.Invoke("Could not read the proposals: " + ex.Message);
+        }
+    }
+
+    /// <summary>The words of the confirm question: what the first press read, and what the confirm does.</summary>
+    internal static string ApproveConfirmText(ProposalViewRow row, ProposalPressAnswer first) =>
+        first.Message + Environment.NewLine + Environment.NewLine + row.Kind + " on " + row.Server + Environment.NewLine
+        + (row.Target.Length > 0 ? row.Target + Environment.NewLine : "")
+        + (first.FactsText.Length > 0 ? first.FactsText + Environment.NewLine : "") + Environment.NewLine
+        + "The agent's reason (the agent's own words): " + (row.Reason.Length > 0 ? row.Reason : "none given") + Environment.NewLine + Environment.NewLine
+        + "Run this action on the monitored server?";
+
+    /// <summary>The first press shows the fresh facts; the confirm runs only after the person says yes to them.</summary>
+    internal async Task ApproveCommandAsync()
+    {
+        if (_dataService is null || _readOnly)
+            return;
+        var selected = ProposalsGrid.SelectedItem as ProposalViewRow;
+        if (ProposalViewRow.ApproveError(selected) is { } error)
+        {
+            Status?.Invoke(error);
+            return;
+        }
+
+        try
+        {
+            Status?.Invoke("Asking the service to read the facts again...");
+            var first = await _dataService.PressProposalAsync(selected!.ProposalId, confirm: false, _login);
+            if (!first.FirstPressed)
+            {
+                Status?.Invoke(first.Words);
+                await LoadProposalsAsync();
+                return;
+            }
+
+            var ask = MessageBox.Show(Window.GetWindow(this), ApproveConfirmText(selected, first), "Approve agent action", MessageBoxButton.OKCancel, MessageBoxImage.Question);
+            if (ask != MessageBoxResult.OK)
+            {
+                Status?.Invoke("Not approved. The proposal is still waiting.");
+                return;
+            }
+
+            Status?.Invoke("Confirming...");
+            var done = await _dataService.PressProposalAsync(selected.ProposalId, confirm: true, _login);
+            Status?.Invoke(done.Words);
+            await LoadAsync();
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            Status?.Invoke("Could not approve the proposal: " + ex.Message);
         }
     }
 
@@ -173,6 +248,8 @@ public partial class AgentChangesTab : UserControl
     }
 
     private async void Undo_Click(object sender, RoutedEventArgs e) => await UndoCommandAsync();
+
+    private async void Approve_Click(object sender, RoutedEventArgs e) => await ApproveCommandAsync();
 
     private async void Switch_Click(object sender, RoutedEventArgs e) => await SwitchCommandAsync();
 }

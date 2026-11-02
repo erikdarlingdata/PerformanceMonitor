@@ -61,7 +61,7 @@ public sealed class AgentTokenIdentityGateLiveTests
             + "VALUES (7, 'srv-7', 'sql-host', 'Optional', TRUE), (8, 'srv-8', 'pg-host', 'Optional', TRUE)", ct);
         await ExecAsync(connection, "INSERT INTO collect.servers (server_id, server_name, display_name, is_enabled, sql_major_version, engine_kind, created_date, modified_date) "
             + "VALUES (7, 'srv-7', 'srv-7', TRUE, 16, 'sqlserver', now(), now()), (8, 'srv-8', 'srv-8', TRUE, NULL, 'postgres', now(), now())", ct);
-        await ExecAsync(connection, "INSERT INTO config.config_notification_routes (metric_match, agent_level) VALUES ('Blocking', 3)", ct);
+        await ExecAsync(connection, "INSERT INTO config.config_notification_routes (metric_match, agent_level, action_approval) VALUES ('Blocking', 3, 'off')", ct);
 
         var builder = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { SearchPath = PgSchemaGenerator.SearchPath };
         await using var source = NpgsqlDataSource.Create(builder.ConnectionString);

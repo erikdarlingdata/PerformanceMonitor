@@ -19,13 +19,13 @@ namespace PerformanceMonitor.Darling.Storage;
 /// the validated <c>agent_action</c> and the server it would run on.</summary>
 public sealed record ServerActionCall(string Tool, string ServerAction, AgentAction Action, AgentActionTarget Target, string? TokenName = null);
 
-/// <summary>The caller's part of a server-action check (#5632, step 5): the live routes (as <see cref="AgentActionHooks.LoadLevels"/>) and
+/// <summary>The caller's part of a server-action check (#5632, step 5): the live routes (as <see cref="AgentActionHooks.LoadRoutes"/>) and
 /// the server's credential classification. The credential read is the caller's because the <c>remediation_encrypted_password</c> column is
 /// secret to the <c>viewer</c> and <c>mcp</c> roles: the caller runs it as the store owner, through
 /// <see cref="InvestigationRequestStore.ReadServerCredentialStateAsync"/>. It never resolves the secret.</summary>
 public sealed class ServerActionHooks
 {
-    public required Func<NpgsqlConnection, NpgsqlTransaction, CancellationToken, Task<Func<string, int, AlertSeverityLevel?, int?>>> LoadLevels { get; init; }
+    public required Func<NpgsqlConnection, NpgsqlTransaction, CancellationToken, Task<Func<string, int, AlertSeverityLevel?, NotificationRoute?>>> LoadRoutes { get; init; }
 
     public required Func<int, CancellationToken, Task<ServerCredentialState>> ReadCredential { get; init; }
 }
@@ -84,7 +84,16 @@ public sealed partial class InvestigationRequestStore
     /// Null means every condition holds; the secret was not read or resolved.
     /// </summary>
     public async Task<AgentActionRefusal?> CheckServerActionAsync(ServerActionCall call, ServerActionHooks hooks,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        (await CheckServerActionCoreAsync(call, hooks, cancellationToken)).Refusal;
+
+    /// <summary>
+    /// <see cref="CheckServerActionAsync"/>, also answering whether the action needs a person's approval (#7109). The approval is an outcome,
+    /// never a refusal here: it is set only when every condition holds, so the tool can run its prepare step and a dry run and store a
+    /// proposal. Only the write's re-check refuses an action that needs approval.
+    /// </summary>
+    private async Task<ServerActionCheck> CheckServerActionCoreAsync(ServerActionCall call, ServerActionHooks hooks,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(call);
         ArgumentNullException.ThrowIfNull(hooks);
@@ -96,64 +105,130 @@ public sealed partial class InvestigationRequestStore
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
         var request = await ReadAgentActionRequestAsync(connection, transaction, action.RequestId, cancellationToken);
-        var refusal = await ServerActionChecksAsync(connection, transaction, request, call, hooks, now, cancellationToken);
+        var (refusal, approval) = await ServerActionChecksAsync(connection, transaction, request, call, hooks, now, cancellationToken);
         if (refusal is not null)
             await JournalRefusedAsync(connection, transaction, now, request is null ? null : action.RequestId,
                 request?.ServerId, actor, call.TokenName, call.Tool, refusal.Reason, cancellationToken);
         await transaction.CommitAsync(cancellationToken);
-        return refusal;
+        return refusal is not null
+            ? new ServerActionCheck(refusal, null)
+            : new ServerActionCheck(null, new ServerActionApproval(approval!.Needed, approval.SinglePerson, request!.ClaimCount));
     }
 
-    private async Task<AgentActionRefusal?> ServerActionChecksAsync(NpgsqlConnection connection, NpgsqlTransaction transaction,
+    /// <summary>The gate's answer inside the store: a refusal, or the approval outcome of an action that may proceed.</summary>
+    private sealed record ServerActionCheck(AgentActionRefusal? Refusal, ServerActionApproval? Approval);
+
+    private async Task<(AgentActionRefusal? Refusal, ActionApprovalState? Approval)> ServerActionChecksAsync(NpgsqlConnection connection, NpgsqlTransaction transaction,
         AgentActionRequest? request, ServerActionCall call, ServerActionHooks hooks, DateTime now, CancellationToken cancellationToken)
     {
         if (!System.Linq.Enumerable.Contains(ServerActionNames.All, call.ServerAction, StringComparer.Ordinal))
-            return new AgentActionRefusal(AgentActionCodes.UnknownServerAction,
-                "That is not a server action. The actions are force_plan, evict_plan, kill_session, recompile_module, create_plan_guide and drop_plan_guide.");
+            return (new AgentActionRefusal(AgentActionCodes.UnknownServerAction,
+                "That is not a server action. The actions are force_plan, evict_plan, kill_session, recompile_module, create_plan_guide and drop_plan_guide."), null);
 
-        /* 1: the service-wide switch, the one read the write-time re-check uses (without the lock, here). */
+        /* 1: the service-wide switch, the one read the write-time re-check uses (without the lock, here). It stays ahead of the claim, so
+           the gate answers actions_off first, as it always has. The shared conditions read it again: a cheap read of one row. */
         if (await ActionsOffRefusalAsync(connection, transaction, lockRow: false, cancellationToken) is { } off)
-            return off;
+            return (off, null);
 
-        /* 2 and 3: the claim, Level 3, the request's server and this server's switch, the conditions the write re-checks. */
-        if (await ServerActionConditionsRefusalAsync(connection, transaction, request, call.ServerAction, call.Action, call.Target,
-                hooks.LoadLevels, now, practice: true, cancellationToken) is { } refusal)
-            return refusal;
-
-        /* 4: this server's remediation login. */
-        return await CredentialRefusalAsync(request!.ServerId, request.ServerName, hooks.ReadCredential, person: false, cancellationToken);
+        /* 2: the claim, the agent's own condition. 3 and 4: every other condition, in the one method the approval path runs too (#7109).
+           The approval is read there, over the same routes, and reported, not refused. */
+        var conditions = await ServerActionConditionsAsync(connection, transaction, request, call.ServerAction, call.Action, call.Target,
+            hooks.LoadRoutes, hooks.ReadCredential, lockRow: false, now, practice: true, cancellationToken);
+        return conditions.Refusal is { } refusal ? (refusal, null) : (null, conditions.Approval);
     }
 
     /// <summary>
-    /// The conditions of a server action that can change between the gate and the write, checked in ONE place so the gate and the write's
-    /// re-check cannot drift (#5632): the claim (and, in the gate, the practice flag), Level 3 over the live routes (the lowest level among the
-    /// request's metrics wins), the request's own server, and this server's switch for this action (no row is off). The refusal codes and
-    /// words are the same in both places.
+    /// The agent's conditions of a server action that can change between the gate and the write (#5632): the claim (and, in the gate, the
+    /// practice flag), then <see cref="SharedActionConditionsAsync"/>. The refusal codes and words are the same in both places. The approval
+    /// (#7109) is read there: the gate reports it, and the write (<paramref name="refuseNeedsApproval"/>) refuses it, so a route a person set to
+    /// <c>required</c> after the gate refuses the agent's write, and a future tool that reaches the write cannot skip it.
     /// </summary>
     private async Task<AgentActionRefusal?> ServerActionConditionsRefusalAsync(NpgsqlConnection connection, NpgsqlTransaction transaction,
         AgentActionRequest? request, string serverAction, AgentAction action, AgentActionTarget target,
-        Func<NpgsqlConnection, NpgsqlTransaction, CancellationToken, Task<Func<string, int, AlertSeverityLevel?, int?>>> loadLevels, DateTime now, bool practice,
+        Func<NpgsqlConnection, NpgsqlTransaction, CancellationToken, Task<Func<string, int, AlertSeverityLevel?, NotificationRoute?>>> loadRoutes, DateTime now, bool practice,
+        bool refuseNeedsApproval, CancellationToken cancellationToken)
+    {
+        var conditions = await ServerActionConditionsAsync(connection, transaction, request, serverAction, action, target, loadRoutes, null,
+            lockRow: true, now, practice, cancellationToken);
+        if (conditions.Refusal is not null)
+            return conditions.Refusal;
+        if (refuseNeedsApproval && conditions.Approval!.Needed)
+            return new AgentActionRefusal(AgentActionCodes.ApprovalRequired, ApprovalRequiredMessage);
+        return null;
+    }
+
+    private const string ApprovalRequiredMessage =
+        "This action needs a person's approval, so the agent's own write does not run it. A person may have set this request's route to require approval after the check. Nothing was run. Call the tool again with dry_run false to propose it for approval.";
+
+    /// <summary>The agent's path: the claim check, which only this path has, then the conditions both paths share.</summary>
+    private async Task<(AgentActionRefusal? Refusal, ActionApprovalState? Approval)> ServerActionConditionsAsync(NpgsqlConnection connection,
+        NpgsqlTransaction transaction, AgentActionRequest? request, string serverAction, AgentAction action, AgentActionTarget target,
+        Func<NpgsqlConnection, NpgsqlTransaction, CancellationToken, Task<Func<string, int, AlertSeverityLevel?, NotificationRoute?>>> loadRoutes,
+        Func<int, CancellationToken, Task<ServerCredentialState>>? readCredential, bool lockRow, DateTime now, bool practice,
         CancellationToken cancellationToken)
     {
         if (ClaimOrPracticeRefusal(request, action, now, practice) is { } claimRefusal)
-            return claimRefusal;
-        var live = request!;
-
-        var level = await ResolveRequestLevelAsync(connection, transaction, live, loadLevels, ServerActionLevel, cancellationToken);
-        if (level == 2)
-            return new AgentActionRefusal(AgentActionCodes.NotLevel3,
-                "Level 2 changes only the monitoring store. A server action needs a Level 3 route. Report what you would change instead.");
-        if (level < ServerActionLevel)
-            return new AgentActionRefusal(AgentActionCodes.NotLevel3,
-                "This request is not Level 3: its routes do not let an agent act on a monitored server. Report what you would change instead.");
-
-        if (target.ServerId != live.ServerId)
-            return new AgentActionRefusal(AgentActionCodes.OtherServer,
-                $"This action targets {target.ServerName}; the request is for {live.ServerName}. An action runs only on the request's server.");
-
-        return await ServerActionSwitchRefusalAsync(connection, transaction, live.ServerId, live.ServerName, serverAction, person: false,
+            return (claimRefusal, null);
+        return await SharedActionConditionsAsync(connection, transaction, request!, serverAction, target, loadRoutes, readCredential, lockRow,
             cancellationToken);
     }
+
+    /// <summary>
+    /// Every condition of a server action but the claim, in ONE method the agent's path and the approval path both run (#7109), so the two
+    /// cannot drift: the service switch (held <c>FOR SHARE</c> when <paramref name="lockRow"/>), the request not closed (and for
+    /// <c>kill_session</c> on an alert request, its alert not resolved), Level 3 over the live routes (the lowest level among the request's
+    /// metrics wins) with the approval setting over the same routes, the request's own server, this server's switch for this action (no row is
+    /// off) and, when <paramref name="readCredential"/> is given, the remediation login. The approval is returned, never refused here: the
+    /// agent's write refuses it, and on the approval path an approved proposal satisfies it.
+    /// </summary>
+    private async Task<(AgentActionRefusal? Refusal, ActionApprovalState? Approval)> SharedActionConditionsAsync(NpgsqlConnection connection,
+        NpgsqlTransaction transaction, AgentActionRequest live, string serverAction, AgentActionTarget target,
+        Func<NpgsqlConnection, NpgsqlTransaction, CancellationToken, Task<Func<string, int, AlertSeverityLevel?, NotificationRoute?>>> loadRoutes,
+        Func<int, CancellationToken, Task<ServerCredentialState>>? readCredential, bool lockRow, CancellationToken cancellationToken)
+    {
+        if (await ActionsOffRefusalAsync(connection, transaction, lockRow, cancellationToken) is { } actionsOff)
+            return (actionsOff, null);
+
+        if (live.State == "closed")
+            return (new AgentActionRefusal(AgentActionCodes.RequestClosed,
+                "A person closed this request, so no action runs under it. Nothing was run."), null);
+
+        if (serverAction == ServerActionNames.KillSession && live.TriggerKind == InvestigationTriggerKinds.Alert)
+        {
+            await using var resolved = Command(connection, transaction, RequestResolvedSql, P(live.RequestId));
+            if (await resolved.ExecuteScalarAsync(cancellationToken) is true)
+                return (new AgentActionRefusal(AgentActionCodes.AlertResolved,
+                    "This request's alert has resolved, so the session it showed is no longer the problem. Nothing was run."), null);
+        }
+
+        var routes = await ResolveRequestRoutesAsync(connection, transaction, live, loadRoutes, ServerActionLevel, cancellationToken);
+        var level = routes.Level;
+        if (level == 2)
+            return (new AgentActionRefusal(AgentActionCodes.NotLevel3,
+                "Level 2 changes only the monitoring store. A server action needs a Level 3 route. Report what you would change instead."), null);
+        if (level < ServerActionLevel)
+            return (new AgentActionRefusal(AgentActionCodes.NotLevel3,
+                "This request is not Level 3: its routes do not let an agent act on a monitored server. Report what you would change instead."), null);
+
+        if (target.ServerId != live.ServerId)
+            return (new AgentActionRefusal(AgentActionCodes.OtherServer,
+                $"This action targets {target.ServerName}; the request is for {live.ServerName}. An action runs only on the request's server."), null);
+
+        var off = await ServerActionSwitchRefusalAsync(connection, transaction, live.ServerId, live.ServerName, serverAction, person: false,
+            cancellationToken);
+        if (off is not null)
+            return (off, null);
+
+        if (readCredential is not null
+            && await CredentialRefusalAsync(live.ServerId, live.ServerName, readCredential, person: false, cancellationToken) is { } credential)
+            return (credential, null);
+
+        return (null, routes.Approval);
+    }
+
+    /// <summary>The resolve sweep's mark on a request (#7109): a <c>resolved</c> journal row, as the proposal sweep's kill void reads it.</summary>
+    internal const string RequestResolvedSql =
+        "SELECT EXISTS (SELECT 1 FROM config.investigation_journal WHERE request_id = $1 AND event = 'resolved')";
 
     /// <summary>The server action a gated kind runs, null for a kind that only changes the monitoring store. The write's re-check keys on it,
     /// so a call site cannot forget to name its action.</summary>

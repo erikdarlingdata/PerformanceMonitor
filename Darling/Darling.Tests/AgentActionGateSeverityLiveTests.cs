@@ -68,7 +68,7 @@ public sealed class AgentActionGateSeverityLiveTests
             var writes = 0;
             var hooks = new AgentActionHooks
             {
-                LoadLevels = (connection, _, token) => DarlingAgentActionGate.LoadLevelsAsync(connection, NullLogger.Instance, token),
+                LoadRoutes = (connection, _, token) => DarlingAgentActionGate.LoadRoutesAsync(connection, NullLogger.Instance, token),
                 ReadBefore = (_, _, _) => Task.FromResult<string?>(null),
                 Write = (_, _, _) => { writes++; return Task.FromResult<string?>("{}"); },
             };

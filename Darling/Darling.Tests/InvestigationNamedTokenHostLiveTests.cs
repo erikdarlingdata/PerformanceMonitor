@@ -59,7 +59,7 @@ public sealed class InvestigationNamedTokenHostLiveTests
         await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, "HostLiveSrv", ct);
         await DarlingMcpTestData.RegisterServerAsync(connection, PgServerId, "HostLivePg", ct);
         await ExecAsync(connection, $"UPDATE collect.servers SET engine_kind = 'postgres' WHERE server_id = {PgServerId}", ct);
-        await ExecAsync(connection, "INSERT INTO config.config_notification_routes (metric_match, agent_level) VALUES ('Blocking', 3)", ct);
+        await ExecAsync(connection, "INSERT INTO config.config_notification_routes (metric_match, agent_level, action_approval) VALUES ('Blocking', 3, 'off')", ct);
 
         await using var source = NpgsqlDataSource.Create(scratch.ConnectionString);
         var store = new InvestigationRequestStore(source, 30, () => DateTime.UtcNow);

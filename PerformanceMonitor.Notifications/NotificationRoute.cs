@@ -176,6 +176,13 @@ public sealed record NotificationRoute(
     /// or <see cref="NotificationRouteKinds.ReportNoticeAll"/>.</summary>
     public string ReportNotice { get; init; } = NotificationRouteKinds.ReportNoticeOff;
 
+    /// <summary>Whether a Level 3 action on this route waits for a person's approval (<c>action_approval</c>, #7109):
+    /// <see cref="NotificationRouteKinds.ActionApprovalRequired"/> (the default) or <see cref="NotificationRouteKinds.ActionApprovalOff"/>.</summary>
+    public string ActionApproval { get; init; } = NotificationRouteKinds.ActionApprovalRequired;
+
+    /// <summary>Whether a person who asked for the action may also approve it on this route (<c>approval_single_person</c>, #7109). False by default.</summary>
+    public bool ApprovalSinglePerson { get; init; }
+
     /// <summary>Whether this route's severity filter takes an alert of <paramref name="severity"/> (#6928). Null takes every route.</summary>
     public bool AcceptsSeverity(AlertSeverityLevel? severity) => NotificationRouteKinds.SeveritiesAccept(Severities, severity);
 

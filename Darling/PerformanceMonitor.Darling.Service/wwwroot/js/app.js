@@ -16,6 +16,7 @@
  *   #/server/{name}/{tab} — one server's detail, opened on a named sub-tab (pages/server-tabs.js)
  *   #/alerts            — fleet-wide Alert History
  *   #/investigations    — agent investigation requests, their reports and journal (#5904)
+ *   #/proposals         — server actions an agent proposed, and the two presses that approve one (#7109)
  *   #/alert-rules       — Custom Alert Rules list (#3285)
  *   #/alert-rule/new    — the alert-rule editor creating a new rule (optionally /new/{template})
  *   #/alert-rule/{id}   — the alert-rule editor editing a saved rule (#3285)
@@ -48,6 +49,7 @@ import { renderServer } from "./pages/server.js";
 import { renderFinops } from "./pages/finops.js";
 import { renderAlerts } from "./pages/alerts.js";
 import { renderInvestigations, requestIdFromQuery } from "./pages/investigations.js";
+import { renderProposals, proposalIdFromQuery } from "./pages/proposals.js";
 import { renderAlertRuleList } from "./pages/alert-rules.js";
 import { renderViewList, renderView, currentViewRefresh, onViewRefreshChange, clearViewRefresh } from "./pages/views.js";
 import { REFRESH_CHOICES, PAGE_REFRESH_CHOICES, nextRefreshDelayMs, isBackedOff, defaultRefreshChoice, refreshLabel, loadPageRefreshChoice, savePageRefreshChoice, PAGE_REFRESH_KEY } from "./refresh-policy.js";
@@ -104,6 +106,9 @@ function currentRoute() {
   if (h.startsWith("#/investigations?")) {
     return { name: "investigations", request: requestIdFromQuery(h.slice("#/investigations?".length)) };
   }
+  if (h === "#/proposals" || h === "#/proposals/") return { name: "proposals" };
+  /* #/proposals?proposal=<id> (#7109): one proposal, the link a proposal notice carries. */
+  if (h.startsWith("#/proposals?")) return { name: "proposals", proposal: proposalIdFromQuery(h.slice("#/proposals?".length)) };
   /* Alert-rule routes (#3285): the list, the new form (optionally /new/{template}), then the bare /{id} edit form,
      tested most-specific first. Distinct from #/alerts above (which cannot collide: #/alert- never starts #/alerts). */
   if (h === "#/alert-rules" || h === "#/alert-rules/") return { name: "alertRules" };
@@ -288,6 +293,7 @@ function route(opts) {
   else if (r.name === "sweeps") renderSweeps(main, opts);
   else if (r.name === "alerts") renderAlerts(main);
   else if (r.name === "investigations") renderInvestigations(main, r.request);
+  else if (r.name === "proposals") renderProposals(main, r.proposal);
   else if (r.name === "alertRules") renderAlertRuleList(main);
   else if (r.name === "alertEditor") renderAlertEditor(main, r.id, r.template);
   else if (r.name === "admin") renderAdmin(main, r.tab);

@@ -162,8 +162,16 @@ WHERE status = 'in_progress'
     private readonly string _serviceInstance;
     private readonly ILogger? _logger;
 
-    public DarlingCommandExecutor(NpgsqlDataSource postgres, IDarlingCommandHost host, string serviceInstance, ILogger? logger = null)
+    private readonly PerformanceMonitor.Common.McpDataDetail _dataDetail;
+    private readonly Func<string>? _webBaseUrl;
+
+    /// <param name="dataDetail">#7109: the <c>mcp.dataDetail</c> level the proposal commands' statement text follows (full unless told).</param>
+    /// <param name="webBaseUrl">#7109: the web dashboard's public base URL (empty for no links), read per proposal command.</param>
+    public DarlingCommandExecutor(NpgsqlDataSource postgres, IDarlingCommandHost host, string serviceInstance, ILogger? logger = null,
+        PerformanceMonitor.Common.McpDataDetail dataDetail = PerformanceMonitor.Common.McpDataDetail.Full, Func<string>? webBaseUrl = null)
     {
+        _dataDetail = dataDetail;
+        _webBaseUrl = webBaseUrl;
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
         _host = host ?? throw new ArgumentNullException(nameof(host));
         _serviceInstance = serviceInstance ?? throw new ArgumentNullException(nameof(serviceInstance));
@@ -418,6 +426,25 @@ WHERE status = 'in_progress'
                 return new CommandOutcome(result.Succeeded, result.Code ?? result.Status, result.ToJson().ToJsonString());
             }
 
+            case CommandKind.ProposalCommand:
+            {
+                /* #7109: the Viewer's approval of an action proposal, run in the service as the store owner. The Viewer is an administrator path
+                   with no person, so the press API approves only on a single-person route; requested_by is not a person here. */
+                if (command.CommandType == Investigations.ProposalCommands.ReadType)
+                {
+                    Investigations.ProposalCommands.TryParseReadArgs(command.ArgsJson, out var readRequest);
+                    return await Investigations.ProposalCommands.ReadAsync(_postgres, _logger, readRequest, command.TargetServerId, _dataDetail,
+                        _webBaseUrl?.Invoke(), cancellationToken);
+                }
+
+                if (!Investigations.ProposalCommands.TryParsePressArgs(command.ArgsJson, out var pressProposal))
+                {
+                    return new CommandOutcome(false, "invalid args_json", ErrorJson(command.CommandType + " needs args_json {proposal_id}"));
+                }
+
+                return await Investigations.ProposalCommands.PressAsync(_postgres, _logger, command.CommandType, pressProposal, _dataDetail, cancellationToken);
+            }
+
             case CommandKind.PersonDirectoryWrite:
             {
                 /* #7107: an administrator's people directory write from the Viewer. The service's own store source is the owner source here
@@ -595,6 +622,17 @@ WHERE status = 'in_progress'
                 return UndoPlanChangeArgs.LoginIsValid(command.RequestedBy)
                     ? new CommandPlan(CommandKind.SetServerAction, null, null, "server action switch set", null)
                     : Fail("set_server_action requires requested_by to be the person's login (1 to 64 letters, digits or . _ : - @ \\)");
+
+            case Investigations.ProposalCommands.ReadType:
+                return Investigations.ProposalCommands.TryParseReadArgs(command.ArgsJson, out _)
+                    ? new CommandPlan(CommandKind.ProposalCommand, null, null, "ok", null)
+                    : Fail(command.CommandType + " takes an optional args_json {request_id}");
+
+            case Investigations.ProposalCommands.FirstPressType:
+            case Investigations.ProposalCommands.ConfirmType:
+                return Investigations.ProposalCommands.TryParsePressArgs(command.ArgsJson, out _)
+                    ? new CommandPlan(CommandKind.ProposalCommand, null, null, "proposal pressed", null)
+                    : Fail(command.CommandType + " requires args_json with a proposal_id");
 
             case PersonDirectoryCommands.AddPerson:
             case PersonDirectoryCommands.RenamePerson:
@@ -1200,6 +1238,10 @@ public enum CommandKind
     /// person, or adds or removes an identity or a grant. Run in the service as the store owner, because no other role can write the people tables;
     /// the administrator is <c>requested_by</c>.</summary>
     PersonDirectoryWrite,
+
+    /// <summary>The Viewer's action proposal commands (#7109, <c>read_action_proposals</c>, <c>proposal_first_press</c>, <c>proposal_confirm</c>): the list, and the
+    /// two presses of an approval on an administrator path. Run in the service as the store owner.</summary>
+    ProposalCommand,
 
     /// <summary><c>fetch_active_queries</c>: read the LIVE running-request DMV snapshot from a server on demand (via
     /// the host, running the shared Active Queries collector's query) and return the rows in result_json. Read-only.</summary>

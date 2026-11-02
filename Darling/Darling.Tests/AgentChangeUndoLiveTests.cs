@@ -329,7 +329,7 @@ SELECT now() at time zone 'utc' - interval '1 hour', 7, 'srv-7', 'Blocking', 9, 
             var writes = 0;
             var hooks = new AgentActionHooks
             {
-                LoadLevels = (_, _, _) => Task.FromResult<Func<string, int, PerformanceMonitor.Notifications.AlertSeverityLevel?, int?>>((_, _, _) => 2),
+                LoadRoutes = (_, _, _) => Task.FromResult<Func<string, int, PerformanceMonitor.Notifications.AlertSeverityLevel?, PerformanceMonitor.Notifications.NotificationRoute?>>((_, _, _) => TestRouteHooks.AtLevel(2)),
                 ReadBefore = (_, _, _) => Task.FromResult<string?>(null),
                 Write = (_, _, _) => { writes++; return Task.FromResult<string?>("{}"); },
             };

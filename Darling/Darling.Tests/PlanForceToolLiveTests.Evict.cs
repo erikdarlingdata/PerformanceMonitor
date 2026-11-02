@@ -146,6 +146,36 @@ VALUES ($1, $2, 7, 'srv-7', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
         });
     }
 
+    /// <summary>#7109: on a route set to <c>required</c>, an evict with <c>dry_run</c> false runs the prepare step and the executor's dry run, stores a proposal
+    /// and answers <c>proposed</c>. The handle is still cached (the executor received no write), no <c>action_</c> row is journaled, and a retry gets the
+    /// same proposal id. Runs where SQL Server is configured, as the other tests of this class do.</summary>
+    [Fact]
+    public async Task ARouteThatRequiresApproval_ProposesAnEvict_WritesNothingToTheServer_AndARetryGetsTheSameProposal()
+    {
+        await RunAsync(Without.Nothing, async c =>
+        {
+            var marker = "ev3" + Guid.NewGuid().ToString("N")[..8];
+            await RunMarkerAsync(c.Sql, marker, 3, c.Ct);
+            var cached = await ReadCachedAsync(marker, c.Ct);
+            await SeedStatsAsync(c, cached, DateTime.UtcNow.AddMinutes(-5), cached.Executions);
+
+            var json = Parse(await EvictAsync(c, cached.PlanHandle, dryRun: false));
+            Assert.Equal("proposed", (string?)json["status"]);
+            Assert.Equal("evict_plan", (string?)json["kind"]);
+            Assert.StartsWith("DBCC FREEPROCCACHE (0x", (string?)json["statement"], StringComparison.Ordinal);
+            Assert.True(Guid.TryParse((string?)json["proposal_id"], out var proposalId));
+            Assert.True(await IsCachedAsync(c.Sql, cached.PlanHandle, c.Ct), "the proposal evicted nothing");
+            Assert.Equal(0, await JournalActionRowsAsync(c));
+            Assert.Equal("1", await PgScalarAsync(c.Connection,
+                $"SELECT count(*) FROM config.agent_action_proposals WHERE proposal_id = '{proposalId}' AND state = 'pending' AND tool = 'evict_cached_plan'", c.Ct));
+
+            var retry = Parse(await EvictAsync(c, cached.PlanHandle, dryRun: false));
+            Assert.Equal(proposalId.ToString(), (string?)retry["proposal_id"]);
+            Assert.Equal("1", await PgScalarAsync(c.Connection, "SELECT count(*) FROM config.agent_action_proposals", c.Ct));
+            Assert.True(await IsCachedAsync(c.Sql, cached.PlanHandle, c.Ct));
+        }, approval: "required");
+    }
+
     [Fact]
     public async Task ARealEvict_RemovesTheHandle_JournalsCalledAndDone_AnswersTheJournalId_AndHasNoUndo()
     {

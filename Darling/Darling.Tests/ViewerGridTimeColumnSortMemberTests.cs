@@ -202,6 +202,7 @@ public sealed class ViewerGridTimeColumnSortMemberTests
         { "InvestigationsWindow.xaml", "NotesGrid", "ExpiresDisplay", Name(typeof(InvestigationNoteViewRow)), "ExpiresAtUtc" },
         { "AgentChangesTab.xaml", "ChangesGrid", "WhenDisplay", Name(typeof(AgentChangeViewRow)), "CalledAtUtc" },
         { "AgentChangesTab.xaml", "RefusalsGrid", "WhenDisplay", Name(typeof(AgentRefusalViewRow)), "AtUtc" },
+        { "AgentChangesTab.xaml", "ProposalsGrid", "ExpiresDisplay", Name(typeof(ProposalViewRow)), "ExpiresAtUtc" },
         { "ServerActionsTab.xaml", "ServersGrid", "ChangedDisplay", Name(typeof(ServerActionViewRow)), "ChangedAtUtc" },
 
         /* #5913: the report feedback tab's two time columns sort by the row wrapper's UTC DateTime. */

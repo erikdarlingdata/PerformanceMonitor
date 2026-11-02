@@ -336,7 +336,7 @@ public sealed class InvestigationPracticeLiveTests
             var writes = 0;
             var hooks = new AgentActionHooks
             {
-                LoadLevels = (_, _, _) => Task.FromResult<Func<string, int, PerformanceMonitor.Notifications.AlertSeverityLevel?, int?>>((_, _, _) => 2),
+                LoadRoutes = (_, _, _) => Task.FromResult<Func<string, int, PerformanceMonitor.Notifications.AlertSeverityLevel?, PerformanceMonitor.Notifications.NotificationRoute?>>((_, _, _) => TestRouteHooks.AtLevel(2)),
                 ReadBefore = (_, _, _) => Task.FromResult<string?>("{}"),
                 Write = (_, _, _) => { writes++; return Task.FromResult<string?>("{}"); },
             };

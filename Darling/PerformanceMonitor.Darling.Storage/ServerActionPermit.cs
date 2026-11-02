@@ -67,8 +67,17 @@ public sealed class ServerActionPermit
     public string AgentId { get; }
 }
 
-/// <summary>The gate's answer as a value: exactly one of <see cref="Permit"/> and <see cref="Refusal"/> is set.</summary>
-public sealed record ServerActionDecision(ServerActionPermit? Permit, AgentActionRefusal? Refusal);
+/// <summary>The gate's answer as a value: exactly one of <see cref="Permit"/> and <see cref="Refusal"/> is set. <see cref="Approval"/> is set
+/// with the permit (#7109): whether the action needs a person's approval, which the tool answers with a proposal instead of a write.</summary>
+public sealed record ServerActionDecision(ServerActionPermit? Permit, AgentActionRefusal? Refusal, ServerActionApproval? Approval = null)
+{
+    /// <summary>True when the gate passed and the action needs a person's approval.</summary>
+    public bool NeedsApproval => Permit is not null && Approval is { Needed: true };
+}
+
+/// <summary>The approval outcome of a passed gate (#7109): <see cref="Needed"/> as <see cref="ActionApprovalRules.ForRequest"/> decides it,
+/// <see cref="SinglePerson"/> for the approver check, and the request's claim number, which a proposal stores.</summary>
+public sealed record ServerActionApproval(bool Needed, bool SinglePerson, int ClaimNo);
 
 public sealed partial class InvestigationRequestStore
 {
@@ -79,7 +88,9 @@ public sealed partial class InvestigationRequestStore
     public async System.Threading.Tasks.Task<ServerActionDecision> AuthorizeServerActionAsync(ServerActionCall call, ServerActionHooks hooks,
         System.Threading.CancellationToken cancellationToken = default)
     {
-        var refusal = await CheckServerActionAsync(call, hooks, cancellationToken);
-        return refusal is null ? new ServerActionDecision(new ServerActionPermit(call), null) : new ServerActionDecision(null, refusal);
+        var check = await CheckServerActionCoreAsync(call, hooks, cancellationToken);
+        return check.Refusal is null
+            ? new ServerActionDecision(new ServerActionPermit(call), null, check.Approval)
+            : new ServerActionDecision(null, check.Refusal);
     }
 }

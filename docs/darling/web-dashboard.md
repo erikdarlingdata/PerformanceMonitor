@@ -106,6 +106,20 @@ The web host also writes to the monitoring store. Everything below changes monit
 - Known Patterns: add, edit and delete a known pattern.
 - Run collectors now: queue one run of the collectors of a server, then read the result on the page.
 - Investigations and agent actions: approve or reject investigation notes, undo or switch agent changes, and turn the agent actions of a server on or off.
+- Proposals: approve a server action that an agent proposed (see [Proposals](#proposals)).
+- Route approval: the route editor sets **Action approval** and **Single-person approval**.
+
+### Proposals
+
+The **Proposals** link in the top bar opens `#/proposals` ([#7109](https://github.com/erikdarlingdata/PerformanceMonitor/issues/7109)). It lists the server actions that agents proposed on a route that needs approval, newest first. `#/proposals?proposal=<id>` opens one proposal. That is the link in a proposal notice. The rules for approval are in [Level 3 server actions: approval](security.md#level-3-server-actions-approval).
+
+A proposal shows its kind, server, target, binding, state, the agent's reason, the times, the first press and the outcome. The agent's reason is labelled as written by the agent. The statement follows `mcp.dataDetail`. A session that can press sees **First press: read the facts**. The press reads the facts again and shows them. The page then shows **Read the facts again** and **Confirm and run**.
+
+The same person must make both presses. If the facts changed at either press, the proposal ends as `superseded`, nothing runs, and the page shows what changed.
+
+A signed-in person presses as the enabled person that their sign-in maps to. That person needs an `approve` grant for that kind on that server. A seat that maps to nobody, such as the shared web token, presses as an administrator, and only on a route with single-person approval. A viewer-role sign-in presses only as the person it maps to. A session that cannot press reads the page and sees no buttons. The page says why when a press is not possible.
+
+The Admin page, on the Notification Routes tab, also names each Level 3 route that nobody can approve. See [Nobody can approve this](security.md#level-3-server-actions-approval) for the test.
 
 ### The tabs of a server
 

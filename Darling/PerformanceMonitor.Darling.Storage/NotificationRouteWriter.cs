@@ -68,6 +68,12 @@ public sealed class NotificationRouteDraft
     /// <summary>Whether the route posts a chat notice when an agent files a report (V233, #6979): <c>off</c>, <c>needs_person_or_change</c> or <c>all</c>.</summary>
     public string ReportNotice { get; set; } = NotificationRouteKinds.ReportNoticeOff;
 
+    /// <summary>Whether a Level 3 action on the route waits for a person's approval (V238, #7109): <c>required</c> (the column default) or <c>off</c>.</summary>
+    public string ActionApproval { get; set; } = NotificationRouteKinds.ActionApprovalRequired;
+
+    /// <summary>Whether a person who asked for an action may approve it on this route (V238, #7109). False by default.</summary>
+    public bool ApprovalSinglePerson { get; set; }
+
     /// <summary>When the route was last saved, as the writer's screen read it (the store's <c>modified_at</c>, UTC). On a <c>stored</c> draft
     /// handed to <see cref="NotificationRouteWriter.SaveAsync"/> it is the version the save expects: a route saved by anyone since is refused
     /// as a conflict instead of overwritten (#6274). Null or <c>default</c> skips the check.</summary>
@@ -99,8 +105,8 @@ public static class NotificationRouteWriter
     /// <summary>Inserts one route. <c>route_id</c> is <c>GENERATED ALWAYS AS IDENTITY</c>, so it is never in the column list.</summary>
     public const string InsertSql = @"
 INSERT INTO config_notification_routes
-    (metric_match, " + DestinationColumns + @", enabled, scope_server_id, scope_tag_id, " + AgentColumns + @", send_resolutions, fallback_route_id, severities, report_notice, modified_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, (now() AT TIME ZONE 'UTC'))
+    (metric_match, " + DestinationColumns + @", enabled, scope_server_id, scope_tag_id, " + AgentColumns + @", send_resolutions, fallback_route_id, severities, report_notice, action_approval, approval_single_person, modified_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, (now() AT TIME ZONE 'UTC'))
 RETURNING route_id";
 
     public const string UpdateSql = @"
@@ -123,6 +129,8 @@ UPDATE config_notification_routes SET
     fallback_route_id = $17,
     severities = $18,
     report_notice = $19,
+    action_approval = $20,
+    approval_single_person = $21,
     modified_at = (now() AT TIME ZONE 'UTC')
 WHERE route_id = $1";
 
@@ -223,8 +231,8 @@ WHERE route_id = $1";
     /// plaintext) and the address list. Only a writer with the service's login reads them.</summary>
     public const string SelectStoredSql =
         "SELECT route_id, metric_match, teams_url, slack_url, generic_url, pagerduty_routing_key, smtp_recipients, enabled, "
-        + "scope_server_id, scope_tag_id, " + AgentColumns + ", send_resolutions, fallback_route_id, modified_at, severities, report_notice "
-        + "FROM config_notification_routes WHERE route_id = $1";
+        + "scope_server_id, scope_tag_id, " + AgentColumns + ", send_resolutions, fallback_route_id, modified_at, severities, report_notice, "
+        + "action_approval, approval_single_person FROM config_notification_routes WHERE route_id = $1";
 
     /// <summary>The proxy of each webhook channel on the settings row (the row id 1 the Viewer reads).</summary>
     public const string SelectProxiesSql =
@@ -288,6 +296,11 @@ WHERE route_id = $1";
         if (ReportNoticeRefusal(row.ReportNotice) is { } reportNotice)
         {
             return reportNotice;
+        }
+
+        if (row.ActionApproval?.Trim().ToLowerInvariant() is not (NotificationRouteKinds.ActionApprovalRequired or NotificationRouteKinds.ActionApprovalOff))
+        {
+            return "action_approval is required or off.";
         }
 
         if (row.AgentLevel is { } level && level is not (NotificationRoute.AgentLevelOff or NotificationRoute.AgentLevelInvestigate or NotificationRoute.AgentLevelAct or NotificationRoute.AgentLevelServerAct))
@@ -446,6 +459,9 @@ WHERE route_id = $1";
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = NotificationRouteKinds.NormalizeSeverities(row.Severities) });
         /* #6979 (V233): the report notice setting, bound after the severity filter. */
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = NotificationRouteKinds.NormalizeReportNotice(row.ReportNotice) });
+        /* #7109 (V238): the approval setting and single-person approval, bound after the report notice. */
+        command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = NotificationRouteKinds.NormalizeActionApproval(row.ActionApproval) });
+        command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = row.ApprovalSinglePerson });
     }
 
     /// <summary>Binds an <c>integer</c> that may be SQL NULL.</summary>
@@ -671,6 +687,8 @@ WHERE route_id = $1";
             ModifiedAtUtc = reader.IsDBNull(17) ? null : DateTime.SpecifyKind(reader.GetDateTime(17), DateTimeKind.Utc),
             Severities = reader.GetString(18),
             ReportNotice = reader.GetString(19),
+            ActionApproval = NotificationRouteKinds.NormalizeActionApproval(reader.GetString(20)),
+            ApprovalSinglePerson = reader.GetBoolean(21),
         };
     }
 
@@ -841,6 +859,9 @@ WHERE route_id = $1";
             Compare("severities", NotificationRouteKinds.NormalizeSeverities(before?.Severities), NotificationRouteKinds.NormalizeSeverities(after?.Severities));
             /* #6979: the report notice setting decides whether the route's requests post a notice. */
             Compare("report_notice", NotificationRouteKinds.NormalizeReportNotice(before?.ReportNotice), NotificationRouteKinds.NormalizeReportNotice(after?.ReportNotice));
+            /* #7109: whether a Level 3 action waits for a person, and whether the asker may approve it. */
+            Compare("action_approval", NotificationRouteKinds.NormalizeActionApproval(before?.ActionApproval), NotificationRouteKinds.NormalizeActionApproval(after?.ActionApproval));
+            Compare("approval_single_person", before?.ApprovalSinglePerson, after?.ApprovalSinglePerson);
         }
 
         Compare("agent_level", before?.AgentLevel, after?.AgentLevel);
@@ -871,6 +892,8 @@ WHERE route_id = $1";
             ["enabled"] = row.Enabled,
             ["severities"] = NotificationRouteKinds.NormalizeSeverities(row.Severities),
             ["report_notice"] = NotificationRouteKinds.NormalizeReportNotice(row.ReportNotice),
+            ["action_approval"] = NotificationRouteKinds.NormalizeActionApproval(row.ActionApproval),
+            ["approval_single_person"] = row.ApprovalSinglePerson,
         };
 
         var detail = new System.Text.Json.Nodes.JsonObject { ["before"] = Describe(before), ["after"] = Describe(after) };

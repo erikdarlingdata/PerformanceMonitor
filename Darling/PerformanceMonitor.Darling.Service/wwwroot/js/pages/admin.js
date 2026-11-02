@@ -35,7 +35,7 @@ import { dailyReportEditor } from "./admin-daily-report.js";
 import { buildAgentChanges, resetAgentChangesStatus } from "./admin-agent-changes.js";
 import { buildServerActions, resetServerActionsStatus } from "./admin-server-actions.js";
 import { buildPeople, resetPeopleStatus } from "./admin-people.js";
-import { buildProfiles, readAgentSetupAccess, routeColumns, routeEditorNodes, routeListOnlyNodes, routeUseText } from "./admin-agent-setup.js";
+import { buildProfiles, nobodyCanApproveNodes, readAgentSetupAccess, routeColumns, routeEditorNodes, routeListOnlyNodes, routeUseText } from "./admin-agent-setup.js";
 
 export const SERVER_COLUMNS = [
   { key: "display_name", label: "Display Name" },
@@ -1271,7 +1271,8 @@ export function signingStatusLines(data) {
 }
 
 async function buildRoutes(body, generation) {
-  const [res, signing, session] = await Promise.all([readTool("get_notification_routes", {}), apiGet("/api/webhook-signing"), getSession()]);
+  const [res, signing, session, approvers] = await Promise.all([readTool("get_notification_routes", {}), apiGet("/api/webhook-signing"), getSession(),
+    apiGet("/api/notification-routes/nobody-can-approve")]);
   if (generation !== renderGeneration) return;
   const bad = failure(res);
   if (bad) return mount(body, bad);
@@ -1295,6 +1296,7 @@ async function buildRoutes(body, generation) {
     ...(access.routes ? routeEditorNodes(options) : routeListOnlyNodes(access.message, access.managed, access.adminWritesOff)),
     noticeStrip(ROUTES_NOTE),
     ...signingNodes,
+    ...nobodyCanApproveNodes(approvers),
     VIZ.table({ routes: rows }, {
       rowsKey: "routes",
       columns: routeColumns(ROUTE_COLUMNS, options),

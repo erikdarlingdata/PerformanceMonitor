@@ -172,7 +172,95 @@ When a notification route is set to Level 2, an investigating agent may change m
 
 **People, identities and grants (#7107).** An administrator can name people, map each one to the identities they sign in with, and give them grants. A `web` identity is a signed-in web seat's owner key, a hash of the identity provider's issuer and subject. It is never the user name, because some identity providers reuse user names. The shared web token has no owner key, so it maps to nobody. A `slack` identity is the Slack team id and user id. One identity belongs to one person at most. A grant names a capability and a scope: one server, one tag, or the fleet. The capabilities are `ask`, `request_level_2`, `request_level_3`, `approve`, `undo`, `decide_note` and `feedback`. A `request_level_3` or `approve` grant also lists the server action kinds it covers. The web dashboard's Admin page has a **People** tab. Only a signed-in admin, or the shared web token, sees the list with each person's sign-in keys and Slack ids. Any other session sees only its own sign-in key, to give to an administrator. MCP `get_people` shows the kind of each identity and never its key or ids. Only the store owner writes the three tables. The schema upgrade itself takes every write back from the four roles, on the tables and on their id sequences. So the tables are safe even before provisioning runs again after the upgrade. Removing a server or a tag removes its grants. See [People, sign-ins and grants](admin.md#people-sign-ins-and-grants).
 
-Only the store owner writes the three tables, as for the server action switches. The `admin`, `viewer`, `web` and `mcp` logins read them and cannot change them. Each change writes a journal row that names the administrator. Only the store owner can write those rows: `person_added`, `person_renamed`, `person_enabled`, `person_disabled`, `person_identity_added`, `person_identity_removed`, `person_grant_added` and `person_grant_removed`. The `get_people` MCP tool reads the directory. No MCP tool, chat message or agent changes it. No gate checks a grant yet. So nothing a login, token or screen can do changes, and administrators keep every power they have.
+Only the store owner writes the three tables, as for the server action switches. The `admin`, `viewer`, `web` and `mcp` logins read them and cannot change them. Each change writes a journal row that names the administrator. Only the store owner can write those rows: `person_added`, `person_renamed`, `person_enabled`, `person_disabled`, `person_identity_added`, `person_identity_removed`, `person_grant_added` and `person_grant_removed`. The `get_people` MCP tool reads the directory. No MCP tool, chat message or agent changes it. Only the `approve` grant is read today (see "Level 3 server actions: approval" below). No other grant is checked, so administrators keep every other power.
+
+### Level 3 server actions: approval
+
+#### Action approval
+
+Each alert route has two approval settings that apply at Level 3. `action_approval` is `required` or `off`. A new route starts at `required`, so a person must approve each server action that the route lets an agent run. The upgrade to this version set `off` only on the routes that were at Level 3 then, so those routes keep acting as before. A route that a person raises to Level 3 later starts at `required`. `approval_single_person` starts off.
+
+If the alerts of one request come from several routes, the request needs approval when any of those routes is `required`. It allows single-person approval only when every one of them does. A request that a person's chat message opened always needs approval, whatever the route says.
+
+#### What the agent gets
+
+On a route that needs approval, a Level 3 tool called with `dry_run` false runs its checks and a dry run. It does not change the server. It stores a proposal and answers `status` `proposed`. The answer also holds the `kind`, the `server`, the `proposal_id` and `nobody_can_approve`. It adds what the dry run shows, such as the statement. A second call for the same request, tool and target gets the same `proposal_id` and adds no proposal. The answer tells the agent not to call the tool again. If a route is set to `required` after the gate passed, the agent's own write is refused as `approval_required`.
+
+#### Where proposals are stored
+
+A proposal waits in `config.agent_action_proposals` for a person. Only the store owner writes that table. The `admin`, `viewer` and `web` logins read it. The `mcp` login cannot read it, because a proposal holds the statement that the action runs.
+
+A proposal is `pending` until a person approves it, and it expires after 60 minutes. The service's sweep voids a pending proposal when a person closes its request. It also voids a pending `kill_session` proposal when the alert of its request resolves. It marks an approved proposal `unknown` when no outcome arrives within 10 minutes. A plan force whose reply was lost ends the same way as the agent's own call. The press reads the plan again, and the proposal ends as `run` when the plan reads as forced. If the read fails or the plan is not forced, the proposal stays `unknown`. Each state change writes a journal row that only the store owner can write: `proposal_created`, `proposal_first_press`, `proposal_approved`, `proposal_run`, `proposal_failed`, `proposal_unknown`, `proposal_refused`, `proposal_expired`, `proposal_superseded` and `proposal_voided`. The row `proposal_notice_sent` is owner-only too.
+
+#### Approving a proposal
+
+All seven action tools go through the same approval:
+
+- `force_query_store_plan` and `unforce_query_store_plan`
+- `evict_cached_plan`
+- `kill_session` (SQL Server, Azure SQL Database and PostgreSQL)
+- `recompile_module`
+- `create_plan_guide` and `drop_plan_guide`
+
+A person approves with two presses, and the same person makes both. Each press runs the tool's dry run again against the proposal's server. If the facts differ from what the agent proposed, the proposal ends as `superseded`, nothing runs, and the answer names what changed.
+
+The confirming press also compares the facts with the first press. A dry run that the server refuses, such as a session that is gone, ends the proposal as `superseded` too. A read that fails leaves it `pending`.
+
+The confirming press checks the conditions that the agent's own write checks, in one transaction:
+
+- the service switch
+- the request is not closed
+- a `kill_session` on an alert request has an alert that has not resolved
+- Level 3 over the live routes
+- the server's switch and the remediation login
+
+It then checks the approver. The write runs in its own transaction, which checks the same conditions again. If they no longer hold, the proposal ends as `refused` with the reason. The journal records the agent as the actor of `action_called` and the approver in its detail. No agent tool approves a proposal. The agent's own kill is also refused once a person closes the request or the alert of an alert request resolves (`request_closed`, `alert_resolved`).
+
+#### Who can press
+
+The approver must be an enabled person with an `approve` grant for that kind on that server. The grant names the server, a tag of the server, or the fleet.
+
+- **Web dashboard.** A signed-in person whose `web` identity maps to such a person presses as that person. A seat that can edit and maps to nobody, such as the shared web token, presses as an administrator. A viewer-role sign-in presses only as the person it maps to. It is refused when it maps to nobody or to a disabled person. On a managed store, `web.allowAdminWrites` must be on, or nobody presses on the web.
+- **Viewer.** It presses as an administrator.
+- **Administrator path.** An administrator presses only on a route with single-person approval. On any other route the press is refused with `administrator_needs_single_person`.
+- **Asker.** On a route without single-person approval, a person who asked in the request cannot approve it.
+
+Where the statement shows, in the web page and the Viewer grid, it follows `mcp.dataDetail`. At `maskLiterals` its literals are replaced, and at `metadataOnly` it is left out. The agent's reason is shown as the agent's own words.
+
+#### Nobody can approve this
+
+The sentence "Nobody can approve this. Map a person, or turn on single-person approval." shows in four places.
+
+- The `proposed` answer to the agent. It adds the sentence when single-person approval is off. It also needs that no enabled person with a sign-in holds an `approve` grant for that kind that reaches the server.
+- The Approval column of the Viewer's Proposals grid and the proposal notice, with the same test.
+- The Viewer's route dialog, under the approval setting. It shows when approval is `required`, single-person approval is off, and no enabled person with a sign-in holds any `approve` grant.
+- The web dashboard's Admin page, on the Notification Routes tab, as "Route N: ...". It names each Level 3 route that meets three tests. Approval is not `off`. Single-person approval is off. No enabled person with a sign-in holds an `approve` grant that reaches a server of the route.
+
+For the web page see [Proposals](web-dashboard.md#proposals). For the grid and the dialog see [Proposals in the Viewer](viewer.md#proposals). For the notice see [Proposal notices](alerts-and-notifications.md#proposal-notices-7109).
+
+#### Who sets approval
+
+A person sets any value in the Viewer's route dialog or in the web route editor. Over MCP, `update_notification_route` takes `action_approval` and `approval_single_person` for the operator token only, and it can only tighten them.
+
+- `action_approval` can go to `required`, never to `off`.
+- `approval_single_person` can go to false, never to true.
+- `create_notification_route` takes neither, so a route that MCP creates starts at `required` and false.
+- A route with approval `off` cannot be raised to Level 3 unless the same call sets `required`. A Level 3 route with approval `off` cannot be enabled, and its match, scope and severities cannot be changed.
+- A Level 3 route with `required` cannot be disabled, cleared to Inherit, or have its match, scope or severities changed. Its level can still be lowered to 0, 1 or 2.
+- While any other enabled Level 3 route has approval `off`, MCP refuses three changes to a route that has an agent level (0 to 3). It does not disable the route, clear its level, or change its match, scope or severities. Such a change can move an alert to the route with approval `off`, whose actions run with no proposal. This closes the path of lowering a Level 3 route with `required` to Level 2 first and changing it with a second call. The refusal names both routes and says that a person makes the change in the Viewer or on the web dashboard. Setting `action_approval` to `required` on the other route is still allowed.
+- `set_notification_route_enabled` follows the same rules, because on a route with an agent level it makes the same change as `update_notification_route`.
+
+Lowering a level, raising a level (except to Level 3 on a route with approval `off`), and turning approval on are allowed.
+
+`get_notification_routes` and every route answer show both columns. `route_agent_changed` journals both, before and after. The undo answer of `update_notification_route` leaves both out. When a call changed one of them, the answer says that a person must undo that change in the Viewer or on the web dashboard.
+
+#### Known limits of approval
+
+The MCP rules stop the plain paths. They are not a boundary against an operator token.
+
+- An operator token can edit server tags. That can move a server out of a route's tag scope.
+- A token holder who edits server tags can move a server into or out of a tag-scoped `approve` grant. So tag edits widen or narrow who can approve. They do not skip approval, because a person with the grant must still press twice.
+- The shared web token is an administrator web seat. It can set `off`, and it presses as an administrator on a route with single-person approval.
 
 ## Level 2: agents change mute rules and custom alert rules
 

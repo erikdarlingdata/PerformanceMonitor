@@ -365,8 +365,56 @@ public sealed class AzureKillLiveTests
         command.Parameters.Add(new SqlParameter("@dry", SqlDbType.Bit) { Value = false });
         command.Parameters.Add(new SqlParameter("@database", SqlDbType.NVarChar, 128) { Value = database });
         command.Parameters.Add(new SqlParameter("@monitoring_login", SqlDbType.NVarChar, 128) { Value = DBNull.Value });
+        SqlServerRemediationExecutor.AddKillActivityParameters(command, null);
         Assert.Equal("not_primary", (string?)await command.ExecuteScalarAsync(ct));
         Assert.True(await AliveAsync(database, victim));
+    }
+
+    /// <summary>The victim's <c>last_request_end_time</c>, read as the remediation user.</summary>
+    private static async Task<DateTime?> LastRequestEndAsync(string database, Victim victim)
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var connection = new SqlConnection(Builder(database, Fix).ConnectionString);
+        await connection.OpenAsync(ct);
+        await using var command = new SqlCommand("SELECT last_request_end_time FROM sys.dm_exec_sessions WHERE session_id = @id AND login_time = @login;", connection);
+        command.Parameters.Add(new SqlParameter("@id", SqlDbType.Int) { Value = victim.SessionId });
+        command.Parameters.Add(new SqlParameter("@login", SqlDbType.DateTime) { Value = victim.LoginTime });
+        return await command.ExecuteScalarAsync(ct) as DateTime?;
+    }
+
+    /// <summary>
+    /// #7109: a kill that carries the <c>last_request_end_time</c> read before the session finished another batch is refused <c>session_changed</c>,
+    /// dry run and write alike, and the session lives. With the current value the same kill goes through.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(Databases))]
+    public async Task AKillWithAStaleLastRequestEnd_IsRefusedSessionChanged_AndTheSessionLives_ButTheCurrentValueKills(string database)
+    {
+        SkipUnlessSet(database);
+        var ct = TestContext.Current.CancellationToken;
+        await using var victim = await OpenVictimAsync(database, holdLock: false);
+        var before = await LastRequestEndAsync(database, victim);
+        Assert.NotNull(before);
+
+        /* The session finishes a new batch: its last_request_end_time moves on (datetime resolution is about 3 ms). */
+        await Task.Delay(50, ct);
+        await using (var again = new SqlCommand("SELECT 1;", victim.Connection))
+            Assert.Equal(1, (int)(await again.ExecuteScalarAsync(ct))!);
+        var after = await LastRequestEndAsync(database, victim);
+        Assert.NotEqual(before, after);
+
+        foreach (var dry in new[] { true, false })
+        {
+            var refused = await Executor().KillAzureSessionAsync(Permit(victim.SessionId, database), victim.SessionId, victim.LoginTime, dry, ct, new KillExpectedActivity(before));
+            Assert.Equal(RemediationOutcome.Refused, refused.Outcome);
+            Assert.Equal(RemediationResult.Reasons.SessionChanged, refused.Reason);
+            Assert.False(refused.Wrote);
+            Assert.True(await AliveAsync(database, victim));
+        }
+
+        var killed = await Executor().KillAzureSessionAsync(Permit(victim.SessionId, database), victim.SessionId, victim.LoginTime, dryRun: false, ct, new KillExpectedActivity(after));
+        Assert.True(killed is { Outcome: RemediationOutcome.Done, Wrote: true }, killed.Message);
+        Assert.False(await AliveAsync(database, victim));
     }
 
     [Theory]

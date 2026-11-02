@@ -43,6 +43,8 @@ public partial class NotificationRouteEditDialog : Window
     internal const string ReportNoticeOffChoice = "Off";
     internal const string ReportNoticeNeedsPersonOrChangeChoice = "Needs a person or made a change";
     internal const string ReportNoticeAllChoice = "All reports";
+    internal const string ActionApprovalRequiredChoice = "Required";
+    internal const string ActionApprovalOffChoice = "Off";
     private const string AgentOffChoice = "Off";
     /* #5912: shown only on a route already stored at Level 2, and never chosen from here (the write path for Act is a later slice). */
     private const string AgentActChoice = "Act (Level 2: investigate and change alert settings)";
@@ -72,6 +74,34 @@ public partial class NotificationRouteEditDialog : Window
     /// <param name="existing">The route to edit, or null for a new one.</param>
     /// <param name="dataService">The store, for the signing key of an existing route (#5998); null leaves the key block off.</param>
     private const string FallbackNoneChoice = "None (this route's own channels)";
+
+    private bool _nobodyCanApprove;
+
+    /// <summary>#7109: whether no enabled mapped person holds any approve grant. The window reads it from the store before it shows the dialog.</summary>
+    internal bool NobodyCanApprove
+    {
+        get => _nobodyCanApprove;
+        set
+        {
+            _nobodyCanApprove = value;
+            ShowApprovalNote();
+        }
+    }
+
+    /// <summary>The sentence under the approval setting, or null: only on a route set to Act on servers (the one level that proposes actions for approval),
+    /// where approval is required, a second person is needed and nobody can approve. The web page's check (<c>agent_level = 3</c>) reads the same way.</summary>
+    internal static string? ApprovalNote(int? agentLevel, string? actionApproval, bool singlePerson, bool nobodyCanApprove) =>
+        nobodyCanApprove && !singlePerson && agentLevel == NotificationRoute.AgentLevelServerAct
+        && NotificationRouteKinds.NormalizeActionApproval(actionApproval) == NotificationRouteKinds.ActionApprovalRequired
+            ? PerformanceMonitor.Darling.Storage.ActionApprovalRules.NobodyCanApproveMessage
+            : null;
+
+    private void ShowApprovalNote()
+    {
+        var note = ApprovalNote(SelectedAgentLevel(), (ActionApprovalCombo.SelectedItem as ComboBoxItem)?.Tag as string, ApprovalSinglePersonCheck.IsChecked == true, _nobodyCanApprove);
+        ApprovalNobodyText.Text = note ?? "";
+        ApprovalNobodyText.Visibility = note is null ? Visibility.Collapsed : Visibility.Visible;
+    }
 
     public NotificationRouteEditDialog(ViewerRouteScopeInputs? scopeInputs, NotificationRouteRow? existing = null, ViewerDataService? dataService = null,
         System.Collections.Generic.IEnumerable<NotificationRouteRow>? allRoutes = null)
@@ -115,6 +145,14 @@ public partial class NotificationRouteEditDialog : Window
         ReportNoticeCombo.Items.Add(new ComboBoxItem { Content = ReportNoticeAllChoice, Tag = NotificationRouteKinds.ReportNoticeAll });
         var storedReportNotice = NotificationRouteKinds.NormalizeReportNotice(existing?.ReportNotice);
         ReportNoticeCombo.SelectedItem = ReportNoticeCombo.Items.Cast<ComboBoxItem>().First(i => Equals(i.Tag, storedReportNotice));
+        /* #7109: the approval setting for Level 3 actions and single-person approval. A person in the Viewer sets any value. */
+        ActionApprovalCombo.Items.Add(new ComboBoxItem { Content = ActionApprovalRequiredChoice, Tag = NotificationRouteKinds.ActionApprovalRequired });
+        ActionApprovalCombo.Items.Add(new ComboBoxItem { Content = ActionApprovalOffChoice, Tag = NotificationRouteKinds.ActionApprovalOff });
+        var storedApproval = NotificationRouteKinds.NormalizeActionApproval(existing?.ActionApproval);
+        ActionApprovalCombo.SelectedItem = ActionApprovalCombo.Items.Cast<ComboBoxItem>().First(i => Equals(i.Tag, storedApproval));
+        ApprovalSinglePersonCheck.IsChecked = existing?.ApprovalSinglePerson == true;
+        ActionApprovalCombo.SelectionChanged += (_, _) => ShowApprovalNote();
+        ApprovalSinglePersonCheck.Click += (_, _) => ShowApprovalNote();
 
         /* #6036: the fallback picker lists every OTHER route, with a none choice; the route being edited is never offered. */
         FallbackRouteCombo.Items.Add(new ComboBoxItem { Content = FallbackNoneChoice, Tag = null });
@@ -250,6 +288,8 @@ public partial class NotificationRouteEditDialog : Window
         Route.Enabled = EnabledCheckBox.IsChecked == true;
         Route.Severities = NotificationRouteKinds.NormalizeSeverities((SeveritiesCombo.SelectedItem as ComboBoxItem)?.Tag as string);
         Route.ReportNotice = NotificationRouteKinds.NormalizeReportNotice((ReportNoticeCombo.SelectedItem as ComboBoxItem)?.Tag as string);
+        Route.ActionApproval = NotificationRouteKinds.NormalizeActionApproval((ActionApprovalCombo.SelectedItem as ComboBoxItem)?.Tag as string);
+        Route.ApprovalSinglePerson = ApprovalSinglePersonCheck.IsChecked == true;
 
         var error = ReadAgent();
         error ??= ViewerDataService.ValidateNotificationRoute(Route);
@@ -462,7 +502,11 @@ public partial class NotificationRouteEditDialog : Window
         ReportNoticeHint.Visibility = investigates ? Visibility.Collapsed : Visibility.Visible;
     }
 
-    private void AgentLevelCombo_SelectionChanged(object sender, SelectionChangedEventArgs e) => UpdateAgentLimitsEnabled();
+    private void AgentLevelCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        UpdateAgentLimitsEnabled();
+        ShowApprovalNote();
+    }
 
     /// <summary>Reads the agent channel off the screen into <see cref="Route"/> (#5632), or says which number is not a
     /// whole number. The bounds are <see cref="ViewerDataService.ValidateNotificationRoute"/>'s.</summary>

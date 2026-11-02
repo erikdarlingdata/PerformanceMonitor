@@ -125,18 +125,17 @@ public sealed class PersonDirectoryCommandTests
     }
 
     [Fact]
-    public void TheRungIsTheLadderTop_AndTheProbeMapsIt()
+    public void TheRungIsV237_AndTheProbeMapsIt()
     {
         var rung = PgMigrations.Scripts.Single(m => m.Name == "people-identities-grants");
         Assert.Equal(237, rung.Version);
-        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var parameters = method.GetParameters();
         var own = Array.FindIndex(parameters, p => p.Name == "hasPeopleGrants");
         Assert.True(own >= 0);
-        var all = Enumerable.Repeat((object)true, parameters.Length).ToArray();
+        /* Every sentinel up to this rung's own: the rungs above it are off, so the map reads this rung. */
+        var all = parameters.Select((_, i) => (object)(i <= own)).ToArray();
         Assert.Equal(237, (int)method.Invoke(null, all)!);
         all[own] = false;
         Assert.Equal(236, (int)method.Invoke(null, all)!);

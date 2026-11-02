@@ -187,7 +187,25 @@ A read-only seat sees the fields for reference and cannot save them. The Viewer 
 
 Settings, Muting and triage, Manage People ([#7107](https://github.com/erikdarlingdata/PerformanceMonitor/issues/7107), store schema V237) lists the people who work with the agents. Add, rename, disable or enable a person, then map identities and give grants to the selected one. A `web` identity is the 43-character sign-in key the person copies from the web page after they sign in. A `slack` identity is a Slack team id and user id. A grant is a capability plus a scope picked as a notification route picks one: the whole fleet, a tag or one server. The Level 3 request and approve capabilities also list the server actions they cover.
 
-Every change goes through the service, which writes it and journals it. A refusal shows the service's own sentence. A read-only seat sees the lists and no buttons. Nothing reads a grant yet, so this screen changes what no one can do today.
+Every change goes through the service, which writes it and journals it. A refusal shows the service's own sentence. A read-only seat sees the lists and no buttons. Only the `approve` grant is read today, when a person approves a server action that an agent proposed (see [Proposals](#proposals)). This screen changes no other power.
+
+## Proposals
+
+A route set to **Act on servers** (Level 3) can make an agent's server action wait for a person ([#7109](https://github.com/erikdarlingdata/PerformanceMonitor/issues/7109), store schema V238). The agent then stores a proposal instead of running the action. The rules for approval are in [Level 3 server actions: approval](security.md#level-3-server-actions-approval).
+
+### The grid
+
+The **Agent changes** tab of the Investigations window has a Proposals grid under the list of changes. It lists the newest 200 proposals. The columns are Kind, Server, Target, State, Agent's reason, Expires and Approval. The reason is the agent's own words. A read-only seat sees no proposals. The statement in a target follows `mcp.dataDetail`.
+
+### Approve Selected Proposal
+
+The Viewer presses as an administrator, so it approves only a pending proposal on a route with single-person approval. The first press reads the facts again and shows them with the agent's reason. If you confirm, the second press runs the action only when the facts still match. If they changed, the proposal ends as `superseded` and the message names what changed.
+
+On any other route the Approval column says that a mapped person approves it in the web. It gives the link `<web.publicBaseUrl>/#/proposals?proposal=<id>` when the dashboard is on and `web.publicBaseUrl` is set. When nobody can approve the proposal, the column adds "Nobody can approve this. Map a person, or turn on single-person approval."
+
+### The route dialog
+
+The Viewer's route dialog has an **Action approval** box (`Required` or `Off`) and a **The person who asked may approve** box. They apply when the agent level is **Act on servers**. Under them the dialog shows "Nobody can approve this. Map a person, or turn on single-person approval." in one case. Approval is `Required`, the second box is off, and no enabled person with a sign-in holds any `approve` grant. The sentence follows the two controls as you change them.
 
 ## Read-only versus read-write seats
 

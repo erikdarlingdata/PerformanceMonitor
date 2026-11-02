@@ -654,6 +654,12 @@ END $$;"),
             @"DROP TABLE IF EXISTS config.person_grant;
 DROP TABLE IF EXISTS config.person_identity;
 DROP TABLE IF EXISTS config.person;"),
+        // V238 (#7109): the action proposals table and the two route approval columns. The table is the probe's newest sentinel. The rewind
+        // drops all three, so a re-run of V238 adds them again (and runs the backfill again, on a store whose column is gone). Safe on a store
+        // that never had them.
+        new(238, "hasActionProposals",
+            @"DROP TABLE IF EXISTS config.agent_action_proposals;
+ALTER TABLE config.config_notification_routes DROP COLUMN IF EXISTS action_approval, DROP COLUMN IF EXISTS approval_single_person;"),
     ];
 
     /// <summary>

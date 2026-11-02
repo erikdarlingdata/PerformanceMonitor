@@ -78,7 +78,7 @@ public sealed class ViewerNotificationRouteScopeTests
         Assert.Contains("scope_server_id = $9", ViewerDataService.NotificationRouteUpdateSql, StringComparison.Ordinal);
         Assert.Contains("scope_tag_id = $10", ViewerDataService.NotificationRouteUpdateSql, StringComparison.Ordinal);
         /* #5632: the agent columns, $10-$14, follow the scope pair. */
-        Assert.Contains("$8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, (now()", ViewerDataService.NotificationRouteInsertSql, StringComparison.Ordinal);
+        Assert.Contains("$8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, (now()", ViewerDataService.NotificationRouteInsertSql, StringComparison.Ordinal);
     }
 
     /* ---- the picker ---------------------------------------------------------------------------------------- */

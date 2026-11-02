@@ -38,7 +38,7 @@ public sealed partial class SqlServerRemediationExecutor
     /// is this connection's own (<c>own_session</c>); no such session on this compute (<c>session_gone</c>); a different <c>login_time</c>
     /// (<c>session_reused</c>); the session is in another database (<c>session_in_other_database</c>); not a user session
     /// (<c>not_user_session</c>); the session has no login name, is the remediation login's with any program name, or has a Darling program name (<c>PerformanceMonitorDarling%</c>) AND the monitoring login (<c>tool_login_session</c>; with no monitoring login known, the program name alone); the login lacks
-    /// <c>KILL DATABASE CONNECTION</c> (<c>kill_permission_denied</c>). Then the <c>KILL</c> unless <c>@dry</c>, built from the int parameter's
+    /// <c>KILL DATABASE CONNECTION</c> (<c>kill_permission_denied</c>). Then the a write whose <c>@expected_last_end</c> is not the session's <c>last_request_end_time</c>, when <c>@check_activity</c> is 1 (<c>session_changed</c>, #7109). Then the <c>KILL</c> unless <c>@dry</c>, built from the int parameter's
     /// decimal form only, and the same TRY/CATCH read of the session's request after it as <see cref="KillSql"/>. The columns are
     /// <see cref="KillSql"/>'s, so the one reader serves both.
     /// </summary>
@@ -132,6 +132,9 @@ BEGIN
         SET @outcome = 'tool_login_session';
     ELSE IF ISNULL(HAS_PERMS_BY_NAME(DB_NAME(), 'DATABASE', 'KILL DATABASE CONNECTION'), 0) <> 1
         SET @outcome = 'kill_permission_denied';
+    ELSE IF @check_activity = 1
+         AND NOT (@last_end = @expected_last_end OR (@last_end IS NULL AND @expected_last_end IS NULL))
+        SET @outcome = 'session_changed';
     ELSE IF @dry = 1
         SET @outcome = 'dry_ok';
     ELSE
@@ -247,7 +250,8 @@ SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actua
     /// one session id never reaches the same id in another database. The connection opens it (never <c>master</c>), read-write.
     /// A transient error on the open is retried (<see cref="AzureOpenWaits"/>); the kill batch is sent once, and never again.
     /// </summary>
-    public async Task<RemediationResult> KillAzureSessionAsync(ServerActionPermit permit, int sessionId, DateTime loginTime, bool dryRun, CancellationToken ct)
+    public async Task<RemediationResult> KillAzureSessionAsync(ServerActionPermit permit, int sessionId, DateTime loginTime, bool dryRun, CancellationToken ct,
+        KillExpectedActivity? expected = null)
     {
         const string name = "kill_session";
         if (sessionId <= 0)
@@ -278,6 +282,7 @@ SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actua
             command.Parameters.Add(new SqlParameter("@dry", SqlDbType.Bit) { Value = dryRun });
             command.Parameters.Add(new SqlParameter("@database", SqlDbType.NVarChar, 128) { Value = database });
             command.Parameters.Add(new SqlParameter("@monitoring_login", SqlDbType.NVarChar, 128) { Value = (object?)_monitoringUserName ?? DBNull.Value });
+            AddKillActivityParameters(command, expected);
             try
             {
                 return Log(await ReadKillAnswerAsync(command, name, dryRun, sessionId, ct, database));

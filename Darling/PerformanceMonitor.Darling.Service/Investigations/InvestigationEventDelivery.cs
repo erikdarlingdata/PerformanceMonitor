@@ -162,7 +162,78 @@ public sealed class InvestigationEventDelivery
             }
         }
 
-        return (fallbacks, posted, await NoticePassAsync(routes, cancellationToken));
+        var notices = await NoticePassAsync(routes, cancellationToken);
+        return (fallbacks, posted, notices + await ProposalNoticePassAsync(routes, cancellationToken));
+    }
+
+    /// <summary>#7109: how far back a pass reads proposal creations for a notice. A proposal expires after an hour, so a service that was down
+    /// longer than half of it does not announce a proposal with little time left.</summary>
+    public static readonly TimeSpan ProposalNoticeWindow = TimeSpan.FromMinutes(30);
+
+    /// <summary>#7109: the reason of the mark a proposal gets when its route has no notice channel.</summary>
+    internal const string NoProposalNoticeDestination = "no_destination";
+
+    /// <summary>
+    /// #7109: one notice for each new proposal. The proposal's <c>proposal_created</c> journal row drives it (a retry that returns the
+    /// same proposal writes none), the once mark is written before the send, and a pass that finds the mark sends nothing. The notice goes to
+    /// the email, Teams and Slack destinations of the request's route and carries the kind, the server and the link, and the sentence when
+    /// nobody can approve (<see cref="ProposalNotice"/>). A route with no channel gets the mark and no send. Answers how many proposals
+    /// reached at least one channel.
+    /// </summary>
+    private async Task<int> ProposalNoticePassAsync(IReadOnlyList<NotificationRoute> routes, CancellationToken cancellationToken)
+    {
+        var since = DateTime.SpecifyKind(_utcNow(), DateTimeKind.Utc) - ProposalNoticeWindow;
+        var sent = 0;
+        foreach (var candidate in await _store.PendingProposalNoticesAsync(since, BatchSize, cancellationToken))
+        {
+            var route = routes.FirstOrDefault(r => r.RouteId == candidate.RouteId);
+            if (route is null || !route.Enabled)
+            {
+                continue;
+            }
+
+            var targets = DarlingAlertDeliverer.NoticeTargets(route);
+            if (targets.Count == 0)
+            {
+                await _store.MarkProposalNoticeAsync(candidate, NoProposalNoticeDestination, cancellationToken);
+                continue;
+            }
+
+            /* The sentence is read before the mark, so a read that fails is tried again next pass instead of losing the notice. */
+            var approval = await _store.RequestApprovalAsync(candidate.RequestId,
+                (connection, _, token) => Mcp.DarlingAgentActionGate.LoadRoutesAsync(connection, _logger, token), cancellationToken);
+            var nobody = approval is { } state
+                && await _store.NobodyCanApproveAsync(candidate.ServerId, InvestigationRequestStore.ServerActionForTool(candidate.Tool), state.SinglePerson, cancellationToken);
+            if (!await _store.MarkProposalNoticeAsync(candidate, "sent", cancellationToken))
+            {
+                continue;
+            }
+
+            var (currentValue, detail) = ProposalNotice.Build(candidate, _baseUrl(), nobody);
+            try
+            {
+                var reached = await _sends.SendNoticeAsync(targets, ProposalNotice.Title, candidate.ServerName, currentValue, detail, cancellationToken);
+                if (reached.Count > 0)
+                {
+                    sent++;
+                }
+                else
+                {
+                    _logger.LogWarning("Proposal notice for proposal {ProposalId} reached no channel", candidate.ProposalId);
+                }
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                /* Not retried: the mark is written, and the proposal stays on the Viewer and the web page. */
+                _logger.LogWarning("Proposal notice for proposal {ProposalId} was not delivered: {Message}", candidate.ProposalId, ex.Message);
+            }
+        }
+
+        return sent;
     }
 
     private async Task<bool> FallBackAsync(

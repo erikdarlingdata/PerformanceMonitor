@@ -72,6 +72,8 @@ public sealed class WebRouteStatementCensusTests
         ["\"/api/servers/{id:int}\""] = "server registry",
         ["\"/api/servers/{id:int}/actions/{action}\""] = "writes one action switch; the answer is a status, server name and on or off (#6269)",
         ["\"/api/people/{command}\""] = "writes one person, sign-in or grant; the answer is a status, a message and the row ids (#7107)",
+        ["\"/api/proposals/{id:guid}/first-press\""] = "presses one proposal through PressAsync, which answers through the sweep; the facts pass the mcp.dataDetail masker first (#7109)",
+        ["\"/api/proposals/{id:guid}/confirm\""] = "presses one proposal through PressAsync, which answers through the sweep; the facts pass the mcp.dataDetail masker first (#7109)",
         ["\"/api/admin/servers/{id:int}\""] = "server registry",
         ["\"/api/collectors/run\""] = "queues one command through a store function; no statement read (#5941)",
         ["\"/api/collectors/run/{commandId:long}\""] = "one command row by id (#5941)",

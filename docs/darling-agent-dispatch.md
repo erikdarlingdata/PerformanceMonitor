@@ -99,7 +99,7 @@ A named token that cannot be served is left out, and the start logs one Critical
 
 Darling reads `mcp.tokens` once, at start.
 
-Route agent fields over MCP (the agent level and its limits on `create_notification_route` and `update_notification_route`, for the operator role only) are available. The fields are `agent_level`, `agent_max_per_hour`, `agent_max_per_day`, `agent_lease_minutes` and `agent_expiry_minutes`. `update_notification_route` also takes `clear_agent_level`.
+Route agent fields over MCP (the agent level and its limits on `create_notification_route` and `update_notification_route`, for the operator role only) are available. The fields are `agent_level`, `agent_max_per_hour`, `agent_max_per_day`, `agent_lease_minutes` and `agent_expiry_minutes`. `update_notification_route` also takes `clear_agent_level`. For the operator role, `update_notification_route` also takes `action_approval` and `approval_single_person`. It can only tighten them. `action_approval` goes to `required` and never to `off`, and `approval_single_person` goes to false and never to true. `create_notification_route` takes neither, so a new route starts at `required`. See [Who sets approval](darling/security.md#who-sets-approval).
 
 ## Create an agent route
 
@@ -218,7 +218,7 @@ At Level 3, an agent can also change the monitored server. These tools exist:
 
 Each tool runs as a dry run unless the agent passes `dry_run` as `false`. A dry run returns the exact statement and writes nothing. A dry run still signs in with the remediation login.
 
-A server action runs only when all of these hold:
+A server action is allowed to run only when all of these hold:
 
 1. The service switch is on. It is `config_service.agent_actions_enabled`, and it is on by default.
 2. The request is Level 3.
@@ -226,6 +226,8 @@ A server action runs only when all of these hold:
 4. The server has a remediation login, given as a login name and an `env:` or `file:` reference to its password.
 
 When a condition fails, the gate refuses with `actions_off`, `not_level_3`, `server_action_off`, `no_remediation_credential` or `credential_not_reference`. `mcp.allowWrites` never skips these checks.
+
+When all four hold, the action runs at once only on a route with `action_approval` `off`. On a route with `action_approval` `required`, the tool called with `dry_run` false changes nothing. It stores a proposal and answers `proposed`, and a person must approve the proposal before the action runs. See [Action approval](darling/security.md#action-approval).
 
 ### Undo and its limits
 

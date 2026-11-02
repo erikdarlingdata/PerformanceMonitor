@@ -655,7 +655,7 @@ public sealed partial class DarlingMcpInvestigationTools
         IReadOnlySet<string>? namedAgentNames = null)
     {
         var problems = InvestigationToolCore.ValidateReport(request_id, claim_id, verdict, root_cause, evidence, summary, proposed_note,
-            action_proposals, out var requestId, out var claimId, out var evidenceJson, requireBasis: true);
+            action_proposals, out var requestId, out var claimId, out var evidenceJson, requireBasis: true, serverActionTools: true);
         /* #5914: links ride after the other fields, so a report's field order in invalid's message is unchanged. */
         if (InvestigationReportLinks.Validate(links, out var reportLinks) is { } linkProblem)
             problems.Add("links: " + linkProblem);

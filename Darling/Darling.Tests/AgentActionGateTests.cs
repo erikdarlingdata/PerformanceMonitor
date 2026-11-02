@@ -218,7 +218,7 @@ public sealed class AgentActionGateLiveTests
 
     private AgentActionHooks Hooks(int? resolved = 2, AgentActionRefusal? kind = null) => new()
     {
-        LoadLevels = (_, _, _) => Task.FromResult<Func<string, int, PerformanceMonitor.Notifications.AlertSeverityLevel?, int?>>((_, _, _) => resolved),
+        LoadRoutes = (_, _, _) => Task.FromResult<Func<string, int, PerformanceMonitor.Notifications.AlertSeverityLevel?, PerformanceMonitor.Notifications.NotificationRoute?>>((_, _, _) => TestRouteHooks.AtLevel(resolved)),
         KindRule = kind is null ? null : (_, _, _, _) => Task.FromResult<AgentActionRefusal?>(kind),
         ReadBefore = (_, _, _) => Task.FromResult<string?>("{\"reason\":\"old\"}"),
         Write = (_, _, _) => { _writes++; return Task.FromResult<string?>("{\"reason\":\"new\"}"); },
@@ -360,10 +360,10 @@ public sealed class AgentActionGateLiveTests
             var hooks = new AgentActionHooks
             {
                 /* Live in the gate's transaction, lowered before the write's re-check. */
-                LoadLevels = (_, _, _) =>
+                LoadRoutes = (_, _, _) =>
                 {
                     var level = ++calls == 1 ? 2 : 1;
-                    return Task.FromResult<Func<string, int, PerformanceMonitor.Notifications.AlertSeverityLevel?, int?>>((_, _, _) => level);
+                    return Task.FromResult<Func<string, int, PerformanceMonitor.Notifications.AlertSeverityLevel?, PerformanceMonitor.Notifications.NotificationRoute?>>((_, _, _) => TestRouteHooks.AtLevel(level));
                 },
                 ReadBefore = (_, _, _) => Task.FromResult<string?>(null),
                 Write = (_, _, _) => { _writes++; return Task.FromResult<string?>(null); },
@@ -387,7 +387,7 @@ public sealed class AgentActionGateLiveTests
             await ExecAsync(connection, "UPDATE config.config_service SET agent_actions_enabled = true", ct);
             var hooks = new AgentActionHooks
             {
-                LoadLevels = (_, _, _) => Task.FromResult<Func<string, int, PerformanceMonitor.Notifications.AlertSeverityLevel?, int?>>((_, _, _) => 2),
+                LoadRoutes = (_, _, _) => Task.FromResult<Func<string, int, PerformanceMonitor.Notifications.AlertSeverityLevel?, PerformanceMonitor.Notifications.NotificationRoute?>>((_, _, _) => TestRouteHooks.AtLevel(2)),
                 /* Runs in the gate's transaction after the switch check passed and before action_called commits: a person turns the switch
                    off now, so only the write's re-check can see it. */
                 ReadBefore = async (_, _, token) =>
@@ -483,10 +483,10 @@ public sealed class AgentActionGateLiveTests
             var seen = new List<string>();
             var hooks = new AgentActionHooks
             {
-                LoadLevels = (_, _, _) =>
+                LoadRoutes = (_, _, _) =>
                 {
                     loads++;
-                    return Task.FromResult<Func<string, int, PerformanceMonitor.Notifications.AlertSeverityLevel?, int?>>((metric, _, _) => { seen.Add(metric); return 2; });
+                    return Task.FromResult<Func<string, int, PerformanceMonitor.Notifications.AlertSeverityLevel?, PerformanceMonitor.Notifications.NotificationRoute?>>((metric, _, _) => { seen.Add(metric); return TestRouteHooks.AtLevel(2); });
                 },
                 ReadBefore = (_, _, _) => Task.FromResult<string?>(null),
                 Write = (_, _, _) => { _writes++; return Task.FromResult<string?>(null); },
@@ -553,7 +553,7 @@ CREATE TRIGGER test_fail_every_done BEFORE INSERT ON config.investigation_journa
     private AgentActionHooks WriteHooks(ServerChangeSignal? signal, bool mark, Func<CancellationToken, Task>? then = null) => new()
     {
         ServerChange = signal,
-        LoadLevels = (_, _, _) => Task.FromResult<Func<string, int, PerformanceMonitor.Notifications.AlertSeverityLevel?, int?>>((_, _, _) => 2),
+        LoadRoutes = (_, _, _) => Task.FromResult<Func<string, int, PerformanceMonitor.Notifications.AlertSeverityLevel?, PerformanceMonitor.Notifications.NotificationRoute?>>((_, _, _) => TestRouteHooks.AtLevel(2)),
         ReadBefore = (_, _, _) => Task.FromResult<string?>("{\"state\":\"old\"}"),
         Write = async (_, _, token) =>
         {
