@@ -14,6 +14,7 @@ using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
+using PerformanceMonitor.Ui;
 using Xunit;
 
 namespace Darling.Tests;
@@ -248,6 +249,7 @@ public sealed class ViewerCollectionHealthSqlTests
 /// formatting and the rich Collection Health row's HealthStatus banding + duration/time formatting.
 /// These are the load-bearing bits computed in C# (not SQL), so they run without any Postgres.
 /// </summary>
+[Collection("viewer-time-statics")]
 public sealed class ViewerDailyHealthRowTests
 {
     [Theory]
@@ -455,12 +457,23 @@ public sealed class ViewerDailyHealthRowTests
     [Fact]
     public void CollectionLogRow_CollectionTimeFormatted_TreatsTheStoredValueAsUtc()
     {
-        /* Npgsql reads a naive timestamp as Unspecified; ToLocalTime treats Unspecified as UTC, so the
-           formatted local time round-trips back to the stored instant on any machine. */
-        var storedUtc = new DateTime(2026, 7, 3, 3, 30, 0, DateTimeKind.Unspecified);
-        var row = new CollectionLogRow { CollectionTime = storedUtc };
-        var expected = storedUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss");
-        Assert.Equal(expected, row.CollectionTimeFormatted);
+        var savedMode = ViewerTimeHelper.CurrentDisplayMode;
+        try
+        {
+            ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.LocalTime;
+            /* Npgsql reads a naive timestamp as Unspecified, and ToLocalTime treats Unspecified as UTC.
+               The property reads the process-wide ViewerTimeHelper.CurrentDisplayMode, so this test pins
+               Local mode. The default Server mode uses a fixed offset taken from the machine's current
+               offset, so a July value comes out an hour off when the test runs in standard time. */
+            var storedUtc = new DateTime(2026, 7, 3, 3, 30, 0, DateTimeKind.Unspecified);
+            var row = new CollectionLogRow { CollectionTime = storedUtc };
+            var expected = storedUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss");
+            Assert.Equal(expected, row.CollectionTimeFormatted);
+        }
+        finally
+        {
+            ViewerTimeHelper.CurrentDisplayMode = savedMode;
+        }
     }
 }
 
