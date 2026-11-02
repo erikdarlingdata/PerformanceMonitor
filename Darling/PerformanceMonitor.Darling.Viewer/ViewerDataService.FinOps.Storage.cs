@@ -85,6 +85,29 @@ AND   collection_time = $2
 AND   ($3::text[] IS NULL OR database_name = ANY($3))
 ORDER BY total_size_mb DESC NULLS LAST, database_name, file_type_desc, file_name";
 
+    /// <summary>#7174: the Database Sizes rows for <paramref name="databaseNames"/> (null or empty = every database), each with its
+    /// <see cref="DatabaseSizeRow.MonthlyCostShare"/> as its share of the SERVER's allocated size times the monthly cost. The grid is
+    /// narrowed by the saved database filter but the budget is the whole server's, so the total comes from the unfiltered snapshot:
+    /// dividing by the filtered total made one picked database cost 100% of the server. A file with no allocated size takes no share.
+    /// No cost (0 or less) leaves every share 0.</summary>
+    public async Task<List<DatabaseSizeRow>> GetDatabaseSizeLatestWithCostShareAsync(
+        int serverId, IReadOnlyList<string>? databaseNames, decimal monthlyCostUsd, CancellationToken cancellationToken = default)
+    {
+        var rows = await GetDatabaseSizeLatestAsync(serverId, databaseNames, cancellationToken);
+        if (monthlyCostUsd <= 0m || rows.Count == 0) return rows;
+
+        var serverRows = databaseNames is { Count: > 0 }
+            ? await GetDatabaseSizeLatestAsync(serverId, null, cancellationToken)
+            : rows;
+        var totalMb = DatabaseSizeRow.AllocatedTotalMb(serverRows);
+        if (totalMb > 0m)
+        {
+            foreach (var d in rows)
+                d.MonthlyCostShare = FinOpsCost.StorageShare(d.TotalSizeMb ?? 0m, totalMb, monthlyCostUsd);
+        }
+        return rows;
+    }
+
     public async Task<List<DatabaseSizeRow>> GetDatabaseSizeLatestAsync(int serverId, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
     {
         var items = new List<DatabaseSizeRow>();

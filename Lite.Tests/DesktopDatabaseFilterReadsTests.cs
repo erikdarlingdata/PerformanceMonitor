@@ -208,6 +208,24 @@ WITH file_totals AS (
     }
 
     [Fact]
+    public async Task DatabaseSizes_CostShare_IsOfTheWholeServer_NotOfTheFilteredRows()
+    {
+        /* #7174: DbA is 100 of the server's 300 MB. One database picked must cost a third of the budget, not all of it. */
+        await SeedSizeAsync("DbA", 5, 100);
+        await SeedSizeAsync("DbB", 5, 200);
+
+        var picked = await _service.GetDatabaseSizeLatestWithCostShareAsync(ServerId, OnlyA, 300m);
+        var a = Assert.Single(picked);
+        Assert.Equal(100m, Math.Round(a.MonthlyCostShare, 6));
+
+        var all = await _service.GetDatabaseSizeLatestWithCostShareAsync(ServerId, null, 300m);
+        Assert.Equal(new[] { 100m, 200m }, all.Select(r => Math.Round(r.MonthlyCostShare, 6)).ToArray());
+
+        var noCost = await _service.GetDatabaseSizeLatestWithCostShareAsync(ServerId, OnlyA, 0m);
+        Assert.Equal(0m, Assert.Single(noCost).MonthlyCostShare);
+    }
+
+    [Fact]
     public async Task DatabaseSizeSummary_FilterTakesTheTopAmongTheChosenDatabases()
     {
         await SeedSizeAsync("DbA", 5, 100);
@@ -401,7 +419,7 @@ WITH file_totals AS (
     public void FinOpsTab_PassesTheSavedFilterIntoSizesPvsAndLockingReads()
     {
         var tab = Source("Lite", "Controls", "FinOpsTab.xaml.cs");
-        Assert.Contains("GetDatabaseSizeLatestAsync(serverId, sizesFilter)", tab, StringComparison.Ordinal);
+        Assert.Contains("GetDatabaseSizeLatestWithCostShareAsync(serverId, sizesFilter, monthlyCost)", tab, StringComparison.Ordinal);
         Assert.Contains("GetDatabaseSizeSummaryAsync(serverId, 10, sizeChartFilter)", tab, StringComparison.Ordinal);
         Assert.Contains("GetPvsStatsLatestAsync(serverId, pvsFilter)", tab, StringComparison.Ordinal);
         Assert.Contains("GetPvsTrendAsync(serverId, DateTime.UtcNow.AddDays(-7), pvsFilter)", tab, StringComparison.Ordinal);
