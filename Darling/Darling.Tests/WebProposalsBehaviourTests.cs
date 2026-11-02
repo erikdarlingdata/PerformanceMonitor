@@ -70,6 +70,9 @@ public sealed class WebProposalsBehaviourTests
         Assert.Contains("proposal-actions", r.GetProperty("actionsClass").GetString());
         Assert.Contains("These are the facts now.", r.GetProperty("afterFirst").EnumerateArray().Select(e => e.GetString()));
         Assert.Contains("pid: 87", r.GetProperty("pressFacts").GetString());
+        /* #7109: the first press reads as the person's name, never the stored key. */
+        Assert.Contains("Ann at", r.GetProperty("firstPressText").GetString());
+        Assert.DoesNotContain("person:", r.GetProperty("firstPressText").GetString());
         Assert.Equal(["first-press", "confirm"], r.GetProperty("buttonsAfter").EnumerateArray().Select(e => e.GetString()));
         var posts = r.GetProperty("posts").EnumerateArray().ToArray();
         Assert.Equal(2, posts.Length);

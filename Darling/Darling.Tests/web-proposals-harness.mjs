@@ -48,7 +48,7 @@ globalThis.fetch = async (url, init) => {
   if (init && init.method === "POST") {
     posts.push({ path: u, body: JSON.parse(init.body) });
     if (u.endsWith("/first-press") && pressAnswer.body.status === "first_pressed") {
-      proposal.first_press_by = "person:5";
+      proposal.first_press_by = "person:5"; proposal.first_press_name = "Ann";
       proposal.first_press_at_utc = "2026-11-01T10:05:00Z";
     }
     return reply(pressAnswer.status, pressAnswer.body);
@@ -90,6 +90,7 @@ try {
       out.actionsClass = body.every((n) => n.tag === "button")[0].parent.className;
       await click(button("first-press"));
       out.afterFirst = strips().map((s) => s.text);
+      out.firstPressText = role("first-press") ? role("first-press").textContent : null;
       out.pressFacts = role("press-facts") ? role("press-facts").textContent : null;
       out.buttonsAfter = buttons().map((b) => b.getAttribute("data-action"));
       pressAnswer = { status: 200, body: { status: "run", code: null, message: "The action ran.", facts: { pid: 87 }, changed: [] } };

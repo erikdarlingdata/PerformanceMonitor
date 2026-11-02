@@ -93,7 +93,7 @@ public sealed record ProposalPressAnswer(string Status, string? Code, string Mes
     public bool FirstPressed => Status == "first_pressed";
 
     /// <summary>The facts in lines for the confirm question, one per member; empty when there are none.</summary>
-    public string FactsText => Facts is null ? "" : string.Join(Environment.NewLine, Facts.Select(p => p.Key + ": " + (p.Value?.ToJsonString().Trim('"') ?? "")));
+    public string FactsText => Facts is null ? "" : string.Join(Environment.NewLine, Facts.Select(p => p.Key + ": " + (p.Value?.ToJsonString().Trim('"') ?? "none")));
 
     /// <summary>The sentence to show for the answer: the message, and for a superseded proposal what changed.</summary>
     public string Words => Status == "superseded" && Changed.Count > 0 && !Message.Contains(string.Join(", ", Changed), StringComparison.Ordinal)
@@ -137,7 +137,8 @@ public sealed class ProposalViewRow
 
     public required string Server { get; init; }
 
-    /// <summary>The target fields as the service sent them (a statement already follows <c>mcp.dataDetail</c>).</summary>
+    /// <summary>The short target line the service words for the tool (the session, its database and login time, the plan and query ids). It is
+    /// built from the target after <c>mcp.dataDetail</c> has been applied, so a statement-class value never reaches it.</summary>
     public required string Target { get; init; }
 
     public required string State { get; init; }
@@ -153,6 +154,9 @@ public sealed class ProposalViewRow
 
     public bool CanApproveHere { get; init; }
 
+    /// <summary>Who made the first press, in words (a person's display name, or the administrator path), or null before any press.</summary>
+    public string? FirstPressName { get; init; }
+
     public bool NobodyCanApprove { get; init; }
 
     public string? Link { get; init; }
@@ -163,25 +167,29 @@ public sealed class ProposalViewRow
 
     public bool IsPending => State == ProposalStates.Pending;
 
-    /// <summary>What the Viewer offers for this proposal: approve here, or where a mapped person approves it.</summary>
-    public string ApprovalDisplay
+    /// <summary>What the grid says for this proposal, short enough for its column: approve here, or that a mapped person approves it in the web.</summary>
+    public string ApprovalDisplay => ApprovalText(withLink: false);
+
+    /// <summary>The same, with the first press and the web link in full, for the status line.</summary>
+    public string ApprovalDetail => ApprovalText(withLink: true);
+
+    private string ApprovalText(bool withLink)
     {
-        get
-        {
-            if (!IsPending)
-                return "";
-            var text = CanApproveHere
-                ? "Approve here (single-person route)"
-                : "A mapped person approves this in the web" + (Link is null ? "." : ": " + Link);
-            return NobodyCanApprove ? text + " " + ActionApprovalRules.NobodyCanApproveMessage : text;
-        }
+        if (!IsPending)
+            return "";
+        var text = CanApproveHere
+            ? "Approve here (single-person route)"
+            : "A mapped person approves this in the web" + (withLink && Link is not null ? ": " + Link : ".");
+        if (withLink && FirstPressName is not null)
+            text = "First press by " + FirstPressName + ". " + text;
+        return NobodyCanApprove ? text + (withLink && Link is not null && !CanApproveHere ? Environment.NewLine : " ") + ActionApprovalRules.NobodyCanApproveMessage : text;
     }
 
     /// <summary>The check before Approve: what is wrong with it, or null.</summary>
     internal static string? ApproveError(ProposalViewRow? selected) =>
         selected is null ? "Select a proposal first."
         : !selected.IsPending ? "This proposal is " + selected.State + ", so there is nothing to approve."
-        : !selected.CanApproveHere ? selected.ApprovalDisplay
+        : !selected.CanApproveHere ? selected.ApprovalDetail
         : null;
 
     /// <summary>Reads the service's <c>{proposals: [...]}</c>; an unreadable answer is an empty list.</summary>
@@ -200,15 +208,17 @@ public sealed class ProposalViewRow
                     rows.Add(new ProposalViewRow
                     {
                         ProposalId = id,
-                        Kind = Text(item, "kind") ?? Text(item, "tool") ?? "",
+                        Kind = Capitalized(Text(item, "kind") ?? Text(item, "tool") ?? ""),
                         Server = Text(item, "server_name") ?? "",
-                        Target = item["target"] is JsonObject t ? string.Join(", ", t.Select(p => p.Key + "=" + (p.Value?.ToJsonString().Trim('"') ?? ""))) : "",
+                        Target = Text(item, "target_text")
+                            ?? (item["target"] is JsonObject t ? string.Join(", ", t.Select(p => p.Key + "=" + (p.Value?.ToJsonString().Trim('"') ?? ""))) : ""),
                         State = Text(item, "state") ?? "",
                         Agent = Text(item, "agent") ?? "",
                         Reason = Text(item, "reason") ?? "",
                         ExpiresAtUtc = DateTime.SpecifyKind(expires, DateTimeKind.Utc),
                         SinglePerson = Flag(item, "single_person"),
                         CanApproveHere = Flag(item, "can_approve_here"),
+                        FirstPressName = Text(item, "first_press_name"),
                         NobodyCanApprove = Flag(item, "nobody_can_approve"),
                         Link = Text(item, "link"),
                     });
@@ -222,6 +232,8 @@ public sealed class ProposalViewRow
 
         return rows;
     }
+
+    private static string Capitalized(string text) => text.Length == 0 ? text : char.ToUpper(text[0], CultureInfo.CurrentCulture) + text[1..];
 
     private static string? Text(JsonObject o, string name) => o[name] is JsonValue v && v.TryGetValue(out string? s) ? s : null;
 

@@ -88,16 +88,17 @@ public partial class NotificationRouteEditDialog : Window
         }
     }
 
-    /// <summary>The sentence under the approval setting, or null: only where approval is required, a second person is needed and nobody can approve.</summary>
-    internal static string? ApprovalNote(string? actionApproval, bool singlePerson, bool nobodyCanApprove) =>
-        nobodyCanApprove && !singlePerson
+    /// <summary>The sentence under the approval setting, or null: only on a route set to Act on servers (the one level that proposes actions for approval),
+    /// where approval is required, a second person is needed and nobody can approve. The web page's check (<c>agent_level = 3</c>) reads the same way.</summary>
+    internal static string? ApprovalNote(int? agentLevel, string? actionApproval, bool singlePerson, bool nobodyCanApprove) =>
+        nobodyCanApprove && !singlePerson && agentLevel == NotificationRoute.AgentLevelServerAct
         && NotificationRouteKinds.NormalizeActionApproval(actionApproval) == NotificationRouteKinds.ActionApprovalRequired
             ? PerformanceMonitor.Darling.Storage.ActionApprovalRules.NobodyCanApproveMessage
             : null;
 
     private void ShowApprovalNote()
     {
-        var note = ApprovalNote((ActionApprovalCombo.SelectedItem as ComboBoxItem)?.Tag as string, ApprovalSinglePersonCheck.IsChecked == true, _nobodyCanApprove);
+        var note = ApprovalNote(SelectedAgentLevel(), (ActionApprovalCombo.SelectedItem as ComboBoxItem)?.Tag as string, ApprovalSinglePersonCheck.IsChecked == true, _nobodyCanApprove);
         ApprovalNobodyText.Text = note ?? "";
         ApprovalNobodyText.Visibility = note is null ? Visibility.Collapsed : Visibility.Visible;
     }
@@ -501,7 +502,11 @@ public partial class NotificationRouteEditDialog : Window
         ReportNoticeHint.Visibility = investigates ? Visibility.Collapsed : Visibility.Visible;
     }
 
-    private void AgentLevelCombo_SelectionChanged(object sender, SelectionChangedEventArgs e) => UpdateAgentLimitsEnabled();
+    private void AgentLevelCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        UpdateAgentLimitsEnabled();
+        ShowApprovalNote();
+    }
 
     /// <summary>Reads the agent channel off the screen into <see cref="Route"/> (#5632), or says which number is not a
     /// whole number. The bounds are <see cref="ViewerDataService.ValidateNotificationRoute"/>'s.</summary>

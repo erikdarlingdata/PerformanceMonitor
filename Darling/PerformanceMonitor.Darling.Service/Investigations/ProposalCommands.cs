@@ -115,6 +115,7 @@ internal static class ProposalCommands
         var rows = await store.ListProposalsAsync(requestId, null, 200, serverId, cancellationToken);
         var masker = McpDataDetailMasker.ForAnswer(dataDetail);
         var names = await ServerNamesAsync(owner, rows.Select(r => r.ServerId).Distinct().ToArray(), cancellationToken);
+        var people = await ProposalDisplay.PeopleAsync(owner, rows.Select(r => r.FirstPressBy), cancellationToken);
         var approvals = new Dictionary<Guid, ActionApprovalState?>();
         var list = new JsonArray();
         foreach (var row in rows)
@@ -130,6 +131,7 @@ internal static class ProposalCommands
             var pending = row.State == ProposalStates.Pending;
             var nobody = pending && approval is not null
                 && await store.NobodyCanApproveAsync(row.ServerId, InvestigationRequestStore.ServerActionForTool(row.Tool), singlePerson, cancellationToken);
+            var target = MaskedJson(JsonNode.Parse(row.TargetJson), masker);
             list.Add(new JsonObject
             {
                 ["proposal_id"] = row.ProposalId.ToString("D"),
@@ -138,13 +140,15 @@ internal static class ProposalCommands
                 ["kind"] = ProposalNotice.KindOf(row.Tool),
                 ["server_id"] = row.ServerId,
                 ["server_name"] = names.TryGetValue(row.ServerId, out var name) ? name : row.ServerId.ToString(CultureInfo.InvariantCulture),
-                ["target"] = MaskedJson(JsonNode.Parse(row.TargetJson), masker),
+                ["target"] = target,
+                ["target_text"] = ProposalDisplay.TargetLine(row.Tool, target),
                 ["state"] = row.State,
                 ["agent"] = row.Agent,
                 ["reason"] = masker.FreeText(row.Reason),
                 ["proposed_at"] = DateTime.SpecifyKind(row.ProposedAt, DateTimeKind.Utc).ToString("O", CultureInfo.InvariantCulture),
                 ["expires_at"] = DateTime.SpecifyKind(row.ExpiresAt, DateTimeKind.Utc).ToString("O", CultureInfo.InvariantCulture),
                 ["first_press_by"] = row.FirstPressBy,
+                ["first_press_name"] = ProposalDisplay.PressName(row.FirstPressBy, people),
                 ["single_person"] = singlePerson,
                 ["can_approve_here"] = pending && singlePerson,
                 ["nobody_can_approve"] = nobody,

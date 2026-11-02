@@ -60,17 +60,27 @@ export function factLines(facts) {
   return Object.keys(facts).map((k) => k + ": " + factValue(facts[k]));
 }
 
-/** A short target for the list: the target's values joined. */
+/** A short target for the list. The service words it for each tool (p.target_text) from the masked target. A proposal without that line falls back to the target's values joined. */
+export function targetLine(p) {
+  return p.target_text || targetText(p.target);
+}
+
+/** The target's values joined, as key and value pairs. */
 export function targetText(target) {
   if (!target || typeof target !== "object") return "—";
   const parts = Object.keys(target).map((k) => k + " " + factValue(target[k]));
   return parts.length ? parts.join(", ") : "—";
 }
 
+/** Who pressed: the person's display name, or the administrator path in words. The stored key (person:13) is only the last resort. */
+export function pressName(name, key) {
+  return name || key || "";
+}
+
 /** Who made the first press, in words. */
 export function pressedByText(p) {
   if (!p.first_press_by) return "No press yet";
-  return p.first_press_by + " at " + localTime(p.first_press_at_utc);
+  return pressName(p.first_press_name, p.first_press_by) + " at " + localTime(p.first_press_at_utc);
 }
 
 const factList = (facts, role) => el("ul", { class: "fact-list", "data-role": role }, factLines(facts).map((t) => el("li", { text: t })));
@@ -109,7 +119,7 @@ export async function buildList(body, isCurrent = () => true) {
   const lines = rows.map((p) => el("tr", { "data-role": "proposal-row" }, [
     el("td", {}, [el("a", { href: "#/proposals?proposal=" + encodeURIComponent(p.proposal_id), text: KIND_LABELS[p.kind] || p.kind })]),
     el("td", { text: p.server_name || "Server " + p.server_id }),
-    el("td", { text: targetText(p.target) }),
+    el("td", { text: targetLine(p) }),
     el("td", { text: STATE_LABELS[p.state] || p.state }),
     el("td", { text: localTime(p.proposed_at_utc) }),
     el("td", { text: localTime(p.expires_at_utc) }),
@@ -159,7 +169,7 @@ export async function buildProposal(body, id, isCurrent = () => true) {
     factList(p.binding, "binding"),
   ];
   if (p.first_press_facts) nodes.push(el("div", { class: "kv" }, [el("strong", { text: "The facts the first press read:" })]), factList(p.first_press_facts, "first-press-facts"));
-  if (p.decided_by) nodes.push(field("Decided by", p.decided_by + " at " + localTime(p.decided_at_utc), "decided"));
+  if (p.decided_by) nodes.push(field("Decided by", pressName(p.decided_by_name, p.decided_by) + " at " + localTime(p.decided_at_utc), "decided"));
   if (p.outcome) nodes.push(el("div", { class: "kv" }, [el("strong", { text: "Outcome:" })]), factList(p.outcome, "outcome"));
   nodes.push(...pressResultNodes(lastPress.get(p.proposal_id)));
 

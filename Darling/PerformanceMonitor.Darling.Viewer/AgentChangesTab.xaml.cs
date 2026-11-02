@@ -93,6 +93,7 @@ public partial class AgentChangesTab : UserControl
     /// <summary>The words of the confirm question: what the first press read, and what the confirm does.</summary>
     internal static string ApproveConfirmText(ProposalViewRow row, ProposalPressAnswer first) =>
         first.Message + Environment.NewLine + Environment.NewLine + row.Kind + " on " + row.Server + Environment.NewLine
+        + (row.Target.Length > 0 ? row.Target + Environment.NewLine : "")
         + (first.FactsText.Length > 0 ? first.FactsText + Environment.NewLine : "") + Environment.NewLine
         + "The agent's reason (the agent's own words): " + (row.Reason.Length > 0 ? row.Reason : "none given") + Environment.NewLine + Environment.NewLine
         + "Run this action on the monitored server?";

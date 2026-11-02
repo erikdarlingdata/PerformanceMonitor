@@ -158,10 +158,11 @@ public static partial class DarlingWebEndpoints
                 var rows = await reads.ListProposalsAsync(null, state, ProposalsLimit, context.RequestAborted);
                 var names = await RequestServerNamesAsync(postgres, rows.Select(r => r.RequestId), context.RequestAborted);
                 var masker = McpDataDetailMasker.ForAnswer(dataDetail);
+                var people = await ProposalDisplay.PeopleAsync(postgres, rows.SelectMany(r => new[] { r.FirstPressBy, r.DecidedBy }), context.RequestAborted);
                 var list = new JsonArray();
                 foreach (var row in rows)
                 {
-                    list.Add(ProposalJson(row, names.GetValueOrDefault(row.RequestId), masker));
+                    list.Add(ProposalJson(row, names.GetValueOrDefault(row.RequestId), masker, people));
                 }
 
                 var body = await SeatFieldsAsync(context, new JsonObject { ["proposals_returned"] = rows.Count, ["proposals"] = list });
@@ -186,9 +187,10 @@ public static partial class DarlingWebEndpoints
                 }
 
                 var names = await RequestServerNamesAsync(postgres, [row.RequestId], context.RequestAborted);
+                var people = await ProposalDisplay.PeopleAsync(postgres, [row.FirstPressBy, row.DecidedBy], context.RequestAborted);
                 var body = await SeatFieldsAsync(context, new JsonObject
                 {
-                    ["proposal"] = ProposalJson(row, names.GetValueOrDefault(row.RequestId), McpDataDetailMasker.ForAnswer(dataDetail)),
+                    ["proposal"] = ProposalJson(row, names.GetValueOrDefault(row.RequestId), McpDataDetailMasker.ForAnswer(dataDetail), people),
                 });
                 return DarlingWebStatementSweep.JsonText(body, ProposalsRoute + "/{id}", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
             }
@@ -309,30 +311,38 @@ public static partial class DarlingWebEndpoints
     }
 
     /// <summary>One proposal as the page reads it. The target, binding, first press facts and outcome pass through the masker by key, so a
-    /// <c>statement</c> follows <c>mcp.dataDetail</c>.</summary>
-    internal static JsonObject ProposalJson(ActionProposalRow row, string? serverName, McpDataDetailMasker masker) => new()
+    /// <c>statement</c> follows <c>mcp.dataDetail</c>. <c>target_text</c> is the short line the list shows, built from the masked target.
+    /// <c>first_press_name</c> and <c>decided_by_name</c> say who pressed: a person's display name, or the administrator path in words.</summary>
+    internal static JsonObject ProposalJson(ActionProposalRow row, string? serverName, McpDataDetailMasker masker, IReadOnlyDictionary<long, string> people)
     {
-        ["proposal_id"] = row.ProposalId.ToString("D", CultureInfo.InvariantCulture),
-        ["request_id"] = row.RequestId.ToString("D", CultureInfo.InvariantCulture),
-        ["kind"] = InvestigationRequestStore.ServerActionForTool(row.Tool),
-        ["tool"] = row.Tool,
-        ["agent"] = row.Agent,
-        ["server_id"] = row.ServerId,
-        ["server_name"] = serverName,
-        ["state"] = row.State,
-        ["target"] = MaskedJson(row.TargetJson, masker),
-        ["binding"] = MaskedJson(row.BindingJson, masker),
-        ["agent_reason"] = row.Reason is null ? null : masker.FreeText(row.Reason),
-        ["proposed_at_utc"] = Utc(row.ProposedAt),
-        ["expires_at_utc"] = Utc(row.ExpiresAt),
-        ["first_press_by"] = row.FirstPressBy,
-        ["first_press_at_utc"] = row.FirstPressAt is { } pressed ? Utc(pressed) : null,
-        ["first_press_facts"] = MaskedJson(row.FirstPressFactsJson, masker),
-        ["decided_by"] = row.DecidedBy,
-        ["decided_at_utc"] = row.DecidedAt is { } decided ? Utc(decided) : null,
-        ["finished_at_utc"] = row.FinishedAt is { } finished ? Utc(finished) : null,
-        ["outcome"] = MaskedJson(row.OutcomeJson, masker),
-    };
+        var target = MaskedJson(row.TargetJson, masker);
+        return new JsonObject
+        {
+            ["proposal_id"] = row.ProposalId.ToString("D", CultureInfo.InvariantCulture),
+            ["request_id"] = row.RequestId.ToString("D", CultureInfo.InvariantCulture),
+            ["kind"] = InvestigationRequestStore.ServerActionForTool(row.Tool),
+            ["tool"] = row.Tool,
+            ["agent"] = row.Agent,
+            ["server_id"] = row.ServerId,
+            ["server_name"] = serverName,
+            ["state"] = row.State,
+            ["target"] = target,
+            ["target_text"] = ProposalDisplay.TargetLine(row.Tool, target),
+            ["binding"] = MaskedJson(row.BindingJson, masker),
+            ["agent_reason"] = row.Reason is null ? null : masker.FreeText(row.Reason),
+            ["proposed_at_utc"] = Utc(row.ProposedAt),
+            ["expires_at_utc"] = Utc(row.ExpiresAt),
+            ["first_press_by"] = row.FirstPressBy,
+            ["first_press_name"] = ProposalDisplay.PressName(row.FirstPressBy, people),
+            ["first_press_at_utc"] = row.FirstPressAt is { } pressed ? Utc(pressed) : null,
+            ["first_press_facts"] = MaskedJson(row.FirstPressFactsJson, masker),
+            ["decided_by"] = row.DecidedBy,
+            ["decided_by_name"] = ProposalDisplay.PressName(row.DecidedBy, people),
+            ["decided_at_utc"] = row.DecidedAt is { } decided ? Utc(decided) : null,
+            ["finished_at_utc"] = row.FinishedAt is { } finished ? Utc(finished) : null,
+            ["outcome"] = MaskedJson(row.OutcomeJson, masker),
+        };
+    }
 
     private static string Utc(DateTime value) => DateTime.SpecifyKind(value, DateTimeKind.Utc).ToString("o", CultureInfo.InvariantCulture);
 

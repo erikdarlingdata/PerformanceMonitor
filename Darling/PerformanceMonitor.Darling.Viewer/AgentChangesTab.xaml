@@ -7,11 +7,12 @@
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
-            <RowDefinition Height="2*"/>
+            <RowDefinition Height="0.8*" MinHeight="60"/>
             <RowDefinition Height="Auto"/>
-            <RowDefinition Height="*"/>
+            <RowDefinition Height="0.5*" MinHeight="45"/>
             <RowDefinition Height="Auto"/>
-            <RowDefinition Height="*"/>
+            <!-- #7109: the proposals are what a person acts on here, so their grid gets the biggest share of the tab (about eight rows at the window's default size). -->
+            <RowDefinition Height="2*" MinHeight="120"/>
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
         <TextBlock Grid.Row="0" TextWrapping="Wrap" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,0,0,8"
@@ -51,13 +52,13 @@
                    Text="Actions agents proposed, newest first. The agent's reason is the agent's own words. Approve here works on a route set to single-person approval: the first press reads the facts again and shows them, and the confirm runs the action only if they still match."/>
         <DataGrid Grid.Row="6" x:Name="ProposalsGrid" Style="{DynamicResource DarkGrid}" IsReadOnly="True" SelectionMode="Single" AutomationProperties.Name="Proposed agent actions">
             <DataGrid.Columns>
-                <DataGridTextColumn Header="Kind" Binding="{Binding Kind}" Width="140"/>
-                <DataGridTextColumn Header="Server" Binding="{Binding Server}" Width="90"/>
-                <DataGridTextColumn Header="Target" Binding="{Binding Target}" Width="180"/>
-                <DataGridTextColumn Header="State" Binding="{Binding State}" Width="80"/>
+                <DataGridTextColumn Header="Kind" Binding="{Binding Kind}" Width="150"/>
+                <DataGridTextColumn Header="Server" Binding="{Binding Server}" Width="80"/>
+                <DataGridTextColumn Header="Target" Binding="{Binding Target}" Width="1.3*"/>
+                <DataGridTextColumn Header="State" Binding="{Binding State}" Width="90"/>
                 <DataGridTextColumn Header="Agent's reason" Binding="{Binding ReasonDisplay}" Width="*"/>
-                <DataGridTextColumn Header="Expires" Binding="{Binding ExpiresDisplay}" Width="130" SortMemberPath="ExpiresAtUtc"/>
-                <DataGridTextColumn Header="Approval" Binding="{Binding ApprovalDisplay}" Width="2*"/>
+                <DataGridTextColumn Header="Expires" Binding="{Binding ExpiresDisplay}" Width="150" SortMemberPath="ExpiresAtUtc"/>
+                <DataGridTextColumn Header="Approval" Binding="{Binding ApprovalDisplay}" Width="1.7*"/>
             </DataGrid.Columns>
         </DataGrid>
         <StackPanel x:Name="ProposalsPanel" Grid.Row="7" Orientation="Horizontal" Margin="0,8,0,0">
