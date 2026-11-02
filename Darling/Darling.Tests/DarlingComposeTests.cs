@@ -3526,7 +3526,7 @@ public sealed class DarlingComposeTests
             + "WHERE f.collection_time >= $1\n"
             + "  AND f.collection_time <= $2\n"
             + "GROUP BY f.database_name, COALESCE(m.object_name, '(ad hoc)')\n"
-            + "ORDER BY value DESC NULLS LAST\n"
+            + "ORDER BY value DESC NULLS LAST, database_name, object_name\n"
             + "LIMIT $5", compiled.Sql);
         Assert.Contains("collect.procedure_stats", compiled.Sql, StringComparison.Ordinal);
         Assert.DoesNotContain("module_map", compiled.Sql, StringComparison.Ordinal);
@@ -3586,7 +3586,7 @@ public sealed class DarlingComposeTests
             + "WHERE f.collection_time >= $1\n"
             + "  AND f.collection_time <= $2\n"
             + "GROUP BY f.database_name, COALESCE(m.object_name, '(ad hoc)')\n"
-            + "ORDER BY value DESC NULLS LAST\n"
+            + "ORDER BY value DESC NULLS LAST, database_name, object_name\n"
             + "LIMIT $6", compiled.Sql);
         Assert.Contains("collect.module_map AS mm", compiled.Sql, StringComparison.Ordinal);
         Assert.Contains("LEAST(last_ps.collection_time, $5)", compiled.Sql, StringComparison.Ordinal);
