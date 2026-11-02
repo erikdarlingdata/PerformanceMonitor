@@ -5151,6 +5151,13 @@ internal sealed class CollectorHealth
     public long TrailingZeroRowSuccessRuns { get; set; }
 
     /// <summary>
+    /// #7242: the newest run that was NOT a zero-row SUCCESS (<c>last_zero_row_streak_break_time</c>), the instant the quiet streak
+    /// began after. Set by the fleet read only, where it is the lower bound of the exact run count taken for an activity collector
+    /// whose last productive run is older than the quiet bar (<see cref="CollectorHealthClassifier.NeedsObservedQuietRuns"/>).
+    /// </summary>
+    internal DateTime? LastZeroRowStreakBreakTime { get; set; }
+
+    /// <summary>
     /// Whether this collector WAS producing rows and is now recording SUCCESS with zero rows every cycle
     /// (#3885) — the regression class whose status word is the most reassuring one the vocabulary has,
     /// which is why nothing on any health surface could see it. Event collectors and on-load collectors
@@ -5158,7 +5165,7 @@ internal sealed class CollectorHealth
     /// stays HEALTHY.
     /// </summary>
     public bool ProducedThenStopped => CollectorHealthClassifier.ProducedThenStopped(
-        CollectorName, TrailingZeroRowSuccessRuns, LastProductiveTime);
+        CollectorName, TrailingZeroRowSuccessRuns, LastProductiveTime, FrequencyMinutes);
 
     /// <summary>
     /// The sentence a produced-then-stopped collector carries, or null when it is not one (#3885).

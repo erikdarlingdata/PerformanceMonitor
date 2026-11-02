@@ -1752,6 +1752,13 @@ namespace PerformanceMonitor.Common
         /// fortnight of zero-row successes, is still flagged: from 72 hours after the last productive run
         /// until that run ages out of the read's seven-day window. The comparison is strictly greater, like
         /// the interval arm's, so a target sitting exactly on the bar is still read as quiet.</para>
+        ///
+        /// <para><b>The bar is observed time, not wall time (#7242).</b> The quiet stretch is the trailing
+        /// zero-row run count times the collector's interval on that server, the time the service actually
+        /// watched the server return nothing. A service that was stopped overnight and over a weekend made no
+        /// runs for those hours, so it cannot say the server was quiet through them, and counting them read
+        /// 19 observed hours (1,141 runs at one minute) as 75 quiet hours. The wall-clock gap since the last
+        /// productive run must also pass the bar, which an observed stretch of that length implies.</para>
         /// </summary>
         public static readonly TimeSpan ActivitySourcedQuietBar = TimeSpan.FromHours(72);
 
@@ -2137,11 +2144,17 @@ namespace PerformanceMonitor.Common
         /// <see cref="RegressedFromProductive"/> reads. Null means the window holds no productivity to
         /// have regressed from, which is the never-produced-here case that stays benign.
         /// </param>
+        /// <param name="frequencyMinutes">
+        /// The collector's effective interval on this server, in minutes (#7242). Only the activity-sourced
+        /// arm reads it, to turn the trailing run count into observed time. Zero or less means the cadence
+        /// is unknown, and that arm then falls back to the wall clock alone.
+        /// </param>
         public static bool ProducedThenStopped(
             string? collectorName,
             long trailingZeroRowSuccessRuns,
-            DateTime? lastProductiveTimeUtc) =>
-            ProducedThenStopped(collectorName, trailingZeroRowSuccessRuns, lastProductiveTimeUtc, DateTime.UtcNow);
+            DateTime? lastProductiveTimeUtc,
+            int frequencyMinutes) =>
+            ProducedThenStopped(collectorName, trailingZeroRowSuccessRuns, lastProductiveTimeUtc, DateTime.UtcNow, frequencyMinutes);
 
         /// <summary>
         /// The clock-aware overload (#4473): for an interval-sourced collector
@@ -2161,11 +2174,18 @@ namespace PerformanceMonitor.Common
         /// — this parameter exists so a pin can hold the clock still rather than to change any caller's
         /// semantics.
         /// </param>
+        /// <param name="frequencyMinutes">
+        /// The collector's effective interval on this server, in minutes (#7242). The activity-sourced arm
+        /// multiplies it by <paramref name="trailingZeroRowSuccessRuns"/> to get the time the service
+        /// actually observed the server quiet. Zero or less means the cadence is unknown, and that arm then
+        /// falls back to the wall clock alone, as it read before #7242.
+        /// </param>
         public static bool ProducedThenStopped(
             string? collectorName,
             long trailingZeroRowSuccessRuns,
             DateTime? lastProductiveTimeUtc,
-            DateTime nowUtc)
+            DateTime nowUtc,
+            int frequencyMinutes)
         {
             if (lastProductiveTimeUtc is null || trailingZeroRowSuccessRuns < ProductiveZeroRunStreak)
             {
@@ -2193,14 +2213,38 @@ namespace PerformanceMonitor.Common
 
             /* An activity-sourced collector on an idle target returns nothing for hours at a time, which
                the streak alone read as a stop every night (#4620). Same shape as the interval arm: the
-               streak AND a quiet longer than anything an idle weekend explains. */
+               streak AND a quiet longer than anything an idle weekend explains. The quiet is OBSERVED time
+               (#7242): the zero-row runs the service made, times the interval it made them at. Hours the
+               service was stopped produced no runs, so they cannot say the server was quiet, and the wall
+               clock alone would have counted them. The wall-clock gap stays a second condition: a streak
+               cannot be longer in observed time than the wall time it sits in, so it only guards a run
+               count that is larger than the elapsed time allows. */
             if (IsActivitySourcedCollector(collectorName))
             {
-                return nowUtc - lastProductiveTimeUtc.Value > ActivitySourcedQuietBar;
+                if (nowUtc - lastProductiveTimeUtc.Value <= ActivitySourcedQuietBar)
+                {
+                    return false;
+                }
+
+                return frequencyMinutes <= 0
+                    || trailingZeroRowSuccessRuns * (double)frequencyMinutes > ActivitySourcedQuietBar.TotalMinutes;
             }
 
             return true;
         }
+
+        /// <summary>
+        /// Whether the activity-sourced quiet bar (#7242) is the deciding question for this row: an
+        /// activity-sourced collector that produced once and whose last productive run is older than
+        /// <see cref="ActivitySourcedQuietBar"/> on the wall clock. Only such a row needs the EXACT count of
+        /// zero-row runs, because <see cref="EstimateTrailingZeroRowSuccessRuns"/> divides elapsed time by the
+        /// cadence and so hands the wall clock back, hours the service was stopped included. A surface that
+        /// estimates (the fleet card, the Viewer's overview) reads the exact count for just these rows.
+        /// </summary>
+        public static bool NeedsObservedQuietRuns(string? collectorName, DateTime? lastProductiveTimeUtc, DateTime nowUtc) =>
+            lastProductiveTimeUtc is not null
+            && IsActivitySourcedCollector(collectorName)
+            && nowUtc - lastProductiveTimeUtc.Value > ActivitySourcedQuietBar;
 
         /// <summary>
         /// The width of the trailing zero-row-success streak ESTIMATED from two instants and the

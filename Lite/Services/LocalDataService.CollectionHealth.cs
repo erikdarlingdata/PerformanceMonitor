@@ -1309,7 +1309,7 @@ public class CollectorHealthRow
     /// fortnight of zeros from a deadlock capture at rest stays HEALTHY.
     /// </summary>
     public bool ProducedThenStopped => CollectorHealthClassifier.ProducedThenStopped(
-        CollectorName, TrailingZeroRowSuccessRuns, LastProductiveTime);
+        CollectorName, TrailingZeroRowSuccessRuns, LastProductiveTime, FrequencyMinutes);
 
     /// <summary>The sentence a produced-then-stopped collector carries, or null when it is not one
     /// (#3885) — composed from the shared formatter, like <see cref="RegressedFinding"/>.</summary>
