@@ -47,7 +47,7 @@ SELECT
     SUM(delta_elapsed_time) / 1000.0 AS total_duration_ms,
     SUM(delta_logical_reads) AS total_reads,
     SUM(delta_logical_writes) AS total_writes,
-    SUM(COALESCE(max_grant_kb, 0)) / 1024.0 AS total_memory_mb,
+    MAX(COALESCE(max_grant_kb, 0)) / 1024.0 AS peak_memory_mb,
     (SELECT LEFT(qs2.query_text, 200) FROM v_query_stats qs2
      WHERE qs2.query_hash = qs.query_hash AND qs2.server_id = $1 AND qs2.collection_time >= $2
      AND qs2.query_text IS NOT NULL AND qs2.query_text != ''
@@ -315,7 +315,7 @@ LIMIT $3";
                         TotalDurationMs = reader.IsDBNull(4) ? 0m : Convert.ToDecimal(reader.GetValue(4)),
                         TotalReads = reader.IsDBNull(5) ? 0 : Convert.ToInt64(reader.GetValue(5)),
                         TotalWrites = reader.IsDBNull(6) ? 0 : Convert.ToInt64(reader.GetValue(6)),
-                        TotalMemoryMb = reader.IsDBNull(7) ? 0m : Convert.ToDecimal(reader.GetValue(7)),
+                        PeakMemoryMb = reader.IsDBNull(7) ? 0m : Convert.ToDecimal(reader.GetValue(7)),
                         SampleQueryText = reader.IsDBNull(8) ? "" : reader.GetString(8),
                         FullQueryText = reader.IsDBNull(9) ? "" : reader.GetString(9),
                         QueryPlanXml = PayloadDimensions.ResolveContent(
@@ -340,7 +340,7 @@ LIMIT $3";
                 Assert.Equal(e.TotalDurationMs, a.TotalDurationMs);
                 Assert.Equal(e.TotalReads, a.TotalReads);
                 Assert.Equal(e.TotalWrites, a.TotalWrites);
-                Assert.Equal(e.TotalMemoryMb, a.TotalMemoryMb);
+                Assert.Equal(e.PeakMemoryMb, a.PeakMemoryMb);
                 Assert.Equal(e.ImpactScore, a.ImpactScore);
                 Assert.Equal(e.SampleQueryText, a.SampleQueryText);
                 Assert.Equal(e.FullQueryText, a.FullQueryText);

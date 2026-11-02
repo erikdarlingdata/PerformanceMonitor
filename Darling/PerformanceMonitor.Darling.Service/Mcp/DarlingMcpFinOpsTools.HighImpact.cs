@@ -74,7 +74,7 @@ public sealed partial class DarlingMcpFinOpsTools
         total_duration_ms = r.TotalDurationMs,
         total_reads = r.TotalReads,
         total_writes = r.TotalWrites,
-        total_memory_mb = r.TotalMemoryMb,
+        peak_memory_mb = r.PeakMemoryMb,
         cpu_share_pct = r.CpuShare,
         duration_share_pct = r.DurationShare,
         reads_share_pct = r.ReadsShare,

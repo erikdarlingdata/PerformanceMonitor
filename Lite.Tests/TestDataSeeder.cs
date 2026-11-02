@@ -2641,6 +2641,47 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)";
     }
 
     /// <summary>
+    /// Seeds query_stats for the peak-grant check (#7166): STEADY is one 1 GB grant seen in 96 collection rows,
+    /// ONEOFF is one 50 GB grant seen once. max_grant_kb is a lifetime high-water mark, so each row repeats it.
+    /// </summary>
+    internal async Task SeedQueryStatsGrantHistoryAsync()
+    {
+        await ClearTestDataAsync();
+        await SeedTestServerAsync();
+
+        using var readLock = _duckDb.AcquireReadLock();
+        var connection = await SeedConnectionAsync();
+        using var batch = new SeedBatch(connection);
+
+        var rows = new List<(string hash, int minutesAgo, long grantKb)>();
+        for (var i = 0; i < 96; i++) rows.Add(("STEADY", 30 + i, 1_048_576L));
+        rows.Add(("ONEOFF", 30, 52_428_800L));
+
+        foreach (var (hash, minutesAgo, grantKb) in rows)
+        {
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = @"
+INSERT INTO query_stats
+    (collection_id, collection_time, server_id, server_name,
+     database_name, query_hash, query_text,
+     delta_execution_count, delta_worker_time, delta_elapsed_time,
+     delta_logical_reads, delta_logical_writes, max_grant_kb)
+VALUES ($1, $2, $3, $4, $5, $6, $7, 10, 1000000, 2000000, 1000, 10, $8)";
+
+            cmd.Parameters.Add(new DuckDBParameter { Value = _nextId-- });
+            cmd.Parameters.Add(new DuckDBParameter { Value = TestPeriodEnd.AddMinutes(-minutesAgo) });
+            cmd.Parameters.Add(new DuckDBParameter { Value = TestServerId });
+            cmd.Parameters.Add(new DuckDBParameter { Value = TestServerName });
+            cmd.Parameters.Add(new DuckDBParameter { Value = "UserDB" });
+            cmd.Parameters.Add(new DuckDBParameter { Value = hash });
+            cmd.Parameters.Add(new DuckDBParameter { Value = $"SELECT /* {hash} */ * FROM dbo.SomeTable" });
+            cmd.Parameters.Add(new DuckDBParameter { Value = grantKb });
+
+            await cmd.ExecuteNonQueryAsync();
+        }
+    }
+
+    /// <summary>
     /// Seeds database_size_stats with named databases.
     /// Used for dev/test detection testing and general size seeding.
     /// </summary>
