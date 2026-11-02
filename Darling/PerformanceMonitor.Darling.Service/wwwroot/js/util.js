@@ -335,6 +335,11 @@ export function readErrorStrip(message) {
   return errorStrip(message);
 }
 
+/** #7257: true for the "window too wide" refusal readErrorStrip shows as a notice. Running the same range again shows the same notice. */
+export function isWindowTooWide(message) {
+  return keptHoursOf(message) != null;
+}
+
 /* The M of a "window too wide" refusal (`... exceeds maximum of M hours ...`), or null for any other message.
    A `top` refusal (`exceeds maximum of 1000.`) carries no " hours" and so is never one. */
 function keptHoursOf(message) {

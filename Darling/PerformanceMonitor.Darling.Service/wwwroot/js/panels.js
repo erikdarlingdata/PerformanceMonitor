@@ -29,6 +29,7 @@ import {
   loadingStrip,
   waitingStrip,
   retryButton,
+  isWindowTooWide,
   retryOnceWhenBusy,
   busyRetryStrip,
   errorStrip,
@@ -198,7 +199,8 @@ async function loadPanelBody(desc, body, signal, onRetry = null) {
     /* readErrorStrip degrades the "window too wide" validation error to a notice; every other error stays red
        (#2780). Shared with the server-tab composites so the whole page degrades the same way. A window refusal
        only reaches it now when the one retry above could not settle it. */
-    mount(body, onRetry ? [readErrorStrip(res.message), retryButton(onRetry)] : readErrorStrip(res.message));
+    /* #7257: the "pick a shorter range" notice gets no Retry button, since the same range gives the same notice. */
+    mount(body, onRetry && !isWindowTooWide(res.message) ? [readErrorStrip(res.message), retryButton(onRetry)] : readErrorStrip(res.message));
     return;
   }
   const kept = keptWindowStrip(res);

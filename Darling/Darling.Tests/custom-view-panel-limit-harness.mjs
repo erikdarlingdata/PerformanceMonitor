@@ -80,7 +80,7 @@ const okBody = () => ({ columns: [{ name: "n", label: "n" }], rows: [{ n: 1 }], 
 function answer(call, status) {
   if (!call) return; /* a read the page never sent: the test then sees the missing call in what it recorded */
   call.answered = status;
-  call.resolve(status === 429 ? reply(429, { error: BUSY_TEXT }, { "retry-after": "1" }) : status === 500 ? reply(500, { error: "The read failed." }) : reply(200, call.source.startsWith("r") ? { rows: [{ n: 1 }] } : okBody()));
+  call.resolve(status === 400 ? reply(400, { error: "hours exceeds maximum of 24 hours for this read." }) : status === 429 ? reply(429, { error: BUSY_TEXT }, { "retry-after": "1" }) : status === 500 ? reply(500, { error: "The read failed." }) : reply(200, call.source.startsWith("r") ? { rows: [{ n: 1 }] } : okBody()));
 }
 globalThis.fetch = async (url, init) => {
   const u = new URL(String(url), "http://viewer.test");
@@ -327,6 +327,15 @@ const out = {};
   out.readRetryLoadingAtEnd = loadingCount(main);
   out.readRetryButtonsAtEnd = retryButtons(main).length;
   out.readRetryErrorsAtEnd = stripsOf(main).filter((s) => /\berror\b/.test(s.cls)).length;
+}
+
+/* A range-too-long answer shows the notice and no Retry button. */
+{
+  const main = await open(dashboard([rpanel("r1")]));
+  answer(calls[0], 400);
+  await flush();
+  out.rangeNotice = stripsOf(main).map((s) => s.text);
+  out.rangeRetryButtons = retryButtons(main).length;
 }
 
 console.log(JSON.stringify(out));

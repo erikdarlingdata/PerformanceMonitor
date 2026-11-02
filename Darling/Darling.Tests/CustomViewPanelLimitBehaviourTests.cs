@@ -147,6 +147,14 @@ public sealed class CustomViewPanelLimitBehaviourTests
     }
 
     [Fact]
+    public void ARangeTooLongAnswer_ShowsTheNotice_WithNoRetryButton()
+    {
+        var run = Result.Value;
+        Assert.Contains(Strings(run.GetProperty("rangeNotice")), s => s.Contains("Pick a shorter range."));
+        Assert.Equal(0, run.GetProperty("rangeRetryButtons").GetInt32());
+    }
+
+    [Fact]
     public void AMarkdownCell_AndAPanelWithAnUnknownSource_TakeNoSlot_AndGetNoRetryButton()
     {
         var run = Result.Value;
