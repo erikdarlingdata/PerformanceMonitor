@@ -2561,7 +2561,11 @@ public static class FactAdvice
 
         var totalFree = FactMeta(facts, "DISK_SPACE", "total_free_mb");
         var vols = FactMeta(facts, "DISK_SPACE", "volume_count");
-        var inv = new StringBuilder($"The tightest volume on this server is down to {mb.Value:N0} MB free");
+        /* #7179: the volume that scored, by name, so the MB figure and the score read the same volume. */
+        var mount = facts.TryGetValue("DISK_SPACE", out var diskFact) && !string.IsNullOrWhiteSpace(diskFact.ObjectName)
+            ? $" ({diskFact.ObjectName.Trim()})"
+            : "";
+        var inv = new StringBuilder($"The tightest volume on this server{mount} is down to {mb.Value:N0} MB free");
         if (vols is > 1 && totalFree is > 0)
             inv.Append($" (of {vols.Value:N0} volumes monitored, {totalFree.Value:N0} MB free in total)");
         inv.Append(". Low free space on a database volume risks autogrowth failures, and at zero a database can no longer accept writes.");
