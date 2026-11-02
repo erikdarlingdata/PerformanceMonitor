@@ -64,7 +64,7 @@
                     <DataGridTextColumn Header="Operators" Binding="{Binding Operators}" Width="80"/>
                     <DataGridTextColumn Header="Fired in the window" Binding="{Binding FiredInWindow}" Width="120"/>
                     <DataGridTextColumn Header="Times fired" Binding="{Binding TimesFired}" Width="80"/>
-                    <DataGridTextColumn Header="Last fired (server clock)" Binding="{Binding LastFired}" Width="*"/>
+                    <DataGridTextColumn Header="Last fired (server clock)" Binding="{Binding LastFired}" SortMemberPath="LastFiredAt" Width="*"/>
                 </DataGrid.Columns>
             </DataGrid>
             <TextBlock Grid.Row="1" x:Name="AlertsEmptyMessage" Visibility="Collapsed" TextWrapping="Wrap" Margin="4,36,4,6"
