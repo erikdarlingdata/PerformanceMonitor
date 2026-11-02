@@ -3892,11 +3892,21 @@ public sealed class DarlingManagedPostgres
         _logger.LogInformation("Managed Postgres cluster initialized (scram-sha-256, data checksums, UTF8/C locale)");
     }
 
-    /// <summary>The file beside the data directory that exists exactly while a first-run initdb is in flight.</summary>
+    /// <summary>
+    /// The file beside the data directory that exists while a first-run initdb is in flight, or after one was
+    /// stopped. It holds the full path of the data directory it was written for (#7191), because the file name is
+    /// fixed and sits in the parent folder, which other data directories can share.
+    /// </summary>
     internal const string InitdbIncompleteMarkerFileName = "pg-initdb-incomplete.marker";
 
     internal static string InitdbIncompleteMarkerPath(string dataDirectory)
         => Path.Combine(ParentOf(dataDirectory), InitdbIncompleteMarkerFileName);
+
+    /// <summary>The suffix <see cref="DiscardInterruptedInitdb"/> adds to the name of a half-made data directory it moves aside.</summary>
+    internal const string InterruptedInitdbDirectorySuffix = ".interrupted-";
+
+    private static string FullDataDirectoryPath(string dataDirectory)
+        => Path.TrimEndingDirectorySeparator(Path.GetFullPath(dataDirectory));
 
     /// <summary>
     /// Runs the first-run initdb between writing and removing <see cref="InitdbIncompleteMarkerFileName"/>
@@ -3910,8 +3920,9 @@ public sealed class DarlingManagedPostgres
     /// the marker on that return would leave its half-made folder blocking every later start. The marker is
     /// written only when the data directory is absent or empty, so a folder that held anything never gets one
     /// (a mistyped <c>postgres.dataDirectory</c> that names a folder with files in it: initdb exits 1 "exists but
-    /// is not empty" and touches nothing), and <see cref="DiscardInterruptedInitdb"/>, which reads the marker on
-    /// the next start, can only delete what this initdb made.
+    /// is not empty" and touches nothing). The marker records the data directory's full path, so
+    /// <see cref="DiscardInterruptedInitdb"/>, which reads it on a later start, acts only on the directory this
+    /// initdb was started for.
     /// </summary>
     internal static async Task<(int ExitCode, string Output)> RunInitdbWithMarkerAsync(
         string dataDirectory, Func<Task<(int ExitCode, string Output)>> runInitdb)
@@ -3922,11 +3933,11 @@ public sealed class DarlingManagedPostgres
         }
 
         var marker = InitdbIncompleteMarkerPath(dataDirectory);
-        File.WriteAllText(marker, "initdb started; delete only if the data directory beside it is empty or unwanted" + Environment.NewLine);
+        File.WriteAllText(marker, FullDataDirectoryPath(dataDirectory) + Environment.NewLine);
         var result = await runInitdb();
 
         /* Only a clean exit removes the marker. A throw skips this line, and a non-zero exit (an initdb killed from
-           outside the service) keeps it so the next start discards the half-made folder. */
+           outside the service) keeps it so the next start sets the half-made folder aside. */
         if (result.ExitCode == 0)
         {
             File.Delete(marker);
@@ -3936,10 +3947,16 @@ public sealed class DarlingManagedPostgres
     }
 
     /// <summary>
-    /// A first-run initdb that never finished (<see cref="InitdbIncompleteMarkerFileName"/> still beside the data
-    /// directory) left a half-made cluster that is not a store: nothing was ever monitored into it and its
-    /// credential was written for this very initdb. Deletes it and the marker so the start initializes again
-    /// (#7191). Does nothing when there is no marker, so a real cluster is never touched.
+    /// A first-run initdb that never finished left <see cref="InitdbIncompleteMarkerFileName"/> beside the data
+    /// directory, naming it, and a half-made cluster that is not a store (#7191). Moves that folder aside to
+    /// <c>&lt;dataDirectory&gt;.interrupted-yyyyMMddHHmmss</c> (an empty one is just removed) and removes the
+    /// marker, so the start initializes again. It never deletes a non-empty folder: the marker survives every
+    /// non-zero initdb exit, so it can sit on disk until an operator has pointed <c>postgres.dataDirectory</c>
+    /// at a sibling store or restored a backup into the same folder, and either would be lost to a delete.
+    /// Acts only when the marker names exactly this directory (full paths, case-insensitive on Windows only). A
+    /// marker that names another directory, or holds no readable path, is left in place with one warning and
+    /// nothing is touched. When the move throws, the exception propagates and the marker stays, so the start
+    /// fails with the reason and nothing is lost. Does nothing when there is no marker.
     /// </summary>
     internal static void DiscardInterruptedInitdb(string dataDirectory, ILogger logger)
     {
@@ -3949,12 +3966,46 @@ public sealed class DarlingManagedPostgres
             return;
         }
 
-        logger.LogWarning(
-            "A previous first-run initdb for {DataDirectory} did not finish (it was stopped or timed out). Deleting the half-made data directory and initializing again",
-            dataDirectory);
-        if (Directory.Exists(dataDirectory))
+        var full = FullDataDirectoryPath(dataDirectory);
+        string? named = null;
+        try
         {
-            Directory.Delete(dataDirectory, recursive: true);
+            var text = File.ReadLines(marker).FirstOrDefault()?.Trim();
+            if (!string.IsNullOrEmpty(text) && Path.IsPathFullyQualified(text))
+            {
+                named = FullDataDirectoryPath(text);
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        {
+            named = null;
+        }
+
+        var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        if (named is null || !string.Equals(named, full, comparison))
+        {
+            logger.LogWarning(
+                "The first-run initdb marker {Marker} {Names}, not {DataDirectory}, so it was left in place and nothing was touched. Delete the marker file once you have checked it is stale",
+                marker,
+                named is null ? "does not name a readable data directory" : "names " + named,
+                dataDirectory);
+            return;
+        }
+
+        if (Directory.Exists(full))
+        {
+            if (Directory.EnumerateFileSystemEntries(full).Any())
+            {
+                var aside = full + InterruptedInitdbDirectorySuffix + DateTime.Now.ToString("yyyyMMddHHmmss", System.Globalization.CultureInfo.InvariantCulture);
+                logger.LogWarning(
+                    "A previous first-run initdb for {DataDirectory} did not finish (it was stopped or timed out). Moving the half-made data directory to {MovedTo} and initializing again. The moved folder can be deleted once you have checked it",
+                    dataDirectory, aside);
+                Directory.Move(full, aside);
+            }
+            else
+            {
+                Directory.Delete(full);
+            }
         }
 
         File.Delete(marker);

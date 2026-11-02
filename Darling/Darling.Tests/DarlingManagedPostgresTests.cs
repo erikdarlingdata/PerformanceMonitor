@@ -4908,6 +4908,104 @@ public sealed class DarlingManagedPostgresTests
             Assert.False(File.Exists(Path.Combine(dataDirectory, "PG_VERSION")));
             Assert.False(Directory.Exists(dataDirectory));
             Assert.False(File.Exists(DarlingManagedPostgres.InitdbIncompleteMarkerPath(dataDirectory)));
+            var aside = Assert.Single(MovedAsideFolders(store));
+            Assert.True(File.Exists(Path.Combine(aside, "PG_VERSION")));
+            Assert.True(Directory.Exists(Path.Combine(aside, "base")));
+        }
+        finally
+        {
+            try { Directory.Delete(store, recursive: true); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+        }
+    }
+
+    private static string[] MovedAsideFolders(string store)
+        => Directory.GetDirectories(store, "pgdata" + DarlingManagedPostgres.InterruptedInitdbDirectorySuffix + "*");
+
+    /* #7191 review, case A: the first-run initdb for ...\pgdata fails and leaves its marker in the shared parent.
+       The operator then sets postgres.dataDirectory to a sibling folder that holds a real store. The marker names
+       pgdata, not the sibling, so the start must not touch one file there. */
+    [Fact]
+    public async Task AMarkerThatNamesAnotherFolder_IsLeftInPlace_AndTheRealStoreAtTheRequestedPathIsUntouched()
+    {
+        var store = Path.Combine(Path.GetTempPath(), "pm-initdb-othermarker-" + Guid.NewGuid().ToString("N"));
+        var failedDirectory = Path.Combine(store, "pgdata");
+        var realStore = Path.Combine(store, "pgdata-old");
+        Directory.CreateDirectory(store);
+        try
+        {
+            var result = await DarlingManagedPostgres.RunInitdbWithMarkerAsync(
+                failedDirectory, () => Task.FromResult((1, "initdb: error: could not create directory")));
+            Assert.Equal(1, result.ExitCode);
+
+            Directory.CreateDirectory(Path.Combine(realStore, "base"));
+            File.WriteAllText(Path.Combine(realStore, "PG_VERSION"), "17");
+            File.WriteAllText(Path.Combine(realStore, "base", "1"), "a real store");
+
+            DarlingManagedPostgres.DiscardInterruptedInitdb(realStore, NullLogger.Instance);
+
+            Assert.Equal("17", File.ReadAllText(Path.Combine(realStore, "PG_VERSION")));
+            Assert.Equal("a real store", File.ReadAllText(Path.Combine(realStore, "base", "1")));
+            Assert.True(File.Exists(DarlingManagedPostgres.InitdbIncompleteMarkerPath(failedDirectory)));
+            Assert.Empty(Directory.GetDirectories(store, "*" + DarlingManagedPostgres.InterruptedInitdbDirectorySuffix + "*"));
+        }
+        finally
+        {
+            try { Directory.Delete(store, recursive: true); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+        }
+    }
+
+    /* Case B: the same folder the failed initdb used now holds a restored store backup. The marker does name this
+       folder, so the start sets it aside, and it never deletes: every restored file is still on disk. */
+    [Fact]
+    public async Task AStoreRestoredIntoTheFailedFolder_IsMovedAside_NotDeleted()
+    {
+        var store = Path.Combine(Path.GetTempPath(), "pm-initdb-restored-" + Guid.NewGuid().ToString("N"));
+        var dataDirectory = Path.Combine(store, "pgdata");
+        Directory.CreateDirectory(store);
+        try
+        {
+            var result = await DarlingManagedPostgres.RunInitdbWithMarkerAsync(
+                dataDirectory, () => Task.FromResult((1, "initdb: error: could not create directory")));
+            Assert.Equal(1, result.ExitCode);
+
+            Directory.CreateDirectory(Path.Combine(dataDirectory, "base"));
+            File.WriteAllText(Path.Combine(dataDirectory, "PG_VERSION"), "17");
+            File.WriteAllText(Path.Combine(dataDirectory, "base", "1"), "restored from backup");
+
+            DarlingManagedPostgres.DiscardInterruptedInitdb(dataDirectory, NullLogger.Instance);
+
+            Assert.False(Directory.Exists(dataDirectory));
+            Assert.False(File.Exists(DarlingManagedPostgres.InitdbIncompleteMarkerPath(dataDirectory)));
+            var aside = Assert.Single(MovedAsideFolders(store));
+            Assert.Equal("17", File.ReadAllText(Path.Combine(aside, "PG_VERSION")));
+            Assert.Equal("restored from backup", File.ReadAllText(Path.Combine(aside, "base", "1")));
+        }
+        finally
+        {
+            try { Directory.Delete(store, recursive: true); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+        }
+    }
+
+    /* A marker that holds no readable path (empty, or text that is not a full path) names no folder, so it proves
+       nothing about this one: leave both alone. */
+    [Theory]
+    [InlineData("")]
+    [InlineData("initdb started; delete only if the data directory beside it is empty or unwanted")]
+    public void AMarkerWithNoReadablePath_IsLeftInPlace_AndNothingIsTouched(string markerText)
+    {
+        var store = Path.Combine(Path.GetTempPath(), "pm-initdb-nopath-" + Guid.NewGuid().ToString("N"));
+        var dataDirectory = Path.Combine(store, "pgdata");
+        Directory.CreateDirectory(dataDirectory);
+        File.WriteAllText(Path.Combine(dataDirectory, "PG_VERSION"), "17");
+        var marker = DarlingManagedPostgres.InitdbIncompleteMarkerPath(dataDirectory);
+        File.WriteAllText(marker, markerText);
+        try
+        {
+            DarlingManagedPostgres.DiscardInterruptedInitdb(dataDirectory, NullLogger.Instance);
+
+            Assert.Equal("17", File.ReadAllText(Path.Combine(dataDirectory, "PG_VERSION")));
+            Assert.True(File.Exists(marker));
+            Assert.Empty(MovedAsideFolders(store));
         }
         finally
         {
@@ -5044,6 +5142,7 @@ public sealed class DarlingManagedPostgresTests
 
             Assert.False(File.Exists(DarlingManagedPostgres.InitdbIncompleteMarkerPath(dataDirectory)));
             Assert.False(Directory.Exists(dataDirectory));
+            Assert.Empty(MovedAsideFolders(store));
         }
         finally
         {
@@ -5079,6 +5178,9 @@ public sealed class DarlingManagedPostgresTests
             Assert.False(File.Exists(Path.Combine(dataDirectory, "PG_VERSION")));
             Assert.False(Directory.Exists(dataDirectory));
             Assert.False(File.Exists(DarlingManagedPostgres.InitdbIncompleteMarkerPath(dataDirectory)));
+            var aside = Assert.Single(MovedAsideFolders(store));
+            Assert.True(File.Exists(Path.Combine(aside, "PG_VERSION")));
+            Assert.True(Directory.Exists(Path.Combine(aside, "base")));
         }
         finally
         {
@@ -5108,6 +5210,8 @@ public sealed class DarlingManagedPostgresTests
 
             Assert.False(Directory.Exists(dataDirectory));
             Assert.False(File.Exists(DarlingManagedPostgres.InitdbIncompleteMarkerPath(dataDirectory)));
+            var aside = Assert.Single(MovedAsideFolders(store));
+            Assert.True(File.Exists(Path.Combine(aside, "PG_VERSION")));
         }
         finally
         {
