@@ -2063,5 +2063,19 @@ LIMIT 1";
         var attentionFault = await DarlingXeSessions.EnsureAllAsync(server.Runtime, runner, logger, cancellationToken, attentionEnabled, captureOutcome);
         server.AttentionXePermissionFault = attentionFault?.Message;
         server.CaptureEnsure = captureOutcome;
+        ApplyTransientEnsureRetry(server, captureOutcome, utcNow);
+    }
+
+    /// <summary>
+    /// #7164: an ensure that failed with a transient error (a timeout, a dropped connection) says nothing about the session, so it is
+    /// asked again after <see cref="DarlingXeSessions.TransientRetryInterval"/> instead of the hour. The stamp is moved back so the
+    /// ordinary <see cref="AlwaysOnXeSessions.EnsureIsDue"/> check finds it due then.
+    /// </summary>
+    internal static void ApplyTransientEnsureRetry(ServerLoopState server, DarlingXeSessions.CaptureEnsureOutcome outcome, DateTime utcNow)
+    {
+        if (outcome.TransientFailure)
+        {
+            server.XeSessionsEnsuredAtUtc = utcNow - (AlwaysOnXeSessions.EnsureInterval - DarlingXeSessions.TransientRetryInterval);
+        }
     }
 }

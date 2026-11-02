@@ -484,6 +484,7 @@ public sealed partial class DarlingWorker
                 server.CaptureEnsure = captureOutcome;
                 server.AttentionXeEnsuredWhileEnabled = attentionEnabled;
                 server.XeSessionsEnsuredAtUtc = DateTime.UtcNow;
+                ApplyTransientEnsureRetry(server, captureOutcome, DateTime.UtcNow);
             }
 
             /* On-load config snapshots (effective FrequencyMinutes 0) run once per connect, then every

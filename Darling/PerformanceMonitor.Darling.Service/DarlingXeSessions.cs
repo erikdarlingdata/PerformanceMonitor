@@ -82,6 +82,78 @@ public static class DarlingXeSessions
         public string? DeadlockPartialNote { get; set; }
 
         public string? BlockedProcessPartialNote { get; set; }
+
+        /// <summary>
+        /// True when an on-premises, Managed Instance or RDS ensure failed with a transient error (a timeout, a dropped connection).
+        /// That is not a fault for the run: the session may well be running, so the runs read it as they did before #6893, and the
+        /// worker asks again after <see cref="TransientRetryInterval"/> instead of waiting out the hour.
+        /// </summary>
+        public bool TransientFailure { get; set; }
+    }
+
+    /// <summary>How long after a transient ensure failure the next sweep ensures again (#7164), instead of the hourly interval.</summary>
+    public static readonly TimeSpan TransientRetryInterval = TimeSpan.FromMinutes(5);
+
+    /// <summary>
+    /// Whether a failed on-premises ensure is a blip that says nothing about the session (#7164): a command timeout (-2) or a dropped
+    /// or refused connection, as <see cref="SqlErrorClassification.IsTransient"/> reads them, or a transport exception the driver
+    /// did not wrap in a SqlException. A permission denial is never transient.
+    /// </summary>
+    internal static bool IsTransientEnsureFailure(Exception ex)
+    {
+        var numbers = ErrorNumbersOf(ex);
+        if (numbers.Any(SqlServerPermissionErrors.IsPermissionDenied))
+        {
+            return false;
+        }
+
+        if (numbers.Any(SqlErrorClassification.IsTransient))
+        {
+            return true;
+        }
+
+        for (var current = ex; current is not null; current = current.InnerException)
+        {
+            if (current is TimeoutException or System.IO.IOException or System.Net.Sockets.SocketException)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// What an on-premises deadlock or blocked-process ensure failure leaves for the run (#7164): a transient failure only marks the
+    /// outcome so the ensure is asked again soon, any other failure is the fault the run records (#6893). Returns the fault, or null when
+    /// the failure was transient.
+    /// </summary>
+    internal static XeEnsureFailure? RecordOnPremCaptureFault(CaptureEnsureOutcome? outcome, bool deadlock, Exception ex)
+    {
+        if (IsTransientEnsureFailure(ex))
+        {
+            if (outcome is not null)
+            {
+                outcome.TransientFailure = true;
+            }
+
+            return null;
+        }
+
+        var fault = CaptureFaultFor(ex, deadlock ? "deadlock" : "blocked process");
+        if (outcome is not null)
+        {
+            if (deadlock)
+            {
+                outcome.Deadlock = fault;
+            }
+            else
+            {
+                outcome.BlockedProcess = fault;
+            }
+        }
+
+        return fault;
     }
 
     /// <summary>The failure a failed deadlock or blocked-process ensure leaves for the run (#6893): PERMISSIONS for a denied create, SESSION_MISSING for anything else.</summary>
@@ -164,13 +236,15 @@ public static class DarlingXeSessions
             {
                 /* #6893: carried to the run, which records PERMISSIONS for a denied create and SESSION_MISSING for any other failure,
                    instead of reading a session that cannot exist and recording a SUCCESS with zero rows. */
-                var fault = CaptureFaultFor(ex, "deadlock");
-                if (outcome is not null)
+                var fault = RecordOnPremCaptureFault(outcome, deadlock: true, ex);
+                if (fault is null)
                 {
-                    outcome.Deadlock = fault;
+                    LogTransientCaptureFault(logger, server, "deadlock", ex);
                 }
-
-                LogCaptureFault(logger, server, "deadlock", "deadlock", fault, ex);
+                else
+                {
+                    LogCaptureFault(logger, server, "deadlock", "deadlock", fault, ex);
+                }
             }
 
             try
@@ -183,13 +257,15 @@ public static class DarlingXeSessions
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                var fault = CaptureFaultFor(ex, "blocked process");
-                if (outcome is not null)
+                var fault = RecordOnPremCaptureFault(outcome, deadlock: false, ex);
+                if (fault is null)
                 {
-                    outcome.BlockedProcess = fault;
+                    LogTransientCaptureFault(logger, server, "blocked process", ex);
                 }
-
-                LogCaptureFault(logger, server, "blocked process", "blocked-process", fault, ex);
+                else
+                {
+                    LogCaptureFault(logger, server, "blocked process", "blocked-process", fault, ex);
+                }
             }
 
             /* The client-timeout capture (#5640), its own try block like the two above: a failure of one capture never
@@ -231,6 +307,11 @@ public static class DarlingXeSessions
 
         return attentionFault;
     }
+
+    /// <summary>#7164: a transient ensure failure leaves no fault for the run: the session is probably running, and the ensure is asked again in a few minutes.</summary>
+    private static void LogTransientCaptureFault(ILogger? logger, ServerRuntime server, string captureName, Exception ex) =>
+        logger?.LogWarning("[{Server}] Could not ensure the {Capture} XE session because of a transient error: {Message} — asking again in {Minutes} minutes",
+            server.Config.DisplayName, captureName, ex.Message, (int)TransientRetryInterval.TotalMinutes);
 
     /// <summary>#6893: a denied create is a permission state the run records as PERMISSIONS, so it is a Warning, like the client-timeout session's (#5640). Any other failure is a capture that broke.</summary>
     private static void LogCaptureFault(ILogger? logger, ServerRuntime server, string captureName, string collectorWord, XeEnsureFailure fault, Exception ex)
