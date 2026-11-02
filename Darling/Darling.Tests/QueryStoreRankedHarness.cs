@@ -31,8 +31,9 @@ namespace Darling.Tests;
 /// Store fact column is <c>bigint</c> (V145), so every partial sum, count, minimum and maximum a candidate keeps is an exact
 /// integer or numeric and the tolerance is 0; the parameter exists for a candidate that keeps a float partial.</para>
 ///
-/// <para><b>Ties at the top-N cutoff.</b> Neither text orders the rank beyond <c>value DESC NULLS LAST</c>, so which of
-/// several groups tied at the cutoff takes the last slot is the plan's choice. When the two member sets differ the harness
+/// <para><b>Ties at the top-N cutoff.</b> Both texts order the rank by <c>value DESC NULLS LAST</c> and then the group
+/// key columns (#7146), so groups tied at the cutoff are taken in key order on every route. A candidate that does not compile the key
+/// order could still differ in which tied group takes the last slot; when the two member sets differ the harness
 /// reads every group's true total from the ranked (non-time) panel, which neither switch changes, and accepts the difference
 /// only if each side is a valid top N under those totals and the groups that differ all sit exactly at the cutoff value. The
 /// rows of the groups both sides chose must still be equal. <see cref="Comparison.MemberSetsDiffered"/> reports whether it
