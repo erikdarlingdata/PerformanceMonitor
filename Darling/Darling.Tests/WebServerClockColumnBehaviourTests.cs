@@ -37,7 +37,7 @@ public sealed class WebServerClockColumnBehaviourTests
         catch (Win32Exception)
         {
             Assert.Skip("Node is not installed, so the shipped column script cannot be run.");
-            return;
+            throw;
         }
 
         using (proc)
