@@ -3116,6 +3116,13 @@ BEGIN
       AND NOT EXISTS (SELECT 1 FROM {config}.config_notification_routes WHERE route_id = v_fallback) THEN
       RAISE EXCEPTION 'The fallback route does not exist.' USING ERRCODE = 'DL404';
    END IF;
+   -- #7109: the Level 3 route with approval off is not made or kept live by an MCP change. The caller read the approval a moment ago, so the
+   -- stored value is checked again here, under the lock: a person who saved approval off after that read leaves a route this call must not
+   -- enable or reshape. A person in the Viewer or on the web writes the table on their own login and is not held to this.
+   IF v_operator AND v_row.agent_level = 3 AND v_row.action_approval = 'off'
+      AND (('enabled' = ANY (p_columns) AND v_enabled) OR 'metric_match' = ANY (p_columns) OR 'scope' = ANY (p_columns) OR 'severities' = ANY (p_columns)) THEN
+      RAISE EXCEPTION 'Route % is a Level 3 route with action approval off, so it is not enabled, and its match, scope or severities are not changed, over MCP. A person can make this change in the Viewer or on the web dashboard, or set action_approval to required here first.', p_route_id USING ERRCODE = 'DL403';
+   END IF;
    -- The one UPDATE names no destination column: the sealed webhook values, the key, the signing keys and the address list
    -- stay exactly as stored.
    UPDATE {config}.config_notification_routes
@@ -3211,6 +3218,11 @@ BEGIN
    END IF;
    IF v_single AND NOT v_row.approval_single_person THEN
       RAISE EXCEPTION 'MCP sets approval_single_person only to false, never to true. A person turns it on in the Viewer or on the web dashboard.' USING ERRCODE = 'DL403';
+   END IF;
+   -- #7109: the approval value is read again under the lock. A person who saved approval off after the caller's read leaves a route that this
+   -- call must not raise to Level 3, or the result is a Level 3 route with no approval that nobody chose.
+   IF v_level = 3 AND v_approval = 'off' AND 'agent_level' = ANY (p_columns) AND v_row.agent_level IS DISTINCT FROM 3 THEN
+      RAISE EXCEPTION 'Route % has action approval off, so it is not raised to Level 3 over MCP. A person can make this change in the Viewer or on the web dashboard, or set action_approval to required in the same call.', p_route_id USING ERRCODE = 'DL403';
    END IF;
    IF v_level IS NOT NULL AND v_level NOT IN (0, 1, 2, 3) THEN
       RAISE EXCEPTION 'The agent level is Off (0), Investigate (1), Act (2) or Act on servers (3).' USING ERRCODE = 'DL400';

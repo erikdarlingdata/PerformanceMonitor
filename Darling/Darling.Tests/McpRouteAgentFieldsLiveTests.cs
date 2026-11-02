@@ -458,6 +458,65 @@ public sealed class McpRouteAgentFieldsLiveTests
         });
     }
 
+    /// <summary>#7109: the tool reads the route, then the store function writes. A person who saves approval off in between (from a dialog that
+    /// shows Level 2) must not end up with a Level 3 route with no approval that nobody chose. The store functions check the approval again under
+    /// the row's lock and refuse (DL403) a raise to Level 3, an enable of a Level 3 route, or a change of its match, scope or severities, each
+    /// leaving the row as it was. A person writing the table directly, as the Viewer does, can still set Level 3 with approval off.</summary>
+    [Fact]
+    public async Task AnApprovalSavedOffAfterTheToolsRead_IsRefusedByTheStoreFunctions_AndAPersonCanStillSetLevel3Off()
+    {
+        await WithMcpRoleAsync(async (owner, asMcp, ct) =>
+        {
+            const string Shape = "SELECT coalesce(agent_level::text, 'null') || '|' || action_approval || '|' || enabled::text || '|' || metric_match || '|' || severities " +
+                "FROM config.config_notification_routes WHERE route_id = ";
+            async Task<PostgresException> RefusedAsync(string call, CancellationToken token) => await Assert.ThrowsAsync<PostgresException>(async () =>
+            {
+                await using var command = asMcp.CreateCommand(call);
+                await command.ExecuteNonQueryAsync(token);
+            });
+
+            var routeId = RouteIdOf(await DarlingMcpAlertTools.CreateNotificationRoute(asMcp, "Blocking", agent_level: 2, served: OperatorPolicy(), cancellationToken: ct));
+            Assert.Equal("2|required|true|Blocking|both", await ScalarAsync(owner, Shape + routeId, ct));
+
+            /* The person's save lands after the tool read "required" and before its function runs. */
+            await ExecAsync(owner, $"UPDATE config.config_notification_routes SET action_approval = 'off' WHERE route_id = {routeId}", ct);
+            var raise = await RefusedAsync(
+                $"SELECT config.set_notification_route_agent({routeId}, 'operator:{Operator}', ARRAY['agent_level'], 3, NULL, NULL, NULL, NULL, NULL, false, NULL)", ct);
+            Assert.Equal("DL403", raise.SqlState);
+            Assert.Contains($"Route {routeId}", raise.MessageText, StringComparison.Ordinal);
+            Assert.Equal("2|off|true|Blocking|both", await ScalarAsync(owner, Shape + routeId, ct));
+
+            /* The same call that sets required is not refused: the result has approval. */
+            await using (var fixesIt = asMcp.CreateCommand(
+                $"SELECT config.set_notification_route_agent({routeId}, 'operator:{Operator}', ARRAY['agent_level', 'action_approval'], 3, NULL, NULL, NULL, NULL, NULL, false, NULL, 'required', NULL)"))
+            {
+                await fixesIt.ExecuteNonQueryAsync(ct);
+            }
+
+            Assert.Equal("3|required|true|Blocking|both", await ScalarAsync(owner, Shape + routeId, ct));
+
+            /* A person sets approval off on a Level 3 route, which is allowed. */
+            await ExecAsync(owner, $"UPDATE config.config_notification_routes SET action_approval = 'off', enabled = false WHERE route_id = {routeId}", ct);
+            Assert.Equal("3|off|false|Blocking|both", await ScalarAsync(owner, Shape + routeId, ct));
+
+            var enable = await RefusedAsync(
+                $"SELECT config.update_notification_route({routeId}, 'operator:{Operator}', ARRAY['enabled'], NULL, true, NULL, NULL, NULL, NULL, NULL, NULL)", ct);
+            Assert.Equal("DL403", enable.SqlState);
+            Assert.Contains($"Route {routeId}", enable.MessageText, StringComparison.Ordinal);
+            var reshape = await RefusedAsync(
+                $"SELECT config.update_notification_route({routeId}, 'operator:{Operator}', ARRAY['metric_match'], 'Deadlocks', NULL, NULL, NULL, NULL, NULL, NULL, NULL)", ct);
+            Assert.Equal("DL403", reshape.SqlState);
+            Assert.Equal("3|off|false|Blocking|both", await ScalarAsync(owner, Shape + routeId, ct));
+
+            /* Turning the route off, or changing what is not its shape, is still allowed to an operator. */
+            await using (var allowed = asMcp.CreateCommand(
+                $"SELECT config.update_notification_route({routeId}, 'operator:{Operator}', ARRAY['enabled', 'send_resolutions'], NULL, false, NULL, NULL, true, NULL, NULL, NULL)"))
+            {
+                await allowed.ExecuteNonQueryAsync(ct);
+            }
+        });
+    }
+
     /// <summary>#7109: a Level 3 route with action approval required cannot be disabled (by either tool), put back to Inherit, or have its match,
     /// scope or severities changed over MCP, so no alert falls through to a route whose actions run without approval. Its level can go down,
     /// and once it is below Level 3 it can be disabled.</summary>

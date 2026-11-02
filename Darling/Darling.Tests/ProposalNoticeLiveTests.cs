@@ -35,6 +35,9 @@ public sealed class ProposalNoticeLiveTests
     private const string AgentReason = "AGENT-REASON-TEXT drop table";
     private const string TargetText = "TARGET-TEXT-9917";
 
+    /* A seven-digit session id: a two-digit one (55) turned up by chance inside the proposal GUID in the notice link (#7109). */
+    private const int SessionMarker = 7391846;
+
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
     private sealed class RecordingSends : IInvestigationEventSends
@@ -81,7 +84,7 @@ public sealed class ProposalNoticeLiveTests
         var opened = await store.OpenOrJoinAsync(alert, ct);
         var claim = await store.ClaimAsync(opened.RequestId!.Value, "agent-a", ct);
         var draft = new ActionProposalDraft(opened.RequestId.Value, 1, "agent-a", "kill_session", 101,
-            new JsonObject { ["session_id"] = 55, ["note"] = TargetText }, new JsonObject { ["session_id"] = 55 }, AgentReason);
+            new JsonObject { ["session_id"] = SessionMarker, ["note"] = TargetText }, new JsonObject { ["session_id"] = SessionMarker }, AgentReason);
         return (store, await store.CreateProposalAsync(draft, ct), draft);
     }
 
@@ -129,7 +132,7 @@ public sealed class ProposalNoticeLiveTests
             var all = string.Join("|", notice.Title, notice.Server, notice.Current, notice.Detail);
             Assert.DoesNotContain("AGENT-REASON-TEXT", all, StringComparison.Ordinal);
             Assert.DoesNotContain(TargetText, all, StringComparison.Ordinal);
-            Assert.DoesNotContain("55", all, StringComparison.Ordinal);
+            Assert.DoesNotContain(SessionMarker.ToString(System.Globalization.CultureInfo.InvariantCulture), all, StringComparison.Ordinal);
             Assert.DoesNotContain("drop table", all, StringComparison.OrdinalIgnoreCase);
         });
     }
