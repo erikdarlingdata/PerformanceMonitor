@@ -203,6 +203,7 @@ public sealed class ViewerPlanHostLivePostgresTests
     private const int QueryStatsNoPlanServerId = -970812;
     private const int QueryStorePlanServerId = -970813;
     private const int QueryStatsRegressedPlanServerId = -971176;
+    private const int QueryStatsUnstoredPlanServerId = -971177;
 
     /* A small but well-formed ShowPlanXML — the reads only round-trip the text (the WPF host parses it),
        so any stable string proves the fetch; a realistic plan keeps the fixture honest. */
@@ -311,6 +312,58 @@ public sealed class ViewerPlanHostLivePostgresTests
         {
             await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
                 await DeleteRowsAsync(cleanup, "query_stats", QueryStatsRegressedPlanServerId, cleanupCt));
+        }
+    }
+
+    /// <summary>
+    /// #7175: a row whose own plan text was never stored (the plan was over the capture cap, or the tick stored no
+    /// plan) gets the newest plan, and the read says whose plan that is. The window names its saved file and its
+    /// title from that answer, so the file carries the newest plan's hash, not the clicked row's.
+    /// </summary>
+    [Fact]
+    public async Task QueryStatsPlan_RowPlanNeverStored_ReportsTheNewestPlansHash_AndFlagsTheFallback_AgainstDevPostgres()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live row-plan fallback test.");
+
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
+        await DeleteRowsAsync(connection, "query_stats", QueryStatsUnstoredPlanServerId, TestContext.Current.CancellationToken);
+
+        await using var viewer = new ViewerDataService(cs!);
+        var t = TruncateToSeconds(DateTime.UtcNow).AddHours(-3);
+
+        var bodySucceeded = false;
+        try
+        {
+            /* The old plan's snapshot stored no plan text. The newest snapshot holds the new plan. */
+            await InsertQueryStatsWithPlanAsync(connection, QueryStatsUnstoredPlanServerId, t, "StackOverflow", "0xUNSTORED",
+                deltaExec: 1, deltaWorker: 10_000, deltaElapsed: 20_000, queryText: "SELECT u", planXml: null, planHash: "0xOLDPLAN");
+            await InsertQueryStatsWithPlanAsync(connection, QueryStatsUnstoredPlanServerId, t.AddMinutes(20), "StackOverflow", "0xUNSTORED",
+                deltaExec: 1, deltaWorker: 10_000, deltaElapsed: 20_000, queryText: "SELECT u", planXml: NewerPlanXml, planHash: "0xNEWPLAN");
+
+            var fallback = await viewer.GetQueryStatsPlanAsync(QueryStatsUnstoredPlanServerId, "StackOverflow", "0xUNSTORED", "0xOLDPLAN");
+            Assert.NotNull(fallback);
+            Assert.Equal(NewerPlanXml, fallback.PlanXml);
+            Assert.Equal("0xNEWPLAN", fallback.PlanId); /* the file is named for the plan inside it */
+            Assert.True(fallback.IsFallback);
+
+            var own = await viewer.GetQueryStatsPlanAsync(QueryStatsUnstoredPlanServerId, "StackOverflow", "0xUNSTORED", "0xNEWPLAN");
+            Assert.NotNull(own);
+            Assert.Equal("0xNEWPLAN", own.PlanId);
+            Assert.False(own.IsFallback);
+
+            var noRow = await viewer.GetQueryStatsPlanAsync(QueryStatsUnstoredPlanServerId, "StackOverflow", "0xUNSTORED");
+            Assert.NotNull(noRow);
+            Assert.False(noRow.IsFallback); /* no row named, so nothing was substituted */
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, "query_stats", QueryStatsUnstoredPlanServerId, cleanupCt));
         }
     }
 

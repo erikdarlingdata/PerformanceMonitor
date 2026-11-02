@@ -850,6 +850,16 @@ public sealed class ViewerQueriesLivePostgresTests
                 await viewer.GetProcedureStatsPlanXmlAsync(ProcedureStatsRecompiledServerId, "StackOverflow", "dbo", "usp_Recompiled", "0xOLDHANDLE"));
             Assert.Equal("<ShowPlanXML>new</ShowPlanXML>",
                 await viewer.GetProcedureStatsPlanXmlAsync(ProcedureStatsRecompiledServerId, "StackOverflow", "dbo", "usp_Recompiled", "0xNEWHANDLE"));
+            /* The read names the snapshot it picked, and flags a substitution (#7175): the window files the
+               plan under that snapshot's time, not the clicked row's. */
+            var own = await viewer.GetProcedureStatsPlanAsync(ProcedureStatsRecompiledServerId, "StackOverflow", "dbo", "usp_Recompiled", "0xOLDHANDLE");
+            Assert.NotNull(own);
+            Assert.False(own.IsFallback);
+            Assert.Equal(t, own.CollectionTime);
+            var substituted = await viewer.GetProcedureStatsPlanAsync(ProcedureStatsRecompiledServerId, "StackOverflow", "dbo", "usp_Recompiled", "0xNEVERSTORED");
+            Assert.NotNull(substituted);
+            Assert.True(substituted.IsFallback);
+            Assert.Equal(t.AddMinutes(30), substituted.CollectionTime); /* the newest plan's snapshot, not the asked-for one */
             /* No handle (the Top Procedures row) and a handle with no stored plan both read the newest plan. */
             Assert.Equal("<ShowPlanXML>new</ShowPlanXML>",
                 await viewer.GetProcedureStatsPlanXmlAsync(ProcedureStatsRecompiledServerId, "StackOverflow", "dbo", "usp_Recompiled"));

@@ -195,7 +195,8 @@ public partial class ProcedureHistoryWindow : Window
         btn.Content = "...";
         try
         {
-            var plan = await _dataService.GetProcedureStatsPlanXmlAsync(_serverId, _databaseName, _schemaName, _objectName, row?.PlanHandle);
+            var read = await _dataService.GetProcedureStatsPlanAsync(_serverId, _databaseName, _schemaName, _objectName, row?.PlanHandle);
+            var plan = read?.PlanXml;
             if (string.IsNullOrEmpty(plan))
             {
                 MessageBox.Show(this, "No plan was captured in the collected data for this procedure.",
@@ -206,13 +207,18 @@ public partial class ProcedureHistoryWindow : Window
             /* #5320: a plan the statement filter withheld whole is the marker, not a plan: say so, save nothing. */
             if (WithheldPlanGuard.RefuseSave(plan)) return;
 
+            if (read!.IsFallback)
+            {
+                MessageBox.Show(this, StoredPlanNotice.Text, "Showing The Newest Plan", MessageBoxButton.OK, MessageBoxImage.Information);
+            }
+
             var dialog = new SaveFileDialog
             {
                 Filter = "SQL Plan files (*.sqlplan)|*.sqlplan|All files (*.*)|*.*",
                 DefaultExt = ".sqlplan",
-                FileName = row is null
-                    ? $"proc_plan_{_objectName}_{DateTime.Now:yyyyMMdd_HHmmss}.sqlplan"
-                    : $"proc_plan_{_objectName}_{row.CollectionTime:yyyyMMdd_HHmmss}Z.sqlplan"
+                FileName = read.CollectionTime is { } snapshot
+                    ? $"proc_plan_{_objectName}_{snapshot:yyyyMMdd_HHmmss}Z.sqlplan"
+                    : $"proc_plan_{_objectName}_{DateTime.Now:yyyyMMdd_HHmmss}.sqlplan"
             };
 
             if (dialog.ShowDialog() != true) return;
@@ -239,9 +245,11 @@ public partial class ProcedureHistoryWindow : Window
         var fullName = string.IsNullOrEmpty(_schemaName) ? _objectName : $"{_schemaName}.{_objectName}";
         string? planXml;
         var row = HistoryRowPlanTarget.Resolve<ViewerProcedureStatsHistoryRow>(sender, HistoryDataGrid);
+        StoredPlanRead? read;
         try
         {
-            planXml = await _dataService.GetProcedureStatsPlanXmlAsync(_serverId, _databaseName, _schemaName, _objectName, row?.PlanHandle);
+            read = await _dataService.GetProcedureStatsPlanAsync(_serverId, _databaseName, _schemaName, _objectName, row?.PlanHandle);
+            planXml = read?.PlanXml;
         }
         catch (Exception ex)
         {
@@ -256,7 +264,9 @@ public partial class ProcedureHistoryWindow : Window
             return;
         }
 
-        var label = row is null ? $"Est Plan - {fullName}" : $"Est Plan - {fullName} ({row.CollectionTime:yyyy-MM-dd HH:mm}Z)";
+        /* #7175: name the plan that was read. On a fallback, say the clicked row's plan was not stored. */
+        var label = read!.CollectionTime is { } snapshot ? $"Est Plan - {fullName} ({snapshot:yyyy-MM-dd HH:mm}Z)" : $"Est Plan - {fullName}";
+        if (read.IsFallback) label += " - " + StoredPlanNotice.Text;
         var viewer = new PlanViewerControl();
         viewer.AnalyzerConfig = ViewerSettings.CurrentAnalyzerConfig;
         try
