@@ -623,6 +623,43 @@ RETURNING journal_id";
             new JsonObject { ["tool"] = tool }.ToJsonString(), onceKey, cancellationToken);
     }
 
+    /// <summary>
+    /// Journals a store change a tool made on the writes arm (#7185), where no investigation request, claim or agent is behind it: an
+    /// <c>action_called</c> row with the tool, the kind, the target and no before image (the change created the row), then the
+    /// <c>action_done</c> row with the after image, in the caller's transaction so the change and its journal commit together. The Agent
+    /// changes list then shows it and its undo works, exactly as for a gated change. Both rows carry no request id. The connection must be
+    /// the store owner's: the journal keeps these events to it. Answers the <c>action_called</c> journal id.
+    /// </summary>
+    public static async Task<long> JournalDirectChangeAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, DateTime now,
+        int? serverId, string actor, string reason, string tool, string kind, string targetId, string afterJson, CancellationToken cancellationToken)
+    {
+        var called = new JsonObject
+        {
+            ["tool"] = tool,
+            ["kind"] = kind,
+            ["target"] = new JsonObject { ["id"] = targetId, ["server_id"] = serverId, ["database"] = null },
+            ["before"] = null,
+        }.ToJsonString();
+        var calledId = await InsertDirectJournalAsync(connection, transaction, now, serverId, "action_called", actor, reason, called, cancellationToken);
+        var done = new JsonObject { ["called_id"] = calledId, ["after"] = JsonNode.Parse(afterJson) }.ToJsonString();
+        await InsertDirectJournalAsync(connection, transaction, now, serverId, "action_done", actor, null, done, cancellationToken);
+        return calledId;
+    }
+
+    private static async Task<long> InsertDirectJournalAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, DateTime now,
+        int? serverId, string journalEvent, string actor, string? reason, string detailJson, CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(AgentActionJournalSql, connection, transaction);
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = now, NpgsqlDbType = NpgsqlDbType.TimestampTz });
+        command.Parameters.Add(new NpgsqlParameter<Guid?> { TypedValue = null, NpgsqlDbType = NpgsqlDbType.Uuid });
+        command.Parameters.Add(new NpgsqlParameter<int?> { TypedValue = serverId, NpgsqlDbType = NpgsqlDbType.Integer });
+        command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = journalEvent });
+        command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = actor });
+        command.Parameters.Add(new NpgsqlParameter<string?> { TypedValue = reason });
+        command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = detailJson });
+        return (long)(await command.ExecuteScalarAsync(cancellationToken))!;
+    }
+
     private async Task<long> JournalReturningAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, DateTime now,
         Guid requestId, int? serverId, string journalEvent, string actor, string? reason, string detailJson,
         CancellationToken cancellationToken)
