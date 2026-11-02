@@ -70,6 +70,21 @@ public sealed class LiteQueryTagBlockingWaitsTests : IDisposable
         await cmd.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
     }
 
+    private async Task SnapshotAsync(long id, long waitMs, int blockedSpid, int blockingSpid)
+    {
+        using var connection = _duckDb.CreateConnection();
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = "INSERT INTO dmv_blocking_snapshots (collection_id, collection_time, event_time, server_id, server_name, database_name, monitor_loop, wait_time_ms, blocked_spid, blocking_spid) "
+            + "VALUES ($1, $2, $2, $3, 'x', 'db1', 1, $4, $5, $6)";
+        foreach (var v in new object[] { id, DateTime.UtcNow.AddMinutes(-20), _serverId, waitMs, blockedSpid, blockingSpid })
+        {
+            cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = v });
+        }
+
+        await cmd.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+    }
+
     [Fact]
     public async Task BlockingReportsOfOneWait_CountOnce_AtTheLongestReport_AndSelfWaitsAddNothing()
     {
@@ -86,6 +101,10 @@ public sealed class LiteQueryTagBlockingWaitsTests : IDisposable
         await ReportAsync(id++, second.AddSeconds(8), 8_000, 71, 60);
         await ReportAsync(id++, second.AddSeconds(5), 5_000, 90, 90);
 
+        /* The always-on DMV sample: one row per sample, so an ordinary row counts and the self-wait row adds nothing. */
+        await SnapshotAsync(id++, 3_000, 70, 60);
+        await SnapshotAsync(id++, 9_000, 90, 90);
+
         var json = await McpQueryTagUsageTools.GetResourceUseByTag(_service, _serverManager, ServerName, 24);
         using var doc = JsonDocument.Parse(json);
         var blocking = doc.RootElement.GetProperty("sections").EnumerateArray().Single(s => s.GetProperty("section").GetString() == "blocking_reports");
@@ -95,5 +114,11 @@ public sealed class LiteQueryTagBlockingWaitsTests : IDisposable
         Assert.Equal(68_000, total.GetProperty("caused_ms").GetDouble());
         Assert.Equal(2, total.GetProperty("blocked_reports").GetDouble());
         Assert.Equal(2, total.GetProperty("caused_reports").GetDouble());
+
+        var snapshots = doc.RootElement.GetProperty("sections").EnumerateArray().Single(s => s.GetProperty("section").GetString() == "blocking_snapshots").GetProperty("total");
+        Assert.Equal(3_000, snapshots.GetProperty("blocked_ms").GetDouble());
+        Assert.Equal(3_000, snapshots.GetProperty("caused_ms").GetDouble());
+        Assert.Equal(1, snapshots.GetProperty("blocked_snapshots").GetDouble());
+        Assert.Equal(1, snapshots.GetProperty("caused_snapshots").GetDouble());
     }
 }
