@@ -358,12 +358,20 @@ public sealed partial class ViewerDataService
     }
 
     /// <summary>
-    /// The Collection Health tab header's count (#1591, #7241): how many collectors the monitored server refuses NOW. It
-    /// counts <c>BandTally.NoPermission</c> over the rows the status bar tallies (<c>UpdateCollectorHealthTextAsync</c>),
-    /// from the same shared fleet-by-server rollup read (#4226), so the header and the status bar cannot disagree. A
-    /// collector refused earlier in the 7-day window that has succeeded since is not refused now: the ladder bands it
-    /// HEALTHY and the header stops counting it at the next read, instead of keeping the count for a week after the
-    /// grant is added.
+    /// The Collection Health tab header's count (#1591, #7241): how many collectors were refused on their latest attempt after
+    /// their last success, the rule <c>get_collection_health</c> exposes as <c>denied_since_last_success</c>
+    /// (<see cref="CollectorHealthClassifier.DeniedSinceLastSuccess"/>). One refused, then successful since, is not counted. One
+    /// refused on every run and never successful is, and so is one that succeeded earlier and has been refused on every run since
+    /// (a revoked grant), from its first refused run. A collector the server's engine does not run (<c>EngineGated</c>) is never
+    /// counted, as Lite's badge has it. Reads the shared fleet-by-server rollup (#4226), no read of its own.
+    ///
+    /// <para>The fleet rows carry no last-refusal time: the hourly aggregate behind them does not hold one, and adding it means
+    /// rebuilding that aggregate. <see cref="CollectorHealthRow.LastRunTime"/> stands in for it, and only the rule's own
+    /// preconditions let it: at least one refusal in the window and no ERROR at all. Then a latest run later than the last
+    /// success is a refusal for a SQL Server target. The other non-success statuses a run can end on there are SESSION_MISSING,
+    /// YIELDED and ABANDONED, and EXTENSION_MISSING exists only for PostgreSQL targets, which skip this badge. The answer
+    /// differs from the MCP field only when a collector refused earlier, succeeded since, and its newest run is one of those
+    /// three, which the fleet banding already shows as its own problem.</para>
     /// </summary>
     public async Task<int> GetPermissionDeniedCollectorCountAsync(int serverId, CancellationToken cancellationToken = default)
     {
@@ -373,13 +381,17 @@ public sealed partial class ViewerDataService
             return 0;
         }
 
-        var tally = new CollectorHealthClassifier.BandTally();
+        var denied = 0;
         foreach (var row in rows)
         {
-            tally = tally.Add(row.CollectorName, row.HealthStatus, row.ServerAlwaysOnOff, row.EngineGated);
+            if (!row.EngineGated && CollectorHealthClassifier.DeniedSinceLastSuccess(
+                    row.PermissionDeniedCount, row.ErrorCount, row.LastSuccessTime, row.LastRunTime))
+            {
+                denied++;
+            }
         }
 
-        return tally.NoPermission;
+        return denied;
     }
 
     /// <summary>

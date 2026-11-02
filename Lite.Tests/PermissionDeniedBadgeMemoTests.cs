@@ -17,9 +17,9 @@ namespace PerformanceMonitorLite.Tests;
 
 /// <summary>
 /// <c>LocalDataService.GetPermissionDeniedCollectorCountAsync</c> (the Collection Health badge, run on EVERY
-/// server-tab refresh) answers from the Collection Health grid's own per-server memo (#4226, #5371), so a
-/// refresh costs at most the one health read the grid takes. #7241: it counts the collectors banded
-/// NO_PERMISSIONS now, not every collector refused at some point in the 7-day window.
+/// server-tab refresh) answers from its own 20 s per-server memo (#4226), so a
+/// refresh costs at most one narrow read per server. #7241: it counts the collectors refused on their latest attempt
+/// after their last success, not every collector refused at some point in the 7-day window.
 /// </summary>
 public sealed class PermissionDeniedBadgeMemoTests : IClassFixture<SharedDuckDbFixture>
 {
@@ -50,23 +50,43 @@ VALUES ($1, $2, 'srv', $3, $4, $5)";
         await cmd.ExecuteNonQueryAsync();
     }
 
-    /// <summary>#7241: a collector refused earlier in the window that has succeeded on every run since reads 0, and
-    /// one refused on every run, its latest included, reads 1. The old count was 1 for both.</summary>
+    /// <summary>#7241: a collector refused earlier in the window that has succeeded on every run since reads 0, one refused on
+    /// every run and never successful reads 1, and so does one that succeeded earlier and has been refused on every run since
+    /// (a revoked grant). The old count was 1 for the first, and a count of banded NO_PERMISSIONS collectors read 0 for the third.</summary>
     [Fact]
-    public async Task TheCount_IgnoresACollectorRefusedEarlierThatSucceededSince_AndCountsOneRefusedOnItsLatestRun()
+    public async Task TheCount_IsZeroForARefusedThenSuccessfulCollector_AndOneForOneNeverGrantedAndOneRevoked()
     {
         var now = DateTime.UtcNow;
         for (var i = 0; i < 12; i++)
         {
             var at = now.AddMinutes(-60 + i * 5);
             await SeedRowAsync(ServerId + 10, 100 + i, "granted_since", i < 3 ? "PERMISSIONS" : "SUCCESS", at);
-            await SeedRowAsync(ServerId + 11, 200 + i, "granted_since", i < 3 ? "PERMISSIONS" : "SUCCESS", at);
-            await SeedRowAsync(ServerId + 11, 300 + i, "still_refused", "PERMISSIONS", at);
+            await SeedRowAsync(ServerId + 11, 200 + i, "never_granted", "PERMISSIONS", at);
+            await SeedRowAsync(ServerId + 12, 300 + i, "revoked", i < 9 ? "SUCCESS" : "PERMISSIONS", at);
         }
 
         var service = new LocalDataService(_duckDb);
         Assert.Equal(0, await service.GetPermissionDeniedCollectorCountAsync(ServerId + 10));
         Assert.Equal(1, await service.GetPermissionDeniedCollectorCountAsync(ServerId + 11));
+        Assert.Equal(1, await service.GetPermissionDeniedCollectorCountAsync(ServerId + 12));
+    }
+
+    /// <summary>A collector this server's engine does not run is never counted, whatever it logged, and the one beside it still is.
+    /// The memo holds the refused names, so a gate that changes between calls is honored.</summary>
+    [Fact]
+    public async Task TheCount_NeverCountsAnEngineGatedCollector()
+    {
+        var now = DateTime.UtcNow;
+        for (var i = 0; i < 6; i++)
+        {
+            var at = now.AddMinutes(-30 + i * 5);
+            await SeedRowAsync(ServerId + 20, 400 + i, "gated_collector", "PERMISSIONS", at);
+            await SeedRowAsync(ServerId + 20, 500 + i, "running_collector", "PERMISSIONS", at);
+        }
+
+        var service = new LocalDataService(_duckDb);
+        Assert.Equal(1, await service.GetPermissionDeniedCollectorCountAsync(ServerId + 20, name => name == "gated_collector"));
+        Assert.Equal(2, await service.GetPermissionDeniedCollectorCountAsync(ServerId + 20));
     }
 
     private async Task SeedOnePermissionsRowAsync(int serverId, long logId)

@@ -15,20 +15,23 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// #7241: the Collection Health tab header counts the collectors the monitored server refuses NOW, the same count the
-/// status bar shows, not every collector refused at some point in the 7-day window.
+/// #7241: the Collection Health tab header counts the collectors refused on their latest attempt after their last success
+/// (<c>denied_since_last_success</c> in <c>get_collection_health</c>), not every collector refused at some point in the 7-day window.
 /// </summary>
 // #1776 own-store: the live tests mint their own scratch database through ScratchPostgres.
 [Collection("live-postgres")]
 public sealed class PermissionDeniedBadgeCurrentLiveTests
 {
-    private const int GrantedServerId = -7241001;
-    private const int RefusedServerId = -7241002;
+    private const int GrantedSinceServerId = -7241001;
+    private const int NeverGrantedServerId = -7241002;
+    private const int RevokedServerId = -7241003;
+
+    private static readonly int[] ServerIds = [GrantedSinceServerId, NeverGrantedServerId, RevokedServerId];
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
     [Fact]
-    public async Task TheHeaderCount_IgnoresACollectorRefusedEarlierThatSucceededSince_AndCountsOneRefusedOnItsLatestRun_AgainstDevPostgres()
+    public async Task TheHeaderCount_IsZeroForARefusedThenSuccessfulCollector_AndOneForOneRefusedOnEveryRunAndOneWhoseGrantWasRevoked_AgainstDevPostgres()
     {
         var cs = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(cs),
@@ -44,27 +47,34 @@ public sealed class PermissionDeniedBadgeCurrentLiveTests
         var bodySucceeded = false;
         try
         {
-            await DarlingMcpTestData.RegisterServerAsync(connection, GrantedServerId, "badge-granted", ct);
-            await DarlingMcpTestData.RegisterServerAsync(connection, RefusedServerId, "badge-refused", ct);
+            await DarlingMcpTestData.RegisterServerAsync(connection, GrantedSinceServerId, "badge-granted-since", ct);
+            await DarlingMcpTestData.RegisterServerAsync(connection, NeverGrantedServerId, "badge-never-granted", ct);
+            await DarlingMcpTestData.RegisterServerAsync(connection, RevokedServerId, "badge-revoked", ct);
 
             var start = DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc).AddMinutes(-150);
 
-            /* Server 1: refused for its first three runs, then the grant was added and every run since succeeded. */
+            /* Refused for its first three runs, then the grant was added and every run since succeeded. */
             for (var i = 0; i < 12; i++)
             {
-                await SeedAsync(connection, ct, GrantedServerId, "badge-granted", "agent_alerts", 1000 + i, start.AddMinutes(i * 5), i < 3 ? "PERMISSIONS" : "SUCCESS");
+                await SeedAsync(connection, ct, GrantedSinceServerId, "badge-granted-since", "agent_alerts", 1000 + i, start.AddMinutes(i * 5), i < 3 ? "PERMISSIONS" : "SUCCESS");
             }
 
-            /* Server 2: one collector granted the same way, one refused on every run including the latest. */
+            /* Refused on every run, the latest included, and never successful. */
             for (var i = 0; i < 12; i++)
             {
-                await SeedAsync(connection, ct, RefusedServerId, "badge-refused", "agent_alerts", 2000 + i, start.AddMinutes(i * 5), i < 3 ? "PERMISSIONS" : "SUCCESS");
-                await SeedAsync(connection, ct, RefusedServerId, "badge-refused", "msdb_jobs", 3000 + i, start.AddMinutes(i * 5), "PERMISSIONS");
+                await SeedAsync(connection, ct, NeverGrantedServerId, "badge-never-granted", "msdb_jobs", 2000 + i, start.AddMinutes(i * 5), "PERMISSIONS");
+            }
+
+            /* Succeeded for its first nine runs, then the grant was revoked and every run since was refused. */
+            for (var i = 0; i < 12; i++)
+            {
+                await SeedAsync(connection, ct, RevokedServerId, "badge-revoked", "msdb_jobs", 3000 + i, start.AddMinutes(i * 5), i < 9 ? "SUCCESS" : "PERMISSIONS");
             }
 
             await using var viewer = new ViewerDataService(scratch.ConnectionString);
-            Assert.Equal(0, await viewer.GetPermissionDeniedCollectorCountAsync(GrantedServerId, ct));
-            Assert.Equal(1, await viewer.GetPermissionDeniedCollectorCountAsync(RefusedServerId, ct));
+            Assert.Equal(0, await viewer.GetPermissionDeniedCollectorCountAsync(GrantedSinceServerId, ct));
+            Assert.Equal(1, await viewer.GetPermissionDeniedCollectorCountAsync(NeverGrantedServerId, ct));
+            Assert.Equal(1, await viewer.GetPermissionDeniedCollectorCountAsync(RevokedServerId, ct));
 
             bodySucceeded = true;
         }
@@ -84,7 +94,7 @@ VALUES ($1, $2, $3, $4, $5, 100, $6, NULL, 5, 80, 20)",
 
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {
-        foreach (var serverId in new[] { GrantedServerId, RefusedServerId })
+        foreach (var serverId in ServerIds)
         {
             await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM collection_log WHERE server_id = $1", serverId);
             await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM servers WHERE server_id = $1", serverId);

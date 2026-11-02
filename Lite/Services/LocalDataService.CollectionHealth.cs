@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
@@ -19,24 +20,77 @@ namespace PerformanceMonitorLite.Services;
 
 public partial class LocalDataService
 {
+    /// <summary>Re-probe at most this often per server (#4226 lane V1b): measured 46-58 ms on a seeded
+    /// 20-collector/7-day/1-minute-cadence DuckDB (Lite's realistic scale for one server), against a 30 s
+    /// floor on the auto-refresh timer (<c>ServerTab.AutoRefreshSecondsForIndex</c>) — over the ~50 ms bar
+    /// worth memoizing, even though Lite has no fleet fan-out to amortize across. The same "benignly racy"
+    /// TTL shape Darling's <c>GetFleetCollectionHealthByServerAsync</c> uses, not a lock: a refresh racing a
+    /// cold per-server entry may run the scan twice, which is still far cheaper than never caching.</summary>
+    private static readonly TimeSpan PermissionDeniedCountMemoLifetime = TimeSpan.FromSeconds(20);
+
+    private readonly Dictionary<int, (List<string> Collectors, DateTime AtUtc)> _permissionDeniedCollectorsByServer = new();
+
     /// <summary>
-    /// The Collection Health tab header's count (#1591, #7241): how many collectors the monitored server refuses NOW, the ones
-    /// the Collection Health grid bands NO_PERMISSIONS. It reads the grid's own rows through <see cref="GetCollectionHealthAsync"/>
-    /// and its per-server memo, so the header and the grid share one classifier and one read: a collector refused earlier in the
-    /// 7-day window that has succeeded since is HEALTHY there, and stops counting here at the next read instead of a week later.
-    /// Nothing else is scanned. The tick drops the memo before the refresh pass (<see cref="InvalidateCollectionHealthMemo"/>),
-    /// so the Collection Health tab, when it is the visible one, and this badge share that pass's single read.
+    /// #1591, #7241: the Collection Health tab header's count: how many collectors were refused on their latest attempt after their
+    /// last success. A collector counts when <see cref="CollectorHealthClassifier.DeniedSinceLastSuccess"/> says so, the rule
+    /// <c>get_collection_health</c> exposes as <c>denied_since_last_success</c>. So one refused, then successful since, reads 0.
+    /// One refused on every run in the window and never successful reads 1, and so does one that succeeded earlier and has been
+    /// refused on every run since (a revoked grant), from its first refused run. A collector that logged any ERROR in the window
+    /// is not counted, as the rule has it.
+    ///
+    /// <para>Deliberately its own narrow read rather than <c>GetCollectionHealthAsync</c>: that one is per-collector, only runs
+    /// when its tab is selected and aggregates far more than this needs. This runs on every refresh alongside the alert-count badge,
+    /// so a denied collector is discoverable from any tab. One GROUP BY per collector over the 7-day window, with its own short memo.
+    /// Counts collectors, not rows, so one collector failing every cycle for a week reads as "1".</para>
+    ///
+    /// <para><paramref name="isEngineGated"/> names the collectors this server's engine does not run. Those are never counted, as
+    /// Darling's badge does: a collector that does not run here cannot be fixed with a grant. The memo holds the refused collector
+    /// names, so the gate is applied to each answer, and an engine read after the first call is honored.</para>
     /// </summary>
-    /// <param name="memoLifetime">How long the shared memo answers; the tab passes its auto-refresh interval, as its grid does.</param>
-    public async Task<int> GetPermissionDeniedCollectorCountAsync(int serverId, TimeSpan? memoLifetime = null, CancellationToken cancellationToken = default)
+    public async Task<int> GetPermissionDeniedCollectorCountAsync(int serverId, Func<string, bool>? isEngineGated = null)
     {
-        var rows = await GetCollectionHealthAsync(serverId, allowMemo: true, memoLifetime: memoLifetime, cancellationToken: cancellationToken);
-        var denied = 0;
-        foreach (var row in rows)
+        if (!_permissionDeniedCollectorsByServer.TryGetValue(serverId, out var cached) ||
+            DateTime.UtcNow - cached.AtUtc >= PermissionDeniedCountMemoLifetime)
         {
-            if (string.Equals(row.HealthStatus, CollectorHealthClassifier.NoPermissions, StringComparison.Ordinal))
+            var collectors = await ReadDeniedSinceLastSuccessCollectorsAsync(serverId);
+            cached = (collectors, DateTime.UtcNow);
+            _permissionDeniedCollectorsByServer[serverId] = cached;
+        }
+
+        return isEngineGated is null ? cached.Collectors.Count : cached.Collectors.Count(name => !isEngineGated(name));
+    }
+
+    private async Task<List<string>> ReadDeniedSinceLastSuccessCollectorsAsync(int serverId)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+        command.CommandText = $@"
+SELECT
+    collector_name,
+    COUNT(*) FILTER (WHERE status = 'PERMISSIONS') AS permission_denied_count,
+    COUNT(*) FILTER (WHERE status = 'ERROR') AS error_count,
+    MAX(CASE WHEN status IN ('SUCCESS', 'SKIPPED') THEN collection_time END) AS last_success_time,
+    MAX(CASE WHEN status = 'PERMISSIONS' THEN collection_time END) AS last_denied_time
+FROM v_collection_log
+WHERE server_id = $1
+AND   collection_time >= $2
+AND   collector_name <> '{CollectionCycleSkip.CollectorName}'
+GROUP BY collector_name
+HAVING COUNT(*) FILTER (WHERE status = 'PERMISSIONS') > 0";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddDays(-7) });
+
+        var denied = new List<string>();
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            var lastSuccess = reader.IsDBNull(3) ? (DateTime?)null : reader.GetDateTime(3);
+            var lastDenied = reader.IsDBNull(4) ? (DateTime?)null : reader.GetDateTime(4);
+            if (CollectorHealthClassifier.DeniedSinceLastSuccess(
+                    Convert.ToInt64(reader.GetValue(1)), Convert.ToInt64(reader.GetValue(2)), lastSuccess, lastDenied))
             {
-                denied++;
+                denied.Add(reader.GetString(0));
             }
         }
 
