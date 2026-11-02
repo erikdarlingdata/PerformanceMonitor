@@ -1716,17 +1716,16 @@ public static class ComposeCompiler
         /* #7146: the fleet read. Arm 1 takes an hour's rows from the fleet table when NO pair of that hour is unfit for it, and from the
            stamp, as above, when one is. A pair is unfit when its build is behind its late writes (the stamp path reads that pair from the
            wide table in the stale arm), when the fleet table was not built against its current late_seq (fleet_built_seq: NULL on every hour
-           built before V239 until the ordinary tick rebuilds it, so those hours are never read from a table that does not hold them), or when
-           its server is not in the registry (the stamp path's join drops that server's rows, and the fleet rows would keep them). The check
-           is per hour, so one bad pair costs that hour the stamp path and no other. The hours it sends to the stamp are driven from the ledger,
+           built before V239 until the ordinary tick rebuilds it, so those hours are never read from a table that does not hold them). A removed
+           server needs no clause: removal flips is_enabled and deletes no registry, stamp, ledger or fleet row, so both paths keep its history
+           alike. The check is per hour, so one bad pair costs that hour the stamp path and no other. The hours it sends to the stamp are driven from the ledger,
            by a lateral probe behind an optimisation fence as the stale arm is, so a store with no unfit pair reads no stamp rows at all.
            The fleet arm names the same columns as the others; the three it has no value for are NULL, which no group, filter or measure of a
            fleet-eligible panel reads. */
         if (stamp.Fleet)
         {
             string Unfit(string alias) =>
-                $"({alias}.built_seq IS DISTINCT FROM {alias}.late_seq OR {alias}.fleet_built_seq IS DISTINCT FROM {alias}.late_seq "
-                + $"OR NOT EXISTS (SELECT 1 FROM {servers} AS v WHERE v.server_id = {alias}.server_id))";
+                $"({alias}.built_seq IS DISTINCT FROM {alias}.late_seq OR {alias}.fleet_built_seq IS DISTINCT FROM {alias}.late_seq)";
             var fleetRows = $"SELECT CAST(NULL AS integer) AS server_id, CAST(NULL AS text) AS database_name, CAST(NULL AS text) AS module_name, f.query_hash, f.collection_time, CAST(NULL AS text) AS server_name{rollupPartials} "
                 + $"FROM {schema}.{FleetTable} AS f "
                 + $"WHERE f.collection_time >= {wideStartParam} AND f.collection_time < {through} "

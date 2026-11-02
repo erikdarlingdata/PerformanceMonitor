@@ -72,6 +72,12 @@ public sealed class ComposeQueryStoreFleetLiveTests
                 Assert.True(viaStamp.Equal, $"stamp | {json}: {viaStamp.Difference}");
             }
 
+            /* A removed server only flips is_enabled (DarlingObservability.DisableOrphanedServersSql): its registry, stamp, ledger and fleet rows stay, so
+               the fleet path still counts its history and still gives the oracle's answer. */
+            await ComposeStampLiveSupport.ExecAsync(connection, "UPDATE collect.servers SET is_enabled = FALSE WHERE server_id = 3", ct);
+            var disabled = await CompareAsync(connection, HashPanel, start, end, through, true, null, ct);
+            Assert.True(disabled.Equal, $"fleet, one server disabled: {disabled.Difference}");
+
             /* 2. Fleet use is behaviour: with every fleet row multiplied, the fleet path differs from the oracle and nothing else does. */
             await CorruptFleetAsync(connection, hourNow.AddHours(-30), hourNow.AddHours(1), ct);
             Assert.False((await CompareAsync(connection, HashPanel, start, end, through, true, null, ct)).Equal);
