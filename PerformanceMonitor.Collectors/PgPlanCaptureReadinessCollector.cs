@@ -114,9 +114,11 @@ public sealed class PgPlanCaptureReadinessCollector : PostgresCollectorDefinitio
                                is inconclusive and says so, because auto_explain is preload-only and never
                                appears in pg_available_extensions - see the type header.
 
-         plan_text_setting   - auto_explain.log_format. Recorded rather than judged: any format proves
-                               capture is happening, and #2565 has not chosen what we would read.
-         plan_attribution    - log_line_prefix carrying %Q. Measured on PostgreSQL 17 while investigating
+         plan_text_setting   - auto_explain.log_format. Satisfied only for json (#7182): the plan reader
+                               parses JSON and skips every other block without counting it, so auto_explain's
+                               default text format loads, logs, and stores no plan at all.
+         plan_attribution    - log_line_prefix carrying %Q directly after %p (the position the stderr plan
+                               readers take the query id from, #7182). Measured on PostgreSQL 17 while investigating
                                #2538: auto_explain's JSON output contains NO query identifier, even with
                                compute_query_id on. The only place the id appears is the LOG LINE PREFIX,
                                and with %Q present it equals pg_stat_statements.queryid exactly. So without
@@ -218,7 +220,16 @@ probe AS (
            the bracket than the pid (%t [%p-%l]) has every line dropped, and an empty deadlock, plan or log-event read
            then looks like a quiet server. Case-sensitive on purpose: %P is not %p, and %T is not %t. A NULL or empty
            prefix reads as unsatisfied, the direction that never presents a precondition this cannot prove as met. */
-        coalesce(s.line_prefix, '') ~ '^%[tm].*\[%p\]'                          AS prefix_readable
+        coalesce(s.line_prefix, '') ~ '^%[tm].*\[%p\]'                          AS prefix_readable,
+        /* #7182: %Q is the FIRST escape after %p. The stderr plan readers take the query id from the token
+           right after the bracketed pid, so %Q anywhere else (the Debian prefix '%m [%p] %q%u@%d ' with %Q
+           appended) captures no plan at all while a bare 'contains %Q' test reads as met. This is
+           PgPlanLogParser.PrefixCarriesQueryIdAfterPid's own rule: [^%]* is the literal text between %p and
+           the next escape, so '%%' (a literal percent) is that next escape, not skipped over. */
+        coalesce(s.line_prefix, '') ~ '%p[^%]*%Q'                               AS prefix_qid_after_pid,
+        /* #7182: the plan reader parses JSON only. Case-insensitive because auto_explain accepts any case for
+           an enum value, and trimmed because a placeholder read may carry what the file spelled. */
+        lower(btrim(coalesce(s.log_format, ''))) = 'json'                       AS log_format_json
     FROM settings AS s
 )
 SELECT
@@ -300,14 +311,18 @@ SELECT
     'plan_text_setting'::text,
     /* Gated on loaded for the same reason as capture_threshold: auto_explain.log_format is equally
        definable as a placeholder on a server with no auto_explain. */
-    p.loaded AND p.log_format IS NOT NULL,
+    p.loaded AND p.log_format_json,
     coalesce(p.log_format, '(setting absent - library not loaded)'),
     CASE
         WHEN NOT p.loaded AND p.log_format IS NOT NULL
             THEN 'This value is a PLACEHOLDER - auto_explain is not loaded, so nothing is writing plans in '
                  || 'this or any format. Fix library_loaded first.'
-        ELSE 'The format auto_explain writes plans in. Recorded, not judged: any value proves capture is '
-             || 'configured, and which format is readable is settled separately.'
+        WHEN p.log_format_json
+            THEN 'auto_explain writes plans as JSON, the format the plan capture reads.'
+        ELSE 'auto_explain.log_format is not json. The plan capture reads only JSON and skips every other '
+             || 'block without a trace, so with auto_explain''s default text format the library loads and '
+             || 'logs plans while none are stored. SET auto_explain.log_format = json (a reload, no restart: '
+             || 'ALTER SYSTEM or the parameter group, then pg_reload_conf()).'
     END
 FROM probe AS p
 
@@ -325,15 +340,21 @@ SELECT
        NOT gated on loaded: log_line_prefix is a real core GUC that always exists and always means what it
        says, and it is worth knowing this is wrong BEFORE the library goes on, because fixing it afterwards
        means every plan captured in between is an orphan. */
-    strpos(coalesce(p.line_prefix, ''), '%Q') > 0,
+    p.prefix_qid_after_pid,
     coalesce(p.line_prefix, '(unreadable)'),
     CASE
+        WHEN p.prefix_qid_after_pid
+            THEN 'log_line_prefix carries %Q directly after %p, so each captured plan is stamped with the '
+                 || 'query id that joins it to pg_stat_statements.'
         WHEN strpos(coalesce(p.line_prefix, ''), '%Q') > 0
-            THEN 'log_line_prefix carries %Q, so each captured plan is stamped with the query id that joins '
-                 || 'it to pg_stat_statements.'
+            THEN 'log_line_prefix carries %Q, but not directly after %p. The stderr plan readers take the '
+                 || 'query id from the token right after the bracketed pid, so with %Q anywhere else no plan '
+                 || 'is stored at all. Put %Q directly after [%p], for example ''%m [%p] %Q ''; it is a '
+                 || 'dynamic parameter and needs no restart.'
         ELSE 'log_line_prefix does NOT carry %Q. auto_explain does not put a query identifier in the plan '
-             || 'itself - the id appears ONLY in the log line prefix - so plans captured without it cannot '
-             || 'be joined to the statement they belong to. Add %Q to log_line_prefix; it is a dynamic '
+             || 'itself - the id appears ONLY in the log line prefix - so a plan read without it cannot be '
+             || 'joined to the statement it belongs to, and the stderr plan readers store no plan at all. Add '
+             || '%Q directly after [%p] in log_line_prefix, for example ''%m [%p] %Q ''; it is a dynamic '
              || 'parameter and needs no restart.'
     END
 FROM probe AS p
