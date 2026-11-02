@@ -231,7 +231,7 @@ ORDER BY server_id, sql_handle, statement_start_offset, statement_end_offset, pl
             await SeedFamilyAsync("latch_stats", () => SeedLatchStatsAsync(connection, cutoff));
             await SeedFamilyAsync("spinlock_stats", () => SeedSpinlockStatsAsync(connection, cutoff));
             await SeedFamilyAsync("procedure_stats", () => SeedProcedureStatsAsync(connection, cutoff));
-            await SeedFamilyAsync("query_stats", () => SeedQueryStatsAsync(connection, cutoff));
+            await SeedFamilyAsync("query_stats", () => SeedQueryStatsAsync(connection, QueryStatsSeedCutoff()));
 
             _logger?.LogInformation(
                 "Delta calculator seeded from database (baselines from the last {Minutes} minutes)",

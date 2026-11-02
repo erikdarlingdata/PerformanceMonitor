@@ -146,6 +146,23 @@ public class CollectorDeltaCalculator : ICollectorDeltaCalculator
         => DateTime.SpecifyKind(DateTime.UtcNow - SeedLookback, DateTimeKind.Unspecified);
 
     /// <summary>
+    /// How far back the query_stats restart re-seed reads (#7156): the gap policy,
+    /// <see cref="DefaultMaxGapSeconds"/>, not <see cref="SeedLookback"/>.
+    ///
+    /// <para>query_stats writes a row only for a statement whose counters moved in the interval, so a key idle
+    /// across the restart has no row inside the fifteen-minute window and would be a first sighting afterwards:
+    /// its first interval stored as 0 although the gap policy would have credited it. Every row this reads can
+    /// still produce a real delta (the policy rejects older), so a wider window loses nothing. The read keeps
+    /// its single <c>collection_time &gt;= $1</c> bound, so on the hypertable it still excludes every chunk
+    /// outside the window; an hour is inside one store chunk, or two when it straddles a boundary.</para>
+    /// </summary>
+    public static readonly TimeSpan QueryStatsSeedLookback = TimeSpan.FromSeconds(DefaultMaxGapSeconds);
+
+    /// <summary>The <c>collection_time &gt;= $1</c> bound for the query_stats seed read; see <see cref="QueryStatsSeedLookback"/>.</summary>
+    public static DateTime QueryStatsSeedCutoff()
+        => DateTime.SpecifyKind(DateTime.UtcNow - QueryStatsSeedLookback, DateTimeKind.Unspecified);
+
+    /// <summary>
     /// Cache structure: serverId -> collectorName -> key -> (previousValue, timestamp)
     /// </summary>
     private readonly ConcurrentDictionary<int, ConcurrentDictionary<string, ConcurrentDictionary<string, (long Value, DateTime? Timestamp)>>> _cache = new();
