@@ -3231,6 +3231,7 @@ public sealed class DarlingManagedPostgres
 
         /* #3908: whether this start found a cluster, captured before initdb can create one. A new cluster has no
            extension for the quiesced update to move. */
+        DiscardInterruptedInitdb(_dataDirectory, _logger);
         var existingCluster = File.Exists(Path.Combine(_dataDirectory, "PG_VERSION"));
         if (!existingCluster)
         {
@@ -3826,8 +3827,9 @@ public sealed class DarlingManagedPostgres
     /// First-run initdb. The credential is generated and DPAPI-persisted BEFORE initdb runs:
     /// if the order were reversed, a crash after a successful initdb would leave a cluster whose
     /// password nobody knows. A failed initdb leaves the credential file behind harmlessly —
-    /// the next attempt regenerates and overwrites it (initdb itself cleans up its partial data
-    /// directory on failure).
+    /// the next attempt regenerates and overwrites it. initdb cleans up its partial data directory
+    /// when it exits non-zero, but not when it is killed (the 180 s timeout, a service stop): that case
+    /// is covered by <see cref="RunInitdbWithMarkerAsync"/> and <see cref="DiscardInterruptedInitdb"/> (#7191).
     /// </summary>
     [SupportedOSPlatform("windows")]
     private async Task InitializeClusterAsync(string binDirectory, CancellationToken cancellationToken)
@@ -3852,11 +3854,13 @@ public sealed class DarlingManagedPostgres
         try
         {
             var initDb = Path.Combine(binDirectory, "initdb.exe");
-            var (exitCode, output) = await RunToolAsync(
-                initDb,
-                $"-D \"{_dataDirectory}\" -U {UserName} -A scram-sha-256 --pwfile=\"{passwordFile}\" -E UTF8 --locale=C --data-checksums",
-                s_initDbTimeout,
-                cancellationToken);
+            var (exitCode, output) = await RunInitdbWithMarkerAsync(
+                _dataDirectory,
+                () => RunToolAsync(
+                    initDb,
+                    $"-D \"{_dataDirectory}\" -U {UserName} -A scram-sha-256 --pwfile=\"{passwordFile}\" -E UTF8 --locale=C --data-checksums",
+                    s_initDbTimeout,
+                    cancellationToken));
 
             if (exitCode != 0)
             {
@@ -3885,6 +3889,59 @@ public sealed class DarlingManagedPostgres
         }
 
         _logger.LogInformation("Managed Postgres cluster initialized (scram-sha-256, data checksums, UTF8/C locale)");
+    }
+
+    /// <summary>The file beside the data directory that exists exactly while a first-run initdb is in flight.</summary>
+    internal const string InitdbIncompleteMarkerFileName = "pg-initdb-incomplete.marker";
+
+    internal static string InitdbIncompleteMarkerPath(string dataDirectory)
+        => Path.Combine(ParentOf(dataDirectory), InitdbIncompleteMarkerFileName);
+
+    /// <summary>
+    /// Runs the first-run initdb between writing and removing <see cref="InitdbIncompleteMarkerFileName"/>
+    /// (#7191). initdb writes <c>PG_VERSION</c> long before the cluster is usable, and a killed initdb (the
+    /// 180 s timeout, a service stop, a power cut) cannot run its own cleanup, so without the marker the next
+    /// start would see <c>PG_VERSION</c>, take the existing-cluster branch and fail on a half-made cluster for
+    /// good. The marker is removed only on exit code 0 and left in place on any other exit or exception;
+    /// <see cref="DiscardInterruptedInitdb"/> reads it on the next start.
+    /// </summary>
+    internal static async Task<(int ExitCode, string Output)> RunInitdbWithMarkerAsync(
+        string dataDirectory, Func<Task<(int ExitCode, string Output)>> runInitdb)
+    {
+        var marker = InitdbIncompleteMarkerPath(dataDirectory);
+        File.WriteAllText(marker, "initdb started; delete only if the data directory beside it is empty or unwanted" + Environment.NewLine);
+        var result = await runInitdb();
+        if (result.ExitCode == 0)
+        {
+            File.Delete(marker);
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// A first-run initdb that never finished (<see cref="InitdbIncompleteMarkerFileName"/> still beside the data
+    /// directory) left a half-made cluster that is not a store: nothing was ever monitored into it and its
+    /// credential was written for this very initdb. Deletes it and the marker so the start initializes again
+    /// (#7191). Does nothing when there is no marker, so a real cluster is never touched.
+    /// </summary>
+    internal static void DiscardInterruptedInitdb(string dataDirectory, ILogger logger)
+    {
+        var marker = InitdbIncompleteMarkerPath(dataDirectory);
+        if (!File.Exists(marker))
+        {
+            return;
+        }
+
+        logger.LogWarning(
+            "A previous first-run initdb for {DataDirectory} did not finish (it was stopped or timed out). Deleting the half-made data directory and initializing again",
+            dataDirectory);
+        if (Directory.Exists(dataDirectory))
+        {
+            Directory.Delete(dataDirectory, recursive: true);
+        }
+
+        File.Delete(marker);
     }
 
     /// <summary>

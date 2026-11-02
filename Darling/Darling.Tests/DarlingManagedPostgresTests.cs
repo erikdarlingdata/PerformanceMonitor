@@ -4879,4 +4879,88 @@ public sealed class DarlingManagedPostgresTests
         Assert.False(dir is null, "could not locate the repo root from the test source path");
         return File.ReadAllText(Path.Combine(dir!, relative));
     }
+
+    /* #7191: a first-run initdb killed partway (the 180 s timeout, a service stop) leaves PG_VERSION behind but no
+       usable cluster. The next start must not take the existing-cluster branch on it. */
+    [Fact]
+    public async Task KilledInitdb_LeavesAMarker_AndTheNextStartDiscardsTheHalfMadeDataDirectory()
+    {
+        var store = Path.Combine(Path.GetTempPath(), "pm-initdb-killed-" + Guid.NewGuid().ToString("N"));
+        var dataDirectory = Path.Combine(store, "pgdata");
+        Directory.CreateDirectory(store);
+        try
+        {
+            await Assert.ThrowsAsync<TimeoutException>(() => DarlingManagedPostgres.RunInitdbWithMarkerAsync(
+                dataDirectory,
+                () =>
+                {
+                    /* What initdb gets done before it is killed: PG_VERSION is written, pg_control is not. */
+                    Directory.CreateDirectory(Path.Combine(dataDirectory, "base"));
+                    File.WriteAllText(Path.Combine(dataDirectory, "PG_VERSION"), "17");
+                    throw new TimeoutException("initdb timed out");
+                }));
+
+            Assert.True(File.Exists(DarlingManagedPostgres.InitdbIncompleteMarkerPath(dataDirectory)));
+            Assert.True(File.Exists(Path.Combine(dataDirectory, "PG_VERSION")));
+
+            DarlingManagedPostgres.DiscardInterruptedInitdb(dataDirectory, NullLogger.Instance);
+
+            Assert.False(File.Exists(Path.Combine(dataDirectory, "PG_VERSION")));
+            Assert.False(Directory.Exists(dataDirectory));
+            Assert.False(File.Exists(DarlingManagedPostgres.InitdbIncompleteMarkerPath(dataDirectory)));
+        }
+        finally
+        {
+            try { Directory.Delete(store, recursive: true); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+        }
+    }
+
+    [Fact]
+    public async Task InitdbThatExitsZero_RemovesItsMarker_AndALaterStartLeavesTheCluster()
+    {
+        var store = Path.Combine(Path.GetTempPath(), "pm-initdb-ok-" + Guid.NewGuid().ToString("N"));
+        var dataDirectory = Path.Combine(store, "pgdata");
+        Directory.CreateDirectory(store);
+        try
+        {
+            var result = await DarlingManagedPostgres.RunInitdbWithMarkerAsync(
+                dataDirectory,
+                () =>
+                {
+                    Directory.CreateDirectory(dataDirectory);
+                    File.WriteAllText(Path.Combine(dataDirectory, "PG_VERSION"), "17");
+                    return Task.FromResult((0, string.Empty));
+                });
+
+            Assert.Equal(0, result.ExitCode);
+            Assert.False(File.Exists(DarlingManagedPostgres.InitdbIncompleteMarkerPath(dataDirectory)));
+
+            DarlingManagedPostgres.DiscardInterruptedInitdb(dataDirectory, NullLogger.Instance);
+
+            Assert.True(File.Exists(Path.Combine(dataDirectory, "PG_VERSION")));
+        }
+        finally
+        {
+            try { Directory.Delete(store, recursive: true); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+        }
+    }
+
+    [Fact]
+    public void DiscardInterruptedInitdb_WithNoMarker_NeverTouchesAnExistingCluster()
+    {
+        var store = Path.Combine(Path.GetTempPath(), "pm-initdb-nomarker-" + Guid.NewGuid().ToString("N"));
+        var dataDirectory = Path.Combine(store, "pgdata");
+        Directory.CreateDirectory(dataDirectory);
+        File.WriteAllText(Path.Combine(dataDirectory, "PG_VERSION"), "17");
+        try
+        {
+            DarlingManagedPostgres.DiscardInterruptedInitdb(dataDirectory, NullLogger.Instance);
+
+            Assert.True(File.Exists(Path.Combine(dataDirectory, "PG_VERSION")));
+        }
+        finally
+        {
+            try { Directory.Delete(store, recursive: true); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+        }
+    }
 }
