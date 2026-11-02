@@ -183,15 +183,29 @@ GROUP BY server_id, database_name, schema_name, object_name", 3, ObjectTag);
         /* A blocking row lands on the blocked side's tag (blocked) and on the blocking side's tag (caused). The caller keys are read
            first and the caller map is read for only those keys (and only the servers in the call), never every caller row of the file. */
         var callerKeys = new HashSet<string>(StringComparer.Ordinal);
-        async Task<List<(int Server, string Key, bool Blocked, double Ms, double Count)>> BlockingRows(QueryTagRollupSection section, Func<string, string> source, string timeColumn)
+        /* collapse (#7163): the blocked-process reports of one wait (SQL Server writes one per threshold interval, each carrying the
+           wait so far) become one row, the longest report, through BlockingWaits.WaitsCteSql, the definition every other blocking
+           surface reads; the counts are waits and a parallel query's self-wait is no wait. The snapshots stay one row per sample
+           (a still-open wait repeats once per sample) but drop the self-wait rows. */
+        async Task<List<(int Server, string Key, bool Blocked, double Ms, double Count)>> BlockingRows(QueryTagRollupSection section, Func<string, string> source, string timeColumn, bool collapse)
         {
             var rows = new List<(int, string, bool, double, double)>();
+            var where = $"server_id IN ({ids}) AND {timeColumn} >= $1 AND {timeColumn} <= $2";
             foreach (var side in new[] { "blocked", "blocking" })
             {
-                var sql = $@"
+                var sql = collapse
+                    ? $@"
+WITH {BlockingWaits.WaitsCteSql(BlockingWaits.SqlDialect.DuckDb, "rw", $@"SELECT server_id, blocked_spid, blocking_spid, event_time, wait_time_ms, database_name,
+       blocked_client_app, blocked_login_name, blocked_host_name, blocking_client_app, blocking_login_name, blocking_host_name
+FROM {source(where)}", new[] { "server_id" })}
 SELECT server_id, {side}_client_app, {side}_login_name, {side}_host_name, database_name,
        CAST(COALESCE(SUM(COALESCE(wait_time_ms, 0)), 0) AS DOUBLE), COUNT(*)
-FROM {source($"server_id IN ({ids}) AND {timeColumn} >= $1 AND {timeColumn} <= $2")}
+FROM rw
+GROUP BY server_id, {side}_client_app, {side}_login_name, {side}_host_name, database_name"
+                    : $@"
+SELECT server_id, {side}_client_app, {side}_login_name, {side}_host_name, database_name,
+       CAST(COALESCE(SUM(COALESCE(wait_time_ms, 0)), 0) AS DOUBLE), COUNT(*)
+FROM {source($"{where} AND {BlockingWaits.NotSelfWaitSql}")}
 GROUP BY server_id, {side}_client_app, {side}_login_name, {side}_host_name, database_name";
                 await ReadRowsAsync(connection, sql, window, r =>
                 {
@@ -206,9 +220,9 @@ GROUP BY server_id, {side}_client_app, {side}_login_name, {side}_host_name, data
         }
 
         var reportRows = await Served(QueryTagRollupSection.BlockingReports,
-            () => BlockingRows(QueryTagRollupSection.BlockingReports, w => StoredEventCopies.BlockedProcessReports(w) + " AS ev", "event_time"));
+            () => BlockingRows(QueryTagRollupSection.BlockingReports, w => StoredEventCopies.BlockedProcessReports(w) + " AS ev", "event_time", collapse: true));
         var snapshotRows = await Served(QueryTagRollupSection.BlockingSnapshots,
-            () => BlockingRows(QueryTagRollupSection.BlockingSnapshots, w => $"(SELECT * FROM v_dmv_blocking_snapshots WHERE {w}) AS ev", "collection_time"));
+            () => BlockingRows(QueryTagRollupSection.BlockingSnapshots, w => $"(SELECT * FROM v_dmv_blocking_snapshots WHERE {w}) AS ev", "collection_time", collapse: false));
 
         var graphs = new List<(int Server, List<string> Keys, bool Unparsed)>();
         var read = 0;
