@@ -88,6 +88,12 @@ public sealed class QueryStoreReadBudgetLiveTests
         /// <summary>#5813 plan fetch: how long each plan row then takes to arrive.</summary>
         public TimeSpan ShipPerPlan { get; set; }
 
+        /// <summary>#7187: a plan-fetch statement that asks for any of these ids throws, as a read timeout would.</summary>
+        public HashSet<long> FailPlanIds { get; } = [];
+
+        /// <summary>#7187: as <see cref="FailPlanIds"/>, for the statement-text fetch.</summary>
+        public HashSet<long> FailTextIds { get; } = [];
+
         /// <summary>Every plan id the plan fetch shipped, in order, across passes.</summary>
         public List<long> ShippedPlans { get; } = [];
 
@@ -854,6 +860,126 @@ public sealed class QueryStoreReadBudgetLiveTests
         return result;
     }
 
+    /// <summary>
+    /// #7187: a plan fetch that throws in the pass that first found its plans missing keeps those ids for the next pass.
+    /// The three plans ran once, in a batch the watermark has passed, so no later pass references them again: the
+    /// carryover is the only way they are fetched. The next pass reads no new interval and stores all three.
+    /// </summary>
+    [Fact]
+    public async Task APlanFetchThatThrows_KeepsTheIdsItJustFoundMissing_ForTheNextPass()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to run the #7187 plan-fetch carry pin.");
+        var token = TestContext.Current.CancellationToken;
+        await using var rig = await Rig.OpenAsync(token);
+        var collector = QueryStoreCollector.Instance.Name;
+
+        var now = WholeSecondNow();
+        var target = new Target();
+        target.Rows[Alpha] = Enumerable.Range(1, 3).Select(id => Row(id, now.AddMinutes(-8))).ToList();
+        target.FailPlanIds.UnionWith([1L, 2L, 3L]);
+
+        await PassAsync(rig, target, token, Alpha);
+
+        Assert.Equal(3, (await StoredAsync(rig, Alpha, token)).Count);
+        Assert.Empty(await StoredPlansAsync(rig, Alpha, token));
+        Assert.Equal([1L, 2L, 3L], rig.Runner.PlanFetchCarryoverForTests(LiveServerId, Alpha, collector));
+
+        target.FailPlanIds.Clear();
+        await PassAsync(rig, target, token, Alpha);
+
+        Assert.Equal([1L, 2L, 3L], await StoredPlansAsync(rig, Alpha, token));
+        Assert.Empty(rig.Runner.PlanFetchCarryoverForTests(LiveServerId, Alpha, collector));
+    }
+
+    /// <summary>
+    /// #7187: a plan id that makes every fetch throw is dropped after <see cref="DarlingCollectorRunner.MaxFetchThrowAttempts"/>
+    /// throws and does not hold up the ids behind it. Plan 1 sorts first, so a plain carry of the owed set would retry
+    /// it at the head of every pass and never reach the ids behind the first thirty-two.
+    /// </summary>
+    [Fact]
+    public async Task APlanIdThatKeepsThrowing_IsDroppedAfterTheCap_AndDoesNotBlockTheIdsBehindIt()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to run the #7187 plan-fetch carry pin.");
+        var token = TestContext.Current.CancellationToken;
+        await using var rig = await Rig.OpenAsync(token);
+        var collector = QueryStoreCollector.Instance.Name;
+
+        var now = WholeSecondNow();
+        var target = new Target();
+        target.Rows[Alpha] = Enumerable.Range(1, 100).Select(id => Row(id, now.AddMinutes(-8))).ToList();
+        target.FailPlanIds.Add(1);
+
+        await PassAsync(rig, target, token, Alpha);
+        Assert.Contains(1L, rig.Runner.PlanFetchCarryoverForTests(LiveServerId, Alpha, collector));
+
+        for (var pass = 0; pass < 20 && (await StoredPlansAsync(rig, Alpha, token)).Count < 100 - QueryStorePlanXmlState.MinCandidatePlans; pass++)
+        {
+            await PassAsync(rig, target, token, Alpha);
+        }
+
+        var stored = await StoredPlansAsync(rig, Alpha, token);
+        /* The #2776 backoff never narrows below QueryStorePlanXmlState.MinCandidatePlans (32), so the dropped id takes the
+        ids sorted within that floor with it. Everything behind them is stored. */
+        Assert.Equal(Enumerable.Range(1 + QueryStorePlanXmlState.MinCandidatePlans, 100 - QueryStorePlanXmlState.MinCandidatePlans).Select(static id => (long)id), stored);
+        Assert.Empty(rig.Runner.PlanFetchCarryoverForTests(LiveServerId, Alpha, collector));
+    }
+
+    /// <summary>#7187: the statement-text fetch's twin of the plan fetch's keep-on-throw.</summary>
+    [Fact]
+    public async Task ATextFetchThatThrows_KeepsTheIdsItJustFoundMissing_ForTheNextPass()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to run the #7187 text-fetch carry pin.");
+        var token = TestContext.Current.CancellationToken;
+        await using var rig = await Rig.OpenAsync(token);
+        var collector = QueryStoreCollector.Instance.Name;
+
+        var now = WholeSecondNow();
+        var target = new Target();
+        target.Rows[Alpha] = Enumerable.Range(1, 3).Select(id => Row(id, now.AddMinutes(-8))).ToList();
+        target.FailTextIds.UnionWith([1L, 2L, 3L]);
+
+        await PassAsync(rig, target, token, Alpha);
+
+        Assert.Equal(3, (await StoredAsync(rig, Alpha, token)).Count);
+        Assert.Empty(await StoredTextsAsync(rig, Alpha, token));
+        Assert.Equal([1L, 2L, 3L], rig.Runner.TextFetchCarryoverForTests(LiveServerId, Alpha, collector));
+
+        target.FailTextIds.Clear();
+        await PassAsync(rig, target, token, Alpha);
+
+        Assert.Equal([1L, 2L, 3L], await StoredTextsAsync(rig, Alpha, token));
+        Assert.Empty(rig.Runner.TextFetchCarryoverForTests(LiveServerId, Alpha, collector));
+    }
+
+    /// <summary>#7187: the statement-text fetch's twin of the plan fetch's attempt cap.</summary>
+    [Fact]
+    public async Task AQueryIdThatKeepsThrowing_IsDroppedAfterTheCap_AndDoesNotBlockTheIdsBehindIt()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to run the #7187 text-fetch carry pin.");
+        var token = TestContext.Current.CancellationToken;
+        await using var rig = await Rig.OpenAsync(token);
+        var collector = QueryStoreCollector.Instance.Name;
+
+        var now = WholeSecondNow();
+        var target = new Target();
+        target.Rows[Alpha] = Enumerable.Range(1, 100).Select(id => Row(id, now.AddMinutes(-8))).ToList();
+        target.FailTextIds.Add(1);
+
+        await PassAsync(rig, target, token, Alpha);
+        Assert.Contains(1L, rig.Runner.TextFetchCarryoverForTests(LiveServerId, Alpha, collector));
+
+        for (var pass = 0; pass < 20 && (await StoredTextsAsync(rig, Alpha, token)).Count < 100 - QueryStorePlanXmlState.MinCandidatePlans; pass++)
+        {
+            await PassAsync(rig, target, token, Alpha);
+        }
+
+        var stored = await StoredTextsAsync(rig, Alpha, token);
+        /* The #2776 backoff never narrows below QueryStorePlanXmlState.MinCandidatePlans (32), so the dropped id takes the
+        ids sorted within that floor with it. Everything behind them is stored. */
+        Assert.Equal(Enumerable.Range(1 + QueryStorePlanXmlState.MinCandidatePlans, 100 - QueryStorePlanXmlState.MinCandidatePlans).Select(static id => (long)id), stored);
+        Assert.Empty(rig.Runner.TextFetchCarryoverForTests(LiveServerId, Alpha, collector));
+    }
+
     private static DateTime WholeSecondNow()
     {
         var now = DateTime.UtcNow;
@@ -956,6 +1082,11 @@ public sealed class QueryStoreReadBudgetLiveTests
                     target.RequestedWidths.Add((owner.DatabaseName, ids.Length));
                 }
 
+                if (target.FailPlanIds.Overlaps(ids))
+                {
+                    throw new InvalidOperationException("the plan fetch read failed");
+                }
+
                 if (target.HoldPlanUntilCut)
                 {
                     await Task.Delay(Timeout.Infinite, cancellationToken);
@@ -981,6 +1112,11 @@ public sealed class QueryStoreReadBudgetLiveTests
                 lock (target.RequestedTextWidths)
                 {
                     target.RequestedTextWidths.Add((owner.DatabaseName, ids.Length));
+                }
+
+                if (target.FailTextIds.Overlaps(ids))
+                {
+                    throw new InvalidOperationException("the text fetch read failed");
                 }
 
                 if (target.HoldTextUntilCut)
