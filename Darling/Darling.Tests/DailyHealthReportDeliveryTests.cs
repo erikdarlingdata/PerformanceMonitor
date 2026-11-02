@@ -111,6 +111,12 @@ public class DailyHealthReportDeliveryTests
         var sendAt = new TimeOnly(1, 30);
         Assert.Equal(first, DailyHealthReportPeriod.EndUtcFor(new DateOnly(2026, 11, 1), sendAt, zone));
         Assert.Equal(new DateOnly(2026, 11, 1), DailyHealthReportPeriod.LatestEndedDate(first, sendAt, zone));
+
+        /* 06:15Z is 01:15 EST, the repeat's second pass, before the send time on the clock. The period ended at 05:30Z, so the report
+           is still owed: a failed 05:30Z delivery keeps its five-minute retries instead of pausing for thirty minutes (#7201). */
+        var secondPass = second.AddMinutes(-15);
+        Assert.True(s.IsDue(secondPass));
+        Assert.Equal(first, s.MostRecentSendAtUtc(secondPass));
     }
 
     /* ---------------- the scheduled send ---------------- */
