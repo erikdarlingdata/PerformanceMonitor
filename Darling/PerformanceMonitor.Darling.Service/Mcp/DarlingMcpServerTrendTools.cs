@@ -413,15 +413,21 @@ public sealed class DarlingMcpServerTrendTools
         /* #7010: the window-floor notice, only where the server HAS collected the metric (a never-collected server answers bare: there is no window
            to be short of data). Under hints, because a window the store does not reach back to is not a true negative. */
         var notice = everCollected ? await NoticeAsync(postgres, resolved.ServerName, collector, start, end, emptyAnswer: true, cancellationToken) : McpWindowNotice.Unavailable;
-        return everCollected
+        /* #7167: these metrics are periodic snapshots, so no rows in a cut window is not a quiet window, and an offline server answers unavailable, as the get_pg_* reads do. */
+        var answer = everCollected
             ? DarlingMcpWindowNotice.FinishEmpty(McpHelpers.Status(
                 "empty",
-                $"No {what} recorded for {resolved.DisplayName} in the last {hoursBack} hour(s). This server HAS collected them before, so this window is genuinely quiet rather than broken - widen hours_back to find the most recent samples.", notice.AsHints()), notice)
+                McpHelpers.QuietUnlessCut(
+                    notice.WindowTruncated, notice.EffectiveStart,
+                    factual: $"No {what} recorded for {resolved.DisplayName} in the last {hoursBack} hour(s)",
+                    coveredClaim: ". This server HAS collected them before, so this window is genuinely quiet rather than broken - widen hours_back to find the most recent samples."),
+                notice.AsHints()), notice)
             : McpHelpers.Status(
                 "unavailable",
                 metric == "tempdb_file_io"
                     ? $"No {what} have EVER been recorded for {resolved.DisplayName}. This is not an empty window - the {collector} collector has stored no rows for the tempdb files of this server (it may have stored other databases' files). Check that collection is running and that the server is enabled."
                     : $"No {what} have EVER been recorded for {resolved.DisplayName}. This is not an empty window - the {collector} collector has stored nothing at all for this server. Check that collection is running and that the server is enabled.");
+        return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, end, answer, cancellationToken);
     }
 
     private static async Task<List<string>> ReadTopNamesAsync(
