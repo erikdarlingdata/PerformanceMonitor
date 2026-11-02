@@ -471,6 +471,58 @@ public sealed class AlwaysOnXeSessionsTests : IAsyncDisposable
         Assert.False(DarlingXeSessions.CaptureFaultFor(LongQueryTraceReadOnlyIntentTests.SqlExceptionFactory.Create(1105, 17, "The filegroup is full."), "deadlock").IsPermission);
     }
 
+    [Fact]
+    public void ATransientEnsureFailure_StoresNoFault_AndMarksTheOutcomeTransient()
+    {
+        foreach (var deadlock in new[] { true, false })
+        {
+            var outcome = new DarlingXeSessions.CaptureEnsureOutcome();
+            var fault = DarlingXeSessions.RecordOnPremCaptureFault(
+                outcome, deadlock, LongQueryTraceReadOnlyIntentTests.SqlExceptionFactory.Create(-2, 11, "Execution Timeout Expired."));
+
+            Assert.Null(fault);
+            Assert.Null(outcome.Deadlock);
+            Assert.Null(outcome.BlockedProcess);
+            Assert.True(outcome.TransientFailure);
+        }
+    }
+
+    [Theory]
+    [InlineData(15247, 14, true)]
+    [InlineData(1105, 17, false)]
+    public void ANonTransientEnsureFailure_StillStoresTheFault(int number, byte severity, bool permission)
+    {
+        var ex = LongQueryTraceReadOnlyIntentTests.SqlExceptionFactory.Create(number, severity, "failed");
+
+        var deadlockOutcome = new DarlingXeSessions.CaptureEnsureOutcome();
+        var deadlockFault = DarlingXeSessions.RecordOnPremCaptureFault(deadlockOutcome, deadlock: true, ex);
+        Assert.NotNull(deadlockFault);
+        Assert.Same(deadlockFault, deadlockOutcome.Deadlock);
+        Assert.Null(deadlockOutcome.BlockedProcess);
+        Assert.Equal(permission, deadlockFault.IsPermission);
+        Assert.False(deadlockOutcome.TransientFailure);
+
+        var bpOutcome = new DarlingXeSessions.CaptureEnsureOutcome();
+        var bpFault = DarlingXeSessions.RecordOnPremCaptureFault(bpOutcome, deadlock: false, ex);
+        Assert.Same(bpFault, bpOutcome.BlockedProcess);
+        Assert.Null(bpOutcome.Deadlock);
+    }
+
+    [Fact]
+    public void ATransientEnsureFailure_MakesTheNextEnsureDueInFiveMinutes_NotAnHour()
+    {
+        var rig = BuildRig(azureSqlDatabase: false);
+        var now = DateTime.UtcNow;
+        rig.State.XeSessionsEnsuredAtUtc = now;
+
+        DarlingWorker.ApplyTransientEnsureRetry(rig.State, new DarlingXeSessions.CaptureEnsureOutcome(), now);
+        Assert.False(AlwaysOnXeSessions.EnsureIsDue(rig.State.XeSessionsEnsuredAtUtc, now.AddMinutes(59)));
+
+        DarlingWorker.ApplyTransientEnsureRetry(rig.State, new DarlingXeSessions.CaptureEnsureOutcome { TransientFailure = true }, now);
+        Assert.False(AlwaysOnXeSessions.EnsureIsDue(rig.State.XeSessionsEnsuredAtUtc, now.AddMinutes(4)));
+        Assert.True(AlwaysOnXeSessions.EnsureIsDue(rig.State.XeSessionsEnsuredAtUtc, now.AddMinutes(5)));
+    }
+
     [Theory]
     [InlineData(true, true, false)]
     [InlineData(true, false, true)]
