@@ -42,7 +42,7 @@ All editions include real-time alerts (email + webhooks), charts and graphs, Dar
 | SQL Server collectors | More than 40 (the long-running-query trace is opt-in) | Lite's set, plus a forced-plan collector, a Query Store hint collector, an identity column capacity collector, a database protection collector (backups and CHECKDB) and an Agent alerts collector | Its own set, installed on the target |
 | PostgreSQL collectors | None | More than 25 | None |
 | Agent investigations (your own AI agent picks up an alert and reports) | Level 1: the agent reads and reports | Level 1 to 3: reports, plus agent-made alert changes and server actions, each behind its own switch | Not available |
-| Agent changes on a monitored server (force or unforce a Query Store plan, evict a cached plan, recompile a module, create or drop a plan guide, kill a session) | Not available | Yes, one switch per server and action, all off until you turn them on | Not available |
+| Agent changes on a monitored server (force or unforce a Query Store plan, evict a cached plan, recompile a module, create or drop a plan guide, kill a session) | Not available | Yes, one switch per server and action, all off until you turn them on. An alert route can also require a person to approve each action | Not available |
 | Query tags (name a group of queries and see its resource use) | Yes | Yes | Not available |
 | Notification routes limited to a server or a tag | Yes | Yes | Not available |
 | MCP server (LLM integration) | Built-in (more than 100 tools) | On request (more than 200 tools) | Built into Dashboard (more than 60 tools) |

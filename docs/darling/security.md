@@ -190,7 +190,7 @@ On a route that needs approval, a Level 3 tool called with `dry_run` false runs 
 
 A proposal waits in `config.agent_action_proposals` for a person. Only the store owner writes that table. The `admin`, `viewer` and `web` logins read it. The `mcp` login cannot read it, because a proposal holds the statement that the action runs.
 
-A proposal is `pending` until a person approves it, and it expires after 60 minutes. The service's sweep voids a pending proposal when a person closes its request. It also voids a pending `kill_session` proposal when the alert of its request resolves. It marks an approved proposal `unknown` when no outcome arrives within 10 minutes. Each state change writes a journal row that only the store owner can write: `proposal_created`, `proposal_first_press`, `proposal_approved`, `proposal_run`, `proposal_failed`, `proposal_unknown`, `proposal_refused`, `proposal_expired`, `proposal_superseded` and `proposal_voided`. The row `proposal_notice_sent` is owner-only too.
+A proposal is `pending` until a person approves it, and it expires after 60 minutes. The service's sweep voids a pending proposal when a person closes its request. It also voids a pending `kill_session` proposal when the alert of its request resolves. It marks an approved proposal `unknown` when no outcome arrives within 10 minutes. A plan force whose reply was lost ends the same way as the agent's own call. The press reads the plan again, and the proposal ends as `run` when the plan reads as forced. If the read fails or the plan is not forced, the proposal stays `unknown`. Each state change writes a journal row that only the store owner can write: `proposal_created`, `proposal_first_press`, `proposal_approved`, `proposal_run`, `proposal_failed`, `proposal_unknown`, `proposal_refused`, `proposal_expired`, `proposal_superseded` and `proposal_voided`. The row `proposal_notice_sent` is owner-only too.
 
 #### Approving a proposal
 
@@ -245,9 +245,12 @@ A person sets any value in the Viewer's route dialog or in the web route editor.
 - `action_approval` can go to `required`, never to `off`.
 - `approval_single_person` can go to false, never to true.
 - `create_notification_route` takes neither, so a route that MCP creates starts at `required` and false.
-- A route with approval `off` cannot be raised to Level 3 unless the same call sets `required`.
-- While any enabled Level 3 route has approval `off`, MCP refuses three changes to a route that has a level. It does not disable the route, clear its level, or change its match, scope or severities. Such a change can send an alert to the route with approval `off`. Lowering a level to 0, 1 or 2 is still allowed. A person makes the refused change in the Viewer or on the web dashboard.
-- A Level 3 route with `required` cannot be disabled, cleared to Inherit, or have its match, scope or severities changed over MCP.
+- A route with approval `off` cannot be raised to Level 3 unless the same call sets `required`. A Level 3 route with approval `off` cannot be enabled, and its match, scope and severities cannot be changed.
+- A Level 3 route with `required` cannot be disabled, cleared to Inherit, or have its match, scope or severities changed. Its level can still be lowered to 0, 1 or 2.
+- While any other enabled Level 3 route has approval `off`, MCP refuses three changes to a route that has an agent level (0 to 3). It does not disable the route, clear its level, or change its match, scope or severities. Such a change can move an alert to the route with approval `off`, whose actions run with no proposal. This closes the path of lowering a Level 3 route with `required` to Level 2 first and changing it with a second call. The refusal names both routes and says that a person makes the change in the Viewer or on the web dashboard. Setting `action_approval` to `required` on the other route is still allowed.
+- `set_notification_route_enabled` follows the same rules, because on a route with an agent level it makes the same change as `update_notification_route`.
+
+Lowering a level, raising a level (except to Level 3 on a route with approval `off`), and turning approval on are allowed.
 
 `get_notification_routes` and every route answer show both columns. `route_agent_changed` journals both, before and after. The undo answer of `update_notification_route` leaves both out. When a call changed one of them, the answer says that a person must undo that change in the Viewer or on the web dashboard.
 
