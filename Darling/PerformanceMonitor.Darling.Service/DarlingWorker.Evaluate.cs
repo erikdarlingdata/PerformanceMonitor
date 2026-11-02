@@ -425,7 +425,7 @@ public sealed partial class DarlingWorker
                 /* #2716: this cooldown has no in-memory entry for a subject this process has never
                    evaluated, which includes every subject after a restart even if it was alerted on
                    moments before. Seed it ONCE per key from history before trusting its absence —
-                   finding.Subject IS the #1140 dedup fingerprint this alert already fires with, so
+                   PgSubjectDedupKey is the #1140 dedup fingerprint this alert already fires with, so
                    GetLastAlertTimeAsync's existing #1154 filter reconstructs exactly the per-subject
                    time this cooldown needs, no new schema required. Guarded by
                    _postgresAlertHistorySeeded so a subject that has never alerted (the common case —
@@ -2211,7 +2211,7 @@ public sealed partial class DarlingWorker
                    phantom Cleared next sweep. */
                 _activePgPoisonWaitAlert[cooldownKey] = true;
 
-                /* #2716: seed the cooldown from history once per key — finding.Subject is the #1140 dedup
+                /* #2716: seed the cooldown from history once per key — PgSubjectDedupKey is the #1140 dedup
                    fingerprint this alert fires with, so GetLastAlertTimeAsync's #1154 filter reconstructs
                    the per-subject stamp. The same seed floors the #2704 guard: rows collected before the
                    last recorded fire were already reported by whichever process fired it. */
