@@ -411,12 +411,20 @@ public partial class LocalDataService
     {
         var view = QueryWindowRelationView(relation);
         using var _q = TimeQuery("GetQueryWindowFloorAsync", $"{view} window floor");
+        var collector = QueryWindowRelationCollector(relation);
+        var timeColumn = QueryWindowRelationTimeColumn(relation);
+
+        /* #7256: what the table's Parquet archive holds in time, taken BEFORE this read's own lock (a lookup that waits for a
+           slot or another reader's lookup must not do it while holding the non-recursive read lock). Read once per archive
+           generation. Null (unknown, or a view that removes copies on a natural key) keeps the whole-view probe below. */
+        var archiveTable = view.Substring(2);
+        ArchiveSpan? archiveSpan = QueryWindowRelationTimeIsServerLocal(relation)
+            ? null
+            : await GetArchiveSpanAsync(archiveTable, timeColumn, cancellationToken);
+
         /* #5371: a token (the Collection Health pass's) reaches the lock wait, the open and the two statements of the generic
            path below; a caller that passes none keeps the original uninterruptible read. */
         using var connection = await OpenConnectionAsync(timer: null, cancellationToken);
-
-        var collector = QueryWindowRelationCollector(relation);
-        var timeColumn = QueryWindowRelationTimeColumn(relation);
 
         /* #4989: a time column that holds the server's wall clock (the Default Trace) goes through the clock, the way the
            grid reads it. Every UTC relation keeps the single-query path below. */
@@ -462,17 +470,21 @@ SELECT LEAST(
             return firstInWindow;
         }
 
-        using (var olderCommand = connection.CreateCommand())
+        /* #7256: the older-row probe asks the hot table first and stops at its first older row. It reads the view, which opens
+           every archive file, only when the archive's cached span reaches back before the window start (or is unknown).
+           With no older row anywhere, the probe used to read the whole archive each time. The answer is the same: a row
+           older than the start exists in the view exactly when it exists in the hot table or in the archive. */
+        if (archiveSpan is not null)
         {
-            olderCommand.CommandText = $@"
-SELECT 1
-FROM {view}
-WHERE server_id = $1
-AND   {timeColumn} < $2
-LIMIT 1";
-            olderCommand.Parameters.Add(new DuckDBParameter { Value = serverId });
-            olderCommand.Parameters.Add(new DuckDBParameter { Value = startUtc });
-            if (await olderCommand.ExecuteScalarAsync(cancellationToken) is not null)
+            if (await HasRowOlderThanAsync(connection, archiveTable, timeColumn, serverId, startUtc, cancellationToken))
+            {
+                return startUtc;
+            }
+        }
+
+        if (archiveSpan is null || (archiveSpan.Value.Oldest is DateTime archiveOldest && archiveOldest < startUtc))
+        {
+            if (await HasRowOlderThanAsync(connection, view, timeColumn, serverId, startUtc, cancellationToken))
             {
                 return startUtc;
             }
@@ -485,6 +497,23 @@ LIMIT 1";
 
         /* No older row: an older run of the collector still proves the window is covered. */
         return await HasCollectorRunBeforeAsync(connection, collector, serverId, startUtc) ? startUtc : firstRow;
+    }
+
+    /// <summary>Whether <paramref name="relation"/> (a table or a <c>v_</c> view) holds a row of the server older than <paramref name="startUtc"/>.
+    /// It stops at the first one.</summary>
+    private static async Task<bool> HasRowOlderThanAsync(
+        LockedConnection connection, string relation, string timeColumn, int serverId, DateTime startUtc, CancellationToken cancellationToken)
+    {
+        using var olderCommand = connection.CreateCommand();
+        olderCommand.CommandText = $@"
+SELECT 1
+FROM {relation}
+WHERE server_id = $1
+AND   {timeColumn} < $2
+LIMIT 1";
+        olderCommand.Parameters.Add(new DuckDBParameter { Value = serverId });
+        olderCommand.Parameters.Add(new DuckDBParameter { Value = startUtc });
+        return await olderCommand.ExecuteScalarAsync(cancellationToken) is not null;
     }
 
     /// <summary>Whether the collector's runs in <c>v_collection_log</c> (<c>collection_time</c>, UTC) include one before
