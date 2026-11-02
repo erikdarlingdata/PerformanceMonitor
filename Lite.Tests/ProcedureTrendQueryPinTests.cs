@@ -7,8 +7,6 @@
  */
 
 using System;
-using System.Security.Cryptography;
-using System.Text;
 using PerformanceMonitorLite.Services;
 using Xunit;
 
@@ -16,32 +14,15 @@ namespace Lite.Tests;
 
 /// <summary>
 /// #5449: the procedure grain's duration trend moved to the run-based model (<see cref="LocalDataService.ProcedureCollectionsSql"/>),
-/// and the query grain's did not. These pin the query grain's two statements byte for byte (SHA-256 of the text as it stood before
-/// #5449, line endings normalised) so a change to the shared builders cannot move <c>v_query_stats</c>, and pin the procedure
-/// statements' shape: both tables read from an hour before the window, and none of the removed span term.
+/// and the query grain's did not. These pin the procedure statements' shape: both tables read from an hour before the window, and
+/// none of the removed span term. (The byte-for-byte pins of the query grain's two statements were removed in #7161, which changes
+/// that grain on purpose; their rule was the spelling of the text, and the behaviour is covered by PerformanceTrendDurationBucketingTests.)
 /// </summary>
 [Trait("Stage", "Guard")]
 public sealed class ProcedureTrendQueryPinTests
 {
-    private static string Sha(string sql) =>
-        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(sql.Replace("\r\n", "\n"))));
-
     private static string Clause(int firstIndex) =>
         LocalDataService.BuildDbInClause(new[] { "A", "B" }, "database_name", firstIndex, out _);
-
-    [Fact]
-    public void QueryStatsChartSql_IsByteIdenticalToItsTextBeforeTheProcedureChange()
-    {
-        Assert.Equal("DE5B7384FAEDD51B1BF8E3B4DAEBCF3C5DEAD100A7A8CAEFB89C5C08A1CA81C2", Sha(LocalDataService.DurationTrendChartSql("v_query_stats", "", 4)));
-        Assert.Equal("EB6226CB8F98242253395FAD9E41E431A650630F1C79109778279C08FBF56423", Sha(LocalDataService.DurationTrendChartSql("v_query_stats", Clause(4), 6)));
-    }
-
-    [Fact]
-    public void QueryStatsBucketedSql_IsByteIdenticalToItsTextBeforeTheProcedureChange()
-    {
-        Assert.Equal("03270AC3C869E7777050580B1F373911E3D3789B6A98054E894E872D894CC341", Sha(LocalDataService.BucketedDurationTrendSql("v_query_stats", "")));
-        Assert.Equal("C7B500FC53A093AF9340583AF94C742019C61AFC8FCD7BB4BA53C7C5AAE075C2", Sha(LocalDataService.BucketedDurationTrendSql("v_query_stats", Clause(5))));
-    }
 
     [Theory]
     [InlineData(false)]
