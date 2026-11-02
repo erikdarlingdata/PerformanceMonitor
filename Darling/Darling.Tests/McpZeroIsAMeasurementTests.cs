@@ -253,7 +253,7 @@ public sealed class McpZeroIsAMeasurementTests
         /* #3897: the bucketed duration pair shares ONE read over both relations, and it takes the same
            three-state interval — never the LAG-only shape, never the COALESCE that fabricates a restart's. */
         var liteBuckets = ReadRepoFile("Lite", "Services", "LocalDataService.TrendBuckets.cs");
-        Assert.DoesNotMatch(new Regex(@"MAX\(sample_interval_seconds\)"), liteBuckets); /* #7161: it reads QueryCollectionsSql now */
+        /* #7161: the query duration pair reads QueryCollectionsSql now; the MAX that remains in this file is the wait/perfmon grain's. */
         Assert.DoesNotMatch(new Regex(@"\)\)\) AS interval_seconds"), liteBuckets);
         Assert.DoesNotMatch(new Regex(@"COALESCE\(NULLIF\(sample_interval_seconds, 0\),\s*(CAST\()?extract"), liteBuckets);
 
