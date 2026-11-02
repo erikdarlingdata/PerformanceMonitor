@@ -122,6 +122,11 @@ public sealed class QueryTagRollupLiveTests
             "INSERT INTO blocked_process_reports (blocked_report_id, collection_time, server_id, server_name, event_time, wait_time_ms, blocking_spid, blocked_spid, blocking_status, database_name, blocked_client_app, blocked_login_name, blocked_host_name, blocking_client_app, blocking_login_name, blocking_host_name) VALUES ($1, $2, $3, 'x', $2, $4, 60, 70, 'suspended', 'db1', $5, 'lg', 'h', $6, 'lg', 'h')",
             c.Ct, CollectionIdGenerator.Next(), DateTime.UtcNow.AddMinutes(-20), server, waitMs, blockedApp, blockingApp);
 
+    private static Task BlockedReportAsync(Ctx c, int server, string blockedApp, string blockingApp, DateTime eventTime, long waitMs, int blockedSpid, int blockingSpid) =>
+        ExecAsync(c.Store,
+            "INSERT INTO blocked_process_reports (blocked_report_id, collection_time, server_id, server_name, event_time, wait_time_ms, blocking_spid, blocked_spid, blocking_status, database_name, blocked_client_app, blocked_login_name, blocked_host_name, blocking_client_app, blocking_login_name, blocking_host_name) VALUES ($1, $2, $3, 'x', $2, $4, $7, $8, 'suspended', 'db1', $5, 'lg', 'h', $6, 'lg', 'h')",
+            c.Ct, CollectionIdGenerator.Next(), eventTime, server, waitMs, blockedApp, blockingApp, blockingSpid, blockedSpid);
+
     private static Task DeadlockAsync(Ctx c, int server, params string[] apps) =>
         ExecAsync(c.Store,
             "INSERT INTO deadlocks (deadlock_id, collection_time, server_id, server_name, deadlock_time, deadlock_graph_xml, database_name) VALUES ($1, $2, $3, 'x', $2, $4, 'db1')",
@@ -274,6 +279,41 @@ public sealed class QueryTagRollupLiveTests
             Assert.Equal(12_000, Figure(Row(blocking, "Etl").GetProperty("own"), "caused_ms"));
             Assert.Equal(0, Figure(Row(blocking, "Etl").GetProperty("own"), "blocked_ms"));
             Assert.Equal(12_000, Figure(blocking.GetProperty("total"), "blocked_ms"));
+        });
+    }
+
+    /// <summary>#7163: SQL Server writes a blocked-process report every threshold interval, each carrying the wait so far. One 60 s wait at a
+    /// 5 s threshold is twelve reports: the section counts it once, at its longest report, not as 390 s and twelve; a parallel query's
+    /// self-wait (the same spid on both sides) is no wait and adds nothing.</summary>
+    [Fact]
+    public async Task BlockingReportsOfOneWait_CountOnce_AtTheLongestReport_AndSelfWaitsAddNothing()
+    {
+        await WithStoreAsync(async c =>
+        {
+            var victim = await TagAsync(c, "Reports");
+            var culprit = await TagAsync(c, "Etl");
+            await MapAsync(c, ServerOne, "caller", Caller("reportApp", "lg", "h", "db1"), victim);
+            await MapAsync(c, ServerOne, "caller", Caller("etlApp", "lg", "h", "db1"), culprit);
+            var start = DateTime.UtcNow.AddMinutes(-30);
+            for (var k = 1; k <= 12; k++)
+            {
+                await BlockedReportAsync(c, ServerOne, "reportApp", "etlApp", start.AddSeconds(5 * k), 5_000L * k, 70, 60);
+            }
+
+            /* A second, separate wait of 8 s (two reports), and a self-wait the way a parallel query writes it. */
+            var second = start.AddMinutes(10);
+            await BlockedReportAsync(c, ServerOne, "reportApp", "etlApp", second.AddSeconds(5), 5_000, 71, 60);
+            await BlockedReportAsync(c, ServerOne, "reportApp", "etlApp", second.AddSeconds(8), 8_000, 71, 60);
+            await BlockedReportAsync(c, ServerOne, "reportApp", "etlApp", second.AddSeconds(5), 5_000, 90, 90);
+
+            using var doc = await ReadAsync(c, "srv-one");
+            var blocking = Section(doc, "blocking_reports");
+            Assert.Equal(68_000, Figure(Row(blocking, "Reports").GetProperty("own"), "blocked_ms"));
+            Assert.Equal(2, Figure(Row(blocking, "Reports").GetProperty("own"), "blocked_reports"));
+            Assert.Equal(68_000, Figure(Row(blocking, "Etl").GetProperty("own"), "caused_ms"));
+            Assert.Equal(2, Figure(Row(blocking, "Etl").GetProperty("own"), "caused_reports"));
+            Assert.Equal(68_000, Figure(blocking.GetProperty("total"), "blocked_ms"));
+            Assert.Equal(2, Figure(blocking.GetProperty("total"), "blocked_reports"));
         });
     }
 
