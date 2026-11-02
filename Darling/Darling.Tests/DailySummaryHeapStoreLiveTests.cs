@@ -250,9 +250,56 @@ public sealed class DailySummaryHeapStoreLiveTests
         }
     }
 
+    /* #7152: the cover is on the hypertable and a second session holds the table, so the drop times out on the lock. The line must
+       say the index was not dropped (the cover is still there), not that it was not built. */
+    [Fact]
+    public async Task ABusyTable_ReportsTheCoverAsNotDropped_NotAsNotBuilt()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the heap-store daily summary live test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, plainPostgres: true);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        Assert.SkipUnless(await LiveTimescaleProbe.TryEnableAsync(scratch.ConnectionString, ct), "TimescaleDB is not available on this cluster.");
+
+        await PgTableTuning.ApplyAsync(connection, NullLogger.Instance, ct);
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+        Assert.True(await TableIsHypertableAsync(connection, "wait_stats", ct), "the conversion makes wait_stats a hypertable");
+        Assert.True(await CoverIndexCountAsync(connection, ct) > 0, "the cover is on the hypertable");
+
+        await using var holder = new NpgsqlConnection(scratch.ConnectionString);
+        await holder.OpenAsync(ct);
+        await using var hold = await holder.BeginTransactionAsync(ct);
+        try
+        {
+            await using (var lockTable = new NpgsqlCommand("LOCK TABLE collect.wait_stats IN ACCESS EXCLUSIVE MODE", holder, hold))
+            {
+                await lockTable.ExecuteNonQueryAsync(ct);
+            }
+
+            var logger = new CapturingLogger();
+            await PgTableTuning.ApplyAsync(connection, logger, ct);
+
+            Assert.Contains(logger.Infos, m => m.Contains(PgTableTuning.WaitStatsDailyCoverIndexName, StringComparison.Ordinal)
+                && m.Contains("not dropped this pass", StringComparison.Ordinal));
+            Assert.DoesNotContain(logger.Infos, m => m.Contains(PgTableTuning.WaitStatsDailyCoverIndexName, StringComparison.Ordinal)
+                && m.Contains("not built", StringComparison.Ordinal));
+        }
+        finally
+        {
+            await hold.RollbackAsync(CancellationToken.None);
+        }
+
+        Assert.True(await CoverIndexCountAsync(connection, ct) > 0, "the cover is still on the hypertable after the busy pass");
+    }
+
     private sealed class CapturingLogger : Microsoft.Extensions.Logging.ILogger
     {
         public List<string> Warnings { get; } = new();
+
+        public List<string> Infos { get; } = new();
 
         public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
 
@@ -263,6 +310,10 @@ public sealed class DailySummaryHeapStoreLiveTests
             if (logLevel == Microsoft.Extensions.Logging.LogLevel.Warning)
             {
                 Warnings.Add(formatter(state, exception));
+            }
+            else if (logLevel == Microsoft.Extensions.Logging.LogLevel.Information)
+            {
+                Infos.Add(formatter(state, exception));
             }
         }
     }

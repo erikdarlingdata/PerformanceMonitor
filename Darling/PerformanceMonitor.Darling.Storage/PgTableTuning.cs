@@ -610,6 +610,7 @@ public static class PgTableTuning
         foreach (var statement in Statements)
         {
             var sql = statement;
+            var dropIssued = false;
             try
             {
                 if (statement.StartsWith(CreateIndexPrefix, StringComparison.Ordinal))
@@ -636,7 +637,8 @@ public static class PgTableTuning
                         {
                             /* #7152: a cover built while the table was plain survives the conversion (create_hypertable with
                                migrate_data keeps existing indexes) and then only costs every insert, so a hypertable drops it.
-                               A failed drop falls to the catch below: one Warning, the pass goes on, the next start retries. */
+                               A failed drop falls to the catch below: one Warning, the pass goes on, the next pass retries. */
+                            dropIssued = true;
                             using var drop = new NpgsqlCommand(GuardedDrop(indexName), connection) { CommandTimeout = SetupTimeoutSeconds };
                             await drop.ExecuteNonQueryAsync(cancellationToken);
                             applied++;
@@ -707,6 +709,13 @@ public static class PgTableTuning
                     logger?.LogInformation(
                         "Tuning setting on {Table} not applied this pass: the table was busy; the next pass tries again",
                         AlteredTable(statement));
+                }
+                else if (dropIssued)
+                {
+                    /* #7152: the statement that hit the lock was the cover's drop, so the cover is still on the hypertable. */
+                    logger?.LogInformation(
+                        "Index {Index} not dropped this pass: the table was busy; the next pass tries again",
+                        CreatedIndexName(statement));
                 }
                 else
                 {
