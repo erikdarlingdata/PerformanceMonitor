@@ -418,6 +418,7 @@ public partial class LocalDataService
            slot or another reader's lookup must not do it while holding the non-recursive read lock). Read once per archive
            generation. Null (unknown, or a view that removes copies on a natural key) keeps the whole-view probe below. */
         var archiveTable = view.Substring(2);
+        var spanGeneration = _duckDb.ArchiveViewGeneration;
         ArchiveSpan? archiveSpan = QueryWindowRelationTimeIsServerLocal(relation)
             ? null
             : await GetArchiveSpanAsync(archiveTable, timeColumn, cancellationToken);
@@ -425,6 +426,14 @@ public partial class LocalDataService
         /* #5371: a token (the Collection Health pass's) reaches the lock wait, the open and the two statements of the generic
            path below; a caller that passes none keeps the original uninterruptible read. */
         using var connection = await OpenConnectionAsync(timer: null, cancellationToken);
+
+        /* The span was taken before the lock wait. An archive-and-reset or an export that ran during the wait moved older rows to
+           Parquet and bumped the generation inside its write lock, so the span is stale and the view probe below must run. The
+           read lock is held here, so this check is exact. */
+        if (_duckDb.ArchiveViewGeneration != spanGeneration)
+        {
+            archiveSpan = null;
+        }
 
         /* #4989: a time column that holds the server's wall clock (the Default Trace) goes through the clock, the way the
            grid reads it. Every UTC relation keeps the single-query path below. */
@@ -470,10 +479,12 @@ SELECT LEAST(
             return firstInWindow;
         }
 
-        /* #7256: the older-row probe asks the hot table first and stops at its first older row. It reads the view, which opens
-           every archive file, only when the archive's cached span reaches back before the window start (or is unknown).
-           With no older row anywhere, the probe used to read the whole archive each time. The answer is the same: a row
-           older than the start exists in the view exactly when it exists in the hot table or in the archive. */
+        /* #7256: the older-row probe asks the hot table first and stops at its first older row, so a server whose hot table holds
+           an older row never reads the archive. The view, which opens every archive file, is read when the archive's cached span
+           reaches back before the window start or is unknown. That span covers every server in the archive, so the view is
+           skipped only when the whole archive holds nothing older than the start. A server with no older row of its own still
+           reads the view when another server's archived rows are older. The answer is the same either way: a row older than the
+           start exists in the view exactly when it exists in the hot table or in the archive. */
         if (archiveSpan is not null)
         {
             if (await HasRowOlderThanAsync(connection, archiveTable, timeColumn, serverId, startUtc, cancellationToken))

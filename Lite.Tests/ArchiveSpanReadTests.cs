@@ -209,6 +209,86 @@ public sealed class ArchiveSpanReadTests : IDisposable
     }
 
     [Fact]
+    public async Task AnArchiveMoveDuringTheLockWait_DoesNotLeaveAFalseDataStart()
+    {
+        var start = Whole(NowUtc.AddHours(-6));
+        var end = Whole(NowUtc);
+        var firstInWindow = Whole(start.AddMinutes(30));
+        var older = Whole(start.AddHours(-2));
+
+        /* The older row is hot and no archive file exists yet, so the span read before the lock wait is (null, null). */
+        await ExecuteAsync(Row(ServerId, older, 0), Row(ServerId, firstInWindow, 1));
+        await _duckDb.CreateArchiveViewsAsync();
+
+        var signal = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var move = new ManualResetEventSlim();
+        var archivePath = Path.Combine(_archiveDir, "20260109_000000_query_store_stats.parquet").Replace("\\", "/");
+        var archiver = Task.Factory.StartNew(() =>
+        {
+            /* The archive-and-reset: under the write lock it moves the older rows to Parquet and rebuilds the views, which bumps the generation. */
+            using var writeLock = _duckDb.AcquireWriteLock(TimeSpan.FromMinutes(2));
+            signal.SetResult();
+            move.Wait(TimeSpan.FromMinutes(2));
+            using var connection = _duckDb.CreateConnection();
+            connection.Open();
+            foreach (var sql in new[]
+            {
+                $"COPY (SELECT * FROM query_store_stats WHERE collection_time < {Ts(start)}) TO '{DuckDbInitializer.EscapeSqlPath(archivePath)}' (FORMAT PARQUET)",
+                $"DELETE FROM query_store_stats WHERE collection_time < {Ts(start)}",
+            })
+            {
+                using var command = connection.CreateCommand();
+                command.CommandText = sql;
+                command.ExecuteNonQuery();
+            }
+            _duckDb.CreateArchiveViewsCoreAsync().GetAwaiter().GetResult();
+        }, TaskCreationOptions.LongRunning);
+        await signal.Task.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+
+        var read = Task.Run(() => _service.GetQueryWindowFloorAsync(
+            QueryWindowRelation.QueryStoreStats, ServerId, start, end, cancellationToken: TestContext.Current.CancellationToken), TestContext.Current.CancellationToken);
+        await Task.Delay(500, TestContext.Current.CancellationToken);
+        Assert.False(read.IsCompleted, "the read waits behind the archive move");
+        move.Set();
+        await archiver;
+        var floor = await read.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+
+        Assert.Equal(start, floor);
+    }
+
+    [Fact]
+    public async Task AnArchiveMoveBetweenTheSpanAndTheHotRead_SendsTheReadToTheView()
+    {
+        var reads = new List<string>();
+        var result = await _service.ReadWindowSkippingEmptyArchiveAsync(
+            "query_store_stats", "collection_time", Whole(NowUtc.AddHours(-1)),
+            table =>
+            {
+                reads.Add(table);
+                if (reads.Count == 1)
+                {
+                    /* The archive-and-reset lands after the span was taken and before the hot read returns. */
+                    _duckDb.BumpArchiveViewGeneration();
+                }
+                return Task.FromResult(table);
+            }, TestContext.Current.CancellationToken);
+
+        Assert.Equal(["query_store_stats", "v_query_store_stats"], reads);
+        Assert.Equal("v_query_store_stats", result);
+    }
+
+    [Fact]
+    public async Task AnUnchangedGeneration_KeepsTheHotRead()
+    {
+        var reads = new List<string>();
+        await _service.ReadWindowSkippingEmptyArchiveAsync(
+            "query_store_stats", "collection_time", Whole(NowUtc.AddHours(-1)),
+            table => { reads.Add(table); return Task.FromResult(table); }, TestContext.Current.CancellationToken);
+
+        Assert.Equal(["query_store_stats"], reads);
+    }
+
+    [Fact]
     public async Task ASlowReadsLogLine_SeparatesTheLockWaitFromTheQueryTime()
     {
         var logDirectory = Path.Combine(_tempDir, "logs");
