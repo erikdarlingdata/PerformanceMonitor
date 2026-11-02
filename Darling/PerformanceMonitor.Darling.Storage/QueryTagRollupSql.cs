@@ -31,6 +31,15 @@ public static class QueryTagRollupSql
     /// <summary>The ceiling bound, with the shape the hourly top-N reads bind.</summary>
     public const string CeilingClause = " AND f.bucket < $4";
 
+    /// <summary>Where a statement windowed on an event's own timestamp carries the <c>collection_time</c> floor (#7204); replaced by
+    /// <see cref="EventFloorClause"/> in <see cref="DarlingQueryTagRollupReader.ReadFactsAsync"/>, which then binds $4 from
+    /// <c>EventWindowFloor.For(windowStart)</c>. Never beside <see cref="CeilingPlaceholder"/>: both are $4.</summary>
+    public const string EventFloorPlaceholder = "$FLOOR$";
+
+    /// <summary>The floor bound: the hypertable is partitioned on <c>collection_time</c>, so a read bounded only on the event's own
+    /// timestamp opens every retained chunk (see <see cref="EventWindowFloor"/>).</summary>
+    public const string EventFloorClause = " AND r.collection_time >= $4";
+
     /// <summary>Every tag: id, name, parent. The tree maths (own figure, subtree figure) runs over this in C#.</summary>
     public const string TagTreeSql = "SELECT id, name, parent_id FROM config.query_tags ORDER BY id";
 
@@ -279,18 +288,19 @@ public static class QueryTagRollupSql
         """;
 
     /// <summary>Blocking, blocked-process reports: the wait lands on the blocked side's tag (blocked) and on the blocking side's tag (caused).</summary>
-    public static readonly string BlockingReportsSql = BlockingSql("collect.blocked_process_reports", "r.event_time >= $2 AND r.event_time <= $3", "blocked_reports", "caused_reports");
+    public static readonly string BlockingReportsSql = BlockingSql("collect.blocked_process_reports", "r.event_time >= $2 AND r.event_time <= $3" + EventFloorPlaceholder, "blocked_reports", "caused_reports");
 
     /// <summary>Blocking, DMV snapshots: the same two sides over the always-on DMV sample.</summary>
     public static readonly string BlockingSnapshotsSql = BlockingSql("collect.dmv_blocking_snapshots", "r.collection_time >= $2 AND r.collection_time <= $3", "blocked_snapshots", "caused_snapshots");
 
-    /// <summary>The deadlock graphs of the window, newest first, up to $4; the processes are parsed in C# (a graph is XML).</summary>
+    /// <summary>The deadlock graphs of the window, newest first, up to $4; the processes are parsed in C# (a graph is XML). $5 is the <c>collection_time</c> floor (<see cref="EventWindowFloor"/>, #7204): without it the fleet read opens and sorts every retained chunk.</summary>
     public const string DeadlockGraphsSql = """
         SELECT server_id, deadlock_id, deadlock_graph_xml, deadlock_time
         FROM collect.deadlocks
         WHERE server_id = ANY($1)
         AND   deadlock_time >= $2
         AND   deadlock_time <= $3
+        AND   collection_time >= $5
         ORDER BY deadlock_time DESC, deadlock_id DESC
         LIMIT $4
         """;
