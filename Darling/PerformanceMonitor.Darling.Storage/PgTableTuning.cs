@@ -165,6 +165,7 @@ public static class PgTableTuning
         LegacyRowIndexName,
         QueryStatsRestartRowIndexName,
         ProcedureStatsRestartRowIndexName,
+        WaitStatsDailyCoverIndexName,
     };
 
     /// <summary>True for an index that shares the one-build-per-start budget.</summary>
@@ -204,6 +205,26 @@ public static class PgTableTuning
                 "Could not tell whether {Table} is empty, so its index counts against the one-build budget this start: {Message}",
                 table, ex.Message);
             return false;
+        }
+    }
+
+    /// <summary>
+    /// Whether the TimescaleDB extension is installed in this database. A failed check answers true, so a store whose
+    /// state is unknown is left without the heap-only indexes (they are an optimisation) rather than given an index build.
+    /// </summary>
+    private static async Task<bool> TimescaleInstalledAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var command = new NpgsqlCommand(TimescaleInstalledSql, connection) { CommandTimeout = EmptinessCheckTimeoutSeconds };
+            return await command.ExecuteScalarAsync(cancellationToken) is true;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogWarning(
+                "Could not tell whether the TimescaleDB extension is installed, so {Index} is skipped this start: {Message}",
+                WaitStatsDailyCoverIndexName, ex.Message);
+            return true;
         }
     }
 
@@ -257,6 +278,22 @@ public static class PgTableTuning
 
     /// <summary>The restart-row partial index on <c>collect.procedure_stats</c>, built and read like <see cref="QueryStatsRestartRowIndexName"/>.</summary>
     public const string ProcedureStatsRestartRowIndexName = "idx_procedure_stats_restart_rows_time";
+
+    /// <summary>#7147: the covering index for the Daily Summary's per-day wait sums, on a store without TimescaleDB.</summary>
+    public const string WaitStatsDailyCoverIndexName = "idx_wait_stats_daily_cover";
+
+    /// <summary>
+    /// #7147: the indexes built only on a store that has no TimescaleDB extension. A TimescaleDB store compresses a chunk
+    /// after <see cref="TimescaleSupport.CompressAfterDays"/> (1) day, so all but about the newest day of a month sits in
+    /// compressed chunks, where a heap btree index on the hypertable cannot serve the read, and the index would still cost
+    /// every insert (see the statement). The pass counts a skipped one as applied, like any index that is already there.
+    /// </summary>
+    private static readonly HashSet<string> s_heapStoreOnly = new(StringComparer.Ordinal)
+    {
+        WaitStatsDailyCoverIndexName,
+    };
+
+    private const string TimescaleInstalledSql = "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'timescaledb')";
 
     public static IReadOnlyList<string> ForcePlanFailuresIndexColumns { get; } = new[]
     {
@@ -517,6 +554,20 @@ public static class PgTableTuning
            StoreMetricsLatestSql below, the latest read went from 7,772 ms to 15 ms on the same seed with
            identical rows (251). */
         "CREATE INDEX IF NOT EXISTS idx_store_metrics_kind_name_time ON collect.store_metrics (object_kind, object_name, metric_time DESC)",
+        /* #7147: the Daily Summary and calendar month read on a store WITHOUT TimescaleDB (a bring-your-own PostgreSQL
+           store: plain heaps, no rollups). That read has no rollup to take, so it scans a month of one server's raw
+           wait_stats; the servers interleave in the heap by time, so with only the (server_id, collection_time) index it
+           reads every heap page of the month for one server's share of the rows. This is covering for exactly that read
+           (DailySummarySql: server_id and collection_time to filter, wait_type and delta_wait_time_ms for the per-day wait
+           sums), so it becomes an Index Only Scan over the server's own slice of the index. The distinct-query count needs
+           no new index: it reads collect.query_stats directly and takes idx_query_stats_server_hash_time above. Measured on a
+           plain-heap test store, 4 servers x 33 days, 3.8 M query_stats and 5.7 M wait_stats rows, 31-day read for one server,
+           EXPLAIN (ANALYZE, BUFFERS): 219,525 buffers and 2,420 ms before, about 31,000 buffers and 1,550 ms after (both warm:
+           the buffer count is the cold-disk cost). Plain stores only (s_heapStoreOnly): a TimescaleDB store compresses a chunk
+           after TimescaleSupport.CompressAfterDays (1) day, so all but about the newest day of the month sits in compressed
+           chunks, where a heap btree index on the hypertable cannot serve the read, and the index would still cost every
+           insert. */
+        "CREATE INDEX IF NOT EXISTS " + WaitStatsDailyCoverIndexName + " ON collect.wait_stats (server_id, collection_time) INCLUDE (wait_type, delta_wait_time_ms)",
     };
 
     /// <summary>
@@ -553,6 +604,7 @@ public static class PgTableTuning
         var applied = 0;
         var buildIssued = false;
         var buildStartedAt = 0L;
+        bool? timescaleInstalled = null;
         foreach (var statement in Statements)
         {
             var sql = statement;
@@ -561,6 +613,16 @@ public static class PgTableTuning
                 if (statement.StartsWith(CreateIndexPrefix, StringComparison.Ordinal))
                 {
                     var indexName = CreatedIndexName(statement);
+                    if (s_heapStoreOnly.Contains(indexName))
+                    {
+                        timescaleInstalled ??= await TimescaleInstalledAsync(connection, logger, cancellationToken);
+                        if (timescaleInstalled == true)
+                        {
+                            applied++;
+                            continue;
+                        }
+                    }
+
                     using var probe = new NpgsqlCommand(IndexValidSql, connection) { CommandTimeout = SetupTimeoutSeconds };
                     probe.Parameters.AddWithValue(indexName);
                     var valid = await probe.ExecuteScalarAsync(cancellationToken);
