@@ -490,6 +490,7 @@ public sealed class ServerPropertyRow
         InventoryAsOfUtc = dto.InventoryAsOfUtc,
         /* sqlserver_start_time is the server's LOCAL clock — shown as-is like Lite. */
         SqlServerStartTime = dto.SqlServerStartTime,
+        UtcOffsetMinutes = dto.UtcOffsetMinutes,
         HostOsVersion = dto.HostOsVersion,
         AgReplicaRole = dto.AgReplicaRole,
         IsEnabled = dto.IsEnabled,
@@ -504,6 +505,11 @@ public sealed class ServerPropertyRow
     public int? CoresPerSocket { get => FinOpsInventoryFigures.CoresPerSocket(EngineEdition, _coresPerSocket); set => _coresPerSocket = value; }
     /// <summary>The server's LOCAL start clock (sys.dm_os_sys_info) — stored verbatim, shown as-is like Lite.</summary>
     public DateTime? SqlServerStartTime { get; set; }
+
+    /// <summary>The server's UTC offset in minutes when the row was collected (<c>server_properties.utc_offset_minutes</c>), the only way to
+    /// turn <see cref="SqlServerStartTime"/> into UTC (#7176). Null on a row collected before the column existed.</summary>
+    public int? UtcOffsetMinutes { get; set; }
+
     /// <summary>
     /// When this server's CONFIG SNAPSHOT was taken — not a freshness heartbeat (#2359).
     ///
@@ -603,14 +609,22 @@ public sealed class ServerPropertyRow
 
     /// <summary>The uptime in seconds, the sort key of the Uptime column (#6086): <see cref="UptimeDisplay"/> is text, which sorts
     /// "10d" before "2d". Null when the start time is unknown.</summary>
-    public double? UptimeSeconds => SqlServerStartTime is { } start ? (DateTime.Now - start).TotalSeconds : null;
+    public double? UptimeSeconds => UptimeSecondsAt(DateTime.UtcNow);
+
+    /// <summary>The uptime at <paramref name="utcNow"/>. The start time is the SERVER's local clock, so it is moved to UTC by the
+    /// collected offset before it meets a UTC instant. Subtracting it from the viewer's own local clock was wrong by the zone
+    /// difference (#7176). Null when either is unknown: an uptime built on a guessed zone would be as wrong as the old one.</summary>
+    internal double? UptimeSecondsAt(DateTime utcNow) =>
+        SqlServerStartTime is { } start && UtcOffsetMinutes is { } offset
+            ? Math.Max(0d, (utcNow - start.AddMinutes(-offset)).TotalSeconds)
+            : null;
 
     public string UptimeDisplay
     {
         get
         {
-            if (SqlServerStartTime == null) return "";
-            var uptime = DateTime.Now - SqlServerStartTime.Value;
+            if (UptimeSeconds is not { } seconds) return "";
+            var uptime = TimeSpan.FromSeconds(seconds);
             return $"{(int)uptime.TotalDays}d {uptime.Hours}h";
         }
     }
