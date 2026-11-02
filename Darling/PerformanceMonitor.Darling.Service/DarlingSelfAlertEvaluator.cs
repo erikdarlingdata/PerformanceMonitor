@@ -5090,7 +5090,9 @@ internal sealed class DarlingSelfAlertEvaluator
         var key = Key(serverId);
         var stateKey = StateRetryKey(metric, key);
         var now = _utcNow();
-        var items = overdue.Where(o => o.Kind == kind).ToList();
+        /* #7202: the oldest first, a database never backed up or checked (no age) before any dated one, so the names the alert
+           carries are the worst ones. OrderBy is stable, so equal ages keep the read's order. */
+        var items = overdue.Where(o => o.Kind == kind).OrderBy(o => o.Age.HasValue).ThenByDescending(o => o.Age).ToList();
         if (items.Count > 0)
         {
             _activeDatabaseProtection[stateKey] = true;

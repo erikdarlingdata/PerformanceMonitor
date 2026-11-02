@@ -129,22 +129,35 @@ public sealed class DatabaseProtectionAlertTests
     }
 
     [Fact]
-    public async Task AServerWithHundredsOfOverdueDatabases_NamesTheFirstFew_AndCountsTheRest()
+    public async Task AServerWithHundredsOfOverdueDatabases_NamesTheOldestFew_AndCountsTheRest()
     {
-        /* #7202: every overdue database in one flat sentence put a Teams card past its size ceiling. */
+        /* #7202: every overdue database in one flat sentence put a Teams card past its size ceiling. The ones named are the most
+           overdue, not the first the read returned: 600 distinct ages, deliberately not in read order, and one never backed up. */
         var h = AllOn();
         var late = ReadAt(h.Now, c => Enumerable.Range(0, 600)
-            .Select(i => Db($"Tenant_{i:D4}", c, TimeSpan.FromDays(30), TimeSpan.FromMinutes(5), TimeSpan.FromDays(2)))
+            .Select(i => Db($"Tenant_{i:D4}", c, TimeSpan.FromDays(30) + TimeSpan.FromMinutes(i * 7 % 600), TimeSpan.FromMinutes(5), TimeSpan.FromDays(2)))
+            .Append(Db("Never_Backed_Up", c, fullAgo: null, logAgo: TimeSpan.FromMinutes(5), checkDbAgo: TimeSpan.FromDays(2), fullState: DatabaseProtectionCollector.BackupNoneInWindow))
             .ToArray());
+        var oldest = Enumerable.Range(0, 600).OrderByDescending(i => i * 7 % 600).Select(i => $"Tenant_{i:D4}").ToArray();
 
         await h.Build().ApplyDatabaseProtectionAsync(ServerId, Name, late, Ct);
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
-        Assert.Equal("600 overdue", fired.CurrentValue);
-        Assert.Contains("on 600 database(s)", fired.DetailText, StringComparison.Ordinal);
-        Assert.Contains("Tenant_0000 (30 days old)", fired.DetailText, StringComparison.Ordinal);
-        Assert.Contains($", and {600 - DarlingSelfAlertEvaluator.OverdueDetailDatabases} more.", fired.DetailText, StringComparison.Ordinal);
-        Assert.DoesNotContain("Tenant_0599", fired.DetailText, StringComparison.Ordinal);
+        Assert.Equal("601 overdue", fired.CurrentValue);
+        Assert.Contains("on 601 database(s)", fired.DetailText, StringComparison.Ordinal);
+        Assert.Contains($", and {601 - DarlingSelfAlertEvaluator.OverdueDetailDatabases} more.", fired.DetailText, StringComparison.Ordinal);
+        Assert.StartsWith("Backup Overdue: 601 database(s) - Never_Backed_Up, " + string.Join(", ", oldest.Take(4)) + ", ...", fired.ShortMessage, StringComparison.Ordinal);
+        Assert.Contains("Never_Backed_Up (no backup on record)", fired.DetailText, StringComparison.Ordinal);
+        foreach (var name in oldest.Take(DarlingSelfAlertEvaluator.OverdueDetailDatabases - 1))
+        {
+            Assert.Contains(name + " (", fired.DetailText, StringComparison.Ordinal);
+        }
+
+        foreach (var name in oldest.Skip(DarlingSelfAlertEvaluator.OverdueDetailDatabases))
+        {
+            Assert.DoesNotContain(name, fired.DetailText, StringComparison.Ordinal);
+        }
+
         Assert.True(fired.DetailText?.Length < 1_000, "the detail stays short however many databases are overdue");
     }
 

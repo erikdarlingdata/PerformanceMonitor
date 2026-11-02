@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Globalization;
 using System.Linq;
 using System.Text;
 using System.Text.Json;
@@ -49,6 +50,25 @@ public class TeamsProseCapTests
         /* The cut lands between two entries, never inside "Tenant_0123 (12 days old)". */
         var kept = text[..text.IndexOf("\n\n_The rest", StringComparison.Ordinal)];
         Assert.EndsWith("days old)", kept.TrimEnd(',', ' '), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("База_{0:D4}")]
+    [InlineData("数据库_{0:D4}")]
+    [InlineData("R&D&Q&A_{0:D4}")]
+    [InlineData("a+b<c>'d'_{0:D4}")]
+    public void AHugeDetailOfNamesTheEncoderEscapes_StaysUnderTheConnectorCeiling_OnTheWire(string nameFormat)
+    {
+        /* The card is serialized with the default JavaScriptEncoder, so a Cyrillic or CJK character and each of & < > + ' take six
+           bytes (and the escaped &amp; eleven): a budget counted in raw UTF-8 passed these through at 1.5 to 3 times its size. */
+        var names = string.Join(", ", Enumerable.Range(0, 3000).Select(i => string.Format(CultureInfo.InvariantCulture, nameFormat, i) + " (12 days old)"));
+        var payload = Build("The last log backup is older than 2 hours on 3000 database(s): " + names + ".");
+
+        Assert.True(Encoding.UTF8.GetByteCount(payload) < 28_000, "the whole card stays under the connector ceiling");
+        var text = DetailsText(payload);
+        Assert.True(JsonEncodedText.Encode(text).EncodedUtf8Bytes.Length <= WebhookAlertService.TeamsProseMaxBytes);
+        Assert.Contains("cut to fit the Teams size limit", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("_2999", text, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -139,7 +139,8 @@ public partial class WebhookAlertService
                   .Replace("<", "&lt;", StringComparison.Ordinal)
                   .Replace(">", "&gt;", StringComparison.Ordinal);
 
-    /// <summary>#7202: the most UTF-8 bytes the Details prose of a Teams card may carry once escaped. The connector rejects a
+    /// <summary>#7202: the most bytes the Details prose of a Teams card may take on the wire, once markdown-escaped and JSON-encoded
+    /// (a non-ASCII character or an <c>&amp; &lt; &gt; + '</c> becomes a six-byte <c>\uXXXX</c>). The connector rejects a
     /// card past about 28 KB, so a long flat detail (a list of hundreds of names) gets 20 KB and the rest of the card keeps
     /// room for its facts and sections.</summary>
     internal const int TeamsProseMaxBytes = 20_000;
@@ -152,20 +153,22 @@ public partial class WebhookAlertService
     /// </summary>
     internal static string CapTeamsProse(string escaped)
     {
-        if (Encoding.UTF8.GetByteCount(escaped) <= TeamsProseMaxBytes)
+        /* The card is serialized with the default JavaScriptEncoder, which writes every non-ASCII character and every & < > + '
+           as a six-byte \uXXXX, so the budget is measured on that encoded form, not on raw UTF-8. */
+        if (JsonEncodedText.Encode(escaped).EncodedUtf8Bytes.Length <= TeamsProseMaxBytes)
         {
             return escaped;
         }
 
         const string notice = "\n\n_The rest of this detail is cut to fit the Teams size limit._";
-        var budget = TeamsProseMaxBytes - Encoding.UTF8.GetByteCount(notice);
+        var budget = TeamsProseMaxBytes - JsonEncodedText.Encode(notice).EncodedUtf8Bytes.Length;
         var bytes = 0;
         var end = 0;
         var cut = -1;
         while (end < escaped.Length)
         {
             var width = char.IsHighSurrogate(escaped[end]) && end + 1 < escaped.Length ? 2 : 1;
-            bytes += Encoding.UTF8.GetByteCount(escaped.AsSpan(end, width));
+            bytes += JsonEncodedText.Encode(escaped.AsSpan(end, width)).EncodedUtf8Bytes.Length;
             if (bytes > budget)
             {
                 break;
