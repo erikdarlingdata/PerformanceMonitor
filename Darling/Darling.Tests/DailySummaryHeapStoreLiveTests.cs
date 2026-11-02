@@ -138,6 +138,64 @@ public sealed class DailySummaryHeapStoreLiveTests
         Assert.True(await IndexExistsAsync(connection, PgTableTuning.WaitStatsDailyCoverIndexName, ct));
     }
 
+    /* #7152: the cover built while wait_stats was plain survives create_hypertable(migrate_data => true) onto the hypertable and
+       its chunks. Once the table is a hypertable the pass drops it, including when a retry comes after a chunk is compressed. */
+    [Fact]
+    public async Task TheCover_IsDropped_WhenWaitStatsBecomesAHypertableAfterItWasBuilt()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the heap-store daily summary live test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, plainPostgres: true);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        Assert.SkipUnless(await LiveTimescaleProbe.TryEnableAsync(scratch.ConnectionString, ct), "TimescaleDB is not available on this cluster.");
+
+        /* An old row and a recent one, so the conversion carries real rows into two chunks and the old chunk can be compressed. */
+        await using (var seed = new NpgsqlCommand(
+            "INSERT INTO collect.wait_stats (collection_id, collection_time, server_id, server_name, wait_type, delta_wait_time_ms) "
+            + "VALUES (1, now() AT TIME ZONE 'UTC' - interval '20 days', 7152, 'srv', 'W', 1), (2, now() AT TIME ZONE 'UTC', 7152, 'srv', 'W', 1)", connection))
+        {
+            await seed.ExecuteNonQueryAsync(ct);
+        }
+
+        await PgTableTuning.ApplyAsync(connection, NullLogger.Instance, ct);
+        Assert.True(await CoverIndexCountAsync(connection, ct) > 0, "the cover is built while wait_stats is a plain table");
+
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+        Assert.True(await TableIsHypertableAsync(connection, "wait_stats", ct), "the conversion makes wait_stats a hypertable");
+        Assert.True(await CoverIndexCountAsync(connection, ct) > 1, "the conversion carries the cover onto the hypertable and its chunks");
+
+        /* The old chunk is compressed before the pass runs again, as on a retry some days later. */
+        await using (var enable = new NpgsqlCommand(TimescaleSupport.EnableCompressionSql("collect.wait_stats"), connection))
+        {
+            await enable.ExecuteNonQueryAsync(ct);
+        }
+
+        await using (var chunks = new NpgsqlCommand(
+            "SELECT format('%I.%I', chunk_schema, chunk_name) FROM timescaledb_information.chunks WHERE hypertable_schema = 'collect' AND hypertable_name = 'wait_stats' AND NOT is_compressed ORDER BY range_start LIMIT 1", connection))
+        {
+            var chunk = (string?)await chunks.ExecuteScalarAsync(ct);
+            Assert.NotNull(chunk);
+            await using var compress = new NpgsqlCommand($"SELECT compress_chunk('{chunk}'::regclass, if_not_compressed => true)", connection);
+            await compress.ExecuteNonQueryAsync(ct);
+        }
+
+        await PgTableTuning.ApplyAsync(connection, NullLogger.Instance, ct);
+
+        Assert.Equal(0, await CoverIndexCountAsync(connection, ct));
+    }
+
+    /// <summary>The cover's indexes in <c>pg_index</c>: the one on <c>collect.wait_stats</c> and the one Timescale names after it on each chunk.</summary>
+    private static async Task<long> CoverIndexCountAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(
+            "SELECT count(*) FROM pg_index i JOIN pg_class ic ON ic.oid = i.indexrelid WHERE ic.relname LIKE '%' || $1", connection);
+        command.Parameters.AddWithValue(PgTableTuning.WaitStatsDailyCoverIndexName);
+        return (long)(await command.ExecuteScalarAsync(ct))!;
+    }
+
     private static async Task<bool> TableIsHypertableAsync(NpgsqlConnection connection, string table, CancellationToken ct)
     {
         await using var command = new NpgsqlCommand(

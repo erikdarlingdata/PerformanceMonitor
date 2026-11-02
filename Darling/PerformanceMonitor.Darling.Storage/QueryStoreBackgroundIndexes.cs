@@ -331,11 +331,12 @@ SELECT EXISTS
     /// extension is not installed: the information view is looked up first with <c>to_regclass</c>, which answers NULL for a
     /// missing relation instead of throwing, and a store without the view answers false. An installed extension is not a
     /// hypertable: a store can have the extension and still run in plain-PostgreSQL mode with plain heap tables (#7152).
+    /// Each of the two catalog reads runs under <paramref name="timeoutSeconds"/>, which a caller with a tighter bound passes.
     /// </summary>
-    internal static async Task<bool> IsHypertableAsync(NpgsqlConnection connection, string tableName, CancellationToken cancellationToken)
+    internal static async Task<bool> IsHypertableAsync(NpgsqlConnection connection, string tableName, CancellationToken cancellationToken, int timeoutSeconds = CatalogReadTimeoutSeconds)
     {
         await using (var viewExists = new NpgsqlCommand(
-            "SELECT to_regclass('timescaledb_information.hypertables') IS NOT NULL", connection) { CommandTimeout = CatalogReadTimeoutSeconds })
+            "SELECT to_regclass('timescaledb_information.hypertables') IS NOT NULL", connection) { CommandTimeout = timeoutSeconds })
         {
             if (!(bool)(await viewExists.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))!)
             {
@@ -343,14 +344,14 @@ SELECT EXISTS
             }
         }
 
-        return await ReadIsHypertableAsync(connection, tableName, cancellationToken).ConfigureAwait(false);
+        return await ReadIsHypertableAsync(connection, tableName, cancellationToken, timeoutSeconds).ConfigureAwait(false);
     }
 
     /// <summary>The <see cref="HypertableSql"/> read, for a caller that already knows the information view exists.</summary>
-    private static async Task<bool> ReadIsHypertableAsync(NpgsqlConnection connection, string tableName, CancellationToken cancellationToken)
+    private static async Task<bool> ReadIsHypertableAsync(NpgsqlConnection connection, string tableName, CancellationToken cancellationToken, int timeoutSeconds = CatalogReadTimeoutSeconds)
     {
         var (tableSchema, name) = SplitTableName(tableName);
-        await using var hypertable = new NpgsqlCommand(HypertableSql, connection) { CommandTimeout = CatalogReadTimeoutSeconds };
+        await using var hypertable = new NpgsqlCommand(HypertableSql, connection) { CommandTimeout = timeoutSeconds };
         hypertable.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text, Value = tableSchema });
         hypertable.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text, Value = name });
         return (bool)(await hypertable.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))!;

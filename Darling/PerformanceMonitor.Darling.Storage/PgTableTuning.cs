@@ -217,7 +217,7 @@ public static class PgTableTuning
     {
         try
         {
-            return await QueryStoreBackgroundIndexes.IsHypertableAsync(connection, table, cancellationToken);
+            return await QueryStoreBackgroundIndexes.IsHypertableAsync(connection, table, cancellationToken, EmptinessCheckTimeoutSeconds);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -287,8 +287,9 @@ public static class PgTableTuning
     /// table. A hypertable compresses a chunk after <see cref="TimescaleSupport.CompressAfterDays"/> (1) day, so all but about the
     /// newest day of a month sits in compressed chunks, where a heap btree index on the hypertable cannot serve the read, and the
     /// index would still cost every insert (see the statement). The test is the table, not the extension: a store can have
-    /// TimescaleDB installed and still run in plain-PostgreSQL mode with plain heaps. The pass counts a skipped index as applied,
-    /// like any index that is already there.
+    /// TimescaleDB installed and still run in plain-PostgreSQL mode with plain heaps. On a hypertable the pass drops the index if it
+    /// is there (one built while the table was plain survives the conversion) and counts it as applied, like any index that is
+    /// already there.
     /// </summary>
     private static readonly HashSet<string> s_plainTableOnly = new(StringComparer.Ordinal)
     {
@@ -625,6 +626,11 @@ public static class PgTableTuning
 
                         if (isHypertable)
                         {
+                            /* #7152: a cover built while the table was plain survives the conversion (create_hypertable with
+                               migrate_data keeps existing indexes) and then only costs every insert, so a hypertable drops it.
+                               A failed drop falls to the catch below: one Warning, the pass goes on, the next start retries. */
+                            using var drop = new NpgsqlCommand(GuardedDrop(indexName), connection) { CommandTimeout = SetupTimeoutSeconds };
+                            await drop.ExecuteNonQueryAsync(cancellationToken);
                             applied++;
                             continue;
                         }
