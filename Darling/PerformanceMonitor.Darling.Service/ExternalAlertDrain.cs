@@ -284,7 +284,15 @@ public sealed class ExternalAlertDrain
             ExternalSource = row.SourceName,
         });
 
-        var context = new AlertContext { External = new AlertExternalOrigin(row.SourceName, row.AlertKey, row.PendingId) };
+        /* #7158: a firing alert that rises from Warning to Critical goes through the delivery cooldowns, as an engine alert's
+           tier rise does (#5641): the email and webhook cooldowns key on server and metric, not severity, so without the bypass a
+           Critical that follows a Warning inside the cooldown is held back and the operator never hears it. */
+        var context = new AlertContext
+        {
+            External = new AlertExternalOrigin(row.SourceName, row.AlertKey, row.PendingId),
+            EscalationBypassesCooldown = wasFiring && severity == AlertSeverityLevel.Critical
+                && string.Equals(previousSeverity, "warning", StringComparison.OrdinalIgnoreCase),
+        };
         var currentText = row.Value is { } value
             ? value.ToString("0.###", CultureInfo.InvariantCulture)
             : row.Severity;
@@ -332,7 +340,14 @@ public sealed class ExternalAlertDrain
             return result;
         }
 
-        await TryConfirmFireAsync(row, server.StateLabel);
+        /* #7158: a send the delivery cooldown held back told the operator nothing, so its severity is not recorded as the one
+           they were told about: a Critical held back stays unconfirmed and the next repeat fire is still a rise. */
+        var throttled = !delivery.Sent && string.Equals(delivery.Channel, AlertDelivery.ChannelThrottled, StringComparison.Ordinal);
+        if (!throttled)
+        {
+            await TryConfirmFireAsync(row, server.StateLabel);
+        }
+
         if (delivery.Sent)
         {
             await TryMarkAsync(row.PendingId, ExternalAlertOutcome.Delivered,
