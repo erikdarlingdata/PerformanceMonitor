@@ -27,6 +27,7 @@ import {
   el,
   mount,
   loadingStrip,
+  waitingStrip,
   errorStrip,
   readErrorStrip,
   emptyStrip,
@@ -130,9 +131,9 @@ export function applySourceWording(desc, data, panel) {
  * Build a panel node. It returns immediately with a loading strip and fills itself once the fetch resolves,
  * mapping the API response kinds (data / empty envelope / error / aborted / auth) to the right UI.
  */
-export function renderPanel(desc, onSettled) {
+export function renderPanel(desc, onSettled, gate = null) {
   const signal = panelSignal;
-  const body = el("div", { class: "panel-body" }, [loadingStrip()]);
+  const body = el("div", { class: "panel-body" }, [gate ? waitingStrip() : loadingStrip()]);
   /* #5701: `data-panel` (the read) and `data-title` are the hooks the web UI smoke check finds a panel by. */
   const panel = el("div", { class: "panel card" + (desc.span === 2 ? " span-2" : ""), "data-panel": desc.read || desc.title, "data-title": desc.title }, [
     /* The database-scope chip (#5245): while the page's database filter is active it says whether this panel's read took it
@@ -145,7 +146,9 @@ export function renderPanel(desc, onSettled) {
   ]);
   /* #6933: the key a poll matches this panel by, so it keeps the panel on screen while the same read runs again. */
   notePanelKey(panel, JSON.stringify([desc.read || desc.path || null, desc.params || null]));
-  loadPanel(desc, body, signal, onSettled);
+  /* #7257: a saved view's `gate` starts the read when the page's long-read slots allow it. */
+  if (gate) gate(() => loadPanel(desc, body, signal, onSettled));
+  else loadPanel(desc, body, signal, onSettled);
   return panel;
 }
 

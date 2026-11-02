@@ -20,7 +20,7 @@
  * inert. The chart SVG lives entirely in charts.js (one SVG_NS occurrence, the air-gap allowlist); this file has no SVG.
  */
 
-import { el, mount, loadingStrip, errorStrip, emptyStrip, disclosure, fmtInt, fmtNum, fmtSize, tickDecimals, apiSendRead, noticeStrip, parseUtc, windowNoteText } from "./util.js";
+import { el, mount, loadingStrip, waitingStrip, retryOnceWhenBusy, busyRetryStrip, errorStrip, emptyStrip, disclosure, fmtInt, fmtNum, fmtSize, tickDecimals, apiSendRead, noticeStrip, parseUtc, windowNoteText } from "./util.js";
 import { renderLineChart, zoomChip, getChartHidden, setChartHidden, nextHiddenKeys, chartZoomScope, renderBarChart, renderPieChart, renderScatterChart, CATEGORICAL_COLORS } from "./charts.js";
 import { navigateServer, gridTable } from "./panels.js";
 import { getCatalog } from "./views-api.js";
@@ -40,13 +40,13 @@ const OTHER_SERIES_LABEL = "(other)";
  * shape (title + span-2 + a body that shows a loading strip, then the chart / a state). `scope` is the view-level
  * run context {server, hours, variables, values}; flipping it and re-rendering re-scopes every panel at once.
  */
-export function renderComposedPanelCard(panelSpec, scope, onSettled, slot = null) {
-  const body = el("div", { class: "panel-body" }, [loadingStrip()]);
+export function renderComposedPanelCard(panelSpec, scope, onSettled, slot = null, gate = null) {
+  const body = el("div", { class: "panel-body" }, [gate ? waitingStrip() : loadingStrip()]);
   const panel = el("div", { class: "panel card" + (panelSpec.span === 2 ? " span-2" : "") }, [
     el("h3", {}, [panelSpec.title || measureLabel(panelSpec), pinBadge(panelSpec)]),
     body,
   ]);
-  driveComposedPanel(body, panelSpec, scope, onSettled, slot);
+  driveComposedPanel(body, panelSpec, scope, onSettled, slot, gate);
   return panel;
 }
 
@@ -198,7 +198,7 @@ function pinHoursLabel(hours) {
  * never persisted (the stored definition renders verbatim), and a "clear" chip pops back to the base spec. Each new
  * selection REPLACES the drill (a simple "you are viewing X" model), so drilling never stacks into a dead end.
  */
-function driveComposedPanel(body, panelSpec, scope, onSettled, slot = null) {
+function driveComposedPanel(body, panelSpec, scope, onSettled, slot = null, gate = null) {
   let drill = null; // { keys: [{dimension, value}] } or null
   let zoom = null; // { startIso, endIso } or null (#1606 brush-zoom — view-state only, like the drill)
   let firstRun = true; // onSettled (#4222) fires once, for the initial load only — a later drill/zoom re-run is
@@ -215,11 +215,21 @@ function driveComposedPanel(body, panelSpec, scope, onSettled, slot = null) {
     const spec = drill ? withDrillFilters(panelSpec, drill) : panelSpec;
     const done = firstRun ? onSettled : null;
     firstRun = false;
-    renderComposedInto(body, spec, scope, { drill, onDrill, zoom, onZoomChange, panelSlot: slot }).finally(() => {
+    return renderComposedInto(body, spec, scope, { drill, onDrill, zoom, onZoomChange, panelSlot: slot, onRetry: retry }).finally(() => {
       if (done) done();
     });
   }
-  run();
+  /* #7257: the Retry button on a failed read runs this panel again through the page's gate, like its first load. */
+  function retry() {
+    if (!gate) {
+      run();
+      return;
+    }
+    mount(body, waitingStrip());
+    gate(run, true);
+  }
+  if (gate) gate(run);
+  else run();
 }
 
 /** A base panel spec + the drill's pinned filters (design D6): each key becomes an `eq` filter appended to the
@@ -251,15 +261,24 @@ export function composedNoticeText(data) {
   return typeof local === "string" && local ? notice.split(sentence).join(local) : notice;
 }
 
+/** #7257: the Retry button under a panel's read error. */
+function retryButton(onRetry) {
+  const btn = el("button", { class: "btn small", type: "button", text: "Retry" });
+  btn.addEventListener("click", () => onRetry());
+  return btn;
+}
+
 /** Run a composed panel and fill `body` with the chart (or the empty/error state). Used by the card + the live
  *  preview. `opts` (design D5/D6): {drill, onDrill} drive the transient drill-down chip + mark clicks. */
 export async function renderComposedInto(body, panelSpec, scope, opts = {}) {
   mount(body, loadingStrip());
-  const res = await runCompose(panelSpec, scope, opts.zoom);
+  /* #7257: a read the service refuses busy (429) is sent once more after its Retry-After, as the by-tag page does (#6800). */
+  const res = await retryOnceWhenBusy(() => runCompose(panelSpec, scope, opts.zoom), (seconds) => mount(body, busyRetryStrip(seconds)));
   if (res.kind === "error") {
     /* Keep the drill AND zoom chips (with their clears) above a failed run so the viewer can always pop
        back — a historical zoom can legitimately land on a window this store can't serve. */
     const nodes = [errorStrip(res.message || "Could not run this panel.")];
+    if (opts.onRetry) nodes.push(retryButton(opts.onRetry));
     if (opts.zoom && opts.onZoomChange) nodes.unshift(zoomChip(opts.zoom, opts.onZoomChange));
     if (opts.drill && opts.onDrill) nodes.unshift(drillChip(opts.drill, opts.onDrill));
     mount(body, nodes);

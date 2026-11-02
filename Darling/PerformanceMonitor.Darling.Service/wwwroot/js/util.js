@@ -572,6 +572,11 @@ export function loadingStrip(label) {
   return el("div", { class: "strip loading" }, [label || "Loading…"]);
 }
 
+/** #7257: what a panel shows while it waits for one of the page's long-read slots (a loading strip, so a poll waits for it too). */
+export function waitingStrip() {
+  return loadingStrip("Waiting for the panels above to finish…");
+}
+
 /* ─────────────────────────── time (UTC -> local) ─────────────────────────── */
 
 /** Parse a naive-UTC ISO string (no zone) as UTC; pass through strings that already carry a zone. */
