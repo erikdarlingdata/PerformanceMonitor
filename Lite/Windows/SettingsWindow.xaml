@@ -256,11 +256,11 @@
                                              ToolTip="Critical floor: client timeouts and cancels (attentions) per minute (same span as the Warning floor). Never below the Warning floor. Default 60. The bar is the higher of this floor and the Critical multiple times the server's own baseline."/>
                                     <TextBlock Text="(floors), or" VerticalAlignment="Center" Margin="6,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
-                                    <TextBox AutomationProperties.Name="Client timeouts, warning multiple" x:Name="AlertClientTimeoutsWarningMultipleBox" Width="35" Text="3" Margin="6,0,0,0" VerticalAlignment="Center"
+                                    <TextBox AutomationProperties.Name="Client timeouts, warning multiple" x:Name="AlertClientTimeoutsWarningMultipleBox" Width="45" Text="3" Margin="6,0,0,0" VerticalAlignment="Center"
                                              ToolTip="Warning multiple: the Warning bar is at least this many times the server's own baseline (the p99.9 of its 3-minute average rate over the last 7 days). At least 1. Default 3. A server with under a day of capture (or under 720 minutes with a successful run) has no baseline and uses the floors."/>
                                     <TextBlock Text="x /" VerticalAlignment="Center" Margin="4,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
-                                    <TextBox AutomationProperties.Name="Client timeouts, critical multiple" x:Name="AlertClientTimeoutsCriticalMultipleBox" Width="35" Text="10" Margin="6,0,0,0" VerticalAlignment="Center"
+                                    <TextBox AutomationProperties.Name="Client timeouts, critical multiple" x:Name="AlertClientTimeoutsCriticalMultipleBox" Width="45" Text="10" Margin="6,0,0,0" VerticalAlignment="Center"
                                              ToolTip="Critical multiple: the Critical bar is at least this many times the server's own baseline. Never below the Warning multiple. Default 10."/>
                                     <TextBlock Text="x the server's own baseline" VerticalAlignment="Center" Margin="4,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
@@ -355,7 +355,7 @@
                                 <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
                                     <CheckBox x:Name="AlertLongRunningJobCheckBox" Content="Agent jobs running over" VerticalAlignment="Center"
                                               Foreground="{DynamicResource ForegroundBrush}"/>
-                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AlertLongRunningJobCheckBox}" x:Name="AlertLongRunningJobMultiplierBox" Width="35" Text="3" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AlertLongRunningJobCheckBox}" x:Name="AlertLongRunningJobMultiplierBox" Width="45" Text="3" Margin="6,0,0,0" VerticalAlignment="Center"/>
                                     <TextBlock Text="x historical average" VerticalAlignment="Center" Margin="2,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                 </WrapPanel>
