@@ -95,6 +95,11 @@ AND   object_kind IN ('{StoreSelfMetrics.OtherObjectKind}', '{StoreSelfMetrics.S
         NpgsqlConnection connection, bool timescale, DateTime previousHourlyTime, CancellationToken ct)
     {
         var baselineTime = previousHourlyTime.AddHours(1);
+        /* #7254: collect.store_metrics is itself a catch-all relation, and each sweep inserts into it. Enough inserts between
+           the two sweeps wake autoanalyze on it, which rewrites its relpages (one page, 8192 bytes, on the timescale store in
+           about three runs in four) and moves the estimate past the seeded relation's own bytes. Turn autovacuum off for it so
+           its relpages stay at the VACUUM below. It is the only relation a sweep writes. */
+        await ExecAsync(connection, "ALTER TABLE collect.store_metrics SET (autovacuum_enabled = false)", ct);
         /* Bring every relation's relpages current first, so autovacuum has nothing pending that could move another catch-all
            relation's relpages between the two sweeps and break the exact comparison below. */
         await ExecAsync(connection, "VACUUM (ANALYZE)", ct);
