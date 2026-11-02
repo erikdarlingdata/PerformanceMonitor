@@ -123,7 +123,14 @@ public sealed class ManagedBootstrapStopsStoreLiveTests
                 stop.Cancel();
             }
 
-            await worker.ExecuteTask!.WaitAsync(TimeSpan.FromMinutes(5), TestContext.Current.CancellationToken);
+            try
+            {
+                await worker.ExecuteTask!.WaitAsync(TimeSpan.FromMinutes(5), TestContext.Current.CancellationToken);
+            }
+            catch (OperationCanceledException) when (healthy)
+            {
+                /* A service stop reaches the collection loop as a cancellation; the finally has still run. */
+            }
 
             Assert.NotNull(cluster);
             Assert.True(healthy || startedWhenBroken, "the bootstrap was not broken while this process owned a running store");
