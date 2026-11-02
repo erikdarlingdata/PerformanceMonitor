@@ -127,6 +127,10 @@ public sealed class DarlingWebHostService : BackgroundService
 
     private int _runningPort;
 
+    /// <summary>True while the running app uses the read-only viewer login because the managed web credential had not appeared by the end of
+    /// the first-start wait (#7192). The supervisor watches for the credential while it is set.</summary>
+    private bool _onViewerFallback;
+
     /// <summary>Whether this process has logged <see cref="MissingTokenMessage"/>: a start with no token fails the same
     /// way on every retry until the config changes, which needs a restart, so the line is logged once.</summary>
     private bool _missingTokenReported;
@@ -193,9 +197,12 @@ public sealed class DarlingWebHostService : BackgroundService
 
     /// <summary>The supervisor's per-tick verdict — pure over (running, runningPort, enabled, desiredPort) so a
     /// unit test pins the whole decision table without a server (#1562, mirrors the MCP host).</summary>
-    public enum WebSupervisorAction { None, Start, Stop, Restart }
+    public enum WebSupervisorAction { None, Start, Stop, Restart, RestartForWebCredential }
 
-    internal static WebSupervisorAction DecideWebAction(bool running, int runningPort, bool enabled, int desiredPort)
+    /// <summary><paramref name="webCredentialAppeared"/> is true when the app is running on the read-only viewer login (the managed web
+    /// credential had not appeared when it started) and the web credential has since appeared (#7192): the app restarts once to pick it up,
+    /// so a first start after an update whose provisioning ran long does not leave the dashboard read-only until the next service restart.</summary>
+    internal static WebSupervisorAction DecideWebAction(bool running, int runningPort, bool enabled, int desiredPort, bool webCredentialAppeared = false)
     {
         if (!running)
         {
@@ -207,7 +214,12 @@ public sealed class DarlingWebHostService : BackgroundService
             return WebSupervisorAction.Stop;
         }
 
-        return runningPort == desiredPort ? WebSupervisorAction.None : WebSupervisorAction.Restart;
+        if (runningPort != desiredPort)
+        {
+            return WebSupervisorAction.Restart;
+        }
+
+        return webCredentialAppeared ? WebSupervisorAction.RestartForWebCredential : WebSupervisorAction.None;
     }
 
     /// <summary>
@@ -287,9 +299,19 @@ public sealed class DarlingWebHostService : BackgroundService
 
             lastOverrideReport = overrideReport;
 
-            switch (DecideWebAction(_app is not null, _runningPort, toggle.Enabled, toggle.Port))
+            switch (DecideWebAction(_app is not null, _runningPort, toggle.Enabled, toggle.Port, WebCredentialAppearedForViewerFallback(config)))
             {
                 case WebSupervisorAction.Start when CollectorCadence.IntervalElapsed(lastFailedStartUtc, DateTime.UtcNow, FailedStartBackoff):
+                    if (!await TryStartServerAsync(config, toggle, stoppingToken))
+                    {
+                        lastFailedStartUtc = DateTime.UtcNow;
+                    }
+                    break;
+
+                case WebSupervisorAction.RestartForWebCredential:
+                    _logger.LogInformation(
+                        "The managed Postgres web-role credential has appeared — restarting the web dashboard so it stops using the read-only viewer login");
+                    await StopServerAsync(stoppingToken);
                     if (!await TryStartServerAsync(config, toggle, stoppingToken))
                     {
                         lastFailedStartUtc = DateTime.UtcNow;
@@ -388,6 +410,7 @@ public sealed class DarlingWebHostService : BackgroundService
         _oidcClient = null;
 
         _runningPort = 0;
+        _onViewerFallback = false;
     }
 
     /// <summary>Disposes the held certificate (its private key) and updates the published certificate state, the way
@@ -2978,12 +3001,32 @@ if (location.pathname.toLowerCase() !== '/auth/login') { document.getElementById
     /// <summary>
     /// Managed mode's first-boot race, handled: the VIEWER-role credential appears only after the worker's
     /// initdb + migration + role provisioning finish, so poll up to ~5 minutes (60 x 5s) instead of racing it,
-    /// then stand down with a pointer at the worker log — fail-closed (the dashboard just does not start; it
-    /// self-heals on the next attempt once the credential exists).
+    /// then fall back to the read-only viewer login (the supervisor restarts the app on the web login when the credential later appears, #7192).
     /// </summary>
+    /// <summary>True when the app runs on the viewer fallback and the web credential can now be read, with the same call the start makes (a
+    /// credential file the service refuses reads as not appeared, so a bad file never turns into a restart loop). Cheap: a file check per tick.</summary>
+    private bool WebCredentialAppearedForViewerFallback(DarlingConfig config)
+    {
+        if (!_onViewerFallback || _app is null || !config.Postgres.Managed || !OperatingSystem.IsWindows())
+        {
+            return false;
+        }
+
+        try
+        {
+            return DarlingManagedPostgres.TryBuildWebConnectionStringFromStoredCredential(config.Postgres) is not null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "The managed Postgres web-role credential could not be read yet; the web dashboard stays on the viewer login");
+            return false;
+        }
+    }
+
     [SupportedOSPlatform("windows")]
     private async Task<string?> WaitForManagedConnectionStringAsync(PostgresConfig config, CancellationToken stoppingToken)
     {
+        _onViewerFallback = false;
         for (var attempt = 0; attempt < 60; attempt++)
         {
             var connectionString = DarlingManagedPostgres.TryBuildWebConnectionStringFromStoredCredential(config);
@@ -3013,7 +3056,8 @@ if (location.pathname.toLowerCase() !== '/auth/login') { document.getElementById
         if (viewer is not null)
         {
             _logger.LogWarning(
-                "The managed Postgres web-role credential never appeared, so the web dashboard starts on the read-only viewer login: it lists, and every write it offers (mute rules, dismissals, custom alerts, server add and edit, run-now requests) is refused until the service provisions the web role (see the worker log for the role batch). Restart the service once it has.");
+                "The managed Postgres web-role credential never appeared, so the web dashboard starts on the read-only viewer login: it lists, and every write it offers (mute rules, dismissals, custom alerts, server add and edit, run-now requests) is refused until the service provisions the web role (see the worker log for the role batch). The supervisor keeps checking and restarts the dashboard on the web login once the credential appears.");
+            _onViewerFallback = true;
             return viewer;
         }
 
