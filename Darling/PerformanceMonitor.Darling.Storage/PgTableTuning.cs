@@ -212,7 +212,7 @@ public static class PgTableTuning
     /// Whether the TimescaleDB extension is installed in this database. A failed check answers true, so a store whose
     /// state is unknown is left without the heap-only indexes (they are an optimisation) rather than given an index build.
     /// </summary>
-    private static async Task<bool> TimescaleInstalledAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    private static async Task<bool> TimescaleInstalledAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken)
     {
         try
         {
@@ -221,6 +221,9 @@ public static class PgTableTuning
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            logger?.LogWarning(
+                "Could not tell whether the TimescaleDB extension is installed, so {Index} is skipped this start: {Message}",
+                WaitStatsDailyCoverIndexName, ex.Message);
             return true;
         }
     }
@@ -280,9 +283,10 @@ public static class PgTableTuning
     public const string WaitStatsDailyCoverIndexName = "idx_wait_stats_daily_cover";
 
     /// <summary>
-    /// #7147: the indexes built only on a store that has no TimescaleDB extension. On a TimescaleDB store the month read
-    /// takes the rollups, so these would only add insert cost (see the statement). The pass counts a skipped one as
-    /// applied, like any index that is already there.
+    /// #7147: the indexes built only on a store that has no TimescaleDB extension. A TimescaleDB store compresses a chunk
+    /// after <see cref="TimescaleSupport.CompressAfterDays"/> (1) day, so all but about the newest day of a month sits in
+    /// compressed chunks, where a heap btree index on the hypertable cannot serve the read, and the index would still cost
+    /// every insert (see the statement). The pass counts a skipped one as applied, like any index that is already there.
     /// </summary>
     private static readonly HashSet<string> s_heapStoreOnly = new(StringComparer.Ordinal)
     {
@@ -557,11 +561,12 @@ public static class PgTableTuning
            (DailySummarySql: server_id and collection_time to filter, wait_type and delta_wait_time_ms for the per-day wait
            sums), so it becomes an Index Only Scan over the server's own slice of the index. The distinct-query count needs
            no new index: it reads collect.query_stats directly and takes idx_query_stats_server_hash_time above. Measured on a
-           plain-heap rig, 4 servers x 33 days, 3.8 M query_stats and 5.7 M wait_stats rows, 31-day read for one server,
+           plain-heap test store, 4 servers x 33 days, 3.8 M query_stats and 5.7 M wait_stats rows, 31-day read for one server,
            EXPLAIN (ANALYZE, BUFFERS): 219,525 buffers and 2,420 ms before, about 31,000 buffers and 1,550 ms after (both warm:
-           the buffer count is the cold-disk cost). Plain stores only (s_heapStoreOnly): on a TimescaleDB store the month
-           comes from the rollups and the 30-day raw tables are compressed, so the index would cost every insert and help no
-           read. */
+           the buffer count is the cold-disk cost). Plain stores only (s_heapStoreOnly): a TimescaleDB store compresses a chunk
+           after TimescaleSupport.CompressAfterDays (1) day, so all but about the newest day of the month sits in compressed
+           chunks, where a heap btree index on the hypertable cannot serve the read, and the index would still cost every
+           insert. */
         "CREATE INDEX IF NOT EXISTS " + WaitStatsDailyCoverIndexName + " ON collect.wait_stats (server_id, collection_time) INCLUDE (wait_type, delta_wait_time_ms)",
     };
 
@@ -610,7 +615,7 @@ public static class PgTableTuning
                     var indexName = CreatedIndexName(statement);
                     if (s_heapStoreOnly.Contains(indexName))
                     {
-                        timescaleInstalled ??= await TimescaleInstalledAsync(connection, cancellationToken);
+                        timescaleInstalled ??= await TimescaleInstalledAsync(connection, logger, cancellationToken);
                         if (timescaleInstalled == true)
                         {
                             applied++;
