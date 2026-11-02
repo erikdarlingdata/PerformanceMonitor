@@ -607,6 +607,20 @@ export function localTime(s) {
   return d ? d.toLocaleString() : "—";
 }
 
+/**
+ * A monitored server's own wall-clock stamp ("2025-12-07T13:32:48", as msdb stores it) in the grids' date-time format, with no zone
+ * shift (#7243). localTime reads a naive stamp as UTC and moves it into the browser's zone, which would state the wrong hour for a
+ * value that is already the server's local time, so the fields are read as written (through a UTC date, so a browser hour that a
+ * clock change skips cannot move them). Null or empty is an em dash, and text that is not a stamp comes back as given.
+ */
+export function serverClockTime(s) {
+  if (s == null || s === "") return "—";
+  const m = /^(\d{4})-(\d\d)-(\d\d)[T ](\d\d):(\d\d):(\d\d)/.exec(String(s));
+  if (!m) return String(s);
+  const d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]));
+  return d.toLocaleString(undefined, { timeZone: "UTC" });
+}
+
 /** Time-of-day only (HH:MM local), or an em dash — for compact "last collect" lines where the date is implied. */
 export function localClock(s) {
   const d = parseUtc(s);

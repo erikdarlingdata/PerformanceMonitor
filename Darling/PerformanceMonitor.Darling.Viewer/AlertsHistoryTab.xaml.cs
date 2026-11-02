@@ -396,6 +396,10 @@ public partial class AlertsHistoryTab : UserControl
             return;
         }
 
+        /* #7160: the window write ignores column filters and the row cap, so with either in play it would dismiss alerts
+           the grid never showed. Then dismiss the rows on screen by key, the way Dismiss Selected does. */
+        var dismissShownRows = AlertDismissScope.UseShownRows(_filterManager?.AnyFilterActive == true, _lastReadRowCount, RowCap);
+
         var result = MessageBox.Show(
             $"Dismiss {allAlerts.Count} alert(s)?\n\nDismissed alerts are hidden from this view but remain in the store.",
             "Dismiss All Alerts",
@@ -413,10 +417,12 @@ public partial class AlertsHistoryTab : UserControl
             int? serverId = GetSelectedServerId();
             /* The same window the grid read (#5562): a range that ended in the past dismisses only the rows up to its end. */
             var (sinceUtc, untilUtc, isLive) = GetSelectedWindow();
-            var affected = await _dataService.DismissAllVisibleAlertsWindowAsync(sinceUtc, isLive ? null : untilUtc, serverId);
+            var affected = dismissShownRows
+                ? await _dataService.DismissAlertsAsync(allAlerts)
+                : await _dataService.DismissAllVisibleAlertsWindowAsync(sinceUtc, isLive ? null : untilUtc, serverId);
             if (LogDismissals)
             {
-                var scope = serverId.HasValue ? $"server {serverId.Value}" : "all servers";
+                var scope = dismissShownRows ? "the rows shown" : serverId.HasValue ? $"server {serverId.Value}" : "all servers";
                 ViewerLogger.Info("AlertsHistory", $"Dismissed all {affected} visible alert(s) ({scope}, last {hoursBack}h)");
             }
             await LoadAlertsAsync();
