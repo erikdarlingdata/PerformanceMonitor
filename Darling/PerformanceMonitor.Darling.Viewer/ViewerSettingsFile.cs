@@ -148,7 +148,11 @@ internal static class ViewerSettingsFile
                 Directory.CreateDirectory(directory);
             }
 
-            File.WriteAllText(filePath, JsonSerializer.Serialize(value, options));
+            /* Temp file then move (as ViewerPasswordKeyPins does), so a crash or power loss mid-write leaves
+               the previous file whole instead of a truncated one that reads back as empty (#7209). */
+            var temp = filePath + ".tmp";
+            File.WriteAllText(temp, JsonSerializer.Serialize(value, options));
+            File.Move(temp, filePath, overwrite: true);
             return true;
         }
         catch (Exception ex)
