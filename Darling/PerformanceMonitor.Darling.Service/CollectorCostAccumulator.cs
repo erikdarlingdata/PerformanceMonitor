@@ -110,6 +110,10 @@ FROM unnest($2::integer[], $3::text[], $4::integer[], $5::bigint[], $6::bigint[]
 DELETE FROM collect.collector_cost
 WHERE metric_time < $1";
 
+    /// <summary>True when at least one run has been recorded since the last drain (#7153): the stop-time flush opens no
+    /// store connection when nothing was recorded, so a stop before the store was reached does no store work.</summary>
+    internal bool HasSamples => !_buckets.IsEmpty;
+
     /// <summary>Drain the accumulated buckets — one aggregate per (server, collector) — and RESET the window
     /// (TryRemove), so the next hour starts clean and an hour with no runs writes nothing. Extracted so the
     /// aggregation is unit-testable without a store.</summary>

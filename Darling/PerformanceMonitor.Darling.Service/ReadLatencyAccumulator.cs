@@ -229,6 +229,10 @@ public sealed class ReadLatencyAccumulator
         return rows;
     }
 
+    /// <summary>True when at least one read has been recorded since the last drain (#7153): the stop-time flush opens no
+    /// store connection when nothing was recorded.</summary>
+    internal bool HasSamples => !_buckets.IsEmpty;
+
     /// <summary>Drain every accumulated bucket and RESET the window (<c>TryRemove</c>), so the next hour
     /// starts clean and an hour with no reads writes nothing — exactly <see cref="CollectorCostAccumulator.Drain"/>'s
     /// shape. Extracted so the aggregation is unit-testable without a store or a flush.</summary>

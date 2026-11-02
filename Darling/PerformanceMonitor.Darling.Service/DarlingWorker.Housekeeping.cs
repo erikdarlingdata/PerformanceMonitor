@@ -1383,6 +1383,76 @@ AND   j.hypertable_name = '{relation}'", connection))
     }
 
     /// <summary>
+    /// The read-latency flush, with its own catch so a failed flush costs only this window's histogram rows (#4442 scope 2).
+    /// Shared by the hourly tick and the stop-time flush (#7153). A cancellation the caller's budget caused is not a flush
+    /// failure and passes through.
+    /// </summary>
+    private static async Task FlushReadLatencyAsync(
+        ReadLatencyAccumulator readLatency, NpgsqlConnection connection, ILogger logger, CancellationToken budget)
+    {
+        try
+        {
+            await readLatency.FlushAsync(connection, DateTime.UtcNow, logger, budget);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !budget.IsCancellationRequested)
+        {
+            logger.LogWarning("Read-latency flush failed; this hour's histogram rows are dropped: {Message}", ex.Message);
+        }
+    }
+
+    /* #7153: the stop-time flush's own budget. The host's ShutdownTimeout is its default 30 s, and by the time the collection
+       loop reaches this the sweeps (up to s_shutdownDrainBudget) and the other drains have already run, so this stays small:
+       it opens one connection and writes a handful of rows, and a store that cannot answer in this long is not going to. */
+    internal static readonly TimeSpan ShutdownSampleFlushBudget = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// #7153: flushes the collector-cost and read-latency samples recorded since the last hourly tick, once, at stop, on a new
+    /// store connection. Without it a stop or restart lost up to an hour of both. Does nothing when neither accumulator holds a
+    /// sample, so a stop before the store was reached opens no connection. A failure or the budget logs one Warning and the stop
+    /// continues. The service's own token is already cancelled here, so the budget runs on its own source.
+    /// A second flush inside an hour adds rows rather than replacing them: read_latency merges equal keys and collector_cost
+    /// keeps one row per flush that its readers sum.
+    /// </summary>
+    internal static async Task FlushSamplesOnStopAsync(
+        NpgsqlDataSource postgres, CollectorCostAccumulator collectorCost, ReadLatencyAccumulator readLatency,
+        TimeSpan budgetLimit, ILogger logger)
+    {
+        if (!collectorCost.HasSamples && !readLatency.HasSamples)
+        {
+            return;
+        }
+
+        using var budget = new CancellationTokenSource(budgetLimit);
+        try
+        {
+            await using var connection = await postgres.OpenConnectionAsync(budget.Token);
+
+            try
+            {
+                await collectorCost.FlushAsync(connection, DateTime.UtcNow, logger, budget.Token);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException || !budget.IsCancellationRequested)
+            {
+                logger.LogWarning("Collector-cost flush at stop failed; the samples since the last hourly flush are dropped: {Message}", ex.Message);
+            }
+
+            if (connection.State != ConnectionState.Open)
+            {
+                await connection.CloseAsync();
+                await connection.OpenAsync(budget.Token);
+            }
+
+            await FlushReadLatencyAsync(readLatency, connection, logger, budget.Token);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(
+                "Flushing the collector-cost and read-latency samples at stop did not finish within {Seconds:N0}s, so the samples since the last hourly flush are dropped: {Message}",
+                budgetLimit.TotalSeconds, ex.Message);
+        }
+    }
+
+    /// <summary>
     /// The #2068 store self-metrics sweep (fleet-level, hourly): one <see cref="StoreSelfMetrics"/> run —
     /// per-hypertable size/compression rows (Timescale stores only, gated on the cached
     /// <see cref="_timescaleAvailable"/> flag INSIDE the sweep so plain-PG stores still record their
@@ -1665,14 +1735,7 @@ AND   j.hypertable_name = '{relation}'", connection))
                 }
             }
 
-            try
-            {
-                await _readLatency.FlushAsync(connection, DateTime.UtcNow, _logger, budget.Token);
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException || !budget.IsCancellationRequested)
-            {
-                _logger.LogWarning("Read-latency flush failed; this hour's histogram rows are dropped: {Message}", ex.Message);
-            }
+            await FlushReadLatencyAsync(_readLatency, connection, _logger, budget.Token);
 
             /* #5810: the hourly rollup get_collection_health reads for its closed hours. Last on the tick and in its own slice
                of the budget, so its first pass after the upgrade (a backfill of the whole window) cannot cost the flushes
