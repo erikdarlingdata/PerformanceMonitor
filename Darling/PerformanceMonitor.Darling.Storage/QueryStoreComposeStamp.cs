@@ -542,6 +542,17 @@ GROUP BY s.collection_time, s.query_hash;";
         : column.FactExpression.StartsWith("MAX(", StringComparison.Ordinal) ? "max"
         : "sum";
 
+    /// <summary>
+    /// Marks the hour's fleet rows as built from the stamp rows the hour's pairs were built from (#7146): $1 the hour. Sets <c>fleet_built_seq</c>
+    /// to <c>built_seq</c> and nothing else, never <c>late_seq</c>. A writer that bumped a pair's <c>late_seq</c> before or during the fleet-only build
+    /// leaves <c>built_seq</c> behind it, so the pair stays stale for every table and the full build takes the hour. The UPDATE waits for a
+    /// writer's open row lock on the pair and then reads the committed <c>built_seq</c>, so the mark can never put a pair level with a newer <c>late_seq</c>.
+    /// </summary>
+    public const string MarkFleetBuiltSql = @"
+UPDATE collect.query_store_compose_stamp_built
+SET fleet_built_seq = built_seq
+WHERE hour = $1;";
+
     /// <summary>Removes every fleet row below the floor: $1 the floor, served by the (collection_time) index. By the floor, as
     /// <see cref="GcHashHourlySql"/>, so rows of an hour a build that predates the table retired still go.</summary>
     public const string GcFleetSql = @"
@@ -781,6 +792,11 @@ ON CONFLICT (hour) DO UPDATE SET built_at = EXCLUDED.built_at;";
     /// <c>built_seq</c> differs from <c>late_seq</c> is a late-write hour, not backlog. $5 is <see cref="MaxExtraBacklogBuilds"/>: backlog hours are
     /// capped at $2 plus $5, the others at $2, so the tick can build its extra backlog hours (<see cref="ChooseExtraBacklog"/>).</para>
     ///
+    /// <para>The seventh column, <c>fleet_only</c> (#7146), is true for a stale hour whose pairs all have <c>built_seq</c> and <c>hash_built_seq</c>
+    /// equal to <c>late_seq</c> and differ only in <c>fleet_built_seq</c>: every hour built before V239. The stamp and the hash-hourly rows of such an
+    /// hour are right, so the tick rebuilds only its fleet rows from its stamp rows (<see cref="BuildFleetHourAsync"/>) and reads no wide-table row.
+    /// It is still a backlog hour for the caps and the order. Any other stale hour takes the full build.</para>
+    ///
     /// <para>The third column, <c>blocked</c>, is true for an hour an open writer of the wide table would defer (<see cref="OpenWriterSql"/>:
     /// the oldest writer started before the hour plus two hours; a writer with no readable start blocks every hour). The cap is per kind AND
     /// per blocked, so hours that cannot build do not take the build slots of the hours that can: an old, never-built hour still builds
@@ -812,7 +828,8 @@ cutoff AS
 stale AS
 (
     SELECT b.hour, true AS stale, (b.hour" + BlockedByWriterTail + @") AS blocked,
-           NOT bool_or(b.built_seq IS DISTINCT FROM b.late_seq) AS backlog
+           NOT bool_or(b.built_seq IS DISTINCT FROM b.late_seq) AS backlog,
+           NOT bool_or(b.built_seq IS DISTINCT FROM b.late_seq OR b.hash_built_seq IS DISTINCT FROM b.late_seq) AS fleet_only
     FROM collect.query_store_compose_stamp_built AS b
     JOIN collect.query_store_compose_stamp_hours AS h ON h.hour = b.hour
     CROSS JOIN bounds
@@ -823,17 +840,17 @@ stale AS
 ),
 missing AS
 (
-    SELECT g AS hour, false AS stale, (g" + BlockedByWriterTail + @") AS blocked, false AS backlog
+    SELECT g AS hour, false AS stale, (g" + BlockedByWriterTail + @") AS blocked, false AS backlog, false AS fleet_only
     FROM bounds
     CROSS JOIN cutoff
     CROSS JOIN clock
     CROSS JOIN LATERAL generate_series(bounds.floor_hour, date_trunc('hour', clock.at - interval '3 hours'), interval '1 hour') AS g
     WHERE NOT EXISTS (SELECT 1 FROM collect.query_store_compose_stamp_hours AS h WHERE h.hour = g)
 )
-SELECT p.hour, p.stale, p.blocked, p.failures, p.extended, p.backlog
+SELECT p.hour, p.stale, p.blocked, p.failures, p.extended, p.backlog, p.fleet_only
 FROM
 (
-    SELECT u.hour, u.stale, u.blocked, u.backlog, coalesce(f.failures, 0) AS failures,
+    SELECT u.hour, u.stale, u.blocked, u.backlog, u.fleet_only, coalesce(f.failures, 0) AS failures,
            coalesce(f.last_sqlstate = $4::text, false) AS extended,
            row_number() OVER (PARTITION BY u.stale, u.blocked, u.backlog ORDER BY u.hour DESC) AS rn
     FROM (SELECT * FROM stale UNION ALL SELECT * FROM missing) AS u
@@ -915,8 +932,9 @@ WHERE hour < $1;";
     /// <summary>One planned build: <paramref name="Failures"/> is the hour's consecutive failed builds (#5867, 0 for none), and
     /// <paramref name="Extended"/> is true when the last one was a statement timeout, so this attempt runs under
     /// <see cref="ExtendedBuildStatementTimeoutSeconds"/>. <paramref name="Backlog"/> (#6865) is a stale hour that is stale only for the
-    /// hash-hourly table (see <see cref="PlanSql"/>); it is also <paramref name="Stale"/>.</summary>
-    public readonly record struct Build(DateTime Hour, bool Stale, int Failures = 0, bool Extended = false, bool Backlog = false);
+    /// hash-hourly table (see <see cref="PlanSql"/>); it is also <paramref name="Stale"/>. <paramref name="FleetOnly"/> (#7146) is a stale hour that is
+    /// stale only for the fleet table: the tick builds just its fleet rows.</summary>
+    public readonly record struct Build(DateTime Hour, bool Stale, int Failures = 0, bool Extended = false, bool Backlog = false, bool FleetOnly = false);
 
     /// <summary>One hour's failure record (<see cref="ReadFailuresSql"/>, #5867). Times are naive UTC on the store's clock.</summary>
     public readonly record struct HourFailure(
@@ -1030,7 +1048,7 @@ WHERE hour < $1;";
                 continue;
             }
 
-            builds.Add(new Build(reader.GetDateTime(0), reader.GetBoolean(1), reader.GetInt32(3), reader.GetBoolean(4), reader.GetBoolean(5)));
+            builds.Add(new Build(reader.GetDateTime(0), reader.GetBoolean(1), reader.GetInt32(3), reader.GetBoolean(4), reader.GetBoolean(5), reader.GetBoolean(6)));
         }
 
         var normal = ChooseBuilds(builds, MaxBuildsPerTick);
@@ -1334,6 +1352,79 @@ WHERE hour < $1;";
         return sourceRows;
     }
 
+    /// <summary>
+    /// Rebuilds one hour's FLEET rows only, from the hour's stamp rows, in one transaction (#7146). For an hour whose stamp and hash-hourly rows are
+    /// valid and only <c>fleet_built_seq</c> differs (<see cref="Build.FleetOnly"/>): every hour built before V239. It reads no wide-table row,
+    /// so the upgrade does not rebuild every retained hour from the wide table. Takes the hour's advisory lock (<see cref="HourLockSql"/>), so it never
+    /// runs beside a full build of the same hour, deletes and inserts the fleet rows as the full build does, then marks the hour's pairs
+    /// (<see cref="MarkFleetBuiltSql"/>). The mark copies <c>built_seq</c>, so a late writer that bumped <c>late_seq</c> leaves the hour stale for the full
+    /// build. No open-writer check: this reads no wide-table row and the stamp rows do not change here. Returns the hour's stamp rows
+    /// (<see cref="SourceRowsSql"/>), never null, as <see cref="BuildHourAsync"/> does when the hour built.
+    /// </summary>
+    public static async Task<long?> BuildFleetHourAsync(
+        NpgsqlConnection connection, DateTime hour, CancellationToken cancellationToken,
+        int statementTimeoutSeconds = BuildStatementTimeoutSeconds, Action<NpgsqlCommand>? commandCreated = null)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        ArgumentOutOfRangeException.ThrowIfLessThan(statementTimeoutSeconds, 1);
+
+        var hourValue = Unspecified(hour);
+        var commandTimeout = Math.Max(CommandTimeoutSeconds, statementTimeoutSeconds + 30);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+        NpgsqlCommand NewCommand(string sql)
+        {
+            var created = new NpgsqlCommand(sql, connection, transaction) { CommandTimeout = commandTimeout };
+            commandCreated?.Invoke(created);
+            return created;
+        }
+
+        await using (var timeout = NewCommand(StatementTimeoutSql(statementTimeoutSeconds)))
+        {
+            await timeout.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await using (var advisory = NewCommand(HourLockSql))
+        {
+            advisory.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = HourNumber(hourValue) });
+            await advisory.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await using (var deleteFleet = NewCommand(DeleteFleetHourSql))
+        {
+            deleteFleet.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = hourValue });
+            await deleteFleet.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await using (var insertFleet = NewCommand(BuildFleetHourInsertSql))
+        {
+            insertFleet.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = hourValue });
+            await insertFleet.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await using (var mark = NewCommand(MarkFleetBuiltSql))
+        {
+            mark.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = hourValue });
+            await mark.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        long sourceRows;
+        await using (var count = NewCommand(SourceRowsSql))
+        {
+            count.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = hourValue });
+            sourceRows = Convert.ToInt64(await count.ExecuteScalarAsync(cancellationToken));
+        }
+
+        await using (var clear = NewCommand(ClearFailureSql))
+        {
+            clear.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = hourValue });
+            await clear.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await transaction.CommitAsync(cancellationToken);
+        return sourceRows;
+    }
+
     /// <summary>Records a failed build (<see cref="RecordFailureSql"/>, #5867) on <paramref name="connection"/>, outside any transaction.</summary>
     public static async Task<FailureOutcome> RecordFailureAsync(
         NpgsqlConnection connection, DateTime hour, string? sqlState, string reason, int timeoutSeconds, DateTime? storeNow, CancellationToken cancellationToken)
@@ -1464,7 +1555,11 @@ WHERE hour < $1;";
             var timeoutSeconds = item.Extended ? ExtendedBuildStatementTimeoutSeconds : BuildStatementTimeoutSeconds;
             try
             {
-                if (await BuildHourAsync(connection, item.Hour, nowUtc, cancellationToken, statementTimeoutSeconds: timeoutSeconds) is null)
+                /* #7146: an hour stale only for the fleet table needs just its fleet rows, rebuilt from its stamp rows (no wide-table read). */
+                var built = item.FleetOnly
+                    ? await BuildFleetHourAsync(connection, item.Hour, cancellationToken, statementTimeoutSeconds: timeoutSeconds)
+                    : await BuildHourAsync(connection, item.Hour, nowUtc, cancellationToken, statementTimeoutSeconds: timeoutSeconds);
+                if (built is null)
                 {
                     /* Only a plan hour is "deferred" by a writer: an extra the writer held is opportunistic and is the next tick's backlog, so it is in
                        neither Deferred nor the writer warning's count (it would report hours the plan never held, #6865). */

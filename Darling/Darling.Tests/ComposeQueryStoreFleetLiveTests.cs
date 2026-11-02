@@ -188,6 +188,166 @@ SELECT count(*) FROM
         }
     }
 
+    /* The stamp's partials combined per (collection_time, query_hash), compared to the fleet rows of the hour in both directions (the rows
+       are counted, so a missing, an extra and a wrong row each show). */
+    private static Task<long> FleetDiffersFromStampAsync(NpgsqlConnection connection, DateTime hour, CancellationToken ct)
+    {
+        var range = $"collection_time >= TIMESTAMP '{Hour(hour)}' AND collection_time < TIMESTAMP '{Hour(hour.AddHours(1))}'";
+        const string Stamp = "SELECT collection_time, query_hash, sum(wide_rows)::bigint AS w, sum(ec_sum) AS e, sum(cpu_wsum) AS c, max(maxdur_max) AS m";
+        const string Fleet = "SELECT collection_time, query_hash, wide_rows, ec_sum, cpu_wsum, maxdur_max";
+        var stamp = $"({Stamp} FROM collect.query_store_compose_stamp WHERE {range} GROUP BY collection_time, query_hash)";
+        var fleet = $"({Fleet} FROM collect.query_store_compose_fleet WHERE {range})";
+        return ComposeStampLiveSupport.CountAsync(connection,
+            $"SELECT (SELECT count(*) FROM ({stamp} EXCEPT {fleet}) a) + (SELECT count(*) FROM ({fleet} EXCEPT {stamp}) b)", ct);
+    }
+
+    [Fact]
+    public async Task AnHourBuiltBeforeV239_GetsItsFleetRowsFromItsStampRowsAlone_WithoutReadingTheWideTable()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ComposeStampLiveSupport.BaseConnectionString), ComposeStampLiveSupport.SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, connection, source, hourNow) = await ComposeStampLiveSupport.ArrangeAsync(ct);
+        var bodySucceeded = false;
+        try
+        {
+            var old = hourNow.AddHours(-12);
+            var range = $"collection_time >= TIMESTAMP '{Hour(old)}' AND collection_time < TIMESTAMP '{Hour(old.AddHours(1))}'";
+            var stampRows = await ComposeStampLiveSupport.CountAsync(connection, $"SELECT count(*) FROM collect.query_store_compose_stamp WHERE {range}", ct);
+            Assert.True(stampRows > 0);
+
+            /* The upgrade-shaped hour: the stamp and the hash-hourly rows are built and valid, the fleet rows do not exist. The hour's wide rows are then
+               REMOVED (a delete fires no late-writer trigger), so a build that reads the wide table would empty the stamp rows and the fleet rows. */
+            await ComposeStampLiveSupport.ExecAsync(connection, $"DELETE FROM collect.query_store_compose_fleet WHERE {range}", ct);
+            await ComposeStampLiveSupport.ExecAsync(connection, $"UPDATE collect.query_store_compose_stamp_built SET fleet_built_seq = NULL WHERE hour = TIMESTAMP '{Hour(old)}'", ct);
+            await ComposeStampLiveSupport.ExecAsync(connection, $"DELETE FROM collect.query_store_interval_wide WHERE {range}", ct);
+            Assert.Equal(0, await ComposeStampLiveSupport.CountAsync(connection, $"SELECT count(*) FROM collect.query_store_interval_wide WHERE {range}", ct));
+
+            var tick = await ComposeStampLiveSupport.TickAtAsync(source, ComposeStampLiveSupport.ClockWithin(hourNow), ct);
+            Assert.Equal(0, tick.Failed);
+            Assert.Equal(1, tick.Built);
+
+            Assert.Equal(stampRows, await ComposeStampLiveSupport.CountAsync(connection, $"SELECT count(*) FROM collect.query_store_compose_stamp WHERE {range}", ct));
+            Assert.True(await ComposeStampLiveSupport.CountAsync(connection, $"SELECT count(*) FROM collect.query_store_compose_fleet WHERE {range}", ct) > 0);
+            Assert.Equal(0, await FleetDiffersFromStampAsync(connection, old, ct));
+            Assert.Equal(0, await ComposeStampLiveSupport.CountAsync(connection,
+                $"SELECT count(*) FROM collect.query_store_compose_stamp_built WHERE hour = TIMESTAMP '{Hour(old)}' AND (fleet_built_seq IS DISTINCT FROM late_seq OR built_seq IS DISTINCT FROM late_seq)", ct));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await ComposeStampLiveSupport.CleanupAsync(scratch, connection, source, bodySucceeded);
+        }
+    }
+
+    [Fact]
+    public async Task AWriterThatBumpedAPairBeforeTheFleetOnlyBuild_LeavesThatPairStale_AndTheFullBuildTakesTheHourNext()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ComposeStampLiveSupport.BaseConnectionString), ComposeStampLiveSupport.SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, connection, source, hourNow) = await ComposeStampLiveSupport.ArrangeAsync(ct);
+        var bodySucceeded = false;
+        try
+        {
+            var old = hourNow.AddHours(-12);
+            var hour = $"hour = TIMESTAMP '{Hour(old)}'";
+            await ComposeStampLiveSupport.ExecAsync(connection, $"UPDATE collect.query_store_compose_stamp_built SET fleet_built_seq = NULL WHERE {hour}", ct);
+
+            /* The plan saw an hour stale only for the fleet table; a late write to server 1 lands before the build runs. */
+            await ComposeStampLiveSupport.ExecAsync(connection, $"UPDATE collect.query_store_compose_stamp_built SET late_seq = late_seq + 1 WHERE {hour} AND server_id = 1", ct);
+            Assert.NotNull(await QueryStoreComposeStamp.BuildFleetHourAsync(connection, old, ct));
+
+            Assert.Equal(1, await ComposeStampLiveSupport.CountAsync(connection, $"SELECT count(*) FROM collect.query_store_compose_stamp_built WHERE {hour} AND fleet_built_seq IS DISTINCT FROM late_seq", ct));
+            Assert.Equal(1, await ComposeStampLiveSupport.CountAsync(connection, $"SELECT count(*) FROM collect.query_store_compose_stamp_built WHERE {hour} AND server_id = 1 AND fleet_built_seq IS DISTINCT FROM late_seq", ct));
+
+            /* The full build, which the plan now chooses for the hour, brings every pair level again. */
+            var tick = await ComposeStampLiveSupport.TickAtAsync(source, ComposeStampLiveSupport.ClockWithin(hourNow), ct);
+            Assert.Equal(0, tick.Failed);
+            Assert.Equal(0, await ComposeStampLiveSupport.CountAsync(connection,
+                $"SELECT count(*) FROM collect.query_store_compose_stamp_built WHERE {hour} AND (fleet_built_seq IS DISTINCT FROM late_seq OR built_seq IS DISTINCT FROM late_seq)", ct));
+            Assert.Equal(0, await FleetDiffersFromStampAsync(connection, old, ct));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await ComposeStampLiveSupport.CleanupAsync(scratch, connection, source, bodySucceeded);
+        }
+    }
+
+    [Fact]
+    public async Task GroupsTiedAtTheNthValue_GiveTheSameMembersOnTheFleetPathTheStampPathAndTheWideTable()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ComposeStampLiveSupport.BaseConnectionString), ComposeStampLiveSupport.SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, connection, source, hourNow) = await ComposeStampLiveSupport.ArrangeAsync(ct, build: false);
+        var bodySucceeded = false;
+        try
+        {
+            /* One hour of rows of our own: five hashes tied at 10 executions, inserted in reverse order, and one hash at 99. A top 3 keeps hashF and
+               then two of the five: the key column breaks the tie, so it is hashA and hashB on every path. */
+            var tied = hourNow.AddHours(-6).AddMinutes(5);
+            await ComposeStampLiveSupport.ExecAsync(connection, "DELETE FROM collect.query_store_interval_wide", ct);
+            var id = 1;
+            foreach (var (hash, executions) in new[] { ("hashE", 10), ("hashD", 10), ("hashC", 10), ("hashB", 10), ("hashA", 10), ("hashF", 99) })
+            {
+                await ComposeStampLiveSupport.ExecAsync(connection, $@"
+INSERT INTO collect.query_store_interval_wide
+(collection_time, server_id, database_name, query_id, plan_id, execution_type_desc, first_execution_time, last_execution_time,
+ module_name, query_hash, execution_count, avg_duration_us, avg_cpu_time_us, max_duration_us, max_cpu_time_us, runtime_stats_interval_id)
+VALUES (TIMESTAMP '{Hour(tied)}', 1, 'db', {id}, {id}, 'Regular', TIMESTAMP '{Hour(tied.AddMinutes(-3))}', TIMESTAMP '{Hour(tied)}', 'mod', '{hash}', {executions}, 1000, 500, 2000, 900, {id})", ct);
+                id++;
+            }
+
+            Assert.True(await ComposeStampLiveSupport.BuildAllAsync(source, ct, ComposeStampLiveSupport.ClockWithin(hourNow)) > 0);
+            Assert.True(await ComposeStampLiveSupport.CountAsync(connection, "SELECT count(*) FROM collect.query_store_compose_fleet WHERE query_hash = 'hashA'", ct) > 0);
+
+            var start = hourNow.AddHours(-28).AddMinutes(17);
+            var end = hourNow.AddMinutes(-40);
+            var through = hourNow.AddHours(-2);
+            const string Ranked = "{\"source\":\"query_store_stats\",\"measure\":\"qs_executions\",\"aggregate\":\"sum\",\"topN\":3,\"groupBy\":[\"query_hash\"],\"viz\":\"bar\"}";
+            const string Series = "{\"source\":\"query_store_stats\",\"measure\":\"qs_executions\",\"aggregate\":\"sum\",\"topN\":3,\"groupBy\":[\"query_hash\"],\"timeBucket\":\"hour\",\"viz\":\"line\"}";
+
+            var expected = new[] { "hashF", "hashA", "hashB" };
+            foreach (var fleetReady in new[] { true, false })
+            {
+                var context = QueryStoreRankedHarness.WideContext(start, end) with { QueryStoreStampThrough = through, QueryStoreFleetReady = fleetReady };
+                Assert.Equal(expected, await RankedMembersAsync(connection, Ranked, context, ct));
+                var series = await CompareAsync(connection, Series, start, end, through, fleetReady, null, ct);
+                Assert.True(series.Equal, series.Difference);
+                Assert.False(series.MemberSetsDiffered);
+            }
+
+            /* The wide table (the oracle's route) gives the same members. */
+            Assert.Equal(expected, await RankedMembersAsync(connection, Ranked, QueryStoreRankedHarness.WideContext(start, end), ct));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await ComposeStampLiveSupport.CleanupAsync(scratch, connection, source, bodySucceeded);
+        }
+    }
+
+    /* The groups of a ranked (bar) panel, in the order the statement returns them. */
+    private static async Task<string[]> RankedMembersAsync(NpgsqlConnection connection, string json, ComposeRunContext context, CancellationToken ct)
+    {
+        var plan = QueryStoreRankedHarness.Parse(json);
+        var (compiled, error) = ComposeCompiler.CompileCore(plan, context, singleScanRankedTimeSeries: true);
+        Assert.True(error is null, error);
+        await using var command = new NpgsqlCommand(compiled!.Sql, connection);
+        foreach (var parameter in compiled.Parameters)
+        {
+            command.Parameters.Add(parameter);
+        }
+
+        var members = new List<string>();
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            members.Add(reader.GetString(0));
+        }
+
+        return members.ToArray();
+    }
+
     [Fact]
     public async Task TheRungV239_CreatesTheTableAndTheLedgerColumnFromV238_AndARerunChangesNothing()
     {

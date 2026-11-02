@@ -818,7 +818,7 @@ public static class ComposeCompiler
                otherwise outrank every REAL winner and silently occupy a series slot. Worse here than in
                the plain Ranked arm below (where the NULL row is at least visible): this ordering decides
                MEMBERSHIP for the whole chart. */
-            sql.Append("    ORDER BY value DESC NULLS LAST\n");
+            sql.Append("    ORDER BY value DESC NULLS LAST").Append(RankTieBreak(plan)).Append('\n');
             sql.Append("    LIMIT ").Append(p.AddInt(plan.TopN)).Append('\n');
             sql.Append(")\n");
         }
@@ -921,7 +921,7 @@ public static class ComposeCompiler
                 /* NULLS LAST for the same reason as the rank CTE above: DESC's default NULLS FIRST put a
                    NULL-aggregate group at the TOP of the ranking, ahead of every real value — and under
                    the LIMIT it evicted a legitimate member. */
-                sql.Append("ORDER BY value DESC NULLS LAST\n");
+                sql.Append("ORDER BY value DESC NULLS LAST").Append(RankTieBreak(plan)).Append('\n');
                 sql.Append("LIMIT ").Append(p.AddInt(plan.TopN));
                 break;
             default: /* Scalar — a single aggregate row. */
@@ -1659,6 +1659,14 @@ public static class ComposeCompiler
         && !hasRawServers
         && plan.Filters.Count == 0
         && plan.GroupBy.All(d => string.Equals(d.Column, "query_hash", StringComparison.Ordinal));
+
+    /// <summary>
+    /// The second sort of a top-N rank (#7146): the group key columns, ascending, after <c>value DESC NULLS LAST</c>. Without it, several groups that
+    /// tie at the Nth value left the choice of members to the plan, so the fleet path, the stamp path and two runs of the same path could keep
+    /// different members. The names are the select list's own aliases, so the tie-break is the same on every route. Empty when there is no grouping.
+    /// </summary>
+    private static string RankTieBreak(PanelPlan plan) =>
+        plan.GroupBy.Count == 0 ? string.Empty : ", " + string.Join(", ", plan.GroupBy.Select(d => d.Name));
 
     /// <summary>Whether <see cref="Compile"/> would read the Query Store rollup for this panel and context (#5582 part 3). The runner asks
     /// before the guard, so the guard weights the rollup hours only for a panel whose text really reads them: a panel the rollup cannot

@@ -459,7 +459,7 @@ internal static class ComposePanelRunner
             /* #5582 part 3: the hours the rollup answers count at ComposeLimits.StampRowWeight, but only when this panel's text really reads
                the rollup. A panel it cannot serve compiles to the wide-table text, and keeping the stamp-through would under-count it. */
             if (wideResolution.StampThrough is not null
-                && ComposeCompiler.ReadsStampRollup(plan!, new ComposeRunContext(serverScope, start, end, values, rollups, now, coverage, true, wideResolution.WideStart, QueryStoreStampThrough: wideResolution.StampThrough, QueryStoreFleetReady: wideResolution.FleetReady)))
+                && ComposeCompiler.ReadsStampRollup(plan!, new ComposeRunContext(serverScope, start, end, values, rollups, now, coverage, true, wideResolution.WideStart, QueryStoreStampThrough: wideResolution.StampThrough)))
             {
                 stampThrough = wideResolution.StampThrough;
             }
