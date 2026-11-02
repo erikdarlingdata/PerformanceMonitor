@@ -131,6 +131,12 @@ public sealed class ReadLatencyAccumulator
            values: past the cap a new caller is not added, so the stored count reads "at least 1,000" and one key's set
            never grows past a few tens of kilobytes however many sessions read it. */
         public HashSet<string>? Callers;
+
+        /* #7153: the distinct-caller count of a restored failed flush. The set itself was not kept, so the count stays as a
+           floor, and the stored value is the greater of it and the live set, as the INSERT's GREATEST does for two partial flushes. */
+        public int CallerFloor;
+
+        public int DistinctCallers => Math.Max(CallerFloor, Callers?.Count ?? 0);
     }
 
     /// <summary>The most distinct callers one key keeps in one hour (#5793). A busier key stores this number, a floor.</summary>
@@ -222,7 +228,7 @@ public sealed class ReadLatencyAccumulator
                 rows.Add(new DrainedLatency(
                     key.Surface, key.Route, key.Outcome, bucket.Count, bucket.TotalMs, bucket.MaxMs,
                     (long[])bucket.BucketCounts.Clone(), key.WindowBand, bucket.MaxInFlight, bucket.WaitTotalMs,
-                    bucket.Callers?.Count ?? 0));
+                    bucket.DistinctCallers));
             }
         }
 
@@ -255,11 +261,36 @@ public sealed class ReadLatencyAccumulator
                 rows.Add(new DrainedLatency(
                     key.Surface, key.Route, key.Outcome, bucket.Count, bucket.TotalMs, bucket.MaxMs,
                     (long[])bucket.BucketCounts.Clone(), key.WindowBand, bucket.MaxInFlight, bucket.WaitTotalMs,
-                    bucket.Callers?.Count ?? 0));
+                    bucket.DistinctCallers));
             }
         }
 
         return rows;
+    }
+
+    /// <summary>Put drained rows back after a failed or cancelled write (#7153), merged with whatever was recorded since the
+    /// drain: counts, totals and bucket counts add, the maxima take the greater, as two partial flushes of one hour do in
+    /// the INSERT. Without it a stop that cancels the hourly write after <see cref="Drain"/> loses the hour, and the
+    /// stop-time flush sees no samples.</summary>
+    internal void Restore(IEnumerable<DrainedLatency> rows)
+    {
+        foreach (var row in rows)
+        {
+            var bucket = _buckets.GetOrAdd((row.Surface, row.Route, row.Outcome, row.WindowBand), static _ => new Bucket());
+            lock (bucket)
+            {
+                bucket.Count += row.Count;
+                bucket.TotalMs += row.TotalMs;
+                bucket.MaxMs = Math.Max(bucket.MaxMs, row.MaxMs);
+                for (var i = 0; i < bucket.BucketCounts.Length && i < row.BucketCounts.Length; i++)
+                {
+                    bucket.BucketCounts[i] += row.BucketCounts[i];
+                }
+                bucket.MaxInFlight = Math.Max(bucket.MaxInFlight, row.MaxInFlight);
+                bucket.WaitTotalMs += row.WaitTotalMs;
+                bucket.CallerFloor = Math.Max(bucket.CallerFloor, row.DistinctCallers);
+            }
+        }
     }
 
     /// <summary>Rows older than this are pruned by the flush's own bounded DELETE — the same 90 days
@@ -311,22 +342,36 @@ WHERE metric_time < $1";
     {
         var drained = Drain();
 
-        foreach (var row in drained)
+        /* #7153: the drain took the samples out before the first await, so a write that fails or is cancelled (the hourly
+           sweep's token is linked to the stop token) would lose them and the stop-time flush would see none. Put back the rows
+           not yet written, merged with anything recorded since, then let the exception leave. A row whose INSERT was cut short
+           is put back too: autocommit has not acknowledged it. */
+        var written = 0;
+        try
         {
-            await using var insert = new NpgsqlCommand(InsertSql, connection) { CommandTimeout = FlushTimeoutSeconds };
-            insert.Parameters.AddWithValue(metricTimeUtc);
-            insert.Parameters.AddWithValue(row.Surface.ToString().ToLowerInvariant());
-            insert.Parameters.AddWithValue(row.Route);
-            insert.Parameters.AddWithValue(OutcomeLabel(row.Outcome));
-            insert.Parameters.AddWithValue((int)Math.Min(row.Count, int.MaxValue));
-            insert.Parameters.AddWithValue(row.TotalMs);
-            insert.Parameters.AddWithValue(row.MaxMs);
-            insert.Parameters.AddWithValue(row.BucketCounts);
-            insert.Parameters.AddWithValue(row.WindowBand);
-            insert.Parameters.AddWithValue(row.MaxInFlight);
-            insert.Parameters.AddWithValue(row.WaitTotalMs);
-            insert.Parameters.AddWithValue(row.DistinctCallers);
-            await insert.ExecuteNonQueryAsync(cancellationToken);
+            foreach (var row in drained)
+            {
+                await using var insert = new NpgsqlCommand(InsertSql, connection) { CommandTimeout = FlushTimeoutSeconds };
+                insert.Parameters.AddWithValue(metricTimeUtc);
+                insert.Parameters.AddWithValue(row.Surface.ToString().ToLowerInvariant());
+                insert.Parameters.AddWithValue(row.Route);
+                insert.Parameters.AddWithValue(OutcomeLabel(row.Outcome));
+                insert.Parameters.AddWithValue((int)Math.Min(row.Count, int.MaxValue));
+                insert.Parameters.AddWithValue(row.TotalMs);
+                insert.Parameters.AddWithValue(row.MaxMs);
+                insert.Parameters.AddWithValue(row.BucketCounts);
+                insert.Parameters.AddWithValue(row.WindowBand);
+                insert.Parameters.AddWithValue(row.MaxInFlight);
+                insert.Parameters.AddWithValue(row.WaitTotalMs);
+                insert.Parameters.AddWithValue(row.DistinctCallers);
+                await insert.ExecuteNonQueryAsync(cancellationToken);
+                written++;
+            }
+        }
+        catch
+        {
+            Restore(drained.Skip(written));
+            throw;
         }
 
         await using var retention = new NpgsqlCommand(RetentionDeleteSql, connection) { CommandTimeout = FlushTimeoutSeconds };

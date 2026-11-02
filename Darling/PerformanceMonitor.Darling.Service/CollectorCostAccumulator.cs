@@ -142,6 +142,25 @@ WHERE metric_time < $1";
         return rows;
     }
 
+    /// <summary>Put a drained batch back after a failed or cancelled write (#7153), merged with whatever was recorded since the
+    /// drain: runs, totals and rows add, the maximum takes the greater, as <see cref="Record"/> would have. Without it a stop that
+    /// cancels the hourly write after <see cref="Drain"/> loses the hour, and the stop-time flush sees no samples.</summary>
+    internal void Restore(IEnumerable<DrainedCost> rows)
+    {
+        foreach (var row in rows)
+        {
+            var bucket = _buckets.GetOrAdd((row.ServerId, row.CollectorName), static _ => new Bucket());
+            lock (bucket)
+            {
+                bucket.RunCount += row.RunCount;
+                bucket.TotalSqlMs += row.TotalSqlMs;
+                bucket.MaxSqlMs = Math.Max(bucket.MaxSqlMs, row.MaxSqlMs);
+                bucket.TotalStorageMs += row.TotalStorageMs;
+                bucket.TotalRows += row.TotalRows;
+            }
+        }
+    }
+
     internal sealed record DrainedCost(
         int ServerId, string CollectorName, long RunCount, long TotalSqlMs, long MaxSqlMs, long TotalStorageMs, long TotalRows);
 
@@ -160,7 +179,17 @@ WHERE metric_time < $1";
             insert.Parameters.AddWithValue(drained.Select(d => d.MaxSqlMs).ToArray());
             insert.Parameters.AddWithValue(drained.Select(d => d.TotalStorageMs).ToArray());
             insert.Parameters.AddWithValue(drained.Select(d => d.TotalRows).ToArray());
-            await insert.ExecuteNonQueryAsync(cancellationToken);
+            try
+            {
+                await insert.ExecuteNonQueryAsync(cancellationToken);
+            }
+            catch
+            {
+                /* #7153: the drain took the samples out before this await, so a failed or cancelled write (the hourly sweep's
+                   token is linked to the stop token) would lose them and the stop-time flush would see none. */
+                Restore(drained);
+                throw;
+            }
         }
 
         await using var retention = new NpgsqlCommand(RetentionDeleteSql, connection) { CommandTimeout = FlushTimeoutSeconds };
