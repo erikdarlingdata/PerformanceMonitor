@@ -4963,4 +4963,114 @@ public sealed class DarlingManagedPostgresTests
             try { Directory.Delete(store, recursive: true); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
         }
     }
+
+    /* #7191 review: postgres.dataDirectory pointed at an existing folder with files in it. initdb exits 1 ("exists
+       but is not empty") and touches nothing, so a marker left by that run would make the NEXT start delete the
+       folder. Neither the failed run nor the next start may touch a file there. */
+    [Fact]
+    public async Task InitdbThatExitsNonZeroOnAFolderWithFiles_LeavesNoMarker_AndTheNextStartKeepsEveryFile()
+    {
+        var store = Path.Combine(Path.GetTempPath(), "pm-initdb-notempty-" + Guid.NewGuid().ToString("N"));
+        var dataDirectory = Path.Combine(store, "pgdata");
+        Directory.CreateDirectory(Path.Combine(dataDirectory, "docs"));
+        File.WriteAllText(Path.Combine(dataDirectory, "report.txt"), "an operator's file");
+        File.WriteAllText(Path.Combine(dataDirectory, "docs", "notes.txt"), "more");
+        try
+        {
+            var result = await DarlingManagedPostgres.RunInitdbWithMarkerAsync(
+                dataDirectory,
+                () => Task.FromResult((1, "initdb: error: directory \"pgdata\" exists but is not empty")));
+
+            Assert.Equal(1, result.ExitCode);
+            Assert.False(File.Exists(DarlingManagedPostgres.InitdbIncompleteMarkerPath(dataDirectory)));
+
+            DarlingManagedPostgres.DiscardInterruptedInitdb(dataDirectory, NullLogger.Instance);
+
+            Assert.Equal("an operator's file", File.ReadAllText(Path.Combine(dataDirectory, "report.txt")));
+            Assert.Equal("more", File.ReadAllText(Path.Combine(dataDirectory, "docs", "notes.txt")));
+        }
+        finally
+        {
+            try { Directory.Delete(store, recursive: true); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+        }
+    }
+
+    /* The same folder with an initdb step that throws (a kill): no marker was written for a folder this initdb did
+       not create, so even a kill leaves the files alone. */
+    [Fact]
+    public async Task InitdbThatThrowsOnAFolderWithFiles_NeverMarksIt_AndTheNextStartKeepsTheFile()
+    {
+        var store = Path.Combine(Path.GetTempPath(), "pm-initdb-notempty-throw-" + Guid.NewGuid().ToString("N"));
+        var dataDirectory = Path.Combine(store, "pgdata");
+        Directory.CreateDirectory(dataDirectory);
+        File.WriteAllText(Path.Combine(dataDirectory, "report.txt"), "an operator's file");
+        try
+        {
+            await Assert.ThrowsAsync<TimeoutException>(() => DarlingManagedPostgres.RunInitdbWithMarkerAsync(
+                dataDirectory, () => throw new TimeoutException("initdb timed out")));
+
+            Assert.False(File.Exists(DarlingManagedPostgres.InitdbIncompleteMarkerPath(dataDirectory)));
+
+            DarlingManagedPostgres.DiscardInterruptedInitdb(dataDirectory, NullLogger.Instance);
+
+            Assert.True(File.Exists(Path.Combine(dataDirectory, "report.txt")));
+        }
+        finally
+        {
+            try { Directory.Delete(store, recursive: true); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+        }
+    }
+
+    /* A non-zero exit is an initdb that ran to its own end (and cleaned up after itself), not a kill: no marker, on
+       an absent folder and on an empty one. A throw on an empty folder still keeps the marker. */
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task InitdbThatExitsNonZero_OnAnAbsentOrEmptyFolder_LeavesNoMarker(bool folderExists)
+    {
+        var store = Path.Combine(Path.GetTempPath(), "pm-initdb-fail-" + Guid.NewGuid().ToString("N"));
+        var dataDirectory = Path.Combine(store, "pgdata");
+        Directory.CreateDirectory(folderExists ? dataDirectory : store);
+        try
+        {
+            var result = await DarlingManagedPostgres.RunInitdbWithMarkerAsync(
+                dataDirectory, () => Task.FromResult((1, "initdb: error: could not create directory")));
+
+            Assert.Equal(1, result.ExitCode);
+            Assert.False(File.Exists(DarlingManagedPostgres.InitdbIncompleteMarkerPath(dataDirectory)));
+        }
+        finally
+        {
+            try { Directory.Delete(store, recursive: true); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+        }
+    }
+
+    [Fact]
+    public async Task InitdbThatThrowsOnAnEmptyExistingFolder_KeepsTheMarker_AndTheNextStartDiscardsTheHalfMadeFolder()
+    {
+        var store = Path.Combine(Path.GetTempPath(), "pm-initdb-emptythrow-" + Guid.NewGuid().ToString("N"));
+        var dataDirectory = Path.Combine(store, "pgdata");
+        Directory.CreateDirectory(dataDirectory);
+        try
+        {
+            await Assert.ThrowsAsync<OperationCanceledException>(() => DarlingManagedPostgres.RunInitdbWithMarkerAsync(
+                dataDirectory,
+                () =>
+                {
+                    File.WriteAllText(Path.Combine(dataDirectory, "PG_VERSION"), "17");
+                    throw new OperationCanceledException();
+                }));
+
+            Assert.True(File.Exists(DarlingManagedPostgres.InitdbIncompleteMarkerPath(dataDirectory)));
+
+            DarlingManagedPostgres.DiscardInterruptedInitdb(dataDirectory, NullLogger.Instance);
+
+            Assert.False(Directory.Exists(dataDirectory));
+            Assert.False(File.Exists(DarlingManagedPostgres.InitdbIncompleteMarkerPath(dataDirectory)));
+        }
+        finally
+        {
+            try { Directory.Delete(store, recursive: true); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+        }
+    }
 }

@@ -3902,20 +3902,28 @@ public sealed class DarlingManagedPostgres
     /// (#7191). initdb writes <c>PG_VERSION</c> long before the cluster is usable, and a killed initdb (the
     /// 180 s timeout, a service stop, a power cut) cannot run its own cleanup, so without the marker the next
     /// start would see <c>PG_VERSION</c>, take the existing-cluster branch and fail on a half-made cluster for
-    /// good. The marker is removed only on exit code 0 and left in place on any other exit or exception;
-    /// <see cref="DiscardInterruptedInitdb"/> reads it on the next start.
+    /// good. The marker stays only when <paramref name="runInitdb"/> throws (<see cref="RunToolAsync"/> throws
+    /// after killing the tree on both the timeout and a stop) or the process dies with the service; it is removed
+    /// whenever the call returns, at any exit code, because an initdb that exits by itself cleans up its own
+    /// partial directory. The marker is written only when the data directory is absent or empty, so a folder
+    /// this initdb did not create (a mistyped <c>postgres.dataDirectory</c> that names a folder with files in it:
+    /// initdb exits 1 "exists but is not empty" and touches nothing) can never be deleted by
+    /// <see cref="DiscardInterruptedInitdb"/>. <see cref="DiscardInterruptedInitdb"/> reads it on the next start.
     /// </summary>
     internal static async Task<(int ExitCode, string Output)> RunInitdbWithMarkerAsync(
         string dataDirectory, Func<Task<(int ExitCode, string Output)>> runInitdb)
     {
+        if (Directory.Exists(dataDirectory) && Directory.EnumerateFileSystemEntries(dataDirectory).Any())
+        {
+            return await runInitdb();
+        }
+
         var marker = InitdbIncompleteMarkerPath(dataDirectory);
         File.WriteAllText(marker, "initdb started; delete only if the data directory beside it is empty or unwanted" + Environment.NewLine);
         var result = await runInitdb();
-        if (result.ExitCode == 0)
-        {
-            File.Delete(marker);
-        }
 
+        /* Reached only when the call returned: a throw skips this line and leaves the marker. */
+        File.Delete(marker);
         return result;
     }
 
