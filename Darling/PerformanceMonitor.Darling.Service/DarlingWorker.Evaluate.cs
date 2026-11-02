@@ -1343,6 +1343,12 @@ public sealed partial class DarlingWorker
         string[] newKeys;
         lock (unannounced)
         {
+            /* #7188: a pair whose reports have all left the hour's rows can no longer be announced by a page that
+               carries them. Left in the set, it would turn a later held known-pair fire into a page with nothing new
+               to show. A store failure above added nothing, and this sweep's fresh pairs are in the rows, so only
+               stale pairs are dropped. */
+            var current = byReport.Values.Select(key => key.Value).ToHashSet(StringComparer.Ordinal);
+            unannounced.RemoveWhere(pair => !current.Contains(pair));
             newKeys = unannounced.ToArray();
         }
 
