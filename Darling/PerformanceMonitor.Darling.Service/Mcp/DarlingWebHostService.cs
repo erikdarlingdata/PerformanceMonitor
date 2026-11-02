@@ -2998,11 +2998,6 @@ if (location.pathname.toLowerCase() !== '/auth/login') { document.getElementById
         => (_lastFirewallRule, _lastFirewallVerdict) = await DarlingFirewallCheck.CheckAsync(
             WebFirewallRuleName(port), port, exposed, cidr, _lastFirewallRule, _lastFirewallVerdict, _logger, cancellationToken);
 
-    /// <summary>
-    /// Managed mode's first-boot race, handled: the VIEWER-role credential appears only after the worker's
-    /// initdb + migration + role provisioning finish, so poll up to ~5 minutes (60 x 5s) instead of racing it,
-    /// then fall back to the read-only viewer login (the supervisor restarts the app on the web login when the credential later appears, #7192).
-    /// </summary>
     /// <summary>True when the app runs on the viewer fallback and the web credential can now be read, with the same call the start makes (a
     /// credential file the service refuses reads as not appeared, so a bad file never turns into a restart loop). Cheap: a file check per tick.</summary>
     private bool WebCredentialAppearedForViewerFallback(DarlingConfig config)
@@ -3023,6 +3018,11 @@ if (location.pathname.toLowerCase() !== '/auth/login') { document.getElementById
         }
     }
 
+    /// <summary>
+    /// Managed mode's first-boot race, handled: the VIEWER-role credential appears only after the worker's
+    /// initdb + migration + role provisioning finish, so poll up to ~5 minutes (60 x 5s) instead of racing it,
+    /// then fall back to the read-only viewer login (the supervisor restarts the app on the web login when the credential later appears, #7192).
+    /// </summary>
     [SupportedOSPlatform("windows")]
     private async Task<string?> WaitForManagedConnectionStringAsync(PostgresConfig config, CancellationToken stoppingToken)
     {
