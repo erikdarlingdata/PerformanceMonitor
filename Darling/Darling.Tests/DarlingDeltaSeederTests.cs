@@ -717,6 +717,54 @@ public sealed class DarlingDeltaSeederTests
     }
 
     /// <summary>
+    /// #7156: query_stats writes only the statements that moved, so a key idle across a restart has its newest
+    /// row older than the fifteen-minute window every other family seeds from. The query_stats seed reads the gap
+    /// policy's hour instead, so that key's first post-restart interval is credited rather than stored as 0. The row
+    /// here is 40 minutes old (inside the policy, outside fifteen minutes); on the old window it was never read.
+    /// </summary>
+    [Fact]
+    public async Task QueryStatsSeed_KeyIdleLongerThanTheShortWindow_ButInsideTheGapPolicy_IsRestored_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live delta-seeding test.");
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DeleteFamilyRowsAsync(connection, TestContext.Current.CancellationToken);
+
+            var now = WholeSecond(DateTime.UtcNow);
+            await KeyedQueryStatsAsync(connection, now.AddMinutes(-40), "0xSH1", 0, -1, "0xPH1", 10);
+            /* Older than the gap policy: outside even the wider window. */
+            await KeyedQueryStatsAsync(connection, now.AddMinutes(-70), "0xSH2", 0, -1, "0xPH2", 10);
+
+            var deltas = new DarlingDeltaCalculator();
+            await using (var postgres = NpgsqlDataSource.Create(connectionString!))
+            {
+                await deltas.SeedFromStoreAsync(postgres, null, TestContext.Current.CancellationToken);
+            }
+
+            const int Gap = CollectorDeltaCalculator.DefaultMaxGapSeconds;
+            Assert.Equal(5, deltas.CalculateDeltaWithInterval(TestServerId, "query_stats_exec", "0xSH1:0:-1:0xPH1", 15, out var interval, now, Gap));
+            Assert.Equal(2400, interval);
+            /* Gap policy off, so only a first sighting reads 0: the 70-minute-old row was not read. */
+            Assert.Equal(0, deltas.CalculateDelta(TestServerId, "query_stats_exec", "0xSH2:0:-1:0xPH2", 15, now, 0));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteFamilyRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>
     /// The per-key shape's bound, asked of the planner the way the #1772 pin asks it of the row-value
     /// shape: with one bound on one table read, DISTINCT ON over the window must still exclude the
     /// two-day-old chunk and read the window's. pg_statement_stats is the family with the most rows per

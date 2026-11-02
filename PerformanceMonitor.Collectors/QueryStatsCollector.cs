@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Data.Common;
 using System.Globalization;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using PerformanceMonitor.Common;
@@ -123,6 +124,111 @@ public sealed class QueryStatsCollector : CollectorDefinitionBase<QueryStatsColl
         /// key reports 0, which on a churning instance is most of the server's CPU.
         /// </summary>
         public int? CompileAgeSeconds { get; set; }
+
+        /// <summary>
+        /// #7156: the deltas <see cref="ReadAsync"/> already computed for this row, set only for a row it kept because
+        /// every counter equalled its baseline but no interval was knowable (a gap past the delta policy).
+        /// <see cref="WritePayload"/> writes them instead of calling the calculator a second time. Null for every other
+        /// row, which takes the write's own delta path.
+        /// </summary>
+        internal PrecomputedDeltas? Precomputed { get; set; }
+    }
+
+    /// <summary>#7156: the eight deltas and the three intervals the write needs, as the read computed them.</summary>
+    internal sealed record PrecomputedDeltas(
+        long Exec, long Worker, long Elapsed, long Reads, long Writes, long PhysReads, long Rows, long Spills,
+        int ExecInterval, int WorkerInterval, int ElapsedInterval);
+
+    private const string ExecGroup = "query_stats_exec";
+    private const string WorkerGroup = "query_stats_worker";
+    private const string ElapsedGroup = "query_stats_elapsed";
+    private const string ReadsGroup = "query_stats_reads";
+    private const string WritesGroup = "query_stats_writes";
+    private const string PhysReadsGroup = "query_stats_phys_reads";
+    private const string RowsGroup = "query_stats_rows";
+    private const string SpillsGroup = "query_stats_spills";
+
+    /// <summary>The delta key (see <see cref="WritePayload"/>): the dm_exec_query_stats row identity.</summary>
+    private static string DeltaKeyOf(Row row) =>
+        $"{row.SqlHandle}:{row.StatementStartOffset}:{row.StatementEndOffset}:{row.PlanHandle}";
+
+    /// <summary>
+    /// #7156: the idle skip and the rank. The main query now returns every statement that ran in the last ten minutes, and
+    /// most of them did nothing since the last run. A row whose eight counters all equal their cached baselines is run
+    /// through the calculator (which advances the baseline's timestamp; the value is unchanged, so no work is hidden) and
+    /// dropped when it reports eight zero deltas over a measured interval. Every other row is kept: one whose counter
+    /// moved, one with no baseline yet, and one whose gap passed the delta policy, which carries its computed deltas so
+    /// the write does not call the calculator again. The kept rows come back by in-interval elapsed time, descending (ties
+    /// by plan_handle), which is the order the deferred plan fetch spends its <see cref="MaxPlansPerRun"/> in. A calculator
+    /// that peeks no baselines (a test double, a first run) drops nothing and ranks by lifetime elapsed time.
+    /// </summary>
+    internal static List<Row> SkipIdleAndRank(List<Row> fetched, CollectorContext context)
+    {
+        var deltas = context.Deltas;
+        var serverId = context.ServerId;
+        var exec = deltas.PeekBaselines(serverId, ExecGroup);
+        var worker = deltas.PeekBaselines(serverId, WorkerGroup);
+        var elapsed = deltas.PeekBaselines(serverId, ElapsedGroup);
+        var reads = deltas.PeekBaselines(serverId, ReadsGroup);
+        var writes = deltas.PeekBaselines(serverId, WritesGroup);
+        var physReads = deltas.PeekBaselines(serverId, PhysReadsGroup);
+        var rowsBase = deltas.PeekBaselines(serverId, RowsGroup);
+        var spills = deltas.PeekBaselines(serverId, SpillsGroup);
+
+        var kept = new List<(Row Row, long Rank)>(fetched.Count);
+        foreach (var row in fetched)
+        {
+            var key = DeltaKeyOf(row);
+            var rank = row.TotalElapsedTime;
+            if (elapsed.TryGetValue(key, out var elapsedBase) && row.TotalElapsedTime >= elapsedBase)
+            {
+                rank = row.TotalElapsedTime - elapsedBase;
+            }
+
+            if (exec.TryGetValue(key, out var b1) && b1 == row.ExecutionCount
+                && worker.TryGetValue(key, out var b2) && b2 == row.TotalWorkerTime
+                && elapsed.TryGetValue(key, out var b3) && b3 == row.TotalElapsedTime
+                && reads.TryGetValue(key, out var b4) && b4 == row.TotalLogicalReads
+                && writes.TryGetValue(key, out var b5) && b5 == row.TotalLogicalWrites
+                && physReads.TryGetValue(key, out var b6) && b6 == row.TotalPhysicalReads
+                && rowsBase.TryGetValue(key, out var b7) && b7 == row.TotalRows
+                && spills.TryGetValue(key, out var b8) && b8 == row.TotalSpills)
+            {
+                var age = row.CompileAgeSeconds;
+                long Delta(string group, long current, out int interval) => deltas.CalculateDeltaWithSeriesAge(
+                    serverId, group, key, current, age, out interval,
+                    collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+
+                var computed = new PrecomputedDeltas(
+                    Delta(ExecGroup, row.ExecutionCount, out var execInterval),
+                    Delta(WorkerGroup, row.TotalWorkerTime, out var workerInterval),
+                    Delta(ElapsedGroup, row.TotalElapsedTime, out var elapsedInterval),
+                    Delta(ReadsGroup, row.TotalLogicalReads, out _),
+                    Delta(WritesGroup, row.TotalLogicalWrites, out _),
+                    Delta(PhysReadsGroup, row.TotalPhysicalReads, out _),
+                    Delta(RowsGroup, row.TotalRows, out _),
+                    Delta(SpillsGroup, row.TotalSpills, out _),
+                    execInterval, workerInterval, elapsedInterval);
+
+                if (computed.Exec == 0 && computed.Worker == 0 && computed.Elapsed == 0 && computed.Reads == 0
+                    && computed.Writes == 0 && computed.PhysReads == 0 && computed.Rows == 0 && computed.Spills == 0
+                    && computed.ExecInterval > 0)
+                {
+                    continue; /* idle over a measured interval: nothing moved, nothing to store */
+                }
+
+                row.Precomputed = computed;
+            }
+
+            kept.Add((row, rank));
+        }
+
+        /* OrderBy is stable, so a full tie (same rank, same handle) keeps the DMV's order. */
+        return kept
+            .OrderByDescending(k => k.Rank)
+            .ThenBy(k => k.Row.PlanHandle, StringComparer.Ordinal)
+            .Select(k => k.Row)
+            .ToList();
     }
 
     private const string SelectColumnsText = @"
@@ -202,6 +308,24 @@ public sealed class QueryStatsCollector : CollectorDefinitionBase<QueryStatsColl
        exists only to inform the delta. */
     compile_age_seconds = DATEDIFF(SECOND, qs.creation_time, GETDATE())";
 
+    /// <summary>
+    /// #7156: the safety cap on the main query's candidate rows. The query keeps EVERY statement that ran in the last ten
+    /// minutes, newest first by <c>last_execution_time</c>, so a cap that bites drops the stalest rows (the least likely to
+    /// have moved) and not the busiest. It was <c>TOP (300)</c> then <c>TOP (200)</c> by LIFETIME elapsed time, which kept a
+    /// plan that had just recompiled or regressed (a lifetime total near zero) out of the store until it passed the
+    /// 200th-heaviest plan's lifetime total, and the work it did meanwhile was never recorded. The cap bounds the text
+    /// apply on a pathological cache and is several times the few hundred statements a busy server runs in ten minutes.
+    /// </summary>
+    public const int MaxCandidateRows = 2000;
+
+    /// <summary>
+    /// #7156: the most statements one run renders a plan for, in either capture mode: the inline apply hands the first
+    /// this many by recency a plan handle and the rest NULL, and the deferred fetch asks for at most this many misses, in
+    /// the rank <see cref="ReadAsync"/> returns. It is the old outer <c>TOP (200)</c>, which is what bounded the plan work
+    /// before the candidate set stopped being the bound.
+    /// </summary>
+    public const int MaxPlansPerRun = 200;
+
     /* #1959: rank on the CHEAP DMV columns inside the derived table FIRST, and run the text apply, the
        NOT LIKE self-filter, and the (Darling-only) plan-XML render against the survivors ONLY. The optimizer
        does not defer the applies past the TOP on its own - a field plan showed dm_exec_text_query_plan
@@ -209,20 +333,22 @@ public sealed class QueryStatsCollector : CollectorDefinitionBase<QueryStatsColl
        big-cache boxes - so the deferral is made structural here rather than hoped for. The derived table is
        deliberately aliased qs so SelectColumnsText and the plan fragments splice unchanged.
 
-       The inner TOP is 300, not 200: the self-filter runs post-ranking now, so the inner set needs headroom
-       for collector-self rows that ranking admits and the filter then removes. The expensive applies still
-       run at most ~200-300 times either way; measured 6.0x on the reporting fleet's apex box (median
-       7,736 ms -> 1,286 ms), 99.2% row-identity parity with the residual explained by cache churn. */
-    private const string StandardQueryText = @"
+       #7156: the derived table's TOP is MaxCandidateRows ordered by RECENCY (last_execution_time), not 300 by
+       lifetime elapsed time. Ranking by lifetime weight kept a newly regressed or recompiled plan out of the
+       store until it out-weighed a plan that had been cached for a week; recency keeps everything that ran in
+       the window, and ReadAsync drops the rows whose counters did not move since the last run. The text apply
+       still runs only against the derived table's rows and the plan render only against the first
+       MaxPlansPerRun of them (PLAN_RANK). The same shape as ProcedureStatsCollector's #5449 candidate query. */
+    private static readonly string StandardQueryText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-SELECT /* PerformanceMonitorLite */ TOP (200)
+SELECT /* PerformanceMonitorLite */
     database_name = qs.database_name," + SelectColumnsText + @"/*PLAN_SELECT*/
 FROM
 (
-    SELECT TOP (300)
+    SELECT TOP (" + MaxCandidateRows + @")
         database_name = d.name,
-        qs.*
+        qs.*/*PLAN_RANK*/
     FROM sys.dm_exec_query_stats AS qs
     CROSS APPLY
     (
@@ -237,35 +363,44 @@ FROM
     AND   qs.last_execution_time >= DATEADD(MINUTE, -10, GETDATE())
     /*EXCLUSION_FILTER*/
     ORDER BY
+        qs.last_execution_time DESC,
         qs.total_elapsed_time DESC
 ) AS qs
 OUTER APPLY sys.dm_exec_sql_text(qs.sql_handle) AS st/*PLAN_APPLY*/
 WHERE st.text NOT LIKE N'%PerformanceMonitorLite%'
 ORDER BY
+    qs.last_execution_time DESC,
     qs.total_elapsed_time DESC
 OPTION(RECOMPILE);";
 
     /* #1959: same rank-first shape as StandardQueryText, minus the dbid apply (Azure SQL DB scopes the
        DMV to the connected database). See the standard variant's comment for the mechanism and numbers. */
-    private const string AzureSqlDbQueryText = @"
+    private static readonly string AzureSqlDbQueryText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-SELECT /* PerformanceMonitorLite */ TOP (200)
+SELECT /* PerformanceMonitorLite */
     database_name = DB_NAME()," + SelectColumnsText + @"/*PLAN_SELECT*/
 FROM
 (
-    SELECT TOP (300)
-        qs.*
+    SELECT TOP (" + MaxCandidateRows + @")
+        qs.*/*PLAN_RANK*/
     FROM sys.dm_exec_query_stats AS qs
     WHERE qs.last_execution_time >= DATEADD(MINUTE, -10, GETDATE())
     ORDER BY
+        qs.last_execution_time DESC,
         qs.total_elapsed_time DESC
 ) AS qs
 OUTER APPLY sys.dm_exec_sql_text(qs.sql_handle) AS st/*PLAN_APPLY*/
 WHERE st.text NOT LIKE N'%PerformanceMonitorLite%'
 ORDER BY
+    qs.last_execution_time DESC,
     qs.total_elapsed_time DESC
 OPTION(RECOMPILE);";
+
+    /* #7156: spliced into the derived table only when the main query renders plans inline. The row number is taken over
+       the same ordering as the derived table's TOP, so 1..MaxPlansPerRun are the newest statements. */
+    private const string PlanRankFragment = @",
+        plan_rank = ROW_NUMBER() OVER (ORDER BY qs.last_execution_time DESC, qs.total_elapsed_time DESC)";
 
     /* Execution-plan capture — spliced into both variants only when the host sets CapturePlanXml
        (Darling); when off the placeholders erase to nothing, so Lite's SQL is byte-identical to the
@@ -291,11 +426,14 @@ OPTION(RECOMPILE);";
     query_plan_xml = CASE WHEN DATALENGTH(tqp.query_plan) > " + QueryPlanXmlCaptureLimits.MaxCapturedPlanXmlBytes + @" THEN NULL ELSE tqp.query_plan END,
     query_plan_xml_bytes = DATALENGTH(tqp.query_plan)";
 
-    private const string PlanApplyFragment = @"
+    /* #7156: the handle is NULL past the first MaxPlansPerRun rows by recency, and sys.dm_exec_text_query_plan returns no
+       row for a NULL handle (the way sp_WhoIsActive applies it to idle sessions). The row set is fixed by the derived
+       table, so the cap holds whatever order the optimizer runs the apply in. */
+    private static readonly string PlanApplyFragment = @"
 OUTER APPLY
     sys.dm_exec_text_query_plan
     (
-        qs.plan_handle,
+        CASE WHEN qs.plan_rank <= " + MaxPlansPerRun + @" THEN qs.plan_handle END,
         qs.statement_start_offset,
         qs.statement_end_offset
     ) AS tqp";
@@ -488,11 +626,13 @@ OPTION(RECOMPILE);";
         var inlinePlan = InlinePlanCapture(context);
         var planSelect = inlinePlan ? PlanSelectFragment : "";
         var planApply = inlinePlan ? PlanApplyFragment : "";
+        var planRank = inlinePlan ? PlanRankFragment : "";
 
         if (context.Target.IsAzureSqlDb)
         {
             return new CollectorQuery(
                 AzureSqlDbQueryText
+                    .Replace("/*PLAN_RANK*/", planRank, StringComparison.Ordinal)
                     .Replace("/*PLAN_SELECT*/", planSelect, StringComparison.Ordinal)
                     .Replace("/*PLAN_APPLY*/", planApply, StringComparison.Ordinal));
         }
@@ -501,6 +641,7 @@ OPTION(RECOMPILE);";
         return new CollectorQuery(
             StandardQueryText
                 .Replace("/*EXCLUSION_FILTER*/", exclusionClause, StringComparison.Ordinal)
+                .Replace("/*PLAN_RANK*/", planRank, StringComparison.Ordinal)
                 .Replace("/*PLAN_SELECT*/", planSelect, StringComparison.Ordinal)
                 .Replace("/*PLAN_APPLY*/", planApply, StringComparison.Ordinal),
             exclusionParameters);
@@ -653,7 +794,7 @@ OPTION(RECOMPILE);";
             });
         }
 
-        return rows;
+        return SkipIdleAndRank(rows, context);
     }
 
     public override void WritePayload(Row row, ICollectorRowWriter writer, CollectorContext context)
@@ -680,6 +821,27 @@ OPTION(RECOMPILE);";
            disagree about how much work it did, which is worse than under-reporting all of them. */
         var age = row.CompileAgeSeconds;
 
+        long deltaExecCount, deltaWorkerTime, deltaElapsedTime, deltaLogicalReads, deltaLogicalWrites, deltaPhysicalReads, deltaRows, deltaSpills;
+        int execIntervalSeconds, workerIntervalSeconds, elapsedIntervalSeconds;
+        if (row.Precomputed is { } pre)
+        {
+            /* #7156: ReadAsync found every counter at its baseline and kept the row only because no interval was knowable
+               (a gap past the delta policy). It already called the calculator for this row once, so calling it again would
+               compute a zero over a fresh one-interval baseline and replace the (0, 0) pair this row has to carry. */
+            deltaExecCount = pre.Exec;
+            deltaWorkerTime = pre.Worker;
+            deltaElapsedTime = pre.Elapsed;
+            deltaLogicalReads = pre.Reads;
+            deltaLogicalWrites = pre.Writes;
+            deltaPhysicalReads = pre.PhysReads;
+            deltaRows = pre.Rows;
+            deltaSpills = pre.Spills;
+            execIntervalSeconds = pre.ExecInterval;
+            workerIntervalSeconds = pre.WorkerInterval;
+            elapsedIntervalSeconds = pre.ElapsedInterval;
+        }
+        else
+        {
         /* #4428: a per-family CalculateDeltaWithSeriesAge call only ever sees its OWN counter, so a row
            whose statistics restart under this same key can be read as a reset in one family (the one that
            happened to shrink) and a giant real increment in another (a sibling that had already re-grown
@@ -710,16 +872,16 @@ OPTION(RECOMPILE);";
             context.CollectionTime,
             CollectorDeltaCalculator.DefaultMaxGapSeconds);
 
-        var deltaExecCount = context.Deltas.CalculateDeltaWithSeriesAge(context.ServerId, "query_stats_exec", deltaKey, row.ExecutionCount, age, out var execIntervalSeconds, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        deltaExecCount = context.Deltas.CalculateDeltaWithSeriesAge(context.ServerId, "query_stats_exec", deltaKey, row.ExecutionCount, age, out execIntervalSeconds, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
         /* Capture the collection interval alongside the CPU delta so the display can derive
            worker_time_per_second (peak CPU-ms per wall-clock second) over the window. */
-        var deltaWorkerTime = context.Deltas.CalculateDeltaWithSeriesAge(context.ServerId, "query_stats_worker", deltaKey, row.TotalWorkerTime, age, out var workerIntervalSeconds, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
-        var deltaElapsedTime = context.Deltas.CalculateDeltaWithSeriesAge(context.ServerId, "query_stats_elapsed", deltaKey, row.TotalElapsedTime, age, out var elapsedIntervalSeconds, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
-        var deltaLogicalReads = context.Deltas.CalculateDeltaWithSeriesAge(context.ServerId, "query_stats_reads", deltaKey, row.TotalLogicalReads, age, out _, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
-        var deltaLogicalWrites = context.Deltas.CalculateDeltaWithSeriesAge(context.ServerId, "query_stats_writes", deltaKey, row.TotalLogicalWrites, age, out _, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
-        var deltaPhysicalReads = context.Deltas.CalculateDeltaWithSeriesAge(context.ServerId, "query_stats_phys_reads", deltaKey, row.TotalPhysicalReads, age, out _, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
-        var deltaRows = context.Deltas.CalculateDeltaWithSeriesAge(context.ServerId, "query_stats_rows", deltaKey, row.TotalRows, age, out _, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
-        var deltaSpills = context.Deltas.CalculateDeltaWithSeriesAge(context.ServerId, "query_stats_spills", deltaKey, row.TotalSpills, age, out _, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        deltaWorkerTime = context.Deltas.CalculateDeltaWithSeriesAge(context.ServerId, "query_stats_worker", deltaKey, row.TotalWorkerTime, age, out workerIntervalSeconds, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        deltaElapsedTime = context.Deltas.CalculateDeltaWithSeriesAge(context.ServerId, "query_stats_elapsed", deltaKey, row.TotalElapsedTime, age, out elapsedIntervalSeconds, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        deltaLogicalReads = context.Deltas.CalculateDeltaWithSeriesAge(context.ServerId, "query_stats_reads", deltaKey, row.TotalLogicalReads, age, out _, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        deltaLogicalWrites = context.Deltas.CalculateDeltaWithSeriesAge(context.ServerId, "query_stats_writes", deltaKey, row.TotalLogicalWrites, age, out _, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        deltaPhysicalReads = context.Deltas.CalculateDeltaWithSeriesAge(context.ServerId, "query_stats_phys_reads", deltaKey, row.TotalPhysicalReads, age, out _, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        deltaRows = context.Deltas.CalculateDeltaWithSeriesAge(context.ServerId, "query_stats_rows", deltaKey, row.TotalRows, age, out _, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        deltaSpills = context.Deltas.CalculateDeltaWithSeriesAge(context.ServerId, "query_stats_spills", deltaKey, row.TotalSpills, age, out _, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
 
         /* #4428: apply the row-coherent decision AFTER every per-family call above has run — each call
            already updated its own baseline to the current value/time (the store-forward the Add/Update
@@ -759,6 +921,7 @@ OPTION(RECOMPILE);";
                 workerIntervalSeconds = 0;
                 elapsedIntervalSeconds = 0;
             }
+        }
         }
 
         /* #4394: the worker (CPU) counter's own interval can land at 0 — a first sighting, a plan
