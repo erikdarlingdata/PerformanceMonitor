@@ -3828,8 +3828,9 @@ public sealed class DarlingManagedPostgres
     /// if the order were reversed, a crash after a successful initdb would leave a cluster whose
     /// password nobody knows. A failed initdb leaves the credential file behind harmlessly —
     /// the next attempt regenerates and overwrites it. initdb cleans up its partial data directory
-    /// when it exits non-zero, but not when it is killed (the 180 s timeout, a service stop): that case
-    /// is covered by <see cref="RunInitdbWithMarkerAsync"/> and <see cref="DiscardInterruptedInitdb"/> (#7191).
+    /// when it exits non-zero by itself, but not when it is killed (the 180 s timeout, a service stop, or a
+    /// kill from outside the service, which returns a non-zero code): the marker stays on any non-zero exit
+    /// and any throw, so that case is covered by <see cref="RunInitdbWithMarkerAsync"/> and <see cref="DiscardInterruptedInitdb"/> (#7191).
     /// </summary>
     [SupportedOSPlatform("windows")]
     private async Task InitializeClusterAsync(string binDirectory, CancellationToken cancellationToken)
@@ -3902,13 +3903,15 @@ public sealed class DarlingManagedPostgres
     /// (#7191). initdb writes <c>PG_VERSION</c> long before the cluster is usable, and a killed initdb (the
     /// 180 s timeout, a service stop, a power cut) cannot run its own cleanup, so without the marker the next
     /// start would see <c>PG_VERSION</c>, take the existing-cluster branch and fail on a half-made cluster for
-    /// good. The marker stays only when <paramref name="runInitdb"/> throws (<see cref="RunToolAsync"/> throws
-    /// after killing the tree on both the timeout and a stop) or the process dies with the service; it is removed
-    /// whenever the call returns, at any exit code, because an initdb that exits by itself cleans up its own
-    /// partial directory. The marker is written only when the data directory is absent or empty, so a folder
-    /// this initdb did not create (a mistyped <c>postgres.dataDirectory</c> that names a folder with files in it:
-    /// initdb exits 1 "exists but is not empty" and touches nothing) can never be deleted by
-    /// <see cref="DiscardInterruptedInitdb"/>. <see cref="DiscardInterruptedInitdb"/> reads it on the next start.
+    /// good. The marker is removed only on exit code 0. It stays on any non-zero exit and when
+    /// <paramref name="runInitdb"/> throws (<see cref="RunToolAsync"/> throws after killing the tree on both the
+    /// timeout and a stop), and when the process dies with the service: an initdb killed from outside the service
+    /// (Task Manager, a crash, an out-of-memory kill) returns a non-zero code instead of throwing, and removing
+    /// the marker on that return would leave its half-made folder blocking every later start. The marker is
+    /// written only when the data directory is absent or empty, so a folder that held anything never gets one
+    /// (a mistyped <c>postgres.dataDirectory</c> that names a folder with files in it: initdb exits 1 "exists but
+    /// is not empty" and touches nothing), and <see cref="DiscardInterruptedInitdb"/>, which reads the marker on
+    /// the next start, can only delete what this initdb made.
     /// </summary>
     internal static async Task<(int ExitCode, string Output)> RunInitdbWithMarkerAsync(
         string dataDirectory, Func<Task<(int ExitCode, string Output)>> runInitdb)
@@ -3922,8 +3925,13 @@ public sealed class DarlingManagedPostgres
         File.WriteAllText(marker, "initdb started; delete only if the data directory beside it is empty or unwanted" + Environment.NewLine);
         var result = await runInitdb();
 
-        /* Reached only when the call returned: a throw skips this line and leaves the marker. */
-        File.Delete(marker);
+        /* Only a clean exit removes the marker. A throw skips this line, and a non-zero exit (an initdb killed from
+           outside the service) keeps it so the next start discards the half-made folder. */
+        if (result.ExitCode == 0)
+        {
+            File.Delete(marker);
+        }
+
         return result;
     }
 

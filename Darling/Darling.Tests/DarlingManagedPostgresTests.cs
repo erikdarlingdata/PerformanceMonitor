@@ -5021,12 +5021,13 @@ public sealed class DarlingManagedPostgresTests
         }
     }
 
-    /* A non-zero exit is an initdb that ran to its own end (and cleaned up after itself), not a kill: no marker, on
-       an absent folder and on an empty one. A throw on an empty folder still keeps the marker. */
+    /* The marker is removed only on exit 0. An initdb killed from outside the service (Task Manager, a crash, an
+       out-of-memory kill) returns a non-zero code instead of throwing, so a non-zero exit on an absent or empty
+       folder keeps the marker and the next start discards what is there and initializes again. */
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task InitdbThatExitsNonZero_OnAnAbsentOrEmptyFolder_LeavesNoMarker(bool folderExists)
+    public async Task InitdbThatExitsNonZero_OnAnAbsentOrEmptyFolder_KeepsTheMarker_AndTheNextStartInitializesAgain(bool folderExists)
     {
         var store = Path.Combine(Path.GetTempPath(), "pm-initdb-fail-" + Guid.NewGuid().ToString("N"));
         var dataDirectory = Path.Combine(store, "pgdata");
@@ -5037,6 +5038,46 @@ public sealed class DarlingManagedPostgresTests
                 dataDirectory, () => Task.FromResult((1, "initdb: error: could not create directory")));
 
             Assert.Equal(1, result.ExitCode);
+            Assert.True(File.Exists(DarlingManagedPostgres.InitdbIncompleteMarkerPath(dataDirectory)));
+
+            DarlingManagedPostgres.DiscardInterruptedInitdb(dataDirectory, NullLogger.Instance);
+
+            Assert.False(File.Exists(DarlingManagedPostgres.InitdbIncompleteMarkerPath(dataDirectory)));
+            Assert.False(Directory.Exists(dataDirectory));
+        }
+        finally
+        {
+            try { Directory.Delete(store, recursive: true); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+        }
+    }
+
+    /* An initdb killed from outside writes PG_VERSION, then the wrapper sees a non-zero code: the next start must
+       discard the half-made folder instead of taking the existing-cluster branch on it. */
+    [Fact]
+    public async Task InitdbThatWritesPgVersionThenExitsNonZero_KeepsTheMarker_AndTheNextStartDiscardsTheHalfMadeFolder()
+    {
+        var store = Path.Combine(Path.GetTempPath(), "pm-initdb-killedext-" + Guid.NewGuid().ToString("N"));
+        var dataDirectory = Path.Combine(store, "pgdata");
+        Directory.CreateDirectory(store);
+        try
+        {
+            var result = await DarlingManagedPostgres.RunInitdbWithMarkerAsync(
+                dataDirectory,
+                () =>
+                {
+                    Directory.CreateDirectory(Path.Combine(dataDirectory, "base"));
+                    File.WriteAllText(Path.Combine(dataDirectory, "PG_VERSION"), "17");
+                    return Task.FromResult((-1073741510, string.Empty));
+                });
+
+            Assert.NotEqual(0, result.ExitCode);
+            Assert.True(File.Exists(DarlingManagedPostgres.InitdbIncompleteMarkerPath(dataDirectory)));
+            Assert.True(File.Exists(Path.Combine(dataDirectory, "PG_VERSION")));
+
+            DarlingManagedPostgres.DiscardInterruptedInitdb(dataDirectory, NullLogger.Instance);
+
+            Assert.False(File.Exists(Path.Combine(dataDirectory, "PG_VERSION")));
+            Assert.False(Directory.Exists(dataDirectory));
             Assert.False(File.Exists(DarlingManagedPostgres.InitdbIncompleteMarkerPath(dataDirectory)));
         }
         finally
