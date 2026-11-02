@@ -254,7 +254,7 @@ ORDER BY server_id, queryid, database_id, user_id, toplevel, collection_time DES
             await SeedFamilyAsync("latch_stats", () => SeedLatchStatsAsync(connection, cutoff, logger, cancellationToken), logger);
             await SeedFamilyAsync("spinlock_stats", () => SeedSpinlockStatsAsync(connection, cutoff, logger, cancellationToken), logger);
             await SeedFamilyAsync("procedure_stats", () => SeedProcedureStatsAsync(connection, cutoff, logger, cancellationToken), logger);
-            await SeedFamilyAsync("query_stats", () => SeedQueryStatsAsync(connection, cutoff, logger, cancellationToken), logger);
+            await SeedFamilyAsync("query_stats", () => SeedQueryStatsAsync(connection, QueryStatsSeedCutoff(), logger, cancellationToken), logger);
             await SeedFamilyAsync("pg_wait_stats", () => SeedPgWaitStatsAsync(connection, cutoff, logger, cancellationToken), logger);
             await SeedFamilyAsync("pg_statement_stats", () => SeedPgStatementStatsAsync(connection, cutoff, logger, cancellationToken), logger);
 
