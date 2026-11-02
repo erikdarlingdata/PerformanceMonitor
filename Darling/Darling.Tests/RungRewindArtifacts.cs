@@ -660,6 +660,11 @@ DROP TABLE IF EXISTS config.person;"),
         new(238, "hasActionProposals",
             @"DROP TABLE IF EXISTS config.agent_action_proposals;
 ALTER TABLE config.config_notification_routes DROP COLUMN IF EXISTS action_approval, DROP COLUMN IF EXISTS approval_single_person;"),
+        // V239 (#7146): the fleet rollup of the Query Store compose stamp. The table is the probe's newest sentinel. The rewind drops it and
+        // the ledger column, so a re-run of V239 creates them again. Safe on a store that never had them.
+        new(239, "hasComposeFleet",
+            @"DROP TABLE IF EXISTS collect.query_store_compose_fleet;
+ALTER TABLE IF EXISTS collect.query_store_compose_stamp_built DROP COLUMN IF EXISTS fleet_built_seq;"),
     ];
 
     /// <summary>

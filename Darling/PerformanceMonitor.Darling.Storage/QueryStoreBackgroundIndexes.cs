@@ -327,6 +327,37 @@ SELECT EXISTS
 );";
 
     /// <summary>
+    /// Whether <paramref name="tableName"/> (<c>schema.table</c>) is a TimescaleDB hypertable. Safe on a store where the
+    /// extension is not installed: the information view is looked up first with <c>to_regclass</c>, which answers NULL for a
+    /// missing relation instead of throwing, and a store without the view answers false. An installed extension is not a
+    /// hypertable: a store can have the extension and still run in plain-PostgreSQL mode with plain heap tables (#7152).
+    /// Each of the two catalog reads runs under <paramref name="timeoutSeconds"/>, which a caller with a tighter bound passes.
+    /// </summary>
+    internal static async Task<bool> IsHypertableAsync(NpgsqlConnection connection, string tableName, CancellationToken cancellationToken, int timeoutSeconds = CatalogReadTimeoutSeconds)
+    {
+        await using (var viewExists = new NpgsqlCommand(
+            "SELECT to_regclass('timescaledb_information.hypertables') IS NOT NULL", connection) { CommandTimeout = timeoutSeconds })
+        {
+            if (!(bool)(await viewExists.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))!)
+            {
+                return false;
+            }
+        }
+
+        return await ReadIsHypertableAsync(connection, tableName, cancellationToken, timeoutSeconds).ConfigureAwait(false);
+    }
+
+    /// <summary>The <see cref="HypertableSql"/> read, for a caller that already knows the information view exists.</summary>
+    private static async Task<bool> ReadIsHypertableAsync(NpgsqlConnection connection, string tableName, CancellationToken cancellationToken, int timeoutSeconds = CatalogReadTimeoutSeconds)
+    {
+        var (tableSchema, name) = SplitTableName(tableName);
+        await using var hypertable = new NpgsqlCommand(HypertableSql, connection) { CommandTimeout = timeoutSeconds };
+        hypertable.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text, Value = tableSchema });
+        hypertable.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text, Value = name });
+        return (bool)(await hypertable.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))!;
+    }
+
+    /// <summary>
     /// A schema-qualified table name split at its last dot into the schema and the name, the two values the hypertable
     /// probe binds. A name without both parts is a defect in the spec, so it is rejected rather than guessed at.
     /// </summary>
@@ -507,11 +538,7 @@ SELECT EXISTS
         var isHypertable = false;
         if (hasHypertableView)
         {
-            var (tableSchema, tableName) = SplitTableName(spec.TableName);
-            await using var hypertable = new NpgsqlCommand(HypertableSql, connection) { CommandTimeout = CatalogReadTimeoutSeconds };
-            hypertable.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text, Value = tableSchema });
-            hypertable.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text, Value = tableName });
-            isHypertable = (bool)(await hypertable.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))!;
+            isHypertable = await ReadIsHypertableAsync(connection, spec.TableName, cancellationToken).ConfigureAwait(false);
         }
 
         var decision = Decide(spec, serverVersionNum, isHypertable);
