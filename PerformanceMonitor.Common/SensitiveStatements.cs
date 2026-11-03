@@ -218,7 +218,8 @@ public static partial class SensitiveStatements
                 () => budget.Spent,
                 PlaceholderText,
                 budget.AddElapsed,
-                maxOutputChars);
+                maxOutputChars,
+                clock: budget.Clock);
         }
 #pragma warning disable CA1031 // fail closed
         catch (Exception)

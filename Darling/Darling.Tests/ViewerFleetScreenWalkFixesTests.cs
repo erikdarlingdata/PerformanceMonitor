@@ -177,6 +177,36 @@ public sealed class ViewerFleetScreenWalkFixesTests : IDisposable
         Assert.Empty(rollup.WorstServers);
     }
 
+    /// <summary>#7354: typing a term that matches no server hid the whole Fleet Health block, Search box included,
+    /// because the block was gated on the matched count. It must stay drawn so the term can be cleared, and
+    /// must not claim "All 0 servers healthy".</summary>
+    [Fact]
+    public void Rollup_WithASearchThatMatchesNothing_KeepsTheBlockAndNeverClaimsAllHealthy()
+    {
+        var cards = new List<ServerSummaryItem> { Healthy("prod-a", 1), Offline("prod-b", 2) };
+
+        var rollup = OverviewCardView.BuildRollup(cards, new FleetTotals(), registeredCount: 2, search: "037qqqqq");
+
+        Assert.Equal(0, rollup.TotalServers);
+        Assert.True(OverviewCardView.ShowsRollup(rollup));
+        Assert.False(OverviewCardView.ShowsAllClear(rollup));
+        Assert.Equal(ServerOverviewFilter.NoMatchText, OverviewCardView.CountText(cards, shown: 0, attentionOnly: false, search: "037qqqqq"));
+
+        // Clearing the term brings the whole fleet back.
+        var cleared = OverviewCardView.BuildRollup(cards, new FleetTotals(), registeredCount: 2, search: "");
+        Assert.True(OverviewCardView.ShowsRollup(cleared));
+        Assert.Equal(2, cleared.TotalServers);
+    }
+
+    [Fact]
+    public void Rollup_WithNothingRegistered_StaysHidden()
+    {
+        var rollup = OverviewCardView.BuildRollup(new List<ServerSummaryItem>(), new FleetTotals(), registeredCount: 0, search: null);
+
+        Assert.False(OverviewCardView.ShowsRollup(rollup));
+        Assert.False(OverviewCardView.ShowsAllClear(rollup));
+    }
+
     // ── D10: an Availability Group on old data is Stale, never Healthy ──────────────────────────────
 
     private static AgTopologyReplicaRow Replica(DateTime collected) => new()

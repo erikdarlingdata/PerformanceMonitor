@@ -711,6 +711,10 @@ public static partial class SensitiveStatements
 
         public TimeSpan Elapsed => _elapsed;
 
+        /// <summary>The clock this budget measures on: the one it was given, or the real one. Parse time is read from it too, so a
+        /// budget on a fake clock is charged on that clock alone (#7348).</summary>
+        internal Func<TimeSpan> Clock => _now;
+
         public bool Spent => _elapsed >= Limit;
 
         /// <summary>Values the judge named.</summary>
