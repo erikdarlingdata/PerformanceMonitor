@@ -132,7 +132,9 @@ export async function buildList(body, isCurrent = () => true) {
 export function pressResultNodes(result) {
   if (!result) return [];
   const answer = result.body || {};
-  const message = answer.message || result.message || "The press did not answer.";
+  /* A press refused before it reached the press logic (not signed in as a person, the owner connection not yet up, a bad request) answers
+     { error } from the route, not { message } (#7207). */
+  const message = answer.message || answer.error || result.message || "The press did not answer.";
   const nodes = [];
   if (answer.status === "first_pressed" || answer.status === "run") nodes.push(noticeStrip(message));
   else nodes.push(errorStrip(message));
@@ -178,12 +180,17 @@ export async function buildProposal(body, id, isCurrent = () => true) {
   } else if (p.state === "pending") {
     if (data.press_note) nodes.push(noticeStrip(data.press_note));
     else if (data.person_name) nodes.push(noticeStrip("You press as " + data.person_name + "."));
+    /* #7207: both buttons stay disabled from the click until the reply arrives, so a double click sends one press, not two. The page draws
+       again on the reply, which replaces the buttons. */
+    const buttons = [];
     const press = (verb) => async () => {
+      if (buttons.some((b) => b.disabled)) return;
+      for (const b of buttons) b.disabled = true;
       const result = await apiWrite("POST", "/api/proposals/" + encodeURIComponent(p.proposal_id) + "/" + verb, {});
       lastPress.set(p.proposal_id, result);
       return buildProposal(body, id, isCurrent);
     };
-    const buttons = [el("button", { class: "btn", type: "button", "data-action": "first-press", text: p.first_press_by ? "Read the facts again" : "First press: read the facts", onClick: press("first-press") })];
+    buttons.push(el("button", { class: "btn", type: "button", "data-action": "first-press", text: p.first_press_by ? "Read the facts again" : "First press: read the facts", onClick: press("first-press") }));
     if (p.first_press_by) buttons.push(el("button", { class: "btn", type: "button", "data-action": "confirm", text: "Confirm and run", onClick: press("confirm") }));
     nodes.push(el("div", { class: "row-actions proposal-actions" }, buttons));
   }
