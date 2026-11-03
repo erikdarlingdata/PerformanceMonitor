@@ -325,15 +325,16 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
             DarlingMcpTestData.Naive(intervalStart));
 
     /// <summary>
-    /// #7010: one clean collector run for the table's collector half an hour ago. A running collector logs a run every cycle, and the window floor counts a
+    /// #7010: one clean collector run for the table's collector five minutes ago. A running collector logs a run every cycle, and the window floor counts a
     /// server in a window when it holds a row there or the collection log records a run there: a sparse table's quiet window has the runs and no rows.
+    /// #7167: it is five minutes, not thirty: a run on the 30-minute offline threshold ages past it before the read, and the empty answer turns unavailable.
     /// </summary>
     private static Task RecordRunAsync(NpgsqlConnection connection, CancellationToken ct, string table) =>
         DarlingMcpTestData.ExecAsync(connection, ct,
             @"INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected)
 VALUES ($1,$2,$3,$4,$5,100,'SUCCESS',0)",
             CollectionIdGenerator.Next(), ServerId, ServerName, CollectorCatalog.All.First(c => c.TargetTable == table).Name,
-            DarlingMcpTestData.Naive(DateTime.UtcNow.AddMinutes(-30)));
+            DarlingMcpTestData.Naive(DateTime.UtcNow.AddMinutes(-5)));
 
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {

@@ -149,8 +149,12 @@ public sealed class DarlingMcpQueryStoreRegressionTools
                 tailFor: effectiveStart => QueryStoreRegressionRules.TailFor(effectiveStart, start));
 
             if (rows.Count == 0)
-                return McpHelpers.WithDatabasesLeftOut(
-                    await EmptyAsync(postgres, resolved.DisplayName, resolved.ServerId, start, end, baselineStart, hours_back, databaseFilter, notice, tableSpans, dataStart, !string.IsNullOrWhiteSpace(as_of), cancellationToken), leftOut)!;
+                /* #7167: the all-clear rung below is a true negative only while the server is being collected. */
+                return await DarlingServerOfflineNote.EmptyAsync(
+                    postgres, resolved.ServerId, resolved.DisplayName, end,
+                    McpHelpers.WithDatabasesLeftOut(
+                        await EmptyAsync(postgres, resolved.DisplayName, resolved.ServerId, start, end, baselineStart, hours_back, databaseFilter, notice, tableSpans, dataStart, !string.IsNullOrWhiteSpace(as_of), cancellationToken), leftOut)!,
+                    cancellationToken);
 
             /* #6750: always present. On the table path below raw's floor each arm's own start; otherwise both are the notice's effective_start. */
             var costBaselineStart = tableSpans is not null ? McpHelpers.FormatEffectiveStart(tableSpans.CostStart) : notice.EffectiveStart;

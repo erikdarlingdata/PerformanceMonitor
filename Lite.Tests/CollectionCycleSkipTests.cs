@@ -440,7 +440,7 @@ public sealed class CollectionCycleSkipTests : IDisposable
     [Fact]
     public void NoFileUnderLite_CopiesTheCollectorNameAsASingleQuotedSqlLiteral()
     {
-        /* The ten reader predicates interpolate CollectionCycleSkip.CollectorName; a rename must move writer and readers
+        /* The eleven reader predicates interpolate CollectionCycleSkip.CollectorName; a rename must move writer and readers
            together. The census has no exceptions: doc comments write the name in <c> tags, never in single quotes. */
         var literal = "'" + CollectionCycleSkip.CollectorName + "'";
         var lite = Path.GetFullPath(Path.Combine(RepoRootFromThisFile(), "Lite"));
@@ -458,14 +458,14 @@ public sealed class CollectionCycleSkipTests : IDisposable
     }
 
     [Fact]
-    public void TheTenPredicates_InterpolateTheCollectorName()
+    public void TheElevenPredicates_InterpolateTheCollectorName()
     {
         var services = Path.Combine(RepoRootFromThisFile(), "Lite", "Services");
         var count = Directory.EnumerateFiles(services, "LocalDataService.*.cs")
             .Sum(f => System.Text.RegularExpressions.Regex.Matches(File.ReadAllText(f),
                 @"collector_name <> '\{CollectionCycleSkip\.CollectorName\}'").Count);
 
-        Assert.Equal(10, count);
+        Assert.Equal(11, count);
     }
 
     [Fact]

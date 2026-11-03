@@ -111,7 +111,7 @@ VALUES ($1, $2, 'S1', 'running_jobs', $3, 12, $4, $5)";
             new LogRow(TimeSpan.FromMinutes(10), "SUCCESS", 0),
             new LogRow(TimeSpan.FromMinutes(5), "SUCCESS", 0));
 
-        var jobs = await data.GetRunningJobsAsync(ServerId);
+        var jobs = (await data.ReadRunningJobsAsync(ServerId)).Jobs;
 
         Assert.Empty(jobs);
     }
@@ -125,7 +125,7 @@ VALUES ($1, $2, 'S1', 'running_jobs', $3, 12, $4, $5)";
             new LogRow(TimeSpan.FromMinutes(6), "SUCCESS", 0),
             new LogRow(TimeSpan.FromMinutes(1.01), "SUCCESS", 1));
 
-        var jobs = await data.GetRunningJobsAsync(ServerId);
+        var jobs = (await data.ReadRunningJobsAsync(ServerId)).Jobs;
 
         var job = Assert.Single(jobs);
         Assert.Equal("Nightly ETL", job.JobName);
@@ -139,7 +139,7 @@ VALUES ($1, $2, 'S1', 'running_jobs', $3, 12, $4, $5)";
             TimeSpan.FromSeconds(20),
             new LogRow(TimeSpan.FromMinutes(5), "SUCCESS", 0));
 
-        var jobs = await data.GetRunningJobsAsync(ServerId);
+        var jobs = (await data.ReadRunningJobsAsync(ServerId)).Jobs;
 
         Assert.Single(jobs);
     }
@@ -178,7 +178,7 @@ VALUES ($1, $2, 'S1', 'running_jobs', $3, 12, $4, $5)";
         Assert.Empty(read.Jobs);
         Assert.NotNull(read.LastGoodCollection);
         Assert.True(DateTime.UtcNow - read.LastGoodCollection!.Value > TimeSpan.FromHours(2.9));
-        Assert.Empty(await data.GetRunningJobsAsync(ServerId));
+        Assert.Empty((await data.ReadRunningJobsAsync(ServerId)).Jobs);
     }
 
     [Fact]
@@ -213,7 +213,7 @@ VALUES ($1, $2, 'S1', 'running_jobs', $3, 12, $4, $5)";
         /* A log row can be gone (retention) while the data row is not: with nothing to decide by, keep what was read before, while it is recent. */
         var data = await SeedAsync(TimeSpan.FromMinutes(4));
 
-        var jobs = await data.GetRunningJobsAsync(ServerId);
+        var jobs = (await data.ReadRunningJobsAsync(ServerId)).Jobs;
 
         Assert.Single(jobs);
     }
@@ -234,7 +234,7 @@ VALUES ($1, $2, 'S1', 'running_jobs', $3, 12, $4, $5)";
     {
         var data = await SeedAsync(null, new LogRow(TimeSpan.FromMinutes(2), "SUCCESS", 0));
 
-        var jobs = await data.GetRunningJobsAsync(ServerId);
+        var jobs = (await data.ReadRunningJobsAsync(ServerId)).Jobs;
 
         Assert.Empty(jobs);
     }

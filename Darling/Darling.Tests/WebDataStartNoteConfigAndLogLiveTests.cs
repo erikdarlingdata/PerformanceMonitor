@@ -119,6 +119,9 @@ public sealed class ConfigAndLogNoteStore : IAsyncLifetime
         var (oldFlatId, oldFlatName) = await AddServerAsync(connection, ServerName(ServerConfigRead, "flat-old"), End.AddDays(-120));
         await SnapshotAsync(connection, ServerConfigRead, oldFlatId, oldFlatName, End.AddDays(-10), changed: false);
         await SnapshotAsync(connection, ServerConfigRead, oldFlatId, oldFlatName, End.AddDays(-3), changed: false);
+        /* #7167: a server monitored for months is collecting now. Without a SUCCESS run in the last 30 minutes the empty read is offline
+           (unavailable), which is not the covered, quiet answer this server stands for. One daily run back to registration, the last at End. */
+        await RunsAsync(connection, oldFlatId, oldFlatName, "wait_stats", End.AddDays(-120), End, "1 day");
 
         var (pgFlatId, pgFlatName) = await AddServerAsync(connection, ServerName(PgConfigRead, "flat"), End.AddDays(-2));
         await PgSettingAsync(connection, pgFlatId, pgFlatName, End.AddDays(-2).AddMinutes(1), "work_mem", "4096");

@@ -107,7 +107,7 @@ public sealed class ViewerPerfmonSqlTests
 
 /// <summary>
 /// Pins the Running Jobs tab's two ported reads (no live Postgres): the latest-snapshot grid read
-/// (copied from Lite's GetRunningJobsAsync, run on <c>v_running_jobs</c>) and the msdb-warning
+/// (copied from Lite's ReadRunningJobsAsync, run on <c>v_running_jobs</c>) and the msdb-warning
 /// derivation read that stands in for Lite's live <c>_hasMsdbAccess</c> probe — the running_jobs
 /// collector's most recent collection_log status.
 /// </summary>

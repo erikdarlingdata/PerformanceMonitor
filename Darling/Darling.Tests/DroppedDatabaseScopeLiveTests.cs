@@ -202,8 +202,10 @@ public sealed class DroppedDatabaseScopeLiveTests
                                            delta_worker_time, delta_elapsed_time, delta_execution_count, delta_spills, sample_interval_seconds)
               VALUES ($1,$2,$3,$4,'GoneDb','dbo','usp_Work','0xHGoneDb',900000,1800000,900,0,60)",
             CollectionIdGenerator.Next(), now.AddHours(-2), serverId, serverName);
-        /* The collector has run twice and looked at the window, so the empty page takes the "ran, found nothing" branch. */
-        foreach (var minutes in new[] { 30, 90 })
+        /* The collector has run twice and looked at the window, so the empty page takes the "ran, found nothing" branch. The newest run is
+           5 minutes old: a run at 30 minutes sits on the 30-minute offline threshold and ages past it before the read (#7167 then answers
+           unavailable), and this server is meant to be collecting. */
+        foreach (var minutes in new[] { 5, 90 })
         {
             await DarlingMcpTestData.ExecAsync(connection, ct, @"
 INSERT INTO collection_log

@@ -230,6 +230,27 @@ internal static class ServerResolver
             .FirstOrDefault();
 
     /// <summary>
+    /// #7167: the display name of the enabled server whose storage identity is <paramref name="serverId"/> (its server name when it has none),
+    /// or null when none matches. It is how the offline answer names the server, as Darling's does.
+    /// </summary>
+    internal static string? DisplayNameByStorageId(ServerManager serverManager, int serverId) =>
+        serverManager.GetEnabledServers()
+            .Where(s => RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(s)) == serverId)
+            .Select(s => string.IsNullOrEmpty(s.DisplayName) ? s.ServerName : s.DisplayName)
+            .FirstOrDefault();
+
+    /// <summary>
+    /// #7167: the two lookups the offline answer reads off a <see cref="LocalDataService"/> (when each server was added, and what it is called),
+    /// set from the server list. The MCP host wires its own service with this, and so does every other service an MCP empty-answer path builds
+    /// for itself (the analysis tools' window probe), so a read answers the same way whichever service it ran on.
+    /// </summary>
+    internal static void WireOfflineLookups(LocalDataService dataService, ServerManager serverManager)
+    {
+        dataService.RegisteredAtUtcLookup = serverId => RegisteredAtUtc(serverManager, serverId);
+        dataService.ServerDisplayNameLookup = serverId => DisplayNameByStorageId(serverManager, serverId);
+    }
+
+    /// <summary>
     /// The listing a miss carries, over a list the caller already holds. <c>internal</c> so
     /// <c>mute_analysis_finding</c>'s <c>not_found</c> answer (#4734) names the servers in the read tools' own words
     /// without a second read of the registry.

@@ -47,10 +47,10 @@ public sealed class McpBlockingTools
                     ?? await McpRuntimePrecondition.StatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "deadlocks")
                     /* #4966: an empty answer over a window the store may not reach back to is not a true negative, so
                        the window keys ride on it under hints. not_collected and the precondition stay bare. */
-                    ?? McpHelpers.Status("empty", "No deadlocks found in the specified time range.",
+                    ?? await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, McpHelpers.Status("empty", "No deadlocks found in the specified time range.",
                         (await McpQueryTools.EventWindowNoticeAsync(
                             () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.Deadlocks, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd),
-                            null, windowEnd.AddHours(-hours_back), windowEnd, "deadlocks", emptyAnswer: true)).AsHints());
+                            null, windowEnd.AddHours(-hours_back), windowEnd, "deadlocks", emptyAnswer: true)).AsHints()));
             }
 
             var truncated = rows.Count > limit;
@@ -142,10 +142,10 @@ public sealed class McpBlockingTools
             if (withXml.Count == 0)
             {
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, serverManager, resolved.ServerId, resolved.DisplayName, "deadlocks")
-                    ?? McpHelpers.Status("empty", "No deadlock XML available in the specified time range.",
+                    ?? await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, McpHelpers.Status("empty", "No deadlock XML available in the specified time range.",
                         (await McpQueryTools.EventWindowNoticeAsync(
                             () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.Deadlocks, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd),
-                            null, windowEnd.AddHours(-hours_back), windowEnd, "deadlocks", emptyAnswer: true)).AsHints());
+                            null, windowEnd.AddHours(-hours_back), windowEnd, "deadlocks", emptyAnswer: true)).AsHints()));
             }
 
             /* #4966: where this server's deadlocks data starts for the window. An event list, so the floor is the
@@ -250,10 +250,10 @@ public sealed class McpBlockingTools
             if (rows.Count == 0)
             {
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, serverManager, resolved.ServerId, resolved.DisplayName, "blocked_process_report")
-                    ?? McpHelpers.Status("empty", $"No blocked process reports found in the specified time range{ForChosenDatabase(database)}.",
+                    ?? await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, McpHelpers.Status("empty", $"No blocked process reports found in the specified time range{ForChosenDatabase(database)}.",
                         (await McpQueryTools.EventWindowNoticeAsync(
                             () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.BlockedProcessReports, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd),
-                            null, windowEnd.AddHours(-hours_back), windowEnd, "blocked_process_report", emptyAnswer: true)).AsHints());
+                            null, windowEnd.AddHours(-hours_back), windowEnd, "blocked_process_report", emptyAnswer: true)).AsHints()));
             }
 
             var truncated = rows.Count > limit;
@@ -386,10 +386,10 @@ public sealed class McpBlockingTools
                     /* #2546: same order and same reason as get_deadlocks — a blocked-process capture the
                        collector cannot read is indistinguishable here from a server that never blocked. */
                     ?? await McpRuntimePrecondition.StatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "blocked_process_report")
-                    ?? McpHelpers.Status("empty", $"No blocked process report XML available in the specified time range{ForChosenDatabase(database)}.",
+                    ?? await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, McpHelpers.Status("empty", $"No blocked process report XML available in the specified time range{ForChosenDatabase(database)}.",
                         (await McpQueryTools.EventWindowNoticeAsync(
                             () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.BlockedProcessReports, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, includeAlsoCovered: false),
-                            null, windowEnd.AddHours(-hours_back), windowEnd, "blocked_process_report", emptyAnswer: true)).AsHints());
+                            null, windowEnd.AddHours(-hours_back), windowEnd, "blocked_process_report", emptyAnswer: true)).AsHints()));
             }
 
             /* #4966: the XML exists only in the XE arm, so the probe is the XE collector's alone (the DMV snapshots are not
@@ -661,7 +661,7 @@ public sealed class McpBlockingTools
                 return await McpQueryTools.WithEmptyWindowNoticeAsync(await dataService.HasAnyWaitStatAsync(resolved.ServerId)
                     ? McpHelpers.Status(
                         "empty",
-                        $"No lock waits recorded for {resolved.DisplayName} in the last {hours_back} hour(s). This server HAS collected wait stats before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples.")
+                        await McpQueryTools.QuietWindowMessageAsync(dataService, QueryWindowRelation.WaitStats, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, "wait_stats", $"No lock waits recorded for {resolved.DisplayName} in the last {hours_back} hour(s)", ". This server HAS collected wait stats before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples."))
                     : McpHelpers.Status(
                         "unavailable",
                         $"No wait stats have EVER been recorded for {resolved.DisplayName}, so this is NOT a report of a server without lock contention — nothing has been stored for it at all. Delta wait stats need a SECOND collection cycle before the first row exists, so on a newly added server this clears itself; otherwise check that collection is running and that the server is enabled."),
