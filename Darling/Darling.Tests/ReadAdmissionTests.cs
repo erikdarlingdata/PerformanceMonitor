@@ -355,7 +355,7 @@ public sealed class ReadAdmissionTests
     {
         var source = RepoFile.ReadRepoFile(Path.Combine(RepoFile.Root, "Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"));
         var rebuild = source.IndexOf("ReadAdmission.RunRebuildSliceAsync(", StringComparison.Ordinal);
-        var flush = source.IndexOf("await _readLatency.FlushAsync(", StringComparison.Ordinal);
+        var flush = source.IndexOf("await FlushReadLatencyAsync(_readLatency,", StringComparison.Ordinal);
         Assert.True(rebuild > 0 && flush > rebuild, "The rebuild runs in its own slice, before the read-latency flush.");
         Assert.Contains("connection.State != ConnectionState.Open", source.Substring(rebuild, flush - rebuild));
         Assert.DoesNotContain("_readAdmission.RefreshAsync(connection", source);
