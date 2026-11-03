@@ -273,7 +273,7 @@ public sealed class CrossSkuSurfaceSourceTests
         Assert.Contains("external-alert delivery", inventory, StringComparison.Ordinal);
         Assert.Contains("threshold-override reload", inventory, StringComparison.Ordinal);
         Assert.Contains("daily report (#7041)", inventory, StringComparison.Ordinal);
-        Assert.Contains("store autovacuum self-alert", inventory, StringComparison.Ordinal);
+        Assert.Contains("store autovacuum (#7368)", inventory, StringComparison.Ordinal);
 
         /* And the phantom stays gone. Disk pressure's feed reads are exempt — a local filesystem read and a
            recorded-store-size lookup that is context for the alert text — so naming it here would send an
