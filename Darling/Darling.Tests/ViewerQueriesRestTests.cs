@@ -43,14 +43,22 @@ public sealed class ViewerQueryTrendsSqlTests
         var sql = SqlByName(sqlName);
         Assert.Contains($"FROM {table}", sql, StringComparison.Ordinal);
         Assert.DoesNotContain($"v_{table}", sql, StringComparison.Ordinal); /* viewer reads base tables */
-        /* The per-second rate denominator is the collection's STORED interval (#3540 V128 for the procedure
-           trend, #3653 A11 for the two query-stats trends): MAX(sample_interval_seconds), 0 → NULL (unrated),
-           and the seconds-since-previous-snapshot LAG only where a pre-V128 collection recorded none. */
-        Assert.Contains("CASE WHEN MAX(sample_interval_seconds) IS NULL", sql, StringComparison.Ordinal);
-        Assert.Contains("ELSE NULLIF(MAX(sample_interval_seconds), 0)", sql, StringComparison.Ordinal);
+        /* The per-second rate denominator is the collection's gap to the previous collection (#7161, the #5449 rule the
+           procedure trend uses), capped at the collector's own 3600 s: a collection whose rows ALL stored 0 is a
+           restart and stays unrated whatever the gap (#3653 A11), and the stored interval, MAX(sample_interval_seconds),
+           is read only where there is no previous collection. Never the longest stored interval of any one query in the
+           collection: that stretched a 60 s collection to the 900 s of one query that returns every 15 minutes. */
+        Assert.Contains("MAX(sample_interval_seconds) AS stored_interval", sql, StringComparison.Ordinal);
+        Assert.Contains("WHEN stored_interval = 0 THEN NULL", sql, StringComparison.Ordinal);
+        Assert.Contains($"WHEN gap_seconds IS NOT NULL THEN CASE WHEN gap_seconds <= {CollectorDeltaCalculator.DefaultMaxGapSeconds} THEN gap_seconds END", sql, StringComparison.Ordinal);
+        Assert.Contains("ELSE NULLIF(stored_interval, 0)", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("NULLIF(MAX(sample_interval_seconds), 0)", sql, StringComparison.Ordinal);
         Assert.Contains("LAG(collection_time) OVER (ORDER BY collection_time)", sql, StringComparison.Ordinal);
         Assert.Contains("extract(epoch FROM", sql, StringComparison.Ordinal);
         Assert.Contains("date_trunc('second', collection_time)", sql, StringComparison.Ordinal);
+        /* The table is read an hour before $2 so the first in-window collection has its previous one; the rows before $2 are
+           dropped after the LAG. */
+        Assert.Contains($"collection_time >= $2 - INTERVAL '{CollectorDeltaCalculator.DefaultMaxGapSeconds} seconds'", sql, StringComparison.Ordinal);
         /* interval_seconds > 0 guards the first row: its LAG is NULL, its rate unknowable, and the CASE has no
            ELSE — NULL, not a fabricated 0 (#3653; #3642 on the MCP copies). The reader skips the row. */
         Assert.Contains("CASE WHEN interval_seconds > 0 THEN", sql, StringComparison.Ordinal);
