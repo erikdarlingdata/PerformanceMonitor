@@ -43,6 +43,12 @@ public partial class ServerTab : UserControl
     private readonly int _serverId;
     public int ServerId => _serverId;
     public ServerConnection Server => _server;
+
+    /// <summary>The server name line at the top of the tab (#7212). Only the text: the tab keeps its server record and its store key.</summary>
+    public void ShowServerName(ServerConnection server)
+    {
+        ServerNameText.Text = server.ReadOnlyIntent ? $"{server.DisplayName} (Read-Only)" : server.DisplayName;
+    }
     private readonly CredentialResolver _credentialResolver;
     private readonly DispatcherTimer _refreshTimer;
     private bool _refreshPendingWhileHidden;
@@ -199,7 +205,7 @@ public partial class ServerTab : UserControl
         _engineEdition = sqlEngineEdition;
         ServerTimeHelper.ActiveServerClock = _serverClock;
 
-        ServerNameText.Text = server.ReadOnlyIntent ? $"{server.DisplayName} (Read-Only)" : server.DisplayName;
+        ShowServerName(server);
         ConnectionStatusText.Text = "Connecting...";
 
         /* Apply default time range from settings */
