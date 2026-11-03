@@ -143,8 +143,11 @@ public sealed class WebFetchLayerTests
         // (views.js's renderAlertCell) needs to know when a panel's load reaches a terminal state so it can
         // free the slot. The render-signal capture/apply behaviour this pin protects is unchanged: renderPanel
         // still captures panelSignal synchronously and threads it straight through to the fetch.
-        Assert.Contains("export function renderPanel(desc, onSettled) {", panels, StringComparison.Ordinal);
-        Assert.Contains("async function loadPanel(desc, body, signal, onSettled) {", panels, StringComparison.Ordinal);
+        // #7257: renderPanel grew an optional `gate` (the custom view page runs two panels at a time) and
+        // loadPanel an optional `onRetry` (the Retry button on a read error). Without a gate the panel still
+        // loads at once with the signal captured here.
+        Assert.Contains("export function renderPanel(desc, onSettled, gate = null) {", panels, StringComparison.Ordinal);
+        Assert.Contains("async function loadPanel(desc, body, signal, onSettled, onRetry = null) {", panels, StringComparison.Ordinal);
         Assert.Contains("loadPanel(desc, body, signal, onSettled);", panels, StringComparison.Ordinal);
         Assert.Contains("if (res.kind === \"aborted\" || res.kind === \"auth\") {", panels, StringComparison.Ordinal);
     }

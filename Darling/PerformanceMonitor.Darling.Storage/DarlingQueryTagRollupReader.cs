@@ -230,8 +230,16 @@ public static class DarlingQueryTagRollupReader
         NpgsqlDataSource postgres, string sql, QueryTagRollupSection section, int[] serverIds, DateTime startUtc, DateTime endUtc,
         DateTime? ceiling, CancellationToken cancellationToken, int readSeconds = DefaultReadSeconds)
     {
-        var text = sql.Replace(QueryTagRollupSql.CeilingPlaceholder, ceiling is null ? string.Empty : QueryTagRollupSql.CeilingClause, StringComparison.Ordinal);
+        var text = sql
+            .Replace(QueryTagRollupSql.CeilingPlaceholder, ceiling is null ? string.Empty : QueryTagRollupSql.CeilingClause, StringComparison.Ordinal)
+            .Replace(QueryTagRollupSql.EventFloorPlaceholder, QueryTagRollupSql.EventFloorClause, StringComparison.Ordinal);
         await using var command = Command(postgres, text, serverIds, startUtc, endUtc, readSeconds);
+        if (sql.Contains(QueryTagRollupSql.EventFloorPlaceholder, StringComparison.Ordinal))
+        {
+            /* $4: the collection_time floor beside the event window, so TimescaleDB can leave the older chunks closed (#7204). */
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = EventWindowFloor.For(startUtc) });
+        }
+
         if (ceiling is not null && sql.Contains(QueryTagRollupSql.CeilingPlaceholder, StringComparison.Ordinal))
         {
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(ceiling.Value, DateTimeKind.Unspecified) });
@@ -277,6 +285,8 @@ public static class DarlingQueryTagRollupReader
         {
             /* The ceiling + 1 as the fetch: the extra row is the observed truncation signal. */
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DeadlockScanCeiling + 1 });
+            /* $5: the collection_time floor beside the event window, so TimescaleDB can leave the older chunks closed (#7204). */
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = EventWindowFloor.For(startUtc) });
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             var read = 0;
             while (await reader.ReadAsync(cancellationToken))

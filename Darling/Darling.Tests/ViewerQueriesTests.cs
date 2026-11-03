@@ -623,6 +623,7 @@ public sealed class ViewerQueriesLivePostgresTests
     private const int ComparisonServerId = -970804;
     private const int SlicerServerId = -970805;
     private const int ProcedureStatsPlanServerId = -970806;
+    private const int ProcedureStatsRecompiledServerId = -971175;
     private const int RegressionsServerId = -970807;
     private const int ModuleAttributionServerId = -970808;
     private const int DedupServerId = -970809;
@@ -816,6 +817,61 @@ public sealed class ViewerQueriesLivePostgresTests
         {
             await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
                 await DeleteRowsAsync(cleanup, "procedure_stats", ProcedureStatsPlanServerId, cleanupCt));
+        }
+    }
+
+    /// <summary>
+    /// #7175: a procedure that recompiled has a row per plan_handle. The history window's per-row Download and View
+    /// Stored Plan pass the row's own plan_handle, so an older snapshot reads its own plan, not the newest one.
+    /// </summary>
+    [Fact]
+    public async Task ProcedureStatsPlan_RowPlanHandle_ReturnsThatRowsPlan_NotTheNewest_AgainstDevPostgres()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live row-plan test.");
+
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
+        await DeleteRowsAsync(connection, "procedure_stats", ProcedureStatsRecompiledServerId, TestContext.Current.CancellationToken);
+
+        await using var viewer = new ViewerDataService(cs!);
+        var t = TruncateToSeconds(DateTime.UtcNow).AddHours(-2);
+
+        var bodySucceeded = false;
+        try
+        {
+            await InsertProcedureStatsAsync(connection, ProcedureStatsRecompiledServerId, t, "StackOverflow", "dbo", "usp_Recompiled", "PROC",
+                deltaExec: 1, deltaWorker: 10_000, deltaElapsed: 20_000, deltaReads: 100, planXml: "<ShowPlanXML>old</ShowPlanXML>", planHandle: "0xOLDHANDLE");
+            await InsertProcedureStatsAsync(connection, ProcedureStatsRecompiledServerId, t.AddMinutes(30), "StackOverflow", "dbo", "usp_Recompiled", "PROC",
+                deltaExec: 1, deltaWorker: 10_000, deltaElapsed: 20_000, deltaReads: 100, planXml: "<ShowPlanXML>new</ShowPlanXML>", planHandle: "0xNEWHANDLE");
+
+            Assert.Equal("<ShowPlanXML>old</ShowPlanXML>",
+                await viewer.GetProcedureStatsPlanXmlAsync(ProcedureStatsRecompiledServerId, "StackOverflow", "dbo", "usp_Recompiled", "0xOLDHANDLE"));
+            Assert.Equal("<ShowPlanXML>new</ShowPlanXML>",
+                await viewer.GetProcedureStatsPlanXmlAsync(ProcedureStatsRecompiledServerId, "StackOverflow", "dbo", "usp_Recompiled", "0xNEWHANDLE"));
+            /* The read names the snapshot it picked, and flags a substitution (#7175): the window files the
+               plan under that snapshot's time, not the clicked row's. */
+            var own = await viewer.GetProcedureStatsPlanAsync(ProcedureStatsRecompiledServerId, "StackOverflow", "dbo", "usp_Recompiled", "0xOLDHANDLE");
+            Assert.NotNull(own);
+            Assert.False(own.IsFallback);
+            Assert.Equal(t, own.CollectionTime);
+            var substituted = await viewer.GetProcedureStatsPlanAsync(ProcedureStatsRecompiledServerId, "StackOverflow", "dbo", "usp_Recompiled", "0xNEVERSTORED");
+            Assert.NotNull(substituted);
+            Assert.True(substituted.IsFallback);
+            Assert.Equal(t.AddMinutes(30), substituted.CollectionTime); /* the newest plan's snapshot, not the asked-for one */
+            /* No handle (the Top Procedures row) and a handle with no stored plan both read the newest plan. */
+            Assert.Equal("<ShowPlanXML>new</ShowPlanXML>",
+                await viewer.GetProcedureStatsPlanXmlAsync(ProcedureStatsRecompiledServerId, "StackOverflow", "dbo", "usp_Recompiled"));
+            Assert.Equal("<ShowPlanXML>new</ShowPlanXML>",
+                await viewer.GetProcedureStatsPlanXmlAsync(ProcedureStatsRecompiledServerId, "StackOverflow", "dbo", "usp_Recompiled", "0xNEVERSTORED"));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, "procedure_stats", ProcedureStatsRecompiledServerId, cleanupCt));
         }
     }
 
@@ -1436,7 +1492,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
     private static async Task InsertProcedureStatsAsync(
         NpgsqlConnection connection, int serverId, DateTime collectionTimeUtc,
         string databaseName, string schemaName, string objectName, string objectType,
-        long deltaExec, long deltaWorker, long deltaElapsed, long deltaReads, string? planXml = null, string sqlHandle = "0xSQLHANDLE")
+        long deltaExec, long deltaWorker, long deltaElapsed, long deltaReads, string? planXml = null, string sqlHandle = "0xSQLHANDLE", string planHandle = "0xPLANHANDLE")
     {
         using var command = new NpgsqlCommand(@"
 INSERT INTO procedure_stats
@@ -1457,7 +1513,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         command.Parameters.AddWithValue(DateTime.SpecifyKind(collectionTimeUtc.AddHours(-1), DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(DateTime.SpecifyKind(collectionTimeUtc, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(sqlHandle);
-        command.Parameters.AddWithValue("0xPLANHANDLE");
+        command.Parameters.AddWithValue(planHandle);
         command.Parameters.AddWithValue(deltaExec);
         command.Parameters.AddWithValue(deltaWorker);
         command.Parameters.AddWithValue(deltaElapsed);

@@ -123,7 +123,18 @@ FROM
         /// <see cref="ComposeLimits.StampRowWeight"/> per wide row; the rest, the tail the stamp has not reached, counts at 1.0.
         /// With no <paramref name="stampThrough"/> every hour counts at 1.0, which is the figure before the stamp existed.
         /// </summary>
-        public long RowsOver(DateTime countedStart, DateTime countedEnd, DateTime? stampThrough)
+        public long RowsOver(DateTime countedStart, DateTime countedEnd, DateTime? stampThrough) =>
+            RowsOver(countedStart, countedEnd, stampThrough, null);
+
+        /// <summary>
+        /// #7285: <see cref="RowsOver(DateTime, DateTime, DateTime?)"/> for a panel that reads the fleet rollup. The hours the fleet table
+        /// serves (<see cref="FleetServing.Hours"/>) leave the stamp-weighted part, and their rows count from the fleet table's own row
+        /// count at <see cref="ComposeLimits.FleetRowWeight"/> each, because the fleet table's size does not follow the servers' wide
+        /// rows. The stamp hours the fleet table does not serve (an hour whose fleet build is behind) stay at the stamp weight, and the
+        /// tail after <paramref name="stampThrough"/> stays at 1.0 per wide row. With no <paramref name="fleet"/> this is exactly
+        /// the figure above.
+        /// </summary>
+        public long RowsOver(DateTime countedStart, DateTime countedEnd, DateTime? stampThrough, FleetServing? fleet)
         {
             var days = Math.Max(0d, (countedEnd - countedStart).TotalDays);
             if (stampThrough is not { } through)
@@ -132,8 +143,68 @@ FROM
             }
 
             var stampedDays = Math.Clamp((through - countedStart).TotalDays, 0d, days);
-            var weighted = (days - stampedDays) + (stampedDays * ComposeLimits.StampRowWeight);
-            return (long)Math.Ceiling(DailyRows * weighted) + RawRows;
+            var fleetDays = fleet is { } served ? Math.Min(served.Hours / 24d, stampedDays) : 0d;
+            var weighted = (days - stampedDays) + ((stampedDays - fleetDays) * ComposeLimits.StampRowWeight);
+            var fleetRows = fleet is { } rowsServed ? (long)Math.Ceiling(rowsServed.Rows * ComposeLimits.FleetRowWeight) : 0L;
+            return (long)Math.Ceiling(DailyRows * weighted) + fleetRows + RawRows;
+        }
+    }
+
+    /// <summary>
+    /// #7285: the part of a stamp-served range the fleet rollup serves, from the fleet table itself. <c>Hours</c> are the hours of the
+    /// range in which no pair of the build ledger is unfit for the fleet table (the test the compiled statement applies per hour, so
+    /// the hours counted here are the ones its fleet arm reads), and <c>Rows</c> are the fleet table's rows in those hours and the range.
+    /// </summary>
+    internal readonly record struct FleetServing(int Hours, long Rows);
+
+    /// <summary>
+    /// #7285: the fleet-served hours of <c>[$1, $2)</c> (counted start, stamp-through) and the fleet table's rows in them. An hour is
+    /// fleet-served when the ledger has a row for it and none of its pairs is behind its late writes or its fleet build
+    /// (<c>built_seq</c> and <c>fleet_built_seq</c> both equal <c>late_seq</c>), the per-hour test <c>ComposeCompiler.BuildStampRelation</c>
+    /// puts in the fleet arm. One pass over the ledger finds the hours, then one range count per hour on the fleet table's
+    /// <c>(collection_time)</c> index, bounded to the range so the first hour is counted from the start only.
+    /// </summary>
+    internal const string FleetServingSql = @"
+WITH fit AS
+(
+    SELECT b.hour
+    FROM collect.query_store_compose_stamp_built AS b
+    WHERE b.hour >= date_trunc('hour', $1::timestamp)
+      AND b.hour < $2::timestamp
+    GROUP BY b.hour
+    HAVING bool_and(b.built_seq IS NOT DISTINCT FROM b.late_seq AND b.fleet_built_seq IS NOT DISTINCT FROM b.late_seq)
+)
+SELECT COUNT(*)::integer, COALESCE(SUM(c.n), 0)::bigint
+FROM fit
+CROSS JOIN LATERAL
+(
+    SELECT COUNT(*) AS n
+    FROM collect.query_store_compose_fleet AS f
+    WHERE f.collection_time >= GREATEST(fit.hour, $1::timestamp)
+      AND f.collection_time < LEAST(fit.hour + interval '1 hour', $2::timestamp)
+) AS c;";
+
+    /// <summary>
+    /// #7285: reads <see cref="FleetServing"/> for the counted range up to <paramref name="stampThrough"/>. Null on any fault other than
+    /// cancellation: the estimate then counts every stamped hour at the stamp weight, which is the figure before the fleet table.
+    /// </summary>
+    internal static async Task<FleetServing?> FleetServingAsync(
+        NpgsqlDataSource postgres, DateTime countedStart, DateTime stampThrough, ILogger? logger,
+        int commandTimeoutSeconds, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+            await using var command = new NpgsqlCommand(FleetServingSql, connection) { CommandTimeout = commandTimeoutSeconds };
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(countedStart, DateTimeKind.Unspecified) });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(stampThrough, DateTimeKind.Unspecified) });
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            return await reader.ReadAsync(cancellationToken) ? new FleetServing(reader.GetInt32(0), reader.GetInt64(1)) : null;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogDebug(ex, "The #7285 Query Store fleet-table size could not be read; the guard counts the stamped hours at the stamp weight.");
+            return null;
         }
     }
 
@@ -394,7 +465,7 @@ WHERE b.daily_rows IS NOT NULL
     /// </summary>
     internal static string? Refusal(
         Estimate? estimate, DateTime countedStart, DateTime countedEnd, long limit = ComposeLimits.MaxQueryStoreWideRows,
-        DateTime? stampThrough = null)
+        DateTime? stampThrough = null, FleetServing? fleet = null)
     {
         /* #6115: a split panel whose wide half counts no server still has a raw half to refuse. */
         if (estimate is not { } found || (found.Servers == 0 && found.RawServers == 0))
@@ -403,7 +474,7 @@ WHERE b.daily_rows IS NOT NULL
         }
 
         var servers = found.Servers + found.RawServers;
-        var rows = found.RowsOver(countedStart, countedEnd, stampThrough);
+        var rows = found.RowsOver(countedStart, countedEnd, stampThrough, fleet);
         if (rows <= limit)
         {
             return null;
@@ -425,8 +496,21 @@ WHERE b.daily_rows IS NOT NULL
     internal static async Task<string?> CheckAsync(
         NpgsqlDataSource postgres, IReadOnlyList<string>? serverScope, DateTime countedStart, DateTime countedEnd,
         ILogger? logger, int commandTimeoutSeconds, CancellationToken cancellationToken, long limit = ComposeLimits.MaxQueryStoreWideRows,
-        DateTime? stampThrough = null, IReadOnlyList<int>? excludedServerIds = null, DateTime? rawCountedStart = null) =>
-        Refusal(await EstimateSplitAsync(postgres, serverScope, countedEnd, logger, excludedServerIds, rawCountedStart ?? countedStart, commandTimeoutSeconds, cancellationToken, countedStart), countedStart, countedEnd, limit, stampThrough);
+        DateTime? stampThrough = null, IReadOnlyList<int>? excludedServerIds = null, DateTime? rawCountedStart = null, bool readsFleetRollup = false)
+    {
+        var estimate = await EstimateSplitAsync(postgres, serverScope, countedEnd, logger, excludedServerIds, rawCountedStart ?? countedStart, commandTimeoutSeconds, cancellationToken, countedStart);
+
+        /* #7285: a panel the compiled statement sends to the fleet rollup counts the hours that table serves from its own size: the same
+           guard and the same refusal as the stamp's hours. Asked only when the stamp-weighted figure alone is over the limit, since a
+           figure that already fits cannot be made to refuse by it. */
+        FleetServing? fleet = null;
+        if (readsFleetRollup && stampThrough is { } through && Refusal(estimate, countedStart, countedEnd, limit, through) is not null)
+        {
+            fleet = await FleetServingAsync(postgres, countedStart, through, logger, commandTimeoutSeconds, cancellationToken);
+        }
+
+        return Refusal(estimate, countedStart, countedEnd, limit, stampThrough, fleet);
+    }
 
     /// <summary>The collector the Query Store raw half of a split panel is counted under in the collection log (#6115): the Query Store
     /// collector's own name, whose <c>rows_collected</c> is what it stored into <c>collect.query_store_stats</c>.</summary>

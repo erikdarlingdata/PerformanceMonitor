@@ -32,6 +32,15 @@ public static class QueryTagRollupSql
     /// <summary>The ceiling bound, with the shape the hourly top-N reads bind.</summary>
     public const string CeilingClause = " AND f.bucket < $4";
 
+    /// <summary>Where a statement windowed on an event's own timestamp carries the <c>collection_time</c> floor (#7204); replaced by
+    /// <see cref="EventFloorClause"/> in <see cref="DarlingQueryTagRollupReader.ReadFactsAsync"/>, which then binds $4 from
+    /// <c>EventWindowFloor.For(windowStart)</c>. Never beside <see cref="CeilingPlaceholder"/>: both are $4.</summary>
+    public const string EventFloorPlaceholder = "$FLOOR$";
+
+    /// <summary>The floor bound: the hypertable is partitioned on <c>collection_time</c>, so a read bounded only on the event's own
+    /// timestamp opens every retained chunk (see <see cref="EventWindowFloor"/>).</summary>
+    public const string EventFloorClause = " AND r.collection_time >= $4";
+
     /// <summary>Every tag: id, name, parent. The tree maths (own figure, subtree figure) runs over this in C#.</summary>
     public const string TagTreeSql = "SELECT id, name, parent_id FROM config.query_tags ORDER BY id";
 
@@ -291,6 +300,7 @@ public static class QueryTagRollupSql
     /// the wait so far, so summing the rows added a wait up about eleven times over a one-minute wait. <c>blocked_ms</c> and
     /// <c>caused_ms</c> are the longest report of each wait and the counts are waits; a parallel query's thread waiting on its own
     /// session is no wait (<see cref="BlockingWaits.NotSelfWaitSql"/>). The tag keys are the longest report's caller columns.
+    /// <see cref="EventFloorPlaceholder"/> (#7204) adds the <c>collection_time</c> floor ($4) inside the CTE, so the chunk exclusion applies before the collapse.
     /// The columns keep the names <c>blocked_reports</c> and <c>caused_reports</c>, the section's contract.
     /// </summary>
     public static readonly string BlockingReportsSql = BlockingSql(
@@ -299,9 +309,9 @@ public static class QueryTagRollupSql
             """
             SELECT server_id, blocked_spid, blocking_spid, event_time, wait_time_ms, database_name,
                    blocked_client_app, blocked_login_name, blocked_host_name, blocking_client_app, blocking_login_name, blocking_host_name
-            FROM collect.blocked_process_reports
+            FROM collect.blocked_process_reports AS r
             WHERE server_id = ANY($1) AND event_time >= $2 AND event_time <= $3
-            """,
+            """ + EventFloorPlaceholder,
             ["server_id"]) + "\n",
         "rw", string.Empty, "blocked_reports", "caused_reports");
 
@@ -310,13 +320,14 @@ public static class QueryTagRollupSql
         string.Empty, "collect.dmv_blocking_snapshots",
         " AND r.collection_time >= $2 AND r.collection_time <= $3 AND " + BlockingWaits.NotSelfWaitSql, "blocked_snapshots", "caused_snapshots");
 
-    /// <summary>The deadlock graphs of the window, newest first, up to $4; the processes are parsed in C# (a graph is XML).</summary>
+    /// <summary>The deadlock graphs of the window, newest first, up to $4; the processes are parsed in C# (a graph is XML). $5 is the <c>collection_time</c> floor (<see cref="EventWindowFloor"/>, #7204): without it the fleet read opens and sorts every retained chunk.</summary>
     public const string DeadlockGraphsSql = """
         SELECT server_id, deadlock_id, deadlock_graph_xml, deadlock_time
         FROM collect.deadlocks
         WHERE server_id = ANY($1)
         AND   deadlock_time >= $2
         AND   deadlock_time <= $3
+        AND   collection_time >= $5
         ORDER BY deadlock_time DESC, deadlock_id DESC
         LIMIT $4
         """;

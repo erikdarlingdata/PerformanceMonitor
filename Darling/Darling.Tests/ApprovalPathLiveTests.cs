@@ -227,7 +227,7 @@ public sealed partial class ApprovalPathLiveTests(PostgresKillLiveTests.ScramTls
             Assert.Equal(InvestigationRequestStore.ProposalPressCodes.OtherApprover, other.Code);
 
             /* The store's own first transaction refuses it too, so a caller that skips the press class cannot confirm for another person. */
-            var direct = await c.Requests.ApproveProposalForRunAsync(proposalId, b, c.Hooks, c.Ct);
+            var direct = await c.Requests.ApproveProposalForRunAsync(proposalId, b, c.Hooks, null, c.Ct);
             Assert.Equal(InvestigationRequestStore.ProposalPressCodes.OtherApprover, direct.Refusal?.Reason);
 
             Assert.Equal("pending", await c.StateAsync(proposalId));
@@ -334,7 +334,7 @@ public sealed partial class ApprovalPathLiveTests(PostgresKillLiveTests.ScramTls
             var approver = await c.PersonAsync("Approver A");
             Assert.Equal("first_pressed", (await c.Press().FirstPressAsync(proposalId, approver, c.Ct)).Status);
 
-            var approval = await c.Requests.ApproveProposalForRunAsync(proposalId, approver, c.Hooks, c.Ct);
+            var approval = await c.Requests.ApproveProposalForRunAsync(proposalId, approver, c.Hooks, null, c.Ct);
             Assert.Null(approval.Refusal);
             await c.ScalarAsync("UPDATE config.config_service SET agent_actions_enabled = FALSE WHERE id = 1");
 
@@ -354,6 +354,40 @@ public sealed partial class ApprovalPathLiveTests(PostgresKillLiveTests.ScramTls
             /* A permit runs once. */
             var second = await c.Requests.RunApprovedActionAsync(approval.Permit!, c.Hooks, _ => Task.FromResult(new ApprovedWriteOutcome("run", "x")), c.Ct);
             Assert.Equal(InvestigationRequestStore.ProposalPressCodes.AlreadyRun, second.Code);
+        });
+    }
+
+    /// <summary>A store failure between the approval and the write (#7206; here the credential read throws) journals action_failed with the
+    /// called id and ends the proposal failed, instead of leaving action_called with no result. The write never runs.</summary>
+    [Fact]
+    public async Task AStoreFailureBeforeTheWrite_JournalsActionFailed_AndEndsTheProposalFailed()
+    {
+        await RunAsync(singlePerson: false, async c =>
+        {
+            var (connection, pid, proposalId) = await c.ProposeKillAsync();
+            await using var victim = connection;
+            var approver = await c.PersonAsync("Approver A");
+            Assert.Equal("first_pressed", (await c.Press().FirstPressAsync(proposalId, approver, c.Ct)).Status);
+
+            var approval = await c.Requests.ApproveProposalForRunAsync(proposalId, approver, c.Hooks, c.Ct);
+            Assert.Null(approval.Refusal);
+            var failing = new ApprovedActionHooks
+            {
+                LoadRoutes = c.Hooks.LoadRoutes,
+                ReadCredential = (_, _) => throw new InvalidOperationException("store went away"),
+            };
+
+            var wrote = false;
+            var thrown = await Assert.ThrowsAsync<InvalidOperationException>(() => c.Requests.RunApprovedActionAsync(approval.Permit!, failing, _ =>
+            {
+                wrote = true;
+                return Task.FromResult(new ApprovedWriteOutcome("run", "written"));
+            }, c.Ct));
+            Assert.Equal("store went away", thrown.Message);
+            Assert.False(wrote);
+            Assert.Equal("failed", await c.StateAsync(proposalId));
+            Assert.Equal(1, await c.JournalAsync("action_failed"));
+            Assert.True(await c.AliveAsync(pid, polls: 10));
         });
     }
 

@@ -190,6 +190,8 @@ public partial class SettingsWindow : Window
 
     private void ServerScheduleGrid_DoubleClick(object sender, MouseButtonEventArgs e)
     {
+        // A double-click on a column header, the scrollbar or the empty area is not a row (#7210).
+        if (!DataGridRowHit.IsOnRow(e.OriginalSource)) return;
         OpenServerScheduleEditor();
     }
 

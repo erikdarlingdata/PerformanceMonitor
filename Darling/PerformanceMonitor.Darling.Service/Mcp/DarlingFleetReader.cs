@@ -1316,8 +1316,11 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
             TotalThreads = threads.TotalThreads,
             CurrentWorkers = threads.CurrentWorkers,
             AvailableThreads = availableThreads,
-            ThreadsWaitingForCpu = threads.RunnableTasks,
-            RequestsWaitingForThreads = threads.WorkQueue,
+            /* #7195: a target with no scheduler snapshot (every PostgreSQL target, or a SQL Server whose
+               scheduler collector has not run) gets a default ThreadsRow, whose zeros are not readings.
+               The whole threads block is null there, as the tool description says. */
+            ThreadsWaitingForCpu = threads.TotalThreads.HasValue ? threads.RunnableTasks : null,
+            RequestsWaitingForThreads = threads.TotalThreads.HasValue ? threads.WorkQueue : null,
             ThreadsSeverity = ServerHealthClassifier.ThreadsSeverity(threads.TotalThreads, availableThreads, threads.RunnableTasks, threads.WorkQueue),
             /* #6874: set only when the Agent alert setup has a gap. The Band below is not read from it. */
             AgentAlertGaps = agentAlertGaps is { Count: > 0 } ? agentAlertGaps : null,
@@ -3081,8 +3084,8 @@ public sealed class FleetServerCard
     [JsonPropertyName("total_threads")] public int? TotalThreads { get; init; }
     [JsonPropertyName("current_workers")] public int? CurrentWorkers { get; init; }
     [JsonPropertyName("available_threads")] public int? AvailableThreads { get; init; }
-    [JsonPropertyName("threads_waiting_for_cpu")] public int ThreadsWaitingForCpu { get; init; }
-    [JsonPropertyName("requests_waiting_for_threads")] public long RequestsWaitingForThreads { get; init; }
+    [JsonPropertyName("threads_waiting_for_cpu")] public int? ThreadsWaitingForCpu { get; init; }
+    [JsonPropertyName("requests_waiting_for_threads")] public long? RequestsWaitingForThreads { get; init; }
     [JsonPropertyName("threads_severity")] public HealthSeverity ThreadsSeverity { get; init; }
 
     [JsonPropertyName("healthy_collector_count")] public int HealthyCollectorCount { get; init; }
@@ -3197,8 +3200,8 @@ public sealed class FleetServerCard
         BlockingBandThresholds = BlockingBandThresholds,
         TotalThreads = TotalThreads,
         AvailableThreads = AvailableThreads,
-        ThreadsWaitingForCpu = ThreadsWaitingForCpu,
-        RequestsWaitingForThreads = RequestsWaitingForThreads,
+        ThreadsWaitingForCpu = ThreadsWaitingForCpu ?? 0,
+        RequestsWaitingForThreads = RequestsWaitingForThreads ?? 0,
         FailedCollectorCount = FailedCollectorCount,
         /* #3539 A8d: the share's denominator, or the re-band would grade presence-flat again. */
         CollectorCount = CollectorCount,

@@ -223,27 +223,34 @@ public partial class AlertsHistoryTab : UserControl
         }
     }
 
-    private void PopulateServerFilter(List<AlertHistoryRow> alerts)
+    /// <summary>
+    /// Brings the Server filter combo up to date after a read (#7211): "All Servers" first, then every server already on offer plus
+    /// those in the read. The list only grows (<see cref="JobHistoryFilterChoices.MergeServers"/>, as on the Job History tab, #5703), so
+    /// a read narrowed to one server, or to a window where the picked server has no alerts, never removes a choice and the operator can
+    /// always pick another server or go back to All. The picked server is kept, and a pick that cannot be found falls back to
+    /// "All Servers" on purpose instead of leaving the combo blank while the grid reads every server.
+    /// </summary>
+    internal void PopulateServerFilter(List<AlertHistoryRow> alerts)
     {
-        var servers = alerts
-            .Select(a => (a.ServerId, a.ServerName))
-            .Where(s => !string.IsNullOrEmpty(s.ServerName))
-            .Distinct()
-            .OrderBy(s => s.ServerName)
+        var offered = ServerFilterComboBox.Items
+            .OfType<ComboBoxItem>()
+            .Skip(1)
+            .Where(i => int.TryParse(i.Tag?.ToString(), out _))
+            .Select(i => new JobHistoryFilterChoices.ServerChoice(int.Parse(i.Tag!.ToString()!), i.Content?.ToString() ?? string.Empty))
             .ToList();
 
         var currentSelection = ServerFilterComboBox.SelectedIndex > 0
             ? (ServerFilterComboBox.SelectedItem as ComboBoxItem)?.Tag?.ToString()
             : null;
 
-        var existingIds = ServerFilterComboBox.Items
-            .OfType<ComboBoxItem>()
-            .Skip(1)
-            .Select(i => i.Tag?.ToString())
-            .ToList();
+        var servers = JobHistoryFilterChoices.MergeServers(
+            offered,
+            [],
+            alerts.Select(a => new JobHistoryFilterChoices.ServerChoice(a.ServerId, a.ServerName ?? string.Empty)));
 
         var newIds = servers.Select(s => s.ServerId.ToString()).ToList();
-        if (newIds.SequenceEqual(existingIds)) return;
+        var existingIds = offered.Select(o => o.ServerId.ToString()).ToList();
+        if (newIds.SequenceEqual(existingIds) && ServerFilterComboBox.SelectedIndex >= 0) return;
 
         ServerFilterComboBox.SelectionChanged -= ServerFilterComboBox_SelectionChanged;
 
@@ -259,18 +266,20 @@ public partial class AlertsHistoryTab : UserControl
             });
         }
 
+        var picked = 0;
         if (currentSelection != null)
         {
             for (int i = 1; i < ServerFilterComboBox.Items.Count; i++)
             {
                 if ((ServerFilterComboBox.Items[i] as ComboBoxItem)?.Tag?.ToString() == currentSelection)
                 {
-                    ServerFilterComboBox.SelectedIndex = i;
+                    picked = i;
                     break;
                 }
             }
         }
 
+        ServerFilterComboBox.SelectedIndex = picked;
         ServerFilterComboBox.SelectionChanged += ServerFilterComboBox_SelectionChanged;
     }
 
@@ -278,7 +287,7 @@ public partial class AlertsHistoryTab : UserControl
     private (DateTime sinceUtc, DateTime? untilUtc) GetSelectedWindow()
         => LiteTimeRange.BoundsOf(RangePicker, 24, DateTime.UtcNow);
 
-    private int? GetSelectedServerId()
+    internal int? GetSelectedServerId()
     {
         if (ServerFilterComboBox.SelectedIndex > 0 &&
             ServerFilterComboBox.SelectedItem is ComboBoxItem item &&
@@ -579,13 +588,8 @@ public partial class AlertsHistoryTab : UserControl
     {
         if (sender is not DataGrid) return;
 
-        // Walk up the visual tree from the click target to find the DataGridRow
-        var source = e.OriginalSource as DependencyObject;
-        while (source != null && source is not DataGridRow && source is not DataGridColumnHeader)
-            source = System.Windows.Media.VisualTreeHelper.GetParent(source);
-
-        // Ignore clicks on column headers or outside rows
-        if (source is not DataGridRow row) return;
+        // Ignore clicks on column headers, the scrollbar or outside rows (#7210)
+        if (DataGridRowHit.RowOf(e.OriginalSource) is not { } row) return;
         if (row.DataContext is not AlertHistoryRow item) return;
 
         ShowDetail(item);
@@ -599,11 +603,14 @@ public partial class AlertsHistoryTab : UserControl
     private async void ShowDetail(AlertHistoryRow item)
     {
         IReadOnlyList<string>? attached = null;
-        if (_dataService is { } data && OpenEngineAlerts.IsAttachable(item.MetricName))
+        if (_dataService is { } dataService && OpenEngineAlerts.IsAttachable(item.MetricName))
         {
             try
             {
-                attached = await data.GetAttachedFindingsAsync(item);
+                /* The read takes the DuckDB read lock before its first await and DuckDB.NET's async methods complete
+                   synchronously, so awaited straight from this handler it would wait on archival or compaction and then
+                   run the query on the dispatcher. Task.Run keeps both off the UI thread (#7180). */
+                attached = await System.Threading.Tasks.Task.Run(() => dataService.GetAttachedFindingsAsync(item));
             }
             catch (Exception ex)
             {

@@ -9,6 +9,7 @@
 using System;
 using System.Windows;
 using System.Windows.Input;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -52,7 +53,14 @@ public partial class ManageCredentialProfilesDialog : Window
 
     private void EditButton_Click(object sender, RoutedEventArgs e) => EditSelected();
 
-    private void ProfilesGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e) => EditSelected();
+    /* A double-click on a column header, the scrollbar or the empty area is not a row (#7210). */
+    private void ProfilesGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e)
+    {
+        if (DataGridRowHit.IsOnRow(e.OriginalSource))
+        {
+            EditSelected();
+        }
+    }
 
     private void EditSelected()
     {
