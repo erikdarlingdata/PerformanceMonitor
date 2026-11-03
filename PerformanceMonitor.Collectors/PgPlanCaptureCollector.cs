@@ -134,6 +134,18 @@ public sealed class PgPlanCaptureCollector : PostgresCollectorDefinitionBase<PgP
        guard below (item 1, #4058) and the pattern's own literal stay ONE spelling. */
     private const string PlanMarkerLiteral = "LOG:  duration: ";
 
+    /* The block pattern both pg_read_file route statements splice (#7182): ONE spelling, so the two copies
+       cannot drift apart, and the SAME pattern as PgPlanLogParser.s_planBlock (the RDS API route's) rather
+       than a narrower one. The readiness rule for plan_attribution accepts a colon-separated prefix
+       ('%t:%r:%u@%d:[%p]:%Q '), so a pattern that read only the space family met that facet and stored
+       nothing. The colon alternative's character classes are the C# pattern's, which is what keeps a forged
+       '[1] 424242 LOG:  duration:' in a STATEMENT echo from being reached. Groups: (1) query id, (2) duration,
+       (3) the plan lines; the colon alternative is non-capturing, so the readers' m[1..3] are unchanged. */
+    internal const string PlanBlockPatternSql =
+        @"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)? "
+        + @"(?:[^ [\n]+ [^[\n]*\[\d+\]|[^ :\n]+:[^[\n]*\[\d+\])"
+        + @"[ :](-?\d+) " + PlanMarkerLiteral + @"([0-9.]+) ms  plan:\s*\n((?:\t[^\n]*\n)+)";
+
     /* The csvlog twin of PlanMarkerLiteral (#4053 part b2): csvlog's own "message" field never carries the
        severity label — that is its own column — so a captured record's message reads "duration: N ms
        plan:\n{json}" with no "LOG:  " head, verified live on a pg18 rig with logging_collector=on and
@@ -172,7 +184,7 @@ FROM (
     FROM tail
     CROSS JOIN LATERAL regexp_matches(
          tail.body,
-         '^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)? [^ [\n]+ [^[\n]*\[\d+\] (-?\d+) " + PlanMarkerLiteral + @"([0-9.]+) ms  plan:\s*\n((?:\t[^\n]*\n)+)',
+         '" + PlanBlockPatternSql + @"',
          'gn') WITH ORDINALITY AS mm(m, ord)
     ORDER BY tail.part DESC, mm.ord DESC
     LIMIT " + MatchFetchLiteral + @"
@@ -275,7 +287,7 @@ FROM (
     FROM tail
     CROSS JOIN LATERAL regexp_matches(
          pg_catalog.encode(tail.body, 'escape'),
-         '^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)? [^ [\n]+ [^[\n]*\[\d+\] (-?\d+) " + PlanMarkerLiteral + @"([0-9.]+) ms  plan:\s*\n((?:\t[^\n]*\n)+)',
+         '" + PlanBlockPatternSql + @"',
          'gn') WITH ORDINALITY AS mm(m, ord)
     WHERE pg_catalog.position(tail.body, '" + PlanMarkerLiteral + @"'::bytea) > 0
     ORDER BY tail.part DESC, mm.ord DESC

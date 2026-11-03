@@ -93,10 +93,9 @@ public static class PgPlanLogParser
        backtrack into that would ever reach a later one. Proven by re-adding the lazy form and watching
        PgPlanLogParserTests.AForgedHeaderBehindARealColonPrefixedBracket_StillYieldsNoPlan fail.
 
-       PgPlanCaptureCollector holds this pattern's counterpart for the pg_read_file route, as SQL and
-       narrower: self-hosted's own SQL regex only ever needed the space family (PostgreSQL's own default),
-       so it gained the same timestamp anchor without the colon alternative rather than a capability neither
-       transport asked for. */
+       PgPlanCaptureCollector.PlanBlockPatternSql is this same pattern spelled for SQL (#7182), for the
+       pg_read_file route: both families, the same character classes, so the two routes read the same
+       prefixes and the readiness rule can be one rule for both. */
     /* Every pattern in this type runs under this match bound (the same one PgSettingRedactor.TimeBoundPattern
        carries on the fingerprint pair below). A match that runs out of time withholds what it was reading:
        FromBlock skips that one plan, Extract stops with the plans it has already taken. */
