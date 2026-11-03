@@ -335,26 +335,39 @@ AND   f.hour < $2";
     }
 
     /// <summary>
-    /// What the routed statement's hourly arm reads (#7240 step 4): the servers in scope, one hour range <c>[From, To)</c> and the gaps inside
-    /// it, as parallel arrays, each gap <c>[start, end)</c> of one server. The arm reads the range for the servers and removes the gaps with
-    /// an anti-join, which replaces the list of every <c>(hour, server)</c> pair. Derived from <see cref="Plan.TablePairs"/> alone, so the
-    /// rows read are exactly the table pairs: for each server, every hour of the range that is not one of its pairs lies in a gap. Those are
-    /// the hours the plan sends elsewhere (an hour not built or stale for the pair, which the wide table answers; an hour of a taken day,
-    /// which the day table answers) and the hours before a server's own start or after its last table hour. With no table pair the arm reads
-    /// nothing: no servers, an empty range.
+    /// What the routed statement's hourly arm reads (#7240 step 4): the servers in scope, the hour ranges <c>[RangeFrom, RangeTo)</c> and the
+    /// gaps inside them, as parallel arrays, each gap <c>[start, end)</c> of one server. A range is one contiguous run of hours that some
+    /// server reads from the hourly table, so the arm never scans the hours between runs. Those are the whole days the day table answers:
+    /// their hourly rows stay in the table until the garbage collection removes them, and one range over the first to the last table hour would
+    /// scan them and then drop them in the anti-join. The arm reads the ranges for the servers and removes the gaps with an anti-join, which
+    /// replaces the list of every <c>(hour, server)</c> pair. Derived from <see cref="Plan.TablePairs"/> alone, so the rows read are exactly the
+    /// table pairs: for each server, every hour of a range that is not one of its pairs lies in a gap. Those are the hours the plan sends
+    /// elsewhere (an hour not built or stale for the pair, which the wide table answers; an hour of a day taken for another server only) and
+    /// the hours before a server's own start or after its last hour in the run. With no table pair the arm reads nothing: no servers, no ranges.
     /// </summary>
-    internal sealed record HourlyRead(int[] Servers, DateTime From, DateTime To, int[] GapServers, DateTime[] GapFrom, DateTime[] GapTo);
+    internal sealed record HourlyRead(int[] Servers, DateTime[] RangeFrom, DateTime[] RangeTo, int[] GapServers, DateTime[] GapFrom, DateTime[] GapTo);
 
     internal static HourlyRead HourlyReadFor(Plan plan, DateTime windowEnd)
     {
         if (plan.TablePairs.Count == 0)
         {
-            var none = DateTime.SpecifyKind(windowEnd, DateTimeKind.Unspecified);
-            return new HourlyRead([], none, none, [], [], []);
+            return new HourlyRead([], [], [], [], [], []);
         }
 
-        var from = plan.TablePairs.Min(p => p.Hour);
-        var to = plan.TablePairs.Max(p => p.Hour).Add(Hour);
+        /* Runs of consecutive hours that any server reads from the table. */
+        var runs = new List<(DateTime From, DateTime To)>();
+        foreach (var hour in plan.TablePairs.Select(p => p.Hour).Distinct().Order())
+        {
+            if (runs.Count > 0 && runs[^1].To == hour)
+            {
+                runs[^1] = (runs[^1].From, hour.Add(Hour));
+            }
+            else
+            {
+                runs.Add((hour, hour.Add(Hour)));
+            }
+        }
+
         var servers = new List<int>();
         var gapServers = new List<int>();
         var gapFrom = new List<DateTime>();
@@ -362,34 +375,41 @@ AND   f.hour < $2";
         foreach (var server in plan.TablePairs.GroupBy(p => p.ServerId).OrderBy(g => g.Key))
         {
             servers.Add(server.Key);
-            var cursor = from;
-            foreach (var hour in server.Select(p => p.Hour).Distinct().Order())
+            var hours = server.Select(p => p.Hour).Distinct().Order().ToList();
+            var next = 0;
+            foreach (var run in runs)
             {
-                if (hour > cursor)
+                var cursor = run.From;
+                while (next < hours.Count && hours[next] < run.To)
+                {
+                    if (hours[next] > cursor)
+                    {
+                        gapServers.Add(server.Key);
+                        gapFrom.Add(cursor);
+                        gapTo.Add(hours[next]);
+                    }
+
+                    cursor = hours[next].Add(Hour);
+                    next++;
+                }
+
+                if (cursor < run.To)
                 {
                     gapServers.Add(server.Key);
                     gapFrom.Add(cursor);
-                    gapTo.Add(hour);
+                    gapTo.Add(run.To);
                 }
-
-                cursor = hour.Add(Hour);
-            }
-
-            if (cursor < to)
-            {
-                gapServers.Add(server.Key);
-                gapFrom.Add(cursor);
-                gapTo.Add(to);
             }
         }
 
         static DateTime Unspecified(DateTime value) => DateTime.SpecifyKind(value, DateTimeKind.Unspecified);
         return new HourlyRead(
-            servers.ToArray(), Unspecified(from), Unspecified(to), gapServers.ToArray(), gapFrom.Select(Unspecified).ToArray(), gapTo.Select(Unspecified).ToArray());
+            servers.ToArray(), runs.Select(r => Unspecified(r.From)).ToArray(), runs.Select(r => Unspecified(r.To)).ToArray(),
+            gapServers.ToArray(), gapFrom.Select(Unspecified).ToArray(), gapTo.Select(Unspecified).ToArray());
     }
 
     /// <summary>
-    /// The routed statement's command (<see cref="QueryTagRollupSql.QueryStoreRoutedSqlFor"/>): the hourly arm's range, servers and gaps
+    /// The routed statement's command (<see cref="QueryTagRollupSql.QueryStoreRoutedSqlFor"/>): the hourly arm's servers, ranges and gaps
     /// (<see cref="HourlyReadFor"/>, $1 to $6), the window end ($7), the day pairs when the plan has any (two more arrays, $8 and $9), and one (servers, from, to) triple per DISTINCT wide range, each range with the servers that share it. The statement has
     /// one arm for each, so the planner sees every range's own bounds (#6800 part 2, step 2b).
     /// </summary>
@@ -404,8 +424,8 @@ AND   f.hour < $2";
         var hourly = HourlyReadFor(plan, windowEnd);
         var command = new NpgsqlCommand(QueryTagRollupSql.QueryStoreRoutedSqlFor(groups.Count, plan.UsesDays), connection) { CommandTimeout = readSeconds };
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer, Value = hourly.Servers });
-        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = hourly.From });
-        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = hourly.To });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Timestamp, Value = hourly.RangeFrom });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Timestamp, Value = hourly.RangeTo });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer, Value = hourly.GapServers });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Timestamp, Value = hourly.GapFrom });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Timestamp, Value = hourly.GapTo });

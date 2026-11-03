@@ -115,7 +115,7 @@ public static class QueryTagRollupSql
     /// The fleet form of <see cref="QueryStoreSql"/> (#6800 part 2, step 2): the same six measures per <c>(server_id, tag_id)</c>, with the
     /// whole hours the hourly builder has done read from <c>collect.query_store_hash_hourly</c> and the rest from the wide table.
     /// <see cref="QueryTagRollupHashRoute"/> decides which is which. Parameters: the hourly arm's six first (#7240 step 4): $1 the servers it reads
-    /// (<c>integer[]</c>), $2 and $3 the hour range <c>[from, to)</c> (<c>timestamp</c>), and $4, $5, $6 the gaps inside that range that
+    /// (<c>integer[]</c>), $2 and $3 the hour ranges (parallel <c>timestamp[]</c> arrays of starts and ends, each range <c>[from, to)</c>), and $4, $5, $6 the gaps inside those ranges that
     /// the arm must not read, as parallel arrays (server <c>integer[]</c>, gap start and gap end <c>timestamp[]</c>, each gap <c>[start, end)</c>); then $7 the
     /// window end, then three per wide range: the servers that share it (<c>integer[]</c>), its <c>from</c> and its <c>to</c> (each range
     /// <c>[from, to)</c>), the first range at $8, $9 and $10.
@@ -125,7 +125,7 @@ public static class QueryTagRollupSql
     /// the memory), exact <c>numeric</c> sums, so adding the hours gives the wide statement's total. The tag map is joined once, on the
     /// partials, and the final GROUP BY is by <c>(server_id, tag_id)</c>: the aggregate stays at that size. The COALESCE and the cast to
     /// <c>double precision</c> are today's, applied after the hours are added.</para>
-    /// <para>The hourly arm (#7240 step 4) is one range on <c>hour</c> for the servers in scope, less the gaps: <see cref="QueryTagRollupHashRoute.HourlyRead"/>
+    /// <para>The hourly arm (#7240 step 4) is one range on <c>hour</c> for each run of hours some server reads from the table (so the whole days the day table answers are never scanned), for the servers in scope, less the gaps: <see cref="QueryTagRollupHashRoute.HourlyRead"/>
     /// derives the gaps from the plan's table pairs, so a gap is every hour of a server inside the range that is not one of its table
     /// pairs (an hour not built, a stale pair, an hour a day row answers, an hour before the server's own start), and an anti-join removes
     /// them. It replaces the <c>unnest</c> of every <c>(hour, server)</c> pair, which the planner merge-joined against
@@ -171,10 +171,11 @@ public static class QueryTagRollupSql
                        SUM(t.reads_wsum) AS reads_wsum,
                        SUM(t.writes_wsum) AS writes_wsum,
                        MAX(t.mem_max) AS mem_max
-                FROM collect.query_store_hash_hourly AS t
+                FROM unnest($2::timestamp[], $3::timestamp[]) AS r(range_from, range_to)
+                JOIN collect.query_store_hash_hourly AS t
+                       ON t.hour >= r.range_from
+                      AND t.hour < r.range_to
                 WHERE t.server_id = ANY($1::integer[])
-                AND   t.hour >= $2::timestamp
-                AND   t.hour < $3::timestamp
                 AND   NOT EXISTS
                       (
                           SELECT 1
