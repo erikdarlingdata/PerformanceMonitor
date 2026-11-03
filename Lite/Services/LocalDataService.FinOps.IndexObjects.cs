@@ -162,6 +162,10 @@ LIMIT {topN}";
         using var command = connection.CreateCommand();
 
         var dbFilter = databaseName == null ? "" : " AND database_name = $2";
+        /* #7216: the newest-snapshot lookup has no time bound, so through the v_ view it read every archived row of index_object_stats.
+           The hot table holds the newest snapshot of any server still being collected; the view is read only for a server with no
+           hot row (collection stopped and archival moved every row out), which still shows the last values it had. */
+        var indexRelation = await HotTableHasServerAsync(connection, "index_object_stats", serverId) ? "index_object_stats" : "v_index_object_stats";
 
         command.CommandText = $@"
 SELECT
@@ -190,9 +194,9 @@ SELECT
              AND COALESCE(user_updates, 0) > 0 THEN 'Write-only'
         ELSE 'Active'
     END AS classification
-FROM v_index_object_stats
+FROM {indexRelation}
 WHERE server_id = $1
-AND   collection_time = (SELECT MAX(collection_time) FROM v_index_object_stats WHERE server_id = $1){dbFilter}
+AND   collection_time = (SELECT MAX(collection_time) FROM {indexRelation} WHERE server_id = $1){dbFilter}
 ORDER BY
     CASE WHEN COALESCE(user_seeks, 0) + COALESCE(user_scans, 0) + COALESCE(user_lookups, 0) = 0
          AND index_type_desc IS DISTINCT FROM 'HEAP' AND COALESCE(index_type_desc, '') NOT LIKE 'CLUSTERED%' THEN 0 ELSE 1 END,
@@ -246,12 +250,16 @@ LIMIT {topN}";
         using var command = connection.CreateCommand();
 
         var dbFilter = databaseName == null ? "" : " AND database_name = $2";
+        /* #7216: the newest-snapshot lookup has no time bound, so through the v_ view it read every archived row of index_object_stats.
+           The hot table holds the newest snapshot of any server still being collected; the view is read only for a server with no
+           hot row (collection stopped and archival moved every row out), which still shows the last values it had. */
+        var indexRelation = await HotTableHasServerAsync(connection, "index_object_stats", serverId) ? "index_object_stats" : "v_index_object_stats";
 
         command.CommandText = $@"
 SELECT count(*)
-FROM v_index_object_stats
+FROM {indexRelation}
 WHERE server_id = $1
-AND   collection_time = (SELECT MAX(collection_time) FROM v_index_object_stats WHERE server_id = $1){dbFilter}";
+AND   collection_time = (SELECT MAX(collection_time) FROM {indexRelation} WHERE server_id = $1){dbFilter}";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         if (databaseName != null)

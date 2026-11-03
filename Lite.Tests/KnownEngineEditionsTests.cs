@@ -212,13 +212,16 @@ public sealed class KnownEngineEditionsTests : IClassFixture<SharedDuckDbFixture
         await SeedPropertiesAsync(1, Enterprise, now.AddHours(-3));
         await SeedPropertiesAsync(2, Enterprise, now.AddHours(-1));
         await SeedPropertiesAsync(2, AzureSqlDatabase, now.AddHours(-2));
-        await SeedPropertiesAsync(77, AzureSqlDatabase, now.AddHours(-2));
 
-        /* Server 77's newest row is archived with no edition, as a row archived before the column existed reads
-           through the view. The one-server read answers unknown, so the grouped read must leave 77 out rather
-           than answer its older row's edition. */
+        /* Server 77 has only archived rows (#7216: the one-server read takes the hot table first, and only a server with no hot row
+           reads the view). Its newest row is archived with no edition, as a row archived before the column existed reads through
+           the view, and an older archived row carries one. The one-server read answers unknown, so the grouped read must leave 77
+           out rather than answer its older row's edition. */
+        var archivedOlder = Path.Combine(_duckDb.ArchivePath, "209911_server_properties.parquet");
         var archived = Path.Combine(_duckDb.ArchivePath, "209912_server_properties.parquet");
         Directory.CreateDirectory(_duckDb.ArchivePath);
+        await ExecAsync(
+            $"COPY (SELECT -8 AS collection_id, TIMESTAMP '{now.AddHours(-2):yyyy-MM-dd HH:mm:ss}' AS collection_time, 77 AS server_id, 'TestServer' AS server_name, 'Edition' AS edition, '16.0.4150.1' AS product_version, 'RTM' AS product_level, {AzureSqlDatabase} AS engine_edition) TO '{archivedOlder.Replace('\\', '/')}' (FORMAT PARQUET)");
         await ExecAsync(
             $"COPY (SELECT -9 AS collection_id, TIMESTAMP '{now.AddMinutes(-30):yyyy-MM-dd HH:mm:ss}' AS collection_time, 77 AS server_id, 'TestServer' AS server_name, 'Edition' AS edition, '16.0.4150.1' AS product_version, 'RTM' AS product_level) TO '{archived.Replace('\\', '/')}' (FORMAT PARQUET)");
         try
@@ -242,6 +245,7 @@ public sealed class KnownEngineEditionsTests : IClassFixture<SharedDuckDbFixture
         {
             /* And again once it is gone, or the view would still name a file that no longer exists. */
             File.Delete(archived);
+            File.Delete(archivedOlder);
             await _duckDb.CreateArchiveViewsAsync();
         }
     }
