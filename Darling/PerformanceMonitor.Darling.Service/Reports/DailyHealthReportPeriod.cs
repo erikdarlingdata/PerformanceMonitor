@@ -18,12 +18,20 @@ namespace PerformanceMonitor.Darling.Service.Reports;
 internal static class DailyHealthReportPeriod
 {
     /// <summary>The UTC instant that <paramref name="sendAt"/> falls on <paramref name="date"/> in <paramref name="zone"/>. A time the
-    /// zone skips (the spring-forward hour) moves to the first valid moment after it, and a repeated time takes the first occurrence.</summary>
+    /// zone skips (the spring-forward hour) moves to the end of the gap (the first valid moment after it), and a repeated time takes the first occurrence.</summary>
     public static DateTime EndUtcFor(DateOnly date, TimeOnly sendAt, TimeZoneInfo zone)
     {
         ArgumentNullException.ThrowIfNull(zone);
         var local = DateTime.SpecifyKind(date.ToDateTime(sendAt), DateTimeKind.Unspecified);
-        if (zone.IsInvalidTime(local)) local = local.AddHours(1);
+        if (zone.IsInvalidTime(local))
+        {
+            /* The end of the gap, not an hour past the send time: 02:30 on a spring-forward day ends at 03:00, the instant the
+               clock jumps, so a report built the moment it is due does not claim a period that ends in the future (#7201). Step
+               by whole minutes from the send time's minute: a transition lands on one, and the gap is at most a few hours. */
+            local = new DateTime(local.Ticks - (local.Ticks % TimeSpan.TicksPerMinute), DateTimeKind.Unspecified);
+            while (zone.IsInvalidTime(local)) local = local.AddMinutes(1);
+        }
+
         return LocalToUtc(local, zone);
     }
 

@@ -35,6 +35,19 @@ public sealed class ProposalDisplayTests
     }
 
     [Fact]
+    public void AFailedOrCancelledListRead_IsNotAnEmptyList_ButASucceededOneWithNoProposalsIs()
+    {
+        var cancelled = new CommandResult(ViewerDataService.StatusFailed, ViewerDataService.CommandCancelledErrorText,
+            "{\"success\":false,\"error\":\"" + ViewerDataService.CommandCancelledErrorText + "\"}");
+        Assert.Null(ViewerDataService.ProposalsFromResult(cancelled));
+        Assert.Null(ViewerDataService.ProposalsFromResult(new CommandResult(ViewerDataService.StatusFailed, "failed", "{\"success\":false,\"error\":\"boom\"}")));
+
+        var empty = ViewerDataService.ProposalsFromResult(new CommandResult(ViewerDataService.StatusSucceeded, "succeeded", "{\"proposals\":[]}"));
+        Assert.NotNull(empty);
+        Assert.Empty(empty);
+    }
+
+    [Fact]
     public void ThePlanGuideLine_ReadsTheMaskedTarget_SoAStatementClassValueNeverReachesIt()
     {
         const string target = "{\"database\":\"Sales\",\"definition\":{\"name\":\"PG_Orders\",\"statement\":\"SELECT 'alice'\",\"hints\":\"OPTION (RECOMPILE)\"}}";

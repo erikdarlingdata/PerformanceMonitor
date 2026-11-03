@@ -139,12 +139,16 @@ UPDATE config_notification_routes
  WHERE route_id = $1
    AND (agent_level IS NULL OR (agent_level = 0 AND $2))";
 
-    /// <summary>The fallback write (#6036): the id and the stamp, nothing else.</summary>
+    /// <summary>The fallback write (#6036): the id and the stamp, nothing else. Like <see cref="SetEnabledSql"/> and <see cref="DeleteSql"/> it
+    /// holds back a route that has an agent setting above Off in its own statement, so one a person gave a setting after the tool read it is
+    /// not written (#7199). The column has no foreign key, so a fallback that is not a route (deleted since the read) is not written either.</summary>
     public const string SetFallbackSql = @"
 UPDATE config_notification_routes
    SET fallback_route_id = $2,
        modified_at = (now() AT TIME ZONE 'UTC')
- WHERE route_id = $1";
+ WHERE route_id = $1
+   AND (agent_level IS NULL OR agent_level < 1)
+   AND ($2 IS NULL OR EXISTS (SELECT 1 FROM config_notification_routes f WHERE f.route_id = $2))";
 
     /// <summary>The fallback column has no foreign key (V193 adds the column and a not-itself CHECK only), so a delete clears
     /// every reference to the deleted route first, in the same transaction (#6036).</summary>

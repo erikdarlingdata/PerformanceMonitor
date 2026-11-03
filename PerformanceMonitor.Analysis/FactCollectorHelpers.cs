@@ -144,7 +144,9 @@ public static class FactCollectorHelpers
     /// Keeps individual facts for:
     ///   - LCK_M_S, LCK_M_IS (reader/writer blocking — RCSI signal)
     ///   - LCK_M_RS_*, LCK_M_RIn_*, LCK_M_RX_* (serializable/repeatable read signal)
-    ///   - SCH_M, SCH_S (schema locks — DDL/index operations)
+    ///   - LCK_M_SCH_M (schema-modification lock — DDL/index operations), keyed SCH_M by
+    ///     <see cref="WaitFactKey"/> before this runs (#7178). LCK_M_SCH_S (readers queued behind a
+    ///     schema change) is a general lock wait here and folds into LCK, as before.
     /// Individual constituent wait times are preserved in metadata as "{type}_ms" keys.
     ///
     /// <para>The grouped Value is the SUM of the constituents' Values, not a fresh division (#3538 A2).
@@ -259,8 +261,9 @@ public static class FactCollectorHelpers
     /// <summary>
     /// Maps a raw wait type to the FAMILY key its regular fact is grouped under, mirroring
     /// <see cref="GroupParallelismWaits"/> (all CX* → CXPACKET) and <see cref="GroupGeneralLockWaits"/> /
-    /// <see cref="IsGeneralLockWait"/> (general lock modes → LCK; LCK_M_S / LCK_M_IS, range locks, and
-    /// schema locks keep their own key). Every other wait type maps to itself. This is the single
+    /// <see cref="IsGeneralLockWait"/> (general lock modes → LCK; LCK_M_S / LCK_M_IS and range locks keep
+    /// their own key) and <see cref="WaitFactKey"/> (LCK_M_SCH_M → SCH_M, #7178). Every other wait type
+    /// maps to itself. This is the single
     /// source of truth <see cref="AnomalyIncidentReconciler"/> uses to fold an ANOMALY_WAIT_PROFILE
     /// into the regular wait finding that shares its dominant driver's family, so the family decision
     /// can never drift from how the collector actually grouped the waits.
@@ -271,14 +274,27 @@ public static class FactCollectorHelpers
             return waitType ?? string.Empty;
         if (waitType.StartsWith("CX", StringComparison.Ordinal))
             return "CXPACKET";
-        if (IsGeneralLockWait(waitType))
+        var factKey = WaitFactKey(waitType);
+        if (IsGeneralLockWait(factKey))
             return "LCK";
-        return waitType;
+        return factKey;
     }
 
     /// <summary>
+    /// The key a raw <c>wait_type</c> is stored under on its wait fact (#7178). The engine names the
+    /// schema-modification lock <c>LCK_M_SCH_M</c> but every consumer (scorer ramp, the SCH_M advice
+    /// card, the SCH_M → RUNNING_JOBS edge, the reconciler's maintenance family) keys on <c>SCH_M</c>, and
+    /// before this the raw name reached <see cref="GroupGeneralLockWaits"/> and folded into LCK, so none
+    /// of those arms could fire. Both collectors call this where they build the fact. Every other wait
+    /// type keeps its own name.
+    /// </summary>
+    public static string WaitFactKey(string waitType) =>
+        string.Equals(waitType, "LCK_M_SCH_M", StringComparison.OrdinalIgnoreCase) ? "SCH_M" : waitType;
+
+    /// <summary>
     /// Returns true for general lock waits that should be grouped into "LCK".
-    /// Excludes reader locks (S, IS), range locks (RS_*, RIn_*, RX_*), and schema locks.
+    /// Excludes reader locks (S, IS) and range locks (RS_*, RIn_*, RX_*). Schema-modification waits
+    /// reach here already keyed SCH_M (<see cref="WaitFactKey"/>), which is not a LCK_M_ name.
     /// </summary>
     public static bool IsGeneralLockWait(string waitType)
     {
