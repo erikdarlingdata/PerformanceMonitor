@@ -264,8 +264,8 @@ public class DarlingMcpPgPlanToolsTests
 
     /// <summary>
     /// The unsatisfied facets are NAMED rather than reduced to a verdict. There is deliberately no
-    /// ready/not-ready boolean: an unmet <c>plan_attribution</c> still captures plans and merely orphans
-    /// them, while <c>message_locale</c> and <c>log_line_prefix_readable</c> are about the target-side log
+    /// ready/not-ready boolean: an unmet <c>plan_attribution</c> means no plan is stored or plans carry
+    /// no query id, while <c>message_locale</c> and <c>log_line_prefix_readable</c> are about the target-side log
     /// reads rather than about capture, so one flag would have to pick a meaning and be wrong under the
     /// other — the exact collapse the collector splits its rows to avoid.
     /// </summary>
