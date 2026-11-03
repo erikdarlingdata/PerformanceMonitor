@@ -224,10 +224,9 @@ AND   collector_name <> '{CollectionCycleSkip.CollectorName}'";
 
     /// <summary>
     /// The least age (#7196) at which the newest SQL Server CPU reading stops showing on the Overview card and in
-    /// get_server_summary. The Lite twin of Darling's <c>DarlingPgCpuUtilizationReader.Freshness</c>, which
-    /// Lite does not reference; keep the two at the same 15 minutes.
+    /// get_server_summary: <see cref="CollectorScheduleDefaults.CpuReadingFreshnessFloorMinutes"/>, the one value Darling reads too.
     /// </summary>
-    internal static readonly TimeSpan CpuFreshnessFloor = TimeSpan.FromMinutes(15);
+    internal static readonly TimeSpan CpuFreshnessFloor = TimeSpan.FromMinutes(CollectorScheduleDefaults.CpuReadingFreshnessFloorMinutes);
 
     /// <summary>
     /// How old the newest CPU reading may be and still show (#7196): the larger of <see cref="CpuFreshnessFloor"/> and
@@ -677,8 +676,9 @@ public class ServerSummaryItem
     public bool CollectionIsNotFresh =>
         CollectionFreshness is ServerFreshness.Stale or ServerFreshness.Offline or ServerFreshness.NeverCollected;
 
-    /* Color coding */
-    public SolidColorBrush CpuBrush => MakeBrush(CpuIsCritical ? "#E57373" : CpuIsElevated ? "#FFB74D" : "#81C784");
+    /* Color coding. A CPU row with no shown figure (stale, #7196, or never measured) is the card's unknown grey, the one
+       StatusBrush's fallback uses, never the Healthy green (#3635): Darling bands the same case Unknown. */
+    public SolidColorBrush CpuBrush => MakeBrush(CpuIsCritical ? "#E57373" : CpuIsElevated ? "#FFB74D" : ShownCpuPercentForAlert is null ? "#888888" : "#81C784");
     public SolidColorBrush BlockingBrush => MakeBrush(BlockingIsElevated ? "#FFB74D" : "#81C784");
     public SolidColorBrush DeadlockBrush => MakeBrush(DeadlocksAreElevated ? "#E57373" : "#81C784");
     /* The border ranks the same states the status word names, so it reads the SAME discriminant rather than

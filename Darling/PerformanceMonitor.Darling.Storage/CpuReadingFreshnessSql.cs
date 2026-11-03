@@ -29,7 +29,7 @@ public static class CpuReadingFreshnessSql
     private const string CollectorName = "cpu_utilization";
 
     /// <summary>The freshness floor in whole minutes, bound by the caller as an integer.</summary>
-    public static int FloorMinutes => (int)DarlingPgCpuUtilizationReader.Freshness.TotalMinutes;
+    public static int FloorMinutes => CollectorScheduleDefaults.CpuReadingFreshnessFloorMinutes;
 
     /// <summary>
     /// A SQL expression for the cutoff instant (naive UTC, a <c>timestamp</c>).

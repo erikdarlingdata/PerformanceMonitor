@@ -154,6 +154,28 @@ public sealed class StaleSqlServerCpuOverviewTests : IClassFixture<SharedDuckDbF
         Assert.True(threeDays!.CpuIsStale);
     }
 
+    [Fact]
+    public void AStaleOrUnmeasuredCpuRow_IsTheUnknownGrey_NotTheHealthyGreen_AndSinksBelowAMeasuredServerInTheSort()
+    {
+        var healthy = new ServerSummaryItem { DisplayName = "calm", ServerId = 1, IsOnline = true, CpuPercent = 1 };
+        var stale = new ServerSummaryItem { DisplayName = "stale", ServerId = 2, IsOnline = true, CpuPercent = 90, CpuIsStale = true };
+        var neverMeasured = new ServerSummaryItem { DisplayName = "never", ServerId = 3, IsOnline = true };
+        var unknownGrey = new ServerSummaryItem { IsOnline = null }.StatusBrush.Color;
+
+        /* #3635: a CPU row with no shown figure is Unknown, as Darling bands it, never the Healthy colour. */
+        Assert.NotEqual(healthy.CpuBrush.Color, stale.CpuBrush.Color);
+        Assert.Equal(unknownGrey, stale.CpuBrush.Color);
+        Assert.Equal(unknownGrey, neverMeasured.CpuBrush.Color);
+        /* The stale 90% must not light the critical colour or the card border either. */
+        Assert.NotEqual(new ServerSummaryItem { IsOnline = true, CpuPercent = 90 }.CpuBrush.Color, stale.CpuBrush.Color);
+        Assert.Equal(healthy.CardBorderBrush.Color, stale.CardBorderBrush.Color);
+
+        var ordered = PerformanceMonitor.Ui.ServerOverviewSort.Order(
+            new[] { stale, healthy }, PerformanceMonitor.Ui.ServerOverviewSortMode.Cpu,
+            s => s.ShownCpuPercentForAlert, s => s.DisplayName, s => s.ServerId);
+        Assert.Equal(new[] { healthy, stale }, ordered);
+    }
+
     /// <summary>The store holds microseconds and a tick is finer, so a seeded instant is cut to whole seconds.</summary>
     private static DateTime Whole(DateTime utc) =>
         DateTime.SpecifyKind(new DateTime(utc.Ticks - (utc.Ticks % TimeSpan.TicksPerSecond)), DateTimeKind.Unspecified);
