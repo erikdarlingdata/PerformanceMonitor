@@ -158,8 +158,7 @@
                           HeadersVisibility="Column" GridLinesVisibility="Horizontal"
                           RowStyle="{StaticResource DefaultRowStyle}"
                           Background="Transparent" BorderThickness="0"
-                          RowBackground="Transparent"
-                          AlternatingRowBackground="{DynamicResource DataGridAlternatingRowBrush}">
+                          RowBackground="Transparent">
                     <DataGrid.Columns>
                         <DataGridTextColumn Header="Category" Binding="{Binding Category}" MinWidth="120" Width="Auto"/>
                         <DataGridTextColumn Header="Severity" Binding="{Binding Severity}" MinWidth="80" Width="Auto" SortMemberPath="SeveritySort">
@@ -2495,8 +2494,7 @@
                           HeadersVisibility="Column" GridLinesVisibility="Horizontal"
                           RowStyle="{StaticResource HighImpactRowStyle}"
                           Background="Transparent" BorderThickness="0"
-                          RowBackground="Transparent"
-                          AlternatingRowBackground="{DynamicResource DataGridAlternatingRowBrush}">
+                          RowBackground="Transparent">
                     <DataGrid.Columns>
                         <DataGridTextColumn Binding="{Binding ImpactScore}" Width="90">
                             <DataGridTextColumn.Header>

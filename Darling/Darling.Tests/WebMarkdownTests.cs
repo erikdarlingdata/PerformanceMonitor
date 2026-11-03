@@ -97,4 +97,37 @@ public sealed class WebMarkdownTests
         Assert.Equal("plain [x](https://example.invalid/y)", pre.GetProperty("kids")[0].GetProperty("text").GetString());
         Assert.False(HasLink(pre));
     }
+
+    private static string PlainText(JsonElement node) =>
+        node.GetProperty("tag").GetString() == "#text"
+            ? node.GetProperty("text").GetString()!
+            : string.Concat(node.GetProperty("kids").EnumerateArray().Select(PlainText));
+
+    private static bool HasTag(JsonElement node, params string[] tags) =>
+        tags.Contains(node.GetProperty("tag").GetString()) || node.GetProperty("kids").EnumerateArray().Any(k => HasTag(k, tags));
+
+    [Theory]
+    [InlineData("**Story:** SOS_SCHEDULER_YIELD -> CPU_SQL_PERCENT -> LCK_M_SCH_M", "Story: SOS_SCHEDULER_YIELD -> CPU_SQL_PERCENT -> LCK_M_SCH_M")]
+    [InlineData("Read sys_dm_exec_requests and sys_dm_os_wait_stats.", "Read sys_dm_exec_requests and sys_dm_os_wait_stats.")]
+    [InlineData("a__b__c and snake__case__name", "a__b__c and snake__case__name")]
+    public void UnderscoresInsideWords_StayLiteralText(string markdown, string expectedText)
+    {
+        var block = Assert.Single(Render(markdown).EnumerateArray());
+
+        Assert.Equal(expectedText, PlainText(block));
+        Assert.False(HasTag(block, "em"), "an underscore inside a word must not start italics");
+    }
+
+    [Theory]
+    [InlineData("a _slanted_ word", "em", "slanted")]
+    [InlineData("a __heavy__ word", "strong", "heavy")]
+    [InlineData("_start_ of line", "em", "start")]
+    [InlineData("a _snake_case_ word", "em", "snake_case")]
+    public void UnderscoresAtWordEdges_StillEmphasise(string markdown, string tag, string inner)
+    {
+        var block = Assert.Single(Render(markdown).EnumerateArray());
+
+        var span = block.GetProperty("kids").EnumerateArray().Single(k => k.GetProperty("tag").GetString() == tag);
+        Assert.Equal(inner, PlainText(span));
+    }
 }

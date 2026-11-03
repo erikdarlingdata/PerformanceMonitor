@@ -473,8 +473,9 @@ AND   (
 
     /// <summary>
     /// Collects on SQL Server, Azure SQL Managed Instance, and AWS RDS — everywhere SQL Agent exists. NOT
-    /// Azure SQL Database (edition 5): there is no Agent / <c>msdb.dbo.sysjobhistory</c> there. NOT a login
-    /// without msdb access: every table this reads (sysjobhistory, sysjobs) lives in msdb. It is NOT gated on
+    /// Azure SQL Database (edition 5): there is no Agent / <c>msdb.dbo.sysjobhistory</c> there. A login
+    /// without msdb access is NOT gated (#2559): it attempts and the denial lands as PERMISSIONS, which bands
+    /// NO_PERMISSIONS (see <see cref="CollectorTargetInfo.HasMsdbAccess"/>). It is NOT gated on
     /// AWS RDS — unlike <see cref="RunningJobsCollector"/> it never touches <c>syssessions</c>, so retained
     /// history reads fine there. Gated here in the shared AppliesTo so Lite and Darling skip identically.
     /// </summary>

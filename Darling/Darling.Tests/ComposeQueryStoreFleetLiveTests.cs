@@ -156,6 +156,45 @@ SELECT count(*) FROM
     }
 
     [Fact]
+    public async Task TheGuardCountsTheFleetHoursFromTheFleetTable_AndAnHourTheFleetTableDoesNotServeLeavesTheCount()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ComposeStampLiveSupport.BaseConnectionString), ComposeStampLiveSupport.SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, connection, source, hourNow) = await ComposeStampLiveSupport.ArrangeAsync(ct);
+        var bodySucceeded = false;
+        try
+        {
+            var start = hourNow.AddHours(-10).AddMinutes(17);
+            var through = hourNow.AddHours(-2);
+            string RowsIn(DateTime from, DateTime to) =>
+                $"SELECT count(*) FROM collect.query_store_compose_fleet WHERE collection_time >= TIMESTAMP '{Hour(from)}' AND collection_time < TIMESTAMP '{Hour(to)}'";
+
+            /* Every hour built: the hours are the ones from the start's hour to the stamp-through, the rows are the fleet table's rows in the range. */
+            var all = await QueryStoreWideReadGuard.FleetServingAsync(source, start, through, null, 30, ct);
+            var expectedRows = await ComposeStampLiveSupport.CountAsync(connection, RowsIn(start, through), ct);
+            Assert.Equal(8, all!.Value.Hours);   /* the hours -10 through -3: the start's own hour to the one before the stamp-through */
+            Assert.True(expectedRows > 0);
+            Assert.Equal(expectedRows, all.Value.Rows);
+
+            /* A pair behind its late writes, and a pair never built for the fleet table: each takes its hour out of the count and its rows with it. */
+            var staleHour = hourNow.AddHours(-6);
+            var oldHour = hourNow.AddHours(-4);
+            await ComposeStampLiveSupport.InsertRowAsync(connection, 1, staleHour.AddMinutes(55), 9_000_001, ct);
+            await ComposeStampLiveSupport.ExecAsync(connection, $"UPDATE collect.query_store_compose_stamp_built SET fleet_built_seq = NULL WHERE hour = TIMESTAMP '{Hour(oldHour)}'", ct);
+            var without = await QueryStoreWideReadGuard.FleetServingAsync(source, start, through, null, 30, ct);
+            Assert.Equal(all.Value.Hours - 2, without!.Value.Hours);
+            Assert.Equal(expectedRows - await ComposeStampLiveSupport.CountAsync(connection, RowsIn(staleHour, staleHour.AddHours(1)), ct)
+                - await ComposeStampLiveSupport.CountAsync(connection, RowsIn(oldHour, oldHour.AddHours(1)), ct), without.Value.Rows);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await ComposeStampLiveSupport.CleanupAsync(scratch, connection, source, bodySucceeded);
+        }
+    }
+
+    [Fact]
     public async Task AnHourBuiltBeforeV239_HasNoFleetRowsAndIsNeverReadFromTheFleetTable_UntilTheTickBuildsIt()
     {
         Assert.SkipWhen(string.IsNullOrEmpty(ComposeStampLiveSupport.BaseConnectionString), ComposeStampLiveSupport.SkipReason);

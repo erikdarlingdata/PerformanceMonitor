@@ -114,7 +114,7 @@ public partial class FinOpsTab
 
     private async void FinOpsStorageGrowthGrid_DoubleClick(object sender, MouseButtonEventArgs e)
     {
-        if (FinOpsStorageGrowthDataGrid.SelectedItem is StorageGrowthRow row)
+        if (DataGridRowHit.IsOnRow(e.OriginalSource) && FinOpsStorageGrowthDataGrid.SelectedItem is StorageGrowthRow row)
             await DrillFinOpsToObjectsAsync(row.DatabaseName);
     }
 
@@ -126,7 +126,7 @@ public partial class FinOpsTab
 
     private async void FinOpsObjectGrowthGrid_DoubleClick(object sender, MouseButtonEventArgs e)
     {
-        if (FinOpsObjectGrowthDetailGrid.SelectedItem is ObjectSizeGrowthRow row)
+        if (DataGridRowHit.IsOnRow(e.OriginalSource) && FinOpsObjectGrowthDetailGrid.SelectedItem is ObjectSizeGrowthRow row)
             await DrillFinOpsToIndexesAsync(row.DatabaseName, row.SchemaName, row.TableName);
     }
 

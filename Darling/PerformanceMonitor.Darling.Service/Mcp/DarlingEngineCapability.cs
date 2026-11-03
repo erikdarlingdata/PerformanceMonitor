@@ -308,6 +308,21 @@ ORDER BY server_name";
     }
 
     /// <summary>
+    /// The collector table an analysis read (get_analysis_findings, get_analysis_facts) asks "was this window collected at all"
+    /// of, chosen from the registry's engine kind by <see cref="PerformanceMonitor.Darling.Analysis.DarlingAnalysisService.CoverageTableFor"/>
+    /// (#7194): <c>wait_stats</c> for a SQL Server target, <c>pg_database_stats</c> for a PostgreSQL one. One registry read, the
+    /// same column <see cref="ReadServerEngineAsync"/> answers the <c>not_collected</c> envelopes from.
+    /// </summary>
+    internal static async Task<string> AnalysisCoverageTableAsync(
+        NpgsqlDataSource postgres,
+        int serverId,
+        CancellationToken cancellationToken)
+    {
+        var (_, kind, _) = await ReadServerEngineAsync(postgres, serverId, cancellationToken);
+        return PerformanceMonitor.Darling.Analysis.DarlingAnalysisService.CoverageTableFor(kind);
+    }
+
+    /// <summary>
     /// The registry's two PostgreSQL facts for one server (the major from V100 #2653, the kind from V82
     /// #2530). $1 server_id.
     ///

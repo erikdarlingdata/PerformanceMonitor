@@ -28,7 +28,7 @@
 
         <TextBlock Grid.Row="0" Text="People" FontSize="18" FontWeight="Bold" HorizontalAlignment="Left" Margin="0,0,0,4"/>
         <TextBlock Grid.Row="1" TextWrapping="Wrap" HorizontalAlignment="Left" Margin="0,0,0,12" Foreground="{DynamicResource ForegroundMutedBrush}"
-                   Text="Name each person who works with the agents, map the identities they sign in with (a web sign-in key, a Slack account), and give them grants. Nothing reads a grant yet, so this changes what no one can do today. Only the store owner writes these lists: each change goes through the service and is journaled."/>
+                   Text="Name each person who works with the agents, map the identities they sign in with (a web sign-in key, a Slack account), and give them grants. An approve grant lets that person approve the actions an agent proposes, only for the kinds and the scope it names. The other grants are not read yet. Only the store owner writes these lists: each change goes through the service and is journaled."/>
 
         <Grid Grid.Row="2">
             <Grid.ColumnDefinitions>

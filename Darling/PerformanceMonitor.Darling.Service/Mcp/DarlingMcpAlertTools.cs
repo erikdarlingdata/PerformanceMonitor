@@ -138,14 +138,20 @@ public sealed partial class DarlingMcpAlertTools
                 ? 0L
                 : await DarlingAlertReader.CountDismissedAlertsAsync(postgres, since, windowEnd, serverId, filter, cancellationToken);
 
-            /* #7010: the window-floor notice. The floor is the fleet's wait_stats floor (the collector every collecting server runs each cycle,
-               the data the store holds), never the oldest alert: a window that holds no alert is not truncation, a window that starts before
-               the data is. Lite's twin probes the same relation. An empty page carries it under hints, because a window the store does not
+            /* #7010: the window-floor notice. The floor is the fleet's collection floor (the data the store holds), never the oldest alert: a window
+               that holds no alert is not truncation, a window that starts before the data is. #7309: the earliest of wait_stats (the collector every
+               SQL Server target runs each cycle) and pg_database_stats (the one every PostgreSQL target runs), which DataWindowFloor combines in one read.
+               A wait_stats-only floor told a PostgreSQL-only fleet its collection may have stopped, about a table that engine never writes. Lite's twin
+               probes wait_stats, because Lite has no PostgreSQL targets. An empty page carries it under hints, because a window the store does not
                reach back to is not a true negative. */
-            var waitStats = DataWindowFloor.Source.ForCollectorTable("wait_stats");
+            var fleetFloorSources = new[]
+            {
+                DataWindowFloor.Source.ForCollectorTable("wait_stats"),
+                DataWindowFloor.Source.ForCollectorTable("pg_database_stats"),
+            };
             var notice = await DarlingMcpWindowNotice.ReadAsync(
-                () => DarlingMcpWindowNotice.ProbeScoped(postgres, [waitStats], null, since, windowEnd, cancellationToken),
-                since, windowEnd, "wait_stats", emptyAnswer: page.Count == 0, cancellationToken: cancellationToken);
+                () => DarlingMcpWindowNotice.ProbeScoped(postgres, fleetFloorSources, null, since, windowEnd, cancellationToken),
+                since, windowEnd, "wait_stats or pg_database_stats", emptyAnswer: page.Count == 0, cancellationToken: cancellationToken);
 
             if (page.Count == 0)
             {

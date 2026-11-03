@@ -35,11 +35,11 @@ public sealed partial class ViewerDataService
     /// <summary>The wait for the list.</summary>
     public static readonly TimeSpan ReadProposalsTimeout = TimeSpan.FromSeconds(30);
 
-    /// <summary>The proposals, newest first, of every request or of one server. Null when the service has not answered with a list: it is still
+    /// <summary>The proposals, newest first, of every request. Null when the service has not answered with a list: it is still
     /// running the command, the poll cancelled it unclaimed, or the command failed (#7168).</summary>
-    public async Task<IReadOnlyList<ProposalViewRow>?> ReadProposalsAsync(int? serverId, string login, CancellationToken cancellationToken = default)
+    public async Task<IReadOnlyList<ProposalViewRow>?> ReadProposalsAsync(string login, CancellationToken cancellationToken = default)
     {
-        var commandId = await EnqueueCommandAsync(CommandReadProposals, serverId, "{}", login, cancellationToken);
+        var commandId = await EnqueueCommandAsync(CommandReadProposals, null, "{}", login, cancellationToken);
         var result = await PollCommandResultAsync(commandId, ReadProposalsTimeout, cancellationToken);
         if (result is null)
             return null;
