@@ -648,10 +648,14 @@ public sealed partial class DarlingWorker
                The metric name is the shared AlertEngine.CpuPersistenceMetric ("High CPU"), the same string
                the mute context and the history row use, so this row is the same subject an operator sees in
                config_alert_log. server_id never collides across engines, so one table serves both. */
-            if (_pgCpuPersistenceSeeded.TryAdd(key, true))
+            if (!_pgCpuPersistenceSeeded.ContainsKey(key))
             {
+                /* #7295: the key is marked seeded only after the load worked (a row or no row). A load that cannot read the store
+                   throws into the catch below, which counts it: this pass evaluates nothing from an empty record that an open
+                   incident's saved one would have replaced, and the next pass loads it again. */
                 var seeded = await stateStore.LoadAlertPersistenceAsync(key, metricName);
                 readClock.Restart();
+                _pgCpuPersistenceSeeded[key] = true;
                 if (seeded.HasValue)
                 {
                     _pgCpuPersistence[key] = seeded.Value;
@@ -1040,7 +1044,7 @@ public sealed partial class DarlingWorker
                AlertEngine's own SQL Server "Deadlocks Detected" twin reads/writes — the parity metric
                name #2711 deliberately chose means no new column or row shape is needed, only a read
                before trusting an in-memory zero. Once per key, mirroring AlertEngine's
-               EnsureWatermarksSeededAsync/_seededServerKeys. */
+               EnsureWatermarksSeededAsync/_seededSteps. */
             /* #7295: the watermark half of the seed is done only when its load worked, a row or no row. A load that fails throws
                into the catch below: this pass counts and pages nothing from a watermark of 0 that a page may already have been
                carried past, and the next pass loads it again. Nothing in memory has moved by then, so the load is still the first one.

@@ -61,6 +61,8 @@ public interface IAlertStateStore
     /// and returned in its native server-local basis (NEVER coerced to UTC) so it compares
     /// directly against <see cref="FailedJobInfo.RunDateTime"/>; mixing bases here re-fires or
     /// eats failed-job alerts by the timezone offset.
+    /// <para>#7295: <c>null</c> means "the store was read and holds no row", nothing else. A store that could not be read THROWS,
+    /// and the engine leaves the failed-job check unseeded and reads again on its next sweep.</para>
     /// </summary>
     Task<DateTime?> LoadFailedJobWatermarkAsync(string serverKey);
 
@@ -142,6 +144,10 @@ public interface IAlertStateStore
     /// the pre-#3282 CPU check kept that flag in memory only, so the first post-restart sweep over a
     /// standing condition delivered it again. The counters are what stop a restart mid-excursion throwing
     /// away a streak that was about to fire.</para>
+    ///
+    /// <para>#7295: <c>null</c> means "the store was read and holds no row". A store that could not be read THROWS, and the engine
+    /// leaves that gate's check unseeded and reads again on its next sweep. Null for both restarted the streak from zero and lost an
+    /// open incident's <c>Firing</c> bit.</para>
     ///
     /// <para>A host that cannot persist may return <c>null</c> and no-op the save. The degradation is
     /// stated rather than hidden: the gate then lives for one process lifetime, so a restart resets the

@@ -517,6 +517,12 @@ public sealed class PgDeadlockRestartWorkerLiveTests
             Assert.Empty(secondEndpoint.Bodies);
             Assert.Equal(DarlingWorker.PgDeadlockPageReports, await state.LoadEdgeTriggerWatermarkAsync(Key, "Deadlocks Detected"));
 
+            /* The positive control: the seed is done and the path can page. A sixth report is a rise past the saved 5, and it pages once. */
+            await PlantReportAsync(plant, DateTime.UtcNow.AddMinutes(-1), ct, "DDDD9999" + new string('0', 24));
+            await secondPass();
+            Assert.Single(secondEndpoint.Bodies);
+            Assert.Equal(DarlingWorker.PgDeadlockPageReports + 1, await state.LoadEdgeTriggerWatermarkAsync(Key, "Deadlocks Detected"));
+
             /* The failed pass left the worker unseeded and with no watermark to run from. */
             Assert.False(seededAfterFailedPass);
             Assert.False(watermarkAfterFailedPass);

@@ -380,8 +380,19 @@ public sealed class AlertEngineTests
             return Task.CompletedTask;
         }
 
-        public Task<DateTime?> LoadFailedJobWatermarkAsync(string serverKey) =>
-            Task.FromResult(FailedJobWatermarks.TryGetValue(serverKey, out var w) ? (DateTime?)w : null);
+        /* #7295: how many of the next failed-job watermark loads throw, as a store that cannot be read does. */
+        public int FailFailedJobLoads { get; set; }
+
+        public Task<DateTime?> LoadFailedJobWatermarkAsync(string serverKey)
+        {
+            if (FailFailedJobLoads > 0)
+            {
+                FailFailedJobLoads--;
+                throw new InvalidOperationException("failed-job watermark store read failed");
+            }
+
+            return Task.FromResult(FailedJobWatermarks.TryGetValue(serverKey, out var w) ? (DateTime?)w : null);
+        }
 
         public Task SaveFailedJobWatermarkAsync(string serverKey, DateTime watermark)
         {
@@ -407,8 +418,19 @@ public sealed class AlertEngineTests
         public Dictionary<(string Key, string Metric), AlertPersistenceRecord> Persistence { get; } = new();
         public List<(string Key, string Metric, AlertPersistenceRecord Record)> SavedPersistence { get; } = new();
 
-        public Task<AlertPersistenceRecord?> LoadAlertPersistenceAsync(string serverKey, string metricName) =>
-            Task.FromResult(Persistence.TryGetValue((serverKey, metricName), out var r) ? (AlertPersistenceRecord?)r : null);
+        /* #7295: how many of the next persistence-record loads throw, as a store that cannot be read does. Every load counts. */
+        public int FailPersistenceLoads { get; set; }
+
+        public Task<AlertPersistenceRecord?> LoadAlertPersistenceAsync(string serverKey, string metricName)
+        {
+            if (FailPersistenceLoads > 0)
+            {
+                FailPersistenceLoads--;
+                throw new InvalidOperationException("persistence store read failed");
+            }
+
+            return Task.FromResult(Persistence.TryGetValue((serverKey, metricName), out var r) ? (AlertPersistenceRecord?)r : null);
+        }
 
         public Task SaveAlertPersistenceAsync(string serverKey, string metricName, AlertPersistenceRecord record)
         {
@@ -1140,6 +1162,30 @@ public sealed class AlertEngineTests
         /* And it resolves normally rather than being orphaned. */
         at = await DriveCpuAsync(restarted, sqlCpu: 20, totalCpu: 30, samples: ((int)AlertEngine.SqlCpuClearHold.TotalMinutes + 1), from: at);
         Assert.Single(h.Resolutions);
+    }
+
+    [Fact]
+    public async Task Cpu_AFailedPersistenceReadOnTheFirstSweep_SkipsTheCheck_AndTheNextSweepResumesTheSavedStreak()
+    {
+        /* #7295: a store that cannot be read used to look like a store with no row. The CPU record was left at Initial and marked seeded,
+           so the streak the last life had built (one sample short of the page) restarted from zero and the page that was due came
+           late. The failed read now leaves the check unseeded and skipped, and the next sweep resumes the saved streak: the one sample
+           after it completes the streak and pages. */
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+
+        var at = await DriveCpuAsync(h.Build(), sqlCpu: 70, totalCpu: 95, samples: AlertEngine.SqlCpuBreachSamples - 1, from: Harness.SampleBase);
+        Assert.Empty(h.Deliverer.Outcomes);
+        var savedBefore = h.StateStore.SavedPersistence.Count;
+
+        h.StateStore.FailPersistenceLoads = 1;
+        var restarted = h.Build();
+        at = await DriveCpuAsync(restarted, sqlCpu: 70, totalCpu: 95, samples: 1, from: at);
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Equal(savedBefore, h.StateStore.SavedPersistence.Count);
+
+        await DriveCpuAsync(restarted, sqlCpu: 70, totalCpu: 95, samples: 1, from: at);
+        Assert.Equal("High CPU", Assert.Single(h.Deliverer.Outcomes).MetricName);
     }
 
     [Fact]
@@ -2688,6 +2734,17 @@ public sealed class AlertEngineTests
         await engine.EvaluateServerAsync(Harness.Snapshot());
         Assert.Empty(h.Deliverer.Outcomes);
         Assert.Empty(h.StateStore.SavedEdge);
+
+        /* The positive control: the check can page once it is seeded. Under the #7086 rule a rise inside an open episode does not page,
+           so the report leaves the hour (the episode ends and the watermark resets) and a new deadlock is a new episode. */
+        h.Adapter.Deadlocks.Clear();
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Empty(h.Deliverer.Outcomes);
+        h.Adapter.Deadlocks.Add(DeadlockRow());
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal("Deadlocks Detected", Assert.Single(h.Deliverer.Outcomes).MetricName);
     }
 
     [Fact]
@@ -2733,6 +2790,12 @@ public sealed class AlertEngineTests
         Assert.Empty(h.Deliverer.Outcomes);
         Assert.Equal(2, h.StateStore.EdgeLoadAttempts);
         Assert.Equal(0, h.Adapter.BlockingFetches + h.Adapter.DeadlockFetches);
+
+        /* The positive control: the same two checks page once the store can be read, with no saved watermark to hold them. */
+        h.StateStore.FailEdgeLoads = 0;
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Contains(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Detected");
+        Assert.Contains(h.Deliverer.Outcomes, o => o.MetricName == "Deadlocks Detected");
     }
 
     [Fact]
@@ -5061,6 +5124,37 @@ public sealed class AlertEngineTests
     }
 
     /* ---------------- failed jobs ---------------- */
+
+    [Fact]
+    public async Task FailedJobs_AFailedWatermarkReadOnTheFirstSweep_SkipsTheCheck_AndTheNextSweepSeedsFromTheSavedWatermark()
+    {
+        /* #7295: the saved watermark covers the failure in the window. A store that cannot be read used to look like a store with no row:
+           the watermark stayed empty and a failure a page had already carried was paged again. The failed read now leaves the check
+           unseeded and skipped (it fetches nothing and saves nothing), and the next sweep reads the saved watermark. */
+        var h = new Harness();
+        h.Settings.FailedJobEnabled = true;
+        var failure = new DateTime(2026, 7, 1, 6, 55, 0);
+        h.StateStore.FailedJobWatermarks[Key] = failure;
+        h.StateStore.FailFailedJobLoads = 1;
+        var engine = h.Build(withFailedJobsFetcher: true);
+        h.FailedJobs.Add(new FailedJobInfo { JobName = "Backup.Full", JobId = "j1", RunDateTime = failure, StepId = 2, StepName = "Backup", Message = "disk full" });
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Equal(0, h.FailedJobFetches);
+        Assert.Empty(h.StateStore.SavedFailedJob);
+
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Equal(1, h.FailedJobFetches);
+
+        /* The positive control: a failure newer than the saved watermark pages. */
+        h.FailedJobs.Insert(0, new FailedJobInfo { JobName = "Index.Rebuild", JobId = "j2", RunDateTime = failure.AddMinutes(30) });
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal("Failed Agent Job", Assert.Single(h.Deliverer.Outcomes).MetricName);
+    }
 
     [Fact]
     public async Task FailedJobs_WatermarkDedups_AndPersistsTheServerLocalRunTime()

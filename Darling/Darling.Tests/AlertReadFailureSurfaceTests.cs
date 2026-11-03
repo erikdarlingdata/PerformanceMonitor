@@ -914,7 +914,7 @@ public sealed class AlertReadFailureSurfaceTests
     /// </summary>
     private static readonly (string Path, int Counted, int Exempt)[] s_wholeFileScopes =
     {
-        (Path.Combine("PerformanceMonitor.Alerting", "AlertEngine.cs"), 19, 9),
+        (Path.Combine("PerformanceMonitor.Alerting", "AlertEngine.cs"), 21, 9),
         /* 7th AlertEngine exempt since #5910: the threshold-override fallback in Threshold(), an in-memory lookup and
            not a read; the check it serves still reads, and counts, exactly as before. 8th since #6005: the deadlock
            rollup's catch, a write after the deadlock read, which counts its own failure. */
@@ -1063,8 +1063,9 @@ public sealed class AlertReadFailureSurfaceTests
     /// And a FIFTY-THIRD since #7086: the PostgreSQL Long-Running Query alert's statement lookup ("PostgreSQL long-running-query statement lookup"), counted because a swallowed lookup sends the page without its statement line.
     /// And a FIFTY-FOURTH since #7076: the same seed read for a stuck TimescaleDB policy job found on the first pass after a restart ("policy job standing seed self-alert"), counted for the same reason.
     /// And a FIFTY-FIFTH since #7076: the read that closes an ended policy job episode ("policy job ended-episode close self-alert"), counted because a swallowed failure leaves the old row open for the next restart to seed from.
+    /// And a FIFTY-SIXTH and FIFTY-SEVENTH since #7295: the blocking and deadlock count watermark seed ("blocking and deadlock count watermark seed") and the CPU incident opened-time seed ("CPU incident opened-time seed"), counted because a swallowed read there leaves the key seeded at 0 and pages again what a page already carried, or reads an open incident as opened at its first sweep.
     /// </summary>
-    private const int CountedSites = 55;
+    private const int CountedSites = 57;
 
     /// <summary>
     /// Log-message fragments that identify a catch block DELIBERATELY not counted, each paired with the

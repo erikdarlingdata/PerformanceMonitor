@@ -825,9 +825,8 @@ AND   metric_name = $2"
     /// — the Lite twin of Darling's V118 table. Returns null when there is no row, which the engine reads as
     /// "no memory" and arms the gate from zero.
     ///
-    /// <para>Null on failure too, deliberately. A load failure cannot resurrect a <c>firing</c> bit it did
-    /// not read, so the worst outcome is the streak rebuilding over the next few samples — a delay, never a
-    /// re-announcement of an incident the user already has open.</para>
+    /// <para>#7295: a read that fails is logged and then thrown, so a caller can tell it from a table with no row. It used to answer
+    /// null for both, and a seed that could not read lost an open incident's <c>firing</c> bit and its streak.</para>
     /// </summary>
     public async Task<(int Breaches, int Clears, bool Firing, DateTime? LastObservedSampleUtc)?>
         LoadAlertPersistenceAsync(int serverId, string metricName)
@@ -870,7 +869,7 @@ AND   metric_name = $2";
         catch (Exception ex)
         {
             AppLogger.Error("Alerts", $"Could not load the alert persistence gate ({metricName}): {ex.Message}");
-            return null;
+            throw;
         }
     }
 
@@ -943,6 +942,7 @@ ON CONFLICT (server_id, metric_name) DO UPDATE SET
     /// toasts for failures still inside the lookback window that the user already saw and dismissed.
     /// The value is the server-local run time of the newest already-alerted failure, returned in its
     /// native basis (NOT coerced to UTC) so it compares directly against <c>FailedJobInfo.RunDateTime</c>.
+    /// <para>#7295: a read that fails is logged and then thrown. An empty list means the table was read and holds no row.</para>
     /// </summary>
     public async Task<List<(int ServerId, DateTime Watermark)>> LoadFailedJobWatermarksAsync()
     {
@@ -978,6 +978,7 @@ AND   watermark_time IS NOT NULL";
         catch (Exception ex)
         {
             AppLogger.Error("Alerts", $"Could not load failed-job watermarks: {ex.Message}");
+            throw;
         }
         return result;
     }

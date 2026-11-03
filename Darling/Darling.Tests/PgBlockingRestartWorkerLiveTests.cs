@@ -210,6 +210,10 @@ public sealed class PgBlockingRestartWorkerLiveTests
             await secondPass();
             Assert.Equal(4, await state.LoadEdgeTriggerWatermarkAsync(Key, Metric));
 
+            /* The positive control: that pass is also the one that pages. The path that paged nothing above can page, and it pages the
+               fourth root once. */
+            Assert.Single(secondEndpoint.Bodies);
+
             /* The failed pass left the worker unseeded and with no watermark to run from. */
             Assert.False(seededAfterFailedPass);
             Assert.False(watermarkAfterFailedPass);
