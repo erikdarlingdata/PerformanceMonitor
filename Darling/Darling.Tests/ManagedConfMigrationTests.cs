@@ -517,35 +517,6 @@ public sealed class ManagedConfMigrationTests
         Assert.Equal(ConfLineClassification.HandEdit, FindByText(ClassifyLines(mismatched), "max_worker_processes").Classification);
     }
 
-    /// <summary>#7365: a v2 block an earlier release wrote holds 3 + N + 8 and a v8 block holds the same count beside its RAM-derived N.
-    /// Both are still ours, not hand edits, though the current formula adds 16.</summary>
-    [Fact]
-    public void ClassifyLines_WorkerProcessesWrittenBeforeTheParallelSlots_AreStillOurs()
-    {
-        var v2 = "\n" + DarlingManagedPostgres.ConfMarkerV2 + "\ntimescaledb.max_background_workers = 74\nmax_worker_processes = 85\n";
-        Assert.Equal(ConfLineClassification.Ours, FindByText(ClassifyLines(v2), "max_worker_processes").Classification);
-
-        var current = DarlingManagedPostgres.DeriveWorkerSettings(72, 16L * 1024 * 1024 * 1024);
-        var v8 = V8BlockWithWorkers(16L * 1024 * 1024 * 1024, 72, current.MaxBackgroundWorkers, 3 + current.MaxBackgroundWorkers + DarlingManagedPostgres.LegacyParallelWorkerSlots);
-        var lines = ClassifyLines(v8);
-        Assert.Equal(ConfLineClassification.Ours, FindByText(lines, "max_worker_processes").Classification);
-        Assert.Equal(ConfLineClassification.Ours, FindByText(lines, "timescaledb.max_background_workers").Classification);
-    }
-
-    /// <summary>#7365 review: an operator who raised BOTH worker lines coherently (300 beside 311, which is N + 11) wrote a pair no
-    /// release wrote. The 8 GB / 72 hypertable fingerprint rebuilds 128 / 147, so 300 is not the rebuild's N: both lines stay hand edits
-    /// and neither half of the edit is dropped.</summary>
-    [Fact]
-    public void ClassifyLines_V8Block_WithACoherentOperatorRaisedWorkerPair_KeepsBothLinesAsHandEdits()
-    {
-        var conf = V8BlockWithWorkers(8L * 1024 * 1024 * 1024, 72, 300, 311);
-
-        var lines = ClassifyLines(conf);
-
-        Assert.Equal(ConfLineClassification.HandEdit, FindByText(lines, "timescaledb.max_background_workers").Classification);
-        Assert.Equal(ConfLineClassification.HandEdit, FindByText(lines, "max_worker_processes").Classification);
-    }
-
     private static string V8BlockWithWorkers(long ramBytes, int hypertables, int workers, int processes)
     {
         var current = DarlingManagedPostgres.DeriveWorkerSettings(hypertables, ramBytes);

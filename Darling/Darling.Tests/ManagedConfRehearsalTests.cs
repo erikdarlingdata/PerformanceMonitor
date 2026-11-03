@@ -130,7 +130,7 @@ public sealed class ManagedConfRehearsalTests
         var afterLineCount = result.NewConfText.Split('\n').Length;
 
         Assert.Equal(69, beforeLineCount - afterLineCount);
-        Assert.Equal(36, managedValues.Count);
+        Assert.Equal(34, managedValues.Count);
         Assert.Single(result.ExcludedKeys);
         Assert.Contains("max_connections", result.ExcludedKeys);
     }

@@ -102,12 +102,6 @@ internal static class ManagedConfFile
     /// reading (<see cref="DarlingManagedPostgres.IsWalSizeWithinDriftOf"/>), so a volume standing next to a
     /// ladder edge does not render a different body from one start to the next. It is an input rather than
     /// something <see cref="RenderBody"/> reads, to keep the render pure: the same inputs, the same bytes.</para>
-    ///
-    /// <para><paramref name="OperatorPinned"/> (#7365) holds, per <see cref="ManagedOnlyKeys"/> key, the operator's own
-    /// active line above the include in <c>postgresql.conf</c> (<see cref="FindOperatorLinesAboveInclude"/>); null or
-    /// empty when there is none or the caller did not look. <see cref="RenderBody"/> leaves such a key out of the file:
-    /// the include sits at the END of <c>postgresql.conf</c>, so a key written there would override the operator's
-    /// line above it.</para>
     /// </summary>
     internal readonly record struct RenderInputs(
         int FormulaVersion,
@@ -122,12 +116,7 @@ internal static class ManagedConfFile
         bool DataVolumeAuthoritative,
         int Port,
         string? EffectivePreloadList,
-        long? InForceMaxWalSizeMb = null,
-        IReadOnlyDictionary<string, OperatorPinnedLine>? OperatorPinned = null);
-
-    /// <summary>An active operator assignment in <c>postgresql.conf</c> ABOVE the managed include: its 1-based line
-    /// and its value as PostgreSQL reads it. See <see cref="FindOperatorLinesAboveInclude"/>.</summary>
-    internal readonly record struct OperatorPinnedLine(int Line, string Value);
+        long? InForceMaxWalSizeMb = null);
 
     /// <summary>One parse of an existing <see cref="FileName"/>: whether it carries a recognizable
     /// <see cref="BodyHashPrefix"/> line at all, the hash it declares, and the body text that line's hash is
@@ -260,23 +249,10 @@ internal static class ManagedConfFile
         /* Planner page cost: no legacy block and no marker; this file is the only place the setting is written. */
         blocks.Append(DarlingManagedPostgres.BuildPlannerPageCostConfAppend());
 
-        /* Parallel query (#7365): no legacy block and no marker either. Its max_parallel_workers follows the core
-           count, so it is the one managed-only key whose value depends on the host. */
-        blocks.Append(DarlingManagedPostgres.BuildParallelQueryConfAppend(inputs.ProcessorCount));
-
         var (order, values) = ReduceToLastOccurrence(blocks.ToString());
         var body = new StringBuilder();
         foreach (var key in order)
         {
-            /* A key the operator already assigns above the include is left out (#7365): this file is included at the
-               END of postgresql.conf, so a line here would override theirs on a store that migrated before the key
-               became managed. Only ManagedOnlyKeys can be pinned: no legacy block ever wrote them, so a line above
-               the include is the operator's by construction. */
-            if (inputs.OperatorPinned is { } pinned && ManagedOnlyKeys.Contains(key) && pinned.ContainsKey(key))
-            {
-                continue;
-            }
-
             body.Append(key).Append(" = '")
                 .Append(DarlingManagedPostgres.EscapeConfValue(values[key]))
                 .Append("'\n");
@@ -286,107 +262,16 @@ internal static class ManagedConfFile
     }
 
     /// <summary>
-    /// Every <see cref="ManagedOnlyKeys"/> key the operator assigns in an active line of <paramref name="postgresqlConf"/>
-    /// ABOVE its managed include (#7365), with the last such line. <c>darling-managed.conf</c> is included at the end
-    /// of <c>postgresql.conf</c> and so overrides every line above it. <see cref="ManagedConfMigration.Rewrite"/>
-    /// (rule 3) moved the lines of the keys that were managed when a store migrated, and its rule 6 makes later runs
-    /// no-ops, so a key that became managed afterwards (<c>random_page_cost</c>, the parallel settings) keeps the
-    /// operator's line where it was, and the first render that carries the key would silently win over it. The
-    /// stock <c>#max_parallel_workers_per_gather = 2</c> line edited in place is the common case.
-    ///
-    /// <para>A line only counts when <see cref="ManagedConfMigration.ClassifyLines(string)"/> finds it outside every
-    /// covered marker block: nothing the product wrote ever counts as an operator line. Empty when the file has no
-    /// working include (a legacy conf, which the migration's rule 3 still moves), and a line below the include is
-    /// not listed, since it already wins.</para>
-    /// </summary>
-    internal static IReadOnlyDictionary<string, OperatorPinnedLine> FindOperatorLinesAboveInclude(string postgresqlConf)
-    {
-        var result = new Dictionary<string, OperatorPinnedLine>(StringComparer.OrdinalIgnoreCase);
-        var includeLine = -1;
-        foreach (var (line, name, value) in DarlingManagedPostgres.ParseConfText(postgresqlConf))
-        {
-            if (name.Equals("include", StringComparison.OrdinalIgnoreCase)
-                && string.Equals(Path.GetFileName(value), FileName, StringComparison.OrdinalIgnoreCase))
-            {
-                includeLine = line;
-                break;
-            }
-        }
-
-        if (includeLine < 0)
-        {
-            return result;
-        }
-
-        var candidates = new List<(int Line, string Key, string Value)>();
-        foreach (var (line, name, value) in DarlingManagedPostgres.ParseConfText(postgresqlConf))
-        {
-            if (line >= includeLine)
-            {
-                break;
-            }
-
-            var key = ManagedOnlyKeys.FirstOrDefault(k => k.Equals(name, StringComparison.OrdinalIgnoreCase));
-            if (key is not null)
-            {
-                candidates.Add((line, key, value));
-            }
-        }
-
-        if (candidates.Count == 0)
-        {
-            return result;
-        }
-
-        /* The classification walks every line of the file, so it only runs when a line could be the operator's. */
-        var outsideEveryBlock = new HashSet<int>(
-            ManagedConfMigration.ClassifyLines(postgresqlConf)
-                .Where(l => l.Classification == ManagedConfMigration.ConfLineClassification.HandEdit
-                    && l.Reason == ManagedConfMigration.HandEditReason.OutsideBlock)
-                .Select(l => l.LineNumber));
-        foreach (var (line, key, value) in candidates)
-        {
-            if (outsideEveryBlock.Contains(line))
-            {
-                result[key] = new OperatorPinnedLine(line, value);
-            }
-        }
-
-        return result;
-    }
-
-    /// <summary>
     /// The owned keys no legacy <c>postgresql.conf</c> block ever wrote, with the value <see cref="RenderBody"/>
     /// derives for each: only <c>darling-managed.conf</c> carries them. <see cref="RenderWithValues"/> writes
     /// that value when the before-snapshot has none, and <see cref="ManagedConfFileSettings.Compare"/> is given
     /// the same map so Step A's verification accepts exactly that addition and nothing else.
     /// </summary>
-    internal static readonly IReadOnlySet<string> ManagedOnlyKeys =
-        new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    internal static readonly IReadOnlyDictionary<string, string> ManagedOnlyKeys =
+        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
-            DarlingManagedPostgres.RandomPageCostSetting,
-            DarlingManagedPostgres.MaxParallelWorkersPerGatherSetting,
-            DarlingManagedPostgres.MaxParallelWorkersSetting,
+            [DarlingManagedPostgres.RandomPageCostSetting] = DarlingManagedPostgres.RandomPageCostValue,
         };
-
-    /// <summary>
-    /// The value <paramref name="fileText"/> (a rendered <see cref="FileName"/>) carries for each <see cref="ManagedOnlyKeys"/>
-    /// key: what Step A's after-snapshot is allowed to add. It is read from the file rather than fixed, because
-    /// <c>max_parallel_workers</c> follows the host's core count (#7365).
-    /// </summary>
-    internal static IReadOnlyDictionary<string, string> ManagedOnlyValuesIn(string fileText)
-    {
-        var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var (_, name, value) in DarlingManagedPostgres.ParseConfText(ParseExisting(fileText).Body))
-        {
-            if (ManagedOnlyKeys.Contains(name))
-            {
-                result[name] = value;
-            }
-        }
-
-        return result;
-    }
 
     /// <summary>
     /// Renders <c>darling-managed.conf</c> the way Step A's post-start verification needs (#4336):
@@ -424,7 +309,7 @@ internal static class ManagedConfFile
                     .Append("'\n");
                 written.Add(key);
             }
-            else if (ManagedOnlyKeys.Contains(key))
+            else if (ManagedOnlyKeys.ContainsKey(key))
             {
                 /* No legacy block ever wrote this key, so a legacy store's snapshot never has it. Dropping it here
                    would leave the migrated file one line short of what the next start renders, and that start

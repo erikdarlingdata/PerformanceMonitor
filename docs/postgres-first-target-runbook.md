@@ -418,7 +418,7 @@ settings. Nearly every collector table becomes a hypertable. The required
 numbers move whenever collectors are added, and undersizing does not error — it silently stops
 compression and retention from running. See
 [Background workers](darling/operations.md#background-workers-sizing-an-unmanaged-store-and-what-happens-if-you-dont);
-this build's first start migrates the store and can add hypertables. After that start, count your hypertables and continuous aggregates with the two queries there and work its formula. For example, a store with 72 hypertables and 29 continuous aggregates gets 128 and 147 on an 8 GB host. It gets 74 and 93 at 4 GB or less, and 177 and 196 at 12 GB or more. The extra 16 slots are for parallel query workers. Both settings need a server restart. Managed mode does this itself.
+this build's first start migrates the store and can add hypertables. After that start, count your hypertables and continuous aggregates with the two queries there and work its formula. For example, a store with 72 hypertables and 29 continuous aggregates gets 128 and 139 on an 8 GB host. It gets 74 and 85 at 4 GB or less, and 177 and 188 at 12 GB or more. Both settings need a server restart. Managed mode does this itself.
 
 ## 5. First start, in console mode
 

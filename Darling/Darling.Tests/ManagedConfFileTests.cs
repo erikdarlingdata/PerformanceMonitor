@@ -8,7 +8,6 @@
 
 using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Threading;
@@ -395,29 +394,6 @@ public sealed class ManagedConfFileTests
             Assert.Single(lines);
             Assert.Equal("random_page_cost = '1.1'", lines[0]);
         }
-    }
-
-    /// <summary>#7365: the parallel-query settings follow the core count, capped at 16, and four workers go to each Gather.
-    /// max_worker_processes stays above the background workers plus max_parallel_workers, whatever the core count.</summary>
-    [Theory]
-    [InlineData(64, "16")]
-    [InlineData(17, "16")]
-    [InlineData(16, "16")]
-    [InlineData(12, "12")]
-    [InlineData(4, "4")]
-    [InlineData(1, "1")]
-    public void RenderBody_SetsParallelWorkersFromTheCoreCount_CappedAt16(int cores, string expectedParallelWorkers)
-    {
-        var inputs = SampleInputs() with { ProcessorCount = cores };
-        var settings = DarlingManagedPostgres.ParseConfText(ManagedConfFile.RenderBody(inputs)).ToDictionary(s => s.Name, s => s.Value);
-
-        Assert.Equal("4", settings["max_parallel_workers_per_gather"]);
-        Assert.Equal(expectedParallelWorkers, settings["max_parallel_workers"]);
-        var background = int.Parse(settings["timescaledb.max_background_workers"], CultureInfo.InvariantCulture);
-        var processes = int.Parse(settings["max_worker_processes"], CultureInfo.InvariantCulture);
-        Assert.True(
-            processes >= 3 + background + int.Parse(expectedParallelWorkers, CultureInfo.InvariantCulture),
-            $"max_worker_processes {processes} must hold the {background} TimescaleDB workers plus {expectedParallelWorkers} parallel workers");
     }
 
     /// <summary>A file the previous version wrote (the same body without the page-cost line, with a header hash
@@ -861,159 +837,6 @@ public sealed class ManagedConfFileTests
         {
             Directory.Delete(dir.FullName, recursive: true);
         }
-    }
-
-    private static Dictionary<string, string> ManagedFileValues(string dataDirectory)
-        => DarlingManagedPostgres.ParseConfText(File.ReadAllText(Path.Combine(dataDirectory, ManagedConfFile.FileName)))
-            .ToDictionary(a => a.Name, a => a.Value, StringComparer.OrdinalIgnoreCase);
-
-    /// <summary>The value PostgreSQL ends up with from postgresql.conf and what it includes: the last assignment
-    /// across the files, following the include (<c>ReadConfAssignments</c> reads them in the server's order).</summary>
-    private static string? EffectiveValue(string dataDirectory, string key)
-        => DarlingManagedPostgres.ReadConfAssignments(Path.Combine(dataDirectory, "postgresql.conf"), key)
-            .Select(a => a.Value).LastOrDefault();
-
-    /// <summary>
-    /// A store migrated before a key became managed keeps the operator's line for it above the include, where
-    /// <c>ManagedConfMigration.Rewrite</c> never moves it, and the include sits at the end of the file (#7365). The
-    /// start path leaves the key out of <c>darling-managed.conf</c> rather than override that line, and says so.
-    /// The file is first written with the key, as the build before this change did, so the heal of an existing
-    /// managed file is covered too.
-    /// </summary>
-    [Theory]
-    [InlineData("max_parallel_workers_per_gather", "0")]
-    [InlineData("max_parallel_workers", "2")]
-    [InlineData("random_page_cost", "2.5")]
-    public void WriteManagedConfFile_OperatorLineAboveTheInclude_StaysInForce_AndTheKeyIsLeftOut(string key, string operatorValue)
-    {
-        var dir = Directory.CreateTempSubdirectory("darling-7365-pinned-");
-        try
-        {
-            var confPath = Path.Combine(dir.FullName, "postgresql.conf");
-            File.WriteAllText(confPath, "# base conf\n");
-            var logger = new CapturingTestLogger();
-            var cluster = new DarlingManagedPostgres(
-                new PostgresConfig { Managed = true, Port = 55432, DataDirectory = dir.FullName }, logger);
-
-            var first = cluster.WriteManagedConfFile(dir.FullName, postgresMajor: 18);
-            Assert.True(first.Written);
-            Assert.True(ManagedFileValues(dir.FullName).ContainsKey(key));
-            var managedValue = EffectiveValue(dir.FullName, key);
-            Assert.NotEqual(operatorValue, managedValue);
-
-            /* The operator's own line near the top, the stock commented line uncommented and edited in place. */
-            File.WriteAllText(confPath, $"#{key} = 2\n{key} = {operatorValue}\n" + File.ReadAllText(confPath));
-            var second = cluster.WriteManagedConfFile(dir.FullName, postgresMajor: 18);
-
-            Assert.True(second.Written);
-            Assert.False(ManagedFileValues(dir.FullName).ContainsKey(key));
-            Assert.Equal(operatorValue, EffectiveValue(dir.FullName, key));
-            Assert.Contains(
-                logger.Lines,
-                line => line.Contains(key, StringComparison.Ordinal)
-                    && line.Contains("line 2", StringComparison.Ordinal)
-                    && line.Contains("stays in force", StringComparison.Ordinal));
-
-            /* Nothing else about the file changed: the other managed keys are all still there. */
-            var values = ManagedFileValues(dir.FullName);
-            Assert.True(values.ContainsKey("shared_buffers"));
-            var firstKeyCount = DarlingManagedPostgres.ParseConfText(first.RenderedText).Count();
-            Assert.Equal(firstKeyCount - 1, DarlingManagedPostgres.ParseConfText(second.RenderedText).Count());
-
-            /* A start with the operator's line still there writes nothing new. */
-            var third = cluster.WriteManagedConfFile(dir.FullName, postgresMajor: 18);
-            Assert.False(third.Written);
-        }
-        finally
-        {
-            Directory.Delete(dir.FullName, recursive: true);
-        }
-    }
-
-    [Fact]
-    public void WriteManagedConfFile_NoOperatorLine_StillGetsTheManagedValues()
-    {
-        var dir = Directory.CreateTempSubdirectory("darling-7365-unpinned-");
-        try
-        {
-            File.WriteAllText(Path.Combine(dir.FullName, "postgresql.conf"), "#max_parallel_workers_per_gather = 2\n#random_page_cost = 4.0\n");
-            var cluster = new DarlingManagedPostgres(
-                new PostgresConfig { Managed = true, Port = 55432, DataDirectory = dir.FullName }, new CapturingTestLogger());
-
-            cluster.WriteManagedConfFile(dir.FullName, postgresMajor: 18);
-
-            var values = ManagedFileValues(dir.FullName);
-            Assert.Equal("4", values["max_parallel_workers_per_gather"]);
-            Assert.Equal("1.1", values["random_page_cost"]);
-            Assert.True(values.ContainsKey("max_parallel_workers"));
-            Assert.Equal("4", EffectiveValue(dir.FullName, "max_parallel_workers_per_gather"));
-        }
-        finally
-        {
-            Directory.Delete(dir.FullName, recursive: true);
-        }
-    }
-
-    /// <summary>Step A's two readers of the file agree with a file that leaves a pinned key out: the snapshot-valued
-    /// render does not invent the line, and the allowed-additions map does not expect it.</summary>
-    [Fact]
-    public void RenderWithValues_AndManagedOnlyValuesIn_AgreeWithAFileThatLeavesAPinnedKeyOut()
-    {
-        var pinned = new Dictionary<string, ManagedConfFile.OperatorPinnedLine>
-        {
-            ["max_parallel_workers_per_gather"] = new(3, "0"),
-        };
-        var inputs = SampleInputs() with { OperatorPinned = pinned };
-
-        var text = ManagedConfFile.RenderWithValues(inputs, new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
-        {
-            ["max_parallel_workers_per_gather"] = "0",
-        });
-
-        var written = DarlingManagedPostgres.ParseConfText(text).Select(a => a.Name).ToList();
-        Assert.DoesNotContain("max_parallel_workers_per_gather", written);
-        Assert.Contains("max_parallel_workers", written);
-        var allowed = ManagedConfFile.ManagedOnlyValuesIn(text);
-        Assert.False(allowed.ContainsKey("max_parallel_workers_per_gather"));
-        Assert.True(allowed.ContainsKey("max_parallel_workers"));
-        Assert.True(allowed.ContainsKey("random_page_cost"));
-    }
-
-    /// <summary>A line below the include already wins over the managed file, so it is not a pin and the key stays.</summary>
-    [Fact]
-    public void FindOperatorLinesAboveInclude_ALineBelowTheInclude_IsNotListed()
-    {
-        var conf = "# base\ninclude 'darling-managed.conf'\nmax_parallel_workers_per_gather = 0\n";
-
-        Assert.Empty(ManagedConfFile.FindOperatorLinesAboveInclude(conf));
-    }
-
-    /// <summary>A conf with no include yet is a legacy conf: the migration's rule 3 moves the operator line, so nothing is left out.</summary>
-    [Fact]
-    public void FindOperatorLinesAboveInclude_NoInclude_ListsNothing()
-        => Assert.Empty(ManagedConfFile.FindOperatorLinesAboveInclude("max_parallel_workers_per_gather = 0\n"));
-
-    /// <summary>
-    /// A line inside one of the product's own marker blocks is never the operator's: the same assignment placed
-    /// outside the block is listed (so the empty result is the block's doing, not a parse miss).
-    /// </summary>
-    [Fact]
-    public void FindOperatorLinesAboveInclude_ALineInsideAnOldMarkerBlock_NeverCounts()
-    {
-        var block = DarlingManagedPostgres.BuildWorkerSizingConfAppend().TrimEnd('\n').Split('\n').ToList();
-        var markerIndex = block.FindIndex(l => l.Contains(DarlingManagedPostgres.ConfMarkerV2, StringComparison.Ordinal));
-        Assert.True(markerIndex >= 0 && block.Count >= markerIndex + 3, "the v2 block should hold its marker and at least two assignments");
-        var inside = new List<string>(block);
-        inside.Insert(markerIndex + 1, "max_parallel_workers_per_gather = 8");
-        var include = "include 'darling-managed.conf'";
-
-        var withLineInsideTheBlock = string.Join('\n', inside) + "\n" + include + "\n";
-        var withLineBeforeTheBlock = "max_parallel_workers_per_gather = 8\n" + string.Join('\n', block) + "\n" + include + "\n";
-
-        Assert.Empty(ManagedConfFile.FindOperatorLinesAboveInclude(withLineInsideTheBlock));
-        var outside = ManagedConfFile.FindOperatorLinesAboveInclude(withLineBeforeTheBlock);
-        Assert.Equal("8", outside["max_parallel_workers_per_gather"].Value);
-        Assert.Equal(1, outside["max_parallel_workers_per_gather"].Line);
     }
 
     [Fact]

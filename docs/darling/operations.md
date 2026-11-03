@@ -98,7 +98,7 @@ Managed mode sizes the two settings from the host's RAM, bounded by the policy j
 
 ```
 timescaledb.max_background_workers = clamp(16 * <host RAM in GB>, <hypertables> + 2, <ceiling>)
-max_worker_processes               = 3 + timescaledb.max_background_workers + 16
+max_worker_processes               = 3 + timescaledb.max_background_workers + 8
 <ceiling> = <hypertables> + 3 * <continuous aggregates> + 2 + 16
 ```
 
@@ -109,7 +109,7 @@ SELECT count(*) AS hypertables FROM timescaledb_information.hypertables;
 SELECT count(*) AS continuous_aggregates FROM timescaledb_information.continuous_aggregates;
 ```
 
-For example, take a store with 72 hypertables and 29 continuous aggregates. Its ceiling is 177, and on an 8 GB host the two settings are **128** and **147**. The same store gets 74 and 93 on a host of 4 GB or less (the floor). It gets 177 and 196 on 12 GB or more (the ceiling). The 16 extra slots are for parallel query workers (#7365): the managed store sets `max_parallel_workers` to the host's core count, at most 16, and keeps that many slots free above the TimescaleDB ones. Your counts will differ, and they grow as collectors are added, so work the formula with the numbers the queries return. One fully migrated store carried **142 policy jobs** when measured for #5633 item 14: 94 compression, 23 continuous-aggregate refresh, 23 retention, plus TimescaleDB's own `policy_telemetry` and `policy_job_stat_history_retention`. The job query below gives your store's own count. The count depends on the schema (hypertables and aggregates), not on how much data is stored.
+For example, take a store with 72 hypertables and 29 continuous aggregates. Its ceiling is 177, and on an 8 GB host the two settings are **128** and **139**. The same store gets 74 and 85 on a host of 4 GB or less (the floor). It gets 177 and 188 on 12 GB or more (the ceiling). Your counts will differ, and they grow as collectors are added, so work the formula with the numbers the queries return. One fully migrated store carried **142 policy jobs** when measured for #5633 item 14: 94 compression, 23 continuous-aggregate refresh, 23 retention, plus TimescaleDB's own `policy_telemetry` and `policy_job_stat_history_retention`. The job query below gives your store's own count. The count depends on the schema (hypertables and aggregates), not on how much data is stored.
 
 After any downtime every job is overdue at the next start, so they all ask for a worker at once. With 74 workers the postmaster log showed 61 to 68 `out of background workers` launch failures on one store at a restart (each job was retried later and ran, so the first pass is noisy and late, not lost).
 
