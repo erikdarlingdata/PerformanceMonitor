@@ -123,7 +123,6 @@ VALUES ({_nextId++}, {Ts(collected)}, {ServerId}, 'TestSrv', 'Db', 11, 22, 'Regu
         ["QueryStoreRegressions"] = ("query_store_stats", s => s.GetQueryStoreRegressionsAsync(ServerId, 6, dataStartUtc: Start)),
         ["QueryStoreRegressionCoverage"] = ("query_store_stats", s => s.GetQueryStoreRegressionCoverageAsync(ServerId, 6)),
         ["QueryTagRollupQueryStore"] = ("query_store_stats", s => s.GetQueryTagRollupDataAsync([ServerId], Start, NowUtc)),
-        ["ForcePlanTargetStates"] = ("query_store_stats", s => s.GetForcePlanTargetStatesAsync(ServerId, [new ForcePlanTarget("Db", 11, 22)])),
     };
 
     public static IEnumerable<TheoryDataRow<string>> CaseNames() => Cases.Keys.Select(k => new TheoryDataRow<string>(k));
@@ -146,5 +145,26 @@ VALUES ({_nextId++}, {Ts(collected)}, {ServerId}, 'TestSrv', 'Db', 11, 22, 'Regu
         File.WriteAllText(archiveFile, "not a parquet file");
 
         await read(_service);
+    }
+
+    /// <summary>The force-plan state read goes through the analysis service's own handle (no LocalDataService entry point), so it gets its own case.</summary>
+    [Fact]
+    public async Task ForcePlanTargetStates_AWindowNewerThanTheArchive_OpensNoArchiveFile()
+    {
+        await ExecuteAsync(
+            StoreRow(Whole(NowUtc.AddDays(-10))),
+            StoreRow(Whole(NowUtc.AddHours(-2))));
+        var archiveFile = await ArchiveAsync("query_store_stats");
+        var finding = new AnalysisFinding { Remediation = new RemediationAction("PLAN_REGRESSION", "force", [new ForcePlanTarget("Db", 11, 22)]) };
+        var analysis = new PerformanceMonitorLite.Analysis.AnalysisService(_duckDb);
+
+        var (_, firstReason) = await analysis.TryGetForcePlanTargetStatesAsync(ServerId, [finding]);
+        Assert.Null(firstReason);
+
+        File.WriteAllText(archiveFile, "not a parquet file");
+
+        /* A read that still opens the file comes back as an unavailable reason, not as an exception. */
+        var (_, secondReason) = await analysis.TryGetForcePlanTargetStatesAsync(ServerId, [finding]);
+        Assert.Null(secondReason);
     }
 }

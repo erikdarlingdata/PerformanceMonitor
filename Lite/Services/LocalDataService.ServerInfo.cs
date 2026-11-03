@@ -71,10 +71,13 @@ LIMIT 1";
     }
 
     /// <summary>
-    /// One server's OWN UTC offset in minutes, for the reads whose window is expressed in that server's
-    /// local wall clock (<c>cpu_utilization_stats.sample_time</c>, <c>default_trace_events.event_time</c>).
-    /// <c>null</c> when the store holds no offset for it — callers decide what an unknown offset means, and
-    /// <see cref="Mcp.McpServerLocalWindow"/> holds that decision for the MCP surface.
+    /// One server's OWN clock: the newest <c>server_properties</c> row that
+    /// carries an offset, with its <c>time_zone_id</c> (schema v42 - <c>CURRENT_TIMEZONE_ID()</c>, a Windows zone
+    /// id such as "Eastern Standard Time" on SQL Server 2022 and later, NULL before). Both columns come from the
+    /// SAME row, so the id and the offset describe one snapshot. The zone is what lets Server-time mode follow a
+    /// daylight-saving change (#4766); a server with no zone id keeps its fixed offset.
+    /// <para>Returns <c>null</c> when the store holds no offset for the server yet, so a caller keeps the clock
+    /// it already has rather than falling back to UTC on a server whose properties are still uncollected.</para>
     ///
     /// <para><b>Why the STORE and not the live probe.</b> <c>ServerManager</c> also learns an offset — its
     /// detection query selects <c>DATEDIFF(MINUTE, GETUTCDATE(), GETDATE())</c> — but that value only
@@ -86,35 +89,6 @@ LIMIT 1";
     /// <para>Skips NULL offsets rather than taking the newest row blindly: the column arrived in schema v42
     /// and is nullable, so a store migrated from earlier holds pre-v42 snapshots that predate it. Ordering
     /// by <c>collection_time DESC</c> alone would let one of those mask an offset the store does have.</para>
-    /// </summary>
-    public async Task<int?> GetServerUtcOffsetMinutesAsync(int serverId)
-    {
-        using var connection = await OpenConnectionAsync();
-        using var command = connection.CreateCommand();
-        /* #7216: the hot table when it holds an offset for the server (see ServerPropertiesWithOffsetRelation), else the view. */
-        var propertiesRelation = await ServerPropertiesWithOffsetRelationAsync(connection, serverId);
-        command.CommandText = $@"
-SELECT utc_offset_minutes
-FROM {propertiesRelation}
-WHERE server_id = $1
-AND   utc_offset_minutes IS NOT NULL
-ORDER BY collection_time DESC
-LIMIT 1";
-
-        command.Parameters.Add(new DuckDBParameter { Value = serverId });
-
-        var scalar = await command.ExecuteScalarAsync();
-        return scalar is null or DBNull ? null : Convert.ToInt32(scalar);
-    }
-
-    /// <summary>
-    /// <see cref="GetServerUtcOffsetMinutesAsync"/> with the zone: the newest <c>server_properties</c> row that
-    /// carries an offset, with its <c>time_zone_id</c> (schema v42 - <c>CURRENT_TIMEZONE_ID()</c>, a Windows zone
-    /// id such as "Eastern Standard Time" on SQL Server 2022 and later, NULL before). Both columns come from the
-    /// SAME row, so the id and the offset describe one snapshot. The zone is what lets Server-time mode follow a
-    /// daylight-saving change (#4766); a server with no zone id keeps its fixed offset.
-    /// <para>Returns <c>null</c> when the store holds no offset for the server yet, so a caller keeps the clock
-    /// it already has rather than falling back to UTC on a server whose properties are still uncollected.</para>
     /// </summary>
     public async Task<ServerClock?> GetServerClockAsync(int serverId)
     {
