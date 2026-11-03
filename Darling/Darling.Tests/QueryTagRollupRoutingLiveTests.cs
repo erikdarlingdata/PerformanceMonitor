@@ -225,6 +225,52 @@ public sealed class QueryTagRollupRoutingLiveTests
             }
         });
 
+    /// <summary>#7240: the io rollups' floors are cached from a probe made while the rollups were 20 hours behind, then the refresh policy
+    /// catches up to one hour before now. The next fleet read of 24 hours takes the hourly rollup for both sections, because the probe reads
+    /// the ceiling fresh instead of serving the one cached with the floor. With the old ceiling the rollup served 4 of the 24 hours and both
+    /// sections read every server's raw rows.</summary>
+    [Fact]
+    public Task AFleetRead_AfterTheRollupCaughtUp_UsesTheFreshCeiling_NotTheOneCachedWithTheFloor() =>
+        WithStoreAsync(async (scratch, connection, ct) =>
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerTwoId, ServerTwoName, ct);
+            var now = DateTime.UtcNow;
+            await TopRankingLiveTests.PlantQueryAsync(connection, ct, "collect.query_stats", ServerId, ServerName, now.AddHours(-30), "QOLD", 1_000, 1_000, 7, 1);
+            await TopRankingLiveTests.PlantQueryAsync(connection, ct, "collect.query_stats", ServerId, ServerName, now.AddHours(-3), "QNEW", 4_000_000, 6_000_000, 11, 3);
+            await TopRankingLiveTests.PlantProcedureAsync(connection, ct, "collect.procedure_stats", ServerId, ServerName, now.AddHours(-30), "POLD", 1_000, 1_000, 7, 1);
+            await TopRankingLiveTests.PlantProcedureAsync(connection, ct, "collect.procedure_stats", ServerId, ServerName, now.AddHours(-3), "PNEW", 4_000_000, 6_000_000, 11, 3);
+            var views = new[] { TimescaleSupport.QueryStatsIoHourlyView, TimescaleSupport.ProcedureStatsIoHourlyView };
+            foreach (var view in views)
+            {
+                await RefreshAsync(connection, ct, view, now.AddHours(-32), now.AddHours(-20));
+            }
+
+            /* The floors are measured now, with the ceiling about 20 hours back. */
+            await using (var warm = NpgsqlDataSource.Create(scratch.ConnectionString))
+            {
+                var availability = await TimescaleSupport.DetectRollupsAsync(warm, ct);
+                var stale = await TimescaleSupport.DetectRollupCoverageAsync(warm, availability, now, ct);
+                await TimescaleSupport.RollupFloorDrainFor(warm);
+                foreach (var view in views)
+                {
+                    Assert.True(stale.CeilingOf(view) < now.AddHours(-19), "the first probe must see the rollup 20 hours behind");
+                }
+            }
+
+            foreach (var view in views)
+            {
+                await RefreshAsync(connection, ct, view, now.AddHours(-32), now.AddHours(-1));
+            }
+
+            using var fleet = JsonDocument.Parse(await FleetAsync(scratch, 24, ct));
+            foreach (var name in new[] { "plan_cache", "procedures" })
+            {
+                var section = Section(fleet, name);
+                Assert.Equal("hourly", section.GetProperty("tier").GetString());
+                Assert.Equal(4_000, section.GetProperty("fleet_total").GetProperty("cpu_ms").GetDouble());
+            }
+        });
+
     /// <summary>#6794 review: the io rollup's floor is inside the window (it was built or backfilled late) and reaches further back than raw's
     /// oldest row, so the route table answers Io through its partial branch. The fleet read still keeps raw, as the Viewer does, because the
     /// hourly answer would leave out the window's first hours and the section would not name the floor.</summary>
