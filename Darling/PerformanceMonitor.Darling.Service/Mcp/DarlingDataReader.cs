@@ -2575,9 +2575,10 @@ internal static class DarlingDataReader
     /// Top Query Store groups over the window — a focused projection of the viewer's
     /// <c>QueryStoreTopSql</c> (the columns Lite's get_query_store_top returns): group by
     /// (database, query_id, plan_id, query_hash, execution_type_desc, replica_role), average the per-interval
-    /// metrics, rank by total duration (<c>SUM(execution_count) * AVG(avg_duration_us)</c>) descending,
+    /// metrics weighted by each interval's execution count (#7169, <see cref="QueryStoreWeightedAverage"/>), rank by
+    /// total duration (<c>SUM(avg_duration_us * execution_count)</c>) descending,
     /// over-fetch by 5 for the WAITFOR trim, cap at top. The avg columns are bigint (per-interval averages) →
-    /// double precision before the AVG/scale. Reads the base <c>query_store_stats</c> table (no v_ view).
+    /// double precision before the weighted sum/scale. Reads the base <c>query_store_stats</c> table (no v_ view).
     /// $1 server_id, $2/$3 window (naive UTC), $4 top, $5 database (NULL = all), $6 execution outcome
     /// (NULL = all; Regular, Aborted or Exception otherwise, one row per outcome either way), $7 module_name
     /// (NULL = every module; applied to the deduplicated interval rows, before the ranking and the cap).
@@ -2601,8 +2602,8 @@ internal static class DarlingDataReader
                per-Query-Store-interval snapshots, and the collector re-fetches the OPEN interval every
                cycle as its last_execution_time advances, so the SAME interval (same first_execution_time)
                is stored repeatedly with a growing execution_count. SUM(execution_count) over the raw rows
-               reports 10 + 25 + 40 for an interval that reached 40, and AVG(avg_*) becomes an avg-of-avgs
-               weighted by how many times each interval happened to be re-collected. This surface feeds
+               reports 10 + 25 + 40 for an interval that reached 40, and the execution-weighted
+               averages would count a re-collected interval again at its own execution count. This surface feeds
                BOTH the MCP tool and the REST route, so un-deduped numbers reach an agent's reasoning as
                readily as the web dashboard. Twins the viewer's QueryStoreTopSql.
 
@@ -2693,7 +2694,7 @@ internal static class DarlingDataReader
     /// before <c>LIMIT $8</c>, the round's candidate limit) — module_name is not a GROUP BY key here (<c>MAX(module_name)</c> is the
     /// aggregate), so it has to filter the deduplicated rows before the GROUP BY rather than after it, and
     /// living in the shared suffix means both the raw and the table CTE inherit that same placement.</summary>
-    private const string QueryStoreTopRankedHead = """
+    private const string QueryStoreTopRankedHead = $$"""
         ranked AS (
             SELECT
                 database_name,
@@ -2711,12 +2712,12 @@ internal static class DarlingDataReader
                    standalone/non-AG server, where every row shares one value. */
                 replica_role,
                 CAST(SUM(execution_count) AS bigint) AS total_executions,
-                AVG(CAST(avg_duration_us AS double precision)) / 1000.0 AS avg_duration_ms,
-                AVG(CAST(avg_cpu_time_us AS double precision)) / 1000.0 AS avg_cpu_time_ms,
-                AVG(CAST(avg_logical_io_reads AS double precision)) AS avg_logical_reads,
-                AVG(CAST(avg_logical_io_writes AS double precision)) AS avg_logical_writes,
-                AVG(CAST(avg_physical_io_reads AS double precision)) AS avg_physical_reads,
-                AVG(CAST(avg_rowcount AS double precision)) AS avg_rowcount,
+                {{QueryStoreWeightedAverage.DurationUs}} / 1000.0 AS avg_duration_ms,
+                {{QueryStoreWeightedAverage.CpuTimeUs}} / 1000.0 AS avg_cpu_time_ms,
+                {{QueryStoreWeightedAverage.LogicalReads}} AS avg_logical_reads,
+                {{QueryStoreWeightedAverage.LogicalWrites}} AS avg_logical_writes,
+                {{QueryStoreWeightedAverage.PhysicalReads}} AS avg_physical_reads,
+                {{QueryStoreWeightedAverage.Rowcount}} AS avg_rowcount,
                 MAX(last_execution_time) AS last_execution_time,
                 MAX(query_plan_hash) AS query_plan_hash
             FROM deduped
@@ -2724,7 +2725,7 @@ internal static class DarlingDataReader
             AND   ($7::text IS NULL OR module_name = $7)
             /*TAG:hash:query_hash*/
             GROUP BY database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
-            ORDER BY SUM(execution_count) * AVG(CAST(avg_duration_us AS double precision)) DESC, database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
+            ORDER BY {{QueryStoreWeightedAverage.RankByDuration}} DESC, database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
             LIMIT $8
         ),
 
@@ -2836,13 +2837,13 @@ internal static class DarlingDataReader
     /// <see cref="QueryStoreIntervalWide.FirstExecUpperSlack"/>, so an edge reads about a day of the server's rows, not
     /// every row newer than it), so a partial first or last day, and any day without a built row, is exact.
     /// <para><b>Every arm is projected as recombinable parts</b>: the execution count, and for each averaged column its
-    /// value as <c>numeric</c> and a 0/1 for "not NULL" (the summary stores the same two things as
-    /// <c>&lt;col&gt;_sum</c> and <c>&lt;col&gt;_n</c>). <c>ranked</c> then groups the unioned rows by the table read's own
-    /// keys and computes <c>SUM(sum) / NULLIF(SUM(n), 0)</c>, which is the table read's unweighted mean of interval
-    /// averages. In the clean case it equals the table read bit for bit: <c>AVG(double precision)</c> of the
-    /// bigint-valued columns is <c>Sx / N</c> with <c>Sx</c> a sum of integers, exact in a double while it stays below
-    /// 2^53; here <c>Sx</c> is an exact <c>numeric</c> sum that is converted to a double once and divided by the same
-    /// <c>N</c>, so both are one correctly rounded division of the same two numbers. $7 filters the unioned rows before
+    /// execution-weighted sum <c>avg * execution_count</c> as <c>numeric</c> (the summary stores the same thing as
+    /// <c>&lt;col&gt;_wsum</c>, V240, #7169). <c>ranked</c> then groups the unioned rows by the table read's own
+    /// keys and computes <c>SUM(wsum) / NULLIF(SUM(ec), 0)</c>, which is the table read's execution-weighted mean of interval
+    /// averages, and ranks on <c>SUM(duration_wsum)</c>, the plan's total duration. In the clean case it equals the table read bit for
+    /// bit: the weighted sum of the bigint-valued columns is a sum of integer products, exact in a double while it stays below
+    /// 2^53; here it is an exact <c>numeric</c> sum that is converted to a double once and divided by the same
+    /// execution total, so both are one correctly rounded division of the same two numbers. $7 filters the unioned rows before
     /// the GROUP BY, where the table read puts it (<c>module_name</c> is part of the summary's key). The text lateral,
     /// the WAITFOR exclusion and the ordering are <see cref="QueryStoreTopTail"/>, shared with the table read.</para>
     /// <para><b>Approximate only through the summary's documented staleness</b>: a row written into a day after that day
@@ -2856,12 +2857,12 @@ internal static class DarlingDataReader
             SELECT
                 database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role, module_name,
                 CAST(execution_count AS numeric) AS ec,
-                CAST(avg_duration_us AS numeric) AS duration_sum, CAST(CAST(avg_duration_us IS NOT NULL AS integer) AS bigint) AS duration_n,
-                CAST(avg_cpu_time_us AS numeric) AS cpu_sum, CAST(CAST(avg_cpu_time_us IS NOT NULL AS integer) AS bigint) AS cpu_n,
-                CAST(avg_logical_io_reads AS numeric) AS reads_sum, CAST(CAST(avg_logical_io_reads IS NOT NULL AS integer) AS bigint) AS reads_n,
-                CAST(avg_logical_io_writes AS numeric) AS writes_sum, CAST(CAST(avg_logical_io_writes IS NOT NULL AS integer) AS bigint) AS writes_n,
-                CAST(avg_physical_io_reads AS numeric) AS physical_sum, CAST(CAST(avg_physical_io_reads IS NOT NULL AS integer) AS bigint) AS physical_n,
-                CAST(avg_rowcount AS numeric) AS rowcount_sum, CAST(CAST(avg_rowcount IS NOT NULL AS integer) AS bigint) AS rowcount_n,
+                CAST(avg_duration_us AS numeric) * execution_count AS duration_wsum,
+                CAST(avg_cpu_time_us AS numeric) * execution_count AS cpu_wsum,
+                CAST(avg_logical_io_reads AS numeric) * execution_count AS reads_wsum,
+                CAST(avg_logical_io_writes AS numeric) * execution_count AS writes_wsum,
+                CAST(avg_physical_io_reads AS numeric) * execution_count AS physical_wsum,
+                CAST(avg_rowcount AS numeric) * execution_count AS rowcount_wsum,
                 last_execution_time, query_plan_hash
             FROM query_store_interval_wide
             WHERE server_id = $1
@@ -2875,12 +2876,12 @@ internal static class DarlingDataReader
             SELECT
                 database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role, module_name,
                 CAST(execution_count AS numeric) AS ec,
-                CAST(avg_duration_us AS numeric), CAST(CAST(avg_duration_us IS NOT NULL AS integer) AS bigint),
-                CAST(avg_cpu_time_us AS numeric), CAST(CAST(avg_cpu_time_us IS NOT NULL AS integer) AS bigint),
-                CAST(avg_logical_io_reads AS numeric), CAST(CAST(avg_logical_io_reads IS NOT NULL AS integer) AS bigint),
-                CAST(avg_logical_io_writes AS numeric), CAST(CAST(avg_logical_io_writes IS NOT NULL AS integer) AS bigint),
-                CAST(avg_physical_io_reads AS numeric), CAST(CAST(avg_physical_io_reads IS NOT NULL AS integer) AS bigint),
-                CAST(avg_rowcount AS numeric), CAST(CAST(avg_rowcount IS NOT NULL AS integer) AS bigint),
+                CAST(avg_duration_us AS numeric) * execution_count,
+                CAST(avg_cpu_time_us AS numeric) * execution_count,
+                CAST(avg_logical_io_reads AS numeric) * execution_count,
+                CAST(avg_logical_io_writes AS numeric) * execution_count,
+                CAST(avg_physical_io_reads AS numeric) * execution_count,
+                CAST(avg_rowcount AS numeric) * execution_count,
                 last_execution_time, query_plan_hash
             FROM query_store_interval_wide
             WHERE server_id = $1
@@ -2894,12 +2895,12 @@ internal static class DarlingDataReader
             SELECT
                 database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role, module_name,
                 execution_count_sum,
-                avg_duration_us_sum, avg_duration_us_n,
-                avg_cpu_time_us_sum, avg_cpu_time_us_n,
-                avg_logical_io_reads_sum, avg_logical_io_reads_n,
-                avg_logical_io_writes_sum, avg_logical_io_writes_n,
-                avg_physical_io_reads_sum, avg_physical_io_reads_n,
-                avg_rowcount_sum, avg_rowcount_n,
+                avg_duration_us_wsum,
+                avg_cpu_time_us_wsum,
+                avg_logical_io_reads_wsum,
+                avg_logical_io_writes_wsum,
+                avg_physical_io_reads_wsum,
+                avg_rowcount_wsum,
                 last_execution_time_max, query_plan_hash_max
             FROM query_store_top_daily
             WHERE server_id = $1
@@ -2918,32 +2919,40 @@ internal static class DarlingDataReader
                 MAX(module_name) AS module_name,
                 replica_role,
                 CAST(SUM(ec) AS bigint) AS total_executions,
-                CAST(SUM(duration_sum) AS double precision) / NULLIF(SUM(duration_n), 0) / 1000.0 AS avg_duration_ms,
-                CAST(SUM(cpu_sum) AS double precision) / NULLIF(SUM(cpu_n), 0) / 1000.0 AS avg_cpu_time_ms,
-                CAST(SUM(reads_sum) AS double precision) / NULLIF(SUM(reads_n), 0) AS avg_logical_reads,
-                CAST(SUM(writes_sum) AS double precision) / NULLIF(SUM(writes_n), 0) AS avg_logical_writes,
-                CAST(SUM(physical_sum) AS double precision) / NULLIF(SUM(physical_n), 0) AS avg_physical_reads,
-                CAST(SUM(rowcount_sum) AS double precision) / NULLIF(SUM(rowcount_n), 0) AS avg_rowcount,
+                CAST(SUM(duration_wsum) AS double precision) / NULLIF(SUM(ec), 0) / 1000.0 AS avg_duration_ms,
+                CAST(SUM(cpu_wsum) AS double precision) / NULLIF(SUM(ec), 0) / 1000.0 AS avg_cpu_time_ms,
+                CAST(SUM(reads_wsum) AS double precision) / NULLIF(SUM(ec), 0) AS avg_logical_reads,
+                CAST(SUM(writes_wsum) AS double precision) / NULLIF(SUM(ec), 0) AS avg_logical_writes,
+                CAST(SUM(physical_wsum) AS double precision) / NULLIF(SUM(ec), 0) AS avg_physical_reads,
+                CAST(SUM(rowcount_wsum) AS double precision) / NULLIF(SUM(ec), 0) AS avg_rowcount,
                 MAX(last_execution_time) AS last_execution_time,
                 MAX(query_plan_hash) AS query_plan_hash
             FROM parts
             WHERE ($7::text IS NULL OR module_name = $7)
             /*TAG:hash:query_hash*/
             GROUP BY database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
-            ORDER BY SUM(ec) * (CAST(SUM(duration_sum) AS double precision) / NULLIF(SUM(duration_n), 0)) DESC, database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
+            ORDER BY CAST(SUM(duration_wsum) AS double precision) DESC, database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
             LIMIT $10
         ),
 
         """ + QueryStoreTopTail;
 
-    /// <summary>The days of <c>[$2, $3)</c> that have a built summary row for server $1. $2 and $3 are dates.</summary>
+    /// <summary>
+    /// The days of <c>[$2, $3)</c> that have a built summary row for server $1 AND were built by a V240-or-newer builder
+    /// (#7169, <see cref="QueryStoreTopDaily.DayIsWeightedSql"/>). A day built before V240 has NULL weighted sums, which would
+    /// sum to a wrong average beside a non-NULL execution count, so it counts as not built and is read from the wide table until
+    /// the service rebuilds it. $2 and $3 are dates.
+    /// </summary>
     private const string QueryStoreTopBuiltDaysSql = """
-        SELECT day
-        FROM query_store_top_daily_built
-        WHERE server_id = $1
-        AND   day >= $2::date
-        AND   day < $3::date
-        ORDER BY day
+        SELECT b.day
+        FROM query_store_top_daily_built AS b
+        WHERE b.server_id = $1
+        AND   b.day >= $2::date
+        AND   b.day < $3::date
+        AND   
+        """ + QueryStoreTopDaily.DayIsWeightedSql + """
+
+        ORDER BY b.day
         """;
 
     /// <summary>
