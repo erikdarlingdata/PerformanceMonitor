@@ -85,7 +85,11 @@ FROM
         var cutoff = RunningJobsCurrency.Cutoff(DateTime.UtcNow, RunningJobsCadenceMinutes(serverId));
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        command.CommandText = @"
+        /* #7216: the newest-snapshot lookup has no time bound, so through the v_ view it read every archived row of running_jobs.
+           The hot table holds the newest snapshot of any server still being collected; the view is read only for a server with no
+           hot row (collection stopped and archival moved every row out), which still shows the last values it had. */
+        var jobsRelation = await HotTableHasServerAsync(connection, "running_jobs", serverId) ? "running_jobs" : "v_running_jobs";
+        command.CommandText = $@"
 SELECT
     collection_time,
     job_name,
@@ -98,11 +102,11 @@ SELECT
     successful_run_count,
     is_running_long,
     percent_of_average
-FROM v_running_jobs AS j
+FROM {jobsRelation} AS j
 WHERE server_id = $1
 AND   collection_time = (
     SELECT MAX(collection_time)
-    FROM v_running_jobs
+    FROM {jobsRelation}
     WHERE server_id = $1
 )
 AND   collection_time >= $2
@@ -185,7 +189,11 @@ ORDER BY current_duration_seconds DESC";
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        command.CommandText = "SELECT MAX(collection_time) FROM v_running_jobs WHERE server_id = $1";
+        /* #7216: the newest-snapshot lookup has no time bound, so through the v_ view it read every archived row of running_jobs.
+           The hot table holds the newest snapshot of any server still being collected; the view is read only for a server with no
+           hot row (collection stopped and archival moved every row out), which still shows the last values it had. */
+        var jobsRelation = await HotTableHasServerAsync(connection, "running_jobs", serverId) ? "running_jobs" : "v_running_jobs";
+        command.CommandText = $"SELECT MAX(collection_time) FROM {jobsRelation} WHERE server_id = $1";
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
 
         var result = await command.ExecuteScalarAsync();
@@ -211,7 +219,12 @@ ORDER BY current_duration_seconds DESC";
 
         var thresholdPercent = (decimal)(multiplier * 100);
 
-        command.CommandText = @"
+        /* #7216: the newest-snapshot lookup has no time bound, so through the v_ view it read every archived row of running_jobs.
+           The hot table holds the newest snapshot of any server still being collected; the view is read only for a server with no
+           hot row (collection stopped and archival moved every row out), which still shows the last values it had. */
+        var jobsRelation = await HotTableHasServerAsync(connection, "running_jobs", serverId) ? "running_jobs" : "v_running_jobs";
+
+        command.CommandText = $@"
 SELECT
     job_name,
     job_id,
@@ -222,7 +235,7 @@ SELECT
     start_time,
     svr.utc_offset_minutes,
     svr.time_zone_id
-FROM v_running_jobs
+FROM {jobsRelation}
 LEFT JOIN
 (
     SELECT utc_offset_minutes, time_zone_id
@@ -234,7 +247,7 @@ LEFT JOIN
 ) AS svr
   ON 1 = 1
 WHERE server_id = $1
-AND collection_time = (SELECT MAX(collection_time) FROM v_running_jobs WHERE server_id = $1)
+AND collection_time = (SELECT MAX(collection_time) FROM {jobsRelation} WHERE server_id = $1)
 AND avg_duration_seconds >= 60
 AND percent_of_average >= $2
 ORDER BY percent_of_average DESC

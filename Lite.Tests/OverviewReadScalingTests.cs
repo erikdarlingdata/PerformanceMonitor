@@ -108,6 +108,24 @@ INSERT INTO tempdb_stats (collection_id, collection_time, server_id, server_name
     version_store_reserved_mb, total_reserved_mb, unallocated_mb, total_sessions_using_tempdb, top_session_id, top_session_tempdb_mb)
 SELECT s, t, {1}, 'SRV', 10, 5, 5, 20, 10, 3, 55, 7 FROM slots ORDER BY t;
 
+/* #7216: the other snapshot tables whose newest-snapshot reads had no time bound. */
+INSERT INTO running_jobs (collection_time, server_id, server_name, job_name, job_id, job_enabled, start_time, current_duration_seconds,
+    avg_duration_seconds, p95_duration_seconds, successful_run_count, is_running_long, percent_of_average)
+SELECT t, {1}, 'SRV', 'Job', 'job-1', true, t, 3600, 900, 1200, 42, true, 400.0 FROM slots ORDER BY t;
+
+INSERT INTO perfmon_stats (collection_id, collection_time, server_id, server_name, object_name, counter_name, instance_name, cntr_value,
+    delta_cntr_value, sample_interval_seconds)
+SELECT s * 10 + c, t, {1}, 'SRV', 'SQLServer:SQL Statistics', 'Counter_' || c, '', 100, 10, 1800 FROM slots, range(10) b(c) ORDER BY t;
+
+INSERT INTO memory_clerks (collection_id, collection_time, server_id, server_name, clerk_type, memory_mb)
+SELECT s * 10 + c, t, {1}, 'SRV', 'CLERK_' || c, 100 + c FROM slots, range(10) b(c) ORDER BY t;
+
+INSERT INTO session_stats (collection_id, collection_time, server_id, server_name, program_name, connection_count, running_count, sleeping_count, dormant_count)
+SELECT s * 10 + c, t, {1}, 'SRV', 'App' || c, 5, 1, 3, 1 FROM slots, range(10) b(c) ORDER BY t;
+
+INSERT INTO plan_correction (collection_id, collection_time, server_id, server_name, database_name, recommendation_name, recommendation_state, score)
+SELECT s * 10 + c, t, {1}, 'SRV', 'Db' || c, 'PR_' || c, 'Active', 50 FROM slots, range(10) b(c) ORDER BY t;
+
 INSERT INTO procedure_stats (collection_id, collection_time, server_id, server_name, database_name, schema_name, object_name, sql_handle, sample_interval_seconds)
 SELECT s * {2} + d, t, {1}, 'SRV', 'Db' || d, 'dbo', 'usp_' || d, '0xH' || d, 1800
 FROM slots, range({2}) b(d) ORDER BY t;
@@ -240,6 +258,21 @@ FROM slots, range({2}) b(d) ORDER BY t;
         ("PVS trend", d => d.GetPvsTrendAsync(ServerId, DateTime.UtcNow.AddHours(-24))),
         ("PVS grid", d => d.GetPvsStatsLatestAsync(ServerId)),
         ("tempdb alert read", d => d.GetLatestTempDbSpaceAsync(ServerId)),
+        /* #7216: the reads that take a server's newest snapshot of a table, by the same unbounded pattern. */
+        ("volume free space alert read", d => d.GetVolumeFreeSpaceAsync(ServerId)),
+        ("running jobs", d => d.ReadRunningJobsAsync(ServerId)),
+        ("running jobs snapshot time", d => d.GetLatestRunningJobsSnapshotTimeAsync(ServerId)),
+        ("anomalous jobs alert read", d => d.GetAnomalousJobsAsync(ServerId, 2)),
+        ("tempdb card", d => d.GetTempdbSummaryAsync(ServerId)),
+        ("database size latest (FinOps)", d => d.GetDatabaseSizeLatestAsync(ServerId)),
+        ("database size summary", d => d.GetDatabaseSizeSummaryAsync(ServerId)),
+        ("idle databases", d => d.GetIdleDatabasesAsync(ServerId)),
+        ("database size stats (server info)", d => d.GetLatestDatabaseSizeStatsAsync(ServerId)),
+        ("session stats", d => d.GetLatestSessionStatsAsync(ServerId)),
+        ("file I/O latest", d => d.GetLatestFileIoStatsAsync(ServerId)),
+        ("perfmon latest", d => d.GetLatestPerfmonStatsAsync(ServerId)),
+        ("memory clerks", d => d.GetLatestMemoryClerksAsync(ServerId)),
+        ("automatic tuning latest", d => d.GetLatestAutomaticTuningAsync(ServerId)),
     ];
 
     private async Task<(List<string> Failures, List<string> Report)> CheckReadsAsync(LocalDataService oneDay, LocalDataService eightDays)
@@ -380,7 +413,7 @@ VALUES (1, TIMESTAMP '{now}' - INTERVAL 1 HOUR, {ServerId}, 'SRV', TIMESTAMP '{n
     /// and each read must still answer from the archive with that server's last values. Built with the real archive pass.
     /// </summary>
     [Fact]
-    public async Task PvsAndTempDbReads_ServerWhoseRowsAreAllArchived_StillShowItsLastValues()
+    public async Task NewestRowReads_ServerWhoseRowsAreAllArchived_StillShowItsLastValues()
     {
         var dir = Path.Combine(_tempDir, "pvsfallback");
         var archiveDir = Path.Combine(dir, "archive");
@@ -404,7 +437,33 @@ VALUES (1, TIMESTAMP '{now}' - INTERVAL 11 DAY, {ServerId}, 'SRV', 'DbA', 5, tru
 INSERT INTO tempdb_stats (collection_id, collection_time, server_id, server_name, user_object_reserved_mb, internal_object_reserved_mb,
     version_store_reserved_mb, total_reserved_mb, unallocated_mb, total_sessions_using_tempdb, top_session_id, top_session_tempdb_mb)
 VALUES (1, TIMESTAMP '{now}' - INTERVAL 11 DAY, {ServerId}, 'SRV', 1, 1, 1, 10, 10, 1, 55, 1),
-       (2, TIMESTAMP '{now}' - INTERVAL 10 DAY, {ServerId}, 'SRV', 10, 5, 5, 20, 10, 3, 55, 7);";
+       (2, TIMESTAMP '{now}' - INTERVAL 10 DAY, {ServerId}, 'SRV', 10, 5, 5, 20, 10, 3, 55, 7);
+/* #7216: the other newest-snapshot reads; the 10 day old snapshot carries the 2s, the 11 day old one the 1s. */
+INSERT INTO database_size_stats (collection_id, collection_time, server_id, server_name, database_name, database_id, file_id, file_type_desc,
+    file_name, physical_name, total_size_mb, used_size_mb, volume_mount_point, volume_total_mb, volume_free_mb)
+VALUES (1, TIMESTAMP '{now}' - INTERVAL 11 DAY, {ServerId}, 'SRV', 'DbA', 5, 1, 'ROWS', 'DbA_data', 'D:\DbA.mdf', 1000, 400, 'D:', 1000, 100),
+       (2, TIMESTAMP '{now}' - INTERVAL 10 DAY, {ServerId}, 'SRV', 'DbA', 5, 1, 'ROWS', 'DbA_data', 'D:\DbA.mdf', 2000, 400, 'D:', 1000, 200);
+INSERT INTO file_io_stats (collection_id, collection_time, server_id, server_name, database_name, file_name, file_type, physical_name, size_mb,
+    delta_reads, delta_writes, delta_read_bytes, delta_write_bytes, delta_stall_read_ms, delta_stall_write_ms, sample_interval_seconds)
+VALUES (1, TIMESTAMP '{now}' - INTERVAL 11 DAY, {ServerId}, 'SRV', 'DbA', 'DbA_data', 'ROWS', 'D:\DbA.mdf', 100, 1, 1, 1, 1, 1, 1, 1800),
+       (2, TIMESTAMP '{now}' - INTERVAL 10 DAY, {ServerId}, 'SRV', 'DbA', 'DbA_data', 'ROWS', 'D:\DbA.mdf', 100, 2, 1, 1, 1, 1, 1, 1800);
+INSERT INTO perfmon_stats (collection_id, collection_time, server_id, server_name, object_name, counter_name, instance_name, cntr_value,
+    delta_cntr_value, sample_interval_seconds)
+VALUES (1, TIMESTAMP '{now}' - INTERVAL 11 DAY, {ServerId}, 'SRV', 'SQLServer:SQL Statistics', 'Counter', '', 1, 1, 1800),
+       (2, TIMESTAMP '{now}' - INTERVAL 10 DAY, {ServerId}, 'SRV', 'SQLServer:SQL Statistics', 'Counter', '', 2, 2, 1800);
+INSERT INTO memory_clerks (collection_id, collection_time, server_id, server_name, clerk_type, memory_mb)
+VALUES (1, TIMESTAMP '{now}' - INTERVAL 11 DAY, {ServerId}, 'SRV', 'CLERK', 1),
+       (2, TIMESTAMP '{now}' - INTERVAL 10 DAY, {ServerId}, 'SRV', 'CLERK', 2);
+INSERT INTO session_stats (collection_id, collection_time, server_id, server_name, program_name, connection_count, running_count, sleeping_count, dormant_count)
+VALUES (1, TIMESTAMP '{now}' - INTERVAL 11 DAY, {ServerId}, 'SRV', 'App', 1, 0, 0, 0),
+       (2, TIMESTAMP '{now}' - INTERVAL 10 DAY, {ServerId}, 'SRV', 'App', 2, 0, 0, 0);
+INSERT INTO plan_correction (collection_id, collection_time, server_id, server_name, database_name, force_last_good_plan_actual_state, recommendation_name, recommendation_state, score)
+VALUES (1, TIMESTAMP '{now}' - INTERVAL 11 DAY, {ServerId}, 'SRV', 'DbA', 'OLD', 'PR_1', 'Active', 50),
+       (2, TIMESTAMP '{now}' - INTERVAL 10 DAY, {ServerId}, 'SRV', 'DbA', 'NEW', 'PR_1', 'Active', 50);
+INSERT INTO running_jobs (collection_time, server_id, server_name, job_name, job_id, job_enabled, start_time, current_duration_seconds,
+    avg_duration_seconds, p95_duration_seconds, successful_run_count, is_running_long, percent_of_average)
+VALUES (TIMESTAMP '{now}' - INTERVAL 11 DAY, {ServerId}, 'SRV', 'OldJob', 'job-1', true, TIMESTAMP '{now}' - INTERVAL 11 DAY, 3600, 900, 1200, 42, true, 400.0),
+       (TIMESTAMP '{now}' - INTERVAL 10 DAY, {ServerId}, 'SRV', 'NewJob', 'job-1', true, TIMESTAMP '{now}' - INTERVAL 10 DAY, 3600, 900, 1200, 42, true, 400.0);";
             await cmd.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
         }
 
@@ -416,7 +475,9 @@ VALUES (1, TIMESTAMP '{now}' - INTERVAL 11 DAY, {ServerId}, 'SRV', 1, 1, 1, 10, 
         {
             await connection.OpenAsync(TestContext.Current.CancellationToken);
             using var cmd = connection.CreateCommand();
-            cmd.CommandText = "SELECT (SELECT COUNT(*) FROM pvs_stats) + (SELECT COUNT(*) FROM tempdb_stats)";
+            cmd.CommandText = "SELECT (SELECT COUNT(*) FROM pvs_stats) + (SELECT COUNT(*) FROM tempdb_stats) + (SELECT COUNT(*) FROM database_size_stats)"
+                + " + (SELECT COUNT(*) FROM file_io_stats) + (SELECT COUNT(*) FROM perfmon_stats) + (SELECT COUNT(*) FROM memory_clerks)"
+                + " + (SELECT COUNT(*) FROM session_stats) + (SELECT COUNT(*) FROM plan_correction) + (SELECT COUNT(*) FROM running_jobs)";
             Assert.Equal(0L, Convert.ToInt64(await cmd.ExecuteScalarAsync(TestContext.Current.CancellationToken)));
         }
 
@@ -434,6 +495,27 @@ VALUES (1, TIMESTAMP '{now}' - INTERVAL 11 DAY, {ServerId}, 'SRV', 1, 1, 1, 10, 
         var tempDb = await data.GetLatestTempDbSpaceAsync(ServerId);
         Assert.NotNull(tempDb);
         Assert.Equal(20, tempDb.TotalReservedMb);
+
+        /* #7216 */
+        var tempDbCard = await data.GetTempdbSummaryAsync(ServerId);
+        Assert.Equal(20m, tempDbCard.Single(r => r.Metric == "Total Reserved").CurrentMb);
+
+        var volumes = await data.GetVolumeFreeSpaceAsync(ServerId);
+        Assert.Equal(200, Assert.Single(volumes).FreeMb);
+
+        Assert.Equal(2000m, Assert.Single(await data.GetDatabaseSizeLatestAsync(ServerId)).TotalSizeMb);
+        Assert.Equal(2000m, Assert.Single(await data.GetDatabaseSizeSummaryAsync(ServerId)).TotalMb);
+        Assert.Equal(2000, Assert.Single(await data.GetLatestDatabaseSizeStatsAsync(ServerId)).TotalSizeMb);
+        Assert.Equal(2, Assert.Single(await data.GetLatestFileIoStatsAsync(ServerId)).DeltaReads);
+        Assert.Equal(2, Assert.Single(await data.GetLatestPerfmonStatsAsync(ServerId)).Value);
+        Assert.Equal(2, Assert.Single(await data.GetLatestMemoryClerksAsync(ServerId)).MemoryMb);
+        Assert.Equal(2, Assert.Single(await data.GetLatestSessionStatsAsync(ServerId)).ConnectionCount);
+        Assert.Equal("NEW", Assert.Single(await data.GetLatestAutomaticTuningAsync(ServerId)).ActualState);
+
+        var jobsSnapshot = await data.GetLatestRunningJobsSnapshotTimeAsync(ServerId);
+        Assert.NotNull(jobsSnapshot);
+        Assert.InRange(DateTime.UtcNow - jobsSnapshot.Value, TimeSpan.FromDays(9.9), TimeSpan.FromDays(10.1));
+        Assert.Equal("NewJob", Assert.Single(await data.GetAnomalousJobsAsync(ServerId, 2)).JobName);
     }
 
     /// <summary>

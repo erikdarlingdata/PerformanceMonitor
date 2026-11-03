@@ -25,6 +25,10 @@ public partial class LocalDataService
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
+        /* #7216: the newest-snapshot lookup has no time bound, so through the v_ view it read every archived row of database_size_stats.
+           The hot table holds the newest snapshot of any server still being collected; the view is read only for a server with no
+           hot row (collection stopped and archival moved every row out), which still shows the last values it had. */
+        var sizeRelation = await HotTableHasServerAsync(connection, "database_size_stats", serverId) ? "database_size_stats" : "v_database_size_stats";
         var dbClause = BuildDbInClause(databaseNames, "database_name", 2, out var dbValues);
         command.CommandText = $@"
 SELECT
@@ -42,11 +46,11 @@ SELECT
     growth_pct,
     vlf_count,
     file_id
-FROM v_database_size_stats
+FROM {sizeRelation}
 WHERE server_id = $1
 AND   collection_time = (
     SELECT MAX(collection_time)
-    FROM v_database_size_stats
+    FROM {sizeRelation}
     WHERE server_id = $1
 ){dbClause}
 ORDER BY database_name, file_type_desc, file_name";
@@ -96,6 +100,10 @@ ORDER BY database_name, file_type_desc, file_name";
         using var command = connection.CreateCommand();
 
         /* $1 server, $2 topN, so the optional database list starts at $3. */
+        /* #7216: the newest-snapshot lookup has no time bound, so through the v_ view it read every archived row of database_size_stats.
+           The hot table holds the newest snapshot of any server still being collected; the view is read only for a server with no
+           hot row (collection stopped and archival moved every row out), which still shows the last values it had. */
+        var sizeRelation = await HotTableHasServerAsync(connection, "database_size_stats", serverId) ? "database_size_stats" : "v_database_size_stats";
         var dbClause = BuildDbInClause(databaseNames, "database_name", 3, out var dbValues);
         command.CommandText = $@"
 SELECT
@@ -104,10 +112,10 @@ SELECT
     /* Used is summed only over the files whose size counts, so used and allocated stay on one footing: the
        Hyperscale log file (NULL size, the log service) is in neither. */
     SUM(CASE WHEN total_size_mb IS NOT NULL THEN used_size_mb END) AS used_mb
-FROM v_database_size_stats
+FROM {sizeRelation}
 WHERE server_id = $1
 AND   collection_time = (
-    SELECT MAX(collection_time) FROM v_database_size_stats WHERE server_id = $1
+    SELECT MAX(collection_time) FROM {sizeRelation} WHERE server_id = $1
 ){dbClause}
 GROUP BY database_name
 ORDER BY total_mb DESC
@@ -142,17 +150,22 @@ LIMIT $2";
 
         var cutoff = DateTime.UtcNow.AddDays(-daysBack);
 
-        command.CommandText = @"
+        /* #7216: the newest-snapshot lookup has no time bound, so through the v_ view it read every archived row of database_size_stats.
+           The hot table holds the newest snapshot of any server still being collected; the view is read only for a server with no
+           hot row (collection stopped and archival moved every row out), which still shows the last values it had. */
+        var sizeRelation = await HotTableHasServerAsync(connection, "database_size_stats", serverId) ? "database_size_stats" : "v_database_size_stats";
+
+        command.CommandText = $@"
 WITH db_sizes AS (
     SELECT
         database_name,
         SUM(total_size_mb) AS total_size_mb,
         COUNT(*) AS file_count
-    FROM v_database_size_stats
+    FROM {sizeRelation}
     WHERE server_id = $1
     AND   collection_time = (
         SELECT MAX(collection_time)
-        FROM v_database_size_stats
+        FROM {sizeRelation}
         WHERE server_id = $1
     )
     GROUP BY database_name
@@ -207,14 +220,19 @@ ORDER BY ds.total_size_mb DESC";
 
         var cutoff = DateTime.UtcNow.AddHours(-24);
 
-        command.CommandText = @"
+        /* #7216: the "latest" row has no time bound, so through the v_ view it ordered every archived row of tempdb_stats. The hot table
+           holds the newest row of any server still being collected; the view is read only for a server with no hot row. The 24 hour
+           "peak" below is windowed and stays on the view. */
+        var latestRelation = await HotTableHasServerAsync(connection, "tempdb_stats", serverId) ? "tempdb_stats" : "v_tempdb_stats";
+
+        command.CommandText = $@"
 WITH latest AS (
     SELECT
         user_object_reserved_mb,
         internal_object_reserved_mb,
         version_store_reserved_mb,
         total_reserved_mb
-    FROM v_tempdb_stats
+    FROM {latestRelation}
     WHERE server_id = $1
     ORDER BY collection_time DESC
     LIMIT 1

@@ -148,15 +148,19 @@ LIMIT 1";
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
+        /* #7216: the newest-snapshot lookup has no time bound, so through the v_ view it read every archived row of database_size_stats.
+           The hot table holds the newest snapshot of any server still being collected; the view is read only for a server with no
+           hot row (collection stopped and archival moved every row out), which still shows the last values it had. */
+        var sizeRelation = await HotTableHasServerAsync(connection, "database_size_stats", serverId) ? "database_size_stats" : "v_database_size_stats";
         var dbClause = BuildDbInClause(databaseNames, "database_name", 2, out var dbValues);
         command.CommandText = $@"
 SELECT database_name, file_name, file_type_desc, physical_name,
        total_size_mb, used_size_mb, auto_growth_mb, max_size_mb,
        volume_mount_point, volume_total_mb, volume_free_mb,
        collection_time, file_id, is_percent_growth, growth_pct
-FROM v_database_size_stats
+FROM {sizeRelation}
 WHERE server_id = $1
-AND   collection_time = (SELECT MAX(collection_time) FROM v_database_size_stats WHERE server_id = $1){dbClause}
+AND   collection_time = (SELECT MAX(collection_time) FROM {sizeRelation} WHERE server_id = $1){dbClause}
 ORDER BY database_name, file_type_desc, file_name";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
@@ -203,13 +207,17 @@ ORDER BY database_name, file_type_desc, file_name";
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        command.CommandText = @"
+        /* #7216: the newest-snapshot lookup has no time bound, so through the v_ view it read every archived row of session_stats.
+           The hot table holds the newest snapshot of any server still being collected; the view is read only for a server with no
+           hot row (collection stopped and archival moved every row out), which still shows the last values it had. */
+        var sessionRelation = await HotTableHasServerAsync(connection, "session_stats", serverId) ? "session_stats" : "v_session_stats";
+        command.CommandText = $@"
 SELECT program_name, connection_count, running_count, sleeping_count, dormant_count,
        total_cpu_time_ms, total_reads, total_writes, total_logical_reads,
        collection_time
-FROM v_session_stats
+FROM {sessionRelation}
 WHERE server_id = $1
-AND   collection_time = (SELECT MAX(collection_time) FROM v_session_stats WHERE server_id = $1)
+AND   collection_time = (SELECT MAX(collection_time) FROM {sessionRelation} WHERE server_id = $1)
 ORDER BY connection_count DESC";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });

@@ -403,11 +403,15 @@ ORDER BY sample_time";
         using var command = connection.CreateCommand();
         /* #3541 A10: collection_time rides on the row (same statement as the values), so get_memory_clerks
            can publish captured_at — every clerk of one snapshot shares it by construction. */
-        command.CommandText = @"
+        /* #7216: the newest-snapshot lookup has no time bound, so through the v_ view it read every archived row of memory_clerks.
+           The hot table holds the newest snapshot of any server still being collected; the view is read only for a server with no
+           hot row (collection stopped and archival moved every row out), which still shows the last values it had. */
+        var clerksRelation = await HotTableHasServerAsync(connection, "memory_clerks", serverId) ? "memory_clerks" : "v_memory_clerks";
+        command.CommandText = $@"
 SELECT clerk_type, memory_mb, collection_time
-FROM v_memory_clerks
+FROM {clerksRelation}
 WHERE server_id = $1
-AND   collection_time = (SELECT MAX(collection_time) FROM v_memory_clerks WHERE server_id = $1)
+AND   collection_time = (SELECT MAX(collection_time) FROM {clerksRelation} WHERE server_id = $1)
 ORDER BY memory_mb DESC";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
