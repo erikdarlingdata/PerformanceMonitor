@@ -169,27 +169,36 @@ public static class QueryTagRollupSql
     /// </summary>
     public static string QueryStoreRoutedSqlFor(int wideRanges, bool days = false)
     {
-        /* $1 to $6 are the hourly arm's, $7 the window end, then the day pair arrays (when days) and the wide arms' triples. */
+        /* $1 to $6 are the hourly arm's, $7 the window end, then the day pair arrays (when days) and the wide arms' triples,
+           then the hourly arm's first start and last end (#7365). The two bounds come last so no other number moves. */
         const string windowEnd = "$7";
         var first = days ? 10 : 8;
+        var hourFirst = "$" + (first + (3 * wideRanges)).ToString(System.Globalization.CultureInfo.InvariantCulture);
+        var hourLast = "$" + (first + (3 * wideRanges) + 1).ToString(System.Globalization.CultureInfo.InvariantCulture);
         var text = new System.Text.StringBuilder();
-        text.Append("""
+        text.Append($$"""
             WITH partials AS
             (
                 SELECT t.server_id, m.tag_id,
-                       SUM(t.ec_sum) AS ec_sum,
-                       SUM(t.cpu_wsum) AS cpu_wsum,
-                       SUM(t.dur_wsum) AS dur_wsum,
-                       SUM(t.reads_wsum) AS reads_wsum,
-                       SUM(t.writes_wsum) AS writes_wsum,
-                       MAX(t.mem_max) AS mem_max
-                FROM unnest($2::timestamp[], $3::timestamp[]) AS r(range_from, range_to)
-                JOIN collect.query_store_hash_hourly AS t
-                       ON t.hour >= r.range_from
-                      AND t.hour < r.range_to
+                       CAST(t.ec_sum AS numeric) AS ec_sum,
+                       CAST(t.cpu_wsum AS numeric) AS cpu_wsum,
+                       CAST(t.dur_wsum AS numeric) AS dur_wsum,
+                       CAST(t.reads_wsum AS numeric) AS reads_wsum,
+                       CAST(t.writes_wsum AS numeric) AS writes_wsum,
+                       CAST(t.mem_max AS numeric) AS mem_max
+                FROM collect.query_store_hash_hourly AS t
                 LEFT JOIN config.query_tag_map AS m
                        ON m.server_id = t.server_id AND m.key_kind = 'hash' AND m.key = t.query_hash
                 WHERE t.server_id = ANY($1::integer[])
+                AND   t.hour >= {{hourFirst}}::timestamp
+                AND   t.hour < {{hourLast}}::timestamp
+                AND   EXISTS
+                      (
+                          SELECT 1
+                          FROM unnest($2::timestamp[], $3::timestamp[]) AS r(range_from, range_to)
+                          WHERE t.hour >= r.range_from
+                          AND   t.hour < r.range_to
+                      )
                 AND   NOT EXISTS
                       (
                           SELECT 1
@@ -198,7 +207,6 @@ public static class QueryTagRollupSql
                           AND   t.hour >= g.gap_from
                           AND   t.hour < g.gap_to
                       )
-                GROUP BY t.server_id, m.tag_id
 
             """);
         if (days)
@@ -206,19 +214,18 @@ public static class QueryTagRollupSql
             text.Append("""
                     UNION ALL
                     SELECT t.server_id, m.tag_id,
-                           SUM(t.ec_sum) AS ec_sum,
-                           SUM(t.cpu_wsum) AS cpu_wsum,
-                           SUM(t.dur_wsum) AS dur_wsum,
-                           SUM(t.reads_wsum) AS reads_wsum,
-                           SUM(t.writes_wsum) AS writes_wsum,
-                           MAX(t.mem_max) AS mem_max
+                           CAST(t.ec_sum AS numeric) AS ec_sum,
+                           CAST(t.cpu_wsum AS numeric) AS cpu_wsum,
+                           CAST(t.dur_wsum AS numeric) AS dur_wsum,
+                           CAST(t.reads_wsum AS numeric) AS reads_wsum,
+                           CAST(t.writes_wsum AS numeric) AS writes_wsum,
+                           CAST(t.mem_max AS numeric) AS mem_max
                     FROM unnest($8::timestamp[], $9::integer[]) AS p(day, server_id)
                     JOIN collect.query_store_hash_daily AS t
                            ON t.day = p.day
                           AND t.server_id = p.server_id
                     LEFT JOIN config.query_tag_map AS m
                            ON m.server_id = t.server_id AND m.key_kind = 'hash' AND m.key = t.query_hash
-                    GROUP BY t.server_id, m.tag_id
 
                 """);
         }
@@ -231,12 +238,12 @@ public static class QueryTagRollupSql
             text.Append($$"""
                     UNION ALL
                     SELECT q.server_id, m.tag_id,
-                           SUM(q.execution_count) AS ec_sum,
-                           SUM(q.avg_cpu_time_us * q.execution_count) AS cpu_wsum,
-                           SUM(q.avg_duration_us * q.execution_count) AS dur_wsum,
-                           SUM(q.avg_logical_io_reads * q.execution_count) AS reads_wsum,
-                           SUM(q.avg_logical_io_writes * q.execution_count) AS writes_wsum,
-                           MAX(q.max_query_max_used_memory) AS mem_max
+                           CAST(q.execution_count AS numeric) AS ec_sum,
+                           CAST(q.avg_cpu_time_us * q.execution_count AS numeric) AS cpu_wsum,
+                           CAST(q.avg_duration_us * q.execution_count AS numeric) AS dur_wsum,
+                           CAST(q.avg_logical_io_reads * q.execution_count AS numeric) AS reads_wsum,
+                           CAST(q.avg_logical_io_writes * q.execution_count AS numeric) AS writes_wsum,
+                           CAST(q.max_query_max_used_memory AS numeric) AS mem_max
                     FROM collect.query_store_interval_wide AS q
                     LEFT JOIN config.query_tag_map AS m
                            ON m.server_id = q.server_id AND m.key_kind = 'hash' AND m.key = q.query_hash
@@ -246,7 +253,6 @@ public static class QueryTagRollupSql
                     AND   q.collection_time <= {{windowEnd}}
                     AND   q.first_execution_time >= {{from}}::timestamp - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
                     AND   q.first_execution_time <= LEAST({{to}}::timestamp, {{windowEnd}}) + {{QueryStoreIntervalWide.FirstExecUpperSlackSql}}
-                    GROUP BY q.server_id, m.tag_id
 
                 """);
         }

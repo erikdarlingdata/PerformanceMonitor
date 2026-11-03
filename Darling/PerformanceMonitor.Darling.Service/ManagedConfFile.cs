@@ -249,6 +249,10 @@ internal static class ManagedConfFile
         /* Planner page cost: no legacy block and no marker; this file is the only place the setting is written. */
         blocks.Append(DarlingManagedPostgres.BuildPlannerPageCostConfAppend());
 
+        /* Parallel query (#7365): no legacy block and no marker either. Its max_parallel_workers follows the core
+           count, so it is the one managed-only key whose value depends on the host. */
+        blocks.Append(DarlingManagedPostgres.BuildParallelQueryConfAppend(inputs.ProcessorCount));
+
         var (order, values) = ReduceToLastOccurrence(blocks.ToString());
         var body = new StringBuilder();
         foreach (var key in order)
@@ -267,11 +271,32 @@ internal static class ManagedConfFile
     /// that value when the before-snapshot has none, and <see cref="ManagedConfFileSettings.Compare"/> is given
     /// the same map so Step A's verification accepts exactly that addition and nothing else.
     /// </summary>
-    internal static readonly IReadOnlyDictionary<string, string> ManagedOnlyKeys =
-        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+    internal static readonly IReadOnlySet<string> ManagedOnlyKeys =
+        new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
-            [DarlingManagedPostgres.RandomPageCostSetting] = DarlingManagedPostgres.RandomPageCostValue,
+            DarlingManagedPostgres.RandomPageCostSetting,
+            DarlingManagedPostgres.MaxParallelWorkersPerGatherSetting,
+            DarlingManagedPostgres.MaxParallelWorkersSetting,
         };
+
+    /// <summary>
+    /// The value <paramref name="fileText"/> (a rendered <see cref="FileName"/>) carries for each <see cref="ManagedOnlyKeys"/>
+    /// key: what Step A's after-snapshot is allowed to add. It is read from the file rather than fixed, because
+    /// <c>max_parallel_workers</c> follows the host's core count (#7365).
+    /// </summary>
+    internal static IReadOnlyDictionary<string, string> ManagedOnlyValuesIn(string fileText)
+    {
+        var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (_, name, value) in DarlingManagedPostgres.ParseConfText(ParseExisting(fileText).Body))
+        {
+            if (ManagedOnlyKeys.Contains(name))
+            {
+                result[name] = value;
+            }
+        }
+
+        return result;
+    }
 
     /// <summary>
     /// Renders <c>darling-managed.conf</c> the way Step A's post-start verification needs (#4336):
@@ -309,7 +334,7 @@ internal static class ManagedConfFile
                     .Append("'\n");
                 written.Add(key);
             }
-            else if (ManagedOnlyKeys.ContainsKey(key))
+            else if (ManagedOnlyKeys.Contains(key))
             {
                 /* No legacy block ever wrote this key, so a legacy store's snapshot never has it. Dropping it here
                    would leave the migrated file one line short of what the next start renders, and that start

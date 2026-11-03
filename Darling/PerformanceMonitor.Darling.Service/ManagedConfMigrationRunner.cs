@@ -280,7 +280,7 @@ internal static class ManagedConfMigrationRunner
         IReadOnlyList<FileSettingRow> before,
         IReadOnlyList<FileSettingRow> after)
     {
-        var (match, mismatches) = ManagedConfFileSettings.Compare(before, after, ManagedConfFile.ManagedOnlyKeys);
+        var (match, mismatches) = ManagedConfFileSettings.Compare(before, after, ManagedConfFile.ManagedOnlyValuesIn(newManagedConfText));
 
         if (match)
         {

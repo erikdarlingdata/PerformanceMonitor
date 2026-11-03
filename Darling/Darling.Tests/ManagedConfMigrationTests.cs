@@ -517,6 +517,21 @@ public sealed class ManagedConfMigrationTests
         Assert.Equal(ConfLineClassification.HandEdit, FindByText(ClassifyLines(mismatched), "max_worker_processes").Classification);
     }
 
+    /// <summary>#7365: a v2 block an earlier release wrote holds 3 + N + 8 and a v8 block holds the same count beside its RAM-derived N.
+    /// Both are still ours, not hand edits, though the current formula adds 16.</summary>
+    [Fact]
+    public void ClassifyLines_WorkerProcessesWrittenBeforeTheParallelSlots_AreStillOurs()
+    {
+        var v2 = "\n" + DarlingManagedPostgres.ConfMarkerV2 + "\ntimescaledb.max_background_workers = 74\nmax_worker_processes = 85\n";
+        Assert.Equal(ConfLineClassification.Ours, FindByText(ClassifyLines(v2), "max_worker_processes").Classification);
+
+        var current = DarlingManagedPostgres.DeriveWorkerSettings(72, 16L * 1024 * 1024 * 1024);
+        var v8 = V8BlockWithWorkers(16L * 1024 * 1024 * 1024, 72, current.MaxBackgroundWorkers, 3 + current.MaxBackgroundWorkers + DarlingManagedPostgres.LegacyParallelWorkerSlots);
+        var lines = ClassifyLines(v8);
+        Assert.Equal(ConfLineClassification.Ours, FindByText(lines, "max_worker_processes").Classification);
+        Assert.Equal(ConfLineClassification.Ours, FindByText(lines, "timescaledb.max_background_workers").Classification);
+    }
+
     private static string V8BlockWithWorkers(long ramBytes, int hypertables, int workers, int processes)
     {
         var current = DarlingManagedPostgres.DeriveWorkerSettings(hypertables, ramBytes);

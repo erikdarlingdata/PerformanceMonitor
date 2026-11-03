@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Threading;
@@ -394,6 +395,29 @@ public sealed class ManagedConfFileTests
             Assert.Single(lines);
             Assert.Equal("random_page_cost = '1.1'", lines[0]);
         }
+    }
+
+    /// <summary>#7365: the parallel-query settings follow the core count, capped at 16, and four workers go to each Gather.
+    /// max_worker_processes stays above the background workers plus max_parallel_workers, whatever the core count.</summary>
+    [Theory]
+    [InlineData(64, "16")]
+    [InlineData(17, "16")]
+    [InlineData(16, "16")]
+    [InlineData(12, "12")]
+    [InlineData(4, "4")]
+    [InlineData(1, "1")]
+    public void RenderBody_SetsParallelWorkersFromTheCoreCount_CappedAt16(int cores, string expectedParallelWorkers)
+    {
+        var inputs = SampleInputs() with { ProcessorCount = cores };
+        var settings = DarlingManagedPostgres.ParseConfText(ManagedConfFile.RenderBody(inputs)).ToDictionary(s => s.Name, s => s.Value);
+
+        Assert.Equal("4", settings["max_parallel_workers_per_gather"]);
+        Assert.Equal(expectedParallelWorkers, settings["max_parallel_workers"]);
+        var background = int.Parse(settings["timescaledb.max_background_workers"], CultureInfo.InvariantCulture);
+        var processes = int.Parse(settings["max_worker_processes"], CultureInfo.InvariantCulture);
+        Assert.True(
+            processes >= 3 + background + int.Parse(expectedParallelWorkers, CultureInfo.InvariantCulture),
+            $"max_worker_processes {processes} must hold the {background} TimescaleDB workers plus {expectedParallelWorkers} parallel workers");
     }
 
     /// <summary>A file the previous version wrote (the same body without the page-cost line, with a header hash

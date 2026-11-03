@@ -120,7 +120,7 @@ public sealed class DarlingManagedPostgresTests
 
         var block = DarlingManagedPostgres.BuildWorkerSizingConfAppend();
         var expectedBackgroundWorkers = TimescaleSupport.HypertableCount + 2;
-        var expectedWorkerProcesses = 3 + expectedBackgroundWorkers + 8;
+        var expectedWorkerProcesses = 3 + expectedBackgroundWorkers + DarlingManagedPostgres.MaxParallelWorkersCeiling;
 
         Assert.Contains(DarlingManagedPostgres.ConfMarkerV2, block, StringComparison.Ordinal);
         Assert.Contains($"timescaledb.max_background_workers = {expectedBackgroundWorkers}", block, StringComparison.Ordinal);
@@ -1904,7 +1904,7 @@ public sealed class DarlingManagedPostgresTests
         Assert.Contains("maintenance_work_mem = 1638MB", block, StringComparison.Ordinal);   /* 5% of 32 GB, past the 1536 floor, under the 2 GB cap */
         Assert.Contains("work_mem = 64MB", block, StringComparison.Ordinal);                 /* RAM/512 = 64 MB, exactly the ceiling */
         Assert.Contains("timescaledb.max_background_workers = 145", block, StringComparison.Ordinal);  /* 32 GB x 16 = 512, clamped to the ceiling 40 + 3 x 29 aggregates + 2 + 16, #5633 item 14 */
-        Assert.Contains("max_worker_processes = 156", block, StringComparison.Ordinal);      /* 3 + 145 + 8 */
+        Assert.Contains("max_worker_processes = 164", block, StringComparison.Ordinal);      /* 3 + 145 + 16 (#7365) */
     }
 
     /// <summary>

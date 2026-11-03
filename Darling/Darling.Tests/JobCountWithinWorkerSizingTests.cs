@@ -46,16 +46,16 @@ public sealed class JobCountWithinWorkerSizingTests
         /* 4 GB: 64 is under the floor, so the old sizing (and its retried launches) stays. */
         var at4 = DarlingManagedPostgres.DeriveWorkerSettings(72, 29, 4 * Gb);
         Assert.Equal(74, at4.MaxBackgroundWorkers);
-        Assert.Equal(85, at4.MaxWorkerProcesses);
+        Assert.Equal(93, at4.MaxWorkerProcesses);
 
         var at8 = DarlingManagedPostgres.DeriveWorkerSettings(72, 29, 8 * Gb);
         Assert.Equal(128, at8.MaxBackgroundWorkers);
-        Assert.Equal(139, at8.MaxWorkerProcesses);
+        Assert.Equal(147, at8.MaxWorkerProcesses);
 
         /* 16 GB: 256 would be past every job the schema can create (72 + 3 x 29 + 2 + 16 = 177). */
         var at16 = DarlingManagedPostgres.DeriveWorkerSettings(72, 29, 16 * Gb);
         Assert.Equal(177, at16.MaxBackgroundWorkers);
-        Assert.Equal(188, at16.MaxWorkerProcesses);
+        Assert.Equal(196, at16.MaxWorkerProcesses);
         Assert.Equal(177, DarlingManagedPostgres.DeriveWorkerCeiling(72, 29));
 
         /* The ceiling counts aggregates: one more aggregate adds up to three jobs and so three slots. */
@@ -71,7 +71,7 @@ public sealed class JobCountWithinWorkerSizingTests
         {
             var w = DarlingManagedPostgres.DeriveWorkerSettings(72, 29, ram);
             Assert.InRange(w.MaxBackgroundWorkers, 74, 177);
-            Assert.Equal(3 + w.MaxBackgroundWorkers + 8, w.MaxWorkerProcesses);
+            Assert.Equal(3 + w.MaxBackgroundWorkers + DarlingManagedPostgres.MaxParallelWorkersCeiling, w.MaxWorkerProcesses);
         }
 
         /* The burst bound the factor exists for: at 15 MB a backend (the review's figure, above the 4-6 MB

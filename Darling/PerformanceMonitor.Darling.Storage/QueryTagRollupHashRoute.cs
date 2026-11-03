@@ -443,6 +443,19 @@ AND   f.hour < $2";
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(group.To, DateTimeKind.Unspecified) });
         }
 
+        /* The hourly arm's plain bounds (#7365): the first range's start and the last range's end, which let the table read be split
+           across parallel workers. No ranges means NULL bounds, which match no row, the same as the empty range list does. */
+        command.Parameters.Add(new NpgsqlParameter
+        {
+            NpgsqlDbType = NpgsqlDbType.Timestamp,
+            Value = hourly.RangeFrom.Length == 0 ? DBNull.Value : (object)hourly.RangeFrom.Min(),
+        });
+        command.Parameters.Add(new NpgsqlParameter
+        {
+            NpgsqlDbType = NpgsqlDbType.Timestamp,
+            Value = hourly.RangeTo.Length == 0 ? DBNull.Value : (object)hourly.RangeTo.Max(),
+        });
+
         return command;
     }
 }

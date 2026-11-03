@@ -121,13 +121,18 @@ public sealed class ManagedConfMigrationRunnerTests : IDisposable
         var beforeRows = new List<FileSettingRow>();
         foreach (var kvp in derived)
         {
-            if (kvp.Key != "random_page_cost")
+            if (!ManagedConfFile.ManagedOnlyKeys.Contains(kvp.Key))
             {
                 beforeRows.Add(Applied(kvp.Key, kvp.Value));
             }
         }
 
-        var afterRows = new List<FileSettingRow>(beforeRows) { Applied("random_page_cost", "1.1", ManagedConfFile.FileName) };
+        var afterRows = new List<FileSettingRow>(beforeRows);
+        foreach (var key in ManagedConfFile.ManagedOnlyKeys)
+        {
+            afterRows.Add(Applied(key, derived[key], ManagedConfFile.FileName));
+        }
+
         var calls = 0;
         Func<CancellationToken, Task<IReadOnlyList<FileSettingRow>>> snapshot = _ =>
             Task.FromResult<IReadOnlyList<FileSettingRow>>(++calls == 1 ? beforeRows : afterRows);
@@ -143,6 +148,43 @@ public sealed class ManagedConfMigrationRunnerTests : IDisposable
         Assert.False(ManagedConfFile.ShouldReplaceManagedConf(written, ManagedConfFile.Render(inputs)));
     }
 
+    /// <summary>#7365: <c>max_parallel_workers</c> follows the host's cores, so a 4-core host's migration adds 4, not 16, and Step A
+    /// accepts the value the file it wrote carries.</summary>
+    [Fact]
+    public async Task RunStepA_LegacyStoreOnAFourCoreHost_AcceptsTheCoreCountAsMaxParallelWorkers()
+    {
+        WriteConf("# base conf\n");
+        var inputs = SampleInputs() with { ProcessorCount = 4 };
+        var derived = DerivedValues(inputs);
+        Assert.Equal("4", derived["max_parallel_workers"]);
+
+        var beforeRows = new List<FileSettingRow>();
+        foreach (var kvp in derived)
+        {
+            if (!ManagedConfFile.ManagedOnlyKeys.Contains(kvp.Key))
+            {
+                beforeRows.Add(Applied(kvp.Key, kvp.Value));
+            }
+        }
+
+        var afterRows = new List<FileSettingRow>(beforeRows);
+        foreach (var key in ManagedConfFile.ManagedOnlyKeys)
+        {
+            afterRows.Add(Applied(key, derived[key], ManagedConfFile.FileName));
+        }
+
+        var calls = 0;
+        Func<CancellationToken, Task<IReadOnlyList<FileSettingRow>>> snapshot = _ =>
+            Task.FromResult<IReadOnlyList<FileSettingRow>>(++calls == 1 ? beforeRows : afterRows);
+
+        var outcome = await ManagedConfMigrationRunner.RunStepA(
+            _dataDir, snapshot, derived, inputs, inputs.Port, UtcNow, new CapturingTestLogger(), CancellationToken.None);
+
+        Assert.Equal(ManagedConfVerificationStatus.Verified, outcome.Status);
+        Assert.Empty(outcome.MismatchedKeys);
+        Assert.Contains("max_parallel_workers = '4'", File.ReadAllText(Path.Combine(_dataDir, ManagedConfFile.FileName)), StringComparison.Ordinal);
+    }
+
     /// <summary>Pin: only the page-cost addition is accepted. If the after-snapshot also gains any other key the
     /// before did not have, Step A still fails and restores.</summary>
     [Fact]
@@ -155,7 +197,7 @@ public sealed class ManagedConfMigrationRunnerTests : IDisposable
         var beforeRows = new List<FileSettingRow>();
         foreach (var kvp in derived)
         {
-            if (kvp.Key is not ("random_page_cost" or "work_mem"))
+            if (kvp.Key != "work_mem" && !ManagedConfFile.ManagedOnlyKeys.Contains(kvp.Key))
             {
                 beforeRows.Add(Applied(kvp.Key, kvp.Value));
             }
@@ -163,9 +205,13 @@ public sealed class ManagedConfMigrationRunnerTests : IDisposable
 
         var afterRows = new List<FileSettingRow>(beforeRows)
         {
-            Applied("random_page_cost", "1.1", ManagedConfFile.FileName),
             Applied("work_mem", derived["work_mem"], ManagedConfFile.FileName),
         };
+        foreach (var key in ManagedConfFile.ManagedOnlyKeys)
+        {
+            afterRows.Add(Applied(key, derived[key], ManagedConfFile.FileName));
+        }
+
         var calls = 0;
         Func<CancellationToken, Task<IReadOnlyList<FileSettingRow>>> snapshot = _ =>
             Task.FromResult<IReadOnlyList<FileSettingRow>>(++calls == 1 ? beforeRows : afterRows);

@@ -362,7 +362,7 @@ internal static class ManagedConfMigration
 
         if (!TryFindAssignmentValue(span, assignments, "max_worker_processes", out var workerProcessesText) ||
             !int.TryParse(workerProcessesText, NumberStyles.Integer, CultureInfo.InvariantCulture, out var workerProcesses) ||
-            workerProcesses != backgroundWorkers + 11)
+            !IsWorkerProcessCountWeWrote(backgroundWorkers, workerProcesses))
         {
             return (false, HandEditReason.RebuildMismatch);
         }
@@ -382,6 +382,12 @@ internal static class ManagedConfMigration
             key, text, "max_worker_processes",
             FormattableString.Invariant($"max_worker_processes = {workerProcesses}"));
     }
+
+    /// <summary>Whether <paramref name="workerProcesses"/> is the <c>max_worker_processes</c> some release wrote beside
+    /// <paramref name="backgroundWorkers"/>: <c>3 + N + 16</c> since #7365, or <c>3 + N + 8</c> in every release before it.</summary>
+    private static bool IsWorkerProcessCountWeWrote(int backgroundWorkers, int workerProcesses)
+        => workerProcesses == 3 + backgroundWorkers + DarlingManagedPostgres.MaxParallelWorkersCeiling
+        || workerProcesses == 3 + backgroundWorkers + DarlingManagedPostgres.LegacyParallelWorkerSlots;
 
     /// <summary>The value text of the one assignment for <paramref name="key"/> inside <paramref name="span"/>,
     /// read straight from the parsed assignment index rather than re-parsed here — v2's N/M rebuild rule needs
@@ -621,12 +627,27 @@ internal static class ManagedConfMigration
            pair some release wrote. A line checked on its own would accept 74 beside 171, which no release
            ever wrote (an operator lowering only the job slots), and drop the operator's edit. */
         var legacyWorkers = DarlingManagedPostgres.DeriveWorkerFloor(hypertables);
+
+        /* #7365 added parallel-worker slots to max_worker_processes (3 + N + 16 where it was 3 + N + 8). A v8 block written
+           before that holds the old count beside the N the rebuild produces, and is still ours until the every-start heal
+           rewrites it. */
+        if (string.Equals(key, "max_worker_processes", StringComparison.OrdinalIgnoreCase) &&
+            TryFindAssignmentValue(span, assignments, "timescaledb.max_background_workers", out var priorWorkersText) &&
+            TryFindAssignmentValue(span, assignments, "max_worker_processes", out var priorProcessesText) &&
+            int.TryParse(priorWorkersText, NumberStyles.Integer, CultureInfo.InvariantCulture, out var priorWorkers) &&
+            int.TryParse(priorProcessesText, NumberStyles.Integer, CultureInfo.InvariantCulture, out var priorProcesses) &&
+            priorWorkers >= 2 &&
+            priorProcesses == 3 + priorWorkers + DarlingManagedPostgres.LegacyParallelWorkerSlots)
+        {
+            return ClassifyFixedLine(key, text, key, FormattableString.Invariant($"{key} = {priorProcesses}"));
+        }
         if ((string.Equals(key, "timescaledb.max_background_workers", StringComparison.OrdinalIgnoreCase) ||
              string.Equals(key, "max_worker_processes", StringComparison.OrdinalIgnoreCase)) &&
             TryFindAssignmentValue(span, assignments, "timescaledb.max_background_workers", out var workersText) &&
             TryFindAssignmentValue(span, assignments, "max_worker_processes", out var processesText) &&
             workersText == legacyWorkers.MaxBackgroundWorkers.ToString(CultureInfo.InvariantCulture) &&
-            processesText == legacyWorkers.MaxWorkerProcesses.ToString(CultureInfo.InvariantCulture))
+            (processesText == legacyWorkers.MaxWorkerProcesses.ToString(CultureInfo.InvariantCulture) ||
+             processesText == (3 + legacyWorkers.MaxBackgroundWorkers + DarlingManagedPostgres.LegacyParallelWorkerSlots).ToString(CultureInfo.InvariantCulture)))
         {
             return string.Equals(key, "timescaledb.max_background_workers", StringComparison.OrdinalIgnoreCase)
                 ? ClassifyFixedLine(key, text, key, FormattableString.Invariant($"{key} = {legacyWorkers.MaxBackgroundWorkers}"))

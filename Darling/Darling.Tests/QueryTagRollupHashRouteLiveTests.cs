@@ -1353,6 +1353,7 @@ WHERE server_id = 2 AND query_id IN (1, 2) AND collection_time >= TIMESTAMP '{At
             var hourlyOne = QueryTagRollupHashRoute.HourlyReadFor(planOne, a.End);
             Assert.True(hourlyOne.GapServers.Length >= 5, "the gaps must cover the unbuilt hour, the stale pairs and the later starts, got " + hourlyOne.GapServers.Length);
             await AssertSameAsTheListOfPairsAsync(a, planOne, ct);
+            await AssertSameAsThePerArmGroupedStatementAsync(a, planOne, ct);
 
             /* Plan two: a day from the day table. */
             var day = new DateTime(a.HourNow.AddHours(-48).Date.Ticks, DateTimeKind.Unspecified);
@@ -1385,6 +1386,35 @@ CROSS JOIN (VALUES ('hash1'), ('hash2'), ('hash3'), ('hashX'), (NULL)) AS k (has
             Assert.DoesNotContain(planTwo.TablePairs, p => p.Hour == day.AddHours(5) && p.ServerId == 3);
             Assert.DoesNotContain(planTwo.TablePairs, p => p.Hour == day.AddHours(4) && p.ServerId == 1);
             await AssertSameAsTheListOfPairsAsync(a, planTwo, ct);
+            await AssertSameAsThePerArmGroupedStatementAsync(a, planTwo, ct);
+
+            /* Plan three (#7365): two servers take the day from the day table, so the hourly arm has two ranges, the hours before the day and the
+               hours after it, and the day's own hourly rows (still in the table, seeded above for both servers) lie between the first range's
+               start and the last range's end but in no range. The plain bounds alone would read them; the range filter must not. */
+            var aroundTheDay = new Dictionary<int, DateTime> { [1] = day.AddHours(-3), [2] = day.AddHours(-3) };
+            var allHours = new HashSet<DateTime>();
+            for (var hour = day.AddHours(-3); hour < a.HourNow.AddHours(1); hour = hour.AddHours(1))
+            {
+                allHours.Add(hour);
+            }
+
+            var planThree = QueryTagRollupHashRoute.Split(
+                aroundTheDay, a.HourNow, allHours, new HashSet<(DateTime Hour, int ServerId)>(), new HashSet<(DateTime Day, int ServerId)> { (day, 1), (day, 2) });
+            Assert.Equal(2, planThree.DayPairs.Count);
+            var hourlyThree = QueryTagRollupHashRoute.HourlyReadFor(planThree, a.End);
+            Assert.True(hourlyThree.RangeFrom.Length >= 2, "the day table's day must split the hourly arm into two ranges, got " + hourlyThree.RangeFrom.Length);
+            var between = await ScalarAsync(a.Connection, $@"
+SELECT count(*) FROM collect.query_store_hash_hourly
+WHERE server_id IN (1, 2) AND hour >= TIMESTAMP '{At(day)}' AND hour < TIMESTAMP '{At(day.AddHours(24))}'", ct);
+            Assert.True(between > 0, "the day's hourly rows must sit between the ranges for the test to mean anything");
+            await AssertSameAsThePerArmGroupedStatementAsync(a, planThree, ct);
+            await AssertSameAsTheListOfPairsAsync(a, planThree, ct);
+
+            /* Plan four: no hour is read from the table, so the hourly arm has no ranges and its bounds are NULL. */
+            var planFour = QueryTagRollupHashRoute.Split(
+                new Dictionary<int, DateTime> { [1] = a.Start, [2] = a.Start }, a.HourNow, new HashSet<DateTime>(), new HashSet<(DateTime Hour, int ServerId)>());
+            Assert.Empty(planFour.TablePairs);
+            await AssertSameAsThePerArmGroupedStatementAsync(a, planFour, ct);
 
             bodySucceeded = true;
         }
@@ -1440,6 +1470,119 @@ CROSS JOIN (VALUES ('hash1'), ('hash2'), ('hash3'), ('hashX'), (NULL)) AS k (has
         }
 
         return facts;
+    }
+
+    private static async Task<long> ScalarAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(sql, connection);
+        return Convert.ToInt64(await command.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>
+    /// The flat routed statement (#7365) against the one before it, where every arm grouped by (server, tag) itself and the hourly arm was driven by
+    /// <c>unnest</c> of the ranges. The reference takes the routed command's parameters without its last two (the hourly bounds).
+    /// </summary>
+    private static async Task AssertSameAsThePerArmGroupedStatementAsync(Arranged a, QueryTagRollupHashRoute.Plan plan, CancellationToken ct)
+    {
+        var groups = plan.WideRanges.Select(r => (r.From, r.To)).Distinct().Count();
+        await using var flat = QueryTagRollupHashRoute.Command(a.Connection, plan, a.End, 120);
+        await using var reference = new NpgsqlCommand(PerArmGroupedSqlFor(groups, plan.UsesDays), a.Connection) { CommandTimeout = 120 };
+        for (var i = 0; i < flat.Parameters.Count - 2; i++)
+        {
+            var source = flat.Parameters[i];
+            reference.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = source.NpgsqlDbType, Value = source.Value });
+        }
+
+        var expected = await ReadFactsAsync(reference, ct);
+        var actual = await ReadFactsAsync(flat, ct);
+        Assert.NotEmpty(expected);
+
+        /* All six measures (cpu, duration, reads, writes, executions, peak memory), compared exactly: the arms add exact numeric sums, so the
+           flat statement's totals are not just within a tolerance of the grouped one's, they are the same doubles. */
+        Assert.Equal(6, QueryTagRollupSection.QueryStore.Measures.Count);
+        Assert.Equal(Canon(expected), Canon(actual));
+    }
+
+    /// <summary>The routed statement as #7358 (70084d98a) left it: each arm grouped by (server, tag), the hourly arm driven by <c>unnest</c> of the ranges.</summary>
+    private static string PerArmGroupedSqlFor(int wideRanges, bool days)
+    {
+        var first = days ? 10 : 8;
+        var text = new System.Text.StringBuilder();
+        text.Append(@"
+WITH partials AS
+(
+    SELECT t.server_id, m.tag_id,
+           SUM(t.ec_sum) AS ec_sum, SUM(t.cpu_wsum) AS cpu_wsum, SUM(t.dur_wsum) AS dur_wsum,
+           SUM(t.reads_wsum) AS reads_wsum, SUM(t.writes_wsum) AS writes_wsum, MAX(t.mem_max) AS mem_max
+    FROM unnest($2::timestamp[], $3::timestamp[]) AS r(range_from, range_to)
+    JOIN collect.query_store_hash_hourly AS t
+           ON t.hour >= r.range_from
+          AND t.hour < r.range_to
+    LEFT JOIN config.query_tag_map AS m
+           ON m.server_id = t.server_id AND m.key_kind = 'hash' AND m.key = t.query_hash
+    WHERE t.server_id = ANY($1::integer[])
+    AND   NOT EXISTS
+          (
+              SELECT 1
+              FROM unnest($4::integer[], $5::timestamp[], $6::timestamp[]) AS g(server_id, gap_from, gap_to)
+              WHERE g.server_id = t.server_id
+              AND   t.hour >= g.gap_from
+              AND   t.hour < g.gap_to
+          )
+    GROUP BY t.server_id, m.tag_id
+");
+        if (days)
+        {
+            text.Append(@"
+    UNION ALL
+    SELECT t.server_id, m.tag_id,
+           SUM(t.ec_sum), SUM(t.cpu_wsum), SUM(t.dur_wsum), SUM(t.reads_wsum), SUM(t.writes_wsum), MAX(t.mem_max)
+    FROM unnest($8::timestamp[], $9::integer[]) AS p(day, server_id)
+    JOIN collect.query_store_hash_daily AS t
+           ON t.day = p.day
+          AND t.server_id = p.server_id
+    LEFT JOIN config.query_tag_map AS m
+           ON m.server_id = t.server_id AND m.key_kind = 'hash' AND m.key = t.query_hash
+    GROUP BY t.server_id, m.tag_id
+");
+        }
+
+        for (var arm = 0; arm < wideRanges; arm++)
+        {
+            var servers = "$" + (first + (3 * arm)).ToString(CultureInfo.InvariantCulture);
+            var from = "$" + (first + 1 + (3 * arm)).ToString(CultureInfo.InvariantCulture);
+            var to = "$" + (first + 2 + (3 * arm)).ToString(CultureInfo.InvariantCulture);
+            text.Append($@"
+    UNION ALL
+    SELECT q.server_id, m.tag_id,
+           SUM(q.execution_count), SUM(q.avg_cpu_time_us * q.execution_count), SUM(q.avg_duration_us * q.execution_count),
+           SUM(q.avg_logical_io_reads * q.execution_count), SUM(q.avg_logical_io_writes * q.execution_count),
+           MAX(q.max_query_max_used_memory)
+    FROM collect.query_store_interval_wide AS q
+    LEFT JOIN config.query_tag_map AS m
+           ON m.server_id = q.server_id AND m.key_kind = 'hash' AND m.key = q.query_hash
+    WHERE q.server_id = ANY({servers}::integer[])
+    AND   q.collection_time >= {from}::timestamp
+    AND   q.collection_time < {to}::timestamp
+    AND   q.collection_time <= $7
+    AND   q.first_execution_time >= {from}::timestamp - {QueryStoreIntervalWide.PurgeEdgeMarginSql}
+    AND   q.first_execution_time <= LEAST({to}::timestamp, $7) + {QueryStoreIntervalWide.FirstExecUpperSlackSql}
+    GROUP BY q.server_id, m.tag_id
+");
+        }
+
+        text.Append(@"
+)
+SELECT p.server_id, p.tag_id,
+       CAST(COALESCE(SUM(p.cpu_wsum), 0) AS double precision) AS cpu_ms,
+       CAST(COALESCE(SUM(p.dur_wsum), 0) AS double precision) AS duration_ms,
+       CAST(COALESCE(SUM(p.reads_wsum), 0) AS double precision) AS logical_reads,
+       CAST(COALESCE(SUM(p.writes_wsum), 0) AS double precision) AS logical_writes,
+       CAST(COALESCE(SUM(p.ec_sum), 0) AS double precision) AS executions,
+       CAST(COALESCE(MAX(p.mem_max), 0) AS double precision) AS peak_memory_pages
+FROM partials AS p
+GROUP BY p.server_id, p.tag_id");
+        return text.ToString();
     }
 
     /// <summary>

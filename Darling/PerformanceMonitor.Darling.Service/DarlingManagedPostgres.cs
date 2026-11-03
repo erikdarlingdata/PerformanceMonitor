@@ -997,12 +997,13 @@ public sealed class DarlingManagedPostgres
     internal readonly record struct WorkerSettings(int MaxBackgroundWorkers, int MaxWorkerProcesses);
 
     /// <summary>
-    /// The FLOOR of the worker sizing: <c>hypertables + 2</c> background workers and <c>3 + workers + 8</c>
-    /// worker processes, the shape every release up to 3.10.0 wrote and the one the v2 block still writes
-    /// (it has no RAM input; the v8 block is later in the file and wins, #5633 item 14). 74 / 85 at 72
-    /// hypertables. 3 = launcher, logical-replication launcher and slack; 8 = the PostgreSQL default
-    /// <c>max_parallel_workers</c>, which this class does not set — see the v8 block for why raising it is
-    /// deliberately NOT bundled here.
+    /// The FLOOR of the worker sizing: <c>hypertables + 2</c> background workers and
+    /// <c>3 + workers + <see cref="MaxParallelWorkersCeiling"/></c> worker processes, the shape the v2 block writes
+    /// (it has no RAM input; the v8 block is later in the file and wins, #5633 item 14). 3 = launcher,
+    /// logical-replication launcher and slack; <see cref="MaxParallelWorkersCeiling"/> = the most
+    /// <c>max_parallel_workers</c> <see cref="BuildParallelQueryConfAppend"/> grants (#7365), so the parallel workers always
+    /// have slots above the TimescaleDB ones. Releases up to 3.12.0 added 8, PostgreSQL's default <c>max_parallel_workers</c>
+    /// (85 at 72 hypertables, not 93); <see cref="LegacyParallelWorkerSlots"/> names that figure for the migration.
     /// </summary>
     internal static WorkerSettings DeriveWorkerFloor(int hypertableCount)
         => WithWorkerProcesses(hypertableCount + 2);
@@ -1010,7 +1011,7 @@ public sealed class DarlingManagedPostgres
     /// <summary>
     /// Derives the v8 worker sizing from the host's RAM (#5633 item 14, extracted from
     /// <see cref="BuildWorkerSizingConfAppend"/> in #2845 so every caller shares ONE formula):
-    /// <c>workers = clamp(WorkerSlotsPerGb x RAM GB, floor, ceiling)</c>, <c>max_worker_processes = 3 + workers + 8</c>.
+    /// <c>workers = clamp(WorkerSlotsPerGb x RAM GB, floor, ceiling)</c>, <c>max_worker_processes = 3 + workers + <see cref="MaxParallelWorkersCeiling"/></c>.
     /// The floor is <see cref="DeriveWorkerFloor"/> (74 at 72 hypertables). The ceiling is
     /// <see cref="DeriveWorkerCeiling"/>: every policy job the schema can create plus headroom (177 at 72
     /// hypertables and 29 aggregates).
@@ -1055,7 +1056,7 @@ public sealed class DarlingManagedPostgres
         => hypertableCount + PolicyJobsPerContinuousAggregate * continuousAggregateCount + NonObjectPolicyJobs + WorkerSlotHeadroom;
 
     private static WorkerSettings WithWorkerProcesses(int maxBackgroundWorkers)
-        => new(maxBackgroundWorkers, 3 + maxBackgroundWorkers + 8);
+        => new(maxBackgroundWorkers, 3 + maxBackgroundWorkers + MaxParallelWorkersCeiling);
 
     /// <summary>
     /// Background-worker slots granted per GB of host RAM (#5633 item 14). Measured on a rig with every job of a
@@ -1664,14 +1665,10 @@ public sealed class DarlingManagedPostgres
     ///   change and belongs to a version-keyed block where it gets reviewed, not something a resize should
     ///   silently propagate to production. work_mem has no such structural reason: nothing caps its formula
     ///   to a value a hardware change cannot move, which is exactly why letting it go stale had a cost.</item>
-    /// <item><b>max_parallel_workers</b> — not emitted because this class has never set it; it sits at the
-    ///   PostgreSQL default of 8 regardless of core count. Deriving it from cores is a plausible want on a
-    ///   16-core host, but it is a behaviour change rather than a staleness fix, and it multiplies the
-    ///   memory story above: each parallel worker gets its OWN work_mem for its share of a node, so raising
-    ///   parallelism raises peak sort memory on exactly the query that already degrades with more of it.
-    ///   It wants its own evidence and its own PR. Note this is also why the fingerprint records RAM and
-    ///   hypertables and not cores: with nothing core-derived to re-state, a core-only change has no work
-    ///   to do, and fingerprinting it would append a block of identical values on every resize.</item>
+    /// <item><b>max_parallel_workers</b> — not emitted by this block. <see cref="BuildParallelQueryConfAppend"/> sets it, and
+    ///   <c>max_parallel_workers_per_gather</c>, from the core count, on the 16 vCPU measurement in #7365. Each parallel worker
+    ///   gets its OWN work_mem for its share of a node, so more parallelism means more peak sort memory. The fingerprint
+    ///   records RAM and hypertables and not cores: those two settings live in darling-managed.conf, which is re-rendered each start.</item>
     /// </list>
     ///
     /// <para><b>Reload semantics.</b> <c>effective_cache_size</c>, <c>maintenance_work_mem</c> and
@@ -2680,6 +2677,50 @@ public sealed class DarlingManagedPostgres
         builder.Append(RandomPageCostSetting).Append(" = ").Append(RandomPageCostValue).Append('\n');
         return builder.ToString();
     }
+
+    /* ===================== parallel query (#7365) ===================== */
+
+    /// <summary>The setting <see cref="BuildParallelQueryConfAppend"/> writes for workers per Gather node.</summary>
+    internal const string MaxParallelWorkersPerGatherSetting = "max_parallel_workers_per_gather";
+
+    /// <summary>The setting <see cref="BuildParallelQueryConfAppend"/> writes for the cluster-wide parallel worker pool.</summary>
+    internal const string MaxParallelWorkersSetting = "max_parallel_workers";
+
+    /// <summary>Workers per Gather node: 4, the figure measured in #7365 (2 is PostgreSQL's default).</summary>
+    internal const int MaxParallelWorkersPerGatherValue = 4;
+
+    /// <summary>The most <c>max_parallel_workers</c> is ever set to: 16, the 16 vCPU host measured in #7365. A host with
+    /// fewer logical cores gets its core count. <see cref="BuildParallelQueryConfAppend"/> keeps <c>max_worker_processes</c>
+    /// above the TimescaleDB workers plus this many.</summary>
+    internal const int MaxParallelWorkersCeiling = 16;
+
+    /// <summary><c>max_parallel_workers</c> for a host: its logical core count, at most <see cref="MaxParallelWorkersCeiling"/>, at least 1.</summary>
+    internal static int DeriveMaxParallelWorkers(int processorCount)
+        => Math.Clamp(processorCount, 1, MaxParallelWorkersCeiling);
+
+    /// <summary>
+    /// The parallel-query block (#7365): <c>max_parallel_workers_per_gather = 4</c> and <c>max_parallel_workers</c> at the
+    /// core count, capped at 16. Measured on a 16 vCPU host with 210 servers (#7365): the fleet Query Store tag statement ran
+    /// faster with 4 workers per Gather than with PostgreSQL's default of 2. Hosts with fewer cores are not measured, so they get
+    /// their core count and no more.
+    /// Rendered into <c>darling-managed.conf</c> by <see cref="ManagedConfFile.RenderBody"/> and not appended to
+    /// <c>postgresql.conf</c>: like <see cref="BuildPlannerPageCostConfAppend"/> it has no marker, so a store already on the
+    /// managed file has the lines written before <c>pg_ctl start</c> (the file is re-rendered each start), and a store still on the legacy
+    /// blocks gets them when that conf migrates (<see cref="ManagedConfFile.ManagedOnlyKeys"/>).
+    /// <c>max_parallel_workers</c> is restart-only (like <c>max_worker_processes</c>), the per-Gather one reloads.
+    /// </summary>
+    internal static string BuildParallelQueryConfAppend(int processorCount)
+    {
+        var builder = new StringBuilder();
+        builder.Append('\n');
+        builder.Append(MaxParallelWorkersPerGatherSetting).Append(" = ").Append(MaxParallelWorkersPerGatherValue).Append('\n');
+        builder.Append(MaxParallelWorkersSetting).Append(" = ").Append(DeriveMaxParallelWorkers(processorCount)).Append('\n');
+        return builder.ToString();
+    }
+
+    /// <summary>The parallel slots the worker-process count added before #7365: PostgreSQL's default <c>max_parallel_workers</c>.
+    /// A v2 or v8 block an earlier release wrote holds <c>3 + workers + 8</c>, and the migration still reads it as ours.</summary>
+    internal const int LegacyParallelWorkerSlots = 8;
 
     /* ===================== v12 wal sizing (derived from data-volume headroom, #3802) ===================== */
 
