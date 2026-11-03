@@ -135,6 +135,13 @@ public sealed class AlertEngine
        (_seededSteps) on the same rule. */
     private readonly ConcurrentDictionary<string, bool> _countWatermarksSeeded = new();
 
+    /* #7295 round 3: a failed seed read is retried on the next sweep, but only SeedLoadCap.MaxFailedLoads times in a row for a key and
+       a step. The failed read that reaches it seeds the step empty and the check runs, so a state table that stays unreadable
+       cannot hold an alert family back for as long as the failure lasts. */
+    private readonly SeedLoadCap _seedLoadCap = new();
+
+    private const string CountWatermarkSeedStep = "blocking and deadlock count watermarks";
+
     /* Cooldown timestamps — Lite's MainWindow.xaml.cs:56-63,90 dictionaries, keyed serverKey.
        In-memory only, exactly like Lite (the restart protection is the persisted watermarks plus
        the deliverer's own email/webhook cooldown seeds, not these). */
@@ -820,8 +827,9 @@ public sealed class AlertEngine
 
     /// <summary>
     /// #7295: runs one seed load and marks the step done for the key only when it worked. A store that cannot be read is logged and
-    /// counted, leaves the step open, and the check that depends on it skips the sweep (<see cref="IsSeeded"/>). Only cancellation
-    /// propagates.
+    /// counted, leaves the step open, and the check that depends on it skips the sweep (<see cref="IsSeeded"/>). The
+    /// <see cref="SeedLoadCap.MaxFailedLoads"/>th failed read in a row for the step marks it done with nothing loaded, so the check
+    /// runs from an empty seed (at worst one duplicate page) instead of waiting out the failure. Only cancellation propagates.
     /// </summary>
     private async Task SeedStepAsync(string key, string step, string what, Func<Task> load, CancellationToken ct)
     {
@@ -844,6 +852,10 @@ public sealed class AlertEngine
         {
             _logger?.LogError("Failed to seed the {What} for {ServerKey} after {ElapsedMs} ms; the check that needs it is skipped and the read is tried again on the next sweep: {Message}", what, key, readClock.ElapsedMilliseconds, ex.Message);
             _readFailures?.RecordReadFailure(key, "edge-trigger watermark seed", readClock.ElapsedMilliseconds);
+            if (_seedLoadCap.RecordFailedLoad(_logger, _stateStore.GetType().Name, key, what, ex))
+            {
+                _seededSteps[(key, step)] = true;
+            }
         }
     }
 
@@ -854,7 +866,9 @@ public sealed class AlertEngine
     /// only when both reads worked (a row or no row). A store that cannot be read throws, and an empty store answers null; the two
     /// used to look the same, so the key was marked seeded with a watermark of 0 and counts a page had carried were paged again once
     /// the cooldown ran out. A failed read is logged and counted, leaves the key unseeded, and the sweep skips this server's blocking
-    /// and deadlock checks (<see cref="CheckBlockingAsync"/>, <see cref="CheckDeadlocksAsync"/>) until a later sweep reads them.
+    /// and deadlock checks (<see cref="CheckBlockingAsync"/>, <see cref="CheckDeadlocksAsync"/>) until a later sweep reads them. The
+    /// <see cref="SeedLoadCap.MaxFailedLoads"/>th failed sweep in a row marks the key seeded with both watermarks left empty, so the two
+    /// checks run (at worst one duplicate page) instead of waiting out a standing failure.
     /// Nothing else is held back: the other checks do not depend on these two values. Only cancellation propagates.
     /// </summary>
     private async Task EnsureCountWatermarksSeededAsync(string key, CancellationToken ct)
@@ -890,6 +904,10 @@ public sealed class AlertEngine
         {
             _logger?.LogError("Failed to seed the blocking and deadlock count watermarks for {ServerKey} after {ElapsedMs} ms; those two checks are skipped and the read is tried again on the next sweep: {Message}", key, readClock.ElapsedMilliseconds, ex.Message);
             _readFailures?.RecordReadFailure(key, "blocking and deadlock count watermark seed", readClock.ElapsedMilliseconds);
+            if (_seedLoadCap.RecordFailedLoad(_logger, _stateStore.GetType().Name, key, CountWatermarkSeedStep, ex))
+            {
+                _countWatermarksSeeded[key] = true;
+            }
         }
     }
 

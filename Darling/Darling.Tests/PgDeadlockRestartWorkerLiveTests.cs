@@ -541,6 +541,126 @@ public sealed class PgDeadlockRestartWorkerLiveTests
         }
     }
 
+    /// <summary>
+    /// #7295 round 3: the state table stays unreadable while the collected reports are readable. The watermark half of the seed is
+    /// tried on three passes in a row. The first two skip the pass, and the third seeds an empty watermark and pages the reports
+    /// (at worst one duplicate page, which is what every pass did before #7295) instead of staying silent for as long as the failure
+    /// lasts. The pairs half never skips a pass and has no cap.
+    /// </summary>
+    [Fact]
+    public async Task AStateTableThatStaysUnreadable_SeedsTheWatermarkEmptyOnTheThirdFailedPass_AndThePageGoesOut()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the PostgreSQL deadlock restart worker test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        var roleName = "dl7295c_" + Guid.NewGuid().ToString("N")[..8];
+        var rolePassword = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(16));
+        var bodySucceeded = false;
+        await using var owner = NpgsqlDataSource.Create(new NpgsqlConnectionStringBuilder(scratch.ConnectionString)
+        {
+            SearchPath = "collect,config,public",
+        }.ConnectionString);
+        try
+        {
+            await using (var connection = new NpgsqlConnection(scratch.ConnectionString))
+            {
+                await connection.OpenAsync(ct);
+                await PgMigrations.MigrateAsync(connection, ct);
+            }
+
+            foreach (var sql in new[]
+            {
+                $"CREATE ROLE {roleName} LOGIN NOSUPERUSER PASSWORD '{rolePassword}'",
+                $"GRANT USAGE ON SCHEMA collect, config, public TO {roleName}",
+                $"GRANT ALL ON ALL TABLES IN SCHEMA collect, config, public TO {roleName}",
+                $"GRANT ALL ON ALL SEQUENCES IN SCHEMA collect, config, public TO {roleName}",
+            })
+            {
+                await using var grant = owner.CreateCommand(sql);
+                await grant.ExecuteNonQueryAsync(ct);
+            }
+
+            await using var asRole = NpgsqlDataSource.Create(new NpgsqlConnectionStringBuilder(scratch.ConnectionString)
+            {
+                Username = roleName,
+                Password = rolePassword,
+                SearchPath = "collect,config,public",
+                Pooling = false,
+            }.ConnectionString);
+            var state = new PgAlertStateStore(owner);
+
+            await using var plant = new NpgsqlConnection(scratch.ConnectionString);
+            await plant.OpenAsync(ct);
+            for (var i = 0; i < DarlingWorker.PgDeadlockPageReports; i++)
+            {
+                await PlantReportAsync(
+                    plant, DateTime.UtcNow.AddMinutes(-2), ct, "DDDD" + i.ToString("D4", CultureInfo.InvariantCulture) + new string('0', 24));
+            }
+
+            /* First life: the five reports are paged, the page is delivered, and the watermark 5 is saved. */
+            using var firstEndpoint = new CapturingWebhookEndpoint();
+            var (firstPass, _) = StartLife(owner, firstEndpoint.Url, ct);
+            await firstPass();
+            Assert.Single(firstEndpoint.Bodies);
+            Assert.Equal(DarlingWorker.PgDeadlockPageReports, await state.LoadEdgeTriggerWatermarkAsync(Key, "Deadlocks Detected"));
+
+            /* Second life: the state table stays unreadable (the grant is revoked and not given back) while the collected reports are
+               still readable. Before the cap this silenced the alert for as long as the failure lasted. */
+            await using (var revoke = owner.CreateCommand($"REVOKE SELECT ON config.config_edge_trigger_watermarks FROM {roleName}"))
+            {
+                await revoke.ExecuteNonQueryAsync(ct);
+            }
+
+            using var secondEndpoint = new CapturingWebhookEndpoint();
+            WebhookAlertService? secondWebhooks = null;
+            var (secondPass, secondWorker) = StartLife(asRole, secondEndpoint.Url, ct, webhooks => secondWebhooks = webhooks);
+            var webhookFlags = BindingFlags.NonPublic | BindingFlags.Instance;
+            typeof(WebhookAlertService).GetField("_cooldown", webhookFlags)!.SetValue(secondWebhooks, new IncidentCooldown("webhook:", null));
+            typeof(WebhookAlertService).GetField("_repeatBudget", webhookFlags)!.SetValue(secondWebhooks, new RepeatDeliveryBudget());
+
+            for (var pass = 1; pass < SeedLoadCap.MaxFailedLoads; pass++)
+            {
+                await secondPass();
+                Assert.Empty(secondEndpoint.Bodies);
+                Assert.False(Field<ConcurrentDictionary<string, bool>>(secondWorker, "_pgDeadlockWatermarkSeeded").ContainsKey(Key));
+            }
+
+            /* The third failed read seeds the watermark empty and the pass carries on: the five reports page once more (the duplicate
+               the cap accepts), and the saved watermark was never read. The pairs half is not capped. It never skips a pass, so it
+               stays unseeded and is read again on every pass. */
+            await secondPass();
+            Assert.Single(secondEndpoint.Bodies);
+            Assert.True(Field<ConcurrentDictionary<string, bool>>(secondWorker, "_pgDeadlockWatermarkSeeded").ContainsKey(Key));
+            Assert.False(Field<ConcurrentDictionary<string, bool>>(secondWorker, "_pgDeadlockPairsSeeded").ContainsKey(Key));
+
+            /* The read works again. The seed is done, so nothing pages again and the page that went out stays sent, and the pairs half
+               now reads its list. */
+            await using (var restore = owner.CreateCommand($"GRANT SELECT ON config.config_edge_trigger_watermarks TO {roleName}"))
+            {
+                await restore.ExecuteNonQueryAsync(ct);
+            }
+
+            await secondPass();
+            await secondPass();
+            Assert.Single(secondEndpoint.Bodies);
+            Assert.True(Field<ConcurrentDictionary<string, bool>>(secondWorker, "_pgDeadlockPairsSeeded").ContainsKey(Key));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunOwnedAsync(bodySucceeded, async () =>
+            {
+                await using var drop = owner.CreateCommand($"DROP OWNED BY {roleName}; DROP ROLE IF EXISTS {roleName};");
+                await drop.ExecuteNonQueryAsync(CancellationToken.None);
+            });
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (_, _) => await Task.CompletedTask);
+            await scratch.DisposeAsync();
+        }
+    }
+
     [Fact]
     public async Task ARestoredPairThatLeftTheHour_DoesNotPageTheReportsAPageAlreadyCarried_WhenTheFailedReadIsRetried()
     {

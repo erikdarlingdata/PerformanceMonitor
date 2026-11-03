@@ -652,8 +652,11 @@ public sealed partial class DarlingWorker
             {
                 /* #7295: the key is marked seeded only after the load worked (a row or no row). A load that cannot read the store
                    throws into the catch below, which counts it: this pass evaluates nothing from an empty record that an open
-                   incident's saved one would have replaced, and the next pass loads it again. */
-                var seeded = await stateStore.LoadAlertPersistenceAsync(key, metricName);
+                   incident's saved one would have replaced, and the next pass loads it again. The third failed read in a row seeds an
+                   empty record instead (SeedLoadCap), so a state table that stays unreadable cannot hold this alert back for good. */
+                var seeded = await _seedLoadCap.LoadOrSeedEmptyAsync(
+                    () => stateStore.LoadAlertPersistenceAsync(key, metricName),
+                    _logger, nameof(PgAlertStateStore), key, "CPU persistence record", "PostgreSQL CPU persistence seed");
                 readClock.Restart();
                 _pgCpuPersistenceSeeded[key] = true;
                 if (seeded.HasValue)
@@ -1050,7 +1053,9 @@ public sealed partial class DarlingWorker
                carried past, and the next pass loads it again. Nothing in memory has moved by then, so the load is still the first one.
                The pairs half is done only when the read returned a list. A failed read is tried again on the next sweep, and until
                it succeeds the replace hook writes nothing (below), so the stored pairs a restart should have found are not
-               overwritten by a set that never loaded them. */
+               overwritten by a set that never loaded them. The pairs half never skips a pass, so it has no cap. The watermark half
+               does skip, so its third failed read in a row seeds it empty (SeedLoadCap) and the pass carries on, and a state table that
+               stays unreadable cannot hold deadlock pages back for good. */
             var watermarkSeeded = _pgDeadlockWatermarkSeeded.ContainsKey(key);
             if (!watermarkSeeded || !_pgDeadlockPairsSeeded.ContainsKey(key))
             {
@@ -1065,7 +1070,10 @@ public sealed partial class DarlingWorker
                             restored.UnionWith(waiting);
                         }
                     },
-                    loadWatermark: !watermarkSeeded);
+                    loadWatermark: !watermarkSeeded,
+                    seedWatermarkEmptyAfterFailure: ex => _seedLoadCap.RecordFailedLoad(
+                        _logger, nameof(PgAlertStateStore), key, "deadlock count watermark", ex,
+                        "PostgreSQL deadlock watermark seed", readClock.ElapsedMilliseconds));
                 readClock.Restart();
                 _pgDeadlockWatermarkSeeded.TryAdd(key, true);
                 if (seeded.PairsRead)
@@ -1368,12 +1376,31 @@ public sealed partial class DarlingWorker
     /// calls again with <paramref name="loadWatermark"/> still true, so the saved watermark is loaded as it would be after a clean
     /// restart. Answering null for a failed load would have taken the retry for an empty store, and the pass would have run from a
     /// watermark of 0.</para>
+    /// <para><paramref name="seedWatermarkEmptyAfterFailure"/> bounds that retry (<see cref="SeedLoadCap"/>): it gets the failed
+    /// load's exception and answers true on the failure that reaches the cap. The watermark is then answered as null, the same as a
+    /// store with no row, and the pairs are read as usual. Null (the default) never seeds empty.</para>
     /// </summary>
     internal static async Task<PgDeadlockSeed> SeedPgDeadlockStateAsync(
         PgAlertStateStore stateStore, string serverKey, string metricName, HashSet<string> unannounced,
-        Action<IReadOnlyCollection<string>>? noteNewForAgentGate, bool loadWatermark = true)
+        Action<IReadOnlyCollection<string>>? noteNewForAgentGate, bool loadWatermark = true,
+        Func<Exception, bool>? seedWatermarkEmptyAfterFailure = null)
     {
-        var watermark = loadWatermark ? await stateStore.LoadEdgeTriggerWatermarkAsync(serverKey, metricName) : null;
+        int? watermark = null;
+        if (loadWatermark)
+        {
+            try
+            {
+                watermark = await stateStore.LoadEdgeTriggerWatermarkAsync(serverKey, metricName);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException && seedWatermarkEmptyAfterFailure is not null)
+            {
+                if (!seedWatermarkEmptyAfterFailure(ex))
+                {
+                    throw;
+                }
+            }
+        }
+
         var waiting = await stateStore.LoadUnannouncedPairsAsync(serverKey);
         if (waiting is null)
         {
@@ -1686,10 +1713,14 @@ public sealed partial class DarlingWorker
         {
             /* #2716: same restart-survival seed as EvaluatePgDeadlocksAsync — see its comment. #7295: the server is marked
                seeded only after a load that worked, a row or no row. A load that fails throws into the catch below, so this pass
-               pages nothing from a watermark of 0 that a page may already have been carried past, and the next pass loads again. */
+               pages nothing from a watermark of 0 that a page may already have been carried past, and the next pass loads again. The third
+               failed read in a row seeds an empty watermark instead (SeedLoadCap), so a state table that stays unreadable cannot
+               hold this alert back for good. */
             if (!_pgBlockingWatermarkSeeded.ContainsKey(key))
             {
-                var seeded = await stateStore.LoadEdgeTriggerWatermarkAsync(key, metricName);
+                var seeded = await _seedLoadCap.LoadOrSeedEmptyAsync(
+                    () => stateStore.LoadEdgeTriggerWatermarkAsync(key, metricName),
+                    _logger, nameof(PgAlertStateStore), key, "blocking count watermark", "PostgreSQL blocking watermark seed");
                 readClock.Restart();
                 if (_pgBlockingWatermarkSeeded.TryAdd(key, true) && seeded.HasValue)
                 {

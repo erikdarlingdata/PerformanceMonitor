@@ -231,4 +231,116 @@ public sealed class PgBlockingRestartWorkerLiveTests
             await scratch.DisposeAsync();
         }
     }
+
+    /// <summary>
+    /// #7295 round 3: the state table stays unreadable while the collected edges are readable. The watermark load fails on three
+    /// passes in a row. The first two skip the pass, and the third seeds an empty watermark and pages (at worst one duplicate page,
+    /// which is what every pass did before #7295) instead of staying silent for as long as the failure lasts.
+    /// </summary>
+    [Fact]
+    public async Task AStateTableThatStaysUnreadable_SeedsTheWatermarkEmptyOnTheThirdFailedPass_AndThePageGoesOut()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the PostgreSQL blocking restart worker test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        var roleName = "bl7295c_" + Guid.NewGuid().ToString("N")[..8];
+        var rolePassword = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(16));
+        var bodySucceeded = false;
+        await using var owner = NpgsqlDataSource.Create(new NpgsqlConnectionStringBuilder(scratch.ConnectionString)
+        {
+            SearchPath = "collect,config,public",
+        }.ConnectionString);
+        try
+        {
+            await using (var connection = new NpgsqlConnection(scratch.ConnectionString))
+            {
+                await connection.OpenAsync(ct);
+                await PgMigrations.MigrateAsync(connection, ct);
+            }
+
+            foreach (var sql in new[]
+            {
+                $"CREATE ROLE {roleName} LOGIN NOSUPERUSER PASSWORD '{rolePassword}'",
+                $"GRANT USAGE ON SCHEMA collect, config, public TO {roleName}",
+                $"GRANT ALL ON ALL TABLES IN SCHEMA collect, config, public TO {roleName}",
+                $"GRANT ALL ON ALL SEQUENCES IN SCHEMA collect, config, public TO {roleName}",
+            })
+            {
+                await using var grant = owner.CreateCommand(sql);
+                await grant.ExecuteNonQueryAsync(ct);
+            }
+
+            await using var asRole = NpgsqlDataSource.Create(new NpgsqlConnectionStringBuilder(scratch.ConnectionString)
+            {
+                Username = roleName,
+                Password = rolePassword,
+                SearchPath = "collect,config,public",
+                Pooling = false,
+            }.ConnectionString);
+            var state = new PgAlertStateStore(owner);
+
+            await using var plant = new NpgsqlConnection(scratch.ConnectionString);
+            await plant.OpenAsync(ct);
+            await PlantRootsAsync(plant, 1, 3, 0, ct);
+
+            /* First life: the three root blockers page, the page is delivered, and the watermark 3 is saved. */
+            using var firstEndpoint = new CapturingWebhookEndpoint();
+            var (firstPass, _) = StartLife(owner, firstEndpoint.Url, ct);
+            await firstPass();
+            Assert.Single(firstEndpoint.Bodies);
+            Assert.Equal(3, await state.LoadEdgeTriggerWatermarkAsync(Key, Metric));
+
+            /* Second life: the state table stays unreadable (the grant is revoked and not given back) while the collected edges are
+               still readable. Before the cap this silenced the alert for as long as the failure lasted. */
+            await using (var revoke = owner.CreateCommand($"REVOKE SELECT ON config.config_edge_trigger_watermarks FROM {roleName}"))
+            {
+                await revoke.ExecuteNonQueryAsync(ct);
+            }
+
+            using var secondEndpoint = new CapturingWebhookEndpoint();
+            WebhookAlertService? secondWebhooks = null;
+            var (secondPass, secondWorker) = StartLife(asRole, secondEndpoint.Url, ct, webhooks => secondWebhooks = webhooks);
+            var webhookFlags = BindingFlags.NonPublic | BindingFlags.Instance;
+            typeof(WebhookAlertService).GetField("_cooldown", webhookFlags)!.SetValue(secondWebhooks, new IncidentCooldown("webhook:", null));
+            typeof(WebhookAlertService).GetField("_repeatBudget", webhookFlags)!.SetValue(secondWebhooks, new RepeatDeliveryBudget());
+
+            for (var pass = 1; pass < SeedLoadCap.MaxFailedLoads; pass++)
+            {
+                await secondPass();
+                Assert.Empty(secondEndpoint.Bodies);
+                Assert.False(Field<ConcurrentDictionary<string, bool>>(secondWorker, "_pgBlockingWatermarkSeeded").ContainsKey(Key));
+            }
+
+            /* The third failed read seeds an empty watermark and the pass carries on: the three roots page once more (the duplicate the
+               cap accepts). */
+            await secondPass();
+            Assert.Single(secondEndpoint.Bodies);
+            Assert.True(Field<ConcurrentDictionary<string, bool>>(secondWorker, "_pgBlockingWatermarkSeeded").ContainsKey(Key));
+
+            /* The read works again. The seed is done, so nothing is loaded again, nothing pages again, and the page that went out stays sent. */
+            await using (var restore = owner.CreateCommand($"GRANT SELECT ON config.config_edge_trigger_watermarks TO {roleName}"))
+            {
+                await restore.ExecuteNonQueryAsync(ct);
+            }
+
+            await secondPass();
+            await secondPass();
+            Assert.Single(secondEndpoint.Bodies);
+            Assert.Equal(3, await state.LoadEdgeTriggerWatermarkAsync(Key, Metric));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunOwnedAsync(bodySucceeded, async () =>
+            {
+                await using var drop = owner.CreateCommand($"DROP OWNED BY {roleName}; DROP ROLE IF EXISTS {roleName};");
+                await drop.ExecuteNonQueryAsync(CancellationToken.None);
+            });
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (_, _) => await Task.CompletedTask);
+            await scratch.DisposeAsync();
+        }
+    }
 }

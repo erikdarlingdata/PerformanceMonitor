@@ -1383,6 +1383,12 @@ public sealed partial class DarlingWorker : BackgroundService
        about those it keeps and forgets the rest (the pairs whose reports left the hour while the service was down). */
     private readonly ConcurrentDictionary<string, HashSet<string>> _pgDeadlockRestoredForGate = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, bool> _pgBlockingWatermarkSeeded = new(StringComparer.Ordinal);
+    /* #7295 round 3: counts the failed state reads of the PostgreSQL seeds above (CPU persistence record, deadlock watermark, blocking
+       watermark) per server and step. The third failed read in a row seeds that step empty, so a state table that stays unreadable
+       while the collected data is readable cannot silence the alert for as long as the failure lasts. The deadlock pairs half is not
+       capped: it never skips a pass, it only holds the saved-pair writes back, and capping it would turn those writes on over a set
+       that never loaded. */
+    private readonly SeedLoadCap _seedLoadCap = new(AlertReadFailureCounter.Shared);
 
     /* #2716: the three Tier 0 predictors' cooldown (_lastPostgresAlert, keyed per server|metric|subject)
        has the same restart gap, but no watermark COUNT to seed — it is a plain last-alerted TIME per
