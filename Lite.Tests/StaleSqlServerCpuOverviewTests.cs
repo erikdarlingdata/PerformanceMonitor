@@ -138,6 +138,22 @@ public sealed class StaleSqlServerCpuOverviewTests : IClassFixture<SharedDuckDbF
         Assert.Equal("--", card.CpuDisplay);
     }
 
+    [Fact]
+    public async Task AnOnLoadCpuSchedule_BoundsTheReadingByTheOnLoadInterval_AsDarlingDoes()
+    {
+        /* A schedule of 0 is on-load only, re-run daily: the bound is two days, the same as Darling's SQL. */
+        var onLoad = new LocalDataService(_duckDb) { CollectorFrequencyMinutes = (_, _) => 0 };
+
+        await SeedCpuAsync(Whole(DateTime.UtcNow.AddHours(-3)), sqlCpu: 61, otherCpu: 0);
+        var threeHours = await onLoad.GetServerSummaryAsync(_serverId, ServerName, registeredAtUtc: null);
+        Assert.False(threeHours!.CpuIsStale);
+
+        await ExecAsync("DELETE FROM cpu_utilization_stats WHERE server_id = $1", _serverId);
+        await SeedCpuAsync(Whole(DateTime.UtcNow.AddDays(-3)), sqlCpu: 61, otherCpu: 0);
+        var threeDays = await onLoad.GetServerSummaryAsync(_serverId, ServerName, registeredAtUtc: null);
+        Assert.True(threeDays!.CpuIsStale);
+    }
+
     /// <summary>The store holds microseconds and a tick is finer, so a seeded instant is cut to whole seconds.</summary>
     private static DateTime Whole(DateTime utc) =>
         DateTime.SpecifyKind(new DateTime(utc.Ticks - (utc.Ticks % TimeSpan.TicksPerSecond)), DateTimeKind.Unspecified);

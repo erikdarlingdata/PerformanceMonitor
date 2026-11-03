@@ -18,7 +18,10 @@ namespace PerformanceMonitor.Darling.Storage;
 /// and twice the server's own <c>cpu_utilization</c> interval, so a collector an operator scheduled every 30 minutes
 /// is not read as stopped between samples. The interval is the one the scheduler runs by: the server's own row in
 /// <c>config_collector_schedules</c>, else the fleet-wide row, else the shipped default. The table is sparse, so the
-/// two lookups are keyed scalar subqueries against a handful of rows rather than a join that could multiply rows.</para>
+/// two lookups are keyed scalar subqueries against a handful of rows rather than a join that could multiply rows.
+/// A row of 0 means on-load only, which the scheduler re-runs every <see cref="CollectorScheduleDefaults.OnLoadRecaptureMinutes"/>
+/// (<see cref="CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes"/>), so 0 is bounded by that interval
+/// and not read as a 15-minute cadence. A server row of 0 wins over a fleet row, as it does in the scheduler.</para>
 /// </summary>
 public static class CpuReadingFreshnessSql
 {
@@ -35,10 +38,11 @@ public static class CpuReadingFreshnessSql
     /// <param name="nowParameter">The parameter holding now as naive UTC, for example <c>$2</c>.</param>
     /// <param name="floorMinutesParameter">The parameter holding <see cref="FloorMinutes"/>, for example <c>$3</c>.</param>
     public static string Cutoff(string serverIdExpression, string nowParameter, string floorMinutesParameter) =>
-        $@"({nowParameter} - GREATEST({floorMinutesParameter}, 2 * COALESCE(
+        $@"({nowParameter} - GREATEST({floorMinutesParameter}, 2 * COALESCE(NULLIF(COALESCE(
         (SELECT frequency_minutes FROM config.config_collector_schedules
          WHERE collector_name = '{CollectorName}' AND server_id = {serverIdExpression}),
         (SELECT frequency_minutes FROM config.config_collector_schedules
          WHERE collector_name = '{CollectorName}' AND server_id IS NULL),
-        {CollectorScheduleDefaults.ResolveFrequencyMinutes(CollectorName, null, null)})) * INTERVAL '1 minute')";
+        {CollectorScheduleDefaults.ResolveFrequencyMinutes(CollectorName, null, null)}), 0),
+        {CollectorScheduleDefaults.OnLoadRecaptureMinutes})) * INTERVAL '1 minute')";
 }

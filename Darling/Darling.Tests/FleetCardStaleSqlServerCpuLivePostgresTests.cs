@@ -38,13 +38,17 @@ public sealed class FleetCardStaleSqlServerCpuLivePostgresTests
     private const int StaleServerId = -993_7197;
     private const int SlowScheduleServerId = -993_7198;
     private const int FastScheduleServerId = -993_7199;
+    private const int OnLoadServerId = -993_7195;
+    private const int OnLoadOldServerId = -993_7194;
+    private const string OnLoadName = "cc-stale-cpu-on-load";
+    private const string OnLoadOldName = "dd-stale-cpu-on-load-old";
     private const string FreshName = "zz-stale-cpu-fresh";
     private const string SlowScheduleName = "mm-stale-cpu-slow-schedule";
     private const string FastScheduleName = "bb-stale-cpu-fast-schedule";
     private const string StaleName = "aa-stale-cpu-stale";
 
     private static readonly int[] SentinelIds =
-        [FreshServerId, StaleServerId, SlowScheduleServerId, FastScheduleServerId];
+        [FreshServerId, StaleServerId, SlowScheduleServerId, FastScheduleServerId, OnLoadServerId, OnLoadOldServerId];
 
     [Fact]
     public async Task ADaysOldSqlServerCpuReading_IsNotShownOrBanded_OnTheFleetCardOrTheOverviewCard()
@@ -132,6 +136,67 @@ public sealed class FleetCardStaleSqlServerCpuLivePostgresTests
             Assert.Equal(30.0, slowSummary.CpuPercent);
             Assert.NotNull(slowSummary.CpuCapturedAt);
             Assert.Null(fastSummary.CpuPercent);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, DeleteSentinelRowsAsync);
+        }
+    }
+
+    /// <summary>
+    /// A <c>cpu_utilization</c> row of 0 means on-load only. The scheduler re-runs such a collector every
+    /// <see cref="CollectorScheduleDefaults.OnLoadRecaptureMinutes"/> (a day), so the bound is two of those, not the
+    /// 15-minute floor that <c>2 * 0</c> would leave. A 3-hour-old reading shows and a 3-day-old one is still hidden.
+    /// </summary>
+    [Fact]
+    public async Task AnOnLoadCpuSchedule_BoundsTheReadingByTheOnLoadInterval_NotByTheFloor()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live stale-CPU test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteSentinelRowsAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        await using var viewer = new ViewerDataService(connectionString!);
+
+        var bodySucceeded = false;
+        try
+        {
+            var now = DateTime.UtcNow;
+            foreach (var (id, name) in new[] { (OnLoadServerId, OnLoadName), (OnLoadOldServerId, OnLoadOldName) })
+            {
+                await InsertServerAsync(connection, id, name, ct);
+                await InsertCollectionLogAsync(connection, id, name, now.AddSeconds(-30), ct);
+                await InsertCpuScheduleAsync(connection, id, 0, ct);
+            }
+
+            await InsertSqlServerCpuAsync(connection, OnLoadServerId, OnLoadName, now.AddHours(-3), 30, 4, ct);
+            await InsertSqlServerCpuAsync(connection, OnLoadOldServerId, OnLoadOldName, now.AddDays(-3), 30, 4, ct);
+
+            var result = await DarlingFleetReader.GetFleetOverviewAsync(
+                postgres, now.AddHours(-1), now, now, cancellationToken: ct);
+            var onLoad = result.Cards.Single(c => c.ServerId == OnLoadServerId);
+            var onLoadOld = result.Cards.Single(c => c.ServerId == OnLoadOldServerId);
+            Assert.Equal(34.0, onLoad.TotalCpuPercent);
+            Assert.Equal(FleetCpuSource.RingBuffer, onLoad.CpuSource);
+            Assert.Null(onLoadOld.TotalCpuPercent);
+            Assert.Equal(FleetCpuSource.NotCollected, onLoadOld.CpuSource);
+
+            Assert.Equal(34.0, (await viewer.GetServerSummaryAsync(OnLoadServerId, OnLoadName, cancellationToken: ct)).TotalCpuPercent);
+            Assert.Null((await viewer.GetServerSummaryAsync(OnLoadOldServerId, OnLoadOldName, cancellationToken: ct)).TotalCpuPercent);
+
+            var summary = await DarlingHealthReader.GetServerSummaryAsync(postgres, OnLoadServerId, cancellationToken: ct);
+            var oldSummary = await DarlingHealthReader.GetServerSummaryAsync(postgres, OnLoadOldServerId, cancellationToken: ct);
+            Assert.Equal(30.0, summary.CpuPercent);
+            Assert.NotNull(summary.CpuCapturedAt);
+            Assert.Null(oldSummary.CpuPercent);
 
             bodySucceeded = true;
         }
