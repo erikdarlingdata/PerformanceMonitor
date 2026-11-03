@@ -2115,7 +2115,7 @@ function Get-DarlingStoreHardLinkAdvice([string]$full, [string]$dataDirectory, $
     if ($outside.Count -eq 0 -and $unread.Count -eq 0 -and $oldFolders.Count -gt 0) {
         $folderText = (@($oldFolders) | ForEach-Object { "'$_'" }) -join ' and '
         $commands = (@($oldFolders) | ForEach-Object { "rmdir /s /q `"$_`"" }) -join ' and '
-        return "$head Every name of these files is inside the store folder or inside $folderText. That folder is what is left of a major store upgrade that linked the files instead of copying them, and it is not a rollback copy. The fix is removing that folder with $commands and nothing inside the data directory, then running this script again. $never"
+        return "$head Every name of these files is inside the store folder or inside $folderText. That folder is what is left of a major store upgrade that linked the files instead of copying them, and it is not a rollback copy. The fix is removing that folder with $commands and nothing inside the data directory, then running this script again. Do not remove anything else inside the store folder '$full': the data directory in it is the live cluster."
     }
     $parts = New-Object System.Collections.Generic.List[string]
     $parts.Add($head)

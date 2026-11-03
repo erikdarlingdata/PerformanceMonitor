@@ -1001,7 +1001,9 @@ public sealed class DarlingStoreFolderScriptTests
             'retainedRmdirOld=' + $r.Contains('rmdir /s /q "' + $oldCanon + '"')
             'retainedSaysUpgrade=' + ($r.Contains('major store upgrade') -and $r.Contains('not a rollback copy'))
             'retainedRemovesInData=' + (Test-RemovesUnder $r $dataCanon)
-            'retainedSaysNotInData=' + $r.Contains('Do not remove any name inside the store folder')
+            # The retained folder is inside the store folder, so its closing sentence must not tell the operator to leave every name in the store alone.
+            'retainedSaysNotInData=' + ($r.Contains('Do not remove anything else inside the store folder') -and $r.Contains(': the data directory in it is the live cluster.'))
+            'retainedNoContradiction=' + (-not $r.Contains('Do not remove any name inside the store folder'))
 
             # A name outside the store: it is named, and the in-store name inside the data directory is not offered for removal.
             $elsewhere = Join-Path $base 'elsewhere'
@@ -1062,6 +1064,7 @@ public sealed class DarlingStoreFolderScriptTests
         Assert.Contains("retainedSaysUpgrade=True", answers);
         Assert.Contains("retainedRemovesInData=False", answers);
         Assert.Contains("retainedSaysNotInData=True", answers);
+        Assert.Contains("retainedNoContradiction=True", answers);
         Assert.Contains("outsideState=Refuse", answers);
         Assert.Contains("outsideByHand=False", answers);
         Assert.Contains("outsideNamesOutside=True", answers);
