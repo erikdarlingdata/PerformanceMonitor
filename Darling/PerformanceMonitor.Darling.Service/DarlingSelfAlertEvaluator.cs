@@ -6044,6 +6044,181 @@ internal sealed class DarlingSelfAlertEvaluator
         }
     }
 
+    /* ---------------- store autovacuum behind (fleet-level, polled hourly — #7368) ---------------- */
+
+    /// <summary>The fixed key for the fleet-level Store Autovacuum Behind edge (not a real server); non-numeric so the
+    /// deliverer's #1236 int.TryParse override no-ops on it, like <see cref="DiskKey"/>.</summary>
+    private const string AutovacuumKey = "autovacuum";
+
+    /// <summary>The alert metric name the Store Autovacuum Behind edge fires under (#7368). A WEBHOOK AUTOMATION KEY like its
+    /// siblings and keyed on by the triage map, so it is a const and must stay stable across releases. Its value is the count of
+    /// big tables past the line (a count metric to <c>AlertMetricClassifier</c>).</summary>
+    internal const string AutovacuumBehindMetric = "Store Autovacuum Behind";
+
+    /// <summary>The resolution title the recovery edge records into <c>config_alert_log.metric_name</c>; the triage map aliases it back
+    /// to <see cref="AutovacuumBehindMetric"/>.</summary>
+    internal const string AutovacuumBehindResolvedMetric = "Store Autovacuum Behind Resolved";
+
+    /// <summary>How many hourly reads in a row must find a table over the line before the alert fires, so one large build
+    /// that autovacuum catches up on within the hour does not page.</summary>
+    internal const int AutovacuumBehindReadsToFire = 2;
+
+    /// <summary>The Store Autovacuum Behind edge: <see cref="_autovacuumBehindReads"/> counts the hourly reads in a row that found a
+    /// table over the line, <see cref="_activeAutovacuumBehind"/> is set once the alert has fired. All three are in memory only,
+    /// like the disk-pressure edge: a service restart forgets them, so the first read after a restart counts as the first of two
+    /// even when the alert was standing before, and a standing alert that clears across a restart records no resolution row.</summary>
+    private readonly ConcurrentDictionary<string, int> _autovacuumBehindReads = new();
+    private readonly ConcurrentDictionary<string, bool> _activeAutovacuumBehind = new();
+    private readonly ConcurrentDictionary<string, DateTime> _lastAutovacuumBehindAlert = new();
+
+    /// <summary>
+    /// The entry point the worker's hourly autovacuum check calls. Skips the read when the master alerts switch is off, reads the
+    /// store once (<see cref="StoreAutovacuumReader"/>), and hands the reading to <see cref="ApplyAutovacuumBehindAsync"/> in the
+    /// same failure isolation the disk-pressure sweep has, so a throwing mute seam never reaches the un-guarded sweep loop. A
+    /// FAILED read changes no state: it neither counts toward the two reads nor resolves a standing alert. Cancellation propagates.
+    /// <paramref name="managedStore"/> only picks which sentence tells the operator where to change a PostgreSQL setting.
+    /// </summary>
+    public async Task EvaluateAutovacuumBehindAsync(
+        NpgsqlDataSource postgres, bool managedStore, CancellationToken cancellationToken)
+    {
+        if (!_settings.AlertsEnabled)
+        {
+            return;
+        }
+
+        StoreAutovacuumReading reading;
+        var readClock = Stopwatch.StartNew();
+        try
+        {
+            reading = await StoreAutovacuumReader.ReadAsync(postgres, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger?.LogDebug(ex, "store autovacuum self-alert read failed after {ElapsedMs} ms", readClock.ElapsedMilliseconds);
+            _readFailures?.RecordReadFailure(null, "store autovacuum self-alert", readClock.ElapsedMilliseconds);
+            return;
+        }
+
+        try
+        {
+            await ApplyAutovacuumBehindAsync(reading, managedStore, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            /* Not counted as a swallowed read: the read above succeeded, this catch covers the apply/deliver half. */
+            _logger?.LogError("Store autovacuum self-alert failed: {Message}", ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Edge-applies the fleet-level Store Autovacuum Behind condition (#7368) from one hourly reading. A reading with a table over the
+    /// line counts as one read toward <see cref="AutovacuumBehindReadsToFire"/>. The alert fires on the second such read in a row and
+    /// re-fires only after the shared cooldown while the condition stands. The first read that finds no table over the line clears
+    /// the count and, when the alert had fired, writes ONE "Store Autovacuum Behind Resolved" row. A null reading is a read that
+    /// failed: nothing changes. Gated on the master alerts switch. Internal so it pins directly with a recording deliverer and a
+    /// controllable clock.
+    /// </summary>
+    internal async Task ApplyAutovacuumBehindAsync(
+        StoreAutovacuumReading? reading, bool managedStore, CancellationToken cancellationToken)
+    {
+        if (!_settings.AlertsEnabled || reading is null)
+        {
+            return;
+        }
+
+        var now = _utcNow();
+        if (!reading.IsBehind)
+        {
+            _autovacuumBehindReads.TryRemove(AutovacuumKey, out _);
+            if (_activeAutovacuumBehind.TryRemove(AutovacuumKey, out var was) && was)
+            {
+                await RecordResolutionAsync(new AlertResolution(
+                    StoreKey(AutovacuumKey), _storeLabel, AutovacuumBehindMetric,
+                    AutovacuumBehindResolvedMetric,
+                    "No table with over 1,000,000 live rows is past 3 times its analyze threshold any more"), cancellationToken);
+            }
+
+            return;
+        }
+
+        var reads = _autovacuumBehindReads.AddOrUpdate(AutovacuumKey, 1, static (_, n) => n < int.MaxValue ? n + 1 : n);
+        if (reads < AutovacuumBehindReadsToFire)
+        {
+            return;
+        }
+
+        _activeAutovacuumBehind[AutovacuumKey] = true;
+        if (!CooldownElapsed(_lastAutovacuumBehindAlert, AutovacuumKey, now))
+        {
+            return;
+        }
+
+        _lastAutovacuumBehindAlert[AutovacuumKey] = now;
+        var shortMessage = BuildAutovacuumShortMessage(reading);
+        var delivery = await FireAsync(
+            StoreKey(AutovacuumKey), _storeLabel, AutovacuumBehindMetric,
+            currentValue: reading.TablesOverLine.ToString(CultureInfo.InvariantCulture),
+            thresholdValue: "0",
+            detail: BuildAutovacuumDetail(reading, managedStore),
+            severity: AlertSeverityLevel.Warning,
+            shortMessage: shortMessage,
+            numericCurrentValue: reading.TablesOverLine,
+            numericThresholdValue: 0,
+            cancellationToken);
+        AfterSelfFire(AutovacuumBehindMetric, _lastAutovacuumBehindAlert, AutovacuumKey, now, SharedCooldown, delivery);
+    }
+
+    private static string FormatAutovacuumRatio(double ratio) =>
+        ratio.ToString("0.#", CultureInfo.InvariantCulture);
+
+    internal static string BuildAutovacuumShortMessage(StoreAutovacuumReading reading) =>
+        string.Create(CultureInfo.InvariantCulture,
+            $"autovacuum is behind on {reading.TablesOverLine} big {(reading.TablesOverLine == 1 ? "table" : "tables")}, worst {reading.WorstTable} at {FormatAutovacuumRatio(reading.WorstRatio)} times its analyze threshold");
+
+    /// <summary>The alert text. No em dashes and no semicolons: it is public text.</summary>
+    internal static string BuildAutovacuumDetail(StoreAutovacuumReading reading, bool managedStore)
+    {
+        var text = new StringBuilder();
+        text.Append(CultureInfo.InvariantCulture,
+            $"{reading.TablesOverLine} {(reading.TablesOverLine == 1 ? "table" : "tables")} with over 1,000,000 live rows {(reading.TablesOverLine == 1 ? "is" : "are")} past 3 times the autoanalyze threshold on two hourly reads in a row. ");
+        text.Append(CultureInfo.InvariantCulture,
+            $"The worst is {reading.WorstTable} at {FormatAutovacuumRatio(reading.WorstRatio)} times its threshold (autovacuum starts at 1 time). ");
+        text.Append(CultureInfo.InvariantCulture,
+            $"{reading.WorkersInUse} of {reading.MaxWorkers} autovacuum workers are running. ");
+        if (reading.LongestWorkerSeconds is double age && reading.LongestWorkerTable is { } workerTable)
+        {
+            text.Append(CultureInfo.InvariantCulture,
+                $"The longest has been on {workerTable} for {StoreAutovacuumReader.FormatAge(age)}. ");
+        }
+        else if (reading.LongestWorkerSeconds is double ageOnly)
+        {
+            text.Append(CultureInfo.InvariantCulture,
+                $"The longest has been running for {StoreAutovacuumReader.FormatAge(ageOnly)}. Its table is not shown because the store login cannot read other sessions' query text. ");
+        }
+        else if (reading.LongestWorkerTable is { } tableOnly)
+        {
+            text.Append(CultureInfo.InvariantCulture, $"The longest is on {tableOnly}. ");
+        }
+        else if (reading.WorkersInUse > 0)
+        {
+            text.Append("The longest worker's age and table are not shown because the store login cannot read other sessions' details. ");
+        }
+
+        text.Append("Tables without fresh statistics make the planner misjudge row counts, and a bad estimate shows up as a slow query or a sort that spills. ");
+        text.Append("Raise autovacuum_vacuum_cost_limit and autovacuum_max_workers. ");
+        text.Append(reading.ServerVersionNum >= 180000
+            ? "On PostgreSQL 18 both take a reload, and autovacuum_max_workers can go up to autovacuum_worker_slots without a restart. "
+            : "autovacuum_vacuum_cost_limit takes a reload, and autovacuum_max_workers takes a restart on this PostgreSQL version. ");
+        text.Append(managedStore
+            ? "On the managed store, set them with ALTER SYSTEM or add lines below the include line in postgresql.conf. The service does not manage these settings, so there is nothing for them in darling.json, and darling-managed.conf is rewritten on every start."
+            : "Change them on the store's PostgreSQL.");
+        return text.ToString();
+    }
+
     /* ---------------- custom-alert-rule health (fleet-level, polled — #3304) ---------------- */
 
     /// <summary>

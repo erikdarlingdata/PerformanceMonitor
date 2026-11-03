@@ -117,6 +117,8 @@ internal static class DarlingTriageEndpoint
         /* The store family's recovery edges (#2768). Store Runtime Upgrade has no resolution edge — an
            in-place major upgrade is a one-shot event, not a condition that clears. */
         (DarlingSelfAlertEvaluator.DiskPressureResolvedMetric, DarlingSelfAlertEvaluator.DiskPressureMetric),
+        /* #7368: the autovacuum-behind check's recovery. */
+        (DarlingSelfAlertEvaluator.AutovacuumBehindResolvedMetric, DarlingSelfAlertEvaluator.AutovacuumBehindMetric),
         ("Store Job Cadence Recovered", DarlingSelfAlertEvaluator.JobCadenceMetric),
         ("Compression Job Recovered", DarlingSelfAlertEvaluator.CompressionJobMetric),
         /* #3816: the other two policy families' recovery edges. The total_failures arm has none — it reports

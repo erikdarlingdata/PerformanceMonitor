@@ -104,6 +104,8 @@ public sealed partial class DarlingWorker : BackgroundService
        finish-to-start tick, so the delivered count sits just under that) at ~2.5 s each is ~11.9 min/day of
        this loop's wall time, of which the ~2% that crossed 5 s were the only part that logged anything. */
     private static readonly TimeSpan s_diskCheckInterval = TimeSpan.FromMinutes(5);
+    /// <summary>#7368: the Store Autovacuum Behind read runs hourly, and the alert needs it true twice in a row.</summary>
+    private static readonly TimeSpan s_autovacuumCheckInterval = TimeSpan.FromHours(1);
 
     /* The custom-alert-rule health check's cadence (fleet-level, #3304). An integrity heuristic, not an urgent
        page: it re-parses the enabled rules against the live catalog and flags broken / never-firing rules. Cheap
@@ -1004,6 +1006,10 @@ public sealed partial class DarlingWorker : BackgroundService
     /* MinValue = the first sweep after startup evaluates the store disk-pressure self-alert, then every
        s_diskCheckInterval. Fleet-level (one shared store), so it is a single field, not per-server. */
     private DateTime _nextDiskCheckUtc = DateTime.MinValue;
+
+    /* #7368: MinValue = the first sweep after startup reads the store for tables autovacuum has fallen behind on, then every
+       s_autovacuumCheckInterval. Fleet-level (one shared store), so a single field. */
+    private DateTime _nextAutovacuumCheckUtc = DateTime.MinValue;
 
     /* MinValue = the first sweep after startup runs the custom-alert-rule health check (#3304), then every
        s_customAlertHealthInterval. Fleet-level (the rules are a fleet concept), so a single field. */

@@ -1557,6 +1557,18 @@ public sealed partial class DarlingWorker
                 await EvaluateStoreDiskPressureAsync(config, stoppingToken);
             }
 
+            /* #7368: autovacuum falling behind on the service's own store. One statement against the store once an hour
+               (pg_stat_user_tables, pg_class, pg_stat_activity). The alert needs two true reads in a row, so this cadence is
+               the 2-hour hold. Failure-isolated inside EvaluateAutovacuumBehindAsync, which also gates on the master switch. */
+            /* #4732: the stamp below is written as now + s_autovacuumCheckInterval, so that is the span. */
+            if (_selfAlerts is not null && _postgres is not null
+                && StampIsDue(_nextAutovacuumCheckUtc, s_autovacuumCheckInterval, DateTime.UtcNow))
+            {
+                _nextAutovacuumCheckUtc = DateTime.UtcNow.Add(s_autovacuumCheckInterval);
+                await _selfAlerts.EvaluateAutovacuumBehindAsync(
+                    _postgres, config.Postgres.Managed && OperatingSystem.IsWindows(), stoppingToken);
+            }
+
             /* #3304: the custom-alert-rule integrity check. A stored rule silently stops compiling when a
                measure drifts out of the catalog (the incremental pg_* buildout), and a rule can compile yet
                never fire (scope resolves to no monitored server, or its measure is always-NULL). Nobody
