@@ -187,9 +187,7 @@ public sealed class CollectorRunTimeSweepTests : IDisposable
             await Task.WhenAll(sweep, tabOpen).WaitAsync(TimeSpan.FromSeconds(30));
 
             /* Both runs finish once the turn is released, and the collector ran. */
-            /* The count can be two (#7269): the sweep's due list is read at a cycle time taken before the turn, and under the #4732 clamp a run
-               stamped after that time is due again. */
-            Assert.True(await RowsAsync(duckDb, server, "no_such_daily") >= 1);
+            Assert.Equal(1, await RowsAsync(duckDb, server, "no_such_daily"));
         }
         finally
         {

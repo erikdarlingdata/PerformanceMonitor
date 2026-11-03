@@ -697,7 +697,7 @@ public partial class RemoteCollectorService
                make a daily collector due and a run time reads the server's clock. */
             await EnsureRunTimeReadyAsync(server, cancellationToken);
 
-            var dueCollectors = _scheduleManager.GetDueCollectorsForServer(server.Id, cycleStartUtc);
+            var dueCollectors = _scheduleManager.GetDueCollectorsForServer(server.Id, cycleStartUtc, DateTime.UtcNow);
             foreach (var collector in dueCollectors)
             {
                 await RunCollectorAsync(server, collector.Name, scheduledAtUtc: cycleStartUtc, cancellationToken);
