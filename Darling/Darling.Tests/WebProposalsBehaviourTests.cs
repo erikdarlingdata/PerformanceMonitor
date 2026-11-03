@@ -109,6 +109,9 @@ public sealed class WebProposalsBehaviourTests
         Assert.All(r.GetProperty("disabledInFlight").EnumerateArray(), d => Assert.True(d.GetBoolean()));
         Assert.Equal(1, r.GetProperty("postsInFlight").GetInt32());
         Assert.Equal(1, r.GetProperty("postsAfter").GetInt32());
+        var disabledAfter = r.GetProperty("disabledAfter").EnumerateArray().ToArray();
+        Assert.NotEmpty(disabledAfter);
+        Assert.All(disabledAfter, d => Assert.False(d.GetBoolean()));
         Assert.Contains("The action ran.", r.GetProperty("strips").EnumerateArray().Select(e => e.GetString()));
     }
 
