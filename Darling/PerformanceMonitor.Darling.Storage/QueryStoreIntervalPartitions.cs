@@ -1129,11 +1129,18 @@ SELECT COALESCE
 
     /// <summary>
     /// ANALYZE of the parent. Autovacuum never analyzes a partitioned table, so the parent's statistics only exist when
-    /// this runs. In one transaction under a 5 s <c>lock_timeout</c> (a leaf held by an anti-wraparound vacuum or an index
-    /// build gives <see cref="StepOutcome.RetryLater"/>, not a wait). On PostgreSQL 18 and later it is
-    /// <c>ANALYZE ONLY parent</c>: the leaves are analyzed by autovacuum already, and without ONLY the statement
-    /// samples every leaf again, the 91 GB legacy table included (#5571 review M1). Never called from a convergence
-    /// step: it runs on the background loop and once after a promotion.
+    /// this runs. In one transaction under a <c>lock_timeout</c> of half of <c>deadlock_timeout</c>
+    /// (<see cref="QueryStoreIntervalBrin.SummarizeLockTimeoutMs"/>, #7353): a leaf held by a vacuum, an anti-wraparound vacuum or
+    /// an index build gives <see cref="StepOutcome.RetryLater"/>, not a wait, and a <c>deadlock_timeout</c> too short to wait
+    /// below is <see cref="StepOutcome.NotReady"/>. The locks differ by version. On PostgreSQL 18 and later it is
+    /// <c>ANALYZE ONLY parent</c>: the leaves are analyzed by autovacuum already, and the statement takes only the parent's
+    /// SHARE UPDATE EXCLUSIVE lock and an AccessShareLock on each leaf to sample it. Before 18 the statement is a plain <c>ANALYZE parent</c>,
+    /// which recurses into the partitions, and each is analyzed as a table of its own, under
+    /// SHARE UPDATE EXCLUSIVE, which a regular autovacuum on the current partition holds (#5571 review M1: it samples every
+    /// leaf again, the 91 GB legacy table included). A waiter that sits past <c>deadlock_timeout</c> there makes PostgreSQL
+    /// cancel that autovacuum (#5594), so the wait is below it on every version. A retry is the next hourly pass of
+    /// <see cref="AnalyzeIfDueAsync"/>, which reads <c>last_analyze</c> again. Never called from a convergence step: it runs on
+    /// the background loop and once after a promotion.
     /// </summary>
     public static async Task<StepResult> AnalyzeAsync(
         NpgsqlConnection connection, IntervalTable table, ILogger logger, CancellationToken cancellationToken)
@@ -1144,11 +1151,21 @@ SELECT COALESCE
             return new StepResult(StepOutcome.NotReady, $"{table.Parent} is not a partitioned table");
         }
 
+        /* The #5594 rule, as AnalyzeCurrentPartitionAsync has it: wait at most half of deadlock_timeout, so this is never the waiter
+           that cancels a regular autovacuum on a leaf. No busy check: a leaf that is taken is a lock timeout, which is RetryLater. */
+        var deadlockMs = await QueryStoreIntervalBrin.ReadDeadlockTimeoutMsAsync(connection, cancellationToken).ConfigureAwait(false);
+        var lockMs = QueryStoreIntervalBrin.SummarizeLockTimeoutMs(deadlockMs);
+        if (lockMs == 0)
+        {
+            return new StepResult(
+                StepOutcome.NotReady, $"deadlock_timeout is {deadlockMs} ms, too short to wait for a lock below it, so the ANALYZE of {table.Parent} does not run");
+        }
+
         var started = System.Diagnostics.Stopwatch.StartNew();
         try
         {
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
-            await ExecuteAsync(connection, LockTimeoutSql, ShortTimeoutSeconds, transaction, cancellationToken).ConfigureAwait(false);
+            await ExecuteAsync(connection, $"SET LOCAL lock_timeout = '{lockMs}ms';", ShortTimeoutSeconds, transaction, cancellationToken).ConfigureAwait(false);
             await ExecuteAsync(
                 connection, AnalyzeSql(table, connection.PostgreSqlVersion.Major >= AnalyzeOnlyMajorVersion), AnalyzeTimeoutSeconds, transaction, cancellationToken)
                 .ConfigureAwait(false);
@@ -1157,8 +1174,9 @@ SELECT COALESCE
         catch (PostgresException ex) when (IsLockContention(ex))
         {
             logger.LogInformation(
-                "Query Store interval table {Table}: analyzing the parent hit a {Reason}; the next background pass retries.", table.Parent, LockReason(ex));
-            return new StepResult(StepOutcome.RetryLater, LockReason(ex));
+                "Query Store interval table {Table}: analyzing the parent hit a {Reason} after at most {LockMs} ms (deadlock_timeout is {DeadlockMs} ms); the next background pass retries.",
+                table.Parent, LockReason(ex), lockMs, deadlockMs);
+            return new StepResult(StepOutcome.RetryLater, $"{LockReason(ex)} after at most {lockMs} ms");
         }
 
         logger.LogInformation(
@@ -1197,6 +1215,186 @@ SELECT COALESCE
         return due
             ? await AnalyzeAsync(connection, table, logger, cancellationToken).ConfigureAwait(false)
             : new StepResult(StepOutcome.NothingToDo, "analyzed within the last day");
+    }
+
+    /// <summary>
+    /// The partition of <paramref name="partitions"/> whose bounds hold <paramref name="utcNow"/>: a day partition with both
+    /// bounds, never the DEFAULT and never the legacy table (its lower bound is MINVALUE). Null when no day partition holds
+    /// it. The partition is found by its bounds, never by its name (#7353).
+    /// </summary>
+    public static PartitionInfo? CurrentPartition(IEnumerable<PartitionInfo> partitions, DateTime utcNow)
+    {
+        foreach (var partition in partitions)
+        {
+            if (!partition.IsDefault && !partition.UpperUnbounded
+                && partition.Lower.HasValue && partition.Upper.HasValue
+                && partition.Lower.Value <= utcNow && utcNow < partition.Upper.Value)
+            {
+                return partition;
+            }
+        }
+
+        return null;
+    }
+
+    /* Whether the connected role may ANALYZE the relation $1. ANALYZE by a role that may not does not fail: PostgreSQL skips the
+       relation with a WARNING and the statement succeeds, so the answer has to come from the catalogs. The rule is the engine's:
+       the owner (or a member of the owner role), the owner of the database, or on PostgreSQL 17 and later the MAINTAIN privilege.
+       The privilege name sits inside a CASE so a server before 17, which has no such privilege, never evaluates it. */
+    internal const string CanAnalyzeSql = @"
+SELECT pg_has_role(c.relowner, 'USAGE')
+    OR pg_has_role((SELECT d.datdba FROM pg_database AS d WHERE d.datname = current_database()), 'USAGE')
+    OR CASE WHEN current_setting('server_version_num')::int >= 170000 THEN has_table_privilege(c.oid, 'MAINTAIN') ELSE false END
+FROM pg_class AS c
+WHERE c.oid = to_regclass($1);";
+
+    /* Whether a VACUUM, an autovacuum or an auto-analyze is working on the relation $1 right now (#5594). The progress views are per
+       database. A role that may not see another role's worker reads NULL there, which only means the lock timeout decides instead. */
+    internal const string PartitionBusySql = @"
+SELECT EXISTS
+(
+    SELECT 1
+    FROM pg_stat_progress_vacuum AS v
+    WHERE v.datid = (SELECT d.oid FROM pg_database AS d WHERE d.datname = current_database())
+    AND   v.relid = to_regclass($1)
+)
+OR EXISTS
+(
+    SELECT 1
+    FROM pg_stat_progress_analyze AS a
+    WHERE a.datid = (SELECT d.oid FROM pg_database AS d WHERE d.datname = current_database())
+    AND   a.relid = to_regclass($1)
+);";
+
+    /// <summary>How recent the last ANALYZE of the current partition must be for its statistics to count as fresh, in seconds (#7353):
+    /// twice the background pass's hour, so one pass that lost a lock or found a vacuum running does not make them stale.</summary>
+    public const int FreshStatisticsSeconds = 2 * 3600;
+
+    /* Seconds from the last ANALYZE of the relation $1, by hand or by autovacuum, to $2 (the database's now() when $2 is NULL). NULL when
+       it never was analyzed, or the counters were reset. */
+    internal const string StatisticsAgeSql = @"
+SELECT EXTRACT(EPOCH FROM COALESCE($2::timestamptz, now()) - GREATEST(s.last_analyze, s.last_autoanalyze))::double precision
+FROM pg_stat_user_tables AS s
+WHERE s.relid = to_regclass($1);";
+
+    /// <summary>
+    /// Whether the day partition of <paramref name="table"/> that holds <paramref name="utcNow"/> was analyzed within
+    /// <see cref="FreshStatisticsSeconds"/> (#7353). The partition is the one <see cref="AnalyzeCurrentPartitionAsync"/> analyzes,
+    /// found by the same bounds. False when no day partition holds the clock, or the partition was never analyzed: the wide read's
+    /// tail is only cheap with statistics, so the guard prices it at the cold rate then. <paramref name="utcNow"/> picks the partition
+    /// and, unless <paramref name="ageClock"/> is given, the age is measured to the database's <c>now()</c>; a test passes
+    /// <paramref name="ageClock"/> to put the age on either side of <see cref="FreshStatisticsSeconds"/>.
+    /// </summary>
+    public static async Task<bool> CurrentPartitionHasFreshStatisticsAsync(
+        NpgsqlConnection connection, IntervalTable table, DateTime utcNow, CancellationToken cancellationToken, DateTime? ageClock = null)
+    {
+        var current = CurrentPartition(await ReadPartitionsAsync(connection, table, cancellationToken).ConfigureAwait(false), utcNow);
+        if (current is null)
+        {
+            return false;
+        }
+
+        await using var command = Command(connection, StatisticsAgeSql, ShortTimeoutSeconds);
+        AddText(command, current.Name);
+        command.Parameters.Add(new NpgsqlParameter
+        {
+            NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.TimestampTz,
+            Value = ageClock is { } at ? DateTime.SpecifyKind(at, DateTimeKind.Utc) : DBNull.Value,
+        });
+        return await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is double age && age <= FreshStatisticsSeconds;
+    }
+
+    /* One warning per table per process: a store whose role may not ANALYZE would otherwise repeat it every hour. */
+    private static readonly ConcurrentDictionary<string, byte> NotPermittedWarned = new(StringComparer.Ordinal);
+
+    internal static void ResetNotPermittedWarnings() => NotPermittedWarned.Clear();
+
+    /// <summary>
+    /// The hourly ANALYZE of the day partition that holds <paramref name="utcNow"/> (#7353). Autovacuum can leave a new day's
+    /// partition without statistics for most of the day when its workers are busy on bigger tables, and the planner then
+    /// estimated a few hundred rows for millions and chose the wrong index. The partition is found by its bounds
+    /// (<see cref="CurrentPartition"/>), so it works the same on every store, and only that one partition is analyzed: never
+    /// the legacy table, never the DEFAULT. One transaction under a <c>lock_timeout</c> of half of <c>deadlock_timeout</c>
+    /// (<see cref="QueryStoreIntervalBrin.SummarizeLockTimeoutMs"/>, so it is never the waiter that cancels a regular autovacuum,
+    /// #5594) and the <see cref="AnalyzeTimeoutSeconds"/> deadline. A partition that <c>pg_stat_progress_vacuum</c> or
+    /// <c>pg_stat_progress_analyze</c> shows a worker on is not asked for a lock, and a lock timeout is
+    /// <see cref="StepOutcome.RetryLater"/> too. A role that may not ANALYZE the partition (a store the service does not own) is
+    /// <see cref="StepOutcome.NotReady"/>, logged once per process, and so is a <c>deadlock_timeout</c> too short to wait below.
+    /// </summary>
+    public static async Task<StepResult> AnalyzeCurrentPartitionAsync(
+        NpgsqlConnection connection, IntervalTable table, DateTime utcNow, ILogger logger, CancellationToken cancellationToken)
+    {
+        var current = CurrentPartition(await ReadPartitionsAsync(connection, table, cancellationToken).ConfigureAwait(false), utcNow);
+        if (current is null)
+        {
+            return new StepResult(StepOutcome.NothingToDo, $"no day partition of {table.Parent} holds {Literal(utcNow)}");
+        }
+
+        bool allowed;
+        await using (var command = Command(connection, CanAnalyzeSql, ShortTimeoutSeconds))
+        {
+            AddText(command, current.Name);
+            allowed = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is true;
+        }
+
+        if (!allowed)
+        {
+            var detail = $"the service role may not ANALYZE {current.Name}";
+            if (NotPermittedWarned.TryAdd(table.Parent, 0))
+            {
+                logger.LogWarning(
+                    "Query Store interval table {Table}: {Detail} (it is neither the owner nor holds MAINTAIN), so the hourly ANALYZE of the current partition is skipped. "
+                    + "Collection is not affected. Give the service role ownership of the partitions, or MAINTAIN on PostgreSQL 17 and later, to keep the planner's statistics current.",
+                    table.Parent, detail);
+            }
+
+            return new StepResult(StepOutcome.NotReady, detail);
+        }
+
+        /* The #5594 rule, the BRIN summarize's: an ANALYZE asks for SHARE UPDATE EXCLUSIVE, which a VACUUM or an auto-analyze holds, and a
+           backend that waits on a regular autovacuum worker for longer than deadlock_timeout makes PostgreSQL cancel the worker. The
+           current partition takes every insert, so insert-driven autovacuum keeps coming back to it, and this step must never be the
+           waiter that cancels one. So it reads deadlock_timeout at run time, waits at most half of it, and does not ask at all while
+           pg_stat_progress_vacuum or pg_stat_progress_analyze shows a worker on the partition. */
+        var deadlockMs = await QueryStoreIntervalBrin.ReadDeadlockTimeoutMsAsync(connection, cancellationToken).ConfigureAwait(false);
+        var lockMs = QueryStoreIntervalBrin.SummarizeLockTimeoutMs(deadlockMs);
+        if (lockMs == 0)
+        {
+            return new StepResult(
+                StepOutcome.NotReady, $"deadlock_timeout is {deadlockMs} ms, too short to wait for a lock below it, so the ANALYZE of {current.Name} does not run");
+        }
+
+        bool busy;
+        await using (var check = Command(connection, PartitionBusySql, ShortTimeoutSeconds))
+        {
+            AddText(check, current.Name);
+            busy = await check.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is true;
+        }
+
+        if (busy)
+        {
+            logger.LogDebug(
+                "Query Store interval table {Table}: {Partition} is being vacuumed or analyzed, so its ANALYZE waits for the next background pass.", table.Parent, current.Name);
+            return new StepResult(StepOutcome.RetryLater, $"{current.Name} is being vacuumed or analyzed, so it was not asked for a lock");
+        }
+
+        var started = System.Diagnostics.Stopwatch.StartNew();
+        try
+        {
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            await ExecuteAsync(connection, $"SET LOCAL lock_timeout = '{lockMs}ms';", ShortTimeoutSeconds, transaction, cancellationToken).ConfigureAwait(false);
+            await ExecuteAsync(connection, $"ANALYZE {current.Name};", AnalyzeTimeoutSeconds, transaction, cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (PostgresException ex) when (IsLockContention(ex))
+        {
+            logger.LogInformation(
+                "Query Store interval table {Table}: analyzing {Partition} hit a {Reason} after at most {LockMs} ms (deadlock_timeout is {DeadlockMs} ms); the next background pass retries.",
+                table.Parent, current.Name, LockReason(ex), lockMs, deadlockMs);
+            return new StepResult(StepOutcome.RetryLater, $"{LockReason(ex)} after at most {lockMs} ms");
+        }
+
+        return new StepResult(StepOutcome.Done, $"analyzed {current.Name} in {started.Elapsed.TotalSeconds:F1} s", 1);
     }
 
     /// <summary>
@@ -1554,7 +1752,8 @@ SELECT COALESCE
     /// other), then, on the first pass and after any refusal, the Query Store index ensures
     /// (<see cref="QueryStoreBackgroundIndexes.RunDelayedAsync(NpgsqlDataSource, ILogger, TimeSpan, IReadOnlyList{QueryStoreBackgroundIndexes.IndexSpec}, CancellationToken)"/>)
     /// and promotion again for any table whose promotion was <see cref="StepOutcome.Refused"/> (a parent index had no
-    /// legacy child, which the index ensure has just built), then the once-a-day ANALYZE of each promoted parent. The
+    /// legacy child, which the index ensure has just built), then the once-a-day ANALYZE of each promoted parent and the hourly
+    /// ANALYZE of each table's current day partition (<see cref="AnalyzeCurrentPartitionAsync"/>, #7353). The
     /// VALIDATE and a concurrent <c>CREATE INDEX CONCURRENTLY</c> on the legacy table conflict, so the indexes wait for
     /// Phase A. The loop is serial, so one VALIDATE runs at a time per table, and none of it ever runs inside a
     /// convergence step's budget (#5571 review H1, M1).
@@ -1586,6 +1785,11 @@ SELECT COALESCE
             {
                 await using var connection = await postgres.OpenConnectionAsync(token).ConfigureAwait(false);
                 return await QueryStoreIntervalBrin.SummarizeNewRangesAsync(connection, table, logger, token).ConfigureAwait(false);
+            },
+            async (table, token) =>
+            {
+                await using var connection = await postgres.OpenConnectionAsync(token).ConfigureAwait(false);
+                return await AnalyzeCurrentPartitionAsync(connection, table, DateTime.UtcNow, logger, token).ConfigureAwait(false);
             });
 
     /// <summary><see cref="RunDelayedAsync(NpgsqlDataSource, ILogger, TimeSpan, IReadOnlyList{QueryStoreBackgroundIndexes.IndexSpec}, CancellationToken)"/> with the three actions injected, so the order, the repetition and the isolation run without a store.</summary>
@@ -1598,7 +1802,8 @@ SELECT COALESCE
         Func<IntervalTable, CancellationToken, Task<StepResult>> analyze,
         Func<CancellationToken, Task> ensureIndexes,
         CancellationToken cancellationToken,
-        Func<IntervalTable, CancellationToken, Task<StepResult>>? summarize = null)
+        Func<IntervalTable, CancellationToken, Task<StepResult>>? summarize = null,
+        Func<IntervalTable, CancellationToken, Task<StepResult>>? analyzeCurrent = null)
     {
         try
         {
@@ -1640,6 +1845,17 @@ SELECT COALESCE
                     await TryStepAsync(logger, table, "analyze", analyze, quiet: true, cancellationToken).ConfigureAwait(false);
                 }
 
+                /* #7353: the hourly ANALYZE of the day partition that holds now. Autovacuum's analyze of a new day's partition can wait
+                   a day behind busier tables, and the planner then reads the wide table's newest hours with no statistics. A failure
+                   is logged by TryStepAsync and never stops the BRIN summarize below or the next pass. */
+                if (analyzeCurrent is not null)
+                {
+                    foreach (var table in tables)
+                    {
+                        await TryStepAsync(logger, table, "current partition analyze", analyzeCurrent, quiet: true, cancellationToken).ConfigureAwait(false);
+                    }
+                }
+
                 /* #5594: the BRIN indexes are summarized here, hourly, because autosummarize is off and a VACUUM only summarizes
                    when it finishes. Never the waiter that cancels an autovacuum (see QueryStoreIntervalBrin). */
                 if (summarize is not null)
@@ -1650,7 +1866,7 @@ SELECT COALESCE
                     }
                 }
 
-                await Task.Delay(interval, cancellationToken).ConfigureAwait(false);
+                await Task.Delay(NextPassDelay(DateTime.UtcNow, interval), cancellationToken).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException)
@@ -1663,6 +1879,27 @@ SELECT COALESCE
                 "Query Store interval partition background task stopped at shutdown: {ExceptionType}: {Message}; the next start continues.",
                 ex.GetType().Name, ex.Message);
         }
+    }
+
+    /// <summary>How long after 00:00 UTC the background pass that analyzes the new day's partition runs.</summary>
+    public static readonly TimeSpan DayChangeGrace = TimeSpan.FromMinutes(1);
+
+    /// <summary>
+    /// The wait before the next background pass (#7353): <paramref name="interval"/>, or less when the UTC day changes sooner. A new
+    /// day's partition has no statistics until the hourly ANALYZE reaches it, and a pass that fell anywhere in the hour left the wide
+    /// read's newest hours without them for up to an hour after midnight. A pass <see cref="DayChangeGrace"/> past midnight closes
+    /// that to about a minute. The clock is passed in, so the figure is a pure function of it.
+    /// </summary>
+    internal static TimeSpan NextPassDelay(DateTime utcNow, TimeSpan interval)
+    {
+        var dayChange = utcNow.Date + DayChangeGrace;
+        if (dayChange <= utcNow)
+        {
+            dayChange = dayChange.AddDays(1);
+        }
+
+        var untilDayChange = dayChange - utcNow;
+        return untilDayChange < interval ? untilDayChange : interval;
     }
 
     private static async Task<StepOutcome?> TryStepAsync(

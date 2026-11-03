@@ -263,7 +263,8 @@ public sealed partial class DarlingWorker
            of the two interval tables, then these index ensures, because the VALIDATE and a CREATE INDEX CONCURRENTLY on
            the legacy table conflict. It then LOOPS every hour until shutdown, so a VALIDATE that lost a lock or a promote
            that did not get one is tried again without a restart, and it runs the once-a-day ANALYZE of each promoted
-           parent off the sweep loop. It never blocks collectors or startup. Phase B (create ahead, drop expired, and the
+           parent off the sweep loop, and the hourly ANALYZE of each table's current day partition (#7353: autovacuum can leave a new
+           day's partition without statistics for most of the day). It never blocks collectors or startup. Phase B (create ahead, drop expired, and the
            cheap parts of Phase A for a table that is not promoted) is the "query store interval partitions" convergence
            step, which runs before the collectors and every hour. */
         var queryStoreIndexes = QueryStoreIntervalPartitions.RunDelayedAsync(
