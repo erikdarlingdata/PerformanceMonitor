@@ -130,9 +130,10 @@ FROM
         /// #7285: <see cref="RowsOver(DateTime, DateTime, DateTime?)"/> for a panel that reads the fleet rollup. The hours the fleet table
         /// serves (<see cref="FleetServing.Hours"/>) leave the stamp-weighted part, and their rows count from the fleet table's own row
         /// count at <see cref="ComposeLimits.FleetRowWeight"/> each, because the fleet table's size does not follow the servers' wide
-        /// rows. The stamp hours the fleet table does not serve (an hour whose fleet build is behind) stay at the stamp weight, and the
-        /// tail after <paramref name="stampThrough"/> stays at 1.0 per wide row. With no <paramref name="fleet"/> this is exactly
-        /// the figure above.
+        /// rows. The stamp hours the fleet table does not serve (an hour whose fleet build is behind) stay at the stamp weight. The
+        /// tail after <paramref name="stampThrough"/> counts at <see cref="ComposeLimits.FleetTailRowWeight"/> per wide row (#7353): the
+        /// newest hours are mostly in shared buffers, so they cost less than the cold wide-row rate the limit is built on. With no
+        /// <paramref name="fleet"/> the tail stays at 1.0 and this is exactly the figure above.
         /// </summary>
         public long RowsOver(DateTime countedStart, DateTime countedEnd, DateTime? stampThrough, FleetServing? fleet)
         {
@@ -144,7 +145,8 @@ FROM
 
             var stampedDays = Math.Clamp((through - countedStart).TotalDays, 0d, days);
             var fleetDays = fleet is { } served ? Math.Min(served.Hours / 24d, stampedDays) : 0d;
-            var weighted = (days - stampedDays) + ((stampedDays - fleetDays) * ComposeLimits.StampRowWeight);
+            var tailWeight = fleet is null ? 1d : ComposeLimits.FleetTailRowWeight;
+            var weighted = ((days - stampedDays) * tailWeight) + ((stampedDays - fleetDays) * ComposeLimits.StampRowWeight);
             var fleetRows = fleet is { } rowsServed ? (long)Math.Ceiling(rowsServed.Rows * ComposeLimits.FleetRowWeight) : 0L;
             return (long)Math.Ceiling(DailyRows * weighted) + fleetRows + RawRows;
         }

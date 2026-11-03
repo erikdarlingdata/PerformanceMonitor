@@ -100,6 +100,17 @@ public static class ComposeLimits
     public const double FleetRowWeight = 0.3;
 
     /// <summary>
+    /// The weight of a wide row in the raw tail of a panel that reads the fleet rollup (#7353), against 1.0 for a cold wide row. The
+    /// tail is the hours after the stamp's newest built hour: the newest data, mostly in shared buffers. On the 210-server load-test
+    /// store the guard refused the fleet 24 hour panel for about 34 minutes of each hour, because the tail counted at the cold rate
+    /// (6.53 us per row) while the panel ran in 10 to 13 s. The fleet panel's raw-tail arm measured 0.66 us per row warm and 4 to
+    /// 4.9 us per row after another scan evicted it, and 4.9 / 6.53 is about 0.7. A panel that does not read the fleet rollup keeps
+    /// the tail at 1.0. PROVISIONAL: 0.7 stands until the cold measurement of the tail arm is posted on #7353, then this value is
+    /// replaced by it.
+    /// </summary>
+    public const double FleetTailRowWeight = 0.7;
+
+    /// <summary>
     /// The most rows a single-scan RankedTimeSeries base CTE may hold (#5582): buckets x members of the group dimension. The
     /// single-scan text writes about 436 bytes of temp file per base row (measured on a large production store in its worst shape,
     /// a <c>query_hash</c> group: 1,021,784 kB for 2,397,235 base rows), against <see cref="TempFileLimit"/> of 1 GB. At one
