@@ -260,8 +260,8 @@ ORDER BY server_id, queryid, database_id, user_id, toplevel, collection_time DES
             await SeedFamilyAsync("pg_statement_stats", () => SeedPgStatementStatsAsync(connection, GapPolicySeedCutoff(), logger, cancellationToken), logger);
 
             logger?.LogInformation(
-                "Delta calculator seeded from Postgres store (baselines from the last {Minutes} minutes)",
-                (int)SeedLookback.TotalMinutes);
+                "Delta calculator seeded from Postgres store (baselines from the last {Minutes} minutes, {GapPolicyMinutes} minutes for query_stats, pg_wait_stats and pg_statement_stats)",
+                (int)SeedLookback.TotalMinutes, (int)GapPolicySeedLookback.TotalMinutes);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
