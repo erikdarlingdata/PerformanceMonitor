@@ -129,6 +129,12 @@ SELECT s * 10 + c, t, {1}, 'SRV', 'Db' || c, 'PR_' || c, 'Active', 50 FROM slots
 INSERT INTO procedure_stats (collection_id, collection_time, server_id, server_name, database_name, schema_name, object_name, sql_handle, sample_interval_seconds)
 SELECT s * {2} + d, t, {1}, 'SRV', 'Db' || d, 'dbo', 'usp_' || d, '0xH' || d, 1800
 FROM slots, range({2}) b(d) ORDER BY t;
+
+/* #7216: the Index Usage grid and its match count take the newest index_object_stats snapshot. */
+INSERT INTO index_object_stats (collection_id, collection_time, server_id, server_name, database_name, database_id, schema_name, object_id,
+    table_name, index_id, index_name, index_type_desc, reserved_mb, used_mb, total_rows, user_seeks, user_scans, user_lookups, user_updates)
+SELECT s * 10 + c, t, {1}, 'SRV', 'Db' || c, c + 5, 'dbo', 1000 + c, 'Tbl' || c, 2, 'IX_' || c, 'NONCLUSTERED', 10 + c, 10 + c, 1000, 5, 1, 1, 3
+FROM slots, range(10) b(c) ORDER BY t;
 ";
 
     /// <summary>
@@ -273,6 +279,12 @@ FROM slots, range({2}) b(d) ORDER BY t;
         ("perfmon latest", d => d.GetLatestPerfmonStatsAsync(ServerId)),
         ("memory clerks", d => d.GetLatestMemoryClerksAsync(ServerId)),
         ("automatic tuning latest", d => d.GetLatestAutomaticTuningAsync(ServerId)),
+        /* #7216: the index usage grid, its match count, and the newest memory, server properties and engine edition lookups. */
+        ("index usage", d => d.GetIndexUsageAsync(ServerId)),
+        ("index usage match count", d => d.GetIndexUsageMatchCountAsync(ServerId)),
+        ("latest memory stats", d => d.GetLatestMemoryStatsAsync(ServerId)),
+        ("latest server properties", d => d.GetLatestServerPropertiesAsync(ServerId)),
+        ("SQL engine edition", d => d.GetSqlEngineEditionAsync(ServerId)),
     ];
 
     private async Task<(List<string> Failures, List<string> Report)> CheckReadsAsync(LocalDataService oneDay, LocalDataService eightDays)
@@ -463,7 +475,18 @@ VALUES (1, TIMESTAMP '{now}' - INTERVAL 11 DAY, {ServerId}, 'SRV', 'DbA', 'OLD',
 INSERT INTO running_jobs (collection_time, server_id, server_name, job_name, job_id, job_enabled, start_time, current_duration_seconds,
     avg_duration_seconds, p95_duration_seconds, successful_run_count, is_running_long, percent_of_average)
 VALUES (TIMESTAMP '{now}' - INTERVAL 11 DAY, {ServerId}, 'SRV', 'OldJob', 'job-1', true, TIMESTAMP '{now}' - INTERVAL 11 DAY, 3600, 900, 1200, 42, true, 400.0),
-       (TIMESTAMP '{now}' - INTERVAL 10 DAY, {ServerId}, 'SRV', 'NewJob', 'job-1', true, TIMESTAMP '{now}' - INTERVAL 10 DAY, 3600, 900, 1200, 42, true, 400.0);";
+       (TIMESTAMP '{now}' - INTERVAL 10 DAY, {ServerId}, 'SRV', 'NewJob', 'job-1', true, TIMESTAMP '{now}' - INTERVAL 10 DAY, 3600, 900, 1200, 42, true, 400.0);
+INSERT INTO index_object_stats (collection_id, collection_time, server_id, server_name, database_name, database_id, schema_name, object_id,
+    table_name, index_id, index_name, index_type_desc, reserved_mb, used_mb, total_rows, user_seeks, user_scans, user_lookups, user_updates)
+VALUES (1, TIMESTAMP '{now}' - INTERVAL 11 DAY, {ServerId}, 'SRV', 'DbA', 5, 'dbo', 1000, 'Tbl', 2, 'IX_Old', 'NONCLUSTERED', 10, 10, 1000, 5, 1, 1, 3),
+       (2, TIMESTAMP '{now}' - INTERVAL 10 DAY, {ServerId}, 'SRV', 'DbA', 5, 'dbo', 1000, 'Tbl', 2, 'IX_New', 'NONCLUSTERED', 10, 10, 1000, 5, 1, 1, 3);
+INSERT INTO memory_stats (collection_id, collection_time, server_id, server_name, total_physical_memory_mb, available_physical_memory_mb,
+    target_server_memory_mb, total_server_memory_mb, buffer_pool_mb)
+VALUES (1, TIMESTAMP '{now}' - INTERVAL 11 DAY, {ServerId}, 'SRV', 65536, 10000, 50000, 1111, 30000),
+       (2, TIMESTAMP '{now}' - INTERVAL 10 DAY, {ServerId}, 'SRV', 65536, 10000, 50000, 2222, 30000);
+INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, edition, product_version, product_level, engine_edition, cpu_count)
+VALUES (1, TIMESTAMP '{now}' - INTERVAL 11 DAY, {ServerId}, 'SRV', 'OldEdition', '15.0.2000.5', 'RTM', 3, 4),
+       (2, TIMESTAMP '{now}' - INTERVAL 10 DAY, {ServerId}, 'SRV', 'NewEdition', '15.0.2000.5', 'RTM', 5, 16);";
             await cmd.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
         }
 
@@ -477,7 +500,8 @@ VALUES (TIMESTAMP '{now}' - INTERVAL 11 DAY, {ServerId}, 'SRV', 'OldJob', 'job-1
             using var cmd = connection.CreateCommand();
             cmd.CommandText = "SELECT (SELECT COUNT(*) FROM pvs_stats) + (SELECT COUNT(*) FROM tempdb_stats) + (SELECT COUNT(*) FROM database_size_stats)"
                 + " + (SELECT COUNT(*) FROM file_io_stats) + (SELECT COUNT(*) FROM perfmon_stats) + (SELECT COUNT(*) FROM memory_clerks)"
-                + " + (SELECT COUNT(*) FROM session_stats) + (SELECT COUNT(*) FROM plan_correction) + (SELECT COUNT(*) FROM running_jobs)";
+                + " + (SELECT COUNT(*) FROM session_stats) + (SELECT COUNT(*) FROM plan_correction) + (SELECT COUNT(*) FROM running_jobs)"
+                + " + (SELECT COUNT(*) FROM index_object_stats) + (SELECT COUNT(*) FROM memory_stats) + (SELECT COUNT(*) FROM server_properties)";
             Assert.Equal(0L, Convert.ToInt64(await cmd.ExecuteScalarAsync(TestContext.Current.CancellationToken)));
         }
 
@@ -516,6 +540,14 @@ VALUES (TIMESTAMP '{now}' - INTERVAL 11 DAY, {ServerId}, 'SRV', 'OldJob', 'job-1
         Assert.NotNull(jobsSnapshot);
         Assert.InRange(DateTime.UtcNow - jobsSnapshot.Value, TimeSpan.FromDays(9.9), TimeSpan.FromDays(10.1));
         Assert.Equal("NewJob", Assert.Single(await data.GetAnomalousJobsAsync(ServerId, 2)).JobName);
+
+        Assert.Equal("IX_New", Assert.Single(await data.GetIndexUsageAsync(ServerId)).IndexName);
+        Assert.Equal(1L, await data.GetIndexUsageMatchCountAsync(ServerId));
+        Assert.Equal(2222, (await data.GetLatestMemoryStatsAsync(ServerId))!.TotalServerMemoryMb);
+        var properties = await data.GetLatestServerPropertiesAsync(ServerId);
+        Assert.NotNull(properties);
+        Assert.Equal("NewEdition", properties.Edition);
+        Assert.Equal(5, await data.GetSqlEngineEditionAsync(ServerId));
     }
 
     /// <summary>

@@ -491,7 +491,7 @@ public sealed class AzureSqlDatabaseMemoryScopeTests : IClassFixture<SharedDuckD
         Assert.True(start > 0, "GetLatestMemoryStatsAsync is missing");
         var memoryRead = service[start..service.IndexOf("GetMemoryTrendAsync(", start, StringComparison.Ordinal)];
 
-        Assert.Contains("FROM v_memory_stats", memoryRead, StringComparison.Ordinal);
+        Assert.Contains("v_memory_stats", memoryRead, StringComparison.Ordinal);
         Assert.DoesNotContain("server_properties", memoryRead, StringComparison.Ordinal);
         Assert.DoesNotContain("engine_edition", memoryRead, StringComparison.Ordinal);
         Assert.Null(typeof(MemoryStatsRow).GetProperty("EngineEdition"));

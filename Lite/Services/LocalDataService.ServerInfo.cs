@@ -23,13 +23,17 @@ public partial class LocalDataService
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        command.CommandText = @"
+        /* #7216: the newest-snapshot lookup has no time bound, so through the v_ view it read every archived row of server_properties.
+           The hot table holds the newest snapshot of any server still being collected; the view is read only for a server with no
+           hot row (collection stopped and archival moved every row out), which still shows the last values it had. */
+        var propertiesRelation = await HotTableHasServerAsync(connection, "server_properties", serverId) ? "server_properties" : "v_server_properties";
+        command.CommandText = $@"
 SELECT edition, product_version, product_level, product_update_level,
        engine_edition, cpu_count, hyperthread_ratio, physical_memory_mb,
        socket_count, cores_per_socket, is_hadr_enabled, is_clustered,
        enterprise_features, service_objective, collection_time,
        utc_offset_minutes, time_zone_id, vcore_count
-FROM v_server_properties
+FROM {propertiesRelation}
 WHERE server_id = $1
 ORDER BY collection_time DESC
 LIMIT 1";
