@@ -46,7 +46,7 @@ namespace PerformanceMonitor.Darling.Service;
 public sealed class ReadAdmission
 {
     /// <summary>The default of <c>reads.maxHeavyReads</c>.</summary>
-    public const int DefaultMaxHeavyReads = 2;
+    public const int DefaultMaxHeavyReads = 4;
 
     /// <summary>How many heavy reads may wait for a slot.</summary>
     internal const int QueueLimit = 16;

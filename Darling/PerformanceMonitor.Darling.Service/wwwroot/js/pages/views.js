@@ -1189,8 +1189,8 @@ function panelProblem(p, readSet, sourceSet) {
   return null;
 }
 
-/* #7257: the most long reads one saved view starts at once. The service default for reads.maxHeavyReads is 2 and the page
-   cannot read the service's limit, so the two move together. */
+/* #7257: the most long reads one saved view starts at once. The service default for reads.maxHeavyReads is 4 (#7357) and the
+   page cannot read the service's limit. The page stays at 2 so one saved view leaves slots for other readers. */
 const SAVED_VIEW_READS = 2;
 
 /* One render of a saved dashboard or notebook: its own limiter (the alert notebook's InFlightLimiter) and a way to end it.
