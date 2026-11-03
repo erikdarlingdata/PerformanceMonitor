@@ -173,7 +173,7 @@ public static partial class SensitiveStatements
             var precheck = s_prefilter.Value;
             if (precheck is null)
                 return false;
-            var started = Stopwatch.GetTimestamp();
+            var started = budget.Clock();
             bool matched;
             try
             {
@@ -185,7 +185,7 @@ public static partial class SensitiveStatements
             }
             finally
             {
-                budget.AddElapsed(Stopwatch.GetElapsedTime(started));
+                budget.AddElapsed(budget.Clock() - started);
             }
             if (matched)
                 return false;
