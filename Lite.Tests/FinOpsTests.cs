@@ -333,7 +333,8 @@ public class FinOpsTests : IClassFixture<SharedDuckDbFixture>
     }
 
     /// <summary>#7166: max_grant_kb is a lifetime high-water mark, so a steady 1 GB grant seen in 96 collection
-    /// rows is 1 GB, not 96 GB, and it must rank below a 50 GB grant seen once.</summary>
+    /// rows is 1 GB, not 96 GB, and it must rank below a 50 GB grant seen once. Across plans the figure is the newest
+    /// row's reading: an older plan that once took 8 GB does not outrank the 2 GB plan running now.</summary>
     [Fact]
     public async Task HighImpact_PeakMemory_IsThePeakGrantNotASumOverCollectionRows()
     {
@@ -341,6 +342,8 @@ public class FinOpsTests : IClassFixture<SharedDuckDbFixture>
 
         var steady = Assert.Single(results, r => r.QueryHash == "STEADY");
         var oneOff = Assert.Single(results, r => r.QueryHash == "ONEOFF");
+        var twoPlans = Assert.Single(results, r => r.QueryHash == "TWOPLANS");
+        Assert.Equal(2048m, twoPlans.PeakMemoryMb);
         Assert.Equal(1024m, steady.PeakMemoryMb);
         Assert.Equal(51200m, oneOff.PeakMemoryMb);
         Assert.True(oneOff.MemoryShare > steady.MemoryShare,

@@ -50,6 +50,27 @@ public static class DarlingFinOpsHighImpactReader
     /// before the scorer kept the top few dozen (#6803). $1 server_id, $2 cutoff.
     /// </summary>
     public const string HighImpactQueriesSql = $@"
+WITH windowed AS
+(
+    -- #7166: max_grant_kb is a per-plan high-water mark since that plan was cached, so MAX across a hash's plans
+    -- is the largest grant any plan ever had (the max_dop trap, #3648). Rank each hash's rows newest-first and
+    -- keep the newest row's reading, the same choice max_dop makes. Explicit NULLS LAST: DuckDB and Postgres
+    -- default DESC null placement differently. The final ORDER BY ends on query_hash: CPU totals tie, and the
+    -- scorer keeps ties in input order, so the window's plan must not decide which tied hash is kept.
+    SELECT query_hash, database_name, delta_execution_count, delta_worker_time, delta_elapsed_time,
+           delta_logical_reads, delta_logical_writes, max_grant_kb,
+           ROW_NUMBER() OVER
+           (
+               PARTITION BY query_hash
+               ORDER BY collection_time DESC, creation_time DESC NULLS LAST, delta_worker_time DESC NULLS LAST
+           ) AS newest_rn
+    FROM v_query_stats AS qs
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   query_hash IS NOT NULL AND query_hash != ''
+    AND   delta_execution_count > 0
+    AND   {TimescaleSupport.IntervalHonestSourceFilter}
+)
 SELECT
     query_hash,
     MIN(database_name) AS database_name,
@@ -58,16 +79,11 @@ SELECT
     SUM(delta_elapsed_time) / 1000.0 AS total_duration_ms,
     SUM(delta_logical_reads) AS total_reads,
     SUM(delta_logical_writes) AS total_writes,
-    MAX(COALESCE(max_grant_kb, 0)) / 1024.0 AS peak_memory_mb
-FROM v_query_stats AS qs
-WHERE server_id = $1
-AND   collection_time >= $2
-AND   query_hash IS NOT NULL AND query_hash != ''
-AND   delta_execution_count > 0
-AND   {TimescaleSupport.IntervalHonestSourceFilter}
+    COALESCE(MAX(CASE WHEN newest_rn = 1 THEN max_grant_kb END), 0) / 1024.0 AS peak_memory_mb
+FROM windowed
 GROUP BY query_hash
 HAVING SUM(delta_execution_count) > 0
-ORDER BY SUM(delta_worker_time) DESC";
+ORDER BY SUM(delta_worker_time) DESC, query_hash";
 
     /// <summary>
     /// The sample text and stored plan for the kept query hashes, each from the hash's busiest row in the window (the

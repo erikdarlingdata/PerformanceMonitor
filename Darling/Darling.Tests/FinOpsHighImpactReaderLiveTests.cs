@@ -30,7 +30,7 @@ public sealed class FinOpsHighImpactReaderLiveTests
     internal const string ServerName = "darling-finops-high-impact-e2e";
     internal static readonly int ServerId = ServerIdHelper.GetDeterministicHashCode(ServerName);
 
-    /* Captured from the pre-move viewer read (memory is the peak grant per hash since #7166, so 0xHI03's two rows give 20, not 21): hash, database, executions, cpu ms, duration ms, reads, writes,
+    /* Captured from the pre-move viewer read (memory is the newest row's grant per hash since #7166, so 0xHI03's two rows give 20, the newer one, not 21): hash, database, executions, cpu ms, duration ms, reads, writes,
        memory MB, shares (cpu, duration, reads, writes, memory, executions), impact score. */
     private static readonly (string Hash, string Db, long Exec, decimal Cpu, decimal Dur, long Reads, long Writes, decimal Mem, decimal[] Shares, int Score)[] Expected =
     [
@@ -101,7 +101,8 @@ public sealed class FinOpsHighImpactReaderLiveTests
 
     /// <summary>
     /// #7166: max_grant_kb is a lifetime high-water mark, so a steady 1 GB grant seen in 96 collection rows is 1 GB,
-    /// not 96 GB, and it ranks below a 50 GB grant seen once.
+    /// not 96 GB, and it ranks below a 50 GB grant seen once. Across plans the figure is the NEWEST row's reading:
+    /// an older plan that once took 8 GB does not outrank the 2 GB plan that is running now (the max_dop rule, #3648).
     /// </summary>
     [Fact]
     public async Task StorageRead_PeakMemory_IsThePeakGrantNotASumOverCollectionRows()
@@ -121,6 +122,10 @@ public sealed class FinOpsHighImpactReaderLiveTests
                 await Plant(connection, ct, at.AddMinutes(-i), "0xSTEADY", "Db0", exec: 10, cpuUs: 1_000_000L, elapsedUs: 2_000_000L,
                     reads: 1000L, writes: 10L, grantKb: 1_048_576L);
             }
+            await Plant(connection, ct, at.AddMinutes(-30), "0xTWOPLANS", "Db0", exec: 10, cpuUs: 1_000_000L, elapsedUs: 2_000_000L,
+                reads: 1000L, writes: 10L, grantKb: 8_388_608L);
+            await Plant(connection, ct, at, "0xTWOPLANS", "Db0", exec: 10, cpuUs: 1_000_000L, elapsedUs: 2_000_000L,
+                reads: 1000L, writes: 10L, grantKb: 2_097_152L);
             await Plant(connection, ct, at, "0xONEOFF", "Db0", exec: 10, cpuUs: 1_000_000L, elapsedUs: 2_000_000L,
                 reads: 1000L, writes: 10L, grantKb: 52_428_800L);
         }
@@ -129,6 +134,8 @@ public sealed class FinOpsHighImpactReaderLiveTests
         var rows = await DarlingFinOpsHighImpactReader.ReadAsync(dataSource, ServerId, 24, 60, ct);
 
         var steady = Assert.Single(rows, r => r.QueryHash == "0xSTEADY");
+        var twoPlans = Assert.Single(rows, r => r.QueryHash == "0xTWOPLANS");
+        Assert.Equal(2048m, twoPlans.PeakMemoryMb);
         var oneOff = Assert.Single(rows, r => r.QueryHash == "0xONEOFF");
         Assert.Equal(1024m, steady.PeakMemoryMb);
         Assert.Equal(51200m, oneOff.PeakMemoryMb);

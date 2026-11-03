@@ -2643,6 +2643,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)";
     /// <summary>
     /// Seeds query_stats for the peak-grant check (#7166): STEADY is one 1 GB grant seen in 96 collection rows,
     /// ONEOFF is one 50 GB grant seen once. max_grant_kb is a lifetime high-water mark, so each row repeats it.
+    /// TWOPLANS is one hash with an older plan that took 8 GB and a newer plan at 2 GB: the figure is the newest row's reading.
     /// </summary>
     internal async Task SeedQueryStatsGrantHistoryAsync()
     {
@@ -2656,6 +2657,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)";
         var rows = new List<(string hash, int minutesAgo, long grantKb)>();
         for (var i = 0; i < 96; i++) rows.Add(("STEADY", 30 + i, 1_048_576L));
         rows.Add(("ONEOFF", 30, 52_428_800L));
+        rows.Add(("TWOPLANS", 90, 8_388_608L));
+        rows.Add(("TWOPLANS", 30, 2_097_152L));
 
         foreach (var (hash, minutesAgo, grantKb) in rows)
         {
