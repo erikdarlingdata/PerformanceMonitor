@@ -785,7 +785,7 @@ public sealed class HighImpactQueryRow
     public decimal TotalDurationMs { get; set; }
     public long TotalReads { get; set; }
     public long TotalWrites { get; set; }
-    public decimal TotalMemoryMb { get; set; }
+    public decimal PeakMemoryMb { get; set; }
     public decimal CpuShare { get; set; }
     public decimal DurationShare { get; set; }
     public decimal ReadsShare { get; set; }
@@ -815,7 +815,7 @@ public sealed class HighImpactQueryRow
         TotalDurationMs = q.TotalDurationMs,
         TotalReads = q.TotalReads,
         TotalWrites = q.TotalWrites,
-        TotalMemoryMb = q.TotalMemoryMb,
+        PeakMemoryMb = q.PeakMemoryMb,
         CpuShare = q.CpuShare,
         DurationShare = q.DurationShare,
         ReadsShare = q.ReadsShare,
