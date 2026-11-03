@@ -217,6 +217,33 @@ public sealed class ViewerQueryTrendBucketingLiveTests
         });
     }
 
+    /// <summary>
+    /// #7161: a query that runs every 15 minutes returns with its own 900 s interval beside siblings at 60 s. The collection's
+    /// seconds are its gap to the previous collection, so the third collection reads 70 executions over 60 s, not over 900 s.
+    /// </summary>
+    [Fact]
+    public async Task QueryTrends_ALongIntervalQueryBesideSteadyOnes_DoesNotStretchTheCollection()
+    {
+        await RunAsync(async (connection, viewer, ct) =>
+        {
+            var t0 = new DateTime(2026, 3, 10, 9, 0, 0);
+            for (var i = 0; i < 4; i++)
+            {
+                await InsertQueryStatsRowAsync(connection, ct, t0.AddMinutes(i), executions: 60, elapsedMs: 600, sampleIntervalSeconds: 60);
+            }
+            await InsertQueryStatsRowAsync(connection, ct, t0.AddMinutes(2), executions: 10, elapsedMs: 100, sampleIntervalSeconds: 900, queryHash: "0xQTB15");
+
+            var duration = await viewer.GetQueryDurationTrendAsync(ServerId, t0.AddMinutes(-1), t0.AddMinutes(5), null, t0.AddMinutes(5), ct);
+            var executions = await viewer.GetExecutionCountTrendAsync(ServerId, t0.AddMinutes(-1), t0.AddMinutes(5), null, t0.AddMinutes(5), ct);
+
+            Assert.Equal(4, duration.Points.Count);
+            Assert.Equal(700.0 / 60.0, duration.Points[2].Value, precision: 6);
+            Assert.Equal(10.0, duration.Points[3].Value, precision: 6);
+            Assert.Equal(70.0 / 60.0, executions.Points[2].Value, precision: 6);
+            Assert.Equal(1.0, executions.Points[3].Value, precision: 6);
+        });
+    }
+
     /* ───────────────────────────── plumbing ───────────────────────────── */
 
     private static async Task RunAsync(Func<NpgsqlConnection, ViewerDataService, System.Threading.CancellationToken, Task> body)
@@ -245,13 +272,13 @@ public sealed class ViewerQueryTrendBucketingLiveTests
     }
 
     private static async Task InsertQueryStatsRowAsync(
-        NpgsqlConnection connection, System.Threading.CancellationToken ct, DateTime t, long executions, long elapsedMs, int sampleIntervalSeconds) =>
+        NpgsqlConnection connection, System.Threading.CancellationToken ct, DateTime t, long executions, long elapsedMs, int sampleIntervalSeconds, string queryHash = "0xQTB") =>
         await DarlingMcpTestData.ExecAsync(connection, ct, @"
 INSERT INTO query_stats
     (collection_id, collection_time, server_id, server_name, database_name, query_hash,
      delta_execution_count, delta_elapsed_time, sample_interval_seconds)
-VALUES ($1, $2, $3, $4, 'AppDb', '0xQTB', $5, $6, $7)",
-            CollectionIdGenerator.Next(), t, ServerId, ServerName, executions, elapsedMs * 1000, sampleIntervalSeconds);
+VALUES ($1, $2, $3, $4, 'AppDb', $8, $5, $6, $7)",
+            CollectionIdGenerator.Next(), t, ServerId, ServerName, executions, elapsedMs * 1000, sampleIntervalSeconds, queryHash);
 
     private static async Task InsertProcedureStatsRowAsync(
         NpgsqlConnection connection, System.Threading.CancellationToken ct, DateTime t, long executions, long elapsedMs, int sampleIntervalSeconds) =>

@@ -1463,24 +1463,7 @@ LEFT JOIN texts t ON t.sql_handle = j.text_handle;";
     /// never shifts, mirroring the wait/perfmon trend reads' own width parameter.
     /// </summary>
     internal static string DurationTrendChartSql(string relation, string dbClause, int widthParamIndex) => $@"
-WITH {(relation == "v_procedure_stats" ? ProcedureCollectionsSql(dbClause) : $@"raw AS
-(
-    SELECT
-        collection_time,
-        {FilteredSum("delta_elapsed_time", dbClause)} / 1000.0 AS total_elapsed_ms,
-        {FilteredSum("delta_execution_count", dbClause)} AS total_executions,
-        /* The stored interval, three-state (#3653 A11): MAX 0 = every row unknowable (a restart) -> NULL, so
-           the collection is unrated; NULL = pre-v61, the LAG stands in; n = measured. */
-        CASE WHEN MAX(sample_interval_seconds) IS NULL
-             THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
-             ELSE NULLIF(MAX(sample_interval_seconds), 0)
-        END AS interval_seconds{(dbClause.Length == 0 ? "" : $",\n        COUNT(*) FILTER (WHERE {DbInPredicate(dbClause)}) AS matched_rows")}
-    FROM {relation}
-    WHERE server_id = $1
-    AND   collection_time >= $2
-    AND   collection_time <= $3
-    GROUP BY collection_time
-),")}
+WITH {(relation == "v_procedure_stats" ? ProcedureCollectionsSql(dbClause) : QueryCollectionsSql(relation, dbClause, includeElapsed: true))}
 rated AS
 (
     SELECT
@@ -1501,6 +1484,53 @@ SELECT
 FROM rated{(dbClause.Length == 0 ? "" : "\nWHERE EXISTS (SELECT 1 FROM rated WHERE matched_rows > 0)")}
 GROUP BY 1
 ORDER BY 1";
+
+    /// <summary>
+    /// #7161: the collections of the query grain, as the leading <c>raw</c> CTE of the bucketed duration-trend and execution-count
+    /// reads (<c>total_elapsed_ms</c> only when <paramref name="includeElapsed"/>, <c>total_executions</c>, <c>interval_seconds</c>,
+    /// and <c>matched_rows</c> under a database filter). A collection's seconds are its gap to the previous collection, never the
+    /// longest <c>sample_interval_seconds</c> of any one query in it: the collector keeps only queries that ran in the last ten
+    /// minutes, so a query that runs every 15 or 30 minutes returns with its own long interval beside siblings at 60 s, and
+    /// <c>MAX</c> over the collection stretched the whole minute to that length and cut the rate about 15-fold. The gap is NULL
+    /// (unrated) past <see cref="CollectorDeltaCalculator.DefaultMaxGapSeconds"/>, the collector's own limit. The three states
+    /// stay distinct: every row stored 0 (a restart) is unrated whatever the gap, and the first collection of the store, which
+    /// has no previous one, keeps its stored interval. The table is read from an hour before <c>$2</c> so the first in-window
+    /// collection has its previous one, and the collections before <c>$2</c> are dropped after the LAG.
+    /// Darling's twin is <c>DurationTrendRouting.RawCollectionsCte</c>.
+    /// </summary>
+    internal static string QueryCollectionsSql(string relation, string dbClause, bool includeElapsed)
+    {
+        const int gap = CollectorDeltaCalculator.DefaultMaxGapSeconds;
+        var elapsed = includeElapsed ? $"\n            {FilteredSum("delta_elapsed_time", dbClause)} / 1000.0 AS total_elapsed_ms," : "";
+        var elapsedOut = includeElapsed ? "\n        total_elapsed_ms," : "";
+        var matched = dbClause.Length == 0 ? "" : $",\n            COUNT(*) FILTER (WHERE {DbInPredicate(dbClause)}) AS matched_rows";
+        var matchedOut = dbClause.Length == 0 ? "" : ",\n        matched_rows";
+        return $@"raw AS
+(
+    SELECT
+        collection_time,{elapsedOut}
+        total_executions,
+        CASE
+            WHEN stored_interval = 0 THEN NULL
+            WHEN gap_seconds IS NOT NULL THEN CASE WHEN gap_seconds <= {gap} THEN gap_seconds END
+            ELSE NULLIF(stored_interval, 0)
+        END AS interval_seconds{matchedOut}
+    FROM
+    (
+        SELECT
+            collection_time,{elapsed}
+            {FilteredSum("delta_execution_count", dbClause)} AS total_executions,
+            MAX(sample_interval_seconds) AS stored_interval,
+            extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))) AS gap_seconds{matched}
+        FROM {relation}
+        WHERE server_id = $1
+        AND   collection_time >= $2 - to_seconds({gap})
+        AND   collection_time <= $3
+        GROUP BY collection_time
+    ) AS g
+    WHERE collection_time >= $2
+),";
+    }
 
     /// <summary>
     /// #5449: the collections of the procedure grain, as the leading CTEs of both bucketed duration-trend reads, ending in
@@ -1721,22 +1751,7 @@ LIMIT 1";
     /// parameter). Reads <c>v_query_stats</c> only; there is no procedure-side execution-count chart.
     /// </summary>
     internal static string ExecutionCountTrendChartSql(string dbClause, int widthParamIndex) => $@"
-WITH raw AS
-(
-    SELECT
-        collection_time,
-        {FilteredSum("delta_execution_count", dbClause)} AS total_executions,
-        /* The stored interval, three-state (#3653 A11) — see GetQueryDurationTrendAsync. */
-        CASE WHEN MAX(sample_interval_seconds) IS NULL
-             THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
-             ELSE NULLIF(MAX(sample_interval_seconds), 0)
-        END AS interval_seconds{(dbClause.Length == 0 ? "" : $",\n        COUNT(*) FILTER (WHERE {DbInPredicate(dbClause)}) AS matched_rows")}
-    FROM v_query_stats
-    WHERE server_id = $1
-    AND   collection_time >= $2
-    AND   collection_time <= $3
-    GROUP BY collection_time
-),
+WITH {QueryCollectionsSql("v_query_stats", dbClause, includeElapsed: false)}
 rated AS
 (
     SELECT

@@ -354,11 +354,13 @@ public sealed class CollectionHealthPayloadBudgetLiveTests
             for (var i = 1; i <= 3; i++)
                 await InsertLogRowAsync(connection, "memory_grant_stats", now.AddMinutes(-i), "SUCCESS", 20, 0, null, ct);
 
-            /* Activity-only, last productive 73 hours ago, four zero-row successes since: flagged. */
+            /* Activity-only, last productive 73 hours ago, then hourly zero-row successes the service watched (#7242: the bar is
+               observed time, so sparse runs would not count): 73 observed hours, flagged. */
             await InsertLogRowAsync(connection, "job_history", now.AddHours(-74), "SUCCESS", 80, 12, null, ct);
             await InsertLogRowAsync(connection, "job_history", now.AddHours(-73), "SUCCESS", 80, 12, null, ct);
-            foreach (var hoursAgo in new[] { 72.0, 48.0, 24.0, 0.05 })
+            for (var hoursAgo = 72; hoursAgo >= 1; hoursAgo--)
                 await InsertLogRowAsync(connection, "job_history", now.AddHours(-hoursAgo), "SUCCESS", 20, 0, null, ct);
+            await InsertLogRowAsync(connection, "job_history", now.AddHours(-0.05), "SUCCESS", 20, 0, null, ct);
 
             /* Activity-only, last productive 71 hours ago, four zero-row successes since: HEALTHY. */
             await InsertLogRowAsync(connection, "waiting_tasks", now.AddHours(-72), "SUCCESS", 80, 3, null, ct);
@@ -397,7 +399,7 @@ public sealed class CollectionHealthPayloadBudgetLiveTests
                 }
 
                 Assert.Contains("has recorded SUCCESS with zero rows on 3 runs since", rows["memory_grant_stats"].GetProperty("regression_finding").GetString()!, StringComparison.Ordinal);
-                Assert.Contains("has recorded SUCCESS with zero rows on 4 runs since", rows["job_history"].GetProperty("regression_finding").GetString()!, StringComparison.Ordinal);
+                Assert.Contains("has recorded SUCCESS with zero rows on 73 runs since", rows["job_history"].GetProperty("regression_finding").GetString()!, StringComparison.Ordinal);
                 Assert.Contains("has reported PERMISSIONS since", rows["wait_stats"].GetProperty("regression_finding").GetString()!, StringComparison.Ordinal);
 
                 Assert.Equal(CollectorHealthClassifier.Healthy, rows["waiting_tasks"].GetProperty("status").GetString());

@@ -599,11 +599,14 @@ public partial class AlertsHistoryTab : UserControl
     private async void ShowDetail(AlertHistoryRow item)
     {
         IReadOnlyList<string>? attached = null;
-        if (_dataService is { } data && OpenEngineAlerts.IsAttachable(item.MetricName))
+        if (_dataService is { } dataService && OpenEngineAlerts.IsAttachable(item.MetricName))
         {
             try
             {
-                attached = await data.GetAttachedFindingsAsync(item);
+                /* The read takes the DuckDB read lock before its first await and DuckDB.NET's async methods complete
+                   synchronously, so awaited straight from this handler it would wait on archival or compaction and then
+                   run the query on the dispatcher. Task.Run keeps both off the UI thread (#7180). */
+                attached = await System.Threading.Tasks.Task.Run(() => dataService.GetAttachedFindingsAsync(item));
             }
             catch (Exception ex)
             {
