@@ -254,13 +254,23 @@ public class ScheduleManager
     public IReadOnlyList<CollectorSchedule> GetDueCollectorsForServer(string serverId)
         => GetDueCollectorsForServer(serverId, DateTime.UtcNow);
 
-    /// <summary>The collectors due at <paramref name="atUtc"/>: the same rule as the one-argument overload, evaluated
-    /// at the caller's logical cycle time (#4640). A collector whose recorded run is later than
-    /// <paramref name="atUtc"/> is due now (#4732, <see cref="CollectorCadence.ClampDue"/>). That is a wall clock that
-    /// stepped backwards since the run was recorded, or a tab-open or refresh run
-    /// (<see cref="RemoteCollectorService.RunAllCollectorsForServerAsync"/>) that recorded its own start time after the
-    /// cycle's time was taken.</summary>
+    /// <summary>The collectors due at <paramref name="atUtc"/>, with the real clock taken as <paramref name="atUtc"/> too.
+    /// See <see cref="GetDueCollectorsForServer(string, DateTime, DateTime)"/>: a run recorded after
+    /// <paramref name="atUtc"/> can only be a wall clock that stepped backwards, so it is due now (#4732).</summary>
     public IReadOnlyList<CollectorSchedule> GetDueCollectorsForServer(string serverId, DateTime atUtc)
+        => GetDueCollectorsForServer(serverId, atUtc, atUtc);
+
+    /// <summary>The collectors due at <paramref name="atUtc"/>: the same rule as the one-argument overload, evaluated
+    /// at the caller's logical cycle time (#4640), where <paramref name="nowUtc"/> is the wall clock when the caller
+    /// reads the list. A collector whose recorded run is later than <paramref name="nowUtc"/> is due now (#4732,
+    /// <see cref="CollectorCadence.ClampDue"/>): that is a wall clock that stepped backwards since the run was recorded.
+    /// A run recorded after <paramref name="atUtc"/> but not after <paramref name="nowUtc"/> happened since the cycle's
+    /// time was taken (a tab-open or refresh run, <see cref="RemoteCollectorService.RunAllCollectorsForServerAsync"/>,
+    /// that took its turn first) and is not due again (#7269). A run at or before <paramref name="atUtc"/> keeps the
+    /// interval rule. The sweep passes the time it got the server's turn, so the window is as long as the wait for that
+    /// turn: a wall clock that steps back by less than the wait leaves stamps inside the window, and those read as a
+    /// run since the cycle time, not as a step (the collector then waits out the step plus one interval).</summary>
+    public IReadOnlyList<CollectorSchedule> GetDueCollectorsForServer(string serverId, DateTime atUtc, DateTime nowUtc)
     {
         lock (_lock)
         {
@@ -276,7 +286,7 @@ public class ScheduleManager
                 if (!s.Enabled)
                     continue;
 
-                if (IsDue(serverId, s, runState, atUtc))
+                if (IsDue(serverId, s, runState, atUtc, nowUtc))
                 {
                     due.Add(s);
                 }
@@ -292,7 +302,7 @@ public class ScheduleManager
     /// <paramref name="atUtc"/>: from the day's time to the end of the 60-minute grace, once a day. A never-run
     /// collector, or one that missed its day, waits for the next day's time. Every other collector keeps the interval rule.
     /// </summary>
-    private bool IsDue(string serverId, CollectorSchedule s, Dictionary<string, DateTime>? runState, DateTime atUtc)
+    private bool IsDue(string serverId, CollectorSchedule s, Dictionary<string, DateTime>? runState, DateTime atUtc, DateTime nowUtc)
     {
         var intervalMinutes = CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(s.FrequencyMinutes);
         DateTime? lastRun = runState != null && runState.TryGetValue(s.Name, out var last) ? last : null;
@@ -311,13 +321,19 @@ public class ScheduleManager
             return true; // never run — due immediately
         }
 
-        /* #4732: due when lastRun plus the interval has come, decided through the shared clamp. A run recorded
-           after atUtc is either what a wall clock that stepped backwards leaves behind for every collector (the
-           plain elapsed check would hold each one back for as long as the step), or a tab-open or refresh run
-           that recorded its own start time after this cycle's time was taken (RemoteCollectorService, only the
-           collectors it ran); the clamp counts either as due now. A run one interval or more before atUtc is
-           due and one less than an interval before is not, exactly as before. */
+        /* #7269: a run recorded after atUtc but not after nowUtc happened since this cycle's time was taken: a
+           tab-open or refresh run (RemoteCollectorService, only the collectors it ran) that took its turn first.
+           It is not due again. */
         var interval = TimeSpan.FromMinutes(intervalMinutes);
+        if (ran > atUtc && ran <= nowUtc)
+        {
+            return false;
+        }
+
+        /* #4732: otherwise due when lastRun plus the interval has come, decided through the shared clamp. A run
+           recorded after nowUtc is what a wall clock that stepped backwards leaves behind for every collector (the
+           plain elapsed check would hold each one back for as long as the step); the clamp counts it as due now.
+           A run one interval or more before atUtc is due and one less than an interval before is not. */
         return CollectorCadence.ClampDue(ran + interval, atUtc, interval) <= atUtc;
     }
 
@@ -517,7 +533,7 @@ public class ScheduleManager
                     if (ResolveRunAtMinute(serverId, s, intervalMinutes) is not null)
                         continue;
 
-                    if (IsDailyOrLonger(intervalMinutes) && !IsDue(serverId, s, runState, atUtc))
+                    if (IsDailyOrLonger(intervalMinutes) && !IsDue(serverId, s, runState, atUtc, atUtc))
                         continue;
                 }
 

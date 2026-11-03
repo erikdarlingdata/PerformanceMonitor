@@ -687,6 +687,12 @@ public partial class RemoteCollectorService
                it), so two runs never share the server's telemetry slot. */
             using var serverTurn = await AcquireServerRunAsync(server, cancellationToken);
 
+            /* #7269: the clock when this sweep got the turn. A run that took the turn before this one (a tab-open or refresh run)
+               has finished by now, so the runs recorded after cycleStartUtc and not after this time are the ones the due
+               list skips. It is read here, not at the list: the XE reconcile and the last-runs read below can take a while, and
+               a stamp written in that time is not a run that took the turn first. */
+            var turnStartUtc = DateTime.UtcNow;
+
             /* Reconcile the opt-in long-query completion XE session to its enabled flag BEFORE the
                due-collector loop and regardless of whether it is due — a disabled collector is never
                dispatched, so the DROP-on-disable (#1496) has nowhere else to run. Cheap when nothing
@@ -697,7 +703,7 @@ public partial class RemoteCollectorService
                make a daily collector due and a run time reads the server's clock. */
             await EnsureRunTimeReadyAsync(server, cancellationToken);
 
-            var dueCollectors = _scheduleManager.GetDueCollectorsForServer(server.Id, cycleStartUtc);
+            var dueCollectors = _scheduleManager.GetDueCollectorsForServer(server.Id, cycleStartUtc, turnStartUtc);
             foreach (var collector in dueCollectors)
             {
                 await RunCollectorAsync(server, collector.Name, scheduledAtUtc: cycleStartUtc, cancellationToken);
