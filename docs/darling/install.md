@@ -520,6 +520,8 @@ With `"auth": "integrated"`, the monitoring identity **is** the service's Log On
 
    **No ownership step is needed when the service was running as the default virtual account** (the `NT SERVICE\PerformanceMonitor Darling` account `install-darling.ps1` creates). The service and `install-darling.ps1` trust a store item owned by SYSTEM, Administrators, TrustedInstaller, the account the service runs as, or *this service's own service SID* (`NT SERVICE\PerformanceMonitor Darling`, `S-1-5-80-…`), and everything the virtual account created is owned by that SID. Ownership is only a step when the service has already run as *another* account (a second switch, from one domain account or gMSA to the next): that account then owns the items, and the service refuses them as a possible pre-plant. Hand ownership to Administrators, which is trusted across any later account change, from an elevated prompt with the service stopped:
 
+   `/T` follows a junction or symbolic link into whatever it points at and changes that too. First list the links with `dir /s /a:l "C:\ProgramData\PerformanceMonitorDarling"` and remove each one (`rmdir "<link>"` removes the link and keeps what it points at). Make the links again after the command.
+
    ```
    icacls "C:\ProgramData\PerformanceMonitorDarling" /setowner "*S-1-5-32-544" /T /C /L
    ```
@@ -745,6 +747,8 @@ dir /q /a "C:\ProgramData" | findstr /C:"PerformanceMonitorDarling"
 
 - The folder is owned by `NT AUTHORITY\SYSTEM`, `BUILTIN\Administrators`, `NT SERVICE\TrustedInstaller`, `NT SERVICE\PerformanceMonitor Darling` or the account the service logs on as. Keep it, skip the `mkdir`, and run the two `icacls` commands below. The script does the same.
 - The folder is owned by anyone else. You did not make it, and the script refuses it. Delete it and make a new one. If it is your own store, for example after you changed the service's Log On account, take ownership first, then run the two `icacls` commands. The first command below makes Administrators the owner of the folder and everything in it.
+
+Before you run it, remove every junction or symbolic link below the folder, as the paragraphs after it describe. `/T` follows a link into whatever it points at and changes that too.
 
 ```
 icacls "C:\ProgramData\PerformanceMonitorDarling" /setowner *S-1-5-32-544 /T /C /L
