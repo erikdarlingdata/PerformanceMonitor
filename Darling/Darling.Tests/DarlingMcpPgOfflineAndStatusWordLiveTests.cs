@@ -60,7 +60,7 @@ public sealed class DarlingMcpPgOfflineAndStatusWordLiveTests
 
             Assert.Equal("unavailable", root.GetProperty("status").GetString());
             var message = root.GetProperty("message").GetString()!;
-            var expectedLead = "Orders PG is offline: the store has had no collection from it since "
+            var expectedLead = "Orders PG is offline: the store has had no successful collection from it since "
                 + lastCollection.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture) + " UTC";
             Assert.StartsWith(expectedLead, message, StringComparison.Ordinal);
             Assert.DoesNotContain(Name, message, StringComparison.Ordinal);

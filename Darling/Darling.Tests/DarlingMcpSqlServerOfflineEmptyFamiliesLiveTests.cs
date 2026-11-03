@@ -135,7 +135,7 @@ FROM generate_series($4::timestamp - interval '3 hours', $4::timestamp - interva
 
             Assert.Equal("unavailable", root.GetProperty("status").GetString());
             Assert.StartsWith(
-                name + " is offline: the store has had no collection from it since "
+                name + " is offline: the store has had no successful collection from it since "
                 + lastCollection.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture) + " UTC",
                 root.GetProperty("message").GetString()!,
                 StringComparison.Ordinal);

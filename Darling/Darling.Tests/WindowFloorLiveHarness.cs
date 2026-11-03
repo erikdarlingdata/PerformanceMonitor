@@ -55,6 +55,13 @@ FROM generate_series($4::timestamp, $5::timestamp, make_interval(mins => $6)) AS
         }
     }
 
+    /// <summary>#7167: one FAILED run of <paramref name="collector"/> at <paramref name="at"/>: a server the service cannot reach still logs these every cycle.</summary>
+    public static Task SeedFailedRunAsync(NpgsqlConnection connection, string name, string collector, string status, DateTime at, CancellationToken ct) =>
+        DarlingMcpTestData.ExecAsync(connection, ct,
+            @"INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected)
+SELECT COALESCE(MAX(log_id), 0) + 1, $1, $2, $3, $4, 12, $5, 0 FROM collection_log",
+            ServerIdHelper.GetDeterministicHashCode(name), name, collector, DarlingMcpTestData.Naive(at), status);
+
     public static async Task DeleteServerAsync(NpgsqlConnection connection, string name, string[] tables, CancellationToken ct)
     {
         var serverId = ServerIdHelper.GetDeterministicHashCode(name);

@@ -1295,9 +1295,9 @@ public sealed class DarlingMcpDataTools
 
             /* #5984: a tag that matched nothing is an answer, not a collection miss. */
             if (rows.Count == 0 && tagFilter.Active)
-                return McpHelpers.WithDatabasesLeftOut(McpHelpers.Status(
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, McpHelpers.WithDatabasesLeftOut(McpHelpers.Status(
                     "empty",
-                    $"No procedure on {resolved.DisplayName} in the last {hours_back} hour(s) carries query tag '{tagFilter.Requested}'. The tag filter was applied in SQL before the top-{top} ranking."), leftOut)!;
+                    $"No procedure on {resolved.DisplayName} in the last {hours_back} hour(s) carries query tag '{tagFilter.Requested}'. The tag filter was applied in SQL before the top-{top} ranking."), leftOut)!, cancellationToken);
 
             if (rows.Count == 0)
             {

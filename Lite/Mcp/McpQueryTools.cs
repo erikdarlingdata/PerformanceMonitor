@@ -1683,7 +1683,9 @@ public sealed class McpQueryTools
     /// same: a server is offline when its newest collection is older than <see cref="ServerHealthThresholds.OfflineThreshold"/> as of the
     /// read's anchor (<paramref name="windowEnd"/>: its <c>as_of</c>, or now), and an empty read is a true negative only when nothing was
     /// missing. Lite reads "newest collection" as the newest SUCCESS run (<see cref="LocalDataService.GetLastSuccessfulCollectionAsync"/>),
-    /// since a server it cannot reach still logs failed runs. Any other status, a server that is not offline, a window that ends at or before
+    /// since a server it cannot reach still logs failed runs. That is a deliberate second rule beside the Overview band, which reads
+    /// every non-skip row (<c>GetServerSummaryAsync</c>): a server logging only ERROR rows shows Fresh there while its reads say nothing is
+    /// arriving, and Darling's <c>list_servers</c> splits the same way. Any other status, a server that is not offline, a window that ends at or before
     /// the newest success (an <c>as_of</c> inside collected history stays <c>empty</c>), a server with no success on record
     /// (never collected: the tools' own "ever recorded" answers speak for it) and a failed read all return <paramref name="answer"/> unchanged.
     /// The original answer's wording and hints are dropped with its word.

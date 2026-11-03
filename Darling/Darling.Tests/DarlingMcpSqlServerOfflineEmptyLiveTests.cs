@@ -56,8 +56,35 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
 
             Assert.Equal("unavailable", root.GetProperty("status").GetString());
             Assert.StartsWith(
-                Name + " is offline: the store has had no collection from it since "
+                Name + " is offline: the store has had no successful collection from it since "
                 + lastCollection.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture) + " UTC",
+                root.GetProperty("message").GetString()!,
+                StringComparison.Ordinal);
+        });
+    }
+
+    /// <summary>
+    /// A server the service cannot reach still logs failed runs every cycle. Its newest SUCCESS is days old, so the read is unavailable even
+    /// though a fresh ERROR row (the row that would keep <c>list_servers</c> fresh) sits in the log.
+    /// </summary>
+    [Fact]
+    public async Task AnEmptyMemoryTrend_FromAServerWithOnlyAFreshErrorRow_IsUnavailable_AgainstDevPostgres()
+    {
+        const string Name = "sql7167-error-only";
+        await WindowFloorLiveHarness.RunAsync(ConnectionString, ["memory_stats"], [Name], Tables, async (c, ds, now) =>
+        {
+            var lastSuccess = now.AddDays(-3);
+            await WindowFloorLiveHarness.SeedServerAsync(
+                c, Name, now.AddDays(-40), "memory_stats", lastSuccess.AddHours(-3), 30, lastSuccess, Tables, TestContext.Current.CancellationToken);
+            await WindowFloorLiveHarness.SeedFailedRunAsync(c, Name, "memory_stats", "ERROR", DateTime.UtcNow.AddMinutes(-1), TestContext.Current.CancellationToken);
+            await SeedMemoryAsync(c, Name, lastSuccess);
+
+            var root = WindowFloorLiveHarness.Parse(await DarlingMcpTrendTools.GetMemoryTrend(ds, Name, 1));
+
+            Assert.Equal("unavailable", root.GetProperty("status").GetString());
+            Assert.StartsWith(
+                Name + " is offline: the store has had no successful collection from it since "
+                + lastSuccess.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture) + " UTC",
                 root.GetProperty("message").GetString()!,
                 StringComparison.Ordinal);
         });

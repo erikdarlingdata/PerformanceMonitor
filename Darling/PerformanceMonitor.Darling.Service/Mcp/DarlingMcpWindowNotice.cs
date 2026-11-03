@@ -342,8 +342,8 @@ internal static class DarlingMcpWindowNotice
     }
 
     /// <summary>
-    /// #7167: <see cref="FinishEmpty"/>, then <see cref="DarlingServerOfflineNote.EmptyAsync"/>: an empty answer for a server that is Offline by
-    /// <c>list_servers</c>'s rule comes back as <c>unavailable</c> with the offline sentence first, because nothing was arriving to read.
+    /// #7167: <see cref="FinishEmpty"/>, then <see cref="DarlingServerOfflineNote.EmptyAsync"/>: an empty answer for a server with no recent SUCCESS
+    /// collector run (Lite's rule, see <see cref="DarlingServerOfflineNote"/>) comes back as <c>unavailable</c> with the offline sentence first, because nothing was arriving to read.
     /// <paramref name="windowEndUtc"/> is the read's anchor (its <c>as_of</c>, or now), so a window inside collected history stays <c>empty</c>.
     /// </summary>
     internal static async Task<string> FinishEmptyAsync(

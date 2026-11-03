@@ -136,14 +136,14 @@ public sealed class DarlingMcpPlanCorrectionTools
             if (tuning.Count == 0 && rows.Count == 0)
             {
                 return McpHelpers.WithDatabase(await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "plan_correction", cancellationToken), databaseFilter.Describe())
-                    ?? McpHelpers.StatusForDatabase("empty",
+                    ?? await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, McpHelpers.StatusForDatabase("empty",
                         !databaseFilter.IsAll
                             ? $"No plan correction data found{DarlingMcpBlockingTools.ForChosenDatabases(databaseFilter)}."
                             : "No plan correction data collected for this server. The collector runs against SQL Server 2017+ " +
                         "(sys.dm_db_tuning_recommendations); a server that has never produced a row here either predates " +
                         "that or has no databases with Query Store on.",
                         databaseFilter.Describe(), /* #5244 review L2: the echo rides on an empty answer too */
-                        notice.AsHints());
+                        notice.AsHints()), cancellationToken);
             }
 
             var recommendations = page.Select(r => new

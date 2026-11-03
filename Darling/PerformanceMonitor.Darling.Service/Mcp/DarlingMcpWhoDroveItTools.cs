@@ -225,9 +225,9 @@ public sealed class DarlingMcpWhoDroveItTools
             if (page.Count == 0)
             {
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "query_snapshots", cancellationToken)
-                    ?? McpHelpers.Status("empty",
+                    ?? await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, McpHelpers.Status("empty",
                         $"No active-query snapshots for {resolved.DisplayName} in the last {hours_back} hour(s): nothing was running at a capture, or the collector did not run in the window.",
-                        notice.AsHints());
+                        notice.AsHints()), cancellationToken);
             }
 
             static double? Share(double part, double whole) => whole > 0 ? Math.Round(part / whole, 4) : null;
@@ -344,10 +344,10 @@ public sealed class DarlingMcpWhoDroveItTools
             {
                 var anySnapshots = notice.EffectiveStart is not null || notice.WindowTruncated;
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "query_snapshots", cancellationToken)
-                    ?? McpHelpers.Status("empty",
+                    ?? await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, McpHelpers.Status("empty",
                         $"No capture in the last {hours_back} hour(s) on {resolved.DisplayName} had {min_sessions} or more sessions running the same query_hash. "
                         + "A pile-up between two captures is not seen; a lower min_sessions or a longer window may find one.",
-                        notice.AsHints());
+                        notice.AsHints()), cancellationToken);
             }
 
             /* The head blocker of each pile-up, from the DMV blocking snapshot nearest its time. */
