@@ -75,7 +75,7 @@ public sealed class McpHostService : BackgroundService
            (LocalDataService.DefaultCollectorFrequencyMinutes), which is none when nothing set one, so every row
            then keeps its shipped cadence. */
         /* #7167: an empty read for a server with no SUCCESS row is offline only when it was added before the log's retention horizon. */
-        dataService.RegisteredAtUtcLookup = serverId => ServerResolver.RegisteredAtUtc(serverManager, serverId);
+        ServerResolver.WireOfflineLookups(dataService, serverManager);
         dataService.CollectorFrequencyMinutes = scheduleManager is null
             ? null
             : (serverId, collector) => scheduleManager.GetFrequencyForStorageServer(serverManager, serverId, collector);

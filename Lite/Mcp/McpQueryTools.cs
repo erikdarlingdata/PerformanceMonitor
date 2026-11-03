@@ -1561,7 +1561,7 @@ public sealed class McpQueryTools
     /// </summary>
     internal static string WithWindowNotice(string answer, McpWindowNotice notice, DateTime requestedStart, DateTime windowEnd)
     {
-        if (!McpHelpers.IsEmptyOrUnavailableStatus(answer))
+        if (!McpHelpers.IsEmptyOrUnavailableStatus(answer) || IsOfflineAnswer(answer))
         {
             return answer;
         }
@@ -1670,6 +1670,11 @@ public sealed class McpQueryTools
         string answer, LocalDataService dataService, QueryWindowRelation relation, int serverId, DateTime requestedStart, DateTime windowEnd, string table)
     {
         answer = await OfflineInsteadOfEmptyAsync(dataService, serverId, windowEnd, answer);
+        if (IsOfflineAnswer(answer))
+        {
+            return answer;
+        }
+
         return McpHelpers.IsEmptyOrUnavailableStatus(answer)
             ? (await EmptyWindowNoticeAsync(dataService, relation, serverId, requestedStart, windowEnd, table) is { } emptyNotice
                 ? WithWindowNotice(answer, emptyNotice, requestedStart, windowEnd)
@@ -1690,8 +1695,9 @@ public sealed class McpQueryTools
     /// inside the retention horizon (never collected: the tools' own "ever recorded" answers speak for it) and a failed read all return <paramref name="answer"/> unchanged.
     /// A server with no success on record that was added BEFORE <see cref="RetentionService.OldestRetainedInstant"/> (as of the anchor) is offline
     /// too, as Darling reads it through the registration: it had time to collect and never once did. Its registration is
-    /// <see cref="LocalDataService.RegisteredAtUtcLookup"/>; none wired keeps the never-collected reading.
-    /// The original answer's wording and hints are dropped with its word.
+    /// <see cref="LocalDataService.RegisteredAtUtcLookup"/>; none wired keeps the never-collected reading. The sentence names the server
+    /// (<see cref="LocalDataService.ServerDisplayNameLookup"/>), as Darling's does. The original answer's wording and hints are dropped with its
+    /// word, and the window wrappers add none (<see cref="IsOfflineAnswer"/>).
     /// </summary>
     internal static async Task<string> OfflineInsteadOfEmptyAsync(LocalDataService dataService, int serverId, DateTime windowEnd, string answer)
     {
@@ -1725,8 +1731,8 @@ public sealed class McpQueryTools
 
             return McpHelpers.Status(
                 "unavailable",
-                "This server is offline: the store holds no successful collection from it within its retained history, "
-                + "so nothing is arriving to read, whatever the collectors would otherwise report. An empty result here is missing data, not a finding.");
+                $"{OfflineSubject(dataService, serverId)} is offline: the store holds no successful collection from it within its retained history, "
+                + "so nothing is arriving to read, whatever the collectors would otherwise report. " + OfflineAnswerEnd);
         }
 
         if (windowEnd <= newest
@@ -1737,8 +1743,34 @@ public sealed class McpQueryTools
 
         return McpHelpers.Status(
             "unavailable",
-            $"This server is offline: it has had no successful collection since {newest.ToString("yyyy-MM-dd HH:mm", System.Globalization.CultureInfo.InvariantCulture)} UTC, "
-            + "so nothing is arriving to read, whatever the collectors would otherwise report. An empty result here is missing data, not a finding.");
+            $"{OfflineSubject(dataService, serverId)} is offline: it has had no successful collection since {newest.ToString("yyyy-MM-dd HH:mm", System.Globalization.CultureInfo.InvariantCulture)} UTC, "
+            + "so nothing is arriving to read, whatever the collectors would otherwise report. " + OfflineAnswerEnd);
+    }
+
+    private const string OfflineAnswerEnd = "An empty result here is missing data, not a finding.";
+
+    /// <summary>The server's display name, as Darling's offline sentence opens with it, or "This server" when no lookup is wired.</summary>
+    private static string OfflineSubject(LocalDataService dataService, int serverId) =>
+        dataService.ServerDisplayNameLookup?.Invoke(serverId) is { Length: > 0 } name ? name : "This server";
+
+    /// <summary>
+    /// True for the answer <see cref="OfflineInsteadOfEmptyAsync"/> builds. It carries no window hints, as Darling's <c>OfflineInsteadOfEmpty</c>
+    /// answer carries none: the window notice speaks for a window the store may not reach back to, and an offline answer says why nothing
+    /// is there already.
+    /// </summary>
+    private static bool IsOfflineAnswer(string answer)
+    {
+        try
+        {
+            return System.Text.Json.Nodes.JsonNode.Parse(answer) is System.Text.Json.Nodes.JsonObject node
+                && node["status"] is System.Text.Json.Nodes.JsonValue status && status.TryGetValue<string>(out var word) && word == "unavailable"
+                && node["message"] is System.Text.Json.Nodes.JsonValue message && message.TryGetValue<string>(out var text)
+                && text.Contains(" is offline: ", StringComparison.Ordinal) && text.EndsWith(OfflineAnswerEnd, StringComparison.Ordinal);
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
     }
 
     private static bool IsEmptyStatus(string answer)
@@ -1771,6 +1803,11 @@ public sealed class McpQueryTools
         string answer, LocalDataService dataService, QueryWindowRelation relation, int serverId, DateTime requestedStart, DateTime windowEnd, string table)
     {
         answer = await OfflineInsteadOfEmptyAsync(dataService, serverId, windowEnd, answer);
+        if (IsOfflineAnswer(answer))
+        {
+            return answer;
+        }
+
         return McpHelpers.IsEmptyOrUnavailableStatus(answer)
             ? (await EmptyWindowNoticeAsync(dataService, relation, serverId, requestedStart, windowEnd, table) is { } emptyNotice
                 ? WithWindowNotice(answer, emptyNotice, requestedStart, windowEnd)

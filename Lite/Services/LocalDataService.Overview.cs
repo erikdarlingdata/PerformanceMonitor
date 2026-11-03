@@ -234,6 +234,12 @@ AND   collector_name <> '{CollectionCycleSkip.CollectorName}'";
     internal Func<int, DateTime?>? RegisteredAtUtcLookup { get; set; }
 
     /// <summary>
+    /// #7167: what the server with this storage id is called (its display name), or null for an unknown one. Wired with
+    /// <see cref="RegisteredAtUtcLookup"/>; the offline answer names the server with it, as Darling's does. Null keeps "This server".
+    /// </summary>
+    internal Func<int, string?>? ServerDisplayNameLookup { get; set; }
+
+    /// <summary>
     /// #7167: when this server's newest SUCCESSFUL collector run landed (<c>collection_log.status = 'SUCCESS'</c>, the status Collection
     /// Health counts as a run that reached the server), or null when the store holds none. A server Lite cannot reach logs ERROR,
     /// PERMISSIONS or SKIPPED rows every cycle, which keep the plain newest-row read of <see cref="GetServerSummaryAsync"/> fresh while
