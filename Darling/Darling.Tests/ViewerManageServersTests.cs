@@ -34,12 +34,12 @@ public sealed class ViewerManageServersColumnTests
             LastCollectedUtc = lastCollectedUtc,
         };
 
-    /// <summary>#7343: the Added column is a fleet-wide value. Server mode on a row whose own clock is UTC+05:30 still reads UTC (labelled), Local reads this machine.</summary>
+    /// <summary>#7343: the Added column renders on the row's own clock, like Last Collected. A row whose clock is UTC+05:30 reads 20:00 in Server mode, 14:30 in UTC mode and this machine's wall time in Local mode, none of them labelled.</summary>
     [Theory]
     [InlineData(TimeDisplayMode.ServerTime)]
     [InlineData(TimeDisplayMode.UTC)]
     [InlineData(TimeDisplayMode.LocalTime)]
-    public void CreatedDisplay_FollowsTheDisplayMode_AsAFleetWideValue(TimeDisplayMode mode)
+    public void CreatedDisplay_FollowsTheDisplayMode_OnTheRowsOwnClock(TimeDisplayMode mode)
     {
         var savedMode = ViewerTimeHelper.CurrentDisplayMode;
         try
@@ -51,10 +51,13 @@ public sealed class ViewerManageServersColumnTests
                 Clock = ServerClock.FixedOffset(330),
             };
 
-            var expected = mode == TimeDisplayMode.LocalTime
-                ? TimeZoneInfo.ConvertTimeFromUtc(created, TimeZoneInfo.Local).ToString("yyyy-MM-dd HH:mm", System.Globalization.CultureInfo.InvariantCulture) + " "
-                : "2026-07-01 14:30 UTC";
-            Assert.StartsWith(expected, item.CreatedDisplay, StringComparison.Ordinal);
+            var expected = mode switch
+            {
+                TimeDisplayMode.ServerTime => "2026-07-01 20:00",
+                TimeDisplayMode.UTC => "2026-07-01 14:30",
+                _ => TimeZoneInfo.ConvertTimeFromUtc(created, TimeZoneInfo.Local).ToString("yyyy-MM-dd HH:mm", System.Globalization.CultureInfo.InvariantCulture),
+            };
+            Assert.Equal(expected, item.CreatedDisplay);
             Assert.Equal(created, item.CreatedAtUtc);
         }
         finally

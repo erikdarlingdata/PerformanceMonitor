@@ -367,9 +367,13 @@ public sealed class ManagedServerListItem
     /// <summary>The store's creation time (naive UTC), the sort key of the "Added" column; falls back to now for a row read without it.</summary>
     public DateTime CreatedAtUtc => Row.CreatedAt ?? DateTime.UtcNow;
 
-    /// <summary>The "Added" cell (#7343): the registration time as a fleet-wide value, UTC (labelled) in Server and UTC modes and this
-    /// machine's zone (labelled) in Local mode. The list holds every server, so no one server's clock applies to it.</summary>
-    public string CreatedDisplay => ViewerTimeHelper.FormatFleetWide(CreatedAtUtc, "yyyy-MM-dd HH:mm");
+    /// <summary>The "Added" cell (#7343): the registration time on this row's own clock, exactly as <see cref="LastCollectedDisplay"/>
+    /// renders its time, so one row never mixes zones. Server mode shows this server's hour, UTC mode UTC, Local mode this
+    /// machine's wall time. None of them carries a label.</summary>
+    public string CreatedDisplay =>
+        ViewerTimeHelper.FormatForDisplay(
+            CreatedAtUtc, ViewerTimeHelper.DisplayZoneFor(ViewerTimeHelper.CurrentDisplayMode, Clock ?? ViewerTimeHelper.ActiveServerClock),
+            "yyyy-MM-dd HH:mm");
 
     /// <summary>The store's naive-UTC newest collection time for this server (MAX(collection_time) across all
     /// collectors), set once before binding; null when the Darling service has not collected this server yet.</summary>
