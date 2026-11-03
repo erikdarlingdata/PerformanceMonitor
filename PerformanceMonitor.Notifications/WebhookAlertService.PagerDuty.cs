@@ -289,22 +289,11 @@ public partial class WebhookAlertService
 
             if (error != null)
             {
-                _consecutivePagerDutyFailures++;
-                _lastPagerDutyError = error;
-
-                if (_consecutivePagerDutyFailures <= FailingChannelThreshold)
-                    _logger.LogError($"PAGERDUTY WEBHOOK FAILED ({_consecutivePagerDutyFailures}x): {error}");
-                else if (_consecutivePagerDutyFailures % 50 == 0)
-                    _logger.LogError($"PAGERDUTY WEBHOOK STILL FAILING: {_consecutivePagerDutyFailures} failures. Last: {error}");
-
+                RecordChannelFailure(ref _consecutivePagerDutyFailures, ref _lastPagerDutyError, "PagerDuty", error);
                 return error;
             }
 
-            if (_consecutivePagerDutyFailures > 0)
-                _logger.LogInformation($"PagerDuty webhook recovered after {_consecutivePagerDutyFailures} failure(s)");
-
-            _consecutivePagerDutyFailures = 0;
-            _lastPagerDutyError = null;
+            RecordChannelRecovered(ref _consecutivePagerDutyFailures, ref _lastPagerDutyError, "PagerDuty");
             _logger.LogInformation($"PagerDuty webhook sent for {metricName} on {serverName}");
             return null;
         }
@@ -315,9 +304,7 @@ public partial class WebhookAlertService
         }
         catch (Exception ex)
         {
-            _consecutivePagerDutyFailures++;
-            _lastPagerDutyError = ex.Message;
-            _logger.LogError($"PagerDuty webhook error: {ex.Message}");
+            RecordChannelException(ref _consecutivePagerDutyFailures, ref _lastPagerDutyError, "PagerDuty", ex);
             return ex.Message;
         }
     }

@@ -573,7 +573,7 @@ public partial class ViewerServerTab
             }
         }
 
-        if (CollectionHealthGrid.SelectedItem is not CollectorHealthRow item) return;
+        if (!DataGridRowHit.IsOnRow(e.OriginalSource) || CollectionHealthGrid.SelectedItem is not CollectorHealthRow item) return;
 
         var window = new CollectionLogWindow(_dataService, _server.ServerId, item.CollectorName)
         {

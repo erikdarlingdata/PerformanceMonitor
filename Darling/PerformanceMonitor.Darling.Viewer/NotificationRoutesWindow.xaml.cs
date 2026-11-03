@@ -13,6 +13,7 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -243,7 +244,14 @@ public partial class NotificationRoutesWindow : Window
         }
     }
 
-    private void RoutesGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e) => EditRoute_Click(sender, e);
+    /* A double-click on a column header, the scrollbar or the empty area is not a row (#7210). */
+    private void RoutesGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e)
+    {
+        if (DataGridRowHit.IsOnRow(e.OriginalSource))
+        {
+            EditRoute_Click(sender, e);
+        }
+    }
 
     private void Close_Click(object sender, RoutedEventArgs e) => Close();
 

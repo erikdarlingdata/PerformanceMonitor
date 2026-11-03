@@ -20,7 +20,7 @@ public readonly record struct ServerMetricsDto(
     decimal? AvgCpuPct, decimal? StorageTotalGb, int? IdleDbCount, string? ProvisioningStatus, int? HealthScore = null);
 
 /// <summary>One Server Inventory base row. Times are naive-UTC instants, except <c>SqlServerStartTime</c>, which is
-/// the server's own local clock, stored verbatim. No display or WPF state.</summary>
+/// the server's own local clock, stored verbatim; <c>UtcOffsetMinutes</c> and <c>TimeZoneId</c> are the collected zone that turn it into UTC (#7176). No display or WPF state.</summary>
 public sealed record ServerInventoryDto(
     int ServerId,
     string ServerName,
@@ -40,7 +40,9 @@ public sealed record ServerInventoryDto(
     string AgReplicaRole,
     bool IsEnabled,
     decimal MonthlyCost,
-    DateTime? LastCollectedUtc);
+    DateTime? LastCollectedUtc,
+    int? UtcOffsetMinutes = null,
+    string? TimeZoneId = null);
 
 /// <summary>
 /// The FinOps Server Inventory reads, shared by the viewer and the coming read tool. Lite queries each target LIVE; the
@@ -532,13 +534,16 @@ SELECT
     /* #2359: real collection freshness, which is NOT what sp.collection_time means. server_properties
        has FrequencyMinutes 0 - collected once on server load - so its timestamp is the last service
        start, not a heartbeat. Appended LAST so no existing reader ordinal moves. */
-    (SELECT MAX(cl.collection_time) FROM v_collection_log cl WHERE cl.server_id = sp.server_id AND {CollectionCycleRow.NotCycleRowSql}) AS last_collection
+    (SELECT MAX(cl.collection_time) FROM v_collection_log cl WHERE cl.server_id = sp.server_id AND {CollectionCycleRow.NotCycleRowSql}) AS last_collection,
+    /* #7176: the zone id and offset that turn sqlserver_start_time (server-local) into UTC. Appended LAST so no existing reader ordinal moves. */
+    sp.utc_offset_minutes,
+    sp.time_zone_id
 FROM (
     SELECT DISTINCT ON (server_id)
         server_id, edition, product_version, product_level, product_update_level,
         engine_edition, cpu_count, physical_memory_mb, socket_count, cores_per_socket,
         is_hadr_enabled, is_clustered, collection_time,
-        sqlserver_start_time, host_os_version, ag_replica_role
+        sqlserver_start_time, host_os_version, ag_replica_role, utc_offset_minutes, time_zone_id
     FROM server_properties
     ORDER BY server_id, collection_time DESC
 ) sp
@@ -588,7 +593,9 @@ ORDER BY s.is_enabled DESC, server_name";
                 AgReplicaRole: reader.IsDBNull(16) ? "Standalone" : reader.GetString(16),
                 IsEnabled: reader.IsDBNull(17) || reader.GetBoolean(17),
                 MonthlyCost: reader.IsDBNull(18) ? 0m : Convert.ToDecimal(reader.GetValue(18)),
-                LastCollectedUtc: reader.IsDBNull(19) ? null : reader.GetDateTime(19)));
+                LastCollectedUtc: reader.IsDBNull(19) ? null : reader.GetDateTime(19),
+                UtcOffsetMinutes: reader.IsDBNull(20) ? null : reader.GetInt32(20),
+                TimeZoneId: reader.IsDBNull(21) ? null : reader.GetString(21)));
         }
         return items;
     }

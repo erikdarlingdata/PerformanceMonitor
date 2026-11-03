@@ -17,6 +17,7 @@ using System.Reflection;
 using System.Text.RegularExpressions;
 using System.Windows.Data;
 using PerformanceMonitor.Analysis.Baselines;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitor.Ui;
@@ -101,6 +102,7 @@ public sealed class ViewerGridTimeColumnSortMemberTests
         { "QueryStoreHistoryWindow.xaml", "HistoryDataGrid", "FirstExecutionTimeLocal", Name(typeof(ViewerQueryStoreHistoryRow)), "FirstExecutionTime" },
         { "QueryStoreHistoryWindow.xaml", "HistoryDataGrid", "LastExecutionTimeLocal", Name(typeof(ViewerQueryStoreHistoryRow)), "LastExecutionTime" },
         { "ManageServersWindow.xaml", "ServersGrid", "LastCollectedDisplay", Name(typeof(ManagedServerListItem)), "LastCollectedUtc" },
+        { "ManageServersWindow.xaml", "ServersGrid", "CreatedDisplay", Name(typeof(ManagedServerListItem)), "CreatedAtUtc" },
         { "NotificationRoutesWindow.xaml", "RoutesGrid", "ModifiedDisplay", Name(typeof(NotificationRouteRow)), "ModifiedAtUtc" },
 
         /* Columns whose row already had a UTC (or display-zone) DateTime and only lacked the SortMemberPath. */
@@ -205,6 +207,10 @@ public sealed class ViewerGridTimeColumnSortMemberTests
         { "AgentChangesTab.xaml", "ProposalsGrid", "ExpiresDisplay", Name(typeof(ProposalViewRow)), "ExpiresAtUtc" },
         { "ServerActionsTab.xaml", "ServersGrid", "ChangedDisplay", Name(typeof(ServerActionViewRow)), "ChangedAtUtc" },
 
+        /* #7213: the People window's Changed column and the identities grid's Added column (its text ends in " by name"). */
+        { "PeopleWindow.xaml", "PeopleGrid", "UpdatedDisplay", Name(typeof(PersonViewRow)), "UpdatedAtUtc" },
+        { "PeopleWindow.xaml", "IdentitiesGrid", "AddedDisplay", Name(typeof(PersonIdentityViewRow)), "CreatedAtUtc" },
+
         /* #5913: the report feedback tab's two time columns sort by the row wrapper's UTC DateTime. */
         { "InvestigationsWindow.xaml", "FeedbackReportsGrid", "ReportedDisplay", Name(typeof(InvestigationsWindow.FeedbackReportItem)), "ReportedAtUtc" },
         { "InvestigationsWindow.xaml", "FeedbackGivenGrid", "WhenDisplay", Name(typeof(InvestigationsWindow.FeedbackGivenItem)), "CreatedAtUtc" },
@@ -267,6 +273,33 @@ public sealed class ViewerGridTimeColumnSortMemberTests
 
         Assert.False(sortMember.EndsWith("Local", StringComparison.Ordinal) || sortMember.EndsWith("Display", StringComparison.Ordinal),
             $"{sortMember} reads as a display-zone member; the column must sort by the UTC one.");
+    }
+
+    /// <summary>
+    /// #7213: the People grid's Identities and Grants columns show "none" or a count as text, which sorts "10" before "2".
+    /// Each column sorts by the row's numeric count instead, and a header click (a <see cref="ListCollectionView"/> on that
+    /// SortMemberPath) puts 2 before 10 and a person with none first.
+    /// </summary>
+    [Theory]
+    [InlineData("IdentitiesDisplay", "IdentityCount")]
+    [InlineData("GrantsDisplay", "GrantCount")]
+    public void ThePeopleCountColumns_SortByTheirNumber_NotTheirText(string textProperty, string sortMember)
+    {
+        var column = FindColumn(ReadRepoFile("Darling", ViewerFolder, "PeopleWindow.xaml"), "PeopleGrid", textProperty);
+        var declared = Regex.Match(column, @"\sSortMemberPath=""(?<path>[^""]*)""");
+        Assert.True(declared.Success, $"PeopleWindow.xaml: the PeopleGrid column bound to {textProperty} has no SortMemberPath, so it sorts by its text.");
+        Assert.Equal(sortMember, declared.Groups["path"].Value);
+
+        var at = new DateTime(2026, 11, 1, 12, 0, 0, DateTimeKind.Utc);
+        PersonRow Person(long id, int identities, int grants) => new(
+            id, "p" + id, true, at, "person:a", at, "person:a",
+            Enumerable.Range(0, identities).Select(i => new PersonIdentityRow(i, "slack", "T:U" + i, at, "person:a")).ToList(),
+            Enumerable.Range(0, grants).Select(i => new PersonGrantRow(i, null, null, null, null, "ask", [], at, "person:a")).ToList());
+        var rows = new[] { Person(1, 10, 10), Person(2, 2, 2), Person(3, 0, 0) };
+
+        var view = new ListCollectionView(rows.Select(r => new PersonViewRow(r)).ToList());
+        view.SortDescriptions.Add(new SortDescription(sortMember, ListSortDirection.Ascending));
+        Assert.Equal([3L, 2L, 1L], view.Cast<PersonViewRow>().Select(r => r.PersonId));
     }
 
     /// <summary>

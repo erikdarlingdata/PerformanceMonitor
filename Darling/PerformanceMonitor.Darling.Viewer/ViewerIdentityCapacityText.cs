@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Numerics;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Storage;
 
@@ -82,9 +83,10 @@ public static class ViewerIdentityCapacityText
     }
 
     /// <summary>The databases, one row each: scanned clean, scanned with columns, or not yet scanned.</summary>
-    public static IReadOnlyList<ViewerIdentityScanRow> ScanRows(ViewerIdentityCapacityRead read)
+    public static IReadOnlyList<ViewerIdentityScanRow> ScanRows(ViewerIdentityCapacityRead read, ServerClock clock)
     {
         ArgumentNullException.ThrowIfNull(read);
+        ArgumentNullException.ThrowIfNull(clock);
         if (read.Read is null)
         {
             return [];
@@ -95,16 +97,17 @@ public static class ViewerIdentityCapacityText
             .Select(d => new ViewerIdentityScanRow(
                 d.DatabaseName,
                 ScanState(read.Read.Columns.Count(c => string.Equals(c.DatabaseName, d.DatabaseName, StringComparison.Ordinal))),
-                LocalTime(d.ScannedAt)));
+                DisplayTime(d.ScannedAt, clock)));
         var waiting = read.Read.Unscanned
-            .Select(u => new ViewerIdentityScanRow(u.DatabaseName, NotYetScanned, u.LastScannedAt is { } last ? LocalTime(last) : Dash));
+            .Select(u => new ViewerIdentityScanRow(u.DatabaseName, NotYetScanned, u.LastScannedAt is { } last ? DisplayTime(last, clock) : Dash));
         var skipped = read.Read.Skipped
-            .Select(u => new ViewerIdentityScanRow(u.DatabaseName, char.ToUpperInvariant(u.Text[0]) + u.Text[1..], u.LastScannedAt is { } last ? LocalTime(last) : Dash));
+            .Select(u => new ViewerIdentityScanRow(u.DatabaseName, char.ToUpperInvariant(u.Text[0]) + u.Text[1..], u.LastScannedAt is { } last ? DisplayTime(last, clock) : Dash));
         return scanned.Concat(waiting).Concat(skipped).ToList();
     }
 
-    private static string LocalTime(DateTime utc) =>
-        DateTime.SpecifyKind(utc, DateTimeKind.Utc).ToLocalTime().ToString("g", CultureInfo.CurrentCulture);
+    /// <summary>#7343: a scan time (stored naive UTC) in the display mode's zone on the picked server's clock.</summary>
+    private static string DisplayTime(DateTime utc, ServerClock clock) =>
+        ViewerTimeHelper.FormatForDisplay(utc, ViewerTimeHelper.DisplayZoneFor(ViewerTimeHelper.CurrentDisplayMode, clock), "g");
 
     /// <summary>
     /// The sentence under the scan list when it has no row. The list has a row for every scanned, unscanned and skipped database, so

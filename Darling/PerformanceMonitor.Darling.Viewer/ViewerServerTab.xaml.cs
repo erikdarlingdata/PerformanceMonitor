@@ -89,7 +89,7 @@ public partial class ViewerServerTab : UserControl
     internal const int PgStorageInnerTabIndex = 25;
 
     private readonly ViewerDataService _dataService;
-    private readonly DarlingServer _server;
+    private DarlingServer _server;
     private readonly ViewerServerStore? _serverStore;
 
     private bool _refreshInFlight;
@@ -141,7 +141,7 @@ public partial class ViewerServerTab : UserControl
         /* #5565: every filtered grid below this tab keeps its column filters across a restart under this server. */
         ColumnFilterScope.SetServer(this, _server.ServerName);
 
-        /* Per-server toolbar identity label: the display name is static (it also heads the tab), while the
+        /* Per-server toolbar identity label (UpdateServer refreshes it after a rename (#7212)); the
            freshness readout to its right is filled on the first (and every) refresh from the shared
            collection-time read (UpdateServerFreshnessLabelAsync). */
         ServerNameText.Text = _server.DisplayName;
@@ -246,6 +246,18 @@ public partial class ViewerServerTab : UserControl
 
     /// <summary>The server record, for the tab header label and status text.</summary>
     public DarlingServer Server => _server;
+
+    /// <summary>
+    /// Swaps in the reloaded server record after the operator renamed it (#7212), so the export file names and the Block Chain
+    /// and Deadlock window titles use the new display name without closing and reopening the tab. The id is the same, so
+    /// every read keeps its key.
+    /// </summary>
+    public void UpdateServer(DarlingServer server)
+    {
+        ArgumentNullException.ThrowIfNull(server);
+        _server = server;
+        ServerNameText.Text = server.DisplayName;
+    }
 
     /// <summary>
     /// Lazy per-inner-tab load: switching inner tabs loads the newly visible one. SelectionChanged is

@@ -464,13 +464,18 @@ internal static class ComposePanelRunner
                 stampThrough = wideResolution.StampThrough;
             }
 
+            /* #7285: a panel the compile sends to the fleet rollup (V239) has its stamped hours counted from the fleet table's size. The
+               conditions are the compile's own, asked of the same context fields. */
+            var readsFleetRollup = stampThrough is not null
+                && ComposeCompiler.ReadsFleetRollup(plan!, new ComposeRunContext(serverScope, start, end, values, rollups, now, coverage, true, wideResolution.WideStart, QueryStoreRawServerIds: rawServerIds, QueryStoreFleetReady: wideResolution.FleetReady));
+
             /* #6115: the guard's wide estimate leaves out the servers read raw (the interval table never reads them), and ADDS the raw half's
                rows, counted from the collection log over the window's own start (the raw half is not clamped to the wide start) at 1.0 each,
                against the same limit. One statement reads both halves under one timeout, so the sum is what must fit. The wide figure is
                exactly what the guard counted before #6115 for those servers, so a split panel is never let through that today's code would
                refuse for the same wide rows; the raw rows can only refuse more. A panel whose every server passes adds nothing and is
                unchanged. A log that cannot answer adds nothing: the guard fails open, as it always has. */
-            if (await QueryStoreWideReadGuard.CheckAsync(postgres, serverScope, countedStart, end, logger, StorageCommandDeadlines.ComposedReadSeconds, cancellationToken, limit, stampThrough, rawServerIds, start) is { } tooBig)
+            if (await QueryStoreWideReadGuard.CheckAsync(postgres, serverScope, countedStart, end, logger, StorageCommandDeadlines.ComposedReadSeconds, cancellationToken, limit, stampThrough, rawServerIds, start, readsFleetRollup) is { } tooBig)
             {
                 return ComposeRunOutcome.BadRequest(tooBig);
             }

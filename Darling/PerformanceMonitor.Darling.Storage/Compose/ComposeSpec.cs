@@ -88,6 +88,18 @@ public static class ComposeLimits
     public const double StampRowWeight = 0.3;
 
     /// <summary>
+    /// The weight of one row of the fleet rollup (<c>collect.query_store_compose_fleet</c>, V239, #7146), against 1.0 for a wide row
+    /// (#7285). Unlike <see cref="StampRowWeight"/> it is per ROW OF THE FLEET TABLE, not per wide row: the fleet table keeps one row per
+    /// stamp time and <c>query_hash</c> however many servers fed it, so the wide-row count of the servers in scope says nothing about
+    /// how much of it a read takes. The cost of reading one is the cost of reading one rollup row, the figure the stamp weight is built
+    /// on: about 1.89 us against 6.53 us for a cold wide row, 0.29, rounded up to 0.3. A fleet row has the same partial columns as a
+    /// stamp row and none of the three dimension columns, so it is no wider, and the figure leans toward refusing. The #7146 prototype's
+    /// warm timings of a fleet-wide 24 h panel are consistent with it. The hours the fleet table serves are counted from its own row
+    /// count, in <c>QueryStoreWideReadGuard</c>.
+    /// </summary>
+    public const double FleetRowWeight = 0.3;
+
+    /// <summary>
     /// The most rows a single-scan RankedTimeSeries base CTE may hold (#5582): buckets x members of the group dimension. The
     /// single-scan text writes about 436 bytes of temp file per base row (measured on a large production store in its worst shape,
     /// a <c>query_hash</c> group: 1,021,784 kB for 2,397,235 base rows), against <see cref="TempFileLimit"/> of 1 GB. At one
