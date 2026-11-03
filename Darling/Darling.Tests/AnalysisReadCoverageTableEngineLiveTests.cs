@@ -24,7 +24,8 @@ namespace Darling.Tests;
 /// #7194: get_analysis_findings and get_analysis_facts ask "was this window collected at all" of the engine's own
 /// series, as the analysis pass does: <c>pg_database_stats</c> on a PostgreSQL target, <c>wait_stats</c> on a SQL Server
 /// one. Before, both always asked <c>wait_stats</c>, so a quiet PostgreSQL window answered "window_truncated true" and
-/// "collection of wait_stats may have stopped" about a table that engine never writes.
+/// "collection of wait_stats may have stopped" about a table that engine never writes. #7309: get_alert_history probes the
+/// whole fleet's floor over both tables, so a PostgreSQL-only fleet is covered too.
 /// </summary>
 [Collection("live-postgres")]
 public sealed class AnalysisReadCoverageTableEngineLiveTests
@@ -95,6 +96,64 @@ public sealed class AnalysisReadCoverageTableEngineLiveTests
                 Assert.Equal("unavailable", doc.RootElement.GetProperty("status").GetString());
                 Assert.Contains("wait_stats", doc.RootElement.GetProperty("hints").GetProperty("truncation_note").GetString(), StringComparison.Ordinal);
             }
+        });
+    }
+
+    [Fact]
+    public async Task PostgresOnlyFleet_AlertHistoryWindowIsCovered_AndNamesNoWaitStats()
+    {
+        /* #7309: get_alert_history probes the whole fleet's floor. A fleet whose only collecting target is PostgreSQL (pg_database_stats
+           rows, no wait_stats row anywhere) used to read as "no collection of wait_stats, collection may have stopped". */
+        await RunAsync(async (postgres, analysisService, ct) =>
+        {
+            var json = await DarlingMcpAlertTools.GetAlertHistory(postgres, null, 24, 50, cancellationToken: ct);
+            using var doc = JsonDocument.Parse(json);
+            Assert.Equal("empty", doc.RootElement.GetProperty("status").GetString());
+            Assert.False(doc.RootElement.GetProperty("hints").GetProperty("window_truncated").GetBoolean(), json);
+            Assert.DoesNotContain("may have stopped", json, StringComparison.Ordinal);
+        });
+    }
+
+    [Fact]
+    public async Task SqlServerOnlyFleet_AlertHistoryWindowIsCovered_ByWaitStats()
+    {
+        await RunAsync(async (postgres, analysisService, ct) =>
+        {
+            await using var connection = await postgres.OpenConnectionAsync(ct);
+            await DeleteStatsAsync(connection, ct);
+            var now = DateTime.UtcNow;
+            for (var i = 0; i <= 23; i++)
+            {
+                using var insert = new NpgsqlCommand(@"
+INSERT INTO wait_stats (collection_id, collection_time, server_id, server_name, wait_type, delta_waiting_tasks, delta_wait_time_ms)
+VALUES ($1, $2, $3, $4, 'SOS_SCHEDULER_YIELD', 5, 50)", connection);
+                insert.Parameters.AddWithValue(CollectionIdGenerator.Next());
+                insert.Parameters.AddWithValue(DateTime.SpecifyKind(now.AddHours(-23 + i), DateTimeKind.Unspecified));
+                insert.Parameters.AddWithValue(SqlServerId);
+                insert.Parameters.AddWithValue(SqlServerName);
+                await insert.ExecuteNonQueryAsync(ct);
+            }
+
+            var json = await DarlingMcpAlertTools.GetAlertHistory(postgres, null, 24, 50, cancellationToken: ct);
+            using var doc = JsonDocument.Parse(json);
+            Assert.Equal("empty", doc.RootElement.GetProperty("status").GetString());
+            Assert.False(doc.RootElement.GetProperty("hints").GetProperty("window_truncated").GetBoolean(), json);
+        });
+    }
+
+    [Fact]
+    public async Task FleetWithNoCollectionAnywhere_AlertHistoryStillSaysCollectionMayHaveStopped()
+    {
+        await RunAsync(async (postgres, analysisService, ct) =>
+        {
+            await using var connection = await postgres.OpenConnectionAsync(ct);
+            await DeleteStatsAsync(connection, ct);
+
+            var json = await DarlingMcpAlertTools.GetAlertHistory(postgres, null, 24, 50, cancellationToken: ct);
+            using var doc = JsonDocument.Parse(json);
+            var hints = doc.RootElement.GetProperty("hints");
+            Assert.True(hints.GetProperty("window_truncated").GetBoolean(), json);
+            Assert.Contains("collection may have stopped", hints.GetProperty("truncation_note").GetString(), StringComparison.Ordinal);
         });
     }
 
@@ -172,6 +231,7 @@ ON CONFLICT (server_id) DO UPDATE SET engine_kind = EXCLUDED.engine_kind, is_ena
     {
         using var cleanup = new NpgsqlCommand(
             $"DELETE FROM pg_database_stats WHERE server_id = {PgServerId}; " +
+            $"DELETE FROM wait_stats WHERE server_id = {SqlServerId}; " +
             $"DELETE FROM servers WHERE server_id IN ({PgServerId}, {SqlServerId});",
             connection);
         await cleanup.ExecuteNonQueryAsync(ct);
