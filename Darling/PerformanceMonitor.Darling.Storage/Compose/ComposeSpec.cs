@@ -103,12 +103,13 @@ public static class ComposeLimits
     /// The weight of a wide row in the raw tail of a panel that reads the fleet rollup (#7353), against 1.0 for a cold wide row. The
     /// tail is the hours after the stamp's newest built hour: the newest data, mostly in shared buffers. On the 210-server load-test
     /// store the guard refused the fleet 24 hour panel for about 34 minutes of each hour, because the tail counted at the cold rate
-    /// (6.53 us per row) while the panel ran in 10 to 13 s. The fleet panel's raw-tail arm measured 0.66 us per row warm and 4 to
-    /// 4.9 us per row after another scan evicted it, and 4.9 / 6.53 is about 0.7. A panel that does not read the fleet rollup keeps
-    /// the tail at 1.0. PROVISIONAL: 0.7 stands until the cold measurement of the tail arm is posted on #7353, then this value is
-    /// replaced by it.
+    /// (6.53 us per row) while the panel ran in 10 to 13 s. The raw-tail arm was then measured cold on that store (cold boot, after an
+    /// ANALYZE of today's partition): 2.91 us per row, 15.8 s for 5.44 M rows, which is 0.45 of the guard's 6.53 us per row, and 0.5
+    /// keeps a margin over it. The weight holds only with the hourly ANALYZE of the current partition that
+    /// <c>QueryStoreIntervalPartitions</c> runs: without it the same arm took 13.4 us per row (about 2.05 of the guard's rate). A panel
+    /// that does not read the fleet rollup keeps the tail at 1.0.
     /// </summary>
-    public const double FleetTailRowWeight = 0.7;
+    public const double FleetTailRowWeight = 0.5;
 
     /// <summary>
     /// The most rows a single-scan RankedTimeSeries base CTE may hold (#5582): buckets x members of the group dimension. The
