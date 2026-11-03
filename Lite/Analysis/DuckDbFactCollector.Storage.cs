@@ -22,6 +22,8 @@ public partial class DuckDbFactCollector
     {
         try
         {
+            /* #7256: Reads the hot table alone when the file_io_stats archive holds nothing at or after the lookback start. The plan is taken before the read lock. */
+            var plan = await _duckDb.PlanArchiveReadAsync("file_io_stats", "collection_time", context.LatestValueStartFor(FileIoStatsCollector.Instance.Name), context.CancellationToken);
             using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(context.CancellationToken);
@@ -48,6 +50,7 @@ WHERE rn = 1";
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.LatestValueStartFor(FileIoStatsCollector.Instance.Name) });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
+            cmd.CommandText = plan.Apply(cmd.CommandText);
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             if (!await reader.ReadAsync(context.CancellationToken)) return;
@@ -73,6 +76,8 @@ WHERE rn = 1";
     {
         try
         {
+            /* #7256: Reads the hot table alone when the file_io_stats archive holds nothing at or after the window start. The plan is taken before the read lock. */
+            var plan = await _duckDb.PlanArchiveReadAsync("file_io_stats", "collection_time", context.TimeRangeStart, context.CancellationToken);
             using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(context.CancellationToken);
@@ -95,6 +100,7 @@ AND   (delta_reads > 0 OR delta_writes > 0)";
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
+            cmd.CommandText = plan.Apply(cmd.CommandText);
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             if (!await reader.ReadAsync(context.CancellationToken)) return;
@@ -169,6 +175,8 @@ AND   (delta_reads > 0 OR delta_writes > 0)";
     {
         try
         {
+            /* #7256: Reads the hot table alone when the tempdb_stats archive holds nothing at or after the window start. The plan is taken before the read lock. */
+            var plan = await _duckDb.PlanArchiveReadAsync("tempdb_stats", "collection_time", context.TimeRangeStart, context.CancellationToken);
             using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(context.CancellationToken);
@@ -195,6 +203,7 @@ AND   collection_time <= $3";
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
+            cmd.CommandText = plan.Apply(cmd.CommandText);
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             if (!await reader.ReadAsync(context.CancellationToken)) return;
@@ -262,6 +271,8 @@ AND   collection_time <= $3";
     {
         try
         {
+            /* #7256: Reads the hot table alone when the database_size_stats archive holds nothing at or after the lookback start. The plan is taken before the read lock. */
+            var plan = await _duckDb.PlanArchiveReadAsync("database_size_stats", "collection_time", context.LatestValueStartFor(DatabaseSizeStatsCollector.Instance.Name), context.CancellationToken);
             using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(context.CancellationToken);
@@ -294,6 +305,7 @@ AND   database_name NOT IN ('master', 'msdb', 'model', 'tempdb')
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
             /* #5558: the file growth setting replicates from the primary; a secondary copy is the primary's to report. */
             cmd.CommandText = SecondaryReplicaScope.Apply(cmd.CommandText, cmd, context, "FILE_AUTOGROWTH_PERCENT", "database_name", 4);
+            cmd.CommandText = plan.Apply(cmd.CommandText);
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             if (!await reader.ReadAsync(context.CancellationToken)) return;
@@ -333,6 +345,8 @@ AND   database_name NOT IN ('master', 'msdb', 'model', 'tempdb')
     {
         try
         {
+            /* #7256: Reads the hot table alone when the database_size_stats archive holds nothing at or after the lookback start. The plan is taken before the read lock. */
+            var plan = await _duckDb.PlanArchiveReadAsync("database_size_stats", "collection_time", context.LatestValueStartFor(DatabaseSizeStatsCollector.Instance.Name), context.CancellationToken);
             using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(context.CancellationToken);
@@ -360,6 +374,7 @@ FROM latest WHERE rn = 1";
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.LatestValueStartFor(DatabaseSizeStatsCollector.Instance.Name) });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
+            cmd.CommandText = plan.Apply(cmd.CommandText);
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             if (!await reader.ReadAsync(context.CancellationToken)) return;

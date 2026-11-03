@@ -411,7 +411,7 @@ ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
                    that regresses into timeouts or errors is found here. A failed read costs the failure half only. */
                 try
                 {
-                    failures = await ReadPlanRegressionFailuresAsync(connection, context);
+                    failures = await ReadPlanRegressionFailuresAsync(connection, context, plan);
                 }
                 catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))
                 {

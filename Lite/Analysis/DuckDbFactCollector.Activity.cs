@@ -215,6 +215,8 @@ AND   collection_time <= $3";
     {
         try
         {
+            /* #7256: Reads the hot table alone when the running_jobs archive holds nothing at or after the window start. The plan is taken before the read lock. */
+            var plan = await _duckDb.PlanArchiveReadAsync("running_jobs", "collection_time", context.TimeRangeStart, context.CancellationToken);
             using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(context.CancellationToken);
@@ -252,6 +254,7 @@ AND   collection_time <= $3";
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
+            cmd.CommandText = plan.Apply(cmd.CommandText);
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             if (!await reader.ReadAsync(context.CancellationToken)) return;
@@ -304,6 +307,8 @@ AND   collection_time <= $3";
     {
         try
         {
+            /* #7256: Reads the hot table alone when the session_stats archive holds nothing at or after the window start. The plan is taken before the read lock. */
+            var plan = await _duckDb.PlanArchiveReadAsync("session_stats", "collection_time", context.TimeRangeStart, context.CancellationToken);
             using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(context.CancellationToken);
@@ -330,6 +335,7 @@ FROM latest WHERE rn = 1";
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
+            cmd.CommandText = plan.Apply(cmd.CommandText);
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             if (!await reader.ReadAsync(context.CancellationToken)) return;
