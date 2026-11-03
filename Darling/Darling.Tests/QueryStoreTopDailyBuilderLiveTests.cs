@@ -489,7 +489,7 @@ ANALYZE collect.query_store_top_daily_built;", ct);
     }
 
     [Fact]
-    public async Task ABacklogLargerThanTheCap_BuildsTheOldestDaysFirst_AndExactlyTheCap()
+    public async Task ABacklogLargerThanTheCap_BuildsTheNewestDaysFirst_AndExactlyTheCap()
     {
         await RunLiveAsync(async (scratch, connection, ct) =>
         {
@@ -503,18 +503,19 @@ ANALYZE collect.query_store_top_daily_built;", ct);
             Assert.Equal(QueryStoreTopDaily.MaxBuildsPerTick, result.Built);
             Assert.Equal(0, result.Failed);
             Assert.Equal((long)QueryStoreTopDaily.MaxBuildsPerTick, Convert.ToInt64(await ScalarAsync(connection, "SELECT count(*) FROM collect.query_store_top_daily_built", ct)));
-            var first = (now - TimeSpan.FromDays(Retention)).Date.AddDays(2);
-            Assert.Equal(first, (DateTime)(await ScalarAsync(connection, "SELECT min(day)::timestamp FROM collect.query_store_top_daily_built", ct))!);
-            Assert.Equal(first.AddDays(QueryStoreTopDaily.MaxBuildsPerTick - 1), (DateTime)(await ScalarAsync(connection, "SELECT max(day)::timestamp FROM collect.query_store_top_daily_built", ct))!);
+            /* #7169: newest first, so after an upgrade the short windows are back on the summary within the first ticks. */
+            var newest = now.Date.AddDays(-1);
+            Assert.Equal(newest, (DateTime)(await ScalarAsync(connection, "SELECT max(day)::timestamp FROM collect.query_store_top_daily_built", ct))!);
+            Assert.Equal(newest.AddDays(-(QueryStoreTopDaily.MaxBuildsPerTick - 1)), (DateTime)(await ScalarAsync(connection, "SELECT min(day)::timestamp FROM collect.query_store_top_daily_built", ct))!);
 
-            /* Every one of those days was already past its final-build time, so each was built once, at pass 2. */
-            Assert.Equal((long)QueryStoreTopDaily.MaxBuildsPerTick, Convert.ToInt64(await ScalarAsync(connection, "SELECT count(*) FROM collect.query_store_top_daily_built WHERE pass = 2", ct)));
-            Assert.Equal(0, result.BuiltPass1);
+            /* Every day but yesterday was already past its final-build time, so each was built once, at pass 2. Yesterday is at pass 1. */
+            Assert.Equal((long)QueryStoreTopDaily.MaxBuildsPerTick - 1, Convert.ToInt64(await ScalarAsync(connection, "SELECT count(*) FROM collect.query_store_top_daily_built WHERE pass = 2", ct)));
+            Assert.Equal(1, result.BuiltPass1);
         });
     }
 
     [Fact]
-    public async Task ABacklogPastTheFinalThreshold_BuildsEachDayOnceAtPassTwo_AndTheNextTickReachesNewerDays()
+    public async Task ABacklogPastTheFinalThreshold_BuildsEachDayOnceAtPassTwo_AndTheNextTickReachesOlderDays()
     {
         await RunLiveAsync(async (scratch, connection, ct) =>
         {
@@ -523,11 +524,11 @@ ANALYZE collect.query_store_top_daily_built;", ct);
             var now = new DateTime(2026, 6, 1, 12, 0, 0, DateTimeKind.Unspecified);
             const int Retention = 150;
             var cap = QueryStoreTopDaily.MaxBuildsPerTick;
-            var first = (now - TimeSpan.FromDays(Retention)).Date.AddDays(2);
+            var first = now.Date.AddDays(-1);
 
             var one = await QueryStoreTopDaily.RunTickAsync(source, now, Retention, NullLogger.Instance, ct);
-            Assert.Equal(cap, one.BuiltPass2);
-            Assert.Equal(0, one.BuiltPass1);
+            Assert.Equal(cap - 1, one.BuiltPass2);
+            Assert.Equal(1, one.BuiltPass1);
             var firstBuiltAt = (DateTime)(await ScalarAsync(connection, "SELECT built_at FROM collect.query_store_top_daily_built WHERE day = DATE '" + At(first)[..10] + "'", ct))!;
 
             var two = await QueryStoreTopDaily.RunTickAsync(source, now, Retention, NullLogger.Instance, ct);
@@ -535,9 +536,9 @@ ANALYZE collect.query_store_top_daily_built;", ct);
             Assert.Equal(0, two.BuiltPass1);
             Assert.Equal(cap, two.BuiltPass2);
 
-            /* The second tick built the next days; it did not redo the oldest ones. */
-            Assert.Equal((long)(2 * cap), Convert.ToInt64(await ScalarAsync(connection, "SELECT count(*) FROM collect.query_store_top_daily_built WHERE pass = 2", ct)));
-            Assert.Equal(first.AddDays(2 * cap - 1), (DateTime)(await ScalarAsync(connection, "SELECT max(day)::timestamp FROM collect.query_store_top_daily_built", ct))!);
+            /* The second tick built the next older days; it did not redo the newest ones. */
+            Assert.Equal((long)(2 * cap - 1), Convert.ToInt64(await ScalarAsync(connection, "SELECT count(*) FROM collect.query_store_top_daily_built WHERE pass = 2", ct)));
+            Assert.Equal(first.AddDays(-(2 * cap - 1)), (DateTime)(await ScalarAsync(connection, "SELECT min(day)::timestamp FROM collect.query_store_top_daily_built", ct))!);
             Assert.Equal(firstBuiltAt, (DateTime)(await ScalarAsync(connection, "SELECT built_at FROM collect.query_store_top_daily_built WHERE day = DATE '" + At(first)[..10] + "'", ct))!);
         });
     }
@@ -611,7 +612,7 @@ FROM collect.query_store_top_daily WHERE server_id = 1 AND day = DATE '2026-01-1
     }
 
     [Fact]
-    public async Task TheOldestPlannedDay_IsTwoDaysAfterTheRetentionHorizon()
+    public async Task TheOldestPlannedDay_IsTheOldestDayTheCleanupKeeps_OneBeforeTheRetentionHorizon()
     {
         await RunLiveAsync(async (scratch, connection, ct) =>
         {
@@ -622,10 +623,12 @@ FROM collect.query_store_top_daily WHERE server_id = 1 AND day = DATE '2026-01-1
             await using var planConnection = await source.OpenConnectionAsync(ct);
             var plan = await QueryStoreTopDaily.PlanBuildsAsync(planConnection, now, RetentionDays, ct);
 
-            /* (now - 9 days)::date is 2026-01-11; the purge may already have cut part of 2026-01-12. */
-            Assert.Equal(new DateOnly(2026, 1, 13), plan.Min(b => b.Day));
+            /* (now - 9 days)::date is 2026-01-11. The cleanup keeps down to 2026-01-10 (#7169), so the plan reaches it: no built
+               day the cleanup keeps is out of the rebuild's reach. */
+            Assert.Equal(new DateOnly(2026, 1, 10), plan.Min(b => b.Day));
             Assert.Equal(new DateOnly(2026, 1, 19), plan.Max(b => b.Day));
-            Assert.Equal(7, plan.Count);
+            Assert.Equal(10, plan.Count);
+            Assert.Equal(plan.OrderByDescending(b => b.Day).ToList(), plan);
         });
     }
 
@@ -685,13 +688,13 @@ FROM collect.query_store_top_daily WHERE server_id = 1 AND day = DATE '2026-01-1
                 () => reads++ == 0 ? TimeSpan.Zero : QueryStoreTopDaily.MaxTickDuration, ct);
 
             Assert.Equal(1, result.Built);
-            Assert.Equal(6, result.Deferred);
+            Assert.Equal(9, result.Deferred);
             Assert.Equal(0, result.Failed);
-            Assert.Equal("2026-01-13", await ScalarAsync(connection, "SELECT string_agg(day::text, ',') FROM collect.query_store_top_daily_built", ct));
+            Assert.Equal("2026-01-19", await ScalarAsync(connection, "SELECT string_agg(day::text, ',') FROM collect.query_store_top_daily_built", ct));
 
             /* The next tick plans what was deferred. */
             var next = await QueryStoreTopDaily.RunTickAsync(source, now, RetentionDays, NullLogger.Instance, ct);
-            Assert.Equal(6, next.Built);
+            Assert.Equal(9, next.Built);
             Assert.Equal(0, next.Deferred);
         });
     }
@@ -720,6 +723,91 @@ FROM collect.query_store_top_daily WHERE server_id = 1 AND day = DATE '2026-01-1
         Assert.Contains("QueryStoreTopDaily.RunTickAsync(", builder, StringComparison.Ordinal);
         Assert.Contains("DarlingRetention.QueryStoreIntervalWideRetentionDays", builder, StringComparison.Ordinal);
         Assert.DoesNotContain("throw", builder, StringComparison.Ordinal);
+    }
+
+    private const string OldFormatSql = @"UPDATE collect.query_store_top_daily SET avg_duration_us_wsum = NULL, avg_cpu_time_us_wsum = NULL,
+        avg_logical_io_reads_wsum = NULL, avg_logical_io_writes_wsum = NULL, avg_physical_io_reads_wsum = NULL, avg_rowcount_wsum = NULL WHERE ";
+
+    /// <summary>
+    /// #7169: a built day written before V240 (or by an older instance on the same store) has NULL weighted sums beside a
+    /// non-NULL execution count. It is not trusted: the plan lists it again, at the pass its time allows, and the rebuild fills
+    /// the sums. A day whose averages are all NULL (and a NULL execution count) is NULL on any format and is not planned
+    /// again, so a day written by the current builder never loops.
+    /// </summary>
+    [Fact]
+    public async Task ABuiltDayWithNullWeightedSums_IsPlannedAgain_AtItsPass_AndRebuiltWeighted_WhileNullAveragesAreNotTreatedAsOld()
+    {
+        await RunLiveAsync(async (scratch, connection, ct) =>
+        {
+            await CoverAsync(connection, 1, ct);
+            await using var source = DataSource(scratch);
+            var now = new DateTime(2026, 1, 20, 12, 0, 0, DateTimeKind.Unspecified);
+            foreach (var d in new[] { 17, 18, 19 })
+            {
+                await SeedAsync(connection, 1, new DateTime(2026, 1, d, 5, 0, 0), d, ct, executionCount: 100, duration: 10, cpu: 20);
+            }
+
+            /* Query 1: nothing but NULL averages and a NULL execution count. */
+            await SeedAsync(connection, 1, new DateTime(2026, 1, 16, 5, 0, 0), 1, ct);
+            await using (var planConnection = await source.OpenConnectionAsync(ct))
+            {
+                Assert.Equal(10, (await QueryStoreTopDaily.PlanBuildsAsync(planConnection, now, RetentionDays, ct)).Count);
+            }
+
+            Assert.Equal(10, await TickBuiltAsync(source, now));
+            await using var plan = await source.OpenConnectionAsync(ct);
+            Assert.Empty(await QueryStoreTopDaily.PlanBuildsAsync(plan, now, RetentionDays, ct));
+
+            /* Jan 17 is final (pass 2); Jan 19 is at pass 1. Make both look like an older builder wrote them. */
+            await ExecAsync(connection, OldFormatSql + "day IN (DATE '2026-01-17', DATE '2026-01-19')", ct);
+            var again = await QueryStoreTopDaily.PlanBuildsAsync(plan, now, RetentionDays, ct);
+            Assert.Equal(new[] { new QueryStoreTopDaily.Build(1, new DateOnly(2026, 1, 19), 1), new QueryStoreTopDaily.Build(1, new DateOnly(2026, 1, 17), 2) }, again.ToArray());
+
+            Assert.Equal(2, await TickBuiltAsync(source, now));
+            Assert.Empty(await QueryStoreTopDaily.PlanBuildsAsync(plan, now, RetentionDays, ct));
+            Assert.Equal(100m * 10m, Convert.ToDecimal(await ScalarAsync(connection, "SELECT avg_duration_us_wsum FROM collect.query_store_top_daily WHERE day = DATE '2026-01-17'", ct)));
+            Assert.Equal(100m * 20m, Convert.ToDecimal(await ScalarAsync(connection, "SELECT avg_cpu_time_us_wsum FROM collect.query_store_top_daily WHERE day = DATE '2026-01-19'", ct)));
+        });
+    }
+
+    /// <summary>
+    /// #7169: the cleanup keeps a built day down to one before the retention horizon, so the plan must reach that far. Days built
+    /// before V240 sit at the horizon when the rung lands; each must be rebuilt (an unplanned one would stay untrusted, and the
+    /// reader would read it from the wide table), and after enough ticks no day in the kept range is left without a weighted build.
+    /// </summary>
+    [Fact]
+    public async Task EveryDayTheCleanupKeeps_IsRebuilt_IncludingTheOldFormatDaysAtTheRetentionHorizon()
+    {
+        await RunLiveAsync(async (scratch, connection, ct) =>
+        {
+            await CoverAsync(connection, 1, ct);
+            await using var source = DataSource(scratch);
+            var now = new DateTime(2026, 1, 20, 12, 0, 0, DateTimeKind.Unspecified);
+            /* Horizon (now - 9 days) is Jan 11, so the cleanup keeps from Jan 10. Jan 10 to 12 were built before V240. */
+            foreach (var d in new[] { 10, 11, 12, 15 })
+            {
+                await SeedAsync(connection, 1, new DateTime(2026, 1, d, 5, 0, 0), d, ct, executionCount: 100, duration: 10);
+            }
+
+            foreach (var d in new[] { 10, 11, 12 })
+            {
+                await ExecAsync(connection,
+                    $"INSERT INTO collect.query_store_top_daily (server_id, day, query_id, interval_rows, execution_count_sum, avg_duration_us_sum, avg_duration_us_n, avg_cpu_time_us_n, avg_logical_io_reads_n, avg_logical_io_writes_n, avg_physical_io_reads_n, avg_rowcount_n) VALUES (1, DATE '2026-01-{d:00}', {d}, 1, 100, 10, 1, 0, 0, 0, 0, 0)", ct);
+                await ExecAsync(connection,
+                    $"INSERT INTO collect.query_store_top_daily_built (server_id, day, pass, built_at, source_rows) VALUES (1, DATE '2026-01-{d:00}', 2, TIMESTAMP '2026-01-13 00:00:00', 1)", ct);
+            }
+
+            Assert.Equal(0L, await QueryStoreTopDaily.GcAsync(connection, now, RetentionDays, ct));
+            for (var tick = 0; tick < 3 && (await TickBuiltAsync(source, now)) > 0; tick++)
+            {
+            }
+
+            Assert.Equal(10L, Convert.ToInt64(await ScalarAsync(connection, "SELECT count(*) FROM collect.query_store_top_daily_built WHERE day BETWEEN DATE '2026-01-10' AND DATE '2026-01-19'", ct)));
+            Assert.Equal(0L, Convert.ToInt64(await ScalarAsync(connection, "SELECT count(*) FROM collect.query_store_top_daily WHERE execution_count_sum IS NOT NULL AND avg_duration_us_n > 0 AND avg_duration_us_wsum IS NULL", ct)));
+            Assert.Equal(4L, Convert.ToInt64(await ScalarAsync(connection, "SELECT count(*) FROM collect.query_store_top_daily WHERE avg_duration_us_wsum = 1000", ct)));
+            await using var plan = await source.OpenConnectionAsync(ct);
+            Assert.Empty(await QueryStoreTopDaily.PlanBuildsAsync(plan, now, RetentionDays, ct));
+        });
     }
 
     [Fact]

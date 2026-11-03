@@ -2936,14 +2936,22 @@ internal static class DarlingDataReader
 
         """ + QueryStoreTopTail;
 
-    /// <summary>The days of <c>[$2, $3)</c> that have a built summary row for server $1. $2 and $3 are dates.</summary>
+    /// <summary>
+    /// The days of <c>[$2, $3)</c> that have a built summary row for server $1 AND were built by a V240-or-newer builder
+    /// (#7169, <see cref="QueryStoreTopDaily.DayIsWeightedSql"/>). A day built before V240 has NULL weighted sums, which would
+    /// sum to a wrong average beside a non-NULL execution count, so it counts as not built and is read from the wide table until
+    /// the service rebuilds it. $2 and $3 are dates.
+    /// </summary>
     private const string QueryStoreTopBuiltDaysSql = """
-        SELECT day
-        FROM query_store_top_daily_built
-        WHERE server_id = $1
-        AND   day >= $2::date
-        AND   day < $3::date
-        ORDER BY day
+        SELECT b.day
+        FROM query_store_top_daily_built AS b
+        WHERE b.server_id = $1
+        AND   b.day >= $2::date
+        AND   b.day < $3::date
+        AND   
+        """ + QueryStoreTopDaily.DayIsWeightedSql + """
+
+        ORDER BY b.day
         """;
 
     /// <summary>

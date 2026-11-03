@@ -2516,13 +2516,13 @@ CREATE INDEX IF NOT EXISTS idx_job_history_job_success
     /// <c>_sum</c> and <c>_n</c> (the unweighted mean of interval averages, a 1-execution interval counting as much as a
     /// 10,000-execution one) stay and are still written, but no reader uses them.
     ///
-    /// <para><b>The rung empties both summary tables.</b> The summary is derived from <c>collect.query_store_interval_wide</c> and
-    /// the service's tick rebuilds a day with no built row (oldest day first, <see cref="QueryStoreTopDaily.MaxBuildsPerTick"/> a
-    /// tick), so a day built before this rung, which has no weighted sum, is simply rebuilt. Until it is, the reader finds no built
-    /// day for it and reads it from the wide table (exact, slower), so no answer is wrong while the backfill runs. Both tables go
-    /// together, because the cleanup removes summary rows by the built table's keys and would never remove an orphan.
-    /// <c>TRUNCATE</c> needs an ACCESS EXCLUSIVE lock the builder's transaction also holds, so the lock timeout is
-    /// <see cref="MigrationCommandTimeoutSeconds"/> less 20 s, as V239's. The columns are nullable with no default, catalog-only. An older build ignores them.</para>
+    /// <para><b>The rung does not empty the summary.</b> A day built before it has NULL weighted sums. The reader treats such a day as
+    /// not built (<see cref="QueryStoreTopDaily.DayIsWeightedSql"/>) and reads it from the wide table, exact but slower, and the
+    /// service's tick rebuilds it, newest day first, <see cref="QueryStoreTopDaily.MaxBuildsPerTick"/> a tick. The same test
+    /// covers a rollback and roll-forward, and an older instance that still writes to the same store, with no manual step. Only
+    /// the lock timeout is here: the <c>ALTER</c> needs an ACCESS EXCLUSIVE lock the builder's transaction also holds, so it is
+    /// <see cref="MigrationCommandTimeoutSeconds"/> less 20 s, as V239's. The columns are nullable with no default, catalog-only.
+    /// An older build ignores them.</para>
     /// </summary>
     private static readonly string V240Sql =
         "SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + "s';\n" + @"
@@ -2532,8 +2532,7 @@ ALTER TABLE collect.query_store_top_daily
     ADD COLUMN IF NOT EXISTS avg_logical_io_reads_wsum numeric,
     ADD COLUMN IF NOT EXISTS avg_logical_io_writes_wsum numeric,
     ADD COLUMN IF NOT EXISTS avg_physical_io_reads_wsum numeric,
-    ADD COLUMN IF NOT EXISTS avg_rowcount_wsum numeric;
-TRUNCATE collect.query_store_top_daily, collect.query_store_top_daily_built;";
+    ADD COLUMN IF NOT EXISTS avg_rowcount_wsum numeric;";
 
     /// <summary>
     /// V223 (#6873) - <c>collect.database_protection</c>: per database, the last good CHECKDB and the last full and log backup, read by

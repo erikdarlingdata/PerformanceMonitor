@@ -145,7 +145,7 @@ VALUES (@ct, 1, 'db0', @q, @q, 'Regular', COALESCE(@fet, @ct - interval '10 minu
     {
         var result = await QueryStoreTopDaily.RunTickAsync(source, BuildNow, RetentionDays, NullLogger.Instance, ct);
         Assert.Equal(0, result.Failed);
-        Assert.Equal(7, result.Built);
+        Assert.Equal(10, result.Built);
     }
 
     private static async Task RunLiveAsync(Func<NpgsqlConnection, NpgsqlDataSource, CancellationToken, Task> body)
