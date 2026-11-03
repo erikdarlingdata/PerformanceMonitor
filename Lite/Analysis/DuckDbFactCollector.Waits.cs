@@ -218,7 +218,7 @@ ORDER BY SUM(delta_wait_time_ms) DESC";
             facts.Add(new Fact
             {
                 Source = "waits",
-                Key = waitType,
+                Key = FactCollectorHelpers.WaitFactKey(waitType),
                 Value = fractionOfPeriod,
                 ServerId = context.ServerId,
                 Metadata = metadata
