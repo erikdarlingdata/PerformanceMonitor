@@ -66,8 +66,7 @@ public partial class ServerTab : UserControl
                 return;
             }
 
-            SavePlanFile(plan, $"QueryPlan_{row.QueryHash}");
-            btn.Content = $"Saved ({source})";
+            if (SavePlanFile(plan, $"QueryPlan_{row.QueryHash}")) btn.Content = $"Saved ({source})";
             return;
         }
         catch (Exception ex)
@@ -121,8 +120,7 @@ public partial class ServerTab : UserControl
                 return;
             }
 
-            SavePlanFile(plan, $"ProcPlan_{row.FullName}");
-            btn.Content = $"Saved ({source})";
+            if (SavePlanFile(plan, $"ProcPlan_{row.FullName}")) btn.Content = $"Saved ({source})";
             return;
         }
         catch (Exception ex)
