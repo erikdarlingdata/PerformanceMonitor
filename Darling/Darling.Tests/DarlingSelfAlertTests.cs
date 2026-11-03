@@ -3056,6 +3056,104 @@ public sealed class DarlingSelfAlertTests
     }
 
     /// <summary>
+    /// #7183: a recurring window (#7040) and a digest rule (#7083) are permanent by design, so neither is a
+    /// forgotten rule however old, blanket or scoped. A plain open-ended mute of the same age still is.
+    /// </summary>
+    [Fact]
+    public async Task StaleMute_RecurringAndDigestRules_AreNotFlagged_HoweverOldOrBlanket()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        var blanketRecurring = Mute(StaleDays + 30, metric: null, id: "rule-recurring-blanket");
+        MakeRecurring(blanketRecurring);
+        var scopedRecurring = Mute(StaleDays + 30, id: "rule-recurring-scoped");
+        MakeRecurring(scopedRecurring);
+        var blanketDigest = Mute(StaleDays + 30, metric: null, id: "rule-digest-blanket");
+        blanketDigest.Action = MuteRuleActions.Digest;
+        var scopedDigest = Mute(StaleDays + 30, id: "rule-digest-scoped");
+        scopedDigest.Action = MuteRuleActions.Digest;
+
+        await e.ApplyStaleMuteRulesAsync(
+            new[] { blanketRecurring, scopedRecurring, blanketDigest, scopedDigest }, Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task StaleMute_PlainOpenEndedMutes_StillFlag_BesideRecurringAndDigestRules()
+    {
+        var h = new Harness();
+
+        var recurring = Mute(StaleDays + 30, metric: null, id: "rule-recurring");
+        MakeRecurring(recurring);
+        var digest = Mute(StaleDays + 30, metric: null, id: "rule-digest");
+        digest.Action = MuteRuleActions.Digest;
+
+        await h.Build().ApplyStaleMuteRulesAsync(
+            new[] { recurring, digest, Mute(StaleDays + 1, id: "rule-plain-scoped") }, Ct);
+
+        var scoped = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("1", scoped.CurrentValue);
+        Assert.Equal(AlertSeverityLevel.Warning, scoped.Severity);
+        Assert.Contains("rule-plain-scoped", scoped.DetailText);
+        Assert.DoesNotContain("rule-recurring", scoped.DetailText);
+        Assert.DoesNotContain("rule-digest", scoped.DetailText);
+
+        var h2 = new Harness();
+        await h2.Build().ApplyStaleMuteRulesAsync(
+            new[] { recurring, digest, Mute(StaleDays + 1, metric: null, id: "rule-plain-blanket") }, Ct);
+
+        var blanket = Assert.Single(h2.Deliverer.Outcomes);
+        Assert.Equal("1", blanket.CurrentValue);
+        Assert.Equal(AlertSeverityLevel.Critical, blanket.Severity);
+        Assert.Contains("rule-plain-blanket", blanket.DetailText);
+    }
+
+    /// <summary>
+    /// #7183: the validator accepts a recurring window of 00:00-23:59 every day, or 00:01-00:00 across midnight,
+    /// so those schedules mute nearly around the clock with no expiry. They are no bound, so the stale check
+    /// still reports them. A window that leaves an hour a day unmuted, or skips a day, is bounded and is not reported.
+    /// </summary>
+    [Theory]
+    [InlineData(0, 0, 23, 59, null, true)]
+    [InlineData(0, 1, 0, 0, null, true)]
+    [InlineData(0, 0, 23, 59, 0x7F, true)]
+    [InlineData(1, 0, 5, 0, null, false)]
+    [InlineData(0, 0, 23, 59, 0x40, false)]
+    [InlineData(0, 1, 0, 0, 0x3F, false)]
+    [InlineData(0, 0, 22, 59, null, false)]
+    public async Task StaleMute_RecurringWindow_IsReportedOnlyWhenItIsNoRealBound(
+        int startH, int startM, int endH, int endM, int? days, bool reported)
+    {
+        var h = new Harness();
+        var rule = Mute(StaleDays + 30, metric: null, id: "rule-recurring-window");
+        rule.RecurStartTime = new TimeOnly(startH, startM);
+        rule.RecurEndTime = new TimeOnly(endH, endM);
+        rule.RecurDays = days;
+        rule.RecurTimeZone = "UTC";
+
+        await h.Build().ApplyStaleMuteRulesAsync(new[] { rule }, Ct);
+
+        if (reported)
+        {
+            var outcome = Assert.Single(h.Deliverer.Outcomes);
+            Assert.Contains("rule-recurring-window", outcome.DetailText);
+        }
+        else
+        {
+            Assert.Empty(h.Deliverer.Outcomes);
+        }
+    }
+
+    private static void MakeRecurring(MuteRule rule)
+    {
+        rule.RecurStartTime = new TimeOnly(1, 0);
+        rule.RecurEndTime = new TimeOnly(5, 0);
+        rule.RecurTimeZone = "UTC";
+    }
+
+    /// <summary>
     /// #3432: a rule taken out of force through <c>set_mute_rule_enabled</c> and put back is stale to THIS
     /// condition on the age it actually has. The claim is driven through the real evaluator rather than
     /// asserted about a timestamp, because what a reset costs is measured in what this alert does and does
