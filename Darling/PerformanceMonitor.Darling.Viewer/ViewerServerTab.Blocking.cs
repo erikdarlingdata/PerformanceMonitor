@@ -88,7 +88,7 @@ public partial class ViewerServerTab
         CurrentWaitsBlockedChart.Refresh();
 
         _lockWaitTrendHover = new ChartHoverHelper(LockWaitTrendChart, "ms/sec", displayZone: ViewerTimeHelper.CurrentDisplayZone);
-        _blockingTrendHover = new ChartHoverHelper(BlockingTrendChart, "incidents", displayZone: ViewerTimeHelper.CurrentDisplayZone);
+        _blockingTrendHover = new ChartHoverHelper(BlockingTrendChart, PerformanceMonitor.Ui.BlockingTrendLabels.ReportsUnit, displayZone: ViewerTimeHelper.CurrentDisplayZone);
         _deadlockTrendHover = new ChartHoverHelper(DeadlockTrendChart, "deadlocks", displayZone: ViewerTimeHelper.CurrentDisplayZone);
         _blockingDurationHover = new ChartHoverHelper(BlockingDurationChart, "ms", displayZone: ViewerTimeHelper.CurrentDisplayZone);
         _blockingTotalDurationHover = new ChartHoverHelper(BlockingTotalDurationChart, "ms", displayZone: ViewerTimeHelper.CurrentDisplayZone);
@@ -655,15 +655,18 @@ public partial class ViewerServerTab
         expandedCounts.Add(0);
 
         var plot = BlockingTrendChart.Plot.Add.Scatter(expandedTimes.ToArray(), expandedCounts.ToArray()); /* synthetic spike baseline (±0.0001d offsets), NOT a cadence series - gap-breaking would lock onto the artificial deltas (#1944 review) */
-        plot.LegendText = PerformanceMonitor.Ui.BlockingSourceLabel.For(PerformanceMonitor.Ui.BlockingTrendLabels.PerMinute, data.Select(d => d.Source));
+        /* #7219: the read counts blocked-process reports, or DMV snapshot rows when the window holds no reports; name the arm that answered. */
+        var sources = data.Select(d => d.Source).ToList();
+        plot.LegendText = PerformanceMonitor.Ui.BlockingTrendLabels.LegendFor(sources);
         plot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("Blocking"));
         plot.MarkerSize = 0; /* No markers, just lines */
-        _blockingTrendHover?.Add(plot, PerformanceMonitor.Ui.BlockingTrendLabels.Reports);
+        if (_blockingTrendHover != null) _blockingTrendHover.Unit = PerformanceMonitor.Ui.BlockingTrendLabels.UnitFor(sources);
+        _blockingTrendHover?.Add(plot, PerformanceMonitor.Ui.BlockingTrendLabels.HoverNameFor(sources));
 
         BlockingTrendChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         BlockingTrendChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
         ReapplyAxisColors(BlockingTrendChart);
-        BlockingTrendChart.Plot.YLabel(BlockingTrendAxisTitle);
+        BlockingTrendChart.Plot.YLabel(PerformanceMonitor.Ui.BlockingTrendLabels.AxisTitleFor(sources));
         SetChartYLimitsWithLegendPadding(BlockingTrendChart, 0, data.Max(d => d.Count));
         ShowChartLegend(BlockingTrendChart);
         BlockingTrendChart.Refresh();

@@ -875,7 +875,7 @@ public static partial class DarlingWebEndpoints
                fetched when the row's Block chain action is used. The key is the page's own row identity. */
             ["get_block_chain"] = R(CatBlocking, "The lead-blocker tree of one blocked-process row: the lead blocker at the root and the sessions it blocks under it, built from the blocked-process reports and DMV blocking snapshots within five minutes of the row, exactly as the desktop viewer builds it.", PServer(), PReqText("event_time"), PReqInt("blocked_spid"), PInt("blocked_ecid", 0)),
             ["get_blocking"] = R(CatBlocking, "Blocking chains observed in the window.", PServer(), PHours(24), PLimit(30), PDatabases(), PAsOf()),
-            ["get_blocking_trend"] = R(CatBlocking, "Blocked-process reports per minute over time.", PServer(), PHours(24), PDatabases(), PAsOf()),
+            ["get_blocking_trend"] = R(CatBlocking, "Blocked-process reports per minute over time (DMV blocking snapshot rows when the window holds no reports; the source key says which).", PServer(), PHours(24), PDatabases(), PAsOf()),
             ["get_deadlock_detail"] = R(CatBlocking, "Deadlock graph detail for recent deadlocks.", PServer(), PHours(24), PLimit(5), PBool("full_graph", true), PAsOf()),
             ["get_deadlock_trend"] = R(CatBlocking, "Deadlock counts over time.", PServer(), PHours(24), PAsOf()),
             ["get_deadlocks"] = R(CatBlocking, "Recent deadlocks with victim/resource summary.", PServer(), PHours(24), PLimit(20), PAsOf()),

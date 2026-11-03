@@ -88,7 +88,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         _crosshairManager = new CorrelatedCrosshairManager { DisplayZoneProvider = ViewerTimeHelper.CurrentDisplayZone };
         _crosshairManager.AddLane(CpuChart, "SQL CPU", "%");
         _crosshairManager.AddLane(WaitStatsChart, "Wait Stats", "ms/sec");
-        _crosshairManager.AddLane(BlockingChart, "Blocking", "reports");
+        _crosshairManager.AddLane(BlockingChart, "Blocking", PerformanceMonitor.Ui.BlockingTrendLabels.ReportsUnit);
         _crosshairManager.AddLane(MemoryChart, "Buffer Pool", "MB");
         _crosshairManager.AddLane(FileIoChart, "I/O Latency", "ms");
     }
@@ -234,7 +234,10 @@ public partial class CorrelatedTimelineLanesControl : UserControl
                 var deadlockData = deadlockTask.IsCompletedSuccessfully
                     ? deadlockTask.Result.Select(d => (d.Time.ToOADate(), (double)d.Count)).ToList()
                     : new List<(double, double)>();
-                UpdateBlockingLane(blockingData, deadlockData, blockingBaseline, (endUtc - startUtc).TotalDays);
+                var blockingUnit = blockingTask.IsCompletedSuccessfully
+                    ? PerformanceMonitor.Ui.BlockingTrendLabels.UnitFor(blockingTask.Result.Select(d => d.Source))
+                    : PerformanceMonitor.Ui.BlockingTrendLabels.ReportsUnit;
+                UpdateBlockingLane(blockingData, deadlockData, blockingBaseline, (endUtc - startUtc).TotalDays, blockingUnit);
             }
 
             if (memoryTask.IsCompletedSuccessfully)
@@ -301,7 +304,8 @@ public partial class CorrelatedTimelineLanesControl : UserControl
     }
 
     private void UpdateBlockingLane(List<(double Time, double Value)> blockingData,
-        List<(double Time, double Value)> deadlockData, BaselineBucket? baseline = null, double windowSpanDays = 0)
+        List<(double Time, double Value)> deadlockData, BaselineBucket? baseline = null, double windowSpanDays = 0,
+        string blockingUnit = PerformanceMonitor.Ui.BlockingTrendLabels.ReportsUnit)
     {
         ClearChart(BlockingChart);
         ApplyTheme(BlockingChart);
@@ -313,6 +317,8 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         var deadValues = deadlockData.Select(d => d.Value).ToArray();
 
         // First series clears any previous data
+        /* #7219: the blocking lane counts blocked-process reports, or DMV snapshot rows when the window holds no reports. */
+        _crosshairManager?.SetLaneUnit(BlockingChart, blockingUnit);
         _crosshairManager?.SetLaneData(BlockingChart, blockTimes, blockValues, isEventBased: true,
             hoverToleranceDays: EventLaneGeometry.HoverToleranceDays(windowSpanDays));
         // Rename the auto-created series and add the second

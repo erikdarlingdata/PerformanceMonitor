@@ -96,10 +96,10 @@ public sealed class BlockingSourceLabelTests
         var src = Read("ServerTab.Charts.cs");
         var chart = Between(src, "private void UpdateBlockingTrendChart(", "private void UpdateDeadlockTrendChart(");
 
-        Assert.Single(Occurrences(chart, "BlockingSourceLabel.For(PerformanceMonitor.Ui.BlockingTrendLabels.PerMinute, data.Select(d => d.Source))"));
+        Assert.Single(Occurrences(chart, "BlockingTrendLabels.LegendFor(sources)"));
         /* The zero-row branch returns early with the plain label: nothing answered, so nothing is named. */
         var empty = chart[..chart.IndexOf("return;", StringComparison.Ordinal)];
-        Assert.Contains("YLabel(PerformanceMonitor.Ui.BlockingTrendLabels.PerMinute)", empty, StringComparison.Ordinal);
+        Assert.Contains("YLabel(PerformanceMonitor.Ui.BlockingTrendLabels.AxisShort)", empty, StringComparison.Ordinal);
         Assert.DoesNotContain("BlockingSourceLabel", empty, StringComparison.Ordinal);
     }
 

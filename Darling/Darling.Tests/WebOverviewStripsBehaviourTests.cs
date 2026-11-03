@@ -107,6 +107,22 @@ public sealed class WebOverviewStripsBehaviourTests
     }
 
     /// <summary>
+    /// #7219: when the trend read answers from DMV snapshot rows (<c>source</c> = "DMV snapshot", no blocked-process reports in the window),
+    /// the strip names its series and its readout for snapshot rows, and the reports arm keeps "Blocked-process reports".
+    /// </summary>
+    [Fact]
+    public void TheBlockingStrip_NamesTheSourceTheReadCounted()
+    {
+        var r = Run("snapshot");
+
+        Assert.Equal(new[] { "Blocking snapshot rows", "Deadlocks" }, r.GetProperty("series").EnumerateArray().Select(e => e.GetString()).ToArray());
+        var readout = r.GetProperty("at12Text").GetProperty("blocking").GetString();
+        Assert.Contains("Blocking snapshot rows 3 per min", readout, StringComparison.Ordinal);
+        Assert.DoesNotContain("reports", readout, StringComparison.Ordinal);
+        Assert.Equal(new[] { "Blocked-process reports", "Deadlocks" }, r.GetProperty("reportsSeries").EnumerateArray().Select(e => e.GetString()).ToArray());
+    }
+
+    /// <summary>
     /// The CPU samples have a gap (minutes 31 to 44). A crosshair inside it reads no CPU value, where nearest-neighbour-at-any-distance
     /// would have printed minute 30's or 45's; the other strips, sampled through the gap, still answer. The CPU lines break at the gap.
     /// </summary>

@@ -83,7 +83,7 @@ public sealed class ViewerShortPlotTests
     [Fact]
     public void BlockingTrendLabels_SayReports_InTheLegendTheAxisAndTheToolText()
     {
-        Assert.Equal("Blocked-process reports per minute (DMV snapshot)", BlockingSourceLabel.For(BlockingTrendLabels.PerMinute, new string?[] { "DMV snapshot" }));
+        Assert.Equal("Blocked-process reports per minute (blocked-process-report)", BlockingTrendLabels.LegendFor(new string?[] { "blocked-process-report" }));
         Assert.Contains("report", PerformanceMonitor.Darling.Viewer.ViewerServerTab.BlockingTrendAxisTitle, System.StringComparison.OrdinalIgnoreCase);
 
         var description = typeof(PerformanceMonitor.Darling.Service.Mcp.DarlingMcpBlockingTools)
@@ -92,6 +92,37 @@ public sealed class ViewerShortPlotTests
             .GetCustomAttributes(typeof(System.ComponentModel.DescriptionAttribute), false).Cast<System.ComponentModel.DescriptionAttribute>().Single().Description;
         Assert.Contains("blocked-process report counts per minute", description, System.StringComparison.Ordinal);
         Assert.DoesNotContain("blocking event counts", description, System.StringComparison.Ordinal);
+    }
+
+    /// <summary>#7219: when the window holds no blocked-process reports the trend counts DMV snapshot rows (the AWS RDS case), so the legend,
+    /// the short axis title, the hover name and the hover unit all say snapshot rows and none says reports, and the short axis title
+    /// still fits the shortest row whole.</summary>
+    [Fact]
+    public void BlockingTrendLabels_WhenTheDmvSnapshotAnswered_NameSnapshotRowsNotReports()
+    {
+        var sources = new string?[] { "DMV snapshot", "DMV snapshot" };
+        var labels = new[]
+        {
+            BlockingTrendLabels.LegendFor(sources), BlockingTrendLabels.AxisTitleFor(sources),
+            BlockingTrendLabels.HoverNameFor(sources), BlockingTrendLabels.UnitFor(sources),
+        };
+
+        Assert.Equal("Blocking snapshot rows per minute (DMV snapshot)", labels[0]);
+        Assert.Equal(BlockingTrendLabels.SnapshotAxisShort, labels[1]);
+        Assert.Equal("Blocking snapshot rows", labels[2]);
+        Assert.Equal("snapshot rows", labels[3]);
+        Assert.All(labels, l => Assert.DoesNotContain("report", l, System.StringComparison.OrdinalIgnoreCase));
+        var (text, size) = ChartAxisTitle.Fit(labels[1], MinRowTitleSpace);
+        Assert.Equal(labels[1], text);
+        Assert.InRange(size, ChartAxisTitle.MinFontSize, ChartAxisTitle.BaseFontSize);
+
+        /* The reports arm, and an empty window, keep the reports wording. */
+        foreach (var reportsArm in new[] { new string?[] { "blocked-process-report" }, System.Array.Empty<string?>(), new string?[] { null } })
+        {
+            Assert.Equal(BlockingTrendLabels.AxisShort, BlockingTrendLabels.AxisTitleFor(reportsArm));
+            Assert.Equal(BlockingTrendLabels.Reports, BlockingTrendLabels.HoverNameFor(reportsArm));
+            Assert.Equal("reports", BlockingTrendLabels.UnitFor(reportsArm));
+        }
     }
 
     [Theory]

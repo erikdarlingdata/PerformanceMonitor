@@ -922,7 +922,7 @@ public partial class ServerTab : UserControl
             BlockingTrendChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
             BlockingTrendChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
             ReapplyAxisColors(BlockingTrendChart);
-            BlockingTrendChart.Plot.YLabel(PerformanceMonitor.Ui.BlockingTrendLabels.PerMinute);
+            BlockingTrendChart.Plot.YLabel(PerformanceMonitor.Ui.BlockingTrendLabels.AxisShort);
             SetChartYLimitsWithLegendPadding(BlockingTrendChart, 0, 1);
             ShowChartLegend(BlockingTrendChart);
             BlockingTrendChart.Refresh();
@@ -956,15 +956,19 @@ public partial class ServerTab : UserControl
         expandedCounts.Add(0);
 
         var plot = BlockingTrendChart.Plot.Add.Scatter(expandedTimes.ToArray(), expandedCounts.ToArray()); /* synthetic spike baseline (±0.0001d offsets), NOT a cadence series - gap-breaking would lock onto the artificial deltas (#1944 review) */
-        plot.LegendText = PerformanceMonitor.Ui.BlockingTrendLabels.PerMinute;
+        /* #7219: the read counts blocked-process reports, or DMV snapshot rows when the window holds no reports, so the legend, hover
+           and axis name the arm that answered. The axis title stays short (the legend has the width): three star-height charts stack here. */
+        var sources = data.Select(d => d.Source).ToList();
+        plot.LegendText = PerformanceMonitor.Ui.BlockingTrendLabels.LegendFor(sources);
         plot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("Blocking"));
         plot.MarkerSize = 0; /* No markers, just lines */
-        _blockingTrendHover?.Add(plot, PerformanceMonitor.Ui.BlockingTrendLabels.Reports);
+        if (_blockingTrendHover != null) _blockingTrendHover.Unit = PerformanceMonitor.Ui.BlockingTrendLabels.UnitFor(sources);
+        _blockingTrendHover?.Add(plot, PerformanceMonitor.Ui.BlockingTrendLabels.HoverNameFor(sources));
 
         BlockingTrendChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
         BlockingTrendChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
         ReapplyAxisColors(BlockingTrendChart);
-        BlockingTrendChart.Plot.YLabel(PerformanceMonitor.Ui.BlockingSourceLabel.For(PerformanceMonitor.Ui.BlockingTrendLabels.PerMinute, data.Select(d => d.Source)));
+        BlockingTrendChart.Plot.YLabel(PerformanceMonitor.Ui.BlockingTrendLabels.AxisTitleFor(sources));
         SetChartYLimitsWithLegendPadding(BlockingTrendChart, 0, data.Max(d => d.Count));
         ShowChartLegend(BlockingTrendChart);
         BlockingTrendChart.Refresh();

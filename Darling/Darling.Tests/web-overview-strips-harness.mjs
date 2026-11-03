@@ -105,6 +105,17 @@ if (scenario === "crosshair") {
   drawn.node.listeners.pointermove[0]({ clientX: xAt(30) });
   out.pointerText = readoutTexts(drawn.node);
   out.hoverLines = find(drawn.node, (n) => n.attrs.class === "hover-line").length;
+} else if (scenario === "snapshot") {
+  /* #7219: a window with no blocked-process reports is counted from DMV snapshot rows; the read's `source` key says so, and the strip
+     must not call those rows reports. */
+  const snap = { ...reads, blocking: data({ source: "DMV snapshot", trend: [{ time: iso(12), count: 3 }] }) };
+  const built = strips.buildStrips(snap);
+  out.series = built.find((s) => s.key === "blocking").series.map((s) => s.label);
+  const drawn = strips.drawStrips(built, domain, 1000, null);
+  drawn.crosshairAt(T0 + 12.2 * MIN);
+  out.at12Text = readoutTexts(drawn.node);
+  out.reportsSeries = strips.buildStrips({ ...reads, blocking: data({ source: "blocked-process-report", trend: [{ time: iso(12), count: 3 }] }) })
+    .find((s) => s.key === "blocking").series.map((s) => s.label);
 } else if (scenario === "zoom") {
   const built = strips.buildStrips(reads);
   let zoomed = null;
