@@ -332,7 +332,13 @@ public sealed class QueryStatsCollector : CollectorDefinitionBase<QueryStatsColl
     /// <summary>#7337: the plan slots given to the newest statements by <c>last_execution_time</c>.</summary>
     public const int PlansByRecency = MaxPlansPerRun / 2;
 
-    /// <summary>#7337: the plan slots given to the heaviest statements by <c>total_elapsed_time</c>.</summary>
+    /// <summary>
+    /// #7337: the plan slots given to the heaviest statements by <c>total_elapsed_time</c>. The weight is the lifetime
+    /// total and the inline apply keeps no digest cache, so inline mode does not rotate this half: each run renders the
+    /// same lifetime-heaviest statements again, and a statement that runs now and then gets a slot only while its
+    /// lifetime total is in the top <see cref="PlansByWeight"/>. The deferred fetch caches a fetched plan and moves on
+    /// to the next heaviest miss.
+    /// </summary>
     public const int PlansByWeight = MaxPlansPerRun - PlansByRecency;
 
     /* #1959: rank on the CHEAP DMV columns inside the derived table FIRST, and run the text apply, the
