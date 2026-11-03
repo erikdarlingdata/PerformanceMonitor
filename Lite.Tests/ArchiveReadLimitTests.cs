@@ -912,14 +912,41 @@ public sealed class ArchiveGroupedWatermarkReadTests : IDisposable
 }
 
 /// <summary>#5377: the forced-plan alert's read of <c>v_query_store_stats</c> shares the archive-read limit.</summary>
-public sealed class ForcePlanArchiveReadLimitTests : IClassFixture<SharedDuckDbFixture>
+public sealed class ForcePlanArchiveReadLimitTests : IClassFixture<SharedDuckDbFixture>, IDisposable
 {
     private readonly DuckDbInitializer _duckDb;
+    private readonly string _archiveFile;
 
+    /* #7256: a read whose window the archive holds nothing from no longer touches the archive, so no longer takes a slot. The
+       limit applies to a read that does reach the archive: this store's archive has a row 30 minutes old, inside the window. */
     public ForcePlanArchiveReadLimitTests(SharedDuckDbFixture fixture)
     {
         fixture.ResetData();
         _duckDb = fixture.DuckDb;
+        _archiveFile = Path.Combine(_duckDb.ArchivePath, "20260101_000000_query_store_stats.parquet").Replace("\\", "/");
+        Directory.CreateDirectory(_duckDb.ArchivePath);
+        using var readLock = _duckDb.AcquireReadLock();
+        using var connection = _duckDb.CreateConnection();
+        connection.Open();
+        foreach (var sql in new[]
+        {
+            $"INSERT INTO query_store_stats (collection_id, collection_time, server_id, server_name, database_name) VALUES (1, TIMESTAMP '{DateTime.UtcNow.AddMinutes(-30):yyyy-MM-dd HH:mm:ss}', 1, 'S1', 'Db')",
+            $"COPY query_store_stats TO '{DuckDbInitializer.EscapeSqlPath(_archiveFile)}' (FORMAT PARQUET)",
+            "DELETE FROM query_store_stats"
+        })
+        {
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = sql;
+            cmd.ExecuteNonQuery();
+        }
+        readLock.Dispose();
+        _duckDb.CreateArchiveViewsAsync().GetAwaiter().GetResult();
+    }
+
+    public void Dispose()
+    {
+        File.Delete(_archiveFile);
+        _duckDb.CreateArchiveViewsAsync().GetAwaiter().GetResult();
     }
 
     [Fact]

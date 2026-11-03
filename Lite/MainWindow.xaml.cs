@@ -181,7 +181,9 @@ public partial class MainWindow : Window
                 investigationStore.OpenOrJoinAsync, _alertSettings, new AppLoggerAdapter<InvestigationDispatchCore>(), opened: null, keys: _pseudonymKeys,
                 /* #6596: an alert whose story is recurring at this hour opens no request; the skip is journaled. */
                 recurringSkipped: duckInvestigationStore.RecordRecurringSkipAsync),
-            (requestId, token) => investigationStore.ReadRequestAsync(requestId, token),
+            /* #7217: the alert path can run on the dispatcher, and this read takes the store read lock, which waits without limit
+               while an archival holds the write lock. Task.Run keeps that wait off the UI thread. */
+            (requestId, token) => Task.Run(() => investigationStore.ReadRequestAsync(requestId, token), token),
             () => _mcpDataDetail);
         _muteRuleService = new MuteRuleService(
             new DuckDbMuteRuleStore(_databaseInitializer),

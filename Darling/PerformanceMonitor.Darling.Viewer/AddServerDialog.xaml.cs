@@ -385,6 +385,33 @@ public partial class AddServerDialog : Window
         return (port, null);
     }
 
+    /// <summary>
+    /// Parses the monthly cost box (#7197): blank is 0, the unset value every FinOps read treats as "no cost".
+    /// Otherwise a plain decimal number, zero or more, in invariant form (the box is filled that way on an edit).
+    /// No thousands separator is accepted, so "120,50" is refused instead of stored as 12050, and "abc", "-5"
+    /// and "$120" give a message instead of silently erasing a stored cost to 0 — the same refusal edit_server
+    /// makes. Pure — pinned by Darling.Tests.
+    /// </summary>
+    internal static (decimal Cost, string? Error) ParseMonthlyCostText(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return (0m, null);
+        }
+
+        if (!decimal.TryParse(
+                text,
+                NumberStyles.AllowDecimalPoint | NumberStyles.AllowLeadingSign | NumberStyles.AllowLeadingWhite | NumberStyles.AllowTrailingWhite,
+                CultureInfo.InvariantCulture,
+                out var cost)
+            || cost < 0)
+        {
+            return (0m, "Monthly cost must be a number, zero or more, written like 120 or 120.50. Leave it blank for no cost.");
+        }
+
+        return (cost, null);
+    }
+
     private string GetSelectedEncryptMode() => EncryptModeComboBox.SelectedIndex switch
     {
         1 => "Mandatory",
@@ -736,10 +763,11 @@ public partial class AddServerDialog : Window
         var database = string.IsNullOrWhiteSpace(DatabaseNameBox.Text) ? null : DatabaseNameBox.Text.Trim();
         var readOnlyIntent = ReadOnlyIntentCheckBox.IsChecked == true;
 
-        decimal monthlyCost = 0m;
-        if (decimal.TryParse(MonthlyCostBox.Text, NumberStyles.Any, CultureInfo.InvariantCulture, out var parsedCost) && parsedCost >= 0)
+        var (monthlyCost, costError) = ParseMonthlyCostText(MonthlyCostBox.Text);
+        if (costError is not null)
         {
-            monthlyCost = parsedCost;
+            error = costError;
+            return null;
         }
 
         return new MonitoredServerRow
