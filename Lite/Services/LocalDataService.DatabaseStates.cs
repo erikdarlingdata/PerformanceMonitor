@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Threading.Tasks;
@@ -264,7 +265,7 @@ SELECT
         {
             seed.CommandText = $@"
 INSERT INTO config_database_state_expected (server_id, database_name, expected_state, is_user_override, updated_at)
-SELECT $1, ds.database_name, {EffectiveStateSql}, false, now()::TIMESTAMP
+SELECT $1, ds.database_name, {EffectiveStateSql}, false, $2
 FROM {src} ds
 WHERE ds.server_id = $1
 AND   ds.collection_time = (SELECT MAX(collection_time) FROM {src} WHERE server_id = $1)
@@ -275,6 +276,7 @@ AND   NOT EXISTS (
     WHERE e.server_id = $1 AND e.database_name = ds.database_name
 )";
             seed.Parameters.Add(new DuckDBParameter { Value = serverId });
+            seed.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow });
             await seed.ExecuteNonQueryAsync();
         }
 
@@ -310,7 +312,7 @@ AND   NOT EXISTS (
             heal.CommandText = $@"
 UPDATE config_database_state_expected
 SET expected_state = 'ONLINE',
-    updated_at = now()::TIMESTAMP
+    updated_at = $2
 WHERE server_id = $1
 AND   is_user_override = false
 AND   expected_state IN ({DatabaseStateTokens.NeverBaselinedSqlList})
@@ -322,6 +324,7 @@ AND   database_name IN (
     AND   {EffectiveStateSql} = 'ONLINE'
 )";
             heal.Parameters.Add(new DuckDBParameter { Value = serverId });
+            heal.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow });
             await heal.ExecuteNonQueryAsync();
         }
 
@@ -518,12 +521,13 @@ ORDER BY l.database_name";
            (not VALUES) for the same reason, matching the auto-seed and reset shape. */
         command.CommandText = @"
 INSERT INTO config_database_state_expected (server_id, database_name, expected_state, is_user_override, updated_at)
-SELECT $1, $2, $3, true, now()::TIMESTAMP
+SELECT $1, $2, $3, true, $4
 ON CONFLICT (server_id, database_name)
-DO UPDATE SET expected_state = EXCLUDED.expected_state, is_user_override = true, updated_at = now()::TIMESTAMP";
+DO UPDATE SET expected_state = EXCLUDED.expected_state, is_user_override = true, updated_at = EXCLUDED.updated_at";
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = databaseName });
         command.Parameters.Add(new DuckDBParameter { Value = expectedState });
+        command.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow });
         await command.ExecuteNonQueryAsync();
     }
 
@@ -543,15 +547,16 @@ DO UPDATE SET expected_state = EXCLUDED.expected_state, is_user_override = true,
         using var command = connection.CreateCommand();
         command.CommandText = $@"
 INSERT INTO config_database_state_expected (server_id, database_name, expected_state, is_user_override, updated_at)
-SELECT $1, $2, {EffectiveStateSql}, false, now()::TIMESTAMP
+SELECT $1, $2, {EffectiveStateSql}, false, $3
 FROM {src} ds
 WHERE ds.server_id = $1
 AND   ds.database_name = $2
 AND   ds.collection_time = (SELECT MAX(collection_time) FROM {src} WHERE server_id = $1)
 ON CONFLICT (server_id, database_name)
-DO UPDATE SET expected_state = EXCLUDED.expected_state, is_user_override = false, updated_at = now()::TIMESTAMP";
+DO UPDATE SET expected_state = EXCLUDED.expected_state, is_user_override = false, updated_at = EXCLUDED.updated_at";
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = databaseName });
+        command.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow });
         await command.ExecuteNonQueryAsync();
     }
 }

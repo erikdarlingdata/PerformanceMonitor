@@ -1316,8 +1316,11 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
             TotalThreads = threads.TotalThreads,
             CurrentWorkers = threads.CurrentWorkers,
             AvailableThreads = availableThreads,
-            ThreadsWaitingForCpu = threads.RunnableTasks,
-            RequestsWaitingForThreads = threads.WorkQueue,
+            /* #7195: a target with no scheduler snapshot (every PostgreSQL target, or a SQL Server whose
+               scheduler collector has not run) gets a default ThreadsRow, whose zeros are not readings.
+               The whole threads block is null there, as the tool description says. */
+            ThreadsWaitingForCpu = threads.TotalThreads.HasValue ? threads.RunnableTasks : null,
+            RequestsWaitingForThreads = threads.TotalThreads.HasValue ? threads.WorkQueue : null,
             ThreadsSeverity = ServerHealthClassifier.ThreadsSeverity(threads.TotalThreads, availableThreads, threads.RunnableTasks, threads.WorkQueue),
             /* #6874: set only when the Agent alert setup has a gap. The Band below is not read from it. */
             AgentAlertGaps = agentAlertGaps is { Count: > 0 } ? agentAlertGaps : null,
@@ -2325,6 +2328,7 @@ AND   {SqlServerCollectedTargetSql}";
            connection at a time), and not at all when no row needs it. The aggregate itself stays plain: no
            fleet-wide sort of a week of collection_log in front of its GROUP BY (#3735). */
         await ApplyTrailingSuccessRunsAsync(postgres, rows, windowStart, cancellationToken);
+        await ApplyObservedQuietRunsAsync(postgres, rows, windowStart, now, cancellationToken);
 
         foreach (var (serverId, health) in rows)
         {
@@ -2425,6 +2429,50 @@ AND   {SqlServerCollectedTargetSql}";
         }
     }
 
+    /// <summary>
+    /// #7242: sets the EXACT <see cref="CollectorHealth.TrailingZeroRowSuccessRuns"/> and the <see cref="CollectorHealth.ObservedQuietGaps"/>
+    /// on the rows the activity quiet bar turns on (<see cref="CollectorHealthClassifier.NeedsObservedQuietRuns"/>), through
+    /// <see cref="CollectorObservedQuietRuns"/>. The estimate the aggregate allows divides elapsed time by the cadence, which hands the
+    /// wall clock back, hours the service was stopped included, and the bar is measured in observed time. Also the per-server read's
+    /// step, where the run count is already exact and a row with no break time has it looked up. Runs no statement when no row needs
+    /// it, so a busy fleet pays nothing.
+    /// </summary>
+    internal static async Task ApplyObservedQuietRunsAsync(
+        NpgsqlDataSource postgres,
+        IReadOnlyList<(int ServerId, CollectorHealth Health)> rows,
+        DateTime windowStart,
+        DateTime nowUtc,
+        CancellationToken cancellationToken)
+    {
+        var requests = new List<(int ServerId, string CollectorName, DateTime? BreakTime)>();
+        foreach (var (serverId, h) in rows)
+        {
+            if (CollectorHealthClassifier.NeedsObservedQuietRuns(h.CollectorName, h.LastProductiveTime, nowUtc))
+            {
+                requests.Add((serverId, h.CollectorName, h.LastZeroRowStreakBreakTime));
+            }
+        }
+
+        if (requests.Count == 0)
+        {
+            return;
+        }
+
+        var counts = await CollectorObservedQuietRuns.ReadAsync(
+            postgres, requests, windowStart, McpCommandDeadlines.ReadSeconds, cancellationToken);
+        foreach (var (serverId, h) in rows)
+        {
+            if (counts.TryGetValue((serverId, h.CollectorName), out var gaps))
+            {
+                h.ObservedQuietGaps = gaps;
+                if (h.LastZeroRowStreakBreakTime is not null)
+                {
+                    h.TrailingZeroRowSuccessRuns = gaps.Runs;
+                }
+            }
+        }
+    }
+
     /// <summary>Maps one row of <see cref="FleetCollectionHealthSql"/> / its composed twin (fourteen columns,
     /// ordinals 0-13; <c>server_id</c> is read by the caller) to the <see cref="CollectorHealth"/> the shared
     /// banding reads. Its own method so a test can drive the banding through the same mapping the fleet read
@@ -2482,9 +2530,10 @@ AND   {SqlServerCollectedTargetSql}";
            here and the card's regressed count would stay silent on a collector that stopped producing
            while get_collection_health called it WARNING -- the #2779/#2784 shape, and it would COMPILE,
            because the default is silent. */
+        health.LastZeroRowStreakBreakTime = reader.IsDBNull(12) ? null : reader.GetDateTime(12);
         health.TrailingZeroRowSuccessRuns = CollectorHealthClassifier.EstimateTrailingZeroRowSuccessRuns(
             health.LastRunTime,
-            reader.IsDBNull(12) ? null : reader.GetDateTime(12),
+            health.LastZeroRowStreakBreakTime,
             health.TotalRuns,
             health.FrequencyMinutes);
 
@@ -3035,8 +3084,8 @@ public sealed class FleetServerCard
     [JsonPropertyName("total_threads")] public int? TotalThreads { get; init; }
     [JsonPropertyName("current_workers")] public int? CurrentWorkers { get; init; }
     [JsonPropertyName("available_threads")] public int? AvailableThreads { get; init; }
-    [JsonPropertyName("threads_waiting_for_cpu")] public int ThreadsWaitingForCpu { get; init; }
-    [JsonPropertyName("requests_waiting_for_threads")] public long RequestsWaitingForThreads { get; init; }
+    [JsonPropertyName("threads_waiting_for_cpu")] public int? ThreadsWaitingForCpu { get; init; }
+    [JsonPropertyName("requests_waiting_for_threads")] public long? RequestsWaitingForThreads { get; init; }
     [JsonPropertyName("threads_severity")] public HealthSeverity ThreadsSeverity { get; init; }
 
     [JsonPropertyName("healthy_collector_count")] public int HealthyCollectorCount { get; init; }
@@ -3151,8 +3200,8 @@ public sealed class FleetServerCard
         BlockingBandThresholds = BlockingBandThresholds,
         TotalThreads = TotalThreads,
         AvailableThreads = AvailableThreads,
-        ThreadsWaitingForCpu = ThreadsWaitingForCpu,
-        RequestsWaitingForThreads = RequestsWaitingForThreads,
+        ThreadsWaitingForCpu = ThreadsWaitingForCpu ?? 0,
+        RequestsWaitingForThreads = RequestsWaitingForThreads ?? 0,
         FailedCollectorCount = FailedCollectorCount,
         /* #3539 A8d: the share's denominator, or the re-band would grade presence-flat again. */
         CollectorCount = CollectorCount,

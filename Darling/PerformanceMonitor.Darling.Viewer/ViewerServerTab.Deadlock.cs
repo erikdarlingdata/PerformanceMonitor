@@ -57,7 +57,7 @@ public partial class ViewerServerTab
     /// <summary>Double-clicking a deadlock row opens the same graph viewer.</summary>
     private async void DeadlockGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e)
     {
-        if (DeadlockGrid.SelectedItem is not DeadlockProcessDetail row) return;
+        if (!DataGridRowHit.IsOnRow(e.OriginalSource) || DeadlockGrid.SelectedItem is not DeadlockProcessDetail row) return;
         await OpenDeadlockGraphAsync(row);
     }
 

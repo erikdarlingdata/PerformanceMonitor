@@ -367,7 +367,12 @@ public class ServerPropertyRow
     public long? PhysicalMemoryMb { get => HostHardware ? null : _physicalMemoryMb; set => _physicalMemoryMb = value ?? 0L; }
     public int? SocketCount { get => HostHardware ? null : _socketCount; set => _socketCount = value; }
     public int? CoresPerSocket { get => HostHardware ? null : _coresPerSocket; set => _coresPerSocket = value; }
+    /// <summary>The server's start time on the SERVER's own clock, shown as-is. Never subtract it from the client's clock (#7176).</summary>
     public DateTime? SqlServerStartTime { get; set; }
+
+    /// <summary>The start instant in UTC, worked out at read time from the uptime the server itself measured as two tick counts
+    /// (<c>(ms_ticks - sqlserver_start_time_ms_ticks) / 1000</c>), so neither the client's zone nor a daylight saving change enters it (#7176). Null when unknown.</summary>
+    public DateTime? SqlServerStartUtc { get; set; }
     public DateTime? LastUpdated { get; set; }
     public bool? IsHadrEnabled { get; set; }
     public bool? IsClustered { get; set; }
@@ -392,14 +397,14 @@ public class ServerPropertyRow
 
     /// <summary>The uptime in seconds, the sort key of the Uptime column (#6086): <see cref="UptimeDisplay"/> is text, which sorts
     /// "10d" before "2d". Null when the start time is unknown.</summary>
-    public double? UptimeSeconds => SqlServerStartTime is { } start ? (DateTime.Now - start).TotalSeconds : null;
+    public double? UptimeSeconds => SqlServerStartUtc is { } start ? Math.Max(0d, (DateTime.UtcNow - start).TotalSeconds) : null;
 
     public string UptimeDisplay
     {
         get
         {
-            if (SqlServerStartTime == null) return "";
-            var uptime = DateTime.Now - SqlServerStartTime.Value;
+            if (UptimeSeconds is not { } seconds) return "";
+            var uptime = TimeSpan.FromSeconds(seconds);
             return $"{(int)uptime.TotalDays}d {uptime.Hours}h";
         }
     }
@@ -698,7 +703,7 @@ public static class HighImpactScorer
         foreach (var hash in allRows.OrderByDescending(r => r.TotalDurationMs).Take(topN).Select(r => r.QueryHash)) interesting.Add(hash);
         foreach (var hash in allRows.OrderByDescending(r => r.TotalReads).Take(topN).Select(r => r.QueryHash)) interesting.Add(hash);
         foreach (var hash in allRows.OrderByDescending(r => r.TotalWrites).Take(topN).Select(r => r.QueryHash)) interesting.Add(hash);
-        foreach (var hash in allRows.OrderByDescending(r => r.TotalMemoryMb).Take(topN).Select(r => r.QueryHash)) interesting.Add(hash);
+        foreach (var hash in allRows.OrderByDescending(r => r.PeakMemoryMb).Take(topN).Select(r => r.QueryHash)) interesting.Add(hash);
         foreach (var hash in allRows.OrderByDescending(r => r.TotalExecutions).Take(topN).Select(r => r.QueryHash)) interesting.Add(hash);
 
         var filtered = allRows.Where(r => interesting.Contains(r.QueryHash)).ToList();
@@ -710,14 +715,14 @@ public static class HighImpactScorer
         var durationValues = filtered.Select(r => r.TotalDurationMs).OrderBy(v => v).ToList();
         var readsValues = filtered.Select(r => (decimal)r.TotalReads).OrderBy(v => v).ToList();
         var writesValues = filtered.Select(r => (decimal)r.TotalWrites).OrderBy(v => v).ToList();
-        var memoryValues = filtered.Select(r => r.TotalMemoryMb).OrderBy(v => v).ToList();
+        var memoryValues = filtered.Select(r => r.PeakMemoryMb).OrderBy(v => v).ToList();
         var execValues = filtered.Select(r => (decimal)r.TotalExecutions).OrderBy(v => v).ToList();
 
         var totalCpu = filtered.Sum(r => r.TotalCpuMs);
         var totalDuration = filtered.Sum(r => r.TotalDurationMs);
         var totalReads = filtered.Sum(r => (decimal)r.TotalReads);
         var totalWrites = filtered.Sum(r => (decimal)r.TotalWrites);
-        var totalMemory = filtered.Sum(r => r.TotalMemoryMb);
+        var totalMemory = filtered.Sum(r => r.PeakMemoryMb);
         var totalExecs = filtered.Sum(r => (decimal)r.TotalExecutions);
 
         foreach (var row in filtered)
@@ -726,14 +731,14 @@ public static class HighImpactScorer
             var durationPctl = PercentRank(durationValues, row.TotalDurationMs);
             var readsPctl = PercentRank(readsValues, (decimal)row.TotalReads);
             var writesPctl = PercentRank(writesValues, (decimal)row.TotalWrites);
-            var memoryPctl = PercentRank(memoryValues, row.TotalMemoryMb);
+            var memoryPctl = PercentRank(memoryValues, row.PeakMemoryMb);
             var execsPctl = PercentRank(execValues, (decimal)row.TotalExecutions);
 
             row.CpuShare = totalCpu > 0 ? Math.Round(100m * row.TotalCpuMs / totalCpu, 1) : 0;
             row.DurationShare = totalDuration > 0 ? Math.Round(100m * row.TotalDurationMs / totalDuration, 1) : 0;
             row.ReadsShare = totalReads > 0 ? Math.Round(100m * row.TotalReads / totalReads, 1) : 0;
             row.WritesShare = totalWrites > 0 ? Math.Round(100m * row.TotalWrites / totalWrites, 1) : 0;
-            row.MemoryShare = totalMemory > 0 ? Math.Round(100m * row.TotalMemoryMb / totalMemory, 1) : 0;
+            row.MemoryShare = totalMemory > 0 ? Math.Round(100m * row.PeakMemoryMb / totalMemory, 1) : 0;
             row.ExecutionsShare = totalExecs > 0 ? Math.Round(100m * row.TotalExecutions / totalExecs, 1) : 0;
 
             var pctlSum = cpuPctl + durationPctl + readsPctl + writesPctl + memoryPctl + execsPctl;
@@ -760,7 +765,7 @@ public class HighImpactQueryRow
     public decimal TotalDurationMs { get; set; }
     public long TotalReads { get; set; }
     public long TotalWrites { get; set; }
-    public decimal TotalMemoryMb { get; set; }
+    public decimal PeakMemoryMb { get; set; }
     public decimal CpuShare { get; set; }
     public decimal DurationShare { get; set; }
     public decimal ReadsShare { get; set; }

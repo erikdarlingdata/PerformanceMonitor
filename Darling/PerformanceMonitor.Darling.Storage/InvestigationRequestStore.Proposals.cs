@@ -274,9 +274,6 @@ FROM config.agent_action_proposals";
     /// The confirming press (#7109): pending to approved, only before the expiry and only by the person of the first press. Journals
     /// <see cref="ProposalEvents.Approved"/>. False when any of those does not hold, so a double press or a replay changes nothing.
     /// </summary>
-    public Task<bool> ApproveProposalAsync(Guid proposalId, string person, JsonObject? detail = null, CancellationToken cancellationToken = default) =>
-        InOwnTransactionAsync((c, t) => ApproveProposalAsync(c, t, proposalId, person, detail, cancellationToken), cancellationToken);
-
     public Task<bool> ApproveProposalAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, Guid proposalId, string person,
         JsonObject? detail = null, CancellationToken cancellationToken = default) =>
         ProposalChangeAsync(connection, transaction, ProposalApproveSql, ProposalEvents.Approved, person, null, detail, cancellationToken,
@@ -301,9 +298,6 @@ FROM config.agent_action_proposals";
     /// Approved to one of <see cref="ProposalStates.AfterApproved"/> (#7109): the write ran, failed, lost its reply, or its re-check refused it.
     /// Journals the state's event with <paramref name="actor"/> and the outcome. False when the proposal is not approved.
     /// </summary>
-    public Task<bool> FinishProposalAsync(Guid proposalId, string state, string actor, JsonObject? outcome, CancellationToken cancellationToken = default) =>
-        InOwnTransactionAsync((c, t) => FinishProposalAsync(c, t, proposalId, state, actor, outcome, cancellationToken), cancellationToken);
-
     public Task<bool> FinishProposalAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, Guid proposalId, string state, string actor,
         JsonObject? outcome, CancellationToken cancellationToken = default)
     {

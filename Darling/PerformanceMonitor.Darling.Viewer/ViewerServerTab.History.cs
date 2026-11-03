@@ -9,6 +9,7 @@
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -83,6 +84,7 @@ public partial class ViewerServerTab
 
     private void QueryStatsGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e)
     {
+        if (!DataGridRowHit.IsOnRow(e.OriginalSource)) return;
         if (MapQueryStatsHistoryKey(QueryStatsGrid.SelectedItem as ViewerQueryStatsRow) is not { } key) return;
 
         var (startUtc, endUtc) = GetWindowUtc();
@@ -96,6 +98,7 @@ public partial class ViewerServerTab
 
     private void ProcedureStatsGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e)
     {
+        if (!DataGridRowHit.IsOnRow(e.OriginalSource)) return;
         if (MapProcedureHistoryKey(ProcedureStatsGrid.SelectedItem as ViewerProcedureStatsRow) is not { } key) return;
 
         var (startUtc, endUtc) = GetWindowUtc();
@@ -109,6 +112,7 @@ public partial class ViewerServerTab
 
     private void QueryStoreGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e)
     {
+        if (!DataGridRowHit.IsOnRow(e.OriginalSource)) return;
         if (MapQueryStoreHistoryKey(QueryStoreGrid.SelectedItem as ViewerQueryStoreRow) is not { } key) return;
 
         var (startUtc, endUtc) = GetWindowUtc();
@@ -122,6 +126,7 @@ public partial class ViewerServerTab
 
     private void QueryStoreRegressionsGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e)
     {
+        if (!DataGridRowHit.IsOnRow(e.OriginalSource)) return;
         if (MapQueryStoreRegressionHistoryKey(QueryStoreRegressionsGrid.SelectedItem as ViewerQueryStoreRegressionRow) is not { } key) return;
 
         var (startUtc, endUtc) = GetWindowUtc();

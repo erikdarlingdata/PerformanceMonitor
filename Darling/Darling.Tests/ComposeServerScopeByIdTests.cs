@@ -237,7 +237,10 @@ public sealed class ComposeServerScopeByIdTests
         Assert.True(lookup > 0 && snapshot > lookup && context > snapshot, "lookup, then the snapshot, then the run context");
         var gate = web.IndexOf("ComposeCompiler.ReadsStampRollup(plan!, new ComposeRunContext(", StringComparison.Ordinal);
         Assert.True(gate > 0 && gate < lookup, "the stamp-rollup gate's context is a separate, earlier, throwaway one");
-        Assert.Equal(2, Regex.Matches(web, @"new ComposeRunContext\(").Count);
+        /* #7285: the fleet-rollup gate builds a second throwaway context, after the wide resolution, also never compiled. */
+        var fleetGate = web.IndexOf("ComposeCompiler.ReadsFleetRollup(plan!, new ComposeRunContext(", StringComparison.Ordinal);
+        Assert.True(fleetGate > gate && fleetGate < lookup, "the fleet-rollup gate's context is a separate, earlier, throwaway one");
+        Assert.Equal(3, Regex.Matches(web, @"new ComposeRunContext\(").Count);
         Assert.Contains("ComposeCompiler.Compile(plan!, runContext)", web[context..], StringComparison.Ordinal);
         Assert.Contains("cancellationToken, unregisteredServers);", web[snapshot..context], StringComparison.Ordinal);
         Assert.Contains("UnregisteredServers: unregisteredServers", web[context..(context + 700)], StringComparison.Ordinal);

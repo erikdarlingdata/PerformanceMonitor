@@ -129,7 +129,7 @@ public partial class InvestigationsWindow : Window
         /// <summary>The instant the Reported column is formatted from, and sorts by (not its text).</summary>
         public DateTime ReportedAtUtc => Row.ReportedAtUtc;
 
-        public string ReportedDisplay => Row.ReportedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.CurrentCulture);
+        public string ReportedDisplay => ViewerTimeHelper.FormatFleetWide(Row.ReportedAtUtc, "yyyy-MM-dd HH:mm");
 
         public string FeedbackSummary => Row.Feedback.Count == 0 ? "none"
             : string.Create(CultureInfo.InvariantCulture, $"{Row.Feedback.Count}, newest: {Row.Feedback[0].Verdict}");
@@ -141,7 +141,7 @@ public partial class InvestigationsWindow : Window
         /// <summary>The instant the When column is formatted from, and sorts by (not its text).</summary>
         public DateTime CreatedAtUtc => Row.CreatedAtUtc;
 
-        public string WhenDisplay => Row.CreatedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.CurrentCulture);
+        public string WhenDisplay => ViewerTimeHelper.FormatFleetWide(Row.CreatedAtUtc, "yyyy-MM-dd HH:mm");
 
         public string CorrectedDisplay => Row.CorrectedVerdict ?? "(report's)";
     }
@@ -307,7 +307,7 @@ public partial class InvestigationsWindow : Window
             : _profiles.FirstOrDefault(p => p.ScopeServerId == scope.ServerId && p.ScopeTagId == scope.TagId);
         ProfileTextBox.Text = profile?.ProfileText ?? "";
         ProfileModifiedText.Text = profile is null ? "No profile yet."
-            : "Saved " + profile.ModifiedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.CurrentCulture)
+            : "Saved " + ViewerTimeHelper.FormatFleetWide(profile.ModifiedAtUtc, "yyyy-MM-dd HH:mm")
               + (profile.ModifiedBy is { } by ? " by " + by : "");
     }
 
@@ -348,7 +348,7 @@ public partial class InvestigationsWindow : Window
         text.Append("Verdict: ").Append(report.Verdict)
             .Append(report.RootCauseFound ? " (root cause found)" : " (root cause not found)")
             .Append(", by ").Append(report.AgentId).Append(" at ")
-            .AppendLine(report.SubmittedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.CurrentCulture));
+            .AppendLine(ViewerTimeHelper.FormatFleetWide(report.SubmittedAtUtc, "yyyy-MM-dd HH:mm"));
         text.Append("Root cause: ").AppendLine(report.RootCause);
         if (!string.IsNullOrWhiteSpace(report.Summary))
         {

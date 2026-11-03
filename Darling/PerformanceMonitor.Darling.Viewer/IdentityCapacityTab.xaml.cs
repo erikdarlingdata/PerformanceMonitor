@@ -12,6 +12,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -89,7 +90,10 @@ public partial class IdentityCapacityTab : UserControl
             var read = await _dataService.ReadIdentityCapacityAsync(server, DateTime.UtcNow);
             if (_loads.Superseded(nameof(LoadCapacityAsync), gen)) return;
 
-            Show(read);
+            var clock = await _dataService.GetServerClockOrMachineAsync(server.ServerId, System.Threading.CancellationToken.None);
+            if (_loads.Superseded(nameof(LoadCapacityAsync), gen)) return;
+
+            Show(read, clock);
             LastRefreshedIndicator.Text = "Last refreshed " + ViewerTimeHelper.FormatFleetWide(DateTime.UtcNow, "HH:mm:ss");
         }
         catch (Exception ex)
@@ -100,7 +104,7 @@ public partial class IdentityCapacityTab : UserControl
         }
     }
 
-    private void Show(ViewerIdentityCapacityRead? read)
+    private void Show(ViewerIdentityCapacityRead? read, ServerClock? clock = null)
     {
         if (read is null)
         {
@@ -113,7 +117,7 @@ public partial class IdentityCapacityTab : UserControl
 
         StatusLine.Text = ViewerIdentityCapacityText.StatusLine(read);
         var columns = ViewerIdentityCapacityText.ColumnRows(read);
-        var scans = ViewerIdentityCapacityText.ScanRows(read);
+        var scans = ViewerIdentityCapacityText.ScanRows(read, clock ?? ViewerTimeHelper.ActiveServerClock);
         ColumnsDataGrid.ItemsSource = columns;
         ScanDataGrid.ItemsSource = scans;
         ColumnsEmptyMessage.Text = ViewerIdentityCapacityText.ColumnsEmptyText(read);
