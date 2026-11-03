@@ -1463,6 +1463,10 @@ public partial class MainWindow : Window
                    registration there would wait out the reset's drain timeout. */
                 using var collectionScope = await CollectionResetGate.BeginCollectionAsync();
 
+                /* #7215: this server's turn, so these runs and a scheduled sweep or tab-open run on the same server never share its
+                   telemetry slot. */
+                using var serverTurn = await _collectorService.AcquireServerRunAsync(server);
+
                 var onLoadCollectors = _scheduleManager.GetOnLoadCollectorsForServer(server.Id);
                 foreach (var collector in onLoadCollectors)
                 {

@@ -7,6 +7,7 @@
  */
 
 using System.Collections.Generic;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Storage;
 
@@ -267,8 +268,13 @@ public static class QueryTagRollupSql
     private const string BlockingKey =
         "COALESCE(r.blocking_client_app, '') || chr(31) || COALESCE(r.blocking_login_name, '') || chr(31) || COALESCE(r.blocking_host_name, '') || chr(31) || COALESCE(r.database_name, '')";
 
-    private static string BlockingSql(string source, string window, string blockedCount, string causedCount) => $"""
-        SELECT s.server_id, s.tag_id,
+    /// <summary>
+    /// The two arms over one relation <c>r</c>: a row lands on the blocked side's tag (blocked) and on the blocking side's tag
+    /// (caused). <paramref name="with"/> is empty or a WITH list ending in a comma-free CTE; <paramref name="armWhere"/> is the
+    /// extra predicate on <c>r</c> (empty when the CTE already applied the window).
+    /// </summary>
+    private static string BlockingSql(string with, string source, string armWhere, string blockedCount, string causedCount) => $"""
+        {with}SELECT s.server_id, s.tag_id,
                CAST(SUM(s.blocked_ms) AS double precision) AS blocked_ms, CAST(SUM(s.caused_ms) AS double precision) AS caused_ms,
                CAST(SUM(s.blocked_n) AS double precision) AS {blockedCount}, CAST(SUM(s.caused_n) AS double precision) AS {causedCount}
         FROM (
@@ -276,22 +282,43 @@ public static class QueryTagRollupSql
             FROM {source} AS r
             LEFT JOIN config.query_tag_map AS m
                    ON m.server_id = r.server_id AND m.key_kind = 'caller' AND m.key = {BlockedKey}
-            WHERE r.server_id = ANY($1) AND {window}
+            WHERE r.server_id = ANY($1){armWhere}
             UNION ALL
             SELECT r.server_id, m.tag_id, 0, COALESCE(r.wait_time_ms, 0), 0, 1
             FROM {source} AS r
             LEFT JOIN config.query_tag_map AS m
                    ON m.server_id = r.server_id AND m.key_kind = 'caller' AND m.key = {BlockingKey}
-            WHERE r.server_id = ANY($1) AND {window}
+            WHERE r.server_id = ANY($1){armWhere}
         ) AS s
         GROUP BY s.server_id, s.tag_id
         """;
 
-    /// <summary>Blocking, blocked-process reports: the wait lands on the blocked side's tag (blocked) and on the blocking side's tag (caused).</summary>
-    public static readonly string BlockingReportsSql = BlockingSql("collect.blocked_process_reports", "r.event_time >= $2 AND r.event_time <= $3" + EventFloorPlaceholder, "blocked_reports", "caused_reports");
+    /// <summary>
+    /// Blocking, blocked-process reports (#7163): the wait lands on the blocked side's tag (blocked) and on the blocking side's
+    /// tag (caused). The reports are collapsed to WAITS first (<see cref="BlockingWaits.WaitsCteSql"/>, the definition the
+    /// alert, the fleet tile and the daily summary share): SQL Server writes a report every threshold interval, each carrying
+    /// the wait so far, so summing the rows added a wait up about eleven times over a one-minute wait. <c>blocked_ms</c> and
+    /// <c>caused_ms</c> are the longest report of each wait and the counts are waits; a parallel query's thread waiting on its own
+    /// session is no wait (<see cref="BlockingWaits.NotSelfWaitSql"/>). The tag keys are the longest report's caller columns.
+    /// <see cref="EventFloorPlaceholder"/> (#7204) adds the <c>collection_time</c> floor ($4) inside the CTE, so the chunk exclusion applies before the collapse.
+    /// The columns keep the names <c>blocked_reports</c> and <c>caused_reports</c>, the section's contract.
+    /// </summary>
+    public static readonly string BlockingReportsSql = BlockingSql(
+        "WITH " + BlockingWaits.WaitsCteSql(
+            BlockingWaits.SqlDialect.Postgres, "rw",
+            """
+            SELECT server_id, blocked_spid, blocking_spid, event_time, wait_time_ms, database_name,
+                   blocked_client_app, blocked_login_name, blocked_host_name, blocking_client_app, blocking_login_name, blocking_host_name
+            FROM collect.blocked_process_reports AS r
+            WHERE server_id = ANY($1) AND event_time >= $2 AND event_time <= $3
+            """ + EventFloorPlaceholder,
+            ["server_id"]) + "\n",
+        "rw", string.Empty, "blocked_reports", "caused_reports");
 
-    /// <summary>Blocking, DMV snapshots: the same two sides over the always-on DMV sample.</summary>
-    public static readonly string BlockingSnapshotsSql = BlockingSql("collect.dmv_blocking_snapshots", "r.collection_time >= $2 AND r.collection_time <= $3", "blocked_snapshots", "caused_snapshots");
+    /// <summary>Blocking, DMV snapshots: the same two sides over the always-on DMV sample, one row per sample (a still-open wait repeats once per sample); a parallel query's self-wait rows are left out.</summary>
+    public static readonly string BlockingSnapshotsSql = BlockingSql(
+        string.Empty, "collect.dmv_blocking_snapshots",
+        " AND r.collection_time >= $2 AND r.collection_time <= $3 AND " + BlockingWaits.NotSelfWaitSql, "blocked_snapshots", "caused_snapshots");
 
     /// <summary>The deadlock graphs of the window, newest first, up to $4; the processes are parsed in C# (a graph is XML). $5 is the <c>collection_time</c> floor (<see cref="EventWindowFloor"/>, #7204): without it the fleet read opens and sorts every retained chunk.</summary>
     public const string DeadlockGraphsSql = """
