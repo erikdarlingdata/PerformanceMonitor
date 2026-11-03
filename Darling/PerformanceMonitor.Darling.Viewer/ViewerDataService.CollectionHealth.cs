@@ -488,21 +488,28 @@ public sealed partial class ViewerDataService
 
         /* #4999: read before the health statement's reader opens, so one call never holds two. */
         var scheduleOverrides = await ReadScheduleOverridesForHealthAsync(cancellationToken);
-        await using var command = _dataSource.CreateCommand(CollectionHealthSql);
-        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
-        command.Parameters.Add(new NpgsqlParameter<DateTime>
+        var windowStart = DateTime.UtcNow.AddDays(-7);
+        await using (var command = _dataSource.CreateCommand(CollectionHealthSql))
         {
-            TypedValue = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-7), DateTimeKind.Unspecified),
-        });
+            command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+            command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+            command.Parameters.Add(new NpgsqlParameter<DateTime>
+            {
+                TypedValue = DateTime.SpecifyKind(windowStart, DateTimeKind.Unspecified),
+            });
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
-        {
-            items.Add(MapHealthRow(reader));
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                items.Add(MapHealthRow(reader));
+            }
         }
 
         ApplyScheduledFrequencies(items, serverId, scheduleOverrides);
+
+        /* #7242: the tab bands the same activity quiet bar as the Overview card and get_collection_health, in observed time. */
+        await ApplyObservedQuietRunsAsync(
+            _dataSource, new() { [serverId] = items }, windowStart, DateTime.UtcNow, cancellationToken);
         await ApplyReadSourceAsync(items, serverId, cancellationToken);
         return items;
     }
@@ -826,8 +833,54 @@ LIMIT 1";
 
         /* #5666: after the cadence is stamped (the ladder reads it) and after the aggregate's reader has closed. */
         await ApplyTrailingSuccessRunsAsync(_dataSource, byServer, windowStart, CancellationToken.None);
+        await ApplyObservedQuietRunsAsync(_dataSource, byServer, windowStart, now, CancellationToken.None);
 
         return byServer;
+    }
+
+    /// <summary>
+    /// #7242: sets <see cref="CollectorHealthRow.ObservedQuietRuns"/> and <see cref="CollectorHealthRow.ObservedQuietGaps"/> on the rows (the fleet's, and the server tab's) the activity quiet bar turns on
+    /// (<see cref="CollectorHealthClassifier.NeedsObservedQuietRuns"/>), through <see cref="CollectorObservedQuietRuns"/>, the read the
+    /// service's fleet card shares, so the Overview card and the service agree for a server the service was stopped on. One follow-up
+    /// statement after the aggregate's reader has closed, and none when no row needs it.
+    /// </summary>
+    internal static async Task ApplyObservedQuietRunsAsync(
+        NpgsqlDataSource dataSource,
+        Dictionary<int, List<CollectorHealthRow>> byServer,
+        DateTime windowStart,
+        DateTime nowUtc,
+        CancellationToken cancellationToken)
+    {
+        var requests = new List<(int ServerId, string CollectorName, DateTime? BreakTime)>();
+        foreach (var (serverId, serverRows) in byServer)
+        {
+            foreach (var r in serverRows)
+            {
+                if (CollectorHealthClassifier.NeedsObservedQuietRuns(r.CollectorName, r.LastProductiveTime, nowUtc))
+                {
+                    requests.Add((serverId, r.CollectorName, r.LastZeroRowStreakBreakTime));
+                }
+            }
+        }
+
+        if (requests.Count == 0)
+        {
+            return;
+        }
+
+        var counts = await CollectorObservedQuietRuns.ReadAsync(
+            dataSource, requests, windowStart, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+        foreach (var (serverId, serverRows) in byServer)
+        {
+            foreach (var r in serverRows)
+            {
+                if (counts.TryGetValue((serverId, r.CollectorName), out var gaps))
+                {
+                    r.ObservedQuietRuns = gaps.Runs;
+                    r.ObservedQuietGaps = gaps;
+                }
+            }
+        }
     }
 
     /// <summary>
@@ -1299,8 +1352,22 @@ public class CollectorHealthRow
     /// (<see cref="CollectorHealthClassifier.EstimateTrailingZeroRowSuccessRuns"/>) from the same aggregate and the cadence this row is
     /// banded against. Computed where it is read, so it always follows the cadence <see cref="ViewerDataService.ApplyScheduledFrequencies"/> stamped.
     /// </summary>
-    public long TrailingZeroRowSuccessRuns => CollectorHealthClassifier.EstimateTrailingZeroRowSuccessRuns(
-        LastRunTime, LastZeroRowStreakBreakTime, TotalRuns, FrequencyMinutes);
+    public long TrailingZeroRowSuccessRuns => ObservedQuietRuns
+        ?? CollectorHealthClassifier.EstimateTrailingZeroRowSuccessRuns(
+            LastRunTime, LastZeroRowStreakBreakTime, TotalRuns, FrequencyMinutes);
+
+    /// <summary>
+    /// #7242: the EXACT count of zero-row runs after <see cref="LastZeroRowStreakBreakTime"/>, set for the rows the activity quiet bar turns
+    /// on (<see cref="CollectorHealthClassifier.NeedsObservedQuietRuns"/>) and null for every other. The estimate above divides elapsed time
+    /// by the cadence, so for such a row it would hand the wall clock back, hours the service was stopped included.
+    /// </summary>
+    internal long? ObservedQuietRuns { get; set; }
+
+    /// <summary>
+    /// #7242: the gaps between those runs, set with <see cref="ObservedQuietRuns"/>. The observed quiet time the bar is measured in is
+    /// the sum of the gaps, each counted at most three intervals (an hour at least), read at the cadence this row is banded against.
+    /// </summary>
+    internal ObservedQuietGaps? ObservedQuietGaps { get; set; }
 
     /// <summary>
     /// #6828: whether this collector WAS producing rows and now records SUCCESS with zero rows every cycle (#3885). Left off this row
@@ -1308,7 +1375,8 @@ public class CollectorHealthRow
     /// excluded inside the shared predicate.
     /// </summary>
     public bool ProducedThenStopped => CollectorHealthClassifier.ProducedThenStopped(
-        CollectorName, TrailingZeroRowSuccessRuns, LastProductiveTime);
+        CollectorName, TrailingZeroRowSuccessRuns, LastProductiveTime, FrequencyMinutes,
+        ObservedQuietGaps?.Minutes(FrequencyMinutes));
 
     /// <summary>Whether the server this row was read for reports Always On as off. Stamped by the fleet read, false for a row built outside it.</summary>
     internal bool ServerAlwaysOnOff { get; set; }
