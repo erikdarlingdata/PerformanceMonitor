@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
@@ -50,6 +51,10 @@ public sealed class ProposalWebRouteLiveTests(PostgresKillLiveTests.ScramTlsClus
     private sealed record Ctx(NpgsqlDataSource Source, NpgsqlConnection Store, NpgsqlConnection Admin, string Victim, string Arg, Guid RequestId,
         int RouteId, SeatBox Seats, ScratchPostgres Scratch, CancellationToken Ct)
     {
+        /// <summary>Login roles a test made inside the scratch store. <c>RunAsync</c> drops them in its <c>finally</c>, so an assertion that fails first still
+        /// leaves nothing on the shared cluster.</summary>
+        public List<string> StoreRoles { get; } = [];
+
         /// <summary>Opens a victim backend and has the agent propose its kill. Answers the backend and the proposal id.</summary>
         public async Task<(NpgsqlConnection Connection, int Pid, Guid ProposalId)> ProposeKillAsync(PostgresKillLiveTests.ScramTlsCluster target)
         {
@@ -178,6 +183,7 @@ public sealed class ProposalWebRouteLiveTests(PostgresKillLiveTests.ScramTlsClus
         var envName = "PM_PGW_" + tag;
         await using var scratch = await ScratchPostgres.CreateAsync(Cluster!, ct, emptyStore: true);
         var bodySucceeded = false;
+        Ctx? ctx = null;
         await using var admin = new NpgsqlConnection(target.SuperuserConnectionString);
         await admin.OpenAsync(ct);
         try
@@ -210,7 +216,8 @@ public sealed class ProposalWebRouteLiveTests(PostgresKillLiveTests.ScramTlsClus
             var opened = await requests.OpenOrJoinAsync(alert, ct);
             var claim = await requests.ClaimAsync(opened.RequestId!.Value, "agent-a", ct);
             var arg = AgentActionArgumentTests.Arg(opened.RequestId.Value.ToString(), claim.ClaimId!.Value.ToString(), reason: "the blocker holds a transaction open");
-            await body(new Ctx(source, store, admin, victim, arg, opened.RequestId.Value, routeId, new SeatBox(), scratch, ct));
+            ctx = new Ctx(source, store, admin, victim, arg, opened.RequestId.Value, routeId, new SeatBox(), scratch, ct);
+            await body(ctx);
             bodySucceeded = true;
         }
         finally
@@ -232,7 +239,15 @@ public sealed class ProposalWebRouteLiveTests(PostgresKillLiveTests.ScramTlsClus
                 }
             });
 
-            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (connection, token) =>
+            {
+                NpgsqlConnection.ClearAllPools();
+                foreach (var role in ctx?.StoreRoles ?? [])
+                {
+                    await using var drop = new NpgsqlCommand($"DROP OWNED BY {role}; DROP ROLE IF EXISTS {role}", connection);
+                    await drop.ExecuteNonQueryAsync(token);
+                }
+            });
         }
     }
 
@@ -427,6 +442,7 @@ public sealed class ProposalWebRouteLiveTests(PostgresKillLiveTests.ScramTlsClus
             const string rolePassword = "proposal-web-view-pw";
             await using (var create = new NpgsqlCommand($"CREATE ROLE {roleName} LOGIN NOSUPERUSER PASSWORD '{rolePassword}'", c.Store))
                 await create.ExecuteNonQueryAsync(c.Ct);
+            c.StoreRoles.Add(roleName);
             foreach (var statement in ViewerGrantReplay.StatementsFor(roleName, c.Scratch.DatabaseName))
             {
                 await using var grant = new NpgsqlCommand(statement, c.Store);
@@ -456,9 +472,6 @@ public sealed class ProposalWebRouteLiveTests(PostgresKillLiveTests.ScramTlsClus
             c.Seats.Seat = DarlingWebSeat.ReadsOnly;
             var signedOut = await web.SendAsync("GET", $"/api/proposals/{proposalId}");
             Assert.Equal(DarlingWebEndpoints.ProposalPressSignInNote, (string?)signedOut.Body!["press_note"]);
-
-            await using (var drop = new NpgsqlCommand($"DROP OWNED BY {roleName}; DROP ROLE {roleName}", c.Store))
-                await drop.ExecuteNonQueryAsync(c.Ct);
         });
     }
 
