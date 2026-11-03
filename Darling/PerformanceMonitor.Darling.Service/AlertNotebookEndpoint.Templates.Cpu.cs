@@ -47,7 +47,10 @@ internal static partial class AlertNotebookEndpoint
 
     /// <summary>Both CPU measures (<c>sqlserver_cpu_utilization</c>, <c>pg_acu_utilization_pct</c>) are Gauge
     /// archetype (point-in-time percent readings, per <c>MeasureCatalog</c>'s own grain-trap note) — their
-    /// <c>ValidAggs</c> is avg/min/max, never <c>count</c>. <see cref="TimelinePanel"/> hardcodes
+    /// <c>ValidAggs</c> is avg/min/max, never <c>count</c>. The aggregate is <c>max</c>: the panel buckets by
+    /// hour over 24 h, and an alert fires on a few minutes over the bar (#7085), so an hourly average would
+    /// flatten a 10-minute spike at 95% in a 20% hour to about 32% and show nothing where the alert fired
+    /// (#7203). The same helper draws the Runnable Queue panels, whose alert is also a short excursion over a bar. <see cref="TimelinePanel"/> hardcodes
     /// <c>aggregate: "count"</c> for the per-event deadlock/blocking sources it was built for, so a CPU
     /// timeline needs its own cell rather than reusing that helper (widening it to a per-family aggregate
     /// would change what every OTHER family's already-shipped panel emits). No annotation overlay: neither
@@ -60,7 +63,7 @@ internal static partial class AlertNotebookEndpoint
         ["title"] = title,
         ["source"] = source,
         ["measure"] = measure,
-        ["aggregate"] = "avg",
+        ["aggregate"] = "max",
         ["viz"] = "line",
         ["timeBucket"] = "hour",
         ["range"] = new JsonObject
