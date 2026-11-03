@@ -324,8 +324,10 @@ public sealed class QueryStatsCollector : CollectorDefinitionBase<QueryStatsColl
     /// #7337: the slots are split, not spent on recency alone (which left a heavy statement that runs now and then with
     /// no plan for good): <see cref="PlansByRecency"/> go to the newest statements by <c>last_execution_time</c>, so a
     /// plan that just recompiled or regressed still gets one, and <see cref="PlansByWeight"/> go to the heaviest by
-    /// <c>total_elapsed_time</c>. The inline apply hands each a plan handle and the rest NULL; the deferred fetch picks
-    /// its misses the same way.
+    /// <c>total_elapsed_time</c>. The inline apply hands each a plan handle and the rest NULL. The split is the inline
+    /// apply's only: the inline query has no counter baselines, so it can rank only by recency and lifetime weight. The
+    /// deferred fetch takes the first <see cref="MaxPlansPerRun"/> misses in the order <c>SkipIdleAndRank</c> returns,
+    /// the in-interval elapsed rank, which already covers a regressed plan and a heavy statement on the run it executes.
     /// #7344: the inline ranks are taken over the self-filtered survivors of the candidate TOP, so a slot never goes to
     /// one of the collector's own statements. Those are the newest rows at collection time and, for the heavy
     /// collectors, among the heaviest by lifetime total; ranked before the filter they took 99 of 100 slots in both
@@ -340,8 +342,8 @@ public sealed class QueryStatsCollector : CollectorDefinitionBase<QueryStatsColl
     /// #7337: the plan slots given to the heaviest statements by <c>total_elapsed_time</c>. The weight is the lifetime
     /// total and the inline apply keeps no digest cache, so inline mode does not rotate this half: each run renders the
     /// same lifetime-heaviest statements again, and a statement that runs now and then gets a slot only while its
-    /// lifetime total is in the top <see cref="PlansByWeight"/>. The deferred fetch caches a fetched plan and moves on
-    /// to the next heaviest miss.
+    /// lifetime total is in the top <see cref="PlansByWeight"/>. The deferred fetch has no weight half: it ranks by the in-interval
+    /// delta, and it caches a fetched plan so the next run spends its slots on the next miss.
     /// </summary>
     public const int PlansByWeight = MaxPlansPerRun - PlansByRecency;
 
