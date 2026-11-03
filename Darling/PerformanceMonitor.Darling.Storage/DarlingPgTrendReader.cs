@@ -266,14 +266,19 @@ public static class DarlingPgTrendReader
         )
         SELECT event
         FROM differenced
-        /* The first snapshot of each event has nothing to difference against: it is the window's left edge. */
-        WHERE prev_samples IS NOT NULL
         GROUP BY event
         /* Summed per-interval deltas, with WaitTrendSql's reset rule (#7205): the counters restart at zero when
            the target restarts, and across the restart the new value is taken whole. MAX - MIN across a window
            holding a restart is the pre-restart lifetime total, which ranks whichever event ran longest before
-           it. */
-        ORDER BY SUM(CASE WHEN sample_count < prev_samples THEN sample_count ELSE sample_count - prev_samples END) DESC, event
+           it. The first snapshot of each event has nothing to difference against, so it adds 0 rather than
+           being filtered out: an event seen once in the window stays a candidate (every sum is 0 and the event
+           name decides, as before), so a window with a single snapshot still answers "needs two snapshots"
+           rather than "nothing was sampled". */
+        ORDER BY SUM(CASE
+                         WHEN prev_samples IS NULL THEN 0
+                         WHEN sample_count < prev_samples THEN sample_count
+                         ELSE sample_count - prev_samples
+                     END) DESC, event
         LIMIT 1
         """;
 

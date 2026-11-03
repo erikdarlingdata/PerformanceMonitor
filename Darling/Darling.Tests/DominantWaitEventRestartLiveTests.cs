@@ -61,7 +61,44 @@ public sealed class DominantWaitEventRestartLiveTests
         });
     }
 
-    private static async Task SeedAsync(NpgsqlConnection connection, string eventName, CancellationToken ct, params long[] counts)
+    [Fact]
+    public async Task WindowWithOneSnapshotPerEvent_StillPicksAnEvent_ByName()
+    {
+        await RunAsync(async (connection, postgres, ct) =>
+        {
+            /* Nothing to difference: every event's sum is 0, so the event name decides, as the MAX - MIN ranking did.
+               A null here sends the MCP tool down the "extension is missing" answer instead of "needs two snapshots". */
+            await SeedAsync(connection, "relation", ct, 900);
+            await SeedAsync(connection, "DataFileRead", ct, 40);
+
+            var chosen = await DarlingPgTrendReader.GetDominantWaitEventAsync(postgres, ServerId, T0, T0.AddHours(1), ct);
+
+            Assert.Equal("DataFileRead", chosen);
+        });
+    }
+
+    [Fact]
+    public async Task EventsSnapshottedAtDifferentTimes_AreDifferencedWithinTheirOwnEvent()
+    {
+        await RunAsync(async (connection, postgres, ct) =>
+        {
+            /* relation snapshots at minutes 0, 2, 4 and DataFileRead at 1, 3, 5, so the rows interleave by time.
+               relation grows 20, DataFileRead grows 10. Without PARTITION BY event, LAG differences each row
+               against the OTHER event's row before it, and DataFileRead's ~1000-count baseline wins. */
+            await SeedAtAsync(connection, "relation", minuteOffset: 0, ct, 10, 20, 30);
+            await SeedAtAsync(connection, "DataFileRead", minuteOffset: 1, ct, 1000, 1005, 1010);
+
+            var chosen = await DarlingPgTrendReader.GetDominantWaitEventAsync(postgres, ServerId, T0, T0.AddHours(1), ct);
+
+            Assert.Equal("relation", chosen);
+        });
+    }
+
+    private static Task SeedAsync(NpgsqlConnection connection, string eventName, CancellationToken ct, params long[] counts) =>
+        SeedAtAsync(connection, eventName, minuteOffset: 0, ct, counts);
+
+    /* Snapshots land every two minutes from the offset, so two events seeded at offsets 0 and 1 interleave. */
+    private static async Task SeedAtAsync(NpgsqlConnection connection, string eventName, int minuteOffset, CancellationToken ct, params long[] counts)
     {
         for (var i = 0; i < counts.Length; i++)
         {
@@ -69,7 +106,7 @@ public sealed class DominantWaitEventRestartLiveTests
 INSERT INTO pg_wait_sampling
     (collection_id, collection_time, server_id, server_name, event_type, event, query_id, sample_count, profile_period_ms, backend_count, sampled_ms)
 VALUES ($1, $2, $3, $4, 'IO', $5, 1, $6, 10, 1, 1000)",
-                CollectionIdGenerator.Next(), T0.AddMinutes(i), ServerId, ServerName, eventName, counts[i]);
+                CollectionIdGenerator.Next(), T0.AddMinutes(minuteOffset + (i * 2)), ServerId, ServerName, eventName, counts[i]);
         }
     }
 
