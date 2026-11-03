@@ -60,26 +60,6 @@ internal static class DarlingTrendReader
     /// in the same cycle, which is why the join is nearest-match rather than equality.</summary>
     public sealed record MemoryGrantTrendPoint(DateTime CollectionTime, double TotalGrantedMb);
 
-    /// <summary>One perfmon-trend point for a single counter: the counter value, the per-interval delta,
-    /// and the wall-clock seconds that delta covers, all summed across the counter's instances at that
-    /// collection (Lite's <c>PerfmonTrendPoint</c>, plus the interval Lite does not carry).
-    /// <para><c>SampleIntervalSeconds</c> is what makes a zero readable: the collector reports 0 in
-    /// exactly the cases where no delta was knowable (first sighting, counter reset, gap past the
-    /// policy), so (0, 0) is "unknown" while (0, n) is "genuinely idle". Without it the two are the same
-    /// number and a fabricated zero reads as quiet (#2234).</para>
-    /// <para>Rows written before that fix carry a hard-coded 60 regardless of the real gap, so a rate
-    /// derived over a window spanning the upgrade is only as good as its newest rows.</para>
-    /// <para>Since V132 (#3653 A7) <c>CntrType</c> is the counter's stored DMV type when every instance row
-    /// summed into the point agrees on one, else null (a pre-rung row, or a family whose instances mix
-    /// types); <c>DeltaValue</c> and <c>SampleIntervalSeconds</c> are nullable because a GAUGE row stores
-    /// neither — its <c>Value</c> is the reading — and a 0 manufactured in their place would be #3642's
-    /// fabricated zero on a level that has no delta.</para>
-    /// <para><c>Artifacts</c> (#4476) is how many of this point's instance rows were an isolated single-sample
-    /// Wait Statistics spike, excluded from <c>Value</c>/<c>DeltaValue</c> before they were summed. This
-    /// per-collection type is Darling's own (Lite's <c>PerfmonTrendPoint</c> is a different type in a different
-    /// namespace), so the field is appended here rather than defaulted.</para></summary>
-    public sealed record PerfmonTrendPoint(DateTime CollectionTime, long Value, long? DeltaValue, long? SampleIntervalSeconds, int? CntrType, long Artifacts = 0);
-
     /// <summary>
     /// One query-duration / execution-count trend point, shared by the three Performance-Trends siblings:
     /// the per-second rate (elapsed ms/sec) plus executions/sec (Lite's <c>QueryTrendPoint</c> shape).
@@ -452,33 +432,6 @@ internal static class DarlingTrendReader
             GROUP BY collection_time
             ORDER BY collection_time
             """;
-    }
-
-    public static async Task<List<PerfmonTrendPoint>> GetPerfmonTrendAsync(
-        NpgsqlDataSource postgres, int serverId, string counterName, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
-    {
-        var items = new List<PerfmonTrendPoint>();
-        await using var command = postgres.CreateCommand(PerfmonTrendSql);
-        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-        DarlingMcpReadParameters.AddInt(command, serverId);
-        DarlingMcpReadParameters.AddText(command, counterName);
-        DarlingMcpReadParameters.AddTimestamp(command, startUtc);
-        DarlingMcpReadParameters.AddTimestamp(command, endUtc);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
-        {
-            items.Add(new PerfmonTrendPoint(
-                reader.GetDateTime(0),
-                reader.IsDBNull(1) ? 0 : reader.GetInt64(1),
-                /* NULL stays NULL on both: a gauge's instance rows store neither (V132), and a pre-V132 row's
-                   NULL interval is #3540's third state; 0 is the marker and must not be manufactured. */
-                reader.IsDBNull(2) ? null : reader.GetInt64(2),
-                reader.IsDBNull(3) ? null : reader.GetInt64(3),
-                reader.IsDBNull(4) ? null : reader.GetInt32(4),
-                reader.GetInt64(5)));
-        }
-
-        return items;
     }
 
     /// <summary>
