@@ -46,20 +46,13 @@ public static class PlanRegressionDaily
     /// <summary>Days of clock skew between a monitored server and the collector that the closing of a day tolerates.</summary>
     public const int PlanRegressionSkewMarginDays = 1;
 
-    /// <summary>
-    /// A test pin only since #5812: before it, a day D was built only once <c>D &lt;= T - ClosedDayLagDays</c> (one day past,
-    /// <see cref="PlanRegressionSkewMarginDays"/> of skew, one day for an interval's span) and the three newest days came from
-    /// the live table. The builder now builds every day of the window, the open ones as partial days, and no code reads this.
-    /// </summary>
-    public const int ClosedDayLagDays = 1 + PlanRegressionSkewMarginDays + 1;
-
     /// <summary>How many days back the hourly cleanup keeps built days: a day older than this can never be read, because
     /// the read's window is <see cref="WindowDays"/> and a row's day can be a day after the day of its first execution.
     /// V168's trigger clamps on the whole day 17 days back, one day wider, so it can mark every day this keeps (a late row
     /// for T-16 has its first execution on T-17).</summary>
     public const int MarkLateWindowDays = WindowDays + 2;
 
-    /// <summary>The open days (newer than <see cref="ClosedDayLagDays"/>) are built too, as partial days (#5812): a build covers
+    /// <summary>The open days (the three newest, which before #5812 came only from the live table) are built too, as partial days (#5812): a build covers
     /// the rows whose <c>first_execution_time</c> is below its watermark, <c>built_through</c>, which is this many hours before
     /// the current hour by the store's clock. It sits one hour under the bound of V185's trigger (<see cref="LateTriggerLagHours"/>
     /// hours before the current hour), so a write whose transaction began up to an hour before a build still marks the day it

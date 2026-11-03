@@ -118,11 +118,7 @@ public sealed class QueryStoreForcedPlansCollector : CollectorDefinitionBase<Que
 
     /// <summary>Query Store is 2016 (v13) and later; Azure SQL DB and Managed Instance are never version-gated; unknown (0) is assumed newest.</summary>
     public override bool AppliesTo(CollectorTargetInfo target) =>
-        target is null
-        || target.SqlMajorVersion == 0
-        || target.SqlMajorVersion >= 13
-        || target.IsAzureSqlDb
-        || target.IsAzureManagedInstance;
+        target is null || target.MeetsMinimumVersion(13, unknownIsNewest: true);
 
     /// <summary>Azure SQL DB rejects three-part names, so the host connects per database there instead.</summary>
     public override bool RunsPerDatabase(CollectorTargetInfo target) => target is not null && target.IsAzureSqlDb;

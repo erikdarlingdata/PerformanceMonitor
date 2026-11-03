@@ -38,8 +38,8 @@ namespace Darling.Tests;
 /// below) for a DML verb aimed at the table. (2) Every
 /// <c>BeginBinaryImportAsync</c> site must be on a register, because the real COPY is built at run time
 /// (<c>PgCollectorRowWriter.CopyCommandFor(definition)</c> appends <c>schema.TargetTable</c>), so arm 1 cannot see it:
-/// the runner's one site over the generic definition, and the four RDS ingestors, each over its own fixed definition
-/// with a named target table that is not this one. (3) No migration rung above the ledger's own may run DML on the table.
+/// the runner's one site over the generic definition, and RdsCopyWriter's one site over a definition its caller hands it
+/// (#7222): the four RDS ingestors each pass their own fixed definition, with a named target table that is not this one. (3) No migration rung above the ledger's own may run DML on the table.
 /// The scan must also be shown to have looked: it asserts the number of files it read and that the files it names were
 /// among them, and each arm carries a positive control.</para>
 ///
@@ -70,6 +70,7 @@ namespace Darling.Tests;
 public sealed class QueryStatsWriterCensusPins
 {
     private const string RunnerFile = "PerformanceMonitor.Darling.Service/DarlingCollectorRunner.cs";
+    private const string CopyWriterFile = "PerformanceMonitor.Darling.Service/Targets/RdsCopyWriter.cs";
     private const string TheWriter = "CopyBatchOnceAsync";
     private const string TableName = "query_stats";
     private const int LedgerRung = 164;
@@ -101,8 +102,9 @@ public sealed class QueryStatsWriterCensusPins
         @"^PgCollectorRowWriter\s*\.\s*CopyCommandFor\s*\(\s*(?<def>\w+)\s*\)$",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
-    private static readonly Regex s_definitionDeclaration = new(
-        @"\bvar\s+definition\s*=\s*(?<expr>[\w.]+)\s*;",
+    /// <summary>A call of the shared RDS COPY, with its first argument: the definition the call copies over.</summary>
+    private static readonly Regex s_copyWriterCall = new(
+        @"\bRdsCopyWriter\s*\.\s*WriteAsync\s*(?:<[^>(]*>)?\s*\(\s*(?<expr>[^,]*?)\s*,",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     private static readonly Regex s_copyBatchOnceDeclaration = new(
@@ -113,8 +115,8 @@ public sealed class QueryStatsWriterCensusPins
     internal sealed record ImportSite(string File, int Line, string Argument, string Definition, int Offset);
 
     /// <summary>
-    /// The register of COPY sites that are NOT the runner's: each RDS ingestor copies over its own fixed collector
-    /// definition into a named table that is not <c>query_stats</c>. The table is declared here and compared with the
+    /// The register of the callers of RdsCopyWriter, the COPY site that is NOT the runner's: each RDS ingestor hands it its own
+    /// fixed collector definition, which writes a named table that is not <c>query_stats</c>. The table is declared here and compared with the
     /// definition's real <c>TargetTable</c>, so a changed definition fails the fact below rather than passing quietly.
     /// </summary>
     private static readonly SortedDictionary<string, (string Definition, string Table, Func<string> ActualTable)> s_fixedSites =
@@ -311,9 +313,9 @@ public sealed class QueryStatsWriterCensusPins
         var writers = new SortedSet<string>(FindLiteralWriters(sources), StringComparer.Ordinal);
         foreach (var site in FindImportSites(sources))
         {
-            if (s_fixedSites.TryGetValue(site.File, out var allowed) && site.Definition == "definition"
-                && DeclaredDefinitions(textByFile[site.File]).SequenceEqual(new[] { allowed.Definition }))
+            if (site.File == CopyWriterFile && site.Definition == "definition")
             {
+                /* The helper copies over whatever its caller hands it, so the sites that matter are the callers, judged below. */
                 continue;
             }
 
@@ -322,12 +324,22 @@ public sealed class QueryStatsWriterCensusPins
                 : $"unlisted COPY site {site.File}:{site.Line.ToString(CultureInfo.InvariantCulture)} ({site.Argument})");
         }
 
+        foreach (var (file, text) in sources)
+        {
+            var passed = file == CopyWriterFile ? new List<string>() : PassedDefinitions(text);
+            if (passed.Count > 0
+                && !(s_fixedSites.TryGetValue(file, out var allowed) && passed.SequenceEqual(new[] { allowed.Definition })))
+            {
+                writers.Add($"unlisted RdsCopyWriter caller {file} ({string.Join(", ", passed)})");
+            }
+        }
+
         return writers;
     }
 
-    /// <summary>The expressions a file assigns to its <c>var definition</c>: the fixed definition an RDS ingestor copies over.</summary>
-    private static List<string> DeclaredDefinitions(string text) =>
-        s_definitionDeclaration.Matches(WithoutComments(text)).Select(m => m.Groups["expr"].Value).ToList();
+    /// <summary>The definitions a file hands to RdsCopyWriter.WriteAsync, one per call: the fixed definition an RDS ingestor copies over.</summary>
+    private static List<string> PassedDefinitions(string text) =>
+        s_copyWriterCall.Matches(WithoutComments(text)).Select(m => m.Groups["expr"].Value).ToList();
 
     private static string StripSqlComments(string sql) =>
         Regex.Replace(Regex.Replace(sql, @"/\*.*?\*/", " ", RegexOptions.Singleline), @"--[^\n]*", " ");
@@ -366,13 +378,13 @@ public sealed class QueryStatsWriterCensusPins
     }
 
     [Fact]
-    public void TheCopySites_AreExactlyTheRunnersAndTheFourRdsIngestors_EachOverAFixedDefinitionWithANamedTable()
+    public void TheCopySites_AreExactlyTheRunnersAndRdsCopyWriter_WhoseFourCallersEachPassAFixedDefinitionWithANamedTable()
     {
         var sources = LoadSources();
         var sites = FindImportSites(sources);
 
-        /* The runner's one site, and one per RDS ingestor, and nothing else. */
-        var expected = new SortedSet<string>(s_fixedSites.Keys.Append(RunnerFile), StringComparer.Ordinal);
+        /* The runner's one site, and RdsCopyWriter's one, and nothing else. */
+        var expected = new SortedSet<string>(new[] { RunnerFile, CopyWriterFile }, StringComparer.Ordinal);
         var actual = new SortedSet<string>(sites.Select(s => s.File), StringComparer.Ordinal);
         Assert.True(
             actual.SetEquals(expected),
@@ -382,13 +394,17 @@ public sealed class QueryStatsWriterCensusPins
         Assert.Equal(expected.Count, sites.Count);
 
         var textByFile = sources.ToDictionary(s => s.File, s => s.Text, StringComparer.Ordinal);
+        /* RdsCopyWriter copies over the definition its caller passes, and no file but the register's calls it. */
+        Assert.Equal("definition", sites.Single(s => s.File == CopyWriterFile).Definition);
+        var callers = sources.Where(s => s.File != CopyWriterFile && PassedDefinitions(s.Text).Count > 0).Select(s => s.File);
+        Assert.True(
+            new SortedSet<string>(callers, StringComparer.Ordinal).SetEquals(s_fixedSites.Keys),
+            WhyItMatters("Every caller of RdsCopyWriter must be on the register. Found: {" + string.Join(", ", callers) + "}."));
+
         foreach (var (file, allowed) in s_fixedSites)
         {
-            /* The site copies over exactly the definition the register names, and the definition is a field of this
-               file, declared where the site can be read. */
-            var site = sites.Single(s => s.File == file);
-            Assert.Equal("definition", site.Definition);
-            var declaration = DeclaredDefinitions(textByFile[file]);
+            /* The caller hands over exactly the definition the register names, once, where the call can be read. */
+            var declaration = PassedDefinitions(textByFile[file]);
             Assert.True(
                 declaration.SequenceEqual(new[] { allowed.Definition }),
                 WhyItMatters($"{file} must copy over `{allowed.Definition}` only, found: {string.Join(", ", declaration)}."));

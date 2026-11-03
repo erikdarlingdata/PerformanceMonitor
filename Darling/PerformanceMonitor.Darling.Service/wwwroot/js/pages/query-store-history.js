@@ -73,12 +73,6 @@ const dropOlderDetached = () => {
   }
 };
 
-/** Forgets every open panel. Tests only; the page never needs it. */
-export function resetQueryStoreHistory() {
-  openHistories.clear();
-  views.clear();
-}
-
 /** The keys of the open panels, for tests. */
 export function openQueryStoreHistoryKeys() {
   return [...openHistories.keys()];

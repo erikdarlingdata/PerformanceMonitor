@@ -80,6 +80,7 @@ try {
     'import { el } from "./util.js";\nexport const SERIES_COLORS = [];\nexport function normalizeColor(c) { return c; }\nexport function renderLineChart() { return el("div", {}); }\nexport function zoomableLineChart() { return el("div", {}); }\nexport function chartZoomScope() { return null; }\n'
   );
   const page = await import(pathToFileURL(path.join(scratch, "pages", "known-patterns.js")).href);
+  const util = await import(pathToFileURL(path.join(scratch, "util.js")).href);
 
   const newMain = () => { const m = new FakeNode("main"); m.isRoot = true; return m; };
   const tick = () => new Promise((r) => setTimeout(r, 30));
@@ -95,7 +96,7 @@ try {
       const main = newMain(); await page.renderKnownPatterns(main);
       button(main, "New known pattern").fire("click");
       out.zoneDefault = field(main, "time_zone").attrs.value;
-      out.browserZone = page.browserZone();
+      out.browserZone = util.browserZoneOrBlank();
       out.serverChoices = field(main, "server_id").children.map((o) => o.attrs.value + "=" + o.textContent);
       type(main, "server_id", "7");
       type(main, "metric_name", " High CPU ");

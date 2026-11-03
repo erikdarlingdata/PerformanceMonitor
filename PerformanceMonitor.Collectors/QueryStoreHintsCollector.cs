@@ -91,11 +91,7 @@ public sealed class QueryStoreHintsCollector : CollectorDefinitionBase<QueryStor
 
     /// <summary>The view is SQL Server 2022 (v16) and later; Azure SQL DB and Managed Instance are not version-gated; unknown (0) is assumed newest.</summary>
     public override bool AppliesTo(CollectorTargetInfo target) =>
-        target is null
-        || target.SqlMajorVersion == 0
-        || target.SqlMajorVersion >= FirstMajorVersion
-        || target.IsAzureSqlDb
-        || target.IsAzureManagedInstance;
+        target is null || target.MeetsMinimumVersion(FirstMajorVersion, unknownIsNewest: true);
 
     /// <summary>Azure SQL DB rejects three-part names, so the host connects per database there instead.</summary>
     public override bool RunsPerDatabase(CollectorTargetInfo target) => target is not null && target.IsAzureSqlDb;
