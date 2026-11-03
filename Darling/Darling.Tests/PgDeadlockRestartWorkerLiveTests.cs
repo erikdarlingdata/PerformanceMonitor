@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
@@ -99,13 +100,14 @@ public sealed class PgDeadlockRestartWorkerLiveTests
 
     /// <summary>One life of the service: a fresh worker, so nothing is in memory, sending to <paramref name="webhookUrl"/>.</summary>
     private static (Func<Task> Pass, DarlingWorker Worker) StartLife(
-        NpgsqlDataSource dataSource, string webhookUrl, CancellationToken ct)
+        NpgsqlDataSource dataSource, string webhookUrl, CancellationToken ct, Action<WebhookAlertService>? onWebhooks = null)
     {
         var config = new DarlingConfig();
         config.Webhooks.GenericUrl = webhookUrl;
         var settings = new DarlingAlertSettings(config);
         var history = new PgAlertHistoryStore(dataSource, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds, NullLogger.Instance);
         var webhooks = new WebhookAlertService(settings, DarlingAlertDeliverer.Branding, NullLogger<WebhookAlertService>.Instance, history);
+        onWebhooks?.Invoke(webhooks);
         var deliverer = new DarlingAlertDeliverer(settings, history, webhooks, NullLogger.Instance);
 
         var worker = new DarlingWorker(
@@ -264,8 +266,9 @@ public sealed class PgDeadlockRestartWorkerLiveTests
     /// <summary>
     /// The first pass of a new life cannot read the store's saved pairs (a refused or timed out read, here a revoked SELECT on
     /// <c>config_edge_trigger_watermarks</c> for the role the worker connects as). The pairs half of the seed is then not done:
-    /// nothing is paged and the saved pair is left alone, and once the read works again the next pass restores the pair and
-    /// pages it once (#7295). Without that, the failed read was never retried in the process life, so the pair was never paged.
+    /// the saved pair is left alone, and once the read works again the next pass restores the pair and pages it once (#7295).
+    /// A fresh pair that arrives while the read is failing pages once, and delivering that page must not clear the saved row
+    /// (the replace hook and the clear after a delivered page both wait for the pairs to have been read). Without that, the failed read was never retried in the process life, so the pair was never paged.
     /// </summary>
     [Fact]
     public async Task AFailedFirstSeedRead_LeavesTheSavedPairAlone_AndTheNextPassPagesItOnce()
@@ -326,17 +329,26 @@ public sealed class PgDeadlockRestartWorkerLiveTests
 
             /* Second life, first pass: the seed's read is refused. The pair is known to the signature store and the memory is
                empty, so nothing is paged, and the saved pair must be left where it is. */
-            await using (var revoke = owner.CreateCommand($"REVOKE SELECT ON config.config_edge_trigger_watermarks FROM {roleName}"))
+            await using (var revoke = owner.CreateCommand(
+                $"REVOKE SELECT ON config.config_edge_trigger_watermarks FROM {roleName}; "
+                /* The key columns stay readable, so a DELETE with a WHERE on them still runs: the clear after a delivered page is
+                   then stopped by its guard and by nothing else. The pairs and the watermark are not readable. */
+                + $"GRANT SELECT (server_id, metric_name) ON config.config_edge_trigger_watermarks TO {roleName}"))
             {
                 await revoke.ExecuteNonQueryAsync(ct);
             }
 
             Assert.Null(await new PgAlertStateStore(asRole).LoadUnannouncedPairsAsync(Key));
 
+            /* A fresh pair Q arrives while the read is failing. It is paged (the page it carries is delivered), and delivering it
+               must not clear P's saved row, which the retry has not yet loaded. */
+            await PlantReportAsync(plant, DateTime.UtcNow.AddMinutes(-1), ct, KnownPairHash, KnownPairGraph);
+
             using var healthy = new CapturingWebhookEndpoint();
-            var (secondPass, _) = StartLife(asRole, healthy.Url, ct);
+            WebhookAlertService? secondWebhooks = null;
+            var (secondPass, secondWorker) = StartLife(asRole, healthy.Url, ct, webhooks => secondWebhooks = webhooks);
             await secondPass();
-            Assert.Empty(healthy.Bodies);
+            Assert.Single(healthy.Bodies);
             Assert.Single((await state.LoadUnannouncedPairsAsync(Key))!);
 
             /* The read works again: the next pass restores the pair, pages it once, and clears the saved row. */
@@ -345,11 +357,21 @@ public sealed class PgDeadlockRestartWorkerLiveTests
                 await restore.ExecuteNonQueryAsync(ct);
             }
 
+            /* Q's page stamped both cooldowns a moment ago (the worker's, and the webhook's for every report that page listed, P's
+               report among them), and a page waits for them. Let them run out, as they do in the field, so that the pass after
+               the grant is the one that pages P. */
+            var webhookFlags = BindingFlags.NonPublic | BindingFlags.Instance;
+            var lastAlerts = (ConcurrentDictionary<string, DateTime>)typeof(DarlingWorker)
+                .GetField("_lastPgDeadlockAlert", webhookFlags)!.GetValue(secondWorker)!;
+            lastAlerts[Key] = DateTime.UtcNow.AddDays(-1);
+            typeof(WebhookAlertService).GetField("_cooldown", webhookFlags)!.SetValue(secondWebhooks, new IncidentCooldown("webhook:", null));
+            typeof(WebhookAlertService).GetField("_repeatBudget", webhookFlags)!.SetValue(secondWebhooks, new RepeatDeliveryBudget());
+
             await secondPass();
-            Assert.Single(healthy.Bodies);
+            Assert.Equal(2, healthy.Bodies.Count);
             Assert.Empty((await state.LoadUnannouncedPairsAsync(Key))!);
             await secondPass();
-            Assert.Single(healthy.Bodies);
+            Assert.Equal(2, healthy.Bodies.Count);
 
             bodySucceeded = true;
         }

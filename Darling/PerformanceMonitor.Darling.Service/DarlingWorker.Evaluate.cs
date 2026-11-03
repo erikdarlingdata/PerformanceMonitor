@@ -1206,7 +1206,14 @@ public sealed partial class DarlingWorker
                 {
                     /* The pairs this page carried are announced; a failed send keeps them for the retry sweep. */
                     _pgDeadlockUnannouncedNew.TryRemove(key, out _);
-                    await stateStore.ClearUnannouncedPairsAsync(key);
+                    /* #7295: the saved row is cleared only once the stored pairs have been read into memory. While the seed read is
+                       still failing, a fresh pair can page, and clearing then would delete a restart's saved pair that the retry has
+                       not yet loaded, so its page would be lost. The replace hook holds back the same way. */
+                    if (_pgDeadlockPairsSeeded.ContainsKey(key))
+                    {
+                        await stateStore.ClearUnannouncedPairsAsync(key);
+                    }
+
                     readClock.Restart();
                 }
 
