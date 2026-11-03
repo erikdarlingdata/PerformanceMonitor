@@ -963,6 +963,7 @@ public sealed class AlertReadFailureSurfaceTests
         "EvaluateStoreDiskPressureAsync",
         "ReadStoreSizeBytesAsync",
         "SweepStoreSelfMetricsAsync",
+        "FlushReadLatencyAsync",
         "NotifyPgResolutionAsync",
         "FetchFailedJobsAsync",
         /* #4215: the store-settings self-alert's one real store read — the

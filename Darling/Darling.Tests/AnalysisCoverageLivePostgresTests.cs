@@ -333,6 +333,73 @@ public sealed class AnalysisCoverageLivePostgresTests
         }
     }
 
+    /// <summary>
+    /// #7178 on the real store: the engine's LCK_M_SCH_M wait reaches its own SCH_M fact instead of
+    /// folding into LCK with the writer/writer lock modes, so the SCH_M scorer ramp, advice card and
+    /// RUNNING_JOBS edge can fire. LCK_M_SCH_S still folds into LCK. Lite's
+    /// <c>FactCollectorMiseryTests</c> is the twin on DuckDB.
+    /// </summary>
+    [Fact]
+    public async Task SchemaModificationWait_GetsItsOwnSchMFact_NotLck()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live schema-lock test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            await RegisterServerAsync(connection, ct);
+
+            var windowEnd = TruncateToMinutes(DateTime.UtcNow).AddMinutes(-1);
+            var windowStart = windowEnd.AddHours(-1);
+
+            await PlantWaitAsync(connection, windowEnd.AddHours(-30), "OLD_WAIT", 1_000L, ct);
+
+            /* A baseline reading, then one delta per wait type across the fully observed hour. */
+            foreach (var type in new[] { "LCK_M_SCH_M", "LCK_M_SCH_S", "LCK_M_X" })
+                await PlantWaitAsync(connection, windowStart, type, 0L, ct);
+            for (var i = 1; i <= 4; i++)
+            {
+                await PlantWaitAsync(connection, windowStart.AddMinutes(15 * i), "LCK_M_SCH_M", 100_000L, ct);
+                await PlantWaitAsync(connection, windowStart.AddMinutes(15 * i), "LCK_M_SCH_S", 50_000L, ct);
+                await PlantWaitAsync(connection, windowStart.AddMinutes(15 * i), "LCK_M_X", 25_000L, ct);
+            }
+
+            var context = new AnalysisContext
+            {
+                ServerId = ServerId,
+                ServerName = ServerName,
+                TimeRangeStart = windowStart,
+                TimeRangeEnd = windowEnd,
+                ServerUtcOffset = TimeSpan.Zero
+            };
+            var facts = await new PgFactCollector(postgres).CollectFactsAsync(context);
+
+            var schM = Assert.Single(facts, f => f.Source == "waits" && f.Key == "SCH_M");
+            Assert.Equal(400_000, schM.Metadata["wait_time_ms"]);
+            Assert.DoesNotContain(facts, f => f.Key == "LCK_M_SCH_M");
+
+            var lck = Assert.Single(facts, f => f.Source == "waits" && f.Key == "LCK");
+            Assert.Equal(300_000, lck.Metadata["wait_time_ms"]); // SCH_S + X, not SCH_M
+            Assert.False(lck.Metadata.ContainsKey("LCK_M_SCH_M_ms"));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
     private static DateTime TruncateToMinutes(DateTime value) =>
         DateTime.SpecifyKind(new DateTime(value.Ticks - (value.Ticks % TimeSpan.TicksPerMinute)), DateTimeKind.Unspecified);
 
