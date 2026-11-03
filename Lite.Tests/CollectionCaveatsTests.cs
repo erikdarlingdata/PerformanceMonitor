@@ -31,8 +31,9 @@ namespace PerformanceMonitorLite.Tests;
 /// sentence in the status prose — ONLY when a family failed. A clean pass's payload is the same object
 /// through the same serializer call, so it carries no such field and its bytes are what they were.
 ///
-/// <para>The fault planted here is a real one on a real store: the trace-flag family's <c>v_trace_flags</c>
-/// view is dropped, so <c>CollectTraceFlagFactsAsync</c>'s read fails while every other family runs. A
+/// <para>The fault planted here is a real one on a real store: the trace-flag family's <c>trace_flags</c>
+/// table is dropped (#7256: a window the archive holds nothing in reads the hot table, not the <c>v_trace_flags</c>
+/// view, so the table is what the read opens), so <c>CollectTraceFlagFactsAsync</c>'s read fails while every other family runs. A
 /// private <see cref="DuckDbInitializer"/> on a temp path (the <c>AnalysisDataSpanTests</c> shape) rather than
 /// the shared fixture, because the drop must not reach any other test's store.</para>
 /// </summary>
@@ -82,7 +83,7 @@ public sealed class CollectionCaveatsTests : IDisposable
     public async Task AFamilyWhoseReadFails_IsRecordedOnTheContext_AndTheOthersStillRun()
     {
         var duckDb = await InitializeAsync();
-        await ExecuteAsync("DROP VIEW v_trace_flags");
+        await ExecuteAsync("DROP TABLE trace_flags");
         var now = DateTime.UtcNow;
         for (var minutesAgo = 240; minutesAgo >= 0; minutesAgo -= 15)
             await PlantWaitAsync(now.AddMinutes(-minutesAgo), BenignWait, 100L);
@@ -140,7 +141,7 @@ public sealed class CollectionCaveatsTests : IDisposable
     /// The tool level, both arms. The same planted store — 25 hours of history so the real 24h gate passes, a
     /// benign wait every fifteen minutes so the window is observed and nothing fires — is analysed twice:
     /// first CLEAN, where the <c>empty</c> all-clear carries no <c>collection_caveats</c> and states its two
-    /// fact counts; then with <c>v_trace_flags</c> dropped, where the same all-clear carries the block naming
+    /// fact counts; then with the <c>trace_flags</c> table dropped, where the same all-clear carries the block naming
     /// <c>trace_flag</c>, <c>1 of 32</c>, and the caveat sentence in its message.
     /// </summary>
     [Fact]
@@ -170,7 +171,7 @@ public sealed class CollectionCaveatsTests : IDisposable
         Assert.Equal(32, service.LastCollectionFamilyCount);
 
         /* ── one family blind: same status, the block and the sentence. */
-        await ExecuteAsync("DROP VIEW v_trace_flags");
+        await ExecuteAsync("DROP TABLE trace_flags");
         var blind = await McpAnalysisTools.AnalyzeServer(service, _serverManager);
         using (var doc = JsonDocument.Parse(blind))
         {

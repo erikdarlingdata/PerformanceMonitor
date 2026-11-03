@@ -207,6 +207,7 @@ LIMIT 1";
         {
             var planXmls = new List<string>();
 
+            var plan = await _duckDb.PlanArchiveReadAsync("query_stats", "collection_time", context.TimeRangeStart, context.CancellationToken);
             using (var readLock = _duckDb.AcquireReadLock(context.CancellationToken))
             using (var connection = _duckDb.CreateConnection())
             {
@@ -226,6 +227,7 @@ LIMIT 10";
                 cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
                 cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
 
+                cmd.CommandText = plan.Apply(cmd.CommandText);
                 using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
                 while (await reader.ReadAsync(context.CancellationToken))
                 {
