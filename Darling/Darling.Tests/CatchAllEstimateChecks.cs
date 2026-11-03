@@ -106,7 +106,7 @@ AND   object_kind IN ('{StoreSelfMetrics.OtherObjectKind}', '{StoreSelfMetrics.S
         await ExecAsync(connection, "VACUUM (ANALYZE)", ct);
         /* #7303: a second catch-all relation that the test grows between the two sweeps on purpose, so the comparison below is
            shown to take another relation's relpages change out of the figure (what an autovacuum on any other table does on
-           its own, rarely). One row now, a few hundred pages after the seed. */
+           its own, rarely). One row now, about sixty pages after the seed. */
         await ExecAsync(connection, $"CREATE TABLE {GrowerTable} (id integer NOT NULL, pad text NOT NULL)", ct);
         await ExecAsync(connection, $"INSERT INTO {GrowerTable} VALUES (0, 'x')", ct);
         await ExecAsync(connection, $"VACUUM {GrowerTable}", ct);
