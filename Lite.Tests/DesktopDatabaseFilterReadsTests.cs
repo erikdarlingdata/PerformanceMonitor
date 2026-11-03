@@ -226,6 +226,22 @@ WITH file_totals AS (
     }
 
     [Fact]
+    public async Task DatabaseSizes_CostShare_UsesOneSnapshot_WhenANewCollectionLandsBetweenTheReads()
+    {
+        /* #7174: the rows and the server total must come from the same snapshot. A newer snapshot (DbA grown to 900 MB) lands after the
+           filtered rows are read and before the total is: DbA's share stays 100 of 300, not 100 of 900. */
+        await SeedSizeAsync("DbA", 5, 100);
+        await SeedSizeAsync("DbB", 5, 200);
+
+        var picked = await _service.GetDatabaseSizeLatestWithCostShareAsync(
+            ServerId, OnlyA, 300m, betweenReads: () => SeedSizeAsync("DbA", 1, 900));
+
+        var a = Assert.Single(picked);
+        Assert.Equal(100m, a.TotalSizeMb);
+        Assert.Equal(100m, Math.Round(a.MonthlyCostShare, 6));
+    }
+
+    [Fact]
     public async Task DatabaseSizeSummary_FilterTakesTheTopAmongTheChosenDatabases()
     {
         await SeedSizeAsync("DbA", 5, 100);

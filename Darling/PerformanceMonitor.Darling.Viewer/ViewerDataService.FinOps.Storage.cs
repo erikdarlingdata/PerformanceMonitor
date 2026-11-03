@@ -89,15 +89,23 @@ ORDER BY total_size_mb DESC NULLS LAST, database_name, file_type_desc, file_name
     /// <see cref="DatabaseSizeRow.MonthlyCostShare"/> as its share of the SERVER's allocated size times the monthly cost. The grid is
     /// narrowed by the saved database filter but the budget is the whole server's, so the total comes from the unfiltered snapshot:
     /// dividing by the filtered total made one picked database cost 100% of the server. A file with no allocated size takes no share.
-    /// No cost (0 or less) leaves every share 0.</summary>
+    /// No cost (0 or less) leaves every share 0. The snapshot is resolved ONCE and both reads use it, so a size collection that
+    /// lands between the two reads cannot make a share come from two different snapshots. <paramref name="betweenReads"/> is a test
+    /// seam that runs after the rows are read and before the server total is.</summary>
     public async Task<List<DatabaseSizeRow>> GetDatabaseSizeLatestWithCostShareAsync(
-        int serverId, IReadOnlyList<string>? databaseNames, decimal monthlyCostUsd, CancellationToken cancellationToken = default)
+        int serverId, IReadOnlyList<string>? databaseNames, decimal monthlyCostUsd, Func<Task>? betweenReads = null,
+        CancellationToken cancellationToken = default)
     {
-        var rows = await GetDatabaseSizeLatestAsync(serverId, databaseNames, cancellationToken);
+        var snapshotTime = await DarlingFinOpsStorageGrowthReader.GetLatestDatabaseSizeSnapshotAsync(
+            _dataSource, serverId, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+        if (snapshotTime is null) return new List<DatabaseSizeRow>();
+
+        var rows = await GetDatabaseSizeAtAsync(serverId, snapshotTime.Value, databaseNames, cancellationToken);
+        if (betweenReads is not null) await betweenReads();
         if (monthlyCostUsd <= 0m || rows.Count == 0) return rows;
 
         var serverRows = databaseNames is { Count: > 0 }
-            ? await GetDatabaseSizeLatestAsync(serverId, null, cancellationToken)
+            ? await GetDatabaseSizeAtAsync(serverId, snapshotTime.Value, null, cancellationToken)
             : rows;
         var totalMb = DatabaseSizeRow.AllocatedTotalMb(serverRows);
         if (totalMb > 0m)
@@ -110,18 +118,20 @@ ORDER BY total_size_mb DESC NULLS LAST, database_name, file_type_desc, file_name
 
     public async Task<List<DatabaseSizeRow>> GetDatabaseSizeLatestAsync(int serverId, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
     {
-        var items = new List<DatabaseSizeRow>();
         var snapshotTime = await DarlingFinOpsStorageGrowthReader.GetLatestDatabaseSizeSnapshotAsync(
             _dataSource, serverId, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
-        if (snapshotTime is null)
-        {
-            return items;
-        }
+        return snapshotTime is null
+            ? new List<DatabaseSizeRow>()
+            : await GetDatabaseSizeAtAsync(serverId, snapshotTime.Value, databaseNames, cancellationToken);
+    }
 
+    private async Task<List<DatabaseSizeRow>> GetDatabaseSizeAtAsync(int serverId, DateTime snapshotTime, IReadOnlyList<string>? databaseNames, CancellationToken cancellationToken)
+    {
+        var items = new List<DatabaseSizeRow>();
         await using var command = _dataSource.CreateCommand(DatabaseSizeLatestSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
-        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = snapshotTime.Value });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = snapshotTime });
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
