@@ -105,6 +105,11 @@ ON CONFLICT (server_id, metric_name) DO UPDATE SET
     /// <c>pg:</c> and 16 hex digits), <c>watermark</c> 1 and <c>watermark_time</c> NULL. A prefixed name never equals an
     /// exact metric name, so <see cref="LoadEdgeTriggerWatermarkAsync"/> cannot read one. No new table: the set is deleted
     /// whole when a page carries it.
+    /// <para>This departs from the V60 remark in <c>PgMigrations</c>, which rejected a compound key carried in
+    /// <c>metric_name</c> because the column "feeds alert history and mute matching". Nothing reads these rows as a metric.
+    /// The only C# reader of this table is this class, and its exact-name read (<see cref="LoadEdgeTriggerWatermarkAsync"/>)
+    /// cannot match a prefixed name. The stored value is a <c>pg:</c> hash with 16 hex digits, so the name holds no query text
+    /// or other sensitive text for a reader of the table to see.</para>
     /// </summary>
     internal const string UnannouncedPairMetricPrefix = "Deadlocks Detected new pair: ";
 
