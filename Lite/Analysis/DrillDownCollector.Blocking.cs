@@ -75,6 +75,7 @@ LIMIT {LIMIT}")
 
     private async Task CollectTopBlockingChains(AnalysisFinding finding, AnalysisContext context)
     {
+        var plan = await _duckDb.PlanArchiveReadAsync("dmv_blocking_snapshots", "collection_time", context.TimeRangeStart, context.CancellationToken);
         using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
         using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync(context.CancellationToken);
@@ -108,6 +109,7 @@ FROM
 ORDER BY wait_time_ms DESC
 LIMIT 5").Replace("{SCOPE}", SeparatelyMonitoredScope.BprFilter(context.SeparatelyMonitoredDatabases, 4));
 
+        cmd.CommandText = plan.Apply(cmd.CommandText);
         cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
         cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
         cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
@@ -244,6 +246,7 @@ LIMIT 5000";
 
     private async Task CollectLockModeBreakdown(AnalysisFinding finding, AnalysisContext context)
     {
+        var plan = await _duckDb.PlanArchiveReadAsync("wait_stats", "collection_time", context.TimeRangeStart, context.CancellationToken);
         using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
         using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync(context.CancellationToken);
@@ -261,6 +264,7 @@ GROUP BY wait_type
 ORDER BY total_wait_ms DESC
 LIMIT 10";
 
+        cmd.CommandText = plan.Apply(cmd.CommandText);
         cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
         cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
         cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
