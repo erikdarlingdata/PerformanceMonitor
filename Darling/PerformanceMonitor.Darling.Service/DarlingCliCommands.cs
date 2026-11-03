@@ -4547,7 +4547,7 @@ public static partial class DarlingCliCommands
     /// the list is readable as a policy rather than as control flow — which file gets INTERACTIVE read is the
     /// only judgement in this verb, and it should be visible at a glance.
     /// </summary>
-    private readonly record struct HardenTarget(string Path, bool AllowInteractive, bool IsDirectory, string What);
+    internal readonly record struct HardenTarget(string Path, bool AllowInteractive, bool IsDirectory, string What);
 
     /// <summary>One file <see cref="TlsKeyFilesNamed"/> lists: the path as written, the setting that names it, and what
     /// its content has to be.</summary>
@@ -4959,7 +4959,7 @@ public static partial class DarlingCliCommands
     /// location when the config did not load.
     /// </summary>
     [SupportedOSPlatform("windows")]
-    private static List<HardenTarget> HardenTargets(string resolvedConfig, string dataDirectory, string? keyDirectory)
+    internal static List<HardenTarget> HardenTargets(string resolvedConfig, string dataDirectory, string? keyDirectory)
     {
         var storeRoot = Path.GetDirectoryName(Path.GetFullPath(dataDirectory));
         var targets = new List<HardenTarget>
@@ -4978,8 +4978,13 @@ public static partial class DarlingCliCommands
         if (!string.IsNullOrEmpty(storeRoot))
         {
             /* Operator-group traverse, never list: the operator walks through it to the admin and viewer credentials,
-               never to the rest. Mirrors DarlingManagedPostgres' own call. */
-            targets.Add(new(storeRoot, AllowInteractive: true, IsDirectory: true, "the store directory"));
+               never to the rest. Mirrors DarlingManagedPostgres' own call, which leaves a drive root alone (#7363): its
+               permissions are the whole drive's, and the files beside the data directory are hardened one by one below. */
+            if (!DarlingManagedPostgres.IsDriveRoot(storeRoot))
+            {
+                targets.Add(new(storeRoot, AllowInteractive: true, IsDirectory: true, "the store directory"));
+            }
+
             targets.Add(new(Path.Combine(storeRoot, "pg-credential.dpapi"), false, false, "the store credential"));
             /* The same posture the service applies on every start (DarlingManagedRoles.EnsureProvisionedAsync): the
                admin and viewer credentials are read by the operator's Viewer, the mcp credential only by the service. */
@@ -5069,6 +5074,15 @@ public static partial class DarlingCliCommands
 
         var targets = HardenTargets(resolvedConfig, dataDirectory, keyDirectory);
         var configDirectory = Path.GetDirectoryName(Path.GetFullPath(resolvedConfig)) ?? AppContext.BaseDirectory;
+        if (Path.GetDirectoryName(Path.GetFullPath(dataDirectory)) is { Length: > 0 } driveRootCandidate
+            && DarlingManagedPostgres.IsDriveRoot(driveRootCandidate))
+        {
+            output.WriteLine(
+                $"NOTE: the store directory {driveRootCandidate} is a drive root, so its permissions were not changed: they are the whole drive's. " +
+                "The credential files beside the data directory are hardened one by one below. " +
+                DarlingManagedPostgres.DriveRootMoveText(driveRootCandidate, dataDirectory));
+            output.WriteLine();
+        }
 
         /* #2371: harden for the account the SERVICE runs as, not for whoever is running THIS. The verb is
            documented to be run elevated and exists because the service cannot re-ACL a file it does not own,
