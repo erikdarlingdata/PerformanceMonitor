@@ -454,6 +454,9 @@ public sealed class McpWindowNoticeConfigAndLogToolTests : IDisposable
         await _duckDb.InitializeFromTemplateAsync();
         await SeedDataAsync(tool, WindowStart.AddDays(-9), baselineAt: WindowStart.AddDays(-10));
         await SeedLogRunsAsync("wait_stats", WindowStart.AddDays(-9), WindowStart.AddDays(-8), everyMinutes: 60);
+        /* #7167: the server is being collected now (another collector ran a minute ago), so the empty window is this collector's
+           alone and stays empty. A server with no successful run of any collector up to the window's end answers unavailable instead. */
+        await SeedLogRunsAsync("cpu_utilization", DateTime.UtcNow.AddMinutes(-1), DateTime.UtcNow.AddMinutes(-1), everyMinutes: 1);
 
         var root = Root(await CallAsync(tool));
 

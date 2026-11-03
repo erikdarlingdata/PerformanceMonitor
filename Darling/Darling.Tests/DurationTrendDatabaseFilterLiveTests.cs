@@ -534,6 +534,15 @@ public sealed class DurationTrendDatabaseFilterHourlyLiveTests
                     CollectionIdGenerator.Next(), ServerId, ServerName, runAt.AddSeconds(3), rows);
             }
 
+            /* #7167: the reads below are anchored at the day's end (as_of), and the stats collectors above stop at hour 5, so the server
+               would read as silent for the last 19 hours of the window and a list that matches nothing would answer unavailable (offline)
+               instead of the true negative this test asserts. The server is collecting: a run of an unrelated collector lands just before
+               the anchor and leaves both rollups untouched. */
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                @"INSERT INTO collect.collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected)
+                  VALUES ($1, $2, $3, 'wait_stats', $4, 3000, 'SUCCESS', 0)",
+                CollectionIdGenerator.Next(), ServerId, ServerName, windowEnd.AddMinutes(-5));
+
             foreach (var view in new[] { TimescaleSupport.QueryStatsIntervalHourlyView, TimescaleSupport.ProcedureStatsIntervalHourlyView })
             {
                 await using var refresh = new NpgsqlCommand($"CALL refresh_continuous_aggregate('collect.{view}'::regclass, $1::timestamp, $2::timestamp)", connection);

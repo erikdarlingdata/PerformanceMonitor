@@ -125,7 +125,7 @@ public sealed class McpWaitTools
                 return await McpQueryTools.WithEmptyWindowNoticeAsync(await dataService.HasAnyWaitStatAsync(resolved.ServerId)
                     ? McpHelpers.Status(
                         "empty",
-                        $"No wait types recorded for {resolved.DisplayName} in the last {hours_back} hour(s). This server HAS collected wait stats before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples.")
+                        await McpQueryTools.QuietWindowMessageAsync(dataService, QueryWindowRelation.WaitStats, resolved.ServerId, typesStart, windowEnd, "wait_stats", $"No wait types recorded for {resolved.DisplayName} in the last {hours_back} hour(s)", ". This server HAS collected wait stats before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples."))
                     : McpHelpers.Status(
                         "unavailable",
                         $"No wait stats have EVER been recorded for {resolved.DisplayName}. This is not an empty window — nothing has been stored for this server at all. Delta wait stats need a SECOND collection cycle before the first row exists, so on a newly added server this clears itself; otherwise check that collection is running and that the server is enabled."),
@@ -257,12 +257,12 @@ public sealed class McpWaitTools
                    not_collected), and only then says the CHOSEN database had none, in Darling's words: it is not a
                    verdict on the databases nobody read. */
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "waiting_tasks", awsRdsKind: AwsRdsKind.None)
-                    ?? McpHelpers.Status("empty",
+                    ?? await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, McpHelpers.Status("empty",
                         database == null
                             ? "No waiting tasks captured in the specified time range."
                             : $"No waiting tasks captured in the specified time range{McpDatabaseSelection.ForChosen(new[] { database })}. "
                               + "The filter was applied in SQL over the whole window, so waiting tasks of other databases may well exist; drop it to see what the window holds.",
-                        notice.AsHints());
+                        notice.AsHints()));
             }
 
             var truncated = rows.Count > limit;
