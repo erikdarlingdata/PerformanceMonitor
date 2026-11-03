@@ -461,7 +461,7 @@ public partial class SettingsWindow : Window
 
         bool written = App.WriteSettingsDocument(root, "settings");
 
-        /* _saved is what stops CloseButton_Click / OnClosing reverting the live theme preview, so it has to
+        /* _saved is what stops OnClosing reverting the live theme preview, so it has to
            mean "the theme reached settings.json" and not "Save was clicked". Set unconditionally it makes
            the window contradict itself: the dialog below says nothing was saved while the unpersisted theme
            stays applied for the rest of the run and comes back to its old value on the next launch. */
@@ -810,7 +810,7 @@ public partial class SettingsWindow : Window
     private bool _isLoadingTheme;
     private readonly string _originalTheme = ThemeManager.CurrentTheme;
     /// <summary>
-    /// Whether this window's Save actually reached settings.json. Read by <c>CloseButton_Click</c> and
+    /// Whether this window's Save actually reached settings.json. Read by
     /// <c>OnClosing</c> to decide whether to revert the live theme preview, so it tracks the write rather
     /// than the click (#2433) — a theme that was previewed but never persisted must not survive the window
     /// that failed to save it.
@@ -2100,12 +2100,8 @@ public partial class SettingsWindow : Window
     private void CopyAllRows_Click(object sender, RoutedEventArgs e) => DataGridExport.CopyAllRows(sender);
     private void ExportToCsv_Click(object sender, RoutedEventArgs e) => DataGridExport.ExportToCsv(sender, "schedules", App.CsvSeparator);
 
-    private void CloseButton_Click(object sender, RoutedEventArgs e)
-    {
-        if (!_saved)
-            ThemeManager.Apply(_originalTheme);
-        Close();
-    }
+    /* OnClosing reverts the unsaved theme preview, and Close() always reaches it (#7228). */
+    private void CloseButton_Click(object sender, RoutedEventArgs e) => Close();
 
     protected override void OnClosing(System.ComponentModel.CancelEventArgs e)
     {

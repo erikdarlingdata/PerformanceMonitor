@@ -207,19 +207,7 @@ public partial class QueryStatsHistoryWindow : Window
                 return;
             }
 
-            /* #5320: a plan the statement filter withheld whole is the marker, not a plan: say so, save nothing. */
-            if (WithheldPlanGuard.RefuseSave(plan)) return;
-
-            var dialog = new SaveFileDialog
-            {
-                Filter = "SQL Plan files (*.sqlplan)|*.sqlplan|All files (*.*)|*.*",
-                DefaultExt = ".sqlplan",
-                FileName = $"query_plan_{_queryHash}_{DateTime.Now:yyyyMMdd_HHmmss}.sqlplan"
-            };
-
-            if (dialog.ShowDialog() != true) return;
-            File.WriteAllText(dialog.FileName, plan, Encoding.UTF8);
-            btn.Content = $"Saved ({source})";
+            if (FileSaveHelper.SavePlanFile(plan, $"query_plan_{_queryHash}")) btn.Content = $"Saved ({source})";
             return;
         }
         catch (Exception ex)

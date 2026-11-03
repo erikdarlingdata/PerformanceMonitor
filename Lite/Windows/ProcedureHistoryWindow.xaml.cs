@@ -255,18 +255,7 @@ public partial class ProcedureHistoryWindow : Window
                 return;
             }
 
-            /* #5320: a plan the statement filter withheld whole is the marker, not a plan: say so, save nothing. */
-            if (WithheldPlanGuard.RefuseSave(plan)) return;
-
-            var dialog = new SaveFileDialog
-            {
-                Filter = "SQL Plan files (*.sqlplan)|*.sqlplan|All files (*.*)|*.*",
-                DefaultExt = ".sqlplan",
-                FileName = $"proc_plan_{_objectName}_{DateTime.Now:yyyyMMdd_HHmmss}.sqlplan"
-            };
-
-            if (dialog.ShowDialog() != true) return;
-            File.WriteAllText(dialog.FileName, plan, Encoding.UTF8);
+            FileSaveHelper.SavePlanFile(plan, $"proc_plan_{_objectName}");
         }
         catch (Exception ex)
         {

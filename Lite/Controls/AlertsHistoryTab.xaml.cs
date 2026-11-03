@@ -350,29 +350,8 @@ public partial class AlertsHistoryTab : UserControl
         UpdateStaleDataIndicator();
     }
 
-    private void UpdateStaleDataIndicator()
-    {
-        if (_lastRefreshed.HasValue)
-        {
-            var elapsed = DateTime.UtcNow - _lastRefreshed.Value;
-            LastRefreshedIndicator.Text = elapsed.TotalSeconds < 5
-                ? "Refreshed just now"
-                : elapsed.TotalMinutes < 1
-                    ? $"Refreshed {(int)elapsed.TotalSeconds}s ago"
-                    : $"Refreshed {(int)elapsed.TotalMinutes}m ago";
-        }
-
-        // Show archival warning if ArchiveService is currently running
-        if (ArchiveService.IsArchiving)
-        {
-            ArchivalWarning.Text = "⚠ Archival in progress";
-            ArchivalWarning.Visibility = Visibility.Visible;
-        }
-        else
-        {
-            ArchivalWarning.Visibility = Visibility.Collapsed;
-        }
-    }
+    private void UpdateStaleDataIndicator() =>
+        StaleDataIndicator.Update(LastRefreshedIndicator, ArchivalWarning, _lastRefreshed);
 
     #endregion
 

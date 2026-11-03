@@ -527,8 +527,6 @@
                                              "Send Test Notification" before, which are three identical labels visible at
                                              once on one scrolling page and so could not carry distinct access keys. -->
                                         <Button x:Name="TestTeamsButton" Content="Send Test to _Teams" Click="TestTeamsButton_Click"/>
-                                        <TextBlock x:Name="TeamsStatusText" FontSize="11" FontStyle="Italic"
-                                                   Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" Margin="8,0,0,0"/>
                                     </WrapPanel>
                                 </Grid>
                                 <TextBlock Margin="20,8,0,0" TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}">
@@ -568,8 +566,6 @@
 
                                     <WrapPanel Grid.Row="2" Grid.Column="1" Orientation="Horizontal" Margin="0,4,0,0">
                                         <Button x:Name="TestSlackButton" Content="Send Test to Slac_k" Click="TestSlackButton_Click"/>
-                                        <TextBlock x:Name="SlackStatusText" FontSize="11" FontStyle="Italic"
-                                                   Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" Margin="8,0,0,0"/>
                                     </WrapPanel>
                                 </Grid>
                                 <TextBlock Margin="20,8,0,0" TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}">
@@ -624,8 +620,6 @@
 
                                     <WrapPanel Grid.Row="4" Grid.Column="1" Orientation="Horizontal" Margin="0,4,0,0">
                                         <Button x:Name="TestGenericButton" Content="Send Test to _Webhook" Click="TestGenericButton_Click"/>
-                                        <TextBlock x:Name="GenericStatusText" FontSize="11" FontStyle="Italic"
-                                                   Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" Margin="8,0,0,0"/>
                                     </WrapPanel>
                                 </Grid>
                                 <!-- #6012: the signing key of the generic URL (Standard Webhooks headers). The key is shown once, here, and never again. -->
@@ -710,8 +704,6 @@
 
                                     <WrapPanel Grid.Row="4" Grid.Column="1" Orientation="Horizontal" Margin="0,4,0,0">
                                         <Button x:Name="TestPagerDutyButton" Content="Send Test Notification" Click="TestPagerDutyButton_Click"/>
-                                        <TextBlock x:Name="PagerDutyStatusText" FontSize="11" FontStyle="Italic"
-                                                   Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" Margin="8,0,0,0"/>
                                     </WrapPanel>
                                 </Grid>
                                 <TextBlock Margin="20,8,0,0" TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}">
