@@ -96,7 +96,8 @@ AND   collection_time <= $5";
     /// columns only and for the named keys only. A key with no row is absent from the result.
     /// </summary>
     internal static async Task<Dictionary<(string DatabaseName, long QueryId), (long CollectionId, DateTime CollectionTime)>> ReadQueryStoreLatestRowsAsync(
-        LockedConnection connection, int serverId, IEnumerable<(string DatabaseName, long QueryId)> keys)
+        LockedConnection connection, int serverId, IEnumerable<(string DatabaseName, long QueryId)> keys,
+        string relation = "v_query_store_stats")
     {
         var result = new Dictionary<(string, long), (long, DateTime)>();
         var distinct = keys.Distinct().ToList();
@@ -105,7 +106,8 @@ AND   collection_time <= $5";
             var slice = distinct.Skip(i).Take(QueryStoreLatestRowKeyChunk).ToList();
             using var command = connection.CreateCommand();
             /* The key list is parameters, never text: a database name is user data. $1 is the server; key n is ($2n, $2n+1). */
-            command.CommandText = @"
+            /* #7256: the latest row is searched in the relation the caller names, the hot table when the window did not reach the archive. */
+            command.CommandText = SwapArchiveView(@"
 SELECT x.database_name, x.query_id, x.collection_id, x.collection_time
 FROM
 (
@@ -121,7 +123,7 @@ FROM
       AND k.query_id = v.query_id
     WHERE v.server_id = $1
 ) x
-WHERE x.lr = 1";
+WHERE x.lr = 1", "query_store_stats", relation);
             command.Parameters.Add(new DuckDBParameter { Value = serverId });
             foreach (var (databaseName, queryId) in slice)
             {
@@ -144,10 +146,10 @@ WHERE x.lr = 1";
     /// for ONE key. Only the rare candidate whose latest row carries no text gets here.
     /// </summary>
     internal static async Task<string?> ReadQueryStoreLatestNonNullTextAsync(
-        LockedConnection connection, int serverId, string databaseName, long queryId)
+        LockedConnection connection, int serverId, string databaseName, long queryId, string relation = "v_query_store_stats")
     {
         using var command = connection.CreateCommand();
-        command.CommandText = @"
+        command.CommandText = SwapArchiveView(@"
 SELECT query_text
 FROM v_query_store_stats
 WHERE server_id = $1
@@ -156,7 +158,7 @@ AND   database_name = $3
 AND   query_text IS NOT NULL
 /* #5299 round 2 (N3): a tie on the time breaks on the row collected last - see GetTopQueriesByCpuAsync. */
 ORDER BY collection_time DESC, collection_id DESC
-LIMIT 1";
+LIMIT 1", "query_store_stats", relation);
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = queryId });
         command.Parameters.Add(new DuckDBParameter { Value = databaseName });

@@ -173,9 +173,16 @@ ORDER BY bucket";
     public async Task<List<QueryStoreRow>> GetQueryStoreTopQueriesAsync(int serverId, int hoursBack = 24, int top = 50, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null, string? executionType = null, string? moduleName = null, QueryTagReadScope? tags = null)
     {
         using var _q = TimeQuery("GetQueryStoreTopQueriesAsync", "v_query_store_stats top N");
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
+
+        /* #7256: a window that starts after the newest archived row ranks on the hot table alone, and each candidate's latest row and text
+           come from it too. Only a candidate with no text in the hot table opens the archive (see the end of the round). */
+        return await ReadWindowSkippingEmptyArchiveAsync("query_store_stats", "collection_time", startTime, ReadAsync, CancellationToken.None);
+
+        async Task<List<QueryStoreRow>> ReadAsync(string relation)
+        {
         using var connection = await OpenConnectionAsync();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         /* #5381: $4 used to be the page limit; the limit is applied after the text lookup now, so the filter parameters start at $4. */
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
         /* #5992: the query tag filter, in the population before the ranking and the cap. */
@@ -401,6 +408,7 @@ FROM page p
 ORDER BY p.page_ord";
 
         if (tags is not null) command.CommandText = tags.Apply(command.CommandText, moduleParameterIndex + (string.IsNullOrWhiteSpace(moduleName) ? 0 : 1));
+        command.CommandText = SwapArchiveView(command.CommandText, "query_store_stats", relation);
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
@@ -481,8 +489,10 @@ ORDER BY p.page_ord";
 
         /* #5381: the row that holds each candidate's text (the latest row of its database and query_id over ALL history,
            as the old lateral picked), then the text of those rows, both by key and for the candidates only. */
-        var latestRows = await ReadQueryStoreLatestRowsAsync(connection, serverId, candidateRows.Select(r => (r.DatabaseName, r.QueryId)));
-        var texts = await ReadQueryStoreTextByRowAsync(connection, serverId, latestRows.Values);
+        /* #7256: with the window read from the hot table alone, a candidate's newest row is in the hot table (it has a row in the window,
+           and the archive holds nothing that new), so the latest row and its text are read there. */
+        var latestRows = await ReadQueryStoreLatestRowsAsync(connection, serverId, candidateRows.Select(r => (r.DatabaseName, r.QueryId)), relation);
+        var texts = await ReadQueryStoreTextByRowAsync(connection, serverId, latestRows.Values, relation);
         var items = new List<QueryStoreRow>();
         foreach (var row in candidateRows)
         {
@@ -491,7 +501,12 @@ ORDER BY p.page_ord";
             {
                 texts.TryGetValue(textRow, out text);
                 /* The old lateral skipped NULL texts: a latest row with no text resolves to the latest row WITH one. */
-                text ??= await ReadQueryStoreLatestNonNullTextAsync(connection, serverId, row.DatabaseName, row.QueryId);
+                text ??= await ReadQueryStoreLatestNonNullTextAsync(connection, serverId, row.DatabaseName, row.QueryId, relation);
+                /* #7256: only a candidate with no text anywhere in the hot table goes to the archive for it. */
+                if (text is null && relation != "v_query_store_stats")
+                {
+                    text = await ReadQueryStoreLatestNonNullTextAsync(connection, serverId, row.DatabaseName, row.QueryId);
+                }
             }
 
             /* The old statement's WHERE (NOT LIKE is case sensitive, a prefix test) and LIMIT $4, in page_ord order. */
@@ -513,6 +528,7 @@ ORDER BY p.page_ord";
         }
 
         return await TopFill.RunAsync(top, RunRoundAsync);
+        }
     }
 
     /// <summary>
