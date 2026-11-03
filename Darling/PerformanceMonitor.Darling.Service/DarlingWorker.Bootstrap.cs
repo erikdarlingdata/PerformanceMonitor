@@ -39,6 +39,10 @@ namespace PerformanceMonitor.Darling.Service;
 
 public sealed partial class DarlingWorker
 {
+    /// <summary>#7162 test seam: builds the managed-store bootstrap object, so a test can point it at a staged runtime
+    /// instead of the <c>pg-runtime</c> folder beside the binary. Null in production.</summary>
+    internal Func<PostgresConfig, ILogger, DarlingManagedPostgres>? ManagedPostgresFactoryOverride { get; set; }
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         /* A file: secret whose target ordinary users can read is reported through the service log; the resolver
@@ -285,139 +289,153 @@ public sealed partial class DarlingWorker
         /* #3908: what this start did to the store's TimescaleDB extension, alerted beside the upgrade report. */
         DarlingSelfAlertEvaluator.StoreTimescaleReport? storeTimescaleReport = null;
 
-        if (config.Postgres.Managed)
+        /* #7162: this try/finally opens BEFORE the bootstrap, not after it. EnsureRunningAsync sets its
+           started-by-this-process flag part way through and then still creates the database, runs the
+           post-upgrade analyze staging (up to 2 h) and verifies TimescaleDB. A cancel (service stop) or a
+           terminal throw in any of those used to return from the catches below with postgres.exe running and
+           nothing left to stop it: the next start adopts a running store with the flag false, so no later stop
+           ever stops it, and upgrade-darling.ps1 refuses while a process runs under the install tree. */
+        try
         {
-            if (!OperatingSystem.IsWindows())
+            if (config.Postgres.Managed)
             {
-                // install-darling.ps1 waits for this text (#6470): reword both together.
-                _logger.LogCritical(
-                    "postgres.managed = true requires Windows (the bundled runtime and the DPAPI-protected credential); " +
-                    "set postgres.managed = false and point postgres.connectionString at your own PostgreSQL instead.");
-                _collectorState.PublishManagedStoreNeedsWindows();
-                return;
-            }
-
-            managedPostgres = new DarlingManagedPostgres(config.Postgres, _logger);
-            /* #2936: the sharpest of the three sites, because the judgment already existed and was being
-               thrown away. OpenProbedMaintenanceConnectionAsync inside this bootstrap classifies transient connection
-               faults and retries 6 times 2 s apart — and when that runs out it throws, and this catch
-               discarded the fact that the failure had been RULED transient. Re-classifying here is what
-               makes that verdict mean something.
-               StartupFailureTriage is deliberately WIDER than the inner IsTransientConnectionFault, which
-               rules that a PostgresException means the server replied and so is never transient. That is
-               right at its own site and wrong one layer up: 57P01 and 57P03 are the server replying "going
-               down" and "not up yet", which is how a store restart and a crash-recovering store present.
-               So a bootstrap the inner layer gave up on can still be retried here, correctly.
-               Safe to re-enter: the class documents it and the body shows it — EnsureRuntimeAsync unpacks
-               only what is missing, initdb runs only without PG_VERSION, the conf append is
-               marker-guarded, and an already-running postmaster is adopted rather than restarted, so "a
-               second EnsureRunningAsync against an initialized, running cluster does no initdb, no
-               restart, no credential rewrite".
-               NOTE this refines a contract DarlingManagedPostgres' own comments still state as
-               "throw => service-exit": for a classified-transient throw it is now retry-then-service-exit.
-               Terminal throws behave exactly as before. */
-            var bootstrapRetryBudget = System.Diagnostics.Stopwatch.StartNew();
-            /* #4508: set once, the first time the fast budget above runs out on a failure that is still
-               retryable — see the sustained arm below. Same gating shape as the store site's
-               storeSustainedRetryCriticalLogged: one CRITICAL the moment the diagnosis is new, then a
-               WARNING on every later attempt against the same still-failing bootstrap. */
-            var bootstrapSustainedRetryCriticalLogged = false;
-            for (var attempt = 1; ; attempt++)
-            {
-                try
+                if (!OperatingSystem.IsWindows())
                 {
-                    storeConnectionString = await managedPostgres.EnsureRunningAsync(stoppingToken);
-                    storeUpgradeReport = BuildStoreUpgradeReport(managedPostgres.LastUpgradeOutcome);
-                    storeTimescaleReport = BuildStoreTimescaleReport(managedPostgres.LastTimescaleOutcome);
-                    break;
-                }
-                catch (OperationCanceledException)
-                {
+                    // install-darling.ps1 waits for this text (#6470): reword both together.
+                    _logger.LogCritical(
+                        "postgres.managed = true requires Windows (the bundled runtime and the DPAPI-protected credential); " +
+                        "set postgres.managed = false and point postgres.connectionString at your own PostgreSQL instead.");
+                    _collectorState.PublishManagedStoreNeedsWindows();
                     return;
                 }
-                catch (Exception ex) when (attempt < StartupFailureTriage.Attempts
-                    && bootstrapRetryBudget.Elapsed < StartupFailureTriage.RetryBudget
-                    && StartupFailureTriage.IsRetryable(ex))
+
+                managedPostgres = ManagedPostgresFactoryOverride is { } factory
+                    ? factory(config.Postgres, _logger)
+                    : new DarlingManagedPostgres(config.Postgres, _logger);
+                /* #2936: the sharpest of the three sites, because the judgment already existed and was being
+                   thrown away. OpenProbedMaintenanceConnectionAsync inside this bootstrap classifies transient connection
+                   faults and retries 6 times 2 s apart — and when that runs out it throws, and this catch
+                   discarded the fact that the failure had been RULED transient. Re-classifying here is what
+                   makes that verdict mean something.
+                   StartupFailureTriage is deliberately WIDER than the inner IsTransientConnectionFault, which
+                   rules that a PostgresException means the server replied and so is never transient. That is
+                   right at its own site and wrong one layer up: 57P01 and 57P03 are the server replying "going
+                   down" and "not up yet", which is how a store restart and a crash-recovering store present.
+                   So a bootstrap the inner layer gave up on can still be retried here, correctly.
+                   Safe to re-enter: the class documents it and the body shows it — EnsureRuntimeAsync unpacks
+                   only what is missing, initdb runs only without PG_VERSION, the conf append is
+                   marker-guarded, and an already-running postmaster is adopted rather than restarted, so "a
+                   second EnsureRunningAsync against an initialized, running cluster does no initdb, no
+                   restart, no credential rewrite".
+                   NOTE this refines a contract DarlingManagedPostgres' own comments still state as
+                   "throw => service-exit": for a classified-transient throw it is now retry-then-service-exit.
+                   Terminal throws behave exactly as before. */
+                var bootstrapRetryBudget = System.Diagnostics.Stopwatch.StartNew();
+                /* #4508: set once, the first time the fast budget above runs out on a failure that is still
+                   retryable — see the sustained arm below. Same gating shape as the store site's
+                   storeSustainedRetryCriticalLogged: one CRITICAL the moment the diagnosis is new, then a
+                   WARNING on every later attempt against the same still-failing bootstrap. */
+                var bootstrapSustainedRetryCriticalLogged = false;
+                for (var attempt = 1; ; attempt++)
                 {
-                    _logger.LogWarning(
-                        ex,
-                        "Managed Postgres bootstrap failed, retrying ({Message}) — attempt {Attempt} of " +
-                        "{Total}, retrying in {Delay}s. A transiently locked file or a store still coming " +
-                        "up recovers on its own; a broken package or a stale credential does not and is " +
-                        "not retried.",
-                        ex.Message, attempt, StartupFailureTriage.Attempts,
-                        (int)StartupFailureTriage.RetryDelay.TotalSeconds);
-                    _collectorState.PublishRetrying(
-                        CollectorRuntimeState.StartupStep.ManagedStore, attempt, StartupFailureTriage.Attempts);
-                    await Task.Delay(StartupFailureTriage.RetryDelay, stoppingToken);
-                }
-                catch (Exception ex) when (ex is not OperationCanceledException
-                    && StartupFailureTriage.IsRetryable(ex))
-                {
-                    /* #4508: reached only once the fast arm above has stopped matching — the managed-Postgres
-                       bootstrap mirror of the store site's sustained arm just above this block. A bootstrap
-                       still failing on a classified-transient cause (a store still coming up, a transiently
-                       locked file) keeps retrying on SustainedRetryDelay instead of falling through to the
-                       terminal catch below, which used to stand collection down for the life of the process
-                       identically to a broken package or a stale credential. */
-                    var next = StartupFailureTriage.NextAction(attempt, bootstrapRetryBudget.Elapsed, ex);
-                    if (!bootstrapSustainedRetryCriticalLogged)
+                    try
                     {
-                        // install-darling.ps1 waits for this text (#6470): reword both together.
-                        _logger.LogCritical(
-                            ex,
-                            "Managed Postgres bootstrap has not succeeded within the {Budget}s retry budget " +
-                            "({Message}); this is still a recoverable failure, so it keeps retrying every " +
-                            "{Delay}s instead of standing down. Collection will not start until it succeeds.",
-                            (int)StartupFailureTriage.RetryBudget.TotalSeconds, ex.Message,
-                            (int)StartupFailureTriage.SustainedRetryDelay.TotalSeconds);
-                        bootstrapSustainedRetryCriticalLogged = true;
+                        /* The IsWindows re-check is a CA1416 guard only: the analyzer loses the early-return guard
+                           above once this loop sits inside the outer try/finally (#7162). */
+                        if (OperatingSystem.IsWindows())
+                        {
+                            storeConnectionString = await managedPostgres.EnsureRunningAsync(stoppingToken);
+                            storeUpgradeReport = BuildStoreUpgradeReport(managedPostgres.LastUpgradeOutcome);
+                            storeTimescaleReport = BuildStoreTimescaleReport(managedPostgres.LastTimescaleOutcome);
+                        }
+
+                        break;
                     }
-                    else
+                    catch (OperationCanceledException)
+                    {
+                        return;
+                    }
+                    catch (Exception ex) when (attempt < StartupFailureTriage.Attempts
+                        && bootstrapRetryBudget.Elapsed < StartupFailureTriage.RetryBudget
+                        && StartupFailureTriage.IsRetryable(ex))
                     {
                         _logger.LogWarning(
                             ex,
-                            "Managed Postgres bootstrap still has not succeeded ({Message}) — attempt " +
-                            "{Attempt}, retrying in {Delay}s.",
-                            ex.Message, attempt, (int)StartupFailureTriage.SustainedRetryDelay.TotalSeconds);
+                            "Managed Postgres bootstrap failed, retrying ({Message}) — attempt {Attempt} of " +
+                            "{Total}, retrying in {Delay}s. A transiently locked file or a store still coming " +
+                            "up recovers on its own; a broken package or a stale credential does not and is " +
+                            "not retried.",
+                            ex.Message, attempt, StartupFailureTriage.Attempts,
+                            (int)StartupFailureTriage.RetryDelay.TotalSeconds);
+                        _collectorState.PublishRetrying(
+                            CollectorRuntimeState.StartupStep.ManagedStore, attempt, StartupFailureTriage.Attempts);
+                        await Task.Delay(StartupFailureTriage.RetryDelay, stoppingToken);
                     }
+                    catch (Exception ex) when (ex is not OperationCanceledException
+                        && StartupFailureTriage.IsRetryable(ex))
+                    {
+                        /* #4508: reached only once the fast arm above has stopped matching — the managed-Postgres
+                           bootstrap mirror of the store site's sustained arm just above this block. A bootstrap
+                           still failing on a classified-transient cause (a store still coming up, a transiently
+                           locked file) keeps retrying on SustainedRetryDelay instead of falling through to the
+                           terminal catch below, which used to stand collection down for the life of the process
+                           identically to a broken package or a stale credential. */
+                        var next = StartupFailureTriage.NextAction(attempt, bootstrapRetryBudget.Elapsed, ex);
+                        if (!bootstrapSustainedRetryCriticalLogged)
+                        {
+                            // install-darling.ps1 waits for this text (#6470): reword both together.
+                            _logger.LogCritical(
+                                ex,
+                                "Managed Postgres bootstrap has not succeeded within the {Budget}s retry budget " +
+                                "({Message}); this is still a recoverable failure, so it keeps retrying every " +
+                                "{Delay}s instead of standing down. Collection will not start until it succeeds.",
+                                (int)StartupFailureTriage.RetryBudget.TotalSeconds, ex.Message,
+                                (int)StartupFailureTriage.SustainedRetryDelay.TotalSeconds);
+                            bootstrapSustainedRetryCriticalLogged = true;
+                        }
+                        else
+                        {
+                            _logger.LogWarning(
+                                ex,
+                                "Managed Postgres bootstrap still has not succeeded ({Message}) — attempt " +
+                                "{Attempt}, retrying in {Delay}s.",
+                                ex.Message, attempt, (int)StartupFailureTriage.SustainedRetryDelay.TotalSeconds);
+                        }
 
-                    _collectorState.PublishRetrying(
-                        CollectorRuntimeState.StartupStep.ManagedStore, attempt, StartupFailureTriage.Attempts,
-                        sustained: true);
-                    await Task.Delay(next.Delay, stoppingToken);
-                }
-                catch (Exception ex)
-                {
-                    // install-darling.ps1 waits for this text (#6470): reword both together.
-                    _logger.LogCritical(ex, "Managed Postgres bootstrap failed: {Message}", ex.Message);
-                    _collectorState.PublishStopped(CollectorRuntimeState.StartupStep.ManagedStore);
-                    return;
+                        _collectorState.PublishRetrying(
+                            CollectorRuntimeState.StartupStep.ManagedStore, attempt, StartupFailureTriage.Attempts,
+                            sustained: true);
+                        await Task.Delay(next.Delay, stoppingToken);
+                    }
+                    catch (Exception ex)
+                    {
+                        // install-darling.ps1 waits for this text (#6470): reword both together.
+                        _logger.LogCritical(ex, "Managed Postgres bootstrap failed: {Message}", ex.Message);
+                        _collectorState.PublishStopped(CollectorRuntimeState.StartupStep.ManagedStore);
+                        return;
+                    }
                 }
             }
-        }
 
-        /* #4215: this start's darling-managed.conf write result, carried past the
-           bootstrap the same way storeUpgradeReport/storeTimescaleReport are, so LogStoreHostProfileAsync can
-           fold a hand edit's changed keys into the stored verdict rows without re-reading the file. Null on a
-           BYO store (managedPostgres itself is null) and on the adopted-listener path (the write never ran). */
-        var managedDataDirectory = managedPostgres?.DataDirectory;
-        var managedConfWriteResult = OperatingSystem.IsWindows() ? managedPostgres?.LastManagedConfWriteResult : null;
+            /* #4215: this start's darling-managed.conf write result, carried past the
+               bootstrap the same way storeUpgradeReport/storeTimescaleReport are, so LogStoreHostProfileAsync can
+               fold a hand edit's changed keys into the stored verdict rows without re-reading the file. Null on a
+               BYO store (managedPostgres itself is null) and on the adopted-listener path (the write never ran). */
+            var managedDataDirectory = managedPostgres?.DataDirectory;
+            var managedConfWriteResult = OperatingSystem.IsWindows() ? managedPostgres?.LastManagedConfWriteResult : null;
 
-        /* #4215: whether THIS start fell back to darling-managed.conf.last-good, carried out of the
-           bootstrap the same way managedConfWriteResult already is — see
-           DarlingManagedPostgres.LastStartUsedLastGoodManagedConf. False (never true) on a BYO store, off
-           Windows, and on the adopted-listener path, for the same reasons managedConfWriteResult is null
-           there. */
-        var managedUsedLastGoodConf = OperatingSystem.IsWindows() && (managedPostgres?.LastStartUsedLastGoodManagedConf ?? false);
+            /* #4215: whether THIS start fell back to darling-managed.conf.last-good, carried out of the
+               bootstrap the same way managedConfWriteResult already is — see
+               DarlingManagedPostgres.LastStartUsedLastGoodManagedConf. False (never true) on a BYO store, off
+               Windows, and on the adopted-listener path, for the same reasons managedConfWriteResult is null
+               there. */
+            var managedUsedLastGoodConf = OperatingSystem.IsWindows() && (managedPostgres?.LastStartUsedLastGoodManagedConf ?? false);
 
-        /* #4336: this start's darling-managed.conf verification outcome, carried out of the
-           bootstrap the same way managedConfWriteResult and managedUsedLastGoodConf already are. Null on a
-           BYO store, off Windows, and on the adopted-listener path, for the same reasons those are. */
-        var managedConfVerification = OperatingSystem.IsWindows() ? managedPostgres?.LastManagedConfVerification : null;
+            /* #4336: this start's darling-managed.conf verification outcome, carried out of the
+               bootstrap the same way managedConfWriteResult and managedUsedLastGoodConf already are. Null on a
+               BYO store, off Windows, and on the adopted-listener path, for the same reasons those are. */
+            var managedConfVerification = OperatingSystem.IsWindows() ? managedPostgres?.LastManagedConfVerification : null;
 
-        try
-        {
             await RunCollectionLoopAsync(
                 config, storeConnectionString, storeUpgradeReport, storeTimescaleReport,
                 managedDataDirectory, managedConfWriteResult, managedUsedLastGoodConf, managedConfVerification,
