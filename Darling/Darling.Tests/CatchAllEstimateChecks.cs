@@ -26,6 +26,7 @@ namespace Darling.Tests;
 internal static class CatchAllEstimateChecks
 {
     private const string SeedTable = "public.tick6971_toasted";
+    private const string GrowerTable = "public.tick7303_grower";
 
     internal sealed record CatchAllRow(long TotalBytes, int ChunkCount, bool? SizeEstimated);
 
@@ -103,6 +104,13 @@ AND   object_kind IN ('{StoreSelfMetrics.OtherObjectKind}', '{StoreSelfMetrics.S
         /* Bring every relation's relpages current first, so autovacuum has nothing pending that could move another catch-all
            relation's relpages between the two sweeps and break the exact comparison below. */
         await ExecAsync(connection, "VACUUM (ANALYZE)", ct);
+        /* #7303: a second catch-all relation that the test grows between the two sweeps on purpose, so the comparison below is
+           shown to take another relation's relpages change out of the figure (what an autovacuum on any other table does on
+           its own, rarely). One row now, about sixty pages after the seed. */
+        await ExecAsync(connection, $"CREATE TABLE {GrowerTable} (id integer NOT NULL, pad text NOT NULL)", ct);
+        await ExecAsync(connection, $"INSERT INTO {GrowerTable} VALUES (0, 'x')", ct);
+        await ExecAsync(connection, $"VACUUM {GrowerTable}", ct);
+        var pagesBefore = await ReadCatchAllRelationPagesAsync(connection, timescale, ct);
         await StoreSelfMetrics.SweepAsync(connection, timescale, baselineTime, null, null, null, ct);
         var before = await ReadAsync(connection, baselineTime, ct);
 
@@ -116,6 +124,7 @@ AND   object_kind IN ('{StoreSelfMetrics.OtherObjectKind}', '{StoreSelfMetrics.S
 
         long expectedDelta;
         long toastBytes;
+        var seedOids = new HashSet<long>();
         await using (var oracle = new NpgsqlCommand($@"
 WITH rels AS (
     SELECT '{SeedTable}'::regclass::oid AS oid, 'heap' AS part
@@ -126,19 +135,29 @@ WITH rels AS (
     UNION ALL
     SELECT i.indexrelid, 'toast_index' FROM pg_index i JOIN pg_class c ON c.reltoastrelid = i.indrelid WHERE c.oid = '{SeedTable}'::regclass
 )
-SELECT coalesce(sum(pg_relation_size(oid, 'main')), 0)::bigint,
-       coalesce(sum(pg_relation_size(oid, 'main')) FILTER (WHERE part = 'toast'), 0)::bigint
-FROM rels", connection))
+SELECT oid::bigint, pg_relation_size(oid, 'main')::bigint, part FROM rels", connection))
         await using (var reader = await oracle.ExecuteReaderAsync(ct))
         {
-            Assert.True(await reader.ReadAsync(ct));
-            expectedDelta = reader.GetInt64(0);
-            toastBytes = reader.GetInt64(1);
+            expectedDelta = 0;
+            toastBytes = 0;
+            while (await reader.ReadAsync(ct))
+            {
+                seedOids.Add(reader.GetInt64(0));
+                expectedDelta += reader.GetInt64(1);
+                if (reader.GetString(2) == "toast")
+                {
+                    toastBytes += reader.GetInt64(1);
+                }
+            }
         }
 
         Assert.True(toastBytes > 10_000_000, $"the seeded relation should be mostly TOAST, but its TOAST table is {toastBytes} bytes");
 
         var next = baselineTime.AddHours(1);
+        await ExecAsync(connection,
+            $"INSERT INTO {GrowerTable} SELECT g, repeat('x', 200) FROM generate_series(1, 2000) AS g", ct);
+        await ExecAsync(connection, $"VACUUM {GrowerTable}", ct);
+        var pagesAfter = await ReadCatchAllRelationPagesAsync(connection, timescale, ct);
         await StoreSelfMetrics.SweepAsync(connection, timescale, next, null, null, null, ct);
         var after = await ReadAsync(connection, next, ct);
 
@@ -146,9 +165,82 @@ FROM rels", connection))
         Assert.True(after[other].SizeEstimated, "the second hourly sweep writes the catch-all estimate");
         Assert.Equal(before[other].ChunkCount + 1, after[other].ChunkCount);
         var delta = after[other].TotalBytes - before[other].TotalBytes;
-        Assert.True(delta == expectedDelta,
-            $"the catch-all estimate rose by {delta} bytes for the seeded relation, expected {expectedDelta} "
-            + $"(heap, {toastBytes} bytes of TOAST, and the indexes of both; timescale {timescale})");
+        /* #7303: the estimate is the whole bucket, so it also moves when any OTHER relation in it gains or loses a page of
+           relpages between the two sweeps (an autovacuum or autoanalyze on a table the test does not control: CI saw exactly
+           one 8192-byte page over). Measure those relations right before each sweep and take their change out, so the
+           comparison stays exact for the seeded relation instead of allowing a band around it. */
+        var blockSize = await ReadBlockSizeAsync(connection, ct);
+        var otherChanges = new List<string>();
+        long otherGrowth = 0;
+        foreach (var (oid, now) in pagesAfter.Where(kv => !seedOids.Contains(kv.Key)))
+        {
+            var was = pagesBefore.TryGetValue(oid, out var prior) ? prior.Pages : 0;
+            if (now.Pages != was)
+            {
+                otherGrowth += (now.Pages - was) * blockSize;
+                otherChanges.Add($"{now.Name} {was}->{now.Pages} pages");
+            }
+        }
+
+        foreach (var prior in pagesBefore.Where(kv => !pagesAfter.ContainsKey(kv.Key)).Select(kv => kv.Value))
+        {
+            otherGrowth -= prior.Pages * blockSize;
+            otherChanges.Add($"{prior.Name} {prior.Pages}->gone pages");
+        }
+
+        Assert.True(delta - otherGrowth == expectedDelta,
+            $"the catch-all estimate rose by {delta} bytes, of which other relations in the bucket moved {otherGrowth} "
+            + $"({(otherChanges.Count == 0 ? "none" : string.Join(", ", otherChanges))}), leaving {delta - otherGrowth} for the seeded relation, "
+            + $"expected {expectedDelta} (heap, {toastBytes} bytes of TOAST, and the indexes of both; timescale {timescale})");
+    }
+
+    private sealed record RelationPages(string Name, long Pages);
+
+    private static async Task<long> ReadBlockSizeAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand("SELECT current_setting('block_size')::bigint", connection);
+        return (long)(await command.ExecuteScalarAsync(ct))!;
+    }
+
+    /// <summary>
+    /// The relations the catch-all estimate adds up for the non-system row, with their <c>relpages</c> as the estimate reads
+    /// them: the census relations by the product's own predicates, their TOAST tables, and the indexes of both (the same
+    /// four arms <c>UnenumeratedEstimateInsertSql</c> unions). Read in one statement right before a sweep so the two
+    /// reads differ only by what changed between the sweeps.
+    /// </summary>
+    private static async Task<Dictionary<long, RelationPages>> ReadCatchAllRelationPagesAsync(
+        NpgsqlConnection connection, bool timescale, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand($@"
+WITH census AS (
+    SELECT c.oid
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE {StoreSelfMetrics.CensusRelationPredicateSql}
+    AND   NOT {StoreSelfMetrics.NamedRelationPredicateSql}
+    {(timescale ? "AND   " + StoreSelfMetrics.TimescaleInventoriedPredicateSql : "")}
+    AND   NOT {StoreSelfMetrics.SystemSchemaPredicateSql}
+),
+page_rels AS (
+    SELECT oid FROM census
+    UNION ALL
+    SELECT c.reltoastrelid FROM census e JOIN pg_class c ON c.oid = e.oid WHERE c.reltoastrelid <> 0
+    UNION ALL
+    SELECT i.indexrelid FROM census e JOIN pg_index i ON i.indrelid = e.oid
+    UNION ALL
+    SELECT i.indexrelid FROM census e JOIN pg_class c ON c.oid = e.oid JOIN pg_index i ON i.indrelid = c.reltoastrelid WHERE c.reltoastrelid <> 0
+)
+SELECT p.oid::bigint, p.relname::text, greatest(p.relpages, 0)::bigint
+FROM page_rels pr
+JOIN pg_class p ON p.oid = pr.oid", connection);
+        var rows = new Dictionary<long, RelationPages>();
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            rows[reader.GetInt64(0)] = new RelationPages(reader.GetString(1), reader.GetInt64(2));
+        }
+
+        return rows;
     }
 
     private static async Task ExecAsync(NpgsqlConnection connection, string sql, CancellationToken ct)

@@ -2630,11 +2630,11 @@
                                 <Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style>
                             </DataGridTextColumn.ElementStyle>
                         </DataGridTextColumn>
-                        <DataGridTextColumn Binding="{Binding TotalMemoryMb, StringFormat='{}{0:N1}'}" Width="135">
+                        <DataGridTextColumn Binding="{Binding PeakMemoryMb, StringFormat='{}{0:N1}'}" Width="135">
                             <DataGridTextColumn.Header>
                                 <StackPanel Orientation="Horizontal">
-                                    <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalMemoryMb" Click="FilterButton_Click" Margin="0,0,4,0"/>
-                                    <TextBlock Text="Memory (MB)" FontWeight="Bold" VerticalAlignment="Center"/>
+                                    <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="PeakMemoryMb" Click="FilterButton_Click" Margin="0,0,4,0"/>
+                                    <TextBlock Text="Peak grant (MB)" FontWeight="Bold" VerticalAlignment="Center"/>
                                 </StackPanel>
                             </DataGridTextColumn.Header>
                             <DataGridTextColumn.ElementStyle>

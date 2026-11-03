@@ -1061,7 +1061,7 @@ public sealed partial class DarlingWorker
                windowed on occurred_at, not collection_time — see that reader's doc comment for why
                collection_time would put a report in the wrong window and move it every cycle. */
             var rows = await DarlingPgDeadlockReader.GetDeadlocksAsync(
-                _postgres, runtime.ServerId, windowStart, now, limit: 50, cancellationToken);
+                _postgres, runtime.ServerId, windowStart, now, limit: PgDeadlockReadLimit, cancellationToken);
             readClock.Restart();
             var count = rows.Count;
 
@@ -1233,6 +1233,10 @@ public sealed partial class DarlingWorker
     /// its pair (#7082). Below it a known pair is held.</summary>
     internal const int PgDeadlockPageReports = 5;
 
+    /// <summary>How many distinct reports one sweep's read of the hour returns, newest first (#7188). A read that returns
+    /// this many may have left older reports of the hour out.</summary>
+    internal const int PgDeadlockReadLimit = 50;
+
     /// <summary>
     /// The page-or-hold rule for a PostgreSQL deadlock fire (#7082): page at <see cref="PgDeadlockPageReports"/> or more
     /// distinct reports in the hour, or when a statement pair is new (not in the 30-day store) and not yet announced, or
@@ -1259,7 +1263,7 @@ public sealed partial class DarlingWorker
     /// Counts the reports of this sweep that were not counted yet into the 30-day signature store under their
     /// <c>pg:</c> pattern key (#7082), and answers every report's key plus the pairs that are new and not yet announced by
     /// a page. A report is counted once for the life of the process (a restart re-counts the hour's reports, which adds to
-    /// counts but cannot make a known pair new, so the pairs still waiting for their page are saved and put back at start by
+    /// counts but cannot make a known pair new, so the pairs still waiting for their page are saved (and forgotten when dropped) and put back at start by
     /// <see cref="SeedPgDeadlockStateAsync"/>, #7295). A store failure leaves the reports uncounted for the next sweep and
     /// answers <c>StoreOk = false</c>, which pages.
     /// </summary>
@@ -1272,7 +1276,7 @@ public sealed partial class DarlingWorker
             _pgDeadlockUnannouncedNew.GetOrAdd(serverKey, _ => new HashSet<string>(StringComparer.Ordinal)),
             fresh => _deadlockRollup?.NoteNewSignatures(serverKey, fresh),
             _logger, serverKey, serverId, rows, now,
-            (fresh, _) => new PgAlertStateStore(_postgres!, _logger).SaveUnannouncedPairsAsync(serverKey, fresh),
+            (waiting, _) => new PgAlertStateStore(_postgres!, _logger).ReplaceUnannouncedPairsAsync(serverKey, waiting),
             cancellationToken);
 
     /// <summary>
@@ -1321,8 +1325,10 @@ public sealed partial class DarlingWorker
     }
 
     /// <summary>
-    /// The counting with a way to save the pairs that came out new (#7295). <paramref name="persistUnannounced"/> runs before
-    /// the page is decided, so a restart between the count and the page still finds them waiting.
+    /// The counting with a way to save the pairs still waiting for a page (#7295). <paramref name="persistUnannounced"/> gets
+    /// the whole set of unannounced pairs (empty when the last one was dropped) whenever the count changed it, by a new pair
+    /// or by a drop (#7188). It runs before the page is decided, so a restart between the count and the page still finds the
+    /// waiting pairs, and never finds one that was dropped. It must not throw: the store's own method logs and swallows.
     /// </summary>
     internal static async Task<PgDeadlockPatterns> CountPgDeadlockPatternsAsync(
         DeadlockSignatureStore store, Dictionary<string, DateTime> counted, HashSet<string> unannounced,
@@ -1356,6 +1362,7 @@ public sealed partial class DarlingWorker
         }
 
         var storeOk = true;
+        var setChanged = false;
         if (pending.Count > 0)
         {
             try
@@ -1376,11 +1383,8 @@ public sealed partial class DarlingWorker
                         unannounced.UnionWith(fresh);
                     }
 
+                    setChanged = true;
                     noteNewForAgentGate?.Invoke(fresh);
-                    if (persistUnannounced is not null)
-                    {
-                        await persistUnannounced(fresh, cancellationToken);
-                    }
                 }
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -1399,7 +1403,29 @@ public sealed partial class DarlingWorker
         string[] newKeys;
         lock (unannounced)
         {
+            /* #7188: a pair whose reports have all left the hour's rows can no longer be announced by a page that
+               carries them. Left in the set, it would turn a later held known-pair fire into a page with nothing new
+               to show. A store failure above added nothing, and this sweep's fresh pairs are in the rows, so only
+               stale pairs are dropped. The rows are the newest PgDeadlockReadLimit reports of the hour, so they are
+               the whole hour only while fewer than that came back. A full read may have left older reports of the
+               hour out, and a pair missing from it can still be inside the hour: the sweep then drops nothing (such a
+               sweep pages on its report count anyway, and the page clears the set). */
+            if (rows.Count < PgDeadlockReadLimit)
+            {
+                var current = byReport.Values.Select(key => key.Value).ToHashSet(StringComparer.Ordinal);
+                setChanged |= unannounced.RemoveWhere(pair => !current.Contains(pair)) > 0;
+            }
+
             newKeys = unannounced.ToArray();
+        }
+
+        /* #7295: the saved set follows the in-memory one, both ways. A pair that came out new is saved before the page is
+           decided, so a restart between the count and the page still finds it waiting. A pair dropped just above leaves the
+           saved set too (#7188): the seed would otherwise put it back at the next start, lower the count watermark for a pair
+           nothing can announce, and tell the agent gate it is new. Only a change is written, and an empty set clears. */
+        if (setChanged && persistUnannounced is not null)
+        {
+            await persistUnannounced(newKeys, cancellationToken);
         }
 
         var patterns = new PgDeadlockPatterns { NewKeys = newKeys, StoreOk = storeOk };

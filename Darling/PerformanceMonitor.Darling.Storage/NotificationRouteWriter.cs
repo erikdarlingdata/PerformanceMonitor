@@ -315,37 +315,14 @@ WHERE route_id = $1";
     }
 
     /// <summary>The most addresses one route's recipient list holds.</summary>
-    public const int MaxRecipients = 50;
+    public const int MaxRecipients = EmailSendCore.MaxRecipients;
 
     /// <summary>
     /// The refusal for a recipient list, or null when it is fine or blank (#6231). The list is comma separated, as the email send
     /// splits it, and each entry must be one plain address (no display name, no group). One copy for the Viewer's route window and
     /// the MCP route tools. The text never carries an address.
     /// </summary>
-    public static string? RecipientsRefusal(string? recipients)
-    {
-        if (string.IsNullOrWhiteSpace(recipients))
-        {
-            return null;
-        }
-
-        var entries = recipients.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        if (entries.Length > MaxRecipients)
-        {
-            return string.Create(CultureInfo.InvariantCulture, $"A route holds at most {MaxRecipients} email recipients.");
-        }
-
-        foreach (var entry in entries)
-        {
-            if (!System.Net.Mail.MailAddress.TryCreate(entry, out var address) || !string.Equals(address.Address, entry, StringComparison.Ordinal)
-                || !string.IsNullOrEmpty(address.DisplayName))
-            {
-                return "The email recipients are a comma separated list of plain addresses such as name@example.com. (The value is not echoed.)";
-            }
-        }
-
-        return null;
-    }
+    public static string? RecipientsRefusal(string? recipients) => EmailSendCore.RecipientsRefusal(recipients);
 
     /// <summary>
     /// Stores sealed destinations through <c>config.set_notification_route_destinations</c> on the caller's transaction (#6231): the

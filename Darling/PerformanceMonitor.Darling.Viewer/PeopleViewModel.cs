@@ -129,13 +129,19 @@ public sealed class PersonViewRow
 
     public string StateDisplay => Person.Enabled ? "Enabled" : "Disabled";
 
+    /// <summary>How many identities the person has, the sort key of the Identities column (its text is "none" or the count, which sorts "10" before "2").</summary>
+    public int IdentityCount => Person.Identities.Count;
+
+    /// <summary>How many grants the person has, the sort key of the Grants column.</summary>
+    public int GrantCount => Person.Grants.Count;
+
     public string IdentitiesDisplay => Person.Identities.Count == 0 ? "none" : Person.Identities.Count.ToString(CultureInfo.InvariantCulture);
 
     public string GrantsDisplay => Person.Grants.Count == 0 ? "none" : Person.Grants.Count.ToString(CultureInfo.InvariantCulture);
 
     public DateTime UpdatedAtUtc => Person.UpdatedAt;
 
-    public string UpdatedDisplay => Person.UpdatedAt.ToLocalTime().ToString("g", CultureInfo.CurrentCulture);
+    public string UpdatedDisplay => ViewerTimeHelper.FormatFleetWide(Person.UpdatedAt, "yyyy-MM-dd HH:mm");
 
     public string UpdatedBy => ServerActionViewRow.WithoutPersonPrefix(Person.UpdatedBy);
 
@@ -163,7 +169,10 @@ public sealed class PersonIdentityViewRow
 
     public string ExternalId => Identity.ExternalId;
 
-    public string AddedDisplay => Identity.CreatedAt.ToLocalTime().ToString("g", CultureInfo.CurrentCulture) + " by " + ServerActionViewRow.WithoutPersonPrefix(Identity.CreatedBy);
+    /// <summary>When the identity was mapped, the sort key of the Added column.</summary>
+    public DateTime CreatedAtUtc => Identity.CreatedAt;
+
+    public string AddedDisplay => ViewerTimeHelper.FormatFleetWide(Identity.CreatedAt, "yyyy-MM-dd HH:mm") + " by " + ServerActionViewRow.WithoutPersonPrefix(Identity.CreatedBy);
 }
 
 /// <summary>One grant of a person, as the detail grid shows it.</summary>
@@ -188,7 +197,7 @@ public sealed class PersonGrantViewRow
         : Grant.ScopeTagId is { } tag ? "Tag: " + (Grant.ScopeTagName ?? "(deleted, id " + tag.ToString(CultureInfo.InvariantCulture) + ")")
         : "The whole fleet";
 
-    public string AddedDisplay => Grant.CreatedAt.ToLocalTime().ToString("g", CultureInfo.CurrentCulture) + " by " + ServerActionViewRow.WithoutPersonPrefix(Grant.CreatedBy);
+    public string AddedDisplay => ViewerTimeHelper.FormatFleetWide(Grant.CreatedAt, "yyyy-MM-dd HH:mm") + " by " + ServerActionViewRow.WithoutPersonPrefix(Grant.CreatedBy);
 }
 
 /// <summary>The words of the People screen and the checks its dialogs run before they send anything.</summary>
