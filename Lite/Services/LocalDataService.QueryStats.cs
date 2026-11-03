@@ -312,9 +312,15 @@ SELECT
     public async Task<List<QueryStatsRow>> GetTopQueriesByCpuAsync(int serverId, int hoursBack = 24, int top = 50, DateTime? fromDate = null, DateTime? toDate = null, ServerClock? serverClock = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null, int minMaxDop = 0, QueryTagReadScope? tags = null)
     {
         using var _q = TimeQuery("GetTopQueriesByCpuAsync", "v_query_stats top N by CPU");
-        using var connection = await OpenConnectionAsync();
-
         var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
+
+        /* #7256: a window that starts after the newest archived row reads the hot table alone. The view opens every Parquet file
+           of query_stats (one per day) however short the window is. */
+        return await ReadWindowSkippingEmptyArchiveAsync("query_stats", "collection_time", startTime, ReadAsync, CancellationToken.None);
+
+        async Task<List<QueryStatsRow>> ReadAsync(string relation)
+        {
+        using var connection = await OpenConnectionAsync();
         var dbClause = BuildDbInClause(databaseNames, "database_name", 7, out var dbValues);
         /* #5992: the query tag filter rides the same place as the database filter, before the ranking and the cap. */
         var tagValues = new List<object>();
@@ -326,6 +332,7 @@ SELECT
         using var command = connection.CreateCommand();
         command.CommandText = TopQueriesByCpuSql(dbClause, candidates);
         if (tags is not null) command.CommandText = tags.Apply(command.CommandText, 7 + dbValues.Count);
+        if (relation != "v_query_stats") command.CommandText = command.CommandText.Replace("v_query_stats", relation, StringComparison.Ordinal);
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
@@ -408,6 +415,7 @@ SELECT
         }
 
         return await TopFill.RunAsync(top, RunRoundAsync);
+        }
     }
 
     /// <summary>

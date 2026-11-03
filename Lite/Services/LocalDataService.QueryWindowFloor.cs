@@ -422,6 +422,9 @@ public partial class LocalDataService
         ArchiveSpan? archiveSpan = QueryWindowRelationTimeIsServerLocal(relation)
             ? null
             : await GetArchiveSpanAsync(archiveTable, timeColumn, cancellationToken);
+        ArchiveSpan? logSpan = collector is null || QueryWindowRelationTimeIsServerLocal(relation)
+            ? null
+            : await GetArchiveSpanAsync("collection_log", "collection_time", cancellationToken);
 
         /* #5371: a token (the Collection Health pass's) reaches the lock wait, the open and the two statements of the generic
            path below; a caller that passes none keeps the original uninterruptible read. */
@@ -433,7 +436,14 @@ public partial class LocalDataService
         if (_duckDb.ArchiveViewGeneration != spanGeneration)
         {
             archiveSpan = null;
+            logSpan = null;
         }
+
+        /* #7256: the first query asks for rows inside [start, end]. When the archive holds nothing at or after the start, only the
+           hot table can hold them, so it reads that alone and never opens an archive file (the view opens every one, however
+           narrow the window). The span is exact here: the generation was checked under this connection's read lock. */
+        var windowRelation = ArchiveHoldsNothingFrom(archiveSpan, startUtc) ? archiveTable : view;
+        var windowLogRelation = ArchiveHoldsNothingFrom(logSpan, startUtc) ? "collection_log" : "v_collection_log";
 
         /* #4989: a time column that holds the server's wall clock (the Default Trace) goes through the clock, the way the
            grid reads it. Every UTC relation keeps the single-query path below. */
@@ -456,14 +466,14 @@ public partial class LocalDataService
             windowCommand.CommandText = collector is null
                 ? $@"
 SELECT MIN({timeColumn})
-FROM {view}
+FROM {windowRelation}
 WHERE server_id = $1
 AND   {timeColumn} >= $2
 AND   {timeColumn} <= $3{rowsFloorInline}"
                 : $@"
 SELECT LEAST(
-    (SELECT MIN({timeColumn}) FROM {view} WHERE server_id = $1 AND {timeColumn} >= $2 AND {timeColumn} <= $3{rowsFloorInline}),
-    (SELECT MIN(collection_time) FROM v_collection_log WHERE server_id = $1 AND collector_name = '{collector}' AND collection_time >= $2 AND collection_time <= $3))";
+    (SELECT MIN({timeColumn}) FROM {windowRelation} WHERE server_id = $1 AND {timeColumn} >= $2 AND {timeColumn} <= $3{rowsFloorInline}),
+    (SELECT MIN(collection_time) FROM {windowLogRelation} WHERE server_id = $1 AND collector_name = '{collector}' AND collection_time >= $2 AND collection_time <= $3))";
             windowCommand.Parameters.Add(new DuckDBParameter { Value = serverId });
             windowCommand.Parameters.Add(new DuckDBParameter { Value = startUtc });
             windowCommand.Parameters.Add(new DuckDBParameter { Value = endUtc });

@@ -91,6 +91,11 @@ public sealed partial class LocalDataService
         return slot;
     }
 
+    /// <summary>True when the archive provably holds no row at or after <paramref name="windowStartUtc"/>: its span is known and
+    /// its newest value is older than the start, or it holds no rows. An unknown span (null) is false.</summary>
+    internal static bool ArchiveHoldsNothingFrom(ArchiveSpan? span, DateTime windowStartUtc) =>
+        span is ArchiveSpan s && (s.Newest is not DateTime newest || newest < windowStartUtc);
+
     /// <summary>
     /// Runs <paramref name="read"/> against the hot table alone when the archive of <paramref name="table"/> holds nothing
     /// at or after <paramref name="windowStartUtc"/>, and against the <c>v_</c> view otherwise (#7256). <paramref name="read"/>
@@ -104,8 +109,7 @@ public sealed partial class LocalDataService
         string table, string timeColumn, DateTime windowStartUtc, Func<string, Task<T>> read, CancellationToken cancellationToken)
     {
         var generation = _duckDb.ArchiveViewGeneration;
-        if (await GetArchiveSpanAsync(table, timeColumn, cancellationToken) is ArchiveSpan span
-            && (span.Newest is not DateTime newest || newest < windowStartUtc))
+        if (ArchiveHoldsNothingFrom(await GetArchiveSpanAsync(table, timeColumn, cancellationToken), windowStartUtc))
         {
             var result = await read(table);
             if (_duckDb.ArchiveViewGeneration == generation)
