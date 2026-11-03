@@ -6349,6 +6349,12 @@ internal sealed class DarlingSelfAlertEvaluator
     /// Edge-applies the fleet-level "a mute rule has outlived its reason" condition (#3306): a rule that is
     /// ENABLED, has NO expiry, and was created longer than <see cref="StaleMuteAge"/> ago.
     ///
+    /// <para><b>Two exclusions (#7183).</b> A recurring rule with a real bound is skipped, because its schedule
+    /// is its bound: it leaves at least an hour of every day unmuted, or skips at least one day of the week
+    /// (see <see cref="MuteRecurrence.CoversNearlyEveryHour"/>). A digest rule is skipped too, because it holds
+    /// alerts for the daily digest and suppresses nothing. A recurring rule open 23 hours or longer on all seven
+    /// days has no real bound, so it is NOT excluded and is reported like a plain open-ended mute.</para>
+    ///
     /// <para><b>Why this condition exists at all.</b> A mute is a deliberate blind spot in a monitoring
     /// tool, and nothing else in this product reports that one is there. The only way to discover a mute is
     /// to ask <c>get_mute_rules</c>, which requires already suspecting it — so a mute whose justification
@@ -6399,6 +6405,21 @@ internal sealed class DarlingSelfAlertEvaluator
         foreach (var rule in rules)
         {
             if (rule is null || !rule.Enabled || rule.ExpiresAtUtc.HasValue)
+            {
+                continue;
+            }
+
+            /* #7183: a recurring window (#7040) is bounded by its schedule, so a missing expiry is the design
+               and not a forgotten rule. A digest rule (#7083) holds alerts for the daily digest and suppresses
+               nothing, so it is no blind spot. Neither belongs in the stale set.
+
+               The exception is a recurring window open 23 hours or longer on all seven days (00:00-23:59 daily,
+               or 00:01-00:00 across midnight): the validator only refuses start == end, so it is accepted, and it
+               mutes nearly around the clock with no expiry. The schedule is no bound then, so that rule is judged
+               like a plain open-ended mute. */
+            if (rule.IsDigestAction
+                || (rule.IsRecurring
+                    && !MuteRecurrence.CoversNearlyEveryHour(rule.RecurDays, rule.RecurStartTime, rule.RecurEndTime)))
             {
                 continue;
             }
