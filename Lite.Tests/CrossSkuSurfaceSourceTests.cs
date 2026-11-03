@@ -219,8 +219,9 @@ public sealed class CrossSkuSurfaceSourceTests
            external-alert delivery self-alert's undelivered-row count, Darling-only like the other store self-alerts. Fifteenth since #5916: the
            threshold-override reload, Darling-only (Lite has no override path). Sixteenth and seventeenth since #7041: the
            scheduled Daily Health Report's build read and its own delivery-stamp read, named apart from
-           the other daily documents' shared delivery-stamp read because the report keeps its own stamp. Both Darling-only. */
-        Assert.Equal(17, nullKeyReads.Count);
+           the other daily documents' shared delivery-stamp read because the report keeps its own stamp. Both Darling-only.
+           Eighteenth since #7368: the Store Autovacuum Behind self-alert's hourly read of the store, Darling-only like the other store self-alerts. */
+        Assert.Equal(18, nullKeyReads.Count);
 
         var inventory = AlertReadFailureCounter.FleetScopedReads;
 
@@ -244,6 +245,7 @@ public sealed class CrossSkuSurfaceSourceTests
         Assert.Contains(nullKeyReads, r => r.Contains("collection-history audit", StringComparison.Ordinal));
         Assert.Contains(nullKeyReads, r => r.Contains("external alert self-alert", StringComparison.Ordinal));
         Assert.Contains(nullKeyReads, r => r.Contains("threshold-override reload", StringComparison.Ordinal));
+        Assert.Contains(nullKeyReads, r => r.Contains("store autovacuum self-alert", StringComparison.Ordinal));
         Assert.Contains(nullKeyReads, r => r.Contains("daily-health-report", StringComparison.Ordinal));
         Assert.Equal(2, nullKeyReads.Count(r => r.Contains("daily-health-report", StringComparison.Ordinal)));
         /* #3354: config_mute_rules belongs to the store, not to any monitored server, so its failed read
@@ -271,6 +273,7 @@ public sealed class CrossSkuSurfaceSourceTests
         Assert.Contains("external-alert delivery", inventory, StringComparison.Ordinal);
         Assert.Contains("threshold-override reload", inventory, StringComparison.Ordinal);
         Assert.Contains("daily report (#7041)", inventory, StringComparison.Ordinal);
+        Assert.Contains("store autovacuum (#7368)", inventory, StringComparison.Ordinal);
 
         /* And the phantom stays gone. Disk pressure's feed reads are exempt — a local filesystem read and a
            recorded-store-size lookup that is context for the alert text — so naming it here would send an

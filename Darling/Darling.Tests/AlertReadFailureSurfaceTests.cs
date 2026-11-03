@@ -936,7 +936,7 @@ public sealed class AlertReadFailureSurfaceTests
         /* 22nd counted in DarlingSelfAlertEvaluator since #7076: the history read that finds an open row of a policy job that is healthy again, to close an episode that ended while the service was down ("policy job ended-episode close self-alert"). */
         /* 16th counted since #6875: the identity-capacity self-alert read in the per-server sweep, counted as "identity-capacity self-alert". */
         /* 22nd exempt since #7041: the daily health report's delivery-stamp WRITE, a write whose loss costs one re-send at the next restart and never a missed delivery, like the other daily documents' stamp write. */
-        (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 22, 22),
+        (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 23, 23),
     };
 
     /// <summary>
@@ -1064,8 +1064,9 @@ public sealed class AlertReadFailureSurfaceTests
     /// And a FIFTY-FOURTH since #7076: the same seed read for a stuck TimescaleDB policy job found on the first pass after a restart ("policy job standing seed self-alert"), counted for the same reason.
     /// And a FIFTY-FIFTH since #7076: the read that closes an ended policy job episode ("policy job ended-episode close self-alert"), counted because a swallowed failure leaves the old row open for the next restart to seed from.
     /// And a FIFTY-SIXTH and FIFTY-SEVENTH since #7295: the blocking and deadlock count watermark seed ("blocking and deadlock count watermark seed") and the CPU incident opened-time seed ("CPU incident opened-time seed"), counted because a swallowed read there leaves the key seeded at 0 and pages again what a page already carried, or reads an open incident as opened at its first sweep.
+    /// And a FIFTY-EIGHTH since #7368: the Store Autovacuum Behind read ("store autovacuum self-alert"), in <c>DarlingSelfAlertEvaluator.cs</c>.
     /// </summary>
-    private const int CountedSites = 57;
+    private const int CountedSites = 58;
 
     /// <summary>
     /// Log-message fragments that identify a catch block DELIBERATELY not counted, each paired with the
@@ -1083,6 +1084,7 @@ public sealed class AlertReadFailureSurfaceTests
         ["Alert resolution callback failed"] = "the delivery path",
         ["Connection-change self-alert delivery failed"] = "the delivery path",
         ["Store disk-pressure self-alert failed"] = "handed its evidence as parameters; the read is counted in DarlingWorker",
+        ["Store autovacuum self-alert failed"] = "the read just before this catch is counted (store autovacuum self-alert), this one covers the apply and deliver half",
         ["Custom-alert rule-health self-alert failed"] = "handed its evidence (the report) as a parameter; the report-building read is in CustomAlertEvaluator, outside this census",
         ["External-alert delivery self-alert failed"] = "handed its evidence (the report) as a parameter; the count read is counted in DarlingWorker (#5654)",
         ["Store runtime upgrade self-alert failed"] = "handed its evidence as parameters",
@@ -1321,8 +1323,9 @@ public sealed class AlertReadFailureSurfaceTests
            already records the failure. 45th since #7041: the daily health report's delivery-stamp write, which costs one re-send
            at the next restart and never a delivery. 46th since #7085: the High CPU incident's opened-at save, a write whose
            loss costs the restart bound and never the opening page. 47th since #7082: the Poison Wait detail read, the text of a page whose
-           condition was already read and counted. */
-        Assert.Equal(47, totalExempt);
+           condition was already read and counted. 48th since #7368: the Store Autovacuum Behind apply and deliver half, whose
+           read is counted just above it. */
+        Assert.Equal(48, totalExempt);
 
         /* Every exemption in the table is actually used. An exemption for a message that no longer exists
            is a hole this pin would otherwise keep open indefinitely — the shape that lets a real new catch

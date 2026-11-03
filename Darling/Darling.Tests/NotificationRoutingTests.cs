@@ -524,6 +524,8 @@ public sealed class NotificationRoutingTests
                ExpiryMetric (tls.ExpiryMetric), which the FireAsync literal scan below cannot see. */
             DarlingSelfAlertEvaluator.McpTlsCertExpiryMetric,
             DarlingSelfAlertEvaluator.StoreSettingsMetric,
+            /* #7368: fired through the constant, so the FireAsync literal scan below cannot see it. */
+            DarlingSelfAlertEvaluator.AutovacuumBehindMetric,
             DarlingSelfAlertEvaluator.CompressionJobMetric, DarlingSelfAlertEvaluator.JobCadenceMetric,
             DarlingSelfAlertEvaluator.RetentionHoldMetric, DarlingSelfAlertEvaluator.StoreUpgradeMetric,
             /* #5450: fired through the constant, so the FireAsync literal scan below cannot see it. */

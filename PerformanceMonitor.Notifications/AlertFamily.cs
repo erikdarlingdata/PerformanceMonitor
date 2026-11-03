@@ -142,6 +142,8 @@ public static class AlertFamily
         ["Capture Down"] = SelfMonitor,
         ["Compression Job Stuck"] = SelfMonitor,
         ["Store Disk Pressure"] = SelfMonitor,
+        /* #7368: big tables past 3 times their autoanalyze threshold on two hourly reads in a row. */
+        ["Store Autovacuum Behind"] = SelfMonitor,
         ["Store Runtime Upgrade"] = SelfMonitor,
         /* #5450: raised once per service start when the store shows the service was not collecting. */
         ["Collection Gap At Start"] = SelfMonitor,

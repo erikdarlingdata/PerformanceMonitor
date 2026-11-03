@@ -111,6 +111,8 @@ internal static class AlertSeverity
             "Collection Stopped" => ("#DC2626", "CRITICAL", "\U0001F534"),
             "Agent Not Running" => ("#DC2626", "CRITICAL", "\U0001F534"),
             "Store Disk Pressure" => ("#DC2626", "CRITICAL", "\U0001F534"),
+            /* #7368: fires Warning at its one site. */
+            "Store Autovacuum Behind" => ("#D97706", "WARNING", "\U0001F7E0"),
             "Store Runtime Upgrade" => ("#DC2626", "CRITICAL", "\U0001F534"),
             "Compression Job Stuck" => ("#DC2626", "CRITICAL", "\U0001F534"),
             /* #6873: the three database protection alerts fire Warning at their one site. */
