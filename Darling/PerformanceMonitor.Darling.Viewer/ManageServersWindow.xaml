@@ -71,7 +71,7 @@
                 </DataGridTextColumn>
                 <!-- "Added" (creation time), not Lite's "Last Connected": the viewer never connects to a
                      monitored server. -->
-                <DataGridTextColumn Header="Added" Binding="{Binding CreatedDate, StringFormat=yyyy-MM-dd HH:mm}" Width="140"/>
+                <DataGridTextColumn Header="Added" Binding="{Binding CreatedDisplay}" Width="190" SortMemberPath="CreatedAtUtc"/>
                 <!-- "Last Collected" (not "Last Connected"): the Darling SERVICE connects + collects, not the
                      viewer. Reuses the sidebar dots' MAX(collection_time) freshness read; "Never" until first collect,
                      "None retained" once retention has dropped a dark server's whole history (#3967). -->

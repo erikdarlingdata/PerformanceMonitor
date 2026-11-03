@@ -337,7 +337,7 @@ public partial class ManageServersWindow : Window
 /// <summary>
 /// One Manage-Servers grid row — a display projection of a <see cref="MonitoredServerRow"/> from the store.
 /// The bound property names match the grid's columns (<c>DisplayNameWithIntent</c> / <c>ServerNameDisplay</c>
-/// / <c>AuthenticationDisplay</c> / <c>StatusDisplay</c> / <c>MonthlyCostUsd</c> / <c>CreatedDate</c>), so the
+/// / <c>AuthenticationDisplay</c> / <c>StatusDisplay</c> / <c>MonthlyCostUsd</c> / <c>CreatedDisplay</c>), so the
 /// XAML is unchanged from the former <c>ViewerServerEntry</c> binding; the underlying <see cref="Row"/> drives
 /// the Edit / Delete / Enable / Excluded-Databases actions.
 /// </summary>
@@ -364,8 +364,12 @@ public sealed class ManagedServerListItem
 
     public decimal MonthlyCostUsd => Row.MonthlyCostUsd;
 
-    /// <summary>The store's creation time (local, for the grid's "Added" column); falls back to now for a row read without it.</summary>
-    public DateTime CreatedDate => (Row.CreatedAt ?? DateTime.UtcNow).ToLocalTime();
+    /// <summary>The store's creation time (naive UTC), the sort key of the "Added" column; falls back to now for a row read without it.</summary>
+    public DateTime CreatedAtUtc => Row.CreatedAt ?? DateTime.UtcNow;
+
+    /// <summary>The "Added" cell (#7343): the registration time as a fleet-wide value, UTC (labelled) in Server and UTC modes and this
+    /// machine's zone (labelled) in Local mode. The list holds every server, so no one server's clock applies to it.</summary>
+    public string CreatedDisplay => ViewerTimeHelper.FormatFleetWide(CreatedAtUtc, "yyyy-MM-dd HH:mm");
 
     /// <summary>The store's naive-UTC newest collection time for this server (MAX(collection_time) across all
     /// collectors), set once before binding; null when the Darling service has not collected this server yet.</summary>
