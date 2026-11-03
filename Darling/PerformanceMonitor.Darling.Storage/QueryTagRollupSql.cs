@@ -123,16 +123,25 @@ public static class QueryTagRollupSql
     /// <summary>
     /// The fleet form of <see cref="QueryStoreSql"/> (#6800 part 2, step 2): the same six measures per <c>(server_id, tag_id)</c>, with the
     /// whole hours the hourly builder has done read from <c>collect.query_store_hash_hourly</c> and the rest from the wide table.
-    /// <see cref="QueryTagRollupHashRoute"/> decides which is which. Parameters: $1 and $2 the table pairs as parallel arrays (hour start
-    /// <c>timestamp[]</c>, server <c>integer[]</c>), $3 the window end, then three per wide range: the servers that share it
-    /// (<c>integer[]</c>), its <c>from</c> and its <c>to</c> (each range <c>[from, to)</c>), the first range at $4, $5 and $6.
-    /// With <paramref name="days"/> (#6800 step 3c) the day pairs come next as $4 (day start <c>timestamp[]</c>) and $5 (server <c>integer[]</c>), probed in
-    /// <c>collect.query_store_hash_daily</c> with the same partials, and the first range moves to $6, $7 and $8.
+    /// <see cref="QueryTagRollupHashRoute"/> decides which is which. Parameters: the hourly arm's six first (#7240 step 4): $1 the servers it reads
+    /// (<c>integer[]</c>), $2 and $3 the hour ranges (parallel <c>timestamp[]</c> arrays of starts and ends, each range <c>[from, to)</c>), and $4, $5, $6 the gaps inside those ranges that
+    /// the arm must not read, as parallel arrays (server <c>integer[]</c>, gap start and gap end <c>timestamp[]</c>, each gap <c>[start, end)</c>); then $7 the
+    /// window end, then three per wide range: the servers that share it (<c>integer[]</c>), its <c>from</c> and its <c>to</c> (each range
+    /// <c>[from, to)</c>), the first range at $8, $9 and $10.
+    /// With <paramref name="days"/> (#6800 step 3c) the day pairs come next as $8 (day start <c>timestamp[]</c>) and $9 (server <c>integer[]</c>), probed in
+    /// <c>collect.query_store_hash_daily</c> with the same partials, and the first range moves to $10, $11 and $12.
     /// <para>Both arms yield six partials per <c>(server_id, query_hash)</c> (sums of the weighted products and of the counts, the maximum of
     /// the memory), exact <c>numeric</c> sums, so adding the hours gives the wide statement's total. The tag map is joined once, on the
     /// partials, and the final GROUP BY is by <c>(server_id, tag_id)</c>: the aggregate stays at that size. The COALESCE and the cast to
     /// <c>double precision</c> are today's, applied after the hours are added.</para>
-    /// <para>The table arm is one probe of <c>(hour, server_id)</c> per listed pair. The wide side is one arm per DISTINCT <c>[from, to)</c>
+    /// <para>The hourly arm (#7240 step 4) is one range on <c>hour</c> for each run of hours some server reads from the table (so the whole days the day table answers are never scanned), for the servers in scope, less the gaps: <see cref="QueryTagRollupHashRoute.HourlyRead"/>
+    /// derives the gaps from the plan's table pairs, so a gap is every hour of a server inside the range that is not one of its table
+    /// pairs (an hour not built, a stale pair, an hour a day row answers, an hour before the server's own start), and an anti-join removes
+    /// them. It replaces the <c>unnest</c> of every <c>(hour, server)</c> pair, which the planner merge-joined against
+    /// <c>ix_query_store_hash_hourly_hour_server</c>. The arm is grouped by <c>(server_id, query_hash)</c> before the <c>UNION ALL</c>, as the wide
+    /// arms are, so the tag join below sees one row per hash, not one per hash and hour: sums stay sums and the memory maximum stays a maximum, so the final
+    /// totals are the same. A pair is read by the hourly arm only when it is a table pair and by a wide arm only when its hour lies in a
+    /// wide range, and the plan keeps those two sets apart. The wide side is one arm per DISTINCT <c>[from, to)</c>
     /// (<paramref name="wideRanges"/>: every server that shares the tail shares one scan of it), and each arm carries its own numbered
     /// parameters. Its bounds on <c>collection_time</c> are written plainly so a scan by <c>collection_time</c> is possible, which a
     /// per-server loop must not use (<see cref="QueryStoreSql"/> explains the 13.0 s it cost), and its <c>first_execution_time</c> floor is
@@ -157,16 +166,34 @@ public static class QueryTagRollupSql
     /// </summary>
     public static string QueryStoreRoutedSqlFor(int wideRanges, bool days = false)
     {
-        var first = days ? 6 : 4;
+        /* $1 to $6 are the hourly arm's, $7 the window end, then the day pair arrays (when days) and the wide arms' triples. */
+        const string windowEnd = "$7";
+        var first = days ? 10 : 8;
         var text = new System.Text.StringBuilder();
         text.Append("""
             WITH partials AS
             (
-                SELECT t.server_id, t.query_hash, t.ec_sum, t.cpu_wsum, t.dur_wsum, t.reads_wsum, t.writes_wsum, t.mem_max
-                FROM unnest($1::timestamp[], $2::integer[]) AS p(hour, server_id)
+                SELECT t.server_id, t.query_hash,
+                       SUM(t.ec_sum) AS ec_sum,
+                       SUM(t.cpu_wsum) AS cpu_wsum,
+                       SUM(t.dur_wsum) AS dur_wsum,
+                       SUM(t.reads_wsum) AS reads_wsum,
+                       SUM(t.writes_wsum) AS writes_wsum,
+                       MAX(t.mem_max) AS mem_max
+                FROM unnest($2::timestamp[], $3::timestamp[]) AS r(range_from, range_to)
                 JOIN collect.query_store_hash_hourly AS t
-                       ON t.hour = p.hour
-                      AND t.server_id = p.server_id
+                       ON t.hour >= r.range_from
+                      AND t.hour < r.range_to
+                WHERE t.server_id = ANY($1::integer[])
+                AND   NOT EXISTS
+                      (
+                          SELECT 1
+                          FROM unnest($4::integer[], $5::timestamp[], $6::timestamp[]) AS g(server_id, gap_from, gap_to)
+                          WHERE g.server_id = t.server_id
+                          AND   t.hour >= g.gap_from
+                          AND   t.hour < g.gap_to
+                      )
+                GROUP BY t.server_id, t.query_hash
 
             """);
         if (days)
@@ -174,7 +201,7 @@ public static class QueryTagRollupSql
             text.Append("""
                     UNION ALL
                     SELECT t.server_id, t.query_hash, t.ec_sum, t.cpu_wsum, t.dur_wsum, t.reads_wsum, t.writes_wsum, t.mem_max
-                    FROM unnest($4::timestamp[], $5::integer[]) AS p(day, server_id)
+                    FROM unnest($8::timestamp[], $9::integer[]) AS p(day, server_id)
                     JOIN collect.query_store_hash_daily AS t
                            ON t.day = p.day
                           AND t.server_id = p.server_id
@@ -200,9 +227,9 @@ public static class QueryTagRollupSql
                     WHERE q.server_id = ANY({{servers}}::integer[])
                     AND   q.collection_time >= {{from}}::timestamp
                     AND   q.collection_time < {{to}}::timestamp
-                    AND   q.collection_time <= $3
+                    AND   q.collection_time <= {{windowEnd}}
                     AND   q.first_execution_time >= {{from}}::timestamp - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
-                    AND   q.first_execution_time <= LEAST({{to}}::timestamp, $3) + {{QueryStoreIntervalWide.FirstExecUpperSlackSql}}
+                    AND   q.first_execution_time <= LEAST({{to}}::timestamp, {{windowEnd}}) + {{QueryStoreIntervalWide.FirstExecUpperSlackSql}}
                     GROUP BY q.server_id, q.query_hash
 
                 """);
