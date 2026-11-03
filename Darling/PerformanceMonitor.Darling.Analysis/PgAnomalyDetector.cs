@@ -833,7 +833,6 @@ ORDER BY ms_delta DESC LIMIT 1";
             if (baseline.IsTrustworthy && baseline.EffectiveRobustSigma > 0)
             {
                 isNew = false;
-                ratio = baseline.Mean > 0 ? peakRate / baseline.Mean : 0;
 
                 /* #3653 A8 option B (lane L2a), coordinator ruling: only the robust-z arm moves onto
                    EvaluateTiles. A null verdict (no tile scored) falls back to today's whole-window
@@ -862,6 +861,13 @@ ORDER BY ms_delta DESC LIMIT 1";
                 }
                 if (!decision.Fire) return;
                 fireThreshold = decision.ThresholdUsed;
+
+                /* #7177: the ratio is the card's "x its baseline" multiple, so it divides the SAME peak by the
+                   SAME bucket mean the card prints as current_ms_per_sec and baseline_mean. It used to divide the
+                   whole window's peak by the window-start bucket's mean, which is a different bucket than the
+                   worst tile's whenever the window spans more than one local hour. On the never-blind fallback
+                   scoredPeakRate/scoredBaseline are still the whole-window peak and start bucket, as before. */
+                ratio = scoredBaseline.Mean > 0 ? scoredPeakRate / scoredBaseline.Mean : 0;
             }
             else if (baseline.IsTrustworthy && baseline.Mean > 0)
             {
