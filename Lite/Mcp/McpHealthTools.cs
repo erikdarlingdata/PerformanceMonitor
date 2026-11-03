@@ -1561,7 +1561,7 @@ public sealed class McpHealthTools
                     ? await BlockingStatsWindowNoticeAsync(dataService, resolved.ServerId, hours, windowEnd, emptyAnswer: true)
                     : default;
                 return everRan
-                    ? McpHelpers.Status(
+                    ? await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, McpHelpers.Status(
                         "empty",
                         McpHelpers.QuietUnlessCut(
                             emptyNotice.WindowTruncated, emptyNotice.EffectiveStart,
@@ -1569,7 +1569,7 @@ public sealed class McpHealthTools
                                 ? $"No blocking or deadlocks recorded for {resolved.DisplayName} in the last {hours} hour(s)"
                                 : $"No blocking{McpDatabaseSelection.ForChosen(new[] { database })} (and no deadlocks, which are not limited by database) recorded for {resolved.DisplayName} in the last {hours} hour(s)",
                             coveredClaim: ". The blocking collectors HAVE run successfully for this server, so the window is genuinely clear rather than blind."),
-                        emptyNotice.AsHints())
+                        emptyNotice.AsHints()))
                     : McpHelpers.Status(
                         "unavailable",
                         $"The blocking collectors have NEVER run successfully for {resolved.DisplayName}, so this is NOT a clean bill of health — nothing looked. Blocked-process reports need the XE session running, or the DMV blocking snapshot collector enabled; check those before concluding this server does not block.");

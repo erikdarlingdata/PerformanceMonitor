@@ -320,7 +320,8 @@ VALUES ($1,$2,$3,$4,$2,$5,$6,60,12000,'suspended')",
                     CollectionIdGenerator.Next(), at, ServerId, ServerName, database, spid);
             }
 
-            /* Collector runs that looked at the last hour, so an empty trend is an all-clear and not a gap. */
+            /* Collector runs that looked at the last hour, so an empty trend is an all-clear and not a gap. The newest run sits 2 minutes back:
+               one at the 30-minute Offline threshold would make this server offline, and its empty reads unavailable (#7167). */
             foreach (var collector in new[] { "blocked_process_report", "dmv_blocking_snapshot" })
             {
                 await DarlingMcpTestData.ExecAsync(connection, ct, @"
@@ -328,7 +329,7 @@ INSERT INTO collection_log
     (log_id, server_id, server_name, collector_name, collection_time,
      duration_ms, status, error_message, rows_collected, sql_duration_ms, duckdb_duration_ms)
 VALUES ($1, $2, $3, $4, $5, 100, 'SUCCESS', NULL, 0, 80, 20)",
-                    CollectionIdGenerator.Next(), ServerId, ServerName, collector, DarlingMcpTestData.Naive(now.AddMinutes(-30)));
+                    CollectionIdGenerator.Next(), ServerId, ServerName, collector, DarlingMcpTestData.Naive(now.AddMinutes(-2)));
             }
 
             await body(postgres, now, ct);

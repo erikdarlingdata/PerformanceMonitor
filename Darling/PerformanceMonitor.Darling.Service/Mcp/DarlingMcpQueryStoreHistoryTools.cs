@@ -398,10 +398,12 @@ public sealed class DarlingMcpQueryStoreHistoryTools
             var forced = await TryReadForcedPlansAsync(postgres, resolved.ServerId, database_name, query_id, start, windowEnd, cancellationToken);
 
             if (rows.Count == 0 && forced.Facts.Count == 0)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "query_store", cancellationToken)
+                /* #7167: an offline server's empty window answers unavailable, as the get_pg_* reads do. */
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd,
+                    await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "query_store", cancellationToken)
                     ?? McpHelpers.Status("empty",
                         $"No Query Store history for query_id {query_id} in database '{database_name}' in the {hours_back}-hour window searched.",
-                        emptyHints);
+                        emptyHints), cancellationToken);
 
             var allPlans = FoldPlans(rows);
             var plansTruncated = allPlans.Count > MaxPlans;

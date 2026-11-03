@@ -918,23 +918,24 @@ public sealed class DarlingMcpHealthParserTools
         if (lastOfType is DateTime seen)
         {
             var notice = await NoticeAsync(postgres, c, hoursBack, null, emptyAnswer: true, logger, cancellationToken);
-            return WitnessStatus(
+            /* #7167: from here on an empty ladder answer from an offline server is unavailable, as the get_pg_* reads do. */
+            return await DarlingServerOfflineNote.EmptyAsync(postgres, c.ServerId, c.DisplayName, c.WindowEnd, WitnessStatus(
                 "empty",
                 McpHelpers.QuietUnlessCut(
                     notice.WindowTruncated, notice.EffectiveStart,
                     factual: $"No {eventType} events were captured for {c.DisplayName} in the last {hoursBack} hour(s). This server HAS captured them before (the newest was stored at {Stamp(seen)})",
                     coveredClaim: ", so the window is genuinely quiet rather than blind — widen hours_back to reach the most recent events."),
                 sourceObserved: true, c.LastCapturedAt, lastCapturedOfTypeAt: seen, eventsInWindow: 0,
-                hints: notice.AsHints());
+                hints: notice.AsHints()), cancellationToken);
         }
 
         if (c.LastCapturedAt is DateTime alive)
         {
-            return WitnessStatus(
+            return await DarlingServerOfflineNote.EmptyAsync(postgres, c.ServerId, c.DisplayName, c.WindowEnd, WitnessStatus(
                 "empty",
                 $"No {eventType} events have been captured for {c.DisplayName} at any time, but its system_health session IS being read — the collector last stored an event of another type at {Stamp(alive)} — so for this category the absence is a measurement: the engine has not recorded one. Not a blind spot, and a wider window would not change it.",
                 sourceObserved: true, alive, lastCapturedOfTypeAt: null, eventsInWindow: 0,
-                hints: (await NoticeAsync(postgres, c, hoursBack, null, emptyAnswer: true, logger, cancellationToken)).AsHints());
+                hints: (await NoticeAsync(postgres, c, hoursBack, null, emptyAnswer: true, logger, cancellationToken)).AsHints()), cancellationToken);
         }
 
         if (await DarlingEngineCapability.NotCollectedStatusAsync(postgres, c.ServerId, c.DisplayName, SystemHealthCollectorName, cancellationToken) is { } notCollected)
@@ -950,11 +951,11 @@ public sealed class DarlingMcpHealthParserTools
         var runNote = await DarlingSystemHealthReader.GetLatestRunNoteAsync(postgres, c.ServerId, SystemHealthCollectorName, cancellationToken);
         if (SystemHealthSourceNote.ReadThroughEventFile(runNote))
         {
-            return WitnessStatus(
+            return await DarlingServerOfflineNote.EmptyAsync(postgres, c.ServerId, c.DisplayName, c.WindowEnd, WitnessStatus(
                 "empty",
                 $"No system_health events of ANY type have been captured for {c.DisplayName}, and that is a true negative rather than missing data: the system_health collector's newest run read the live session through its event_file target and found no events. get_collection_health shows the run history.",
                 sourceObserved: true, lastCapturedAt: null, lastCapturedOfTypeAt: null, eventsInWindow: 0,
-                hints: (await NoticeAsync(postgres, c, hoursBack, null, emptyAnswer: true, logger, cancellationToken)).AsHints());
+                hints: (await NoticeAsync(postgres, c, hoursBack, null, emptyAnswer: true, logger, cancellationToken)).AsHints()), cancellationToken);
         }
 
         return WitnessStatus(

@@ -96,6 +96,8 @@ public sealed class LockWaitTrendToolTests : IClassFixture<SharedDuckDbFixture>,
             server as uncollected, sending someone to fix collection that is working.
         */
         await SeedWaitAsync(Truncate(DateTime.UtcNow).AddMinutes(-30), "CXPACKET", 999_999);
+        /* #7167: the store reaches back past the window start, so the window is covered and the all-clear claim stands. */
+        await SeedWaitAsync(Truncate(DateTime.UtcNow).AddHours(-5), "CXPACKET", 999_999);
 
         var noLocks = Root(await McpBlockingTools.GetLockWaitTrend(service, _serverManager, ServerName, 4));
         Assert.Equal("empty", noLocks.GetProperty("status").GetString());

@@ -188,6 +188,9 @@ public sealed class McpWindowNoticeAggregateToolTests : IDisposable
         await _duckDb.InitializeFromTemplateAsync();
         await SeedServerClockAsync();
         await SeedRunsAsync("default_trace_events", WindowStart.AddDays(-9), WindowStart.AddDays(-8), everyMinutes: 60);
+        /* #7167: the server is being collected now (a run of another collector a minute ago), so the empty window is the collector's
+           alone and stays empty. A server with no successful run of any collector up to the window's end answers unavailable instead. */
+        await SeedRunsAsync("wait_stats", DateTime.UtcNow.AddMinutes(-1), DateTime.UtcNow.AddMinutes(-1), everyMinutes: 1);
 
         var root = Root(await TraceAsync());
 
@@ -488,6 +491,9 @@ public sealed class McpWindowNoticeAggregateToolTests : IDisposable
     {
         await _duckDb.InitializeFromTemplateAsync();
         await SeedRunsAsync("blocked_process_report", WindowStart.AddDays(-9), WindowStart.AddDays(-8), everyMinutes: 60);
+        /* #7167: the server is being collected now (a run of another collector a minute ago), so the empty window is the collector's
+           alone and stays empty. A server with no successful run of any collector up to the window's end answers unavailable instead. */
+        await SeedRunsAsync("wait_stats", DateTime.UtcNow.AddMinutes(-1), DateTime.UtcNow.AddMinutes(-1), everyMinutes: 1);
 
         var root = Root(await BlockingAsync());
 
@@ -502,6 +508,9 @@ public sealed class McpWindowNoticeAggregateToolTests : IDisposable
     {
         await _duckDb.InitializeFromTemplateAsync();
         await SeedRunsAsync("blocked_process_report", WindowStart.AddDays(-9), WindowStart.AddDays(-8), everyMinutes: 60);
+        /* #7167: the server is being collected now (a run of another collector a minute ago), so the empty window is the collector's
+           alone and stays empty. A server with no successful run of any collector up to the window's end answers unavailable instead. */
+        await SeedRunsAsync("wait_stats", DateTime.UtcNow.AddMinutes(-1), DateTime.UtcNow.AddMinutes(-1), everyMinutes: 1);
 
         var root = Root(await BlockingAsync(hoursBack: 1));
 

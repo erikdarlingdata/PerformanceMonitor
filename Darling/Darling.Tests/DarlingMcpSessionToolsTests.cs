@@ -582,13 +582,13 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
         });
     }
 
-    /// <summary>The empty answers carry the hints and the not_collected answer stays bare: the hints ride only on the empty status.</summary>
+    /// <summary>The empty answers carry the hints and the not_collected answer stays bare: the hints ride only on the empty status. (#7167: the empty answer is now inside the offline wrapper, so the pin is the status call and not the text around it.)</summary>
     [Fact]
     public void TheEmptyAnswers_CarryTheHints_AndNotCollectedStaysBare_InTheToolSource()
     {
         var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpSessionTools.cs").ReplaceLineEndings("\n");
-        Assert.Contains("?? McpHelpers.Status(\"empty\", \"No active query snapshots found in the requested time range.\", notice.AsHints());", source, StringComparison.Ordinal);
-        Assert.Contains("?? McpHelpers.Status(\"empty\", \"No waiting tasks captured in the specified time range.\", notice.AsHints());", source, StringComparison.Ordinal);
+        Assert.Contains("McpHelpers.Status(\"empty\", \"No active query snapshots found in the requested time range.\", notice.AsHints())", source, StringComparison.Ordinal);
+        Assert.Contains("McpHelpers.Status(\"empty\", \"No waiting tasks captured in the specified time range.\", notice.AsHints())", source, StringComparison.Ordinal);
         Assert.DoesNotContain("NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, \"query_snapshots\", cancellationToken, notice", source, StringComparison.Ordinal);
     }
 

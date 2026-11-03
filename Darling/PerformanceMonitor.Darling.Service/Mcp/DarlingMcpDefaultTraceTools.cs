@@ -115,11 +115,12 @@ public sealed class DarlingMcpDefaultTraceTools
                 windowStart, now, "default_trace_events", emptyAnswer: significant.Count == 0, logger: logger, cancellationToken: cancellationToken);
 
             if (significant.Count == 0)
-                return McpHelpers.StatusForDatabase(
+                /* #7167: an offline server's empty window answers unavailable, as Lite's twin does. */
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, McpHelpers.StatusForDatabase(
                     "empty",
                     $"No significant default trace events found in the requested time range{DarlingMcpBlockingTools.ForChosenDatabases(databases)}.",
                     databases.Describe(),
-                    notice.AsHints());
+                    notice.AsHints()), cancellationToken);
 
             var events = significant.Take(limit).Select(r =>
             {

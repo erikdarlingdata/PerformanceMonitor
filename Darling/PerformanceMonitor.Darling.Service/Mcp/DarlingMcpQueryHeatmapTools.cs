@@ -146,7 +146,11 @@ public sealed class DarlingMcpQueryHeatmapTools
                 start, end, "query_stats", emptyAnswer: rows.Count == 0, logger: logger, cancellationToken: cancellationToken);
 
             if (rows.Count == 0)
-                return await EmptyAsync(postgres, resolved.DisplayName, resolved.ServerId, start, end, hours_back, notice, databaseFilter, cancellationToken: cancellationToken);
+                /* #7167: an offline server's empty grid answers unavailable, as Lite's twin does. */
+                return await DarlingServerOfflineNote.EmptyAsync(
+                    postgres, resolved.ServerId, resolved.DisplayName, end,
+                    await EmptyAsync(postgres, resolved.DisplayName, resolved.ServerId, start, end, hours_back, notice, databaseFilter, cancellationToken: cancellationToken),
+                    cancellationToken);
 
             var truncated = rows.Count > limit;
             var cells = rows.Take(limit).ToList();
