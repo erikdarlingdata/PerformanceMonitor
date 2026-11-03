@@ -357,12 +357,14 @@ OPTION(RECOMPILE);";
         target.MeetsMinimumVersion(15, unknownIsNewest: true);
 
     /// <summary>
-    /// Never per-database. On the on-prem/MI path the DMV is instance-wide, so one query covers the whole
-    /// server; on Azure SQL DB the query is database-scoped and reads through the connection the host
-    /// already holds. Enumerating would connect to <c>master</c> for nothing — the #1631 trap
-    /// database_size_stats documents.
+    /// Per-database on Azure SQL DB only (#7165). The Azure query is database-scoped
+    /// (<c>pvss.database_id = DB_ID()</c>), and a logical-server registration names no database, so the host
+    /// connects to <c>master</c>: with one connection the collector read master's version store and no user
+    /// database's, although ADR is always on there and version-store growth is a real alert source. The host
+    /// now connects to each database and runs the query in it, the same fallback database_size_stats takes
+    /// (#5498). On the on-prem/MI path the DMV is instance-wide, so one query covers the whole server.
     /// </summary>
-    public override bool RunsPerDatabase(CollectorTargetInfo target) => false;
+    public override bool RunsPerDatabase(CollectorTargetInfo target) => target.IsAzureSqlDb;
 
     public override CollectorQuery BuildQuery(CollectorContext context)
     {
