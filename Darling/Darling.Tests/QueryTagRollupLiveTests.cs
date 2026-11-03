@@ -417,7 +417,7 @@ public sealed class QueryTagRollupLiveTests
 
     /// <summary>Blocked-process reports and deadlocks are read on the event's own timestamp, and carry the collection_time floor beside it
     /// (#7204) so a fleet read leaves the older chunks closed. A report collected a minute after its event (the usual lag) and one collected
-    /// hours late (an outage catch-up, still inside the one-day allowance) both count; a row whose collection_time is days before the window,
+    /// hours late (an outage catch-up, still inside the one-day allowance) both count (each as its own wait, so the blocked spid differs: #7163 counts one wait once); a row whose collection_time is days before the window,
     /// which only a monitored clock days off the collector's could produce, is the row the floor leaves out.</summary>
     [Fact]
     public async Task TheBlockingReportAndDeadlockReads_CarryTheCollectionTimeFloor()
@@ -428,10 +428,10 @@ public sealed class QueryTagRollupLiveTests
             await MapAsync(c, ServerOne, "caller", Caller("floorApp", "lg", "h", "db1"), tag);
             var eventTime = DateTime.UtcNow.AddMinutes(-20);
             const string reportInsert =
-                "INSERT INTO blocked_process_reports (blocked_report_id, collection_time, server_id, server_name, event_time, wait_time_ms, blocking_spid, blocked_spid, blocking_status, database_name, blocked_client_app, blocked_login_name, blocked_host_name, blocking_client_app, blocking_login_name, blocking_host_name) VALUES ($1, $2, $3, 'x', $4, 1000, 60, 70, 'suspended', 'db1', 'floorApp', 'lg', 'h', 'floorApp', 'lg', 'h')";
-            await ExecAsync(c.Store, reportInsert, c.Ct, CollectionIdGenerator.Next(), eventTime.AddMinutes(1), ServerOne, eventTime);
-            await ExecAsync(c.Store, reportInsert, c.Ct, CollectionIdGenerator.Next(), eventTime.AddHours(5), ServerOne, eventTime);
-            await ExecAsync(c.Store, reportInsert, c.Ct, CollectionIdGenerator.Next(), eventTime.AddDays(-5), ServerOne, eventTime);
+                "INSERT INTO blocked_process_reports (blocked_report_id, collection_time, server_id, server_name, event_time, wait_time_ms, blocking_spid, blocked_spid, blocking_status, database_name, blocked_client_app, blocked_login_name, blocked_host_name, blocking_client_app, blocking_login_name, blocking_host_name) VALUES ($1, $2, $3, 'x', $4, 1000, 60, $5, 'suspended', 'db1', 'floorApp', 'lg', 'h', 'floorApp', 'lg', 'h')";
+            await ExecAsync(c.Store, reportInsert, c.Ct, CollectionIdGenerator.Next(), eventTime.AddMinutes(1), ServerOne, eventTime, 70);
+            await ExecAsync(c.Store, reportInsert, c.Ct, CollectionIdGenerator.Next(), eventTime.AddHours(5), ServerOne, eventTime, 71);
+            await ExecAsync(c.Store, reportInsert, c.Ct, CollectionIdGenerator.Next(), eventTime.AddDays(-5), ServerOne, eventTime, 72);
 
             const string deadlockInsert =
                 "INSERT INTO deadlocks (deadlock_id, collection_time, server_id, server_name, deadlock_time, deadlock_graph_xml, database_name) VALUES ($1, $2, $3, 'x', $4, $5, 'db1')";
