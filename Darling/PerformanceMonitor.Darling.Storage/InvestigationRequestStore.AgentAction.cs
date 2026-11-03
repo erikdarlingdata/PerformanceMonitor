@@ -649,7 +649,7 @@ RETURNING journal_id";
     private static async Task<long> InsertDirectJournalAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, DateTime now,
         int? serverId, string journalEvent, string actor, string? reason, string detailJson, CancellationToken cancellationToken)
     {
-        await using var command = new NpgsqlCommand(AgentActionJournalSql, connection, transaction);
+        await using var command = new NpgsqlCommand(AgentActionJournalSql, connection, transaction) { CommandTimeout = DeadlockSignatureStore.MergeCommandTimeoutSeconds };
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = now, NpgsqlDbType = NpgsqlDbType.TimestampTz });
         command.Parameters.Add(new NpgsqlParameter<Guid?> { TypedValue = null, NpgsqlDbType = NpgsqlDbType.Uuid });
         command.Parameters.Add(new NpgsqlParameter<int?> { TypedValue = serverId, NpgsqlDbType = NpgsqlDbType.Integer });
