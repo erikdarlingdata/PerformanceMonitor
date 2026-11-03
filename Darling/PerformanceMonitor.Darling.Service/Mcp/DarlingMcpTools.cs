@@ -354,9 +354,14 @@ public sealed class DarlingMcpTools
             /* #7010: the window-floor notice, over wait_stats (the data the analysis reads), never the oldest stored fact: a quiet pass stores
                nothing, so a facts floor would call a quiet week truncated. Both unavailable answers carry it under hints. */
             var noticeStart = windowEnd.AddHours(-hours_back);
-            Task<McpWindowNotice> NoticeAsync(bool emptyAnswer) => DarlingMcpWindowNotice.ReadAsync(
-                () => DarlingMcpWindowNotice.Probe(postgres, "wait_stats", resolved.ServerName, noticeStart, windowEnd, cancellationToken),
-                noticeStart, windowEnd, "wait_stats", emptyAnswer: emptyAnswer, cancellationToken: cancellationToken);
+            async Task<McpWindowNotice> NoticeAsync(bool emptyAnswer)
+            {
+                /* #7194: the table is the engine's own (pg_database_stats on a PostgreSQL target), the one the analysis pass reads. */
+                var coverageTable = await DarlingEngineCapability.AnalysisCoverageTableAsync(postgres, resolved.ServerId, cancellationToken);
+                return await DarlingMcpWindowNotice.ReadAsync(
+                    () => DarlingMcpWindowNotice.Probe(postgres, coverageTable, resolved.ServerName, noticeStart, windowEnd, cancellationToken),
+                    noticeStart, windowEnd, coverageTable, emptyAnswer: emptyAnswer, cancellationToken: cancellationToken);
+            }
 
             if (facts.Count == 0)
             {
@@ -1206,9 +1211,11 @@ public sealed class DarlingMcpTools
             /* #7010: the window-floor notice, over wait_stats (the data the analysis reads), never the oldest stored finding: a quiet analysis
                pass stores nothing, so a findings floor would call a quiet week truncated. Same floor as get_analysis_facts. */
             var noticeStart = windowEnd.AddHours(-hours_back);
+            /* #7194: the table is the engine's own (pg_database_stats on a PostgreSQL target), the one the analysis pass reads. */
+            var coverageTable = await DarlingEngineCapability.AnalysisCoverageTableAsync(postgres, resolved.ServerId, cancellationToken);
             var notice = await DarlingMcpWindowNotice.ReadAsync(
-                () => DarlingMcpWindowNotice.Probe(postgres, "wait_stats", resolved.ServerName, noticeStart, windowEnd, cancellationToken),
-                noticeStart, windowEnd, "wait_stats", emptyAnswer: findings.Count == 0, cancellationToken: cancellationToken);
+                () => DarlingMcpWindowNotice.Probe(postgres, coverageTable, resolved.ServerName, noticeStart, windowEnd, cancellationToken),
+                noticeStart, windowEnd, coverageTable, emptyAnswer: findings.Count == 0, cancellationToken: cancellationToken);
 
             if (findings.Count == 0)
             {
