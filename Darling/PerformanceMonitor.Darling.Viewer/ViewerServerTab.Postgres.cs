@@ -421,7 +421,7 @@ public partial class ViewerServerTab
     /// </summary>
     private async void PgDeadlocksGrid_MouseDoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
     {
-        if (PgDeadlocksGrid.SelectedItem is not DarlingPgDeadlockReader.PgDeadlockRow row)
+        if (!DataGridRowHit.IsOnRow(e.OriginalSource) || PgDeadlocksGrid.SelectedItem is not DarlingPgDeadlockReader.PgDeadlockRow row)
         {
             return;
         }

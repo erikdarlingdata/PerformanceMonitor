@@ -103,7 +103,7 @@ public partial class FinOpsTab
 
     private void FinOpsIndexLockingGrid_DoubleClick(object sender, MouseButtonEventArgs e)
     {
-        if (FinOpsIndexLockingDataGrid.SelectedItem is IndexLockingRow row)
+        if (DataGridRowHit.IsOnRow(e.OriginalSource) && FinOpsIndexLockingDataGrid.SelectedItem is IndexLockingRow row)
             ShowFinOpsLockingDetail(row);
     }
 
