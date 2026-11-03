@@ -351,7 +351,7 @@ public sealed class DarlingMcpTools
                a family failed, the sentence is appended to the message and collection_caveats to the payload. */
             var collectionCaveat = collection.Describe();
 
-            /* #7010: the window-floor notice, over wait_stats (the data the analysis reads), never the oldest stored fact: a quiet pass stores
+            /* #7010: the window-floor notice, over the engine's coverage table (the data the analysis reads), never the oldest stored fact: a quiet pass stores
                nothing, so a facts floor would call a quiet week truncated. Both unavailable answers carry it under hints. */
             var noticeStart = windowEnd.AddHours(-hours_back);
             async Task<McpWindowNotice> NoticeAsync(bool emptyAnswer)
@@ -1208,7 +1208,7 @@ public sealed class DarlingMcpTools
                (their per-database findings are the primary's). Null when none; the same sentence on every surface. */
             var secondaryReplicaNote = await PgSecondaryReplicaScope.NoteAsync(postgres, resolved.ServerId, null, cancellationToken, anchor);
 
-            /* #7010: the window-floor notice, over wait_stats (the data the analysis reads), never the oldest stored finding: a quiet analysis
+            /* #7010: the window-floor notice, over the engine's coverage table (the data the analysis reads), never the oldest stored finding: a quiet analysis
                pass stores nothing, so a findings floor would call a quiet week truncated. Same floor as get_analysis_facts. */
             var noticeStart = windowEnd.AddHours(-hours_back);
             /* #7194: the table is the engine's own (pg_database_stats on a PostgreSQL target), the one the analysis pass reads. */
