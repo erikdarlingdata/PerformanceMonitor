@@ -48,7 +48,7 @@ public sealed class ProposalWebRouteLiveTests(PostgresKillLiveTests.ScramTlsClus
     }
 
     private sealed record Ctx(NpgsqlDataSource Source, NpgsqlConnection Store, NpgsqlConnection Admin, string Victim, string Arg, Guid RequestId,
-        int RouteId, SeatBox Seats, CancellationToken Ct)
+        int RouteId, SeatBox Seats, ScratchPostgres Scratch, CancellationToken Ct)
     {
         /// <summary>Opens a victim backend and has the agent propose its kill. Answers the backend and the proposal id.</summary>
         public async Task<(NpgsqlConnection Connection, int Pid, Guid ProposalId)> ProposeKillAsync(PostgresKillLiveTests.ScramTlsCluster target)
@@ -107,7 +107,7 @@ public sealed class ProposalWebRouteLiveTests(PostgresKillLiveTests.ScramTlsClus
 
         /// <summary>Starts the web routes over this store at <paramref name="dataDetail"/>, with the seat in <see cref="Seats"/> on every request,
         /// behind the host's real write gate (<see cref="DarlingWebSeat.IsRequestAllowed"/>), which answers 403 as the host does.</summary>
-        public async Task<Web> WebAsync(McpDataDetail dataDetail = McpDataDetail.Full)
+        public async Task<Web> WebAsync(McpDataDetail dataDetail = McpDataDetail.Full, NpgsqlDataSource? webLogin = null, bool managedStore = false)
         {
             var builder = WebApplication.CreateBuilder(new WebApplicationOptions
             {
@@ -131,7 +131,8 @@ public sealed class ProposalWebRouteLiveTests(PostgresKillLiveTests.ScramTlsClus
             });
             var owner = new StoreOwnerSource();
             owner.Publish(Source);
-            DarlingWebEndpoints.MapAll(app, Source, new CollectorRuntimeState(), new CapturingTestLogger(), ownerSource: owner, dataDetail: dataDetail);
+            DarlingWebEndpoints.MapAll(app, webLogin ?? Source, new CollectorRuntimeState(), new CapturingTestLogger(), ownerSource: owner, dataDetail: dataDetail,
+                postgresConfig: managedStore ? new PostgresConfig { Managed = true } : null);
             await app.StartAsync(Ct);
             return new Web(app, Ct);
         }
@@ -209,7 +210,7 @@ public sealed class ProposalWebRouteLiveTests(PostgresKillLiveTests.ScramTlsClus
             var opened = await requests.OpenOrJoinAsync(alert, ct);
             var claim = await requests.ClaimAsync(opened.RequestId!.Value, "agent-a", ct);
             var arg = AgentActionArgumentTests.Arg(opened.RequestId.Value.ToString(), claim.ClaimId!.Value.ToString(), reason: "the blocker holds a transaction open");
-            await body(new Ctx(source, store, admin, victim, arg, opened.RequestId.Value, routeId, new SeatBox(), ct));
+            await body(new Ctx(source, store, admin, victim, arg, opened.RequestId.Value, routeId, new SeatBox(), scratch, ct));
             bodySucceeded = true;
         }
         finally
@@ -409,6 +410,55 @@ public sealed class ProposalWebRouteLiveTests(PostgresKillLiveTests.ScramTlsClus
 
             Assert.Null(await c.FirstPressByAsync(proposalId));
             Assert.Equal(404, (await web.SendAsync("GET", $"/api/proposals/{Guid.NewGuid()}")).Status);
+        });
+    }
+
+    /// <summary>On the managed store with <c>web.allowAdminWrites</c> off the dashboard has only the viewer login, which cannot write, so a
+    /// signed-in admin cannot press. The page must say the dashboard is read-only and name the switch (the sentence the press itself answers),
+    /// not tell the admin to sign in. A seat that is not signed in still gets the sign-in sentence.</summary>
+    [Fact]
+    public async Task OnTheManagedStore_WithAdminWritesOff_ASignedInAdminIsToldTheDashboardIsReadOnly_NotToSignIn()
+    {
+        await RunAsync(singlePerson: true, async c =>
+        {
+            var (connection, _, proposalId) = await c.ProposeKillAsync(target);
+            await using var victim = connection;
+            var roleName = "pmw_view_" + Guid.NewGuid().ToString("N")[..8];
+            const string rolePassword = "proposal-web-view-pw";
+            await using (var create = new NpgsqlCommand($"CREATE ROLE {roleName} LOGIN NOSUPERUSER PASSWORD '{rolePassword}'", c.Store))
+                await create.ExecuteNonQueryAsync(c.Ct);
+            foreach (var statement in ViewerGrantReplay.StatementsFor(roleName, c.Scratch.DatabaseName))
+            {
+                await using var grant = new NpgsqlCommand(statement, c.Store);
+                await grant.ExecuteNonQueryAsync(c.Ct);
+            }
+
+            var viewerLogin = new NpgsqlConnectionStringBuilder(c.Scratch.ConnectionString)
+            {
+                Username = roleName, Password = rolePassword, SearchPath = "config,public", Pooling = false,
+            }.ConnectionString;
+            await using var viewerSource = NpgsqlDataSource.Create(viewerLogin);
+            await using var web = await c.WebAsync(webLogin: viewerSource, managedStore: true);
+
+            c.Seats.Seat = DarlingWebSeat.SharedToken;
+            var read = await web.SendAsync("GET", $"/api/proposals/{proposalId}");
+            Assert.Equal(200, read.Status);
+            Assert.False((bool)read.Body!["can_press"]!);
+            var note = (string?)read.Body["press_note"];
+            Assert.Contains("read-only access to the bundled store", note);
+            Assert.Contains("web.allowAdminWrites", note);
+            Assert.DoesNotContain("Sign in", note);
+
+            var press = await web.PressAsync(proposalId, "first-press");
+            Assert.Equal(403, press.Status);
+            Assert.Equal(note, (string?)press.Body!["error"]);
+
+            c.Seats.Seat = DarlingWebSeat.ReadsOnly;
+            var signedOut = await web.SendAsync("GET", $"/api/proposals/{proposalId}");
+            Assert.Equal(DarlingWebEndpoints.ProposalPressSignInNote, (string?)signedOut.Body!["press_note"]);
+
+            await using (var drop = new NpgsqlCommand($"DROP OWNED BY {roleName}; DROP ROLE {roleName}", c.Store))
+                await drop.ExecuteNonQueryAsync(c.Ct);
         });
     }
 
