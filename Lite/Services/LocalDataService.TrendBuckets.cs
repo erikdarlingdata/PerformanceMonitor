@@ -411,9 +411,6 @@ ORDER BY 1";
     internal static string BucketedDurationTrendSql(string relation, string dbClause)
     {
         /* #5414 M1: the database filter is applied INSIDE the aggregates, not in the WHERE (see DbInPredicate). */
-        var matchedRows = dbClause.Length == 0
-            ? ""
-            : $",\n        COUNT(*) FILTER (WHERE {DbInPredicate(dbClause)}) AS matched_rows";
         var matchedCarry = dbClause.Length == 0 ? "" : ",\n        matched_rows";
         /* #5414 round 2: whether the chosen databases had any row is decided once for the whole window (the tool's
            empty), never per bucket: a bucket they were quiet in is a measured 0, and dropping it made it read missing and
@@ -424,22 +421,7 @@ ORDER BY 1";
            (the collector's runs are the axis, an idle run is a 0 point, a bucket's seconds are the rated gaps). */
         var collections = relation == "v_procedure_stats"
             ? ProcedureCollectionsSql(dbClause)
-            : $@"raw AS
-(
-    SELECT
-        collection_time,
-        {FilteredSum("delta_elapsed_time", dbClause)} / 1000.0 AS total_elapsed_ms,
-        {FilteredSum("delta_execution_count", dbClause)} AS total_executions,
-        CASE WHEN MAX(sample_interval_seconds) IS NULL
-             THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
-             ELSE NULLIF(MAX(sample_interval_seconds), 0)
-        END AS interval_seconds{matchedRows}
-    FROM {relation}
-    WHERE server_id = $1
-    AND   collection_time >= $2
-    AND   collection_time <= $3
-    GROUP BY collection_time
-),";
+            : QueryCollectionsSql(relation, dbClause, includeElapsed: true);
 
         return $@"
 WITH {collections}
