@@ -1200,6 +1200,99 @@ SELECT COALESCE
     }
 
     /// <summary>
+    /// The partition of <paramref name="partitions"/> whose bounds hold <paramref name="utcNow"/>: a day partition with both
+    /// bounds, never the DEFAULT and never the legacy table (its lower bound is MINVALUE). Null when no day partition holds
+    /// it. The partition is found by its bounds, never by its name (#7353).
+    /// </summary>
+    public static PartitionInfo? CurrentPartition(IEnumerable<PartitionInfo> partitions, DateTime utcNow)
+    {
+        foreach (var partition in partitions)
+        {
+            if (!partition.IsDefault && !partition.UpperUnbounded
+                && partition.Lower.HasValue && partition.Upper.HasValue
+                && partition.Lower.Value <= utcNow && utcNow < partition.Upper.Value)
+            {
+                return partition;
+            }
+        }
+
+        return null;
+    }
+
+    /* Whether the connected role may ANALYZE the relation $1. ANALYZE by a role that may not does not fail: PostgreSQL skips the
+       relation with a WARNING and the statement succeeds, so the answer has to come from the catalogs. The rule is the engine's:
+       the owner (or a member of the owner role), the owner of the database, or on PostgreSQL 17 and later the MAINTAIN privilege.
+       The privilege name sits inside a CASE so a server before 17, which has no such privilege, never evaluates it. */
+    internal const string CanAnalyzeSql = @"
+SELECT pg_has_role(c.relowner, 'USAGE')
+    OR pg_has_role((SELECT d.datdba FROM pg_database AS d WHERE d.datname = current_database()), 'USAGE')
+    OR CASE WHEN current_setting('server_version_num')::int >= 170000 THEN has_table_privilege(c.oid, 'MAINTAIN') ELSE false END
+FROM pg_class AS c
+WHERE c.oid = to_regclass($1);";
+
+    /* One warning per table per process: a store whose role may not ANALYZE would otherwise repeat it every hour. */
+    private static readonly ConcurrentDictionary<string, byte> NotPermittedWarned = new(StringComparer.Ordinal);
+
+    internal static void ResetNotPermittedWarnings() => NotPermittedWarned.Clear();
+
+    /// <summary>
+    /// The hourly ANALYZE of the day partition that holds <paramref name="utcNow"/> (#7353). Autovacuum can leave a new day's
+    /// partition without statistics for most of the day when its workers are busy on bigger tables, and the planner then
+    /// estimated a few hundred rows for millions and chose the wrong index. The partition is found by its bounds
+    /// (<see cref="CurrentPartition"/>), so it works the same on every store, and only that one partition is analyzed: never
+    /// the legacy table, never the DEFAULT. One transaction under a 5 s <c>lock_timeout</c> (a lock timeout is
+    /// <see cref="StepOutcome.RetryLater"/>) and the <see cref="AnalyzeTimeoutSeconds"/> deadline. A role that may not ANALYZE
+    /// the partition (a store the service does not own) is <see cref="StepOutcome.NotReady"/>, logged once per process.
+    /// </summary>
+    public static async Task<StepResult> AnalyzeCurrentPartitionAsync(
+        NpgsqlConnection connection, IntervalTable table, DateTime utcNow, ILogger logger, CancellationToken cancellationToken)
+    {
+        var current = CurrentPartition(await ReadPartitionsAsync(connection, table, cancellationToken).ConfigureAwait(false), utcNow);
+        if (current is null)
+        {
+            return new StepResult(StepOutcome.NothingToDo, $"no day partition of {table.Parent} holds {Literal(utcNow)}");
+        }
+
+        bool allowed;
+        await using (var command = Command(connection, CanAnalyzeSql, ShortTimeoutSeconds))
+        {
+            AddText(command, current.Name);
+            allowed = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is true;
+        }
+
+        if (!allowed)
+        {
+            var detail = $"the service role may not ANALYZE {current.Name}";
+            if (NotPermittedWarned.TryAdd(table.Parent, 0))
+            {
+                logger.LogWarning(
+                    "Query Store interval table {Table}: {Detail} (it is neither the owner nor holds MAINTAIN), so the hourly ANALYZE of the current partition is skipped. "
+                    + "Collection is not affected. Give the service role ownership of the partitions, or MAINTAIN on PostgreSQL 17 and later, to keep the planner's statistics current.",
+                    table.Parent, detail);
+            }
+
+            return new StepResult(StepOutcome.NotReady, detail);
+        }
+
+        var started = System.Diagnostics.Stopwatch.StartNew();
+        try
+        {
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            await ExecuteAsync(connection, LockTimeoutSql, ShortTimeoutSeconds, transaction, cancellationToken).ConfigureAwait(false);
+            await ExecuteAsync(connection, $"ANALYZE {current.Name};", AnalyzeTimeoutSeconds, transaction, cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (PostgresException ex) when (IsLockContention(ex))
+        {
+            logger.LogInformation(
+                "Query Store interval table {Table}: analyzing {Partition} hit a {Reason}; the next background pass retries.", table.Parent, current.Name, LockReason(ex));
+            return new StepResult(StepOutcome.RetryLater, LockReason(ex));
+        }
+
+        return new StepResult(StepOutcome.Done, $"analyzed {current.Name} in {started.Elapsed.TotalSeconds:F1} s", 1);
+    }
+
+    /// <summary>
     /// Phase A as one call, one pass of the background loop: arm (or re-arm a not-yet-valid CHECK that is close to S),
     /// validate (never when S is closer than <see cref="ValidateGuard"/>), promote (a lock timeout is retried
     /// <see cref="PromoteRetries"/> times, <see cref="PromoteRetryDelay"/> apart), and ANALYZE the parent only when this
@@ -1554,7 +1647,8 @@ SELECT COALESCE
     /// other), then, on the first pass and after any refusal, the Query Store index ensures
     /// (<see cref="QueryStoreBackgroundIndexes.RunDelayedAsync(NpgsqlDataSource, ILogger, TimeSpan, IReadOnlyList{QueryStoreBackgroundIndexes.IndexSpec}, CancellationToken)"/>)
     /// and promotion again for any table whose promotion was <see cref="StepOutcome.Refused"/> (a parent index had no
-    /// legacy child, which the index ensure has just built), then the once-a-day ANALYZE of each promoted parent. The
+    /// legacy child, which the index ensure has just built), then the once-a-day ANALYZE of each promoted parent and the hourly
+    /// ANALYZE of each table's current day partition (<see cref="AnalyzeCurrentPartitionAsync"/>, #7353). The
     /// VALIDATE and a concurrent <c>CREATE INDEX CONCURRENTLY</c> on the legacy table conflict, so the indexes wait for
     /// Phase A. The loop is serial, so one VALIDATE runs at a time per table, and none of it ever runs inside a
     /// convergence step's budget (#5571 review H1, M1).
@@ -1586,6 +1680,11 @@ SELECT COALESCE
             {
                 await using var connection = await postgres.OpenConnectionAsync(token).ConfigureAwait(false);
                 return await QueryStoreIntervalBrin.SummarizeNewRangesAsync(connection, table, logger, token).ConfigureAwait(false);
+            },
+            async (table, token) =>
+            {
+                await using var connection = await postgres.OpenConnectionAsync(token).ConfigureAwait(false);
+                return await AnalyzeCurrentPartitionAsync(connection, table, DateTime.UtcNow, logger, token).ConfigureAwait(false);
             });
 
     /// <summary><see cref="RunDelayedAsync(NpgsqlDataSource, ILogger, TimeSpan, IReadOnlyList{QueryStoreBackgroundIndexes.IndexSpec}, CancellationToken)"/> with the three actions injected, so the order, the repetition and the isolation run without a store.</summary>
@@ -1598,7 +1697,8 @@ SELECT COALESCE
         Func<IntervalTable, CancellationToken, Task<StepResult>> analyze,
         Func<CancellationToken, Task> ensureIndexes,
         CancellationToken cancellationToken,
-        Func<IntervalTable, CancellationToken, Task<StepResult>>? summarize = null)
+        Func<IntervalTable, CancellationToken, Task<StepResult>>? summarize = null,
+        Func<IntervalTable, CancellationToken, Task<StepResult>>? analyzeCurrent = null)
     {
         try
         {
@@ -1638,6 +1738,17 @@ SELECT COALESCE
                 foreach (var table in tables)
                 {
                     await TryStepAsync(logger, table, "analyze", analyze, quiet: true, cancellationToken).ConfigureAwait(false);
+                }
+
+                /* #7353: the hourly ANALYZE of the day partition that holds now. Autovacuum's analyze of a new day's partition can wait
+                   a day behind busier tables, and the planner then reads the wide table's newest hours with no statistics. A failure
+                   is logged by TryStepAsync and never stops the BRIN summarize below or the next pass. */
+                if (analyzeCurrent is not null)
+                {
+                    foreach (var table in tables)
+                    {
+                        await TryStepAsync(logger, table, "current partition analyze", analyzeCurrent, quiet: true, cancellationToken).ConfigureAwait(false);
+                    }
                 }
 
                 /* #5594: the BRIN indexes are summarized here, hourly, because autosummarize is off and a VACUUM only summarizes
