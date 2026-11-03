@@ -783,7 +783,7 @@ clean AS (
     FROM with_rate
 )," + RobustTierScaffold,
 
-            // Blocking events per minute (chart shows event bars bucketed by minute)
+            // Blocked-process reports per minute (the chart shows report bars bucketed by minute)
             MetricNames.BlockingPerMinute => @"
 WITH per_minute AS (
     SELECT DATE_TRUNC('minute', event_time) AS minute_bucket,
