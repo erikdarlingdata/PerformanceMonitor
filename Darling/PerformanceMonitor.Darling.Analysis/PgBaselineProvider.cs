@@ -1623,7 +1623,7 @@ clean AS (
     WHERE NOT (ms_per_sec = 0 AND prior_ms_per_sec > 100 AND sample_interval_seconds IS NULL)
 )," + RobustTierScaffold,
 
-            // Blocking events per minute (chart shows event bars bucketed by minute)
+            // Blocked-process reports per minute (the chart shows report bars bucketed by minute)
             MetricNames.BlockingPerMinute => @"
 WITH per_minute AS (
     SELECT DATE_TRUNC('minute', collection_time) AS minute_bucket,

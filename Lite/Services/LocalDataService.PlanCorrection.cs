@@ -140,8 +140,12 @@ LIMIT $4";
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
+        /* #7216: the newest-snapshot lookup has no time bound, so through the v_ view it read every archived row of plan_correction.
+           The hot table holds the newest snapshot of any server still being collected; the view is read only for a server with no
+           hot row (collection stopped and archival moved every row out), which still shows the last values it had. */
+        var planCorrectionRelation = await HotTableHasServerAsync(connection, "plan_correction", serverId) ? "plan_correction" : "v_plan_correction";
         var dbClause = BuildDbInClause(databaseNames, "database_name", 2, out var dbValues);
-        command.CommandText = @"
+        command.CommandText = $@"
 SELECT DISTINCT
     database_name,
     force_last_good_plan_desired_state,
@@ -150,9 +154,9 @@ SELECT DISTINCT
     create_index_actual_state,
     drop_index_actual_state,
     collection_time
-FROM v_plan_correction
+FROM {planCorrectionRelation}
 WHERE server_id = $1
-AND   collection_time = (SELECT MAX(collection_time) FROM v_plan_correction WHERE server_id = $1)" + dbClause + @"
+AND   collection_time = (SELECT MAX(collection_time) FROM {planCorrectionRelation} WHERE server_id = $1)" + dbClause + @"
 ORDER BY database_name";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });

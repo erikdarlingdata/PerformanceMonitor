@@ -176,6 +176,31 @@ public sealed class BlockingStatsReaderTests : IClassFixture<SharedDuckDbFixture
         Assert.True(await service.HasBlockedProcessReportsInWindowAsync(ServerId, MinuteA.AddMinutes(-1), MinuteA.AddMinutes(1)));
     }
 
+    /// <summary>
+    /// #7219: a window with no blocked-process reports (the AWS RDS case) is counted from DMV snapshot rows. The trend read says so through
+    /// <c>Source</c>, and every surface worded from it (legend, short axis title, hover name and unit, crosshair lane unit) names snapshot
+    /// rows. A window that holds a report keeps the reports wording.
+    /// </summary>
+    [Fact]
+    public async Task BlockingTrend_DmvOnlyWindow_IsWordedAsSnapshotRows_AndAReportWindowAsReports()
+    {
+        var service = new LocalDataService(_duckDb);
+        await SeedDmvBlockingSnapshotAsync(MinuteB.AddSeconds(5), "DB1", 2000);
+
+        var snapshotSources = (await service.GetBlockingTrendAsync(ServerId)).Select(p => p.Source).ToList();
+        Assert.Equal("DMV snapshot", Assert.Single(snapshotSources));
+        Assert.Equal("Blocking snapshot rows per minute (DMV snapshot)", PerformanceMonitor.Ui.BlockingTrendLabels.LegendFor(snapshotSources));
+        Assert.Equal(PerformanceMonitor.Ui.BlockingTrendLabels.SnapshotAxisShort, PerformanceMonitor.Ui.BlockingTrendLabels.AxisTitleFor(snapshotSources));
+        Assert.Equal("Blocking snapshot rows", PerformanceMonitor.Ui.BlockingTrendLabels.HoverNameFor(snapshotSources));
+        Assert.Equal("snapshot rows", PerformanceMonitor.Ui.BlockingTrendLabels.UnitFor(snapshotSources));
+
+        await SeedBlockedProcessReportAsync(MinuteA.AddSeconds(5), "DB1", 1000);
+        var reportSources = (await service.GetBlockingTrendAsync(ServerId)).Select(p => p.Source).ToList();
+        Assert.Equal("blocked-process-report", Assert.Single(reportSources));
+        Assert.Equal("Blocked-process reports per minute (blocked-process-report)", PerformanceMonitor.Ui.BlockingTrendLabels.LegendFor(reportSources));
+        Assert.Equal("reports", PerformanceMonitor.Ui.BlockingTrendLabels.UnitFor(reportSources));
+    }
+
     [Fact]
     public async Task BlockingSeries_OnlySelfWaitReportsInXe_DrawTheDmvArm_AndDmvSelfWaitsGo()
     {

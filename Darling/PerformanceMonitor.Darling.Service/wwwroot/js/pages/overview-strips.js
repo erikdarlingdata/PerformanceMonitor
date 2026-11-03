@@ -138,10 +138,13 @@ export function buildStrips(reads) {
     note: note(reads.waits, "No wait samples in this window."),
   };
 
+  /* #7219: get_blocking_trend counts blocked-process reports, or DMV snapshot rows when the window holds no reports (the AWS RDS case
+     and the database-filter case), and its `source` key says which; a snapshot row is not a report, so the series is named for the arm that answered. */
+  const blockingBySnapshot = !!(reads.blocking && reads.blocking.kind === "data" && reads.blocking.data && reads.blocking.data.source === "DMV snapshot");
   const blocking = {
-    key: "blocking", title: "Blocking", unit: "events", event: true, min: 0,
+    key: "blocking", title: "Blocking", unit: "per min", event: true, min: 0,
     series: [
-      { label: "Blocking", color: "#ef5350", points: toTimed(rowsOf(reads.blocking, "trend"), "time", (r) => r.count) },
+      { label: blockingBySnapshot ? "Blocking snapshot rows" : "Blocked-process reports", color: "#ef5350", points: toTimed(rowsOf(reads.blocking, "trend"), "time", (r) => r.count) },
       { label: "Deadlocks", color: "#ab47bc", points: toTimed(rowsOf(reads.deadlocks, "trend"), "time", (r) => r.count) },
     ],
     note: null,
