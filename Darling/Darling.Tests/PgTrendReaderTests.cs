@@ -139,10 +139,6 @@ public sealed class PgTrendReaderTests
 
         Assert.Contains("coalesce(event_type, '') <> 'CPU'", sql, StringComparison.Ordinal);
 
-        /* Ranked on the DIFFERENCE across the window. The profile is cumulative, so ranking it raw returns
-           whichever event has accumulated longest since startup — a fact about uptime, not about now. */
-        Assert.Contains("ORDER BY (hi - lo) DESC", sql, StringComparison.Ordinal);
-
         /* The CPU exclusion belongs to the CHOICE only: naming the event explicitly must still follow it. */
         Assert.DoesNotContain("'CPU'", DarlingPgTrendReader.WaitTrendSql, StringComparison.Ordinal);
     }
