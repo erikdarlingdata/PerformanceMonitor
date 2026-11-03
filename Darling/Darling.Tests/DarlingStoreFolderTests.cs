@@ -469,7 +469,7 @@ public sealed class DarlingStoreFolderScriptTests
         foreach (var name in new[]
         {
             "Get-DarlingDataDirectory", "Get-DarlingStoreFolder", "Initialize-DarlingNativeStoreFolder", "Get-DarlingItemOwnerSid", "Get-DarlingLinkOwnerSid",
-            "Get-DarlingStoreContentsProblem", "Get-DarlingItemOwnerProblem", "Get-DarlingStoreRepairSteps", "Get-DarlingStoreRepairText", "Initialize-DarlingStoreFolder", "Get-DarlingServiceSids",
+            "Get-DarlingStoreContentsProblem", "Get-DarlingItemOwnerProblem", "Initialize-DarlingStoreFolder", "Get-DarlingServiceSids",
             "Get-DarlingProductType", "Test-DarlingDomainController", "Initialize-DarlingOperatorGroup",
         })
         {
@@ -647,7 +647,7 @@ public sealed class DarlingStoreFolderScriptTests
             $p = Get-DarlingStoreAdoptionPlan $deep (Join-Path $deep 'pg') $trusted @($meSid)
             'deepState=' + $p.State
             # The reason names a link in its long spelling, and this probe's temp folder may be an 8.3 name (CI's runner temp).
-            'deepNamesLink=' +$p.Reason.Contains((Get-DarlingCanonicalPath $deepLink))
+            'deepNamesLink=' + $p.Reason.Contains((Get-DarlingCanonicalPath $deepLink))
             'deepByHand=' + $p.FixByHand
             'deepFindings=' + @($p.Findings).Count
 
@@ -687,24 +687,60 @@ public sealed class DarlingStoreFolderScriptTests
         Assert.Contains("targetUntouched=True", answers);
     }
 
-    /// <summary>#7267: a store folder that is a drive root is refused by the plan before anything is read, as
-    /// Initialize-DarlingStoreFolder refuses it: "D:" alone would name the current folder of that drive.</summary>
+    /// <summary>#7267: a store folder that is a drive root is not locked and not refused. The service starts on a data directory
+    /// directly below a drive root and the previous upgrade warned and went on, so the plan says 'DriveRoot' before it reads
+    /// anything, the pre-stop report warns instead of calling Fail, and the step after the stop skips the adoption and the
+    /// lock, warns, and returns so the upgrade carries on. The drive root's own permissions are never read or written.</summary>
     [Fact]
-    public void TheUpgrade_RefusesAStoreFolderThatIsADriveRoot()
+    public void TheUpgrade_WarnsAboutAStoreFolderThatIsADriveRoot_AndGoesOn()
     {
         Assert.SkipUnless(OperatingSystem.IsWindows(), "drive letters are Windows-only");
 
         var answers = RunWindowsPowerShell(UpgradeProbe(StoreProbeHelpers + """
+            function Fail([string]$message) { throw ('FAILCALLED:' + $message) }
+            function Get-DarlingDataDirectory([string]$path) { return $script:probeData }
+            function Get-DarlingStoreTrustedSids([string]$account, [string]$name) { return @($meSid, $system, $admins) }
+            function Get-DarlingStoreAdopterSids { return @($meSid) }
+            function Invoke-DarlingStoreAdoption { 'adoption-was-called' }
+            function Initialize-DarlingStoreFolder { 'initialize-was-called' }
             $root = [System.IO.Path]::GetPathRoot($base)
-            $p = Get-DarlingStoreAdoptionPlan $root ($root + 'pg') $trusted @($meSid)
+            $script:probeData = $root + 'pg'
+            $rootAclBefore = (Get-Acl -LiteralPath $root).Sddl
+
+            $p = Get-DarlingStoreAdoptionPlan $root $script:probeData $trusted @($meSid)
             'rootState=' + $p.State
             'rootReason=' + $p.Reason
             'rootByHand=' + $p.FixByHand
+            'rootFindings=' + @($p.Findings).Count
+
+            'check-start'
+            try { Write-DarlingStoreCheckResult $root $script:probeData $p $meSid.Value; 'check=no-fail' } catch { 'check=' + $_.Exception.Message }
+            'check-end'
+
+            $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+            'after-start'
+            try { Repair-DarlingStoreAfterStop $root 'darling.json' $me $null 'PerfSvc'; 'after=no-fail' } catch { 'after=' + $_.Exception.Message }
+            'after-end'
+            'rootAclUntouched=' + ((Get-Acl -LiteralPath $root).Sddl -eq $rootAclBefore)
             """));
 
-        Assert.Contains("rootState=Refuse", answers);
-        Assert.Contains(answers, line => line.StartsWith("rootReason=", StringComparison.Ordinal) && line.Contains("is a drive root", StringComparison.Ordinal));
+        Assert.Contains("rootState=DriveRoot", answers);
+        var reason = Assert.Single(answers, line => line.StartsWith("rootReason=", StringComparison.Ordinal));
+        Assert.Contains("is a drive root", reason, StringComparison.Ordinal);
+        Assert.Contains("The folder is not locked, and the upgrade goes on and starts the service.", reason, StringComparison.Ordinal);
+        Assert.Contains("point postgres.dataDirectory in darling.json at the moved data directory", reason, StringComparison.Ordinal);
+        Assert.DoesNotContain("icacls ", reason, StringComparison.Ordinal);
         Assert.Contains("rootByHand=False", answers);
+        Assert.Contains("rootFindings=0", answers);
+
+        Assert.Contains("check=no-fail", answers);
+        Assert.Contains(Between(answers, "check-start", "check-end"), line => line.StartsWith("WARNING: ", StringComparison.Ordinal) && line.Contains("is a drive root", StringComparison.Ordinal));
+
+        Assert.Contains("after=no-fail", answers);
+        Assert.Contains(Between(answers, "after-start", "after-end"), line => line.StartsWith("WARNING: ", StringComparison.Ordinal) && line.Contains("is a drive root", StringComparison.Ordinal));
+        Assert.DoesNotContain("initialize-was-called", answers);
+        Assert.DoesNotContain("adoption-was-called", answers);
+        Assert.Contains("rootAclUntouched=True", answers);
     }
 
     /// <summary>#7267: an Allow rule that gives write, modify or full control to an account outside the trusted list is
@@ -723,6 +759,39 @@ public sealed class DarlingStoreFolderScriptTests
                 "right:$right=$($p.State)/$(@($p.Writers) -contains 'BUILTIN\Users')"
             }
 
+            # An explicit write grant on an entry INSIDE the data directory, with the data directory itself left at Read (the case a
+            # grant check over the top-level names alone missed): a file, a subfolder, and a store with nothing granted inside.
+            $s = New-Store 'inside-file' $true
+            Expose (Join-Path $s 'pg') 'Read'
+            Expose (Join-Path $s 'pg\postgresql.conf') 'Modify'
+            $p = Get-DarlingStoreAdoptionPlan $s (Join-Path $s 'pg') $trusted @($meSid)
+            "inside:file=$($p.State)/$(@($p.Writers) -contains 'BUILTIN\Users')"
+            'insideFileFinding=' + (@($p.Findings) -join ' | ')
+            $seam = { param($arguments) return 0 }
+            'insideWarn-start'
+            try { Invoke-DarlingStoreAdoption $s (Join-Path $s 'pg') $meSid $trusted @($meSid) $p $seam } catch { }
+            'insideWarn-end'
+
+            $s = New-Store 'inside-dir' $true
+            New-Item -ItemType Directory (Join-Path $s 'pg\base') | Out-Null
+            Expose (Join-Path $s 'pg') 'Read'
+            Expose (Join-Path $s 'pg\base') 'Modify'
+            $p = Get-DarlingStoreAdoptionPlan $s (Join-Path $s 'pg') $trusted @($meSid)
+            "inside:dir=$($p.State)/$(@($p.Writers) -contains 'BUILTIN\Users')"
+
+            $s = New-Store 'inside-read' $true
+            Expose (Join-Path $s 'pg') 'Read'
+            Expose (Join-Path $s 'pg\postgresql.conf') 'Read'
+            $p = Get-DarlingStoreAdoptionPlan $s (Join-Path $s 'pg') $trusted @($meSid)
+            "inside:read=$($p.State)/$(@($p.Writers) -contains 'BUILTIN\Users')"
+
+            # A healthy store: every entry inherits only the trusted accounts' access, so the extra reading changes nothing.
+            $s = New-Store 'inside-clean' $true
+            New-Item -ItemType Directory (Join-Path $s 'pg\base\1') | Out-Null
+            foreach ($name in 'pg_hba.conf', 'postgresql.auto.conf', 'pg_ident.conf') { Set-Content -LiteralPath (Join-Path $s ('pg\' + $name)) 'x' }
+            $p = Get-DarlingStoreAdoptionPlan $s (Join-Path $s 'pg') $trusted @($meSid)
+            'inside:clean=' + $p.State
+
             $store = New-Store 'modify' $true
             $data = Join-Path $store 'pg'
             Expose $data 'Modify'
@@ -734,6 +803,14 @@ public sealed class DarlingStoreFolderScriptTests
             """));
 
         Assert.Contains("right:Read=Adopt/False", answers);
+        Assert.Contains("inside:file=Adopt/True", answers);
+        Assert.Contains(answers, line => line.StartsWith("insideFileFinding=", StringComparison.Ordinal) && line.Contains("postgresql.conf grants write access to BUILTIN\\Users", StringComparison.Ordinal));
+        Assert.Contains(
+            Between(answers, "insideWarn-start", "insideWarn-end"),
+            line => line.StartsWith("WARNING: ", StringComparison.Ordinal) && line.Contains("BUILTIN\\Users", StringComparison.Ordinal) && line.Contains("Review postgresql.conf, postgresql.auto.conf, pg_hba.conf and pg_ident.conf in ", StringComparison.Ordinal));
+        Assert.Contains("inside:dir=Adopt/True", answers);
+        Assert.Contains("inside:read=Adopt/False", answers);
+        Assert.Contains("inside:clean=Clean", answers);
         foreach (var right in new[] { "Modify", "FullControl", "WriteData", "AppendData", "Delete", "DeleteSubdirectoriesAndFiles", "ChangePermissions", "TakeOwnership" })
         {
             Assert.Contains($"right:{right}=Adopt/True", answers);
@@ -762,10 +839,11 @@ public sealed class DarlingStoreFolderScriptTests
             $refuse = Get-DarlingStoreAdoptionPlan $stranger (Join-Path $stranger 'pg') @(@($system, $admins, $meSid) | Where-Object { $_ -ne $owner }) @()
             'planState=' + $refuse.State
             'refusal=' + ((Get-DarlingStoreRefusalText $stranger $refuse 'S-1-5-80-1') -replace "`n", ' | ')
+            """));
 
-            $root = [System.IO.Path]::GetPathRoot($base)
-            $rootPlan = Get-DarlingStoreAdoptionPlan $root ($root + 'pg') $trusted @($meSid)
-            'rootRefusal=' + ((Get-DarlingStoreRefusalText $root $rootPlan 'S-1-5-80-1') -replace "`n", ' | ')
+        // The installer carries its own copy of the same function (a standalone script), so its text is read the same way.
+        var installAnswers = RunWindowsPowerShell(Probe("""
+            'repair=' + ((Get-DarlingStoreRepairText 'D:\Store\' 'S-1-5-80-1') -replace "`n", ' | ')
             """));
 
         const string sentence = "icacls follows a junction or symbolic link into whatever it points at and changes that too, so list the links under the folder with dir /s /a:l";
@@ -777,11 +855,15 @@ public sealed class DarlingStoreFolderScriptTests
         var refusal = Assert.Single(answers, line => line.StartsWith("refusal=", StringComparison.Ordinal));
         Assert.Contains(sentence, refusal, StringComparison.Ordinal);
         Assert.Contains("then make the links again: |     icacls ", refusal, StringComparison.Ordinal);
-        Assert.Contains("NOTHING has been stopped or copied", refusal, StringComparison.Ordinal);
+        // A re-run after a failure past the stop reaches this text with the service stopped and the new build in place: it says
+        // what this run did, never that the service is running.
+        Assert.Contains("This run has not stopped or copied anything.", refusal, StringComparison.Ordinal);
+        Assert.DoesNotContain("still running", refusal, StringComparison.Ordinal);
+        Assert.DoesNotContain("untouched", refusal, StringComparison.Ordinal);
 
-        var rootRefusal = Assert.Single(answers, line => line.StartsWith("rootRefusal=", StringComparison.Ordinal));
-        Assert.Contains("is a drive root", rootRefusal, StringComparison.Ordinal);
-        Assert.DoesNotContain("icacls ", rootRefusal, StringComparison.Ordinal);
+        var installRepair = Assert.Single(installAnswers, line => line.StartsWith("repair=", StringComparison.Ordinal));
+        Assert.Contains(sentence + " \"D:\\Store\", remove each one (rmdir \"<link>\" removes the link and keeps its target), run these four commands, then make the links again: |     icacls ", installRepair, StringComparison.Ordinal);
+        Assert.Equal(4, System.Text.RegularExpressions.Regex.Matches(installRepair, @"\|     icacls ").Count);
     }
 
     /// <summary>#7267: what the pre-stop judgement prints matches what it found. A folder with no PG_VERSION whose items grant

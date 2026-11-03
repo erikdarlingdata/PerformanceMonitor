@@ -1810,7 +1810,7 @@ function Get-DarlingStoreWriteGrantText([string]$dataDirectory, $writers) {
     return "$(@($writers) -join ', ') could change the store's files. Review postgresql.conf, postgresql.auto.conf, pg_hba.conf and pg_ident.conf in '$dataDirectory' before the service starts, because the service runs what they say."
 }
 
-# What the store folder looks like to the service: 'Clean' (nothing to do), 'Adopt' (the previous release's store, with an owner or
+# What the store folder looks like to the service: 'DriveRoot' (a drive root: never touched, the upgrade warns and goes on), 'Clean' (nothing to do), 'Adopt' (the previous release's store, with an owner or
 # a grant the service refuses; this script can fix it), 'Leave' (a folder with no PG_VERSION whose items carry grants but no
 # untrusted owner: this script does not fix it in place and does not call it in order, so Findings names the grants) or 'Refuse'
 # (it cannot be taken over here; Reason says why and FixByHand says whether the four commands are the way forward). Judged read-only: the folder, the names the service writes into
@@ -1819,8 +1819,12 @@ function Get-DarlingStoreWriteGrantText([string]$dataDirectory, $writers) {
 function Get-DarlingStoreAdoptionPlan([string]$folder, [string]$dataDirectory, $trusted, $adopters) {
     $full = [System.IO.Path]::GetFullPath($folder).TrimEnd('\')
     $plan = { param([string]$state, [string]$reason, $findings, [bool]$byHand, $writers = @()) [pscustomobject]@{ State = $state; Reason = $reason; Findings = @($findings); FixByHand = $byHand; Writers = @($writers) } }
-    # The same refusal the store folder lock makes (it names the drive root as well), and before anything is read: "D:" alone names the current folder of that drive.
-    if ([string]::IsNullOrEmpty([System.IO.Path]::GetDirectoryName($full))) { return (& $plan 'Refuse' "$folder is a drive root, not a folder this script will lock. Point postgres.dataDirectory in darling.json at a folder below it." @() $false) }
+    # A drive root is never locked or read here: "D:" alone names the current folder of that drive, and its permissions are the whole
+    # drive's. The service starts on a data directory directly below a drive root (it has no refusal for it) and the previous upgrade
+    # warned and went on, so this is a warning and the upgrade continues, not a refusal (#7267).
+    if ([string]::IsNullOrEmpty([System.IO.Path]::GetDirectoryName($full))) {
+        return (& $plan 'DriveRoot' "The store folder '$folder' is a drive root, so this script does not lock it: that would change the permissions of the whole drive. The folder is not locked, and the upgrade goes on and starts the service. To have the store locked, stop the service, move the data directory and the files beside it (pg.log, server.key, server.crt, the logs folder and the pg-*.dpapi credential files) into a folder of its own such as '$full\PerformanceMonitor', point postgres.dataDirectory in darling.json at the moved data directory, and run this script again." @() $false)
+    }
     if (-not (Test-Path -LiteralPath $full)) { return (& $plan 'Clean' '' @() $false) }
     try { $root = Get-Item -LiteralPath $full -Force -ErrorAction Stop }
     catch { return (& $plan 'Refuse' "$full cannot be read by this script ($($_.Exception.Message))." @() $false) }
@@ -1839,7 +1843,7 @@ function Get-DarlingStoreAdoptionPlan([string]$folder, [string]$dataDirectory, $
             $fullCanonical = Get-DarlingCanonicalPath $full
             if ($parentCanonical -and $fullCanonical -and $parentCanonical.TrimEnd('\') -ieq $fullCanonical.TrimEnd('\')) { $dataName = [System.IO.Path]::GetFileName($dataDirectory) }
         }
-        $isStore =[bool]($dataName -and (Test-Path -LiteralPath (Join-Path $dataDirectory 'PG_VERSION') -PathType Leaf))
+        $isStore = [bool]($dataName -and (Test-Path -LiteralPath (Join-Path $dataDirectory 'PG_VERSION') -PathType Leaf))
     }
 
     # Owners, over the folder, the names the service writes into and the data directory's own entries.
@@ -1864,6 +1868,9 @@ function Get-DarlingStoreAdoptionPlan([string]$folder, [string]$dataDirectory, $
                 continue
             }
             $paths.Add($child.FullName)
+            # Judged for grants too (#7267): an account with write access to postgresql.conf, to pg_hba.conf or to a subfolder such as
+            # base is the one that could change what the service runs, or plant a link after the walk below and before the elevated reset.
+            $judgedForGrants.Add($child.FullName)
         }
     }
 
@@ -1983,6 +1990,9 @@ function Write-DarlingStoreCheckResult([string]$folder, [string]$dataDirectory, 
         $writeText = Get-DarlingStoreWriteGrantText $dataDirectory $plan.Writers
         if ($writeText) { Warn "$writeText The script does not pause here. To get this report without stopping the service or changing anything, run it with -Check, review those files, then run it again without." }
     }
+    elseif ($plan.State -eq 'DriveRoot') {
+        Warn $plan.Reason
+    }
     elseif ($plan.State -eq 'Leave') {
         Warn "The store folder '$folder' has no PG_VERSION in its data directory, so it is not the store the previous release was running and this script does not fix it in place. It leaves these grants as they are, and the service checks the folder itself at its start. Found:"
         foreach ($line in @($plan.Findings | Select-Object -First 5)) { Note "    $line" }
@@ -1992,12 +2002,13 @@ function Write-DarlingStoreCheckResult([string]$folder, [string]$dataDirectory, 
     }
 }
 
-# The pre-stop refusal for a store that cannot be taken over: why, the four commands when they are the way forward, and that nothing
-# has happened yet.
+# The pre-stop refusal for a store that cannot be taken over: why, the four commands when they are the way forward, and that this run
+# has changed nothing. It does not say the service is running: a re-run after a failure past the stop (Get-DarlingStoreStoppedText)
+# reaches this text with the service still stopped and the new build in place.
 function Get-DarlingStoreRefusalText([string]$folder, $plan, [string]$serviceSid) {
     $byHand = ''
     if ($plan.FixByHand) { $byHand = " If it is your own store and you trust what is in it, fix the whole folder at once from an elevated prompt, then re-run this script.`n$(Get-DarlingStoreRepairText $folder $serviceSid)" }
-    return "The store folder '$folder' cannot be upgraded in place: $($plan.Reason)$byHand`nNOTHING has been stopped or copied - the service is still running and the install is untouched."
+    return "The store folder '$folder' cannot be upgraded in place: $($plan.Reason)$byHand`nThis run has not stopped or copied anything. If an earlier run stopped the service, it is still stopped and the new build is already in place."
 }
 
 # The store folder step after the copy, with the service stopped: a store the previous release was running is fixed in place, then
@@ -2007,6 +2018,7 @@ function Repair-DarlingStoreAfterStop([string]$storeFolder, [string]$configPath,
     try { $serviceSid = (New-Object System.Security.Principal.NTAccount($logonAccount)).Translate([System.Security.Principal.SecurityIdentifier]) }
     catch { Fail (Get-DarlingStoreStoppedText $storeFolder "The store folder '$storeFolder' could not be secured because the service account '$logonAccount' could not be resolved ($($_.Exception.Message))." '' $serviceName) }
     $dataDirectory = ''
+    $adoptPlan = $null
     try {
         $dataDirectory = Get-DarlingDataDirectory $configPath
         $adoptTrusted = Get-DarlingStoreTrustedSids $logonAccount $serviceName
@@ -2015,6 +2027,8 @@ function Repair-DarlingStoreAfterStop([string]$storeFolder, [string]$configPath,
         if ($adoptPlan.State -eq 'Adopt') { Invoke-DarlingStoreAdoption $storeFolder $dataDirectory $serviceSid $adoptTrusted $adoptors $adoptPlan }
     }
     catch { Fail (Get-DarlingStoreStoppedText $storeFolder "The store folder '$storeFolder' could not be fixed in place: $($_.Exception.Message)" $serviceSid.Value $serviceName) }
+    # A drive root is not locked (the plan says why and how to move the store), and the upgrade goes on.
+    if ($adoptPlan -and $adoptPlan.State -eq 'DriveRoot') { Warn $adoptPlan.Reason; return }
     try {
         Initialize-DarlingStoreFolder $storeFolder $logonAccount $operatorSid $dataDirectory $serviceName
         Good "Store folder '$storeFolder' is owned by Administrators and locked to SYSTEM, Administrators and the service account; the operator group can only traverse it."
