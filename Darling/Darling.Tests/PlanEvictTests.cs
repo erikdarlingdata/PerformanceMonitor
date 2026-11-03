@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Remediation;
 using PerformanceMonitor.Darling.Service.Mcp;
@@ -125,7 +126,7 @@ public sealed class PlanEvictTests
     {
         var state = Judge(Image());
         Assert.Equal("not_collected_yet", (string?)state["state"]);
-        Assert.Contains("2000 most recently run statements", (string?)state["message"], StringComparison.Ordinal);
+        Assert.Contains(QueryStatsCollector.MaxCandidateRows.ToString(System.Globalization.CultureInfo.InvariantCulture) + " most recently run statements", (string?)state["message"], StringComparison.Ordinal);
     }
 
     [Fact]
