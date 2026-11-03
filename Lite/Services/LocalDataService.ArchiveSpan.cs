@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using PerformanceMonitorLite.Database;
@@ -22,10 +23,6 @@ namespace PerformanceMonitorLite.Services;
 /// </summary>
 public sealed partial class LocalDataService
 {
-    /// <summary>The oldest and newest value of a time column across a table's archive files. Both are null when the
-    /// archive holds no files, or no rows.</summary>
-    internal readonly record struct ArchiveSpan(DateTime? Oldest, DateTime? Newest);
-
     /// <summary>
     /// The span of <paramref name="table"/>'s archive for <paramref name="timeColumn"/>, read once per archive view
     /// generation (<see cref="DuckDbInitializer.ArchiveSpans"/>) however many reads and servers ask. Null means unknown:
@@ -37,52 +34,9 @@ public sealed partial class LocalDataService
     /// does (#5377), and an archive with no files takes neither. The generation is sampled before the read, so a rebuild
     /// that lands mid-read leaves an entry the next call reads again.</para>
     /// </summary>
-    internal async Task<ArchiveSpan?> GetArchiveSpanAsync(string table, string timeColumn, CancellationToken cancellationToken)
-    {
-        if (DuckDbInitializer.ArchiveViewDedups(table))
-        {
-            return null;
-        }
-
-        try
-        {
-            var generation = _duckDb.ArchiveViewGeneration;
-            var span = await _duckDb.ArchiveSpans.GetOrReadAsync($"span:{table}.{timeColumn}", generation, async () =>
-            {
-                var globs = _duckDb.ArchiveParquetGlobs(table);
-                if (globs.Count == 0)
-                {
-                    return new ArchiveSpan(null, null);
-                }
-
-                var timer = Helpers.QueryExecutionContext.CurrentPhases;
-                using var slot = await WaitForArchiveSlotAsync(timer, cancellationToken);
-                using var connection = await OpenConnectionAsync(timer, cancellationToken);
-                using var command = connection.CreateCommand();
-                command.CommandText = $"SELECT MIN({timeColumn}), MAX({timeColumn}) FROM read_parquet({DuckDbInitializer.ParquetSourceSql(globs)}, union_by_name=true)";
-                using var reader = await command.ExecuteReaderAsync(cancellationToken);
-                if (!await reader.ReadAsync(cancellationToken))
-                {
-                    return new ArchiveSpan(null, null);
-                }
-
-                return new ArchiveSpan(
-                    reader.IsDBNull(0) ? null : reader.GetDateTime(0),
-                    reader.IsDBNull(1) ? null : reader.GetDateTime(1));
-            }, variant: 0, cancellationToken);
-            return (ArchiveSpan?)span;
-        }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
-        catch (Exception ex)
-        {
-            /* The safe direction: the caller reads the view exactly as it did before the span existed. */
-            AppLogger.Warn("ArchiveSpan", $"Could not read the span of the {table} archive ({ex.GetType().Name}: {ex.Message}); reading the archive view instead");
-            return null;
-        }
-    }
+    internal Task<ArchiveSpan?> GetArchiveSpanAsync(string table, string timeColumn, CancellationToken cancellationToken) =>
+        _duckDb.GetArchiveSpanAsync(table, timeColumn, cancellationToken, _archiveReadLimiter,
+            (timer, token) => OpenConnectionAsync(timer, token));
 
     private async Task<IDisposable> WaitForArchiveSlotAsync(ReadPhaseTimer? timer, CancellationToken cancellationToken)
     {
@@ -95,7 +49,7 @@ public sealed partial class LocalDataService
     /// <summary>True when the archive provably holds no row at or after <paramref name="windowStartUtc"/>: its span is known and
     /// its newest value is older than the start, or it holds no rows. An unknown span (null) is false.</summary>
     internal static bool ArchiveHoldsNothingFrom(ArchiveSpan? span, DateTime windowStartUtc) =>
-        span is ArchiveSpan s && (s.Newest is not DateTime newest || newest < windowStartUtc);
+        DuckDbInitializer.ArchiveHoldsNothingFrom(span, windowStartUtc);
 
     /// <summary>
     /// Runs <paramref name="read"/> against the hot table alone when the archive of <paramref name="table"/> holds nothing
@@ -124,14 +78,9 @@ public sealed partial class LocalDataService
         IReadOnlyList<string> tables, string timeColumn, DateTime windowStartUtc, Func<Func<string, string>, Task<T>> read, CancellationToken cancellationToken)
     {
         var generation = _duckDb.ArchiveViewGeneration;
-        var hot = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var table in tables)
-        {
-            if (ArchiveHoldsNothingFrom(await GetArchiveSpanAsync(table, timeColumn, cancellationToken), windowStartUtc))
-            {
-                hot.Add(table);
-            }
-        }
+        var hot = await _duckDb.GetHotOnlyArchiveTablesAsync(
+            tables.Select(table => new ArchiveWindow(table, timeColumn, windowStartUtc)), cancellationToken,
+            _archiveReadLimiter, (timer, token) => OpenConnectionAsync(timer, token));
 
         if (hot.Count > 0)
         {

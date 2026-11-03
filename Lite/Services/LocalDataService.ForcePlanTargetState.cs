@@ -28,14 +28,15 @@ public partial class LocalDataService
     {
         var nowUtc = DateTime.UtcNow;
 
-        /* #7256: a lookback that starts after the newest archived row reads the hot table alone. */
-        return await ReadWindowSkippingEmptyArchiveAsync("query_store_stats", "collection_time", nowUtc - ForcePlanTargetState.Lookback, ReadAsync, cancellationToken);
+        /* #7256: a lookback that starts after the newest archived row of a table reads that table's hot table alone. */
+        return await ReadWindowSkippingEmptyArchivesAsync(
+            ForcePlanTargetStateReader.ArchivedTables, "collection_time", nowUtc - ForcePlanTargetState.Lookback, ReadAsync, cancellationToken);
 
-        async Task<IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>> ReadAsync(string relation)
+        async Task<IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>> ReadAsync(Func<string, string> relationFor)
         {
             using var connection = await OpenConnectionAsync();
             using var command = connection.CreateCommand();
-            return await ForcePlanTargetStateReader.ReadAsync(command, serverId, targets, nowUtc, relation, cancellationToken);
+            return await ForcePlanTargetStateReader.ReadAsync(command, serverId, targets, nowUtc, relationFor, cancellationToken);
         }
     }
 }
@@ -238,13 +239,23 @@ ORDER BY t.database_name, t.query_id, t.plan_id";
     public static Task<IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>> ReadAsync(
         DuckDBCommand command, int serverId, IReadOnlyList<ForcePlanTarget> targets, DateTime nowUtc,
         CancellationToken cancellationToken = default) =>
-        ReadAsync(command, serverId, targets, nowUtc, "v_query_store_stats", cancellationToken);
+        ReadAsync(command, serverId, targets, nowUtc, table => "v_" + table, cancellationToken);
 
-    /// <summary>The same read over <paramref name="relation"/>, <c>v_query_store_stats</c> or its hot table
-    /// <c>query_store_stats</c> (#7256, from <see cref="LocalDataService.GetForcePlanTargetStatesAsync"/>).</summary>
+    /// <summary>The two archived tables the statement reads, both over the same lookback on <c>collection_time</c>.</summary>
+    internal static readonly string[] ArchivedTables = ["query_store_stats", "plan_correction"];
+
+    /// <summary>The same read for a caller that planned its archive reads first (#7256), with the read lock held: each table
+    /// whose archive holds nothing in the lookback is read as the hot table.</summary>
+    internal static Task<IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>> ReadAsync(
+        DuckDBCommand command, int serverId, IReadOnlyList<ForcePlanTarget> targets, DateTime nowUtc,
+        PerformanceMonitorLite.Database.ArchiveReadPlan plan, CancellationToken cancellationToken) =>
+        ReadAsync(command, serverId, targets, nowUtc, table => plan.IsHot(table) ? table : "v_" + table, cancellationToken);
+
+    /// <summary>The same read over the relation <paramref name="relationFor"/> names for each of <see cref="ArchivedTables"/>:
+    /// its <c>v_</c> view or its hot table (#7256, from <see cref="LocalDataService.GetForcePlanTargetStatesAsync"/>).</summary>
     internal static async Task<IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>> ReadAsync(
         DuckDBCommand command, int serverId, IReadOnlyList<ForcePlanTarget> targets, DateTime nowUtc,
-        string relation, CancellationToken cancellationToken)
+        Func<string, string> relationFor, CancellationToken cancellationToken)
     {
         var result = new Dictionary<ForcePlanTargetKey, ForcePlanTargetState>(ForcePlanTargetKey.Comparer);
         var keys = targets.Select(ForcePlanTargetKey.Of).Distinct(ForcePlanTargetKey.Comparer).ToList();
@@ -253,7 +264,7 @@ ORDER BY t.database_name, t.query_id, t.plan_id";
             return result;
         }
 
-        command.CommandText = LocalDataService.SwapArchiveView(BuildSql(keys.Count), "query_store_stats", relation);
+        command.CommandText = LocalDataService.SwapViews(BuildSql(keys.Count), ArchivedTables, relationFor);
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = nowUtc - ForcePlanTargetState.Lookback });
         foreach (var key in keys)
