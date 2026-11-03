@@ -1246,7 +1246,7 @@ public partial class MainWindow : Window
 
         OverviewItemsControl.ItemsSource = ServerOverviewSort.Order(
             filtered, App.OverviewSortMode,
-            s => s.CpuPercentForAlert, s => s.DisplayName, s => s.ServerId);
+            s => s.ShownCpuPercentForAlert, s => s.DisplayName, s => s.ServerId);
 
         /* #5352: a search that matched nothing says so (same sentence as the viewer) rather than leaving a blank grid. */
         var noMatch = _overviewSummaries.Count > 0 && filtered.Count == 0;

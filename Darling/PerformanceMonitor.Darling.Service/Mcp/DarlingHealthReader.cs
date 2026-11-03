@@ -64,7 +64,7 @@ internal static class DarlingHealthReader
     /// <summary>Latest SQL-process CPU for one server (newest ring-buffer sample). $1 server_id.
     /// Same shape and same reasoning as <c>DarlingWorker.LatestCpuSql</c>: ordered on the hypertable's
     /// <c>collection_time</c> partition column so ordered ChunkAppend stops at the newest chunk, with
-    /// <c>sample_time</c> as the within-batch tiebreak, and no time predicate because <c>sample_time</c> is
+    /// <c>sample_time</c> as the within-batch tiebreak, and no predicate on <c>sample_time</c>, because it is
     /// the monitored server's local wall clock. $2 now (naive UTC), $3 the freshness floor in minutes: the read
     /// is cut off on <c>collection_time</c> at now minus the larger of the floor and twice this server's
     /// <c>cpu_utilization</c> interval (<see cref="CpuReadingFreshnessSql"/>), so a collector that stopped days ago

@@ -56,7 +56,7 @@ public sealed partial class ViewerDataService
     /// card (<c>DarlingFleetReader.FleetCpuSql</c>) carries the same bound, so the two cards agree.
     /// Ordered on <c>collection_time</c> — the hypertable's partition column, which earns TimescaleDB's
     /// ordered ChunkAppend and so touches ONE chunk instead of appending and top-N sorting the server's whole
-    /// retained history — with <c>sample_time</c> as the within-batch tiebreak. Carries no time predicate:
+    /// retained history — with <c>sample_time</c> as the within-batch tiebreak. Carries no predicate on <c>sample_time</c>:
     /// <c>sample_time</c> is the monitored server's local wall clock, so bounding on it against store time
     /// returns zero rows for any server behind the store. Full reasoning on
     /// <c>DarlingWorker.LatestCpuSql</c>.</summary>
