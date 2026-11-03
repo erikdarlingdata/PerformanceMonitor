@@ -191,6 +191,70 @@ public sealed class PgAlertNoise7082LiveTests
         });
     }
 
+    /// <summary>The restart wiring the worker uses for the agent gate (#7295): the seed puts the restored pairs aside, and the first
+    /// count tells the gate about those it keeps.</summary>
+    private static async Task<DarlingWorker.PgDeadlockPatterns> RestartAndCountAsync(
+        Harness h, PgAlertStateStore state, IReadOnlyList<DarlingPgDeadlockReader.PgDeadlockRow> rows, DateTime now, CancellationToken ct)
+    {
+        var unannounced = new HashSet<string>(StringComparer.Ordinal);
+        var restored = new HashSet<string>(StringComparer.Ordinal);
+        await DarlingWorker.SeedPgDeadlockStateAsync(state, Server, Metric, unannounced, waiting => restored.UnionWith(waiting));
+        return await DarlingWorker.CountPgDeadlockPatternsAsync(
+            h.Store, new Dictionary<string, DateTime>(StringComparer.Ordinal), unannounced,
+            fresh => h.Rollup.NoteNewSignatures(Server, fresh), NullLogger.Instance, Server, ServerId, rows, now,
+            (waiting, _) => state.ReplaceUnannouncedPairsAsync(Server, waiting), ct, restored);
+    }
+
+    [Fact]
+    public async Task ARestoredPairWhoseReportsLeftTheHour_DoesNotOpenTheAgentGate_ForAPageAboutOtherPairs()
+    {
+        await RunAsync(async (h, ct) =>
+        {
+            var now = DateTime.UtcNow;
+            await using var source = NpgsqlDataSource.Create(h.StoreString);
+            var state = new PgAlertStateStore(source);
+
+            /* Before the restart: a first-ever pair was counted today and saved as waiting for its page. While the service was
+               down its reports left the hour. A known pair (counted ten days ago) is the only one in the hour now. */
+            var stale = ValueOf(UpdateOrders, UpdateStock);
+            await h.Store.AddAsync(ServerId, new Dictionary<string, int> { [stale] = 1 }, DateOnly.FromDateTime(now), ct);
+            await h.Store.AddAsync(ServerId, new Dictionary<string, int> { [ValueOf(UpdateOrders, UpdateLedger)] = 1 },
+                DateOnly.FromDateTime(now.AddDays(-10)), ct);
+            await state.ReplaceUnannouncedPairsAsync(Server, [stale]);
+
+            var five = Enumerable.Range(0, 5).Select(i => Report($"k{i}", UpdateOrders, UpdateLedger, now)).ToList();
+            var patterns = await RestartAndCountAsync(h, state, five, now, ct);
+            Assert.Empty(patterns.NewKeys);
+            Assert.True(DarlingWorker.PgDeadlockPagesNow(five.Count, patterns.NewKeys.Count, patterns.StoreOk));
+
+            /* Five reports page. The page is about the known pair only, so its investigation request must not open on the strength
+               of a pair that no page carries. */
+            await h.Deliverer.DeliverAsync(Page(), ct);
+            Assert.Equal(0, await RequestsAsync(h.Connection, ct));
+        });
+    }
+
+    [Fact]
+    public async Task ARestoredPairWhoseReportsAreStillInTheHour_OpensTheAgentGate_ThroughTheFirstCount()
+    {
+        await RunAsync(async (h, ct) =>
+        {
+            var now = DateTime.UtcNow;
+            await using var source = NpgsqlDataSource.Create(h.StoreString);
+            var state = new PgAlertStateStore(source);
+
+            var pair = ValueOf(UpdateOrders, UpdateStock);
+            await h.Store.AddAsync(ServerId, new Dictionary<string, int> { [pair] = 1 }, DateOnly.FromDateTime(now), ct);
+            await state.ReplaceUnannouncedPairsAsync(Server, [pair]);
+
+            var patterns = await RestartAndCountAsync(h, state, [Report("r1", UpdateOrders, UpdateStock, now)], now, ct);
+            Assert.Equal(new[] { pair }, patterns.NewKeys.ToArray());
+
+            await h.Deliverer.DeliverAsync(Page(), ct);
+            Assert.Equal(1, await RequestsAsync(h.Connection, ct));
+        });
+    }
+
     [Fact]
     public async Task ANewPairWhoseReportsAgedOutOfTheHour_IsNoLongerUnannounced_SoAKnownPairStaysHeld()
     {

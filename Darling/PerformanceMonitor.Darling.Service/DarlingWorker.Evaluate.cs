@@ -1050,7 +1050,14 @@ public sealed partial class DarlingWorker
                 var seeded = await SeedPgDeadlockStateAsync(
                     stateStore, key, metricName,
                     _pgDeadlockUnannouncedNew.GetOrAdd(key, _ => new HashSet<string>(StringComparer.Ordinal)),
-                    waiting => _deadlockRollup?.NoteNewSignatures(key, waiting),
+                    waiting =>
+                    {
+                        var restored = _pgDeadlockRestoredForGate.GetOrAdd(key, _ => new HashSet<string>(StringComparer.Ordinal));
+                        lock (restored)
+                        {
+                            restored.UnionWith(waiting);
+                        }
+                    },
                     retry: !firstSeed);
                 readClock.Restart();
                 if (seeded.PairsRead)
@@ -1296,7 +1303,8 @@ public sealed partial class DarlingWorker
             (waiting, _) => _pgDeadlockPairsSeeded.ContainsKey(serverKey)
                 ? new PgAlertStateStore(_postgres!, _logger).ReplaceUnannouncedPairsAsync(serverKey, waiting)
                 : Task.CompletedTask,
-            cancellationToken);
+            cancellationToken,
+            _pgDeadlockRestoredForGate.GetOrAdd(serverKey, _ => new HashSet<string>(StringComparer.Ordinal)));
 
     /// <summary>
     /// The counting itself, with its state handed in so it runs against a real signature store without a worker. The
@@ -1324,7 +1332,10 @@ public sealed partial class DarlingWorker
     /// been moved to this count by the fire whose page never went out, and the gate would not fire again at the same count.
     /// The restored pairs are also handed to <paramref name="noteNewForAgentGate"/>: the agent gate reads new pairs from
     /// memory that a restart emptied, and the next count finds them known, so without it the rescued page would open no
-    /// investigation request.
+    /// investigation request. The worker passes a callback that holds them until the first count has dropped the pairs whose
+    /// reports left the hour (see the count's <c>restoredForGate</c>), so the gate is never told about a pair no page carries.
+    /// When a retry finds pairs in memory that the stored set lacks (counted while the read was failing), the whole set is
+    /// written back once.
     /// <para><c>PairsRead</c> is false when the pairs read failed, so the caller tries again on the next sweep with
     /// <paramref name="retry"/> set. A retry answers a watermark only when it restored a pair (the 0 above): the first read
     /// already took the saved watermark's turn, and the count has moved since.</para>
@@ -1335,14 +1346,30 @@ public sealed partial class DarlingWorker
     {
         var watermark = retry ? null : await stateStore.LoadEdgeTriggerWatermarkAsync(serverKey, metricName);
         var waiting = await stateStore.LoadUnannouncedPairsAsync(serverKey);
-        if (waiting is not { Count: > 0 })
+        if (waiting is null)
         {
-            return new PgDeadlockSeed(watermark, waiting is not null);
+            return new PgDeadlockSeed(watermark, false);
         }
 
+        string[] memory;
         lock (unannounced)
         {
             unannounced.UnionWith(waiting);
+            memory = unannounced.ToArray();
+        }
+
+        /* A retry after a failed read can find pairs in memory that the stored set lacks: a fresh pair counted while the read
+           was failing was not saved (the replace hook writes nothing until the read works), and its page may not have been
+           delivered. The count that follows adds nothing new, so nothing else would save it, and a restart would then lose it.
+           Written once, here, with the whole set. */
+        if (memory.Any(pair => !waiting.Contains(pair, StringComparer.Ordinal)))
+        {
+            await stateStore.ReplaceUnannouncedPairsAsync(serverKey, memory);
+        }
+
+        if (waiting.Count == 0)
+        {
+            return new PgDeadlockSeed(watermark, true);
         }
 
         noteNewForAgentGate?.Invoke(waiting);
@@ -1360,7 +1387,7 @@ public sealed partial class DarlingWorker
         Action<IReadOnlyCollection<string>>? noteNewForAgentGate, ILogger logger,
         string serverKey, int serverId, IReadOnlyList<DarlingPgDeadlockReader.PgDeadlockRow> rows, DateTime now,
         Func<IReadOnlyCollection<string>, CancellationToken, Task>? persistUnannounced,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, HashSet<string>? restoredForGate = null)
     {
         var byReport = new Dictionary<string, PgDeadlockSignature.Key>(StringComparer.Ordinal);
         foreach (var row in rows)
@@ -1426,6 +1453,7 @@ public sealed partial class DarlingWorker
         }
 
         string[] newKeys;
+        var keptRestored = Array.Empty<string>();
         lock (unannounced)
         {
             /* #7188: a pair whose reports have all left the hour's rows can no longer be announced by a page that
@@ -1442,6 +1470,21 @@ public sealed partial class DarlingWorker
             }
 
             newKeys = unannounced.ToArray();
+            if (restoredForGate is not null)
+            {
+                lock (restoredForGate)
+                {
+                    keptRestored = restoredForGate.Where(unannounced.Contains).ToArray();
+                    restoredForGate.Clear();
+                }
+            }
+        }
+
+        /* A pair a seed put back is told to the agent gate only if it survived the drop above. One whose reports all left the hour
+           while the service was down is forgotten here: left in the rollup's set it would read as new to a later page about other pairs. */
+        if (keptRestored.Length > 0)
+        {
+            noteNewForAgentGate?.Invoke(keptRestored);
         }
 
         /* #7295: the saved set follows the in-memory one, both ways. A pair that came out new is saved before the page is

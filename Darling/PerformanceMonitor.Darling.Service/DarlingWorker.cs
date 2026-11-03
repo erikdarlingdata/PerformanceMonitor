@@ -1378,6 +1378,9 @@ public sealed partial class DarlingWorker : BackgroundService
     private readonly ConcurrentDictionary<string, bool> _pgDeadlockWatermarkSeeded = new(StringComparer.Ordinal);
     /* #7295: set once the pairs half of the deadlock seed has read the stored list. Until then the replace hook writes nothing. */
     private readonly ConcurrentDictionary<string, bool> _pgDeadlockPairsSeeded = new(StringComparer.Ordinal);
+    /* #7295: per server, the pairs a seed put back that the agent gate has not been told about yet. The next count tells the gate
+       about those it keeps and forgets the rest (the pairs whose reports left the hour while the service was down). */
+    private readonly ConcurrentDictionary<string, HashSet<string>> _pgDeadlockRestoredForGate = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, bool> _pgBlockingWatermarkSeeded = new(StringComparer.Ordinal);
 
     /* #2716: the three Tier 0 predictors' cooldown (_lastPostgresAlert, keyed per server|metric|subject)

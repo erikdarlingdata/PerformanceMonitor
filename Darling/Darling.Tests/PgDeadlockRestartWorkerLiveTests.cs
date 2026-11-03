@@ -386,4 +386,107 @@ public sealed class PgDeadlockRestartWorkerLiveTests
             await scratch.DisposeAsync();
         }
     }
+
+    [Fact]
+    public async Task AFreshPairCountedWhileTheSeedReadFails_IsSavedByTheRetry_AndPagedAfterARestart()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the PostgreSQL deadlock restart worker test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        var roleName = "dl7295r_" + Guid.NewGuid().ToString("N")[..8];
+        var rolePassword = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(16));
+        var bodySucceeded = false;
+        await using var owner = NpgsqlDataSource.Create(new NpgsqlConnectionStringBuilder(scratch.ConnectionString)
+        {
+            SearchPath = "collect,config,public",
+        }.ConnectionString);
+        try
+        {
+            await using (var connection = new NpgsqlConnection(scratch.ConnectionString))
+            {
+                await connection.OpenAsync(ct);
+                await PgMigrations.MigrateAsync(connection, ct);
+            }
+
+            foreach (var sql in new[]
+            {
+                $"CREATE ROLE {roleName} LOGIN NOSUPERUSER PASSWORD '{rolePassword}'",
+                $"GRANT USAGE ON SCHEMA collect, config, public TO {roleName}",
+                $"GRANT ALL ON ALL TABLES IN SCHEMA collect, config, public TO {roleName}",
+                $"GRANT ALL ON ALL SEQUENCES IN SCHEMA collect, config, public TO {roleName}",
+            })
+            {
+                await using var grant = owner.CreateCommand(sql);
+                await grant.ExecuteNonQueryAsync(ct);
+            }
+
+            await using var asRole = NpgsqlDataSource.Create(new NpgsqlConnectionStringBuilder(scratch.ConnectionString)
+            {
+                Username = roleName,
+                Password = rolePassword,
+                SearchPath = "collect,config,public",
+                Pooling = false,
+            }.ConnectionString);
+            var state = new PgAlertStateStore(owner);
+
+            await using var plant = new NpgsqlConnection(scratch.ConnectionString);
+            await plant.OpenAsync(ct);
+            await PlantReportAsync(plant, DateTime.UtcNow.AddMinutes(-2), ct);
+
+            /* First life: pair P is counted and its page reaches no channel, so P is saved. */
+            using var brokenFirst = new CapturingWebhookEndpoint(statusCode: 500);
+            var (firstPass, _) = StartLife(owner, brokenFirst.Url, ct);
+            await firstPass();
+            Assert.Single((await state.LoadUnannouncedPairsAsync(Key))!);
+
+            /* Second life, first pass: the seed read is refused. A fresh pair Q is counted, and its page reaches no channel
+               either. The pairs are not seeded, so Q is not saved: the store still holds P alone. */
+            await using (var revoke = owner.CreateCommand(
+                $"REVOKE SELECT ON config.config_edge_trigger_watermarks FROM {roleName}; "
+                + $"GRANT SELECT (server_id, metric_name) ON config.config_edge_trigger_watermarks TO {roleName}"))
+            {
+                await revoke.ExecuteNonQueryAsync(ct);
+            }
+
+            await PlantReportAsync(plant, DateTime.UtcNow.AddMinutes(-1), ct, KnownPairHash, KnownPairGraph);
+            using var brokenSecond = new CapturingWebhookEndpoint(statusCode: 500);
+            var (secondPass, _) = StartLife(asRole, brokenSecond.Url, ct);
+            await secondPass();
+            Assert.NotEmpty(brokenSecond.Bodies);
+            Assert.Single((await state.LoadUnannouncedPairsAsync(Key))!);
+
+            /* The read works again: the retry restores P next to Q in memory, and writes the whole set back, because the saved
+               one lacks Q. Its page fails too. */
+            await using (var restore = owner.CreateCommand($"GRANT SELECT ON config.config_edge_trigger_watermarks TO {roleName}"))
+            {
+                await restore.ExecuteNonQueryAsync(ct);
+            }
+
+            await secondPass();
+            Assert.Equal(2, (await state.LoadUnannouncedPairsAsync(Key))!.Count);
+
+            /* Third life: both pairs come back from the saved set and one page carries them, once. */
+            using var healthy = new CapturingWebhookEndpoint();
+            var (thirdPass, _) = StartLife(owner, healthy.Url, ct);
+            await thirdPass();
+            Assert.Single(healthy.Bodies);
+            Assert.Empty((await state.LoadUnannouncedPairsAsync(Key))!);
+            await thirdPass();
+            Assert.Single(healthy.Bodies);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunOwnedAsync(bodySucceeded, async () =>
+            {
+                await using var drop = owner.CreateCommand($"DROP OWNED BY {roleName}; DROP ROLE IF EXISTS {roleName};");
+                await drop.ExecuteNonQueryAsync(CancellationToken.None);
+            });
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (_, _) => await Task.CompletedTask);
+            await scratch.DisposeAsync();
+        }
+    }
 }
