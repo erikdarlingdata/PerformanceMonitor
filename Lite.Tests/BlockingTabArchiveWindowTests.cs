@@ -67,17 +67,19 @@ public sealed class BlockingTabArchiveWindowTests : IDisposable
 
     private static string Ts(DateTime t) => $"TIMESTAMP '{t:yyyy-MM-dd HH:mm:ss}'";
 
-    private async Task ExecuteAsync(params string[] statements)
+    /* Synchronous on purpose: the database lock is thread-affine (#2463), so no await may sit between taking it and releasing it (#7256). */
+    private Task ExecuteAsync(params string[] statements)
     {
         using var readLock = _duckDb.AcquireReadLock();
         using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync(Ct);
+        connection.Open();
         foreach (var sql in statements)
         {
             using var cmd = connection.CreateCommand();
             cmd.CommandText = sql;
-            await cmd.ExecuteNonQueryAsync(Ct);
+            cmd.ExecuteNonQuery();
         }
+        return Task.CompletedTask;
     }
 
     /// <summary>A snapshot pair. The collector writes the event time and the collection time from one value.</summary>
