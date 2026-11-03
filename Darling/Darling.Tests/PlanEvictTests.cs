@@ -121,11 +121,11 @@ public sealed class PlanEvictTests
         JsonSerializer.SerializeToNode(DarlingMcpCompilesAfterEvictTools.Judge(before, rows))!;
 
     [Fact]
-    public void NoRowsAfterTheEviction_IsNotCollectedYet_AndTheWordsSayTheCollectorTakesOnlyTheCostliest()
+    public void NoRowsAfterTheEviction_IsNotCollectedYet_AndTheWordsSayItHasNotRunOrIsOutsideTheNewest()
     {
         var state = Judge(Image());
         Assert.Equal("not_collected_yet", (string?)state["state"]);
-        Assert.Contains("costliest statements", (string?)state["message"], StringComparison.Ordinal);
+        Assert.Contains("2000 most recently run statements", (string?)state["message"], StringComparison.Ordinal);
     }
 
     [Fact]
