@@ -352,6 +352,22 @@ public class AnomalyIncidentReconcilerTests
     }
 
     /// <summary>
+    /// The engine's own name for the schema-modification wait, LCK_M_SCH_M, is what a real wait profile's
+    /// <c>contrib_</c> keys carry. It maps to the SCH_M family (#7178), so the profile is a maintenance
+    /// anomaly and folds onto the fired job's incident. Before, it mapped to LCK and stayed solo.
+    /// </summary>
+    [Fact]
+    public void WaitProfileDominatedByTheEnginesSchemaModificationName_FoldsOntoTheFiredJob()
+    {
+        var job = Story("RUNNING_JOBS", "job-incident", severity: 0.5);
+        var anomaly = Anomaly("ANOMALY_WAIT_PROFILE", "anomaly-schm", Dominant("LCK_M_SCH_M"));
+
+        AnomalyIncidentReconciler.Reconcile([job, anomaly], [JobFact(1)]);
+
+        Assert.Equal("job-incident", anomaly.IncidentId);
+    }
+
+    /// <summary>
     /// The same four with RUNNING_JOBS PRESENT but NOT fired (jobs running, none running long): a quiet
     /// job scores 0, roots nothing and is consumed by nothing, so no story carries it and the anomalies
     /// stay four incidents with their text byte-identical. The fold is the FIRED job's doing and nothing
@@ -391,7 +407,7 @@ public class AnomalyIncidentReconcilerTests
     [InlineData("ANOMALY_WAIT_PROFILE", "HADR_SYNC_COMMIT")]
     [InlineData("ANOMALY_WAIT_PROFILE", "CXCONSUMER")]
     [InlineData("ANOMALY_WAIT_PROFILE", "LCK_M_X")]
-    [InlineData("ANOMALY_WAIT_PROFILE", "LCK_M_SCH_M")]
+    [InlineData("ANOMALY_WAIT_PROFILE", "LCK_M_SCH_S")]
     public void NonMaintenanceAnomaly_StaysSolo_BesideTheFiredJob(string key, string? dominant)
     {
         var job = Story("RUNNING_JOBS", "job-incident", severity: 0.5);
