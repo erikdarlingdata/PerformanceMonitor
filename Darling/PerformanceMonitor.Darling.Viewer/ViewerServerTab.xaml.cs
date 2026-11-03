@@ -334,8 +334,8 @@ public partial class ViewerServerTab : UserControl
     }
 
     /// <summary>
-    /// #1591: badges the Collection Health tab header with the number of collectors that were permission-denied.
-    /// Mirrors Lite's <c>RefreshPermissionDeniedBadgeAsync</c>. Best-effort chrome like the freshness readout
+    /// #1591, #7241: badges the Collection Health tab header with the number of collectors refused on their latest
+    /// attempt after their last success (<c>denied_since_last_success</c> in <c>get_collection_health</c>). Mirrors Lite's <c>RefreshPermissionDeniedBadgeAsync</c>. Best-effort chrome like the freshness readout
     /// above — a read failure leaves the plain header rather than disturbing the tab load.
     /// <see cref="ViewerDataService.GetPermissionDeniedCollectorCountAsync"/> reads the shared fleet-by-server
     /// rollup read (#4226), not a raw <c>collection_log</c> scan of its own — this refresh (auto default 1 min,

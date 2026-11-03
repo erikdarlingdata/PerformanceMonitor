@@ -94,6 +94,21 @@ public sealed class DarlingWebSupervisorTests
         Assert.Equal(expected, DarlingWebHostService.DecideWebAction(running, runningPort, enabled, desiredPort));
     }
 
+    /* #7192: the app started on the read-only viewer login because the web credential had not appeared; once it has, the supervisor restarts
+       the app once instead of leaving every dashboard write refused until the service restarts. */
+    [Theory]
+    [InlineData(true, 5153, true, 5153, true, DarlingWebHostService.WebSupervisorAction.RestartForWebCredential)]
+    [InlineData(true, 5153, true, 5153, false, DarlingWebHostService.WebSupervisorAction.None)]
+    [InlineData(true, 5153, true, 5199, true, DarlingWebHostService.WebSupervisorAction.Restart)]
+    [InlineData(true, 5153, false, 5153, true, DarlingWebHostService.WebSupervisorAction.Stop)]
+    [InlineData(false, 0, true, 5153, true, DarlingWebHostService.WebSupervisorAction.Start)]
+    [InlineData(false, 0, false, 5153, true, DarlingWebHostService.WebSupervisorAction.None)]
+    public void DecideWebAction_RestartsOnceTheWebCredentialAppears(
+        bool running, int runningPort, bool enabled, int desiredPort, bool webCredentialAppeared, DarlingWebHostService.WebSupervisorAction expected)
+    {
+        Assert.Equal(expected, DarlingWebHostService.DecideWebAction(running, runningPort, enabled, desiredPort, webCredentialAppeared));
+    }
+
     [Fact]
     public void WebRuntimeState_UnpublishedReadsNull_ThenLatestCoherentSnapshot()
     {

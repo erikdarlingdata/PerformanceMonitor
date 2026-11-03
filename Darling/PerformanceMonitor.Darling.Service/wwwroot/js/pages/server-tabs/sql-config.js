@@ -6,7 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
-import { el, readTool, readToolWithinKeptHistory, mount, errorStrip, readErrorStrip, emptyStrip, noticeStrip, localTime, dbFilteredEmptyText } from "../../util.js";
+import { el, readTool, readToolWithinKeptHistory, mount, errorStrip, readErrorStrip, emptyStrip, noticeStrip, localTime, serverClockTime, dbFilteredEmptyText } from "../../util.js";
 import { getPanelSignal, VIZ } from "../../panels.js";
 import { panelShell } from "./shared.js";
 
@@ -219,7 +219,8 @@ const AGENT_ALERT_COLUMNS = [
   { key: "operator_count", label: "Operators", format: "int" },
   { key: "fired_in_window", label: "Fired in the window", format: "bool" },
   { key: "occurrence_count", label: "Times fired", format: "int" },
-  { key: "last_occurrence", label: "Last fired (server clock)" },
+  /* #7243: the monitored server's own clock, shown in the grids' date-time format with no zone shift. The column sorts on the raw stamp (panels.js columnValue), which orders by time as written. */
+  { key: "last_occurrence", label: "Last fired (server clock)", display: (r) => serverClockTime(r.last_occurrence) },
 ];
 export const AGENT_ALERT_SPECS = [
   {

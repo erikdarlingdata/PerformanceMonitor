@@ -292,10 +292,40 @@ public partial class RemoteCollectorService
     /// As plain instance fields these three were shared across those parallel tasks: server B's reset at
     /// the top of its run could blank server A's timings between A's write and A's collection_log read,
     /// and once #1837 gave every enumeration run a note, A's "enumeration yielded 0 items" could land on
-    /// B's row for a collector that does not even enumerate. Keying by server is sufficient precisely
-    /// because of the sequential-within-a-server rule — two collectors on one server never overlap.
+    /// B's row for a collector that does not even enumerate. Keying by server is sufficient only while two
+    /// collectors on one server never overlap. The scheduled sweep, the run a newly opened server tab starts and
+    /// the tab's on-load re-collection are separate entry points, and the reset gate lets collections run together,
+    /// so they are serialized per server by <see cref="AcquireServerRunAsync"/> (#7215): each holds it around its
+    /// whole collector loop. A collector that runs another one inside itself (the blocked process ensure's
+    /// server_config capture) does so under its caller's hold and does not take it again.
     /// </summary>
     private readonly System.Collections.Concurrent.ConcurrentDictionary<int, RunTelemetry> _runTelemetry = new();
+
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<int, SemaphoreSlim> _serverRunLocks = new();
+
+    /// <summary>
+    /// Waits for this server's turn to run collectors and returns the hold; dispose it when the loop ends. Servers do not
+    /// wait for each other. Not re-entrant: take it only at an entry point, never inside <see cref="RunCollectorAsync"/>.
+    /// </summary>
+    public async Task<IDisposable> AcquireServerRunAsync(ServerConnection server, CancellationToken cancellationToken = default)
+    {
+        var gate = _serverRunLocks.GetOrAdd(GetServerId(server), static _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(cancellationToken);
+        return new ServerRunHold(gate);
+    }
+
+    private sealed class ServerRunHold(SemaphoreSlim gate) : IDisposable
+    {
+        private int _released;
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _released, 1) == 0)
+            {
+                gate.Release();
+            }
+        }
+    }
 
     /// <summary>This server's telemetry slot, created on first use.</summary>
     internal RunTelemetry TelemetryFor(int serverId) =>
@@ -653,6 +683,10 @@ public partial class RemoteCollectorService
            Each server gets its own due-collector list from per-server schedules. */
         var serverTasks = onlineServers.Select(server => Task.Run(async () =>
         {
+            /* #7215: this server's turn. A tab opened while the sweep is on the server waits here (or the sweep waits for
+               it), so two runs never share the server's telemetry slot. */
+            using var serverTurn = await AcquireServerRunAsync(server, cancellationToken);
+
             /* Reconcile the opt-in long-query completion XE session to its enabled flag BEFORE the
                due-collector loop and regardless of whether it is due — a disabled collector is never
                dispatched, so the DROP-on-disable (#1496) has nowhere else to run. Cheap when nothing
@@ -737,6 +771,9 @@ public partial class RemoteCollectorService
         {
             return;
         }
+
+        /* #7215: this server's turn, so the tab-open run and the scheduled sweep never share the server's telemetry slot. */
+        using var serverTurn = await AcquireServerRunAsync(server, cancellationToken);
 
         /* #4938: the tab-open run does not start a collector that has a run time or a daily collector that is not
            due; on-load collectors still run (their connect capture). The last runs are read first, so a tab opened
