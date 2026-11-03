@@ -70,16 +70,47 @@ public partial class MuteRuleDialog : Window
         if (!string.IsNullOrEmpty(rule.MetricName))
             SelectMetric(rule.MetricName);
 
-        if (rule.ExpiresAtUtc == null)
-            ExpirationCombo.SelectedIndex = 3;
+        /* #7173: a rule that already expires keeps that moment unless the operator picks another: the first entry stands for the
+           stored expiry, so an edit that never touches the combo cannot stretch a window or bring an expired rule back to life. */
+        if (rule.ExpiresAtUtc is { } storedExpiry)
+        {
+            _keptExpiry = storedExpiry;
+            ExpirationCombo.Items.Insert(0, new ComboBoxItem { Content = KeepExpiryLabel(storedExpiry, DateTime.UtcNow) });
+            ExpirationCombo.SelectedIndex = 0;
+        }
         else
         {
-            var remaining = rule.ExpiresAtUtc.Value - DateTime.UtcNow;
-            if (remaining.TotalHours <= 1.5) ExpirationCombo.SelectedIndex = 0;
-            else if (remaining.TotalHours <= 25) ExpirationCombo.SelectedIndex = 1;
-            else ExpirationCombo.SelectedIndex = 2;
+            ExpirationCombo.SelectedIndex = 3;
         }
     }
+
+    private DateTime? _keptExpiry;
+
+    /// <summary>The expiry the Expires After combo stands for (#7173). When the rule being edited already expires, entry 0 is "Keep"
+    /// and the entries after it are the four presets; otherwise the entries are the four presets alone.</summary>
+    internal static DateTime? ExpiryFromSelection(int selectedIndex, DateTime? keptExpiry, DateTime nowUtc)
+    {
+        if (keptExpiry.HasValue)
+        {
+            if (selectedIndex == 0)
+                return keptExpiry;
+            selectedIndex--;
+        }
+        return selectedIndex switch
+        {
+            0 => nowUtc.AddHours(1),
+            1 => nowUtc.AddHours(24),
+            2 => nowUtc.AddDays(7),
+            _ => null
+        };
+    }
+
+    /// <summary>The text of the "Keep" entry: the stored expiry in local time, marked when it has already passed.</summary>
+    internal static string KeepExpiryLabel(DateTime expiresAtUtc, DateTime nowUtc) =>
+        expiresAtUtc <= nowUtc
+            ? $"Keep: {expiresAtUtc.ToLocalTime():g} (expired)"
+            : $"Keep: {expiresAtUtc.ToLocalTime():g}";
+
 
     private void SelectMetric(string metricName)
     {
@@ -115,13 +146,7 @@ public partial class MuteRuleDialog : Window
         else
             Rule.MetricName = null;
 
-        Rule.ExpiresAtUtc = ExpirationCombo.SelectedIndex switch
-        {
-            0 => DateTime.UtcNow.AddHours(1),
-            1 => DateTime.UtcNow.AddHours(24),
-            2 => DateTime.UtcNow.AddDays(7),
-            _ => null
-        };
+        Rule.ExpiresAtUtc = ExpiryFromSelection(ExpirationCombo.SelectedIndex, _keptExpiry, DateTime.UtcNow);
 
         if (Rule.ServerName == null && Rule.MetricName == null && Rule.DatabasePattern == null
             && Rule.QueryTextPattern == null && Rule.WaitTypePattern == null && Rule.JobNamePattern == null

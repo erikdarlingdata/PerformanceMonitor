@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
+using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Runtime.ExceptionServices;
 using System.Threading;
@@ -3785,7 +3786,7 @@ LIMIT 1";
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddInt(command, serverId);
         AddTimestamp(command, windowStartUtc);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
         while (await reader.ReadAsync(cancellationToken))
         {
             rows.Add(new CollectorHealth
@@ -3841,6 +3842,11 @@ LIMIT 1";
         }
 
         ApplyScheduledFrequencies(rows, serverId, scheduleOverrides);
+
+        /* #7242: the activity quiet bar is observed time, which the ranked subquery's run count cannot give: the gaps between the
+           streak's runs, read for just the rows the bar decides, after the health reader has closed (one connection at a time). */
+        await DarlingFleetReader.ApplyObservedQuietRunsAsync(
+            postgres, rows.Select(r => (serverId, r)).ToList(), windowStartUtc, DateTime.UtcNow, cancellationToken);
         return rows;
     }
 
@@ -5151,6 +5157,20 @@ internal sealed class CollectorHealth
     public long TrailingZeroRowSuccessRuns { get; set; }
 
     /// <summary>
+    /// #7242: the newest run that was NOT a zero-row SUCCESS (<c>last_zero_row_streak_break_time</c>), the instant the quiet streak
+    /// began after. Set by the fleet read only, where it is the lower bound of the exact run count taken for an activity collector
+    /// whose last productive run is older than the quiet bar (<see cref="CollectorHealthClassifier.NeedsObservedQuietRuns"/>).
+    /// </summary>
+    internal DateTime? LastZeroRowStreakBreakTime { get; set; }
+
+    /// <summary>
+    /// #7242: the gaps between the runs of the trailing zero-row streak, set for the rows the activity quiet bar turns on
+    /// (<see cref="CollectorHealthClassifier.NeedsObservedQuietRuns"/>) and null for every other. The observed quiet time the bar is
+    /// measured in is read off it at the cadence this row is banded against, so a schedule edit changes it without another read.
+    /// </summary>
+    internal ObservedQuietGaps? ObservedQuietGaps { get; set; }
+
+    /// <summary>
     /// Whether this collector WAS producing rows and is now recording SUCCESS with zero rows every cycle
     /// (#3885) — the regression class whose status word is the most reassuring one the vocabulary has,
     /// which is why nothing on any health surface could see it. Event collectors and on-load collectors
@@ -5158,7 +5178,8 @@ internal sealed class CollectorHealth
     /// stays HEALTHY.
     /// </summary>
     public bool ProducedThenStopped => CollectorHealthClassifier.ProducedThenStopped(
-        CollectorName, TrailingZeroRowSuccessRuns, LastProductiveTime);
+        CollectorName, TrailingZeroRowSuccessRuns, LastProductiveTime, FrequencyMinutes,
+        ObservedQuietGaps?.Minutes(FrequencyMinutes));
 
     /// <summary>
     /// The sentence a produced-then-stopped collector carries, or null when it is not one (#3885).

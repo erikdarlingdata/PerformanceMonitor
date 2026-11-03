@@ -20,12 +20,12 @@ public sealed record ViewerAgentAlertGapRow(string Message, string Which);
 /// <summary>One alert row of the Agent Alerts tab, in the web page's columns and words.</summary>
 public sealed record ViewerAgentAlertRow(
     string Name, string Enabled, string Severity, string Error, string Database, string Operators,
-    string FiredInWindow, string TimesFired, string LastFired);
+    string FiredInWindow, string TimesFired, string LastFired, DateTime? LastFiredAt = null);
 
 /// <summary>
 /// The words of the Agent Alerts tab (#6874), as functions of <see cref="ViewerAgentAlertsRead"/>. They match the Configuration
 /// tab on the web page: the same empty sentences, the same column words, "yes" and "no" for a flag and a dash for an unknown. The last
-/// fired time is the monitored server's own clock, as msdb stores it and the web page shows it, so it carries no zone.
+/// fired time is the monitored server's own clock, as msdb stores it and the web page shows it, so it carries no zone and is written in the current culture's date and time format (#7243), sorted by the time itself.
 /// </summary>
 public static class ViewerAgentAlertsText
 {
@@ -110,7 +110,8 @@ public static class ViewerAgentAlertsText
         Number(a.OperatorCount),
         YesNo(a.FiredInWindow),
         Number(a.OccurrenceCount),
-        a.LastOccurrence is { } t ? t.ToString("s", CultureInfo.InvariantCulture) : "");
+        a.LastOccurrence is { } t ? t.ToString("G", CultureInfo.CurrentCulture) : "",
+        a.LastOccurrence);
 
     private static string YesNo(bool? value) => value is true ? "yes" : value is false ? "no" : Dash;
 
