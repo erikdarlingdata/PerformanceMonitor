@@ -2406,6 +2406,18 @@ namespace PerformanceMonitor.Common
             string.Equals(collectorName, "ag_database_replica_states", StringComparison.Ordinal)
             || string.Equals(collectorName, "ag_replica_states", StringComparison.Ordinal);
 
+        /// <summary>The sentence on an Always On collector row that a server without Always On reports as not collected (#6828, #7375). One
+        /// text for <c>get_collection_health</c> in Darling and in Lite.</summary>
+        public const string AlwaysOnOffMessage = "Always On availability groups are not enabled on this server, so there is nothing for this collector to read.";
+
+        /// <summary>
+        /// True when the server's newest <c>server_properties</c> row says Always On (HADR) is off (#6828, #7375). A server with no row yet
+        /// makes no claim, so the log-driven rows stand. A row whose flag is NULL reads as off, the way both stores' property reads map
+        /// it (#6838): Darling's <c>GetLatestServerPropertiesAsync</c> and Lite's both turn a NULL into false, and the fleet read answers
+        /// the same, so every surface agrees on a NULL.
+        /// </summary>
+        public static bool IsAlwaysOnOff(bool hasPropertiesRow, bool isHadrEnabled) => hasPropertiesRow && !isHadrEnabled;
+
         /// <summary>
         /// True for a collector row that a server with Always On OFF reports as not collected rather than healthy (#6828): an Always On
         /// collector whose own band is HEALTHY. One that is FAILING keeps its band, because a failing collector is a real problem on a
