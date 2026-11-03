@@ -2601,8 +2601,8 @@ internal static class DarlingDataReader
                per-Query-Store-interval snapshots, and the collector re-fetches the OPEN interval every
                cycle as its last_execution_time advances, so the SAME interval (same first_execution_time)
                is stored repeatedly with a growing execution_count. SUM(execution_count) over the raw rows
-               reports 10 + 25 + 40 for an interval that reached 40, and AVG(avg_*) becomes an avg-of-avgs
-               weighted by how many times each interval happened to be re-collected. This surface feeds
+               reports 10 + 25 + 40 for an interval that reached 40, and the execution-weighted
+               averages would count a re-collected interval again at its own execution count. This surface feeds
                BOTH the MCP tool and the REST route, so un-deduped numbers reach an agent's reasoning as
                readily as the web dashboard. Twins the viewer's QueryStoreTopSql.
 

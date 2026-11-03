@@ -112,8 +112,9 @@ public sealed partial class ViewerDataService
     /// The Query-Store-by-Duration read — Lite's <c>GetQueryStoreTopQueriesAsync</c> ported to Postgres
     /// against the base <c>query_store_stats</c> table (the store name; Lite reads its
     /// <c>v_query_store_stats</c> view). Group by (database, query_id, plan_id, query_hash), average the
-    /// per-interval metrics + carry min/max spreads, rank by <c>SUM(execution_count) *
-    /// AVG(avg_duration_us)</c> (total duration) descending, over-fetch by 5 for the WAITFOR trim, and cap
+    /// per-interval metrics + carry min/max spreads, rank by the plan's total duration,
+    /// <c>SUM(avg_duration_us * execution_count)</c>, descending (every avg column is averaged weighted by
+    /// execution_count), over-fetch by 5 for the WAITFOR trim, and cap
     /// at top. Viewer deviations: <c>SUM(execution_count)</c> CAST to bigint; the query_plan_text column
     /// is not selected (plan surfacing deferred); the forced-plan flag folds through Postgres
     /// <c>bool_or(is_forced_plan)</c> (Postgres has no <c>MAX(boolean)</c> aggregate, unlike DuckDB).
@@ -136,8 +137,8 @@ public sealed partial class ViewerDataService
                per-Query-Store-interval snapshots, and the collector re-fetches the OPEN interval every
                cycle as its last_execution_time advances, so the SAME interval (same first_execution_time)
                is stored repeatedly with a growing execution_count. SUM(execution_count) over the raw rows
-               reports 10 + 25 + 40 for an interval that reached 40, and AVG(avg_*) becomes an avg-of-avgs
-               weighted by how many times each interval happened to be re-collected. Keep the LATEST
+               reports 10 + 25 + 40 for an interval that reached 40, and the execution-weighted
+               averages would count a re-collected interval again at its own execution count. Keep the LATEST
                snapshot per interval. Matches the dedup convention in PgFactCollector.QueryPerf and
                PgDrillDownCollector.Queries, and Lite's GetQueryStoreTopQueriesAsync.
 

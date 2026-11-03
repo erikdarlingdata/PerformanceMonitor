@@ -193,8 +193,8 @@ WITH latest AS (
        per-Query-Store-interval snapshots, and the collector re-fetches the OPEN interval every cycle
        as its last_execution_time advances, so the SAME interval is stored repeatedly with a growing
        execution_count. SUM(execution_count) over the raw rows reports 10 + 25 + 40 for an interval that
-       reached 40, and AVG(avg_*) becomes an avg-of-avgs weighted by how many times each interval happened
-       to be re-collected. Keep the LATEST snapshot per interval. The aggregate below projects nearly every
+       reached 40, and the execution-weighted averages would count a re-collected interval again at its own
+       execution count. Keep the LATEST snapshot per interval. The aggregate below projects nearly every
        payload column, so they are listed in `deduped`; #5381: query_text and query_plan_text are NOT among them.
        The text is read after the ranking, for the page's rows only (below).
 
