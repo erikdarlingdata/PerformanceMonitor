@@ -43,7 +43,7 @@ public sealed class QueryStoreIntervalPartitionsLiveTests
 
     private static DateTime Now => DateTime.UtcNow;
 
-    private sealed class ListLogger : ILogger
+    internal sealed class ListLogger : ILogger
     {
         public List<(LogLevel Level, string Message)> Lines { get; } = new();
 
@@ -99,7 +99,7 @@ public sealed class QueryStoreIntervalPartitionsLiveTests
         NpgsqlConnection connection, QueryStoreIntervalPartitions.IntervalTable table, DateTime utcNow, ILogger logger, CancellationToken ct) =>
         QueryStoreIntervalPartitions.RunPromotionAsync(connection, table, utcNow, logger, NoDelay, NoDelay, ct);
 
-    private static async Task InsertAsync(NpgsqlConnection connection, QueryStoreIntervalPartitions.IntervalTable table, DateTime first, long query, CancellationToken ct)
+    internal static async Task InsertAsync(NpgsqlConnection connection, QueryStoreIntervalPartitions.IntervalTable table, DateTime first, long query, CancellationToken ct)
     {
         var sql = table == Wide
             ? "INSERT INTO collect.query_store_interval_wide (collection_time, server_id, database_name, query_id, plan_id, execution_type_desc, first_execution_time, last_execution_time, query_text, execution_count, avg_duration_us, runtime_stats_interval_id, interval_start_time_utc) "

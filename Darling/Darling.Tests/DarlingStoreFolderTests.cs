@@ -794,6 +794,179 @@ public sealed class DarlingStoreFolderScriptTests
         Assert.Contains("inheritingOutsideUnchanged=True", answers);
     }
 
+    /// <summary>#7267: the pre-stop judgement walks the store while the previous release's postgres is still running, and that process
+    /// deletes and renames files all the time (a WAL segment recycled at a checkpoint, a temp file, a parallel-hash folder). A file
+    /// that is gone by the time it is counted, or a folder that is gone by the time it is listed, is skipped and does not make the plan
+    /// Refuse. Anything else that stops a count or a listing (access denied here) is still reported as before. The hook is called with each
+    /// entry right after the listing returned it, so it removes the entry between the listing and the count.</summary>
+    [Fact]
+    public void TheWalk_SkipsAFileOrFolderThatIsGoneMidWalk_AndStillReportsOneItCannotRead()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "Windows PowerShell and ACLs");
+
+        var answers = RunWindowsPowerShell(UpgradeProbe(StoreProbeHelpers + """
+            $s = New-Store 'gone' $true
+            $d = Join-Path $s 'pg'
+            Expose $d 'Read'
+            Set-Content -LiteralPath (Join-Path $d 'recycled.seg') 'x'
+            $fileset = Join-Path $d 'pgsql_tmp.fileset'
+            New-Item -ItemType Directory $fileset | Out-Null
+            Set-Content -LiteralPath (Join-Path $fileset 'part') 'x'
+            $hook = {
+                param($path)
+                if ($path -like '*\recycled.seg') { Remove-Item -LiteralPath $path -Force }
+                elseif ($path -like '*\pgsql_tmp.fileset') { Remove-Item -LiteralPath $path -Recurse -Force }
+            }
+            $walk = Find-DarlingStoreLinks $s $hook
+            'goneUncounted=[' + $walk.Uncounted + ']'
+            'goneUnreadable=[' + $walk.Unreadable + ']'
+            # The hook removed both; put them back so the plan walk meets them too.
+            Set-Content -LiteralPath (Join-Path $d 'recycled.seg') 'x'
+            New-Item -ItemType Directory $fileset | Out-Null
+            Set-Content -LiteralPath (Join-Path $fileset 'part') 'x'
+            $plan = Get-DarlingStoreAdoptionPlan $s $d $trusted @($meSid) $hook
+            'gonePlan=' + $plan.State + ' ' + $plan.Reason
+
+            # A folder this account may not list is still reported, and so is a file that exists and whose names cannot be counted (the
+            # count is stood in for here: windows grants the attribute read to anyone who may list the folder, so a real denial is not
+            # reachable from a file).
+            $t = New-Store 'denied' $true
+            $td = Join-Path $t 'pg'
+            $lockedDir = Join-Path $td 'lockedDir'
+            New-Item -ItemType Directory $lockedDir | Out-Null
+            $acl = Get-Acl -LiteralPath $lockedDir
+            $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($meSid, 'ListDirectory', 'Deny')))
+            Set-Acl -LiteralPath $lockedDir -AclObject $acl
+            $deniedFolder = Find-DarlingStoreLinks $t
+            # The walk reports the folder's full path, which spells out an 8.3 short name in the runner's temp path, so compare against the full form.
+            'deniedUnreadable=' + $deniedFolder.Unreadable.StartsWith([System.IO.Path]::GetFullPath($lockedDir), [System.StringComparison]::OrdinalIgnoreCase)
+            'deniedUnreadableText=' + $deniedFolder.Unreadable
+            $acl = Get-Acl -LiteralPath $lockedDir
+            foreach ($rule in @($acl.Access | Where-Object { $_.AccessControlType -eq 'Deny' })) { [void]$acl.RemoveAccessRule($rule) }
+            Set-Acl -LiteralPath $lockedDir -AclObject $acl
+            function Get-DarlingFileNameCount([string]$path) { return -1 }
+            $deniedFile = Find-DarlingStoreLinks $t
+            'deniedUncounted=' + $deniedFile.Uncounted
+            """));
+
+        Assert.Contains("goneUncounted=[]", answers);
+        Assert.Contains("goneUnreadable=[]", answers);
+        Assert.Contains(answers, line => line.StartsWith("gonePlan=Adopt", StringComparison.Ordinal));
+        Assert.Contains(answers, line => line.StartsWith("deniedUncounted=", StringComparison.Ordinal) && line.Length > "deniedUncounted=".Length);
+        Assert.Contains("deniedUnreadable=True", answers);
+    }
+
+    /// <summary>#7267: WriteDaclHere (SetKernelObjectSecurity) writes the store folder's protected list through the folder's handle and
+    /// changes nothing below it, a hard link's outside name included, and it leaves the folder protected with the operator's traverse
+    /// entry in place. This is the write Initialize-DarlingStoreFolder uses when the folder is already protected and already carries
+    /// exactly the inheritable entries it would grant (what the adoption's step 3 leaves). Measured here: SetSecurityInfo (WriteDacl) with
+    /// the protected flag did not pass the entries down either, in the layouts this test builds, so this test pins the contract of the
+    /// non-passing write and cannot tell the two calls apart.</summary>
+    [Fact]
+    public void TheFolderLocksNonPassingWrite_ChangesTheFolderAlone_AndLeavesAHardLinkedOutsideFileAsItWas()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "Windows PowerShell, ACLs and hard links");
+
+        var answers = RunWindowsPowerShell(Probe($$"""
+            Initialize-DarlingNativeStoreFolder
+            $other = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-551')
+            $marker = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-547')
+            $system = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-18')
+            # An outside file that inherits from its own folder, with an entry (the marker) the store's list does not have.
+            $elsewhere = Join-Path $base 'elsewhere'
+            New-Item -ItemType Directory $elsewhere | Out-Null
+            $eacl = Get-Acl -LiteralPath $elsewhere
+            $eacl.SetAccessRuleProtection($true, $false)
+            $eacl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($meSid, 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow')))
+            $eacl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($marker, 'ReadAndExecute', 'ContainerInherit, ObjectInherit', 'None', 'Allow')))
+            Set-Acl -LiteralPath $elsewhere -AclObject $eacl
+            $outside = Join-Path $elsewhere 'outside.txt'
+            Set-Content -LiteralPath $outside 'x'
+            # A store folder already protected with the list the adoption's step 3 leaves, a hard link below it, then the lock's list:
+            # the same inheritable entries plus the operator's traverse entry, which is not inherited.
+            $store = Join-Path $base 'class-store'
+            New-Item -ItemType Directory (Join-Path $store 'pg') -Force | Out-Null
+            $acl = New-Object System.Security.AccessControl.DirectorySecurity
+            $acl.SetAccessRuleProtection($true, $false)
+            foreach ($sid in @($system, $meSid)) { $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($sid, 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow'))) }
+            Set-Acl -LiteralPath $store -AclObject $acl
+            cmd /c mklink /H (Join-Path $store 'pg\planted.dat') $outside | Out-Null
+            $before = (Get-Acl -LiteralPath $outside).Sddl
+            $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($other, 'Traverse, Synchronize', 'None', 'None', 'Allow')))
+            $descriptor = $acl.GetSecurityDescriptorBinaryForm()
+            $lock = [DarlingNativeStoreFolder]::Open($store, $false)
+            try {
+                'hereResult=' + $lock.WriteDaclHere($descriptor)
+                'hereOutsideUnchanged=' + ((Get-Acl -LiteralPath $outside).Sddl -eq $before)
+                $written = Get-Acl -LiteralPath $store
+                'hereProtected=' + $written.AreAccessRulesProtected
+                'hereHasOperator=' + (@($written.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) | Where-Object { $_.IdentityReference -eq $other }).Count -eq 1)
+            }
+            finally { $lock.Dispose() }
+            """));
+
+        Assert.Contains("hereResult=0", answers);
+        Assert.Contains("hereOutsideUnchanged=True", answers);
+        Assert.Contains("hereProtected=True", answers);
+        Assert.Contains("hereHasOperator=True", answers);
+    }
+
+    /// <summary>#7267, the whole flow: the adoption runs the four steps, then the folder lock runs. A hard link planted after the
+    /// adoption's last walk and before the lock, to an outside file whose list is NOT protected (it inherits from its own folder),
+    /// keeps its list through the lock, and the store's own files end with the inherited entries of the locked folder. Needs an
+    /// elevated account: only one can make Administrators the owner.</summary>
+    [Fact]
+    public void TheLockAfterTheAdoption_DoesNotChangeAHardLinkedOutsideFile_AndTheStoresFilesStayInherited()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "Windows PowerShell, ACLs and hard links");
+        Assert.SkipUnless(IsElevated(), "making Administrators the owner needs an elevated account");
+
+        var answers = RunWindowsPowerShell(UpgradeProbe(StoreProbeHelpers + """
+            $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+            $marker = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-547')
+            $elsewhere = Join-Path $base 'elsewhere'
+            New-Item -ItemType Directory $elsewhere | Out-Null
+            $eacl = Get-Acl -LiteralPath $elsewhere
+            $eacl.SetAccessRuleProtection($true, $false)
+            $eacl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($meSid, 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow')))
+            $eacl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($marker, 'ReadAndExecute', 'ContainerInherit, ObjectInherit', 'None', 'Allow')))
+            Set-Acl -LiteralPath $elsewhere -AclObject $eacl
+            $outside = Join-Path $elsewhere 'outside.txt'
+            Set-Content -LiteralPath $outside 'x'
+            $before = (Get-Acl -LiteralPath $outside).Sddl
+
+            $s = New-Store 'lock' $true
+            $d = Join-Path $s 'pg'
+            Expose $d 'Read'
+            $plan = Get-DarlingStoreAdoptionPlan $s $d $trusted @($meSid)
+            'planState=' + $plan.State
+            $operator = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-551')
+            Invoke-DarlingStoreAdoption $s $d $meSid $trusted @($meSid) $plan $null $meSid $operator
+            'adopted=ok'
+            'operatorAfterStep3=' + ((Get-Acl -LiteralPath $s).GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) | Where-Object { $_.IdentityReference -eq $operator } | Measure-Object).Count
+            cmd /c mklink /H (Join-Path $d 'planted.dat') $outside | Out-Null
+            try { Initialize-DarlingStoreFolder $s $me $operator $d; 'lock=done' } catch { 'lock=' + ($_.Exception.Message -replace '\r|\n', ' ') }
+            'outsideUnchanged=' + ((Get-Acl -LiteralPath $outside).Sddl -eq $before)
+            $conf = Get-Acl -LiteralPath (Join-Path $d 'postgresql.conf')
+            $rules = @($conf.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
+            'confProtected=' + $conf.AreAccessRulesProtected
+            'confAllInherited=' + (@($rules | Where-Object { -not $_.IsInherited }).Count -eq 0)
+            'confIdentities=' + (($rules | ForEach-Object { $_.IdentityReference.Value } | Sort-Object -Unique) -join ',')
+            'meSid=' + $meSid.Value
+            """));
+
+        Assert.Contains("planState=Adopt", answers);
+        Assert.Contains("adopted=ok", answers);
+        Assert.Contains("operatorAfterStep3=1", answers);
+        Assert.Contains("lock=done", answers);
+        Assert.Contains("outsideUnchanged=True", answers);
+        Assert.Contains("confProtected=False", answers);
+        Assert.Contains("confAllInherited=True", answers);
+        var me = answers.Single(a => a.StartsWith("meSid=", StringComparison.Ordinal))[6..];
+        var expected = string.Join(",", new[] { "S-1-5-18", "S-1-5-32-544", me }.Distinct().OrderBy(x => x, StringComparer.Ordinal));
+        Assert.Contains("confIdentities=" + expected, answers);
+    }
+
     /// <summary>#7267: the names of a hard link are the store's own paths, and the data directory is the live cluster, so the refusal
     /// never tells the operator to remove a name inside it. When the service's major store upgrade linked the files (pg_upgrade --link)
     /// and could not delete the old folder, every relation file has one name in the data directory and one in the retained
@@ -830,7 +1003,9 @@ public sealed class DarlingStoreFolderScriptTests
             'retainedRmdirOld=' + $r.Contains('rmdir /s /q "' + $oldCanon + '"')
             'retainedSaysUpgrade=' + ($r.Contains('major store upgrade') -and $r.Contains('not a rollback copy'))
             'retainedRemovesInData=' + (Test-RemovesUnder $r $dataCanon)
-            'retainedSaysNotInData=' + $r.Contains('Do not remove any name inside the data directory')
+            # The retained folder is inside the store folder, so its closing sentence must not tell the operator to leave every name in the store alone.
+            'retainedSaysNotInData=' + ($r.Contains('Do not remove anything else inside the store folder') -and $r.Contains(': the data directory in it is the live cluster.'))
+            'retainedNoContradiction=' + (-not $r.Contains('Do not remove any name inside the store folder'))
 
             # A name outside the store: it is named, and the in-store name inside the data directory is not offered for removal.
             $elsewhere = Join-Path $base 'elsewhere'
@@ -850,7 +1025,38 @@ public sealed class DarlingStoreFolderScriptTests
             'outsideRemovesInStoreName=' + (Test-RemovesUnder $r2 (Get-DarlingCanonicalPath $inStore))
             'outsideRemovesInData=' + (Test-RemovesUnder $r2 (Get-DarlingCanonicalPath $data2))
             'outsideNoRmdir=' + (-not $r2.Contains('rmdir'))
-            'outsideSaysNotInData=' + $r2.Contains('Do not remove any name inside the data directory')
+            'outsideSaysNotInData=' + $r2.Contains('Do not remove any name inside the store folder')
+
+            # A file beside the data directory but inside the store folder (the credential files live there) with a name outside:
+            # only the outside name is offered, never the one in the store.
+            $s3 = New-Store 'beside' $true
+            $data3 = Join-Path $s3 'pg'
+            Expose $data3 'Read'
+            $outside3 = Join-Path $elsewhere 'outside3.dat'
+            Set-Content -LiteralPath $outside3 'x'
+            $beside = Join-Path $s3 'server.key'
+            Remove-Item -LiteralPath $beside -Force
+            cmd /c mklink /H $beside $outside3 | Out-Null
+            $p3 = Get-DarlingStoreAdoptionPlan $s3 $data3 $trusted @($meSid)
+            $r3 = Get-Plain $p3.Reason
+            $tail3 = $r3.Substring($r3.IndexOf('The names outside'))
+            'besideState=' + $p3.State
+            'besideNamesOutside=' + $tail3.Contains((Get-DarlingCanonicalPath $outside3))
+            'besideOffersInStoreName=' + $tail3.Contains((Get-DarlingCanonicalPath $beside))
+
+            # Every name inside the store folder, no -old- folder: nothing is offered for removal.
+            $s4 = New-Store 'allinside' $true
+            $data4 = Join-Path $s4 'pg'
+            Expose $data4 'Read'
+            $first = Join-Path $data4 'a.dat'
+            Set-Content -LiteralPath $first 'x'
+            cmd /c mklink /H (Join-Path $s4 'server.key.copy') $first | Out-Null
+            $p4 = Get-DarlingStoreAdoptionPlan $s4 $data4 $trusted @($meSid)
+            $r4 = Get-Plain $p4.Reason
+            'allInsideState=' + $p4.State
+            'allInsideNoOutsideSentence=' + (-not $r4.Contains('The names outside'))
+            'allInsideSaysFindOut=' + $r4.Contains('Find out why the cluster holds linked files')
+            'allInsideNoRemoval=' + (-not $r4.Contains('rmdir') -and -not (Test-RemovesUnder $r4 (Get-DarlingCanonicalPath $s4)))
             """));
 
         Assert.Contains("retainedState=Refuse", answers);
@@ -860,6 +1066,7 @@ public sealed class DarlingStoreFolderScriptTests
         Assert.Contains("retainedSaysUpgrade=True", answers);
         Assert.Contains("retainedRemovesInData=False", answers);
         Assert.Contains("retainedSaysNotInData=True", answers);
+        Assert.Contains("retainedNoContradiction=True", answers);
         Assert.Contains("outsideState=Refuse", answers);
         Assert.Contains("outsideByHand=False", answers);
         Assert.Contains("outsideNamesOutside=True", answers);
@@ -867,6 +1074,13 @@ public sealed class DarlingStoreFolderScriptTests
         Assert.Contains("outsideRemovesInData=False", answers);
         Assert.Contains("outsideNoRmdir=True", answers);
         Assert.Contains("outsideSaysNotInData=True", answers);
+        Assert.Contains("besideState=Refuse", answers);
+        Assert.Contains("besideNamesOutside=True", answers);
+        Assert.Contains("besideOffersInStoreName=False", answers);
+        Assert.Contains("allInsideState=Refuse", answers);
+        Assert.Contains("allInsideNoOutsideSentence=True", answers);
+        Assert.Contains("allInsideSaysFindOut=True", answers);
+        Assert.Contains("allInsideNoRemoval=True", answers);
     }
 
     /// <summary>#7267: the reset step changes one object at a time on its own handle. A plain file inside the folder goes back to
@@ -1246,6 +1460,61 @@ public sealed class DarlingStoreFolderScriptTests
         Assert.Contains("fine=no-fail", answers);
     }
 
+    /// <summary>#7267: a post-stop plan of Refuse ends the upgrade with the stopped-text Fail and never reaches the lock. The
+    /// pre-stop judgement can be skipped (its catch only warns) or the store can change after it, and the lock's own gate checks
+    /// owners and top-level links only, so a store the plan refuses would otherwise be locked, printed as Good and started. The text
+    /// is the stopped text with the plan's reason: it never says "has not stopped or copied anything" (false after the stop), and the
+    /// four commands appear only when the plan says they are the way forward.</summary>
+    [Fact]
+    public void ThePostStopPlanOfRefuse_FailsTheUpgrade_AndNeverLocksTheStore()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "Windows PowerShell and ACLs");
+
+        var answers = RunWindowsPowerShell(UpgradeProbe(StoreProbeHelpers + """
+            function Fail([string]$message) { throw ('FAILCALLED:' + $message) }
+            function Get-DarlingDataDirectory([string]$path) { return 'C:\store\pg' }
+            function Get-DarlingStoreTrustedSids([string]$account, [string]$name) { return @($meSid, $system, $admins) }
+            function Get-DarlingStoreAdopterSids { return @($meSid) }
+            function Invoke-DarlingStoreAdoption { 'adoption-was-called' }
+            function Initialize-DarlingStoreFolder { 'initialize-was-called' }
+            $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+            function Run-Case([string]$label, [bool]$byHand) {
+                $script:probeByHand = $byHand
+                try { Repair-DarlingStoreAfterStop 'C:\store' 'darling.json' $me $null 'PerfSvc'; "$label=no-fail" }
+                catch { "$label=" + ($_.Exception.Message -replace "`n", ' | ') }
+            }
+            function Get-DarlingStoreAdoptionPlan {
+                [pscustomobject]@{ State = 'Refuse'; Reason = 'C:\store\pg\base\1 is a hard link to a file outside the store.'; Findings = @(); FixByHand = $script:probeByHand; Writers = @() }
+            }
+
+            Run-Case 'advice' $false
+            Run-Case 'commands' $true
+            """));
+
+        Assert.DoesNotContain("initialize-was-called", answers);
+        Assert.DoesNotContain("adoption-was-called", answers);
+        Assert.DoesNotContain(answers, line => line.EndsWith("=no-fail", StringComparison.Ordinal));
+
+        foreach (var label in new[] { "advice", "commands" })
+        {
+            var failure = Assert.Single(answers, line => line.StartsWith(label + "=", StringComparison.Ordinal));
+            Assert.Contains("FAILCALLED:", failure, StringComparison.Ordinal);
+            Assert.Contains("cannot be upgraded in place: C:\\store\\pg\\base\\1 is a hard link to a file outside the store.", failure, StringComparison.Ordinal);
+            Assert.Contains("'PerfSvc' is STOPPED", failure, StringComparison.Ordinal);
+            Assert.DoesNotContain("has not stopped or copied", failure, StringComparison.Ordinal);
+            Assert.DoesNotContain("Start-Service", failure, StringComparison.Ordinal);
+            Assert.EndsWith("Then run upgrade-darling.ps1 again with the same arguments: it judges the store again, finishes the upgrade and starts the service.", failure, StringComparison.Ordinal);
+        }
+
+        var advice = Assert.Single(answers, line => line.StartsWith("advice=", StringComparison.Ordinal));
+        Assert.DoesNotContain("icacls ", advice, StringComparison.Ordinal);
+        Assert.DoesNotContain("/setowner", advice, StringComparison.Ordinal);
+
+        var commands = Assert.Single(answers, line => line.StartsWith("commands=", StringComparison.Ordinal));
+        Assert.Contains("dir /s /a:l", commands, StringComparison.Ordinal);
+        Assert.Contains("/setowner", commands, StringComparison.Ordinal);
+    }
+
     private static string UpgradeProbe(string body) => string.Join(
         "\n",
         """
@@ -1256,7 +1525,8 @@ public sealed class DarlingStoreFolderScriptTests
         ExtractFunctions(
             UpgradeScript, "Get-DarlingCanonicalPath", "Get-DarlingItemOwnerSid", "Get-DarlingLinkOwnerSid", "Initialize-DarlingNativeStoreFolder", "Initialize-DarlingNativeOwner", "Get-DarlingFileNameCount", "Get-DarlingStoreRepairSteps",
             "Get-DarlingStoreRepairText", "Find-DarlingStoreLinks", "Get-DarlingFileNames", "Get-DarlingStoreHardLinkAdvice", "Get-DarlingStoreFolderSddl", "Get-DarlingStoreWriteGrantText", "Get-DarlingStoreAdoptionPlan", "Set-DarlingStoreTreeSecurity", "Invoke-DarlingStoreAdoption",
-            "Get-DarlingStoreStoppedText", "Get-DarlingNothingChangedText", "Get-DarlingStoreRefusalText", "Write-DarlingStoreCheckResult", "Repair-DarlingStoreAfterStop"),
+            "Get-DarlingStoreStoppedText", "Get-DarlingNothingChangedText", "Get-DarlingStoreRefusalText", "Write-DarlingStoreCheckResult", "Repair-DarlingStoreAfterStop",
+            "Test-DarlingPathGone", "Initialize-DarlingStoreFolder", "Get-DarlingStoreContentsProblem", "Get-DarlingItemOwnerProblem", "Get-DarlingServiceSids"),
         $$"""
         $base = Join-Path $env:TEMP ('darling-adopt-' + [guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory $base | Out-Null

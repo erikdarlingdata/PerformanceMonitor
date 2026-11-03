@@ -525,11 +525,18 @@ public static class DarlingNativeFileNames
 # (detail is the Win32 error); 4 when the owner could not be set (detail is the error); 5 when the opened object is not inside
 # the root, or no root is open, or its real path could not be read (nothing was changed). attributes is the object's attribute
 # bits as read from the handle, so a caller can tell a folder from a link without opening it again. ResetDacl (#7267) opens and
-# judges an object the same way and, in place of the owner, replaces its access list with what its parent passes down (an empty
-# list written with the unprotected flag through the same handle, which is what icacls /reset does), so the owner step and the
-# reset step of the store repair never follow a link or touch a file with more than one name. It returns the same results, and 6
-# when the object is a link (nothing was changed). The list is worked out from the parent's own descriptor and written through the object's own
-# handle with SetKernelObjectSecurity, which does not pass anything down, because SetSecurityInfo writes a folder's inheritable entries to
+# judges an object the same way and, in place of the owner, replaces its access list with what its parent passes down, which is the
+# result of icacls /reset. That list is worked out from the parent's own descriptor, read through the parent's own handle
+# (CreatePrivateObjectSecurityEx, the parent's inheritable entries flagged as inherited and nothing explicit), and written through the
+# object's own handle with SetKernelObjectSecurity, so the owner step and the reset step of the store repair never follow a link or
+# touch a file with more than one name. It returns the same results, and 6 when the object is a link (nothing was changed). Reading
+# the parent's descriptor needs READ_CONTROL on the PARENT, opened by path: when the parent's list does not name the account that runs
+# this (and SeBackupPrivilege is not on, which a backup-semantics open uses to read what a list denies), the first object below it
+# answers 4 with error 5. In the four steps the parent is the store folder, whose step 3 list names Administrators. A parent with no
+# inheritable entries gives the process token's default list (SYSTEM, Administrators and the account itself, none of it inherited),
+# where icacls /reset gives an empty one, and the auto-inherited flag icacls leaves set is not kept. Neither changes who has access
+# in the four steps, because step 3's list is inherited by files and folders.
+# SetKernelObjectSecurity does not pass anything down, and SetSecurityInfo writes a folder's inheritable entries to
 # everything below it, the other name of a hard link included, before a walk could refuse that link (#7267). SetFolderDacl does the same
 # for the root folder alone, with the list the caller describes. EnablePrivileges turns on
 # SeTakeOwnershipPrivilege and SeBackupPrivilege (backup semantics let an object that denies Administrators read access open)
@@ -794,18 +801,18 @@ public static class DarlingNativeOwner
         }
     }
 
-    // READ_CONTROL | WRITE_DAC | FILE_READ_ATTRIBUTES; share read, write and delete; OPEN_EXISTING;
+    // WRITE_DAC | FILE_READ_ATTRIBUTES; share read, write and delete; OPEN_EXISTING;
     // FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS. The object's access list is replaced with the one its parent passes
     // down (InheritedDescriptor), which is what icacls /reset does, and it is written through this handle with SetKernelObjectSecurity
     // (DACL_SECURITY_INFORMATION). That call changes this object only: SetSecurityInfo propagates a folder's inheritable entries to
     // everything below it, including the other name of a hard link that sits below it, before any walk could refuse that link (#7267).
-    // Whatever is below a folder is reset by the walk, one judged object at a time. READ_CONTROL is asked for because the object's
-    // handle is also the one the parent is worked out from.
+    // Whatever is below a folder is reset by the walk, one judged object at a time. The object is opened for its attributes and WRITE_DAC
+    // only: the parent's descriptor is read through the parent's own handle (InheritedDescriptor, READ_CONTROL on the parent).
     public static int ResetDacl(string path, out int detail, out uint attributes)
     {
         detail = 0;
         attributes = 0;
-        using (SafeFileHandle handle = CreateFileW(ExtendedPath(path), 0x80 | 0x00020000 | 0x00040000, 7, IntPtr.Zero, 3, 0x00200000 | 0x02000000, IntPtr.Zero))
+        using (SafeFileHandle handle = CreateFileW(ExtendedPath(path), 0x80 | 0x00040000, 7, IntPtr.Zero, 3, 0x00200000 | 0x02000000, IntPtr.Zero))
         {
             if (handle.IsInvalid) { detail = Marshal.GetLastWin32Error(); return 2; }
             int pathError;
@@ -1529,8 +1536,9 @@ function Get-DarlingStoreFolder([string]$configPath) {
 # and WRITE_DAC always and WRITE_OWNER on request; Error is the Win32 error when it could not open (IsOpen is false then). FinalPath is the real
 # path the open handle resolves to, and ResolvedPath the real path of an existing folder with every link followed, so a
 # link anywhere on the way to the folder shows as a difference between the two. ReadSecurity returns the owner, group and DACL
-# as a self-relative descriptor. WriteDacl installs a protected DACL from its binary form, WriteOwner an owner from a SID's
-# binary form; both return 0 or the Win32 error. IsReparsePoint and Attributes are read from the handle. Written for the C#
+# as a self-relative descriptor. WriteDacl installs a protected DACL from its binary form (and passes the folder's inheritable
+# entries to everything below it), WriteDaclHere installs one from a self-relative descriptor without passing anything down, WriteOwner
+# an owner from a SID's binary form; all return 0 or the Win32 error. IsReparsePoint and Attributes are read from the handle. Written for the C#
 # of Windows PowerShell 5.1.
 function Initialize-DarlingNativeStoreFolder {
     if ('DarlingNativeStoreFolder' -as [type]) { return }
@@ -1580,6 +1588,9 @@ public sealed class DarlingNativeStoreFolder : IDisposable
 
     [DllImport("advapi32.dll", SetLastError = true)]
     private static extern uint SetSecurityInfo(SafeFileHandle handle, int objectType, uint securityInfo, byte[] owner, IntPtr group, byte[] dacl, IntPtr sacl);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool SetKernelObjectSecurity(SafeFileHandle handle, uint securityInformation, byte[] descriptor);
 
     private SafeFileHandle handle;
     public int Error;
@@ -1703,6 +1714,14 @@ public sealed class DarlingNativeStoreFolder : IDisposable
     public int WriteDacl(byte[] dacl)
     {
         return (int)SetSecurityInfo(handle, 1, 0x00000004u | 0x80000000u, null, IntPtr.Zero, dacl, IntPtr.Zero);
+    }
+
+    // The same list as WriteDacl, from a self-relative descriptor, written with SetKernelObjectSecurity, which changes this folder only
+    // and passes nothing down to what is below it (SetSecurityInfo is the call that can write a folder's inheritable entries to every
+    // name below it, the other name of a hard link included). For a folder whose inheritable entries do not change. 0 or the Win32 error.
+    public int WriteDaclHere(byte[] descriptor)
+    {
+        return SetKernelObjectSecurity(handle, 0x00000004u | 0x80000000u, descriptor) ? 0 : Marshal.GetLastWin32Error();
     }
 
     // OWNER_SECURITY_INFORMATION.
@@ -1926,7 +1945,17 @@ function Initialize-DarlingStoreFolder([string]$folder, [string]$serviceAccount,
             $error1 = $lock.WriteOwner($adminsBytes)
             if ($error1 -ne 0) { throw "could not make Administrators the owner of ${folder} (Windows error $error1)." }
         }
-        $error2 = $lock.WriteDacl($daclBytes)
+        # SetSecurityInfo (WriteDacl) is the call that can hand the folder's inheritable entries to everything below it, through a hard
+        # link's outside name too, which is a window for a link planted after the walk that judged the tree (#7267). It is only needed
+        # when those entries change. A folder that is already protected and already carries exactly the inheritable entries this lock grants (the upgrade's
+        # in-place repair has just written them to the folder and reset everything below it) only gets the operator's traverse entry,
+        # and that one is not inherited, so it is written to this folder alone (WriteDaclHere).
+        $inheritableOf = {
+            param($security)
+            @($security.GetAccessRules($true, $true, $sidType) | Where-Object { $_.InheritanceFlags -ne $inheritFlags::None } | ForEach-Object { '{0}|{1}|{2}|{3}|{4}|{5}' -f $_.IdentityReference.Value, [int]$_.FileSystemRights, [int]$_.InheritanceFlags, [int]$_.PropagationFlags, $_.AccessControlType, $_.IsInherited } | Sort-Object)
+        }
+        $sameInheritable = $before.AreAccessRulesProtected -and ((& $inheritableOf $before) -join ';') -eq ((& $inheritableOf $acl) -join ';')
+        if ($sameInheritable) { $error2 = $lock.WriteDaclHere($descriptor) } else { $error2 = $lock.WriteDacl($daclBytes) }
         if ($error2 -ne 0) { throw "could not set the permissions of ${folder} (Windows error $error2)." }
 
         # VERIFY rather than assume, through the same handle: the folder must now be protected, owned by Administrators,
@@ -1989,8 +2018,19 @@ function Get-DarlingStoreAdopterSids {
 # through .NET and checks the attribute before it descends, so it does not depend on how Get-ChildItem -Recurse treats a link in the
 # PowerShell version that runs it. Unreadable is the first folder it could not list ('' when every folder was listed). HardLinks is one
 # 'path (N names)' string per file with more than one name, and HardLinkFiles is the same files as plain paths. Uncounted is the first file whose number of names could not be read ('' when
-# every file was counted).
-function Find-DarlingStoreLinks([string]$folder) {
+# every file was counted). The walk can run against the previous release's postgres while it is still up (the pre-stop judgement), and
+# that process creates, renames and deletes files all the time (WAL segments at a checkpoint, temp files, parallel-hash folders). A file
+# or folder that is gone by the time it is counted or listed is skipped, because nothing is left there to take over (Test-DarlingPathGone).
+# Anything else that stops a count or a listing, access denied included, is still reported. $AfterList is a seam for a test: it is called
+# with the path of each entry right after the listing returned it and before the entry is counted or entered.
+function Test-DarlingPathGone([string]$path) {
+    try { $null = [System.IO.File]::GetAttributes($path); return $false }
+    catch [System.IO.FileNotFoundException] { return $true }
+    catch [System.IO.DirectoryNotFoundException] { return $true }
+    catch { return $false }
+}
+
+function Find-DarlingStoreLinks([string]$folder, [scriptblock]$AfterList = $null) {
     $links = New-Object System.Collections.Generic.List[string]
     $hardLinks = New-Object System.Collections.Generic.List[string]
     $hardLinkFiles = New-Object System.Collections.Generic.List[string]
@@ -2002,34 +2042,29 @@ function Find-DarlingStoreLinks([string]$folder) {
         $dir = $pending.Pop()
         try {
             foreach ($entry in (New-Object System.IO.DirectoryInfo($dir)).EnumerateFileSystemInfos()) {
+                if ($AfterList) { $null = & $AfterList $entry.FullName }
                 if ($entry.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { $links.Add($entry.FullName); continue }
                 if ($entry.Attributes -band [System.IO.FileAttributes]::Directory) { $pending.Push($entry.FullName); continue }
                 $names = Get-DarlingFileNameCount $entry.FullName
-                if ($names -lt 0) { if (-not $uncounted) { $uncounted = $entry.FullName } }
+                if ($names -lt 0) { if (-not $uncounted -and -not (Test-DarlingPathGone $entry.FullName)) { $uncounted = $entry.FullName } }
                 elseif ($names -gt 1) { $hardLinks.Add("$($entry.FullName) ($names names)"); $hardLinkFiles.Add($entry.FullName) }
             }
         }
-        catch { if (-not $unreadable) { $unreadable = "$dir ($($_.Exception.Message))" } }
+        catch { if (-not $unreadable -and -not ($dir -ne $folder -and (Test-DarlingPathGone $dir))) { $unreadable = "$dir ($($_.Exception.Message))" } }
     }
     return [pscustomobject]@{ Links = @($links); HardLinks = @($hardLinks); HardLinkFiles = @($hardLinkFiles); Unreadable = $unreadable; Uncounted = $uncounted }
 }
 
 # Every name one file has, each spelled with its volume, or $null when they cannot be read (#7267). The native class lists them
-# (FindFirstFileNameW and FindNextFileNameW, compiled by Get-DarlingFileNameCount). Only when that cannot be used (the class does not
-# compile or the API refuses the file) is `fsutil hardlink list` read instead, which prints the same names relative to the volume.
+# (FindFirstFileNameW and FindNextFileNameW, compiled by Get-DarlingFileNameCount, each name prefixed with GetVolumePathNameW's answer, which
+# is right on a folder mount point). When that cannot be used the names are unread and the refusal sends the operator to fsutil hardlink
+# list themselves: fsutil prints names relative to the volume, and a drive letter put in front of them would name a path that does not
+# exist on a store that sits on a mounted volume.
 function Get-DarlingFileNames([string]$path) {
     try {
         [void](Get-DarlingFileNameCount $path)
         $names = [DarlingNativeFileNames]::ListNames($path)
         if ($null -ne $names -and $names.Length -gt 0) { return @($names) }
-    }
-    catch { }
-    try {
-        $volume = [System.IO.Path]::GetPathRoot($path).TrimEnd('\')
-        $listed = @(& fsutil.exe hardlink list $path 2>$null)
-        if ($LASTEXITCODE -ne 0) { return $null }
-        $names = @($listed | Where-Object { $_ -and $_.Trim().StartsWith('\') } | ForEach-Object { $volume + $_.Trim() })
-        if ($names.Count -gt 0) { return $names }
     }
     catch { }
     return $null
@@ -2038,10 +2073,11 @@ function Get-DarlingFileNames([string]$path) {
 # The refusal text for a store that holds files with more than one name (#5677, #7267). The names of a hard link are the store's own
 # paths, and the data directory is the live cluster, so deleting a name inside it deletes a relation file from the cluster: nothing
 # here ever points del or rmdir at a name inside the data directory. $files are the plain paths of the hard-linked files the walk found.
-# Every name of every file is read and sorted three ways: inside the data directory, inside a <data directory>-old-<N> folder beside it
-# (what a major store upgrade that ran pg_upgrade --link leaves when it could not delete the old folder: the old cluster's files and
-# the new cluster's files are the same files, and the folder is not a rollback copy), or anywhere else. When nothing is anywhere
-# else the fix is removing the -old- folder. Otherwise the names anywhere else are the ones to look at.
+# Every name of every file is read and sorted three ways: inside the store folder (the data directory and the credential files beside it
+# are all the live store, and no name there is ever offered for removal), inside a <data directory>-old-<N> folder beside the data
+# directory (what a major store upgrade that ran pg_upgrade --link leaves when it could not delete the old folder: the old cluster's
+# files and the new cluster's files are the same files, and the folder is not a rollback copy), or anywhere else. When nothing is
+# anywhere else the fix is removing the -old- folder. Otherwise the names anywhere else are the ones to look at.
 function Get-DarlingStoreHardLinkAdvice([string]$full, [string]$dataDirectory, $hardLinks, $files) {
     $live = $null
     if ($dataDirectory) { $live = Get-DarlingCanonicalPath $dataDirectory }
@@ -2068,30 +2104,31 @@ function Get-DarlingStoreHardLinkAdvice([string]$full, [string]$dataDirectory, $
                     continue
                 }
             }
+            if ($name.Equals($full, [StringComparison]::OrdinalIgnoreCase) -or $name.StartsWith($full + '\', [StringComparison]::OrdinalIgnoreCase)) { continue }
             if (-not ($outside | Where-Object { $_ -ieq $name })) { $outside.Add($name) }
         }
     }
     $named = (@($hardLinks) | Select-Object -First 3) -join ', '
     if (@($hardLinks).Count -gt 3) { $named += " and $(@($hardLinks).Count - 3) more" }
     $head = "$full holds a file with more than one name, a hard link ($named). A file has one owner and one set of permissions under every name, so fixing the store would change them under the names outside it too, and this script does not do that."
-    $never = "Do not remove any name inside the data directory '$inside', because that deletes a file from the live cluster."
+    $never = "Do not remove any name inside the store folder '$full', because that deletes a file from the live store, and the data directory in it is the live cluster."
     if ($outside.Count -eq 0 -and $unread.Count -eq 0 -and $oldFolders.Count -gt 0) {
         $folderText = (@($oldFolders) | ForEach-Object { "'$_'" }) -join ' and '
         $commands = (@($oldFolders) | ForEach-Object { "rmdir /s /q `"$_`"" }) -join ' and '
-        return "$head Every name of these files is inside the data directory or inside $folderText. That folder is what is left of a major store upgrade that linked the files instead of copying them, and it is not a rollback copy. The fix is removing that folder with $commands and nothing inside the data directory, then running this script again. $never"
+        return "$head Every name of these files is inside the store folder or inside $folderText. That folder is what is left of a major store upgrade that linked the files instead of copying them, and it is not a rollback copy. The fix is removing that folder with $commands and nothing inside the data directory, then running this script again. Do not remove anything else inside the store folder '$full': the data directory in it is the live cluster."
     }
     $parts = New-Object System.Collections.Generic.List[string]
     $parts.Add($head)
     if ($outside.Count -gt 0) {
         $shown = (@($outside) | Select-Object -First 3) -join ', '
         if ($outside.Count -gt 3) { $shown += " and $($outside.Count - 3) more" }
-        $parts.Add("The names outside the data directory are $shown. Check that they were not made on purpose, then remove those names and run this script again.")
+        $parts.Add("The names outside the store folder are $shown. Check that they were not made on purpose, then remove those names and run this script again.")
     }
     if ($unread.Count -gt 0) {
-        $parts.Add("The names of $($unread[0]) could not be read by this script. fsutil hardlink list `"$($unread[0])`" shows them, and only a name outside the data directory is one to remove.")
+        $parts.Add("The names of $($unread[0]) could not be read by this script. fsutil hardlink list `"$($unread[0])`" shows them, and only a name outside the store folder is one to remove.")
     }
     if ($outside.Count -eq 0 -and $unread.Count -eq 0) {
-        $parts.Add("Every name of these files is inside the data directory, which is the live cluster, so there is no name outside it to remove. Find out why the cluster holds linked files before you run this script again.")
+        $parts.Add("Every name of these files is inside the store folder, which holds the live cluster, so there is no name outside it to remove. Find out why the cluster holds linked files before you run this script again.")
     }
     $parts.Add($never)
     return ($parts -join ' ')
@@ -2110,7 +2147,7 @@ function Get-DarlingStoreWriteGrantText([string]$dataDirectory, $writers) {
 # (it cannot be taken over here; Reason says why and FixByHand says whether the four commands are the way forward). Judged read-only: the folder, the names the service writes into
 # (Get-DarlingStoreContentsProblem lists them) and the data directory's own entries are checked for their owner, and those names for a
 # grant to any account outside $trusted (a user's grant is what makes the service's own tightening fail once Administrators own it).
-function Get-DarlingStoreAdoptionPlan([string]$folder, [string]$dataDirectory, $trusted, $adopters) {
+function Get-DarlingStoreAdoptionPlan([string]$folder, [string]$dataDirectory, $trusted, $adopters, [scriptblock]$AfterList = $null) {
     $full = [System.IO.Path]::GetFullPath($folder).TrimEnd('\')
     $plan = { param([string]$state, [string]$reason, $findings, [bool]$byHand, $writers = @()) [pscustomobject]@{ State = $state; Reason = $reason; Findings = @($findings); FixByHand = $byHand; Writers = @($writers) } }
     # A drive root is never locked or read here: "D:" alone names the current folder of that drive, and its permissions are the whole
@@ -2228,7 +2265,7 @@ function Get-DarlingStoreAdoptionPlan([string]$folder, [string]$dataDirectory, $
     # icacls /T follows a link below the folder into what it points at, a trusted owner's relocation link (pg_wal, a tablespace) included,
     # so one anywhere in the tree stops the takeover and the operator takes the link out first (#7267). A file with more than one name
     # stops it the same way (#5677): its owner and access list are shared by every name, so the takeover would change them outside the store.
-    $walk = Find-DarlingStoreLinks $full
+    $walk = Find-DarlingStoreLinks $full $AfterList
     if ($walk.Unreadable) { return (& $plan 'Refuse' "$($walk.Unreadable) cannot be listed by this script, so whether the store holds a junction or link is not known. The commands that fix a store follow a link into what it points at and change that too." $findings $true) }
     if (@($walk.Links).Count -gt 0) {
         $named = (@($walk.Links) | Select-Object -First 3) -join ', '
@@ -2279,13 +2316,15 @@ function Set-DarlingStoreTreeSecurity([string]$folder, [string]$mode, [byte[]]$o
                 elseif ($mode -eq 'Owner') { $result = [DarlingNativeOwner]::SetOwner($path, $ownerBytes, [ref]$detail, [ref]$attributes) }
                 elseif ($mode -eq 'RootList') { $result = [DarlingNativeOwner]::SetFolderDacl($path, $sddl, [ref]$detail, [ref]$attributes) }
                 else { $result = [DarlingNativeOwner]::ResetDacl($path, [ref]$detail, [ref]$attributes) }
+                # An object that was listed and is gone when it is opened (file not found, path not found) has nothing left to change.
+                if ($result -eq 2 -and ($detail -eq 2 -or $detail -eq 3) -and -not $isRoot) { continue }
                 if ($result -ne 0) {
                     $what = if ($mode -eq 'Owner') { 'owner' } else { 'permissions' }
                     $why = switch ($result) {
                         1 { "has $detail names (a hard link), and its owner and permissions are the same under every one, so they were not changed" }
                         2 { "could not be opened, error $detail" }
                         3 { "its number of names could not be read, error $detail" }
-                        4 { "its $what could not be changed, error $detail" + $(if ($mode -eq 'Owner' -and -not $privileges) { ' (this session could not turn on SeTakeOwnershipPrivilege and SeBackupPrivilege, see whoami /priv)' } else { '' }) }
+                        4 { "its $what could not be changed, error $detail" + $(if (-not $privileges) { if ($mode -eq 'Owner') { ' (this session could not turn on SeTakeOwnershipPrivilege and SeBackupPrivilege, see whoami /priv)' } else { ' (this session could not turn on SeBackupPrivilege, which reading the permissions of the folder above can need, see whoami /priv)' } } else { '' }) }
                         5 { 'its real path is outside the store folder, so it was not changed' }
                         6 { 'is a junction or link, so it was not changed' }
                         default { "gave result $result" }
@@ -2296,7 +2335,7 @@ function Set-DarlingStoreTreeSecurity([string]$folder, [string]$mode, [byte[]]$o
                 if (-not ($isRoot -and $mode -eq 'Reset')) { $changed++ }
                 if ($mode -notlike 'Root*' -and ($attributes -band 0x10) -ne 0 -and ($attributes -band 0x400) -eq 0) {
                     try { foreach ($kid in [System.IO.Directory]::EnumerateFileSystemEntries($path)) { $pending.Push($kid) } }
-                    catch { $problems.Add("$path (its contents could not be listed: $($_.Exception.Message))") }
+                    catch { if (-not (Test-DarlingPathGone $path)) { $problems.Add("$path (its contents could not be listed: $($_.Exception.Message))") } }
                 }
             }
         }
@@ -2311,10 +2350,13 @@ function Set-DarlingStoreTreeSecurity([string]$folder, [string]$mode, [byte[]]$o
 
 # The access list step 3 writes on the store folder, as SDDL: protected (no inheritance from the parent) with SYSTEM, Administrators and
 # the service account (when its SID is given) each granted full control, inherited by files and folders below (OICI). It is the list the
-# icacls /inheritance:r /grant command in Get-DarlingStoreRepairSteps builds, written through the folder's own handle (#7267).
-function Get-DarlingStoreFolderSddl([string]$serviceSid = '') {
+# icacls /inheritance:r /grant command in Get-DarlingStoreRepairSteps builds, written through the folder's own handle (#7267). With the
+# operator group's SID it also carries the lock's traverse entry (not inherited), so the folder's final list is written in step 3, before
+# step 4 walks what is below it, and the lock that follows (Initialize-DarlingStoreFolder) has no inheritable entry left to change.
+function Get-DarlingStoreFolderSddl([string]$serviceSid = '', [string]$operatorSid = '') {
     $list = 'D:P(A;OICI;FA;;;S-1-5-18)(A;OICI;FA;;;S-1-5-32-544)'
     if ($serviceSid) { $list += "(A;OICI;FA;;;$serviceSid)" }
+    if ($operatorSid) { $list += "(A;;0x100020;;;$operatorSid)" }
     return $list
 }
 
@@ -2325,9 +2367,11 @@ function Get-DarlingStoreFolderSddl([string]$serviceSid = '') {
 # own two steps (2 and 3) are the same as the icacls commands the operator is shown: step 2 gives the folder what its parent passes down
 # and step 3 protects it and grants SYSTEM, Administrators and the service account full control, inherited by what is below. $AfterStep is
 # a seam for a test: it is called with the number of each step after that step finished, so a test can plant something between two steps.
-# $ownerSid is who the owner step makes the owner (Administrators when null), which a test sets to the account that runs it. Throws with the reason when a step fails or the store is still refused afterwards, and the caller warns (the
+# $ownerSid is who the owner step makes the owner (Administrators when null), which a test sets to the account that runs it. $operatorSid is
+# the operator group, which step 3 lets traverse the folder (null when there is none), so the folder's final list is in place before step 4
+# and the lock afterwards writes it without passing anything down. Throws with the reason when a step fails or the store is still refused afterwards, and the caller warns (the
 # service is stopped, and starting it is what the operator came for).
-function Invoke-DarlingStoreAdoption([string]$folder, [string]$dataDirectory, $serviceSid, $trusted, $adopters, $plan, [scriptblock]$AfterStep = $null, $ownerSid = $null) {
+function Invoke-DarlingStoreAdoption([string]$folder, [string]$dataDirectory, $serviceSid, $trusted, $adopters, $plan, [scriptblock]$AfterStep = $null, $ownerSid = $null, $operatorSid = $null) {
     $ErrorActionPreference = 'Continue'
     Note ''
     Note "The store folder '$folder' was made outside this release's rules and the service would refuse to start its database on it. It is the store the previous release was running, so it is being fixed in place:"
@@ -2342,7 +2386,7 @@ function Invoke-DarlingStoreAdoption([string]$folder, [string]$dataDirectory, $s
     $steps = @(Get-DarlingStoreRepairSteps $folder $serviceSid.Value)
     if ($steps.Count -ne 4) { throw "the repair has $($steps.Count) steps, not the four this function runs." }
     $number = 0
-    $folderList = Get-DarlingStoreFolderSddl $serviceSid.Value
+    $folderList = Get-DarlingStoreFolderSddl $serviceSid.Value $(if ($operatorSid) { $operatorSid.Value } else { '' })
     foreach ($step in $steps) {
         $number++
         $mode = switch ($number) { 1 { 'Owner' } 2 { 'RootReset' } 3 { 'RootList' } default { 'Reset' } }
@@ -2373,8 +2417,11 @@ function Invoke-DarlingStoreAdoption([string]$folder, [string]$dataDirectory, $s
 # the upgrade ends here with the service STOPPED, the four commands, and a re-run of this script as the step after them. $what says
 # what failed.
 # An empty $serviceSid leaves the commands out, because the service account's own grant cannot be named without it.
-function Get-DarlingStoreStoppedText([string]$folder, [string]$what, [string]$serviceSid, [string]$serviceName) {
-    if ($serviceSid) { $fix = "Fix the folder by hand from an elevated prompt:`n$(Get-DarlingStoreRepairText $folder $serviceSid)" }
+# $withCommands false leaves them out too, for a store whose reason says not to run them (a hard link outside the store, a link
+# someone else made): $what then carries the advice and this text only adds the re-run step.
+function Get-DarlingStoreStoppedText([string]$folder, [string]$what, [string]$serviceSid, [string]$serviceName, [bool]$withCommands = $true) {
+    if (-not $withCommands) { $fix = "Follow the advice above, because the four fix commands are not the way forward for this store." }
+    elseif ($serviceSid) { $fix = "Fix the folder by hand from an elevated prompt:`n$(Get-DarlingStoreRepairText $folder $serviceSid)" }
     else { $fix = "Fix the service's Log On account so Windows can resolve it." }
     return "$what The new build IS in place and '$serviceName' is STOPPED. It stays stopped: the service refuses a store it cannot trust, so starting it now would only show that refusal. $fix`nThen run upgrade-darling.ps1 again with the same arguments: it judges the store again, finishes the upgrade and starts the service."
 }
@@ -2422,6 +2469,10 @@ function Get-DarlingStoreRefusalText([string]$folder, $plan, [string]$serviceSid
 # The store folder step after the copy, with the service stopped: a store the previous release was running is fixed in place, then
 # the folder is locked the way install-darling.ps1 locks it. Either step failing ends the upgrade with Fail and the service left
 # stopped (#7267): the service would refuse the store, and "Service is Running." with no database is the symptom reported there.
+# So does a post-stop plan of Refuse: the pre-stop judgement may have been skipped (its catch only warns) or the store may have changed
+# since, and the lock's own gate checks owners and top-level links only, so it must not be left to catch what the plan found.
+# A plan of Leave goes on to the lock, as it does before the stop: the store has no PG_VERSION, so no cluster is at risk, the lock
+# leaves the items' explicit grants where they are, and the service's own start check stays the gate.
 function Repair-DarlingStoreAfterStop([string]$storeFolder, [string]$configPath, [string]$logonAccount, $operatorSid, [string]$serviceName) {
     try { $serviceSid = (New-Object System.Security.Principal.NTAccount($logonAccount)).Translate([System.Security.Principal.SecurityIdentifier]) }
     catch { Fail (Get-DarlingStoreStoppedText $storeFolder "The store folder '$storeFolder' could not be secured because the service account '$logonAccount' could not be resolved ($($_.Exception.Message))." '' $serviceName) }
@@ -2432,9 +2483,12 @@ function Repair-DarlingStoreAfterStop([string]$storeFolder, [string]$configPath,
         $adoptTrusted = Get-DarlingStoreTrustedSids $logonAccount $serviceName
         $adoptors = Get-DarlingStoreAdopterSids
         $adoptPlan = Get-DarlingStoreAdoptionPlan $storeFolder $dataDirectory $adoptTrusted $adoptors
-        if ($adoptPlan.State -eq 'Adopt') { Invoke-DarlingStoreAdoption $storeFolder $dataDirectory $serviceSid $adoptTrusted $adoptors $adoptPlan }
+        if ($adoptPlan.State -eq 'Adopt') { Invoke-DarlingStoreAdoption $storeFolder $dataDirectory $serviceSid $adoptTrusted $adoptors $adoptPlan $null $null $operatorSid }
     }
     catch { Fail (Get-DarlingStoreStoppedText $storeFolder "The store folder '$storeFolder' could not be fixed in place: $($_.Exception.Message)" $serviceSid.Value $serviceName) }
+    if ($adoptPlan -and $adoptPlan.State -eq 'Refuse') {
+        Fail (Get-DarlingStoreStoppedText $storeFolder "The store folder '$storeFolder' cannot be upgraded in place: $($adoptPlan.Reason)" $serviceSid.Value $serviceName ([bool]$adoptPlan.FixByHand))
+    }
     # A drive root is not locked (the plan says why and how to move the store), and the upgrade goes on.
     if ($adoptPlan -and $adoptPlan.State -eq 'DriveRoot') {
         $moveTo = [System.IO.Path]::Combine($storeFolder, 'Darling')

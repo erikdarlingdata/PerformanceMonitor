@@ -500,11 +500,18 @@ public static class DarlingNativeFileNames
 # (detail is the Win32 error); 4 when the owner could not be set (detail is the error); 5 when the opened object is not inside
 # the root, or no root is open, or its real path could not be read (nothing was changed). attributes is the object's attribute
 # bits as read from the handle, so a caller can tell a folder from a link without opening it again. ResetDacl (#7267) opens and
-# judges an object the same way and, in place of the owner, replaces its access list with what its parent passes down (an empty
-# list written with the unprotected flag through the same handle, which is what icacls /reset does), so the owner step and the
-# reset step of the store repair never follow a link or touch a file with more than one name. It returns the same results, and 6
-# when the object is a link (nothing was changed). The list is worked out from the parent's own descriptor and written through the object's own
-# handle with SetKernelObjectSecurity, which does not pass anything down, because SetSecurityInfo writes a folder's inheritable entries to
+# judges an object the same way and, in place of the owner, replaces its access list with what its parent passes down, which is the
+# result of icacls /reset. That list is worked out from the parent's own descriptor, read through the parent's own handle
+# (CreatePrivateObjectSecurityEx, the parent's inheritable entries flagged as inherited and nothing explicit), and written through the
+# object's own handle with SetKernelObjectSecurity, so the owner step and the reset step of the store repair never follow a link or
+# touch a file with more than one name. It returns the same results, and 6 when the object is a link (nothing was changed). Reading
+# the parent's descriptor needs READ_CONTROL on the PARENT, opened by path: when the parent's list does not name the account that runs
+# this (and SeBackupPrivilege is not on, which a backup-semantics open uses to read what a list denies), the first object below it
+# answers 4 with error 5. In the four steps the parent is the store folder, whose step 3 list names Administrators. A parent with no
+# inheritable entries gives the process token's default list (SYSTEM, Administrators and the account itself, none of it inherited),
+# where icacls /reset gives an empty one, and the auto-inherited flag icacls leaves set is not kept. Neither changes who has access
+# in the four steps, because step 3's list is inherited by files and folders.
+# SetKernelObjectSecurity does not pass anything down, and SetSecurityInfo writes a folder's inheritable entries to
 # everything below it, the other name of a hard link included, before a walk could refuse that link (#7267). SetFolderDacl does the same
 # for the root folder alone, with the list the caller describes. EnablePrivileges turns on
 # SeTakeOwnershipPrivilege and SeBackupPrivilege (backup semantics let an object that denies Administrators read access open)
@@ -769,18 +776,18 @@ public static class DarlingNativeOwner
         }
     }
 
-    // READ_CONTROL | WRITE_DAC | FILE_READ_ATTRIBUTES; share read, write and delete; OPEN_EXISTING;
+    // WRITE_DAC | FILE_READ_ATTRIBUTES; share read, write and delete; OPEN_EXISTING;
     // FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS. The object's access list is replaced with the one its parent passes
     // down (InheritedDescriptor), which is what icacls /reset does, and it is written through this handle with SetKernelObjectSecurity
     // (DACL_SECURITY_INFORMATION). That call changes this object only: SetSecurityInfo propagates a folder's inheritable entries to
     // everything below it, including the other name of a hard link that sits below it, before any walk could refuse that link (#7267).
-    // Whatever is below a folder is reset by the walk, one judged object at a time. READ_CONTROL is asked for because the object's
-    // handle is also the one the parent is worked out from.
+    // Whatever is below a folder is reset by the walk, one judged object at a time. The object is opened for its attributes and WRITE_DAC
+    // only: the parent's descriptor is read through the parent's own handle (InheritedDescriptor, READ_CONTROL on the parent).
     public static int ResetDacl(string path, out int detail, out uint attributes)
     {
         detail = 0;
         attributes = 0;
-        using (SafeFileHandle handle = CreateFileW(ExtendedPath(path), 0x80 | 0x00020000 | 0x00040000, 7, IntPtr.Zero, 3, 0x00200000 | 0x02000000, IntPtr.Zero))
+        using (SafeFileHandle handle = CreateFileW(ExtendedPath(path), 0x80 | 0x00040000, 7, IntPtr.Zero, 3, 0x00200000 | 0x02000000, IntPtr.Zero))
         {
             if (handle.IsInvalid) { detail = Marshal.GetLastWin32Error(); return 2; }
             int pathError;
@@ -2984,8 +2991,9 @@ function Get-DarlingStoreFolder([string]$configPath) {
 # and WRITE_DAC always and WRITE_OWNER on request; Error is the Win32 error when it could not open (IsOpen is false then). FinalPath is the real
 # path the open handle resolves to, and ResolvedPath the real path of an existing folder with every link followed, so a
 # link anywhere on the way to the folder shows as a difference between the two. ReadSecurity returns the owner, group and DACL
-# as a self-relative descriptor. WriteDacl installs a protected DACL from its binary form, WriteOwner an owner from a SID's
-# binary form; both return 0 or the Win32 error. IsReparsePoint and Attributes are read from the handle. Written for the C#
+# as a self-relative descriptor. WriteDacl installs a protected DACL from its binary form (and passes the folder's inheritable
+# entries to everything below it), WriteDaclHere installs one from a self-relative descriptor without passing anything down, WriteOwner
+# an owner from a SID's binary form; all return 0 or the Win32 error. IsReparsePoint and Attributes are read from the handle. Written for the C#
 # of Windows PowerShell 5.1.
 function Initialize-DarlingNativeStoreFolder {
     if ('DarlingNativeStoreFolder' -as [type]) { return }
@@ -3035,6 +3043,9 @@ public sealed class DarlingNativeStoreFolder : IDisposable
 
     [DllImport("advapi32.dll", SetLastError = true)]
     private static extern uint SetSecurityInfo(SafeFileHandle handle, int objectType, uint securityInfo, byte[] owner, IntPtr group, byte[] dacl, IntPtr sacl);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool SetKernelObjectSecurity(SafeFileHandle handle, uint securityInformation, byte[] descriptor);
 
     private SafeFileHandle handle;
     public int Error;
@@ -3158,6 +3169,14 @@ public sealed class DarlingNativeStoreFolder : IDisposable
     public int WriteDacl(byte[] dacl)
     {
         return (int)SetSecurityInfo(handle, 1, 0x00000004u | 0x80000000u, null, IntPtr.Zero, dacl, IntPtr.Zero);
+    }
+
+    // The same list as WriteDacl, from a self-relative descriptor, written with SetKernelObjectSecurity, which changes this folder only
+    // and passes nothing down to what is below it (SetSecurityInfo is the call that can write a folder's inheritable entries to every
+    // name below it, the other name of a hard link included). For a folder whose inheritable entries do not change. 0 or the Win32 error.
+    public int WriteDaclHere(byte[] descriptor)
+    {
+        return SetKernelObjectSecurity(handle, 0x00000004u | 0x80000000u, descriptor) ? 0 : Marshal.GetLastWin32Error();
     }
 
     // OWNER_SECURITY_INFORMATION.
@@ -3381,7 +3400,17 @@ function Initialize-DarlingStoreFolder([string]$folder, [string]$serviceAccount,
             $error1 = $lock.WriteOwner($adminsBytes)
             if ($error1 -ne 0) { throw "could not make Administrators the owner of ${folder} (Windows error $error1)." }
         }
-        $error2 = $lock.WriteDacl($daclBytes)
+        # SetSecurityInfo (WriteDacl) is the call that can hand the folder's inheritable entries to everything below it, through a hard
+        # link's outside name too, which is a window for a link planted after the walk that judged the tree (#7267). It is only needed
+        # when those entries change. A folder that is already protected and already carries exactly the inheritable entries this lock grants (the upgrade's
+        # in-place repair has just written them to the folder and reset everything below it) only gets the operator's traverse entry,
+        # and that one is not inherited, so it is written to this folder alone (WriteDaclHere).
+        $inheritableOf = {
+            param($security)
+            @($security.GetAccessRules($true, $true, $sidType) | Where-Object { $_.InheritanceFlags -ne $inheritFlags::None } | ForEach-Object { '{0}|{1}|{2}|{3}|{4}|{5}' -f $_.IdentityReference.Value, [int]$_.FileSystemRights, [int]$_.InheritanceFlags, [int]$_.PropagationFlags, $_.AccessControlType, $_.IsInherited } | Sort-Object)
+        }
+        $sameInheritable = $before.AreAccessRulesProtected -and ((& $inheritableOf $before) -join ';') -eq ((& $inheritableOf $acl) -join ';')
+        if ($sameInheritable) { $error2 = $lock.WriteDaclHere($descriptor) } else { $error2 = $lock.WriteDacl($daclBytes) }
         if ($error2 -ne 0) { throw "could not set the permissions of ${folder} (Windows error $error2)." }
 
         # VERIFY rather than assume, through the same handle: the folder must now be protected, owned by Administrators,
