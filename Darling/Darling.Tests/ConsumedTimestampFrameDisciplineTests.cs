@@ -684,6 +684,9 @@ public sealed class ConsumedTimestampFrameDisciplineTests
            pass of the repeated autumn hour it was in, so it goes through ForDisplay and never takes an offset. */
         ("Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.SystemEvents.cs", "StoredWallClock", "ForDisplay"),
         ("Darling/PerformanceMonitor.Darling.Viewer/ViewerHistoryRows.cs", "CollectionLocal", "FormatForDisplay"),
+        /* #7343: the Identity Capacity scan list's time. A scanned-at stamp is naive UTC and DisplayTime hands it to the UTC
+           renderer with the display mode's zone on the picked server's clock, adding no conversion of its own. */
+        ("Darling/PerformanceMonitor.Darling.Viewer/ViewerIdentityCapacityText.cs", "DisplayTime", "FormatForDisplay"),
         ("Darling/PerformanceMonitor.Darling.Viewer/ViewerPostgresDisplay.cs", "Timestamp", "FormatForDisplay"),
         ("Darling/PerformanceMonitor.Darling.Viewer/ViewerPostgresDisplay.cs", "SnapshotTime", "FormatForDisplay"),
         ("Lite/Services/LocalDataService.ConfigChanges.cs", "Local", "FormatServerTime"),

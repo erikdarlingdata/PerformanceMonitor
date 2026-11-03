@@ -343,6 +343,14 @@ public sealed partial class ViewerDataService
     internal Task<Dictionary<int, ServerClock>> GetServerClocksAsync(int? serverId, CancellationToken cancellationToken) =>
         DarlingServerClocksReader.GetAsync(_dataSource, serverId, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
 
+    /// <summary>
+    /// One server's clock for text that belongs to it (#7343): its collected clock, else the viewer machine's offset, the rule
+    /// every list row uses (<see cref="ViewerTimeHelper.ClockForServerOrMachine"/>).
+    /// </summary>
+    internal async Task<ServerClock> GetServerClockOrMachineAsync(int serverId, CancellationToken cancellationToken) =>
+        ViewerTimeHelper.ClockForServerOrMachine(
+            await GetServerClocksAsync(serverId, cancellationToken), serverId, TimeZoneInfo.Local, DateTime.UtcNow);
+
     internal static string BuildServerClocksSql(bool scopedToServer, bool withZone) =>
         DarlingServerClocksReader.BuildSql(scopedToServer, withZone);
 

@@ -102,6 +102,7 @@ public sealed class ViewerGridTimeColumnSortMemberTests
         { "QueryStoreHistoryWindow.xaml", "HistoryDataGrid", "FirstExecutionTimeLocal", Name(typeof(ViewerQueryStoreHistoryRow)), "FirstExecutionTime" },
         { "QueryStoreHistoryWindow.xaml", "HistoryDataGrid", "LastExecutionTimeLocal", Name(typeof(ViewerQueryStoreHistoryRow)), "LastExecutionTime" },
         { "ManageServersWindow.xaml", "ServersGrid", "LastCollectedDisplay", Name(typeof(ManagedServerListItem)), "LastCollectedUtc" },
+        { "ManageServersWindow.xaml", "ServersGrid", "CreatedDisplay", Name(typeof(ManagedServerListItem)), "CreatedAtUtc" },
         { "NotificationRoutesWindow.xaml", "RoutesGrid", "ModifiedDisplay", Name(typeof(NotificationRouteRow)), "ModifiedAtUtc" },
 
         /* Columns whose row already had a UTC (or display-zone) DateTime and only lacked the SortMemberPath. */
