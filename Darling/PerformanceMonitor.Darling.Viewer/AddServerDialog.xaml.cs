@@ -406,7 +406,7 @@ public partial class AddServerDialog : Window
                 out var cost)
             || cost < 0)
         {
-            return (0m, "Monthly cost must be a number, zero or more, written like 120 or 120.50 — leave it blank for no cost.");
+            return (0m, "Monthly cost must be a number, zero or more, written like 120 or 120.50. Leave it blank for no cost.");
         }
 
         return (cost, null);
