@@ -18,7 +18,7 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// #7213: the time columns of the People window, the Agent changes tab and the Server actions tab belong to no one server,
+/// #7213: the time columns of the People window, the Agent changes tab, the Server actions tab, the Investigations window and the Proposals grid belong to no one server,
 /// so they follow the display mode like the other fleet-wide grids: UTC (labelled) in Server and UTC modes, this machine's
 /// zone (labelled) in Local mode. They used to print the machine's local time with no label in every mode.
 /// </summary>
@@ -88,5 +88,48 @@ public sealed class ViewerFleetWideRowTimesTests : IDisposable
             AgentChangeResult.Done, null, null, null, null);
         Assert.Equal("2026-07-01 14:30 UTC", new AgentChangeViewRow(change).WhenDisplay);
         Assert.Equal("2026-07-01 14:30 UTC", new AgentRefusalViewRow(new AgentRefusalRow(1, s_at, null, 7, "agent:a", "code", "tool", "SQL2019")).WhenDisplay);
+    }
+
+    private static InvestigationRequestViewRow RequestRow() => new()
+    {
+        OpenedAtUtc = s_at,
+        ExpiresAtUtc = s_at.AddDays(1),
+        LeaseUntilUtc = s_at.AddMinutes(5),
+    };
+
+    [Theory]
+    [InlineData(TimeDisplayMode.ServerTime)]
+    [InlineData(TimeDisplayMode.UTC)]
+    public void TheInvestigationAndProposalTimes_InServerAndUtcMode_ReadUtcWithItsLabel(TimeDisplayMode mode)
+    {
+        ViewerTimeHelper.ActiveServerClock = ServerClock.FixedOffset(-420);
+        ViewerTimeHelper.CurrentDisplayMode = mode;
+
+        var request = RequestRow();
+        Assert.Equal("2026-07-01 14:30 UTC", request.OpenedDisplay);
+        Assert.Equal("2026-07-02 14:30 UTC", request.ExpiresDisplay);
+        Assert.Equal("14:35 UTC", request.LeaseDisplay);
+        Assert.Equal("2026-07-01 14:30:00 UTC", new InvestigationAlertViewRow(s_at, "m", null).TimeDisplay);
+        Assert.Equal("2026-07-01 14:30:00 UTC", new InvestigationJournalViewRow(s_at, "e", "a", null).TimeDisplay);
+
+        var note = new InvestigationNoteViewRow { CreatedAtUtc = s_at, ExpiresAtUtc = s_at.AddDays(30) };
+        Assert.Equal("2026-07-01 14:30 UTC", note.CreatedDisplay);
+        Assert.Equal("2026-07-31 UTC", note.ExpiresDisplay);
+
+        var proposal = new ProposalViewRow { ProposalId = Guid.NewGuid(), Kind = "k", Server = "s", Target = "t", State = "pending", ExpiresAtUtc = s_at };
+        Assert.Equal("2026-07-01 14:30 UTC", proposal.ExpiresDisplay);
+    }
+
+    [Fact]
+    public void TheInvestigationAndProposalTimes_InLocalMode_ReadThisMachinesZone()
+    {
+        ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.LocalTime;
+        string Local(DateTime utc, string format) => TimeZoneInfo.ConvertTimeFromUtc(utc, TimeZoneInfo.Local).ToString(format, CultureInfo.InvariantCulture) + " ";
+
+        var request = RequestRow();
+        Assert.StartsWith(Local(s_at, "yyyy-MM-dd HH:mm"), request.OpenedDisplay, StringComparison.Ordinal);
+        Assert.StartsWith(Local(s_at.AddMinutes(5), "HH:mm"), request.LeaseDisplay, StringComparison.Ordinal);
+        Assert.StartsWith(Local(s_at, "yyyy-MM-dd HH:mm:ss"), new InvestigationAlertViewRow(s_at, "m", null).TimeDisplay, StringComparison.Ordinal);
+        Assert.StartsWith(Local(s_at.AddDays(30), "yyyy-MM-dd"), new InvestigationNoteViewRow { ExpiresAtUtc = s_at.AddDays(30) }.ExpiresDisplay, StringComparison.Ordinal);
     }
 }

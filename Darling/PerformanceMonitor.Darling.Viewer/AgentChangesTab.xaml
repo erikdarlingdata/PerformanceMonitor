@@ -57,7 +57,7 @@
                 <DataGridTextColumn Header="Target" Binding="{Binding Target}" Width="1.3*"/>
                 <DataGridTextColumn Header="State" Binding="{Binding State}" Width="90"/>
                 <DataGridTextColumn Header="Agent's reason" Binding="{Binding ReasonDisplay}" Width="*"/>
-                <DataGridTextColumn Header="Expires" Binding="{Binding ExpiresDisplay}" Width="150" SortMemberPath="ExpiresAtUtc"/>
+                <DataGridTextColumn Header="Expires" Binding="{Binding ExpiresDisplay}" Width="160" SortMemberPath="ExpiresAtUtc"/>
                 <DataGridTextColumn Header="Approval" Binding="{Binding ApprovalDisplay}" Width="1.7*"/>
             </DataGrid.Columns>
         </DataGrid>
