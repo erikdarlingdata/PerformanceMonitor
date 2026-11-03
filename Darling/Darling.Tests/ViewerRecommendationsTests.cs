@@ -168,28 +168,6 @@ public sealed class ViewerRecommendationCardTests
     }
 
     [Fact]
-    public void BuildCopyPasteSql_ServerConfigTargets_RenderSpConfigureViaTheSharedBuilder()
-    {
-        // Every server-config setting renders sp_configure + RECONFIGURE via the shared builder,
-        // INCLUDING the advise-only memory settings (the operator wants the scaffold regardless).
-        var action = new RemediationAction(
-            "SERVER_CONFIG", "set", Array.Empty<ForcePlanTarget>(),
-            ServerConfigTargets: new[]
-            {
-                new ServerConfigTarget(ServerConfigSetting.Maxdop, 0, 8),
-                new ServerConfigTarget(ServerConfigSetting.MaxServerMemory, 2147483647, 2147483647),
-            });
-
-        var sql = RecommendationsViewModel.BuildCopyPasteSql(action);
-
-        Assert.Equal(
-            FactRemediation.BuildSpConfigureStatement(ServerConfigSetting.Maxdop, 8) +
-            Environment.NewLine + Environment.NewLine +
-            FactRemediation.BuildSpConfigureStatement(ServerConfigSetting.MaxServerMemory, 2147483647),
-            sql);
-    }
-
-    [Fact]
     public void BuildCopyPasteSql_RcsiTargets_RenderAlterWithTwoSidedDisclosureHeader()
     {
         // RCSI rides a DB_CONFIG action as a per-database RcsiTarget (with real inaction figures). It is
@@ -214,35 +192,6 @@ public sealed class ViewerRecommendationCardTests
             sql!.IndexOf("*/", StringComparison.Ordinal) <
             sql.IndexOf("ALTER DATABASE", StringComparison.Ordinal),
             "the disclosure comment header must precede the ALTER statement");
-    }
-
-    [Fact]
-    public void BuildCopyPasteSql_ClearPlanTargets_RenderResolveAndFreeScriptWithDisclosureHeader()
-    {
-        // Clear-plan is DESTRUCTIVE. The honest runnable form live-resolves the currently-cached plan
-        // handle(s) for the abnormal query hash and frees each — with the two-sided disclosure header.
-        var action = new RemediationAction(
-            "CLEAR_PLAN", "clear", Array.Empty<ForcePlanTarget>(),
-            ClearPlanTargets: new[]
-            {
-                new ClearPlanTarget(
-                    "StackOverflow", "0xABCDEF0123456789",
-                    CurrentCpuPerExecMs: 45.0, BaselineCpuPerExecMs: 9.0, AnomalyRatio: 5.0),
-            },
-            ClearPlanFigures: new ClearPlanFigures(45.0, 9.0, 5.0, 62, false, false));
-
-        var sql = RecommendationsViewModel.BuildCopyPasteSql(action);
-
-        Assert.NotNull(sql);
-        Assert.StartsWith("/*", sql, StringComparison.Ordinal);
-        Assert.Contains("Risks of MAKING this change:", sql!, StringComparison.Ordinal);
-        Assert.Contains("Risks of NOT making this change:", sql!, StringComparison.Ordinal);
-        // The real carried anomaly figure (62% of CPU over the window) reaches the inaction side.
-        Assert.Contains("62% of CPU over the window", sql!, StringComparison.Ordinal);
-        // The honest runnable form: resolve cached handles for the hash, then free each one.
-        Assert.Contains("sys.dm_exec_query_stats", sql!, StringComparison.Ordinal);
-        Assert.Contains("0xABCDEF0123456789", sql!, StringComparison.Ordinal);
-        Assert.Contains("DBCC FREEPROCCACHE(@plan_handle);", sql!, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -468,12 +417,6 @@ public sealed class ViewerRecommendationCardTests
             "FILE_AUTOGROWTH_PERCENT", "set", Array.Empty<ForcePlanTarget>(),
             FileGrowthTargets: new[] { new FileGrowthTarget("StackOverflow", "SO_data", 90000, 10, 1024) });
         Assert.False(Card(serverId: 7, windowStart: start, windowEnd: end, remediation: autogrowth).ShowOpenInActiveQueries);
-
-        // Server-level config (MAXDOP) is a config fix.
-        var serverConfig = new RemediationAction(
-            "SERVER_CONFIG", "set", Array.Empty<ForcePlanTarget>(),
-            ServerConfigTargets: new[] { new ServerConfigTarget(ServerConfigSetting.Maxdop, 0, 8) });
-        Assert.False(Card(serverId: 7, windowStart: start, windowEnd: end, remediation: serverConfig).ShowOpenInActiveQueries);
     }
 
     [Fact]

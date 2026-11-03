@@ -1004,44 +1004,6 @@ internal static class FindingMessageFormatter
             }
         }
 
-        /* Clear-cached-plan (§5/§6, PR-B): the DESTRUCTIVE "Clear cached plan (advanced)"
-           affordance is a SEPARATE detail item from the CPU finding's always-safe advice
-           — its own view with its own singular Remediation (FactKey "CLEAR_PLAN"), so it
-           can never cross the force-plan / DB-config / RCSI affordances (each keys on a
-           distinct FactKey). Emitted on a CPU finding (CPU_SQL_PERCENT / CPU_SPIKE) that
-           carries an abnormal_cpu_plans drill-down with >= 1 qualifying row (BuildClearPlanAction
-           returns non-null); returns null otherwise → NO item. Mirrors the RCSI second-item
-           pattern exactly. The risk-of-not-changing figures (the anomaly ratio / per-exec
-           CPU / window CPU%) are captured HERE onto the action so the in-app dialog renders
-           the REAL numbers at apply time; the in-app consent gate is what makes it live. */
-        var clearPlanAction = FactRemediation.BuildClearPlanAction(finding);
-        if (clearPlanAction is not null)
-        {
-            context.Details.Add(new AlertDetailItem
-            {
-                Heading = "Clear cached plan (advanced)",
-                Body = FactRemediation.GenerateClearPlanPreview(finding),
-                IsCodeBlock = true,
-                Remediation = clearPlanAction
-            });
-
-            /* Cross-surface disclosure (§5): the two-sided CLEAR_PLAN risk renders as
-               READ-ONLY prose on email (both bodies) / webhook (all flow from
-               context.Details). You cannot consent through an email, so there is NO
-               checkbox gate off-app; the in-app dialog renders the SAME RiskDisclosure as
-               acknowledge-each-risk checkboxes. Built from advice.Risks (FactAdvice.GetForFinding),
-               which the MCP findings output also reads. */
-            var clearRisksBody = RenderRiskDisclosureBody(advice?.Risks);
-            if (clearRisksBody is not null)
-            {
-                context.Details.Add(new AlertDetailItem
-                {
-                    Heading = "Clear cached plan — risks of changing / not changing",
-                    Body = clearRisksBody
-                });
-            }
-        }
-
         /* Drill-down values are anonymous types behind object (a bare object, or a
            List<object> of them). Round-trip through System.Text.Json and walk as
            JsonElement — robust to any shape DrillDownCollector emits. */

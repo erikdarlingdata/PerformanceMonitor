@@ -7,6 +7,7 @@
  */
 
 using System;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Darling.Viewer;
 using PerformanceMonitor.Ui;
 using Xunit;
@@ -32,6 +33,38 @@ public sealed class ViewerManageServersColumnTests
         {
             LastCollectedUtc = lastCollectedUtc,
         };
+
+    /// <summary>#7343: the Added column renders on the row's own clock, like Last Collected. A row whose clock is UTC+05:30 reads 20:00 in Server mode, 14:30 in UTC mode and this machine's wall time in Local mode, none of them labelled.</summary>
+    [Theory]
+    [InlineData(TimeDisplayMode.ServerTime)]
+    [InlineData(TimeDisplayMode.UTC)]
+    [InlineData(TimeDisplayMode.LocalTime)]
+    public void CreatedDisplay_FollowsTheDisplayMode_OnTheRowsOwnClock(TimeDisplayMode mode)
+    {
+        var savedMode = ViewerTimeHelper.CurrentDisplayMode;
+        try
+        {
+            ViewerTimeHelper.CurrentDisplayMode = mode;
+            var created = new DateTime(2026, 7, 1, 14, 30, 0, DateTimeKind.Utc);
+            var item = new ManagedServerListItem(new MonitoredServerRow { ServerId = 1, Host = "SQL2022", Name = "SQL2022", CreatedAt = created }, isFavorite: false)
+            {
+                Clock = ServerClock.FixedOffset(330),
+            };
+
+            var expected = mode switch
+            {
+                TimeDisplayMode.ServerTime => "2026-07-01 20:00",
+                TimeDisplayMode.UTC => "2026-07-01 14:30",
+                _ => TimeZoneInfo.ConvertTimeFromUtc(created, TimeZoneInfo.Local).ToString("yyyy-MM-dd HH:mm", System.Globalization.CultureInfo.InvariantCulture),
+            };
+            Assert.Equal(expected, item.CreatedDisplay);
+            Assert.Equal(created, item.CreatedAtUtc);
+        }
+        finally
+        {
+            ViewerTimeHelper.CurrentDisplayMode = savedMode;
+        }
+    }
 
     [Fact]
     public void LastCollectedDisplay_ReadsNever_WhenTheServiceHasNotCollectedYet()

@@ -259,6 +259,55 @@ public sealed class QueryTagRollupHashRouteSplitTests
     }
 
     [Fact]
+    public void TheHourlyRanges_OnAWeekWindow_NeverCoverTheInteriorDaysTheDayTableAnswers_AndCoverOnlyHoursSomeServerReads()
+    {
+        /* #7240 step 4: start 21:17 on day 0, end 10:20 on day 7, days 0 to 7 valid for both servers, so days 1 to 6 are day-table days. Their hourly rows
+           are still in the hourly table (garbage collection has not run), so a range over them is rows read and thrown away. Server 2 has a stale pair
+           at hour 5 of day 7, which is a gap inside the last run. */
+        var built = Enumerable.Range(0, 24 * 7 + 10);
+        var days = Enumerable.Range(0, 8).SelectMany(d => new[] { (d, 1), (d, 2) }).ToArray();
+        var plan = SplitWithDays(T(21, 17), T(7 * 24 + 10, 20), built, days, (7 * 24 + 5, 2));
+        var read = QueryTagRollupHashRoute.HourlyReadFor(plan, T(7 * 24 + 10, 20));
+
+        Assert.Equal(read.RangeFrom.Length, read.RangeTo.Length);
+        var rangeHours = new List<DateTime>();
+        for (var i = 0; i < read.RangeFrom.Length; i++)
+        {
+            for (var h = read.RangeFrom[i]; h < read.RangeTo[i]; h = h.AddHours(1))
+            {
+                rangeHours.Add(h);
+            }
+        }
+
+        /* No hour of an interior day lies in any range. */
+        Assert.DoesNotContain(rangeHours, h => h >= T(24) && h < T(7 * 24));
+        /* Every hour of every range is a table-pair hour of some server, and the ranges do not overlap. */
+        var tableHours = plan.TablePairs.Select(p => p.Hour).ToHashSet();
+        Assert.Equal(rangeHours.Count, rangeHours.Distinct().Count());
+        Assert.All(rangeHours, h => Assert.Contains(h, tableHours));
+        Assert.Equal(tableHours.Count, rangeHours.Count);
+        /* Per server, the range hours less its gaps are exactly its table pairs. */
+        foreach (var server in new[] { 1, 2 })
+        {
+            var gapHours = new HashSet<DateTime>();
+            for (var i = 0; i < read.GapServers.Length; i++)
+            {
+                for (var h = read.GapFrom[i]; read.GapServers[i] == server && h < read.GapTo[i]; h = h.AddHours(1))
+                {
+                    gapHours.Add(h);
+                }
+            }
+
+            Assert.Equal(
+                plan.TablePairs.Where(p => p.ServerId == server).Select(p => p.Hour).Order(),
+                rangeHours.Where(h => !gapHours.Contains(h)).Order());
+        }
+
+        /* The two runs: day 0's last two hours, and day 7's first ten. */
+        Assert.Equal(2, read.RangeFrom.Length);
+    }
+
+    [Fact]
     public void ADayInvalidForOneServer_IsReadFromHoursAndWideForThatServerOnly()
     {
         /* Day 1 is valid for server 2 only. Server 1's day 1 has two stale hours, 30 and 40, so server 1 reads its hours and wide ranges there. */

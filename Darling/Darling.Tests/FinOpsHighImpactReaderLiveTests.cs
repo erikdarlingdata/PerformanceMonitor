@@ -30,21 +30,21 @@ public sealed class FinOpsHighImpactReaderLiveTests
     internal const string ServerName = "darling-finops-high-impact-e2e";
     internal static readonly int ServerId = ServerIdHelper.GetDeterministicHashCode(ServerName);
 
-    /* Captured from the pre-move viewer read: hash, database, executions, cpu ms, duration ms, reads, writes,
+    /* Captured from the pre-move viewer read (memory is the newest row's grant per hash since #7166, so 0xHI03's two rows give 20, the newer one, not 21): hash, database, executions, cpu ms, duration ms, reads, writes,
        memory MB, shares (cpu, duration, reads, writes, memory, executions), impact score. */
     private static readonly (string Hash, string Db, long Exec, decimal Cpu, decimal Dur, long Reads, long Writes, decimal Mem, decimal[] Shares, int Score)[] Expected =
     [
-        ("0xHI03", "Db0", 22L, 1150m, 1200m, 3500L, 310L, 21m, new[] { 12.4m, 9.3m, 6.9m, 12.9m, 15.8m, 15.6m }, 75),
-        ("0xHI06", "Db0", 16L, 400m, 1500m, 5000L, 150L, 18m, new[] { 4.3m, 11.6m, 9.9m, 6.2m, 13.5m, 11.3m }, 62),
-        ("0xHI02", "Db2", 13L, 200m, 1800m, 7000L, 200L, 14m, new[] { 2.2m, 14m, 13.9m, 8.3m, 10.5m, 9.2m }, 60),
-        ("0xHI09", "Db0", 14L, 1200m, 450m, 7000L, 0L, 16m, new[] { 13m, 3.5m, 13.9m, 0m, 12m, 9.9m }, 57),
-        ("0xHI08", "Db2", 9L, 500m, 1350m, 4000L, 350L, 10m, new[] { 5.4m, 10.5m, 7.9m, 14.5m, 7.5m, 6.4m }, 53),
+        ("0xHI03", "Db0", 22L, 1150m, 1200m, 3500L, 310L, 20m, new[] { 12.4m, 9.3m, 6.9m, 12.9m, 15.2m, 15.6m }, 75),
+        ("0xHI06", "Db0", 16L, 400m, 1500m, 5000L, 150L, 18m, new[] { 4.3m, 11.6m, 9.9m, 6.2m, 13.6m, 11.3m }, 62),
+        ("0xHI02", "Db2", 13L, 200m, 1800m, 7000L, 200L, 14m, new[] { 2.2m, 14m, 13.9m, 8.3m, 10.6m, 9.2m }, 60),
+        ("0xHI09", "Db0", 14L, 1200m, 450m, 7000L, 0L, 16m, new[] { 13m, 3.5m, 13.9m, 0m, 12.1m, 9.9m }, 57),
+        ("0xHI08", "Db2", 9L, 500m, 1350m, 4000L, 350L, 10m, new[] { 5.4m, 10.5m, 7.9m, 14.5m, 7.6m, 6.4m }, 53),
         ("0xHI04", "Db1", 6L, 300m, 1650m, 6000L, 400L, 6m, new[] { 3.2m, 12.8m, 11.9m, 16.6m, 4.5m, 4.3m }, 50),
-        ("0xHI12", "Db0", 12L, 700m, 1050m, 2000L, 300L, 14m, new[] { 7.6m, 8.1m, 4m, 12.4m, 10.5m, 8.5m }, 46),
-        ("0xHI11", "Db2", 7L, 1300m, 300m, 6000L, 200L, 8m, new[] { 14.1m, 2.3m, 11.9m, 8.3m, 6m, 5m }, 43),
+        ("0xHI12", "Db0", 12L, 700m, 1050m, 2000L, 300L, 14m, new[] { 7.6m, 8.1m, 4m, 12.4m, 10.6m, 8.5m }, 46),
+        ("0xHI11", "Db2", 7L, 1300m, 300m, 6000L, 200L, 8m, new[] { 14.1m, 2.3m, 11.9m, 8.3m, 6.1m, 5m }, 43),
         ("0xHI10", "Db1", 19L, 600m, 1200m, 3000L, 100L, 2m, new[] { 6.5m, 9.3m, 5.9m, 4.1m, 1.5m, 13.5m }, 37),
-        ("0xHI05", "Db2", 11L, 1000m, 750m, 2000L, 50L, 12m, new[] { 10.8m, 5.8m, 4m, 2.1m, 9m, 7.8m }, 34),
-        ("0xHI01", "Db1", 8L, 800m, 1050m, 4000L, 100L, 8m, new[] { 8.6m, 8.1m, 7.9m, 4.1m, 6m, 5.7m }, 34),
+        ("0xHI05", "Db2", 11L, 1000m, 750m, 2000L, 50L, 12m, new[] { 10.8m, 5.8m, 4m, 2.1m, 9.1m, 7.8m }, 34),
+        ("0xHI01", "Db1", 8L, 800m, 1050m, 4000L, 100L, 8m, new[] { 8.6m, 8.1m, 7.9m, 4.1m, 6.1m, 5.7m }, 34),
         ("0xHI07", "Db1", 4L, 1100m, 600m, 1000L, 250L, 4m, new[] { 11.9m, 4.7m, 2m, 10.4m, 3m, 2.8m }, 27),
     ];
 
@@ -87,16 +87,60 @@ public sealed class FinOpsHighImpactReaderLiveTests
         {
             var e = Expected[i];
             AssertRow(e, stored[i].QueryHash, stored[i].DatabaseName, stored[i].TotalExecutions, stored[i].TotalCpuMs,
-                stored[i].TotalDurationMs, stored[i].TotalReads, stored[i].TotalWrites, stored[i].TotalMemoryMb,
+                stored[i].TotalDurationMs, stored[i].TotalReads, stored[i].TotalWrites, stored[i].PeakMemoryMb,
                 [stored[i].CpuShare, stored[i].DurationShare, stored[i].ReadsShare, stored[i].WritesShare, stored[i].MemoryShare, stored[i].ExecutionsShare],
                 stored[i].ImpactScore, stored[i].SampleQueryText, stored[i].FullQueryText);
             AssertRow(e, viewed[i].QueryHash, viewed[i].DatabaseName, viewed[i].TotalExecutions, viewed[i].TotalCpuMs,
-                viewed[i].TotalDurationMs, viewed[i].TotalReads, viewed[i].TotalWrites, viewed[i].TotalMemoryMb,
+                viewed[i].TotalDurationMs, viewed[i].TotalReads, viewed[i].TotalWrites, viewed[i].PeakMemoryMb,
                 [viewed[i].CpuShare, viewed[i].DurationShare, viewed[i].ReadsShare, viewed[i].WritesShare, viewed[i].MemoryShare, viewed[i].ExecutionsShare],
                 viewed[i].ImpactScore, viewed[i].SampleQueryText, viewed[i].FullQueryText);
             Assert.Null(stored[i].QueryPlanXml);
             Assert.Null(viewed[i].QueryPlanXml);
         }
+    }
+
+    /// <summary>
+    /// #7166: max_grant_kb is a lifetime high-water mark, so a steady 1 GB grant seen in 96 collection rows is 1 GB,
+    /// not 96 GB, and it ranks below a 50 GB grant seen once. Across plans the figure is the NEWEST row's reading:
+    /// an older plan that once took 8 GB does not outrank the 2 GB plan that is running now (the max_dop rule, #3648).
+    /// </summary>
+    [Fact]
+    public async Task StorageRead_PeakMemory_IsThePeakGrantNotASumOverCollectionRows()
+    {
+        var cs = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to run the live high-impact reader test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(cs!, ct);
+        using (var connection = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, ct);
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            var at = DarlingMcpTestData.Naive(DateTime.UtcNow).AddHours(-1);
+            for (var i = 0; i < 96; i++)
+            {
+                await Plant(connection, ct, at.AddMinutes(-i), "0xSTEADY", "Db0", exec: 10, cpuUs: 1_000_000L, elapsedUs: 2_000_000L,
+                    reads: 1000L, writes: 10L, grantKb: 1_048_576L);
+            }
+            await Plant(connection, ct, at.AddMinutes(-30), "0xTWOPLANS", "Db0", exec: 10, cpuUs: 1_000_000L, elapsedUs: 2_000_000L,
+                reads: 1000L, writes: 10L, grantKb: 8_388_608L);
+            await Plant(connection, ct, at, "0xTWOPLANS", "Db0", exec: 10, cpuUs: 1_000_000L, elapsedUs: 2_000_000L,
+                reads: 1000L, writes: 10L, grantKb: 2_097_152L);
+            await Plant(connection, ct, at, "0xONEOFF", "Db0", exec: 10, cpuUs: 1_000_000L, elapsedUs: 2_000_000L,
+                reads: 1000L, writes: 10L, grantKb: 52_428_800L);
+        }
+
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var rows = await DarlingFinOpsHighImpactReader.ReadAsync(dataSource, ServerId, 24, 60, ct);
+
+        var steady = Assert.Single(rows, r => r.QueryHash == "0xSTEADY");
+        var twoPlans = Assert.Single(rows, r => r.QueryHash == "0xTWOPLANS");
+        Assert.Equal(2048m, twoPlans.PeakMemoryMb);
+        var oneOff = Assert.Single(rows, r => r.QueryHash == "0xONEOFF");
+        Assert.Equal(1024m, steady.PeakMemoryMb);
+        Assert.Equal(51200m, oneOff.PeakMemoryMb);
+        Assert.True(oneOff.MemoryShare > steady.MemoryShare,
+            $"The 50 GB grant must out-share the 1 GB one, got {oneOff.MemoryShare} vs {steady.MemoryShare}");
     }
 
     [Fact]
