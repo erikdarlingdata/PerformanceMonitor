@@ -52,22 +52,11 @@ public partial class WebhookAlertService
 
             if (error != null)
             {
-                _consecutiveTeamsFailures++;
-                _lastTeamsError = error;
-
-                if (_consecutiveTeamsFailures <= FailingChannelThreshold)
-                    _logger.LogError($"TEAMS WEBHOOK FAILED ({_consecutiveTeamsFailures}x): {error}");
-                else if (_consecutiveTeamsFailures % 50 == 0)
-                    _logger.LogError($"TEAMS WEBHOOK STILL FAILING: {_consecutiveTeamsFailures} failures. Last: {error}");
-
+                RecordChannelFailure(ref _consecutiveTeamsFailures, ref _lastTeamsError, "Teams", error);
                 return error;
             }
 
-            if (_consecutiveTeamsFailures > 0)
-                _logger.LogInformation($"Teams webhook recovered after {_consecutiveTeamsFailures} failure(s)");
-
-            _consecutiveTeamsFailures = 0;
-            _lastTeamsError = null;
+            RecordChannelRecovered(ref _consecutiveTeamsFailures, ref _lastTeamsError, "Teams");
             _logger.LogInformation($"Teams webhook sent for {metricName} on {serverName}");
             return null;
         }
@@ -80,9 +69,7 @@ public partial class WebhookAlertService
         }
         catch (Exception ex)
         {
-            _consecutiveTeamsFailures++;
-            _lastTeamsError = ex.Message;
-            _logger.LogError($"Teams webhook error: {ex.Message}");
+            RecordChannelException(ref _consecutiveTeamsFailures, ref _lastTeamsError, "Teams", ex);
             return ex.Message;
         }
     }
@@ -138,6 +125,52 @@ public partial class WebhookAlertService
             : text.Replace("&", "&amp;", StringComparison.Ordinal)
                   .Replace("<", "&lt;", StringComparison.Ordinal)
                   .Replace(">", "&gt;", StringComparison.Ordinal);
+
+    /// <summary>#7202: the most bytes the Details prose of a Teams card may take on the wire, once markdown-escaped and JSON-encoded
+    /// (a non-ASCII character or an <c>&amp; &lt; &gt; + '</c> becomes a six-byte <c>\uXXXX</c>). The connector rejects a
+    /// card past about 28 KB, so a long flat detail (a list of hundreds of names) gets 20 KB and the rest of the card keeps
+    /// room for its facts and sections.</summary>
+    internal const int TeamsProseMaxBytes = 20_000;
+
+    /// <summary>
+    /// #7202: cuts already-escaped prose to <see cref="TeamsProseMaxBytes"/> at a line break (else a space) and says so. The cut
+    /// is made on the escaped text, where a break is never inside an escape (an escape is a backslash and one punctuation
+    /// character, or an entity with no space in it) and no backtick span is open (<see cref="TeamsEscape"/> escapes every
+    /// backtick). Prose with no break at all inside the ceiling is dropped for the notice alone, rather than cut mid-token.
+    /// </summary>
+    internal static string CapTeamsProse(string escaped)
+    {
+        /* The card is serialized with the default JavaScriptEncoder, which writes every non-ASCII character and every & < > + '
+           as a six-byte \uXXXX, so the budget is measured on that encoded form, not on raw UTF-8. */
+        if (JsonEncodedText.Encode(escaped).EncodedUtf8Bytes.Length <= TeamsProseMaxBytes)
+        {
+            return escaped;
+        }
+
+        const string notice = "\n\n_The rest of this detail is cut to fit the Teams size limit._";
+        var budget = TeamsProseMaxBytes - JsonEncodedText.Encode(notice).EncodedUtf8Bytes.Length;
+        var bytes = 0;
+        var end = 0;
+        var cut = -1;
+        while (end < escaped.Length)
+        {
+            var width = char.IsHighSurrogate(escaped[end]) && end + 1 < escaped.Length ? 2 : 1;
+            bytes += JsonEncodedText.Encode(escaped.AsSpan(end, width)).EncodedUtf8Bytes.Length;
+            if (bytes > budget)
+            {
+                break;
+            }
+
+            if (width == 1 && escaped[end] is '\n' or ' ')
+            {
+                cut = end;
+            }
+
+            end += width;
+        }
+
+        return (cut > 0 ? escaped[..cut].TrimEnd() : string.Empty) + notice;
+    }
 
     /// <summary>
     /// A MessageCard text and fact value render markdown, so alert text is placed in them with the characters that form
@@ -236,6 +269,8 @@ public partial class WebhookAlertService
     /// drill-downs can surface) — about 210 bytes per incident, so the cap is some fifty incidents away
     /// from any shape a producer can emit. <c>SlackDetailsSizeTests</c> pins the heaviest shape against
     /// the cap so a producer that widens the page finds out there rather than in a lost delivery.</para>
+    /// <para>#7202: that reasoning covers the analysis page only. A flat detail that lists one name per database can run to
+    /// hundreds of kilobytes, so the Details prose is cut by <see cref="CapTeamsProse"/> to <see cref="TeamsProseMaxBytes"/>.</para>
     /// </summary>
     internal static string BuildTeamsPayload(
         string metricName,
@@ -297,7 +332,7 @@ public partial class WebhookAlertService
         /* #3297: ahead of the per-incident sections — it is the actionable half of the alert. */
         if (prose is not null)
         {
-            itemSections.Add(new { activityTitle = "Details", text = TeamsEscape(prose), markdown = true });
+            itemSections.Add(new { activityTitle = "Details", text = CapTeamsProse(TeamsEscape(prose)), markdown = true });
         }
 
         if (context?.Details != null)

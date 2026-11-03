@@ -507,7 +507,7 @@
                                                Padding="8,4" FontWeight="Bold"
                                                Foreground="{DynamicResource ForegroundBrush}"
                                                Background="#2244AAFF"/>
-                                    <Expander x:Name="QueryStatsByDbExpander" Header="CPU by database" IsExpanded="False" Margin="4,2,4,0">
+                                    <Expander Header="CPU by database" IsExpanded="False" Margin="4,2,4,0">
                                         <ScrollViewer MaxHeight="220" VerticalScrollBarVisibility="Auto">
                                             <ui:MetricBarCards x:Name="QueryStatsByDbCards" Margin="4,4,4,8"/>
                                         </ScrollViewer>
@@ -2488,7 +2488,7 @@
                     <!-- Toolbar -->
                     <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,6">
                         <Button Content="Refresh" Click="DailySummaryRefresh_Click" Margin="0,0,10,0" Padding="8,4" MinWidth="60"/>
-                        <TextBlock x:Name="DailySummaryIndicator" Text="Composite daily health - click a day for detail and drill-in (times in UTC)" VerticalAlignment="Center"
+                        <TextBlock Text="Composite daily health - click a day for detail and drill-in (times in UTC)" VerticalAlignment="Center"
                                    FontStyle="Italic" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
                     </StackPanel>
 

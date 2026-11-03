@@ -487,7 +487,9 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
             var onToday = await DarlingMcpHealthTools.GetDailySummary(postgres, ServerName);
             using (var doc = JsonDocument.Parse(onToday))
             {
-                Assert.Equal("empty", doc.RootElement.GetProperty("status").GetString());
+                /* #7193: today holds nothing collected, which is "unavailable" (look at collection health), not
+                   "empty" (we looked and found nothing). */
+                Assert.Equal("unavailable", doc.RootElement.GetProperty("status").GetString());
             }
 
             Assert.DoesNotContain("2026-07-20", onToday, StringComparison.Ordinal);

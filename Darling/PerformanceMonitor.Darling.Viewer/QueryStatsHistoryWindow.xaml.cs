@@ -185,11 +185,17 @@ public partial class QueryStatsHistoryWindow : Window
         if (sender is not Button btn) return;
         if (string.IsNullOrEmpty(_queryHash)) return;
 
+        /* #7175: the clicked row's own plan, not the newest plan for the query hash. */
+        var requestedHash = HistoryRowPlanTarget.Resolve<ViewerQueryStatsHistoryRow>(sender, HistoryDataGrid)?.QueryPlanHash;
+
         btn.IsEnabled = false;
         btn.Content = "...";
         try
         {
-            var plan = await _dataService.GetQueryStatsPlanXmlAsync(_serverId, _databaseName, _queryHash);
+            var read = await _dataService.GetQueryStatsPlanAsync(_serverId, _databaseName, _queryHash, requestedHash);
+            var plan = read?.PlanXml;
+            /* The file is named for the plan inside it, which on a fallback is not the clicked row's plan. */
+            var planHash = read?.PlanId;
             if (string.IsNullOrEmpty(plan))
             {
                 MessageBox.Show(this, "No query plan was captured in the collected data for this query hash.",
@@ -200,11 +206,18 @@ public partial class QueryStatsHistoryWindow : Window
             /* #5320: a plan the statement filter withheld whole is the marker, not a plan: say so, save nothing. */
             if (WithheldPlanGuard.RefuseSave(plan)) return;
 
+            if (read!.IsFallback)
+            {
+                MessageBox.Show(this, StoredPlanNotice.Text, "Showing The Newest Plan", MessageBoxButton.OK, MessageBoxImage.Information);
+            }
+
             var dialog = new SaveFileDialog
             {
                 Filter = "SQL Plan files (*.sqlplan)|*.sqlplan|All files (*.*)|*.*",
                 DefaultExt = ".sqlplan",
-                FileName = $"query_plan_{_queryHash}_{DateTime.Now:yyyyMMdd_HHmmss}.sqlplan"
+                FileName = string.IsNullOrEmpty(planHash)
+                    ? $"query_plan_{_queryHash}_{DateTime.Now:yyyyMMdd_HHmmss}.sqlplan"
+                    : $"query_plan_{_queryHash}_{planHash}_{DateTime.Now:yyyyMMdd_HHmmss}.sqlplan"
             };
 
             if (dialog.ShowDialog() != true) return;
@@ -229,9 +242,12 @@ public partial class QueryStatsHistoryWindow : Window
     private async void ViewPlan_Click(object sender, RoutedEventArgs e)
     {
         string? planXml;
+        var requestedHash = HistoryRowPlanTarget.Resolve<ViewerQueryStatsHistoryRow>(sender, HistoryDataGrid)?.QueryPlanHash;
+        StoredPlanRead? read;
         try
         {
-            planXml = await _dataService.GetQueryStatsPlanXmlAsync(_serverId, _databaseName, _queryHash);
+            read = await _dataService.GetQueryStatsPlanAsync(_serverId, _databaseName, _queryHash, requestedHash);
+            planXml = read?.PlanXml;
         }
         catch (Exception ex)
         {
@@ -246,7 +262,10 @@ public partial class QueryStatsHistoryWindow : Window
             return;
         }
 
-        var label = $"Est Plan - {_queryHash}";
+        /* #7175: name the plan that was read. On a fallback, say the clicked row's plan was not stored. */
+        var planHash = read!.PlanId;
+        var label = string.IsNullOrEmpty(planHash) ? $"Est Plan - {_queryHash}" : $"Est Plan - {_queryHash} ({planHash})";
+        if (read.IsFallback) label += " - " + StoredPlanNotice.Text;
         var viewer = new PlanViewerControl();
         viewer.AnalyzerConfig = ViewerSettings.CurrentAnalyzerConfig;
         try

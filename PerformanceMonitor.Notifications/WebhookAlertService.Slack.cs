@@ -49,22 +49,11 @@ public partial class WebhookAlertService
 
             if (error != null)
             {
-                _consecutiveSlackFailures++;
-                _lastSlackError = error;
-
-                if (_consecutiveSlackFailures <= FailingChannelThreshold)
-                    _logger.LogError($"SLACK WEBHOOK FAILED ({_consecutiveSlackFailures}x): {error}");
-                else if (_consecutiveSlackFailures % 50 == 0)
-                    _logger.LogError($"SLACK WEBHOOK STILL FAILING: {_consecutiveSlackFailures} failures. Last: {error}");
-
+                RecordChannelFailure(ref _consecutiveSlackFailures, ref _lastSlackError, "Slack", error);
                 return error;
             }
 
-            if (_consecutiveSlackFailures > 0)
-                _logger.LogInformation($"Slack webhook recovered after {_consecutiveSlackFailures} failure(s)");
-
-            _consecutiveSlackFailures = 0;
-            _lastSlackError = null;
+            RecordChannelRecovered(ref _consecutiveSlackFailures, ref _lastSlackError, "Slack");
             _logger.LogInformation($"Slack webhook sent for {metricName} on {serverName}");
             return null;
         }
@@ -75,9 +64,7 @@ public partial class WebhookAlertService
         }
         catch (Exception ex)
         {
-            _consecutiveSlackFailures++;
-            _lastSlackError = ex.Message;
-            _logger.LogError($"Slack webhook error: {ex.Message}");
+            RecordChannelException(ref _consecutiveSlackFailures, ref _lastSlackError, "Slack", ex);
             return ex.Message;
         }
     }

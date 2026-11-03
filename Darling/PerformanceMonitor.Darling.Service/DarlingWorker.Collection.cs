@@ -2065,6 +2065,12 @@ public sealed partial class DarlingWorker
         /* And the rollup-coverage warm (#4957), which also absorbs its own failures. */
         await rollupCoverageWarm;
 
+        /* #7153: the collector-cost and read-latency samples since the last hourly tick, written once. Last, after every drain
+           above, so the collector runs that finished during the drain are counted. The MCP and web hosts stopped before this
+           worker did (the host stops hosted services in reverse registration order and the worker is registered first), so no
+           read is recorded after this. Budgeted at ShutdownSampleFlushBudget inside the host's 30 s ShutdownTimeout. */
+        await FlushSamplesOnStopAsync(postgres, _collectorCost, _readLatency, ShutdownSampleFlushBudget, _logger);
+
         _logger.LogInformation("PerformanceMonitor Darling collection loop stopped");
     }
 

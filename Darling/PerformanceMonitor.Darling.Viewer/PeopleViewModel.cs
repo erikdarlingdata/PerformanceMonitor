@@ -204,7 +204,7 @@ public static class PeopleText
         "Read-only connection: people can be viewed but not changed here. ";
 
     public const string NoPeopleNote =
-        "No people yet. Add a person, then map the identities they sign in with and give them grants. Nothing reads a grant yet, so adding people changes nothing that anyone can do.";
+        "No people yet. Add a person, then map the identities they sign in with and give them grants. An approve grant lets that person approve the actions an agent proposes, only for the kinds and the scope it names. The other grants are not read yet.";
 
     /// <summary>True when a store at <paramref name="storeVersion"/> has the people tables. A probe that could not answer (null) reads as yes, like every other fail-open rung check, and a failed read then says what went wrong.</summary>
     public static bool StoreHasPeople(int? storeVersion) => storeVersion is not int v || v >= StoreSchemaVersion;
