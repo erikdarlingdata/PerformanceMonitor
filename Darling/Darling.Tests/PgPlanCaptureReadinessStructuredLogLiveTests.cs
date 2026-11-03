@@ -100,6 +100,21 @@ public sealed class PgPlanCaptureReadinessStructuredLogLiveTests
         Assert.DoesNotContain("Add %Q", facets["plan_attribution"].Detail, StringComparison.Ordinal);
     }
 
+    /* #7182: the stderr block rule (%Q directly after [%p], last in the prefix) must not reach a csvlog target, whose
+       reader takes the query id from the record's own query_id column. A prefix with %Q placed elsewhere is the
+       stderr failure, and on csvlog it is harmless, so it must read met and must not claim no plan is stored. */
+    [Theory]
+    [InlineData("csvlog")]
+    [InlineData("stderr,csvlog")]
+    public async Task ACsvlogTargetWithAMisplacedQueryIdInThePrefixStaysMetAndDoesNotClaimNoPlanIsStored(string destination)
+    {
+        var facets = await RunAsync(destination, "%m [%p] %q%u@%d %Q ");
+
+        Assert.True(facets["plan_attribution"].Satisfied, destination);
+        Assert.DoesNotContain("no plan is stored", facets["plan_attribution"].Detail, StringComparison.Ordinal);
+        Assert.True(facets["log_line_prefix_readable"].Satisfied, destination);
+    }
+
     /* The plan readers have no jsonlog route (PgPlanCaptureCollector reads stderr or csvlog), so a jsonlog-only target
        stores no plan whatever its prefix says: met for plan_attribution would be a false pass. The log-events reader does
        read jsonlog, so log_line_prefix_readable stays met. */

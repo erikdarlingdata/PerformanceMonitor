@@ -367,7 +367,7 @@ SELECT
 
        NOT gated on loaded: log_line_prefix is a real core GUC that always exists and always means what it
        says, and it is worth knowing this is wrong BEFORE the library goes on, because fixing it afterwards
-       means every plan captured in between is an orphan. */
+       means every plan captured in between is stored without its query id or not at all. */
     CASE WHEN p.csv_listed THEN p.csv_has_query_id WHEN p.jsonlog_only THEN false ELSE p.prefix_qid_after_pid END,
     coalesce(p.line_prefix, '(unreadable)'),
     CASE

@@ -270,7 +270,8 @@ public sealed class DarlingMcpPgPlanTools
             facet_count = rows.Count,
             truncated,
             /* Deliberately NOT a single ready/not-ready verdict. The facets do not reduce to one: an unmet
-               plan_attribution still captures plans and merely orphans them, while message_locale and
+               plan_attribution means no plan is stored (stderr with %Q misplaced, or jsonlog only) or plans are stored
+               without a query id (csvlog before PostgreSQL 14), while message_locale and
                log_line_prefix_readable are about the target-side log reads (the stderr deadlock and log-event
                reads among them) rather than about capture. A boolean would have to pick one meaning
                and would be wrong under the other, which is the exact collapse the collector splits its rows
