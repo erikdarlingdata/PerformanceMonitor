@@ -3266,7 +3266,7 @@ ALTER TABLE config.config_alert_log
     /// <c>ON DELETE CASCADE</c>: a server id is a hash of its host, database and read-only flag, so a grant left behind by a removed server
     /// would apply again when the same server is added back. The cascade drops the grant whichever login removes the server or tag (it runs
     /// as the table's owner), and removing one is never blocked. Three partial unique indexes keep one grant per person, capability and
-    /// scope (a store can run PostgreSQL 14, which has no <c>NULLS NOT DISTINCT</c>).</para>
+    /// scope (the store is PostgreSQL 15 or later, since earlier rungs already build <c>NULLS NOT DISTINCT</c> indexes, and the product minimum is 16).</para>
     /// <para><b>Owner-only.</b> Only the store owner writes them (<c>PersonDirectory</c>, which journals every change in the same
     /// transaction). Managed provisioning section 10e3 and <c>provision-roles.sql</c> step 3j3 take every privilege back from the four
     /// roles, as for <c>config.config_server_actions</c>, and give SELECT back. The rung itself takes the writes back too, as V198 does, so a

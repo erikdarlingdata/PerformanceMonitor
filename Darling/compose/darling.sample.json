@@ -11,6 +11,7 @@
       "auth": "sql",
       "username": "DarlingMonitor",
       "password": "file:/run/secrets/sql_password",
+      "// trustServerCertificate": "true accepts any certificate from the SQL Server (the connection is still encrypted), so a first run works against a self-signed one. For production, set it to false so the certificate is verified.",
       "trustServerCertificate": true
     }
   ],

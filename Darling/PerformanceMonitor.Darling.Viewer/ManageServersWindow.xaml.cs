@@ -186,7 +186,14 @@ public partial class ManageServersWindow : Window
 
     private void EditButton_Click(object sender, RoutedEventArgs e) => EditSelected();
 
-    private void ServersGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e) => EditSelected();
+    /* A double-click on a column header, the scrollbar or the empty area is not a row (#7210). */
+    private void ServersGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e)
+    {
+        if (DataGridRowHit.IsOnRow(e.OriginalSource))
+        {
+            EditSelected();
+        }
+    }
 
     private async void EditSelected()
     {

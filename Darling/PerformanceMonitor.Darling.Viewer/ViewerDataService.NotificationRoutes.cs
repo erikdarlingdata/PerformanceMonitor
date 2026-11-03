@@ -112,17 +112,22 @@ public sealed partial class ViewerDataService
 
     public const string NotificationRouteDeleteSql = NotificationRouteWriter.DeleteSql;
 
+    /// <summary>Which of the newer route columns the list reads (V229 severities, V233 report notice, V238 approval, #6928, #6979, #7109). A probe that
+    /// cannot tell (null: timed out, or a network blip) reads as "all present", as the People and Proposals reads do (#7208). The connect gate already
+    /// refuses a store below V238, so a null probe is a current store, and a failed read of it throws. Reading the older statement instead would show
+    /// every stored severity filter, report notice and approval setting as its default, and the next save would write those defaults over the real ones.</summary>
+    internal static (bool Severities, bool ReportNotice, bool Approval) RouteColumnsPresent(int? version) =>
+        version is not int known
+            ? (true, true, true)
+            : (known >= RouteSeveritiesStoreSchemaVersion, known >= RouteReportNoticeStoreSchemaVersion, known >= RouteActionApprovalStoreSchemaVersion);
+
     /// <summary>Every route, in resolution order. A read-only seat gets the secret-free projection.</summary>
     public async Task<IReadOnlyList<NotificationRouteRow>> GetNotificationRoutesAsync(CancellationToken cancellationToken = default)
     {
         var rows = new List<NotificationRouteRow>();
         /* V229 (#6928): a store below it has no severities column, so the list reads the older statements and every route shows as Both. */
         var version = _cachedStoreSchemaVersion ??= await GetStoreSchemaVersionAsync(cancellationToken);
-        var hasSeverities = version is int known && known >= RouteSeveritiesStoreSchemaVersion;
-        /* V233 (#6979): a store below it has no report_notice column, so every route shows as Off. */
-        var hasReportNotice = version is int reportKnown && reportKnown >= RouteReportNoticeStoreSchemaVersion;
-        /* V238 (#7109): a store below it has no approval columns, so every route shows the defaults (required, not single-person). */
-        var hasApproval = version is int approvalKnown && approvalKnown >= RouteActionApprovalStoreSchemaVersion;
+        var (hasSeverities, hasReportNotice, hasApproval) = RouteColumnsPresent(version);
         var sql = IsReadOnly
             ? (hasApproval ? NotificationRoutesSelectNoSecretWithActionApprovalSql : hasReportNotice ? NotificationRoutesSelectNoSecretWithReportNoticeSql : hasSeverities ? NotificationRoutesSelectNoSecretWithSeveritiesSql : NotificationRoutesSelectNoSecretSql)
             : (hasApproval ? NotificationRoutesSelectWithActionApprovalSql : hasReportNotice ? NotificationRoutesSelectWithReportNoticeSql : hasSeverities ? NotificationRoutesSelectWithSeveritiesSql : NotificationRoutesSelectSql);

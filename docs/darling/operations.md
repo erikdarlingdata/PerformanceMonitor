@@ -123,6 +123,8 @@ Both settings need a **server restart** (`max_worker_processes` is restart-only 
 
 **One store per cluster is the assumption.** `timescaledb.max_background_workers` is a **cluster-wide** pool shared by every database, while the derivation above is **per-store**. Managed mode puts one store on one cluster so the two coincide, but if you run **N Darling stores on one PostgreSQL cluster** — or share the cluster with any other TimescaleDB database — multiply both numbers by N. Each database with the extension loaded also permanently holds a scheduler slot out of that same pool, so the sharing starts before any policy fires.
 
+The service pins its own connections to UTC and, in managed mode, sets the cluster to UTC. It changes no setting on a store you bring. There, TimescaleDB's own jobs (compression, retention and refresh) follow the time zone of the server or database. A window measured in days can start or end earlier or later than UTC midnight, by up to the zone's offset. No data is wrong, only the boundaries move. To keep them on UTC, set `timezone = 'UTC'` on the server or run `ALTER DATABASE <store> SET timezone = 'UTC'`.
+
 **What under-provisioning looks like.** The postmaster log (`pg.log`, or wherever your cluster logs) is where it shows up, in one of two shapes:
 
 ```

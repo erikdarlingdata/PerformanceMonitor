@@ -109,10 +109,15 @@ SELECT
     /// socket/core topology. That DMV needs VIEW SERVER STATE (VIEW DATABASE STATE on Azure SQL DB),
     /// so it runs in its OWN best-effort read — a permission gap loses only these fields, never the
     /// inventory row above (#1535). Columns: 0 cpu_count, 1 physical_memory_mb, 2 sqlserver_start_time,
-    /// 3 socket_count, 4 cores_per_socket.
+    /// 3 socket_count, 4 cores_per_socket, 5 uptime_seconds: two tick counts of the same DMV row, so no wall clock (the client's or the
+    /// server's, which a daylight saving change shifts by an hour) enters the uptime (#7176).
     /// </summary>
+    /// <summary>The UTC start instant for an uptime the server counted in ticks. Plain subtraction from a UTC instant: no zone, so a start
+    /// before a daylight saving change is exactly as far back as the tick count says (#7176).</summary>
+    internal static DateTime StartUtcFromUptimeSeconds(double uptimeSeconds, DateTime utcNow) => utcNow.AddSeconds(-uptimeSeconds);
+
     internal const string HardwareQueryText =
-        "SELECT cpu_count, physical_memory_kb / 1024, sqlserver_start_time, socket_count, cores_per_socket FROM sys.dm_os_sys_info;";
+        "SELECT cpu_count, physical_memory_kb / 1024, sqlserver_start_time, socket_count, cores_per_socket, (ms_ticks - sqlserver_start_time_ms_ticks) / 1000 FROM sys.dm_os_sys_info;";
 
     /// <summary>
     /// Queries a SQL Server directly for its properties. Inventory facts (edition, version, storage)
@@ -176,6 +181,7 @@ SELECT
                 result.SqlServerStartTime = hardwareReader.IsDBNull(2) ? null : hardwareReader.GetDateTime(2);
                 result.SocketCount = hardwareReader.IsDBNull(3) ? null : Convert.ToInt32(hardwareReader.GetValue(3));
                 result.CoresPerSocket = hardwareReader.IsDBNull(4) ? null : Convert.ToInt32(hardwareReader.GetValue(4));
+                result.SqlServerStartUtc = hardwareReader.IsDBNull(5) ? null : StartUtcFromUptimeSeconds(Convert.ToDouble(hardwareReader.GetValue(5)), DateTime.UtcNow);
             }
         }
         catch (SqlException ex)

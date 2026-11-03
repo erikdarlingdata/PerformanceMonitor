@@ -407,7 +407,7 @@ public class HealthCalculatorTests
     {
         var rows = new List<HighImpactQueryRow>
         {
-            new() { QueryHash = "SOLO", TotalCpuMs = 1000, TotalDurationMs = 500, TotalReads = 100, TotalWrites = 10, TotalMemoryMb = 50, TotalExecutions = 100 }
+            new() { QueryHash = "SOLO", TotalCpuMs = 1000, TotalDurationMs = 500, TotalReads = 100, TotalWrites = 10, PeakMemoryMb = 50, TotalExecutions = 100 }
         };
         var scored = HighImpactScorer.Score(rows, topN: 10);
         Assert.Single(scored);
@@ -427,7 +427,7 @@ public class HealthCalculatorTests
                 TotalDurationMs = 100,
                 TotalReads = 100,
                 TotalWrites = 100,
-                TotalMemoryMb = 100,
+                PeakMemoryMb = 100,
                 TotalExecutions = 100
             });
         }
@@ -454,7 +454,7 @@ public class HealthCalculatorTests
                 TotalDurationMs = i * 5,
                 TotalReads = i * 100,
                 TotalWrites = i * 10,
-                TotalMemoryMb = i,
+                PeakMemoryMb = i,
                 TotalExecutions = 50 - i // Inverse correlation to test UNION dedup
             });
         }
@@ -470,7 +470,7 @@ public class HealthCalculatorTests
     {
         var rows = new List<HighImpactQueryRow>
         {
-            new() { QueryHash = "ZERO", TotalCpuMs = 0, TotalDurationMs = 0, TotalReads = 0, TotalWrites = 0, TotalMemoryMb = 0, TotalExecutions = 0 }
+            new() { QueryHash = "ZERO", TotalCpuMs = 0, TotalDurationMs = 0, TotalReads = 0, TotalWrites = 0, PeakMemoryMb = 0, TotalExecutions = 0 }
         };
         // Should not throw
         var scored = HighImpactScorer.Score(rows, topN: 10);
@@ -482,9 +482,9 @@ public class HealthCalculatorTests
     {
         var rows = new List<HighImpactQueryRow>
         {
-            new() { QueryHash = "LOW", TotalCpuMs = 10, TotalDurationMs = 10, TotalReads = 10, TotalWrites = 10, TotalMemoryMb = 1, TotalExecutions = 10 },
-            new() { QueryHash = "HIGH", TotalCpuMs = 10000, TotalDurationMs = 10000, TotalReads = 1000000, TotalWrites = 10000, TotalMemoryMb = 1000, TotalExecutions = 10000 },
-            new() { QueryHash = "MID", TotalCpuMs = 500, TotalDurationMs = 500, TotalReads = 50000, TotalWrites = 500, TotalMemoryMb = 50, TotalExecutions = 500 },
+            new() { QueryHash = "LOW", TotalCpuMs = 10, TotalDurationMs = 10, TotalReads = 10, TotalWrites = 10, PeakMemoryMb = 1, TotalExecutions = 10 },
+            new() { QueryHash = "HIGH", TotalCpuMs = 10000, TotalDurationMs = 10000, TotalReads = 1000000, TotalWrites = 10000, PeakMemoryMb = 1000, TotalExecutions = 10000 },
+            new() { QueryHash = "MID", TotalCpuMs = 500, TotalDurationMs = 500, TotalReads = 50000, TotalWrites = 500, PeakMemoryMb = 50, TotalExecutions = 500 },
         };
         var scored = HighImpactScorer.Score(rows, topN: 10);
         Assert.Equal("HIGH", scored[0].QueryHash);

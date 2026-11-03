@@ -1161,6 +1161,7 @@ public partial class MainWindow : Window
             var previousSelection = (ServerList.SelectedItem as FleetServerRow)?.Server.ServerId;
             var previousRecoServer = (RecommendationsServerSelector.SelectedItem as DarlingServer)?.ServerId;
             _fleet.SetAll(servers);
+            RefreshRenamedServerTabs(servers);
             ServerListKeyboard.Rebind(ServerList, _fleet.Visible);
             UpdateServerCountText();
 
@@ -1397,6 +1398,31 @@ public partial class MainWindow : Window
         MainTabs.Items.Add(tabItem);
         MainTabs.SelectedItem = tabItem;
         return serverTab;
+    }
+
+    /// <summary>
+    /// After a reload, gives every open server tab whose display name changed (#7212) the new name: the header text and the
+    /// tab's server record. A tab for a server the reload no longer lists is left as it is (a removed server's tab stays open).
+    /// </summary>
+    private void RefreshRenamedServerTabs(IReadOnlyList<DarlingServer> servers)
+    {
+        var open = _openServerTabs.Values
+            .Select(tab => tab.Content as ViewerServerTab)
+            .OfType<ViewerServerTab>()
+            .ToDictionary(serverTab => serverTab.Server.ServerId);
+
+        foreach (var renamed in ViewerServerSetSync.RenamedForOpenTabs(open.Values.Select(serverTab => serverTab.Server), servers))
+        {
+            open[renamed.ServerId].UpdateServer(renamed);
+
+            if (_openServerTabs.TryGet(renamed.ServerId, out var tab)
+                && tab.Header is StackPanel header
+                && header.Children.Count > 0
+                && header.Children[0] is TextBlock nameText)
+            {
+                nameText.Text = renamed.DisplayName;
+            }
+        }
     }
 
     /// <summary>Removes a per-server tab and unwires it. WPF selects an adjacent tab when the closed one was active.</summary>

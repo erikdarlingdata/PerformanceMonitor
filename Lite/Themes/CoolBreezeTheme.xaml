@@ -92,6 +92,8 @@
 
     <SolidColorBrush x:Key="BorderBrush" Color="{StaticResource BorderColor}"/>
     <SolidColorBrush x:Key="BorderLightBrush" Color="{StaticResource BorderLightColor}"/>
+    <!-- #7218: the Availability Groups cards draw their outline from this key. Same definition as the Darling Viewer Cool Breeze theme. -->
+    <SolidColorBrush x:Key="CardBorderBrush" Color="{StaticResource BorderLightColor}"/>
 
     <SolidColorBrush x:Key="SuccessBrush" Color="{StaticResource SuccessColor}"/>
     <SolidColorBrush x:Key="WarningBrush" Color="{StaticResource WarningColor}"/>
