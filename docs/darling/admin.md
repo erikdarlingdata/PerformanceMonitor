@@ -150,6 +150,8 @@ To turn one collector off for the whole fleet, run `.\PerformanceMonitor.Darling
 
 ## Upgrade
 
+To upgrade or uninstall without PowerShell, see [Where PowerShell is used, and installing without it](install.md#where-powershell-is-used-and-installing-without-it).
+
 Do the steps from an elevated PowerShell on the service host.
 
 1. Download the new zip. Take its SHA256 from the release page.
