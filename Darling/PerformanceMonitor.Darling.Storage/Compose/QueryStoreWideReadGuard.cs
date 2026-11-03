@@ -130,9 +130,12 @@ FROM
         /// #7285: <see cref="RowsOver(DateTime, DateTime, DateTime?)"/> for a panel that reads the fleet rollup. The hours the fleet table
         /// serves (<see cref="FleetServing.Hours"/>) leave the stamp-weighted part, and their rows count from the fleet table's own row
         /// count at <see cref="ComposeLimits.FleetRowWeight"/> each, because the fleet table's size does not follow the servers' wide
-        /// rows. The stamp hours the fleet table does not serve (an hour whose fleet build is behind) stay at the stamp weight, and the
-        /// tail after <paramref name="stampThrough"/> stays at 1.0 per wide row. With no <paramref name="fleet"/> this is exactly
-        /// the figure above.
+        /// rows. The stamp hours the fleet table does not serve (an hour whose fleet build is behind) stay at the stamp weight. The
+        /// tail after <paramref name="stampThrough"/> counts at <see cref="ComposeLimits.FleetTailRowWeight"/> per wide row (#7353) only
+        /// when <see cref="FleetServing.TailAnalyzed"/>: the newest hours are mostly in shared buffers and cost less than the cold
+        /// wide-row rate the limit is built on, but only while the current partition has statistics. Without them the same read was
+        /// measured at about four times that weight, so the tail stays at 1.0. With no <paramref name="fleet"/> the tail stays at 1.0
+        /// and this is exactly the figure above.
         /// </summary>
         public long RowsOver(DateTime countedStart, DateTime countedEnd, DateTime? stampThrough, FleetServing? fleet)
         {
@@ -144,7 +147,8 @@ FROM
 
             var stampedDays = Math.Clamp((through - countedStart).TotalDays, 0d, days);
             var fleetDays = fleet is { } served ? Math.Min(served.Hours / 24d, stampedDays) : 0d;
-            var weighted = (days - stampedDays) + ((stampedDays - fleetDays) * ComposeLimits.StampRowWeight);
+            var tailWeight = fleet is { TailAnalyzed: true } ? ComposeLimits.FleetTailRowWeight : 1d;
+            var weighted = ((days - stampedDays) * tailWeight) + ((stampedDays - fleetDays) * ComposeLimits.StampRowWeight);
             var fleetRows = fleet is { } rowsServed ? (long)Math.Ceiling(rowsServed.Rows * ComposeLimits.FleetRowWeight) : 0L;
             return (long)Math.Ceiling(DailyRows * weighted) + fleetRows + RawRows;
         }
@@ -154,8 +158,11 @@ FROM
     /// #7285: the part of a stamp-served range the fleet rollup serves, from the fleet table itself. <c>Hours</c> are the hours of the
     /// range in which no pair of the build ledger is unfit for the fleet table (the test the compiled statement applies per hour, so
     /// the hours counted here are the ones its fleet arm reads), and <c>Rows</c> are the fleet table's rows in those hours and the range.
+    /// <c>TailAnalyzed</c> (#7353) is whether the wide table's current day partition, which holds the raw tail, was analyzed within
+    /// <see cref="QueryStoreIntervalPartitions.FreshStatisticsSeconds"/>: only then does the tail count at
+    /// <see cref="ComposeLimits.FleetTailRowWeight"/>.
     /// </summary>
-    internal readonly record struct FleetServing(int Hours, long Rows);
+    internal readonly record struct FleetServing(int Hours, long Rows, bool TailAnalyzed);
 
     /// <summary>
     /// #7285: the fleet-served hours of <c>[$1, $2)</c> (counted start, stamp-through) and the fleet table's rows in them. An hour is
@@ -186,20 +193,53 @@ CROSS JOIN LATERAL
 
     /// <summary>
     /// #7285: reads <see cref="FleetServing"/> for the counted range up to <paramref name="stampThrough"/>. Null on any fault other than
-    /// cancellation: the estimate then counts every stamped hour at the stamp weight, which is the figure before the fleet table.
+    /// cancellation: the estimate then counts every stamped hour at the stamp weight and the tail at 1.0, which is the figure before the
+    /// fleet table. #7353: on the same connection, one more catalog read says whether the wide table's current day partition holds
+    /// fresh statistics (<see cref="QueryStoreIntervalPartitions.CurrentPartitionHasFreshStatisticsAsync"/>, the partition the hourly
+    /// ANALYZE picks) at <paramref name="utcNow"/>, which tests pass so the clock is read once. A fault in that read alone is caught
+    /// apart from the fleet read: the fleet hours and rows stay and <c>TailAnalyzed</c> is false. <paramref name="freshStatistics"/>
+    /// is the test seam for that read.
     /// </summary>
     internal static async Task<FleetServing?> FleetServingAsync(
         NpgsqlDataSource postgres, DateTime countedStart, DateTime stampThrough, ILogger? logger,
-        int commandTimeoutSeconds, CancellationToken cancellationToken)
+        int commandTimeoutSeconds, CancellationToken cancellationToken, DateTime? utcNow = null,
+        Func<NpgsqlConnection, QueryStoreIntervalPartitions.IntervalTable, DateTime, CancellationToken, Task<bool>>? freshStatistics = null)
     {
         try
         {
             await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
-            await using var command = new NpgsqlCommand(FleetServingSql, connection) { CommandTimeout = commandTimeoutSeconds };
-            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(countedStart, DateTimeKind.Unspecified) });
-            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(stampThrough, DateTimeKind.Unspecified) });
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-            return await reader.ReadAsync(cancellationToken) ? new FleetServing(reader.GetInt32(0), reader.GetInt64(1)) : null;
+            int hours;
+            long rows;
+            await using (var command = new NpgsqlCommand(FleetServingSql, connection) { CommandTimeout = commandTimeoutSeconds })
+            {
+                command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(countedStart, DateTimeKind.Unspecified) });
+                command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(stampThrough, DateTimeKind.Unspecified) });
+                await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                if (!await reader.ReadAsync(cancellationToken))
+                {
+                    return null;
+                }
+
+                hours = reader.GetInt32(0);
+                rows = reader.GetInt64(1);
+            }
+
+            /* Its own catch: a fault in the statistics step alone (a timeout on pg_inherits) keeps the fleet rows already read and
+               counts the tail at 1.0, instead of dropping the whole figure back to the one before #7285. */
+            var analyzed = false;
+            try
+            {
+                var at = utcNow ?? DateTime.UtcNow;
+                analyzed = freshStatistics is null
+                    ? await QueryStoreIntervalPartitions.CurrentPartitionHasFreshStatisticsAsync(connection, QueryStoreIntervalPartitions.Wide, at, cancellationToken)
+                    : await freshStatistics(connection, QueryStoreIntervalPartitions.Wide, at, cancellationToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger?.LogDebug(ex, "The #7353 statistics age of the Query Store wide table's current partition could not be read; the guard counts the fleet tail at 1.0.");
+            }
+
+            return new FleetServing(hours, rows, analyzed);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
