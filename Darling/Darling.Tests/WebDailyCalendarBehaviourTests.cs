@@ -184,6 +184,6 @@ public sealed class WebDailyCalendarBehaviourTests
         Assert.Empty(r.GetProperty("tableSept").GetProperty("missing").EnumerateArray());
         Assert.Equal(new[] { "2026-10-03", "2026-10-04", "2026-10-05" }, r.GetProperty("tableOct").GetProperty("days").EnumerateArray().Select(e => e.GetString()).ToArray());
         Assert.Equal(new[] { "2026-10-04" }, r.GetProperty("tableOct").GetProperty("missing").EnumerateArray().Select(e => e.GetString()).ToArray());
-        Assert.Equal(3, r.GetProperty("totalReads").GetInt32());                  // the day detail twice and September once; October was never re-read
+        Assert.Equal(4, r.GetProperty("totalReads").GetInt32());                  // the day detail three times (a drawn day, a gap day, a purged day) and September once; October was never re-read
     }
 }
