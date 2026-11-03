@@ -730,4 +730,62 @@ WHERE request_id = '{id}' AND event = 'link_recorded'"));
             Assert.Equal(requests, read.Journal.Count(j => j.Event == evt));
         }
     }
+
+    public static TheoryData<string> ReadNames() => new()
+    {
+        "ClaimHolder", "RouteUse", "RequestExists", "ReadRequest", "ReadReports", "List", "OpenedSince", "ListPendingNotes",
+        "ListEvidenceCandidates", "ReadEvidence",
+    };
+
+    private Task ReadByName(string name) => name switch
+    {
+        "ClaimHolder" => _store.ClaimHolderAsync(Guid.NewGuid(), Guid.NewGuid(), Ct),
+        "RouteUse" => _store.RouteUseAsync(Ct),
+        "RequestExists" => _store.RequestExistsAsync(Guid.NewGuid(), Ct),
+        "ReadRequest" => _store.ReadRequestAsync(Guid.NewGuid(), Ct),
+        "ReadReports" => _store.ReadReportsAsync(null, null, T0.AddDays(-1), 10, 10, Ct),
+        "List" => _store.ListAsync(null, null, null, 10, Ct),
+        "OpenedSince" => _store.OpenedSinceAsync(T0.AddDays(-1), null, 10, Ct),
+        "ListPendingNotes" => _store.ListPendingNotesAsync(10, Ct),
+        "ListEvidenceCandidates" => _store.ListEvidenceCandidatesAsync(T0.AddDays(-1), 10,
+            new System.Collections.Generic.Dictionary<string, System.Collections.Generic.IReadOnlyList<string>>(), Ct),
+        "ReadEvidence" => _store.ReadEvidenceAsync(Guid.NewGuid(), Ct),
+        _ => throw new ArgumentOutOfRangeException(nameof(name)),
+    };
+
+    /// <summary>#7217: the archive reset takes the write lock to delete and re-create the database, and the write lock waits
+    /// only for readers that hold the read lock. A store read that opened its connection without the read lock was not waited
+    /// for, so it could hold a connection open across the reset. Here a writer (the reset's lock) holds the write lock on its
+    /// own thread: a read started meanwhile must not open a connection until the writer releases.</summary>
+    [Theory]
+    [MemberData(nameof(ReadNames))]
+    public async Task EveryRead_WaitsForTheWriteLock_SoTheArchiveResetNeverRunsUnderAnOpenReadConnection(string name)
+    {
+        using var held = new ManualResetEventSlim(false);
+        using var release = new ManualResetEventSlim(false);
+        var writer = Task.Factory.StartNew(() =>
+        {
+            using var writeLock = _db.AcquireWriteLock(TestLockBudget);
+            held.Set();
+            release.Wait(TimeSpan.FromMinutes(1));
+        }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+
+        try
+        {
+            Assert.True(held.Wait(TimeSpan.FromSeconds(30)));
+
+            var read = Task.Run(() => ReadByName(name), CancellationToken.None);
+            var finishedWhileLocked = await Task.WhenAny(read, Task.Delay(TimeSpan.FromMilliseconds(500), Ct)) == read;
+            Assert.False(finishedWhileLocked, name + " opened a connection while the write lock was held");
+
+            release.Set();
+            await writer;
+            await read.WaitAsync(TimeSpan.FromSeconds(30), Ct);
+        }
+        finally
+        {
+            release.Set();
+            await writer;
+        }
+    }
 }

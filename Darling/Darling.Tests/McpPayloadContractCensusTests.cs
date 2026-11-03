@@ -392,7 +392,7 @@ public sealed class McpPayloadContractCensusTests
         + @"|\bDarlingReadWindow\.(?:Validate|ValidateUncapped|ValidateHoursBack|ValidateDaysBack)\(" // #5814: McpHelpers' checks plus the window note
         + @"|\bDarlingFleetSweepEndpoints\.ValidateWatchState\("
         + @"|\bTrendBuckets\.(?:Resolve|ValidateWidth|RequireWholeHours)\("
-        + @"|\b(?:Darling|Mcp)EngineCapability\.(?:Fleet)?NotCollectedStatusAsync\("   // #6178: the fleet form asks the same question of every server
+        + @"|\b(?:Darling|Mcp)EngineCapability\.(?:(?:Fleet)?NotCollectedStatusAsync|PostgresTargetSqlServerReadStatusAsync)\("   // #6178: the fleet form asks the same question of every server; #7159: the PostgreSQL-target gate on the SQL Server-only summary reads
         + @"|\b(?:Darling|Mcp)RuntimePrecondition\.(?:StatusAsync|GatedOffStatusAsync)\("
         + @"|\bCollectAsync(?:<[^>]+>)?\(",
         RegexOptions.Compiled);
