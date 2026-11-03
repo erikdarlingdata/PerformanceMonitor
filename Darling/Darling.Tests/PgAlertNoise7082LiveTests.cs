@@ -141,6 +141,125 @@ public sealed class PgAlertNoise7082LiveTests
     }
 
     [Fact]
+    public async Task ANewPairCountedBeforeARestart_PagesOnceAfterIt_AndNeverAgain()
+    {
+        await RunAsync(async (h, ct) =>
+        {
+            var now = DateTime.UtcNow;
+            await using var source = NpgsqlDataSource.Create(h.StoreString);
+            var state = new PgAlertStateStore(source);
+            var pair = ValueOf(UpdateOrders, UpdateStock);
+            var rows = new[] { Report("r1", UpdateOrders, UpdateStock, now) };
+
+            Task<DarlingWorker.PgDeadlockPatterns> Count(
+                Dictionary<string, DateTime> counted, HashSet<string> unannounced) =>
+                DarlingWorker.CountPgDeadlockPatternsAsync(
+                    h.Store, counted, unannounced, null, NullLogger.Instance, Server, ServerId, rows, now,
+                    (waiting, _) => state.ReplaceUnannouncedPairsAsync(Server, waiting), ct);
+
+            /* First life: the pair is counted as new, the gate moved the saved watermark to this count, and the service
+               stops before the page goes out. */
+            var before = await Count(new Dictionary<string, DateTime>(StringComparer.Ordinal), new HashSet<string>(StringComparer.Ordinal));
+            Assert.Equal(new[] { pair }, before.NewKeys.ToArray());
+            await state.SaveEdgeTriggerWatermarkAsync(Server, Metric, 1);
+
+            /* Second life: nothing is in memory. The seed puts the waiting pair back and answers the saved watermark as it is. The
+               gate runs from 0 only when the first count keeps the pair (see the restart tests below and the worker-level ones),
+               and the count pages on the pair although the store already knows it. */
+            var unannouncedAfter = new HashSet<string>(StringComparer.Ordinal);
+            var watermark = (await DarlingWorker.SeedPgDeadlockStateAsync(
+                state, Server, Metric, unannouncedAfter, fresh => h.Rollup.NoteNewSignatures(Server, fresh))).Watermark;
+            Assert.Equal(1, watermark);
+            var after = await Count(new Dictionary<string, DateTime>(StringComparer.Ordinal), unannouncedAfter);
+            Assert.Equal(new[] { pair }, after.NewKeys.ToArray());
+            Assert.True(DarlingWorker.PgDeadlockPagesNow(1, after.NewKeys.Count, after.StoreOk));
+
+            /* The page is delivered and opens its investigation request: the first life's memory of the new pair is gone, so
+               only the seed can tell the gate the pair is new. */
+            await h.Deliverer.DeliverAsync(Page(), ct);
+            Assert.Equal(1, await RequestsAsync(h.Connection, ct));
+
+            /* The page went out: the worker forgets the pair, in memory and in the store. */
+            unannouncedAfter.Clear();
+            await state.ClearUnannouncedPairsAsync(Server);
+
+            /* Third life: the same pair is known and announced, so it is held and never pages again. */
+            var unannouncedThird = new HashSet<string>(StringComparer.Ordinal);
+            Assert.Equal(1, (await DarlingWorker.SeedPgDeadlockStateAsync(state, Server, Metric, unannouncedThird, null)).Watermark);
+            var third = await Count(new Dictionary<string, DateTime>(StringComparer.Ordinal), unannouncedThird);
+            Assert.Empty(third.NewKeys);
+            Assert.False(DarlingWorker.PgDeadlockPagesNow(1, third.NewKeys.Count, third.StoreOk));
+        });
+    }
+
+    /// <summary>The restart wiring the worker uses for the agent gate (#7295): the seed puts the restored pairs aside, and the first
+    /// count tells the gate about those it keeps.</summary>
+    private static async Task<DarlingWorker.PgDeadlockPatterns> RestartAndCountAsync(
+        Harness h, PgAlertStateStore state, IReadOnlyList<DarlingPgDeadlockReader.PgDeadlockRow> rows, DateTime now, CancellationToken ct)
+    {
+        var unannounced = new HashSet<string>(StringComparer.Ordinal);
+        var restored = new HashSet<string>(StringComparer.Ordinal);
+        await DarlingWorker.SeedPgDeadlockStateAsync(state, Server, Metric, unannounced, waiting => restored.UnionWith(waiting));
+        return await DarlingWorker.CountPgDeadlockPatternsAsync(
+            h.Store, new Dictionary<string, DateTime>(StringComparer.Ordinal), unannounced,
+            fresh => h.Rollup.NoteNewSignatures(Server, fresh), NullLogger.Instance, Server, ServerId, rows, now,
+            (waiting, _) => state.ReplaceUnannouncedPairsAsync(Server, waiting), ct, restored);
+    }
+
+    [Fact]
+    public async Task ARestoredPairWhoseReportsLeftTheHour_DoesNotOpenTheAgentGate_ForAPageAboutOtherPairs()
+    {
+        await RunAsync(async (h, ct) =>
+        {
+            var now = DateTime.UtcNow;
+            await using var source = NpgsqlDataSource.Create(h.StoreString);
+            var state = new PgAlertStateStore(source);
+
+            /* Before the restart: a first-ever pair was counted today and saved as waiting for its page. While the service was
+               down its reports left the hour. A known pair (counted ten days ago) is the only one in the hour now. */
+            var stale = ValueOf(UpdateOrders, UpdateStock);
+            await h.Store.AddAsync(ServerId, new Dictionary<string, int> { [stale] = 1 }, DateOnly.FromDateTime(now), ct);
+            await h.Store.AddAsync(ServerId, new Dictionary<string, int> { [ValueOf(UpdateOrders, UpdateLedger)] = 1 },
+                DateOnly.FromDateTime(now.AddDays(-10)), ct);
+            await state.ReplaceUnannouncedPairsAsync(Server, [stale]);
+
+            var five = Enumerable.Range(0, 5).Select(i => Report($"k{i}", UpdateOrders, UpdateLedger, now)).ToList();
+            var patterns = await RestartAndCountAsync(h, state, five, now, ct);
+            Assert.Empty(patterns.NewKeys);
+            /* The stale pair is not kept, so the gate keeps the watermark the seed found (#7295). */
+            Assert.False(patterns.RestoredPairKept);
+            Assert.True(DarlingWorker.PgDeadlockPagesNow(five.Count, patterns.NewKeys.Count, patterns.StoreOk));
+
+            /* Five reports page. The page is about the known pair only, so its investigation request must not open on the strength
+               of a pair that no page carries. */
+            await h.Deliverer.DeliverAsync(Page(), ct);
+            Assert.Equal(0, await RequestsAsync(h.Connection, ct));
+        });
+    }
+
+    [Fact]
+    public async Task ARestoredPairWhoseReportsAreStillInTheHour_OpensTheAgentGate_ThroughTheFirstCount()
+    {
+        await RunAsync(async (h, ct) =>
+        {
+            var now = DateTime.UtcNow;
+            await using var source = NpgsqlDataSource.Create(h.StoreString);
+            var state = new PgAlertStateStore(source);
+
+            var pair = ValueOf(UpdateOrders, UpdateStock);
+            await h.Store.AddAsync(ServerId, new Dictionary<string, int> { [pair] = 1 }, DateOnly.FromDateTime(now), ct);
+            await state.ReplaceUnannouncedPairsAsync(Server, [pair]);
+
+            var patterns = await RestartAndCountAsync(h, state, [Report("r1", UpdateOrders, UpdateStock, now)], now, ct);
+            Assert.Equal(new[] { pair }, patterns.NewKeys.ToArray());
+            Assert.True(patterns.RestoredPairKept);
+
+            await h.Deliverer.DeliverAsync(Page(), ct);
+            Assert.Equal(1, await RequestsAsync(h.Connection, ct));
+        });
+    }
+
+    [Fact]
     public async Task ANewPairWhoseReportsAgedOutOfTheHour_IsNoLongerUnannounced_SoAKnownPairStaysHeld()
     {
         await RunAsync(async (h, ct) =>
@@ -148,10 +267,13 @@ public sealed class PgAlertNoise7082LiveTests
             var now = DateTime.UtcNow;
             var counted = new Dictionary<string, DateTime>(StringComparer.Ordinal);
             var unannounced = new HashSet<string>(StringComparer.Ordinal);
+            await using var source = NpgsqlDataSource.Create(h.StoreString);
+            var state = new PgAlertStateStore(source);
 
             Task<DarlingWorker.PgDeadlockPatterns> Count(IReadOnlyList<DarlingPgDeadlockReader.PgDeadlockRow> rows) =>
                 DarlingWorker.CountPgDeadlockPatternsAsync(
-                    h.Store, counted, unannounced, null, NullLogger.Instance, Server, ServerId, rows, now, ct);
+                    h.Store, counted, unannounced, null, NullLogger.Instance, Server, ServerId, rows, now,
+                    (waiting, _) => state.ReplaceUnannouncedPairsAsync(Server, waiting), ct);
 
             /* A pair counted ten days ago is known. */
             await h.Store.AddAsync(ServerId, new Dictionary<string, int> { [ValueOf(UpdateOrders, UpdateLedger)] = 1 },
@@ -160,12 +282,20 @@ public sealed class PgAlertNoise7082LiveTests
             /* A new pair arrives and the sweep does not page it, so it stays unannounced while its report is in the hour. */
             var withNew = await Count([Report("n1", UpdateOrders, UpdateStock, now)]);
             Assert.Equal(new[] { ValueOf(UpdateOrders, UpdateStock) }, withNew.NewKeys.ToArray());
+            Assert.Equal(new[] { ValueOf(UpdateOrders, UpdateStock) }, (await state.LoadUnannouncedPairsAsync(Server))!.ToArray());
 
             /* Its report ages out of the hour and the known pair reports once: nothing is new, so the fire is held. */
             var known = await Count([Report("k1", UpdateOrders, UpdateLedger, now)]);
             Assert.Empty(known.NewKeys);
             Assert.False(DarlingWorker.PgDeadlockPagesNow(1, known.NewKeys.Count, known.StoreOk));
             Assert.Empty(unannounced);
+
+            /* The drop left the saved set too (#7295): a restart now restores no pair, and the saved count watermark stands. */
+            Assert.Empty((await state.LoadUnannouncedPairsAsync(Server))!);
+            await state.SaveEdgeTriggerWatermarkAsync(Server, Metric, 1);
+            var restored = new HashSet<string>(StringComparer.Ordinal);
+            Assert.Equal(1, (await DarlingWorker.SeedPgDeadlockStateAsync(state, Server, Metric, restored, null)).Watermark);
+            Assert.Empty(restored);
         });
     }
 
@@ -177,10 +307,13 @@ public sealed class PgAlertNoise7082LiveTests
             var now = DateTime.UtcNow;
             var counted = new Dictionary<string, DateTime>(StringComparer.Ordinal);
             var unannounced = new HashSet<string>(StringComparer.Ordinal);
+            await using var source = NpgsqlDataSource.Create(h.StoreString);
+            var state = new PgAlertStateStore(source);
 
             Task<DarlingWorker.PgDeadlockPatterns> Count(IReadOnlyList<DarlingPgDeadlockReader.PgDeadlockRow> rows) =>
                 DarlingWorker.CountPgDeadlockPatternsAsync(
-                    h.Store, counted, unannounced, null, NullLogger.Instance, Server, ServerId, rows, now, ct);
+                    h.Store, counted, unannounced, null, NullLogger.Instance, Server, ServerId, rows, now,
+                    (waiting, _) => state.ReplaceUnannouncedPairsAsync(Server, waiting), ct);
 
             await h.Store.AddAsync(ServerId, new Dictionary<string, int> { [ValueOf(UpdateOrders, UpdateLedger)] = 1 },
                 DateOnly.FromDateTime(now.AddDays(-10)), ct);
@@ -199,10 +332,21 @@ public sealed class PgAlertNoise7082LiveTests
             Assert.Contains(newPair, afterFull.NewKeys);
             Assert.Contains(newPair, unannounced);
 
+            /* A full read drops nothing, in memory or in the saved set: a restart still finds the pair waiting. */
+            var restoredFull = new HashSet<string>(StringComparer.Ordinal);
+            await DarlingWorker.SeedPgDeadlockStateAsync(state, Server, Metric, restoredFull, null);
+            Assert.Equal(new[] { newPair }, restoredFull.ToArray());
+
             /* A short read is the whole hour: the pair's report is not in it, so the pair is dropped. */
             var afterShort = await Count([Report("k0", UpdateOrders, UpdateLedger, now)]);
             Assert.Empty(afterShort.NewKeys);
             Assert.Empty(unannounced);
+
+            /* The drop left the saved set too: a restart restores nothing. */
+            var restoredShort = new HashSet<string>(StringComparer.Ordinal);
+            await state.SaveEdgeTriggerWatermarkAsync(Server, Metric, 1);
+            Assert.Equal(1, (await DarlingWorker.SeedPgDeadlockStateAsync(state, Server, Metric, restoredShort, null)).Watermark);
+            Assert.Empty(restoredShort);
         });
     }
 

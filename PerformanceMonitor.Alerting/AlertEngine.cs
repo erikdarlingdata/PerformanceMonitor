@@ -123,7 +123,24 @@ public sealed class AlertEngine
 
     /* One-time per-serverKey watermark seeding from the state store (#1145) — the per-key twin of
        Lite's bulk SeedEdgeTriggerWatermarksAsync (MainWindow.xaml.cs:1563). */
-    private readonly ConcurrentDictionary<string, bool> _seededServerKeys = new();
+    private readonly ConcurrentDictionary<(string Key, string Step), bool> _seededSteps = new();
+
+    private const string FailedJobSeedStep = "failed-job";
+    private const string CpuSeedStep = "cpu";
+    private const string TempDbSeedStep = "tempdb";
+    private const string BlockingWaitSeedStep = "blocking-wait";
+
+    /* #7295: the blocking and deadlock count watermarks are seeded apart from the rest, and a failed read leaves the key unseeded
+       so the next sweep reads again. The failed-job watermark and the three persistence records are seeded one step each
+       (_seededSteps) on the same rule. */
+    private readonly ConcurrentDictionary<string, bool> _countWatermarksSeeded = new();
+
+    /* #7295 round 3: a failed seed read is retried on the next sweep, but only SeedLoadCap.MaxFailedLoads times in a row for a key and
+       a step. The failed read that reaches it seeds the step empty and the check runs, so a state table that stays unreadable
+       cannot hold an alert family back for as long as the failure lasts. */
+    private readonly SeedLoadCap _seedLoadCap = new();
+
+    private const string CountWatermarkSeedStep = "blocking and deadlock count watermarks";
 
     /* Cooldown timestamps — Lite's MainWindow.xaml.cs:56-63,90 dictionaries, keyed serverKey.
        In-memory only, exactly like Lite (the restart protection is the persisted watermarks plus
@@ -701,78 +718,86 @@ public sealed class AlertEngine
     /// (MainWindow.xaml.cs:1563-1594): loads the persisted blocking/deadlock count watermarks and
     /// the failed-job time watermark before this server's first sweep, so a host restart doesn't
     /// re-fire (and re-post webhooks for) events still lingering in the rolling window. Seeded
-    /// once per key; a seed failure logs and proceeds unseeded, exactly like Lite.
+    /// once per key. A failure of the failed-job and persistence reads logs and proceeds unseeded, exactly like Lite. The blocking
+    /// and deadlock count watermarks are the exception (#7295): they are seeded by <see cref="EnsureCountWatermarksSeededAsync"/>,
+    /// which does not give up on a failed read.
     /// </summary>
     private async Task EnsureWatermarksSeededAsync(string key, CancellationToken ct)
     {
-        if (_seededServerKeys.ContainsKey(key))
+        await EnsureCountWatermarksSeededAsync(key, ct);
+
+        /* #7295: each of these seeds is marked done only after its own load worked (a row or no row). A load that cannot read the
+           store leaves its step open, the check that depends on it skips this sweep, and the load is tried again on the next. */
+        await SeedStepAsync(key, FailedJobSeedStep, "failed-job watermark", async () =>
         {
-            return;
-        }
-
-        var readClock = Stopwatch.StartNew();
-        try
-        {
-            var blocking = await _stateStore.LoadEdgeTriggerWatermarkAsync(key, BlockingWatermarkMetric);
-            readClock.Restart();
-            if (blocking.HasValue)
-            {
-                _lastAlertedBlockingCount[key] = blocking.Value;
-            }
-
-            var deadlock = await _stateStore.LoadEdgeTriggerWatermarkAsync(key, DeadlockWatermarkMetric);
-            readClock.Restart();
-            if (deadlock.HasValue)
-            {
-                _lastAlertedDeadlockCount[key] = deadlock.Value;
-            }
-
             var failedJob = await _stateStore.LoadFailedJobWatermarkAsync(key);
             if (failedJob.HasValue)
             {
                 _lastAlertedFailedJobTime[key] = failedJob.Value;
             }
+        }, ct);
 
-            /* #3282: the CPU persistence gate's record, seeded here for the same reason the watermarks
-               are — so the first post-restart sweep knows an incident is already open (and does not
-               re-announce it) and resumes the streak instead of restarting it. A store with no row hands
-               back null and the subject starts at AlertPersistenceRecord.Initial, which is also what a
-               host with no persistence gets; either way the gate arms from zero rather than misfiring. */
-            readClock.Restart();
+        /* #3282: the CPU persistence gate's record, seeded here for the same reason the watermarks
+           are, so the first post-restart sweep knows an incident is already open (and does not
+           re-announce it) and resumes the streak instead of restarting it. A store with no row hands
+           back null and the subject starts at AlertPersistenceRecord.Initial, which is also what a
+           host with no persistence gets; either way the gate arms from zero rather than misfiring. */
+        await SeedStepAsync(key, CpuSeedStep, "CPU persistence record", async () =>
+        {
             var cpuPersistence = await _stateStore.LoadAlertPersistenceAsync(key, CpuPersistenceMetric);
-            if (cpuPersistence.HasValue)
+            if (!cpuPersistence.HasValue)
             {
-                _cpuPersistence[key] = cpuPersistence.Value;
-
-                /* An incident that was ALREADY OPEN gets its cooldown clock stamped as if it had just been
-                   announced. The persisted Firing bit stops the gate producing a second rising edge, but
-                   the cooldown dictionaries are in-memory by design (see their field comment), so an empty
-                   clock plus a still-breaching condition would deliver the standing-condition REMINDER on
-                   the first post-restart sweep — an identical High CPU message seconds after a restart,
-                   which is a re-announcement whatever it is called internally. Stamping makes the
-                   reminder wait a full cooldown, which is what an operator who already has the incident
-                   open would expect. Nothing can be lost: if the condition is still breaching when the
-                   cooldown elapses the reminder fires then, and if it cleared while the service was down
-                   the first ClearSamples clear samples resolve it. */
-                if (cpuPersistence.Value.State.Firing)
-                {
-                    _lastCpuAlert[key] = _utcNow();
-                    _cpuRestoredOpen[key] = true;
-
-                    readClock.Restart();
-                    var openedMinutes = await _stateStore.LoadEdgeTriggerWatermarkAsync(key, CpuIncidentOpenedMetric);
-                    if (openedMinutes is > 0)
-                    {
-                        _cpuIncidentOpenedUtc[key] = DateTime.UnixEpoch.AddMinutes(openedMinutes.Value);
-                    }
-                }
+                return;
             }
 
-            /* #3653 (A5): the tempdb Space gate's record — the same seed, the same cooldown stamp on an
-               already-open incident, for the same reasons the CPU block above states; a second metric name
-               is a second row in the same (server, metric) table, so nothing new is stored and no rung was
-               needed. */
-            readClock.Restart();
+            _cpuPersistence[key] = cpuPersistence.Value;
+
+            /* An incident that was ALREADY OPEN gets its cooldown clock stamped as if it had just been
+               announced. The persisted Firing bit stops the gate producing a second rising edge, but
+               the cooldown dictionaries are in-memory by design (see their field comment), so an empty
+               clock plus a still-breaching condition would deliver the standing-condition REMINDER on
+               the first post-restart sweep: an identical High CPU message seconds after a restart,
+               which is a re-announcement whatever it is called internally. Stamping makes the
+               reminder wait a full cooldown, which is what an operator who already has the incident
+               open would expect. Nothing can be lost: if the condition is still breaching when the
+               cooldown elapses the reminder fires then, and if it cleared while the service was down
+               the first ClearSamples clear samples resolve it. */
+            if (cpuPersistence.Value.State.Firing)
+            {
+                _lastCpuAlert[key] = _utcNow();
+                _cpuRestoredOpen[key] = true;
+
+                int? openedMinutes = null;
+                var openedClock = Stopwatch.StartNew();
+                try
+                {
+                    openedMinutes = await _stateStore.LoadEdgeTriggerWatermarkAsync(key, CpuIncidentOpenedMetric);
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    /* #7295: the load throws on a failed read now. A missing opened time was always survivable (the incident then
+                       reads as opened at its first sweep here), and it must not cost the CPU record already restored above. */
+                    _logger?.LogError("Could not read when the CPU incident for {ServerKey} opened after {ElapsedMs} ms: {Message}", key, openedClock.ElapsedMilliseconds, ex.Message);
+                    _readFailures?.RecordReadFailure(key, "CPU incident opened-time seed", openedClock.ElapsedMilliseconds);
+                }
+
+                if (openedMinutes is > 0)
+                {
+                    _cpuIncidentOpenedUtc[key] = DateTime.UnixEpoch.AddMinutes(openedMinutes.Value);
+                }
+            }
+        }, ct);
+
+        /* #3653 (A5): the tempdb Space gate's record: the same seed, the same cooldown stamp on an
+           already-open incident, for the same reasons the CPU block above states; a second metric name
+           is a second row in the same (server, metric) table, so nothing new is stored and no rung was
+           needed. */
+        await SeedStepAsync(key, TempDbSeedStep, "tempdb space persistence record", async () =>
+        {
             var tempDbPersistence = await _stateStore.LoadAlertPersistenceAsync(key, TempDbSpacePersistenceMetric);
             if (tempDbPersistence.HasValue)
             {
@@ -782,10 +807,12 @@ public sealed class AlertEngine
                     _lastTempDbSpaceAlert[key] = _utcNow();
                 }
             }
+        }, ct);
 
-            /* #3653 (A5, Q4): the Blocking Wait Time gate's record — the third row under the third metric name,
-               same seed, same cooldown stamp on an already-open incident, same reasons. */
-            readClock.Restart();
+        /* #3653 (A5, Q4): the Blocking Wait Time gate's record: the third row under the third metric name,
+           same seed, same cooldown stamp on an already-open incident, same reasons. */
+        await SeedStepAsync(key, BlockingWaitSeedStep, "blocking wait persistence record", async () =>
+        {
             var blockingWaitPersistence = await _stateStore.LoadAlertPersistenceAsync(key, BlockingWaitPersistenceMetric);
             if (blockingWaitPersistence.HasValue)
             {
@@ -795,6 +822,27 @@ public sealed class AlertEngine
                     _lastBlockingWaitAlert[key] = _utcNow();
                 }
             }
+        }, ct);
+    }
+
+    /// <summary>
+    /// #7295: runs one seed load and marks the step done for the key only when it worked. A store that cannot be read is logged and
+    /// counted, leaves the step open, and the check that depends on it skips the sweep (<see cref="IsSeeded"/>). The
+    /// <see cref="SeedLoadCap.MaxFailedLoads"/>th failed read in a row for the step marks it done with nothing loaded, so the check
+    /// runs from an empty seed (at worst one duplicate page) instead of waiting out the failure. Only cancellation propagates.
+    /// </summary>
+    private async Task SeedStepAsync(string key, string step, string what, Func<Task> load, CancellationToken ct)
+    {
+        if (_seededSteps.ContainsKey((key, step)))
+        {
+            return;
+        }
+
+        var readClock = Stopwatch.StartNew();
+        try
+        {
+            await load();
+            _seededSteps[(key, step)] = true;
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -802,11 +850,65 @@ public sealed class AlertEngine
         }
         catch (Exception ex)
         {
-            _logger?.LogError("Failed to seed edge-trigger watermarks for {ServerKey} after {ElapsedMs} ms: {Message}", key, readClock.ElapsedMilliseconds, ex.Message);
+            _logger?.LogError("Failed to seed the {What} for {ServerKey} after {ElapsedMs} ms; the check that needs it is skipped and the read is tried again on the next sweep: {Message}", what, key, readClock.ElapsedMilliseconds, ex.Message);
             _readFailures?.RecordReadFailure(key, "edge-trigger watermark seed", readClock.ElapsedMilliseconds);
+            if (_seedLoadCap.RecordFailedLoad(_logger, _stateStore.GetType().Name, key, what, ex))
+            {
+                _seededSteps[(key, step)] = true;
+            }
+        }
+    }
+
+    private bool IsSeeded(string key, string step) => _seededSteps.ContainsKey((key, step));
+
+    /// <summary>
+    /// #7295: loads the saved blocking and deadlock count watermarks, both before either is applied, and marks the key seeded
+    /// only when both reads worked (a row or no row). A store that cannot be read throws, and an empty store answers null; the two
+    /// used to look the same, so the key was marked seeded with a watermark of 0 and counts a page had carried were paged again once
+    /// the cooldown ran out. A failed read is logged and counted, leaves the key unseeded, and the sweep skips this server's blocking
+    /// and deadlock checks (<see cref="CheckBlockingAsync"/>, <see cref="CheckDeadlocksAsync"/>) until a later sweep reads them. The
+    /// <see cref="SeedLoadCap.MaxFailedLoads"/>th failed sweep in a row marks the key seeded with both watermarks left empty, so the two
+    /// checks run (at worst one duplicate page) instead of waiting out a standing failure.
+    /// Nothing else is held back: the other checks do not depend on these two values. Only cancellation propagates.
+    /// </summary>
+    private async Task EnsureCountWatermarksSeededAsync(string key, CancellationToken ct)
+    {
+        if (_countWatermarksSeeded.ContainsKey(key))
+        {
+            return;
         }
 
-        _seededServerKeys[key] = true;
+        var readClock = Stopwatch.StartNew();
+        try
+        {
+            var blocking = await _stateStore.LoadEdgeTriggerWatermarkAsync(key, BlockingWatermarkMetric);
+            readClock.Restart();
+            var deadlock = await _stateStore.LoadEdgeTriggerWatermarkAsync(key, DeadlockWatermarkMetric);
+            if (blocking.HasValue)
+            {
+                _lastAlertedBlockingCount[key] = blocking.Value;
+            }
+
+            if (deadlock.HasValue)
+            {
+                _lastAlertedDeadlockCount[key] = deadlock.Value;
+            }
+
+            _countWatermarksSeeded[key] = true;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError("Failed to seed the blocking and deadlock count watermarks for {ServerKey} after {ElapsedMs} ms; those two checks are skipped and the read is tried again on the next sweep: {Message}", key, readClock.ElapsedMilliseconds, ex.Message);
+            _readFailures?.RecordReadFailure(key, "blocking and deadlock count watermark seed", readClock.ElapsedMilliseconds);
+            if (_seedLoadCap.RecordFailedLoad(_logger, _stateStore.GetType().Name, key, CountWatermarkSeedStep, ex))
+            {
+                _countWatermarksSeeded[key] = true;
+            }
+        }
     }
 
     /// <summary>
@@ -1130,6 +1232,13 @@ public sealed class AlertEngine
            second arm behind the same gate. The instant is the row's UTC twin where the store has one and the
            target's local stamp before V134 (#3744); the gate compares it for EQUALITY, so which clock stamped
            it is not a gate input — see ObservePersistenceAsync for why order was the wrong test. */
+        /* #7295: without the saved CPU persistence record this check would run from an empty record and page or stay quiet on a streak the
+           last life already counted. Skipped until the seed has read it; the next sweep reads again. */
+        if (!IsSeeded(key, CpuSeedStep))
+        {
+            return;
+        }
+
         int cpuThreshold = Threshold(AlertThresholdKey.CpuThresholdPercent, key);
         var observations = SelectCpuObservations(snapshot, key, now);
         var events = new List<(bool IsFire, double Value, DateTime? ReadingUtc)>();
@@ -1704,6 +1813,12 @@ public sealed class AlertEngine
         string key, string serverName, int? serverId, string fingerprintServer, DateTime now, TimeSpan alertCooldown, bool suppressed,
         IReadOnlyList<string> excludedDatabases, CancellationToken ct)
     {
+        /* #7295: without the saved count watermark the gate would run from 0 and page counts a page already carried. Read again next sweep. */
+        if (!_countWatermarksSeeded.ContainsKey(key))
+        {
+            return;
+        }
+
         List<BlockedProcessAlertRow>? blockingRows = null;
         int effectiveBlockingCount = 0;
         long worstBlockingWaitMs = 0;
@@ -2057,6 +2172,13 @@ public sealed class AlertEngine
             return;
         }
 
+        /* #7295: without the saved blocking wait persistence record this check would run from an empty record and page or stay quiet on a streak the
+           last life already counted. Skipped until the seed has read it; the next sweep reads again. */
+        if (!IsSeeded(key, BlockingWaitSeedStep))
+        {
+            return;
+        }
+
         CurrentBlockingWaitResult? current;
         var readClock = Stopwatch.StartNew();
         try
@@ -2219,6 +2341,12 @@ public sealed class AlertEngine
         string key, string serverName, int? serverId, string fingerprintServer, DateTime now, TimeSpan alertCooldown, bool suppressed,
         IReadOnlyList<string> excludedDatabases, CancellationToken ct)
     {
+        /* #7295: same skip as CheckBlockingAsync. */
+        if (!_countWatermarksSeeded.ContainsKey(key))
+        {
+            return;
+        }
+
         List<DeadlockAlertRow>? deadlockRows = null;
         int deadlockThreshold = Threshold(AlertThresholdKey.DeadlockCountThreshold, key);
         int effectiveDeadlockCount = 0;
@@ -3303,6 +3431,13 @@ public sealed class AlertEngine
             return;
         }
 
+        /* #7295: without the saved tempdb space persistence record this check would run from an empty record and page or stay quiet on a streak the
+           last life already counted. Skipped until the seed has read it; the next sweep reads again. */
+        if (!IsSeeded(key, TempDbSeedStep))
+        {
+            return;
+        }
+
         int tempDbThreshold = Threshold(AlertThresholdKey.TempDbSpaceThresholdPercent, key);
         var readClock = Stopwatch.StartNew();
         try
@@ -4042,6 +4177,13 @@ public sealed class AlertEngine
         DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
     {
         if (!_settings.FailedJobEnabled || _failedJobsFetcher is null)              /* :639 */
+        {
+            return false;
+        }
+
+        /* #7295: without the saved failed-job watermark this check would run from an empty record and page or stay quiet on a streak the
+           last life already counted. Skipped until the seed has read it; the next sweep reads again. */
+        if (!IsSeeded(key, FailedJobSeedStep))
         {
             return false;
         }
