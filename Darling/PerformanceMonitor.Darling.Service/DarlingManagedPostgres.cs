@@ -143,6 +143,10 @@ public sealed class DarlingManagedPostgres
     /// access checks, so a handful is enough, and every pooled connection is a postgres.exe process.</summary>
     internal const int WebAdminMaxPoolSize = 4;
 
+    /// <summary>#7223: the pool bound every managed role connection string takes unless its caller names a smaller one (the web admin pool's
+    /// <see cref="WebAdminMaxPoolSize"/>). One definition, so a change here moves the owner string and all five stored-credential builders (#1559, #2819).</summary>
+    internal const int DefaultMaxPoolSize = 24;
+
     /// <summary>
     /// The <c>ApplicationName</c> the SERVICE's own collection-loop store connection presents (#4479, the
     /// rest of #4442's pattern): the worker's data source, set through
@@ -3023,7 +3027,7 @@ public sealed class DarlingManagedPostgres
     /// roles (#4442 scope 2) so the connection names itself in <c>pg_stat_activity</c> without a store-side
     /// change.
     /// </summary>
-    private static string BuildRoleConnectionString(int port, string username, string password, string? applicationName = null, int maxPoolSize = 24)
+    private static string BuildRoleConnectionString(int port, string username, string password, string? applicationName = null, int maxPoolSize = DefaultMaxPoolSize)
     {
         var builder = new NpgsqlConnectionStringBuilder
         {
@@ -3133,7 +3137,7 @@ public sealed class DarlingManagedPostgres
     /// </summary>
     [SupportedOSPlatform("windows")]
     private static string? TryBuildRoleConnectionStringFromStoredCredential(
-        PostgresConfig config, Func<string, string> credentialPathFor, string role, string? applicationName, int maxPoolSize = 24)
+        PostgresConfig config, Func<string, string> credentialPathFor, string role, string? applicationName, int maxPoolSize = DefaultMaxPoolSize)
     {
         var credentialPath = credentialPathFor(ResolveDataDirectory(config));
         if (!File.Exists(credentialPath))
