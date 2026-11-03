@@ -166,11 +166,17 @@ public sealed class PgAlertNoise7082LiveTests
             /* Second life: nothing is in memory. The seed puts the waiting pair back and lets the gate fire again at the same
                count, and the count pages on it although the store already knows the pair. */
             var unannouncedAfter = new HashSet<string>(StringComparer.Ordinal);
-            var watermark = await DarlingWorker.SeedPgDeadlockStateAsync(state, Server, Metric, unannouncedAfter);
+            var watermark = await DarlingWorker.SeedPgDeadlockStateAsync(
+                state, Server, Metric, unannouncedAfter, fresh => h.Rollup.NoteNewSignatures(Server, fresh));
             Assert.Equal(0, watermark);
             var after = await Count(new Dictionary<string, DateTime>(StringComparer.Ordinal), unannouncedAfter);
             Assert.Equal(new[] { pair }, after.NewKeys.ToArray());
             Assert.True(DarlingWorker.PgDeadlockPagesNow(1, after.NewKeys.Count, after.StoreOk));
+
+            /* The page is delivered and opens its investigation request: the first life's memory of the new pair is gone, so
+               only the seed can tell the gate the pair is new. */
+            await h.Deliverer.DeliverAsync(Page(), ct);
+            Assert.Equal(1, await RequestsAsync(h.Connection, ct));
 
             /* The page went out: the worker forgets the pair, in memory and in the store. */
             unannouncedAfter.Clear();
@@ -178,7 +184,7 @@ public sealed class PgAlertNoise7082LiveTests
 
             /* Third life: the same pair is known and announced, so it is held and never pages again. */
             var unannouncedThird = new HashSet<string>(StringComparer.Ordinal);
-            Assert.Equal(1, await DarlingWorker.SeedPgDeadlockStateAsync(state, Server, Metric, unannouncedThird));
+            Assert.Equal(1, await DarlingWorker.SeedPgDeadlockStateAsync(state, Server, Metric, unannouncedThird, null));
             var third = await Count(new Dictionary<string, DateTime>(StringComparer.Ordinal), unannouncedThird);
             Assert.Empty(third.NewKeys);
             Assert.False(DarlingWorker.PgDeadlockPagesNow(1, third.NewKeys.Count, third.StoreOk));

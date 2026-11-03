@@ -1045,7 +1045,8 @@ public sealed partial class DarlingWorker
             {
                 var seeded = await SeedPgDeadlockStateAsync(
                     stateStore, key, metricName,
-                    _pgDeadlockUnannouncedNew.GetOrAdd(key, _ => new HashSet<string>(StringComparer.Ordinal)));
+                    _pgDeadlockUnannouncedNew.GetOrAdd(key, _ => new HashSet<string>(StringComparer.Ordinal)),
+                    waiting => _deadlockRollup?.NoteNewSignatures(key, waiting));
                 readClock.Restart();
                 if (seeded.HasValue)
                 {
@@ -1295,9 +1296,13 @@ public sealed partial class DarlingWorker
     /// already counts those pairs, so the next count would not find them new. Answers the watermark to run the gate from,
     /// or null to leave it as it is. With a pair waiting for its page the watermark is 0: the saved one may already have
     /// been moved to this count by the fire whose page never went out, and the gate would not fire again at the same count.
+    /// The restored pairs are also handed to <paramref name="noteNewForAgentGate"/>: the agent gate reads new pairs from
+    /// memory that a restart emptied, and the next count finds them known, so without it the rescued page would open no
+    /// investigation request.
     /// </summary>
     internal static async Task<int?> SeedPgDeadlockStateAsync(
-        PgAlertStateStore stateStore, string serverKey, string metricName, HashSet<string> unannounced)
+        PgAlertStateStore stateStore, string serverKey, string metricName, HashSet<string> unannounced,
+        Action<IReadOnlyCollection<string>>? noteNewForAgentGate)
     {
         var watermark = await stateStore.LoadEdgeTriggerWatermarkAsync(serverKey, metricName);
         var waiting = await stateStore.LoadUnannouncedPairsAsync(serverKey);
@@ -1311,6 +1316,7 @@ public sealed partial class DarlingWorker
             unannounced.UnionWith(waiting);
         }
 
+        noteNewForAgentGate?.Invoke(waiting);
         return 0;
     }
 
