@@ -186,7 +186,7 @@ public sealed class DarlingMcpPgLoggingAuditTools
                 note = "Shown as observed in this snapshot for completeness and NOT judged here: "
                      + DarlingPgLoggingAudit.ReadinessTool + " owns each of these with its own trap - a loaded "
                      + "auto_explain at -1 captures nothing, an auto_explain.* value on a server that never "
-                     + "loaded the module is a placeholder, a log_line_prefix without %Q orphans every plan, "
+                     + "loaded the module is a placeholder, a log_line_prefix without %Q directly after [%p] stores no plan on a stderr target, "
                      + "and a translated lc_messages blinds every log read here. A null value means the "
                      + "setting is not in the snapshot, which for auto_explain.log_min_duration usually means "
                      + "the library is not loaded.",

@@ -114,15 +114,20 @@ public sealed class PgPlanCaptureReadinessCollector : PostgresCollectorDefinitio
                                is inconclusive and says so, because auto_explain is preload-only and never
                                appears in pg_available_extensions - see the type header.
 
-         plan_text_setting   - auto_explain.log_format. Recorded rather than judged: any format proves
-                               capture is happening, and #2565 has not chosen what we would read.
-         plan_attribution    - log_line_prefix carrying %Q. Measured on PostgreSQL 17 while investigating
+         plan_text_setting   - auto_explain.log_format. Satisfied only for json (#7182): the plan reader
+                               parses JSON and skips every other block without counting it, so auto_explain's
+                               default text format loads, logs, and stores no plan at all.
+         plan_attribution    - (#7292: a target with csvlog listed is judged by the csv record's own query_id column
+                               instead, PostgreSQL 14 or later, and log_line_prefix does not matter, because the plan readers
+                               take the csv route whenever csvlog is listed, stderr or not; jsonlog without csvlog
+                               or stderr is unmet, as the plan readers have no jsonlog route) log_line_prefix carrying %Q directly after [%p], as the last thing in the prefix and
+                               followed by one space (the only shape the stderr plan readers match, #7182). Measured on PostgreSQL 17 while investigating
                                #2538: auto_explain's JSON output contains NO query identifier, even with
                                compute_query_id on. The only place the id appears is the LOG LINE PREFIX,
                                and with %Q present it equals pg_stat_statements.queryid exactly. So without
-                               it every captured plan is an orphan that cannot be joined to the statement it
-                               belongs to - and the failure looks like the feature working, which is why
-                               this is a facet rather than a footnote.
+                               it a plan has no id to be joined to the statement it belongs to, so the stderr
+                               readers store none - and the failure looks like the feature working, which is
+                               why this is a facet rather than a footnote.
          message_locale      - lc_messages. Whether the target writes its messages in the language every
                                log read here matches, which decides whether ANY of them can find an anchor.
                                Judged rather than merely recorded: a facet that reported the value and drew
@@ -154,6 +159,11 @@ WITH settings AS (
         current_setting('auto_explain.log_min_duration', true)                   AS threshold,
         current_setting('auto_explain.log_format', true)                         AS log_format,
         current_setting('log_line_prefix', true)                                 AS line_prefix,
+        /* #7292: where the server writes its log. A target whose log_destination lists csvlog is read through its
+           csvlog file, and a jsonlog-only target through its jsonlog file, and those readers take the pid and the
+           query id from columns of their own, never from log_line_prefix. server_version_num decides whether the csv record has a query_id column at all. */
+        current_setting('log_destination', true)                                 AS log_dest,
+        current_setting('server_version_num', true)                              AS version_num,
         /* current_setting rather than a pg_settings subquery, matching the four above. lc_messages is
            PGC_SUPERUSER by context - a superuser can SET it - but it carries no GUC_SUPERUSER_ONLY flag, so
            any role may read it. The decisive evidence is next door rather than in the docs: this collector
@@ -213,13 +223,53 @@ probe AS (
            from an empty deadlock result differs between the two. */
         coalesce(s.message_locale, '') = ''                                      AS locale_unset,
         /* #4735 item 3: DERIVED ONCE, for the reason library_loaded is. SATISFIED means a log_line_prefix the stderr
-           log readers can read: it starts with a timestamp (%t or %m) and carries the process id alone in brackets,
+           log readers can read: it starts with a timestamp (%t or %m) followed by a space or a colon, and carries the process id alone in brackets,
            [%p]. The readers anchor on that bracket, so a prefix with an unbracketed %p (%m %p, %t %p:) or with more in
            the bracket than the pid (%t [%p-%l]) has every line dropped, and an empty deadlock, plan or log-event read
            then looks like a quiet server. Case-sensitive on purpose: %P is not %p, and %T is not %t. A NULL or empty
-           prefix reads as unsatisfied, the direction that never presents a precondition this cannot prove as met. */
-        coalesce(s.line_prefix, '') ~ '^%[tm].*\[%p\]'                          AS prefix_readable
+           prefix reads as unsatisfied, the direction that never presents a precondition this cannot prove as met.
+           The space or colon right after %t or %m is the block pattern's own rule: it needs a space or a colon after the
+           time zone token, so '%t[%p] ' writes '... UTC[123] ' and every line is dropped.
+           Nothing between the timestamp and [%p] may be a literal '['. Every stderr reader's gap before the pid bracket
+           passes one bracket only, the exact text [local] that %r and %h render for a Unix-socket session, and those
+           escapes carry no '[' in the format string. So '%m [%l] [%p] ', '%m [%a] [%p] ' and '%m [%c] [%p] ' write a
+           bracket the gap cannot pass (or, for %l, take the line number for the pid) and every line is dropped. */
+        coalesce(s.line_prefix, '') ~ '^%[tm][ :][^[]*\[%p\]'                    AS prefix_readable,
+        /* #7182: the shape the stderr plan block pattern (PgPlanLogParser, the block regex) can match: a prefix
+           that starts with a timestamp (%t or %m, which the pattern's leading date needs) and a space or a colon right
+           after it (the pattern needs one after the time zone token, so '%t[%p] %Q ' matches nothing), then the bracketed pid,
+           ONE separator (a space or a colon), %Q, ONE space, then the end of the prefix, because
+           PostgreSQL writes 'LOG:  ' straight after the prefix with no space of its own. So '%m [%p] %Q ' and
+           '%t:%r:%u@%d:[%p]:%Q ' match, while '%m [%p] %Q%u@%d ', '%m [%p] %Q %u@%d ' and '%m [%p] %Q' (no
+           trailing space) put text between the id and LOG: or none after it, and '%u [%p] %Q ' has no leading timestamp, so each
+           captures no plan at all, and so does '%m [%l] [%p] %Q ' (a literal bracket between the timestamp and the pid
+           bracket: the pattern's gap passes only the rendered text [local], which %r and %h write and whose format
+           string carries no '['), while a
+           bare 'contains %Q' test, or 'next escape after %p', reads as met. This is the block pattern's rule
+           for whether a block matches at all, not PrefixCarriesQueryIdAfterPid, which only decides whether to
+           trust the token as the id once the block has matched. */
+        coalesce(s.line_prefix, '') ~ '^%[tm][ :][^[]*\[%p\][ :]%Q $'            AS prefix_qid_after_pid,
+        /* #7182: the plan reader parses JSON only. Case-insensitive because auto_explain accepts any case for
+           an enum value, and trimmed because a placeholder read may carry what the file spelled. */
+        lower(btrim(coalesce(s.log_format, ''))) = 'json'                       AS log_format_json,
+        /* #7292: the log_destination list, spaces stripped and lowercased the way PgLogFormatCapability.ProbeSql
+           normalises it (PostgreSQL accepts 'Stderr, CSVlog'). The readers route on csvlog being LISTED
+           (context.PgLogUsesCsvlog is 'csvlog' = ANY (log_destination) and never looks at stderr), so csv_listed
+           decides, stderr or not: log_line_prefix is not what the plan, deadlock and log-event reads use then, and
+           the plan reader takes the query id from the csv record's own query_id column, which exists from
+           PostgreSQL 14 (13 writes 24 columns). jsonlog_only is jsonlog listed with neither csvlog nor stderr: the
+           log-event reader takes jsonlog first, the plan and deadlock readers have no jsonlog route (the plan
+           reader would take the stderr route and skip with 'no stderr log file'). Everything else (stderr without
+           csvlog, a NULL or empty list, syslog) keeps the prefix rule. */
+        'csvlog' = ANY (d.dest)                                                  AS csv_listed,
+        'jsonlog' = ANY (d.dest) AND NOT 'csvlog' = ANY (d.dest)
+            AND NOT 'stderr' = ANY (d.dest)                                      AS jsonlog_only,
+        'csvlog' = ANY (d.dest)
+            AND coalesce(nullif(s.version_num, '')::int, 0) >= 140000           AS csv_has_query_id
     FROM settings AS s
+    CROSS JOIN LATERAL (
+        SELECT string_to_array(lower(replace(coalesce(s.log_dest, ''), ' ', '')), ',') AS dest
+    ) AS d
 )
 SELECT
     'library_loaded'::text                                                        AS facet,
@@ -300,14 +350,18 @@ SELECT
     'plan_text_setting'::text,
     /* Gated on loaded for the same reason as capture_threshold: auto_explain.log_format is equally
        definable as a placeholder on a server with no auto_explain. */
-    p.loaded AND p.log_format IS NOT NULL,
+    p.loaded AND p.log_format_json,
     coalesce(p.log_format, '(setting absent - library not loaded)'),
     CASE
         WHEN NOT p.loaded AND p.log_format IS NOT NULL
             THEN 'This value is a PLACEHOLDER - auto_explain is not loaded, so nothing is writing plans in '
                  || 'this or any format. Fix library_loaded first.'
-        ELSE 'The format auto_explain writes plans in. Recorded, not judged: any value proves capture is '
-             || 'configured, and which format is readable is settled separately.'
+        WHEN p.log_format_json
+            THEN 'auto_explain writes plans as JSON, the format the plan capture reads.'
+        ELSE 'auto_explain.log_format is not json. The plan capture reads only JSON and skips every other '
+             || 'block without a trace, so with auto_explain''s default text format the library loads and '
+             || 'logs plans while none are stored. SET auto_explain.log_format = json (a reload, no restart: '
+             || 'ALTER SYSTEM or the parameter group, then pg_reload_conf()).'
     END
 FROM probe AS p
 
@@ -324,16 +378,45 @@ SELECT
 
        NOT gated on loaded: log_line_prefix is a real core GUC that always exists and always means what it
        says, and it is worth knowing this is wrong BEFORE the library goes on, because fixing it afterwards
-       means every plan captured in between is an orphan. */
-    strpos(coalesce(p.line_prefix, ''), '%Q') > 0,
+       means every plan captured in between is stored without its query id or not at all. */
+    CASE WHEN p.csv_listed THEN p.csv_has_query_id WHEN p.jsonlog_only THEN false ELSE p.prefix_qid_after_pid END,
     coalesce(p.line_prefix, '(unreadable)'),
     CASE
+        /* #7292: a target with csvlog listed is not judged by the prefix: the plan reader takes the csv route
+           whenever csvlog is listed, stderr or not, and reads the query id from the record's own column. */
+        WHEN p.csv_has_query_id
+            THEN 'log_destination lists csvlog, so the plan reader reads the csvlog and takes the query '
+                 || 'id from the record''s own query_id column; log_line_prefix plays no part. Nothing to change in '
+                 || 'log_line_prefix for this.'
+        WHEN p.csv_listed
+            THEN 'log_destination lists csvlog, but this PostgreSQL is older than 14 and its csvlog '
+                 || 'record has no query_id column, so a captured plan cannot be joined to its statement. '
+                 || 'The plan reader reads the csvlog whenever it is listed, so a log_line_prefix with %Q does not '
+                 || 'help while csvlog stays in log_destination. Take csvlog out of log_destination so the server logs '
+                 || 'to stderr, with %Q directly after [%p] in log_line_prefix, or upgrade to PostgreSQL 14 or later.'
+        WHEN p.jsonlog_only
+            THEN 'log_destination has jsonlog and no csvlog or stderr. The plan readers read stderr or csvlog and '
+                 || 'never jsonlog, so no plan is stored from this target at all. Add csvlog to log_destination '
+                 || '(PostgreSQL 14 or later; the plan reader then takes the query id from the csvlog query_id '
+                 || 'column), or add stderr and put %Q directly after [%p] in log_line_prefix, for example '
+                 || '''%m [%p] %Q ''. log_destination needs a reload, not a restart.'
+        WHEN p.prefix_qid_after_pid
+            THEN 'log_line_prefix carries %Q directly after [%p], as the last thing in the prefix and followed by one space, so each captured plan is stamped with the '
+                 || 'query id that joins it to pg_stat_statements.'
         WHEN strpos(coalesce(p.line_prefix, ''), '%Q') > 0
-            THEN 'log_line_prefix carries %Q, so each captured plan is stamped with the query id that joins '
-                 || 'it to pg_stat_statements.'
+            THEN 'log_line_prefix carries %Q, but not directly after [%p] as the last thing in the prefix, '
+                 || 'followed by one space, or it does not start with %t or %m followed by a space or a colon, or it has a literal '
+                 || 'bracket between the timestamp and [%p]. The stderr plan readers need a '
+                 || 'leading timestamp with a space or a colon right after it, no bracket before the pid bracket (only the [local] that %r and %h write), '
+                 || 'take the query id from the token right after the bracketed pid and need '
+                 || 'LOG: right after it, so with %Q anywhere else, with text after it, or with no leading '
+                 || 'timestamp, no plan is stored at all. Put %Q directly after [%p], as the last thing '
+                 || 'in the prefix, followed by one space, and start the prefix with %t or %m followed by a space or a colon, for example '
+                 || '''%m [%p] %Q ''; it is a dynamic parameter and needs no restart.'
         ELSE 'log_line_prefix does NOT carry %Q. auto_explain does not put a query identifier in the plan '
-             || 'itself - the id appears ONLY in the log line prefix - so plans captured without it cannot '
-             || 'be joined to the statement they belong to. Add %Q to log_line_prefix; it is a dynamic '
+             || 'itself - the id appears ONLY in the log line prefix - so a plan read without it cannot be '
+             || 'joined to the statement it belongs to, and the stderr plan readers store no plan at all. Add '
+             || '%Q directly after [%p], as the last thing in the prefix and followed by one space, in log_line_prefix, for example ''%m [%p] %Q ''; it is a dynamic '
              || 'parameter and needs no restart.'
     END
 FROM probe AS p
@@ -394,20 +477,28 @@ SELECT
     'log_line_prefix_readable'::text,
     /* NOT gated on loaded, for message_locale's reason: the deadlock and log-event reads depend on the prefix with
        no auto_explain in the picture at all. */
-    p.prefix_readable,
+    p.prefix_readable OR p.csv_listed OR p.jsonlog_only,
     coalesce(p.line_prefix, '(unreadable)'),
     CASE
+        /* #7292: the destination gate the detail text below has always described. */
+        WHEN p.csv_listed OR p.jsonlog_only
+            THEN 'log_destination lists csvlog, or lists jsonlog without csvlog or stderr, so the log readers take '
+                 || 'the process id and every other field from the structured log''s own columns and '
+                 || 'log_line_prefix plays no part. '
+                 || 'That is a precondition being met, not a claim that anything was read. The deadlock and plan '
+                 || 'reads have no jsonlog route, though: they read csvlog or stderr only.'
         WHEN p.prefix_readable
-            THEN 'log_line_prefix starts with a timestamp (%t or %m) and carries the process id in brackets ([%p]), '
+            THEN 'log_line_prefix starts with a timestamp (%t or %m) followed by a space or a colon and carries the process id in brackets ([%p]), '
                  || 'which is the shape the stderr log readers understand. That is a precondition being met, not a '
                  || 'claim that anything was read. csvlog and jsonlog carry the process id in a column of their own '
                  || 'and do not depend on the prefix.'
         ELSE 'The stderr log readers cannot read this log_line_prefix, so every line written under it is dropped '
              || 'and an empty deadlock, plan or log-event result from this target means nothing. They need the '
-             || 'prefix to start with a timestamp (%t or %m) and to carry the process id alone in brackets, as '
-             || 'in ''%m [%p] ''. An unbracketed %p (''%m %p '', ''%t %p:'') or a bracket that holds more than the pid '
-             || '(''%t [%p-%l]'') is not read. Change log_line_prefix to include [%p]; it is a dynamic parameter and '
-             || 'needs a reload, not a restart. A target that logs to csvlog or jsonlog only does not depend on it.'
+             || 'prefix to start with a timestamp (%t or %m) followed by a space or a colon, and to carry the process id alone in brackets, as '
+             || 'in ''%m [%p] ''. A timestamp with no space or colon right after it (''%t[%p] ''), an unbracketed %p (''%m %p '', ''%t %p:'') or a bracket that holds more than the pid '
+             || '(''%t [%p-%l]'') is not read, and neither is a literal bracket between the timestamp and [%p] (''%m [%l] [%p] '', '
+             || '''%m [%a] [%p] ''): the readers pass only the [local] that %r and %h write there. Change log_line_prefix to include [%p]; it is a dynamic parameter and '
+             || 'needs a reload, not a restart. A target whose log_destination lists csvlog, or lists jsonlog without stderr, does not depend on it.'
     END
 FROM probe AS p";
 
