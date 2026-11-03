@@ -85,16 +85,31 @@ public sealed class PgPlanCaptureReadinessStructuredLogLiveTests
 
     [Theory]
     [InlineData("csvlog")]
-    [InlineData("jsonlog")]
     [InlineData("csvlog,jsonlog")]
     [InlineData("Csvlog, JSONlog")]
-    public async Task AStructuredOnlyTargetIsNotJudgedByItsLinePrefix(string destination)
+    public async Task ACsvlogTargetWithoutStderrIsNotJudgedByItsLinePrefix(string destination)
     {
         var facets = await RunAsync(destination, UnreadablePrefix);
 
         Assert.True(facets["plan_attribution"].Satisfied, destination);
         Assert.True(facets["log_line_prefix_readable"].Satisfied, destination);
         Assert.DoesNotContain("Add %Q", facets["plan_attribution"].Detail, StringComparison.Ordinal);
+    }
+
+    /* The plan readers have no jsonlog route (PgPlanCaptureCollector reads stderr or csvlog), so a jsonlog-only target
+       stores no plan whatever its prefix says: met for plan_attribution would be a false pass. The log-events reader does
+       read jsonlog, so log_line_prefix_readable stays met. */
+    [Theory]
+    [InlineData(UnreadablePrefix)]
+    [InlineData(GoodPrefix)]
+    public async Task AJsonlogOnlyTargetStaysUnmetForPlanAttributionBecauseNoPlanReaderReadsJsonlog(string prefix)
+    {
+        var facets = await RunAsync("jsonlog", prefix);
+
+        Assert.False(facets["plan_attribution"].Satisfied, prefix);
+        Assert.Contains("never jsonlog", facets["plan_attribution"].Detail, StringComparison.Ordinal);
+        Assert.Contains("Add csvlog to log_destination", facets["plan_attribution"].Detail, StringComparison.Ordinal);
+        Assert.True(facets["log_line_prefix_readable"].Satisfied, prefix);
     }
 
     [Theory]

@@ -117,8 +117,9 @@ public sealed class PgPlanCaptureReadinessCollector : PostgresCollectorDefinitio
          plan_text_setting   - auto_explain.log_format. Satisfied only for json (#7182): the plan reader
                                parses JSON and skips every other block without counting it, so auto_explain's
                                default text format loads, logs, and stores no plan at all.
-         plan_attribution    - (#7292: a csvlog or jsonlog only target is judged by the log's own query_id field instead,
-                               and log_line_prefix does not matter) log_line_prefix carrying %Q directly after [%p], as the last thing in the prefix and
+         plan_attribution    - (#7292: a target with csvlog and no stderr is judged by the csv record's own query_id column
+                               instead, PostgreSQL 14 or later, and log_line_prefix does not matter; jsonlog without csvlog
+                               or stderr is unmet, as the plan readers have no jsonlog route) log_line_prefix carrying %Q directly after [%p], as the last thing in the prefix and
                                followed by one space (the only shape the stderr plan readers match, #7182). Measured on PostgreSQL 17 while investigating
                                #2538: auto_explain's JSON output contains NO query identifier, even with
                                compute_query_id on. The only place the id appears is the LOG LINE PREFIX,
@@ -246,10 +247,13 @@ probe AS (
            stderr too keeps the prefix rule, since the stderr reader may be the one in use. A NULL or empty list
            reads as NOT structured, the direction that keeps the prefix rule. */
         d.dest && ARRAY['csvlog', 'jsonlog'] AND NOT 'stderr' = ANY (d.dest)     AS structured_only,
-        /* The csv record carries query_id from PostgreSQL 14 (26 columns, where 13 writes 24) and the json record
-           always (jsonlog is 15 or later), so a csvlog-only target on 13 has no id column to attribute from. */
-        'jsonlog' = ANY (d.dest)
-            OR coalesce(nullif(s.version_num, '')::int, 0) >= 140000             AS structured_has_query_id
+        /* The PLAN readers read stderr or csvlog and never jsonlog (PgPlanCaptureCollector has no jsonlog route: with
+           csvlog unlisted it takes the stderr route and skips with 'no stderr log file'), so a structured-only target
+           stores plans only through csvlog, and only from PostgreSQL 14, where the csv record gains its query_id
+           column (13 writes 24 columns). csvlog plus jsonlog reads csvlog for plans. */
+        'csvlog' = ANY (d.dest)                                                  AS csv_listed,
+        'csvlog' = ANY (d.dest)
+            AND coalesce(nullif(s.version_num, '')::int, 0) >= 140000           AS csv_has_query_id
     FROM settings AS s
     CROSS JOIN LATERAL (
         SELECT string_to_array(lower(replace(coalesce(s.log_dest, ''), ' ', '')), ',') AS dest
@@ -363,19 +367,25 @@ SELECT
        NOT gated on loaded: log_line_prefix is a real core GUC that always exists and always means what it
        says, and it is worth knowing this is wrong BEFORE the library goes on, because fixing it afterwards
        means every plan captured in between is an orphan. */
-    CASE WHEN p.structured_only THEN p.structured_has_query_id ELSE p.prefix_qid_after_pid END,
+    CASE WHEN p.structured_only THEN p.csv_has_query_id ELSE p.prefix_qid_after_pid END,
     coalesce(p.line_prefix, '(unreadable)'),
     CASE
         /* #7292: a csvlog or jsonlog only target is not judged by the prefix, which those readers never use. */
-        WHEN p.structured_only AND p.structured_has_query_id
-            THEN 'log_destination has csvlog or jsonlog and no stderr, so the query id comes from the log '
-                 || 'record''s own query_id field and log_line_prefix plays no part. Nothing to change in '
+        WHEN p.structured_only AND p.csv_has_query_id
+            THEN 'log_destination has csvlog and no stderr, so the plan reader reads the csvlog and takes the query '
+                 || 'id from the record''s own query_id column; log_line_prefix plays no part. Nothing to change in '
                  || 'log_line_prefix for this.'
-        WHEN p.structured_only
+        WHEN p.structured_only AND p.csv_listed
             THEN 'log_destination has csvlog and no stderr, but this PostgreSQL is older than 14 and its csvlog '
                  || 'record has no query_id column, so a captured plan cannot be joined to its statement. '
                  || 'log_line_prefix does not help, since csvlog never writes it. Upgrade to PostgreSQL 14 or '
                  || 'later, or add stderr to log_destination and put %Q directly after [%p] in log_line_prefix.'
+        WHEN p.structured_only
+            THEN 'log_destination has jsonlog and no csvlog or stderr. The plan readers read stderr or csvlog and '
+                 || 'never jsonlog, so no plan is stored from this target at all. Add csvlog to log_destination '
+                 || '(PostgreSQL 14 or later; the plan reader then takes the query id from the csvlog query_id '
+                 || 'column), or add stderr and put %Q directly after [%p] in log_line_prefix, for example '
+                 || '''%m [%p] %Q ''. log_destination needs a reload, not a restart.'
         WHEN p.prefix_qid_after_pid
             THEN 'log_line_prefix carries %Q directly after [%p], as the last thing in the prefix and followed by one space, so each captured plan is stamped with the '
                  || 'query id that joins it to pg_stat_statements.'
@@ -457,7 +467,8 @@ SELECT
         WHEN p.structured_only
             THEN 'log_destination has csvlog or jsonlog and no stderr, so the log readers take the process id and '
                  || 'every other field from the structured log''s own columns and log_line_prefix plays no part. '
-                 || 'That is a precondition being met, not a claim that anything was read.'
+                 || 'That is a precondition being met, not a claim that anything was read. The deadlock and plan '
+                 || 'reads have no jsonlog route, though: they read csvlog or stderr only.'
         WHEN p.prefix_readable
             THEN 'log_line_prefix starts with a timestamp (%t or %m) and carries the process id in brackets ([%p]), '
                  || 'which is the shape the stderr log readers understand. That is a precondition being met, not a '
