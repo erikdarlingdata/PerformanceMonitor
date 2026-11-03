@@ -245,7 +245,7 @@ public sealed class StoreBusyReportTests
     {
         var writes = new[]
         {
-            "CreateServerTagAsync", "RenameServerTagAsync", "SetServerTagColorAsync", "ReparentServerTagAsync",
+            "CreateServerTagAsync", "RenameServerTagAsync", "SetServerTagColorAsync",
             "DeleteServerTagAsync", "AssignServerTagAsync", "UnassignServerTagAsync", "ClearServerTagsForServerAsync",
             "SetDatabaseStateExpectedAsync", "ResetDatabaseStateExpectedToCurrentAsync",
         };

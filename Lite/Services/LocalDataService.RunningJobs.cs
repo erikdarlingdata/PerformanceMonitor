@@ -18,24 +18,6 @@ namespace PerformanceMonitorLite.Services;
 public partial class LocalDataService
 {
     /// <summary>
-    /// Gets the latest snapshot of running jobs for a server, and only while that snapshot is the
-    /// collector's CURRENT answer.
-    /// <para>The collector writes no row when no job is running, so "the newest snapshot ever written"
-    /// can be weeks old: the tab then listed a job that ended days ago as running now. The collector's own
-    /// latest SUCCESSFUL run (<c>v_collection_log</c>, which records a SUCCESS with zero rows for a run that
-    /// found nothing) decides: a run that stored rows means the newest snapshot is that run's, and a run that
-    /// stored none means nothing is running, unless a snapshot newer than that log row exists (a run whose
-    /// rows are stored but whose log row is not written yet). A store with no such log row (retention) keeps
-    /// the newest snapshot, as before. Darling's twin is <c>ViewerDataService.RunningJobsSql</c>.</para>
-    /// <para>The snapshot must also be recent: one older than the alert read's #1812 bound (<see cref="RunningJobsCurrency.Cutoff"/>,
-    /// three missed cycles at the effective running_jobs cadence) is not listed, whatever the log says. Without that, a server that
-    /// went offline while a job ran (only failed runs after it), a lost msdb login or a collector switched off left the job reading
-    /// as running for days.</para>
-    /// </summary>
-    public async Task<List<RunningJobRow>> GetRunningJobsAsync(int serverId)
-        => (await ReadRunningJobsAsync(serverId)).Jobs;
-
-    /// <summary>
     /// The running_jobs collector's schedule cadence for a server, in minutes: the schedule the app runs it on, else the shipped
     /// default. The #1812 freshness bound is taken at this cadence (<see cref="RunningJobsCurrency"/>).
     /// </summary>
@@ -77,8 +59,20 @@ FROM
 ) AS x";
 
     /// <summary>
-    /// <see cref="GetRunningJobsAsync"/> with the not-current verdict: when no job is listed because the collector's last good
-    /// collection is older than the freshness bound, <see cref="RunningJobsRead.LastGoodCollection"/> carries its time.
+    /// Gets the latest snapshot of running jobs for a server, and only while that snapshot is the
+    /// collector's CURRENT answer. When no job is listed because the collector's last good collection is older than the freshness
+    /// bound, <see cref="RunningJobsRead.LastGoodCollection"/> carries its time, so a tab or tool can say so.
+    /// <para>The collector writes no row when no job is running, so "the newest snapshot ever written"
+    /// can be weeks old: the tab then listed a job that ended days ago as running now. The collector's own
+    /// latest SUCCESSFUL run (<c>v_collection_log</c>, which records a SUCCESS with zero rows for a run that
+    /// found nothing) decides: a run that stored rows means the newest snapshot is that run's, and a run that
+    /// stored none means nothing is running, unless a snapshot newer than that log row exists (a run whose
+    /// rows are stored but whose log row is not written yet). A store with no such log row (retention) keeps
+    /// the newest snapshot, as before. Darling's twin is <c>ViewerDataService.RunningJobsSql</c>.</para>
+    /// <para>The snapshot must also be recent: one older than the alert read's #1812 bound (<see cref="RunningJobsCurrency.Cutoff"/>,
+    /// three missed cycles at the effective running_jobs cadence) is not listed, whatever the log says. Without that, a server that
+    /// went offline while a job ran (only failed runs after it), a lost msdb login or a collector switched off left the job reading
+    /// as running for days.</para>
     /// </summary>
     public async Task<RunningJobsRead> ReadRunningJobsAsync(int serverId)
     {

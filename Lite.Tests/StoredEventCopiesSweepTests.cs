@@ -31,11 +31,6 @@ public class StoredEventCopiesSweepTests
         [("StoredEventCopies.cs", "v_system_health_events")] = 1,
         [("StoredEventCopies.cs", "v_deadlocks")] = 2,
 
-        /* HasAnyBlockingCaptureAsync's EXISTS over the server's rows, with no time window: a stored copy cannot
-           change whether a row exists. */
-        [("LocalDataService.BlockingStats.cs", "v_blocked_process_reports")] = 1,
-        [("LocalDataService.BlockingStats.cs", "v_deadlocks")] = 1,
-
         /* The deadlock reads that do not return rows, which count or take a MAX over the plain union (no helper): the
            counts and buckets count COUNT(DISTINCT StoredEventCopies.DeadlockIdentityTuple), pinned by
            EveryDeadlockCountReadsThePlainUnionWithTheSharedIdentity below, and a MAX is unchanged by a copy.

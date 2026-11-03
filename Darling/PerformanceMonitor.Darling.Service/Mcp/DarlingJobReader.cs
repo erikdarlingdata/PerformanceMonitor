@@ -54,7 +54,7 @@ internal static class DarlingJobReader
         bool IsRunningLong, decimal? PercentOfAverage);
 
     /// <summary>
-    /// The latest running-jobs snapshot for one server — Lite's <c>GetRunningJobsAsync</c> / the viewer's
+    /// The latest running-jobs snapshot for one server — Lite's <c>ReadRunningJobsAsync</c> / the viewer's
     /// <c>RunningJobsSql</c>: the newest collection only, longest-running first. The columns are exactly those
     /// the alert engine's <c>DarlingAlertReadAdapter.AnomalousJobsSql</c> reads plus the display fields, with
     /// <c>start_time</c> unconverted (the Agent's local clock; <see cref="MapRunningJobRow"/> converts it to naive

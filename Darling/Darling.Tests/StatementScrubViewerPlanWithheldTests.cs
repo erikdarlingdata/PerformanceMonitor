@@ -115,8 +115,8 @@ public sealed class StatementScrubViewerPlanWithheldTests
             }
         }
 
-        /* The three history windows, the shared SavePlanFile helper and the plan control's own Save button. */
-        Assert.True(sites >= 5, "expected at least 5 plan save sites, found " + sites);
+        /* The shared SavePlanFile helper (the three history windows go through it, #7228) and the plan control's own Save button. */
+        Assert.True(sites >= 2, "expected at least 2 plan save sites, found " + sites);
         Assert.Empty(problems);
     }
 

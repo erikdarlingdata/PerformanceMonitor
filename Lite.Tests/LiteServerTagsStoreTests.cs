@@ -185,8 +185,6 @@ public sealed class LiteServerTagsStoreTests : IClassFixture<SharedDuckDbFixture
         await _service.AssignServerTagAsync(new[] { 2 }, grandchild);
         await _service.AssignServerTagAsync(new[] { 3 }, unrelated);
 
-        Assert.True(await _service.ServerTagHasChildrenAsync(parent));
-
         await _service.DeleteServerTagAsync(parent);
 
         /* The whole subtree is gone; the unrelated root and its assignment survive. */

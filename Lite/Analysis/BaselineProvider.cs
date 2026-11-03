@@ -305,7 +305,7 @@ public class BaselineProvider
 
     /// <summary>
     /// The newest <c>server_properties</c> row that carries an offset, for the clock the buckets key on (#3653 Q6) —
-    /// <c>LocalDataService.GetServerUtcOffsetMinutesAsync</c>'s read with <c>time_zone_id</c> (v42) riding along, and
+    /// <c>LocalDataService.GetServerClockAsync</c>'s read (<c>time_zone_id</c>, v42, rides along), and
     /// its reason for skipping NULL offsets: the column is nullable and a store migrated from earlier holds snapshots
     /// that predate it. One row, on the compute's own connection, once per metric per cache period. A server with no
     /// row reads (NULL, NULL), which <see cref="BaselineLocalClock.Resolve"/> turns into UTC keying — exactly what
