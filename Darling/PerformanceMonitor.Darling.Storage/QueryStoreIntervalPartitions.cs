@@ -1134,8 +1134,8 @@ SELECT COALESCE
     /// an index build gives <see cref="StepOutcome.RetryLater"/>, not a wait, and a <c>deadlock_timeout</c> too short to wait
     /// below is <see cref="StepOutcome.NotReady"/>. The locks differ by version. On PostgreSQL 18 and later it is
     /// <c>ANALYZE ONLY parent</c>: the leaves are analyzed by autovacuum already, and the statement takes only the parent's
-    /// SHARE UPDATE EXCLUSIVE lock and an AccessShareLock on each leaf to sample it. Before 18 ANALYZE ONLY still recurses into the
-    /// partitions, and each is analyzed as a table of its own, under
+    /// SHARE UPDATE EXCLUSIVE lock and an AccessShareLock on each leaf to sample it. Before 18 the statement is a plain <c>ANALYZE parent</c>,
+    /// which recurses into the partitions, and each is analyzed as a table of its own, under
     /// SHARE UPDATE EXCLUSIVE, which a regular autovacuum on the current partition holds (#5571 review M1: it samples every
     /// leaf again, the 91 GB legacy table included). A waiter that sits past <c>deadlock_timeout</c> there makes PostgreSQL
     /// cancel that autovacuum (#5594), so the wait is below it on every version. A retry is the next hourly pass of
@@ -1270,9 +1270,10 @@ OR EXISTS
     /// twice the background pass's hour, so one pass that lost a lock or found a vacuum running does not make them stale.</summary>
     public const int FreshStatisticsSeconds = 2 * 3600;
 
-    /* Seconds since the relation $1 was last analyzed, by hand or by autovacuum. NULL when it never was, or the counters were reset. */
+    /* Seconds from the last ANALYZE of the relation $1, by hand or by autovacuum, to $2 (the database's now() when $2 is NULL). NULL when
+       it never was analyzed, or the counters were reset. */
     internal const string StatisticsAgeSql = @"
-SELECT EXTRACT(EPOCH FROM now() - GREATEST(s.last_analyze, s.last_autoanalyze))::double precision
+SELECT EXTRACT(EPOCH FROM COALESCE($2::timestamptz, now()) - GREATEST(s.last_analyze, s.last_autoanalyze))::double precision
 FROM pg_stat_user_tables AS s
 WHERE s.relid = to_regclass($1);";
 
@@ -1280,10 +1281,12 @@ WHERE s.relid = to_regclass($1);";
     /// Whether the day partition of <paramref name="table"/> that holds <paramref name="utcNow"/> was analyzed within
     /// <see cref="FreshStatisticsSeconds"/> (#7353). The partition is the one <see cref="AnalyzeCurrentPartitionAsync"/> analyzes,
     /// found by the same bounds. False when no day partition holds the clock, or the partition was never analyzed: the wide read's
-    /// tail is only cheap with statistics, so the guard prices it at the cold rate then.
+    /// tail is only cheap with statistics, so the guard prices it at the cold rate then. <paramref name="utcNow"/> picks the partition
+    /// and, unless <paramref name="ageClock"/> is given, the age is measured to the database's <c>now()</c>; a test passes
+    /// <paramref name="ageClock"/> to put the age on either side of <see cref="FreshStatisticsSeconds"/>.
     /// </summary>
     public static async Task<bool> CurrentPartitionHasFreshStatisticsAsync(
-        NpgsqlConnection connection, IntervalTable table, DateTime utcNow, CancellationToken cancellationToken)
+        NpgsqlConnection connection, IntervalTable table, DateTime utcNow, CancellationToken cancellationToken, DateTime? ageClock = null)
     {
         var current = CurrentPartition(await ReadPartitionsAsync(connection, table, cancellationToken).ConfigureAwait(false), utcNow);
         if (current is null)
@@ -1293,6 +1296,11 @@ WHERE s.relid = to_regclass($1);";
 
         await using var command = Command(connection, StatisticsAgeSql, ShortTimeoutSeconds);
         AddText(command, current.Name);
+        command.Parameters.Add(new NpgsqlParameter
+        {
+            NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.TimestampTz,
+            Value = ageClock is { } at ? DateTime.SpecifyKind(at, DateTimeKind.Utc) : DBNull.Value,
+        });
         return await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is double age && age <= FreshStatisticsSeconds;
     }
 

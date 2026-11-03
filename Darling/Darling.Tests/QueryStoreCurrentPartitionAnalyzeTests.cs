@@ -512,4 +512,59 @@ public sealed class QueryStoreCurrentPartitionAnalyzeLiveTests
         var none = await QueryStoreWideReadGuard.FleetServingAsync(source, PanelStart, through, null, 30, ct, DayOf(now).AddYears(-1));
         Assert.False(none!.Value.TailAnalyzed);
     }
+
+    [Fact]
+    public async Task AFaultInTheStatisticsStepAlone_KeepsTheFleetFigure_AndCountsTheTailAtOne_OnARealStore()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #7353 live tests.");
+        var ct = TestContext.Current.CancellationToken;
+        var now = DateTime.UtcNow;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var source = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var through = PanelStart.AddDays(1).AddHours(-6);
+        var logger = new QueryStoreIntervalPartitionsLiveTests.ListLogger();
+
+        /* The fleet read finds no hours here, so the fleet figure is 0 hours and 0 rows: what must survive is that it is not null. */
+        var faulted = await QueryStoreWideReadGuard.FleetServingAsync(
+            source, PanelStart, through, logger, 30, ct, now,
+            (_, _, _, _) => throw new NpgsqlException("pg_inherits timed out"));
+        Assert.NotNull(faulted);
+        Assert.False(faulted!.Value.TailAnalyzed);
+        Assert.Equal(0, faulted.Value.Hours);
+
+        /* A cancellation is still the caller's: it is not swallowed as a fault of the statistics step. */
+        await Assert.ThrowsAsync<OperationCanceledException>(() => QueryStoreWideReadGuard.FleetServingAsync(
+            source, PanelStart, through, logger, 30, ct, now,
+            (_, _, _, _) => throw new OperationCanceledException()));
+    }
+
+    [Fact]
+    public async Task TheStatisticsAgeBound_IsFreshAtTwoHoursAndStaleJustPast_OnARealStore()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #7353 live tests.");
+        var ct = TestContext.Current.CancellationToken;
+        var now = DateTime.UtcNow;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = await OpenStoreAsync(scratch, ct);
+        var logger = new QueryStoreIntervalPartitionsLiveTests.ListLogger();
+        var table = QueryStoreIntervalPartitions.Wide;
+        var current = (await SeedFreshDaysAsync(connection, table, now, logger, ct)).Current;
+        var clock = DayOf(now).AddDays(2).AddHours(5);
+        var analyze = await QueryStoreIntervalPartitions.AnalyzeCurrentPartitionAsync(connection, table, clock, logger, ct);
+        Assert.Equal(QueryStoreIntervalPartitions.StepOutcome.Done, analyze.Outcome);
+
+        /* The age is measured from the database's own last-analyze time, so the three clocks below are exact: one second past the bound,
+           exactly on it, and a minute inside it. */
+        var analyzedAt = (DateTime)(await QueryStoreIntervalWideBrinIndexLiveTests.ScalarAsync(
+            connection, $"SELECT GREATEST(last_analyze, last_autoanalyze) FROM pg_stat_user_tables WHERE relid = '{current}'::regclass", ct))!;
+        var bound = TimeSpan.FromSeconds(QueryStoreIntervalPartitions.FreshStatisticsSeconds);
+        Task<bool> FreshAt(DateTime ageClock) =>
+            QueryStoreIntervalPartitions.CurrentPartitionHasFreshStatisticsAsync(connection, table, clock, ct, ageClock);
+
+        Assert.False(await FreshAt(analyzedAt + bound + TimeSpan.FromSeconds(1)));
+        Assert.True(await FreshAt(analyzedAt + bound));
+        Assert.True(await FreshAt(analyzedAt + bound - TimeSpan.FromMinutes(1)));
+    }
 }

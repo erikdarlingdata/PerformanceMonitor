@@ -196,11 +196,14 @@ CROSS JOIN LATERAL
     /// cancellation: the estimate then counts every stamped hour at the stamp weight and the tail at 1.0, which is the figure before the
     /// fleet table. #7353: on the same connection, one more catalog read says whether the wide table's current day partition holds
     /// fresh statistics (<see cref="QueryStoreIntervalPartitions.CurrentPartitionHasFreshStatisticsAsync"/>, the partition the hourly
-    /// ANALYZE picks) at <paramref name="utcNow"/>, which tests pass so the clock is read once.
+    /// ANALYZE picks) at <paramref name="utcNow"/>, which tests pass so the clock is read once. A fault in that read alone is caught
+    /// apart from the fleet read: the fleet hours and rows stay and <c>TailAnalyzed</c> is false. <paramref name="freshStatistics"/>
+    /// is the test seam for that read.
     /// </summary>
     internal static async Task<FleetServing?> FleetServingAsync(
         NpgsqlDataSource postgres, DateTime countedStart, DateTime stampThrough, ILogger? logger,
-        int commandTimeoutSeconds, CancellationToken cancellationToken, DateTime? utcNow = null)
+        int commandTimeoutSeconds, CancellationToken cancellationToken, DateTime? utcNow = null,
+        Func<NpgsqlConnection, QueryStoreIntervalPartitions.IntervalTable, DateTime, CancellationToken, Task<bool>>? freshStatistics = null)
     {
         try
         {
@@ -221,8 +224,21 @@ CROSS JOIN LATERAL
                 rows = reader.GetInt64(1);
             }
 
-            var analyzed = await QueryStoreIntervalPartitions.CurrentPartitionHasFreshStatisticsAsync(
-                connection, QueryStoreIntervalPartitions.Wide, utcNow ?? DateTime.UtcNow, cancellationToken);
+            /* Its own catch: a fault in the statistics step alone (a timeout on pg_inherits) keeps the fleet rows already read and
+               counts the tail at 1.0, instead of dropping the whole figure back to the one before #7285. */
+            var analyzed = false;
+            try
+            {
+                var at = utcNow ?? DateTime.UtcNow;
+                analyzed = freshStatistics is null
+                    ? await QueryStoreIntervalPartitions.CurrentPartitionHasFreshStatisticsAsync(connection, QueryStoreIntervalPartitions.Wide, at, cancellationToken)
+                    : await freshStatistics(connection, QueryStoreIntervalPartitions.Wide, at, cancellationToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger?.LogDebug(ex, "The #7353 statistics age of the Query Store wide table's current partition could not be read; the guard counts the fleet tail at 1.0.");
+            }
+
             return new FleetServing(hours, rows, analyzed);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
