@@ -446,6 +446,76 @@ public sealed class QueryTagRollupLiveTests
         });
     }
 
+    /// <summary>#7374: all six sections read SQL Server sources, so the fleet form answers a PostgreSQL server's row not_collected in each of
+    /// them (the one-server form already does), instead of empty (five sections) or unavailable (query_store, the gate's "no coverage row").
+    /// The SQL Server row and fleet_total are what they were with no PostgreSQL server in the fleet.</summary>
+    [Fact]
+    public async Task AFleetRead_AnswersAPostgresServerNotCollected_InEverySection_AndLeavesTheSqlServerRowsAlone()
+    {
+        await WithStoreAsync(async c =>
+        {
+            await ExecAsync(c.Store, "UPDATE servers SET engine_kind = 'postgres' WHERE server_id = $1", c.Ct, ServerTwo);
+            var a = await TagAsync(c, "A");
+            await MapAsync(c, ServerOne, "hash", "0xA1", a);
+            await PlanCacheAsync(c, ServerOne, "0xA1", 30, 2_000_000);
+            await CoverQueryStoreAsync(c, ServerOne);
+
+            using var doc = await ReadAsync(c, null);
+            var sections = doc.RootElement.GetProperty("sections").EnumerateArray().ToList();
+            Assert.Equal(6, sections.Count);
+            foreach (var section in sections)
+            {
+                var servers = section.GetProperty("servers").EnumerateArray().ToDictionary(s => s.GetProperty("server").GetString()!);
+                var pg = servers["srv-two"];
+                Assert.Equal("not_collected", pg.GetProperty("status").GetString());
+                Assert.Contains("srv-two", pg.GetProperty("message").GetString(), StringComparison.Ordinal);
+                Assert.NotEqual("not_collected", servers["srv-one"].GetProperty("status").GetString());
+            }
+
+            var plan = Section(doc, "plan_cache");
+            Assert.Equal("ok", plan.GetProperty("servers").EnumerateArray().Single(s => s.GetProperty("server").GetString() == "srv-one").GetProperty("status").GetString());
+            Assert.Equal(2_000, Figure(plan.GetProperty("fleet_total"), "cpu_ms"));
+            Assert.False(doc.RootElement.TryGetProperty("message", out var topMessage) && (topMessage.GetString() ?? string.Empty).Contains("srv-two", StringComparison.Ordinal));
+        });
+    }
+
+    /// <summary>#7374: a PostgreSQL server has no Query Store, so it is never fed to the interval-table gate and never named under "Sections
+    /// not served". With the SQL Server uncovered, only the SQL Server is.</summary>
+    [Fact]
+    public async Task AFleetRead_NeverNamesAPostgresServerAmongTheSectionsNotServed()
+    {
+        await WithStoreAsync(async c =>
+        {
+            await ExecAsync(c.Store, "UPDATE servers SET engine_kind = 'postgres' WHERE server_id = $1", c.Ct, ServerTwo);
+
+            using var doc = await ReadAsync(c, null);
+            Assert.Equal("empty", doc.RootElement.GetProperty("status").GetString());
+            var top = doc.RootElement.GetProperty("message").GetString()!;
+            Assert.Contains("query_store", top, StringComparison.Ordinal);
+            Assert.Contains("srv-one", top, StringComparison.Ordinal);
+            Assert.DoesNotContain("srv-two", top, StringComparison.Ordinal);
+            var qs = Section(doc, "query_store");
+            Assert.DoesNotContain("srv-two", qs.GetProperty("message").GetString()!, StringComparison.Ordinal);
+            var servers = qs.GetProperty("servers").EnumerateArray().ToDictionary(x => x.GetProperty("server").GetString()!);
+            Assert.Equal("unavailable", servers["srv-one"].GetProperty("status").GetString());
+            Assert.Equal("not_collected", servers["srv-two"].GetProperty("status").GetString());
+        });
+    }
+
+    /// <summary>#7374: a fleet of PostgreSQL servers only has nothing to read, so the whole answer is not_collected with the engine reason.</summary>
+    [Fact]
+    public async Task AFleetOfOnlyPostgresServers_AnswersNotCollected()
+    {
+        await WithStoreAsync(async c =>
+        {
+            await ExecAsync(c.Store, "UPDATE servers SET engine_kind = 'postgres'", c.Ct);
+
+            using var doc = await ReadAsync(c, null);
+            Assert.Equal("not_collected", doc.RootElement.GetProperty("status").GetString());
+            Assert.Contains("srv-one", doc.RootElement.GetProperty("message").GetString(), StringComparison.Ordinal);
+        });
+    }
+
     [Fact]
     public async Task TheFleetViewListsEachServer_AndTotalsAcrossThem()
     {

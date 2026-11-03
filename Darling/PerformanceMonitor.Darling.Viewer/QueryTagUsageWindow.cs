@@ -23,8 +23,8 @@ namespace PerformanceMonitor.Darling.Viewer;
 public sealed class QueryTagUsageWindow : Window
 {
     private readonly ViewerDataService _data;
-    private readonly (int Id, string Name) _here;
-    private readonly Func<Task<List<(int Id, string Name)>>> _fleet;
+    private readonly DarlingServer _here;
+    private readonly Func<Task<List<DarlingServer>>> _fleet;
     private readonly ComboBox _scope = new() { Width = 130, Margin = new Thickness(0, 0, 8, 0) };
     private readonly ComboBox _hours = new() { Width = 110, Margin = new Thickness(0, 0, 8, 0) };
     private readonly ComboBox _tag = new() { Width = 220, Margin = new Thickness(0, 0, 8, 0) };
@@ -33,7 +33,7 @@ public sealed class QueryTagUsageWindow : Window
     private IReadOnlyList<Storage.QueryTagNode> _tags = [];
     private bool _loading;
 
-    public QueryTagUsageWindow(ViewerDataService data, (int Id, string Name) here, Func<Task<List<(int Id, string Name)>>> fleet)
+    public QueryTagUsageWindow(ViewerDataService data, DarlingServer here, Func<Task<List<DarlingServer>>> fleet)
     {
         _data = data;
         _here = here;
@@ -86,9 +86,20 @@ public sealed class QueryTagUsageWindow : Window
         {
             var allServers = _scope.SelectedIndex == 1;
             var hours = _hours.SelectedIndex switch { 0 => 1, 2 => 168, _ => 24 };
-            var scope = allServers ? await _fleet() : [_here];
+            var servers = allServers ? await _fleet() : [_here];
+            var scope = servers.Select(s => (Id: s.ServerId, Name: s.DisplayName)).ToList();
+            /* #7374: a PostgreSQL server has none of these SQL Server sources, so it is not read (and never reaches the Query Store gate). It reads not_collected. */
+            var notCollected = QueryTagUsageView.NotCollectedReasons(servers);
+            var readable = scope.Where(s => !notCollected.ContainsKey(s.Id)).Select(s => s.Id).ToList();
+            if (readable.Count == 0 && notCollected.Count > 0)
+            {
+                _message.Text = notCollected[scope[0].Id];
+                _tables.Children.Clear();
+                return;
+            }
+
             var end = DateTime.UtcNow;
-            var data = await _data.GetQueryTagRollupDataAsync(scope.Select(s => s.Id).ToList(), end.AddHours(-hours), end);
+            var data = await _data.GetQueryTagRollupDataAsync(readable, end.AddHours(-hours), end);
 
             if (_tag.Items.Count <= 1)
             {
@@ -99,7 +110,7 @@ public sealed class QueryTagUsageWindow : Window
             }
 
             var filter = QueryTagUsageView.FilterFor(data.Tags, _tag.SelectedItem as string);
-            Render(QueryTagUsageView.Build(data, scope, allServers, filter));
+            Render(QueryTagUsageView.Build(data, scope, allServers, filter, notCollected: notCollected));
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

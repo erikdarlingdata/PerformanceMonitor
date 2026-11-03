@@ -94,6 +94,33 @@ WHERE server_id = $1";
         return await DarlingRuntimePrecondition.QueryStoreReadableSecondaryStatusAsync(postgres, serverId, serverName, cancellationToken);
     }
 
+    /// <summary>
+    /// #7374: which of <paramref name="servers"/> cannot run <paramref name="collectorName"/> on their engine (a PostgreSQL target for
+    /// a read of SQL Server sources), with the reason each one's <see cref="NotCollectedStatusAsync"/> envelope gives, so a fleet read can
+    /// answer <c>not_collected</c> per server in the words the one-server form uses. A server it can run on, or whose registry read fails,
+    /// is left out of the answer (no claim), exactly as <see cref="NotCollectedStatusAsync"/> answers null for it.
+    /// </summary>
+    public static async Task<System.Collections.Generic.Dictionary<int, string>> NotCollectedReasonsAsync(
+        NpgsqlDataSource postgres,
+        System.Collections.Generic.IEnumerable<(int ServerId, string ServerName)> servers,
+        string collectorName,
+        CancellationToken cancellationToken = default)
+    {
+        var reasons = new System.Collections.Generic.Dictionary<int, string>();
+        foreach (var (serverId, serverName) in servers)
+        {
+            var envelope = await NotCollectedStatusAsync(postgres, serverId, serverName, collectorName, cancellationToken);
+            if (envelope is null) continue;
+            using var parsed = System.Text.Json.JsonDocument.Parse(envelope);
+            if (parsed.RootElement.TryGetProperty("message", out var message) && message.GetString() is { } text)
+            {
+                reasons[serverId] = text;
+            }
+        }
+
+        return reasons;
+    }
+
     /// <summary>The collectors that skip a readable secondary's databases (bit 8 of readonly_reason), so a read of what they store can be empty by design there (#6554).</summary>
     internal static bool IsReadableSecondaryGated(string collectorName) =>
         collectorName is "query_store" or "query_store_forced_plans" or "query_store_hints" or "plan_correction";
