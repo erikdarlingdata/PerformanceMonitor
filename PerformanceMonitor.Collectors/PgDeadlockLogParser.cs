@@ -136,7 +136,10 @@ public static class PgDeadlockLogParser
          line's report; that is the rare side, and it can only hide a report, never forge one.
        - The managed family's gap to the pid bracket excludes '[', as plan capture's does since #4008, so it
          cannot slide past the line's real bracket to one inside the text. The lazy '[^\n]*?' it replaces
-         could, when the rest of the pattern failed at the real one.
+         could, when the rest of the pattern failed at the real one. Both gaps pass one bracket, the exact text
+         '[local]' (#7182): %r and %h render it for a Unix-socket session, so '%m %r [%p] ' and the managed
+         '%t:%r:%u@%d:[%p]:' write it before the pid, and without it a local-socket session's deadlocks were all
+         dropped. It is not '[digits]', so the gap still cannot consume the real pid bracket.
        - The space family admits fields between the zone and the pid (#4041), as '%m %u@%d [%p] ' renders them,
          because the assembler does: a report under that prefix matched nothing here and read as a server with no
          deadlocks. Its gap excludes '[' for the same reason as the managed family's, and may not contain a ":  "
@@ -156,7 +159,7 @@ public static class PgDeadlockLogParser
        once for the block pattern above and the header pattern below. */
     private const string BlockHeaderPattern =
         @"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)? "
-        + @"(?:[^ \n]+ (?:(?!:  )[^\[\n])*\[\d+\]|[^ :\n]+:[^\[\n]*\[\d+\])"
+        + @"(?:[^ \n]+ (?:(?!:  )(?:[^\[\n]|\[local\]))*\[\d+\]|[^ :\n]+:(?:[^\[\n]|\[local\])*\[\d+\])"
         + @"(?:(?!:  )[^\n])*ERROR:  deadlock detected\s*";
 
     /* The line after the DETAIL block, when it carries a prefix and does not open another report: the HINT
