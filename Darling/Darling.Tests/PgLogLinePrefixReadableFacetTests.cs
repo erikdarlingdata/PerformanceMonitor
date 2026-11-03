@@ -50,16 +50,36 @@ public sealed class PgLogLinePrefixReadableFacetTests
     public void APrefixWithAnUnbracketedPidIsReportedAsUnreadable(string prefix)
         => Assert.False(Predicate().IsMatch(prefix), prefix);
 
-    /// <summary>The prefixes the assembler already reads: PostgreSQL's own default, the Debian one, pgBadger's, the
-    /// managed family (RDS), and the fields-before-the-pid one.</summary>
+    /// <summary>A literal bracket between the timestamp and <c>[%p]</c> (#7182 round 4). The readers' gap before the pid
+    /// bracket passes the exact text <c>[local]</c> and no other bracket, and <c>%r</c> and <c>%h</c>, the only escapes
+    /// that render it, carry no <c>[</c> in the format string. So <c>[%l]</c>, <c>[%a]</c> and <c>[%c]</c> before the pid
+    /// bracket drop every line (or, for <c>[%l]</c>, read the line number as the pid) and the facet must say so.</summary>
+    [Theory]
+    [InlineData("%m [%l] [%p] ")]
+    [InlineData("%m [%a] [%p] ")]
+    [InlineData("%m [%c] [%p] ")]
+    [InlineData("%m [%l] [%p] %Q ")]
+    [InlineData("%m [%a] [%p] %Q ")]
+    [InlineData("%m [%c] [%p] %Q ")]
+    [InlineData("%t:[%a]:[%p]:")]
+    public void ALiteralBracketBeforeThePidBracketIsReportedAsUnreadable(string prefix)
+        => Assert.False(Predicate().IsMatch(prefix), prefix);
+
+    /// <summary>The prefixes every stderr reader (the plan, deadlock and log-event readers) understands: PostgreSQL's
+    /// own default, the Debian one, pgBadger's, the managed family (RDS), the fields-before-the-pid one, and the two
+    /// that put <c>%r</c> before the pid, which write <c>[local]</c> there for a Unix-socket session. The two
+    /// <c>[local]</c> renderings are read by all three readers since #7182 round 4
+    /// (<see cref="PgLocalSocketPrefixReadersTests"/> and <see cref="PgDeadlockCandidatePatternLiveTests"/>).</summary>
     [Theory]
     [InlineData("%m [%p] ")]
     [InlineData("%m [%p] %q%u@%d ")]
     [InlineData("%t [%p]: user=%u,db=%d,app=%a,client=%h ")]
     [InlineData("%t:%r:%u@%d:[%p]:")]
+    [InlineData("%t:%r:%u@%d:[%p]:%Q ")]
     [InlineData("%m %u@%d [%p] ")]
+    [InlineData("%m %r [%p] ")]
     [InlineData("%m %r [%p] %Q ")]
-    public void APrefixTheReadersAlreadyUnderstandIsReportedAsReadable(string prefix)
+    public void APrefixEveryStderrReaderUnderstandsIsReportedAsReadable(string prefix)
         => Assert.True(Predicate().IsMatch(prefix), prefix);
 
     [Theory]

@@ -129,6 +129,9 @@ public sealed class PgPlanCaptureReadinessSettingsLiveTests
     [InlineData("%u@%d:[%p]:%Q ")]
     [InlineData("%t[%p] %Q ")]
     [InlineData("%m[%p] %Q ")]
+    [InlineData("%m [%l] [%p] %Q ")]
+    [InlineData("%m [%a] [%p] %Q ")]
+    [InlineData("%m [%c] [%p] %Q ")]
     public async Task AQueryIdAnywhereElseLeavesPlanAttributionUnmet(string prefix)
     {
         var facets = await RunAsync("json", prefix);
@@ -154,6 +157,42 @@ public sealed class PgPlanCaptureReadinessSettingsLiveTests
             Assert.False(facets["plan_attribution"].Satisfied, prefix);
             Assert.Contains("space or a colon", facets["plan_attribution"].Detail, StringComparison.Ordinal);
         }
+    }
+
+    /* The plan block pattern's gap before the pid bracket passes the exact text [local] and no other bracket, and %r and
+       %h are the only escapes that render it (their format strings carry no '['). So a literal bracket between the
+       timestamp and [%p] writes a line no stderr reader parses: '%m [%l] [%p] %Q ' writes '... UTC [5] [81] 123 LOG:' and
+       the block pattern takes [5] for the pid, '%m [%a] [%p] %Q ' writes '... UTC [psql] [81] 123 LOG:'. Revert the two
+       prefix rules' '[^[]*' to '.*' and every case here comes back satisfied. */
+    [Theory]
+    [InlineData("%m [%l] [%p] %Q ")]
+    [InlineData("%m [%a] [%p] %Q ")]
+    [InlineData("%m [%c] [%p] %Q ")]
+    [InlineData("%m [%a] [%p] ")]
+    [InlineData("%t:[%a]:[%p]:")]
+    public async Task ALiteralBracketBeforeThePidBracketLeavesBothPrefixFacetsUnmet_AndNamesTheRequirement(string prefix)
+    {
+        var facets = await RunAsync("json", prefix);
+
+        Assert.False(facets["log_line_prefix_readable"].Satisfied, prefix);
+        Assert.Contains("literal bracket", facets["log_line_prefix_readable"].Detail, StringComparison.Ordinal);
+        Assert.False(facets["plan_attribution"].Satisfied, prefix);
+        if (prefix.Contains("%Q", StringComparison.Ordinal))
+        {
+            Assert.Contains("literal bracket", facets["plan_attribution"].Detail, StringComparison.Ordinal);
+        }
+    }
+
+    /* The two Unix-socket renderings stay met: %r renders [local] before the pid bracket and every reader passes it. */
+    [Theory]
+    [InlineData("%m %r [%p] %Q ")]
+    [InlineData("%t:%r:%u@%d:[%p]:%Q ")]
+    public async Task APrefixWithRBeforeThePidKeepsBothPrefixFacetsMet(string prefix)
+    {
+        var facets = await RunAsync("json", prefix);
+
+        Assert.True(facets["log_line_prefix_readable"].Satisfied, prefix);
+        Assert.True(facets["plan_attribution"].Satisfied, prefix);
     }
 
     [Fact]

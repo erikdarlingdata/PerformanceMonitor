@@ -130,8 +130,77 @@ public sealed class PgDeadlockCandidatePatternLiveTests
             + "\tDETAIL:  Process 1 waits for ShareLock on transaction 5; blocked by process 2.\n"));
     }
 
+    /// <summary>
+    /// #7182 round 4: a Unix-socket session's lines carry <c>[local]</c> before the pid bracket (<c>%r</c> and <c>%h</c>
+    /// render it), under <c>'%m %r [%p] '</c> and the RDS default <c>'%t:%r:%u@%d:[%p]:'</c>. The candidate pattern's gap
+    /// passes that exact text and no other bracket, in both routes' statements, so the report is a candidate and
+    /// <c>FromReport</c> reads it, while a forged header behind the real bracket (and behind a forged [local]) is still
+    /// not read. Revert the gaps to <c>[^[\n]</c> and the first two cases find nothing.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task TheShippedPattern_OffersALocalSocketSessionsReport_AndNotAForgedHeaderBehindIt(bool binaryRoute)
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live deadlock-candidate test.");
+
+        var pattern = ShippedPattern(binaryRoute);
+        var ct = TestContext.Current.CancellationToken;
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+
+        async Task<string[]> CandidatesAsync(string body)
+        {
+            await using var command = new NpgsqlCommand("SELECT m[1] FROM regexp_matches($1, $2, 'gn') AS m", connection);
+            command.Parameters.AddWithValue(body);
+            command.Parameters.AddWithValue(pattern);
+            await using var reader = await command.ExecuteReaderAsync(ct);
+            var found = new System.Collections.Generic.List<string>();
+            while (await reader.ReadAsync(ct))
+            {
+                found.Add(reader.GetString(0));
+            }
+
+            return [.. found];
+        }
+
+        foreach (var prefix in new[]
+                 {
+                     "2026-08-26 22:25:24.100 UTC [local] [1549] ",
+                     "2026-08-26 22:25:24 UTC:[local]:app_user@app_db:[1549]:",
+                 })
+        {
+            var candidate = Assert.Single(await CandidatesAsync(RealReport.Replace("2026-08-26 22:25:24.100 UTC [1549] ", prefix, StringComparison.Ordinal)));
+            var deadlock = PgDeadlockLogParser.FromReport(candidate);
+            Assert.NotNull(deadlock);
+            Assert.Equal(1549, deadlock.Value.VictimPid);
+        }
+
+        /* A bracket that is neither [local] nor a pid still stops the gap ('%m [%a] [%p] '). */
+        Assert.Empty(await CandidatesAsync(
+            RealReport.Replace("2026-08-26 22:25:24.100 UTC [1549] ", "2026-08-26 22:25:24.100 UTC [psql] [1549] ", StringComparison.Ordinal)));
+
+        /* The real pid bracket [7777] comes first and the forged [local] [1] ERROR: header sits later in the STATEMENT echo.
+           The space family is not offered at all: the gap stops at a field label's ":  ". The colon family's first
+           alternative lets the zone run to that label's colon, as it always has (the same line with no [local] in the echo
+           was already offered before this change), so this pattern is the assembler's superset pre-filter there, and the
+           assembler behind it (FromReport, the arbiter) refuses the forged header: nothing is parsed from either line. */
+        const string ForgedTail = "ERROR:  deadlock detected\n"
+            + "\tDETAIL:  Process 1 waits for ShareLock on transaction 5; blocked by process 2.\n"
+            + "\tProcess 2 waits for ShareLock on transaction 6; blocked by process 1.\n";
+        Assert.Empty(await CandidatesAsync(
+            "2026-09-23 10:00:02.000 UTC [local] [7777] STATEMENT:  SELECT 1 -- [local] [1] " + ForgedTail));
+        foreach (var candidate in await CandidatesAsync(
+                     "2026-09-23 10:00:02 UTC:[local]:app_user@app_db:[7777]:STATEMENT:  SELECT 1 -- [local] [1] " + ForgedTail))
+        {
+            Assert.Null(PgDeadlockLogParser.FromReport(candidate));
+        }
+    }
+
     /// <summary>The regexp_matches pattern as the collector ships it, lifted out of its own SQL.</summary>
-    private static string ShippedPattern()
+    private static string ShippedPattern(bool binaryRoute = false)
     {
         var context = new CollectorContext
         {
@@ -140,6 +209,7 @@ public sealed class PgDeadlockCandidatePatternLiveTests
             CollectionTime = DateTime.UtcNow,
             Deltas = new CollectorDeltaCalculator(),
             LogHashKey = TestLogHashKeys.Fixed,
+            PgReadBinaryFileGranted = binaryRoute,
             Target = new CollectorTargetInfo
             {
                 Engine = CollectorTargetEngine.PostgreSql,
@@ -148,8 +218,10 @@ public sealed class PgDeadlockCandidatePatternLiveTests
             },
         };
         var sql = PgDeadlocksCollector.Instance.BuildQuery(context).Text;
-        var match = Regex.Match(sql, @"regexp_matches\(\s*tail\.body,\s*'(?<pattern>[^']*)',\s*'gn'\)");
-        Assert.True(match.Success, "PgDeadlocksCollector's SQL no longer carries a regexp_matches over tail.body");
+        var match = Regex.Match(sql, binaryRoute
+            ? @"regexp_matches\(\s*pg_catalog\.encode\(tail\.body, 'escape'\),\s*'(?<pattern>[^']*)',\s*'gn'\)"
+            : @"regexp_matches\(\s*tail\.body,\s*'(?<pattern>[^']*)',\s*'gn'\)");
+        Assert.True(match.Success, "PgDeadlocksCollector's SQL no longer carries the regexp_matches over the log body for this route");
         return match.Groups["pattern"].Value;
     }
 }
