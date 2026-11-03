@@ -1048,14 +1048,19 @@ public sealed class DarlingMcpBlockingTools
                 }
 
                 /* #7010: the window keys ride on either empty answer under hints; the family reads wait_stats, so that is the probe. */
-                var emptyHints = (await DarlingMcpWindowNotice.ReadAsync(
+                var emptyNotice = await DarlingMcpWindowNotice.ReadAsync(
                     () => DarlingMcpWindowNotice.Probe(postgres, "wait_stats", resolved.ServerName, start, end, cancellationToken),
-                    start, end, "wait_stats", emptyAnswer: true, logger: logger, cancellationToken: cancellationToken)).AsHints();
+                    start, end, "wait_stats", emptyAnswer: true, logger: logger, cancellationToken: cancellationToken);
+                var emptyHints = emptyNotice.AsHints();
                 /* #7167: an offline server's empty window answers unavailable, as the get_pg_* reads do. */
                 return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, end, await DarlingDataReader.HasAnyWaitStatAsync(postgres, resolved.ServerId, cancellationToken)
                     ? McpHelpers.Status(
                         "empty",
-                        $"No lock waits recorded for {resolved.DisplayName} in the last {hours_back} hour(s). This server HAS collected wait stats before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples.", emptyHints)
+                        McpHelpers.QuietUnlessCut(
+                            emptyNotice.WindowTruncated, emptyNotice.EffectiveStart,
+                            factual: $"No lock waits recorded for {resolved.DisplayName} in the last {hours_back} hour(s)",
+                            coveredClaim: ". This server HAS collected wait stats before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples."),
+                        emptyHints)
                     : McpHelpers.Status(
                         "unavailable",
                         $"No wait stats have EVER been recorded for {resolved.DisplayName}, so this is NOT a report of a server without lock contention — nothing has been stored for it at all. Delta wait stats need a SECOND collection cycle before the first row exists, so on a newly added server this clears itself; otherwise check that collection is running and that the server is enabled.", emptyHints), cancellationToken);
