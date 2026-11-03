@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Alerting;
@@ -528,15 +529,26 @@ ORDER BY 1";
     /// read bound it, computed from the CALLER's window so the read's cutoff and the evaluator's denominator
     /// are the same number by construction.</para>
     /// </summary>
+    /* #7256: this alert-tick read has a window of minutes; it reads the hot table alone when the Parquet archive of
+       wait_stats holds nothing that new, instead of opening every archive file. */
     public async Task<List<PoisonWaitAccumulation>> GetPoisonWaitAccumulationAsync(int serverId, int windowMinutes)
     {
-        using var connection = await OpenConnectionAsync();
+        using var _q = TimeQuery("GetPoisonWaitAccumulationAsync", "v_wait_stats poison wait accumulation");
+        var windowStart = DateTime.UtcNow.AddMinutes(-windowMinutes);
+        return await ReadWindowSkippingEmptyArchiveAsync("wait_stats", "collection_time", windowStart,
+            view => ReadPoisonWaitAccumulationAsync(PoisonWaitAccumulationSql.Replace("v_wait_stats", view, StringComparison.Ordinal), serverId, windowStart),
+            CancellationToken.None);
+    }
+
+    private async Task<List<PoisonWaitAccumulation>> ReadPoisonWaitAccumulationAsync(string sql, int serverId, DateTime windowStart)
+    {
+        using var connection = await OpenConnectionAsync(timer: null, CancellationToken.None, holderMember: nameof(GetPoisonWaitAccumulationAsync));
         using var command = connection.CreateCommand();
 
-        command.CommandText = PoisonWaitAccumulationSql;
+        command.CommandText = sql;
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
-        command.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddMinutes(-windowMinutes) });
+        command.Parameters.Add(new DuckDBParameter { Value = windowStart });
 
         var items = new List<PoisonWaitAccumulation>();
         using var reader = await command.ExecuteReaderAsync();
