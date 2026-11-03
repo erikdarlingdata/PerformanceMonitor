@@ -202,17 +202,18 @@ public sealed class RdsLogEventIngestor
         if (abandonedEntry.Length > 0)
         {
             /* An entry held for a log file that was not read to its end, whose own last portion never came (RDS stopped
-               listing it): nothing can finish it, and Commit replaces it when the carry moves to this file. It is not
-               stored, as it is cut short, but the loss is logged so it is visible (#7186). */
+               listing it): nothing can finish it, and Commit replaces it when the carry moves to this file. Unlike a plan
+               fragment it starts with a complete primary line, so it is stored as it is, as RdsDeadlockIngestor stores
+               its abandoned report: StoreAsync puts it ahead of this portion's text. The line records it (#7186). */
             _logger?.LogDebug(
                 "RDS log for {Server}: a log entry held for a log file that was not read to its end can never be "
-                + "finished; dropping it as the read moves on to {File} (#7186)",
+                + "finished; storing it as it is as the read moves on to {File} (#7186)",
                 storageName, entryFileName);
         }
 
         var (written, foreignZoneLines, csvRecordsDiscarded, nextCarry, nextEntry) = await StoreAsync(
             serverId, storageName, chunk.Value.Text, logTimezoneIsUtc, pgLogUsesCsvlog,
-            carry, chunk.Value.MoreAvailable, heldEntry, zoneCheck, cancellationToken);
+            carry, chunk.Value.MoreAvailable, heldEntry, abandonedEntry, zoneCheck, cancellationToken);
 
         /* THE MARKER MOVES HERE AND NOWHERE ELSE (#3008), and the csvlog carry moves alongside it for the
            same reason: DownloadDBLogFilePortion is consume-once, so a store failure must leave both the
@@ -258,6 +259,7 @@ public sealed class RdsLogEventIngestor
         RdsCsvlogCarry.CsvCarry carry,
         bool additionalDataPending,
         string heldEntry,
+        string abandonedEntry,
         PgLogZoneCheck? zoneCheck,
         CancellationToken cancellationToken)
     {
@@ -291,7 +293,7 @@ public sealed class RdsLogEventIngestor
         }
         else
         {
-            if (string.IsNullOrEmpty(text) && heldEntry.Length == 0)
+            if (string.IsNullOrEmpty(text) && heldEntry.Length == 0 && abandonedEntry.Length == 0)
             {
                 return (0, 0, 0, nextCarry, nextEntry);
             }
@@ -303,6 +305,12 @@ public sealed class RdsLogEventIngestor
             var portion = RdsDeadlockCarry.Step(heldEntry, text, additionalDataPending, PgLogEntryAssembler.UnfinishedTailStart);
             nextEntry = portion.Next;
             text = portion.Text;
+
+            /* An entry abandoned with its file is stored as it is, ahead of this portion (a different file's text). */
+            if (abandonedEntry.Length > 0)
+            {
+                text = (abandonedEntry.EndsWith('\n') ? abandonedEntry : abandonedEntry + "\n") + text;
+            }
 
             if (text.Length == 0)
             {
