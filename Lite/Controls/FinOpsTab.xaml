@@ -158,8 +158,7 @@
                           HeadersVisibility="Column" GridLinesVisibility="Horizontal"
                           RowStyle="{StaticResource DefaultRowStyle}"
                           Background="Transparent" BorderThickness="0"
-                          RowBackground="Transparent"
-                          AlternatingRowBackground="{DynamicResource DataGridAlternatingRowBrush}">
+                          RowBackground="Transparent">
                     <DataGrid.Columns>
                         <DataGridTextColumn Header="Category" Binding="{Binding Category}" MinWidth="120" Width="Auto"/>
                         <DataGridTextColumn Header="Severity" Binding="{Binding Severity}" MinWidth="80" Width="Auto" SortMemberPath="SeveritySort">
@@ -2495,8 +2494,7 @@
                           HeadersVisibility="Column" GridLinesVisibility="Horizontal"
                           RowStyle="{StaticResource HighImpactRowStyle}"
                           Background="Transparent" BorderThickness="0"
-                          RowBackground="Transparent"
-                          AlternatingRowBackground="{DynamicResource DataGridAlternatingRowBrush}">
+                          RowBackground="Transparent">
                     <DataGrid.Columns>
                         <DataGridTextColumn Binding="{Binding ImpactScore}" Width="90">
                             <DataGridTextColumn.Header>
@@ -2632,11 +2630,11 @@
                                 <Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style>
                             </DataGridTextColumn.ElementStyle>
                         </DataGridTextColumn>
-                        <DataGridTextColumn Binding="{Binding TotalMemoryMb, StringFormat='{}{0:N1}'}" Width="135">
+                        <DataGridTextColumn Binding="{Binding PeakMemoryMb, StringFormat='{}{0:N1}'}" Width="135">
                             <DataGridTextColumn.Header>
                                 <StackPanel Orientation="Horizontal">
-                                    <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalMemoryMb" Click="FilterButton_Click" Margin="0,0,4,0"/>
-                                    <TextBlock Text="Memory (MB)" FontWeight="Bold" VerticalAlignment="Center"/>
+                                    <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="PeakMemoryMb" Click="FilterButton_Click" Margin="0,0,4,0"/>
+                                    <TextBlock Text="Peak grant (MB)" FontWeight="Bold" VerticalAlignment="Center"/>
                                 </StackPanel>
                             </DataGridTextColumn.Header>
                             <DataGridTextColumn.ElementStyle>

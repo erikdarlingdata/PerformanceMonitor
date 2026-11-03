@@ -142,22 +142,39 @@ public partial class LocalDataService
     {
         var timeColumn = QueryWindowRelationTimeColumn(relation);
         var scope = ServerScopeSql(serverIds);
-        var ids = new System.Collections.Generic.List<int>();
-        using (var connection = await OpenConnectionAsync())
-        using (var command = connection.CreateCommand())
+        /* #7256: the window's servers are asked of the hot tables alone when the Parquet archives of the relation (and of
+           collection_log, for a relation with a collector) hold nothing at or after the start. The views open every archive
+           file however short the window is. A rebuild of the archive views during the read sends it back to the views. */
+        var view = QueryWindowRelationView(relation);
+        var collectorName = QueryWindowRelationCollector(relation);
+        var generation = _duckDb.ArchiveViewGeneration;
+        var hotOnly = ArchiveHoldsNothingFrom(await GetArchiveSpanAsync(view.Substring(2), timeColumn, CancellationToken.None), startUtc)
+            && (collectorName is null || ArchiveHoldsNothingFrom(await GetArchiveSpanAsync("collection_log", "collection_time", CancellationToken.None), startUtc));
+        var ids = await ReadWindowServerIdsAsync(hotOnly);
+        if (hotOnly && _duckDb.ArchiveViewGeneration != generation)
         {
+            ids = await ReadWindowServerIdsAsync(hot: false);
+        }
+
+        async Task<System.Collections.Generic.List<int>> ReadWindowServerIdsAsync(bool hot)
+        {
+            var found = new System.Collections.Generic.List<int>();
+            using var connection = await OpenConnectionAsync();
+            using var command = connection.CreateCommand();
             /* A server with a logged run of the relation's collector in the window counts as well as one with a row (a quiet collector stores none); the collector name is from the closed map. */
-            var runs = QueryWindowRelationCollector(relation) is { } collector
-                ? $" UNION SELECT server_id FROM v_collection_log WHERE collector_name = '{collector}' AND collection_time >= $1 AND collection_time <= $2{scope}"
+            var runs = collectorName is { } collector
+                ? $" UNION SELECT server_id FROM {(hot ? "collection_log" : "v_collection_log")} WHERE collector_name = '{collector}' AND collection_time >= $1 AND collection_time <= $2{scope}"
                 : "";
-            command.CommandText = $"SELECT server_id FROM (SELECT server_id FROM {QueryWindowRelationView(relation)} WHERE {timeColumn} >= $1 AND {timeColumn} <= $2{scope}{runs}) AS u GROUP BY server_id ORDER BY server_id";
+            command.CommandText = $"SELECT server_id FROM (SELECT server_id FROM {(hot ? view.Substring(2) : view)} WHERE {timeColumn} >= $1 AND {timeColumn} <= $2{scope}{runs}) AS u GROUP BY server_id ORDER BY server_id";
             command.Parameters.Add(new DuckDBParameter { Value = startUtc });
             command.Parameters.Add(new DuckDBParameter { Value = endUtc });
             using var reader = await command.ExecuteReaderAsync();
             while (await reader.ReadAsync())
             {
-                ids.Add((int)ToInt64(reader.GetValue(0)));
+                found.Add((int)ToInt64(reader.GetValue(0)));
             }
+
+            return found;
         }
 
         return await EarliestCoverageAsync(ids, id => GetQueryWindowFloorAsync(relation, id, startUtc, endUtc, includeAlsoCovered: false), startUtc);
@@ -422,6 +439,9 @@ public partial class LocalDataService
         ArchiveSpan? archiveSpan = QueryWindowRelationTimeIsServerLocal(relation)
             ? null
             : await GetArchiveSpanAsync(archiveTable, timeColumn, cancellationToken);
+        ArchiveSpan? logSpan = collector is null || QueryWindowRelationTimeIsServerLocal(relation)
+            ? null
+            : await GetArchiveSpanAsync("collection_log", "collection_time", cancellationToken);
 
         /* #5371: a token (the Collection Health pass's) reaches the lock wait, the open and the two statements of the generic
            path below; a caller that passes none keeps the original uninterruptible read. */
@@ -433,7 +453,14 @@ public partial class LocalDataService
         if (_duckDb.ArchiveViewGeneration != spanGeneration)
         {
             archiveSpan = null;
+            logSpan = null;
         }
+
+        /* #7256: the first query asks for rows inside [start, end]. When the archive holds nothing at or after the start, only the
+           hot table can hold them, so it reads that alone and never opens an archive file (the view opens every one, however
+           narrow the window). The span is exact here: the generation was checked under this connection's read lock. */
+        var windowRelation = ArchiveHoldsNothingFrom(archiveSpan, startUtc) ? archiveTable : view;
+        var windowLogRelation = ArchiveHoldsNothingFrom(logSpan, startUtc) ? "collection_log" : "v_collection_log";
 
         /* #4989: a time column that holds the server's wall clock (the Default Trace) goes through the clock, the way the
            grid reads it. Every UTC relation keeps the single-query path below. */
@@ -456,14 +483,14 @@ public partial class LocalDataService
             windowCommand.CommandText = collector is null
                 ? $@"
 SELECT MIN({timeColumn})
-FROM {view}
+FROM {windowRelation}
 WHERE server_id = $1
 AND   {timeColumn} >= $2
 AND   {timeColumn} <= $3{rowsFloorInline}"
                 : $@"
 SELECT LEAST(
-    (SELECT MIN({timeColumn}) FROM {view} WHERE server_id = $1 AND {timeColumn} >= $2 AND {timeColumn} <= $3{rowsFloorInline}),
-    (SELECT MIN(collection_time) FROM v_collection_log WHERE server_id = $1 AND collector_name = '{collector}' AND collection_time >= $2 AND collection_time <= $3))";
+    (SELECT MIN({timeColumn}) FROM {windowRelation} WHERE server_id = $1 AND {timeColumn} >= $2 AND {timeColumn} <= $3{rowsFloorInline}),
+    (SELECT MIN(collection_time) FROM {windowLogRelation} WHERE server_id = $1 AND collector_name = '{collector}' AND collection_time >= $2 AND collection_time <= $3))";
             windowCommand.Parameters.Add(new DuckDBParameter { Value = serverId });
             windowCommand.Parameters.Add(new DuckDBParameter { Value = startUtc });
             windowCommand.Parameters.Add(new DuckDBParameter { Value = endUtc });

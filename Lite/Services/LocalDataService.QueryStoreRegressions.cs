@@ -132,6 +132,11 @@ public partial class LocalDataService
             ?? Mcp.McpQueryTools.EffectiveWindowStart(
                 await GetQueryWindowFloorAsync(QueryWindowRelation.QueryStoreStats, serverId, baselineStartTime, endTime), baselineStartTime);
 
+        /* #7256: a window that starts after the newest archived row reads the hot table alone. */
+        return await ReadWindowSkippingEmptyArchiveAsync("query_store_stats", "collection_time", baselineStartTime, ReadAsync, CancellationToken.None);
+
+        async Task<List<QueryStoreRegressionRow>> ReadAsync(string relation)
+        {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
@@ -418,6 +423,7 @@ ORDER BY r.is_cost DESC,
          r.query_id
 LIMIT " + limit;
 
+        command.CommandText = SwapArchiveView(command.CommandText, "query_store_stats", relation);
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
@@ -473,7 +479,7 @@ LIMIT " + limit;
         /* #5381: the text sample, read by key for the returned rows only. */
         var texts = await ReadQueryStoreTextByRowAsync(
             connection, serverId,
-            textKeys.Where(k => k.Id.HasValue && k.Time.HasValue).Select(k => (k.Id!.Value, k.Time!.Value)));
+            textKeys.Where(k => k.Id.HasValue && k.Time.HasValue).Select(k => (k.Id!.Value, k.Time!.Value)), relation);
         for (var i = 0; i < rows.Count; i++)
         {
             string? text = null;
@@ -488,6 +494,7 @@ LIMIT " + limit;
         }
 
         return rows;
+        }
     }
 
     private static QueryStoreRunGroup ReadRunGroup(System.Data.Common.DbDataReader reader, int first, int baselinePerHour, int recentPerHour) => new()
@@ -518,11 +525,17 @@ LIMIT " + limit;
     public async Task<(bool HasBaseline, bool HasRecent)> GetQueryStoreRegressionCoverageAsync(
         int serverId, int hoursBack = 24, DateTime? asOfUtc = null, IReadOnlyList<string>? databaseNames = null)
     {
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
+        var baselineStartTime = startTime.AddDays(-BaselineLookbackDays);
+
+        /* #7256: a window that starts after the newest archived row reads the hot table alone. */
+        return await ReadWindowSkippingEmptyArchiveAsync("query_store_stats", "collection_time", baselineStartTime, ReadAsync, CancellationToken.None);
+
+        async Task<(bool HasBaseline, bool HasRecent)> ReadAsync(string relation)
+        {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
-        var baselineStartTime = startTime.AddDays(-BaselineLookbackDays);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 5, out var dbValues);
 
         command.CommandText = @"
@@ -542,6 +555,7 @@ SELECT
         AND   collection_time <= $3" + dbClause + @"
     ) AS has_recent";
 
+        command.CommandText = SwapArchiveView(command.CommandText, "query_store_stats", relation);
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
@@ -556,6 +570,7 @@ SELECT
             return (false, false);
         return (reader.GetBoolean(0), reader.GetBoolean(1));
     }
+        }
 
     /// <summary>#6877: where the server's stored Query Store rows start, for a window that ends before them (the window-floor probe
     /// answers null when a window holds no row). Null when the server has none.</summary>

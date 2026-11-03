@@ -141,6 +141,72 @@ public sealed class PgAlertNoise7082LiveTests
     }
 
     [Fact]
+    public async Task ANewPairWhoseReportsAgedOutOfTheHour_IsNoLongerUnannounced_SoAKnownPairStaysHeld()
+    {
+        await RunAsync(async (h, ct) =>
+        {
+            var now = DateTime.UtcNow;
+            var counted = new Dictionary<string, DateTime>(StringComparer.Ordinal);
+            var unannounced = new HashSet<string>(StringComparer.Ordinal);
+
+            Task<DarlingWorker.PgDeadlockPatterns> Count(IReadOnlyList<DarlingPgDeadlockReader.PgDeadlockRow> rows) =>
+                DarlingWorker.CountPgDeadlockPatternsAsync(
+                    h.Store, counted, unannounced, null, NullLogger.Instance, Server, ServerId, rows, now, ct);
+
+            /* A pair counted ten days ago is known. */
+            await h.Store.AddAsync(ServerId, new Dictionary<string, int> { [ValueOf(UpdateOrders, UpdateLedger)] = 1 },
+                DateOnly.FromDateTime(now.AddDays(-10)), ct);
+
+            /* A new pair arrives and the sweep does not page it, so it stays unannounced while its report is in the hour. */
+            var withNew = await Count([Report("n1", UpdateOrders, UpdateStock, now)]);
+            Assert.Equal(new[] { ValueOf(UpdateOrders, UpdateStock) }, withNew.NewKeys.ToArray());
+
+            /* Its report ages out of the hour and the known pair reports once: nothing is new, so the fire is held. */
+            var known = await Count([Report("k1", UpdateOrders, UpdateLedger, now)]);
+            Assert.Empty(known.NewKeys);
+            Assert.False(DarlingWorker.PgDeadlockPagesNow(1, known.NewKeys.Count, known.StoreOk));
+            Assert.Empty(unannounced);
+        });
+    }
+
+    [Fact]
+    public async Task ANewPairOlderThanTheNewestFiftyReports_StaysUnannounced_WhileTheHourHasMoreThanFifty()
+    {
+        await RunAsync(async (h, ct) =>
+        {
+            var now = DateTime.UtcNow;
+            var counted = new Dictionary<string, DateTime>(StringComparer.Ordinal);
+            var unannounced = new HashSet<string>(StringComparer.Ordinal);
+
+            Task<DarlingWorker.PgDeadlockPatterns> Count(IReadOnlyList<DarlingPgDeadlockReader.PgDeadlockRow> rows) =>
+                DarlingWorker.CountPgDeadlockPatternsAsync(
+                    h.Store, counted, unannounced, null, NullLogger.Instance, Server, ServerId, rows, now, ct);
+
+            await h.Store.AddAsync(ServerId, new Dictionary<string, int> { [ValueOf(UpdateOrders, UpdateLedger)] = 1 },
+                DateOnly.FromDateTime(now.AddDays(-10)), ct);
+
+            /* A new pair with one report, not yet announced. */
+            var newPair = ValueOf(UpdateOrders, UpdateStock);
+            await Count([Report("n1", UpdateOrders, UpdateStock, now)]);
+            Assert.Contains(newPair, unannounced);
+
+            /* The hour now has more than fifty reports, so the read returns the newest fifty (all of the known pair) and
+               leaves the new pair's older report out. The pair is still inside the hour, so it stays unannounced. */
+            var full = Enumerable.Range(0, DarlingWorker.PgDeadlockReadLimit)
+                .Select(i => Report($"k{i}", UpdateOrders, UpdateLedger, now))
+                .ToList();
+            var afterFull = await Count(full);
+            Assert.Contains(newPair, afterFull.NewKeys);
+            Assert.Contains(newPair, unannounced);
+
+            /* A short read is the whole hour: the pair's report is not in it, so the pair is dropped. */
+            var afterShort = await Count([Report("k0", UpdateOrders, UpdateLedger, now)]);
+            Assert.Empty(afterShort.NewKeys);
+            Assert.Empty(unannounced);
+        });
+    }
+
+    [Fact]
     public async Task AFirstEverPostgresPair_OpensItsInvestigationRequest_AndARepeatPairHeldForTheDigest_OpensNone()
     {
         await RunAsync(async (h, ct) =>

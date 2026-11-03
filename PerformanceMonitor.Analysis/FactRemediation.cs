@@ -132,18 +132,11 @@ public static class FactRemediation
                                     MissingIndexTargets: indexTargets);
     }
 
-    // ── WS3: server-level config (MAXDOP / CTFP / max & min server memory) ──────────
+    // ── Server-level config constants (MAXDOP / max & min server memory) ──────────
     //
-    // The per-setting CONFIG_* facts (CONFIG_MAXDOP / CONFIG_CTFP / CONFIG_MAX_MEMORY_MB /
-    // CONFIG_MIN_MAX_MEMORY_NARROW) each root their OWN advisory finding. The drill-down
-    // attaches a `server_config` array carrying ONLY the bad setting(s) for that finding plus
-    // the edition + cores-per-socket needed to compute the recommended MAXDOP. The recommended
-    // value is computed HERE (not in the collector) so the edition-aware MAXDOP cap is unit-
-    // testable without a server. CTFP is a flat 50; the two memory settings are advise-only and
-    // carry their current value as "recommended" (the executor refuses to apply them).
-
-    /// <summary>The CTFP value WS3 recommends — the canonical AuditConfig figure.</summary>
-    public const long RecommendedCostThreshold = 50;
+    // Shared by the CONFIG_* advice text and the collectors that emit those facts. There is no
+    // server-config remediation action: the builder that read a `server_config` drill-down was
+    // removed in #7220 because no Lite or Darling code ever wrote that drill-down.
 
     /// <summary>The MAXDOP default (0) WS3 flags as bad — unlimited parallelism.</summary>
     public const long BadMaxdopValue = 0;
@@ -202,95 +195,6 @@ public static class FactRemediation
     }
 
     /// <summary>
-    /// Builds the server-level config action for a CONFIG_* finding (WS3), or null when the
-    /// drill-down carries no bad server-config setting. Parallel to <see cref="BuildAction"/> —
-    /// a SEPARATE entry point so neither switch grows. The action carries FactKey
-    /// "SERVER_CONFIG" and the "set" verb. MAXDOP / CTFP targets are APPLY-able
-    /// (ServerConfigHandler runs <c>sp_configure</c>+<c>RECONFIGURE</c>); the two memory targets
-    /// are advise-only (the executor refuses them) but still ride the persisted-action round-trip
-    /// so the Recommendations reader can render their copy-paste on read (the drill-down is
-    /// ephemeral). Each finding roots on a single CONFIG_* key, so its drill-down carries a
-    /// single bad setting → a single target; the reader's fan loop turns each into one card.
-    /// </summary>
-    public static RemediationAction? BuildServerConfigAction(AnalysisFinding finding)
-    {
-        var targets = ExtractServerConfigTargets(finding);
-        return targets.Count == 0
-            ? null
-            : new RemediationAction("SERVER_CONFIG", "set", Array.Empty<ForcePlanTarget>(),
-                                    ServerConfigTargets: targets);
-    }
-
-    /// <summary>
-    /// Extracts the server-config target(s) from a CONFIG_* finding's drill-down
-    /// <c>server_config</c> array. Each row carries the structured fields <c>setting</c>
-    /// (canonical id), <c>current_value</c>, and (for MAXDOP) <c>cores_per_socket</c> — never
-    /// parsing human prose. The recommended value is computed per setting (topology-based MAXDOP =
-    /// min(cores-per-socket, 8) / flat CTFP 50 / current for the advise-only memory settings). A
-    /// defensive cap of 8 mirrors the other extractors.
-    /// </summary>
-    public static IReadOnlyList<ServerConfigTarget> ExtractServerConfigTargets(AnalysisFinding finding)
-    {
-        var targets = new List<ServerConfigTarget>();
-
-        if (finding?.DrillDown is null ||
-            !finding.DrillDown.TryGetValue("server_config", out var raw) ||
-            raw is null)
-            return targets;
-
-        JsonElement element;
-        try
-        {
-            element = JsonSerializer.SerializeToElement(raw);
-        }
-        catch
-        {
-            return targets;
-        }
-
-        if (element.ValueKind != JsonValueKind.Array)
-            return targets;
-
-        foreach (var row in element.EnumerateArray())
-        {
-            if (targets.Count >= 8) break;
-            if (row.ValueKind != JsonValueKind.Object) continue;
-
-            var settingId = GetString(row, "setting");
-            if (string.IsNullOrEmpty(settingId))
-                continue;
-
-            var current = GetInt64(row, "current_value");
-            var cores = GetInt(row, "cores_per_socket");
-
-            switch (settingId)
-            {
-                case "maxdop":
-                    targets.Add(new ServerConfigTarget(
-                        ServerConfigSetting.Maxdop, current, RecommendedMaxdop(cores)));
-                    break;
-                case "ctfp":
-                    targets.Add(new ServerConfigTarget(
-                        ServerConfigSetting.CostThreshold, current, RecommendedCostThreshold));
-                    break;
-                case "max_memory":
-                    // Advise-only: the right value is RAM-dependent. Carry current as
-                    // "recommended" — the executor never applies it; the card is copy-paste only.
-                    targets.Add(new ServerConfigTarget(
-                        ServerConfigSetting.MaxServerMemory, current, current));
-                    break;
-                case "min_memory":
-                    // Advise-only (pinned near max). Carry current as "recommended".
-                    targets.Add(new ServerConfigTarget(
-                        ServerConfigSetting.MinServerMemory, current, current));
-                    break;
-            }
-        }
-
-        return targets;
-    }
-
-    /// <summary>
     /// The fraction of max server memory at/above which min server memory is "pinned near max"
     /// (WS3): min &gt;= 80% of max. Pinning the floor that high stops SQL releasing memory back to
     /// the OS. Single source of truth so Dashboard and Lite collectors agree.
@@ -332,26 +236,6 @@ public static class FactRemediation
         };
     }
 
-    /// <summary>The hardcoded <c>sp_configure</c> name for a server-config setting (display + executor share the taxonomy).</summary>
-    public static string SpConfigureName(ServerConfigSetting setting) => setting switch
-    {
-        ServerConfigSetting.Maxdop => "max degree of parallelism",
-        ServerConfigSetting.CostThreshold => "cost threshold for parallelism",
-        ServerConfigSetting.MaxServerMemory => "max server memory (MB)",
-        ServerConfigSetting.MinServerMemory => "min server memory (MB)",
-        _ => throw new ArgumentOutOfRangeException(nameof(setting), setting, "Unknown ServerConfigSetting")
-    };
-
-    /// <summary>
-    /// Renders one copy-paste <c>EXEC sys.sp_configure N'&lt;name&gt;', &lt;value&gt;; RECONFIGURE;</c>
-    /// statement for a server-config target. The name is a hardcoded literal selected by the enum;
-    /// the value is the recommended value. Advisory text only — the executor builds its OWN
-    /// statement with a bound @value parameter and never executes this rendered string.
-    /// </summary>
-    public static string BuildSpConfigureStatement(ServerConfigSetting setting, long value)
-    {
-        return $"EXEC sys.sp_configure N'{SpConfigureName(setting)}', {value};\nRECONFIGURE;";
-    }
     /// <summary>
     /// Builds the DESTRUCTIVE RCSI remediation action for a DB_CONFIG finding, or null
     /// when it does not apply (B3 Phase 3). Parallel to <see cref="BuildAction"/>, which
@@ -498,148 +382,6 @@ public static class FactRemediation
         sb.AppendLine();
         sb.Append("-- Test on a copy first if the application relies on default locking behavior or uses NOLOCK hints.");
         return sb.ToString();
-    }
-
-    /// <summary>
-    /// Renders the display-only clear-cached-plan code block for the "Clear cached plan
-    /// (advanced)" detail item (§5/§6, PR-B). It shows, per qualifying query hash, the
-    /// anomaly figures the detector captured and a NOTE that the actual plan handle(s)
-    /// are LIVE-RESOLVED at apply (the snapshot handle is display-only, never executed).
-    /// Returns null when no CLEAR_PLAN action applies. The Dashboard executor builds its
-    /// OWN single-`@plan_handle` DBCC statements at apply against the live-resolved handles
-    /// and never executes this rendered text.
-    /// </summary>
-    public static string? GenerateClearPlanPreview(AnalysisFinding finding)
-    {
-        var action = BuildClearPlanAction(finding);
-        if (action?.ClearPlanTargets is not { Count: > 0 } targets)
-            return null;
-
-        var sb = new StringBuilder();
-        var emitted = 0;
-        foreach (var t in targets)
-        {
-            if (emitted > 0)
-                sb.AppendLine();
-
-            var dbLabel = string.IsNullOrEmpty(t.Database) ? "(unknown — resolved live)" : t.Database;
-            sb.AppendLine($"-- Database: {dbLabel}");
-            sb.AppendLine($"-- query_hash = {t.QueryHash}");
-            sb.AppendLine(
-                $"--   ~{t.AnomalyRatio.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture)}x normal per-exec CPU " +
-                $"({t.CurrentCpuPerExecMs.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture)} ms vs baseline " +
-                $"{t.BaselineCpuPerExecMs.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture)} ms)");
-            if (!string.IsNullOrEmpty(t.LatestPlanHandle))
-                sb.AppendLine($"--   last-seen plan handle: {t.LatestPlanHandle} (display only — apply RE-RESOLVES live)");
-            sb.AppendLine("-- Apply live-resolves the currently-cached plan_handle(s) for this query hash and runs:");
-            sb.AppendLine("--   DBCC FREEPROCCACHE(<resolved plan_handle>);   -- per surviving handle");
-            sb.AppendLine("-- There is NO un-clear: the prior plan is gone. The recompile is not guaranteed better.");
-            emitted++;
-        }
-
-        return sb.ToString().TrimEnd();
-    }
-
-    /// <summary>
-    /// Builds the DESTRUCTIVE clear-cached-plan remediation action for a CPU finding
-    /// (CPU_SQL_PERCENT / CPU_SPIKE), or null when it does not apply. PARALLEL to
-    /// <see cref="BuildAction"/>, which stays EXACTLY as-is (it never emits CLEAR_PLAN) —
-    /// this is a SEPARATE entry point, mirroring <see cref="BuildRcsiAction"/>, so the
-    /// CPU finding's normal actions are unchanged and the CLEAR_PLAN action rides a
-    /// SECOND "Clear cached plan (advanced)" detail item (emitted in PR-B).
-    ///
-    /// <para>
-    /// Emits ONLY when the finding carries an <c>abnormal_cpu_plans</c> drill-down (the
-    /// §2 detector enrichment) with at least one qualifying row (the detector has
-    /// already applied the per-exec anomaly threshold + materiality gate + the §2a
-    /// row-level first-collection/restart exclusion server-side; this builder does NOT
-    /// re-derive the math). The action carries FactKey "CLEAR_PLAN" (a distinct
-    /// destructive handler), one <see cref="ClearPlanTarget"/> per qualifying row (the
-    /// stable <c>query_hash</c> is the only execution input — the executor re-resolves
-    /// the live <c>plan_handle(s)</c> at apply), and the <see cref="ClearPlanFigures"/>
-    /// from the FIRST qualifying row so the informed-consent dialog renders the REAL
-    /// numbers at apply time even with no finding in hand.
-    /// </para>
-    /// </summary>
-    public static RemediationAction? BuildClearPlanAction(AnalysisFinding finding)
-    {
-        if (finding is null ||
-            (!string.Equals(finding.RootFactKey, "CPU_SQL_PERCENT", StringComparison.Ordinal) &&
-             !string.Equals(finding.RootFactKey, "CPU_SPIKE", StringComparison.Ordinal)))
-            return null;
-
-        if (finding.DrillDown is null ||
-            !finding.DrillDown.TryGetValue("abnormal_cpu_plans", out var raw) ||
-            raw is null)
-            return null;
-
-        JsonElement element;
-        try
-        {
-            element = JsonSerializer.SerializeToElement(raw);
-        }
-        catch
-        {
-            return null;
-        }
-
-        if (element.ValueKind != JsonValueKind.Array)
-            return null;
-
-        var targets = new List<ClearPlanTarget>();
-        ClearPlanFigures? figures = null;
-
-        foreach (var row in element.EnumerateArray())
-        {
-            if (targets.Count >= 5) break;       // defensive cap, sibling of the force-plan cap discipline
-            if (row.ValueKind != JsonValueKind.Object) continue;
-
-            var queryHash = GetString(row, "query_hash");
-            // query_hash is the ONLY execution input. It must be present and look like a
-            // hex handle (0x...); the detector emits it via CONVERT(VARCHAR, .., 1). A
-            // blank/garbage value cannot become a target (it would never resolve a handle).
-            if (string.IsNullOrEmpty(queryHash) ||
-                !queryHash.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ||
-                queryHash.Length <= 2)
-                continue;
-
-            var database = GetString(row, "database");
-            var current = GetDouble(row, "current_cpu_per_exec_ms");
-            var baseline = GetDouble(row, "baseline_cpu_per_exec_ms");
-            var ratio = GetDouble(row, "anomaly_ratio");
-
-            targets.Add(new ClearPlanTarget(
-                Database: database,
-                QueryHash: queryHash,
-                CurrentCpuPerExecMs: current,
-                BaselineCpuPerExecMs: baseline,
-                AnomalyRatio: ratio,
-                LatestPlanHandle: GetString(row, "latest_plan_handle")));
-
-            // Capture the risk-of-NOT-changing figures from the FIRST qualifying row,
-            // carried on the persisted action so the dialog shows REAL numbers at apply
-            // time (the RcsiInactionFigures precedent). The co-fired flags steer the
-            // honest tool-choice disclosure (§5).
-            figures ??= new ClearPlanFigures(
-                CurrentCpuPerExecMs: current,
-                BaselineCpuPerExecMs: baseline,
-                AnomalyRatio: ratio,
-                CpuPercent: GetInt(row, "cpu_percent"),
-                PlanRegressionCoFired: GetBool(row, "plan_regression_cofired"),
-                ParameterSensitivityCoFired: GetBool(row, "parameter_sensitivity_cofired"));
-        }
-
-        if (targets.Count == 0)
-            return null;
-
-        return new RemediationAction(
-            "CLEAR_PLAN",
-            "clear",
-            Array.Empty<ForcePlanTarget>(),
-            DbConfigTargets: null,
-            RcsiFigures: null,
-            ClearPlanTargets: targets,
-            ClearPlanFigures: figures);
     }
 
     /// <summary>
@@ -1235,8 +977,8 @@ public static class FactRemediation
             : "(no snapshot time)";
 
     /// <summary>
-    /// Whether the action is a standing CONFIG fix: a database-config, RCSI, percent-autogrowth file or
-    /// server-config target list is non-empty. Force-plan, clear-plan and missing-index actions are not config
+    /// Whether the action is a standing CONFIG fix: a database-config, RCSI, or percent-autogrowth file
+    /// target list is non-empty. Force-plan and missing-index actions are not config
     /// fixes, so those findings stay incidents. The viewer card and the MCP <c>is_config_fix</c> field share this.
     /// </summary>
     public static bool IsConfigFix(RemediationAction? action)
@@ -1244,8 +986,7 @@ public static class FactRemediation
         if (action is null) return false;
         return (action.DbConfigTargets?.Count ?? 0) > 0
             || (action.RcsiTargets?.Count ?? 0) > 0
-            || (action.FileGrowthTargets?.Count ?? 0) > 0
-            || (action.ServerConfigTargets?.Count ?? 0) > 0;
+            || (action.FileGrowthTargets?.Count ?? 0) > 0;
     }
 
     /// <summary>
@@ -1777,23 +1518,22 @@ public static class FactRemediation
     // The Darling viewer is advise-only (Postgres read-through, no in-app remediation executor), so a
     // runnable copy-paste command IS its remediation surface: for EVERY remediable finding it must
     // hand the operator T-SQL they can run themselves. RenderCopyPasteCommand turns a PERSISTED
-    // RemediationAction back into that runnable T-SQL for all seven shapes — the single source of
+    // RemediationAction back into that runnable T-SQL for all five shapes — the single source of
     // truth so no surface (Darling / Dashboard reader / email / MCP) can drift from another. The three
     // always-safe shapes render bare (percent-autogrowth MODIFY FILE, missing-index CREATE, safe
-    // DB-config ALTER); the four that were previously copy-paste dead ends now render too — force-plan
-    // (USE + sp_query_store_force_plan, which is database-scoped so each target carries its own USE),
-    // server-config (sp_configure + RECONFIGURE), RCSI, and clear-plan. The two DESTRUCTIVE shapes
-    // (RCSI, clear-plan — both IsDestructive) prepend their two-sided FactRiskDisclosure text as a
-    // /* ... */ header so the copy-paste itself states the risk of changing AND of not changing.
-    // Reuses BuildModifyFileStatement / BuildSpConfigureStatement / StatementFor / FactRiskDisclosure.
+    // DB-config ALTER); force-plan (USE + sp_query_store_force_plan, which is database-scoped so each
+    // target carries its own USE) and RCSI render too. RCSI is DESTRUCTIVE (IsDestructive) and prepends
+    // its two-sided FactRiskDisclosure text as a /* ... */ header so the copy-paste itself states the
+    // risk of changing AND of not changing. Reuses BuildModifyFileStatement / StatementFor /
+    // FactRiskDisclosure.
 
     /// <summary>
     /// Renders runnable, copy-paste T-SQL for a persisted <see cref="RemediationAction"/> — one command
-    /// (or block) per target across all seven remediation shapes — or null when the action carries no
+    /// (or block) per target across all five remediation shapes — or null when the action carries no
     /// renderable target. This is the shared source the Darling viewer's copy-paste affordance delegates
     /// to; it operates purely on the persisted typed targets (the ephemeral drill-down is gone on
-    /// read-back), so it never parses preview prose. The always-safe shapes render bare; the two
-    /// destructive shapes (RCSI, clear-plan) prepend the two-sided <see cref="FactRiskDisclosure"/> text
+    /// read-back), so it never parses preview prose. The always-safe shapes render bare; the
+    /// destructive shape (RCSI) prepends the two-sided <see cref="FactRiskDisclosure"/> text
     /// as a <c>/* ... */</c> comment header. Nothing here executes — it is advisory text the operator runs.
     /// </summary>
     public static string? RenderCopyPasteCommand(RemediationAction? action)
@@ -1826,16 +1566,6 @@ public static class FactRemediation
                 sb.Append(t.CreateStatement);
             }
             return sb.Length == 0 ? null : sb.ToString();
-        }
-
-        // SERVER_CONFIG — one sp_configure + RECONFIGURE per setting (shared builder), incl. the
-        // advise-only memory settings (the operator wants the sp_configure scaffold regardless). Safe.
-        if (action.ServerConfigTargets is { Count: > 0 } serverTargets)
-        {
-            var blocks = new List<string>(serverTargets.Count);
-            foreach (var t in serverTargets)
-                blocks.Add(BuildSpConfigureStatement(t.Setting, t.RecommendedValue));
-            return blocks.Count == 0 ? null : string.Join(nl + nl, blocks);
         }
 
         // PLAN_REGRESSION (force-plan) — sp_query_store_force_plan is DATABASE-scoped, so each target
@@ -1875,12 +1605,6 @@ public static class FactRemediation
 
             return blocks.Count == 0 ? null : string.Join(nl + nl, blocks);
         }
-
-        // CLEAR_PLAN — DESTRUCTIVE. Two-sided disclosure header + a self-contained resolve-and-free
-        // script (live-resolve the currently-cached plan handles for the abnormal query hashes, then
-        // DBCC FREEPROCCACHE each).
-        if (action.ClearPlanTargets is { Count: > 0 } clearTargets)
-            return RenderClearPlanScript(action, clearTargets, nl);
 
         // RCSI reconstructed action (FactKey "RCSI") — DESTRUCTIVE. Carries a ReadCommittedSnapshotOn
         // DbConfigTarget (the alert-path / Dashboard-reader shape); render header + ALTER per target.
@@ -1941,73 +1665,6 @@ public static class FactRemediation
     }
 
     /// <summary>
-    /// Renders the destructive clear-cached-plan script: the two-sided disclosure header, a per-hash
-    /// comment (database + anomaly figures), a review SELECT (the currently-cached plans the free will
-    /// affect — a query_hash is not unique to one query, so the operator confirms the blast radius
-    /// first), then a cursor that frees each live-resolved <c>plan_handle</c> via DBCC FREEPROCCACHE.
-    /// Only query hashes that look like a hex literal (<c>0x…</c>) are inlined (they were validated at
-    /// build time; re-checked here because this text is runnable SQL); null when none qualify.
-    /// </summary>
-    private static string? RenderClearPlanScript(RemediationAction action, IReadOnlyList<ClearPlanTarget> targets, string nl)
-    {
-        var hashes = new List<string>(targets.Count);
-        var lines = new List<string>(targets.Count);
-        foreach (var t in targets)
-        {
-            if (!IsHexLiteral(t.QueryHash)) continue;
-            hashes.Add(t.QueryHash);
-            var dbLabel = string.IsNullOrEmpty(t.Database) ? "(resolved live)" : QuoteName(t.Database);
-            lines.Add(t.AnomalyRatio > 0
-                ? $"--   {dbLabel} {t.QueryHash} (~{t.AnomalyRatio.ToString("0.0", CultureInfo.InvariantCulture)}x normal per-exec CPU: " +
-                  $"{t.CurrentCpuPerExecMs.ToString("0.0", CultureInfo.InvariantCulture)} ms vs baseline " +
-                  $"{t.BaselineCpuPerExecMs.ToString("0.0", CultureInfo.InvariantCulture)} ms)"
-                : $"--   {dbLabel} {t.QueryHash}");
-        }
-
-        if (hashes.Count == 0)
-            return null;
-
-        var inList = string.Join(", ", hashes);
-        var sb = new StringBuilder();
-
-        var disclosure = FactRiskDisclosure.GetForAction(action, null);
-        if (disclosure is not null)
-            sb.Append(RenderRiskDisclosureComment(disclosure, nl)).Append(nl);
-
-        sb.Append("-- Clear the currently-cached plan(s) for these abnormal-CPU query hashes:").Append(nl);
-        foreach (var line in lines)
-            sb.Append(line).Append(nl);
-        sb.Append("-- STEP 1 (review): run this SELECT first — a query_hash can map to more than one query,").Append(nl);
-        sb.Append("-- so confirm the databases/queries below are the ones you intend to clear.").Append(nl);
-        sb.Append("SELECT DISTINCT").Append(nl);
-        sb.Append("    DB_NAME(st.dbid) AS database_name,").Append(nl);
-        sb.Append("    qs.plan_handle,").Append(nl);
-        sb.Append("    qs.execution_count,").Append(nl);
-        sb.Append("    st.text AS batch_text").Append(nl);
-        sb.Append("FROM sys.dm_exec_query_stats AS qs").Append(nl);
-        sb.Append("CROSS APPLY sys.dm_exec_sql_text(qs.sql_handle) AS st").Append(nl);
-        sb.Append($"WHERE qs.query_hash IN ({inList});").Append(nl);
-        sb.Append(nl);
-        sb.Append("-- STEP 2 (apply): free every currently-cached plan for those hashes. There is NO un-clear —").Append(nl);
-        sb.Append("-- the prior plans are gone and the recompile is not guaranteed to be better.").Append(nl);
-        sb.Append("DECLARE @plan_handle varbinary(64);").Append(nl);
-        sb.Append("DECLARE plan_cursor CURSOR LOCAL FAST_FORWARD FOR").Append(nl);
-        sb.Append("    SELECT DISTINCT qs.plan_handle").Append(nl);
-        sb.Append("    FROM sys.dm_exec_query_stats AS qs").Append(nl);
-        sb.Append($"    WHERE qs.query_hash IN ({inList});").Append(nl);
-        sb.Append("OPEN plan_cursor;").Append(nl);
-        sb.Append("FETCH NEXT FROM plan_cursor INTO @plan_handle;").Append(nl);
-        sb.Append("WHILE @@FETCH_STATUS = 0").Append(nl);
-        sb.Append("BEGIN").Append(nl);
-        sb.Append("    DBCC FREEPROCCACHE(@plan_handle);").Append(nl);
-        sb.Append("    FETCH NEXT FROM plan_cursor INTO @plan_handle;").Append(nl);
-        sb.Append("END;").Append(nl);
-        sb.Append("CLOSE plan_cursor;").Append(nl);
-        sb.Append("DEALLOCATE plan_cursor;");
-        return sb.ToString();
-    }
-
-    /// <summary>
     /// Renders a two-sided <see cref="RiskDisclosure"/> as a <c>/* … */</c> T-SQL comment header, so a
     /// destructive copy-paste command states the risk of changing AND of not changing inline. The prose
     /// is fixed/reviewed (only validated identifiers + numeric figures are substituted); any embedded
@@ -2033,21 +1690,6 @@ public static class FactRemediation
     /// <summary>Defuses an embedded C-style comment terminator so disclosure prose cannot close the header early.</summary>
     private static string SanitizeForComment(string text) =>
         string.IsNullOrEmpty(text) ? string.Empty : text.Replace("*/", "* /");
-
-    /// <summary>True when the value is a non-empty hex literal (<c>0x</c> + at least one hex digit) safe to inline into SQL.</summary>
-    private static bool IsHexLiteral(string? value)
-    {
-        if (value is null || value.Length <= 2 ||
-            !(value[0] == '0' && (value[1] == 'x' || value[1] == 'X')))
-            return false;
-        for (var i = 2; i < value.Length; i++)
-        {
-            var c = value[i];
-            var isHex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
-            if (!isHex) return false;
-        }
-        return true;
-    }
 
     /// <summary>
     /// QUOTENAME-equivalent: wrap an identifier in square brackets and double

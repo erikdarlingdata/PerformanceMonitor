@@ -93,6 +93,40 @@ public partial class WebhookAlertService
     };
 
     /// <summary>
+    /// A send that came back with an error text: count it, keep it as the channel's last error, and log it loudly
+    /// for the first <see cref="FailingChannelThreshold"/> failures in a row, then on every 50th (#7225: one copy
+    /// for the four webhook channels).
+    /// </summary>
+    private void RecordChannelFailure(ref int failures, ref string? lastError, string channelLabel, string error)
+    {
+        failures++;
+        lastError = error;
+
+        if (failures <= FailingChannelThreshold)
+            _logger.LogError($"{channelLabel.ToUpperInvariant()} WEBHOOK FAILED ({failures}x): {error}");
+        else if (failures % 50 == 0)
+            _logger.LogError($"{channelLabel.ToUpperInvariant()} WEBHOOK STILL FAILING: {failures} failures. Last: {error}");
+    }
+
+    /// <summary>A send that threw: count it and keep the message, logging every one (no throttle).</summary>
+    private void RecordChannelException(ref int failures, ref string? lastError, string channelLabel, Exception ex)
+    {
+        failures++;
+        lastError = ex.Message;
+        _logger.LogError($"{channelLabel} webhook error: {ex.Message}");
+    }
+
+    /// <summary>A send that succeeded: say so when it ends a run of failures, then clear the count and last error.</summary>
+    private void RecordChannelRecovered(ref int failures, ref string? lastError, string channelLabel)
+    {
+        if (failures > 0)
+            _logger.LogInformation($"{channelLabel} webhook recovered after {failures} failure(s)");
+
+        failures = 0;
+        lastError = null;
+    }
+
+    /// <summary>
     /// Posts a JSON payload to a webhook URL, giving up after <see cref="WebhookPostTimeout"/>. Returns null on
     /// success, error message on failure; a timeout is an error message, and a cancelled
     /// <paramref name="cancellationToken"/> is not one — it propagates as the cancellation it is.

@@ -40,7 +40,7 @@ public partial class ViewerServerTab
     // Double-click a blocked-process-report row.
     private async void BlockedProcessReportGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e)
     {
-        if (BlockedProcessReportGrid.SelectedItem is ViewerBlockedProcessRow row)
+        if (DataGridRowHit.IsOnRow(e.OriginalSource) && BlockedProcessReportGrid.SelectedItem is ViewerBlockedProcessRow row)
             await OpenBlockChainForRowAsync(row);
     }
 

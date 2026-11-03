@@ -588,10 +588,16 @@ ORDER BY accumulated_wait_ms DESC";
         int serverId, string waitType, int hoursBack = 24,
         DateTime? fromDate = null, DateTime? toDate = null)
     {
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
+
+        /* #7256: a window that starts after the newest archived row of query_snapshots reads the hot table alone. The view opens every Parquet file of it (one per day) however short the window is. */
+        return await ReadWindowSkippingEmptyArchiveAsync("query_snapshots", "collection_time", startTime, ReadAsync, CancellationToken.None);
+
+        async Task<List<QuerySnapshotRow>> ReadAsync(string relation)
+        {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
 
         command.CommandText = @"
 WITH blocked_counts AS (
@@ -650,6 +656,7 @@ AND   q.collection_time <= $3
 AND   rtrim(q.wait_type) = rtrim($4)
 ORDER BY q.wait_time_ms DESC
 LIMIT 500";
+        command.CommandText = command.CommandText.Replace("v_query_snapshots", relation, StringComparison.Ordinal);
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
@@ -702,6 +709,7 @@ LIMIT 500";
         }
 
         return items;
+        }
     }
 
     /// <summary>
@@ -712,10 +720,16 @@ LIMIT 500";
         int serverId, int hoursBack = 24,
         DateTime? fromDate = null, DateTime? toDate = null)
     {
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
+
+        /* #7256: a window that starts after the newest archived row of query_snapshots reads the hot table alone. The view opens every Parquet file of it (one per day) however short the window is. */
+        return await ReadWindowSkippingEmptyArchiveAsync("query_snapshots", "collection_time", startTime, ReadAsync, CancellationToken.None);
+
+        async Task<List<QuerySnapshotRow>> ReadAsync(string relation)
+        {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
 
         command.CommandText = @"
 WITH blocked_counts AS (
@@ -773,6 +787,7 @@ AND   q.collection_time >= $2
 AND   q.collection_time <= $3
 ORDER BY q.collection_time DESC
 LIMIT 2000";
+        command.CommandText = command.CommandText.Replace("v_query_snapshots", relation, StringComparison.Ordinal);
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
@@ -824,6 +839,7 @@ LIMIT 2000";
         }
 
         return items;
+        }
     }
 
     /// <summary>How fresh the latest snapshot must be for its sessions to count as still running. Bound as
@@ -873,7 +889,14 @@ LIMIT 2000";
         bool orderByCpu = false)
     {
         exclusions ??= LongRunningQueryExclusions.None;
+        var freshnessFloor = DateTime.UtcNow - LatestSnapshotFreshness;
 
+
+        /* #7256: the alert tick reads only snapshots newer than the freshness floor, so it reads the hot table alone when the Parquet archive of query_snapshots holds nothing that new, instead of opening every archive file. */
+        return await ReadWindowSkippingEmptyArchiveAsync("query_snapshots", "collection_time", freshnessFloor, ReadAsync, CancellationToken.None);
+
+        async Task<LongRunningQueryReadResult> ReadAsync(string relation)
+        {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
@@ -962,6 +985,7 @@ LIMIT 2000";
                 WHERE NOT (r.excluded_by_program_prefix OR r.excluded_by_login OR r.excluded_by_database)
                 {orderBy}
                 LIMIT $3;";
+        command.CommandText = command.CommandText.Replace("v_query_snapshots", relation, StringComparison.Ordinal);
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = thresholdMs });
@@ -970,7 +994,7 @@ LIMIT 2000";
            collection_time is a naive-UTC TIMESTAMP, NOW() is TIMESTAMP WITH TIME ZONE, and the mixed
            comparison resolves the naive side in the host's TimeZone. East of UTC the floor lands in the
            future and this read returns nothing, so the long-running-query alert never fires at all. */
-        command.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow - LatestSnapshotFreshness });
+        command.Parameters.Add(new DuckDBParameter { Value = freshnessFloor });
         foreach (var operand in exclusionSql.Operands)
         {
             command.Parameters.Add(new DuckDBParameter { Value = operand });
@@ -1014,6 +1038,7 @@ LIMIT 2000";
         }
 
         return new LongRunningQueryReadResult(items, excludedByProgramPrefix, excludedByLogin, excludedByDatabase);
+        }
     }
 }
 

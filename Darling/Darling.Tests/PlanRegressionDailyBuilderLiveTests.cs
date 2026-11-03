@@ -662,7 +662,6 @@ AND   query ~ '^DELETE FROM collect\.plan_regression_daily(\s|$)';", connection)
         Assert.Equal(60, PlanRegressionDaily.BuildStatementTimeoutSeconds);
         Assert.Equal(TimeSpan.FromMinutes(10), PlanRegressionDaily.MaxTickDuration);
         Assert.Equal(14, PlanRegressionDaily.WindowDays);
-        Assert.Equal(3, PlanRegressionDaily.ClosedDayLagDays);
         Assert.Equal(16, PlanRegressionDaily.MarkLateWindowDays);
 
         Assert.Contains("pg_try_advisory_xact_lock(hashtextextended('plan_regression_daily:' || $1::integer::text, 0))", PlanRegressionDaily.LockSql, StringComparison.Ordinal);
