@@ -750,7 +750,9 @@ dir /q /a "C:\ProgramData" | findstr /C:"PerformanceMonitorDarling"
 icacls "C:\ProgramData\PerformanceMonitorDarling" /setowner *S-1-5-32-544 /T /C /L
 ```
 
-If you made the folder yourself, its items can also carry your account's grants, and one `/setowner` leaves those in place. `upgrade-darling.ps1` runs the four commands below for you, and prints each one, on a store the previous release was running when the account running the script or an administrator owns it. Otherwise fix the whole folder at once from an elevated prompt, in this order (put your own folder path in each command, and `PerformanceMonitor Darling` is the service name):
+If you made the folder yourself, its items can also carry your account's grants, and one `/setowner` leaves those in place. `upgrade-darling.ps1` runs the four commands below for you, and prints each one, on a store the previous release was running when the account running the script or an administrator owns it. It stops before it changes anything when the store holds a junction or symbolic link anywhere below the folder, or when anyone else owns it. If another account was granted write access to the store, the script says that account could change the store's files. Review `postgresql.conf`, `postgresql.auto.conf`, `pg_hba.conf` and `pg_ident.conf` before the service starts. If the script cannot fix or lock the folder after it has stopped the service, it ends with the service stopped and prints the four commands. Run them, then start the service with `Start-Service -Name "PerformanceMonitor Darling"`.
+
+To fix the whole folder by hand, `icacls` follows a junction or symbolic link into whatever it points at and changes that too. List the links with `dir /s /a:l "C:\ProgramData\PerformanceMonitorDarling"` and remove each one (`rmdir "<link>"` removes the link and keeps what it points at). Then run the four commands from an elevated prompt, in this order, and make the links again. Put your own folder path in each command. `PerformanceMonitor Darling` is the service name.
 
 ```
 icacls "C:\ProgramData\PerformanceMonitorDarling" /setowner "*S-1-5-32-544" /T /C /L

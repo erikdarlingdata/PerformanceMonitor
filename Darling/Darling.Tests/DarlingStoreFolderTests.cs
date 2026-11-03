@@ -265,6 +265,7 @@ public sealed class DarlingStoreFolderScriptTests
 
         Assert.Contains("outcome=refused", answers);
         Assert.Contains(answers, a => a.StartsWith("message=", StringComparison.Ordinal) && a.Contains("already exists and is owned by", StringComparison.Ordinal));
+        Assert.Contains(answers, a => a.Contains("icacls follows a junction or symbolic link into whatever it points at", StringComparison.Ordinal));
         Assert.Contains("unchanged=True", answers);
     }
 
@@ -340,7 +341,7 @@ public sealed class DarlingStoreFolderScriptTests
 
         /* Both scripts hand the function the service's name. */
         Assert.Contains("(Get-DarlingDataDirectory $configPath) $serviceName }", Script, StringComparison.Ordinal);
-        Assert.Contains("(Get-DarlingDataDirectory $configPath) $serviceName\n", UpgradeScript, StringComparison.Ordinal);
+        Assert.Contains("Initialize-DarlingStoreFolder $storeFolder $logonAccount $operatorSid $dataDirectory $serviceName\n", UpgradeScript, StringComparison.Ordinal);
     }
 
     /// <summary>The service SID the script trusts is the one Windows derives from the service's name: the SHA-1 of the
@@ -460,7 +461,8 @@ public sealed class DarlingStoreFolderScriptTests
 
     /// <summary>The upgrade script locks the store folder with the installer's own functions (the same text, so they
     /// cannot drift), after the service has stopped and before it starts, so an upgrade from a release that could not
-    /// lock the folder ends with it locked. A folder it cannot lock is a warning: the upgrade does not stop over it.</summary>
+    /// lock the folder ends with it locked. A folder it cannot lock ends the upgrade with the service stopped (#7267, see
+    /// TheUpgrade_FailsAndLeavesTheServiceStopped_WhenTheStoreCannotBeFixedOrLocked).</summary>
     [Fact]
     public void TheUpgradeLocksTheStoreFolder_WithTheInstallersFunctions_AfterTheServiceStopsAndBeforeItStarts()
     {
@@ -478,15 +480,11 @@ public sealed class DarlingStoreFolderScriptTests
 
         var stop = upgrade.IndexOf("Stop-Service -Name $serviceName", StringComparison.Ordinal);
         var copied = upgrade.IndexOf("Invoke-UpgradeTreeLock 'after the copy'", StringComparison.Ordinal);
-        var call = upgrade.IndexOf("Initialize-DarlingStoreFolder $storeFolder $logonAccount $operatorSid (Get-DarlingDataDirectory $configPath) $serviceName", StringComparison.Ordinal);
+        var call = upgrade.IndexOf("Repair-DarlingStoreAfterStop $storeFolder $configPath $logonAccount $operatorSid $serviceName", StringComparison.Ordinal);
         var start = upgrade.IndexOf("Start-Service -Name $serviceName", StringComparison.Ordinal);
         Assert.True(stop >= 0 && stop < call, "the store folder is locked after the service has stopped");
         Assert.True(copied < call && call < start, "the store folder is locked after the new build is in place and before the service starts");
         Assert.Single(Regex.Matches(upgrade, @"(?<!function )Initialize-DarlingStoreFolder (\S+)"));
-
-        var between = upgrade.Substring(call, start - call);
-        Assert.Contains("Warn \"The store folder '$storeFolder' could not be secured", between, StringComparison.Ordinal);
-        Assert.DoesNotContain("Fail ", between, StringComparison.Ordinal);
     }
 
     /// <summary>The upgrade skips the local operator group on a domain controller, with a warning, and goes on to start the
@@ -601,15 +599,272 @@ public sealed class DarlingStoreFolderScriptTests
         Assert.EndsWith(@"\*"" /reset /T /C /L", steps[3], StringComparison.Ordinal);
     }
 
+    private const string StoreProbeHelpers = """
+        $system = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::LocalSystemSid, $null)
+        $admins = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid, $null)
+        $users = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::BuiltinUsersSid, $null)
+        $trusted = @($meSid, $system, $admins)
+        function New-Store([string]$name, [bool]$existingCluster) {
+            $store = Join-Path $base $name
+            $data = Join-Path $store 'pg'
+            New-Item -ItemType Directory $data | Out-Null
+            if ($existingCluster) { Set-Content -LiteralPath (Join-Path $data 'PG_VERSION') '17' }
+            Set-Content -LiteralPath (Join-Path $data 'postgresql.conf') 'x'
+            Set-Content -LiteralPath (Join-Path $store 'pg.log') 'x'
+            Set-Content -LiteralPath (Join-Path $store 'server.key') 'x'
+            return $store
+        }
+        function Expose([string]$path, [string]$rights) {
+            # What a hand-made folder's items carry: an explicit grant to Users, with inheritance cut.
+            $acl = Get-Acl -LiteralPath $path
+            $acl.SetAccessRuleProtection($true, $true)
+            $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($users, $rights, 'Allow')))
+            Set-Acl -LiteralPath $path -AclObject $acl
+        }
+        """;
+
+    /// <summary>#7267: icacls /T follows a junction below the data directory into its target even with /L, so the upgrade
+    /// does not take over a store that holds a link anywhere, however deep and whoever owns it, and the refusal names the
+    /// link. A link in a store with nothing to fix changes nothing, so that store stays clean.</summary>
+    [Fact]
+    public void TheUpgrade_RefusesAStoreWithALinkAnywhereBelowIt_AndNamesTheLink()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "Windows PowerShell, ACLs and junctions");
+
+        var answers = RunWindowsPowerShell(UpgradeProbe(StoreProbeHelpers + """
+            $elsewhere = Join-Path $base 'elsewhere'
+            New-Item -ItemType Directory (Join-Path $elsewhere 'inner') | Out-Null
+            $marker = Join-Path $elsewhere 'inner\file.txt'
+            Set-Content -LiteralPath $marker 'x'
+            $markerBefore = (Get-Acl -LiteralPath $marker).Sddl
+
+            $plain = New-Store 'plain' $true
+            Expose (Join-Path $plain 'pg') 'Read'
+            $p = Get-DarlingStoreAdoptionPlan $plain (Join-Path $plain 'pg') $trusted @($meSid)
+            'plainState=' + $p.State
+
+            $deep = New-Store 'deep' $true
+            Expose (Join-Path $deep 'pg') 'Read'
+            New-Item -ItemType Directory (Join-Path $deep 'pg\pg_tblspc') | Out-Null
+            $deepLink = Join-Path $deep 'pg\pg_tblspc\16384'
+            cmd /c mklink /J $deepLink $elsewhere | Out-Null
+            $p = Get-DarlingStoreAdoptionPlan $deep (Join-Path $deep 'pg') $trusted @($meSid)
+            'deepState=' + $p.State
+            'deepNamesLink=' + $p.Reason.Contains($deepLink)
+            'deepByHand=' + $p.FixByHand
+            'deepFindings=' + @($p.Findings).Count
+
+            $near = New-Store 'near' $true
+            Expose (Join-Path $near 'pg') 'Read'
+            $nearLink = Join-Path $near 'pg\pg_wal'
+            cmd /c mklink /J $nearLink $elsewhere | Out-Null
+            $p = Get-DarlingStoreAdoptionPlan $near (Join-Path $near 'pg') $trusted @($meSid)
+            'nearState=' + $p.State
+            'nearNamesLink=' + $p.Reason.Contains($nearLink)
+
+            $quiet = New-Store 'quiet' $true
+            $quietLink = Join-Path $quiet 'pg\pg_wal'
+            cmd /c mklink /J $quietLink $elsewhere | Out-Null
+            $p = Get-DarlingStoreAdoptionPlan $quiet (Join-Path $quiet 'pg') $trusted @($meSid)
+            'quietState=' + $p.State
+
+            $walk = Find-DarlingStoreLinks $deep
+            'walkLinks=' + @($walk.Links).Count
+            'walkFoundTheDeepLink=' + (@($walk.Links) -contains $deepLink)
+            'walkUnreadable=[' + $walk.Unreadable + ']'
+            'targetUntouched=' + ((Get-Acl -LiteralPath $marker).Sddl -eq $markerBefore)
+
+            foreach ($link in @($deepLink, $nearLink, $quietLink)) { cmd /c rmdir $link | Out-Null }
+            """));
+
+        Assert.Contains("plainState=Adopt", answers);
+        Assert.Contains("deepState=Refuse", answers);
+        Assert.Contains("deepNamesLink=True", answers);
+        Assert.Contains("deepByHand=True", answers);
+        Assert.Contains("nearState=Refuse", answers);
+        Assert.Contains("nearNamesLink=True", answers);
+        Assert.Contains("quietState=Clean", answers);
+        Assert.Contains("walkLinks=1", answers);
+        Assert.Contains("walkFoundTheDeepLink=True", answers);
+        Assert.Contains("walkUnreadable=[]", answers);
+        Assert.Contains("targetUntouched=True", answers);
+    }
+
+    /// <summary>#7267: a store folder that is a drive root is refused by the plan before anything is read, as
+    /// Initialize-DarlingStoreFolder refuses it: "D:" alone would name the current folder of that drive.</summary>
+    [Fact]
+    public void TheUpgrade_RefusesAStoreFolderThatIsADriveRoot()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "drive letters are Windows-only");
+
+        var answers = RunWindowsPowerShell(UpgradeProbe(StoreProbeHelpers + """
+            $root = [System.IO.Path]::GetPathRoot($base)
+            $p = Get-DarlingStoreAdoptionPlan $root ($root + 'pg') $trusted @($meSid)
+            'rootState=' + $p.State
+            'rootReason=' + $p.Reason
+            'rootByHand=' + $p.FixByHand
+            """));
+
+        Assert.Contains("rootState=Refuse", answers);
+        Assert.Contains(answers, line => line.StartsWith("rootReason=", StringComparison.Ordinal) && line.Contains("is a drive root", StringComparison.Ordinal));
+        Assert.Contains("rootByHand=False", answers);
+    }
+
+    /// <summary>#7267: an Allow rule that gives write, modify or full control to an account outside the trusted list is
+    /// reported (the plan stays Adopt and carries the account, and the adoption warns that it could change the store's
+    /// files and names the four config files to review), and a read-only grant reports nothing of the kind.</summary>
+    [Fact]
+    public void TheUpgrade_ReportsAWriteGrant_AndDoesNotRefuseOnIt()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "Windows PowerShell and ACLs");
+
+        var answers = RunWindowsPowerShell(UpgradeProbe(StoreProbeHelpers + """
+            foreach ($right in @('Read', 'Modify', 'FullControl', 'WriteData', 'AppendData', 'Delete', 'DeleteSubdirectoriesAndFiles', 'ChangePermissions', 'TakeOwnership')) {
+                $s = New-Store ('w-' + $right) $true
+                Expose (Join-Path $s 'pg') $right
+                $p = Get-DarlingStoreAdoptionPlan $s (Join-Path $s 'pg') $trusted @($meSid)
+                "right:$right=$($p.State)/$(@($p.Writers) -contains 'BUILTIN\Users')"
+            }
+
+            $store = New-Store 'modify' $true
+            $data = Join-Path $store 'pg'
+            Expose $data 'Modify'
+            $plan = Get-DarlingStoreAdoptionPlan $store $data $trusted @($meSid)
+            'finding=' + (@($plan.Findings) -join ' | ')
+            'writer=' + (@($plan.Writers) -join ',')
+            $seam = { param($arguments) return 0 }
+            try { Invoke-DarlingStoreAdoption $store $data $meSid $trusted @($meSid) $plan $seam } catch { }
+            """));
+
+        Assert.Contains("right:Read=Adopt/False", answers);
+        foreach (var right in new[] { "Modify", "FullControl", "WriteData", "AppendData", "Delete", "DeleteSubdirectoriesAndFiles", "ChangePermissions", "TakeOwnership" })
+        {
+            Assert.Contains($"right:{right}=Adopt/True", answers);
+        }
+
+        Assert.Contains(answers, line => line.StartsWith("finding=", StringComparison.Ordinal) && line.Contains("grants write access to ", StringComparison.Ordinal) && line.Contains("BUILTIN\\Users", StringComparison.Ordinal) && line.Contains("which could change the store's files.", StringComparison.Ordinal));
+        Assert.Contains(answers, line => line.StartsWith("writer=", StringComparison.Ordinal) && line.Contains("BUILTIN\\Users", StringComparison.Ordinal));
+        Assert.Contains(
+            answers,
+            line => line.StartsWith("WARNING: ", StringComparison.Ordinal) && line.Contains("BUILTIN\\Users", StringComparison.Ordinal) && line.Contains("could change the store's files. Review postgresql.conf, postgresql.auto.conf, pg_hba.conf and pg_ident.conf in ", StringComparison.Ordinal));
+    }
+
+    /// <summary>#7267: every printed copy of the four commands starts with the sentence about links: the text both scripts print
+    /// when their store folder step refuses a folder, and the upgrade's own pre-stop refusal.</summary>
+    [Fact]
+    public void TheRepairText_AndThePreStopRefusal_CarryTheLinkSentenceBeforeTheFourCommands()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "Windows PowerShell and ACLs");
+
+        var answers = RunWindowsPowerShell(UpgradeProbe(StoreProbeHelpers + """
+            $text = Get-DarlingStoreRepairText 'D:\Store\' 'S-1-5-80-1'
+            'repair=' + ($text -replace "`n", ' | ')
+
+            $stranger = New-Store 'stranger' $true
+            $refuse = Get-DarlingStoreAdoptionPlan $stranger (Join-Path $stranger 'pg') @($system, $admins) @()
+            'planState=' + $refuse.State
+            'refusal=' + ((Get-DarlingStoreRefusalText $stranger $refuse 'S-1-5-80-1') -replace "`n", ' | ')
+
+            $root = [System.IO.Path]::GetPathRoot($base)
+            $rootPlan = Get-DarlingStoreAdoptionPlan $root ($root + 'pg') $trusted @($meSid)
+            'rootRefusal=' + ((Get-DarlingStoreRefusalText $root $rootPlan 'S-1-5-80-1') -replace "`n", ' | ')
+            """));
+
+        const string sentence = "icacls follows a junction or symbolic link into whatever it points at and changes that too, so list the links under the folder with dir /s /a:l";
+        var repair = Assert.Single(answers, line => line.StartsWith("repair=", StringComparison.Ordinal));
+        Assert.Contains(sentence + " \"D:\\Store\", remove each one (rmdir \"<link>\" removes the link and keeps its target), run these four commands, then make the links again: |     icacls ", repair, StringComparison.Ordinal);
+        Assert.Equal(4, System.Text.RegularExpressions.Regex.Matches(repair, @"\|     icacls ").Count);
+
+        Assert.Contains("planState=Refuse", answers);
+        var refusal = Assert.Single(answers, line => line.StartsWith("refusal=", StringComparison.Ordinal));
+        Assert.Contains(sentence, refusal, StringComparison.Ordinal);
+        Assert.Contains("then make the links again: |     icacls ", refusal, StringComparison.Ordinal);
+        Assert.Contains("NOTHING has been stopped or copied", refusal, StringComparison.Ordinal);
+
+        var rootRefusal = Assert.Single(answers, line => line.StartsWith("rootRefusal=", StringComparison.Ordinal));
+        Assert.Contains("is a drive root", rootRefusal, StringComparison.Ordinal);
+        Assert.DoesNotContain("icacls ", rootRefusal, StringComparison.Ordinal);
+    }
+
+    /// <summary>#7267: a store the upgrade cannot fix, or cannot lock, after it has stopped the service ends the upgrade with
+    /// Fail (exit 1), leaves the service stopped, prints the four commands with the link sentence, and names Start-Service as
+    /// the step after them. Starting a service that will refuse its store is the symptom the issue reports. A store that is
+    /// fixed and locked fails nothing.</summary>
+    [Fact]
+    public void TheUpgrade_FailsAndLeavesTheServiceStopped_WhenTheStoreCannotBeFixedOrLocked()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "Windows PowerShell and ACLs");
+
+        var answers = RunWindowsPowerShell(UpgradeProbe(StoreProbeHelpers + """
+            function Fail([string]$message) { throw ('FAILCALLED:' + $message) }
+            function Get-DarlingDataDirectory([string]$path) { return $script:probeData }
+            function Get-DarlingStoreTrustedSids([string]$account, [string]$name) { return @($meSid, $system, $admins) }
+            function Get-DarlingStoreAdopterSids { return @($meSid) }
+            $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+            function Run-Case([string]$label, [string]$account) {
+                try { Repair-DarlingStoreAfterStop $script:probeStore 'darling.json' $account $null 'PerfSvc'; "$label=no-fail" }
+                catch { "$label=" + ($_.Exception.Message -replace "`n", ' | ') }
+            }
+
+            # The adoption throws: a store that needs taking over, with the step stood in for.
+            $script:probeStore = New-Store 'adopt' $true
+            $script:probeData = Join-Path $script:probeStore 'pg'
+            Expose $script:probeData 'Read'
+            function Invoke-DarlingStoreAdoption { throw 'step 1 failed with exit code 5.' }
+            function Initialize-DarlingStoreFolder { 'initialize-was-called' }
+            Run-Case 'adoption' $me
+
+            # The lock throws: a store with nothing to fix.
+            $script:probeStore = New-Store 'lock' $true
+            $script:probeData = Join-Path $script:probeStore 'pg'
+            function Initialize-DarlingStoreFolder { throw 'the folder cannot be locked.' }
+            Run-Case 'lock' $me
+
+            # The service account cannot be resolved.
+            Run-Case 'account' 'NoSuchDomain\nobody'
+
+            # Fixed and locked: nothing fails.
+            function Initialize-DarlingStoreFolder { }
+            Run-Case 'fine' $me
+            """));
+
+        var adoption = Assert.Single(answers, line => line.StartsWith("adoption=", StringComparison.Ordinal));
+        Assert.Contains("FAILCALLED:", adoption, StringComparison.Ordinal);
+        Assert.Contains("could not be fixed in place: step 1 failed with exit code 5.", adoption, StringComparison.Ordinal);
+        Assert.DoesNotContain("initialize-was-called", answers);
+
+        var lockFailure = Assert.Single(answers, line => line.StartsWith("lock=", StringComparison.Ordinal));
+        Assert.Contains("FAILCALLED:", lockFailure, StringComparison.Ordinal);
+        Assert.Contains("could not be secured: the folder cannot be locked.", lockFailure, StringComparison.Ordinal);
+
+        foreach (var failure in new[] { adoption, lockFailure })
+        {
+            Assert.Contains("'PerfSvc' is STOPPED", failure, StringComparison.Ordinal);
+            Assert.Contains("dir /s /a:l", failure, StringComparison.Ordinal);
+            Assert.Contains("make the links again: |     icacls ", failure, StringComparison.Ordinal);
+            Assert.Contains("/setowner", failure, StringComparison.Ordinal);
+            Assert.EndsWith("Then start the service with: Start-Service -Name 'PerfSvc'", failure, StringComparison.Ordinal);
+        }
+
+        var account = Assert.Single(answers, line => line.StartsWith("account=", StringComparison.Ordinal));
+        Assert.Contains("could not be resolved", account, StringComparison.Ordinal);
+        Assert.Contains("is STOPPED", account, StringComparison.Ordinal);
+        Assert.DoesNotContain("icacls ", account, StringComparison.Ordinal);
+
+        Assert.Contains("fine=no-fail", answers);
+    }
+
     private static string UpgradeProbe(string body) => string.Join(
         "\n",
         """
         function Note([string]$message) { Write-Host $message }
         function Good([string]$message) { Write-Host $message }
+        function Warn([string]$message) { Write-Host "WARNING: $message" }
         """,
         ExtractFunctions(
             UpgradeScript, "Get-DarlingItemOwnerSid", "Get-DarlingLinkOwnerSid", "Initialize-DarlingNativeStoreFolder", "Get-DarlingStoreRepairSteps",
-            "Get-DarlingStoreRepairText", "Get-DarlingStoreAdoptionPlan", "Invoke-DarlingStoreAdoption"),
+            "Get-DarlingStoreRepairText", "Find-DarlingStoreLinks", "Get-DarlingStoreWriteGrantText", "Get-DarlingStoreAdoptionPlan", "Invoke-DarlingStoreAdoption",
+            "Get-DarlingStoreStoppedText", "Get-DarlingStoreRefusalText", "Repair-DarlingStoreAfterStop"),
         $$"""
         $base = Join-Path $env:TEMP ('darling-adopt-' + [guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory $base | Out-Null
@@ -924,6 +1179,38 @@ public sealed class DarlingStoreContentsGateTests
         Assert.Equal(@"icacls ""D:\Store"" /reset /C /L", lines[1]);
         Assert.StartsWith(@"icacls ""D:\Store"" /inheritance:r /grant ""*S-1-5-18:(OI)(CI)F"" ""*S-1-5-32-544:(OI)(CI)F"" ", lines[2], StringComparison.Ordinal);
         Assert.Equal(@"icacls ""D:\Store\*"" /reset /T /C /L", lines[3]);
+    }
+
+    /// <summary>#7267: both of the service's refusals that print the four commands put the sentence about links before them,
+    /// and the sentence names the folder to list. Built through the same methods the refusals throw from.</summary>
+    [Fact]
+    public void TheServicesTwoRefusals_PutTheLinkSentenceBeforeTheFourCommands()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "ACLs are Windows-only.");
+
+        var store = Path.Combine(Path.GetTempPath(), "darling-refusal-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(store);
+        try
+        {
+            var messages = new[]
+            {
+                DarlingManagedPostgres.UnlockedStoreFolderRefusal(store, "the folder grants access to Users"),
+                DarlingManagedPostgres.UntrustedStoreContentsRefusal(store, "pg.log is owned by someone else", Path.Combine(store, "pg")),
+            };
+
+            foreach (var message in messages)
+            {
+                var sentence = message.IndexOf("icacls follows a junction or symbolic link into whatever it points at", StringComparison.Ordinal);
+                var firstCommand = message.IndexOf($"icacls \"{store}\" /setowner", StringComparison.Ordinal);
+                Assert.True(sentence >= 0 && sentence < firstCommand, message);
+                Assert.Contains($"dir /s /a:l \"{store}\"", message, StringComparison.Ordinal);
+                Assert.Contains("remove each one (rmdir \"<link>\" removes the link and keeps its target), run these four commands, then make the links again:", message, StringComparison.Ordinal);
+            }
+        }
+        finally
+        {
+            Directory.Delete(store, recursive: true);
+        }
     }
 
     private static bool HasOrdinaryUserAccess(string path)

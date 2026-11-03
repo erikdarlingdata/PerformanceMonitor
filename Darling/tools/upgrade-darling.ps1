@@ -1614,9 +1614,14 @@ function Get-DarlingStoreRepairSteps([string]$folder, [string]$serviceSid = '') 
     }
 }
 
-# The steps above as the lines an operator runs from an elevated prompt, one per line.
+# The steps above as the lines an operator runs from an elevated prompt, one per line, after the one sentence about links: icacls
+# follows a junction or symbolic link into whatever it points at even with /L (which governs only a link named on the command line),
+# so a link anywhere under the folder sends the owner change and the reset to its target (#7267). Every printed copy of the four
+# commands carries that sentence because this is the one place that builds them.
 function Get-DarlingStoreRepairText([string]$folder, [string]$serviceSid = '') {
-    return ((Get-DarlingStoreRepairSteps $folder $serviceSid | ForEach-Object { '    ' + $_.Text }) -join "`n")
+    $f = $folder.TrimEnd('\')
+    $links = "icacls follows a junction or symbolic link into whatever it points at and changes that too, so list the links under the folder with dir /s /a:l `"$f`", remove each one (rmdir `"<link>`" removes the link and keeps its target), run these four commands, then make the links again:"
+    return ($links + "`n" + ((Get-DarlingStoreRepairSteps $folder $serviceSid | ForEach-Object { '    ' + $_.Text }) -join "`n"))
 }
 
 # Creates $folder if it is missing, makes Administrators its owner, and gives it the DACL described above.
@@ -1704,11 +1709,11 @@ function Initialize-DarlingStoreFolder([string]$folder, [string]$serviceAccount,
         if ($existed -and $trusted -notcontains $owner) {
             try { $ownerName = $owner.Translate([System.Security.Principal.NTAccount]).Value }
             catch { $ownerName = $owner.Value }
-            throw "$folder already exists and is owned by $ownerName, which is not SYSTEM, Administrators or the service account, so another user may have made it. If you did not create it, delete it and re-run this script: this script does not take over a folder it did not make. If it is your existing store (for example you made the folder yourself, or you changed the service's Log On account), fix the whole folder at once from an elevated prompt, then re-run this script:`n$(Get-DarlingStoreRepairText $full $serviceSid.Value)"
+            throw "$folder already exists and is owned by $ownerName, which is not SYSTEM, Administrators or the service account, so another user may have made it. If you did not create it, delete it and re-run this script: this script does not take over a folder it did not make. If it is your existing store (for example you made the folder yourself, or you changed the service's Log On account), fix the whole folder at once from an elevated prompt, then re-run this script.`n$(Get-DarlingStoreRepairText $full $serviceSid.Value)"
         }
         if ($existed) {
             $contents = Get-DarlingStoreContentsProblem $full $dataDirectory $trusted
-            if ($contents) { throw "$contents If you did not create $folder, delete it (take ownership first if Windows refuses) and re-run this script. If it is your existing store, fix the whole folder at once from an elevated prompt, then re-run this script:`n$(Get-DarlingStoreRepairText $full $serviceSid.Value)" }
+            if ($contents) { throw "$contents If you did not create $folder, delete it (take ownership first if Windows refuses) and re-run this script. If it is your existing store, fix the whole folder at once from an elevated prompt, then re-run this script.`n$(Get-DarlingStoreRepairText $full $serviceSid.Value)" }
         }
 
         # A folder this script made is owned by whoever created it: Administrators, or the installing user's own account
@@ -1748,8 +1753,10 @@ function Initialize-DarlingStoreFolder([string]$folder, [string]$serviceAccount,
 # did not look at who owned it. This release's service does, and refuses to start postgres on it, so an upgrade used to end with the
 # service Running and the store down. The operator is running this script elevated on a store the previous release was running (its
 # data directory holds PG_VERSION), so the script fixes it in place with the same four commands the service's refusal names, and
-# prints each step. Nothing is adopted that the previous release was not running, that is a link, or that an account other than the
-# one running this script or a member of Administrators owns: those stop the upgrade before anything is stopped, with the commands.
+# prints each step. Nothing is adopted that the previous release was not running, that holds a link anywhere below the store folder,
+# or that an account other than the one running this script or a direct member of Administrators owns: those stop the upgrade before
+# anything is stopped, with the commands. A write grant to some other account is reported, not refused: the previous release already
+# ran what that account could write, and the four steps close the way in.
 
 # The owners the service trusts for the store: the same list the store folder lock builds.
 function Get-DarlingStoreTrustedSids([string]$serviceAccount, [string]$serviceName) {
@@ -1772,6 +1779,37 @@ function Get-DarlingStoreAdopterSids {
     return @($sids)
 }
 
+# Every junction, symbolic link or other reparse point under $folder, found by a walk that never goes into one. icacls /T follows a
+# link into whatever it points at even with /L, which governs only a link named on the command line (measured: with a junction at
+# data\pg_tblspc\16384, a tree-wide reset of the store's contents with /T /C /L reset the files inside the junction's target), so one link anywhere in
+# the tree sends the elevated owner change and reset to wherever it points (#7267). The walk lists one folder at a time through
+# .NET and checks the attribute before it descends, so it does not depend on how Get-ChildItem -Recurse treats a link in the
+# PowerShell version that runs it. Unreadable is the first folder it could not list ('' when every folder was listed).
+function Find-DarlingStoreLinks([string]$folder) {
+    $links = New-Object System.Collections.Generic.List[string]
+    $unreadable = ''
+    $pending = New-Object System.Collections.Generic.Stack[string]
+    $pending.Push($folder)
+    while ($pending.Count -gt 0) {
+        $dir = $pending.Pop()
+        try {
+            foreach ($entry in (New-Object System.IO.DirectoryInfo($dir)).EnumerateFileSystemInfos()) {
+                if ($entry.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { $links.Add($entry.FullName); continue }
+                if ($entry.Attributes -band [System.IO.FileAttributes]::Directory) { $pending.Push($entry.FullName) }
+            }
+        }
+        catch { if (-not $unreadable) { $unreadable = "$dir ($($_.Exception.Message))" } }
+    }
+    return [pscustomobject]@{ Links = @($links); Unreadable = $unreadable }
+}
+
+# The sentence that reports a write grant: the accounts in $writers could change the store's files, which the service then runs.
+# '' when there are none.
+function Get-DarlingStoreWriteGrantText([string]$dataDirectory, $writers) {
+    if (@($writers).Count -eq 0) { return '' }
+    return "$(@($writers) -join ', ') could change the store's files. Review postgresql.conf, postgresql.auto.conf, pg_hba.conf and pg_ident.conf in '$dataDirectory' before the service starts, because the service runs what they say."
+}
+
 # What the store folder looks like to the service: 'Clean' (nothing to do), 'Adopt' (the previous release's store, with an owner or
 # a grant the service refuses; this script can fix it) or 'Refuse' (it cannot be taken over here; Reason says why and FixByHand says
 # whether the four commands are the way forward). Judged read-only: the folder, the names the service writes into
@@ -1779,7 +1817,9 @@ function Get-DarlingStoreAdopterSids {
 # grant to any account outside $trusted (a user's grant is what makes the service's own tightening fail once Administrators own it).
 function Get-DarlingStoreAdoptionPlan([string]$folder, [string]$dataDirectory, $trusted, $adopters) {
     $full = [System.IO.Path]::GetFullPath($folder).TrimEnd('\')
-    $plan = { param([string]$state, [string]$reason, $findings, [bool]$byHand) [pscustomobject]@{ State = $state; Reason = $reason; Findings = @($findings); FixByHand = $byHand } }
+    $plan = { param([string]$state, [string]$reason, $findings, [bool]$byHand, $writers = @()) [pscustomobject]@{ State = $state; Reason = $reason; Findings = @($findings); FixByHand = $byHand; Writers = @($writers) } }
+    # The same refusal the store folder lock makes (it names the drive root as well), and before anything is read: "D:" alone names the current folder of that drive.
+    if ([string]::IsNullOrEmpty([System.IO.Path]::GetDirectoryName($full))) { return (& $plan 'Refuse' "$folder is a drive root, not a folder this script will lock. Point postgres.dataDirectory in darling.json at a folder below it." @() $false) }
     if (-not (Test-Path -LiteralPath $full)) { return (& $plan 'Clean' '' @() $false) }
     try { $root = Get-Item -LiteralPath $full -Force -ErrorAction Stop }
     catch { return (& $plan 'Refuse' "$full cannot be read by this script ($($_.Exception.Message))." @() $false) }
@@ -1831,17 +1871,29 @@ function Get-DarlingStoreAdoptionPlan([string]$folder, [string]$dataDirectory, $
         $strangers.Add($owner)
     }
     $creator = @('S-1-3-0', 'S-1-3-1')
+    # A right that changes a file's content, its name or its access: an account holding one could have changed postgresql.conf.
+    $fsRights = [System.Security.AccessControl.FileSystemRights]
+    $writeMask = $fsRights::WriteData -bor $fsRights::AppendData -bor $fsRights::Delete -bor $fsRights::DeleteSubdirectoriesAndFiles -bor $fsRights::ChangePermissions -bor $fsRights::TakeOwnership
+    $writers = New-Object System.Collections.Generic.List[string]
     foreach ($path in $judgedForGrants) {
         try { $rules = @((Get-Acl -LiteralPath $path -ErrorAction Stop).Access) }
         catch { return (& $plan 'Refuse' "The permissions of $path cannot be read by this script ($($_.Exception.Message))." @() $false) }
         $names = New-Object System.Collections.Generic.List[string]
+        $writeNames = New-Object System.Collections.Generic.List[string]
         foreach ($rule in $rules) {
             if ($rule.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow) { continue }
             try { $sid = $rule.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]) } catch { continue }
             if (($trusted -contains $sid) -or ($creator -contains $sid.Value)) { continue }
-            if (-not $names.Contains($rule.IdentityReference.Value)) { $names.Add($rule.IdentityReference.Value) }
+            $who = $rule.IdentityReference.Value
+            if (($rule.FileSystemRights -band $writeMask) -ne 0) {
+                if (-not $writeNames.Contains($who)) { $writeNames.Add($who) }
+                if (-not $writers.Contains($who)) { $writers.Add($who) }
+            }
+            elseif (-not $names.Contains($who)) { $names.Add($who) }
         }
-        if ($names.Count -gt 0) { $findings.Add("$path grants access to $($names -join ', ').") }
+        $readOnlyNames = @($names | Where-Object { -not $writeNames.Contains($_) })
+        if ($writeNames.Count -gt 0) { $findings.Add("$path grants write access to $($writeNames -join ', '), which could change the store's files.") }
+        if ($readOnlyNames.Count -gt 0) { $findings.Add("$path grants access to $($readOnlyNames -join ', ').") }
     }
 
     if ($findings.Count -eq 0) { return (& $plan 'Clean' '' @() $false) }
@@ -1856,7 +1908,16 @@ function Get-DarlingStoreAdoptionPlan([string]$folder, [string]$dataDirectory, $
             return (& $plan 'Refuse' "Items in $full are owned by $ownerName, which is not the account running this script or a member of Administrators, so another user may have made them. If you did not create them, delete the folder." $findings $true)
         }
     }
-    return (& $plan 'Adopt' '' $findings $true)
+    # icacls /T follows a link below the folder into what it points at, a trusted owner's relocation link (pg_wal, a tablespace) included,
+    # so one anywhere in the tree stops the takeover and the operator takes the link out first (#7267).
+    $walk = Find-DarlingStoreLinks $full
+    if ($walk.Unreadable) { return (& $plan 'Refuse' "$($walk.Unreadable) cannot be listed by this script, so whether the store holds a junction or link is not known. The commands that fix a store follow a link into what it points at and change that too." $findings $true) }
+    if (@($walk.Links).Count -gt 0) {
+        $named = (@($walk.Links) | Select-Object -First 3) -join ', '
+        if (@($walk.Links).Count -gt 3) { $named += " and $(@($walk.Links).Count - 3) more" }
+        return (& $plan 'Refuse' "$full holds a junction or symbolic link ($named). The commands that fix a store follow a link into what it points at and change that too, so this script does not run them while a link is there." $findings $true)
+    }
+    return (& $plan 'Adopt' '' $findings $true $writers)
 }
 
 # Runs the four steps on an existing store, printing each one and what it left. $RunIcacls is a seam for a test: it takes the
@@ -1869,6 +1930,8 @@ function Invoke-DarlingStoreAdoption([string]$folder, [string]$dataDirectory, $s
     Note "The store folder '$folder' was made outside this release's rules and the service would refuse to start its database on it. It is the store the previous release was running, so it is being fixed in place:"
     foreach ($line in @($plan.Findings | Select-Object -First 10)) { Note "    found: $line" }
     if (@($plan.Findings).Count -gt 10) { Note "    found: and $(@($plan.Findings).Count - 10) more." }
+    $writeText = Get-DarlingStoreWriteGrantText $dataDirectory $plan.Writers
+    if ($writeText) { Warn "$writeText The upgrade goes on and starts the service afterwards: if those files are not what you set, stop the service and correct them." }
     $steps = @(Get-DarlingStoreRepairSteps $folder $serviceSid.Value)
     $number = 0
     foreach ($step in $steps) {
@@ -1886,6 +1949,46 @@ function Invoke-DarlingStoreAdoption([string]$folder, [string]$dataDirectory, $s
     $after = Get-DarlingStoreAdoptionPlan $folder $dataDirectory $trusted $adopters
     if ($after.State -ne 'Clean') { throw "the store is still refused after the four steps: $($after.Reason) $(@($after.Findings | Select-Object -First 3) -join ' ')" }
     Good "Store folder '$folder' fixed in place: Administrators own it and everything in it, and it grants SYSTEM, Administrators and the service account only. The service restores the operator group's read of the credential files at its start."
+}
+
+# The text when the store cannot be left in a state the service accepts and the service is already stopped (#7267). Starting a
+# service that will refuse its store is the symptom this upgrade exists to prevent (Running, no postgres, nothing on the port), so
+# the upgrade ends here with the service STOPPED, the four commands, and Start-Service as the step after them. $what says what failed.
+# An empty $serviceSid leaves the commands out, because the service account's own grant cannot be named without it.
+function Get-DarlingStoreStoppedText([string]$folder, [string]$what, [string]$serviceSid, [string]$serviceName) {
+    if ($serviceSid) { $fix = "Fix the folder by hand from an elevated prompt:`n$(Get-DarlingStoreRepairText $folder $serviceSid)" }
+    else { $fix = "Fix the service's Log On account so Windows can resolve it, then fix the folder (run this script again, or install-darling.ps1)." }
+    return "$what The new build IS in place and '$serviceName' is STOPPED. It stays stopped: the service refuses a store it cannot trust, so starting it now would only show that refusal. $fix`nThen start the service with: Start-Service -Name '$serviceName'"
+}
+
+# The pre-stop refusal for a store that cannot be taken over: why, the four commands when they are the way forward, and that nothing
+# has happened yet.
+function Get-DarlingStoreRefusalText([string]$folder, $plan, [string]$serviceSid) {
+    $byHand = ''
+    if ($plan.FixByHand) { $byHand = " If it is your own store and you trust what is in it, fix the whole folder at once from an elevated prompt, then re-run this script.`n$(Get-DarlingStoreRepairText $folder $serviceSid)" }
+    return "The store folder '$folder' cannot be upgraded in place: $($plan.Reason)$byHand`nNOTHING has been stopped or copied - the service is still running and the install is untouched."
+}
+
+# The store folder step after the copy, with the service stopped: a store the previous release was running is fixed in place, then
+# the folder is locked the way install-darling.ps1 locks it. Either step failing ends the upgrade with Fail and the service left
+# stopped (#7267): the service would refuse the store, and "Service is Running." with no database is the symptom reported there.
+function Repair-DarlingStoreAfterStop([string]$storeFolder, [string]$configPath, [string]$logonAccount, $operatorSid, [string]$serviceName) {
+    try { $serviceSid = (New-Object System.Security.Principal.NTAccount($logonAccount)).Translate([System.Security.Principal.SecurityIdentifier]) }
+    catch { Fail (Get-DarlingStoreStoppedText $storeFolder "The store folder '$storeFolder' could not be secured because the service account '$logonAccount' could not be resolved ($($_.Exception.Message))." '' $serviceName) }
+    $dataDirectory = ''
+    try {
+        $dataDirectory = Get-DarlingDataDirectory $configPath
+        $adoptTrusted = Get-DarlingStoreTrustedSids $logonAccount $serviceName
+        $adoptors = Get-DarlingStoreAdopterSids
+        $adoptPlan = Get-DarlingStoreAdoptionPlan $storeFolder $dataDirectory $adoptTrusted $adoptors
+        if ($adoptPlan.State -eq 'Adopt') { Invoke-DarlingStoreAdoption $storeFolder $dataDirectory $serviceSid $adoptTrusted $adoptors $adoptPlan }
+    }
+    catch { Fail (Get-DarlingStoreStoppedText $storeFolder "The store folder '$storeFolder' could not be fixed in place: $($_.Exception.Message)" $serviceSid.Value $serviceName) }
+    try {
+        Initialize-DarlingStoreFolder $storeFolder $logonAccount $operatorSid $dataDirectory $serviceName
+        Good "Store folder '$storeFolder' is owned by Administrators and locked to SYSTEM, Administrators and the service account; the operator group can only traverse it."
+    }
+    catch { Fail (Get-DarlingStoreStoppedText $storeFolder "The store folder '$storeFolder' could not be secured: $($_.Exception.Message)" $serviceSid.Value $serviceName) }
 }
 
 # The logon account the Darling service is registered to run as, exactly as Windows reports it (LocalSystem,
@@ -3742,13 +3845,13 @@ if ($storeCheckFolder -and (Test-Path -LiteralPath $storeCheckFolder)) {
         }
         catch { Warn "The store folder '$storeCheckFolder' could not be judged before the stop ($($_.Exception.Message)). The service checks it itself at its start." }
         if ($storeCheckPlan -and $storeCheckPlan.State -eq 'Refuse') {
-            $byHand = ''
-            if ($storeCheckPlan.FixByHand) { $byHand = " If it is your own store and you trust what is in it, fix the whole folder at once from an elevated prompt, then re-run this script:`n$(Get-DarlingStoreRepairText $storeCheckFolder $storeCheckSid.Value)" }
-            Fail "The store folder '$storeCheckFolder' cannot be upgraded in place: $($storeCheckPlan.Reason)$byHand`nNOTHING has been stopped or copied - the service is still running and the install is untouched."
+            Fail (Get-DarlingStoreRefusalText $storeCheckFolder $storeCheckPlan $storeCheckSid.Value)
         }
         elseif ($storeCheckPlan -and $storeCheckPlan.State -eq 'Adopt') {
             Warn "The store folder '$storeCheckFolder' has an owner or a grant the service would refuse. It is the store the previous release was running, so this script fixes it in place after the copy and before the service starts, printing each step. Found:"
             foreach ($line in @($storeCheckPlan.Findings | Select-Object -First 5)) { Note "    $line" }
+            $storeCheckWriteText = Get-DarlingStoreWriteGrantText (Get-DarlingDataDirectory $storeCheckConfig) $storeCheckPlan.Writers
+            if ($storeCheckWriteText) { Warn "$storeCheckWriteText Stop this script now to review them first: nothing has been stopped or changed yet." }
         }
         elseif ($storeCheckPlan) { Good "Store folder '$storeCheckFolder': every item the service checks is owned and granted the way it expects." }
     }
@@ -4186,8 +4289,9 @@ if ($tlsKeyWarning) { Warn $tlsKeyWarning }
 # after its owner, its contents and any link on its path have been checked. A store made by a release that could not lock
 # it ends locked here, and the service finds it locked at its first start. The service is stopped by now and starts below.
 #
-# A store this cannot lock is a WARNING, not a stop: the service checks the same things itself at its start and says what
-# it refuses, and a host this script left down over a folder is worse off than one that is up. NOTHING here calls Fail.
+# A store this cannot fix or lock is a FAIL with the service left stopped (#7267): the service checks the same things at its start and
+# refuses a store it cannot trust, so starting it would print "Service is Running." over a host with no database, which is the
+# symptom reported there. The message says the service is stopped, prints the four commands and names Start-Service for afterwards.
 $storeFolder = Get-DarlingStoreFolder $configPath
 if (-not $storeFolder) {
     Note 'No store folder to secure here: postgres.managed is false, or darling.json could not be read or names a data directory this script does not handle.'
@@ -4196,24 +4300,7 @@ elseif (-not $logonAccount) {
     Warn "Could not read which account '$serviceName' logs on as, so the store folder '$storeFolder' was NOT locked rather than locked around a guess. Fix the lookup and re-run this script, or run install-darling.ps1."
 }
 else {
-    # #7267: a store the previous release was running, made by hand, is fixed in place first (it was judged before the stop).
-    try {
-        $adoptTrusted = Get-DarlingStoreTrustedSids $logonAccount $serviceName
-        $adoptors = Get-DarlingStoreAdopterSids
-        $adoptPlan = Get-DarlingStoreAdoptionPlan $storeFolder (Get-DarlingDataDirectory $configPath) $adoptTrusted $adoptors
-        if ($adoptPlan.State -eq 'Adopt') {
-            $adoptSid = (New-Object System.Security.Principal.NTAccount($logonAccount)).Translate([System.Security.Principal.SecurityIdentifier])
-            Invoke-DarlingStoreAdoption $storeFolder (Get-DarlingDataDirectory $configPath) $adoptSid $adoptTrusted $adoptors $adoptPlan
-        }
-    }
-    catch { Warn "The store folder '$storeFolder' could not be fixed in place: $($_.Exception.Message) Fix the folder by hand from an elevated prompt with the steps printed above, then re-run this script." }
-    try {
-        Initialize-DarlingStoreFolder $storeFolder $logonAccount $operatorSid (Get-DarlingDataDirectory $configPath) $serviceName
-        Good "Store folder '$storeFolder' is owned by Administrators and locked to SYSTEM, Administrators and the service account; the operator group can only traverse it."
-    }
-    catch {
-        Warn "The store folder '$storeFolder' could not be secured: $($_.Exception.Message) The service will start, and refuses a store it cannot trust. Fix the folder, then re-run this script."
-    }
+    Repair-DarlingStoreAfterStop $storeFolder $configPath $logonAccount $operatorSid $serviceName
 }
 
 # #6597: the registered path keeps its quotes, as the MSI registers it. The service is stopped here and the new build is in place.

@@ -3069,9 +3069,14 @@ function Get-DarlingStoreRepairSteps([string]$folder, [string]$serviceSid = '') 
     }
 }
 
-# The steps above as the lines an operator runs from an elevated prompt, one per line.
+# The steps above as the lines an operator runs from an elevated prompt, one per line, after the one sentence about links: icacls
+# follows a junction or symbolic link into whatever it points at even with /L (which governs only a link named on the command line),
+# so a link anywhere under the folder sends the owner change and the reset to its target (#7267). Every printed copy of the four
+# commands carries that sentence because this is the one place that builds them.
 function Get-DarlingStoreRepairText([string]$folder, [string]$serviceSid = '') {
-    return ((Get-DarlingStoreRepairSteps $folder $serviceSid | ForEach-Object { '    ' + $_.Text }) -join "`n")
+    $f = $folder.TrimEnd('\')
+    $links = "icacls follows a junction or symbolic link into whatever it points at and changes that too, so list the links under the folder with dir /s /a:l `"$f`", remove each one (rmdir `"<link>`" removes the link and keeps its target), run these four commands, then make the links again:"
+    return ($links + "`n" + ((Get-DarlingStoreRepairSteps $folder $serviceSid | ForEach-Object { '    ' + $_.Text }) -join "`n"))
 }
 
 # Creates $folder if it is missing, makes Administrators its owner, and gives it the DACL described above.
@@ -3159,11 +3164,11 @@ function Initialize-DarlingStoreFolder([string]$folder, [string]$serviceAccount,
         if ($existed -and $trusted -notcontains $owner) {
             try { $ownerName = $owner.Translate([System.Security.Principal.NTAccount]).Value }
             catch { $ownerName = $owner.Value }
-            throw "$folder already exists and is owned by $ownerName, which is not SYSTEM, Administrators or the service account, so another user may have made it. If you did not create it, delete it and re-run this script: this script does not take over a folder it did not make. If it is your existing store (for example you made the folder yourself, or you changed the service's Log On account), fix the whole folder at once from an elevated prompt, then re-run this script:`n$(Get-DarlingStoreRepairText $full $serviceSid.Value)"
+            throw "$folder already exists and is owned by $ownerName, which is not SYSTEM, Administrators or the service account, so another user may have made it. If you did not create it, delete it and re-run this script: this script does not take over a folder it did not make. If it is your existing store (for example you made the folder yourself, or you changed the service's Log On account), fix the whole folder at once from an elevated prompt, then re-run this script.`n$(Get-DarlingStoreRepairText $full $serviceSid.Value)"
         }
         if ($existed) {
             $contents = Get-DarlingStoreContentsProblem $full $dataDirectory $trusted
-            if ($contents) { throw "$contents If you did not create $folder, delete it (take ownership first if Windows refuses) and re-run this script. If it is your existing store, fix the whole folder at once from an elevated prompt, then re-run this script:`n$(Get-DarlingStoreRepairText $full $serviceSid.Value)" }
+            if ($contents) { throw "$contents If you did not create $folder, delete it (take ownership first if Windows refuses) and re-run this script. If it is your existing store, fix the whole folder at once from an elevated prompt, then re-run this script.`n$(Get-DarlingStoreRepairText $full $serviceSid.Value)" }
         }
 
         # A folder this script made is owned by whoever created it: Administrators, or the installing user's own account
