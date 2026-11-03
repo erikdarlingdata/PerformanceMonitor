@@ -931,8 +931,11 @@ VALUES ($1,$2,$3,$4,$5,120,'SUCCESS',7)", CollectionIdGenerator.Next(), ServerId
 
             /* #7196: the same CPU row left a day or more behind carries no figure and no stamp, while memory and the log still read. */
             var staleCpuAt = cpuAt.AddDays(-3);
+            /* Delete and insert, not UPDATE: the table is a hypertable and a row cannot move to another chunk (23514). */
+            await DarlingMcpTestData.ExecAsync(connection, ct, @"DELETE FROM cpu_utilization_stats WHERE server_id = $1", ServerId);
             await DarlingMcpTestData.ExecAsync(connection, ct,
-                @"UPDATE cpu_utilization_stats SET collection_time = $1, sample_time = $1 WHERE server_id = $2", staleCpuAt, ServerId);
+                @"INSERT INTO cpu_utilization_stats (collection_id, collection_time, server_id, server_name, sample_time, sqlserver_cpu_utilization, other_process_cpu_utilization)
+VALUES ($1,$2,$3,$4,$5,$6,$7)", CollectionIdGenerator.Next(), staleCpuAt, ServerId, ServerName, staleCpuAt, 42, 3);
             var staleSummary = Parse(await DarlingMcpHealthTools.GetServerSummary(postgres, ServerName));
             Assert.Equal(JsonValueKind.Null, staleSummary.GetProperty("cpu_captured_at").ValueKind);
             Assert.Equal(JsonValueKind.Null, staleSummary.GetProperty("cpu_percent").ValueKind);
