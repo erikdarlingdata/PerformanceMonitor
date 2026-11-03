@@ -72,17 +72,19 @@ public sealed class ArchiveWindowAnalysisReadScalingTests : IDisposable
 
     private static string Ts(DateTime t) => $"TIMESTAMP '{t:yyyy-MM-dd HH:mm:ss}'";
 
-    private async Task ExecuteAsync(params string[] statements)
+    /* Synchronous on purpose: the database lock is thread-affine (#2463), so no await may sit between taking it and releasing it (#7256). */
+    private Task ExecuteAsync(params string[] statements)
     {
         using var readLock = _duckDb.AcquireReadLock();
         using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync(Ct);
+        connection.Open();
         foreach (var sql in statements)
         {
             using var cmd = connection.CreateCommand();
             cmd.CommandText = sql;
-            await cmd.ExecuteNonQueryAsync(Ct);
+            cmd.ExecuteNonQuery();
         }
+        return Task.CompletedTask;
     }
 
     private string QueryStatsRow(DateTime collected, string hash, long spills = 0) =>
@@ -273,13 +275,17 @@ VALUES ({_nextId++}, {Ts(collected)}, {ServerId}, 'TestSrv', 'Db', {queryId}, {p
         var plan = await _duckDb.PlanArchiveReadAsync(
             Ct, [.. PerformanceMonitorLite.Services.ForcePlanTargetStateReader.ArchivedTables
                 .Select(t => new ArchiveWindow(t, "collection_time", nowUtc - ForcePlanTargetState.Lookback))]);
-        using var readLock = _duckDb.AcquireReadLock(Ct);
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync(Ct);
-        using var command = connection.CreateCommand();
-        var target = new ForcePlanTarget("Db", 5, 6);
-        var states = await PerformanceMonitorLite.Services.ForcePlanTargetStateReader.ReadAsync(command, ServerId, [target], nowUtc, plan, Ct);
-        return states.TryGetValue(ForcePlanTargetKey.Of(target), out var state) ? state : null;
+        /* The read lock is thread-affine (#2463): take it, read and release it on one dedicated thread, never across an await (#7256). */
+        return await DuckDbLockThread.RunAsync(() =>
+        {
+            using var readLock = _duckDb.AcquireReadLock(Ct);
+            using var connection = _duckDb.CreateConnection();
+            connection.Open();
+            using var command = connection.CreateCommand();
+            var target = new ForcePlanTarget("Db", 5, 6);
+            var states = PerformanceMonitorLite.Services.ForcePlanTargetStateReader.ReadAsync(command, ServerId, [target], nowUtc, plan, Ct).GetAwaiter().GetResult();
+            return states.TryGetValue(ForcePlanTargetKey.Of(target), out var state) ? state : null;
+        });
     }
 
     [Fact]
