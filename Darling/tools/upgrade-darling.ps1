@@ -1811,8 +1811,9 @@ function Get-DarlingStoreWriteGrantText([string]$dataDirectory, $writers) {
 }
 
 # What the store folder looks like to the service: 'Clean' (nothing to do), 'Adopt' (the previous release's store, with an owner or
-# a grant the service refuses; this script can fix it) or 'Refuse' (it cannot be taken over here; Reason says why and FixByHand says
-# whether the four commands are the way forward). Judged read-only: the folder, the names the service writes into
+# a grant the service refuses; this script can fix it), 'Leave' (a folder with no PG_VERSION whose items carry grants but no
+# untrusted owner: this script does not fix it in place and does not call it in order, so Findings names the grants) or 'Refuse'
+# (it cannot be taken over here; Reason says why and FixByHand says whether the four commands are the way forward). Judged read-only: the folder, the names the service writes into
 # (Get-DarlingStoreContentsProblem lists them) and the data directory's own entries are checked for their owner, and those names for a
 # grant to any account outside $trusted (a user's grant is what makes the service's own tightening fail once Administrators own it).
 function Get-DarlingStoreAdoptionPlan([string]$folder, [string]$dataDirectory, $trusted, $adopters) {
@@ -1899,7 +1900,7 @@ function Get-DarlingStoreAdoptionPlan([string]$folder, [string]$dataDirectory, $
     if ($findings.Count -eq 0) { return (& $plan 'Clean' '' @() $false) }
     if (-not $isStore) {
         if ($strangers.Count -gt 0) { return (& $plan 'Refuse' "$full is not a store the previous release was running (its data directory has no PG_VERSION) and $($findings[0]) If you did not create it, delete it. A folder this script did not make is not taken over." $findings $true) }
-        return (& $plan 'Clean' '' @() $false)
+        return (& $plan 'Leave' '' $findings $false)
     }
     foreach ($owner in $strangers) {
         if (-not ($adopters -contains $owner)) {
@@ -1953,12 +1954,35 @@ function Invoke-DarlingStoreAdoption([string]$folder, [string]$dataDirectory, $s
 
 # The text when the store cannot be left in a state the service accepts and the service is already stopped (#7267). Starting a
 # service that will refuse its store is the symptom this upgrade exists to prevent (Running, no postgres, nothing on the port), so
-# the upgrade ends here with the service STOPPED, the four commands, and Start-Service as the step after them. $what says what failed.
+# the upgrade ends here with the service STOPPED, the four commands, and a re-run of this script as the step after them. $what says
+# what failed.
 # An empty $serviceSid leaves the commands out, because the service account's own grant cannot be named without it.
 function Get-DarlingStoreStoppedText([string]$folder, [string]$what, [string]$serviceSid, [string]$serviceName) {
     if ($serviceSid) { $fix = "Fix the folder by hand from an elevated prompt:`n$(Get-DarlingStoreRepairText $folder $serviceSid)" }
-    else { $fix = "Fix the service's Log On account so Windows can resolve it, then fix the folder (run this script again, or install-darling.ps1)." }
-    return "$what The new build IS in place and '$serviceName' is STOPPED. It stays stopped: the service refuses a store it cannot trust, so starting it now would only show that refusal. $fix`nThen start the service with: Start-Service -Name '$serviceName'"
+    else { $fix = "Fix the service's Log On account so Windows can resolve it." }
+    return "$what The new build IS in place and '$serviceName' is STOPPED. It stays stopped: the service refuses a store it cannot trust, so starting it now would only show that refusal. $fix`nThen run upgrade-darling.ps1 again with the same arguments: it judges the store again, finishes the upgrade and starts the service."
+}
+
+# What the pre-stop judgement prints for a plan. 'Refuse' ends the upgrade here with Fail, while the service is still running.
+# 'Adopt' warns that the store is fixed in place after the copy. 'Leave' names the grants it found and says they are not changed here.
+# Only a plan with no findings is called in order (Good), so the line always matches what the plan collected.
+function Write-DarlingStoreCheckResult([string]$folder, [string]$dataDirectory, $plan, [string]$serviceSid) {
+    if ($plan.State -eq 'Refuse') {
+        Fail (Get-DarlingStoreRefusalText $folder $plan $serviceSid)
+    }
+    elseif ($plan.State -eq 'Adopt') {
+        Warn "The store folder '$folder' has an owner or a grant the service would refuse. It is the store the previous release was running, so this script fixes it in place after the copy and before the service starts, printing each step. Found:"
+        foreach ($line in @($plan.Findings | Select-Object -First 5)) { Note "    $line" }
+        $writeText = Get-DarlingStoreWriteGrantText $dataDirectory $plan.Writers
+        if ($writeText) { Warn "$writeText The script does not pause here. To get this report without stopping the service or changing anything, run it with -Check, review those files, then run it again without." }
+    }
+    elseif ($plan.State -eq 'Leave') {
+        Warn "The store folder '$folder' has no PG_VERSION in its data directory, so it is not the store the previous release was running and this script does not fix it in place. It leaves these grants as they are, and the service checks the folder itself at its start. Found:"
+        foreach ($line in @($plan.Findings | Select-Object -First 5)) { Note "    $line" }
+    }
+    else {
+        Good "Store folder '$folder': every item the service checks is owned and granted the way it expects."
+    }
 }
 
 # The pre-stop refusal for a store that cannot be taken over: why, the four commands when they are the way forward, and that nothing
@@ -3844,16 +3868,7 @@ if ($storeCheckFolder -and (Test-Path -LiteralPath $storeCheckFolder)) {
             $storeCheckPlan = Get-DarlingStoreAdoptionPlan $storeCheckFolder (Get-DarlingDataDirectory $storeCheckConfig) (Get-DarlingStoreTrustedSids $storeCheckAccount $serviceName) (Get-DarlingStoreAdopterSids)
         }
         catch { Warn "The store folder '$storeCheckFolder' could not be judged before the stop ($($_.Exception.Message)). The service checks it itself at its start." }
-        if ($storeCheckPlan -and $storeCheckPlan.State -eq 'Refuse') {
-            Fail (Get-DarlingStoreRefusalText $storeCheckFolder $storeCheckPlan $storeCheckSid.Value)
-        }
-        elseif ($storeCheckPlan -and $storeCheckPlan.State -eq 'Adopt') {
-            Warn "The store folder '$storeCheckFolder' has an owner or a grant the service would refuse. It is the store the previous release was running, so this script fixes it in place after the copy and before the service starts, printing each step. Found:"
-            foreach ($line in @($storeCheckPlan.Findings | Select-Object -First 5)) { Note "    $line" }
-            $storeCheckWriteText = Get-DarlingStoreWriteGrantText (Get-DarlingDataDirectory $storeCheckConfig) $storeCheckPlan.Writers
-            if ($storeCheckWriteText) { Warn "$storeCheckWriteText Stop this script now to review them first: nothing has been stopped or changed yet." }
-        }
-        elseif ($storeCheckPlan) { Good "Store folder '$storeCheckFolder': every item the service checks is owned and granted the way it expects." }
+        if ($storeCheckPlan) { Write-DarlingStoreCheckResult $storeCheckFolder (Get-DarlingDataDirectory $storeCheckConfig) $storeCheckPlan $storeCheckSid.Value }
     }
 }
 
@@ -4282,6 +4297,17 @@ else {
 $tlsKeyWarning = Get-UpgradeTlsKeyFileWarning (Join-Path $InstallRoot $serviceExeName) $configPath
 if ($tlsKeyWarning) { Warn $tlsKeyWarning }
 
+# ============================ the service path in quotes (#6597) ============================
+#
+# This comes BEFORE the store folder step on purpose. The store step can end the upgrade with Fail and the service left stopped
+# (#7267), and nothing below it would run: an install whose path install-darling.ps1 registered bare would then be started by
+# hand on an unquoted image path. The service is stopped here and the new build is in place, and the step needs nothing from the
+# store step.
+# #6597: the registered path keeps its quotes, as the MSI registers it. The service is stopped here and the new build is in place.
+if (Set-DarlingServiceQuotedPath $serviceName (Join-Path $InstallRoot $serviceExeName)) {
+    Good "Service path re-registered in quotes."
+}
+
 # ============================ the store folder ============================
 #
 # The same lock install-darling.ps1 step 4b3 applies, through the same functions: the store folder is made or kept owned by
@@ -4291,7 +4317,8 @@ if ($tlsKeyWarning) { Warn $tlsKeyWarning }
 #
 # A store this cannot fix or lock is a FAIL with the service left stopped (#7267): the service checks the same things at its start and
 # refuses a store it cannot trust, so starting it would print "Service is Running." over a host with no database, which is the
-# symptom reported there. The message says the service is stopped, prints the four commands and names Start-Service for afterwards.
+# symptom reported there. The message says the service is stopped, prints the four commands and says to run this script again with
+# the same arguments, which judges the store again, repeats the idempotent steps and starts the service.
 $storeFolder = Get-DarlingStoreFolder $configPath
 if (-not $storeFolder) {
     Note 'No store folder to secure here: postgres.managed is false, or darling.json could not be read or names a data directory this script does not handle.'
@@ -4301,11 +4328,6 @@ elseif (-not $logonAccount) {
 }
 else {
     Repair-DarlingStoreAfterStop $storeFolder $configPath $logonAccount $operatorSid $serviceName
-}
-
-# #6597: the registered path keeps its quotes, as the MSI registers it. The service is stopped here and the new build is in place.
-if (Set-DarlingServiceQuotedPath $serviceName (Join-Path $InstallRoot $serviceExeName)) {
-    Good "Service path re-registered in quotes."
 }
 
 Note "Starting '$serviceName'..."

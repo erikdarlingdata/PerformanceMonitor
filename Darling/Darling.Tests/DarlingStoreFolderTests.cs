@@ -339,9 +339,8 @@ public sealed class DarlingStoreFolderScriptTests
         Assert.Contains("Get-DarlingServiceSids '' $serviceName", line, StringComparison.Ordinal);
         Assert.Contains("[string]$serviceName = ''", initialize.Split('\n')[0], StringComparison.Ordinal);
 
-        /* Both scripts hand the function the service's name. */
+        /* The installer hands the function the service's name. */
         Assert.Contains("(Get-DarlingDataDirectory $configPath) $serviceName }", Script, StringComparison.Ordinal);
-        Assert.Contains("Initialize-DarlingStoreFolder $storeFolder $logonAccount $operatorSid $dataDirectory $serviceName\n", UpgradeScript, StringComparison.Ordinal);
     }
 
     /// <summary>The service SID the script trusts is the one Windows derives from the service's name: the SHA-1 of the
@@ -460,11 +459,11 @@ public sealed class DarlingStoreFolderScriptTests
     }
 
     /// <summary>The upgrade script locks the store folder with the installer's own functions (the same text, so they
-    /// cannot drift), after the service has stopped and before it starts, so an upgrade from a release that could not
-    /// lock the folder ends with it locked. A folder it cannot lock ends the upgrade with the service stopped (#7267, see
+    /// cannot drift), so an upgrade from a release that could not lock the folder ends with it locked. A folder it cannot
+    /// lock ends the upgrade with the service stopped (#7267, see
     /// TheUpgrade_FailsAndLeavesTheServiceStopped_WhenTheStoreCannotBeFixedOrLocked).</summary>
     [Fact]
-    public void TheUpgradeLocksTheStoreFolder_WithTheInstallersFunctions_AfterTheServiceStopsAndBeforeItStarts()
+    public void TheUpgradeLocksTheStoreFolder_WithTheInstallersFunctions()
     {
         var upgrade = UpgradeScript;
         foreach (var name in new[]
@@ -478,12 +477,6 @@ public sealed class DarlingStoreFolderScriptTests
             Assert.Single(Regex.Matches(upgrade, @"(?m)^function " + Regex.Escape(name) + @"\b"));
         }
 
-        var stop = upgrade.IndexOf("Stop-Service -Name $serviceName", StringComparison.Ordinal);
-        var copied = upgrade.IndexOf("Invoke-UpgradeTreeLock 'after the copy'", StringComparison.Ordinal);
-        var call = upgrade.IndexOf("Repair-DarlingStoreAfterStop $storeFolder $configPath $logonAccount $operatorSid $serviceName", StringComparison.Ordinal);
-        var start = upgrade.IndexOf("Start-Service -Name $serviceName", StringComparison.Ordinal);
-        Assert.True(stop >= 0 && stop < call, "the store folder is locked after the service has stopped");
-        Assert.True(copied < call && call < start, "the store folder is locked after the new build is in place and before the service starts");
         Assert.Single(Regex.Matches(upgrade, @"(?<!function )Initialize-DarlingStoreFolder (\S+)"));
     }
 
@@ -786,9 +779,67 @@ public sealed class DarlingStoreFolderScriptTests
         Assert.DoesNotContain("icacls ", rootRefusal, StringComparison.Ordinal);
     }
 
+    /// <summary>#7267: what the pre-stop judgement prints matches what it found. A folder with no PG_VERSION whose items grant
+    /// access to Users is not the store the previous release was running, so nothing is fixed in place, but it is not "in
+    /// order" either: the line names the grant. A clean folder still gets the Good line. A store with a write grant says the
+    /// script does not pause and names -Check as the way to get the report without changing anything.</summary>
+    [Fact]
+    public void ThePreStopReport_NamesTheGrantsItFound_AndCallsOnlyAFolderWithNothingToReportInOrder()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "Windows PowerShell and ACLs");
+
+        var answers = RunWindowsPowerShell(UpgradeProbe(StoreProbeHelpers + """
+            function Fail([string]$message) { throw ('FAILCALLED:' + $message) }
+
+            $grants = New-Store 'grants' $false
+            Expose (Join-Path $grants 'pg.log') 'Read'
+            $plan = Get-DarlingStoreAdoptionPlan $grants (Join-Path $grants 'pg') $trusted @($meSid)
+            'grants-start'
+            Write-DarlingStoreCheckResult $grants (Join-Path $grants 'pg') $plan $meSid.Value
+            'grants-end'
+            'grants-state=' + $plan.State
+
+            $clean = New-Store 'clean' $false
+            $plan = Get-DarlingStoreAdoptionPlan $clean (Join-Path $clean 'pg') $trusted @($meSid)
+            'clean-start'
+            Write-DarlingStoreCheckResult $clean (Join-Path $clean 'pg') $plan $meSid.Value
+            'clean-end'
+
+            $writer = New-Store 'writer' $true
+            Expose (Join-Path $writer 'pg') 'Modify'
+            $plan = Get-DarlingStoreAdoptionPlan $writer (Join-Path $writer 'pg') $trusted @($meSid)
+            'writer-start'
+            Write-DarlingStoreCheckResult $writer (Join-Path $writer 'pg') $plan $meSid.Value
+            'writer-end'
+            """));
+
+        var grants = Between(answers, "grants-start", "grants-end");
+        Assert.Contains(grants, line => line.StartsWith("WARNING: ", StringComparison.Ordinal) && line.Contains("has no PG_VERSION", StringComparison.Ordinal) && line.Contains("leaves these grants as they are", StringComparison.Ordinal));
+        Assert.Contains(grants, line => line.Contains("pg.log grants access to BUILTIN\\Users.", StringComparison.Ordinal));
+        Assert.DoesNotContain(grants, line => line.Contains("every item the service checks", StringComparison.Ordinal));
+        Assert.Contains("grants-state=Leave", answers);
+
+        var clean = Between(answers, "clean-start", "clean-end");
+        Assert.Contains(clean, line => line.Contains("every item the service checks is owned and granted the way it expects", StringComparison.Ordinal));
+        Assert.DoesNotContain(clean, line => line.StartsWith("WARNING: ", StringComparison.Ordinal));
+
+        var writer = Between(answers, "writer-start", "writer-end");
+        Assert.Contains(writer, line => line.StartsWith("WARNING: ", StringComparison.Ordinal) && line.Contains("could change the store's files.", StringComparison.Ordinal) && line.Contains("run it with -Check", StringComparison.Ordinal));
+        Assert.DoesNotContain(writer, line => line.Contains("Stop this script now", StringComparison.Ordinal));
+        Assert.DoesNotContain(writer, line => line.Contains("every item the service checks", StringComparison.Ordinal));
+    }
+
+    private static List<string> Between(List<string> lines, string start, string end)
+    {
+        var from = lines.IndexOf(start);
+        var to = lines.IndexOf(end);
+        Assert.True(from >= 0 && to > from, $"the probe printed no {start} .. {end} block");
+        return lines.GetRange(from + 1, to - from - 1);
+    }
+
     /// <summary>#7267: a store the upgrade cannot fix, or cannot lock, after it has stopped the service ends the upgrade with
-    /// Fail (exit 1), leaves the service stopped, prints the four commands with the link sentence, and names Start-Service as
-    /// the step after them. Starting a service that will refuse its store is the symptom the issue reports. A store that is
+    /// Fail (exit 1), leaves the service stopped, prints the four commands with the link sentence, and says to run the
+    /// script again with the same arguments (a bare Start-Service would skip every step after the store step). Starting a service that will refuse its store is the symptom the issue reports. A store that is
     /// fixed and locked fails nothing.</summary>
     [Fact]
     public void TheUpgrade_FailsAndLeavesTheServiceStopped_WhenTheStoreCannotBeFixedOrLocked()
@@ -843,13 +894,16 @@ public sealed class DarlingStoreFolderScriptTests
             Assert.Contains("dir /s /a:l", failure, StringComparison.Ordinal);
             Assert.Contains("make the links again: |     icacls ", failure, StringComparison.Ordinal);
             Assert.Contains("/setowner", failure, StringComparison.Ordinal);
-            Assert.EndsWith("Then start the service with: Start-Service -Name 'PerfSvc'", failure, StringComparison.Ordinal);
+            Assert.EndsWith("Then run upgrade-darling.ps1 again with the same arguments: it judges the store again, finishes the upgrade and starts the service.", failure, StringComparison.Ordinal);
+            Assert.DoesNotContain("Start-Service", failure, StringComparison.Ordinal);
         }
 
         var account = Assert.Single(answers, line => line.StartsWith("account=", StringComparison.Ordinal));
         Assert.Contains("could not be resolved", account, StringComparison.Ordinal);
         Assert.Contains("is STOPPED", account, StringComparison.Ordinal);
         Assert.DoesNotContain("icacls ", account, StringComparison.Ordinal);
+        Assert.DoesNotContain("Start-Service", account, StringComparison.Ordinal);
+        Assert.EndsWith("Then run upgrade-darling.ps1 again with the same arguments: it judges the store again, finishes the upgrade and starts the service.", account, StringComparison.Ordinal);
 
         Assert.Contains("fine=no-fail", answers);
     }
@@ -864,7 +918,7 @@ public sealed class DarlingStoreFolderScriptTests
         ExtractFunctions(
             UpgradeScript, "Get-DarlingItemOwnerSid", "Get-DarlingLinkOwnerSid", "Initialize-DarlingNativeStoreFolder", "Get-DarlingStoreRepairSteps",
             "Get-DarlingStoreRepairText", "Find-DarlingStoreLinks", "Get-DarlingStoreWriteGrantText", "Get-DarlingStoreAdoptionPlan", "Invoke-DarlingStoreAdoption",
-            "Get-DarlingStoreStoppedText", "Get-DarlingStoreRefusalText", "Repair-DarlingStoreAfterStop"),
+            "Get-DarlingStoreStoppedText", "Get-DarlingStoreRefusalText", "Write-DarlingStoreCheckResult", "Repair-DarlingStoreAfterStop"),
         $$"""
         $base = Join-Path $env:TEMP ('darling-adopt-' + [guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory $base | Out-Null
