@@ -20,9 +20,10 @@ namespace Darling.Tests;
 /// (<c>%t:%r:%u@%d:[%p]:%Q </c>), but the <c>pg_read_file</c> route's SQL block pattern read only the space family,
 /// so that prefix read <c>plan_attribution</c> as met while the route stored nothing. Both route statements now splice
 /// <see cref="PgPlanCaptureCollector.PlanBlockPatternSql"/>; this runs that very constant through a real
-/// <c>regexp_matches</c> over planted text, with the same <c>'gn'</c> flags the statements use. A live cluster's own
-/// prefix is fixed at <c>%m [%p] %Q </c>, so a colon plan cannot be planted in a real log, which is why the text is
-/// planted here. Skips without <c>DARLING_TEST_PG</c>, like its siblings. The query reads no relation, so there is
+/// <c>regexp_matches</c> over planted text, with the same <c>'gn'</c> flags the statements use. A live cluster's
+/// <c>log_line_prefix</c> is fixed per cluster (the 5541 store sets <c>%m [%p] %c </c>, the plan-capture target
+/// <c>%m [%p] %Q </c>), so a colon plan, or one from a Unix-socket session, cannot be planted in a real log, which is
+/// why the text is planted here. Skips without <c>DARLING_TEST_PG</c>, like its siblings. The query reads no relation, so there is
 /// nothing to clean up.
 /// </summary>
 [Collection("live-postgres")]
@@ -79,6 +80,34 @@ public sealed class PgPlanBlockPatternSqlLiveTests
         Assert.Equal("510393640047350727", m[0]);
         Assert.Equal("11.877", m[1]);
         Assert.Contains("Result", m[2], StringComparison.Ordinal);
+    }
+
+    /* %r and %h render the literal [local] for a Unix-socket session, so these prefixes write a bracket before the pid
+       bracket. The gap passes that exact text and no other bracket. Revert the gap to [^[\n]* and both come back empty. */
+    [Theory]
+    [InlineData("2026-08-25 14:50:11 UTC:[local]:app_user@app_db:[81]:510393640047350727 LOG:  duration: 11.877 ms  plan:\n")]
+    [InlineData("2026-08-25 14:50:11.111 UTC [local] [81] 510393640047350727 LOG:  duration: 11.877 ms  plan:\n")]
+    public async Task ALocalSocketSessionsLineWithABracketedHost_YieldsItsPlan(string header)
+    {
+        var matches = await MatchAsync(header + PlanLines);
+
+        var m = Assert.Single(matches);
+        Assert.Equal("510393640047350727", m[0]);
+        Assert.Equal("11.877", m[1]);
+        Assert.Contains("Result", m[2], StringComparison.Ordinal);
+    }
+
+    /* The real pid bracket comes first and the forged [local] [1] header sits later in the STATEMENT echo. The gap
+       passes [local] but never [58], so the forged header is out of reach. A gap that passes any bracket yields it. */
+    [Theory]
+    [InlineData("2026-08-25 14:50:05 UTC:[local]:app_user@app_db:[58]:0 STATEMENT:  SELECT 1 -- [local] [1] 424242 LOG:  duration: 1.0 ms  plan:\n")]
+    [InlineData("2026-08-25 14:50:05.299 UTC [local] [58] 0 STATEMENT:  SELECT 1 -- [local] [1] 424242 LOG:  duration: 1.0 ms  plan:\n")]
+    public async Task AForgedHeaderBehindARealBracketAndALocalBracket_YieldsNoPlan(string forgedLine)
+    {
+        var matches = await MatchAsync(
+            forgedLine + "\t{\"Plan\": {\"Node Type\": \"Seq Scan\", \"Relation Name\": \"HUNTER2_LEAK_LOCAL\"}}\n");
+
+        Assert.Empty(matches);
     }
 
     [Fact]

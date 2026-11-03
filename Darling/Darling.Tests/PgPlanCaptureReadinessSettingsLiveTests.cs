@@ -22,8 +22,9 @@ namespace Darling.Tests;
 /// with <c>%Q</c> anywhere else, or with text after it (the Debian prefix with <c>%Q</c> appended), stored no plan while
 /// <c>plan_attribution</c> read as met.
 ///
-/// <para>The shipped statement runs on a real PostgreSQL with the three <c>current_setting</c> reads it judges swapped
-/// for literals, because the facets cannot otherwise be reached on a server that has not preloaded auto_explain. Skips
+/// <para>The shipped statement runs on a real PostgreSQL with the five <c>current_setting</c> reads it judges swapped
+/// for literals (the preload list, the auto_explain threshold and format, the prefix, and the log destination, pinned
+/// to <c>stderr</c> so the result does not depend on the store's default), because the facets cannot otherwise be reached on a server that has not preloaded auto_explain. Skips
 /// without <c>DARLING_TEST_PG</c>, like its siblings. The statement only reads settings and catalogs, so there is
 /// nothing to clean up.</para>
 /// </summary>
@@ -50,6 +51,7 @@ public sealed class PgPlanCaptureReadinessSettingsLiveTests
             ("current_setting('auto_explain.log_min_duration', true)", "'10'::text"),
             ("current_setting('auto_explain.log_format', true)", "'" + logFormat + "'::text"),
             ("current_setting('log_line_prefix', true)", "'" + linePrefix + "'::text"),
+            ("current_setting('log_destination', true)", "'stderr'::text"),
         };
 
         foreach (var (from, to) in swaps)
@@ -122,6 +124,8 @@ public sealed class PgPlanCaptureReadinessSettingsLiveTests
     [InlineData("%m [%p] %Q%u@%d ")]
     [InlineData("%m [%p] %Q %u@%d ")]
     [InlineData("%m [%p] %Q")]
+    [InlineData("%u [%p] %Q ")]
+    [InlineData("%u@%d:[%p]:%Q ")]
     public async Task AQueryIdAnywhereElseLeavesPlanAttributionUnmet(string prefix)
     {
         var facets = await RunAsync("json", prefix);

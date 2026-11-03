@@ -907,8 +907,8 @@ public partial class ViewerServerTab
               + "the plan, not how often it ran. Plan JSON is redacted at collection: query text is "
               + "dropped and literals are replaced, so nothing here carries customer values."
               + (orphans > 0
-                  ? $" {orphans:N0} plan(s) have no query id, which means log_line_prefix lacks %Q - they "
-                    + "cannot be joined to a statement until that is fixed."
+                  ? $" {orphans:N0} plan(s) have no query id, so they cannot be joined to a statement. A zero id means "
+                    + "compute_query_id is off, or the target logs to csvlog on PostgreSQL 13, whose csvlog has no query_id column."
                   : string.Empty);
     }
 

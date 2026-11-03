@@ -93,6 +93,11 @@ public static class PgPlanLogParser
        backtrack into that would ever reach a later one. Proven by re-adding the lazy form and watching
        PgPlanLogParserTests.AForgedHeaderBehindARealColonPrefixedBracket_StillYieldsNoPlan fail.
 
+       The one bracket the gap may pass is the exact text '[local]': %r and %h render it for a Unix-socket
+       session, so '%t:%r:%u@%d:[%p]:%Q ' writes 'UTC:[local]:u@d:[81]:123 LOG:' there. It is not '[digits]', so
+       the gap still cannot consume the real pid bracket and a forged '[1] 424242 LOG:' later in the line stays
+       unreachable (PgPlanLogParserTests covers the forged-bracket case that carries '[local]').
+
        PgPlanCaptureCollector.PlanBlockPatternSql is this same pattern spelled for SQL (#7182), for the
        pg_read_file route: both families, the same character classes, so the two routes read the same
        prefixes and the readiness rule can be one rule for both. */
@@ -103,7 +108,7 @@ public static class PgPlanLogParser
 
     private static readonly Regex s_planBlock = new(
         @"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)? "
-        + @"(?:[^ \[\n]+ [^\[\n]*\[\d+\]|[^ :\n]+:[^\[\n]*\[\d+\])"
+        + @"(?:[^ \[\n]+ (?:[^\[\n]|\[local\])*\[\d+\]|[^ :\n]+:(?:[^\[\n]|\[local\])*\[\d+\])"
         + @"[ :](-?\d+) LOG:  duration: ([0-9.]+) ms  plan:\s*\n((?:\t[^\n]*\n)+)",
         RegexOptions.Compiled | RegexOptions.Multiline,
         s_matchTimeout);
@@ -237,7 +242,7 @@ public static class PgPlanLogParser
        have cut. */
     private static readonly Regex s_planHeader = new(
         @"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)? "
-        + @"(?:[^ \[\n]+ [^\[\n]*\[\d+\]|[^ :\n]+:[^\[\n]*\[\d+\])"
+        + @"(?:[^ \[\n]+ (?:[^\[\n]|\[local\])*\[\d+\]|[^ :\n]+:(?:[^\[\n]|\[local\])*\[\d+\])"
         + @"[ :](-?\d+) LOG:  duration: ([0-9.]+) ms  plan:[ \t\r]*$",
         RegexOptions.Compiled | RegexOptions.Multiline,
         s_matchTimeout);

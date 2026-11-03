@@ -397,6 +397,50 @@ public class PgPlanLogParserTests
     }
 
     /// <summary>
+    /// A Unix-socket session renders <c>%r</c> (and <c>%h</c>) as the literal <c>[local]</c>, so
+    /// <c>%t:%r:%u@%d:[%p]:%Q </c> and <c>%m %r [%p] %Q </c> write a bracket BEFORE the pid bracket. The gap
+    /// passes that exact text and no other bracket, so these sessions' plans are read, where a gap that could not
+    /// pass the <c>[</c> dropped them while plan_attribution read met. Revert <c>s_planBlock</c>'s gap to
+    /// <c>[^\[\n]*</c> and both cases come back empty.
+    /// </summary>
+    [Theory]
+    [InlineData("2026-08-25 14:50:11 UTC:[local]:app_user@app_db:[81]:510393640047350727 LOG:  duration: 11.877 ms  plan:\n")]
+    [InlineData("2026-08-25 14:50:11.111 UTC [local] [81] 510393640047350727 LOG:  duration: 11.877 ms  plan:\n")]
+    public void ALocalSocketSessionsLineWithABracketedHost_StillYieldsItsPlan(string header)
+    {
+        var log = header
+            + "\t{\n"
+            + "\t  \"Plan\": { \"Node Type\": \"Result\" }\n"
+            + "\t}\n";
+
+        var plan = Assert.Single(PgPlanLogParser.Extract(log));
+        Assert.Equal(510393640047350727, plan.QueryId);
+    }
+
+    /// <summary>
+    /// The forged-bracket guarantee with <c>[local]</c> in the gap (#4008): the real pid bracket <c>[58]</c> comes
+    /// first and a forged <c>[local] [1] 424242 LOG:</c> header sits later in the STATEMENT echo. The gap passes
+    /// <c>[local]</c> but never <c>[58]</c>, so the forged header stays out of reach. Swap the gap for one that
+    /// passes any bracket, <c>(?:[^\[\n]|\[[^\]\n]*\])*</c>, and both cases yield the forged plan.
+    /// </summary>
+    [Theory]
+    [InlineData("2026-08-25 14:50:05 UTC:[local]:app_user@app_db:[58]:0 STATEMENT:  SELECT 1 -- [local] [1] 424242 LOG:  duration: 1.0 ms  plan:\n")]
+    [InlineData("2026-08-25 14:50:05.299 UTC [local] [58] 0 STATEMENT:  SELECT 1 -- [local] [1] 424242 LOG:  duration: 1.0 ms  plan:\n")]
+    public void AForgedHeaderBehindARealBracketAndALocalBracket_StillYieldsNoPlan(string forgedLine)
+    {
+        var log = forgedLine
+            + "\t{\"Plan\": {\"Node Type\": \"Seq Scan\", \"Relation Name\": \"HUNTER2_LEAK_LOCAL\"}}\n"
+            + "2026-08-25 14:50:11.111 UTC [81] 510393640047350727 LOG:  duration: 11.877 ms  plan:\n"
+            + "\t{\n"
+            + "\t  \"Plan\": { \"Node Type\": \"Result\" }\n"
+            + "\t}\n";
+
+        var plan = Assert.Single(PgPlanLogParser.Extract(log));
+        Assert.Equal(510393640047350727, plan.QueryId);
+        Assert.DoesNotContain("HUNTER2_LEAK_LOCAL", plan.PlanJson, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// #4008: plan-capture readiness asks only that <c>log_line_prefix</c> carry <c>%Q</c>, so a self-hosted
     /// prefix with fields between the timestamp and the pid (<c>%m %u@%d [%p] %Q </c>) is a supported
     /// configuration, and it captured before the anchor. The space family's gap is <c>[^\[\n]*</c>, like
