@@ -327,6 +327,45 @@ public sealed class QueryStoreCurrentPartitionAnalyzeLiveTests
         Assert.True((await StatsAsync(connection, current, ct)).ColumnStats > 0);
     }
 
+    [Fact]
+    public async Task ALockOnTheParent_MakesTheDailyAnalyzeRetryLaterWithinHalfOfDeadlockTimeout_OnEveryVersion()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #7353 live tests.");
+        var ct = TestContext.Current.CancellationToken;
+        var now = DateTime.UtcNow;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = await OpenStoreAsync(scratch, ct);
+        await using var blocker = new NpgsqlConnection(scratch.ConnectionString);
+        await blocker.OpenAsync(ct);
+        var logger = new QueryStoreIntervalPartitionsLiveTests.ListLogger();
+        var table = QueryStoreIntervalPartitions.Wide;
+        await SeedFreshDaysAsync(connection, table, now, logger, ct);
+
+        /* The daily parent ANALYZE: before PostgreSQL 18 it recurses into every partition and analyzes each under SHARE UPDATE EXCLUSIVE, so
+           it can be the waiter that cancels a regular autovacuum on the current partition (#5594). It takes the current partition's rule: wait
+           at most half of deadlock_timeout. The parent is held here, so the wait happens on every version, and the step reports the wait it
+           set, so the test asserts on that and not on a clock. The old fixed 5 s lock timeout reported no bound. */
+        await ExecAsync(connection, "SET deadlock_timeout = '4s'", ct);
+        var allowedMs = QueryStoreIntervalBrin.SummarizeLockTimeoutMs(4000);
+        Assert.InRange(allowedMs, 1, 3999);
+        await using (var hold = await blocker.BeginTransactionAsync(ct))
+        {
+            await ExecAsync(blocker, $"LOCK TABLE ONLY {table.Parent} IN SHARE UPDATE EXCLUSIVE MODE", ct);
+            var blocked = await QueryStoreIntervalPartitions.AnalyzeAsync(connection, table, logger, ct);
+            Assert.Equal(QueryStoreIntervalPartitions.StepOutcome.RetryLater, blocked.Outcome);
+            Assert.Contains($"after at most {allowedMs} ms", blocked.Detail, StringComparison.Ordinal);
+            await hold.RollbackAsync(ct);
+        }
+
+        /* A deadlock_timeout too short to wait below is NotReady, as for the current partition. */
+        await ExecAsync(connection, $"SET deadlock_timeout = '{QueryStoreIntervalBrin.MinimumDeadlockTimeoutMs - 100}ms'", ct);
+        Assert.Equal(QueryStoreIntervalPartitions.StepOutcome.NotReady, (await QueryStoreIntervalPartitions.AnalyzeAsync(connection, table, logger, ct)).Outcome);
+
+        await ExecAsync(connection, "RESET deadlock_timeout", ct);
+        Assert.Equal(QueryStoreIntervalPartitions.StepOutcome.Done, (await QueryStoreIntervalPartitions.AnalyzeAsync(connection, table, logger, ct)).Outcome);
+    }
+
     /// <summary>
     /// A manual VACUUM in a second session, throttled to one page per 100 ms so it is still running when the step asks. It shows in
     /// pg_stat_progress_vacuum as an autovacuum worker would. A real autovacuum cannot be started on demand without changing the

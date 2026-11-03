@@ -1129,11 +1129,18 @@ SELECT COALESCE
 
     /// <summary>
     /// ANALYZE of the parent. Autovacuum never analyzes a partitioned table, so the parent's statistics only exist when
-    /// this runs. In one transaction under a 5 s <c>lock_timeout</c> (a leaf held by an anti-wraparound vacuum or an index
-    /// build gives <see cref="StepOutcome.RetryLater"/>, not a wait). On PostgreSQL 18 and later it is
-    /// <c>ANALYZE ONLY parent</c>: the leaves are analyzed by autovacuum already, and without ONLY the statement
-    /// samples every leaf again, the 91 GB legacy table included (#5571 review M1). Never called from a convergence
-    /// step: it runs on the background loop and once after a promotion.
+    /// this runs. In one transaction under a <c>lock_timeout</c> of half of <c>deadlock_timeout</c>
+    /// (<see cref="QueryStoreIntervalBrin.SummarizeLockTimeoutMs"/>, #7353): a leaf held by a vacuum, an anti-wraparound vacuum or
+    /// an index build gives <see cref="StepOutcome.RetryLater"/>, not a wait, and a <c>deadlock_timeout</c> too short to wait
+    /// below is <see cref="StepOutcome.NotReady"/>. The locks differ by version. On PostgreSQL 18 and later it is
+    /// <c>ANALYZE ONLY parent</c>: the leaves are analyzed by autovacuum already, and the statement takes only the parent's
+    /// SHARE UPDATE EXCLUSIVE lock and an AccessShareLock on each leaf to sample it. Before 18 ANALYZE ONLY still recurses into the
+    /// partitions, and each is analyzed as a table of its own, under
+    /// SHARE UPDATE EXCLUSIVE, which a regular autovacuum on the current partition holds (#5571 review M1: it samples every
+    /// leaf again, the 91 GB legacy table included). A waiter that sits past <c>deadlock_timeout</c> there makes PostgreSQL
+    /// cancel that autovacuum (#5594), so the wait is below it on every version. A retry is the next hourly pass of
+    /// <see cref="AnalyzeIfDueAsync"/>, which reads <c>last_analyze</c> again. Never called from a convergence step: it runs on
+    /// the background loop and once after a promotion.
     /// </summary>
     public static async Task<StepResult> AnalyzeAsync(
         NpgsqlConnection connection, IntervalTable table, ILogger logger, CancellationToken cancellationToken)
@@ -1144,11 +1151,21 @@ SELECT COALESCE
             return new StepResult(StepOutcome.NotReady, $"{table.Parent} is not a partitioned table");
         }
 
+        /* The #5594 rule, as AnalyzeCurrentPartitionAsync has it: wait at most half of deadlock_timeout, so this is never the waiter
+           that cancels a regular autovacuum on a leaf. No busy check: a leaf that is taken is a lock timeout, which is RetryLater. */
+        var deadlockMs = await QueryStoreIntervalBrin.ReadDeadlockTimeoutMsAsync(connection, cancellationToken).ConfigureAwait(false);
+        var lockMs = QueryStoreIntervalBrin.SummarizeLockTimeoutMs(deadlockMs);
+        if (lockMs == 0)
+        {
+            return new StepResult(
+                StepOutcome.NotReady, $"deadlock_timeout is {deadlockMs} ms, too short to wait for a lock below it, so the ANALYZE of {table.Parent} does not run");
+        }
+
         var started = System.Diagnostics.Stopwatch.StartNew();
         try
         {
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
-            await ExecuteAsync(connection, LockTimeoutSql, ShortTimeoutSeconds, transaction, cancellationToken).ConfigureAwait(false);
+            await ExecuteAsync(connection, $"SET LOCAL lock_timeout = '{lockMs}ms';", ShortTimeoutSeconds, transaction, cancellationToken).ConfigureAwait(false);
             await ExecuteAsync(
                 connection, AnalyzeSql(table, connection.PostgreSqlVersion.Major >= AnalyzeOnlyMajorVersion), AnalyzeTimeoutSeconds, transaction, cancellationToken)
                 .ConfigureAwait(false);
@@ -1157,8 +1174,9 @@ SELECT COALESCE
         catch (PostgresException ex) when (IsLockContention(ex))
         {
             logger.LogInformation(
-                "Query Store interval table {Table}: analyzing the parent hit a {Reason}; the next background pass retries.", table.Parent, LockReason(ex));
-            return new StepResult(StepOutcome.RetryLater, LockReason(ex));
+                "Query Store interval table {Table}: analyzing the parent hit a {Reason} after at most {LockMs} ms (deadlock_timeout is {DeadlockMs} ms); the next background pass retries.",
+                table.Parent, LockReason(ex), lockMs, deadlockMs);
+            return new StepResult(StepOutcome.RetryLater, $"{LockReason(ex)} after at most {lockMs} ms");
         }
 
         logger.LogInformation(
