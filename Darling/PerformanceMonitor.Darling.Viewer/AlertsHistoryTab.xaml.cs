@@ -47,6 +47,10 @@ public partial class AlertsHistoryTab : UserControl
     private ColumnFilterPopup? _filterPopupContent;
     private DateTime? _lastRefreshed;
 
+    /// <summary>#7211: the newest <see cref="LoadAlertsAsync"/> claims the tab, so a slower read for a server or window the operator
+    /// has since moved off cannot land over a newer one (the Job History tab's rule, #5703).</summary>
+    private readonly ScopedLoadGenerations _loads = new();
+
     /// <summary>The read's row cap (D7): the newest 500 alerts. <see cref="LoadAlertsAsync"/> passes it to the read and
     /// the count text (<see cref="JobHistoryCap.CountText(int, int, int, string)"/>) says "showing the newest 500" when
     /// the read reached it.</summary>
@@ -132,12 +136,20 @@ public partial class AlertsHistoryTab : UserControl
             return;
         }
 
+        var gen = _loads.Claim(nameof(LoadAlertsAsync));
+
         try
         {
             var (sinceUtc, untilUtc, isLive) = GetSelectedWindow();
             int? serverId = GetSelectedServerId();
 
             var alerts = await _dataService.GetAlertHistoryWindowAsync(sinceUtc, isLive ? null : untilUtc, serverId, RowCap);
+
+            /* #7211: nothing awaits between this check and the bind below, so an older read never lands over a newer one. */
+            if (_loads.Superseded(nameof(LoadAlertsAsync), gen))
+            {
+                return;
+            }
 
             if (_filterManager != null)
             {
@@ -168,30 +180,33 @@ public partial class AlertsHistoryTab : UserControl
     }
 
     /// <summary>
-    /// Rebuilds the Server filter combo from the servers present in the current read (Lite's
-    /// PopulateServerFilter): "All Servers" first, then each distinct server, preserving the selection.
+    /// Brings the Server filter combo up to date after a read (#7211): "All Servers" first, then every server already on offer plus
+    /// those in the read. The list only grows (<see cref="JobHistoryFilterChoices.MergeServers"/>, as on the Job History tab, #5703), so
+    /// a read narrowed to one server, or to a window where the picked server has no alerts, never removes a choice and the operator can
+    /// always pick another server or go back to All. The picked server is kept, and a pick that cannot be found falls back to
+    /// "All Servers" on purpose instead of leaving the combo blank while the grid reads every server.
     /// </summary>
-    private void PopulateServerFilter(List<ViewerAlertRow> alerts)
+    internal void PopulateServerFilter(List<ViewerAlertRow> alerts)
     {
-        var servers = alerts
-            .Select(a => (a.ServerId, a.ServerName))
-            .Where(s => !string.IsNullOrEmpty(s.ServerName))
-            .Distinct()
-            .OrderBy(s => s.ServerName)
+        var offered = ServerFilterComboBox.Items
+            .OfType<ComboBoxItem>()
+            .Skip(1)
+            .Where(i => int.TryParse(i.Tag?.ToString(), out _))
+            .Select(i => new JobHistoryFilterChoices.ServerChoice(int.Parse(i.Tag!.ToString()!), i.Content?.ToString() ?? string.Empty))
             .ToList();
 
         var currentSelection = ServerFilterComboBox.SelectedIndex > 0
             ? (ServerFilterComboBox.SelectedItem as ComboBoxItem)?.Tag?.ToString()
             : null;
 
-        var existingIds = ServerFilterComboBox.Items
-            .OfType<ComboBoxItem>()
-            .Skip(1)
-            .Select(i => i.Tag?.ToString())
-            .ToList();
+        var servers = JobHistoryFilterChoices.MergeServers(
+            offered,
+            [],
+            alerts.Select(a => new JobHistoryFilterChoices.ServerChoice(a.ServerId, a.ServerName ?? string.Empty)));
 
         var newIds = servers.Select(s => s.ServerId.ToString()).ToList();
-        if (newIds.SequenceEqual(existingIds))
+        var existingIds = offered.Select(o => o.ServerId.ToString()).ToList();
+        if (newIds.SequenceEqual(existingIds) && ServerFilterComboBox.SelectedIndex >= 0)
         {
             return;
         }
@@ -212,18 +227,20 @@ public partial class AlertsHistoryTab : UserControl
             });
         }
 
+        var picked = 0;
         if (currentSelection != null)
         {
             for (var i = 1; i < ServerFilterComboBox.Items.Count; i++)
             {
                 if ((ServerFilterComboBox.Items[i] as ComboBoxItem)?.Tag?.ToString() == currentSelection)
                 {
-                    ServerFilterComboBox.SelectedIndex = i;
+                    picked = i;
                     break;
                 }
             }
         }
 
+        ServerFilterComboBox.SelectedIndex = picked;
         ServerFilterComboBox.SelectionChanged += ServerFilterComboBox_SelectionChanged;
     }
 
@@ -239,7 +256,7 @@ public partial class AlertsHistoryTab : UserControl
         return ViewerTimeRangeWindow.HoursBack(startUtc, endUtc);
     }
 
-    private int? GetSelectedServerId()
+    internal int? GetSelectedServerId()
     {
         if (ServerFilterComboBox.SelectedIndex > 0 &&
             ServerFilterComboBox.SelectedItem is ComboBoxItem item &&
