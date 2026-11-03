@@ -526,16 +526,19 @@ public sealed class DarlingStoreFolderScriptTests
                 Set-Acl -LiteralPath $path -AclObject $acl
             }
 
-            # A store owned by the running account, which the trusted list leaves out: taken over only for that account or an administrator.
+            # A store owned by an account the trusted list leaves out: taken over only for that account or an administrator. The items
+            # belong to whoever created them, which is this account, or Administrators when the token is elevated (CI), so the trusted
+            # list leaves out whichever one it is.
             $stranger = New-Store 'stranger' $true
-            $trustedWithoutMe = @($system, $admins)
-            $p = Get-DarlingStoreAdoptionPlan $stranger (Join-Path $stranger 'pg') $trustedWithoutMe @($meSid)
+            $owner = Get-DarlingItemOwnerSid $stranger
+            $trustedWithoutMe = @(@($system, $admins, $meSid) | Where-Object { $_ -ne $owner })
+            $p = Get-DarlingStoreAdoptionPlan $stranger (Join-Path $stranger 'pg') $trustedWithoutMe @($owner)
             'strangerAdopter=' + $p.State
             $p = Get-DarlingStoreAdoptionPlan $stranger (Join-Path $stranger 'pg') $trustedWithoutMe @()
             'strangerOther=' + $p.State
             'strangerOtherReason=' + $p.Reason
             $fresh = New-Store 'fresh' $false
-            $p = Get-DarlingStoreAdoptionPlan $fresh (Join-Path $fresh 'pg') $trustedWithoutMe @($meSid)
+            $p = Get-DarlingStoreAdoptionPlan $fresh (Join-Path $fresh 'pg') $trustedWithoutMe @($owner)
             'noClusterState=' + $p.State
             'noClusterReason=' + $p.Reason
             $linked = New-Store 'linked' $true
@@ -643,7 +646,8 @@ public sealed class DarlingStoreFolderScriptTests
             cmd /c mklink /J $deepLink $elsewhere | Out-Null
             $p = Get-DarlingStoreAdoptionPlan $deep (Join-Path $deep 'pg') $trusted @($meSid)
             'deepState=' + $p.State
-            'deepNamesLink=' + $p.Reason.Contains($deepLink)
+            # The reason names a link in its long spelling, and this probe's temp folder may be an 8.3 name (CI's runner temp).
+            'deepNamesLink=' +$p.Reason.Contains((Get-DarlingCanonicalPath $deepLink))
             'deepByHand=' + $p.FixByHand
             'deepFindings=' + @($p.Findings).Count
 
@@ -653,7 +657,7 @@ public sealed class DarlingStoreFolderScriptTests
             cmd /c mklink /J $nearLink $elsewhere | Out-Null
             $p = Get-DarlingStoreAdoptionPlan $near (Join-Path $near 'pg') $trusted @($meSid)
             'nearState=' + $p.State
-            'nearNamesLink=' + $p.Reason.Contains($nearLink)
+            'nearNamesLink=' + $p.Reason.Contains((Get-DarlingCanonicalPath $nearLink))
 
             $quiet = New-Store 'quiet' $true
             $quietLink = Join-Path $quiet 'pg\pg_wal'
@@ -663,7 +667,7 @@ public sealed class DarlingStoreFolderScriptTests
 
             $walk = Find-DarlingStoreLinks $deep
             'walkLinks=' + @($walk.Links).Count
-            'walkFoundTheDeepLink=' + (@($walk.Links) -contains $deepLink)
+            'walkFoundTheDeepLink=' + (@($walk.Links) -contains (Get-DarlingCanonicalPath $deepLink))
             'walkUnreadable=[' + $walk.Unreadable + ']'
             'targetUntouched=' + ((Get-Acl -LiteralPath $marker).Sddl -eq $markerBefore)
 
@@ -754,7 +758,8 @@ public sealed class DarlingStoreFolderScriptTests
             'repair=' + ($text -replace "`n", ' | ')
 
             $stranger = New-Store 'stranger' $true
-            $refuse = Get-DarlingStoreAdoptionPlan $stranger (Join-Path $stranger 'pg') @($system, $admins) @()
+            $owner = Get-DarlingItemOwnerSid $stranger
+            $refuse = Get-DarlingStoreAdoptionPlan $stranger (Join-Path $stranger 'pg') @(@($system, $admins, $meSid) | Where-Object { $_ -ne $owner }) @()
             'planState=' + $refuse.State
             'refusal=' + ((Get-DarlingStoreRefusalText $stranger $refuse 'S-1-5-80-1') -replace "`n", ' | ')
 
@@ -916,7 +921,7 @@ public sealed class DarlingStoreFolderScriptTests
         function Warn([string]$message) { Write-Host "WARNING: $message" }
         """,
         ExtractFunctions(
-            UpgradeScript, "Get-DarlingItemOwnerSid", "Get-DarlingLinkOwnerSid", "Initialize-DarlingNativeStoreFolder", "Get-DarlingStoreRepairSteps",
+            UpgradeScript, "Get-DarlingCanonicalPath", "Get-DarlingItemOwnerSid", "Get-DarlingLinkOwnerSid", "Initialize-DarlingNativeStoreFolder", "Get-DarlingStoreRepairSteps",
             "Get-DarlingStoreRepairText", "Find-DarlingStoreLinks", "Get-DarlingStoreWriteGrantText", "Get-DarlingStoreAdoptionPlan", "Invoke-DarlingStoreAdoption",
             "Get-DarlingStoreStoppedText", "Get-DarlingStoreRefusalText", "Write-DarlingStoreCheckResult", "Repair-DarlingStoreAfterStop"),
         $$"""

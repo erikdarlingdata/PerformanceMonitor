@@ -1830,9 +1830,16 @@ function Get-DarlingStoreAdoptionPlan([string]$folder, [string]$dataDirectory, $
     $isStore = $false
     $dataName = ''
     if ($dataDirectory) {
+        # Both sides in one long spelling: $full came through GetFullPath, which spells out an 8.3 short name that exists
+        # (C:\Users\RUNNER~1), while a data directory handed in as typed keeps it. Compared raw, the two never matched, the data
+        # directory was never read, and a real cluster folder was judged as one with no PG_VERSION (#5649, #7267).
         $dataParent = [System.IO.Path]::GetDirectoryName($dataDirectory)
-        if ($dataParent -and $dataParent.TrimEnd('\') -ieq $full) { $dataName = [System.IO.Path]::GetFileName($dataDirectory) }
-        $isStore = [bool]($dataName -and (Test-Path -LiteralPath (Join-Path $dataDirectory 'PG_VERSION') -PathType Leaf))
+        if ($dataParent) {
+            $parentCanonical = Get-DarlingCanonicalPath $dataParent
+            $fullCanonical = Get-DarlingCanonicalPath $full
+            if ($parentCanonical -and $fullCanonical -and $parentCanonical.TrimEnd('\') -ieq $fullCanonical.TrimEnd('\')) { $dataName = [System.IO.Path]::GetFileName($dataDirectory) }
+        }
+        $isStore =[bool]($dataName -and (Test-Path -LiteralPath (Join-Path $dataDirectory 'PG_VERSION') -PathType Leaf))
     }
 
     # Owners, over the folder, the names the service writes into and the data directory's own entries.
@@ -4299,10 +4306,9 @@ if ($tlsKeyWarning) { Warn $tlsKeyWarning }
 
 # ============================ the service path in quotes (#6597) ============================
 #
-# This comes BEFORE the store folder step on purpose. The store step can end the upgrade with Fail and the service left stopped
+# This comes BEFORE the store folder step on purpose. The store step can end the upgrade in a failure with the service left stopped
 # (#7267), and nothing below it would run: an install whose path install-darling.ps1 registered bare would then be started by
-# hand on an unquoted image path. The service is stopped here and the new build is in place, and the step needs nothing from the
-# store step.
+# hand on an unquoted image path. The step needs nothing from the store step.
 # #6597: the registered path keeps its quotes, as the MSI registers it. The service is stopped here and the new build is in place.
 if (Set-DarlingServiceQuotedPath $serviceName (Join-Path $InstallRoot $serviceExeName)) {
     Good "Service path re-registered in quotes."
