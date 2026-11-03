@@ -234,8 +234,8 @@ ORDER BY server_id, sql_handle, statement_start_offset, statement_end_offset, pl
             await SeedFamilyAsync("query_stats", () => SeedQueryStatsAsync(connection, QueryStatsSeedCutoff()));
 
             _logger?.LogInformation(
-                "Delta calculator seeded from database (baselines from the last {Minutes} minutes)",
-                (int)SeedLookback.TotalMinutes);
+                "Delta calculator seeded from database (baselines from the last {Minutes} minutes, {QueryStatsMinutes} minutes for query_stats)",
+                (int)SeedLookback.TotalMinutes, (int)QueryStatsSeedLookback.TotalMinutes);
         }
         catch (Exception ex)
         {

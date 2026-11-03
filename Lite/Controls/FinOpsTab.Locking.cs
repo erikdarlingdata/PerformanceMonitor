@@ -16,6 +16,7 @@ using System.Windows.Input;
 using System.Windows.Media;
 using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Services;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitorLite.Controls;
 
@@ -139,7 +140,7 @@ public partial class FinOpsTab : UserControl
 
     private void IndexLockingGrid_DoubleClick(object sender, MouseButtonEventArgs e)
     {
-        if (IndexLockingDataGrid.SelectedItem is IndexLockingRow row)
+        if (DataGridRowHit.IsOnRow(e.OriginalSource) && IndexLockingDataGrid.SelectedItem is IndexLockingRow row)
             ShowLockingDetail(row);
     }
 
