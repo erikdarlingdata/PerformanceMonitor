@@ -138,6 +138,27 @@ try {
       out.disabledAfter = buttons().map((b) => b.disabled);
       out.strips = strips().map((x) => x.text);
     },
+    /* A redraw while a press is in flight (#7207): the 60 second poll or Refresh draws the page again. The new buttons are disabled too, no
+       second press goes out, and once the write settles the page shows the answer with the buttons enabled again. */
+    async redrawDuringPress() {
+      proposal.first_press_by = "person:5"; proposal.first_press_name = "Ann";
+      proposal.first_press_at_utc = "2026-11-01T10:05:00Z";
+      pressAnswer = { status: 200, body: { status: "first_pressed", code: null, message: "These are the facts now.", facts: { pid: 87 }, changed: [] } };
+      let release;
+      pressGate = new Promise((r) => { release = r; });
+      await draw(ID);
+      const first = (async () => { for (const fn of button("first-press").listeners.click) await fn({}); })();
+      await settle();
+      await draw(ID); /* the poll: a new page, new buttons */
+      out.disabledAfterRedraw = buttons().map((b) => b.disabled);
+      await click(button("confirm")); /* a click on a disabled button does nothing */
+      out.postsInFlight = posts.length;
+      release();
+      await first; await settle();
+      out.postsAfter = posts.length;
+      out.disabledAfter = buttons().map((b) => b.disabled);
+      out.strips = strips().map((x) => x.text);
+    },
     /* An administrator path: the note that says why a two-person route needs a mapped person shows before any press. */
     async administrator() {
       Object.assign(seat, { presses_as: "administrator", person_name: null, press_note: "Your sign-in is not mapped to an enabled person, so you press as an administrator. A route that needs two people takes a press only from a mapped person." });

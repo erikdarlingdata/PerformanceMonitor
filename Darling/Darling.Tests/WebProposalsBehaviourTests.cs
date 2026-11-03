@@ -116,6 +116,22 @@ public sealed class WebProposalsBehaviourTests
     }
 
     [Fact]
+    public void ARedrawWhileAPressIsInFlight_KeepsTheButtonsDisabled_AndTheyComeBackWhenTheWriteSettles()
+    {
+        var r = Run("redrawDuringPress");
+
+        var redrawn = r.GetProperty("disabledAfterRedraw").EnumerateArray().ToArray();
+        Assert.NotEmpty(redrawn);
+        Assert.All(redrawn, d => Assert.True(d.GetBoolean()));
+        Assert.Equal(1, r.GetProperty("postsInFlight").GetInt32());
+        Assert.Equal(1, r.GetProperty("postsAfter").GetInt32());
+        var after = r.GetProperty("disabledAfter").EnumerateArray().ToArray();
+        Assert.NotEmpty(after);
+        Assert.All(after, d => Assert.False(d.GetBoolean()));
+        Assert.Contains("These are the facts now.", r.GetProperty("strips").EnumerateArray().Select(e => e.GetString()));
+    }
+
+    [Fact]
     public void AnAdministratorPath_SeesWhyATwoPersonRouteNeedsAMappedPerson_BeforeThePress()
     {
         var r = Run("administrator");
