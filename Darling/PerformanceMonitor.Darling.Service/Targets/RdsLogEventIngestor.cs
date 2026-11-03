@@ -339,13 +339,10 @@ public sealed class RdsLogEventIngestor
     }
 
     /// <summary>
-    /// The same binary COPY the collector runner uses, driven by the collector's own definition — verbatim
-    /// the deadlock ingestor's write, over a different definition. A shared write helper for the three
-    /// ingestors is the natural follow-up; it was not pulled out tonight because the deadline-and-phase
-    /// discipline in it is the part every reviewer of #2874 and #3008 has read in place, and moving it
-    /// under a new table is not the night to re-read it.
+    /// The same binary COPY the collector runner uses, driven by the collector's own definition, through the
+    /// write the RDS ingestors share (<see cref="RdsCopyWriter"/>).
     /// </summary>
-    private async Task<int> WriteAsync(
+    private Task<int> WriteAsync(
         int serverId,
         string storageName,
         IReadOnlyList<PgLogEvent> rows,
@@ -353,81 +350,18 @@ public sealed class RdsLogEventIngestor
     {
         if (RowWriter is { } writeRows)
         {
-            return await writeRows(rows, cancellationToken);
+            return writeRows(rows, cancellationToken);
         }
 
-        var definition = PgLogEventsCollector.Instance;
-
-        var collectionTime = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
-
-        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
-
-        var writer = new PgCollectorRowWriter();
-        var written = 0;
-
-        using var startDeadline = StoreCopyStartDeadline.Start(cancellationToken);
-
-        var copyPhase = StoreCopyPhase.Start;
-
-        try
-        {
-            using (var importer = await connection.BeginBinaryImportAsync(
-                PgCollectorRowWriter.CopyCommandFor(definition), startDeadline.Token))
-            {
-                copyPhase = StoreCopyPhase.Data;
-
-                importer.Timeout = TimeSpan.FromSeconds(ServiceCommandDeadlines.CollectionSweepSeconds);
-
-                writer.Importer = importer;
-
-                foreach (var row in rows)
-                {
-                    await importer.StartRowAsync(cancellationToken);
-
-                    if (definition.IncludesCollectionId)
-                    {
-                        writer.Value(CollectionIdGenerator.Next());
-                    }
-
-                    writer.Value(collectionTime)
-                          .Value(serverId)
-                          .Value(storageName);
-
-                    writer.BeginPayload();
-                    definition.WritePayload(row, writer, NullContext(serverId, storageName, collectionTime));
-                    writer.EndPayload(definition.PayloadColumns.Count);
-                    written++;
-                }
-
-                await importer.CompleteAsync(cancellationToken);
-            }
-        }
-        catch (OperationCanceledException cancellation)
-            when (copyPhase == StoreCopyPhase.Start && startDeadline.Breached())
-        {
-            var breach = StoreCopyStartDeadline.Breach(cancellation);
-            CollectorFaultCopyPhase.Stamp(breach, copyPhase);
-            throw breach;
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            CollectorFaultCopyPhase.Stamp(ex, copyPhase);
-            throw;
-        }
-
-        _logger?.LogInformation(
-            "Stored {Count} log event(s) for {Server} from the RDS log API.", written, storageName);
-
-        return written;
+        return RdsCopyWriter.WriteAsync(
+            PgLogEventsCollector.Instance,
+            _postgres,
+            _logger,
+            serverId,
+            storageName,
+            rows,
+            "log event(s)",
+            "the RDS log API",
+            cancellationToken);
     }
-
-    private static CollectorContext NullContext(int serverId, string storageName, DateTime collectionTime)
-        => new()
-        {
-            ServerId = serverId,
-            ServerName = storageName,
-            CollectionTime = collectionTime,
-            Deltas = new CollectorDeltaCalculator(),
-            Target = new CollectorTargetInfo { Engine = CollectorTargetEngine.PostgreSql },
-        };
 }

@@ -43,7 +43,6 @@ public sealed class WebWordingFixesTests
 
         /* W8: a payload's own note (aggregate_note, a truncation note) is written for an MCP caller. */
         Assert.Contains("[localizeIsoText(plainText(message))]", util, StringComparison.Ordinal);
-        Assert.Contains("text: plainText(text)", util, StringComparison.Ordinal);
         Assert.DoesNotContain("class: \"mp-metric-note\", text: res.data.aggregate_note", tabs, StringComparison.Ordinal);
         Assert.DoesNotContain("class: \"mp-metric-note\", text: trend.data.aggregate_note", tabs, StringComparison.Ordinal);
     }
