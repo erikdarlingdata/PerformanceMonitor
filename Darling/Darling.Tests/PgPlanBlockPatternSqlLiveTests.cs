@@ -110,6 +110,18 @@ public sealed class PgPlanBlockPatternSqlLiveTests
         Assert.Empty(matches);
     }
 
+    /* '%t[%p] %Q ' and '%m[%p] %Q ' write the pid bracket straight after the time zone token, which the pattern needs
+       a space or a colon after. The readiness rules call these prefixes unmet for the same reason (#7182). */
+    [Theory]
+    [InlineData("2026-11-03 13:00:00 UTC[123] 456 LOG:  duration: 11.877 ms  plan:\n")]
+    [InlineData("2026-11-03 13:00:00.123 UTC[123] 456 LOG:  duration: 11.877 ms  plan:\n")]
+    public async Task APidBracketRightAfterTheTimeZone_YieldsNoPlan(string header)
+    {
+        var matches = await MatchAsync(header + PlanLines);
+
+        Assert.Empty(matches);
+    }
+
     [Fact]
     public async Task AColonForgedHeaderBehindARealBracket_YieldsNoPlan()
     {

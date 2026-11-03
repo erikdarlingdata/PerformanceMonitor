@@ -45,6 +45,8 @@ public sealed class PgLogLinePrefixReadableFacetTests
     [InlineData("%m %p ")]
     [InlineData("%t %p:")]
     [InlineData("%t [%p-%l]")]
+    [InlineData("%t[%p] ")]
+    [InlineData("%m[%p] %Q ")]
     public void APrefixWithAnUnbracketedPidIsReportedAsUnreadable(string prefix)
         => Assert.False(Predicate().IsMatch(prefix), prefix);
 
@@ -56,6 +58,7 @@ public sealed class PgLogLinePrefixReadableFacetTests
     [InlineData("%t [%p]: user=%u,db=%d,app=%a,client=%h ")]
     [InlineData("%t:%r:%u@%d:[%p]:")]
     [InlineData("%m %u@%d [%p] ")]
+    [InlineData("%m %r [%p] %Q ")]
     public void APrefixTheReadersAlreadyUnderstandIsReportedAsReadable(string prefix)
         => Assert.True(Predicate().IsMatch(prefix), prefix);
 

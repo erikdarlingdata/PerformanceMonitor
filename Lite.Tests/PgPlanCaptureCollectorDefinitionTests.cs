@@ -397,6 +397,24 @@ public class PgPlanLogParserTests
     }
 
     /// <summary>
+    /// <c>%t[%p] %Q </c> and <c>%m[%p] %Q </c> write the pid bracket straight after the time zone token, which the
+    /// pattern needs a space or a colon after, so no plan is read. The readiness rules call these prefixes unmet for
+    /// the same reason (#7182). Make the pattern accept the bracket there and both cases yield a plan.
+    /// </summary>
+    [Theory]
+    [InlineData("2026-11-03 13:00:00 UTC[123] 456 LOG:  duration: 11.877 ms  plan:\n")]
+    [InlineData("2026-11-03 13:00:00.123 UTC[123] 456 LOG:  duration: 11.877 ms  plan:\n")]
+    public void APidBracketRightAfterTheTimeZone_YieldsNoPlan(string header)
+    {
+        var log = header
+            + "\t{\n"
+            + "\t  \"Plan\": { \"Node Type\": \"Result\" }\n"
+            + "\t}\n";
+
+        Assert.Empty(PgPlanLogParser.Extract(log));
+    }
+
+    /// <summary>
     /// A Unix-socket session renders <c>%r</c> (and <c>%h</c>) as the literal <c>[local]</c>, so
     /// <c>%t:%r:%u@%d:[%p]:%Q </c> and <c>%m %r [%p] %Q </c> write a bracket BEFORE the pid bracket. The gap
     /// passes that exact text and no other bracket, so these sessions' plans are read, where a gap that could not

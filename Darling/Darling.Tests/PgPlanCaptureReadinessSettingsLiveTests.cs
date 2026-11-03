@@ -108,6 +108,7 @@ public sealed class PgPlanCaptureReadinessSettingsLiveTests
     [Theory]
     [InlineData("%m [%p] %Q ")]
     [InlineData("%t:%r:%u@%d:[%p]:%Q ")]
+    [InlineData("%m %r [%p] %Q ")]
     public async Task AQueryIdRightAfterThePidSatisfiesPlanAttribution(string prefix)
     {
         var facets = await RunAsync("json", prefix);
@@ -126,11 +127,33 @@ public sealed class PgPlanCaptureReadinessSettingsLiveTests
     [InlineData("%m [%p] %Q")]
     [InlineData("%u [%p] %Q ")]
     [InlineData("%u@%d:[%p]:%Q ")]
+    [InlineData("%t[%p] %Q ")]
+    [InlineData("%m[%p] %Q ")]
     public async Task AQueryIdAnywhereElseLeavesPlanAttributionUnmet(string prefix)
     {
         var facets = await RunAsync("json", prefix);
 
         Assert.False(facets["plan_attribution"].Satisfied, prefix);
+    }
+
+    /* The stderr plan block pattern needs a space or a colon right after the time zone token, so '%t[%p] %Q ' writes
+       '... UTC[123] 456 LOG:' and every plan line is dropped. Revert the [ :] after %[tm] in the two prefix rules
+       and these come back satisfied. */
+    [Theory]
+    [InlineData("%t[%p] %Q ")]
+    [InlineData("%m[%p] %Q ")]
+    [InlineData("%t[%p]")]
+    public async Task ATimestampWithNoSpaceOrColonBeforeThePidLeavesBothPrefixFacetsUnmet_AndNamesTheRequirement(string prefix)
+    {
+        var facets = await RunAsync("json", prefix);
+
+        Assert.False(facets["log_line_prefix_readable"].Satisfied, prefix);
+        Assert.Contains("space or a colon", facets["log_line_prefix_readable"].Detail, StringComparison.Ordinal);
+        if (prefix.Contains("%Q", StringComparison.Ordinal))
+        {
+            Assert.False(facets["plan_attribution"].Satisfied, prefix);
+            Assert.Contains("space or a colon", facets["plan_attribution"].Detail, StringComparison.Ordinal);
+        }
     }
 
     [Fact]

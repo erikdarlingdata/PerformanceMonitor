@@ -223,14 +223,17 @@ probe AS (
            from an empty deadlock result differs between the two. */
         coalesce(s.message_locale, '') = ''                                      AS locale_unset,
         /* #4735 item 3: DERIVED ONCE, for the reason library_loaded is. SATISFIED means a log_line_prefix the stderr
-           log readers can read: it starts with a timestamp (%t or %m) and carries the process id alone in brackets,
+           log readers can read: it starts with a timestamp (%t or %m) followed by a space or a colon, and carries the process id alone in brackets,
            [%p]. The readers anchor on that bracket, so a prefix with an unbracketed %p (%m %p, %t %p:) or with more in
            the bracket than the pid (%t [%p-%l]) has every line dropped, and an empty deadlock, plan or log-event read
            then looks like a quiet server. Case-sensitive on purpose: %P is not %p, and %T is not %t. A NULL or empty
-           prefix reads as unsatisfied, the direction that never presents a precondition this cannot prove as met. */
-        coalesce(s.line_prefix, '') ~ '^%[tm].*\[%p\]'                          AS prefix_readable,
+           prefix reads as unsatisfied, the direction that never presents a precondition this cannot prove as met.
+           The space or colon right after %t or %m is the block pattern's own rule: it needs a space or a colon after the
+           time zone token, so '%t[%p] ' writes '... UTC[123] ' and every line is dropped. */
+        coalesce(s.line_prefix, '') ~ '^%[tm][ :].*\[%p\]'                       AS prefix_readable,
         /* #7182: the shape the stderr plan block pattern (PgPlanLogParser, the block regex) can match: a prefix
-           that starts with a timestamp (%t or %m, which the pattern's leading date needs), then the bracketed pid,
+           that starts with a timestamp (%t or %m, which the pattern's leading date needs) and a space or a colon right
+           after it (the pattern needs one after the time zone token, so '%t[%p] %Q ' matches nothing), then the bracketed pid,
            ONE separator (a space or a colon), %Q, ONE space, then the end of the prefix, because
            PostgreSQL writes 'LOG:  ' straight after the prefix with no space of its own. So '%m [%p] %Q ' and
            '%t:%r:%u@%d:[%p]:%Q ' match, while '%m [%p] %Q%u@%d ', '%m [%p] %Q %u@%d ' and '%m [%p] %Q' (no
@@ -239,7 +242,7 @@ probe AS (
            bare 'contains %Q' test, or 'next escape after %p', reads as met. This is the block pattern's rule
            for whether a block matches at all, not PrefixCarriesQueryIdAfterPid, which only decides whether to
            trust the token as the id once the block has matched. */
-        coalesce(s.line_prefix, '') ~ '^%[tm].*\[%p\][ :]%Q $'                  AS prefix_qid_after_pid,
+        coalesce(s.line_prefix, '') ~ '^%[tm][ :].*\[%p\][ :]%Q $'               AS prefix_qid_after_pid,
         /* #7182: the plan reader parses JSON only. Case-insensitive because auto_explain accepts any case for
            an enum value, and trimmed because a placeholder read may carry what the file spelled. */
         lower(btrim(coalesce(s.log_format, ''))) = 'json'                       AS log_format_json,
@@ -396,11 +399,11 @@ SELECT
                  || 'query id that joins it to pg_stat_statements.'
         WHEN strpos(coalesce(p.line_prefix, ''), '%Q') > 0
             THEN 'log_line_prefix carries %Q, but not directly after [%p] as the last thing in the prefix, '
-                 || 'followed by one space, or it does not start with %t or %m. The stderr plan readers need a '
-                 || 'leading timestamp, take the query id from the token right after the bracketed pid and need '
+                 || 'followed by one space, or it does not start with %t or %m followed by a space or a colon. The stderr plan readers need a '
+                 || 'leading timestamp with a space or a colon right after it, take the query id from the token right after the bracketed pid and need '
                  || 'LOG: right after it, so with %Q anywhere else, with text after it, or with no leading '
                  || 'timestamp, no plan is stored at all. Put %Q directly after [%p], as the last thing '
-                 || 'in the prefix, followed by one space, and start the prefix with %t or %m, for example '
+                 || 'in the prefix, followed by one space, and start the prefix with %t or %m followed by a space or a colon, for example '
                  || '''%m [%p] %Q ''; it is a dynamic parameter and needs no restart.'
         ELSE 'log_line_prefix does NOT carry %Q. auto_explain does not put a query identifier in the plan '
              || 'itself - the id appears ONLY in the log line prefix - so a plan read without it cannot be '
@@ -477,14 +480,14 @@ SELECT
                  || 'That is a precondition being met, not a claim that anything was read. The deadlock and plan '
                  || 'reads have no jsonlog route, though: they read csvlog or stderr only.'
         WHEN p.prefix_readable
-            THEN 'log_line_prefix starts with a timestamp (%t or %m) and carries the process id in brackets ([%p]), '
+            THEN 'log_line_prefix starts with a timestamp (%t or %m) followed by a space or a colon and carries the process id in brackets ([%p]), '
                  || 'which is the shape the stderr log readers understand. That is a precondition being met, not a '
                  || 'claim that anything was read. csvlog and jsonlog carry the process id in a column of their own '
                  || 'and do not depend on the prefix.'
         ELSE 'The stderr log readers cannot read this log_line_prefix, so every line written under it is dropped '
              || 'and an empty deadlock, plan or log-event result from this target means nothing. They need the '
-             || 'prefix to start with a timestamp (%t or %m) and to carry the process id alone in brackets, as '
-             || 'in ''%m [%p] ''. An unbracketed %p (''%m %p '', ''%t %p:'') or a bracket that holds more than the pid '
+             || 'prefix to start with a timestamp (%t or %m) followed by a space or a colon, and to carry the process id alone in brackets, as '
+             || 'in ''%m [%p] ''. A timestamp with no space or colon right after it (''%t[%p] ''), an unbracketed %p (''%m %p '', ''%t %p:'') or a bracket that holds more than the pid '
              || '(''%t [%p-%l]'') is not read. Change log_line_prefix to include [%p]; it is a dynamic parameter and '
              || 'needs a reload, not a restart. A target whose log_destination lists csvlog, or lists jsonlog without stderr, does not depend on it.'
     END
