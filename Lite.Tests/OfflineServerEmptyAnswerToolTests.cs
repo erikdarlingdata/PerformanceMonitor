@@ -8,6 +8,9 @@
 
 using System;
 using System.IO;
+using System.Reflection;
+using PerformanceMonitor.Common;
+using PerformanceMonitor.Notifications;
 using System.Text.Json;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
@@ -131,6 +134,50 @@ public sealed class OfflineServerEmptyAnswerToolTests : IClassFixture<SharedDuck
         Assert.Equal("empty", root.GetProperty("status").GetString());
     }
 
+    /// <summary>
+    /// A server added before the log's retention horizon that has only ever logged failed runs has no SUCCESS row to find. Darling reads it
+    /// Offline through its registration, so Lite answers the same: <c>unavailable</c>, not a false "nothing to find". One added minutes ago is
+    /// still waiting for its first collection and keeps the tools' own answer.
+    /// </summary>
+    [Theory]
+    [InlineData(-400, "unavailable")]
+    [InlineData(-0.01, "empty")]
+    public async Task ServerNeverSucceeded_IsOfflineOnlyWhenAddedBeforeTheRetentionHorizon(double addedDaysAgo, string expected)
+    {
+        var name = "OfflineNeverSucceeded" + Guid.NewGuid().ToString("N")[..6];
+        var server = new ServerConnection
+        {
+            Id = Guid.NewGuid().ToString(), ServerName = name, IsEnabled = true, CreatedDate = DateTime.Now.AddDays(addedDaysAgo),
+        };
+        _serverManager.AddServer(server);
+        var id = RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(server));
+        await SeedCollectionLogAsync("wait_stats", DateTime.UtcNow.AddMinutes(-1), "ERROR", id, name);
+        var service = new LocalDataService(_duckDb) { RegisteredAtUtcLookup = serverId => ServerResolver.RegisteredAtUtc(_serverManager, serverId) };
+
+        var root = JsonDocument.Parse(await McpBlockingTools.GetDeadlocks(service, _serverManager, name, 4)).RootElement;
+
+        Assert.Equal(expected, root.GetProperty("status").GetString());
+        if (expected == "unavailable")
+        {
+            Assert.StartsWith("This server is offline: the store holds no successful collection from it", root.GetProperty("message").GetString(), StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>The host wires the registration lookup onto the data service it serves, so a tool call reaches it with no per-call setup.</summary>
+    [Fact]
+    public void McpHost_WiresTheRegistrationLookup_OntoItsDataService()
+    {
+        var service = new LocalDataService(_duckDb);
+        Assert.Null(service.RegisteredAtUtcLookup);
+
+        _ = new McpHostService(
+            service, _serverManager, new MuteRuleService(new AlertWebhookCancelTests.NoMuteRules(), new AppLoggerAdapter<MuteRuleService>()),
+            _duckDb, 0, DispatchProxy.Create<IInvestigationRequestStore, McpHostGateLiveTests.NoStore>(), "t", false);
+
+        Assert.NotNull(service.RegisteredAtUtcLookup!(_serverId));
+        Assert.Null(service.RegisteredAtUtcLookup(-1));
+    }
+
     private async Task<string> ReadAsync(string family)
     {
         var service = new LocalDataService(_duckDb);
@@ -172,7 +219,7 @@ public sealed class OfflineServerEmptyAnswerToolTests : IClassFixture<SharedDuck
         await SeedQueryAsync(DateTime.UtcNow.AddHours(-48));
     }
 
-    private async Task SeedCollectionLogAsync(string collector, DateTime collectionTimeUtc, string status)
+    private async Task SeedCollectionLogAsync(string collector, DateTime collectionTimeUtc, string status, int? serverId = null, string? serverName = null)
     {
         using var readLock = _duckDb.AcquireReadLock();
         var connection = await SeedConnectionAsync();
@@ -181,8 +228,8 @@ public sealed class OfflineServerEmptyAnswerToolTests : IClassFixture<SharedDuck
 INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected)
 VALUES ($1, $2, $3, $4, $5, 10, $6, 1)";
         cmd.Parameters.Add(new DuckDBParameter { Value = _nextId++ });
-        cmd.Parameters.Add(new DuckDBParameter { Value = _serverId });
-        cmd.Parameters.Add(new DuckDBParameter { Value = ServerName });
+        cmd.Parameters.Add(new DuckDBParameter { Value = serverId ?? _serverId });
+        cmd.Parameters.Add(new DuckDBParameter { Value = serverName ?? ServerName });
         cmd.Parameters.Add(new DuckDBParameter { Value = collector });
         cmd.Parameters.Add(new DuckDBParameter { Value = DateTime.SpecifyKind(collectionTimeUtc, DateTimeKind.Unspecified) });
         cmd.Parameters.Add(new DuckDBParameter { Value = status });

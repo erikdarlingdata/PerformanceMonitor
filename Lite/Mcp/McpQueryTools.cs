@@ -1686,8 +1686,11 @@ public sealed class McpQueryTools
     /// since a server it cannot reach still logs failed runs. That is a deliberate second rule beside the Overview band, which reads
     /// every non-skip row (<c>GetServerSummaryAsync</c>): a server logging only ERROR rows shows Fresh there while its reads say nothing is
     /// arriving, and Darling's <c>list_servers</c> splits the same way. Any other status, a server that is not offline, a window that ends at or before
-    /// the newest success (an <c>as_of</c> inside collected history stays <c>empty</c>), a server with no success on record
-    /// (never collected: the tools' own "ever recorded" answers speak for it) and a failed read all return <paramref name="answer"/> unchanged.
+    /// the newest success (an <c>as_of</c> inside collected history stays <c>empty</c>), a server with no success on record that was added
+    /// inside the retention horizon (never collected: the tools' own "ever recorded" answers speak for it) and a failed read all return <paramref name="answer"/> unchanged.
+    /// A server with no success on record that was added BEFORE <see cref="RetentionService.OldestRetainedInstant"/> (as of the anchor) is offline
+    /// too, as Darling reads it through the registration: it had time to collect and never once did. Its registration is
+    /// <see cref="LocalDataService.RegisteredAtUtcLookup"/>; none wired keeps the never-collected reading.
     /// The original answer's wording and hints are dropped with its word.
     /// </summary>
     internal static async Task<string> OfflineInsteadOfEmptyAsync(LocalDataService dataService, int serverId, DateTime windowEnd, string answer)
@@ -1707,8 +1710,26 @@ public sealed class McpQueryTools
             return answer;
         }
 
-        if (last is not { } newest
-            || windowEnd <= newest
+        if (last is not { } newest)
+        {
+            /* No SUCCESS row in what the log retains. Darling's rule (ServerHealthClassifier.ClassifyFreshness over the retention horizon):
+               a server registered before that horizon has had time to collect and has nothing to show for it, so it is offline, which is
+               what a server whose credentials have been wrong since it was added looks like. One registered inside the horizon, or with no
+               registration known, keeps the tools' own "never collected" answers. */
+            var registered = dataService.RegisteredAtUtcLookup?.Invoke(serverId);
+            if (ServerHealthClassifier.ClassifyFreshness(null, registered, RetentionService.OldestRetainedInstant(windowEnd), windowEnd)
+                != ServerFreshness.Offline)
+            {
+                return answer;
+            }
+
+            return McpHelpers.Status(
+                "unavailable",
+                "This server is offline: the store holds no successful collection from it within its retained history, "
+                + "so nothing is arriving to read, whatever the collectors would otherwise report. An empty result here is missing data, not a finding.");
+        }
+
+        if (windowEnd <= newest
             || ServerHealthClassifier.ClassifyFreshness(newest, windowEnd) != ServerFreshness.Offline)
         {
             return answer;

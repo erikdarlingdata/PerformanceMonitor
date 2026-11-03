@@ -226,6 +226,14 @@ AND   collector_name <> '{CollectionCycleSkip.CollectorName}'";
     private static string[] NewestFirstRelations(string table) => new[] { table, "v_" + table };
 
     /// <summary>
+    /// #7167: when the server with this storage id was added (<see cref="Models.ServerConnection.RegisteredAtUtc"/>), or null for an unknown
+    /// one. The MCP host wires it from the server list. It is what tells a server that has never once succeeded since before the log's
+    /// retention horizon (offline) from one just added (not yet collected) when <see cref="GetLastSuccessfulCollectionAsync"/> finds nothing.
+    /// Null, as on a hand-built service, keeps every no-success server on the never-collected reading.
+    /// </summary>
+    internal Func<int, DateTime?>? RegisteredAtUtcLookup { get; set; }
+
+    /// <summary>
     /// #7167: when this server's newest SUCCESSFUL collector run landed (<c>collection_log.status = 'SUCCESS'</c>, the status Collection
     /// Health counts as a run that reached the server), or null when the store holds none. A server Lite cannot reach logs ERROR,
     /// PERMISSIONS or SKIPPED rows every cycle, which keep the plain newest-row read of <see cref="GetServerSummaryAsync"/> fresh while
