@@ -387,6 +387,159 @@ public sealed class PgDeadlockRestartWorkerLiveTests
         }
     }
 
+    /// <summary>
+    /// A restored pair whose reports left the hour must not lower the count watermark (#7295, third round). The seed finds pair P
+    /// saved, the read of the saved pairs fails for the first pass, and five fresh reports of another pair Q page: the page is
+    /// delivered and the watermark moves to the six reports in the hour. P's saved row stays, because the read has not loaded it.
+    /// P's report then leaves the hour and the read works again. The count drops P, so no page is owed for it. The watermark must
+    /// stay at six: a gate run from 0 would see the reports as new and page them a second time once the cooldowns ran out,
+    /// although the first page carried them.
+    /// </summary>
+    [Fact]
+    public async Task ARestoredPairThatLeftTheHour_DoesNotPageTheReportsAPageAlreadyCarried_WhenTheFailedReadIsRetried()
+    {
+        await RunStalePairAfterAPageAsync(restart: false);
+    }
+
+    /// <summary>The same state seen by a first seed: the service restarts instead of retrying. The saved watermark (six) covers
+    /// the reports the delivered page carried, and the saved pair P is stale, so the first pass of the new life pages nothing.</summary>
+    [Fact]
+    public async Task ARestoredPairThatLeftTheHour_DoesNotPageTheReportsAPageAlreadyCarried_AfterARestart()
+    {
+        await RunStalePairAfterAPageAsync(restart: true);
+    }
+
+    private static async Task RunStalePairAfterAPageAsync(bool restart)
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the PostgreSQL deadlock restart worker test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        var roleName = "dl7295s_" + Guid.NewGuid().ToString("N")[..8];
+        var rolePassword = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(16));
+        var bodySucceeded = false;
+        await using var owner = NpgsqlDataSource.Create(new NpgsqlConnectionStringBuilder(scratch.ConnectionString)
+        {
+            SearchPath = "collect,config,public",
+        }.ConnectionString);
+        try
+        {
+            await using (var connection = new NpgsqlConnection(scratch.ConnectionString))
+            {
+                await connection.OpenAsync(ct);
+                await PgMigrations.MigrateAsync(connection, ct);
+            }
+
+            foreach (var sql in new[]
+            {
+                $"CREATE ROLE {roleName} LOGIN NOSUPERUSER PASSWORD '{rolePassword}'",
+                $"GRANT USAGE ON SCHEMA collect, config, public TO {roleName}",
+                $"GRANT ALL ON ALL TABLES IN SCHEMA collect, config, public TO {roleName}",
+                $"GRANT ALL ON ALL SEQUENCES IN SCHEMA collect, config, public TO {roleName}",
+            })
+            {
+                await using var grant = owner.CreateCommand(sql);
+                await grant.ExecuteNonQueryAsync(ct);
+            }
+
+            await using var asRole = NpgsqlDataSource.Create(new NpgsqlConnectionStringBuilder(scratch.ConnectionString)
+            {
+                Username = roleName,
+                Password = rolePassword,
+                SearchPath = "collect,config,public",
+                Pooling = false,
+            }.ConnectionString);
+            var state = new PgAlertStateStore(owner);
+
+            await using var plant = new NpgsqlConnection(scratch.ConnectionString);
+            await plant.OpenAsync(ct);
+            await PlantReportAsync(plant, DateTime.UtcNow.AddMinutes(-2), ct);
+
+            /* First life: pair P is counted and its page reaches no channel, so P is saved. */
+            using var brokenFirst = new CapturingWebhookEndpoint(statusCode: 500);
+            var (firstPass, _) = StartLife(owner, brokenFirst.Url, ct);
+            await firstPass();
+            Assert.Single((await state.LoadUnannouncedPairsAsync(Key))!);
+
+            /* Second life, first pass: the seed read is refused, as in the failed-read test above. Five fresh reports of pair Q
+               arrive. Q is new, so the pass pages, and this page is delivered. The hour holds six reports (P's and Q's). */
+            await using (var revoke = owner.CreateCommand(
+                $"REVOKE SELECT ON config.config_edge_trigger_watermarks FROM {roleName}; "
+                + $"GRANT SELECT (server_id, metric_name) ON config.config_edge_trigger_watermarks TO {roleName}"))
+            {
+                await revoke.ExecuteNonQueryAsync(ct);
+            }
+
+            for (var i = 0; i < DarlingWorker.PgDeadlockPageReports; i++)
+            {
+                await PlantReportAsync(
+                    plant, DateTime.UtcNow.AddMinutes(-1), ct, "CCCC" + i.ToString("D4", CultureInfo.InvariantCulture) + new string('0', 24), KnownPairGraph);
+            }
+
+            using var healthy = new CapturingWebhookEndpoint();
+            WebhookAlertService? secondWebhooks = null;
+            var (secondPass, secondWorker) = StartLife(asRole, healthy.Url, ct, webhooks => secondWebhooks = webhooks);
+            await secondPass();
+            Assert.Single(healthy.Bodies);
+
+            /* The page is delivered and P's row stays, because the clear waits for the saved pairs to have been read. The gate
+               moved the count watermark to the six reports of the hour. The revoked column also stops this role from saving it,
+               which a timed out read would not, so the test saves what the gate saved. */
+            Assert.Single((await state.LoadUnannouncedPairsAsync(Key))!);
+            await state.SaveEdgeTriggerWatermarkAsync(Key, "Deadlocks Detected", DarlingWorker.PgDeadlockPageReports + 1);
+
+            /* P's only report leaves the hour. The five reports of Q, which that page carried, are still in it. */
+            await AgeOutReportAsync(plant, NewPairHash, ct);
+
+            await using (var restore = owner.CreateCommand($"GRANT SELECT ON config.config_edge_trigger_watermarks TO {roleName}"))
+            {
+                await restore.ExecuteNonQueryAsync(ct);
+            }
+
+            Func<Task> next;
+            if (restart)
+            {
+                /* A restart: the new life reads the saved watermark (six) and the saved pair P. */
+                (next, _) = StartLife(owner, healthy.Url, ct);
+            }
+            else
+            {
+                /* The same life: let both cooldowns run out, as they do in the field, so that a second page would be sent if
+                   the gate wanted one. */
+                var flags = BindingFlags.NonPublic | BindingFlags.Instance;
+                var lastAlerts = (ConcurrentDictionary<string, DateTime>)typeof(DarlingWorker)
+                    .GetField("_lastPgDeadlockAlert", flags)!.GetValue(secondWorker)!;
+                lastAlerts[Key] = DateTime.UtcNow.AddDays(-1);
+                typeof(WebhookAlertService).GetField("_cooldown", flags)!.SetValue(secondWebhooks, new IncidentCooldown("webhook:", null));
+                typeof(WebhookAlertService).GetField("_repeatBudget", flags)!.SetValue(secondWebhooks, new RepeatDeliveryBudget());
+                next = secondPass;
+            }
+
+            /* P is restored and dropped (its report is gone), so nothing is owed for it, and the five reports were paged
+               already: nothing is sent, no row is written for a page the delivery layer held back, and P's saved row goes. */
+            var rowsBefore = await AlertRowsAsync(plant, ct);
+            await next();
+            Assert.Single(healthy.Bodies);
+            Assert.Empty((await state.LoadUnannouncedPairsAsync(Key))!);
+            await next();
+            Assert.Single(healthy.Bodies);
+            Assert.Equal(rowsBefore, await AlertRowsAsync(plant, ct));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunOwnedAsync(bodySucceeded, async () =>
+            {
+                await using var drop = owner.CreateCommand($"DROP OWNED BY {roleName}; DROP ROLE IF EXISTS {roleName};");
+                await drop.ExecuteNonQueryAsync(CancellationToken.None);
+            });
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (_, _) => await Task.CompletedTask);
+            await scratch.DisposeAsync();
+        }
+    }
+
     [Fact]
     public async Task AFreshPairCountedWhileTheSeedReadFails_IsSavedByTheRetry_AndPagedAfterARestart()
     {

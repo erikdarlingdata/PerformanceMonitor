@@ -1102,6 +1102,15 @@ public sealed partial class DarlingWorker
             readClock.Restart();
             var pageWorthy = PgDeadlockPagesNow(count, patterns.NewKeys.Count, patterns.StoreOk);
 
+            /* #7295: a restored pair whose page never went out is paged by running the gate from 0, because the watermark in
+               memory or in the saved row may already sit at this count. That is true only of a pair this count kept. A restored
+               pair that left the hour is dropped, no page is owed for it, and lowering the watermark for it would page the hour's
+               reports again, those a page already carried, once the cooldown ran out. The watermark stays where the seed found it. */
+            if (patterns.RestoredPairKept)
+            {
+                watermark = 0;
+            }
+
             /* A hold does not use the page cooldown (it never stamps it), so it is decided with the cooldown open: every
                new report of a known pair writes its own held row, even right after a page. */
             var decision = RollingCountAlertGate.Evaluate(
@@ -1279,6 +1288,10 @@ public sealed partial class DarlingWorker
 
         public bool StoreOk { get; init; } = true;
 
+        /// <summary>True when a pair the seed put back (<c>restoredForGate</c>) is still waiting after this count dropped the
+        /// pairs whose reports left the hour. Only then does the watermark go to 0 so that the gate fires for it (#7295).</summary>
+        public bool RestoredPairKept { get; init; }
+
         public PgDeadlockSignature.Key? KeyOf(DarlingPgDeadlockReader.PgDeadlockRow row) =>
             ByReport.TryGetValue(row.DeadlockHash, out var key) ? key : null;
     }
@@ -1321,15 +1334,19 @@ public sealed partial class DarlingWorker
             store, counted, unannounced, noteNewForAgentGate, logger, serverKey, serverId, rows, now,
             persistUnannounced: null, cancellationToken);
 
-    /// <summary>What the seed found: the watermark to run the gate from (null leaves it as it is), and whether the pairs read worked.</summary>
+    /// <summary>What the seed found: the saved count watermark (null leaves the one in memory as it is), and whether the pairs read worked.</summary>
     internal readonly record struct PgDeadlockSeed(int? Watermark, bool PairsRead);
 
     /// <summary>
     /// Loads what a restart must not lose, once per server (#2716, #7295): the saved count watermark, and the pairs that were
     /// new and not yet announced by a page, which are put back into <paramref name="unannounced"/>. The signature store
-    /// already counts those pairs, so the next count would not find them new. Answers the watermark to run the gate from,
-    /// or null to leave it as it is. With a pair waiting for its page the watermark is 0: the saved one may already have
-    /// been moved to this count by the fire whose page never went out, and the gate would not fire again at the same count.
+    /// already counts those pairs, so the next count would not find them new. Answers the saved watermark, or null to leave
+    /// the one in memory as it is. A pair waiting for its page does not change that answer. The saved watermark may already
+    /// have been moved to this count by the fire whose page never went out, and the gate would not fire again at the same
+    /// count, so the gate must run from 0 for such a pair. The seed cannot tell whether the pair still has a report in the
+    /// hour, so that choice is the first count's (<see cref="PgDeadlockPatterns.RestoredPairKept"/>). Lowered here, a pair
+    /// whose reports have left the hour would still lower the watermark, and the reports a page already carried would be
+    /// paged a second time.
     /// The restored pairs are also handed to <paramref name="noteNewForAgentGate"/>: the agent gate reads new pairs from
     /// memory that a restart emptied, and the next count finds them known, so without it the rescued page would open no
     /// investigation request. The worker passes a callback that holds them until the first count has dropped the pairs whose
@@ -1337,8 +1354,8 @@ public sealed partial class DarlingWorker
     /// When a retry finds pairs in memory that the stored set lacks (counted while the read was failing), the whole set is
     /// written back once.
     /// <para><c>PairsRead</c> is false when the pairs read failed, so the caller tries again on the next sweep with
-    /// <paramref name="retry"/> set. A retry answers a watermark only when it restored a pair (the 0 above): the first read
-    /// already took the saved watermark's turn, and the count has moved since.</para>
+    /// <paramref name="retry"/> set. A retry answers no watermark: the first read already took the saved watermark's turn,
+    /// and the count has moved since.</para>
     /// </summary>
     internal static async Task<PgDeadlockSeed> SeedPgDeadlockStateAsync(
         PgAlertStateStore stateStore, string serverKey, string metricName, HashSet<string> unannounced,
@@ -1373,7 +1390,7 @@ public sealed partial class DarlingWorker
         }
 
         noteNewForAgentGate?.Invoke(waiting);
-        return new PgDeadlockSeed(0, true);
+        return new PgDeadlockSeed(watermark, true);
     }
 
     /// <summary>
@@ -1496,7 +1513,7 @@ public sealed partial class DarlingWorker
             await persistUnannounced(newKeys, cancellationToken);
         }
 
-        var patterns = new PgDeadlockPatterns { NewKeys = newKeys, StoreOk = storeOk };
+        var patterns = new PgDeadlockPatterns { NewKeys = newKeys, StoreOk = storeOk, RestoredPairKept = keptRestored.Length > 0 };
         foreach (var (report, key) in byReport)
         {
             patterns.ByReport[report] = key;

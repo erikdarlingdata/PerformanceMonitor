@@ -163,12 +163,13 @@ public sealed class PgAlertNoise7082LiveTests
             Assert.Equal(new[] { pair }, before.NewKeys.ToArray());
             await state.SaveEdgeTriggerWatermarkAsync(Server, Metric, 1);
 
-            /* Second life: nothing is in memory. The seed puts the waiting pair back and lets the gate fire again at the same
-               count, and the count pages on it although the store already knows the pair. */
+            /* Second life: nothing is in memory. The seed puts the waiting pair back and answers the saved watermark as it is. The
+               gate runs from 0 only when the first count keeps the pair (see the restart tests below and the worker-level ones),
+               and the count pages on the pair although the store already knows it. */
             var unannouncedAfter = new HashSet<string>(StringComparer.Ordinal);
             var watermark = (await DarlingWorker.SeedPgDeadlockStateAsync(
                 state, Server, Metric, unannouncedAfter, fresh => h.Rollup.NoteNewSignatures(Server, fresh))).Watermark;
-            Assert.Equal(0, watermark);
+            Assert.Equal(1, watermark);
             var after = await Count(new Dictionary<string, DateTime>(StringComparer.Ordinal), unannouncedAfter);
             Assert.Equal(new[] { pair }, after.NewKeys.ToArray());
             Assert.True(DarlingWorker.PgDeadlockPagesNow(1, after.NewKeys.Count, after.StoreOk));
@@ -225,6 +226,8 @@ public sealed class PgAlertNoise7082LiveTests
             var five = Enumerable.Range(0, 5).Select(i => Report($"k{i}", UpdateOrders, UpdateLedger, now)).ToList();
             var patterns = await RestartAndCountAsync(h, state, five, now, ct);
             Assert.Empty(patterns.NewKeys);
+            /* The stale pair is not kept, so the gate keeps the watermark the seed found (#7295). */
+            Assert.False(patterns.RestoredPairKept);
             Assert.True(DarlingWorker.PgDeadlockPagesNow(five.Count, patterns.NewKeys.Count, patterns.StoreOk));
 
             /* Five reports page. The page is about the known pair only, so its investigation request must not open on the strength
@@ -249,6 +252,7 @@ public sealed class PgAlertNoise7082LiveTests
 
             var patterns = await RestartAndCountAsync(h, state, [Report("r1", UpdateOrders, UpdateStock, now)], now, ct);
             Assert.Equal(new[] { pair }, patterns.NewKeys.ToArray());
+            Assert.True(patterns.RestoredPairKept);
 
             await h.Deliverer.DeliverAsync(Page(), ct);
             Assert.Equal(1, await RequestsAsync(h.Connection, ct));
@@ -330,7 +334,7 @@ public sealed class PgAlertNoise7082LiveTests
 
             /* A full read drops nothing, in memory or in the saved set: a restart still finds the pair waiting. */
             var restoredFull = new HashSet<string>(StringComparer.Ordinal);
-            Assert.Equal(0, (await DarlingWorker.SeedPgDeadlockStateAsync(state, Server, Metric, restoredFull, null)).Watermark);
+            await DarlingWorker.SeedPgDeadlockStateAsync(state, Server, Metric, restoredFull, null);
             Assert.Equal(new[] { newPair }, restoredFull.ToArray());
 
             /* A short read is the whole hour: the pair's report is not in it, so the pair is dropped. */
