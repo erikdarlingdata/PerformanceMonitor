@@ -169,7 +169,7 @@ public sealed class ProposalViewRow
 
     public string ReasonDisplay => Reason.Length == 0 ? "" : "Agent says: " + Reason;
 
-    public string ExpiresDisplay => ExpiresAtUtc.ToLocalTime().ToString("g", CultureInfo.CurrentCulture);
+    public string ExpiresDisplay => ViewerTimeHelper.FormatFleetWide(ExpiresAtUtc, "yyyy-MM-dd HH:mm");
 
     public bool IsPending => State == ProposalStates.Pending;
 

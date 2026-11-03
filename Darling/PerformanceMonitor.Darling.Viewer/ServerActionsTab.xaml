@@ -18,7 +18,7 @@
                 <DataGridTextColumn Header="Action" Binding="{Binding ActionDisplay}" Width="*"/>
                 <DataGridTextColumn Header="Switch" Binding="{Binding StateDisplay}" Width="70"/>
                 <DataGridTextColumn Header="Changed by" Binding="{Binding ChangedBy}" Width="170"/>
-                <DataGridTextColumn Header="Changed" Binding="{Binding ChangedDisplay}" Width="130" SortMemberPath="ChangedAtUtc"/>
+                <DataGridTextColumn Header="Changed" Binding="{Binding ChangedDisplay}" Width="190" SortMemberPath="ChangedAtUtc"/>
                 <DataGridTextColumn Header="Note" Binding="{Binding Note}" Width="260">
                     <DataGridTextColumn.ElementStyle>
                         <Style TargetType="TextBlock">

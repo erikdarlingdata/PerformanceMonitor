@@ -457,6 +457,28 @@ public sealed class ViewerServerSetSyncTests
     }
 
     [Fact]
+    public void RenamedForOpenTabs_ReturnsTheReloadedServer_ForATabShowingTheOldName()
+    {
+        var open = new[] { new DarlingServer(1, "SQL01", "Old name", true, 16), new DarlingServer(2, "SQL02", "SQL02", true, 16) };
+        var loaded = new[] { new DarlingServer(1, "SQL01", "New name", true, 16), new DarlingServer(2, "SQL02", "SQL02", true, 16) };
+
+        var renamed = ViewerServerSetSync.RenamedForOpenTabs(open, loaded);
+
+        var only = Assert.Single(renamed);
+        Assert.Equal(1, only.ServerId);
+        Assert.Equal("New name", only.DisplayName);
+    }
+
+    [Fact]
+    public void RenamedForOpenTabs_LeavesARemovedServersTabAlone_AndIgnoresServersWithNoOpenTab()
+    {
+        var open = new[] { new DarlingServer(1, "SQL01", "Old name", true, 16) };
+        var loaded = new[] { new DarlingServer(2, "SQL02", "Other", true, 16) };
+
+        Assert.Empty(ViewerServerSetSync.RenamedForOpenTabs(open, loaded));
+    }
+
+    [Fact]
     public void FreshLoad_StartsThePicker_OnTheSidebarsServer()
     {
         var servers = new[] { Server(1, "SQL01"), Server(2, "SQL02") };
