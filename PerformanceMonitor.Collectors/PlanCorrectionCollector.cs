@@ -482,11 +482,7 @@ OPTION(RECOMPILE);" + NoDatabaseAccessNote.ScopeResults;
     /// enumeration query re-checks PRODUCTVERSION on the server for exactly that case.
     /// </summary>
     public override bool AppliesTo(CollectorTargetInfo target) =>
-        target is null
-        || target.SqlMajorVersion == 0
-        || target.SqlMajorVersion >= 14
-        || target.IsAzureSqlDb
-        || target.IsAzureManagedInstance;
+        target is null || target.MeetsMinimumVersion(14, unknownIsNewest: true);
 
     /// <summary>Azure SQL DB rejects three-part names, so the host connects per database there instead.</summary>
     public override bool RunsPerDatabase(CollectorTargetInfo target) => target is not null && target.IsAzureSqlDb;

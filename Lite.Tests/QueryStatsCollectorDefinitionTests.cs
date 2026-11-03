@@ -104,7 +104,7 @@ public sealed class QueryStatsCollectorDefinitionTests
 
         AssertPlanXmlSizeGuarded(plan.Text);
         Assert.Contains(
-            "sys.dm_exec_text_query_plan(CASEWHENqs.plan_rank<=200THENqs.plan_handleEND,qs.statement_start_offset,qs.statement_end_offset)AStqp",
+            "sys.dm_exec_text_query_plan(CASEWHENqs.plan_rank<=100ORqs.weight_rank<=100THENqs.plan_handleEND,qs.statement_start_offset,qs.statement_end_offset)AStqp",
             Collapse(plan.Text), StringComparison.Ordinal);
         /* The on-prem plan_attributes join is untouched. */
         Assert.Contains("sys.dm_exec_plan_attributes", plan.Text, StringComparison.Ordinal);
@@ -180,7 +180,7 @@ public sealed class QueryStatsCollectorDefinitionTests
 
         AssertPlanXmlSizeGuarded(plan.Text);
         Assert.Contains(
-            "sys.dm_exec_text_query_plan(CASEWHENqs.plan_rank<=200THENqs.plan_handleEND,qs.statement_start_offset,qs.statement_end_offset)AStqp",
+            "sys.dm_exec_text_query_plan(CASEWHENqs.plan_rank<=100ORqs.weight_rank<=100THENqs.plan_handleEND,qs.statement_start_offset,qs.statement_end_offset)AStqp",
             Collapse(plan.Text), StringComparison.Ordinal);
         /* Azure SQL DB still skips plan_attributes (dbid=1 for all plans there). */
         Assert.DoesNotContain("dm_exec_plan_attributes", plan.Text, StringComparison.Ordinal);

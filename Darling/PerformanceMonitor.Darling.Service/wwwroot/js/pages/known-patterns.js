@@ -20,7 +20,7 @@
  * KnownPatternsPageBehaviourTests. All entry text, the note above all, reaches the DOM through el()/textContent.
  */
 
-import { storeHeaders, el, mount, apiGet, readTool, loadingStrip, errorStrip, emptyStrip, localTime, reportSessionExpired, networkErrorText } from "../util.js";
+import { storeHeaders, el, mount, apiGet, readTool, loadingStrip, errorStrip, emptyStrip, localTime, reportSessionExpired, networkErrorText, browserZoneOrBlank } from "../util.js";
 import * as api from "../alerts-api.js";
 
 /** The most characters a note holds (KnownPatternMatcher.MaxNoteLength). The server refuses more; the counter only warns early. */
@@ -29,15 +29,6 @@ export const MAX_NOTE = 500;
 export const MAX_WINDOW = 720;
 /** The window the server fills in when none is sent (KnownPatternMatcher.DefaultWindowMinutes). */
 export const DEFAULT_WINDOW = 30;
-
-/** The browser's IANA zone, or "" when it cannot say. */
-export function browserZone() {
-  try {
-    return Intl.DateTimeFormat().resolvedOptions().timeZone || "";
-  } catch {
-    return "";
-  }
-}
 
 /** A datetime-local value ("2026-08-01T10:30", local clock) to an ISO UTC string, or null when blank or unparseable. */
 export function localInputToIso(v) {
@@ -197,7 +188,7 @@ export async function renderKnownPatterns(main) {
   const listBox = el("div", {});
   mount(main, [headEl, formBox, listBox]);
   live = { main, headEl, formBox, listBox, canEdit, entries: [] };
-  if (newBtn) newBtn.addEventListener("click", () => openForm({ mode: "create", values: { time_zone: browserZone() } }));
+  if (newBtn) newBtn.addEventListener("click", () => openForm({ mode: "create", values: { time_zone: browserZoneOrBlank() } }));
   if (form) drawForm();
   mount(listBox, loadingStrip("Loading known patterns…"));
   await loadServers();
@@ -239,7 +230,7 @@ function entryRow(e, canEdit) {
   ];
   if (canEdit) {
     cells.push(el("td", { class: "mute-actions" }, [
-      el("button", { class: "btn", type: "button", text: "Edit", onClick: () => openForm({ mode: "edit", id: e.id, values: valuesOf(e, browserZone()) }) }),
+      el("button", { class: "btn", type: "button", text: "Edit", onClick: () => openForm({ mode: "edit", id: e.id, values: valuesOf(e, browserZoneOrBlank()) }) }),
       el("button", { class: "btn", type: "button", text: "Delete", onClick: () => remove(e) }),
     ]));
   }
@@ -313,7 +304,7 @@ function formNode() {
     labelled("Server", serverSelect()),
     labelled("Metric (blank = any alert)", textInput("metric_name", "Metric", "text")),
     labelled("Time of day (24-hour, blank = any time)", textInput("time_of_day", "Time of day", "time")),
-    labelled("Time zone (IANA id)", textInput("time_zone", "Time zone", "text", { placeholder: browserZone() })),
+    labelled("Time zone (IANA id)", textInput("time_zone", "Time zone", "text", { placeholder: browserZoneOrBlank() })),
     labelled("Window, minutes either side (0 to " + MAX_WINDOW + ", blank = " + DEFAULT_WINDOW + ")", textInput("window_minutes", "Window minutes", "number", { min: "0", max: String(MAX_WINDOW) })),
     labelled("Note (required, " + MAX_NOTE + " characters at most)", note, counter),
     labelled("Expires (local time; blank = never)", textInput("expires_at_utc", "Expires", "datetime-local")),
@@ -326,7 +317,7 @@ function formNode() {
 
 async function submit() {
   form.banner = null;
-  const body = formToBody(form.values, browserZone());
+  const body = formToBody(form.values, browserZoneOrBlank());
   const res = form.mode === "create" ? await createEntry(body) : await replaceEntry(form.id, body);
   if (res.kind === "ok") {
     closeForm();

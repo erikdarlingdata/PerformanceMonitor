@@ -354,10 +354,7 @@ OPTION(RECOMPILE);";
     /// the shape query_store and database_config already use.
     /// </summary>
     public override bool AppliesTo(CollectorTargetInfo target) =>
-        target.SqlMajorVersion == 0
-        || target.SqlMajorVersion >= 15
-        || target.IsAzureSqlDb
-        || target.IsAzureManagedInstance;
+        target.MeetsMinimumVersion(15, unknownIsNewest: true);
 
     /// <summary>
     /// Per-database on Azure SQL DB only (#7165). The Azure query is database-scoped
@@ -374,11 +371,7 @@ OPTION(RECOMPILE);";
         /* MS documents pvs_off_row_page_skipped_oldest_aborted_xdesid as 2022+; every other column spans
            the whole 2019..2025/Azure range. Azure SQL DB and MI always have it. */
         var target = context.Target;
-        bool has2022Column =
-            target.SqlMajorVersion == 0
-            || target.SqlMajorVersion >= 16
-            || target.IsAzureSqlDb
-            || target.IsAzureManagedInstance;
+        bool has2022Column = target.MeetsMinimumVersion(16, unknownIsNewest: true);
 
         string skippedOldestAborted = has2022Column
             ? SkippedOldestAbortedColumn

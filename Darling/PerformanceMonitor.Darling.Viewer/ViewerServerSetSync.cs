@@ -61,6 +61,28 @@ internal static class ViewerServerSetSync
     }
 
     /// <summary>
+    /// The loaded servers that an open tab shows under an out-of-date display name (#7212): the loaded server for each open
+    /// tab's server id, kept only when its display name differs from the one the tab holds. A tab whose server is not in
+    /// <paramref name="loaded"/> is left alone (a removed server's tab stays open on purpose, see the class summary), and a
+    /// tab whose name still matches needs no change. Matched by server id, so a rename never makes a second tab.
+    /// </summary>
+    internal static IReadOnlyList<DarlingServer> RenamedForOpenTabs(
+        IEnumerable<DarlingServer> openTabServers,
+        IReadOnlyList<DarlingServer> loaded)
+    {
+        ArgumentNullException.ThrowIfNull(openTabServers);
+        ArgumentNullException.ThrowIfNull(loaded);
+
+        var byId = loaded.GroupBy(server => server.ServerId).ToDictionary(group => group.Key, group => group.First());
+        return openTabServers
+            .Select(open => byId.TryGetValue(open.ServerId, out var fresh) && !string.Equals(fresh.DisplayName, open.DisplayName, StringComparison.Ordinal)
+                ? fresh
+                : null)
+            .OfType<DarlingServer>()
+            .ToList();
+    }
+
+    /// <summary>
     /// One pass. A null <paramref name="registered"/> is a read with no config list to report: nothing
     /// happens and this returns false. When the id sets match, nothing happens either. When they differ, runs
     /// <paramref name="forgetRemoved"/> for each loaded server the registry no longer has, then

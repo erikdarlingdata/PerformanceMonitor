@@ -483,6 +483,34 @@ public sealed class ArchiveGroupedWatermarkReadTests : IDisposable
     }
 
     [Fact]
+    public async Task ManyServers_OneGeneration_CostExactlyOneArchiveRead_PerWatermarkShape()
+    {
+        /* #7256: the watermark of each monitored server used to open every Parquet file of the table once per server and
+           generation. Server 1 and 2 are archived, server 3 is not: the one grouped read answers all three as the per-server
+           read did (the archived maximum, or none). */
+        await SeedHotAndParquetAsync();
+        var reads = new Reads(_duckDb);
+
+        var one = await reads.TimeAsync(1, Table, "collection_time", TestContext.Current.CancellationToken);
+        var two = await reads.TimeAsync(2, Table, "collection_time", TestContext.Current.CancellationToken);
+        var three = await reads.TimeAsync(3, Table, "collection_time", TestContext.Current.CancellationToken);
+
+        Assert.Equal(Now.AddMinutes(-5), one);
+        Assert.Equal(Now.AddHours(-6), two);
+        Assert.Null(three);
+        Assert.Equal(1, reads.ArchiveViewReadsForTests);
+
+        var (frameOne, _) = await reads.FrameAsync(1, TestContext.Current.CancellationToken);
+        var (frameTwo, _) = await reads.FrameAsync(2, TestContext.Current.CancellationToken);
+        var (frameThree, _) = await reads.FrameAsync(3, TestContext.Current.CancellationToken);
+
+        Assert.Equal(one, frameOne);
+        Assert.Equal(two, frameTwo);
+        Assert.Null(frameThree);
+        Assert.Equal(2, reads.ArchiveViewReadsForTests);
+    }
+
+    [Fact]
     public async Task AGenerationBump_ReReadsOnce()
     {
         await SeedHotAndParquetAsync();

@@ -199,14 +199,19 @@ export function listOnlyNote(managedStore, lists, toChange, adminWritesOff) {
       ", use the Viewer app, or give the web an admin store login (set postgres.webConnectionString to an admin login).";
 }
 
+/** The browser's IANA zone ("America/New_York"), or "" when the browser does not say. (time-range.js's browserZone answers "UTC" instead.) */
+export function browserZoneOrBlank() {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "";
+  } catch {
+    return "";
+  }
+}
+
 /** A non-fatal caveat about otherwise-good data (e.g. the #1665 partial-window notice). The sentence may be one the service
     wrote for an MCP caller (a width note, a truncation note), so it passes through plainText like every message (#5644 W8). */
 export function noticeStrip(message) {
   return el("div", { class: "strip notice", role: "status" }, [localizeIsoText(plainText(message))]);
-}
-/** A note line under a chart, from a payload's own `aggregate_note`: written for an MCP caller, said in the page's words (#5644 W8). */
-export function metricNote(text) {
-  return el("div", { class: "mp-metric-note", text: plainText(text) });
 }
 
 /**

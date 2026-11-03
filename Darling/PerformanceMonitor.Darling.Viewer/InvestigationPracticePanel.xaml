@@ -40,7 +40,7 @@
         <DataGrid Grid.Row="2" x:Name="PracticeCasesGrid" Style="{StaticResource DarkGrid}" IsReadOnly="True" SelectionMode="Single"
                   AutomationProperties.Name="Judged cases">
             <DataGrid.Columns>
-                <DataGridTextColumn Header="Reported" Binding="{Binding ReportedDisplay}" Width="120" SortMemberPath="ReportedAtUtc"/>
+                <DataGridTextColumn Header="Reported" Binding="{Binding ReportedDisplay}" Width="190" SortMemberPath="ReportedAtUtc"/>
                 <DataGridTextColumn Header="Server" Binding="{Binding Row.ServerName}" Width="*"/>
                 <DataGridTextColumn Header="Family" Binding="{Binding Row.Family}" Width="100"/>
                 <DataGridTextColumn Header="Report said" Binding="{Binding Row.ReportVerdict}" Width="100"/>

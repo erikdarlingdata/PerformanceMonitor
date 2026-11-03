@@ -38,6 +38,7 @@ LIMIT " + FactRanked.MaxObjects + ";";
     {
         try
         {
+            var plan = await _duckDb.PlanArchiveReadAsync("query_stats", "collection_time", context.TimeRangeStart, context.CancellationToken);
             using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(context.CancellationToken);
@@ -91,6 +92,7 @@ AND   v.delta_execution_count > 0";
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
 
+            cmd.CommandText = plan.Apply(cmd.CommandText);
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             if (!await reader.ReadAsync(context.CancellationToken)) return;
 
@@ -116,6 +118,7 @@ AND   v.delta_execution_count > 0";
                     rankCmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
                     rankCmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
                     rankCmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
+                    rankCmd.CommandText = plan.Apply(rankCmd.CommandText);
                     using var rankReader = await rankCmd.ExecuteReaderAsync(context.CancellationToken);
                     while (await rankReader.ReadAsync(context.CancellationToken))
                     {
@@ -192,6 +195,7 @@ AND   v.delta_execution_count > 0";
     {
         try
         {
+            var plan = await _duckDb.PlanArchiveReadAsync("query_stats", "collection_time", context.TimeRangeStart, context.CancellationToken);
             using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(context.CancellationToken);
@@ -296,6 +300,7 @@ ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
                two plans is two offenders. */
             var ranked = new List<RankedObject>();
 
+            cmd.CommandText = plan.Apply(cmd.CommandText);
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             while (await reader.ReadAsync(context.CancellationToken))
             {
@@ -397,6 +402,7 @@ ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
             var candidates = new List<PlanRegressionCandidate>();
             var failures = new List<PlanRegressionFailureRule.Failure>();
             {
+                var plan = await _duckDb.PlanArchiveReadAsync("query_store_stats", "last_execution_time", context.TimeRangeStart.AddDays(-14), context.CancellationToken);
                 using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
                 using var connection = _duckDb.CreateConnection();
                 await connection.OpenAsync(context.CancellationToken);
@@ -405,7 +411,7 @@ ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
                    that regresses into timeouts or errors is found here. A failed read costs the failure half only. */
                 try
                 {
-                    failures = await ReadPlanRegressionFailuresAsync(connection, context);
+                    failures = await ReadPlanRegressionFailuresAsync(connection, context, plan);
                 }
                 catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))
                 {
@@ -618,6 +624,7 @@ LIMIT 100";
                    primary stay in the window, so the read skips those databases. */
                 cmd.CommandText = SecondaryReplicaScope.Apply(cmd.CommandText, cmd, context, "PLAN_REGRESSION", "database_name", 3);
 
+                cmd.CommandText = plan.Apply(cmd.CommandText);
                 using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
                 while (await reader.ReadAsync(context.CancellationToken))
                 {
@@ -753,6 +760,7 @@ LIMIT 100";
     {
         try
         {
+            var plan = await _duckDb.PlanArchiveReadAsync("procedure_stats", "collection_time", context.TimeRangeStart, context.CancellationToken);
             using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(context.CancellationToken);
@@ -775,6 +783,7 @@ AND   delta_execution_count > 0";
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
 
+            cmd.CommandText = plan.Apply(cmd.CommandText);
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             if (!await reader.ReadAsync(context.CancellationToken)) return;
 
@@ -825,6 +834,7 @@ AND   delta_execution_count > 0";
         {
             var planXmls = new List<string>();
 
+            var plan = await _duckDb.PlanArchiveReadAsync("query_stats", "collection_time", context.TimeRangeStart, context.CancellationToken);
             using (var readLock = _duckDb.AcquireReadLock(context.CancellationToken))
             using (var connection = _duckDb.CreateConnection())
             {
@@ -844,6 +854,7 @@ LIMIT 10";
                 command.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
                 command.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
 
+                command.CommandText = plan.Apply(command.CommandText);
                 using var reader = await command.ExecuteReaderAsync(context.CancellationToken);
                 while (await reader.ReadAsync(context.CancellationToken))
                 {

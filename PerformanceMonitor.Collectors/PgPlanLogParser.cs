@@ -197,8 +197,10 @@ public static class PgPlanLogParser
     /// hourly, so the windows touch only while the log grows by under 4 MB an hour — roughly 1.2 KB/s.
     /// Past that the gap between two reads is never read at all, and the plans in it are lost rather than
     /// deferred. <see cref="PgDeadlockLogParser"/> carries the arithmetic and the transport split; the
-    /// short version is that the RDS log API keeps a resume marker and does not have this failure, while
-    /// the <c>pg_read_file</c> tail has no marker and does.</para>
+    /// short version is that the RDS log API keeps a resume marker and so never re-reads a window, which
+    /// means a block it cuts is lost unless the caller carries it: <see cref="UnfinishedTailStart"/> finds the block to
+    /// hold for the next portion (#7186). The <c>pg_read_file</c> tail has no marker and has the gap described
+    /// above.</para>
     ///
     /// <para><paramref name="logLinePrefix"/> (#4501) is the target's own collected <c>log_line_prefix</c>:
     /// the all-digit token this parser's block regex captures right after the pid is trusted as the real
@@ -229,6 +231,115 @@ public static class PgPlanLogParser
         }
 
         return plans;
+    }
+
+    /* The header line alone, the first half of s_planBlock: used to find the last plan the end of a read can
+       have cut. */
+    private static readonly Regex s_planHeader = new(
+        @"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)? "
+        + @"(?:[^ \[\n]+ [^\[\n]*\[\d+\]|[^ :\n]+:[^\[\n]*\[\d+\])"
+        + @"[ :](-?\d+) LOG:  duration: ([0-9.]+) ms  plan:[ \t\r]*$",
+        RegexOptions.Compiled | RegexOptions.Multiline,
+        s_matchTimeout);
+
+    /// <summary>
+    /// Where the plan that a slab of log text ends inside begins, or -1 when it does not end inside one (#7186). The
+    /// RDS log API is consume-once, so a plan the end of a portion cuts is never offered again: <c>RdsPlanIngestor</c>
+    /// holds the text from this index and prepends it to the next portion, so the plan is parsed once, whole.
+    ///
+    /// <para>Unfinished is: the last plan header followed by tab-indented lines that run to the end of the text without
+    /// forming a JSON document yet (the last line cut short, or the closing brace not arrived), or a last line with no
+    /// newline, whatever it starts with, which may be a header cut anywhere, even inside its date. A plan that other lines follow, or one
+    /// whose JSON is complete, is not.</para>
+    /// </summary>
+    public static int UnfinishedTailStart(string? logBody)
+    {
+        if (string.IsNullOrEmpty(logBody))
+        {
+            return -1;
+        }
+
+        var start = -1;
+
+        try
+        {
+            Match? header = null;
+
+            foreach (Match match in s_planHeader.Matches(logBody))
+            {
+                header = match;
+            }
+
+            if (header is not null)
+            {
+                var blockStart = header.Index + header.Length;
+
+                if (blockStart < logBody.Length && logBody[blockStart] == '\n')
+                {
+                    blockStart++;
+                }
+
+                start = BlockIsUnfinished(logBody, blockStart) ? header.Index : -1;
+            }
+
+            if (logBody[^1] != '\n')
+            {
+                var lastLine = logBody.LastIndexOf('\n') + 1;
+
+                if (start < 0 || lastLine < start)
+                {
+                    start = lastLine;
+                }
+            }
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            // Not read to its end: nothing is held, and the text is parsed as it is.
+            return -1;
+        }
+
+        return start;
+    }
+
+    /* The tab-indented lines from blockStart to the end of the text, and whether they are still arriving. */
+    private static bool BlockIsUnfinished(string logBody, int blockStart)
+    {
+        var pos = blockStart;
+
+        while (pos < logBody.Length && logBody[pos] == '\t')
+        {
+            var newline = logBody.IndexOf('\n', pos);
+
+            if (newline < 0)
+            {
+                return true;
+            }
+
+            pos = newline + 1;
+        }
+
+        if (pos < logBody.Length)
+        {
+            return false;
+        }
+
+        var block = logBody[blockStart..].Replace("\t", string.Empty);
+
+        if (string.IsNullOrWhiteSpace(block))
+        {
+            /* The header with nothing under it yet. */
+            return true;
+        }
+
+        try
+        {
+            JsonNode.Parse(block);
+            return false;
+        }
+        catch (JsonException)
+        {
+            return true;
+        }
     }
 
     private static void ExtractInto(List<ParsedPlan> plans, string logBody, bool trustQueryId)
