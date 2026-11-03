@@ -910,7 +910,9 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
             Assert.Equal(Stamp(@base), band.GetProperty("captured_at").GetString());
 
             /* ── server summary: three clocks — a stale CPU row under a fresh collection log ── */
-            var cpuAt = @base.AddDays(-1);
+            /* #7196: the CPU row is minutes old (a days-old one now shows no figure and no stamp), and the memory row and
+               the log are two hours back, so the three stamps still differ. */
+            var cpuAt = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddMinutes(-10);
             await DarlingMcpTestData.ExecAsync(connection, ct,
                 @"INSERT INTO cpu_utilization_stats (collection_id, collection_time, server_id, server_name, sample_time, sqlserver_cpu_utilization, other_process_cpu_utilization)
 VALUES ($1,$2,$3,$4,$5,$6,$7)", CollectionIdGenerator.Next(), cpuAt, ServerId, ServerName, cpuAt, 42, 3);
@@ -926,6 +928,18 @@ VALUES ($1,$2,$3,$4,$5,120,'SUCCESS',7)", CollectionIdGenerator.Next(), ServerId
             Assert.Equal(Stamp(@base), summary.GetProperty("memory_captured_at").GetString());
             Assert.Equal(Stamp(@base.AddMinutes(1)), summary.GetProperty("last_collection").GetString());
             Assert.Equal(DarlingHealthReader.ServerSummaryCountsWindowHours, summary.GetProperty("counts_window_hours").GetInt32());
+
+            /* #7196: the same CPU row left a day or more behind carries no figure and no stamp, while memory and the log still read. */
+            var staleCpuAt = cpuAt.AddDays(-3);
+            /* Delete and insert, not UPDATE: the table is a hypertable and a row cannot move to another chunk (23514). */
+            await DarlingMcpTestData.ExecAsync(connection, ct, @"DELETE FROM cpu_utilization_stats WHERE server_id = $1", ServerId);
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                @"INSERT INTO cpu_utilization_stats (collection_id, collection_time, server_id, server_name, sample_time, sqlserver_cpu_utilization, other_process_cpu_utilization)
+VALUES ($1,$2,$3,$4,$5,$6,$7)", CollectionIdGenerator.Next(), staleCpuAt, ServerId, ServerName, staleCpuAt, 42, 3);
+            var staleSummary = Parse(await DarlingMcpHealthTools.GetServerSummary(postgres, ServerName));
+            Assert.Equal(JsonValueKind.Null, staleSummary.GetProperty("cpu_captured_at").ValueKind);
+            Assert.Equal(JsonValueKind.Null, staleSummary.GetProperty("cpu_percent").ValueKind);
+            Assert.Equal(Stamp(@base), staleSummary.GetProperty("memory_captured_at").GetString());
 
             /* ── #3653: the four reads that stamped themselves as collection_time before the vocabulary ──
 
