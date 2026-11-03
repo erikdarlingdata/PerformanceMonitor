@@ -839,6 +839,165 @@ public sealed class ManagedConfFileTests
         }
     }
 
+    private static Dictionary<string, string> ManagedFileValues(string dataDirectory)
+        => DarlingManagedPostgres.ParseConfText(File.ReadAllText(Path.Combine(dataDirectory, ManagedConfFile.FileName)))
+            .ToDictionary(a => a.Name, a => a.Value, StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>The value PostgreSQL ends up with from postgresql.conf and what it includes: the last assignment
+    /// across the files, following the include (<c>ReadConfAssignments</c> reads them in the server's order).</summary>
+    private static string? EffectiveValue(string dataDirectory, string key)
+        => DarlingManagedPostgres.ReadConfAssignments(Path.Combine(dataDirectory, "postgresql.conf"), key)
+            .Select(a => a.Value).LastOrDefault();
+
+    /// <summary>
+    /// A store migrated before a key became managed keeps the operator's line for it above the include, where
+    /// <c>ManagedConfMigration.Rewrite</c> never moves it, and the include sits at the end of the file (#7370). The
+    /// start path leaves the key out of <c>darling-managed.conf</c> rather than override that line, and says so.
+    /// The file is first written with the key, as the build before this change did, so the heal of an existing
+    /// managed file is covered too.
+    /// </summary>
+    [Fact]
+    public void WriteManagedConfFile_OperatorLineAboveTheInclude_StaysInForce_AndTheKeyIsLeftOut()
+    {
+        const string key = "random_page_cost";
+        const string operatorValue = "2.5";
+        var dir = Directory.CreateTempSubdirectory("darling-7370-pinned-");
+        try
+        {
+            var confPath = Path.Combine(dir.FullName, "postgresql.conf");
+            File.WriteAllText(confPath, "# base conf\n");
+            var logger = new CapturingTestLogger();
+            var cluster = new DarlingManagedPostgres(
+                new PostgresConfig { Managed = true, Port = 55432, DataDirectory = dir.FullName }, logger);
+
+            var first = cluster.WriteManagedConfFile(dir.FullName, postgresMajor: 18);
+            Assert.True(first.Written);
+            Assert.True(ManagedFileValues(dir.FullName).ContainsKey(key));
+            var managedValue = EffectiveValue(dir.FullName, key);
+            Assert.NotEqual(operatorValue, managedValue);
+
+            /* The operator's own line near the top, the stock commented line uncommented and edited in place. */
+            File.WriteAllText(confPath, $"#{key} = 2\n{key} = {operatorValue}\n" + File.ReadAllText(confPath));
+            var second = cluster.WriteManagedConfFile(dir.FullName, postgresMajor: 18);
+
+            Assert.True(second.Written);
+            Assert.False(ManagedFileValues(dir.FullName).ContainsKey(key));
+            Assert.Equal(operatorValue, EffectiveValue(dir.FullName, key));
+            Assert.Contains(
+                logger.Lines,
+                line => line.Contains(key, StringComparison.Ordinal)
+                    && line.Contains("line 2", StringComparison.Ordinal)
+                    && line.Contains("stays in force", StringComparison.Ordinal));
+
+            /* Nothing else about the file changed: the other managed keys are all still there. */
+            var values = ManagedFileValues(dir.FullName);
+            Assert.True(values.ContainsKey("shared_buffers"));
+            var firstKeyCount = DarlingManagedPostgres.ParseConfText(first.RenderedText).Count();
+            Assert.Equal(firstKeyCount - 1, DarlingManagedPostgres.ParseConfText(second.RenderedText).Count());
+
+            /* A start with the operator's line still there writes nothing new. */
+            var third = cluster.WriteManagedConfFile(dir.FullName, postgresMajor: 18);
+            Assert.False(third.Written);
+        }
+        finally
+        {
+            Directory.Delete(dir.FullName, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void WriteManagedConfFile_NoOperatorLine_StillGetsTheManagedValues()
+    {
+        var dir = Directory.CreateTempSubdirectory("darling-7370-unpinned-");
+        try
+        {
+            File.WriteAllText(Path.Combine(dir.FullName, "postgresql.conf"), "#random_page_cost = 4.0\n");
+            var cluster = new DarlingManagedPostgres(
+                new PostgresConfig { Managed = true, Port = 55432, DataDirectory = dir.FullName }, new CapturingTestLogger());
+
+            cluster.WriteManagedConfFile(dir.FullName, postgresMajor: 18);
+
+            var values = ManagedFileValues(dir.FullName);
+            Assert.Equal("1.1", values["random_page_cost"]);
+            Assert.Equal("1.1", EffectiveValue(dir.FullName, "random_page_cost"));
+        }
+        finally
+        {
+            Directory.Delete(dir.FullName, recursive: true);
+        }
+    }
+
+    /// <summary>Step A's two readers of the file agree with a file that leaves a pinned key out: the snapshot-valued
+    /// render does not invent the line, and the allowed-additions map (<c>ManagedOnlyKeys</c>) does not turn the
+    /// operator's own applied row into a mismatch, since the key is in the before-snapshot with the same value.</summary>
+    [Fact]
+    public void RenderWithValues_AndStepACompare_AgreeWithAFileThatLeavesAPinnedKeyOut()
+    {
+        var pinned = new Dictionary<string, ManagedConfFile.OperatorPinnedLine>
+        {
+            ["random_page_cost"] = new(3, "2.5"),
+        };
+        var inputs = SampleInputs() with { OperatorPinned = pinned };
+
+        var text = ManagedConfFile.RenderWithValues(inputs, new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["random_page_cost"] = "2.5",
+            ["shared_buffers"] = "1GB",
+        });
+
+        var written = DarlingManagedPostgres.ParseConfText(text).Select(a => a.Name).ToList();
+        Assert.DoesNotContain("random_page_cost", written);
+        Assert.Contains("shared_buffers", written);
+
+        /* The same inputs without the pin do write the key, so the absence above is the pin's doing. */
+        var unpinned = ManagedConfFile.RenderWithValues(SampleInputs(), new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase));
+        Assert.Contains("random_page_cost", DarlingManagedPostgres.ParseConfText(unpinned).Select(a => a.Name));
+
+        /* Step A: the operator's row is applied before and after, with the same value. */
+        var operatorRow = new FileSettingRow("postgresql.conf", 3, "random_page_cost", "2.5", true, null);
+        var (match, mismatches) = ManagedConfFileSettings.Compare(
+            new[] { operatorRow }, new[] { operatorRow }, ManagedConfFile.ManagedOnlyKeys);
+        Assert.True(match);
+        Assert.Empty(mismatches);
+    }
+
+    /// <summary>A line below the include already wins over the managed file, so it is not a pin and the key stays.</summary>
+    [Fact]
+    public void FindOperatorLinesAboveInclude_ALineBelowTheInclude_IsNotListed()
+    {
+        var conf = "# base\ninclude 'darling-managed.conf'\nrandom_page_cost = 2.5\n";
+
+        Assert.Empty(ManagedConfFile.FindOperatorLinesAboveInclude(conf));
+    }
+
+    /// <summary>A conf with no include yet is a legacy conf: the migration's rule 3 moves the operator line, so nothing is left out.</summary>
+    [Fact]
+    public void FindOperatorLinesAboveInclude_NoInclude_ListsNothing()
+        => Assert.Empty(ManagedConfFile.FindOperatorLinesAboveInclude("random_page_cost = 2.5\n"));
+
+    /// <summary>
+    /// A line inside one of the product's own marker blocks is never the operator's: the same assignment placed
+    /// outside the block is listed (so the empty result is the block's doing, not a parse miss).
+    /// </summary>
+    [Fact]
+    public void FindOperatorLinesAboveInclude_ALineInsideAnOldMarkerBlock_NeverCounts()
+    {
+        var block = DarlingManagedPostgres.BuildWorkerSizingConfAppend().TrimEnd('\n').Split('\n').ToList();
+        var markerIndex = block.FindIndex(l => l.Contains(DarlingManagedPostgres.ConfMarkerV2, StringComparison.Ordinal));
+        Assert.True(markerIndex >= 0 && block.Count >= markerIndex + 3, "the v2 block should hold its marker and at least two assignments");
+        var inside = new List<string>(block);
+        inside.Insert(markerIndex + 1, "random_page_cost = 8");
+        var include = "include 'darling-managed.conf'";
+
+        var withLineInsideTheBlock = string.Join('\n', inside) + "\n" + include + "\n";
+        var withLineBeforeTheBlock = "random_page_cost = 8\n" + string.Join('\n', block) + "\n" + include + "\n";
+
+        Assert.Empty(ManagedConfFile.FindOperatorLinesAboveInclude(withLineInsideTheBlock));
+        var outside = ManagedConfFile.FindOperatorLinesAboveInclude(withLineBeforeTheBlock);
+        Assert.Equal("8", outside["random_page_cost"].Value);
+        Assert.Equal(1, outside["random_page_cost"].Line);
+    }
+
     [Fact]
     public void WriteManagedConfFile_HandEditedFile_IsNeverOverwritten()
     {
