@@ -1301,11 +1301,15 @@ WHERE server_id = $1";
 
         try
         {
+            /* #7256: a table whose archive holds nothing in the lookback is read as its hot table. */
+            var nowUtc = DateTime.UtcNow;
+            var plan = await _duckDb.PlanArchiveReadAsync(cancellationToken,
+                [.. ForcePlanTargetStateReader.ArchivedTables.Select(t => new ArchiveWindow(t, "collection_time", nowUtc - ForcePlanTargetState.Lookback))]);
             using var readLock = _duckDb.AcquireReadLock(cancellationToken);
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(cancellationToken);
             using var command = connection.CreateCommand();
-            return (await ForcePlanTargetStateReader.ReadAsync(command, serverId, targets, DateTime.UtcNow, cancellationToken), null);
+            return (await ForcePlanTargetStateReader.ReadAsync(command, serverId, targets, nowUtc, plan, cancellationToken), null);
         }
         catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, cancellationToken))
         {
