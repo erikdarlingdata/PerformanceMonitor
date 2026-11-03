@@ -104,20 +104,21 @@ ORDER BY d.database_id;";
         /* Twice, byte-identical: the second execution replaces a compiled-plan stub (optimize for ad hoc workloads) with a
            full plan, so a missing plan below can only come from the ranking. */
         /* The GUID sits INSIDE the statement: the DMV's statement offsets skip a leading comment, so a comment before the SELECT
-           would not be part of the row's query_text. */
+           would not be part of the row's query_text. The aggregate keeps the statement out of the trivial-plan, auto-parameterized
+           shape, whose cached text does not carry the comment. */
         var userStatement = $"SELECT c = COUNT_BIG(*) /* qs-rank-user {guid} */ FROM sys.objects;";
         for (var i = 0; i < 2; i++)
         {
             await RunAsync(work, userStatement, ct);
         }
 
-        /* More distinct marker statements than the recency half holds, all newer than the user statement. Each waits a few
-           milliseconds so its total_elapsed_time is above the user statement's too: the weight half cannot rescue the user
+        /* More distinct marker statements than the recency half holds, all newer than the user statement. Each does real work (WAITFOR
+           would leave no query_stats row) so its total_elapsed_time is above the user statement's too: the weight half cannot rescue the user
            statement under the old ranking either. Distinct text per statement makes each its own cache entry. */
         var markerCount = QueryStatsCollector.PlansByRecency + 20;
         for (var i = 0; i < markerCount; i++)
         {
-            await RunAsync(work, $"/* PerformanceMonitorLite qs-rank-marker {guid} {i} */ WAITFOR DELAY '00:00:00.020';", ct);
+            await RunAsync(work, $"/* PerformanceMonitorLite qs-rank-marker {guid} {i} */ SELECT c = COUNT_BIG(*) FROM (SELECT TOP (200000) x = 1 FROM sys.all_objects AS a CROSS JOIN sys.all_objects AS b) AS t;", ct);
         }
 
         var context = new CollectorContext
