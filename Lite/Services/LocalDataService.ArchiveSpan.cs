@@ -94,6 +94,17 @@ public sealed partial class LocalDataService
         return await read(table => "v_" + table);
     }
 
+    /// <summary>The plan for a reader that opens its own connection (#7256): which archived tables of <paramref name="windows"/>
+    /// it can read as the hot table, taken with no lock held and on this service's limiter and connection seams. Pass each
+    /// statement through <see cref="ArchiveReadPlan.Apply"/> once the connection is open.</summary>
+    internal async Task<ArchiveReadPlan> PlanArchiveReadAsync(CancellationToken cancellationToken, params ArchiveWindow[] windows)
+    {
+        var generation = _duckDb.ArchiveViewGeneration;
+        var hot = await _duckDb.GetHotOnlyArchiveTablesAsync(
+            windows, cancellationToken, _archiveReadLimiter, (timer, token) => OpenConnectionAsync(timer, token));
+        return new ArchiveReadPlan(_duckDb, generation, hot);
+    }
+
     /// <summary>Replaces each <c>v_</c> view of <paramref name="tables"/> in <paramref name="sql"/> with the relation
     /// <paramref name="relationFor"/> names for it.</summary>
     internal static string SwapViews(string sql, IReadOnlyList<string> tables, Func<string, string> relationFor)

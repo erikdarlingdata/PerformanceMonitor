@@ -976,6 +976,12 @@ LIMIT $4";
     {
         var rows = new List<BlockingPairRow>();
 
+        /* #7256: the DMV snapshot arm below reads v_dmv_blocking_snapshots, which opens every archive file under the read
+           lock. A window newer than that archive reads the hot table alone. The snapshot's event_time IS its collection
+           time (one value, written by the collector from the run's CollectionTime), so the span on collection_time bounds
+           the event_time filter. The plan is taken before the read lock, the way the drill-down takes it. */
+        var plan = await PlanArchiveReadAsync(System.Threading.CancellationToken.None, new ArchiveWindow("dmv_blocking_snapshots", "collection_time", start));
+
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
         command.CommandText = $@"
@@ -1006,7 +1012,7 @@ LIMIT 5000";
            stop. Stated here rather than defaulted in the shared method, so the exception belongs to
            the caller that actually has it. */
         await PerformanceMonitorLite.Analysis.BlockingPairRowQuery.AppendDmvSnapshotRowsAsync(
-            connection.CreateCommand, rows, serverId, start, end, System.Threading.CancellationToken.None);
+            connection.CreateCommand, rows, serverId, start, end, System.Threading.CancellationToken.None, plan: plan);
 
         return rows;
     }
