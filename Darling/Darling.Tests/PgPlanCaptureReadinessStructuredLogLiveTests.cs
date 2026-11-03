@@ -83,11 +83,15 @@ public sealed class PgPlanCaptureReadinessStructuredLogLiveTests
         return facets;
     }
 
+    /* The readers take the csv route whenever csvlog is LISTED (PgLogUsesCsvlog never looks at stderr), so a bad prefix
+       is not what stops attribution there, stderr or not. */
     [Theory]
     [InlineData("csvlog")]
     [InlineData("csvlog,jsonlog")]
     [InlineData("Csvlog, JSONlog")]
-    public async Task ACsvlogTargetWithoutStderrIsNotJudgedByItsLinePrefix(string destination)
+    [InlineData("stderr,csvlog")]
+    [InlineData("csvlog, stderr")]
+    public async Task ACsvlogTargetIsNotJudgedByItsLinePrefixWhetherOrNotStderrIsListedToo(string destination)
     {
         var facets = await RunAsync(destination, UnreadablePrefix);
 
@@ -113,12 +117,10 @@ public sealed class PgPlanCaptureReadinessStructuredLogLiveTests
     }
 
     [Theory]
-    [InlineData("stderr,csvlog")]
-    [InlineData("csvlog, stderr")]
     [InlineData("jsonlog,stderr")]
     [InlineData("stderr")]
     [InlineData("")]
-    public async Task ATargetThatAlsoLogsToStderrKeepsThePrefixRule(string destination)
+    public async Task ATargetWithStderrAndNoCsvlogKeepsThePrefixRule(string destination)
     {
         var bad = await RunAsync(destination, UnreadablePrefix);
         Assert.False(bad["plan_attribution"].Satisfied, destination);
@@ -129,14 +131,20 @@ public sealed class PgPlanCaptureReadinessStructuredLogLiveTests
         Assert.True(good["log_line_prefix_readable"].Satisfied, destination);
     }
 
-    [Fact]
-    public async Task ACsvlogOnlyTargetOnPostgres13HasNoQueryIdColumnAndStaysUnmet()
+    /* On 13 the csv route has no query_id column, and a good prefix on stderr does nothing while csvlog stays listed, so
+       the remedy is to take csvlog out (or upgrade), never "add stderr". */
+    [Theory]
+    [InlineData("csvlog")]
+    [InlineData("stderr,csvlog")]
+    public async Task ACsvlogTargetOnPostgres13HasNoQueryIdColumnAndStaysUnmet(string destination)
     {
-        var facets = await RunAsync("csvlog", GoodPrefix, "130012");
+        var facets = await RunAsync(destination, GoodPrefix, "130012");
 
-        Assert.False(facets["plan_attribution"].Satisfied);
+        Assert.False(facets["plan_attribution"].Satisfied, destination);
         Assert.Contains("older than 14", facets["plan_attribution"].Detail, StringComparison.Ordinal);
-        Assert.True(facets["log_line_prefix_readable"].Satisfied);
+        Assert.Contains("Take csvlog out of log_destination", facets["plan_attribution"].Detail, StringComparison.Ordinal);
+        Assert.DoesNotContain("add stderr", facets["plan_attribution"].Detail, StringComparison.OrdinalIgnoreCase);
+        Assert.True(facets["log_line_prefix_readable"].Satisfied, destination);
     }
 
     [Fact]
