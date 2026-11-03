@@ -78,4 +78,47 @@ public sealed class QueryStatsDeferredPlanCapTests
             Assert.Equal(1234, r.QueryPlanXmlBytes);
         });
     }
+
+    /* #7337: row n ran n seconds after Created and has the given lifetime elapsed time. */
+    private static QueryStatsCollector.Row TimedRow(int n, long elapsed)
+    {
+        var row = RowFor(n);
+        row.LastExecutionTime = Created.AddSeconds(n);
+        row.TotalElapsedTime = elapsed;
+        return row;
+    }
+
+    [Fact]
+    public void HeavyStatementOutsideTheNewestCap_IsChosen_AndTheNewestHalfStillIs()
+    {
+        var cap = QueryStatsCollector.MaxPlansPerRun;
+
+        /* 300 misses: the LAST one in input order is the oldest and by far the heaviest (a report that runs now and then);
+           the rest are light and newer in order. Recency alone never reaches it. */
+        var rows = Enumerable.Range(1, 299).Select(n => TimedRow(n, n)).ToList();
+        rows.Add(TimedRow(0, 1_000_000_000));
+
+        var misses = DarlingCollectorRunner.PartitionDeferredQueryStatsPlans(1, rows, new PlanDigestCache<QueryStatsPlanKey>(), Now);
+
+        Assert.Equal(cap, misses.Count);
+        Assert.Contains(misses, m => ReferenceEquals(m.Row, rows[^1]));
+        /* The newest QueryStatsCollector.PlansByRecency (the 100 newest, n = 200..299) are all chosen. */
+        Assert.All(rows.Where(r => r.LastExecutionTime >= Created.AddSeconds(200)),r => Assert.Contains(misses, m => ReferenceEquals(m.Row, r)));
+    }
+
+    [Fact]
+    public void StatementInBothHalves_TakesOneSlot_AndTheTotalNeverPassesTheCap()
+    {
+        var cap = QueryStatsCollector.MaxPlansPerRun;
+
+        /* The newest row is also the heaviest: it is in both lists. It must be chosen once, and the heaviest half is
+           filled from the next heaviest, so the total is exactly the cap. */
+        var rows = Enumerable.Range(0, cap + 50).Select(n => TimedRow(n, n)).ToList();
+
+        var misses = DarlingCollectorRunner.PartitionDeferredQueryStatsPlans(1, rows, new PlanDigestCache<QueryStatsPlanKey>(), Now);
+
+        Assert.Equal(cap, misses.Count);
+        Assert.Equal(cap, misses.Select(m => m.Row.PlanHandle).Distinct(StringComparer.Ordinal).Count());
+        Assert.Equal(rows.Skip(50).Select(r => r.PlanHandle), misses.Select(m => m.Row.PlanHandle));
+    }
 }
