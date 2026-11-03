@@ -402,6 +402,8 @@ WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time <= $3";
 
         try
         {
+            /* #7256: the snapshot fallback read below reads the hot table alone for a window newer than the archive. */
+            var plan = await _duckDb.PlanArchiveReadAsync("dmv_blocking_snapshots", "collection_time", context.TimeRangeStart, context.CancellationToken);
             using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(context.CancellationToken);
@@ -436,7 +438,7 @@ LIMIT 5000";
             // e.g. AWS RDS). Merge BEFORE the empty check so DMV-only blocking still produces facts.
             await BlockingPairRowQuery.AppendDmvSnapshotRowsAsync(
                 connection.CreateCommand, rows, context.ServerId, context.TimeRangeStart, context.TimeRangeEnd,
-                context.CancellationToken);
+                context.CancellationToken, plan: plan);
 
             /* On an Azure SQL Database master target, pairs of databases monitored as their own targets are
                skipped, so one chain does not page from both targets. A pair with no database stays. */
