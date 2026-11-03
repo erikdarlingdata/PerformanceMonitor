@@ -125,6 +125,13 @@ VALUES ({_nextId++}, {Ts(collected)}, {ServerId}, 'TestSrv', {userMb}, 1, 1, 500
      wait_time_ms, monitor_loop)
 VALUES ({_nextId++}, {Ts(collected)}, {ServerId}, 'TestSrv', 51, 52, {waitMs}, 1)";
 
+    /// <summary>A snapshot pair with its event time and statement text, which the reconstructed chains read by event key.</summary>
+    private string DmvChainRow(DateTime collected, int blocked, int blocking, long waitMs) =>
+        $@"INSERT INTO dmv_blocking_snapshots (collection_id, collection_time, server_id, server_name, event_time, blocked_spid, blocking_spid,
+     wait_time_ms, blocked_sql_text, blocking_sql_text, blocked_ecid, blocking_ecid, monitor_loop)
+VALUES ({_nextId++}, {Ts(collected)}, {ServerId}, 'TestSrv', {Ts(collected)}, {blocked}, {blocking}, {waitMs},
+     'SELECT blocked_{blocked}', 'UPDATE blocking_{blocking}', 0, 0, 1)";
+
     private async Task<JsonArray?> DrillDownAsync(string pathKey, string section, DateTime start)
     {
         var finding = new AnalysisFinding
@@ -184,6 +191,35 @@ VALUES ({_nextId++}, {Ts(collected)}, {ServerId}, 'TestSrv', 51, 52, {waitMs}, 1
         var rows = await DrillDownAsync("BLOCKING_EVENTS", "top_blocking_chains", Whole(NowUtc.AddDays(-12)));
 
         Assert.Equal([9000L, 100L], rows!.Select(r => r!["wait_time_ms"]!.GetValue<long>()).ToArray());
+    }
+
+    [Fact]
+    public async Task ReconstructedBlockingChains_AWindowNewerThanTheArchive_OpensNoSnapshotArchiveFile()
+    {
+        await ExecuteAsync(DmvChainRow(Whole(NowUtc.AddDays(-10)), 61, 62, 9000), DmvChainRow(Whole(NowUtc.AddHours(-2)), 51, 52, 100));
+        Break(await ArchiveAsync("dmv_blocking_snapshots", NowUtc.AddDays(-1)));
+
+        var chains = await DrillDownAsync("BLOCKING_CHAIN", "reconstructed_blocking_chains", Whole(NowUtc.AddHours(-6)));
+
+        /* The window fetch and the by-key text fetch both ran on the hot table: the one hot pair, with its text. */
+        var chain = Assert.Single(chains!)!;
+        Assert.Equal(52, chain["apex_spid"]!.GetValue<int>());
+        var level = Assert.Single(chain["levels"]!.AsArray())!;
+        Assert.Contains("UPDATE blocking_52", level["blocking_sql"]!.GetValue<string>());
+        Assert.Contains("SELECT blocked_51", level["blocked_sql"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task ReconstructedBlockingChains_AWindowThatReachesIntoTheArchive_StillReadsTheSnapshotArchive()
+    {
+        await ExecuteAsync(DmvChainRow(Whole(NowUtc.AddDays(-10)), 61, 62, 9000), DmvChainRow(Whole(NowUtc.AddHours(-2)), 51, 52, 100));
+        await ArchiveAsync("dmv_blocking_snapshots", NowUtc.AddDays(-1));
+
+        var chains = await DrillDownAsync("BLOCKING_CHAIN", "reconstructed_blocking_chains", Whole(NowUtc.AddDays(-12)));
+
+        Assert.Equal([52, 62], chains!.Select(c => c!["apex_spid"]!.GetValue<int>()).Order().ToArray());
+        var archived = chains!.Single(c => c!["apex_spid"]!.GetValue<int>() == 62)!;
+        Assert.Contains("UPDATE blocking_62", archived["levels"]![0]!["blocking_sql"]!.GetValue<string>());
     }
 
     /* ---- DrillDownCollector.Storage.cs ---- */

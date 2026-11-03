@@ -144,6 +144,9 @@ LIMIT 5").Replace("{SCOPE}", SeparatelyMonitoredScope.BprFilter(context.Separate
     /// </summary>
     private async Task CollectReconstructedBlockingChains(AnalysisFinding finding, AnalysisContext context)
     {
+        /* #7256: the snapshot reads (the window fetch and the by-key text fetch, whose keys come from that window) read the
+           hot table alone for a window newer than the archive. The blocked-process-report reads stay on the view. */
+        var plan = await _duckDb.PlanArchiveReadAsync("dmv_blocking_snapshots", "collection_time", context.TimeRangeStart, context.CancellationToken);
         using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
         using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync(context.CancellationToken);
@@ -185,7 +188,7 @@ LIMIT 5000";
         // (blocked-process-report unavailable, e.g. AWS RDS) still reconstructs.
         await BlockingPairRowQuery.AppendDmvSnapshotRowsAsync(
             connection.CreateCommand, rows, context.ServerId, context.TimeRangeStart, context.TimeRangeEnd,
-            context.CancellationToken, includeText: false);
+            context.CancellationToken, includeText: false, plan);
 
         /* #5361: the merge appends every DMV row after the report
            rows, so every row past the report count is DMV-sourced: the source of each level's text read below. */
@@ -212,7 +215,7 @@ LIMIT 5000";
             shownKeys.Where(k => !dmvKeys.Contains(k)).ToList(), context.CancellationToken);
         var dmvText = await BlockingPairRowQuery.ReadChainLevelTextAsync(
             connection.CreateCommand, dmvSource: true, context.ServerId,
-            shownKeys.Where(dmvKeys.Contains).ToList(), context.CancellationToken);
+            shownKeys.Where(dmvKeys.Contains).ToList(), context.CancellationToken, plan);
         (string BlockedSql, string BlockingSql) TextOf(ChainLevel l) =>
             (dmvKeys.Contains(l.Key) ? dmvText : bprText).GetValueOrDefault(l.Key, (string.Empty, string.Empty));
 
