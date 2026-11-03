@@ -307,7 +307,7 @@ public partial class InvestigationsWindow : Window
             : _profiles.FirstOrDefault(p => p.ScopeServerId == scope.ServerId && p.ScopeTagId == scope.TagId);
         ProfileTextBox.Text = profile?.ProfileText ?? "";
         ProfileModifiedText.Text = profile is null ? "No profile yet."
-            : "Saved " + profile.ModifiedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.CurrentCulture)
+            : "Saved " + ViewerTimeHelper.FormatFleetWide(profile.ModifiedAtUtc, "yyyy-MM-dd HH:mm")
               + (profile.ModifiedBy is { } by ? " by " + by : "");
     }
 
@@ -348,7 +348,7 @@ public partial class InvestigationsWindow : Window
         text.Append("Verdict: ").Append(report.Verdict)
             .Append(report.RootCauseFound ? " (root cause found)" : " (root cause not found)")
             .Append(", by ").Append(report.AgentId).Append(" at ")
-            .AppendLine(report.SubmittedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.CurrentCulture));
+            .AppendLine(ViewerTimeHelper.FormatFleetWide(report.SubmittedAtUtc, "yyyy-MM-dd HH:mm"));
         text.Append("Root cause: ").AppendLine(report.RootCause);
         if (!string.IsNullOrWhiteSpace(report.Summary))
         {
