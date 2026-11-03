@@ -1841,9 +1841,9 @@ public sealed partial class DarlingMcpAlertTools
                 startsAtUtc = DateTime.SpecifyKind(parsedStart, DateTimeKind.Utc);
             }
 
-            if (startsAtUtc.HasValue && expiresAtUtc.HasValue && expiresAtUtc.Value <= startsAtUtc.Value)
+            if (WindowRefusal(startsAtUtc, expiresAtUtc) is { } windowProblem)
             {
-                return Outcome("invalid", $"expires_at ({expiresAtUtc.Value:o}) must be after starts_at ({startsAtUtc.Value:o}). Nothing was written.");
+                return Outcome("invalid", windowProblem);
             }
 
             /* #7040: the repeat schedule, held to the one check every write path runs (MuteRule.TryNormalizeRecurrence). */
@@ -2915,9 +2915,13 @@ public sealed partial class DarlingMcpAlertTools
     /// <summary>The refusal for a rule whose end is not after its start (#6231), or null. A window that ends before it starts would
     /// never apply and would read as if it did, so every write that can set either bound runs this on the rule it is about to
     /// store. A rule with only one bound, or none, is never refused here.</summary>
-    internal static string? WindowRefusal(MuteRule rule) =>
-        rule.StartsAtUtc.HasValue && rule.ExpiresAtUtc.HasValue && rule.ExpiresAtUtc.Value <= rule.StartsAtUtc.Value
-            ? $"The end ({rule.ExpiresAtUtc.Value.ToString("o", CultureInfo.InvariantCulture)}) must be after the start ({rule.StartsAtUtc.Value.ToString("o", CultureInfo.InvariantCulture)}). Nothing was written."
+    internal static string? WindowRefusal(MuteRule rule) => WindowRefusal(rule.StartsAtUtc, rule.ExpiresAtUtc);
+
+    /// <summary>The same refusal for a window that is not a rule yet: create_mute_rule checks its parsed bounds before it builds the rule, so a
+    /// bad window still wins over the recurrence and zone errors it was always reported ahead of.</summary>
+    internal static string? WindowRefusal(DateTime? startsAtUtc, DateTime? expiresAtUtc) =>
+        startsAtUtc.HasValue && expiresAtUtc.HasValue && expiresAtUtc.Value <= startsAtUtc.Value
+            ? $"The end ({expiresAtUtc.Value.ToString("o", CultureInfo.InvariantCulture)}) must be after the start ({startsAtUtc.Value.ToString("o", CultureInfo.InvariantCulture)}). Nothing was written."
             : null;
 
     /// <summary>Whether two rules agree on every field update_mute_rule can move — the 'unchanged'

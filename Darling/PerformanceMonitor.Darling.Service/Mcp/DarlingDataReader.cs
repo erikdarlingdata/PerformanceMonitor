@@ -4873,34 +4873,6 @@ FROM config.config_collector_schedules";
     public sealed record BlockingDurationStatsRow(
         DateTime Time, long EventCount, long TotalDurationMs, long MaxDurationMs, double AvgDurationMs, string? Source = null);
 
-    /// <summary>
-    /// Whether ANY of the three capture paths behind the blocking-severity read has ever produced a row.
-    /// <para>Each can be off independently: the XE blocked-process report needs its session running, the
-    /// DMV snapshot needs its collector enabled, and deadlock capture is separate from both. Probing one
-    /// would report "never captured" for a server capturing fine through another; probing neither would
-    /// let a silent capture gap read as a clean bill of health.</para>
-    /// <para>Deadlocks are in here because the verdict gates on the blocking series AND the deadlock
-    /// series both being empty. Probing only the two blocking sources would call a server 'genuinely
-    /// clear' on the strength of blocking capture alone, while deadlock capture had never run -- the
-    /// reassuring-wrong answer this probe exists to prevent, missed for the deadlock half.</para>
-    /// </summary>
-    public const string HasAnyBlockingCaptureSql = """
-        SELECT 1
-        WHERE EXISTS (SELECT 1 FROM v_blocked_process_reports WHERE server_id = $1)
-        OR    EXISTS (SELECT 1 FROM v_dmv_blocking_snapshots WHERE server_id = $1)
-        OR    EXISTS (SELECT 1 FROM v_deadlocks WHERE server_id = $1)
-        """;
-
-    /// <summary>Runs <see cref="HasAnyBlockingCaptureSql"/>.</summary>
-    public static async Task<bool> HasAnyBlockingCaptureAsync(
-        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
-    {
-        await using var command = postgres.CreateCommand(HasAnyBlockingCaptureSql);
-        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-        AddInt(command, serverId);
-        return await command.ExecuteScalarAsync(cancellationToken) is not null;
-    }
-
     /// <summary>Runs <see cref="BlockingDurationStatsSql"/> over every database.</summary>
     public static Task<List<BlockingDurationStatsRow>> GetBlockingDurationStatsAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,

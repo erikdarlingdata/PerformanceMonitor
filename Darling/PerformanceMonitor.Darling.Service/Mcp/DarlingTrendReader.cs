@@ -454,33 +454,6 @@ internal static class DarlingTrendReader
             """;
     }
 
-    public static async Task<List<PerfmonTrendPoint>> GetPerfmonTrendAsync(
-        NpgsqlDataSource postgres, int serverId, string counterName, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
-    {
-        var items = new List<PerfmonTrendPoint>();
-        await using var command = postgres.CreateCommand(PerfmonTrendSql);
-        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-        DarlingMcpReadParameters.AddInt(command, serverId);
-        DarlingMcpReadParameters.AddText(command, counterName);
-        DarlingMcpReadParameters.AddTimestamp(command, startUtc);
-        DarlingMcpReadParameters.AddTimestamp(command, endUtc);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
-        {
-            items.Add(new PerfmonTrendPoint(
-                reader.GetDateTime(0),
-                reader.IsDBNull(1) ? 0 : reader.GetInt64(1),
-                /* NULL stays NULL on both: a gauge's instance rows store neither (V132), and a pre-V132 row's
-                   NULL interval is #3540's third state; 0 is the marker and must not be manufactured. */
-                reader.IsDBNull(2) ? null : reader.GetInt64(2),
-                reader.IsDBNull(3) ? null : reader.GetInt64(3),
-                reader.IsDBNull(4) ? null : reader.GetInt32(4),
-                reader.GetInt64(5)));
-        }
-
-        return items;
-    }
-
     /// <summary>
     /// A perfmon counter BUCKETED (#3960): <see cref="PerfmonTrendSql"/>'s per-collection sums, byte for byte,
     /// gathered into buckets of <c>$5</c> minutes with every reading the envelope may need — the average, largest

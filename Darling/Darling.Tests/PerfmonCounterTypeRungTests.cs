@@ -264,7 +264,6 @@ public sealed class PerfmonCounterTypeRungTests
            whose delta columns are non-nullable and coerce legitimately): the delta ordinal is read null-or-value. */
         foreach (var (file, method, nullRead, coercion) in new[]
         {
-            ("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingTrendReader.cs", "GetPerfmonTrendAsync(", "reader.IsDBNull(2) ? null : reader.GetInt64(2)", "reader.IsDBNull(2) ? 0 : reader.GetInt64(2)"),
             ("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingDataReader.cs", "GetLatestPerfmonStatsAsync(", "reader.IsDBNull(3) ? null : reader.GetInt64(3)", "reader.IsDBNull(3) ? 0 : reader.GetInt64(3)"),
             ("Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.Perfmon.cs", "GetPerfmonTrendsByCountersAsync(", "reader.IsDBNull(3) ? null : reader.GetInt64(3)", "reader.IsDBNull(3) ? 0 : reader.GetInt64(3)"),
         })
@@ -436,13 +435,7 @@ public sealed class PerfmonCounterTypeLivePostgresTests
                 Assert.Equal(703, mixed.Value);
             }
 
-            /* The MCP trend read and the two tools. */
-            var mcpGauge = await DarlingTrendReader.GetPerfmonTrendAsync(postgres, ServerId, "Total Server Memory (KB)", t1.AddMinutes(-1), t3.AddMinutes(1), ct);
-            Assert.Equal(2, mcpGauge.Count);
-            Assert.All(mcpGauge, p => Assert.Equal(PerfmonCounterTypes.PerfCounterLargeRawCount, p.CntrType));
-            Assert.All(mcpGauge, p => Assert.Null(p.DeltaValue));
-            Assert.All(mcpGauge, p => Assert.Null(p.SampleIntervalSeconds));
-
+            /* The two MCP tools. */
             /* #3960: bucket_minutes: 1 pins per-collection granularity, since this test is about TYPE
                classification, not about bucketing — t1/t3 are 10 minutes apart and the default 24h window's
                auto-sized bucket (10 minutes) could otherwise fold them into one point depending on wall-clock
