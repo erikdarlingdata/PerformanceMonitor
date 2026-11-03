@@ -1024,7 +1024,7 @@
                                             </Style.Triggers>
                                         </Style>
                                     </Border.Style>
-                                    <TextBlock x:Name="FleetAdditionalProblemsText" Text="{Binding AdditionalProblemText}"
+                                    <TextBlock Text="{Binding AdditionalProblemText}"
                                                FontSize="11" TextDecorations="Underline"
                                                Foreground="{DynamicResource AccentBrush}"/>
                                 </Border>

@@ -142,10 +142,12 @@ public sealed class TrendBucketingToolTests : IClassFixture<SharedDuckDbFixture>
     }
 
     /// <summary>
-    /// The duration trend, time-weighted: in the 10:00 bucket a 60-second collection at 100 ms/s, a 120-second one
-    /// at 10 ms/s and a restart (stored 0) — (6,000 + 1,200) ms over 180 s = 40 ms/s, the restart left out and
-    /// counted. The 10:10 bucket holds only a restart (null rates); the 10:20 one a pre-v61 collection rated over
-    /// the ten minutes since the one before.
+    /// The duration trend, time-weighted by each collection's gap to the previous one (#7161), not by the longest stored
+    /// interval of any one query in it. In the 10:00 bucket: the 10:02 collection (60 s stored, but 300 s after the 09:57
+    /// one, which lies before the window and is read only as its previous), the 10:04 one (120 s after 10:02) and a
+    /// restart (stored 0, left out and counted) — (6,000 + 1,200) ms over (300 + 120) s = 17.142857 ms/s; the stored 60 s
+    /// and 120 s said 7,200 / 180 = 40. The 10:10 bucket holds only a restart (null rates); the 10:20 one a pre-v61
+    /// collection rated over the ten minutes since the one before.
     /// </summary>
     [Fact]
     public async Task DurationTrend_IsTimeWeighted_LeavesTheUnknowableOut_AndStampsTheFirstPointAtTheWindowStart()
@@ -166,9 +168,12 @@ public sealed class TrendBucketingToolTests : IClassFixture<SharedDuckDbFixture>
         var trend = root.GetProperty("trend").EnumerateArray().ToArray();
         Assert.Equal(3, trend.Length);
         Assert.StartsWith("2026-03-04T10:00:00", trend[0].GetProperty("time").GetString()!, StringComparison.Ordinal);
-        Assert.Equal(40.0, trend[0].GetProperty("elapsed_ms_per_second").GetDouble(), 9);
-        Assert.Equal(0.4, trend[0].GetProperty("executions_per_second").GetDouble(), 9);
-        Assert.Equal(100.0, trend[0].GetProperty("peak_elapsed_ms_per_second").GetDouble(), 9);
+        /* #7161: (6,000 + 1,200) ms / (300 s gap to 09:57 + 120 s gap to 10:02) = 17.142857; (60 + 12) / 420 = 0.171428571;
+           the peak point is 10:02's 6,000 / 300 = 20 (the stored 60 s said 100). The old 40, 0.4 and 100 divided by the
+           stored 60 s and 120 s. */
+        Assert.Equal(7200.0 / 420.0, trend[0].GetProperty("elapsed_ms_per_second").GetDouble(), 9);
+        Assert.Equal(72.0 / 420.0, trend[0].GetProperty("executions_per_second").GetDouble(), 9);
+        Assert.Equal(20.0, trend[0].GetProperty("peak_elapsed_ms_per_second").GetDouble(), 9);
         Assert.Equal(JsonValueKind.Null, trend[1].GetProperty("elapsed_ms_per_second").ValueKind);
         Assert.Equal(1.0, trend[2].GetProperty("elapsed_ms_per_second").GetDouble(), 9);
         Assert.Equal(1, root.GetProperty("unrated_points").GetInt32());

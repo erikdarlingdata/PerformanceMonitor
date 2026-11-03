@@ -123,8 +123,9 @@ public sealed class PerformanceTrendDurationBucketingTests : IClassFixture<Share
     {
         var minuteFloor = MinuteFloor(DateTime.UtcNow.AddMinutes(-50));
         var t1 = minuteFloor.AddSeconds(37);
-        var t2 = t1.AddMinutes(12);
         var excluded = t1.AddMinutes(5);
+        /* #7161: a collection's seconds are its gap to the previous collection, so t2 sits 25 s after it (the interval it stores). */
+        var t2 = excluded.AddSeconds(25);
 
         await SeedQueryStatAsync(t1, "0xA", "AppDb", deltaExecutions: 12, deltaElapsedUs: 360_000, interval: 30);
         await SeedQueryStatAsync(t2, "0xB", "AppDb", deltaExecutions: 100, deltaElapsedUs: 250_000, interval: 25);
@@ -187,8 +188,9 @@ public sealed class PerformanceTrendDurationBucketingTests : IClassFixture<Share
     {
         var minuteFloor = MinuteFloor(DateTime.UtcNow.AddMinutes(-50));
         var t1 = minuteFloor.AddSeconds(37);
-        var t2 = t1.AddMinutes(12);
         var excluded = t1.AddMinutes(5);
+        /* #7161: a collection's seconds are its gap to the previous collection, so t2 sits 25 s after it (the interval it stores). */
+        var t2 = excluded.AddSeconds(25);
 
         await SeedQueryStatAsync(t1, "0xA", "AppDb", deltaExecutions: 12, deltaElapsedUs: 360_000, interval: 30);
         await SeedQueryStatAsync(t2, "0xB", "AppDb", deltaExecutions: 100, deltaElapsedUs: 250_000, interval: 25);
@@ -209,6 +211,31 @@ public sealed class PerformanceTrendDurationBucketingTests : IClassFixture<Share
        contributes nothing when it shares a bucket with a rated one; alone, it is a kept NULL point
        (bullets 4 and 5) ----------------------------------------------------------------------------------- */
 
+    /* #7161: a query that runs every 15 minutes comes back stored with its own 900 s interval beside siblings at 60 s. The
+       collection's seconds are its gap to the previous collection (60 s), not the longest interval of any one query in it. */
+    [Fact]
+    public async Task QueryTrends_ALongIntervalQueryBesideSteadyOnes_DoesNotStretchTheCollection()
+    {
+        var m0 = MinuteFloor(DateTime.UtcNow.AddMinutes(-40));
+
+        for (var i = 0; i < 4; i++)
+        {
+            await SeedQueryStatAsync(m0.AddMinutes(i), "0xSteady", "AppDb", deltaExecutions: 60, deltaElapsedUs: 600_000, interval: 60);
+        }
+
+        /* Collection 3 (m0+2) also carries the 15-minute query: 10 executions, 100 ms, interval 900. */
+        await SeedQueryStatAsync(m0.AddMinutes(2), "0xQuarterHour", "AppDb", deltaExecutions: 10, deltaElapsedUs: 100_000, interval: 900);
+
+        var duration = await _dataService.GetQueryDurationTrendAsync(ServerId, hoursBack: 1);
+        var executions = await _dataService.GetExecutionCountTrendAsync(ServerId, hoursBack: 1);
+
+        Assert.Equal(4, duration.Count);
+        Assert.Equal(700.0 / 60.0, duration[2].Value!.Value, precision: 6);
+        Assert.Equal(70.0 / 60.0, duration[2].ExecutionsPerSecond!.Value, precision: 6);
+        Assert.Equal(10.0, duration[3].Value!.Value, precision: 6);
+        Assert.Equal(70.0 / 60.0, executions[2].Value!.Value, precision: 6);
+    }
+
     [Fact]
     public async Task QueryDurationTrend_MergedBucketSumsWork_UnratedAloneIsNull_UnratedInAMixIsIgnored()
     {
@@ -220,7 +247,7 @@ public sealed class PerformanceTrendDurationBucketingTests : IClassFixture<Share
            .5/sec and 2/sec alone. Summed: 700/30 = 23.3333 ms/sec, 45/30 = 1.5 execs/sec -- neither the mean
            of the two per-collection rates. */
         await SeedQueryStatAsync(m1.AddSeconds(5), "0xM1a", "AppDb", deltaExecutions: 5, deltaElapsedUs: 100_000, interval: 10);
-        await SeedQueryStatAsync(m1.AddSeconds(45), "0xM1b", "AppDb", deltaExecutions: 40, deltaElapsedUs: 600_000, interval: 20);
+        await SeedQueryStatAsync(m1.AddSeconds(25), "0xM1b", "AppDb", deltaExecutions: 40, deltaElapsedUs: 600_000, interval: 20);
 
         /* m2: one UNRATED collection alone in its bucket (a restart marker) -- kept, with a NULL rate. */
         await SeedQueryStatAsync(m2.AddSeconds(10), "0xM2", "AppDb", deltaExecutions: 777, deltaElapsedUs: 777_000, interval: 0);
@@ -228,7 +255,7 @@ public sealed class PerformanceTrendDurationBucketingTests : IClassFixture<Share
         /* m3: one unrated collection beside one rated one -- the bucket's rate is the rated collection's own,
            unmoved by the unrated sibling's much larger deltas. */
         await SeedQueryStatAsync(m3.AddSeconds(5), "0xM3unrated", "AppDb", deltaExecutions: 999, deltaElapsedUs: 999_000, interval: 0);
-        await SeedQueryStatAsync(m3.AddSeconds(45), "0xM3rated", "AppDb", deltaExecutions: 30, deltaElapsedUs: 150_000, interval: 15);
+        await SeedQueryStatAsync(m3.AddSeconds(20), "0xM3rated", "AppDb", deltaExecutions: 30, deltaElapsedUs: 150_000, interval: 15);
 
         var points = await _dataService.GetQueryDurationTrendAsync(ServerId, hoursBack: 1);
 
@@ -289,10 +316,10 @@ public sealed class PerformanceTrendDurationBucketingTests : IClassFixture<Share
         var m3 = m1.AddMinutes(6);
 
         await SeedQueryStatAsync(m1.AddSeconds(5), "0xM1a", "AppDb", deltaExecutions: 5, deltaElapsedUs: 100_000, interval: 10);
-        await SeedQueryStatAsync(m1.AddSeconds(45), "0xM1b", "AppDb", deltaExecutions: 40, deltaElapsedUs: 600_000, interval: 20);
+        await SeedQueryStatAsync(m1.AddSeconds(25), "0xM1b", "AppDb", deltaExecutions: 40, deltaElapsedUs: 600_000, interval: 20);
         await SeedQueryStatAsync(m2.AddSeconds(10), "0xM2", "AppDb", deltaExecutions: 777, deltaElapsedUs: 777_000, interval: 0);
         await SeedQueryStatAsync(m3.AddSeconds(5), "0xM3unrated", "AppDb", deltaExecutions: 999, deltaElapsedUs: 999_000, interval: 0);
-        await SeedQueryStatAsync(m3.AddSeconds(45), "0xM3rated", "AppDb", deltaExecutions: 30, deltaElapsedUs: 150_000, interval: 15);
+        await SeedQueryStatAsync(m3.AddSeconds(20), "0xM3rated", "AppDb", deltaExecutions: 30, deltaElapsedUs: 150_000, interval: 15);
 
         var points = await _dataService.GetExecutionCountTrendAsync(ServerId, hoursBack: 1);
 
