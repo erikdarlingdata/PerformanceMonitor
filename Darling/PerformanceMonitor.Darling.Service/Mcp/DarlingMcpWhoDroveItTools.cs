@@ -95,7 +95,8 @@ public sealed class DarlingMcpWhoDroveItTools
                 if (notCollected is not null) return notCollected;
 
                 var emptyNotice = await CpuNoticeAsync(postgres, resolved.ServerName, planRoute.Hourly, start, windowEnd, emptyAnswer: true, cancellationToken);
-                return McpHelpers.Status("empty",
+                /* #7167: an offline server's empty window answers unavailable, as the get_pg_* reads do. */
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, McpHelpers.Status("empty",
                     $"No statement CPU for {resolved.DisplayName} in the last {hours_back} hour(s): the plan cache collector wrote no interval with executions in the window. "
                     + "Procedure stats are not a substitute, because they count the same work.",
                     emptyNotice.IsUnavailable
@@ -106,7 +107,7 @@ public sealed class DarlingMcpWhoDroveItTools
                             ["effective_start"] = emptyNotice.EffectiveStart,
                             ["window_truncated"] = emptyNotice.WindowTruncated,
                             ["truncation_note"] = emptyNotice.TruncationNote,
-                        });
+                        }), cancellationToken);
             }
 
             var notice = await CpuNoticeAsync(postgres, resolved.ServerName, planRoute.Hourly, start, windowEnd, emptyAnswer: false, cancellationToken);
