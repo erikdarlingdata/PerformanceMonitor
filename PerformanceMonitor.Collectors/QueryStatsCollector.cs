@@ -419,11 +419,7 @@ OPTION(RECOMPILE);";
        statements between its runs it was never in the newest 200, so every row stored for it had no plan. weight_rank
        is the heaviest by total_elapsed_time, and the apply hands the handle to a row within either half. Both
        numbers are taken over every row the WHERE keeps, before the TOP trims it to MaxCandidateRows, so when more
-       than MaxCandidateRows statements ran in the window, a heavy one the TOP dropped still holds a weight slot.
-       The weight is lifetime total_elapsed_time and inline mode keeps no cache of fetched plans, so the weight half
-       does not rotate: every run renders the same lifetime-heaviest statements, many of them already in the recency
-       half, and a report gets a slot only while its lifetime total is in the top PlansByWeight. The deferred fetch
-       skips plans it already holds, so its weight slots move on to the next heaviest. */
+       than MaxCandidateRows statements ran in the window, a heavy one the TOP dropped still holds a weight slot. */
     private static readonly string PlanRankFragment = @",
         plan_rank = ROW_NUMBER() OVER (ORDER BY qs.last_execution_time DESC, qs.total_elapsed_time DESC),
         weight_rank = ROW_NUMBER() OVER (ORDER BY qs.total_elapsed_time DESC, qs.last_execution_time DESC)";
