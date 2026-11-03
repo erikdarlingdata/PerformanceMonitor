@@ -2002,13 +2002,19 @@ function Write-DarlingStoreCheckResult([string]$folder, [string]$dataDirectory, 
     }
 }
 
+# What every pre-stop refusal says about the state it leaves. It never says the service is running or the install untouched: a re-run after a
+# failure past the stop (Get-DarlingStoreStoppedText) reaches these refusals with the service still stopped and the new build in place (#7267).
+function Get-DarlingNothingChangedText {
+    return "This run has not stopped or copied anything. If an earlier run stopped the service, it is still stopped and the new build is already in place."
+}
+
 # The pre-stop refusal for a store that cannot be taken over: why, the four commands when they are the way forward, and that this run
 # has changed nothing. It does not say the service is running: a re-run after a failure past the stop (Get-DarlingStoreStoppedText)
 # reaches this text with the service still stopped and the new build in place.
 function Get-DarlingStoreRefusalText([string]$folder, $plan, [string]$serviceSid) {
     $byHand = ''
     if ($plan.FixByHand) { $byHand = " If it is your own store and you trust what is in it, fix the whole folder at once from an elevated prompt, then re-run this script.`n$(Get-DarlingStoreRepairText $folder $serviceSid)" }
-    return "The store folder '$folder' cannot be upgraded in place: $($plan.Reason)$byHand`nThis run has not stopped or copied anything. If an earlier run stopped the service, it is still stopped and the new build is already in place."
+    return "The store folder '$folder' cannot be upgraded in place: $($plan.Reason)$byHand`n$(Get-DarlingNothingChangedText)"
 }
 
 # The store folder step after the copy, with the service stopped: a store the previous release was running is fixed in place, then
@@ -3791,9 +3797,9 @@ If this folder is deliberately writable (a dev loop) and you accept the risk, re
 # upgrade changes nothing. The other direction (a self-contained build over a framework-dependent install) is
 # allowed: the exe finds the hostfxr.dll that arrives with it.
 try { $sourceShipsRuntime = Test-DarlingBuildShipsRuntime $Source $sourceIsZip }
-catch { Fail "The source '$Source' could not be read to check whether it carries a .NET runtime: $($_.Exception.Message) NOTHING has been stopped or copied." }
+catch { Fail "The source '$Source' could not be read to check whether it carries a .NET runtime: $($_.Exception.Message) $(Get-DarlingNothingChangedText)" }
 if (-not $sourceShipsRuntime -and (Test-Path -LiteralPath (Join-Path $InstallRoot 'hostfxr.dll') -PathType Leaf)) {
-    Fail "The source is a framework-dependent build (it has no hostfxr.dll, so it ships no .NET runtime) and '$InstallRoot' is a self-contained install (it has hostfxr.dll). Laying the first over the second leaves the old runtime files in place, the new exe takes that folder as its .NET location, finds no framework there, and the service does not start. Use the release zip, or publish with --runtime win-x64 --self-contained. NOTHING has been stopped or copied."
+    Fail "The source is a framework-dependent build (it has no hostfxr.dll, so it ships no .NET runtime) and '$InstallRoot' is a self-contained install (it has hostfxr.dll). Laying the first over the second leaves the old runtime files in place, the new exe takes that folder as its .NET location, finds no framework there, and the service does not start. Use the release zip, or publish with --runtime win-x64 --self-contained. $(Get-DarlingNothingChangedText)"
 }
 
 # ============================ the service has to exist ============================
@@ -3854,7 +3860,7 @@ if ($holders.Count -gt 0 -and -not $SkipStopGuard) {
     $names = @($holders | ForEach-Object { "$($_.ProcessName) (pid $($_.Id))" })
     Note "Processes are running out of the install tree that stopping the service will not close:"
     foreach ($name in $names) { Note "  $name" }
-    Fail "Close them and re-run. NOTHING has been stopped or copied - the service is still running and the install is untouched. Do NOT kill them blindly. If these are your own psql.exe or a shell sitting in the install directory, or a Darling Viewer you left open, just exit them. Use -SkipStopGuard only if you are certain the copy will not hit a locked file."
+    Fail "Close them and re-run. $(Get-DarlingNothingChangedText) Do NOT kill them blindly. If these are your own psql.exe or a shell sitting in the install directory, or a Darling Viewer you left open, just exit them. Use -SkipStopGuard only if you are certain the copy will not hit a locked file."
 }
 
 # ============================ the pre-flight (#6982) ============================
@@ -3863,7 +3869,7 @@ if ($holders.Count -gt 0 -and -not $SkipStopGuard) {
 # service is still running. A failure here costs nothing: nothing has been stopped, copied or changed.
 $preflightProblem = Test-DarlingUpgradePreflight $InstallRoot
 if ($preflightProblem) {
-    Fail "The pre-flight failed under $powerShellText, before anything was stopped: $preflightProblem NOTHING has been stopped or copied - the service is still running and the install is untouched."
+    Fail "The pre-flight failed under $powerShellText, before this run stopped anything: $preflightProblem $(Get-DarlingNothingChangedText)"
 }
 Good "Pre-flight passed under ${powerShellText}: a backup folder under '$InstallRoot' can be created, restricted to SYSTEM and Administrators, and removed."
 

@@ -1005,7 +1005,7 @@ public sealed class DarlingStoreFolderScriptTests
         ExtractFunctions(
             UpgradeScript, "Get-DarlingCanonicalPath", "Get-DarlingItemOwnerSid", "Get-DarlingLinkOwnerSid", "Initialize-DarlingNativeStoreFolder", "Get-DarlingStoreRepairSteps",
             "Get-DarlingStoreRepairText", "Find-DarlingStoreLinks", "Get-DarlingStoreWriteGrantText", "Get-DarlingStoreAdoptionPlan", "Invoke-DarlingStoreAdoption",
-            "Get-DarlingStoreStoppedText", "Get-DarlingStoreRefusalText", "Write-DarlingStoreCheckResult", "Repair-DarlingStoreAfterStop"),
+            "Get-DarlingStoreStoppedText", "Get-DarlingNothingChangedText", "Get-DarlingStoreRefusalText", "Write-DarlingStoreCheckResult", "Repair-DarlingStoreAfterStop"),
         $$"""
         $base = Join-Path $env:TEMP ('darling-adopt-' + [guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory $base | Out-Null
