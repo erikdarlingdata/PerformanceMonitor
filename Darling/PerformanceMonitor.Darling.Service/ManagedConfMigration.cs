@@ -630,13 +630,14 @@ internal static class ManagedConfMigration
 
         /* #7365 added parallel-worker slots to max_worker_processes (3 + N + 16 where it was 3 + N + 8). A v8 block written
            before that holds the old count beside the N the rebuild produces, and is still ours until the every-start heal
-           rewrites it. */
+           rewrites it. The count is accepted only beside the rebuild's own N, so a pair an operator raised together (300 beside
+           311) stays a hand edit on both lines. */
         if (string.Equals(key, "max_worker_processes", StringComparison.OrdinalIgnoreCase) &&
             TryFindAssignmentValue(span, assignments, "timescaledb.max_background_workers", out var priorWorkersText) &&
             TryFindAssignmentValue(span, assignments, "max_worker_processes", out var priorProcessesText) &&
             int.TryParse(priorWorkersText, NumberStyles.Integer, CultureInfo.InvariantCulture, out var priorWorkers) &&
             int.TryParse(priorProcessesText, NumberStyles.Integer, CultureInfo.InvariantCulture, out var priorProcesses) &&
-            priorWorkers >= 2 &&
+            priorWorkers == DarlingManagedPostgres.DeriveWorkerSettings(hypertables, ramMb * 1024L * 1024L).MaxBackgroundWorkers &&
             priorProcesses == 3 + priorWorkers + DarlingManagedPostgres.LegacyParallelWorkerSlots)
         {
             return ClassifyFixedLine(key, text, key, FormattableString.Invariant($"{key} = {priorProcesses}"));
@@ -651,7 +652,7 @@ internal static class ManagedConfMigration
         {
             return string.Equals(key, "timescaledb.max_background_workers", StringComparison.OrdinalIgnoreCase)
                 ? ClassifyFixedLine(key, text, key, FormattableString.Invariant($"{key} = {legacyWorkers.MaxBackgroundWorkers}"))
-                : ClassifyFixedLine(key, text, key, FormattableString.Invariant($"{key} = {legacyWorkers.MaxWorkerProcesses}"));
+                : ClassifyFixedLine(key, text, key, FormattableString.Invariant($"{key} = {processesText}"));
         }
 
         return verdict;

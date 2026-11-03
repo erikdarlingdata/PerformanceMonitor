@@ -532,6 +532,20 @@ public sealed class ManagedConfMigrationTests
         Assert.Equal(ConfLineClassification.Ours, FindByText(lines, "timescaledb.max_background_workers").Classification);
     }
 
+    /// <summary>#7365 review: an operator who raised BOTH worker lines coherently (300 beside 311, which is N + 11) wrote a pair no
+    /// release wrote. The 8 GB / 72 hypertable fingerprint rebuilds 128 / 147, so 300 is not the rebuild's N: both lines stay hand edits
+    /// and neither half of the edit is dropped.</summary>
+    [Fact]
+    public void ClassifyLines_V8Block_WithACoherentOperatorRaisedWorkerPair_KeepsBothLinesAsHandEdits()
+    {
+        var conf = V8BlockWithWorkers(8L * 1024 * 1024 * 1024, 72, 300, 311);
+
+        var lines = ClassifyLines(conf);
+
+        Assert.Equal(ConfLineClassification.HandEdit, FindByText(lines, "timescaledb.max_background_workers").Classification);
+        Assert.Equal(ConfLineClassification.HandEdit, FindByText(lines, "max_worker_processes").Classification);
+    }
+
     private static string V8BlockWithWorkers(long ramBytes, int hypertables, int workers, int processes)
     {
         var current = DarlingManagedPostgres.DeriveWorkerSettings(hypertables, ramBytes);

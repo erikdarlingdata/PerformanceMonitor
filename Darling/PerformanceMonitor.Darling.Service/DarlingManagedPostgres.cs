@@ -2707,7 +2707,7 @@ public sealed class DarlingManagedPostgres
     /// <c>postgresql.conf</c>: like <see cref="BuildPlannerPageCostConfAppend"/> it has no marker, so a store already on the
     /// managed file has the lines written before <c>pg_ctl start</c> (the file is re-rendered each start), and a store still on the legacy
     /// blocks gets them when that conf migrates (<see cref="ManagedConfFile.ManagedOnlyKeys"/>).
-    /// <c>max_parallel_workers</c> is restart-only (like <c>max_worker_processes</c>), the per-Gather one reloads.
+    /// Only <c>max_worker_processes</c> needs a restart: both parallel settings are <c>user</c>-context and apply on a reload.
     /// </summary>
     internal static string BuildParallelQueryConfAppend(int processorCount)
     {
