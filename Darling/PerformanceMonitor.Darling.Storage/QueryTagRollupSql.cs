@@ -130,17 +130,20 @@ public static class QueryTagRollupSql
     /// <c>[from, to)</c>), the first range at $8, $9 and $10.
     /// With <paramref name="days"/> (#6800 step 3c) the day pairs come next as $8 (day start <c>timestamp[]</c>) and $9 (server <c>integer[]</c>), probed in
     /// <c>collect.query_store_hash_daily</c> with the same partials, and the first range moves to $10, $11 and $12.
-    /// <para>Both arms yield six partials per <c>(server_id, query_hash)</c> (sums of the weighted products and of the counts, the maximum of
-    /// the memory), exact <c>numeric</c> sums, so adding the hours gives the wide statement's total. The tag map is joined once, on the
-    /// partials, and the final GROUP BY is by <c>(server_id, tag_id)</c>: the aggregate stays at that size. The COALESCE and the cast to
-    /// <c>double precision</c> are today's, applied after the hours are added.</para>
+    /// <para>Every arm yields six partials per <c>(server_id, tag_id)</c> (sums of the weighted products and of the counts, the maximum of
+    /// the memory), exact <c>numeric</c> sums, and the final GROUP BY adds the arms: SUM of the sums, MAX of the maximum, so adding the arms
+    /// gives the wide statement's total. The tag map is joined inside each arm (#7240 step 5), a LEFT join on its primary key
+    /// <c>(server_id, key_kind, key)</c>, so a hash has at most one tag and an untagged hash keeps its row under a null <c>tag_id</c>. The
+    /// COALESCE and the cast to <c>double precision</c> are today's, applied after the arms are added.</para>
     /// <para>The hourly arm (#7240 step 4) is one range on <c>hour</c> for each run of hours some server reads from the table (so the whole days the day table answers are never scanned), for the servers in scope, less the gaps: <see cref="QueryTagRollupHashRoute.HourlyRead"/>
     /// derives the gaps from the plan's table pairs, so a gap is every hour of a server inside the range that is not one of its table
     /// pairs (an hour not built, a stale pair, an hour a day row answers, an hour before the server's own start), and an anti-join removes
     /// them. It replaces the <c>unnest</c> of every <c>(hour, server)</c> pair, which the planner merge-joined against
-    /// <c>ix_query_store_hash_hourly_hour_server</c>. The arm is grouped by <c>(server_id, query_hash)</c> before the <c>UNION ALL</c>, as the wide
-    /// arms are, so the tag join below sees one row per hash, not one per hash and hour: sums stay sums and the memory maximum stays a maximum, so the final
-    /// totals are the same. A pair is read by the hourly arm only when it is a table pair and by a wide arm only when its hour lies in a
+    /// <c>ix_query_store_hash_hourly_hour_server</c>. Each arm is grouped by <c>(server_id, tag_id)</c> after the tag join, so the
+    /// hourly arm sends out one row per server and tag, not one per hash. Step 4 grouped it by <c>(server_id, query_hash)</c>
+    /// before the <c>UNION ALL</c>: on the 210-server load-test store that was 2.05 million groups in one process under a
+    /// <c>Parallel Append</c>, a hash aggregate that wrote 1.34 GB, which the 1 GB <c>temp_file_limit</c> of the <c>mcp</c> and <c>viewer</c>
+    /// roles refuses. Sums stay sums and the memory maximum stays a maximum, so the final totals are the same. A pair is read by the hourly arm only when it is a table pair and by a wide arm only when its hour lies in a
     /// wide range, and the plan keeps those two sets apart. The wide side is one arm per DISTINCT <c>[from, to)</c>
     /// (<paramref name="wideRanges"/>: every server that shares the tail shares one scan of it), and each arm carries its own numbered
     /// parameters. Its bounds on <c>collection_time</c> are written plainly so a scan by <c>collection_time</c> is possible, which a
@@ -173,7 +176,7 @@ public static class QueryTagRollupSql
         text.Append("""
             WITH partials AS
             (
-                SELECT t.server_id, t.query_hash,
+                SELECT t.server_id, m.tag_id,
                        SUM(t.ec_sum) AS ec_sum,
                        SUM(t.cpu_wsum) AS cpu_wsum,
                        SUM(t.dur_wsum) AS dur_wsum,
@@ -184,6 +187,8 @@ public static class QueryTagRollupSql
                 JOIN collect.query_store_hash_hourly AS t
                        ON t.hour >= r.range_from
                       AND t.hour < r.range_to
+                LEFT JOIN config.query_tag_map AS m
+                       ON m.server_id = t.server_id AND m.key_kind = 'hash' AND m.key = t.query_hash
                 WHERE t.server_id = ANY($1::integer[])
                 AND   NOT EXISTS
                       (
@@ -193,18 +198,27 @@ public static class QueryTagRollupSql
                           AND   t.hour >= g.gap_from
                           AND   t.hour < g.gap_to
                       )
-                GROUP BY t.server_id, t.query_hash
+                GROUP BY t.server_id, m.tag_id
 
             """);
         if (days)
         {
             text.Append("""
                     UNION ALL
-                    SELECT t.server_id, t.query_hash, t.ec_sum, t.cpu_wsum, t.dur_wsum, t.reads_wsum, t.writes_wsum, t.mem_max
+                    SELECT t.server_id, m.tag_id,
+                           SUM(t.ec_sum) AS ec_sum,
+                           SUM(t.cpu_wsum) AS cpu_wsum,
+                           SUM(t.dur_wsum) AS dur_wsum,
+                           SUM(t.reads_wsum) AS reads_wsum,
+                           SUM(t.writes_wsum) AS writes_wsum,
+                           MAX(t.mem_max) AS mem_max
                     FROM unnest($8::timestamp[], $9::integer[]) AS p(day, server_id)
                     JOIN collect.query_store_hash_daily AS t
                            ON t.day = p.day
                           AND t.server_id = p.server_id
+                    LEFT JOIN config.query_tag_map AS m
+                           ON m.server_id = t.server_id AND m.key_kind = 'hash' AND m.key = t.query_hash
+                    GROUP BY t.server_id, m.tag_id
 
                 """);
         }
@@ -216,7 +230,7 @@ public static class QueryTagRollupSql
             var to = "$" + (first + 2 + (3 * arm)).ToString(System.Globalization.CultureInfo.InvariantCulture);
             text.Append($$"""
                     UNION ALL
-                    SELECT q.server_id, q.query_hash,
+                    SELECT q.server_id, m.tag_id,
                            SUM(q.execution_count) AS ec_sum,
                            SUM(q.avg_cpu_time_us * q.execution_count) AS cpu_wsum,
                            SUM(q.avg_duration_us * q.execution_count) AS dur_wsum,
@@ -224,20 +238,22 @@ public static class QueryTagRollupSql
                            SUM(q.avg_logical_io_writes * q.execution_count) AS writes_wsum,
                            MAX(q.max_query_max_used_memory) AS mem_max
                     FROM collect.query_store_interval_wide AS q
+                    LEFT JOIN config.query_tag_map AS m
+                           ON m.server_id = q.server_id AND m.key_kind = 'hash' AND m.key = q.query_hash
                     WHERE q.server_id = ANY({{servers}}::integer[])
                     AND   q.collection_time >= {{from}}::timestamp
                     AND   q.collection_time < {{to}}::timestamp
                     AND   q.collection_time <= {{windowEnd}}
                     AND   q.first_execution_time >= {{from}}::timestamp - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
                     AND   q.first_execution_time <= LEAST({{to}}::timestamp, {{windowEnd}}) + {{QueryStoreIntervalWide.FirstExecUpperSlackSql}}
-                    GROUP BY q.server_id, q.query_hash
+                    GROUP BY q.server_id, m.tag_id
 
                 """);
         }
 
         text.Append("""
             )
-            SELECT p.server_id, m.tag_id,
+            SELECT p.server_id, p.tag_id,
                    CAST(COALESCE(SUM(p.cpu_wsum), 0) AS double precision) AS cpu_ms,
                    CAST(COALESCE(SUM(p.dur_wsum), 0) AS double precision) AS duration_ms,
                    CAST(COALESCE(SUM(p.reads_wsum), 0) AS double precision) AS logical_reads,
@@ -245,9 +261,7 @@ public static class QueryTagRollupSql
                    CAST(COALESCE(SUM(p.ec_sum), 0) AS double precision) AS executions,
                    CAST(COALESCE(MAX(p.mem_max), 0) AS double precision) AS peak_memory_pages
             FROM partials AS p
-            LEFT JOIN config.query_tag_map AS m
-                   ON m.server_id = p.server_id AND m.key_kind = 'hash' AND m.key = p.query_hash
-            GROUP BY p.server_id, m.tag_id
+            GROUP BY p.server_id, p.tag_id
             """);
         return text.ToString();
     }
