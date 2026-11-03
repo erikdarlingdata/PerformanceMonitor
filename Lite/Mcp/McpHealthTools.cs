@@ -21,7 +21,7 @@ public sealed class McpHealthTools
     /// <summary>get_server_summary's description, VERBATIM Darling's (#3541 A10); the cross-SKU census pins them
     /// equal. Names the three clocks the payload carries, because the payload used to carry one.</summary>
     internal const string ServerSummaryDescription =
-        "Gets a quick health overview for a SQL Server instance: current CPU %, memory usage, recent blocking count, and deadlock count. Use this for a fast health check before drilling into specific areas. THREE CLOCKS, NAMED: cpu_percent is the newest CPU snapshot and cpu_captured_at is its instant; memory_mb is the newest memory snapshot and memory_captured_at is its instant; last_collection is the newest collection of ANY collector for this server - the store's freshness, NOT the age of the two figures above, which can be far older when their own collectors have stopped. blocking_count and deadlock_count cover the counts_window_hours ending now.";
+        "Gets a quick health overview for a SQL Server instance: current CPU %, memory usage, recent blocking count, and deadlock count. Use this for a fast health check before drilling into specific areas. THREE CLOCKS, NAMED: cpu_percent is the newest CPU snapshot and cpu_captured_at is its instant; memory_mb is the newest memory snapshot and memory_captured_at is its instant; last_collection is the newest collection of ANY collector for this server - the store's freshness, NOT the age of the two figures above. cpu_percent is null, and cpu_captured_at with it, when the newest CPU snapshot is older than the freshness bound; memory_mb is still the newest memory snapshot at any age. blocking_count and deadlock_count cover the counts_window_hours ending now.";
 
     /// <summary>The span <c>GetServerSummaryAsync</c>'s blocking and deadlock counts cover (its two
     /// <c>UtcNow.AddHours(-1)</c> bounds), published so "recent" has a number. Darling's twin is
@@ -51,11 +51,11 @@ public sealed class McpHealthTools
             return JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
-                cpu_percent = summary.CpuPercent,
+                cpu_percent = summary.ShownCpuPercent,
                 /* #3541 A10: each latest figure carries ITS OWN clock. last_collection below is the newest
                    collection of ANY collector — a live collection log beside a dead CPU collector made a
                    day-old cpu_percent read as current, because the only stamp on the payload was fresh. */
-                cpu_captured_at = summary.CpuCollectionTime?.ToString("o"),
+                cpu_captured_at = summary.ShownCpuCollectionTime?.ToString("o"),
                 memory_mb = summary.MemoryMb,
                 memory_captured_at = summary.MemoryCollectionTime?.ToString("o"),
                 blocking_count = summary.BlockingCount,

@@ -362,20 +362,26 @@ GROUP BY server_id";
             var now = Micro(DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc));
             await SeedAsync(connection, now, ct);
 
-            /* The newest-row reads: identical rows for every compared sentinel. */
-            foreach (var (label, oldSql, newSql) in new[]
+            /* The newest-row reads: identical rows for every compared sentinel. The CPU read is bounded on
+               collection_time (#7196): $1 is now and $2 the freshness floor in minutes. The dark server's
+               five-day-old CPU reading is the one row it leaves out on purpose, so the CPU comparison is over
+               the servers that still collect, and the dark server must be absent from it. */
+            object[] cpuArgs = { now, CpuReadingFreshnessSql.FloorMinutes };
+            var cpuCompared = s_compared.Where(id => id != DarkFiveDays).ToArray();
+            foreach (var (label, oldSql, newSql, args, compared) in new (string, string, string, object[], int[])[]
             {
-                ("cpu", OldCpuSql, DarlingFleetReader.FleetCpuSql),
-                ("memory", OldMemorySql, DarlingFleetReader.FleetMemorySql),
-                ("memory pressure", OldMemoryPressureSql, DarlingFleetReader.FleetMemoryPressureSql),
-                ("threads", OldThreadsSql, DarlingFleetReader.FleetThreadsSql),
+                ("cpu", OldCpuSql, DarlingFleetReader.FleetCpuSql, cpuArgs, cpuCompared),
+                ("memory", OldMemorySql, DarlingFleetReader.FleetMemorySql, Array.Empty<object>(), s_compared),
+                ("memory pressure", OldMemoryPressureSql, DarlingFleetReader.FleetMemoryPressureSql, Array.Empty<object>(), s_compared),
+                ("threads", OldThreadsSql, DarlingFleetReader.FleetThreadsSql, Array.Empty<object>(), s_compared),
             })
             {
-                var before = Scoped(await ReadRowsAsync(connection, oldSql, Array.Empty<object>(), ct), s_compared);
-                var after = Scoped(await ReadRowsAsync(connection, newSql, Array.Empty<object>(), ct), s_compared);
+                var before = Scoped(await ReadRowsAsync(connection, oldSql, Array.Empty<object>(), ct), compared);
+                var after = Scoped(await ReadRowsAsync(connection, newSql, args, ct), compared);
                 Assert.Equal(before, after);
-                /* And the comparison is not vacuous: both collecting servers and the dark one answered. */
-                Assert.Equal(3, after.Count(r => r.StartsWith(Id(CollectingA), StringComparison.Ordinal)
+                /* And the comparison is not vacuous: both collecting servers answered, and the dark one did
+                   everywhere but CPU, where its days-old reading is dropped. */
+                Assert.Equal(label == "cpu" ? 2 : 3, after.Count(r => r.StartsWith(Id(CollectingA), StringComparison.Ordinal)
                                                  || r.StartsWith(Id(CollectingB), StringComparison.Ordinal)
                                                  || r.StartsWith(Id(DarkFiveDays), StringComparison.Ordinal)));
                 Assert.DoesNotContain(after, r => r.StartsWith(Id(NeverCollected), StringComparison.Ordinal));
@@ -383,9 +389,16 @@ GROUP BY server_id";
                 /* The two populations the new driver leaves out on purpose: a disabled server has no card to
                    fill, and a PostgreSQL target never writes these tables (its planted row is the proof the
                    filter is real, not a reading any card was ever built from). */
-                var unscoped = await ReadRowsAsync(connection, newSql, Array.Empty<object>(), ct);
+                var unscoped = await ReadRowsAsync(connection, newSql, args, ct);
                 Assert.DoesNotContain(unscoped, r => r.StartsWith(Id(Disabled), StringComparison.Ordinal));
                 Assert.DoesNotContain(unscoped, r => r.StartsWith(Id(PostgresTarget), StringComparison.Ordinal));
+                if (label == "cpu")
+                {
+                    /* The read with no bound still finds the dark server's old reading; the bounded one does not. */
+                    Assert.Contains(await ReadRowsAsync(connection, oldSql, Array.Empty<object>(), ct), r => r.StartsWith(Id(DarkFiveDays), StringComparison.Ordinal));
+                    Assert.DoesNotContain(unscoped, r => r.StartsWith(Id(DarkFiveDays), StringComparison.Ordinal));
+                }
+
                 if (label == "memory")
                 {
                     /* The planted row is really there to be skipped: the oracle, which has no driver, finds it. */
@@ -394,7 +407,7 @@ GROUP BY server_id";
             }
 
             /* The CPU tiebreak survived the reshape: the newest sample of the tied batch. */
-            Assert.Contains(Id(CollectingB) + "77|7", await ReadRowsAsync(connection, DarlingFleetReader.FleetCpuSql, Array.Empty<object>(), ct));
+            Assert.Contains(Id(CollectingB) + "77|7", await ReadRowsAsync(connection, DarlingFleetReader.FleetCpuSql, cpuArgs, ct));
 
             /* The incident counts over the default hour: the late-collected and the clock-ahead rows count
                in both; nothing differs. */
@@ -528,7 +541,10 @@ GROUP BY server_id";
             Assert.Equal(7, b.OtherProcessCpuPercent);
 
             var dark = cards[DarkFiveDays];
-            Assert.Equal(11, dark.CpuPercent);             // five days old, still its newest
+            /* #7196: its CPU reading is five days old, past the freshness bound, so the card shows none. The memory
+               reading is as old and is still shown as its newest: only the CPU read is bounded by age. */
+            Assert.Null(dark.CpuPercent);
+            Assert.Equal(FleetCpuSource.NotCollected, dark.CpuSource);
             Assert.Equal(1100, dark.MemoryMb);
 
             /* #3935: dark for five days, registered nine days ago — Offline, the viewer's word for it, and not
