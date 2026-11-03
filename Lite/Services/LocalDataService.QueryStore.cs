@@ -28,9 +28,15 @@ public partial class LocalDataService
     public async Task<List<TimeSliceBucket>> GetQueryStoreSlicerDataAsync(
         int serverId, int hoursBack, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null)
     {
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
+
+        /* #7256: a window that starts after the newest archived row reads the hot table alone. */
+        return await ReadWindowSkippingEmptyArchiveAsync("query_store_stats", "collection_time", startTime.AddDays(-1), ReadAsync, CancellationToken.None);
+
+        async Task<List<TimeSliceBucket>> ReadAsync(string relation)
+        {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
         command.CommandText = @"
@@ -132,6 +138,7 @@ WHERE rn = 1
 GROUP BY date_trunc('hour', COALESCE(interval_start_time_utc, collection_time))
 ORDER BY bucket";
 
+        command.CommandText = SwapArchiveView(command.CommandText, "query_store_stats", relation);
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
@@ -161,6 +168,7 @@ ORDER BY bucket";
         }
         return items;
     }
+        }
 
     public async Task<List<QueryStoreRow>> GetQueryStoreTopQueriesAsync(int serverId, int hoursBack = 24, int top = 50, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null, string? executionType = null, string? moduleName = null, QueryTagReadScope? tags = null)
     {
@@ -518,6 +526,11 @@ ORDER BY p.page_ord";
         IReadOnlyList<string>? databaseNames = null)
     {
         using var _q = TimeQuery("GetQueryStoreComparisonAsync", "v_query_store_stats comparison");
+        /* #7256: a window that starts after the newest archived row reads the hot table alone. */
+        return await ReadWindowSkippingEmptyArchiveAsync("query_store_stats", "collection_time", currentStart < baselineStart ? currentStart : baselineStart, ReadAsync, CancellationToken.None);
+
+        async Task<List<QueryStatsComparisonItem>> ReadAsync(string relation)
+        {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
         var dbClause = BuildDbInClause(databaseNames, "database_name", 6, out var dbValues);
@@ -699,6 +712,7 @@ SELECT 2, database_name, query_hash,
        collection_id, collection_time, query_id
 FROM baseline_winner;";
 
+        command.CommandText = SwapArchiveView(command.CommandText, "query_store_stats", relation);
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = currentStart });
         command.Parameters.Add(new DuckDBParameter { Value = currentEnd });
@@ -752,7 +766,7 @@ FROM baseline_winner;";
         /* #5381: the text, read by key after the ranking. COALESCE(current text, baseline text), each a MAX in UTF-8 order. */
         var texts = await ReadQueryStoreTextByRowAsync(
             connection, serverId,
-            currentKeys.Values.Concat(baselineKeys.Values).SelectMany(v => v).Select(v => (v.Item1, v.Item2)));
+            currentKeys.Values.Concat(baselineKeys.Values).SelectMany(v => v).Select(v => (v.Item1, v.Item2)), relation);
         /* A query_id whose latest kept row in the period carries no text: the old MAX skipped NULLs, so it still showed
            an older kept row's text from the same period (the review of #5396). Read only those queries' other kept rows,
            newest UTC day first, until each has a text. */
@@ -765,6 +779,7 @@ FROM baseline_winner;";
         }
 
         return items;
+        }
     }
 
     /// <summary>
@@ -795,9 +810,15 @@ FROM baseline_winner;";
         int serverId, string databaseName, long queryId, long planId,
         int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
     {
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
+
+        /* #7256: a window that starts after the newest archived row reads the hot table alone. */
+        return await ReadWindowSkippingEmptyArchiveAsync("query_store_stats", "collection_time", startTime.AddDays(-1), ReadAsync, CancellationToken.None);
+
+        async Task<List<QueryStoreItemTimelinePoint>> ReadAsync(string relation)
+        {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
 
         command.CommandText = @"
 WITH deduped AS
@@ -857,6 +878,7 @@ WHERE rn = 1
 -- zig-zag rather than a curve.
 ORDER BY point_time";
 
+        command.CommandText = SwapArchiveView(command.CommandText, "query_store_stats", relation);
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = databaseName });
         command.Parameters.Add(new DuckDBParameter { Value = queryId });
@@ -877,6 +899,7 @@ ORDER BY point_time";
         }
         return points;
     }
+        }
 
     /// <summary>
     /// Gets collection-level history for ALL plans of a Query Store query (query-scoped, matching
@@ -900,9 +923,15 @@ ORDER BY point_time";
     /// </summary>
     public async Task<List<QueryStoreHistoryRow>> GetQueryStoreHistoryAsync(int serverId, string databaseName, long queryId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
     {
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
+
+        /* #7256: a window that starts after the newest archived row reads the hot table alone. */
+        return await ReadWindowSkippingEmptyArchiveAsync("query_store_stats", "collection_time", startTime, ReadAsync, CancellationToken.None);
+
+        async Task<List<QueryStoreHistoryRow>> ReadAsync(string relation)
+        {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
         command.CommandText = @"
 SELECT
     collection_time,
@@ -965,6 +994,7 @@ AND   collection_time >= $4
 AND   collection_time <= $5
 ORDER BY collection_time";
 
+        command.CommandText = SwapArchiveView(command.CommandText, "query_store_stats", relation);
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = databaseName });
         command.Parameters.Add(new DuckDBParameter { Value = queryId });
@@ -1034,6 +1064,7 @@ ORDER BY collection_time";
 
         return items;
     }
+        }
 
     /// <summary>
     /// Fetches a query plan on-demand from Query Store by plan_id.
@@ -1120,10 +1151,16 @@ OPTION(RECOMPILE);',
     /// </summary>
     public async Task<List<QueryTrendPoint>> GetQueryStoreDurationTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null)
     {
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
+
+        /* #7256: a window that starts after the newest archived row reads the hot table alone. */
+        return await ReadWindowSkippingEmptyArchiveAsync("query_store_stats", "collection_time", startTime.AddDays(-1), ReadAsync, CancellationToken.None);
+
+        async Task<List<QueryTrendPoint>> ReadAsync(string relation)
+        {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
         command.CommandText = @"
@@ -1208,6 +1245,7 @@ SELECT
 FROM raw
 ORDER BY point_time";
 
+        command.CommandText = SwapArchiveView(command.CommandText, "query_store_stats", relation);
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
@@ -1229,6 +1267,7 @@ ORDER BY point_time";
         }
         return items;
     }
+        }
 }
 
 public class QueryStoreRow

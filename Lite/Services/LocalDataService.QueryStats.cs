@@ -46,9 +46,15 @@ WHERE d.name = @database_name;", connection);
     public async Task<List<TimeSliceBucket>> GetQueryStatsSlicerDataAsync(
         int serverId, int hoursBack, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null)
     {
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
+
+        /* #7256: a window that starts after the newest archived row reads the hot table alone. */
+        return await ReadWindowSkippingEmptyArchiveAsync("query_stats", "collection_time", startTime, ReadAsync, CancellationToken.None);
+
+        async Task<List<TimeSliceBucket>> ReadAsync(string relation)
+        {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
         command.CommandText = @"
@@ -67,6 +73,7 @@ AND   collection_time <= $3" + dbClause + @"
 GROUP BY date_trunc('hour', collection_time)
 ORDER BY bucket";
 
+        command.CommandText = SwapArchiveView(command.CommandText, "query_stats", relation);
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
@@ -92,6 +99,7 @@ ORDER BY bucket";
         }
         return items;
     }
+        }
 
     /// <summary>
     /// The statement behind <see cref="GetTopQueriesByCpuAsync"/>, split out so a test can run it beside the pre-#5381
@@ -429,6 +437,11 @@ SELECT
         IReadOnlyList<string>? databaseNames = null)
     {
         using var _q = TimeQuery("GetQueryStatsComparisonAsync", "v_query_stats comparison");
+        /* #7256: a window that starts after the newest archived row reads the hot table alone. */
+        return await ReadWindowSkippingEmptyArchiveAsync("query_stats", "collection_time", currentStart < baselineStart ? currentStart : baselineStart, ReadAsync, CancellationToken.None);
+
+        async Task<List<QueryStatsComparisonItem>> ReadAsync(string relation)
+        {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
         var dbClause = BuildDbInClause(databaseNames, "database_name", 6, out var dbValues);
@@ -507,6 +520,7 @@ FULL OUTER JOIN baseline_period b
   ON  c.database_name IS NOT DISTINCT FROM b.database_name
   AND c.query_hash IS NOT DISTINCT FROM b.query_hash;";
 
+        command.CommandText = SwapArchiveView(command.CommandText, "query_stats", relation);
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = currentStart });
         command.Parameters.Add(new DuckDBParameter { Value = currentEnd });
@@ -536,6 +550,7 @@ FULL OUTER JOIN baseline_period b
         }
 
         return items;
+        }
     }
 
     /// <summary>
@@ -543,9 +558,15 @@ FULL OUTER JOIN baseline_period b
     /// </summary>
     public async Task<List<QueryStatsHistoryRow>> GetQueryStatsHistoryAsync(int serverId, string databaseName, string queryHash, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
+
+        /* #7256: a window that starts after the newest archived row reads the hot table alone. */
+        return await ReadWindowSkippingEmptyArchiveAsync("query_stats", "collection_time", startTime, ReadAsync, CancellationToken.None);
+
+        async Task<List<QueryStatsHistoryRow>> ReadAsync(string relation)
+        {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         command.CommandText = @"
 SELECT
     collection_time,
@@ -603,6 +624,7 @@ AND   collection_time >= $4
 AND   collection_time <= $5
 ORDER BY collection_time";
 
+        command.CommandText = SwapArchiveView(command.CommandText, "query_stats", relation);
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = databaseName });
         command.Parameters.Add(new DuckDBParameter { Value = queryHash });
@@ -667,6 +689,7 @@ ORDER BY collection_time";
 
         return items;
     }
+        }
 
     /// <summary>
     /// Gets collection-level history for a specific procedure (for drilldown).
@@ -1295,12 +1318,18 @@ LEFT JOIN texts t ON t.sql_handle = j.text_handle;";
         IReadOnlyList<string>? databaseNames = null)
     {
         using var _q = TimeQuery("GetProcedureStatsComparisonAsync", "v_procedure_stats comparison");
+        /* #7256: a window that starts after the newest archived row reads the hot table alone. */
+        return await ReadWindowSkippingEmptyArchiveAsync("query_stats", "collection_time", currentStart < baselineStart ? currentStart : baselineStart, ReadAsync, CancellationToken.None);
+
+        async Task<List<ProcedureStatsComparisonItem>> ReadAsync(string relation)
+        {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
         var dbClause = BuildDbInClause(databaseNames, "database_name", 6, out var dbValues);
 
         command.CommandText = ProcedureStatsComparisonSql(dbClause);
 
+        command.CommandText = SwapArchiveView(command.CommandText, "query_stats", relation);
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = currentStart });
         command.Parameters.Add(new DuckDBParameter { Value = currentEnd });
@@ -1331,6 +1360,7 @@ LEFT JOIN texts t ON t.sql_handle = j.text_handle;";
         }
 
         return items;
+        }
     }
 
     /// <summary>
@@ -1381,21 +1411,30 @@ LEFT JOIN texts t ON t.sql_handle = j.text_handle;";
     /// <summary>
     /// The shared body of the two bucketed duration-trend chart reads (#4234): <see cref="GetQueryDurationTrendAsync"/>
     /// and <see cref="GetProcedureDurationTrendAsync"/> differ only in which view they read, via
-    /// <paramref name="relation"/> — one of the two constants those callers pass, never caller text — so the SQL
+    /// <paramref name="view"/> — one of the two constants those callers pass, never caller text — so the SQL
     /// text (<see cref="DurationTrendChartSql"/>) and the row-buffering/stamping below are written once.
     /// </summary>
     private async Task<List<QueryTrendPoint>> ReadDurationTrendChartAsync(
-        string relation, int serverId, int hoursBack, DateTime? fromDate, DateTime? toDate, IReadOnlyList<string>? databaseNames, DateTime? asOfUtc)
+        string view, int serverId, int hoursBack, DateTime? fromDate, DateTime? toDate, IReadOnlyList<string>? databaseNames, DateTime? asOfUtc)
     {
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
+
+        /* #7256: a window that starts after the newest archived row reads the hot table alone. */
+        /* The procedure grain reads v_procedure_stats, which has no archive span here. */
+        return view == "v_query_stats"
+            ? await ReadWindowSkippingEmptyArchiveAsync("query_stats", "collection_time", startTime.AddSeconds(-CollectorDeltaCalculator.DefaultMaxGapSeconds), ReadAsync, CancellationToken.None)
+            : await ReadAsync(view);
+
+        async Task<List<QueryTrendPoint>> ReadAsync(string relation)
+        {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
         var widthParamIndex = 4 + dbValues.Count;
         var bucketMinutes = AutoChartBucketMinutes(startTime, endTime);
 
-        command.CommandText = DurationTrendChartSql(relation, dbClause, widthParamIndex);
+        command.CommandText = DurationTrendChartSql(view == "v_query_stats" ? relation : view, dbClause, widthParamIndex);
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
@@ -1438,6 +1477,7 @@ LEFT JOIN texts t ON t.sql_handle = j.text_handle;";
 
         return items;
     }
+        }
 
     /// <summary>
     /// The narrowest ladder width (#4234) that keeps a single-series chart near <see cref="TrendBudget.Chart"/>'s
@@ -1679,7 +1719,7 @@ LIMIT 1";
     /// <para>#4234: bucketed the same way and for the same reason as <see cref="GetQueryDurationTrendAsync"/> —
     /// see that method's own #4234 paragraph for the shape, the summed-rate rule and the singleton-window
     /// stamping. This read supplies <c>v_procedure_stats</c> as <see cref="ReadDurationTrendChartAsync"/>'s
-    /// <c>relation</c>; everything else is shared.</para>
+    /// <c>view</c>; everything else is shared.</para>
     /// </summary>
     public Task<List<QueryTrendPoint>> GetProcedureDurationTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null) =>
         ReadDurationTrendChartAsync("v_procedure_stats", serverId, hoursBack, fromDate, toDate, databaseNames, asOfUtc);
@@ -1697,16 +1737,23 @@ LIMIT 1";
     /// </summary>
     public async Task<List<QueryTrendPoint>> GetExecutionCountTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null)
     {
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
+
+        /* #7256: a window that starts after the newest archived row reads the hot table alone. */
+        return await ReadWindowSkippingEmptyArchiveAsync("query_stats", "collection_time", startTime.AddSeconds(-CollectorDeltaCalculator.DefaultMaxGapSeconds), ReadAsync, CancellationToken.None);
+
+        async Task<List<QueryTrendPoint>> ReadAsync(string relation)
+        {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
         var widthParamIndex = 4 + dbValues.Count;
         var bucketMinutes = AutoChartBucketMinutes(startTime, endTime);
 
         command.CommandText = ExecutionCountTrendChartSql(dbClause, widthParamIndex);
 
+        command.CommandText = SwapArchiveView(command.CommandText, "query_stats", relation);
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
@@ -1743,6 +1790,7 @@ LIMIT 1";
         }
         return items;
     }
+        }
 
     /// <summary>
     /// The SQL for the bucketed execution-count trend chart (#4234): the same <c>raw</c>/<c>rated</c>/bucketed
@@ -1914,6 +1962,11 @@ ORDER BY 1";
            AcquireReadLock's recursion escape. A range with no row at all still answers the empty result below. */
         var columnsStart = await GetHeatmapColumnsStartAsync(serverId, startTime, endTime);
 
+        /* #7256: a window that starts after the newest archived row reads the hot table alone. */
+        return await ReadWindowSkippingEmptyArchiveAsync("query_stats", "collection_time", startTime, ReadAsync, CancellationToken.None);
+
+        async Task<HeatmapResult> ReadAsync(string relation)
+        {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
@@ -1955,6 +2008,7 @@ FROM per_query
 GROUP BY time_bin, bucket_index
 ORDER BY time_bin, bucket_index";
 
+        command.CommandText = SwapArchiveView(command.CommandText, "query_stats", relation);
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
@@ -2004,6 +2058,7 @@ ORDER BY time_bin, bucket_index";
             BucketLabels = BucketLabelsMap[metric],
             CellDetails = cellDetails
         };
+        }
     }
 }
 

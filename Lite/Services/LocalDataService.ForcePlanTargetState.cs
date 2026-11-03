@@ -26,9 +26,17 @@ public partial class LocalDataService
     public async Task<IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>> GetForcePlanTargetStatesAsync(
         int serverId, IReadOnlyList<ForcePlanTarget> targets, CancellationToken cancellationToken = default)
     {
-        using var connection = await OpenConnectionAsync();
-        using var command = connection.CreateCommand();
-        return await ForcePlanTargetStateReader.ReadAsync(command, serverId, targets, DateTime.UtcNow, cancellationToken);
+        var nowUtc = DateTime.UtcNow;
+
+        /* #7256: a lookback that starts after the newest archived row reads the hot table alone. */
+        return await ReadWindowSkippingEmptyArchiveAsync("query_store_stats", "collection_time", nowUtc - ForcePlanTargetState.Lookback, ReadAsync, cancellationToken);
+
+        async Task<IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>> ReadAsync(string relation)
+        {
+            using var connection = await OpenConnectionAsync();
+            using var command = connection.CreateCommand();
+            return await ForcePlanTargetStateReader.ReadAsync(command, serverId, targets, nowUtc, relation, cancellationToken);
+        }
     }
 }
 
@@ -227,9 +235,16 @@ ORDER BY t.database_name, t.query_id, t.plan_id";
     /// back two identical rows for one key. <paramref name="nowUtc"/> is the caller's clock so a test can
     /// pin the window edge; production passes <see cref="DateTime.UtcNow"/>.
     /// </summary>
-    public static async Task<IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>> ReadAsync(
+    public static Task<IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>> ReadAsync(
         DuckDBCommand command, int serverId, IReadOnlyList<ForcePlanTarget> targets, DateTime nowUtc,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        ReadAsync(command, serverId, targets, nowUtc, "v_query_store_stats", cancellationToken);
+
+    /// <summary>The same read over <paramref name="relation"/>, <c>v_query_store_stats</c> or its hot table
+    /// <c>query_store_stats</c> (#7256, from <see cref="LocalDataService.GetForcePlanTargetStatesAsync"/>).</summary>
+    internal static async Task<IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>> ReadAsync(
+        DuckDBCommand command, int serverId, IReadOnlyList<ForcePlanTarget> targets, DateTime nowUtc,
+        string relation, CancellationToken cancellationToken)
     {
         var result = new Dictionary<ForcePlanTargetKey, ForcePlanTargetState>(ForcePlanTargetKey.Comparer);
         var keys = targets.Select(ForcePlanTargetKey.Of).Distinct(ForcePlanTargetKey.Comparer).ToList();
@@ -238,7 +253,7 @@ ORDER BY t.database_name, t.query_id, t.plan_id";
             return result;
         }
 
-        command.CommandText = BuildSql(keys.Count);
+        command.CommandText = LocalDataService.SwapArchiveView(BuildSql(keys.Count), "query_store_stats", relation);
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = nowUtc - ForcePlanTargetState.Lookback });
         foreach (var key in keys)

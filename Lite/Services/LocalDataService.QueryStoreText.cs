@@ -37,7 +37,8 @@ public partial class LocalDataService
     /// A row that is not found is absent from the result; a row found with no text maps to null.
     /// </summary>
     internal static async Task<Dictionary<(long CollectionId, DateTime CollectionTime), string?>> ReadQueryStoreTextByRowAsync(
-        LockedConnection connection, int serverId, IEnumerable<(long CollectionId, DateTime CollectionTime)> rows)
+        LockedConnection connection, int serverId, IEnumerable<(long CollectionId, DateTime CollectionTime)> rows,
+        string relation = "v_query_store_stats")
     {
         var result = new Dictionary<(long, DateTime), string?>();
         foreach (var day in rows.Distinct().GroupBy(r => r.CollectionTime.Date).OrderBy(g => g.Key))
@@ -47,7 +48,8 @@ public partial class LocalDataService
             {
                 var slice = ordered.Skip(i).Take(QueryStoreTextKeyChunk).ToList();
                 using var command = connection.CreateCommand();
-                command.CommandText = TextByRowSql(slice.Select(r => r.CollectionId));
+                /* #7256: the rows were found in the window's relation, so their text is read from it too. */
+                command.CommandText = SwapArchiveView(TextByRowSql(slice.Select(r => r.CollectionId)), "query_store_stats", relation);
                 command.Parameters.Add(new DuckDBParameter { Value = serverId });
                 command.Parameters.Add(new DuckDBParameter { Value = slice.Min(r => r.CollectionTime) });
                 command.Parameters.Add(new DuckDBParameter { Value = slice.Max(r => r.CollectionTime) });
