@@ -3071,13 +3071,7 @@ public sealed class DarlingManagedPostgres
     [SupportedOSPlatform("windows")]
     public static string? TryBuildConnectionStringFromStoredCredential(PostgresConfig config)
     {
-        var credentialPath = CredentialPathFor(ResolveDataDirectory(config));
-        if (!File.Exists(credentialPath))
-        {
-            return null;
-        }
-
-        return BuildConnectionString(config.Port, DarlingSecrets.Unprotect(File.ReadAllText(credentialPath).Trim()));
+        return TryBuildRoleConnectionStringFromStoredCredential(config, CredentialPathFor, UserName, null);
     }
 
     /// <summary>
@@ -3091,13 +3085,7 @@ public sealed class DarlingManagedPostgres
     [SupportedOSPlatform("windows")]
     public static string? TryBuildMcpConnectionStringFromStoredCredential(PostgresConfig config)
     {
-        var credentialPath = McpCredentialPathFor(ResolveDataDirectory(config));
-        if (!File.Exists(credentialPath))
-        {
-            return null;
-        }
-
-        return BuildRoleConnectionString(config.Port, McpRoleName, DarlingSecrets.Unprotect(File.ReadAllText(credentialPath).Trim()), McpApplicationName);
+        return TryBuildRoleConnectionStringFromStoredCredential(config, McpCredentialPathFor, McpRoleName, McpApplicationName);
     }
 
     /// <summary>
@@ -3111,13 +3099,7 @@ public sealed class DarlingManagedPostgres
     [SupportedOSPlatform("windows")]
     public static string? TryBuildViewerConnectionStringFromStoredCredential(PostgresConfig config)
     {
-        var credentialPath = ViewerCredentialPathFor(ResolveDataDirectory(config));
-        if (!File.Exists(credentialPath))
-        {
-            return null;
-        }
-
-        return BuildRoleConnectionString(config.Port, ViewerRoleName, DarlingSecrets.Unprotect(File.ReadAllText(credentialPath).Trim()), WebApplicationName);
+        return TryBuildRoleConnectionStringFromStoredCredential(config, ViewerCredentialPathFor, ViewerRoleName, WebApplicationName);
     }
 
     /// <summary>
@@ -3129,13 +3111,7 @@ public sealed class DarlingManagedPostgres
     [SupportedOSPlatform("windows")]
     public static string? TryBuildWebConnectionStringFromStoredCredential(PostgresConfig config)
     {
-        var credentialPath = WebCredentialPathFor(ResolveDataDirectory(config));
-        if (!File.Exists(credentialPath))
-        {
-            return null;
-        }
-
-        return BuildRoleConnectionString(config.Port, WebRoleName, DarlingSecrets.Unprotect(File.ReadAllText(credentialPath).Trim()), WebApplicationName);
+        return TryBuildRoleConnectionStringFromStoredCredential(config, WebCredentialPathFor, WebRoleName, WebApplicationName);
     }
 
     /// <summary>
@@ -3147,14 +3123,25 @@ public sealed class DarlingManagedPostgres
     [SupportedOSPlatform("windows")]
     public static string? TryBuildWebAdminConnectionStringFromStoredCredential(PostgresConfig config)
     {
-        var credentialPath = AdminCredentialPathFor(ResolveDataDirectory(config));
+        return TryBuildRoleConnectionStringFromStoredCredential(config, AdminCredentialPathFor, AdminRoleName, WebAdminApplicationName, WebAdminMaxPoolSize);
+    }
+
+    /// <summary>
+    /// The one body behind every <c>TryBuild*ConnectionStringFromStoredCredential</c>: resolve the credential file for the role, return null
+    /// when it has not been written yet, otherwise unprotect it and build the role's connection string. The five callers differ only in the
+    /// path function, the role, the application name and the pool size.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    private static string? TryBuildRoleConnectionStringFromStoredCredential(
+        PostgresConfig config, Func<string, string> credentialPathFor, string role, string? applicationName, int maxPoolSize = 24)
+    {
+        var credentialPath = credentialPathFor(ResolveDataDirectory(config));
         if (!File.Exists(credentialPath))
         {
             return null;
         }
 
-        return BuildRoleConnectionString(config.Port, AdminRoleName, DarlingSecrets.Unprotect(File.ReadAllText(credentialPath).Trim()),
-            WebAdminApplicationName, WebAdminMaxPoolSize);
+        return BuildRoleConnectionString(config.Port, role, DarlingSecrets.Unprotect(File.ReadAllText(credentialPath).Trim()), applicationName, maxPoolSize);
     }
 
     /// <summary>#4280: the real-start fallback runs only for a "trial-passed" carry, and never for a requested
