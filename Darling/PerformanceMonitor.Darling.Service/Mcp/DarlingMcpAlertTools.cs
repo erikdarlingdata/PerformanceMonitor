@@ -947,7 +947,21 @@ public sealed partial class DarlingMcpAlertTools
                 }, McpHelpers.JsonOptions);
             }
 
-            await store.SetFallbackAsync(route_id, fallback_route_id, cancellationToken);
+            if (await store.SetFallbackAsync(route_id, fallback_route_id, cancellationToken) == 0)
+            {
+                /* The write holds back a route with an agent setting, and a fallback that is not a route, in its own statement (#7199): a
+                   route a person gave a setting after the read above is refused, one removed in the meantime is not found, and a fallback
+                   removed in the meantime is invalid. */
+                var now = await store.LoadSummariesAsync(cancellationToken);
+                if (now.Any(r => r.RouteId == route_id) && fallback_route_id is { } gone
+                    && PgNotificationRouteStore.FallbackRefusal(route_id, gone, now.Select(r => r.RouteId)) is { } missing)
+                {
+                    return Outcome("invalid", missing);
+                }
+
+                return await RefusedOrMissingAsync(store, route_id, "set_notification_route_fallback", false);
+            }
+
             var stored = (await store.LoadSummariesAsync(cancellationToken)).FirstOrDefault(r => r.RouteId == route_id);
             return JsonSerializer.Serialize(new
             {

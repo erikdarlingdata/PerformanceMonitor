@@ -19,21 +19,23 @@ namespace Darling.Tests;
 /// cycle and keep reading their own rows. Their raw-tier statement is pinned here by SHA-256 of the text the code produced
 /// on origin/dev, before the procedure change, line endings normalised, so a change meant for the procedure grain cannot reach them.
 /// A deliberate change to the query views updates the hash with its reason in the commit.
+/// #7161 is one: the query views rate a bucket over the gap to the previous collection, no longer the MAX of the stored intervals,
+/// so the four hashes below were updated on purpose.
 /// </summary>
 [Trait("Stage", "Guard")]
 public sealed class ProcedureTrendQueryViewPinTests
 {
     /// <summary>The unfiltered statement (the MCP reader's text before the viewer's database filter, #5244).</summary>
-    private const string QueryStatsBucketedUnfilteredSha256 = "59C1215D3E171D69285B05D2CF77C6475F9717631C947D1492ACF9D33AF434E0";
+    private const string QueryStatsBucketedUnfilteredSha256 = "F424B1F1323C86401EA6BDBA3D78FBDBF906126A982986B72CB127A275D9500C";
 
     /// <summary>The filtered statement (the viewer's chart and the MCP reader's filtered text).</summary>
-    private const string QueryStatsBucketedFilteredSha256 = "1446ACDD0F7148DAF8268C6AB3D38D3E2B6832B2B6FB787EBEBB09807E8BC98B";
+    private const string QueryStatsBucketedFilteredSha256 = "4EDD8E21D42FB6FB5EB6BD6A6319814BEA6B23202A88406CE582BDAD872070CE";
 
     /// <summary>The per-collection CTE alone (<c>RawCollectionsCte</c>'s query branch), unfiltered.</summary>
-    private const string QueryStatsCollectionsCteUnfilteredSha256 = "7B58F60A5C376E9782EC7A44A189D461A3A44E0A835A2DF00F6786D83423E756";
+    private const string QueryStatsCollectionsCteUnfilteredSha256 = "32D4C7C32D847E12DD5C52060370D5022DBC9BFAAA0EBDBC969219E8E5AFBA35";
 
     /// <summary>The per-collection CTE alone, filtered.</summary>
-    private const string QueryStatsCollectionsCteFilteredSha256 = "59E2C46848E0AD30C83B1556D2DBB155DDB7168C4397DD3A6C8D105B4B4A80B9";
+    private const string QueryStatsCollectionsCteFilteredSha256 = "531DEDF2157A716BA51FA8A3A07C0D76112AB0AE13A488E00F4FD2B8F3CFD051";
 
     [Fact]
     public void QueryStatsRawTrend_IsUnchangedByTheProcedureRunModel()

@@ -196,17 +196,21 @@ public sealed class DeltaFamilyIntervalCompletionLivePostgresTests
     }
 
     /// <summary>
-    /// #3653 (A11): the query-stats duration and execution-count trends, both viewer copies and the MCP reader's
+    /// #3653 (A11) and #7161: the query-stats duration and execution-count trends, both viewer copies and the MCP reader's
     /// bucketed read (the same Storage builder, <see cref="DurationTrendRouting.BuildBucketedRawTrendSql"/>) — the
     /// same four collections as the procedure test above, now on <c>query_stats</c>, which has carried
     /// <c>sample_interval_seconds</c> from its first rung and whose trend reads LAG-recomputed the interval
     /// anyway. t1/t2 pre-V128 (NULL) — t1 no prior, no rate; t2 the LAG's 300 s. t3 a restart — every row 0
     /// — no rate (this was the confident 0.00 ms/sec and 0.00 executions/sec). t4 a steady pass with a
-    /// readmitted plan (0) beside a measured 120 s row: MAX 120 wins over the LAG's 300. Reproduced on a
-    /// PG18 + TimescaleDB 2.28.1 rig before this was written.
+    /// readmitted plan (0) beside a measured 120 s row. Since #7161 the seconds are the collection's gap to the
+    /// previous collection (the #5449 rule the procedure grain uses; the procedure test above has this fixture's 4.0
+    /// with no collection log), never the longest stored interval of any one query in it: t4 divides by its 300 s gap
+    /// to t3, so 1,200 ms is 4.0 ms/sec and 24 executions 0.08, where the stored 120 s said 10.0 and 0.2. The
+    /// readmitted plan still adds nothing to the sums. Reproduced on a PG18 + TimescaleDB 2.28.1 rig before this was
+    /// written.
     /// </summary>
     [Fact]
-    public async Task QueryDurationAndExecutionTrends_DropTheUnknowableCollection_PreferTheStoredInterval_AgainstDevPostgres()
+    public async Task QueryDurationAndExecutionTrends_DropTheUnknowableCollection_RateByTheGapToThePrevious_AgainstDevPostgres()
     {
         var cs = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live query-trend test.");
@@ -235,19 +239,19 @@ public sealed class DeltaFamilyIntervalCompletionLivePostgresTests
             await QueryStatAsync(connection, t4, "0xNEW", 0, 0, 0, ct);
 
             /* The viewer's duration trend on the raw tier (nowUtc pinned so the window is inside the raw
-               horizon): t1 and t3 are dropped by the chart reader; t2 LAG, t4 stored. */
+               horizon): t1 and t3 are dropped by the chart reader; t2 and t4 rate over their gaps. */
             var now = t4.AddMinutes(1);
             var duration = (await viewer.GetQueryDurationTrendAsync(ServerId, t1.AddMinutes(-1), t4.AddMinutes(1), nowUtc: now, cancellationToken: ct));
             Assert.Equal(RetentionTier.Raw, duration.Tier);
             Assert.Equal(new[] { t2, t4 }, duration.Points.Select(p => p.CollectionTime).ToArray());
             Assert.Equal(2.0, duration.Points[0].Value, precision: 6);      /* 600 ms / LAG 300 s */
-            Assert.Equal(10.0, duration.Points[1].Value, precision: 6);     /* 1200 ms / STORED 120 s, not the LAG's 4.0 */
+            Assert.Equal(4.0, duration.Points[1].Value, precision: 6);      /* #7161: 1200 ms / the 300 s gap to t3, not the stored 120 s (10.0) */
 
-            /* The execution-count trend reads the interval the same way: 30 / 300 = 0.1, then 24 / 120 = 0.2. */
+            /* The execution-count trend rates the same seconds: 30 / 300 = 0.1, then 24 / 300 = 0.08 (the stored 120 s said 0.2). */
             var executions = await viewer.GetExecutionCountTrendAsync(ServerId, t1.AddMinutes(-1), t4.AddMinutes(1), nowUtc: now, cancellationToken: ct);
             Assert.Equal(new[] { t2, t4 }, executions.Points.Select(p => p.CollectionTime).ToArray());
             Assert.Equal(0.1, executions.Points[0].Value, precision: 6);
-            Assert.Equal(0.2, executions.Points[1].Value, precision: 6);
+            Assert.Equal(0.08, executions.Points[1].Value, precision: 6);
 
             /* The MCP reader's bucketed read of the same rows (one-minute buckets, so each collection is its own
                bucket), all databases: all four collections come back, t1 and t3 with NULL rates (the MCP reader keeps
@@ -263,8 +267,8 @@ public sealed class DeltaFamilyIntervalCompletionLivePostgresTests
             Assert.Equal(2.0, rows[1].Value!.Value, precision: 6);
             Assert.Null(rows[2].Value);
             Assert.Null(rows[2].ExecutionsPerSecond);
-            Assert.Equal(10.0, rows[3].Value!.Value, precision: 6);
-            Assert.Equal(0.2, rows[3].ExecutionsPerSecond!.Value, precision: 6);
+            Assert.Equal(4.0, rows[3].Value!.Value, precision: 6);
+            Assert.Equal(0.08, rows[3].ExecutionsPerSecond!.Value, precision: 6);
 
             bodySucceeded = true;
         }
