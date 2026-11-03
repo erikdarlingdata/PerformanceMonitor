@@ -86,8 +86,9 @@ INSERT INTO memory_stats (collection_id, collection_time, server_id, server_name
     target_server_memory_mb, total_server_memory_mb, buffer_pool_mb)
 SELECT s, t, {1}, 'SRV', 65536, 10000, 50000, 40000, 30000 FROM slots ORDER BY t;
 
-INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, edition, product_version, product_level, engine_edition)
-SELECT s, t, {1}, 'SRV', 'Edition', '15.0.2000.5', 'RTM', 3 FROM slots ORDER BY t;
+INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, edition, product_version, product_level, engine_edition,
+    utc_offset_minutes)
+SELECT s, t, {1}, 'SRV', 'Edition', '15.0.2000.5', 'RTM', 3, -240 FROM slots ORDER BY t;
 
 INSERT INTO query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash, query_plan_hash, last_execution_time,
     delta_execution_count, delta_worker_time, delta_elapsed_time, query_text, sql_handle, sample_interval_seconds)
@@ -269,6 +270,9 @@ FROM slots, range(10) b(c) ORDER BY t;
         ("running jobs", d => d.ReadRunningJobsAsync(ServerId)),
         ("running jobs snapshot time", d => d.GetLatestRunningJobsSnapshotTimeAsync(ServerId)),
         ("anomalous jobs alert read", d => d.GetAnomalousJobsAsync(ServerId, 2)),
+        /* #7216: the "newest server_properties row that carries an offset" reads (the anomalous jobs read above joins the same one). */
+        ("server UTC offset", d => d.GetServerUtcOffsetMinutesAsync(ServerId)),
+        ("server clock", d => d.GetServerClockAsync(ServerId)),
         ("tempdb card", d => d.GetTempdbSummaryAsync(ServerId)),
         ("database size latest (FinOps)", d => d.GetDatabaseSizeLatestAsync(ServerId)),
         ("database size summary", d => d.GetDatabaseSizeSummaryAsync(ServerId)),
@@ -484,9 +488,10 @@ INSERT INTO memory_stats (collection_id, collection_time, server_id, server_name
     target_server_memory_mb, total_server_memory_mb, buffer_pool_mb)
 VALUES (1, TIMESTAMP '{now}' - INTERVAL 11 DAY, {ServerId}, 'SRV', 65536, 10000, 50000, 1111, 30000),
        (2, TIMESTAMP '{now}' - INTERVAL 10 DAY, {ServerId}, 'SRV', 65536, 10000, 50000, 2222, 30000);
-INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, edition, product_version, product_level, engine_edition, cpu_count)
-VALUES (1, TIMESTAMP '{now}' - INTERVAL 11 DAY, {ServerId}, 'SRV', 'OldEdition', '15.0.2000.5', 'RTM', 3, 4),
-       (2, TIMESTAMP '{now}' - INTERVAL 10 DAY, {ServerId}, 'SRV', 'NewEdition', '15.0.2000.5', 'RTM', 5, 16);";
+INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, edition, product_version, product_level, engine_edition, cpu_count,
+    utc_offset_minutes)
+VALUES (1, TIMESTAMP '{now}' - INTERVAL 11 DAY, {ServerId}, 'SRV', 'OldEdition', '15.0.2000.5', 'RTM', 3, 4, -300),
+       (2, TIMESTAMP '{now}' - INTERVAL 10 DAY, {ServerId}, 'SRV', 'NewEdition', '15.0.2000.5', 'RTM', 5, 16, -240);";
             await cmd.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
         }
 
@@ -539,7 +544,10 @@ VALUES (1, TIMESTAMP '{now}' - INTERVAL 11 DAY, {ServerId}, 'SRV', 'OldEdition',
         var jobsSnapshot = await data.GetLatestRunningJobsSnapshotTimeAsync(ServerId);
         Assert.NotNull(jobsSnapshot);
         Assert.InRange(DateTime.UtcNow - jobsSnapshot.Value, TimeSpan.FromDays(9.9), TimeSpan.FromDays(10.1));
-        Assert.Equal("NewJob", Assert.Single(await data.GetAnomalousJobsAsync(ServerId, 2)).JobName);
+        var anomalous = Assert.Single(await data.GetAnomalousJobsAsync(ServerId, 2));
+        Assert.Equal("NewJob", anomalous.JobName);
+        /* #7216: the svr join found the archived offset (the newest one, -240; the older row carries -300). */
+        Assert.Equal(-240, anomalous.UtcOffsetMinutes);
 
         Assert.Equal("IX_New", Assert.Single(await data.GetIndexUsageAsync(ServerId)).IndexName);
         Assert.Equal(1L, await data.GetIndexUsageMatchCountAsync(ServerId));
@@ -548,6 +556,12 @@ VALUES (1, TIMESTAMP '{now}' - INTERVAL 11 DAY, {ServerId}, 'SRV', 'OldEdition',
         Assert.NotNull(properties);
         Assert.Equal("NewEdition", properties.Edition);
         Assert.Equal(5, await data.GetSqlEngineEditionAsync(ServerId));
+
+        /* #7216: the offset reads probe the hot table for a non-NULL offset and fall back to the view; every row is archived, so the view answers. */
+        Assert.Equal(-240, await data.GetServerUtcOffsetMinutesAsync(ServerId));
+        var clock = await data.GetServerClockAsync(ServerId);
+        Assert.NotNull(clock);
+        Assert.Equal(-240, clock.OffsetMinutesAt(DateTime.UtcNow));
     }
 
     /// <summary>

@@ -91,9 +91,11 @@ LIMIT 1";
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        command.CommandText = @"
+        /* #7216: the hot table when it holds an offset for the server (see ServerPropertiesWithOffsetRelation), else the view. */
+        var propertiesRelation = await ServerPropertiesWithOffsetRelationAsync(connection, serverId);
+        command.CommandText = $@"
 SELECT utc_offset_minutes
-FROM v_server_properties
+FROM {propertiesRelation}
 WHERE server_id = $1
 AND   utc_offset_minutes IS NOT NULL
 ORDER BY collection_time DESC
@@ -118,7 +120,7 @@ LIMIT 1";
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        command.CommandText = ServerClockSql;
+        command.CommandText = ServerClockSqlFor(await ServerPropertiesWithOffsetRelationAsync(connection, serverId));
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
 
         using var reader = await command.ExecuteReaderAsync();
@@ -132,10 +134,11 @@ LIMIT 1";
         return offset.HasValue ? ServerClock.Resolve(zoneId, offset) : null;
     }
 
-    /// <summary>The statement behind <see cref="GetServerClockAsync"/>: <c>$1</c> server_id.</summary>
-    internal const string ServerClockSql = @"
+    /// <summary>The statement behind <see cref="GetServerClockAsync"/>: <c>$1</c> server_id. <paramref name="relation"/> is the
+    /// result of <see cref="ServerPropertiesWithOffsetRelationAsync(DuckDBConnection, int)"/> (#7216), a literal and never user text.</summary>
+    internal static string ServerClockSqlFor(string relation) => $@"
 SELECT utc_offset_minutes, time_zone_id
-FROM v_server_properties
+FROM {relation}
 WHERE server_id = $1
 AND   utc_offset_minutes IS NOT NULL
 ORDER BY collection_time DESC

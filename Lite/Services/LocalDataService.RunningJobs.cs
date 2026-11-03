@@ -223,6 +223,8 @@ ORDER BY current_duration_seconds DESC";
            The hot table holds the newest snapshot of any server still being collected; the view is read only for a server with no
            hot row (collection stopped and archival moved every row out), which still shows the last values it had. */
         var jobsRelation = await HotTableHasServerAsync(connection, "running_jobs", serverId) ? "running_jobs" : "v_running_jobs";
+        /* The same for the svr join: its "newest row with an offset" read is unbounded too (ServerPropertiesWithOffsetRelation). */
+        var propertiesRelation = await ServerPropertiesWithOffsetRelationAsync(connection, serverId);
 
         command.CommandText = $@"
 SELECT
@@ -239,7 +241,7 @@ FROM {jobsRelation}
 LEFT JOIN
 (
     SELECT utc_offset_minutes, time_zone_id
-    FROM v_server_properties
+    FROM {propertiesRelation}
     WHERE server_id = $1
     AND   utc_offset_minutes IS NOT NULL
     ORDER BY collection_time DESC
