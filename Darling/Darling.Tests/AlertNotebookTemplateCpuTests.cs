@@ -65,12 +65,15 @@ public sealed class AlertNotebookTemplateCpuTests
         Assert.Equal("SQL Server CPU", (string)sqlServerCpu["title"]!);
         Assert.Equal("cpu_utilization_stats", (string)sqlServerCpu["source"]!);
         Assert.Equal("sqlserver_cpu_utilization", (string)sqlServerCpu["measure"]!);
+        /* #7203: an hourly average hides a short spike that fired the alert; the panel must plot the peak. */
+        Assert.Equal("max", (string)sqlServerCpu["aggregate"]!);
 
         var pgCpu = Assert.IsType<JsonObject>(cells[3]);
         Assert.Equal("panel", (string)pgCpu["type"]!);
         Assert.Equal("PostgreSQL CPU", (string)pgCpu["title"]!);
         Assert.Equal("pg_cpu_utilization", (string)pgCpu["source"]!);
         Assert.Equal("pg_acu_utilization_pct", (string)pgCpu["measure"]!);
+        Assert.Equal("max", (string)pgCpu["aggregate"]!);
 
         var topQueries = Assert.IsType<JsonObject>(cells[4]);
         Assert.Equal("read", (string)topQueries["type"]!);
