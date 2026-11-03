@@ -99,6 +99,15 @@ INSERT INTO database_size_stats (collection_id, collection_time, server_id, serv
 SELECT s * 40 + d, t, {1}, 'SRV', 'Db' || d, d + 5, 1, 'ROWS', 'Db' || d || '_data', 'D:\Db' || d || '.mdf', 1000 + d, 400 + d
 FROM slots, range(40) b(d) ORDER BY t;
 
+INSERT INTO pvs_stats (collection_id, collection_time, server_id, server_name, database_name, database_id,
+    is_accelerated_database_recovery_on, persistent_version_store_size_mb, database_data_size_mb, current_aborted_transaction_count)
+SELECT s * 40 + d, t, {1}, 'SRV', 'Db' || d, d + 5, true, 100 + d, 1000 + d, d % 3
+FROM slots, range(40) b(d) ORDER BY t;
+
+INSERT INTO tempdb_stats (collection_id, collection_time, server_id, server_name, user_object_reserved_mb, internal_object_reserved_mb,
+    version_store_reserved_mb, total_reserved_mb, unallocated_mb, total_sessions_using_tempdb, top_session_id, top_session_tempdb_mb)
+SELECT s, t, {1}, 'SRV', 10, 5, 5, 20, 10, 3, 55, 7 FROM slots ORDER BY t;
+
 INSERT INTO procedure_stats (collection_id, collection_time, server_id, server_name, database_name, schema_name, object_name, sql_handle, sample_interval_seconds)
 SELECT s * {2} + d, t, {1}, 'SRV', 'Db' || d, 'dbo', 'usp_' || d, '0xH' || d, 1800
 FROM slots, range({2}) b(d) ORDER BY t;
@@ -226,6 +235,11 @@ FROM slots, range({2}) b(d) ORDER BY t;
         (InventoryRead, d => d.GetServerMetricsAsync()),
         /* #7014: the per-server idle-coverage check (the Optimization tab's Idle Databases grid and the recommendation row). */
         ("query stats idle coverage", d => d.HasQueryStatsCoverageAsync(ServerId)),
+        /* #7216: the PVS alert read, the FinOps PVS chart (its top-5 lookup) and grid, and the tempdb alert read all take a server's newest row. */
+        ("PVS pressure alert read", d => d.GetPvsPressureAsync(ServerId)),
+        ("PVS trend", d => d.GetPvsTrendAsync(ServerId, DateTime.UtcNow.AddHours(-24))),
+        ("PVS grid", d => d.GetPvsStatsLatestAsync(ServerId)),
+        ("tempdb alert read", d => d.GetLatestTempDbSpaceAsync(ServerId)),
     ];
 
     private async Task<(List<string> Failures, List<string> Report)> CheckReadsAsync(LocalDataService oneDay, LocalDataService eightDays)
@@ -359,6 +373,67 @@ VALUES (1, TIMESTAMP '{now}' - INTERVAL 1 HOUR, {ServerId}, 'SRV', TIMESTAMP '{n
         Assert.Equal(65536, row.PhysicalMemoryMb);
         Assert.Equal(40000, row.TotalMemoryMb);
         Assert.Equal(16, row.CpuCount);
+    }
+
+    /// <summary>
+    /// The PVS and tempdb newest-row reads (#7216) read the hot tables first. A server that stopped being collected has every row in Parquet,
+    /// and each read must still answer from the archive with that server's last values. Built with the real archive pass.
+    /// </summary>
+    [Fact]
+    public async Task PvsAndTempDbReads_ServerWhoseRowsAreAllArchived_StillShowItsLastValues()
+    {
+        var dir = Path.Combine(_tempDir, "pvsfallback");
+        var archiveDir = Path.Combine(dir, "archive");
+        Directory.CreateDirectory(archiveDir);
+        var dbPath = Path.Combine(dir, "test.duckdb");
+        var initializer = new DuckDbInitializer(dbPath);
+        _initializers.Add(initializer);
+        await initializer.InitializeFromTemplateAsync();
+
+        using (var connection = new DuckDBConnection($"Data Source={dbPath}"))
+        {
+            await connection.OpenAsync(TestContext.Current.CancellationToken);
+            using var cmd = connection.CreateCommand();
+            var now = DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture);
+            /* Two snapshots, 10 and 11 days old: the newer one (PVS 300 MB, tempdb 20 MB reserved) is what the reads must return. */
+            cmd.CommandText = $@"
+INSERT INTO pvs_stats (collection_id, collection_time, server_id, server_name, database_name, database_id,
+    is_accelerated_database_recovery_on, persistent_version_store_size_mb, database_data_size_mb)
+VALUES (1, TIMESTAMP '{now}' - INTERVAL 11 DAY, {ServerId}, 'SRV', 'DbA', 5, true, 100, 1000),
+       (2, TIMESTAMP '{now}' - INTERVAL 10 DAY, {ServerId}, 'SRV', 'DbA', 5, true, 300, 1000);
+INSERT INTO tempdb_stats (collection_id, collection_time, server_id, server_name, user_object_reserved_mb, internal_object_reserved_mb,
+    version_store_reserved_mb, total_reserved_mb, unallocated_mb, total_sessions_using_tempdb, top_session_id, top_session_tempdb_mb)
+VALUES (1, TIMESTAMP '{now}' - INTERVAL 11 DAY, {ServerId}, 'SRV', 1, 1, 1, 10, 10, 1, 55, 1),
+       (2, TIMESTAMP '{now}' - INTERVAL 10 DAY, {ServerId}, 'SRV', 10, 5, 5, 20, 10, 3, 55, 7);";
+            await cmd.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        }
+
+        var archive = new ArchiveService(initializer, archiveDir);
+        archive.TimestampForTests = DateTime.UtcNow.ToString("yyyyMMdd_HHmm");
+        await archive.ArchiveOldDataAsync(hotDataHours: HotDays * 24);
+
+        using (var connection = new DuckDBConnection($"Data Source={dbPath}"))
+        {
+            await connection.OpenAsync(TestContext.Current.CancellationToken);
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = "SELECT (SELECT COUNT(*) FROM pvs_stats) + (SELECT COUNT(*) FROM tempdb_stats)";
+            Assert.Equal(0L, Convert.ToInt64(await cmd.ExecuteScalarAsync(TestContext.Current.CancellationToken)));
+        }
+
+        var data = new LocalDataService(initializer);
+
+        var pressure = await data.GetPvsPressureAsync(ServerId);
+        Assert.Equal(300, Assert.Single(pressure).PvsSizeMb);
+
+        var grid = await data.GetPvsStatsLatestAsync(ServerId);
+        Assert.Equal(300m, Assert.Single(grid).PvsSizeMb);
+
+        var trend = await data.GetPvsTrendAsync(ServerId, DateTime.UtcNow.AddDays(-30));
+        Assert.Equal(2, trend.Count);
+
+        var tempDb = await data.GetLatestTempDbSpaceAsync(ServerId);
+        Assert.NotNull(tempDb);
+        Assert.Equal(20, tempDb.TotalReservedMb);
     }
 
     /// <summary>
