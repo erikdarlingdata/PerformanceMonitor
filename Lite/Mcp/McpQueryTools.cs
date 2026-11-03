@@ -1561,7 +1561,8 @@ public sealed class McpQueryTools
     /// </summary>
     internal static string WithWindowNotice(string answer, McpWindowNotice notice, DateTime requestedStart, DateTime windowEnd)
     {
-        if (!McpHelpers.IsEmptyOrUnavailableStatus(answer))
+        var status = ReadStatus(answer);
+        if (!status.IsEmptyOrUnavailable || status.IsOffline)
         {
             return answer;
         }
@@ -1669,8 +1670,13 @@ public sealed class McpQueryTools
     internal static async Task<string> WithWindowNoticeAsync(
         string answer, LocalDataService dataService, QueryWindowRelation relation, int serverId, DateTime requestedStart, DateTime windowEnd, string table)
     {
-        answer = await OfflineInsteadOfEmptyAsync(dataService, serverId, windowEnd, answer);
-        return McpHelpers.IsEmptyOrUnavailableStatus(answer)
+        (answer, var status) = await OfflineInsteadOfEmptyAsync(dataService, serverId, windowEnd, answer, ReadStatus(answer));
+        if (status.IsOffline)
+        {
+            return answer;
+        }
+
+        return status.IsEmptyOrUnavailable
             ? (await EmptyWindowNoticeAsync(dataService, relation, serverId, requestedStart, windowEnd, table) is { } emptyNotice
                 ? WithWindowNotice(answer, emptyNotice, requestedStart, windowEnd)
                 : answer)
@@ -1690,16 +1696,33 @@ public sealed class McpQueryTools
     /// inside the retention horizon (never collected: the tools' own "ever recorded" answers speak for it) and a failed read all return <paramref name="answer"/> unchanged.
     /// A server with no success on record that was added BEFORE <see cref="RetentionService.OldestRetainedInstant"/> (as of the anchor) is offline
     /// too, as Darling reads it through the registration: it had time to collect and never once did. Its registration is
-    /// <see cref="LocalDataService.RegisteredAtUtcLookup"/>; none wired keeps the never-collected reading.
-    /// The original answer's wording and hints are dropped with its word.
+    /// <see cref="LocalDataService.RegisteredAtUtcLookup"/>; none wired keeps the never-collected reading. The sentence names the server
+    /// (<see cref="LocalDataService.ServerDisplayNameLookup"/>), as Darling's does. The original answer's wording and hints are dropped with its
+    /// word, and the window wrappers add none (<see cref="AnswerStatus.IsOffline"/>).
     /// </summary>
-    internal static async Task<string> OfflineInsteadOfEmptyAsync(LocalDataService dataService, int serverId, DateTime windowEnd, string answer)
+    internal static async Task<string> OfflineInsteadOfEmptyAsync(LocalDataService dataService, int serverId, DateTime windowEnd, string answer) =>
+        (await OfflineInsteadOfEmptyAsync(dataService, serverId, windowEnd, answer, ReadStatus(answer))).Answer;
+
+    /// <summary>
+    /// <see cref="OfflineInsteadOfEmptyAsync(LocalDataService, int, DateTime, string)"/> over a status the caller has already read, so a
+    /// window wrapper parses a data page once for its status instead of once per question it asks of it. Returns the answer and its status
+    /// (read again only when the answer changed, which only an <c>empty</c> one does).
+    /// </summary>
+    private static async Task<(string Answer, AnswerStatus Status)> OfflineInsteadOfEmptyAsync(
+        LocalDataService dataService, int serverId, DateTime windowEnd, string answer, AnswerStatus status)
     {
-        if (!IsEmptyStatus(answer))
+        if (!status.IsEmpty)
         {
-            return answer;
+            return (answer, status);
         }
 
+        var offline = await OfflineAnswerOrNullAsync(dataService, serverId, windowEnd);
+        return offline is null ? (answer, status) : (offline, ReadStatus(offline));
+    }
+
+    /// <summary>The offline answer for the server as of <paramref name="windowEnd"/>, or null when it is not offline (or the read failed).</summary>
+    private static async Task<string?> OfflineAnswerOrNullAsync(LocalDataService dataService, int serverId, DateTime windowEnd)
+    {
         DateTime? last;
         try
         {
@@ -1707,7 +1730,7 @@ public sealed class McpQueryTools
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            return answer;
+            return null;
         }
 
         if (last is not { } newest)
@@ -1720,37 +1743,60 @@ public sealed class McpQueryTools
             if (ServerHealthClassifier.ClassifyFreshness(null, registered, RetentionService.OldestRetainedInstant(windowEnd), windowEnd)
                 != ServerFreshness.Offline)
             {
-                return answer;
+                return null;
             }
 
             return McpHelpers.Status(
                 "unavailable",
-                "This server is offline: the store holds no successful collection from it within its retained history, "
-                + "so nothing is arriving to read, whatever the collectors would otherwise report. An empty result here is missing data, not a finding.");
+                $"{OfflineSubject(dataService, serverId)} is offline: the store holds no successful collection from it within its retained history, "
+                + "so nothing is arriving to read, whatever the collectors would otherwise report. " + OfflineAnswerEnd);
         }
 
         if (windowEnd <= newest
             || ServerHealthClassifier.ClassifyFreshness(newest, windowEnd) != ServerFreshness.Offline)
         {
-            return answer;
+            return null;
         }
 
         return McpHelpers.Status(
             "unavailable",
-            $"This server is offline: it has had no successful collection since {newest.ToString("yyyy-MM-dd HH:mm", System.Globalization.CultureInfo.InvariantCulture)} UTC, "
-            + "so nothing is arriving to read, whatever the collectors would otherwise report. An empty result here is missing data, not a finding.");
+            $"{OfflineSubject(dataService, serverId)} is offline: the store has had no successful collection from it since {newest.ToString("yyyy-MM-dd HH:mm", System.Globalization.CultureInfo.InvariantCulture)} UTC, "
+            + "so nothing is arriving to read, whatever the collectors would otherwise report. " + OfflineAnswerEnd);
     }
 
-    private static bool IsEmptyStatus(string answer)
+    private const string OfflineAnswerEnd = "An empty result here is missing data, not a finding.";
+
+    /// <summary>The server's display name, as Darling's offline sentence opens with it, or "This server" when no lookup is wired.</summary>
+    private static string OfflineSubject(LocalDataService dataService, int serverId) =>
+        dataService.ServerDisplayNameLookup?.Invoke(serverId) is { Length: > 0 } name ? name : "This server";
+
+    /// <summary>An answer's <c>status</c> word and <c>message</c>, read with one parse (null when the answer is not a status envelope).</summary>
+    private readonly record struct AnswerStatus(string? Word, string? Message)
+    {
+        public bool IsEmpty => Word == "empty";
+
+        public bool IsEmptyOrUnavailable => Word is "empty" or "unavailable";
+
+        /// <summary>The answer <see cref="OfflineInsteadOfEmptyAsync(LocalDataService, int, DateTime, string)"/> builds.</summary>
+        public bool IsOffline => Word == "unavailable" && Message is { } text
+            && text.Contains(" is offline: ", StringComparison.Ordinal) && text.EndsWith(OfflineAnswerEnd, StringComparison.Ordinal);
+    }
+
+    private static AnswerStatus ReadStatus(string answer)
     {
         try
         {
-            return System.Text.Json.Nodes.JsonNode.Parse(answer) is System.Text.Json.Nodes.JsonObject node
-                && node["status"] is System.Text.Json.Nodes.JsonValue status && status.TryGetValue<string>(out var word) && word == "empty";
+            if (System.Text.Json.Nodes.JsonNode.Parse(answer) is System.Text.Json.Nodes.JsonObject node
+                && node["status"] is System.Text.Json.Nodes.JsonValue status && status.TryGetValue<string>(out var word))
+            {
+                return new AnswerStatus(word, node["message"] is System.Text.Json.Nodes.JsonValue message && message.TryGetValue<string>(out var text) ? text : null);
+            }
+
+            return default;
         }
         catch (JsonException)
         {
-            return false;
+            return default;
         }
     }
 
@@ -1770,8 +1816,13 @@ public sealed class McpQueryTools
     internal static async Task<string> WithEmptyWindowNoticeAsync(
         string answer, LocalDataService dataService, QueryWindowRelation relation, int serverId, DateTime requestedStart, DateTime windowEnd, string table)
     {
-        answer = await OfflineInsteadOfEmptyAsync(dataService, serverId, windowEnd, answer);
-        return McpHelpers.IsEmptyOrUnavailableStatus(answer)
+        (answer, var status) = await OfflineInsteadOfEmptyAsync(dataService, serverId, windowEnd, answer, ReadStatus(answer));
+        if (status.IsOffline)
+        {
+            return answer;
+        }
+
+        return status.IsEmptyOrUnavailable
             ? (await EmptyWindowNoticeAsync(dataService, relation, serverId, requestedStart, windowEnd, table) is { } emptyNotice
                 ? WithWindowNotice(answer, emptyNotice, requestedStart, windowEnd)
                 : answer)

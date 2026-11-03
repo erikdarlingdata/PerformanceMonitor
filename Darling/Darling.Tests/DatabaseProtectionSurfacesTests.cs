@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Text.Json;
 using System.Threading;
@@ -17,8 +18,10 @@ using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
+using PerformanceMonitor.Ui;
 using Xunit;
 
 namespace Darling.Tests;
@@ -28,8 +31,40 @@ namespace Darling.Tests;
 /// show, so the assertions are on the values: the age text, the state words, the platform label, the order and the sentences of a read
 /// with no capture. The judgement under them is <see cref="DatabaseProtectionBands"/>.
 /// </summary>
-public sealed class ViewerDatabaseProtectionTextTests
+[Collection("viewer-time-statics")]
+public sealed class ViewerDatabaseProtectionTextTests : IDisposable
 {
+    /* #7343: the capture and scan times follow the display mode; these assertions are on the machine-local words, so the class runs in Local mode. */
+    private readonly TimeDisplayMode _savedMode = ViewerTimeHelper.CurrentDisplayMode;
+
+    public ViewerDatabaseProtectionTextTests() => ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.LocalTime;
+
+    public void Dispose() => ViewerTimeHelper.CurrentDisplayMode = _savedMode;
+
+    /// <summary>#7343: the picked server's clock (UTC+05:30, no daylight change), so Server mode differs from UTC and from Local on any machine outside India.</summary>
+    private static readonly ServerClock s_india = ServerClock.FixedOffset(330);
+
+    public static TheoryData<TimeDisplayMode> Modes => new() { TimeDisplayMode.ServerTime, TimeDisplayMode.UTC, TimeDisplayMode.LocalTime };
+
+    /// <summary>The time of <paramref name="utc"/> as each display mode words it for the picked server: Server on its clock, UTC as is, Local on this machine.</summary>
+    private static string Worded(DateTime utc, TimeDisplayMode mode) => mode switch
+    {
+        TimeDisplayMode.ServerTime => utc.AddMinutes(330).ToString("g", CultureInfo.CurrentCulture),
+        TimeDisplayMode.UTC => utc.ToString("g", CultureInfo.CurrentCulture),
+        _ => TimeZoneInfo.ConvertTimeFromUtc(utc, TimeZoneInfo.Local).ToString("g", CultureInfo.CurrentCulture),
+    };
+
+    [Theory]
+    [MemberData(nameof(Modes))]
+    public void TheStatusLineCaptureTime_FollowsTheDisplayMode_OnTheServersClock(TimeDisplayMode mode)
+    {
+        ViewerTimeHelper.CurrentDisplayMode = mode;
+        var read = Read(Fact("a", fullAgo: Day, logAgo: TimeSpan.FromMinutes(5), checkDbAgo: Day));
+
+        Assert.EndsWith("Captured: " + Worded(Captured, mode), ViewerDatabaseProtectionText.StatusLine(read, s_india), StringComparison.Ordinal);
+    }
+
+
     private static readonly DateTime Captured = new(2026, 10, 28, 12, 0, 0, DateTimeKind.Utc);
     private static readonly TimeSpan Day = TimeSpan.FromDays(1);
 
@@ -122,8 +157,8 @@ public sealed class ViewerDatabaseProtectionTextTests
         var read = Read(Fact("zeta", fullAgo: 9 * Day, logAgo: TimeSpan.FromMinutes(5), checkDbAgo: Day));
         var local = Captured.ToLocalTime().ToString("g", System.Globalization.CultureInfo.CurrentCulture);
 
-        Assert.Equal($"1 of 1 judged databases overdue. full backup: zeta.   Captured: {local}", ViewerDatabaseProtectionText.StatusLine(read));
-        Assert.StartsWith("No database is overdue (1 judged).", ViewerDatabaseProtectionText.StatusLine(Read(Fact("a", fullAgo: Day, logAgo: TimeSpan.FromMinutes(5), checkDbAgo: Day))), StringComparison.Ordinal);
+        Assert.Equal($"1 of 1 judged databases overdue. full backup: zeta.   Captured: {local}", ViewerDatabaseProtectionText.StatusLine(read, ServerClock.Utc));
+        Assert.StartsWith("No database is overdue (1 judged).", ViewerDatabaseProtectionText.StatusLine(Read(Fact("a", fullAgo: Day, logAgo: TimeSpan.FromMinutes(5), checkDbAgo: Day)), ServerClock.Utc), StringComparison.Ordinal);
     }
 
     [Theory]
@@ -134,7 +169,7 @@ public sealed class ViewerDatabaseProtectionTextTests
     {
         var read = new ViewerDatabaseProtectionRead(status, sentence, null, [], null);
 
-        Assert.Equal(sentence, ViewerDatabaseProtectionText.StatusLine(read));
+        Assert.Equal(sentence, ViewerDatabaseProtectionText.StatusLine(read, ServerClock.Utc));
         /* #6907: the status line carries the sentence, so the grid note must not repeat it. */
         Assert.Equal(ViewerDatabaseProtectionText.NoData, ViewerDatabaseProtectionText.EmptyText(read));
         Assert.Empty(ViewerDatabaseProtectionText.Rows(read));
@@ -246,7 +281,7 @@ VALUES ($1,$2,$3,$4,$5,'ONLINE',$6,$7,NULL,$8,$9,$10,$11,$12,$13,$14)",
             Assert.Equal("unavailable", web.GetProperty("status").GetString());
             Assert.Equal(ViewerDatabaseProtectionRead.Unavailable, read.Status);
             Assert.StartsWith("No database protection capture in the 24-hour window ending ", read.Message, StringComparison.Ordinal);
-            Assert.Equal(read.Message, ViewerDatabaseProtectionText.StatusLine(read));
+            Assert.Equal(read.Message, ViewerDatabaseProtectionText.StatusLine(read, ServerClock.Utc));
             return 0;
         });
     }

@@ -23,13 +23,17 @@ public partial class LocalDataService
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        command.CommandText = @"
+        /* #7216: the newest-snapshot lookup has no time bound, so through the v_ view it read every archived row of server_properties.
+           The hot table holds the newest snapshot of any server still being collected; the view is read only for a server with no
+           hot row (collection stopped and archival moved every row out), which still shows the last values it had. */
+        var propertiesRelation = await HotTableHasServerAsync(connection, "server_properties", serverId) ? "server_properties" : "v_server_properties";
+        command.CommandText = $@"
 SELECT edition, product_version, product_level, product_update_level,
        engine_edition, cpu_count, hyperthread_ratio, physical_memory_mb,
        socket_count, cores_per_socket, is_hadr_enabled, is_clustered,
        enterprise_features, service_objective, collection_time,
        utc_offset_minutes, time_zone_id, vcore_count
-FROM v_server_properties
+FROM {propertiesRelation}
 WHERE server_id = $1
 ORDER BY collection_time DESC
 LIMIT 1";
@@ -87,9 +91,11 @@ LIMIT 1";
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        command.CommandText = @"
+        /* #7216: the hot table when it holds an offset for the server (see ServerPropertiesWithOffsetRelation), else the view. */
+        var propertiesRelation = await ServerPropertiesWithOffsetRelationAsync(connection, serverId);
+        command.CommandText = $@"
 SELECT utc_offset_minutes
-FROM v_server_properties
+FROM {propertiesRelation}
 WHERE server_id = $1
 AND   utc_offset_minutes IS NOT NULL
 ORDER BY collection_time DESC
@@ -114,7 +120,7 @@ LIMIT 1";
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        command.CommandText = ServerClockSql;
+        command.CommandText = ServerClockSqlFor(await ServerPropertiesWithOffsetRelationAsync(connection, serverId));
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
 
         using var reader = await command.ExecuteReaderAsync();
@@ -128,10 +134,11 @@ LIMIT 1";
         return offset.HasValue ? ServerClock.Resolve(zoneId, offset) : null;
     }
 
-    /// <summary>The statement behind <see cref="GetServerClockAsync"/>: <c>$1</c> server_id.</summary>
-    internal const string ServerClockSql = @"
+    /// <summary>The statement behind <see cref="GetServerClockAsync"/>: <c>$1</c> server_id. <paramref name="relation"/> is the
+    /// result of <see cref="ServerPropertiesWithOffsetRelationAsync(DuckDBConnection, int)"/> (#7216), a literal and never user text.</summary>
+    internal static string ServerClockSqlFor(string relation) => $@"
 SELECT utc_offset_minutes, time_zone_id
-FROM v_server_properties
+FROM {relation}
 WHERE server_id = $1
 AND   utc_offset_minutes IS NOT NULL
 ORDER BY collection_time DESC
@@ -148,15 +155,19 @@ LIMIT 1";
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
+        /* #7216: the newest-snapshot lookup has no time bound, so through the v_ view it read every archived row of database_size_stats.
+           The hot table holds the newest snapshot of any server still being collected; the view is read only for a server with no
+           hot row (collection stopped and archival moved every row out), which still shows the last values it had. */
+        var sizeRelation = await HotTableHasServerAsync(connection, "database_size_stats", serverId) ? "database_size_stats" : "v_database_size_stats";
         var dbClause = BuildDbInClause(databaseNames, "database_name", 2, out var dbValues);
         command.CommandText = $@"
 SELECT database_name, file_name, file_type_desc, physical_name,
        total_size_mb, used_size_mb, auto_growth_mb, max_size_mb,
        volume_mount_point, volume_total_mb, volume_free_mb,
        collection_time, file_id, is_percent_growth, growth_pct
-FROM v_database_size_stats
+FROM {sizeRelation}
 WHERE server_id = $1
-AND   collection_time = (SELECT MAX(collection_time) FROM v_database_size_stats WHERE server_id = $1){dbClause}
+AND   collection_time = (SELECT MAX(collection_time) FROM {sizeRelation} WHERE server_id = $1){dbClause}
 ORDER BY database_name, file_type_desc, file_name";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
@@ -203,13 +214,17 @@ ORDER BY database_name, file_type_desc, file_name";
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        command.CommandText = @"
+        /* #7216: the newest-snapshot lookup has no time bound, so through the v_ view it read every archived row of session_stats.
+           The hot table holds the newest snapshot of any server still being collected; the view is read only for a server with no
+           hot row (collection stopped and archival moved every row out), which still shows the last values it had. */
+        var sessionRelation = await HotTableHasServerAsync(connection, "session_stats", serverId) ? "session_stats" : "v_session_stats";
+        command.CommandText = $@"
 SELECT program_name, connection_count, running_count, sleeping_count, dormant_count,
        total_cpu_time_ms, total_reads, total_writes, total_logical_reads,
        collection_time
-FROM v_session_stats
+FROM {sessionRelation}
 WHERE server_id = $1
-AND   collection_time = (SELECT MAX(collection_time) FROM v_session_stats WHERE server_id = $1)
+AND   collection_time = (SELECT MAX(collection_time) FROM {sessionRelation} WHERE server_id = $1)
 ORDER BY connection_count DESC";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });

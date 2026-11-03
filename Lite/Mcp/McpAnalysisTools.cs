@@ -307,8 +307,12 @@ public sealed class McpAnalysisTools
 
         try
         {
+            /* #7167: the probe is its own LocalDataService, not the host's, so it is given the same offline lookups; without them a server added
+               long ago that never once succeeded reads as never collected here and stays empty where every other Lite read answers unavailable. */
+            var probe = analysisService.CollectorWindowProbe();
+            ServerResolver.WireOfflineLookups(probe, serverManager);
             return await McpQueryTools.WithWindowNoticeAsync(
-                answer, analysisService.CollectorWindowProbe(), QueryWindowRelation.WaitStats, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, "wait_stats");
+                answer, probe, QueryWindowRelation.WaitStats, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, "wait_stats");
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

@@ -290,8 +290,8 @@ public sealed class LiteOverviewCardExplainsItselfTests
     {
         var source = ReadRepoFile(Path.Combine("Lite", "Services", "LocalDataService.Overview.cs"));
 
-        Assert.Contains("private bool CpuIsElevated => CpuPercentForAlert >= 50;", source, StringComparison.Ordinal);
-        Assert.Contains("private bool CpuIsCritical => CpuPercentForAlert >= 80;", source, StringComparison.Ordinal);
+        Assert.Contains("private bool CpuIsElevated => ShownCpuPercentForAlert >= 50;", source, StringComparison.Ordinal);
+        Assert.Contains("private bool CpuIsCritical => ShownCpuPercentForAlert >= 80;", source, StringComparison.Ordinal);
         Assert.Contains("private bool BlockingIsElevated => BlockingCount > 0;", source, StringComparison.Ordinal);
         Assert.Contains("private bool DeadlocksAreElevated => DeadlockCount > 0;", source, StringComparison.Ordinal);
 

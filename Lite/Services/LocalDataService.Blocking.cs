@@ -157,10 +157,16 @@ LIMIT $4";
     public async Task<List<TimeSliceBucket>> GetActiveQuerySlicerDataAsync(
         int serverId, int hoursBack, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null)
     {
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
+
+        /* #7256: a window that starts after the newest archived row of query_snapshots reads the hot table alone. The view opens every Parquet file of it (one per day) however short the window is. */
+        return await ReadWindowSkippingEmptyArchiveAsync("query_snapshots", "collection_time", startTime, ReadAsync, CancellationToken.None);
+
+        async Task<List<TimeSliceBucket>> ReadAsync(string relation)
+        {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
         command.CommandText = @"
@@ -178,6 +184,7 @@ AND   collection_time >= $2
 AND   collection_time <= $3" + dbClause + @"
 GROUP BY date_trunc('hour', collection_time)
 ORDER BY bucket";
+        command.CommandText = command.CommandText.Replace("v_query_snapshots", relation, StringComparison.Ordinal);
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
@@ -203,6 +210,7 @@ ORDER BY bucket";
         }
 
         return items;
+        }
     }
 
     /// <summary>
@@ -211,10 +219,16 @@ ORDER BY bucket";
     public async Task<List<QuerySnapshotRow>> GetLatestQuerySnapshotsAsync(int serverId, int hoursBack = 4, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null)
     {
         using var _q = TimeQuery("GetLatestQuerySnapshotsAsync", "v_query_snapshots latest");
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
+
+        /* #7256: a window that starts after the newest archived row of query_snapshots reads the hot table alone. The view opens every Parquet file of it (one per day) however short the window is. */
+        return await ReadWindowSkippingEmptyArchiveAsync("query_snapshots", "collection_time", startTime, ReadAsync, CancellationToken.None);
+
+        async Task<List<QuerySnapshotRow>> ReadAsync(string relation)
+        {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
         command.CommandText = @"
@@ -253,6 +267,7 @@ AND   collection_time >= $2
 AND   collection_time <= $3" + dbClause + @"
 AND   query_text NOT LIKE 'WAITFOR%'
 ORDER BY collection_time DESC, cpu_time_ms DESC";
+        command.CommandText = command.CommandText.Replace("v_query_snapshots", relation, StringComparison.Ordinal);
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
@@ -298,6 +313,7 @@ ORDER BY collection_time DESC, cpu_time_ms DESC";
         }
 
         return items;
+        }
     }
 
     /// <summary>Selects <c>query_plan</c> on <c>false</c>, <c>live_query_plan</c> on <c>true</c> — SQL can't
@@ -343,6 +359,12 @@ ORDER BY collection_time DESC, cpu_time_ms DESC";
     /// </summary>
     public async Task<string?> GetSnapshotPlanTextAsync(int serverId, DateTime collectionTime, int sessionId, int requestId, bool live)
     {
+
+        /* #7256: the capture is one instant, so a capture newer than the newest archived row of query_snapshots is read from the hot table alone. The view opens every Parquet file of it (one per day). */
+        return await ReadWindowSkippingEmptyArchiveAsync("query_snapshots", "collection_time", collectionTime, ReadAsync, CancellationToken.None);
+
+        async Task<string?> ReadAsync(string relation)
+        {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
         var column = SnapshotPlanColumn(live);
@@ -356,6 +378,7 @@ AND   session_id = $3
 AND   COALESCE(request_id, 0) = $4
 AND   {column} IS NOT NULL
 LIMIT 1";
+        command.CommandText = command.CommandText.Replace("v_query_snapshots", relation, StringComparison.Ordinal);
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = collectionTime });
@@ -364,6 +387,7 @@ LIMIT 1";
 
         var result = await command.ExecuteScalarAsync();
         return result is null or DBNull ? null : (string)result;
+        }
     }
 
     /// <summary>Estimated plan for a grid row: the in-row <see cref="QuerySnapshotRow.QueryPlan"/> when a
@@ -428,10 +452,16 @@ LIMIT 1";
         int serverId, int hoursBack, int cap, string? databaseName = null, bool blockingOnly = false, string? waitType = null, DateTime? asOfUtc = null, QueryTagReadScope? tags = null)
     {
         using var _q = TimeQuery("GetActiveQueriesPageAsync", "v_query_snapshots filtered page (MCP)");
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
+
+        /* #7256: a window that starts after the newest archived row of query_snapshots reads the hot table alone. The view opens every Parquet file of it (one per day) however short the window is. */
+        return await ReadWindowSkippingEmptyArchiveAsync("query_snapshots", "collection_time", startTime, ReadAsync, CancellationToken.None);
+
+        async Task<(List<QuerySnapshotRow> Rows, long PopulationCount)> ReadAsync(string relation)
+        {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
         var dbClause = BuildDbInClause(
             string.IsNullOrWhiteSpace(databaseName) ? null : new[] { databaseName.Trim() }, "w.database_name", 5, out var dbValues);
         var blockingClause = blockingOnly ? " AND (w.blocking_session_id > 0 OR h.session_id IS NOT NULL)" : "";
@@ -532,6 +562,7 @@ SELECT
 FROM population p
 ORDER BY p.collection_time DESC, p.cpu_time_ms DESC
 LIMIT $4";
+        command.CommandText = command.CommandText.Replace("v_query_snapshots", relation, StringComparison.Ordinal);
         if (tags is not null)
         {
             command.CommandText = tags.Apply(command.CommandText, 5 + dbValues.Count + (waitFilter == null ? 0 : 1));
@@ -589,6 +620,7 @@ LIMIT $4";
         }
 
         return (items, populationCount);
+        }
     }
 
     /// <summary>
@@ -944,6 +976,12 @@ LIMIT $4";
     {
         var rows = new List<BlockingPairRow>();
 
+        /* #7256: the DMV snapshot arm below reads v_dmv_blocking_snapshots, which opens every archive file under the read
+           lock. A window newer than that archive reads the hot table alone. The snapshot's event_time IS its collection
+           time (one value, written by the collector from the run's CollectionTime), so the span on collection_time bounds
+           the event_time filter. The plan is taken before the read lock, the way the drill-down takes it. */
+        var plan = await PlanArchiveReadAsync(System.Threading.CancellationToken.None, new ArchiveWindow("dmv_blocking_snapshots", "collection_time", start));
+
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
         command.CommandText = $@"
@@ -974,7 +1012,7 @@ LIMIT 5000";
            stop. Stated here rather than defaulted in the shared method, so the exception belongs to
            the caller that actually has it. */
         await PerformanceMonitorLite.Analysis.BlockingPairRowQuery.AppendDmvSnapshotRowsAsync(
-            connection.CreateCommand, rows, serverId, start, end, System.Threading.CancellationToken.None);
+            connection.CreateCommand, rows, serverId, start, end, System.Threading.CancellationToken.None, plan: plan);
 
         return rows;
     }
@@ -1195,7 +1233,7 @@ SELECT
             () => GetBlockedProcessThresholdOnAsync(serverId, startUtc, endUtc));
 
     /// <summary>
-    /// Gets blocking incident trend (count of distinct blocking events per time bucket).
+    /// Gets the blocking trend: blocked-process reports per minute (report rows, not blocked sessions; one wait can write several reports, #7219).
     /// Uses blocked_process_reports from Extended Events for more reliable detection.
     /// Falls back to blocking_snapshots if no XE data available.
     /// </summary>

@@ -78,4 +78,34 @@ public sealed class QueryStatsDeferredPlanCapTests
             Assert.Equal(1234, r.QueryPlanXmlBytes);
         });
     }
+
+    /* Row n ran n seconds after Created and has the given lifetime elapsed time. */
+    private static QueryStatsCollector.Row TimedRow(int n, long elapsed)
+    {
+        var row = RowFor(n);
+        row.LastExecutionTime = Created.AddSeconds(n);
+        row.TotalElapsedTime = elapsed;
+        return row;
+    }
+
+    [Fact]
+    public void InputOrderWins_WhenInIntervalRankRecencyAndLifetimeWeightDisagree()
+    {
+        var cap = QueryStatsCollector.MaxPlansPerRun;
+
+        /* #7344: input order is the in-interval elapsed rank SkipIdleAndRank computes. The first 200 rows are the top of
+           that rank, but they are the OLDEST by last_execution_time and the LIGHTEST by lifetime total (a plan that just
+           regressed: a big delta on a small, old counter). The last 100 are the newest and the heaviest by lifetime, but
+           low in the in-interval rank. A newest-and-heaviest split would take those last 100 and push out the regressed
+           plans; the deferred fetch must take the first 200 in input order. */
+        var rows = Enumerable.Range(0, cap + 100)
+            .Select(n => n < cap ? TimedRow(n, 1 + n) : TimedRow(n, 1_000_000_000L + n))
+            .ToList();
+
+        var misses = DarlingCollectorRunner.PartitionDeferredQueryStatsPlans(1, rows, new PlanDigestCache<QueryStatsPlanKey>(), Now);
+
+        Assert.Equal(cap, misses.Count);
+        Assert.Equal(rows.Take(cap).Select(r => r.PlanHandle), misses.Select(m => m.Row.PlanHandle));
+        Assert.DoesNotContain(misses, m => m.Row.TotalElapsedTime >= 1_000_000_000L);
+    }
 }

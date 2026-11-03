@@ -514,6 +514,14 @@ public static class CollectorScheduleDefaults
     public const int OnLoadRecaptureMinutes = 1440;
 
     /// <summary>
+    /// How far back the newest CPU reading may be and still count as current (#7196, #3267), in minutes. One value for
+    /// both SKUs: Darling's fleet card, Overview card, <c>get_server_summary</c> and PostgreSQL CPU alert read, and
+    /// Lite's Overview card and <c>get_server_summary</c>. A SQL Server reading is current when newer than the larger of
+    /// this and twice its collector's own interval, so a collector scheduled slower than this is not read as stopped.
+    /// </summary>
+    public const int CpuReadingFreshnessFloorMinutes = 15;
+
+    /// <summary>
     /// The one place "on-load" (frequency 0) becomes a concrete periodic interval (#3929/#3930):
     /// <paramref name="frequencyMinutes"/> itself, or <see cref="OnLoadRecaptureMinutes"/> when it resolved to
     /// 0. Both Darling's worker (the connect seed, the reload recompute, and the due-collector sweep) and

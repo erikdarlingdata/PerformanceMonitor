@@ -1647,9 +1647,7 @@ ORDER BY plan_id, runtime_stats_interval_id, execution_type_desc, replica_role, 
                 _textFetchFailures.AddOrUpdate(
                     carryKey,
                     1,
-                    static (_, current) => current >= QueryStorePlanXmlState.MaxBackoffHalvings
-                        ? QueryStorePlanXmlState.MaxBackoffHalvings
-                        : current + 1);
+                    static (_, current) => QueryStorePlanXmlState.NextFailureCount(current));
             }
             else
             {
@@ -1680,9 +1678,7 @@ ORDER BY plan_id, runtime_stats_interval_id, execution_type_desc, replica_role, 
             var failures = _textFetchFailures.AddOrUpdate(
                 carryKey,
                 1,
-                static (_, current) => current >= QueryStorePlanXmlState.MaxBackoffHalvings
-                    ? QueryStorePlanXmlState.MaxBackoffHalvings
-                    : current + 1);
+                static (_, current) => QueryStorePlanXmlState.NextFailureCount(current));
 
             /* #7187: the plan side's carry on a throw, for the same reason. */
             var droppedTexts = missing is not null && probeStamped

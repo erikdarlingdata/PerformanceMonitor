@@ -127,12 +127,14 @@ public static class QueryStorePlanXmlState
     /// <see cref="MaxBackoffHalvings"/>.
     /// </summary>
     public static PlanSizeEstimate RecordFetchFailure(PlanSizeEstimate previous) =>
-        previous with
-        {
-            ConsecutiveFetchFailures = previous.ConsecutiveFetchFailures >= MaxBackoffHalvings
-                ? MaxBackoffHalvings
-                : previous.ConsecutiveFetchFailures + 1,
-        };
+        previous with { ConsecutiveFetchFailures = NextFailureCount(previous.ConsecutiveFetchFailures) };
+
+    /// <summary>
+    /// The failure count after one more failed pass, saturating at <see cref="MaxBackoffHalvings"/> (#7222).
+    /// The plan estimate and the text fetch's per-database counter both advance by this one rule.
+    /// </summary>
+    public static int NextFailureCount(int current) =>
+        current >= MaxBackoffHalvings ? MaxBackoffHalvings : current + 1;
 
     /// <summary>
     /// Folds a pass that COMPLETED into the estimate (#2776): full width is restored immediately rather than

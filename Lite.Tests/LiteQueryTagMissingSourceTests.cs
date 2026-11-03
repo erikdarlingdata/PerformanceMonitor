@@ -61,7 +61,7 @@ public sealed class LiteQueryTagMissingSourceTests : IDisposable
         {
             await connection.OpenAsync(TestContext.Current.CancellationToken);
             using var cmd = connection.CreateCommand();
-            cmd.CommandText = "DROP VIEW IF EXISTS v_query_stats";
+            cmd.CommandText = "DROP VIEW IF EXISTS v_query_stats; DROP TABLE IF EXISTS query_stats";
             await cmd.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
         }
 
@@ -93,7 +93,7 @@ public sealed class LiteQueryTagMissingSourceTests : IDisposable
             await connection.OpenAsync(TestContext.Current.CancellationToken);
             foreach (var drop in new[]
             {
-                "DROP VIEW IF EXISTS v_query_stats", "DROP VIEW IF EXISTS v_query_store_stats", "DROP VIEW IF EXISTS v_procedure_stats",
+                "DROP VIEW IF EXISTS v_query_stats", "DROP TABLE IF EXISTS query_stats", "DROP VIEW IF EXISTS v_query_store_stats", "DROP TABLE IF EXISTS query_store_stats", "DROP VIEW IF EXISTS v_procedure_stats",
                 "DROP VIEW IF EXISTS v_dmv_blocking_snapshots", "DROP TABLE IF EXISTS blocked_process_reports", "DROP TABLE IF EXISTS deadlocks",
             })
             {

@@ -8,12 +8,14 @@
 
 using System;
 using System.IO;
+using System.Linq;
 using System.Reflection;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Notifications;
 using System.Text.Json;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitorLite.Analysis;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Mcp;
 using PerformanceMonitorLite.Models;
@@ -93,8 +95,10 @@ public sealed class OfflineServerEmptyAnswerToolTests : IClassFixture<SharedDuck
 
         Assert.Equal("unavailable", root.GetProperty("status").GetString());
         var message = root.GetProperty("message").GetString()!;
-        Assert.StartsWith("This server is offline: it has had no successful collection since ", message, StringComparison.Ordinal);
+        Assert.StartsWith(ServerName + " is offline: the store has had no successful collection from it since ", message, StringComparison.Ordinal);
         Assert.DoesNotContain("genuinely", message, StringComparison.Ordinal);
+        /* Darling's offline answer is the bare status and message, with no window keys (DarlingServerOfflineNote.OfflineInsteadOfEmpty). */
+        Assert.Equal(new[] { "message", "status" }, root.EnumerateObject().Select(p => p.Name).OrderBy(n => n, StringComparer.Ordinal));
     }
 
     [Theory]
@@ -152,14 +156,44 @@ public sealed class OfflineServerEmptyAnswerToolTests : IClassFixture<SharedDuck
         _serverManager.AddServer(server);
         var id = RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(server));
         await SeedCollectionLogAsync("wait_stats", DateTime.UtcNow.AddMinutes(-1), "ERROR", id, name);
-        var service = new LocalDataService(_duckDb) { RegisteredAtUtcLookup = serverId => ServerResolver.RegisteredAtUtc(_serverManager, serverId) };
+        var service = new LocalDataService(_duckDb);
+        ServerResolver.WireOfflineLookups(service, _serverManager);
 
         var root = JsonDocument.Parse(await McpBlockingTools.GetDeadlocks(service, _serverManager, name, 4)).RootElement;
 
         Assert.Equal(expected, root.GetProperty("status").GetString());
         if (expected == "unavailable")
         {
-            Assert.StartsWith("This server is offline: the store holds no successful collection from it", root.GetProperty("message").GetString(), StringComparison.Ordinal);
+            Assert.StartsWith(name + " is offline: the store holds no successful collection from it", root.GetProperty("message").GetString(), StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// The analysis reads run their window probe on a <see cref="LocalDataService"/> of their own, not the host's. The same 400-day-old server
+    /// with only failed runs must answer <c>unavailable</c> there too, as Darling's <c>get_analysis_findings</c> does, and one added minutes ago
+    /// keeps <c>empty</c>.
+    /// </summary>
+    [Theory]
+    [InlineData(-400, "unavailable")]
+    [InlineData(-0.01, "empty")]
+    public async Task AnalysisFindings_ForAServerThatNeverSucceeded_AreOfflineOnlyWhenAddedBeforeTheRetentionHorizon(double addedDaysAgo, string expected)
+    {
+        var name = "OfflineAnalysis" + Guid.NewGuid().ToString("N")[..6];
+        var server = new ServerConnection
+        {
+            Id = Guid.NewGuid().ToString(), ServerName = name, IsEnabled = true, CreatedDate = DateTime.Now.AddDays(addedDaysAgo),
+        };
+        _serverManager.AddServer(server);
+        var id = RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(server));
+        await SeedCollectionLogAsync("wait_stats", DateTime.UtcNow.AddMinutes(-1), "ERROR", id, name);
+
+        var root = JsonDocument.Parse(await McpAnalysisTools.GetAnalysisFindings(
+            new AnalysisService(_duckDb) { MinimumDataHours = 0 }, _serverManager, name, 4)).RootElement;
+
+        Assert.Equal(expected, root.GetProperty("status").GetString());
+        if (expected == "unavailable")
+        {
+            Assert.StartsWith(name + " is offline: the store holds no successful collection from it", root.GetProperty("message").GetString(), StringComparison.Ordinal);
         }
     }
 
@@ -176,11 +210,14 @@ public sealed class OfflineServerEmptyAnswerToolTests : IClassFixture<SharedDuck
 
         Assert.NotNull(service.RegisteredAtUtcLookup!(_serverId));
         Assert.Null(service.RegisteredAtUtcLookup(-1));
+        Assert.Equal(ServerName, service.ServerDisplayNameLookup!(_serverId));
+        Assert.Null(service.ServerDisplayNameLookup(-1));
     }
 
     private async Task<string> ReadAsync(string family)
     {
         var service = new LocalDataService(_duckDb);
+        ServerResolver.WireOfflineLookups(service, _serverManager);
         return family switch
         {
             "memory_trend" => await McpMemoryTools.GetMemoryTrend(service, _serverManager, ServerName, 4),

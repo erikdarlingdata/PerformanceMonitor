@@ -36,7 +36,16 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 internal static class DarlingServerOfflineNote
 {
     /// <summary>The <c>list_servers</c> probe for one server: its registration instant and its newest non-cycle collection-log row, whatever its status.</summary>
-    internal static readonly string FreshnessSql = $"""
+    internal static readonly string FreshnessSql = BuildFreshnessSql(statusPredicate: "");
+
+    /// <summary>
+    /// #7167: <see cref="FreshnessSql"/> narrowed to the newest SUCCESS run (<c>status = 'SUCCESS'</c>, the status Collection Health counts
+    /// as a run that reached the server), so a server that logs only failed runs still reads as silent. Lite's rule.
+    /// </summary>
+    internal static readonly string SuccessFreshnessSql = BuildFreshnessSql(statusPredicate: "AND   cl.status = 'SUCCESS'");
+
+    /// <summary>The one probe both rules read, with <paramref name="statusPredicate"/> (empty for any row) closing the inner filter.</summary>
+    private static string BuildFreshnessSql(string statusPredicate) => $"""
         SELECT
             s.created_date,
             latest.collection_time AS last_collection
@@ -47,18 +56,12 @@ internal static class DarlingServerOfflineNote
             FROM v_collection_log cl
             WHERE cl.server_id = s.server_id
             AND   {CollectionCycleRow.NotCycleRowSql}
+            {statusPredicate}
             ORDER BY cl.collection_time DESC
             LIMIT 1
         ) AS latest ON TRUE
         WHERE s.server_id = $1
         """;
-
-    /// <summary>
-    /// #7167: <see cref="FreshnessSql"/> narrowed to the newest SUCCESS run (<c>status = 'SUCCESS'</c>, the status Collection Health counts
-    /// as a run that reached the server), so a server that logs only failed runs still reads as silent. Lite's rule.
-    /// </summary>
-    internal static readonly string SuccessFreshnessSql = FreshnessSql.Replace(
-        $"AND   {CollectionCycleRow.NotCycleRowSql}", $"AND   {CollectionCycleRow.NotCycleRowSql}\n            AND   cl.status = 'SUCCESS'", StringComparison.Ordinal);
 
     /// <summary>
     /// The sentence that opens an <c>unavailable</c> answer for a server that is offline by the SUCCESS-run rule, or null

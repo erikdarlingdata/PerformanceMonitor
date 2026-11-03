@@ -26,6 +26,28 @@ public partial class LocalDataService
         return Convert.ToBoolean(await probe.ExecuteScalarAsync());
     }
 
+    /// <summary>#7216: the relation that answers "the newest server_properties row that carries a utc_offset_minutes". Archival moves
+    /// only OLDER rows out, so when the hot table holds a non-NULL offset for the server, the newest such row is in it and the view
+    /// need not be read. Otherwise (a pre-v42 store whose rows predate the column, or a server whose rows are all archived) the view
+    /// answers, as before. A bare hot-row probe would not decide this: a hot row with a NULL offset says nothing about the archive.</summary>
+    internal static string ServerPropertiesWithOffsetRelation(bool hotHasOffset) => hotHasOffset ? "server_properties" : "v_server_properties";
+
+    private static Task<string> ServerPropertiesWithOffsetRelationAsync(LockedConnection connection, int serverId)
+        => ServerPropertiesWithOffsetRelationAsync(connection.CreateCommand(), serverId);
+
+    internal static Task<string> ServerPropertiesWithOffsetRelationAsync(DuckDBConnection connection, int serverId)
+        => ServerPropertiesWithOffsetRelationAsync(connection.CreateCommand(), serverId);
+
+    private static async Task<string> ServerPropertiesWithOffsetRelationAsync(DuckDBCommand probe, int serverId)
+    {
+        using (probe)
+        {
+            probe.CommandText = "SELECT EXISTS (SELECT 1 FROM server_properties WHERE server_id = $1 AND utc_offset_minutes IS NOT NULL)";
+            probe.Parameters.Add(new DuckDBParameter { Value = serverId });
+            return ServerPropertiesWithOffsetRelation(Convert.ToBoolean(await probe.ExecuteScalarAsync()));
+        }
+    }
+
     /// <summary>
     /// Computes utilization efficiency from cpu_utilization_stats + memory_stats (last 24 hours).
     /// </summary>

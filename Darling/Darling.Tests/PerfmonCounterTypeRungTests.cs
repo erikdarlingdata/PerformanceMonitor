@@ -231,7 +231,7 @@ public sealed class PerfmonCounterTypeRungTests
 
         var latest = DarlingDataReader.LatestPerfmonStatsSql.Replace("\r\n", "\n", StringComparison.Ordinal);
         Assert.Contains("collection_time,\n    cntr_type,\n    sample_interval_seconds\nFROM v_perfmon_stats", latest, StringComparison.Ordinal);
-        Assert.Contains("collection_time,\n    cntr_type,\n    sample_interval_seconds\nFROM v_perfmon_stats", lite.Replace("\r\n", "\n", StringComparison.Ordinal), StringComparison.Ordinal);
+        Assert.Contains("collection_time,\n    cntr_type,\n    sample_interval_seconds\nFROM {perfmonRelation}", lite.Replace("\r\n", "\n", StringComparison.Ordinal), StringComparison.Ordinal);
 
         /* #4476: both the MCP and the Viewer twins' per-collection SUMs exclude a Wait Statistics isolated
            single-sample artifact — FILTER (WHERE NOT is_artifact) — while the MAX interval and the MIN=MAX

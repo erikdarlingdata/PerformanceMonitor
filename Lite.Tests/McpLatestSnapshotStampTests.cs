@@ -259,7 +259,10 @@ VALUES ($1, $2, $3, $4, 'AppDb', 'MAXDOP', '4', NULL)", _nextId--, Naive(connect
     public async Task GetServerSummary_NamesThreeClocks_SoAStaleCpuRowCannotHideUnderAFreshLog()
     {
         var (@base, _) = Past();
-        var cpuAt = @base.AddDays(-1);
+        /* #7196: the CPU row is minutes old (a stale one now shows no figure), and the memory row and the log are
+           long past it, so the three stamps still differ. */
+        var nowUtc = DateTime.UtcNow;
+        var cpuAt = new DateTime(nowUtc.Ticks - (nowUtc.Ticks % TimeSpan.TicksPerSecond), DateTimeKind.Utc).AddMinutes(-10);
         await ExecAsync(@"
 INSERT INTO cpu_utilization_stats (collection_id, collection_time, server_id, server_name, sample_time, sqlserver_cpu_utilization, other_process_cpu_utilization)
 VALUES ($1, $2, $3, $4, $2, 42, 3)", _nextId--, Naive(cpuAt), _serverId, ServerName);

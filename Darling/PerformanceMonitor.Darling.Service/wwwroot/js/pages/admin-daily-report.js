@@ -9,16 +9,7 @@
    A signed-in admin sees the form, anyone else sees the saved values as rows. Self-contained: admin.js hands this file its
    helpers, the way admin-agent-setup.js gets them. */
 
-import { el, readTool, apiWrite } from "../util.js";
-
-/** The browser's IANA zone ("America/New_York"), or "" when the browser does not say. */
-export function browserTimeZone() {
-  try {
-    return Intl.DateTimeFormat().resolvedOptions().timeZone || "";
-  } catch {
-    return "";
-  }
-}
+import { el, readTool, apiWrite, browserZoneOrBlank } from "../util.js";
 
 /** The PUT body from the form's values. A blank time zone or title is sent as null, which clears the saved value (a blank zone
     means the service host's zone, a blank title means "Daily Health Report"). */
@@ -73,7 +64,7 @@ export function dailyReportEditor(group, repaint) {
   });
   /* A report that is off and has no zone yet starts at the browser's zone, since the person setting it up is most likely in the
      zone they want the report in. A saved zone, or a saved blank on a report that is already on, is left as it is. */
-  zone.value = typeof g.time_zone === "string" ? g.time_zone : (g.enabled === true ? "" : browserTimeZone());
+  zone.value = typeof g.time_zone === "string" ? g.time_zone : (g.enabled === true ? "" : browserZoneOrBlank());
   const title = el("input", {
     type: "text", class: "tag-input", "data-field": "daily-report-title", maxlength: "100",
     placeholder: "Daily Health Report",
