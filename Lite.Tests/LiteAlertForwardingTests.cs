@@ -1441,4 +1441,53 @@ public partial class LiteAlertForwardingTests : IDisposable
             try { Directory.Delete(tempDir, recursive: true); } catch { /* best-effort */ }
         }
     }
+
+    [Fact]
+    public async Task StateStore_AWatermarkTableThatCannotBeRead_Throws_NotNull()
+    {
+        /* #7295: null means "read, and no row". A database with no watermark table cannot be read, and the engine must be able to
+           tell that from an empty store, or it marks the server seeded at 0 and pages again what a page already carried. */
+        var tempDir = Path.Combine(Path.GetTempPath(), "LiteFwdTests_" + Guid.NewGuid().ToString("N")[..8]);
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            using var duckDb = new DuckDbInitializer(Path.Combine(tempDir, "uninitialized.duckdb"));
+            IAlertStateStore store = new LiteAlertStateStore(new DuckDbAlertHistoryStore(duckDb));
+
+            await Assert.ThrowsAnyAsync<Exception>(() => store.LoadEdgeTriggerWatermarkAsync("101", AlertEngine.BlockingWatermarkMetric));
+        }
+        finally
+        {
+            try { Directory.Delete(tempDir, recursive: true); } catch { /* best-effort */ }
+        }
+    }
+
+    [Fact]
+    public async Task StateStore_FailedJobAndPersistenceLoads_ThrowOnAnUnreadableStore_AndAnswerNullOnAnEmptyOne()
+    {
+        /* #7295: the failed-job watermark and the persistence record used to answer null for a failed read too, so the engine took
+           an unreadable store for an empty one. Positive control first: an initialized store with no row answers null. */
+        var tempDir = Path.Combine(Path.GetTempPath(), "LiteFwdTests_" + Guid.NewGuid().ToString("N")[..8]);
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            using (var readable = new DuckDbInitializer(Path.Combine(tempDir, "test.duckdb")))
+            {
+                await readable.InitializeFromTemplateAsync();
+                IAlertStateStore empty = new LiteAlertStateStore(new DuckDbAlertHistoryStore(readable));
+                Assert.Null(await empty.LoadFailedJobWatermarkAsync("101"));
+                Assert.Null(await empty.LoadAlertPersistenceAsync("101", AlertEngine.CpuPersistenceMetric));
+            }
+
+            using var duckDb = new DuckDbInitializer(Path.Combine(tempDir, "uninitialized.duckdb"));
+            IAlertStateStore store = new LiteAlertStateStore(new DuckDbAlertHistoryStore(duckDb));
+
+            await Assert.ThrowsAnyAsync<Exception>(() => store.LoadFailedJobWatermarkAsync("101"));
+            await Assert.ThrowsAnyAsync<Exception>(() => store.LoadAlertPersistenceAsync("101", AlertEngine.CpuPersistenceMetric));
+        }
+        finally
+        {
+            try { Directory.Delete(tempDir, recursive: true); } catch { /* best-effort */ }
+        }
+    }
 }

@@ -43,33 +43,31 @@ public sealed class PgAlertStateStore : IAlertStateStore
         _logger = logger;
     }
 
+    /// <summary>
+    /// The saved count watermark, or null when the store was read and has no row (#7295). A store that cannot be read throws,
+    /// and the caller logs it: null for both meant a failed read was taken for an empty store, the server was marked seeded,
+    /// and counts a page had already carried were paged again once the cooldown ran out. Unlike the pairs read next to it,
+    /// which answers null for a failure, nothing here may be read as "no saved watermark" by mistake.
+    /// </summary>
     public async Task<int?> LoadEdgeTriggerWatermarkAsync(string serverKey, string metricName)
     {
-        try
-        {
-            await using var connection = await _postgres.OpenConnectionAsync();
-            using var command = new NpgsqlCommand(@"
+        await using var connection = await _postgres.OpenConnectionAsync();
+        using var command = new NpgsqlCommand(@"
 SELECT watermark
 FROM config_edge_trigger_watermarks
 WHERE server_id = $1
 AND   metric_name = $2
 AND   watermark_time IS NULL", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
-            command.Parameters.AddWithValue(ParseServerKey(serverKey));
-            command.Parameters.AddWithValue(metricName);
+        command.Parameters.AddWithValue(ParseServerKey(serverKey));
+        command.Parameters.AddWithValue(metricName);
 
-            var result = await command.ExecuteScalarAsync();
-            if (result == null || result == DBNull.Value)
-            {
-                return null;
-            }
-
-            return Convert.ToInt32(result, CultureInfo.InvariantCulture);
-        }
-        catch (Exception ex)
+        var result = await command.ExecuteScalarAsync();
+        if (result == null || result == DBNull.Value)
         {
-            _logger?.LogError("Could not load edge-trigger watermark ({Metric}): {Message}", metricName, ex.Message);
             return null;
         }
+
+        return Convert.ToInt32(result, CultureInfo.InvariantCulture);
     }
 
     public async Task SaveEdgeTriggerWatermarkAsync(string serverKey, string metricName, int watermark)
@@ -99,35 +97,139 @@ ON CONFLICT (server_id, metric_name) DO UPDATE SET
         }
     }
 
-    public async Task<DateTime?> LoadFailedJobWatermarkAsync(string serverKey)
+    /// <summary>
+    /// #7295: the metric_name prefix of the rows that hold the PostgreSQL deadlock statement pairs that were new when counted
+    /// and have not been announced by a page yet. One row per pair in <c>config_edge_trigger_watermarks</c> (the pair key is
+    /// <c>pg:</c> and 16 hex digits), <c>watermark</c> 1 and <c>watermark_time</c> NULL. A prefixed name never equals an
+    /// exact metric name, so <see cref="LoadEdgeTriggerWatermarkAsync"/> cannot read one. No new table: the set is deleted
+    /// whole when a page carries it, and a pair leaves it when its reports leave the hour (<see cref="ReplaceUnannouncedPairsAsync"/>).
+    /// <para>This departs from the V60 remark in <c>PgMigrations</c>, which rejected a compound key carried in
+    /// <c>metric_name</c> because the column "feeds alert history and mute matching". Nothing reads these rows as a metric.
+    /// The only C# reader of this table is this class, and its exact-name read (<see cref="LoadEdgeTriggerWatermarkAsync"/>)
+    /// cannot match a prefixed name. The stored value is a <c>pg:</c> hash with 16 hex digits, so the name holds no query text
+    /// or other sensitive text for a reader of the table to see.</para>
+    /// </summary>
+    internal const string UnannouncedPairMetricPrefix = "Deadlocks Detected new pair: ";
+
+    /// <summary>The pairs recorded as new and not yet announced for the server, or null when the store could not be read.</summary>
+    public async Task<IReadOnlyList<string>?> LoadUnannouncedPairsAsync(string serverKey)
     {
         try
         {
             await using var connection = await _postgres.OpenConnectionAsync();
             using var command = new NpgsqlCommand(@"
+SELECT metric_name
+FROM config_edge_trigger_watermarks
+WHERE server_id = $1
+AND   starts_with(metric_name, $2)
+AND   watermark_time IS NULL", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
+            command.Parameters.AddWithValue(ParseServerKey(serverKey));
+            command.Parameters.AddWithValue(UnannouncedPairMetricPrefix);
+
+            var pairs = new List<string>();
+            await using var reader = await command.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                pairs.Add(reader.GetString(0)[UnannouncedPairMetricPrefix.Length..]);
+            }
+
+            return pairs;
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError("Could not load the unannounced deadlock pairs: {Message}", ex.Message);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Makes the stored set of unannounced pairs exactly <paramref name="pairs"/> (#7295, #7188): a pair that is not in it any
+    /// more, because its reports left the hour, is forgotten, and an empty set clears them all. Without that, a restart would
+    /// put a dropped pair back and lower the count watermark for a pair nothing can announce. The new rows are written first,
+    /// so a stop between the two statements can leave an extra pair but never lose a waiting one.
+    /// </summary>
+    public async Task ReplaceUnannouncedPairsAsync(string serverKey, IReadOnlyCollection<string> pairs)
+    {
+        try
+        {
+            await using var connection = await _postgres.OpenConnectionAsync();
+            var names = new List<string>(pairs.Count);
+            foreach (var pair in pairs)
+            {
+                var name = UnannouncedPairMetricPrefix + pair;
+                names.Add(name);
+                using var command = new NpgsqlCommand(@"
+INSERT INTO config_edge_trigger_watermarks (server_id, metric_name, watermark, watermark_time, updated_at)
+VALUES ($1, $2, 1, NULL, $3)
+ON CONFLICT (server_id, metric_name) DO UPDATE SET updated_at = EXCLUDED.updated_at",
+                    connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
+                command.Parameters.AddWithValue(ParseServerKey(serverKey));
+                command.Parameters.AddWithValue(name);
+                command.Parameters.AddWithValue(NaiveUtcNow());
+                await command.ExecuteNonQueryAsync();
+            }
+
+            using var forget = new NpgsqlCommand(@"
+DELETE FROM config_edge_trigger_watermarks
+WHERE server_id = $1
+AND   starts_with(metric_name, $2)
+AND   metric_name <> ALL($3)", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
+            forget.Parameters.AddWithValue(ParseServerKey(serverKey));
+            forget.Parameters.AddWithValue(UnannouncedPairMetricPrefix);
+            forget.Parameters.AddWithValue(names.ToArray());
+            await forget.ExecuteNonQueryAsync();
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError("Could not persist the unannounced deadlock pairs: {Message}", ex.Message);
+        }
+    }
+
+    /// <summary>Forgets every unannounced pair of the server, once a page has carried them.</summary>
+    public async Task ClearUnannouncedPairsAsync(string serverKey)
+    {
+        try
+        {
+            await using var connection = await _postgres.OpenConnectionAsync();
+            using var command = new NpgsqlCommand(@"
+DELETE FROM config_edge_trigger_watermarks
+WHERE server_id = $1
+AND   starts_with(metric_name, $2)", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
+            command.Parameters.AddWithValue(ParseServerKey(serverKey));
+            command.Parameters.AddWithValue(UnannouncedPairMetricPrefix);
+            await command.ExecuteNonQueryAsync();
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError("Could not clear the unannounced deadlock pairs: {Message}", ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// The saved failed-job watermark, or null when the store was read and has no row (#7295). A store that cannot be read throws, and
+    /// the caller logs it: null for both left the watermark empty after a restart, and jobs a page had already carried were paged again.
+    /// </summary>
+    public async Task<DateTime?> LoadFailedJobWatermarkAsync(string serverKey)
+    {
+        await using var connection = await _postgres.OpenConnectionAsync();
+        using var command = new NpgsqlCommand(@"
 SELECT watermark_time
 FROM config_edge_trigger_watermarks
 WHERE server_id = $1
 AND   metric_name = $2
 AND   watermark_time IS NOT NULL", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
-            command.Parameters.AddWithValue(ParseServerKey(serverKey));
-            command.Parameters.AddWithValue(FailedJobWatermarkMetric);
+        command.Parameters.AddWithValue(ParseServerKey(serverKey));
+        command.Parameters.AddWithValue(FailedJobWatermarkMetric);
 
-            var result = await command.ExecuteScalarAsync();
-            if (result == null || result == DBNull.Value)
-            {
-                return null;
-            }
-
-            /* Returned in its native server-local basis — NEVER coerced to UTC (the
-               IAlertStateStore contract; it compares against FailedJobInfo.RunDateTime). */
-            return Convert.ToDateTime(result, CultureInfo.InvariantCulture);
-        }
-        catch (Exception ex)
+        var result = await command.ExecuteScalarAsync();
+        if (result == null || result == DBNull.Value)
         {
-            _logger?.LogError("Could not load failed-job watermark: {Message}", ex.Message);
             return null;
         }
+
+        /* Returned in its native server-local basis — NEVER coerced to UTC (the
+           IAlertStateStore contract; it compares against FailedJobInfo.RunDateTime). */
+        return Convert.ToDateTime(result, CultureInfo.InvariantCulture);
     }
 
     public async Task SaveFailedJobWatermarkAsync(string serverKey, DateTime watermark)
@@ -384,44 +486,35 @@ ON CONFLICT (server_id, metric_name, dedup_key) DO UPDATE SET
     /// #3282: loads one subject's built-in persistence-gate record from the V118
     /// <c>config.alert_persistence_state</c> table.
     ///
-    /// <para>Returns null on failure, which the engine reads as "no memory" and arms the gate from zero —
-    /// the same degradation a host with no persistence at all gets. Crucially that is a DELAY (the streak
-    /// rebuilds over the next few samples), never a re-announcement: a load failure cannot resurrect a
-    /// <c>firing</c> bit it did not read, so the worst outcome is one extra fire after the gate refills.</para>
+    /// <para>Returns null when the store was read and has no row, which the engine reads as "no memory" and arms the gate from zero.
+    /// #7295: a store that cannot be read throws, and the caller logs it. Null for both lost an open incident's <c>firing</c> bit and
+    /// its streak, so the gate refilled from zero, announced the incident again, and a page that was due came late.</para>
     /// </summary>
     public async Task<AlertPersistenceRecord?> LoadAlertPersistenceAsync(string serverKey, string metricName)
     {
-        try
-        {
-            await using var connection = await _postgres.OpenConnectionAsync();
-            using var command = new NpgsqlCommand(@"
+        await using var connection = await _postgres.OpenConnectionAsync();
+        using var command = new NpgsqlCommand(@"
 SELECT consecutive_breaches, consecutive_clears, firing, last_observed_sample_at
 FROM config.alert_persistence_state
 WHERE server_id = $1
 AND   metric_name = $2", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
-            command.Parameters.AddWithValue(ParseServerKey(serverKey));
-            command.Parameters.AddWithValue(metricName);
+        command.Parameters.AddWithValue(ParseServerKey(serverKey));
+        command.Parameters.AddWithValue(metricName);
 
-            await using var reader = await command.ExecuteReaderAsync();
-            if (!await reader.ReadAsync())
-            {
-                return null;
-            }
-
-            /* The sample instant comes back Kind=Unspecified from a `timestamp` column and is naive UTC by
-               the store-wide convention. Deliberately NOT coerced to Kind=Utc: it is only ever COMPARED
-               against the sample instant the alert pass read out of the same store, on the same convention,
-               and a ToUniversalTime() here would shift it by the host's offset — which on a host east of UTC
-               would make every incoming sample look OLDER than the stored one and freeze the gate forever. */
-            return new AlertPersistenceRecord(
-                new PersistenceState(reader.GetInt32(0), reader.GetInt32(1), reader.GetBoolean(2)),
-                reader.IsDBNull(3) ? null : reader.GetDateTime(3));
-        }
-        catch (Exception ex)
+        await using var reader = await command.ExecuteReaderAsync();
+        if (!await reader.ReadAsync())
         {
-            _logger?.LogError("Could not load the alert persistence gate ({Metric}): {Message}", metricName, ex.Message);
             return null;
         }
+
+        /* The sample instant comes back Kind=Unspecified from a `timestamp` column and is naive UTC by
+           the store-wide convention. Deliberately NOT coerced to Kind=Utc: it is only ever COMPARED
+           against the sample instant the alert pass read out of the same store, on the same convention,
+           and a ToUniversalTime() here would shift it by the host's offset — which on a host east of UTC
+           would make every incoming sample look OLDER than the stored one and freeze the gate forever. */
+        return new AlertPersistenceRecord(
+            new PersistenceState(reader.GetInt32(0), reader.GetInt32(1), reader.GetBoolean(2)),
+            reader.IsDBNull(3) ? null : reader.GetDateTime(3));
     }
 
     /// <summary>

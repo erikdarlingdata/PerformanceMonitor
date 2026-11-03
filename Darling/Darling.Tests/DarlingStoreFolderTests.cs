@@ -2326,7 +2326,7 @@ public sealed class DarlingStoreContentsGateTests
     public void TheGate_RunsOnceInEnsureRunning_BeforeInitdbAndBeforeAnyServerStart()
     {
         var source = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingManagedPostgres.cs");
-        var harden = source.IndexOf("var storeFolderLocked = TryHardenDirectory(storeFolder, viaLink);", StringComparison.Ordinal);
+        var harden = source.IndexOf("var storeFolderLocked = LockStoreFolder(storeFolder, viaLink, _dataDirectory, _logger, TryHardenDirectory);", StringComparison.Ordinal);
         var gate = source.IndexOf("RefuseUntrustedStoreContents(storeLink);", StringComparison.Ordinal);
         var existing = source.IndexOf("var existingCluster = File.Exists(", StringComparison.Ordinal);
         var initdb = source.IndexOf("await InitializeClusterAsync(binDirectory, cancellationToken);", StringComparison.Ordinal);

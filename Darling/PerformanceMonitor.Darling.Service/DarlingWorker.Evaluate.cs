@@ -648,10 +648,17 @@ public sealed partial class DarlingWorker
                The metric name is the shared AlertEngine.CpuPersistenceMetric ("High CPU"), the same string
                the mute context and the history row use, so this row is the same subject an operator sees in
                config_alert_log. server_id never collides across engines, so one table serves both. */
-            if (_pgCpuPersistenceSeeded.TryAdd(key, true))
+            if (!_pgCpuPersistenceSeeded.ContainsKey(key))
             {
-                var seeded = await stateStore.LoadAlertPersistenceAsync(key, metricName);
+                /* #7295: the key is marked seeded only after the load worked (a row or no row). A load that cannot read the store
+                   throws into the catch below, which counts it: this pass evaluates nothing from an empty record that an open
+                   incident's saved one would have replaced, and the next pass loads it again. The third failed read in a row seeds an
+                   empty record instead (SeedLoadCap), so a state table that stays unreadable cannot hold this alert back for good. */
+                var seeded = await _seedLoadCap.LoadOrSeedEmptyAsync(
+                    () => stateStore.LoadAlertPersistenceAsync(key, metricName),
+                    _logger, nameof(PgAlertStateStore), key, "CPU persistence record", "PostgreSQL CPU persistence seed");
                 readClock.Restart();
+                _pgCpuPersistenceSeeded[key] = true;
                 if (seeded.HasValue)
                 {
                     _pgCpuPersistence[key] = seeded.Value;
@@ -1040,14 +1047,43 @@ public sealed partial class DarlingWorker
                AlertEngine's own SQL Server "Deadlocks Detected" twin reads/writes — the parity metric
                name #2711 deliberately chose means no new column or row shape is needed, only a read
                before trusting an in-memory zero. Once per key, mirroring AlertEngine's
-               EnsureWatermarksSeededAsync/_seededServerKeys. */
-            if (_pgDeadlockWatermarkSeeded.TryAdd(key, true))
+               EnsureWatermarksSeededAsync/_seededSteps. */
+            /* #7295: the watermark half of the seed is done only when its load worked, a row or no row. A load that fails throws
+               into the catch below: this pass counts and pages nothing from a watermark of 0 that a page may already have been
+               carried past, and the next pass loads it again. Nothing in memory has moved by then, so the load is still the first one.
+               The pairs half is done only when the read returned a list. A failed read is tried again on the next sweep, and until
+               it succeeds the replace hook writes nothing (below), so the stored pairs a restart should have found are not
+               overwritten by a set that never loaded them. The pairs half never skips a pass, so it has no cap. The watermark half
+               does skip, so its third failed read in a row seeds it empty (SeedLoadCap) and the pass carries on, and a state table that
+               stays unreadable cannot hold deadlock pages back for good. */
+            var watermarkSeeded = _pgDeadlockWatermarkSeeded.ContainsKey(key);
+            if (!watermarkSeeded || !_pgDeadlockPairsSeeded.ContainsKey(key))
             {
-                var seeded = await stateStore.LoadEdgeTriggerWatermarkAsync(key, metricName);
+                var seeded = await SeedPgDeadlockStateAsync(
+                    stateStore, key, metricName,
+                    _pgDeadlockUnannouncedNew.GetOrAdd(key, _ => new HashSet<string>(StringComparer.Ordinal)),
+                    waiting =>
+                    {
+                        var restored = _pgDeadlockRestoredForGate.GetOrAdd(key, _ => new HashSet<string>(StringComparer.Ordinal));
+                        lock (restored)
+                        {
+                            restored.UnionWith(waiting);
+                        }
+                    },
+                    loadWatermark: !watermarkSeeded,
+                    seedWatermarkEmptyAfterFailure: ex => _seedLoadCap.RecordFailedLoad(
+                        _logger, nameof(PgAlertStateStore), key, "deadlock count watermark", ex,
+                        "PostgreSQL deadlock watermark seed", readClock.ElapsedMilliseconds));
                 readClock.Restart();
-                if (seeded.HasValue)
+                _pgDeadlockWatermarkSeeded.TryAdd(key, true);
+                if (seeded.PairsRead)
                 {
-                    _lastAlertedPgDeadlockCount[key] = seeded.Value;
+                    _pgDeadlockPairsSeeded.TryAdd(key, true);
+                }
+
+                if (seeded.Watermark.HasValue)
+                {
+                    _lastAlertedPgDeadlockCount[key] = seeded.Watermark.Value;
                 }
             }
 
@@ -1081,6 +1117,15 @@ public sealed partial class DarlingWorker
             var patterns = await CountPgDeadlockPatternsAsync(key, runtime.ServerId, rows, now, cancellationToken);
             readClock.Restart();
             var pageWorthy = PgDeadlockPagesNow(count, patterns.NewKeys.Count, patterns.StoreOk);
+
+            /* #7295: a restored pair whose page never went out is paged by running the gate from 0, because the watermark in
+               memory or in the saved row may already sit at this count. That is true only of a pair this count kept. A restored
+               pair that left the hour is dropped, no page is owed for it, and lowering the watermark for it would page the hour's
+               reports again, those a page already carried, once the cooldown ran out. The watermark stays where the seed found it. */
+            if (patterns.RestoredPairKept)
+            {
+                watermark = 0;
+            }
 
             /* A hold does not use the page cooldown (it never stamps it), so it is decided with the cooldown open: every
                new report of a known pair writes its own held row, even right after a page. */
@@ -1193,6 +1238,15 @@ public sealed partial class DarlingWorker
                 {
                     /* The pairs this page carried are announced; a failed send keeps them for the retry sweep. */
                     _pgDeadlockUnannouncedNew.TryRemove(key, out _);
+                    /* #7295: the saved row is cleared only once the stored pairs have been read into memory. While the seed read is
+                       still failing, a fresh pair can page, and clearing then would delete a restart's saved pair that the retry has
+                       not yet loaded, so its page would be lost. The replace hook holds back the same way. */
+                    if (_pgDeadlockPairsSeeded.ContainsKey(key))
+                    {
+                        await stateStore.ClearUnannouncedPairsAsync(key);
+                    }
+
+                    readClock.Restart();
                 }
 
                 if (AfterPgFire(metricName, _lastPgDeadlockAlert, key, now, cooldown, delivery))
@@ -1250,6 +1304,10 @@ public sealed partial class DarlingWorker
 
         public bool StoreOk { get; init; } = true;
 
+        /// <summary>True when a pair the seed put back (<c>restoredForGate</c>) is still waiting after this count dropped the
+        /// pairs whose reports left the hour. Only then does the watermark go to 0 so that the gate fires for it (#7295).</summary>
+        public bool RestoredPairKept { get; init; }
+
         public PgDeadlockSignature.Key? KeyOf(DarlingPgDeadlockReader.PgDeadlockRow row) =>
             ByReport.TryGetValue(row.DeadlockHash, out var key) ? key : null;
     }
@@ -1258,7 +1316,8 @@ public sealed partial class DarlingWorker
     /// Counts the reports of this sweep that were not counted yet into the 30-day signature store under their
     /// <c>pg:</c> pattern key (#7082), and answers every report's key plus the pairs that are new and not yet announced by
     /// a page. A report is counted once for the life of the process (a restart re-counts the hour's reports, which adds to
-    /// counts but cannot make a known pair new). A store failure leaves the reports uncounted for the next sweep and
+    /// counts but cannot make a known pair new, so the pairs still waiting for their page are saved (and forgotten when dropped) and put back at start by
+    /// <see cref="SeedPgDeadlockStateAsync"/>, #7295). A store failure leaves the reports uncounted for the next sweep and
     /// answers <c>StoreOk = false</c>, which pages.
     /// </summary>
     private Task<PgDeadlockPatterns> CountPgDeadlockPatternsAsync(
@@ -1269,7 +1328,12 @@ public sealed partial class DarlingWorker
             _pgDeadlockCounted.GetOrAdd(serverKey, _ => new Dictionary<string, DateTime>(StringComparer.Ordinal)),
             _pgDeadlockUnannouncedNew.GetOrAdd(serverKey, _ => new HashSet<string>(StringComparer.Ordinal)),
             fresh => _deadlockRollup?.NoteNewSignatures(serverKey, fresh),
-            _logger, serverKey, serverId, rows, now, cancellationToken);
+            _logger, serverKey, serverId, rows, now,
+            (waiting, _) => _pgDeadlockPairsSeeded.ContainsKey(serverKey)
+                ? new PgAlertStateStore(_postgres!, _logger).ReplaceUnannouncedPairsAsync(serverKey, waiting)
+                : Task.CompletedTask,
+            cancellationToken,
+            _pgDeadlockRestoredForGate.GetOrAdd(serverKey, _ => new HashSet<string>(StringComparer.Ordinal)));
 
     /// <summary>
     /// The counting itself, with its state handed in so it runs against a real signature store without a worker. The
@@ -1277,11 +1341,109 @@ public sealed partial class DarlingWorker
     /// whether a delivered page opens an investigation request reads the same store, and the PostgreSQL path writes
     /// <c>pg:</c> rows into it, so a first-ever pair would otherwise look like a repeat to the gate and lose its request.
     /// </summary>
+    internal static Task<PgDeadlockPatterns> CountPgDeadlockPatternsAsync(
+        DeadlockSignatureStore store, Dictionary<string, DateTime> counted, HashSet<string> unannounced,
+        Action<IReadOnlyCollection<string>>? noteNewForAgentGate, ILogger logger,
+        string serverKey, int serverId, IReadOnlyList<DarlingPgDeadlockReader.PgDeadlockRow> rows, DateTime now,
+        CancellationToken cancellationToken) =>
+        CountPgDeadlockPatternsAsync(
+            store, counted, unannounced, noteNewForAgentGate, logger, serverKey, serverId, rows, now,
+            persistUnannounced: null, cancellationToken);
+
+    /// <summary>What the seed found: the saved count watermark (null leaves the one in memory as it is, because no row is saved or because it was not asked for), and whether the pairs read worked.</summary>
+    internal readonly record struct PgDeadlockSeed(int? Watermark, bool PairsRead);
+
+    /// <summary>
+    /// Loads what a restart must not lose, once per server (#2716, #7295): the saved count watermark, and the pairs that were
+    /// new and not yet announced by a page, which are put back into <paramref name="unannounced"/>. The signature store
+    /// already counts those pairs, so the next count would not find them new. Answers the saved watermark, or null to leave
+    /// the one in memory as it is. A pair waiting for its page does not change that answer. The saved watermark may already
+    /// have been moved to this count by the fire whose page never went out, and the gate would not fire again at the same
+    /// count, so the gate must run from 0 for such a pair. The seed cannot tell whether the pair still has a report in the
+    /// hour, so that choice is the first count's (<see cref="PgDeadlockPatterns.RestoredPairKept"/>). Lowered here, a pair
+    /// whose reports have left the hour would still lower the watermark, and the reports a page already carried would be
+    /// paged a second time.
+    /// The restored pairs are also handed to <paramref name="noteNewForAgentGate"/>: the agent gate reads new pairs from
+    /// memory that a restart emptied, and the next count finds them known, so without it the rescued page would open no
+    /// investigation request. The worker passes a callback that holds them until the first count has dropped the pairs whose
+    /// reports left the hour (see the count's <c>restoredForGate</c>), so the gate is never told about a pair no page carries.
+    /// When a retry finds pairs in memory that the stored set lacks (counted while the read was failing), the whole set is
+    /// written back once.
+    /// <para><c>PairsRead</c> is false when the pairs read failed, so the caller tries again on the next sweep with
+    /// <paramref name="loadWatermark"/> false. That call answers no watermark: the first call already took the saved watermark's
+    /// turn, and the count has moved since.</para>
+    /// <para>A watermark load that fails throws (#7295), before anything is restored, and the caller does not count that sweep. It
+    /// calls again with <paramref name="loadWatermark"/> still true, so the saved watermark is loaded as it would be after a clean
+    /// restart. Answering null for a failed load would have taken the retry for an empty store, and the pass would have run from a
+    /// watermark of 0.</para>
+    /// <para><paramref name="seedWatermarkEmptyAfterFailure"/> bounds that retry (<see cref="SeedLoadCap"/>): it gets the failed
+    /// load's exception and answers true on the failure that reaches the cap. The watermark is then answered as null, the same as a
+    /// store with no row, and the pairs are read as usual. Null (the default) never seeds empty.</para>
+    /// </summary>
+    internal static async Task<PgDeadlockSeed> SeedPgDeadlockStateAsync(
+        PgAlertStateStore stateStore, string serverKey, string metricName, HashSet<string> unannounced,
+        Action<IReadOnlyCollection<string>>? noteNewForAgentGate, bool loadWatermark = true,
+        Func<Exception, bool>? seedWatermarkEmptyAfterFailure = null)
+    {
+        int? watermark = null;
+        if (loadWatermark)
+        {
+            try
+            {
+                watermark = await stateStore.LoadEdgeTriggerWatermarkAsync(serverKey, metricName);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException && seedWatermarkEmptyAfterFailure is not null)
+            {
+                if (!seedWatermarkEmptyAfterFailure(ex))
+                {
+                    throw;
+                }
+            }
+        }
+
+        var waiting = await stateStore.LoadUnannouncedPairsAsync(serverKey);
+        if (waiting is null)
+        {
+            return new PgDeadlockSeed(watermark, false);
+        }
+
+        string[] memory;
+        lock (unannounced)
+        {
+            unannounced.UnionWith(waiting);
+            memory = unannounced.ToArray();
+        }
+
+        /* A retry after a failed read can find pairs in memory that the stored set lacks: a fresh pair counted while the read
+           was failing was not saved (the replace hook writes nothing until the read works), and its page may not have been
+           delivered. The count that follows adds nothing new, so nothing else would save it, and a restart would then lose it.
+           Written once, here, with the whole set. */
+        if (memory.Any(pair => !waiting.Contains(pair, StringComparer.Ordinal)))
+        {
+            await stateStore.ReplaceUnannouncedPairsAsync(serverKey, memory);
+        }
+
+        if (waiting.Count == 0)
+        {
+            return new PgDeadlockSeed(watermark, true);
+        }
+
+        noteNewForAgentGate?.Invoke(waiting);
+        return new PgDeadlockSeed(watermark, true);
+    }
+
+    /// <summary>
+    /// The counting with a way to save the pairs still waiting for a page (#7295). <paramref name="persistUnannounced"/> gets
+    /// the whole set of unannounced pairs (empty when the last one was dropped) whenever the count changed it, by a new pair
+    /// or by a drop (#7188). It runs before the page is decided, so a restart between the count and the page still finds the
+    /// waiting pairs, and never finds one that was dropped. It must not throw: the store's own method logs and swallows.
+    /// </summary>
     internal static async Task<PgDeadlockPatterns> CountPgDeadlockPatternsAsync(
         DeadlockSignatureStore store, Dictionary<string, DateTime> counted, HashSet<string> unannounced,
         Action<IReadOnlyCollection<string>>? noteNewForAgentGate, ILogger logger,
         string serverKey, int serverId, IReadOnlyList<DarlingPgDeadlockReader.PgDeadlockRow> rows, DateTime now,
-        CancellationToken cancellationToken)
+        Func<IReadOnlyCollection<string>, CancellationToken, Task>? persistUnannounced,
+        CancellationToken cancellationToken, HashSet<string>? restoredForGate = null)
     {
         var byReport = new Dictionary<string, PgDeadlockSignature.Key>(StringComparer.Ordinal);
         foreach (var row in rows)
@@ -1308,6 +1470,7 @@ public sealed partial class DarlingWorker
         }
 
         var storeOk = true;
+        var setChanged = false;
         if (pending.Count > 0)
         {
             try
@@ -1328,6 +1491,7 @@ public sealed partial class DarlingWorker
                         unannounced.UnionWith(fresh);
                     }
 
+                    setChanged = true;
                     noteNewForAgentGate?.Invoke(fresh);
                 }
             }
@@ -1345,6 +1509,7 @@ public sealed partial class DarlingWorker
         }
 
         string[] newKeys;
+        var keptRestored = Array.Empty<string>();
         lock (unannounced)
         {
             /* #7188: a pair whose reports have all left the hour's rows can no longer be announced by a page that
@@ -1357,13 +1522,37 @@ public sealed partial class DarlingWorker
             if (rows.Count < PgDeadlockReadLimit)
             {
                 var current = byReport.Values.Select(key => key.Value).ToHashSet(StringComparer.Ordinal);
-                unannounced.RemoveWhere(pair => !current.Contains(pair));
+                setChanged |= unannounced.RemoveWhere(pair => !current.Contains(pair)) > 0;
             }
 
             newKeys = unannounced.ToArray();
+            if (restoredForGate is not null)
+            {
+                lock (restoredForGate)
+                {
+                    keptRestored = restoredForGate.Where(unannounced.Contains).ToArray();
+                    restoredForGate.Clear();
+                }
+            }
         }
 
-        var patterns = new PgDeadlockPatterns { NewKeys = newKeys, StoreOk = storeOk };
+        /* A pair a seed put back is told to the agent gate only if it survived the drop above. One whose reports all left the hour
+           while the service was down is forgotten here: left in the rollup's set it would read as new to a later page about other pairs. */
+        if (keptRestored.Length > 0)
+        {
+            noteNewForAgentGate?.Invoke(keptRestored);
+        }
+
+        /* #7295: the saved set follows the in-memory one, both ways. A pair that came out new is saved before the page is
+           decided, so a restart between the count and the page still finds it waiting. A pair dropped just above leaves the
+           saved set too (#7188): the seed would otherwise put it back at the next start, lower the count watermark for a pair
+           nothing can announce, and tell the agent gate it is new. Only a change is written, and an empty set clears. */
+        if (setChanged && persistUnannounced is not null)
+        {
+            await persistUnannounced(newKeys, cancellationToken);
+        }
+
+        var patterns = new PgDeadlockPatterns { NewKeys = newKeys, StoreOk = storeOk, RestoredPairKept = keptRestored.Length > 0 };
         foreach (var (report, key) in byReport)
         {
             patterns.ByReport[report] = key;
@@ -1522,12 +1711,18 @@ public sealed partial class DarlingWorker
         var readClock = Stopwatch.StartNew();
         try
         {
-            /* #2716: same restart-survival seed as EvaluatePgDeadlocksAsync — see its comment. */
-            if (_pgBlockingWatermarkSeeded.TryAdd(key, true))
+            /* #2716: same restart-survival seed as EvaluatePgDeadlocksAsync — see its comment. #7295: the server is marked
+               seeded only after a load that worked, a row or no row. A load that fails throws into the catch below, so this pass
+               pages nothing from a watermark of 0 that a page may already have been carried past, and the next pass loads again. The third
+               failed read in a row seeds an empty watermark instead (SeedLoadCap), so a state table that stays unreadable cannot
+               hold this alert back for good. */
+            if (!_pgBlockingWatermarkSeeded.ContainsKey(key))
             {
-                var seeded = await stateStore.LoadEdgeTriggerWatermarkAsync(key, metricName);
+                var seeded = await _seedLoadCap.LoadOrSeedEmptyAsync(
+                    () => stateStore.LoadEdgeTriggerWatermarkAsync(key, metricName),
+                    _logger, nameof(PgAlertStateStore), key, "blocking count watermark", "PostgreSQL blocking watermark seed");
                 readClock.Restart();
-                if (seeded.HasValue)
+                if (_pgBlockingWatermarkSeeded.TryAdd(key, true) && seeded.HasValue)
                 {
                     _lastAlertedPgBlockingCount[key] = seeded.Value;
                 }
