@@ -64,6 +64,19 @@ public sealed class RdsLogEventIngestor
     /// </summary>
     private readonly RdsCsvlogCarryBook _csvCarry = new();
 
+    /// <summary>
+    /// The last stderr entry of a portion that RDS said had more pending, held for the next portion (#7186). The portion
+    /// call is consume-once, so an entry cut between its primary line and its DETAIL or STATEMENT line was stored without
+    /// them and the orphaned lines in the next portion were dropped. One book per ingestor, like the csvlog one.
+    /// </summary>
+    private readonly RdsDeadlockCarryBook _entryCarry = new();
+
+    /// <summary>
+    /// Where the parsed events go: null is the real COPY into the store (<see cref="WriteAsync"/>). A test that has no
+    /// store sets it, so the events that are stored can be read back without one (#7186). Nothing in the service sets it.
+    /// </summary>
+    internal Func<IReadOnlyList<PgLogEvent>, CancellationToken, Task<int>>? RowWriter { get; init; }
+
     /// <param name="logHashKey">The store's log-hash key (#4004), the same instance the <c>pg_read_file</c> route's
     /// runs carry, so the two transports store identical identities for identical text.</param>
     public RdsLogEventIngestor(NpgsqlDataSource postgres, PgLogHashKey logHashKey, RdsLogSource? logs = null, ILogger? logger = null, RdsResumeStore? resume = null, RdsEndpointVerifier? verifier = null, AwsRoleCredentialCache? roles = null)
@@ -182,9 +195,25 @@ public sealed class RdsLogEventIngestor
             ? _csvCarry.CarryFor(chunk.Value.Resume.Key, chunk.Value.StartsAtFileStart)
             : (RdsCsvlogCarry.CsvCarry.Empty, null, 0, null);
 
-        var (written, foreignZoneLines, csvRecordsDiscarded, nextCarry) = await StoreAsync(
+        var (heldEntry, entryKey, entryFileName, abandonedEntry) = pgLogUsesCsvlog
+            ? (string.Empty, null, null, string.Empty)
+            : _entryCarry.CarryFor(chunk.Value.Resume.Key);
+
+        if (abandonedEntry.Length > 0)
+        {
+            /* An entry held for a log file that was not read to its end, whose own last portion never came (RDS stopped
+               listing it): nothing can finish it, and Commit replaces it when the carry moves to this file. Unlike a plan
+               fragment it starts with a complete primary line, so it is stored as it is, as RdsDeadlockIngestor stores
+               its abandoned report: StoreAsync puts it ahead of this portion's text. The line records it (#7186). */
+            _logger?.LogDebug(
+                "RDS log for {Server}: a log entry held for a log file that was not read to its end can never be "
+                + "finished; storing it as it is as the read moves on to {File} (#7186)",
+                storageName, entryFileName);
+        }
+
+        var (written, foreignZoneLines, csvRecordsDiscarded, nextCarry, nextEntry) = await StoreAsync(
             serverId, storageName, chunk.Value.Text, logTimezoneIsUtc, pgLogUsesCsvlog,
-            carry, chunk.Value.MoreAvailable, zoneCheck, cancellationToken);
+            carry, chunk.Value.MoreAvailable, heldEntry, abandonedEntry, zoneCheck, cancellationToken);
 
         /* THE MARKER MOVES HERE AND NOWHERE ELSE (#3008), and the csvlog carry moves alongside it for the
            same reason: DownloadDBLogFilePortion is consume-once, so a store failure must leave both the
@@ -202,6 +231,13 @@ public sealed class RdsLogEventIngestor
             csvRecordsDiscarded += _csvCarry.Commit(carryKey, currentFileName, nextCarry, droppedByRotation);
         }
 
+        /* The held stderr entry moves with the marker and only when it advanced, as the csvlog carry does. The position is
+           saved past it all the same (below): a restart between here and the next read loses the one entry held. */
+        if (entryKey is not null && resumeAdvanced)
+        {
+            _entryCarry.Commit(entryKey, entryFileName, nextEntry);
+        }
+
         /* #4708: the position is saved AFTER the chunk's rows are stored and the in-process position has moved, never
            before, so a crash between the two re-reads a window (rows dedupe on their identity hash) rather than
            resuming past one. */
@@ -214,7 +250,7 @@ public sealed class RdsLogEventIngestor
             filesSkipped: chunk.Value.FilesSkipped, resumeFileMissing: chunk.Value.ResumeFileMissing), chunk.Value.ReadAgain);
     }
 
-    private async Task<(int Written, int ForeignZoneLines, int CsvRecordsDiscarded, RdsCsvlogCarry.CsvCarry NextCarry)> StoreAsync(
+    private async Task<(int Written, int ForeignZoneLines, int CsvRecordsDiscarded, RdsCsvlogCarry.CsvCarry NextCarry, string NextEntry)> StoreAsync(
         int serverId,
         string storageName,
         string text,
@@ -222,6 +258,8 @@ public sealed class RdsLogEventIngestor
         bool pgLogUsesCsvlog,
         RdsCsvlogCarry.CsvCarry carry,
         bool additionalDataPending,
+        string heldEntry,
+        string abandonedEntry,
         PgLogZoneCheck? zoneCheck,
         CancellationToken cancellationToken)
     {
@@ -229,12 +267,13 @@ public sealed class RdsLogEventIngestor
         int foreignZoneLines;
         var csvRecordsDiscarded = 0;
         var nextCarry = RdsCsvlogCarry.CsvCarry.Empty;
+        var nextEntry = string.Empty;
 
         if (pgLogUsesCsvlog)
         {
             if (string.IsNullOrEmpty(text) && string.IsNullOrEmpty(carry.Partial))
             {
-                return (0, 0, 0, carry);
+                return (0, 0, 0, carry, nextEntry);
             }
 
             var portion = RdsCsvlogCarry.ParseCsvPortion(carry, text, additionalDataPending);
@@ -254,9 +293,28 @@ public sealed class RdsLogEventIngestor
         }
         else
         {
-            if (string.IsNullOrEmpty(text))
+            if (string.IsNullOrEmpty(text) && heldEntry.Length == 0 && abandonedEntry.Length == 0)
             {
-                return (0, 0, 0, nextCarry);
+                return (0, 0, 0, nextCarry, nextEntry);
+            }
+
+            /* #7186: the last entry of a portion RDS said had more pending may be cut before its DETAIL or STATEMENT
+               line, so it is held for the next portion instead of being stored without them. Only then: a portion
+               with nothing more pending ends the log as it stands, and its last entry is whole. The held entry goes
+               through Step even when this portion is empty, so a file's last portion stores what is held. */
+            var portion = RdsDeadlockCarry.Step(heldEntry, text, additionalDataPending, PgLogEntryAssembler.UnfinishedTailStart);
+            nextEntry = portion.Next;
+            text = portion.Text;
+
+            /* An entry abandoned with its file is stored as it is, ahead of this portion (a different file's text). */
+            if (abandonedEntry.Length > 0)
+            {
+                text = (abandonedEntry.EndsWith('\n') ? abandonedEntry : abandonedEntry + "\n") + text;
+            }
+
+            if (text.Length == 0)
+            {
+                return (0, 0, 0, nextCarry, nextEntry);
             }
 
             /* Outside IngestAsync's tolerant catch, which covers the AWS FETCH: a zone refusal is a statement
@@ -274,10 +332,10 @@ public sealed class RdsLogEventIngestor
 
         if (events.Count == 0)
         {
-            return (0, foreignZoneLines, csvRecordsDiscarded, nextCarry);
+            return (0, foreignZoneLines, csvRecordsDiscarded, nextCarry, nextEntry);
         }
 
-        return (await WriteAsync(serverId, storageName, events, cancellationToken), foreignZoneLines, csvRecordsDiscarded, nextCarry);
+        return (await WriteAsync(serverId, storageName, events, cancellationToken), foreignZoneLines, csvRecordsDiscarded, nextCarry, nextEntry);
     }
 
     /// <summary>
@@ -293,6 +351,11 @@ public sealed class RdsLogEventIngestor
         IReadOnlyList<PgLogEvent> rows,
         CancellationToken cancellationToken)
     {
+        if (RowWriter is { } writeRows)
+        {
+            return await writeRows(rows, cancellationToken);
+        }
+
         var definition = PgLogEventsCollector.Instance;
 
         var collectionTime = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);

@@ -1972,11 +1972,8 @@ public partial class RemoteCollectorService
 
             // The archive's maximum (cached per generation) always joins the live one: a hole fill or a late
             // row can leave live non-null but OLDER than what the reset moved into Parquet.
-            var archived = await ReadArchiveViewAsync(
-                $"time|{tableName}|{columnName}|{serverId}",
-                $"SELECT MAX({columnName}) FROM v_{tableName} WHERE server_id = $1",
-                [serverId], cancellationToken);
-            return GreaterOf(live, archived as DateTime?);
+            var archived = await ReadArchivedMaximumsAsync(tableName, columnName, cancellationToken);
+            return GreaterOf(live, archived.TryGetValue(serverId, out var archivedMaximum) ? archivedMaximum : null);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -2068,11 +2065,8 @@ public partial class RemoteCollectorService
             }
 
             // The archive's pair (cached per generation) joins the live pair column by column.
-            var archived = await ReadArchiveViewAsync(
-                $"frame|{tableName}|{columnName}|{utcColumnName}|{serverId}",
-                $"SELECT MAX({utcColumnName}), MAX({columnName}) FROM v_{tableName} WHERE server_id = $1",
-                [serverId], cancellationToken, readRow: ReadDatePair);
-            var (archivedUtc, archivedLocal) = archived is ValueTuple<DateTime?, DateTime?> pair ? pair : (null, null);
+            var archived = await ReadArchivedFrameMaximumsAsync(tableName, columnName, utcColumnName, cancellationToken);
+            var (archivedUtc, archivedLocal) = archived.TryGetValue(serverId, out var pair) ? pair : (null, null);
 
             var utc = GreaterOf(liveUtc, archivedUtc);
             if (utc is DateTime utcValue)
@@ -2459,10 +2453,63 @@ public partial class RemoteCollectorService
         }, variant, cancellationToken);
     }
 
-    /// <summary>Row shape for the two-column twin read: (UTC twin maximum, declared column maximum), either may be null.</summary>
-    private static object? ReadDatePair(System.Data.Common.DbDataReader reader) =>
-        (reader.IsDBNull(0) ? (DateTime?)null : reader.GetDateTime(0),
-         reader.IsDBNull(1) ? (DateTime?)null : reader.GetDateTime(1));
+    /// <summary>
+    /// The archive's maximum of <paramref name="columnName"/> for EVERY server in <c>v_{table}</c>, from ONE grouped read per
+    /// archive generation, cached under a key with no server in it (#7256). A per-server read opened every Parquet file of the
+    /// table once for each monitored server on each generation, so five servers cost five times the file opens and held the
+    /// limiter slot and the read lock for all of them. One server's answer is what
+    /// <c>SELECT MAX(col) FROM v_table WHERE server_id = $1</c> returned: a server with no archived row has no entry, which
+    /// reads as null. The lock order is <see cref="ReadArchiveAsync"/>'s: the caller holds no lock.
+    /// </summary>
+    private async Task<Dictionary<int, DateTime>> ReadArchivedMaximumsAsync(
+        string tableName, string columnName, CancellationToken cancellationToken)
+    {
+        var map = await ReadArchiveAsync(
+            $"timemap|{tableName}|{columnName}", 0,
+            async (conn, token) =>
+            {
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = $"SELECT server_id, MAX({columnName}) FROM v_{tableName} GROUP BY server_id";
+                var rows = new Dictionary<int, DateTime>();
+                using var reader = await cmd.ExecuteReaderAsync(token);
+                while (await reader.ReadAsync(token))
+                {
+                    if (!reader.IsDBNull(0) && reader.GetValue(1) is DateTime maximum)
+                        rows[Convert.ToInt32(reader.GetValue(0))] = maximum;
+                }
+
+                return rows;
+            }, cancellationToken);
+        return (Dictionary<int, DateTime>)map!;
+    }
+
+    /// <summary>The twin of <see cref="ReadArchivedMaximumsAsync"/> for a UTC column beside a local one: each server's
+    /// (UTC maximum, declared column maximum), either of which may be null.</summary>
+    private async Task<Dictionary<int, (DateTime? Utc, DateTime? Local)>> ReadArchivedFrameMaximumsAsync(
+        string tableName, string columnName, string utcColumnName, CancellationToken cancellationToken)
+    {
+        var map = await ReadArchiveAsync(
+            $"framemap|{tableName}|{columnName}|{utcColumnName}", 0,
+            async (conn, token) =>
+            {
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = $"SELECT server_id, MAX({utcColumnName}), MAX({columnName}) FROM v_{tableName} GROUP BY server_id";
+                var rows = new Dictionary<int, (DateTime? Utc, DateTime? Local)>();
+                using var reader = await cmd.ExecuteReaderAsync(token);
+                while (await reader.ReadAsync(token))
+                {
+                    if (!reader.IsDBNull(0))
+                    {
+                        rows[Convert.ToInt32(reader.GetValue(0))] = (
+                            reader.GetValue(1) is DateTime utc ? utc : null,
+                            reader.GetValue(2) is DateTime local ? local : null);
+                    }
+                }
+
+                return rows;
+            }, cancellationToken);
+        return (Dictionary<int, (DateTime? Utc, DateTime? Local)>)map!;
+    }
 
     /// <summary>Row shape for the newest-batch read: (batch time, the batch's maximum id), or null when either is NULL.</summary>
     private static object? ReadBatchRow(System.Data.Common.DbDataReader reader) =>

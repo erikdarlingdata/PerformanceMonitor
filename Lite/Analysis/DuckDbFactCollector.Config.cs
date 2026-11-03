@@ -247,6 +247,8 @@ AND database_name NOT IN ('master', 'msdb', 'model', 'tempdb')";
     {
         try
         {
+            /* #7256: Reads the hot table alone when the trace_flags archive holds nothing at or after the lookback start. The plan is taken before the read lock. */
+            var plan = await _duckDb.PlanArchiveReadAsync("trace_flags", "capture_time", context.LatestValueStartFor("trace_flags"), context.CancellationToken);
             using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(context.CancellationToken);
@@ -282,6 +284,7 @@ ORDER BY trace_flag";
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.LatestValueStartFor("trace_flags") });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
+            cmd.CommandText = plan.Apply(cmd.CommandText);
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             var metadata = new Dictionary<string, double>();
