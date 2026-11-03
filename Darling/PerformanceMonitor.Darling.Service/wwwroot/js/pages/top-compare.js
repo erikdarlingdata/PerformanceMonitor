@@ -61,10 +61,6 @@ const KINDS = {
   querystore: { read: "get_query_store_top", rowsKey: "queries", keyOf: (r) => [r.database_name, r.query_hash], nameOf: (r) => r.query_text, nameLabel: "Query", duration: "avg_duration_ms", cpu: "avg_cpu_ms" },
 };
 
-export function compareKind(kind) {
-  return KINDS[kind] || null;
-}
-
 const num = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
 
 /** One row per key: executions summed, each average weighted by executions (a row with no figure adds no weight to it). */

@@ -555,11 +555,14 @@ ORDER BY m.metric_name, f.day DESC";
 
         try
         {
+            /* #7256: a table whose archive holds nothing in the lookback is read as its hot table. */
+            var plan = await _duckDb.PlanArchiveReadAsync(cancellationToken,
+                [.. ForcePlanTargetStateReader.ArchivedTables.Select(t => new ArchiveWindow(t, "collection_time", now - ForcePlanTargetState.Lookback))]).ConfigureAwait(false);
             using var readLock = _duckDb.AcquireReadLock(cancellationToken);
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
             using var command = connection.CreateCommand();
-            return (await ForcePlanTargetStateReader.ReadAsync(command, serverId, targets, now, cancellationToken).ConfigureAwait(false), null);
+            return (await ForcePlanTargetStateReader.ReadAsync(command, serverId, targets, now, plan, cancellationToken).ConfigureAwait(false), null);
         }
         catch (Exception ex) when (ex is not OperationCanceledException && !cancellationToken.IsCancellationRequested)
         {

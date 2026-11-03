@@ -139,7 +139,7 @@ public static partial class DarlingWebEndpoints
             body["can_press"] = canPress;
             body["presses_as"] = !canPress ? null : seat!.Value.Approver.IsPerson ? "person" : "administrator";
             body["person_name"] = canPress ? seat!.Value.Person?.DisplayName : null;
-            body["press_note"] = seat is null ? CannotPressNote(context) : !canPress ? ProposalPressSignInNote : seat!.Value.Approver.IsPerson ? null : AdministratorPressNote;
+            body["press_note"] = seat is null ? CannotPressNote(context) : !canPress ? DarlingWebStoreWrites.Refused("press a proposal", managedStore, adminWritesOff: adminWritesOff) : seat!.Value.Approver.IsPerson ? null : AdministratorPressNote;
             return body;
         }
 

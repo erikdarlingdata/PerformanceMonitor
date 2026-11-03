@@ -365,7 +365,7 @@ public sealed class McpAnalysisFindingsCommandTests : IClassFixture<SharedDuckDb
             RemediationAction? remediation = (i % 3) switch
             {
                 0 => new RemediationAction("DB_CONFIG", "set", Array.Empty<ForcePlanTarget>(),
-                    ServerConfigTargets: new[] { new ServerConfigTarget(ServerConfigSetting.Maxdop, 0, 8) }),
+                    DbConfigTargets: new[] { new DbConfigTarget("Sales", DbConfigSetting.AutoShrinkOff) }),
                 1 => new RemediationAction("MISSING_INDEX", "set", Array.Empty<ForcePlanTarget>(),
                     MissingIndexTargets: new[] { new MissingIndexTarget(
                         "dbo.Posts", 83.2,

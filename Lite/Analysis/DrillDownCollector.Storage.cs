@@ -19,6 +19,7 @@ public partial class DrillDownCollector
 {
     private async Task CollectFileLatencyBreakdown(AnalysisFinding finding, AnalysisContext context)
     {
+        var plan = await _duckDb.PlanArchiveReadAsync("file_io_stats", "collection_time", context.TimeRangeStart, context.CancellationToken);
         using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
         using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync(context.CancellationToken);
@@ -37,6 +38,7 @@ GROUP BY database_name, file_type
 ORDER BY avg_read_ms DESC NULLS LAST
 LIMIT 10";
 
+        cmd.CommandText = plan.Apply(cmd.CommandText);
         cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
         cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
         cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
@@ -74,6 +76,7 @@ LIMIT 10";
         /* #3896: a no-op in the pass, whose fact collector stamped the bounds on this context already. */
         await LatestValueBounds.EnsureAsync(_duckDb, _collectorFrequencyMinutes, context);
 
+        var plan = await _duckDb.PlanArchiveReadAsync("database_size_stats", "collection_time", context.LatestValueStartFor(DatabaseSizeStatsCollector.Instance.Name), context.CancellationToken);
         using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
         using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync(context.CancellationToken);
@@ -103,6 +106,7 @@ AND   database_name NOT IN ('master', 'msdb', 'model', 'tempdb')
 ORDER BY total_size_mb DESC
 LIMIT 50";
 
+        cmd.CommandText = plan.Apply(cmd.CommandText);
         cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
         cmd.Parameters.Add(new DuckDBParameter { Value = context.LatestValueStartFor(DatabaseSizeStatsCollector.Instance.Name) });
         cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
@@ -139,6 +143,7 @@ LIMIT 50";
 
     private async Task CollectTempDbBreakdown(AnalysisFinding finding, AnalysisContext context)
     {
+        var plan = await _duckDb.PlanArchiveReadAsync("tempdb_stats", "collection_time", context.TimeRangeStart, context.CancellationToken);
         using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
         using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync(context.CancellationToken);
@@ -152,6 +157,7 @@ WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
 ORDER BY (user_object_reserved_mb + internal_object_reserved_mb + version_store_reserved_mb) DESC
 LIMIT 5";
 
+        cmd.CommandText = plan.Apply(cmd.CommandText);
         cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
         cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
         cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
