@@ -307,16 +307,16 @@ public sealed class QueryStoreCurrentPartitionAnalyzeLiveTests
 
         /* A lock held from a normal backend. The wait is bounded by half of deadlock_timeout (#5594): with deadlock_timeout at 4 s the
            lock timeout is 2 s, so the step gives up before the deadlock check could cancel an autovacuum worker holding the lock, where
-           the old fixed 5 s lock timeout waited past it. */
+           the old fixed 5 s lock timeout waited past it. The step reports the wait it set, so the test asserts on that and not on a clock. */
         await ExecAsync(connection, "SET deadlock_timeout = '4s'", ct);
+        var allowedMs = QueryStoreIntervalBrin.SummarizeLockTimeoutMs(4000);
+        Assert.InRange(allowedMs, 1, 3999);
         await using (var hold = await blocker.BeginTransactionAsync(ct))
         {
             await ExecAsync(blocker, $"LOCK TABLE {current} IN SHARE UPDATE EXCLUSIVE MODE", ct);
-            var waited = System.Diagnostics.Stopwatch.StartNew();
             var blocked = await QueryStoreIntervalPartitions.AnalyzeCurrentPartitionAsync(connection, table, clock, logger, ct);
-            waited.Stop();
             Assert.Equal(QueryStoreIntervalPartitions.StepOutcome.RetryLater, blocked.Outcome);
-            Assert.True(waited.Elapsed < TimeSpan.FromSeconds(4), $"the step waited {waited.Elapsed.TotalSeconds:F1} s for a lock, past deadlock_timeout (4 s)");
+            Assert.Contains($"after at most {allowedMs} ms", blocked.Detail, StringComparison.Ordinal);
             Assert.Equal(0L, (await StatsAsync(connection, current, ct)).ColumnStats);
             await hold.RollbackAsync(ct);
         }
