@@ -99,6 +99,91 @@ ON CONFLICT (server_id, metric_name) DO UPDATE SET
         }
     }
 
+    /// <summary>
+    /// #7295: the metric_name prefix of the rows that hold the PostgreSQL deadlock statement pairs that were new when counted
+    /// and have not been announced by a page yet. One row per pair in <c>config_edge_trigger_watermarks</c> (the pair key is
+    /// <c>pg:</c> and 16 hex digits), <c>watermark</c> 1 and <c>watermark_time</c> NULL. A prefixed name never equals an
+    /// exact metric name, so <see cref="LoadEdgeTriggerWatermarkAsync"/> cannot read one. No new table: the set is deleted
+    /// whole when a page carries it.
+    /// </summary>
+    internal const string UnannouncedPairMetricPrefix = "Deadlocks Detected new pair: ";
+
+    /// <summary>The pairs recorded as new and not yet announced for the server, or null when the store could not be read.</summary>
+    public async Task<IReadOnlyList<string>?> LoadUnannouncedPairsAsync(string serverKey)
+    {
+        try
+        {
+            await using var connection = await _postgres.OpenConnectionAsync();
+            using var command = new NpgsqlCommand(@"
+SELECT metric_name
+FROM config_edge_trigger_watermarks
+WHERE server_id = $1
+AND   starts_with(metric_name, $2)
+AND   watermark_time IS NULL", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
+            command.Parameters.AddWithValue(ParseServerKey(serverKey));
+            command.Parameters.AddWithValue(UnannouncedPairMetricPrefix);
+
+            var pairs = new List<string>();
+            await using var reader = await command.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                pairs.Add(reader.GetString(0)[UnannouncedPairMetricPrefix.Length..]);
+            }
+
+            return pairs;
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError("Could not load the unannounced deadlock pairs: {Message}", ex.Message);
+            return null;
+        }
+    }
+
+    /// <summary>Records pairs as new and not yet announced, so a restart before their page still pages them.</summary>
+    public async Task SaveUnannouncedPairsAsync(string serverKey, IEnumerable<string> pairs)
+    {
+        try
+        {
+            await using var connection = await _postgres.OpenConnectionAsync();
+            foreach (var pair in pairs)
+            {
+                using var command = new NpgsqlCommand(@"
+INSERT INTO config_edge_trigger_watermarks (server_id, metric_name, watermark, watermark_time, updated_at)
+VALUES ($1, $2, 1, NULL, $3)
+ON CONFLICT (server_id, metric_name) DO UPDATE SET updated_at = EXCLUDED.updated_at",
+                    connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
+                command.Parameters.AddWithValue(ParseServerKey(serverKey));
+                command.Parameters.AddWithValue(UnannouncedPairMetricPrefix + pair);
+                command.Parameters.AddWithValue(NaiveUtcNow());
+                await command.ExecuteNonQueryAsync();
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError("Could not persist the unannounced deadlock pairs: {Message}", ex.Message);
+        }
+    }
+
+    /// <summary>Forgets every unannounced pair of the server, once a page has carried them.</summary>
+    public async Task ClearUnannouncedPairsAsync(string serverKey)
+    {
+        try
+        {
+            await using var connection = await _postgres.OpenConnectionAsync();
+            using var command = new NpgsqlCommand(@"
+DELETE FROM config_edge_trigger_watermarks
+WHERE server_id = $1
+AND   starts_with(metric_name, $2)", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
+            command.Parameters.AddWithValue(ParseServerKey(serverKey));
+            command.Parameters.AddWithValue(UnannouncedPairMetricPrefix);
+            await command.ExecuteNonQueryAsync();
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError("Could not clear the unannounced deadlock pairs: {Message}", ex.Message);
+        }
+    }
+
     public async Task<DateTime?> LoadFailedJobWatermarkAsync(string serverKey)
     {
         try

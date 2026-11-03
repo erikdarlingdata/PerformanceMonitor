@@ -1043,7 +1043,9 @@ public sealed partial class DarlingWorker
                EnsureWatermarksSeededAsync/_seededServerKeys. */
             if (_pgDeadlockWatermarkSeeded.TryAdd(key, true))
             {
-                var seeded = await stateStore.LoadEdgeTriggerWatermarkAsync(key, metricName);
+                var seeded = await SeedPgDeadlockStateAsync(
+                    stateStore, key, metricName,
+                    _pgDeadlockUnannouncedNew.GetOrAdd(key, _ => new HashSet<string>(StringComparer.Ordinal)));
                 readClock.Restart();
                 if (seeded.HasValue)
                 {
@@ -1193,6 +1195,8 @@ public sealed partial class DarlingWorker
                 {
                     /* The pairs this page carried are announced; a failed send keeps them for the retry sweep. */
                     _pgDeadlockUnannouncedNew.TryRemove(key, out _);
+                    await stateStore.ClearUnannouncedPairsAsync(key);
+                    readClock.Restart();
                 }
 
                 if (AfterPgFire(metricName, _lastPgDeadlockAlert, key, now, cooldown, delivery))
@@ -1254,7 +1258,8 @@ public sealed partial class DarlingWorker
     /// Counts the reports of this sweep that were not counted yet into the 30-day signature store under their
     /// <c>pg:</c> pattern key (#7082), and answers every report's key plus the pairs that are new and not yet announced by
     /// a page. A report is counted once for the life of the process (a restart re-counts the hour's reports, which adds to
-    /// counts but cannot make a known pair new). A store failure leaves the reports uncounted for the next sweep and
+    /// counts but cannot make a known pair new, so the pairs still waiting for their page are saved and put back at start by
+    /// <see cref="SeedPgDeadlockStateAsync"/>, #7295). A store failure leaves the reports uncounted for the next sweep and
     /// answers <c>StoreOk = false</c>, which pages.
     /// </summary>
     private Task<PgDeadlockPatterns> CountPgDeadlockPatternsAsync(
@@ -1265,7 +1270,9 @@ public sealed partial class DarlingWorker
             _pgDeadlockCounted.GetOrAdd(serverKey, _ => new Dictionary<string, DateTime>(StringComparer.Ordinal)),
             _pgDeadlockUnannouncedNew.GetOrAdd(serverKey, _ => new HashSet<string>(StringComparer.Ordinal)),
             fresh => _deadlockRollup?.NoteNewSignatures(serverKey, fresh),
-            _logger, serverKey, serverId, rows, now, cancellationToken);
+            _logger, serverKey, serverId, rows, now,
+            (fresh, _) => new PgAlertStateStore(_postgres!, _logger).SaveUnannouncedPairsAsync(serverKey, fresh),
+            cancellationToken);
 
     /// <summary>
     /// The counting itself, with its state handed in so it runs against a real signature store without a worker. The
@@ -1273,10 +1280,49 @@ public sealed partial class DarlingWorker
     /// whether a delivered page opens an investigation request reads the same store, and the PostgreSQL path writes
     /// <c>pg:</c> rows into it, so a first-ever pair would otherwise look like a repeat to the gate and lose its request.
     /// </summary>
+    internal static Task<PgDeadlockPatterns> CountPgDeadlockPatternsAsync(
+        DeadlockSignatureStore store, Dictionary<string, DateTime> counted, HashSet<string> unannounced,
+        Action<IReadOnlyCollection<string>>? noteNewForAgentGate, ILogger logger,
+        string serverKey, int serverId, IReadOnlyList<DarlingPgDeadlockReader.PgDeadlockRow> rows, DateTime now,
+        CancellationToken cancellationToken) =>
+        CountPgDeadlockPatternsAsync(
+            store, counted, unannounced, noteNewForAgentGate, logger, serverKey, serverId, rows, now,
+            persistUnannounced: null, cancellationToken);
+
+    /// <summary>
+    /// Loads what a restart must not lose, once per server (#2716, #7295): the saved count watermark, and the pairs that were
+    /// new and not yet announced by a page, which are put back into <paramref name="unannounced"/>. The signature store
+    /// already counts those pairs, so the next count would not find them new. Answers the watermark to run the gate from,
+    /// or null to leave it as it is. With a pair waiting for its page the watermark is 0: the saved one may already have
+    /// been moved to this count by the fire whose page never went out, and the gate would not fire again at the same count.
+    /// </summary>
+    internal static async Task<int?> SeedPgDeadlockStateAsync(
+        PgAlertStateStore stateStore, string serverKey, string metricName, HashSet<string> unannounced)
+    {
+        var watermark = await stateStore.LoadEdgeTriggerWatermarkAsync(serverKey, metricName);
+        var waiting = await stateStore.LoadUnannouncedPairsAsync(serverKey);
+        if (waiting is not { Count: > 0 })
+        {
+            return watermark;
+        }
+
+        lock (unannounced)
+        {
+            unannounced.UnionWith(waiting);
+        }
+
+        return 0;
+    }
+
+    /// <summary>
+    /// The counting with a way to save the pairs that came out new (#7295). <paramref name="persistUnannounced"/> runs before
+    /// the page is decided, so a restart between the count and the page still finds them waiting.
+    /// </summary>
     internal static async Task<PgDeadlockPatterns> CountPgDeadlockPatternsAsync(
         DeadlockSignatureStore store, Dictionary<string, DateTime> counted, HashSet<string> unannounced,
         Action<IReadOnlyCollection<string>>? noteNewForAgentGate, ILogger logger,
         string serverKey, int serverId, IReadOnlyList<DarlingPgDeadlockReader.PgDeadlockRow> rows, DateTime now,
+        Func<IReadOnlyCollection<string>, CancellationToken, Task>? persistUnannounced,
         CancellationToken cancellationToken)
     {
         var byReport = new Dictionary<string, PgDeadlockSignature.Key>(StringComparer.Ordinal);
@@ -1325,6 +1371,10 @@ public sealed partial class DarlingWorker
                     }
 
                     noteNewForAgentGate?.Invoke(fresh);
+                    if (persistUnannounced is not null)
+                    {
+                        await persistUnannounced(fresh, cancellationToken);
+                    }
                 }
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
