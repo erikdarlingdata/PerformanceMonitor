@@ -907,8 +907,8 @@ public partial class ViewerServerTab
               + "the plan, not how often it ran. Plan JSON is redacted at collection: query text is "
               + "dropped and literals are replaced, so nothing here carries customer values."
               + (orphans > 0
-                  ? $" {orphans:N0} plan(s) have no query id, which means log_line_prefix lacks %Q - they "
-                    + "cannot be joined to a statement until that is fixed."
+                  ? $" {orphans:N0} plan(s) have no query id, so they cannot be joined to a statement. A zero id means "
+                    + "compute_query_id is off, or the target logs to csvlog on PostgreSQL 13, whose csvlog has no query_id column."
                   : string.Empty);
     }
 
@@ -1068,7 +1068,10 @@ public partial class ViewerServerTab
                       + "plan_attribution, message_locale — each names the specific step and, on Aurora/RDS, "
                       + "whether it needs a parameter-group change and a reboot rather than a SET. "
                       + "plan_attribution is the one that is easy to miss: auto_explain puts no query id in "
-                      + "the plan itself, so without %Q in log_line_prefix every captured plan is an orphan. "
+                      + "the plan itself, so on a server that logs to stderr, without %Q directly after [%p] in "
+                      + "log_line_prefix no plan is stored at all. A target that logs to csvlog takes the id "
+                      + "from the log's own query_id column on PostgreSQL 14 or later, and has none before it. "
+                      + "A target that logs only to jsonlog stores no plan. "
                       + "message_locale is the one that reaches further than this panel: it reports whether "
                       + "the target writes its log messages in English, which every log read here matches, "
                       + "so an unmet one also means the Blocking sub-tab's deadlock grid cannot be trusted "

@@ -103,8 +103,10 @@ public static class PgLogEntryAssembler
        '%m %u@%d [%p] ' renders them (`UTC app@db [5555] ERROR:  `). Its gap is s_prefixRun's step with '[' taken
        out of the class, so it holds to both rules at once. It cannot cross a label, by the run's own boundaries, so
        it never leaves the line's prefix for its text, which is where a forged bracket or label has to live. And it
-       cannot consume a bracket, so the pid is the FIRST bracket after the zone's space and nothing can backtrack
-       past it to a later one (plan capture's #4008 rule). `rest` after it is the unchanged run, so from the zone to
+       cannot consume a bracket but the exact text '[local]' (#7182: %r and %h render it for a Unix-socket
+       session, so '%m %r [%p] ' writes `UTC [local] [5555] ERROR:  `), so the pid is the FIRST bracket after the
+       zone's space that is not '[local]' and nothing can backtrack past it to a later one (plan capture's #4008
+       rule). '[local]' is not '[digits]', so it can never stand in for the real pid bracket. `rest` after it is the unchanged run, so from the zone to
        the label the whole path crosses no label anywhere, and the label read is the line's first.
 
        Tried LAST, so a line the first two read is read exactly as before: the engine takes the first alternative
@@ -124,7 +126,7 @@ public static class PgLogEntryAssembler
 
     private static readonly string s_prefixRun = @"(?:" + s_prefixRunStep + @"[^\n])*?";
 
-    private static readonly string s_prefixGapBeforePid = @"(?:" + s_prefixRunStep + @"[^\[\n])*?";
+    private static readonly string s_prefixGapBeforePid = @"(?:" + s_prefixRunStep + @"(?:[^\[\n]|\[local\]))*?";
 
     /// <summary>Every label this reader knows, the severities and the companion fields alike, as the same
     /// alternation <see cref="s_prefixLine"/>'s own label group uses. Shared with <see cref="IsForgedLabel"/>
