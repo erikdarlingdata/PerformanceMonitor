@@ -322,7 +322,6 @@ CREATE TRIGGER trg_query_store_compose_stamp_late_upd
     EXECUTE FUNCTION collect.query_store_compose_stamp_mark_late();
 """;
 
-    /// <summary>The insert column list: <c>collection_time</c>, the partials in map order, then the dimensions.</summary>
     /// <summary>
     /// V189 (#5867): the failure record of the hours whose build threw. One row per hour, written by <see cref="RecordFailureSql"/>
     /// after the failed build rolled back, and deleted by the build that succeeds (in its own transaction) or by the cleanup once the
@@ -559,6 +558,7 @@ WHERE hour = $1;";
 DELETE FROM collect.query_store_compose_fleet
 WHERE collection_time < $1;";
 
+    /// <summary>The insert column list: <c>collection_time</c>, the partials in map order, then the dimensions.</summary>
     private static string InsertColumns() =>
         "collection_time, " + string.Join(", ", PartialColumnMap.Select(c => c.Column)) + ", " + string.Join(", ", DimensionColumns);
 

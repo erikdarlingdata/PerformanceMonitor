@@ -224,7 +224,7 @@ OPTION(RECOMPILE);";
             throw new ArgumentNullException(nameof(target));
         }
 
-        return target.SqlMajorVersion == 0 || target.SqlMajorVersion >= 14 || target.IsAzureSqlDb || target.IsAzureManagedInstance;
+        return target.MeetsMinimumVersion(14, unknownIsNewest: true);
     }
 
     /// <summary>
@@ -234,7 +234,7 @@ OPTION(RECOMPILE);";
     /// 0 = version unknown = assume newest, and both Azure flavors always have the catalog.
     /// </summary>
     public override bool AppliesTo(CollectorTargetInfo target) =>
-        target.SqlMajorVersion == 0 || target.SqlMajorVersion >= 13 || target.IsAzureSqlDb || target.IsAzureManagedInstance;
+        target.MeetsMinimumVersion(13, unknownIsNewest: true);
 
     public override string Name => "query_store_health";
 

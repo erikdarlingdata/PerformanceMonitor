@@ -654,11 +654,7 @@ public static class PgLogEntryAssembler
                 /* #6866: the server rendered this instant back as exactly this line's text. */
                 _occurredAtUtc = DateTime.SpecifyKind(provenUtc.Value, DateTimeKind.Utc);
             }
-            else if (!DateTime.TryParse(
-                    _stamp,
-                    CultureInfo.InvariantCulture,
-                    DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal,
-                    out _occurredAtUtc))
+            else if (!PgLogEntry.TryParseStampUtc(_stamp, out _occurredAtUtc))
             {
                 /* Unreachable through the pattern, which admits only digits in the stamp's shape; kept so a
                    future loosening of the pattern cannot store DateTime.MinValue as an occurrence. */
