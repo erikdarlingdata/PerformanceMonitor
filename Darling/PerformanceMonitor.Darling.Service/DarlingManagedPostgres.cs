@@ -4517,7 +4517,7 @@ public sealed class DarlingManagedPostgres
     /// force), so a fresh render never disagrees with what those readers would have told the old blocks.
     /// </summary>
     [SupportedOSPlatform("windows")]
-    private ManagedConfFile.RenderInputs GatherManagedConfRenderInputs(string dataDirectory, int postgresMajor)
+    internal ManagedConfFile.RenderInputs GatherManagedConfRenderInputs(string dataDirectory, int postgresMajor)
     {
         var confPath = Path.Combine(dataDirectory, "postgresql.conf");
         var ramBytes = GetTotalPhysicalMemoryBytes();
@@ -4538,6 +4538,19 @@ public sealed class DarlingManagedPostgres
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             _logger.LogWarning("Could not read {Path} for operator lines above the include ({Message}).", confPath, ex.Message);
+        }
+
+        /* #7370: once per start, for each key the managed file leaves out because postgresql.conf assigns it above the
+           include. The start path's WriteManagedConfFile and the post-start Legacy Step A both gather their inputs
+           here, and a start takes only one of the two, so the line is logged here and not in either caller. */
+        if (operatorPinned is not null)
+        {
+            foreach (var (key, pinned) in operatorPinned)
+            {
+                _logger.LogInformation(
+                    "{Key} = {Value} on line {Line} of postgresql.conf, above the include of {ManagedFile}, stays in force: the managed file leaves the key out rather than override it. Remove or comment out that line to let the managed value apply.",
+                    key, pinned.Value, pinned.Line, ManagedConfFile.FileName);
+            }
         }
 
         return new ManagedConfFile.RenderInputs(
@@ -4585,17 +4598,6 @@ public sealed class DarlingManagedPostgres
     {
         var managedPath = Path.Combine(dataDirectory, ManagedConfFile.FileName);
         var inputs = GatherManagedConfRenderInputs(dataDirectory, postgresMajor);
-
-        /* #7370: once per start, for each key this file leaves out because postgresql.conf assigns it above the include. */
-        if (inputs.OperatorPinned is { } operatorPinned)
-        {
-            foreach (var (key, pinned) in operatorPinned)
-            {
-                _logger.LogInformation(
-                    "{Key} = {Value} on line {Line} of postgresql.conf, above the include of {ManagedFile}, stays in force: the managed file leaves the key out rather than override it. Remove or comment out that line to let the managed value apply.",
-                    key, pinned.Value, pinned.Line, ManagedConfFile.FileName);
-            }
-        }
 
         string? existingText = null;
         try

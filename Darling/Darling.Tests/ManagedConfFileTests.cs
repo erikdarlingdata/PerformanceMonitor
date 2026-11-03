@@ -905,6 +905,37 @@ public sealed class ManagedConfFileTests
         }
     }
 
+    /// <summary>The post-start Legacy Step A gathers its inputs through the same method as the start path's write and
+    /// never calls <c>WriteManagedConfFile</c>, so the log line comes from the gather: once per call, with the key, the
+    /// value and the line.</summary>
+    [Fact]
+    public void GatherManagedConfRenderInputs_OperatorLineAboveTheInclude_LogsOnceAndPinsTheKey()
+    {
+        var dir = Directory.CreateTempSubdirectory("darling-7370-gather-");
+        try
+        {
+            File.WriteAllText(
+                Path.Combine(dir.FullName, "postgresql.conf"),
+                "# base conf\nrandom_page_cost = 2.5\ninclude 'darling-managed.conf'\n");
+            var logger = new CapturingTestLogger();
+            var cluster = new DarlingManagedPostgres(
+                new PostgresConfig { Managed = true, Port = 55432, DataDirectory = dir.FullName }, logger);
+
+            var inputs = cluster.GatherManagedConfRenderInputs(dir.FullName, postgresMajor: 18);
+
+            Assert.Equal(new ManagedConfFile.OperatorPinnedLine(2, "2.5"), inputs.OperatorPinned!["random_page_cost"]);
+            Assert.Single(
+                logger.Lines,
+                line => line.Contains("random_page_cost", StringComparison.Ordinal)
+                    && line.Contains("line 2", StringComparison.Ordinal)
+                    && line.Contains("stays in force", StringComparison.Ordinal));
+        }
+        finally
+        {
+            Directory.Delete(dir.FullName, recursive: true);
+        }
+    }
+
     [Fact]
     public void WriteManagedConfFile_NoOperatorLine_StillGetsTheManagedValues()
     {
