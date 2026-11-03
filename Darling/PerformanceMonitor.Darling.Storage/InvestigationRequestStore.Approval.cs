@@ -301,11 +301,6 @@ FOR SHARE OF p";
     /// the guide definition of a drop), so the person's undo and the post-force checks read an approved change as they read the agent's. Null
     /// journals the binding.</para>
     /// </summary>
-    public Task<ProposalApproval> ApproveProposalForRunAsync(Guid proposalId, ProposalApprover approver, ApprovedActionHooks hooks,
-        CancellationToken cancellationToken = default) =>
-        ApproveProposalForRunAsync(proposalId, approver, hooks, null, cancellationToken);
-
-    /// <inheritdoc cref="ApproveProposalForRunAsync(Guid, ProposalApprover, ApprovedActionHooks, CancellationToken)"/>
     public async Task<ProposalApproval> ApproveProposalForRunAsync(Guid proposalId, ProposalApprover approver, ApprovedActionHooks hooks,
         string? beforeJson, CancellationToken cancellationToken = default)
     {

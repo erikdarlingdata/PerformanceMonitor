@@ -227,7 +227,7 @@ public sealed partial class ApprovalPathLiveTests(PostgresKillLiveTests.ScramTls
             Assert.Equal(InvestigationRequestStore.ProposalPressCodes.OtherApprover, other.Code);
 
             /* The store's own first transaction refuses it too, so a caller that skips the press class cannot confirm for another person. */
-            var direct = await c.Requests.ApproveProposalForRunAsync(proposalId, b, c.Hooks, c.Ct);
+            var direct = await c.Requests.ApproveProposalForRunAsync(proposalId, b, c.Hooks, null, c.Ct);
             Assert.Equal(InvestigationRequestStore.ProposalPressCodes.OtherApprover, direct.Refusal?.Reason);
 
             Assert.Equal("pending", await c.StateAsync(proposalId));
@@ -334,7 +334,7 @@ public sealed partial class ApprovalPathLiveTests(PostgresKillLiveTests.ScramTls
             var approver = await c.PersonAsync("Approver A");
             Assert.Equal("first_pressed", (await c.Press().FirstPressAsync(proposalId, approver, c.Ct)).Status);
 
-            var approval = await c.Requests.ApproveProposalForRunAsync(proposalId, approver, c.Hooks, c.Ct);
+            var approval = await c.Requests.ApproveProposalForRunAsync(proposalId, approver, c.Hooks, null, c.Ct);
             Assert.Null(approval.Refusal);
             await c.ScalarAsync("UPDATE config.config_service SET agent_actions_enabled = FALSE WHERE id = 1");
 

@@ -52,22 +52,11 @@ public partial class WebhookAlertService
 
             if (error != null)
             {
-                _consecutiveTeamsFailures++;
-                _lastTeamsError = error;
-
-                if (_consecutiveTeamsFailures <= FailingChannelThreshold)
-                    _logger.LogError($"TEAMS WEBHOOK FAILED ({_consecutiveTeamsFailures}x): {error}");
-                else if (_consecutiveTeamsFailures % 50 == 0)
-                    _logger.LogError($"TEAMS WEBHOOK STILL FAILING: {_consecutiveTeamsFailures} failures. Last: {error}");
-
+                RecordChannelFailure(ref _consecutiveTeamsFailures, ref _lastTeamsError, "Teams", error);
                 return error;
             }
 
-            if (_consecutiveTeamsFailures > 0)
-                _logger.LogInformation($"Teams webhook recovered after {_consecutiveTeamsFailures} failure(s)");
-
-            _consecutiveTeamsFailures = 0;
-            _lastTeamsError = null;
+            RecordChannelRecovered(ref _consecutiveTeamsFailures, ref _lastTeamsError, "Teams");
             _logger.LogInformation($"Teams webhook sent for {metricName} on {serverName}");
             return null;
         }
@@ -80,9 +69,7 @@ public partial class WebhookAlertService
         }
         catch (Exception ex)
         {
-            _consecutiveTeamsFailures++;
-            _lastTeamsError = ex.Message;
-            _logger.LogError($"Teams webhook error: {ex.Message}");
+            RecordChannelException(ref _consecutiveTeamsFailures, ref _lastTeamsError, "Teams", ex);
             return ex.Message;
         }
     }
