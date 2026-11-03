@@ -117,8 +117,8 @@ public sealed class PgPlanCaptureReadinessCollector : PostgresCollectorDefinitio
          plan_text_setting   - auto_explain.log_format. Satisfied only for json (#7182): the plan reader
                                parses JSON and skips every other block without counting it, so auto_explain's
                                default text format loads, logs, and stores no plan at all.
-         plan_attribution    - log_line_prefix carrying %Q directly after %p (the position the stderr plan
-                               readers take the query id from, #7182). Measured on PostgreSQL 17 while investigating
+         plan_attribution    - log_line_prefix carrying %Q directly after [%p], as the last thing in the prefix and
+                               followed by one space (the only shape the stderr plan readers match, #7182). Measured on PostgreSQL 17 while investigating
                                #2538: auto_explain's JSON output contains NO query identifier, even with
                                compute_query_id on. The only place the id appears is the LOG LINE PREFIX,
                                and with %Q present it equals pg_stat_statements.queryid exactly. So without
@@ -221,12 +221,15 @@ probe AS (
            then looks like a quiet server. Case-sensitive on purpose: %P is not %p, and %T is not %t. A NULL or empty
            prefix reads as unsatisfied, the direction that never presents a precondition this cannot prove as met. */
         coalesce(s.line_prefix, '') ~ '^%[tm].*\[%p\]'                          AS prefix_readable,
-        /* #7182: %Q is the FIRST escape after %p. The stderr plan readers take the query id from the token
-           right after the bracketed pid, so %Q anywhere else (the Debian prefix '%m [%p] %q%u@%d ' with %Q
-           appended) captures no plan at all while a bare 'contains %Q' test reads as met. This is
-           PgPlanLogParser.PrefixCarriesQueryIdAfterPid's own rule: [^%]* is the literal text between %p and
-           the next escape, so '%%' (a literal percent) is that next escape, not skipped over. */
-        coalesce(s.line_prefix, '') ~ '%p[^%]*%Q'                               AS prefix_qid_after_pid,
+        /* #7182: the shape the stderr plan block pattern (PgPlanLogParser, the block regex) can match: the
+           bracketed pid, ONE separator (a space or a colon), %Q, ONE space, then the end of the prefix, because
+           PostgreSQL writes 'LOG:  ' straight after the prefix with no space of its own. So '%m [%p] %Q ' and
+           '%t:%r:%u@%d:[%p]:%Q ' match, while '%m [%p] %Q%u@%d ', '%m [%p] %Q %u@%d ' and '%m [%p] %Q' (no
+           trailing space) put text between the id and LOG: or none after it, and capture no plan at all while a
+           bare 'contains %Q' test, or 'next escape after %p', reads as met. This is the block pattern's rule
+           for whether a block matches at all, not PrefixCarriesQueryIdAfterPid, which only decides whether to
+           trust the token as the id once the block has matched. */
+        coalesce(s.line_prefix, '') ~ '\[%p\][ :]%Q $'                          AS prefix_qid_after_pid,
         /* #7182: the plan reader parses JSON only. Case-insensitive because auto_explain accepts any case for
            an enum value, and trimmed because a placeholder read may carry what the file spelled. */
         lower(btrim(coalesce(s.log_format, ''))) = 'json'                       AS log_format_json
@@ -344,17 +347,19 @@ SELECT
     coalesce(p.line_prefix, '(unreadable)'),
     CASE
         WHEN p.prefix_qid_after_pid
-            THEN 'log_line_prefix carries %Q directly after %p, so each captured plan is stamped with the '
+            THEN 'log_line_prefix carries %Q directly after [%p], as the last thing in the prefix and followed by one space, so each captured plan is stamped with the '
                  || 'query id that joins it to pg_stat_statements.'
         WHEN strpos(coalesce(p.line_prefix, ''), '%Q') > 0
-            THEN 'log_line_prefix carries %Q, but not directly after %p. The stderr plan readers take the '
-                 || 'query id from the token right after the bracketed pid, so with %Q anywhere else no plan '
-                 || 'is stored at all. Put %Q directly after [%p], for example ''%m [%p] %Q ''; it is a '
+            THEN 'log_line_prefix carries %Q, but not directly after [%p] as the last thing in the prefix, '
+                 || 'followed by one space. The stderr plan readers take the query id from the token right '
+                 || 'after the bracketed pid and need LOG: right after it, so with %Q anywhere else, or with '
+                 || 'text after it, no plan is stored at all. Put %Q directly after [%p], as the last thing '
+                 || 'in the prefix, followed by one space, for example ''%m [%p] %Q ''; it is a '
                  || 'dynamic parameter and needs no restart.'
         ELSE 'log_line_prefix does NOT carry %Q. auto_explain does not put a query identifier in the plan '
              || 'itself - the id appears ONLY in the log line prefix - so a plan read without it cannot be '
              || 'joined to the statement it belongs to, and the stderr plan readers store no plan at all. Add '
-             || '%Q directly after [%p] in log_line_prefix, for example ''%m [%p] %Q ''; it is a dynamic '
+             || '%Q directly after [%p], as the last thing in the prefix and followed by one space, in log_line_prefix, for example ''%m [%p] %Q ''; it is a dynamic '
              || 'parameter and needs no restart.'
     END
 FROM probe AS p

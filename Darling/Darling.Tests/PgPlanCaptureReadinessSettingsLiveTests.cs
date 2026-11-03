@@ -19,7 +19,7 @@ namespace Darling.Tests;
 /// #7182: the plan-capture readiness read passed two settings the plan reader cannot use. The reader parses only
 /// JSON, so auto_explain's default <c>log_format = text</c> stored no plan while every facet read as met. And the
 /// stderr plan readers take the query id from the token right after the bracketed pid, so a <c>log_line_prefix</c>
-/// with <c>%Q</c> anywhere else (the Debian prefix with <c>%Q</c> appended) stored no plan while
+/// with <c>%Q</c> anywhere else, or with text after it (the Debian prefix with <c>%Q</c> appended), stored no plan while
 /// <c>plan_attribution</c> read as met.
 ///
 /// <para>The shipped statement runs on a real PostgreSQL with the three <c>current_setting</c> reads it judges swapped
@@ -106,7 +106,6 @@ public sealed class PgPlanCaptureReadinessSettingsLiveTests
     [Theory]
     [InlineData("%m [%p] %Q ")]
     [InlineData("%t:%r:%u@%d:[%p]:%Q ")]
-    [InlineData("%m [%p] %Q%u@%d ")]
     public async Task AQueryIdRightAfterThePidSatisfiesPlanAttribution(string prefix)
     {
         var facets = await RunAsync("json", prefix);
@@ -120,6 +119,9 @@ public sealed class PgPlanCaptureReadinessSettingsLiveTests
     [InlineData("%m [%p] %% %Q ")]
     [InlineData("%m [%p] ")]
     [InlineData("%Q %m [%p] ")]
+    [InlineData("%m [%p] %Q%u@%d ")]
+    [InlineData("%m [%p] %Q %u@%d ")]
+    [InlineData("%m [%p] %Q")]
     public async Task AQueryIdAnywhereElseLeavesPlanAttributionUnmet(string prefix)
     {
         var facets = await RunAsync("json", prefix);
@@ -132,6 +134,6 @@ public sealed class PgPlanCaptureReadinessSettingsLiveTests
     {
         var facets = await RunAsync("json", "%m [%p] %q%u@%d %Q ");
 
-        Assert.Contains("not directly after %p", facets["plan_attribution"].Detail, StringComparison.Ordinal);
+        Assert.Contains("not directly after [%p]", facets["plan_attribution"].Detail, StringComparison.Ordinal);
     }
 }
