@@ -483,7 +483,8 @@ WHERE server_id = 2 AND query_id IN (1, 2) AND collection_time >= TIMESTAMP '{At
 
             var tableNodes = nodes.Where(n => Text(n, "Relation Name") == "query_store_hash_hourly").ToList();
             Assert.NotEmpty(tableNodes);
-            Assert.All(tableNodes, n => Assert.Contains("Index", Text(n, "Node Type"), StringComparison.Ordinal));
+            /* #7240 step 4: the arm reads a range of hours, so the heap is reached through the index as an index scan or as a bitmap heap scan over a bitmap index scan of it. */
+            Assert.All(tableNodes, n => Assert.NotEqual("Seq Scan", Text(n, "Node Type")));
             Assert.Contains(nodes, n => Text(n, "Index Name") == "ix_query_store_hash_hourly_hour_server");
 
             await transaction.RollbackAsync(ct);
@@ -1170,5 +1171,210 @@ WHERE server_id = 2 AND query_id IN (1, 2) AND collection_time >= TIMESTAMP '{At
             Assert.NotEmpty(own.Facts);
             Assert.Equal(Canon(own.Facts), Canon(fleet.Facts.Where(f => f.ServerId == server)));
         }
+    }
+
+    /// <summary>
+    /// #7240 step 4: the routed statement's hourly arm is one range on <c>hour</c> less a list of gaps, grouped by <c>(server_id, query_hash)</c>
+    /// before the tag join. It must return, value for value, what the statement it replaced returned: the <c>unnest</c> of every
+    /// <c>(hour, server)</c> pair, ungrouped. The old text is kept below as the reference and run with the old parameters on the same data.
+    /// Plan one has servers with three different starts, stale pairs of each (moved intervals and a late row), and a built hour taken
+    /// out of the middle of the window (every server's pair is then read wide). Plan two has the day table: two servers take a day from
+    /// <c>query_store_hash_daily</c> (rows that differ from the hours' sums, so an hourly arm that read the day's hours too would show), the
+    /// third reads the same day's hours, one of which is stale. The hourly table also holds a NULL <c>query_hash</c>, NULL measures, hashes mapped to
+    /// two tags and hashes mapped to none, and a repeated row for one (hour, server, hash).
+    /// </summary>
+    [Fact]
+    public async Task TheHourlyArmWithARangeAndGaps_ReturnsWhatTheListOfEveryPairReturned()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ComposeStampLiveSupport.BaseConnectionString), "Set DARLING_TEST_PG to run this.");
+        var ct = TestContext.Current.CancellationToken;
+        var a = await ArrangeAsync(ct);
+        var bodySucceeded = false;
+        try
+        {
+            await ExecAsync(a.Connection, $@"
+UPDATE collect.query_store_interval_wide
+SET collection_time = collection_time - interval '1 hour', avg_cpu_time_us = 77777777
+WHERE server_id = 1 AND query_id = 3 AND plan_id = 31 AND collection_time >= TIMESTAMP '{At(a.HourNow.AddHours(-20))}' AND collection_time < TIMESTAMP '{At(a.HourNow.AddHours(-20).AddMinutes(30))}'", ct);
+            await ExecAsync(a.Connection, $@"
+UPDATE collect.query_store_interval_wide
+SET collection_time = collection_time + interval '1 hour', avg_logical_io_reads = 4000
+WHERE server_id = 2 AND query_id IN (1, 2) AND collection_time >= TIMESTAMP '{At(a.HourNow.AddHours(-12))}' AND collection_time < TIMESTAMP '{At(a.HourNow.AddHours(-11))}'", ct);
+            await ComposeStampLiveSupport.InsertRowAsync(a.Connection, 3, a.HourNow.AddHours(-6).AddMinutes(7), 700_001, ct);
+            await ExecAsync(a.Connection, $"DELETE FROM collect.query_store_compose_stamp_hours WHERE hour = TIMESTAMP '{At(a.HourNow.AddHours(-14))}'", ct);
+
+            var starts = new Dictionary<int, DateTime>
+            {
+                [1] = a.Start,
+                [2] = a.HourNow.AddHours(-16).AddMinutes(41),
+                [3] = a.HourNow.AddHours(-9).AddMinutes(13),
+            };
+            var planOne = await QueryTagRollupHashRoute.TryPlanAsync(a.Connection, starts, starts.Values.Min(), a.End, 120, ct);
+            Assert.NotNull(planOne);
+            Assert.Equal(3, planOne.TablePairs.Select(p => p.ServerId).Distinct().Count());
+            Assert.DoesNotContain(planOne.TablePairs, p => p.Hour == a.HourNow.AddHours(-14));
+            Assert.DoesNotContain(planOne.TablePairs, p => p.Hour == a.HourNow.AddHours(-12) && p.ServerId == 2);
+            Assert.Contains(planOne.TablePairs, p => p.Hour == a.HourNow.AddHours(-12) && p.ServerId == 1);
+            var hourlyOne = QueryTagRollupHashRoute.HourlyReadFor(planOne, a.End);
+            Assert.True(hourlyOne.GapServers.Length >= 5, "the gaps must cover the unbuilt hour, the stale pairs and the later starts, got " + hourlyOne.GapServers.Length);
+            await AssertSameAsTheListOfPairsAsync(a, planOne, ct);
+
+            /* Plan two: a day from the day table. */
+            var day = new DateTime(a.HourNow.AddHours(-48).Date.Ticks, DateTimeKind.Unspecified);
+            await ExecAsync(a.Connection, $@"
+INSERT INTO collect.query_store_hash_hourly (hour, wide_rows, mem_max, server_id, query_hash, ec_sum, cpu_wsum, dur_wsum, reads_wsum, writes_wsum)
+SELECT h, 2, CASE WHEN k.hash = 'hash3' THEN NULL ELSE extract(hour FROM h)::int * 10 + s END, s, k.hash,
+       extract(hour FROM h)::int + s + 1, (extract(hour FROM h)::int + 1) * 100 + s, (extract(hour FROM h)::int + 1) * 1000 + s,
+       CASE WHEN extract(hour FROM h)::int % 7 = 0 THEN NULL ELSE extract(hour FROM h)::int * 13 + s END, extract(hour FROM h)::int * 3 + s
+FROM generate_series(TIMESTAMP '{At(day)}', TIMESTAMP '{At(day.AddHours(23))}', interval '1 hour') AS h
+CROSS JOIN (VALUES (1), (2), (3)) AS srv (s)
+CROSS JOIN (VALUES ('hash1'), ('hash2'), ('hash3'), ('hashX'), (NULL)) AS k (hash);
+INSERT INTO collect.query_store_hash_hourly (hour, wide_rows, mem_max, server_id, query_hash, ec_sum, cpu_wsum, dur_wsum, reads_wsum, writes_wsum)
+SELECT hour, wide_rows, mem_max + 5, server_id, query_hash, ec_sum, cpu_wsum, dur_wsum, reads_wsum, writes_wsum
+FROM collect.query_store_hash_hourly WHERE server_id = 1 AND query_hash = 'hash1' AND hour >= TIMESTAMP '{At(day.AddHours(6))}' AND hour < TIMESTAMP '{At(day.AddHours(9))}';
+INSERT INTO collect.query_store_hash_daily (day, wide_rows, mem_max, server_id, query_hash, ec_sum, cpu_wsum, dur_wsum, reads_wsum, writes_wsum)
+SELECT TIMESTAMP '{At(day)}', 48, 999, srv.s, k.hash, 5000 + srv.s, 600000 + srv.s, 7000000 + srv.s, 80000 + srv.s, 9000 + srv.s
+FROM (VALUES (1), (2)) AS srv (s)
+CROSS JOIN (VALUES ('hash1'), ('hash2'), ('hash3'), ('hashX'), (NULL)) AS k (hash)", ct);
+            var builtHours = new HashSet<DateTime>();
+            for (var hour = day; hour < a.HourNow.AddHours(1); hour = hour.AddHours(1))
+            {
+                builtHours.Add(hour);
+            }
+
+            var stale = new HashSet<(DateTime Hour, int ServerId)> { (day.AddHours(5), 3), (a.HourNow.AddHours(-3), 2) };
+            var validDays = new HashSet<(DateTime Day, int ServerId)> { (day, 1), (day, 2) };
+            var planTwo = QueryTagRollupHashRoute.Split(new Dictionary<int, DateTime> { [1] = day, [2] = day, [3] = day }, a.HourNow, builtHours, stale, validDays);
+            Assert.Equal(2, planTwo.DayPairs.Count);
+            Assert.Contains(planTwo.TablePairs, p => p.Hour == day.AddHours(4) && p.ServerId == 3);
+            Assert.DoesNotContain(planTwo.TablePairs, p => p.Hour == day.AddHours(5) && p.ServerId == 3);
+            Assert.DoesNotContain(planTwo.TablePairs, p => p.Hour == day.AddHours(4) && p.ServerId == 1);
+            await AssertSameAsTheListOfPairsAsync(a, planTwo, ct);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await CleanupAsync(a, bodySucceeded);
+        }
+    }
+
+    private static async Task AssertSameAsTheListOfPairsAsync(Arranged a, QueryTagRollupHashRoute.Plan plan, CancellationToken ct)
+    {
+        var groups = plan.WideRanges
+            .GroupBy(r => (r.From, r.To))
+            .OrderBy(g => g.Key.From)
+            .ThenBy(g => g.Key.To)
+            .Select(g => (g.Key.From, g.Key.To, Servers: g.Select(r => r.ServerId).OrderBy(s => s).ToArray()))
+            .ToList();
+        await using var old = new NpgsqlCommand(ListOfPairsSqlFor(groups.Count, plan.UsesDays), a.Connection) { CommandTimeout = 120 };
+        old.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Timestamp, Value = plan.TablePairs.Select(p => p.Hour).ToArray() });
+        old.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer, Value = plan.TablePairs.Select(p => p.ServerId).ToArray() });
+        old.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(a.End, DateTimeKind.Unspecified) });
+        if (plan.UsesDays)
+        {
+            old.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Timestamp, Value = plan.DayPairs.Select(p => p.Day).ToArray() });
+            old.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer, Value = plan.DayPairs.Select(p => p.ServerId).ToArray() });
+        }
+
+        foreach (var group in groups)
+        {
+            old.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer, Value = group.Servers });
+            old.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(group.From, DateTimeKind.Unspecified) });
+            old.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(group.To, DateTimeKind.Unspecified) });
+        }
+
+        await using var current = QueryTagRollupHashRoute.Command(a.Connection, plan, a.End, 120);
+        var expected = await ReadFactsAsync(old, ct);
+        var actual = await ReadFactsAsync(current, ct);
+        Assert.True(expected.Count >= 6, "the reference read must return several (server, tag) rows, got " + expected.Count);
+        Assert.Contains(expected, f => f.TagId is null);
+        Assert.True(expected.Select(f => f.TagId).Distinct().Count() >= 3, "the reference must hold two tags and the untagged rows");
+        Assert.Equal(Canon(expected), Canon(actual));
+    }
+
+    private static async Task<List<QueryTagRollupFact>> ReadFactsAsync(NpgsqlCommand command, CancellationToken ct)
+    {
+        var facts = new List<QueryTagRollupFact>();
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        var ordinals = QueryTagRollupSection.QueryStore.Measures.Select(m => reader.GetOrdinal(m.Name)).ToArray();
+        while (await reader.ReadAsync(ct))
+        {
+            var values = ordinals.Select(o => reader.IsDBNull(o) ? 0 : Convert.ToDouble(reader.GetValue(o), CultureInfo.InvariantCulture)).ToArray();
+            facts.Add(new QueryTagRollupFact(reader.GetInt32(reader.GetOrdinal("server_id")), reader.IsDBNull(reader.GetOrdinal("tag_id")) ? null : reader.GetInt32(reader.GetOrdinal("tag_id")), values));
+        }
+
+        return facts;
+    }
+
+    /// <summary>
+    /// The routed statement as it was before #7240 step 4, kept as the reference: $1 and $2 the table pairs as parallel arrays, $3 the window
+    /// end, the day pairs at $4 and $5 when <paramref name="days"/>, then three parameters per wide range. The hourly arm is the
+    /// <c>unnest</c> of every pair joined to the table, with no grouping before the <c>UNION ALL</c>.
+    /// </summary>
+    private static string ListOfPairsSqlFor(int wideRanges, bool days)
+    {
+        var first = days ? 6 : 4;
+        var text = new System.Text.StringBuilder();
+        text.Append(@"
+WITH partials AS
+(
+    SELECT t.server_id, t.query_hash, t.ec_sum, t.cpu_wsum, t.dur_wsum, t.reads_wsum, t.writes_wsum, t.mem_max
+    FROM unnest($1::timestamp[], $2::integer[]) AS p(hour, server_id)
+    JOIN collect.query_store_hash_hourly AS t
+           ON t.hour = p.hour
+          AND t.server_id = p.server_id
+");
+        if (days)
+        {
+            text.Append(@"
+    UNION ALL
+    SELECT t.server_id, t.query_hash, t.ec_sum, t.cpu_wsum, t.dur_wsum, t.reads_wsum, t.writes_wsum, t.mem_max
+    FROM unnest($4::timestamp[], $5::integer[]) AS p(day, server_id)
+    JOIN collect.query_store_hash_daily AS t
+           ON t.day = p.day
+          AND t.server_id = p.server_id
+");
+        }
+
+        for (var arm = 0; arm < wideRanges; arm++)
+        {
+            var servers = "$" + (first + (3 * arm)).ToString(CultureInfo.InvariantCulture);
+            var from = "$" + (first + 1 + (3 * arm)).ToString(CultureInfo.InvariantCulture);
+            var to = "$" + (first + 2 + (3 * arm)).ToString(CultureInfo.InvariantCulture);
+            text.Append($@"
+    UNION ALL
+    SELECT q.server_id, q.query_hash,
+           SUM(q.execution_count) AS ec_sum,
+           SUM(q.avg_cpu_time_us * q.execution_count) AS cpu_wsum,
+           SUM(q.avg_duration_us * q.execution_count) AS dur_wsum,
+           SUM(q.avg_logical_io_reads * q.execution_count) AS reads_wsum,
+           SUM(q.avg_logical_io_writes * q.execution_count) AS writes_wsum,
+           MAX(q.max_query_max_used_memory) AS mem_max
+    FROM collect.query_store_interval_wide AS q
+    WHERE q.server_id = ANY({servers}::integer[])
+    AND   q.collection_time >= {from}::timestamp
+    AND   q.collection_time < {to}::timestamp
+    AND   q.collection_time <= $3
+    AND   q.first_execution_time >= {from}::timestamp - {QueryStoreIntervalWide.PurgeEdgeMarginSql}
+    AND   q.first_execution_time <= LEAST({to}::timestamp, $3) + {QueryStoreIntervalWide.FirstExecUpperSlackSql}
+    GROUP BY q.server_id, q.query_hash
+");
+        }
+
+        text.Append(@"
+)
+SELECT p.server_id, m.tag_id,
+       CAST(COALESCE(SUM(p.cpu_wsum), 0) AS double precision) AS cpu_ms,
+       CAST(COALESCE(SUM(p.dur_wsum), 0) AS double precision) AS duration_ms,
+       CAST(COALESCE(SUM(p.reads_wsum), 0) AS double precision) AS logical_reads,
+       CAST(COALESCE(SUM(p.writes_wsum), 0) AS double precision) AS logical_writes,
+       CAST(COALESCE(SUM(p.ec_sum), 0) AS double precision) AS executions,
+       CAST(COALESCE(MAX(p.mem_max), 0) AS double precision) AS peak_memory_pages
+FROM partials AS p
+LEFT JOIN config.query_tag_map AS m
+       ON m.server_id = p.server_id AND m.key_kind = 'hash' AND m.key = p.query_hash
+GROUP BY p.server_id, m.tag_id");
+        return text.ToString();
     }
 }
