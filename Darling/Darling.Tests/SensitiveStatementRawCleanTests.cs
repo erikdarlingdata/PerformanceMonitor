@@ -70,6 +70,24 @@ public class SensitiveStatementRawCleanTests
         Assert.True(budget.Elapsed > TimeSpan.Zero);
     }
 
+    [Fact]
+    public void TheClear_IsChargedOnTheBudgetsOwnClock_NotTheRealOne()
+    {
+        // #7348: a budget on a fake clock is charged on that clock alone. The clock moves 1 s on every read, so the
+        // pre-check's two reads (start and end) charge exactly 1 s however fast the real scan ran; read from the real
+        // clock the charge would be a few microseconds. The judge is the shared production one (none passed).
+        var now = TimeSpan.Zero;
+        var budget = new SensitiveStatements.JudgeBudget(
+            SensitiveStatements.ReadBudget,
+            clock: () => now += TimeSpan.FromSeconds(1));
+        var xml = "<r a=\"1\"><n>" + Plain + "</n></r>";
+
+        var cleared = SensitiveStatements.RawTextHoldsNothingNamed(budget, xml);
+
+        Assert.True(cleared);
+        Assert.Equal(TimeSpan.FromSeconds(1), budget.Elapsed);
+    }
+
     public static TheoryData<string> DocumentsThatMustBeWalked() => new()
     {
         // A named value: the walk replaces it.
