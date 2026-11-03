@@ -40,3 +40,19 @@ internal static class BlockingSourceLabel
         return baseLabel;
     }
 }
+
+/// <summary>
+/// #7219: the blocking trend chart counts blocked-process REPORT rows per minute (one wait can write several reports), not blocked
+/// sessions, so every screen that draws it says "reports". One place for both apps, so Lite and the Darling viewer cannot word it differently.
+/// </summary>
+internal static class BlockingTrendLabels
+{
+    /// <summary>The full label: chart legend, and the axis title where the plot is tall enough to carry it.</summary>
+    internal const string PerMinute = "Blocked-process reports per minute";
+
+    /// <summary>The shorter form for a hover name or a legend with less room.</summary>
+    internal const string Reports = "Blocked-process reports";
+
+    /// <summary>The left-axis title on the viewer's shortest chart row (88 px at 9 pt holds about 16 characters, see <c>ChartAxisTitle.Fit</c>); the legend carries the full <see cref="PerMinute"/>.</summary>
+    internal const string AxisShort = "Reports per min";
+}

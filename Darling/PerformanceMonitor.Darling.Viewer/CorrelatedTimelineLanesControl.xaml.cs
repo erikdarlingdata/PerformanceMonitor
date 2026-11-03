@@ -88,7 +88,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         _crosshairManager = new CorrelatedCrosshairManager { DisplayZoneProvider = ViewerTimeHelper.CurrentDisplayZone };
         _crosshairManager.AddLane(CpuChart, "SQL CPU", "%");
         _crosshairManager.AddLane(WaitStatsChart, "Wait Stats", "ms/sec");
-        _crosshairManager.AddLane(BlockingChart, "Blocking", "events");
+        _crosshairManager.AddLane(BlockingChart, "Blocking", "reports");
         _crosshairManager.AddLane(MemoryChart, "Buffer Pool", "MB");
         _crosshairManager.AddLane(FileIoChart, "I/O Latency", "ms");
     }

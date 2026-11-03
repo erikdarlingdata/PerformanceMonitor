@@ -97,6 +97,8 @@ public sealed class WebOverviewStripsBehaviourTests
         var at12 = Samples(r.GetProperty("at12").GetProperty("blocking"));
         Assert.Equal((12.0, 3.0), at12[0]);
         Assert.Null(at12[1].V);
+        // #7219: the strip counts blocked-process report rows, so its readout names reports (not "Blocking 3 events").
+        Assert.Contains("Blocked-process reports 3 per min", r.GetProperty("at12Text").GetProperty("blocking").GetString(), StringComparison.Ordinal);
 
         Assert.Equal((30.0, 3.0), Samples(r.GetProperty("at30").GetProperty("io"))[0]);
         // A pointer move drives the same lookup, over one crosshair line.

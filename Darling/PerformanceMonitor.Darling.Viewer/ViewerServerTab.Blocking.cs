@@ -39,7 +39,7 @@ public partial class ViewerServerTab
     /// <summary>#6878: the Blocking Trends chart's left-axis title. It is drawn rotated along a plot only about 80 px long at 1366x768, so it stays short enough that
     /// <see cref="PerformanceMonitor.Ui.ChartAxisTitle.Fit"/> keeps all of it. The answering collector (blocked-process-report or DMV snapshot) is named in the legend entry instead,
     /// where there is a whole line of width for it.</summary>
-    internal const string BlockingTrendAxisTitle = "Blocking events";
+    internal const string BlockingTrendAxisTitle = PerformanceMonitor.Ui.BlockingTrendLabels.AxisShort;
 
     private ChartHoverHelper? _lockWaitTrendHover;
     private ChartHoverHelper? _blockingTrendHover;
@@ -615,7 +615,7 @@ public partial class ViewerServerTab
             var zeroLine = BlockingTrendChart.Plot.Add.Scatter(
                 new[] { rangeStart.ToOADate(), rangeEnd.ToOADate() },
                 new[] { 0.0, 0.0 });
-            zeroLine.LegendText = "Blocking Incidents";
+            zeroLine.LegendText = PerformanceMonitor.Ui.BlockingTrendLabels.PerMinute;
             zeroLine.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("Blocking"));
             zeroLine.MarkerSize = 0;
             BlockingTrendChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
@@ -655,10 +655,10 @@ public partial class ViewerServerTab
         expandedCounts.Add(0);
 
         var plot = BlockingTrendChart.Plot.Add.Scatter(expandedTimes.ToArray(), expandedCounts.ToArray()); /* synthetic spike baseline (±0.0001d offsets), NOT a cadence series - gap-breaking would lock onto the artificial deltas (#1944 review) */
-        plot.LegendText = PerformanceMonitor.Ui.BlockingSourceLabel.For("Blocking Incidents", data.Select(d => d.Source));
+        plot.LegendText = PerformanceMonitor.Ui.BlockingSourceLabel.For(PerformanceMonitor.Ui.BlockingTrendLabels.PerMinute, data.Select(d => d.Source));
         plot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("Blocking"));
         plot.MarkerSize = 0; /* No markers, just lines */
-        _blockingTrendHover?.Add(plot, "Blocking Incidents");
+        _blockingTrendHover?.Add(plot, PerformanceMonitor.Ui.BlockingTrendLabels.Reports);
 
         BlockingTrendChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         BlockingTrendChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());

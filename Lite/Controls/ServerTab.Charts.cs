@@ -916,13 +916,13 @@ public partial class ServerTab : UserControl
             var zeroLine = BlockingTrendChart.Plot.Add.Scatter(
                 new[] { rangeStart.ToOADate(), rangeEnd.ToOADate() },
                 new[] { 0.0, 0.0 });
-            zeroLine.LegendText = "Blocking Incidents";
+            zeroLine.LegendText = PerformanceMonitor.Ui.BlockingTrendLabels.PerMinute;
             zeroLine.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("Blocking"));
             zeroLine.MarkerSize = 0;
             BlockingTrendChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
             BlockingTrendChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
             ReapplyAxisColors(BlockingTrendChart);
-            BlockingTrendChart.Plot.YLabel("Blocking Incidents");
+            BlockingTrendChart.Plot.YLabel(PerformanceMonitor.Ui.BlockingTrendLabels.PerMinute);
             SetChartYLimitsWithLegendPadding(BlockingTrendChart, 0, 1);
             ShowChartLegend(BlockingTrendChart);
             BlockingTrendChart.Refresh();
@@ -956,15 +956,15 @@ public partial class ServerTab : UserControl
         expandedCounts.Add(0);
 
         var plot = BlockingTrendChart.Plot.Add.Scatter(expandedTimes.ToArray(), expandedCounts.ToArray()); /* synthetic spike baseline (±0.0001d offsets), NOT a cadence series - gap-breaking would lock onto the artificial deltas (#1944 review) */
-        plot.LegendText = "Blocking Incidents";
+        plot.LegendText = PerformanceMonitor.Ui.BlockingTrendLabels.PerMinute;
         plot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("Blocking"));
         plot.MarkerSize = 0; /* No markers, just lines */
-        _blockingTrendHover?.Add(plot, "Blocking Incidents");
+        _blockingTrendHover?.Add(plot, PerformanceMonitor.Ui.BlockingTrendLabels.Reports);
 
         BlockingTrendChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
         BlockingTrendChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
         ReapplyAxisColors(BlockingTrendChart);
-        BlockingTrendChart.Plot.YLabel(PerformanceMonitor.Ui.BlockingSourceLabel.For("Blocking Incidents", data.Select(d => d.Source)));
+        BlockingTrendChart.Plot.YLabel(PerformanceMonitor.Ui.BlockingSourceLabel.For(PerformanceMonitor.Ui.BlockingTrendLabels.PerMinute, data.Select(d => d.Source)));
         SetChartYLimitsWithLegendPadding(BlockingTrendChart, 0, data.Max(d => d.Count));
         ShowChartLegend(BlockingTrendChart);
         BlockingTrendChart.Refresh();

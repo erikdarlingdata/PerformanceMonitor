@@ -74,9 +74,24 @@ public sealed class ViewerShortPlotTests
     public void BlockingTrendAxisTitle_FitsTheMinimumRowWhole_AndTheSourceMovesToTheLegend()
     {
         var (text, size) = ChartAxisTitle.Fit(PerformanceMonitor.Darling.Viewer.ViewerServerTab.BlockingTrendAxisTitle, MinRowTitleSpace);
-        Assert.Equal("Blocking events", text);
+        Assert.Equal(PerformanceMonitor.Ui.BlockingTrendLabels.AxisShort, text);
         Assert.InRange(size, ChartAxisTitle.MinFontSize, ChartAxisTitle.BaseFontSize);
         Assert.Equal("Blocking Incidents (blocked-process-report)", BlockingSourceLabel.For("Blocking Incidents", new string?[] { "blocked-process-report" }));
+    }
+
+    /// <summary>#7219: the trend counts blocked-process report rows, so the legend and the (short) axis title say reports, and the tool text says so too.</summary>
+    [Fact]
+    public void BlockingTrendLabels_SayReports_InTheLegendTheAxisAndTheToolText()
+    {
+        Assert.Equal("Blocked-process reports per minute (DMV snapshot)", BlockingSourceLabel.For(BlockingTrendLabels.PerMinute, new string?[] { "DMV snapshot" }));
+        Assert.Contains("report", PerformanceMonitor.Darling.Viewer.ViewerServerTab.BlockingTrendAxisTitle, System.StringComparison.OrdinalIgnoreCase);
+
+        var description = typeof(PerformanceMonitor.Darling.Service.Mcp.DarlingMcpBlockingTools)
+            .GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Instance)
+            .Single(m => System.Reflection.CustomAttributeExtensions.GetCustomAttribute<ModelContextProtocol.Server.McpServerToolAttribute>(m)?.Name == "get_blocking_trend")
+            .GetCustomAttributes(typeof(System.ComponentModel.DescriptionAttribute), false).Cast<System.ComponentModel.DescriptionAttribute>().Single().Description;
+        Assert.Contains("blocked-process report counts per minute", description, System.StringComparison.Ordinal);
+        Assert.DoesNotContain("blocking event counts", description, System.StringComparison.Ordinal);
     }
 
     [Theory]

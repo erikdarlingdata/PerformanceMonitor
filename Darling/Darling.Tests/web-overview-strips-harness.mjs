@@ -98,6 +98,7 @@ if (scenario === "crosshair") {
   out.at38Text = readoutTexts(drawn.node);
   /* minute 12.2 sits on the blocking bucket; the deadlock series (empty) has no sample */
   out.at12 = { blocking: pick(at(12.2), "blocking") };
+  out.at12Text = readoutTexts(drawn.node);
   /* minute 30: the file I/O bucket of both files, weighted 900:100 -> (2*900 + 12*100)/1000 = 3 ms */
   out.at30 = { io: pick(at(30), "io") };
   /* a pointer move over the plot drives the same lookup */

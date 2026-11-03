@@ -139,9 +139,9 @@ export function buildStrips(reads) {
   };
 
   const blocking = {
-    key: "blocking", title: "Blocking", unit: "events", event: true, min: 0,
+    key: "blocking", title: "Blocking", unit: "per min", event: true, min: 0,
     series: [
-      { label: "Blocking", color: "#ef5350", points: toTimed(rowsOf(reads.blocking, "trend"), "time", (r) => r.count) },
+      { label: "Blocked-process reports", color: "#ef5350", points: toTimed(rowsOf(reads.blocking, "trend"), "time", (r) => r.count) },
       { label: "Deadlocks", color: "#ab47bc", points: toTimed(rowsOf(reads.deadlocks, "trend"), "time", (r) => r.count) },
     ],
     note: null,

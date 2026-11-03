@@ -1195,7 +1195,7 @@ SELECT
             () => GetBlockedProcessThresholdOnAsync(serverId, startUtc, endUtc));
 
     /// <summary>
-    /// Gets blocking incident trend (count of distinct blocking events per time bucket).
+    /// Gets the blocking trend: blocked-process reports per minute (report rows, not blocked sessions; one wait can write several reports, #7219).
     /// Uses blocked_process_reports from Extended Events for more reliable detection.
     /// Falls back to blocking_snapshots if no XE data available.
     /// </summary>
