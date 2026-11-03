@@ -449,7 +449,7 @@ public partial class SettingsWindow : Window
             alertsValid = SaveAlertSettings(root);
             var smtpValid = SaveSmtpSettings(root);
             /* A refused recipient list is reported by its own dialog; folding it into webhooksValid makes the outcome
-               "written with objections" so no second "Settings saved." box contradicts it. */
+               "written with objections" so no second success box contradicts it. */
             webhooksValid = SaveWebhookSettings(root) && smtpValid;
         }
         catch (Exception ex)
