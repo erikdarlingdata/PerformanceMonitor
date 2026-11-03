@@ -464,9 +464,7 @@ public class AnalysisService
                 finding.Remediation =
                     FactRemediation.BuildAction(finding)
                     ?? FactRemediation.BuildRcsiAction(finding)
-                    ?? FactRemediation.BuildClearPlanAction(finding)
                     ?? FactRemediation.BuildFileAutogrowthAction(finding) // advisory copy-paste (no handler)
-                    ?? FactRemediation.BuildServerConfigAction(finding)   // server-level config — MAXDOP/CTFP/memory
                     ?? FactRemediation.BuildMissingIndexAction(finding);  // missing-index CREATE — copy-paste only
             }
 

@@ -57,72 +57,8 @@ public static class FactRiskDisclosure
         return action.FactKey switch
         {
             "RCSI" => BuildRcsiDisclosure(action, finding),
-            "CLEAR_PLAN" => BuildClearPlanDisclosure(action, finding),
             _ => null
         };
-    }
-
-    /// <summary>
-    /// The two-sided disclosure for a DESTRUCTIVE clear-cached-plan action (DBCC
-    /// FREEPROCCACHE on the resolved plan handle(s) for a query hash). Mirrors the RCSI
-    /// arm: fixed/reviewed prose for the risk-of-changing side; the risk-of-NOT-changing
-    /// side filled with the REAL per-exec CPU figures carried on the action
-    /// (<see cref="ClearPlanFigures"/>); and the honest tool-choice steer — when
-    /// PLAN_REGRESSION co-fired, forcing is more durable; when PARAMETER_SENSITIVITY
-    /// co-fired, clearing will not durably help. Always returns at least one item on
-    /// EACH side (so the empty-disclosure fail-closed gate is never tripped).
-    /// </summary>
-    private static RiskDisclosure BuildClearPlanDisclosure(RemediationAction action, AnalysisFinding? finding)
-    {
-        var changing = new List<RiskItem>
-        {
-            new("Clearing the cached plan for this query forces a recompile on its next " +
-                "execution (a one-time compile cost)."),
-            new("The recompile is NOT guaranteed to produce a better plan — if the cause is " +
-                "parameter sniffing, SQL Server may cache an equally-bad or different-but-bad " +
-                "plan for whatever parameter value runs next."),
-            new("Apply will live-resolve and clear EVERY currently-cached plan for this query " +
-                "hash. A query hash is not unique to one logical query (hash collisions and " +
-                "pre-parameterization shape-sharing), so confirm the per-handle database/query " +
-                "list in the preview before applying — it may span more than the query you expect."),
-        };
-
-        var f = action.ClearPlanFigures;
-        var notChanging = new List<RiskItem>();
-
-        if (f is { } figures)
-        {
-            notChanging.Add(new(
-                $"This query is currently at ~{figures.AnomalyRatio.ToString("0.0", CultureInfo.InvariantCulture)}x " +
-                $"its normal per-exec CPU ({figures.CurrentCpuPerExecMs.ToString("0.0", CultureInfo.InvariantCulture)} ms " +
-                $"vs baseline {figures.BaselineCpuPerExecMs.ToString("0.0", CultureInfo.InvariantCulture)} ms) and is " +
-                $"responsible for {figures.CpuPercent.ToString(CultureInfo.InvariantCulture)}% of CPU over the window; " +
-                "leaving the bad plan cached keeps it there."));
-
-            if (figures.PlanRegressionCoFired)
-            {
-                notChanging.Add(new(
-                    "A known-better historical plan exists for this query — forcing it (the Plan " +
-                    "Regression remediation) is more durable than clear-and-recompile."));
-            }
-
-            if (figures.ParameterSensitivityCoFired)
-            {
-                notChanging.Add(new(
-                    "This query is parameter-sensitive — clearing the plan likely WON'T durably " +
-                    "help; consider OPTION(RECOMPILE) / OPTIMIZE FOR. Clearing may give brief relief at best."));
-            }
-        }
-        else
-        {
-            // No carried figures (e.g. a legacy/empty action): degrade to the weak-case
-            // baseline rather than overstate — still one item so the gate never trips.
-            notChanging.Add(new(
-                "Per-exec CPU figures were not captured for this query; the case for clearing " +
-                "the cached plan is weak without an anomaly baseline."));
-        }
-
-        return new RiskDisclosure(changing, notChanging);
     }
 
     private static RiskDisclosure BuildRcsiDisclosure(RemediationAction action, AnalysisFinding? finding)
