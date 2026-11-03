@@ -243,9 +243,6 @@ public static class PgPlanLogParser
         RegexOptions.Compiled | RegexOptions.Multiline,
         s_matchTimeout);
 
-    private static readonly Regex s_logLineStart = new(
-        @"^\d{4}-\d\d-\d\d ", RegexOptions.Compiled, s_matchTimeout);
-
     /// <summary>
     /// Where the plan that a slab of log text ends inside begins, or -1 when it does not end inside one (#7186). The
     /// RDS log API is consume-once, so a plan the end of a portion cuts is never offered again: <c>RdsPlanIngestor</c>
@@ -253,7 +250,7 @@ public static class PgPlanLogParser
     ///
     /// <para>Unfinished is: the last plan header followed by tab-indented lines that run to the end of the text without
     /// forming a JSON document yet (the last line cut short, or the closing brace not arrived), or a last line with no
-    /// newline that starts like a log line, which may be a header cut short. A plan that other lines follow, or one
+    /// newline, whatever it starts with, which may be a header cut anywhere, even inside its date. A plan that other lines follow, or one
     /// whose JSON is complete, is not.</para>
     /// </summary>
     public static int UnfinishedTailStart(string? logBody)
@@ -290,7 +287,7 @@ public static class PgPlanLogParser
             {
                 var lastLine = logBody.LastIndexOf('\n') + 1;
 
-                if (s_logLineStart.IsMatch(logBody.AsSpan(lastLine)) && (start < 0 || lastLine < start))
+                if (start < 0 || lastLine < start)
                 {
                     start = lastLine;
                 }

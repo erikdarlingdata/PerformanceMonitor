@@ -195,9 +195,20 @@ public sealed class RdsLogEventIngestor
             ? _csvCarry.CarryFor(chunk.Value.Resume.Key, chunk.Value.StartsAtFileStart)
             : (RdsCsvlogCarry.CsvCarry.Empty, null, 0, null);
 
-        var (heldEntry, entryKey, entryFileName, _) = pgLogUsesCsvlog
+        var (heldEntry, entryKey, entryFileName, abandonedEntry) = pgLogUsesCsvlog
             ? (string.Empty, null, null, string.Empty)
             : _entryCarry.CarryFor(chunk.Value.Resume.Key);
+
+        if (abandonedEntry.Length > 0)
+        {
+            /* An entry held for a log file that was not read to its end, whose own last portion never came (RDS stopped
+               listing it): nothing can finish it, and Commit replaces it when the carry moves to this file. It is not
+               stored, as it is cut short, but the loss is logged so it is visible (#7186). */
+            _logger?.LogDebug(
+                "RDS log for {Server}: a log entry held for a log file that was not read to its end can never be "
+                + "finished; dropping it as the read moves on to {File} (#7186)",
+                storageName, entryFileName);
+        }
 
         var (written, foreignZoneLines, csvRecordsDiscarded, nextCarry, nextEntry) = await StoreAsync(
             serverId, storageName, chunk.Value.Text, logTimezoneIsUtc, pgLogUsesCsvlog,

@@ -99,9 +99,10 @@ internal static class RdsDeadlockCarry
 /// carries, which hold their own unfinished tail through the same step), modelled on <see cref="RdsCsvlogCarryBook"/>: keyed
 /// by the instance half of <see cref="RdsLogSource.ResumeMarker.Key"/> with the file name carried inside, so a
 /// rotation to a new file starts fresh instead of gluing the new file's first bytes onto the old file's tail. The held
-/// head stays in memory, and the saved resume marker (#4708) is not moved past a chunk while a report is held, so a
-/// restart reads that chunk again rather than starting in the middle of the report. The carry only moves alongside the
-/// marker's own commit. One book per ingestor, never shared.
+/// head stays in memory. On the deadlock route the saved resume marker (#4708) is not moved past a chunk while a report
+/// is held, so a restart reads that chunk again rather than starting in the middle of the report. The plan and
+/// log-event routes save the position on every pass instead, and a restart loses the one plan or entry held. The carry
+/// only moves alongside the marker's own commit. One book per ingestor, never shared.
 /// </summary>
 internal sealed class RdsDeadlockCarryBook
 {

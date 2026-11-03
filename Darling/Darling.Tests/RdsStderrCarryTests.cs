@@ -155,6 +155,40 @@ public sealed class RdsStderrCarryTests
     }
 
     [Fact]
+    public async Task APlanHeaderCutInsideItsDate_IsStoredOnce_AndWhole()
+    {
+        /* #7186 review: seven bytes is "2026-08", before the date is even whole, so the cut line does not look like a
+           log line and the next portion opens with "-26 22:25:24...", which no plan pattern matches by itself. */
+        const int cut = 7;
+        var lead = QuietLine;
+
+        Assert.Equal(lead.Length, PgPlanLogParser.UnfinishedTailStart(lead + PlanText[..cut]));
+
+        var client = new FakeRds((lead + PlanText[..cut], true), (PlanText[cut..] + QuietLine, false));
+        var stored = new List<PgPlanCaptureCollector.Row>();
+
+        await using var store = NpgsqlDataSource.Create(DeadStore);
+        var ingestor = new RdsPlanIngestor(store, new RdsLogSource(_ => client))
+        {
+            RowWriter = (rows, _) =>
+            {
+                stored.AddRange(rows);
+                return Task.FromResult(rows.Count);
+            },
+        };
+
+        await ingestor.IngestAsync(1, "target-a", Host);
+        Assert.Empty(stored);
+
+        await ingestor.IngestAsync(1, "target-a", Host);
+
+        var whole = Assert.Single(stored);
+        var expected = Assert.Single(PgPlanLogParser.Extract(PlanText));
+        Assert.Equal(expected.PlanHash, whole.PlanHash);
+        Assert.Equal(expected.PlanJson, whole.PlanJson);
+    }
+
+    [Fact]
     public async Task APlanThatEndsAPortionWhole_IsStoredAtOnce_WithNothingHeld()
     {
         var client = new FakeRds((QuietLine + WholePlan, true));

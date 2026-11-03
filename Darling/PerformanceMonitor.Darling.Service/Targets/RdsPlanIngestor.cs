@@ -185,9 +185,20 @@ public sealed class RdsPlanIngestor
             ? _csvCarry.CarryFor(chunk.Value.Resume.Key, chunk.Value.StartsAtFileStart)
             : (RdsCsvlogCarry.CsvCarry.Empty, null, 0, null);
 
-        var (heldPlan, planKey, planFileName, _) = pgLogUsesCsvlog
+        var (heldPlan, planKey, planFileName, abandonedPlan) = pgLogUsesCsvlog
             ? (string.Empty, null, null, string.Empty)
             : _planCarry.CarryFor(chunk.Value.Resume.Key);
+
+        if (abandonedPlan.Length > 0)
+        {
+            /* A plan held for a log file that was not read to its end, whose own last portion never came (RDS stopped
+               listing it): nothing can finish it, and Commit replaces it when the carry moves to this file. It is not
+               stored, as an unfinished plan has no complete JSON to parse, but the loss is logged so it is visible (#7186). */
+            _logger?.LogDebug(
+                "RDS plan log for {Server}: a plan held for a log file that was not read to its end can never be "
+                + "finished; dropping it as the read moves on to {File} (#7186)",
+                storageName, planFileName);
+        }
 
         /* A chunk of a file that is no longer the newest and has nothing more pending is that file's last: a plan it
            ends inside can never be finished. */
