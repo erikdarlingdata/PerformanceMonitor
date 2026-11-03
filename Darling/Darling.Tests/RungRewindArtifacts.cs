@@ -665,6 +665,12 @@ ALTER TABLE config.config_notification_routes DROP COLUMN IF EXISTS action_appro
         new(239, "hasComposeFleet",
             @"DROP TABLE IF EXISTS collect.query_store_compose_fleet;
 ALTER TABLE IF EXISTS collect.query_store_compose_stamp_built DROP COLUMN IF EXISTS fleet_built_seq;"),
+        // V240 (#7169): the execution-weighted sums on the Query Store daily summary. The last column is the probe's newest sentinel. The
+        // rewind drops all six, so a re-run of V240 adds them again. Safe on a store that never had them.
+        new(240, "hasQueryStoreTopDailyWsum",
+            @"ALTER TABLE IF EXISTS collect.query_store_top_daily
+    DROP COLUMN IF EXISTS avg_duration_us_wsum, DROP COLUMN IF EXISTS avg_cpu_time_us_wsum, DROP COLUMN IF EXISTS avg_logical_io_reads_wsum,
+    DROP COLUMN IF EXISTS avg_logical_io_writes_wsum, DROP COLUMN IF EXISTS avg_physical_io_reads_wsum, DROP COLUMN IF EXISTS avg_rowcount_wsum;"),
     ];
 
     /// <summary>
