@@ -309,12 +309,7 @@ WHERE server_id = 2 AND query_hash = 'hash3' AND collection_time >= TIMESTAMP '{
         var bodySucceeded = false;
         try
         {
-            /* Rows added to the table directly leave the ledger's pairs as they are, so every built hour stays valid and is read from the table. */
-            await ExecAsync(a.Connection, $@"
-INSERT INTO collect.query_store_hash_hourly (hour, wide_rows, mem_max, server_id, query_hash, ec_sum, cpu_wsum, dur_wsum, reads_wsum, writes_wsum)
-SELECT TIMESTAMP '{At(a.HourNow.AddHours(-24))}' + h * interval '1 hour', 2, (q % 5000) + 1, s, 'bulk' || q, q % 7 + 1, q * 3, q * 5, q * 7, q
-FROM generate_series(0, 27) AS h CROSS JOIN generate_series(1, 3) AS s CROSS JOIN generate_series(1, 12000) AS q;
-ANALYZE collect.query_store_hash_hourly", ct);
+            await SeedBulkHourlyAsync(a, ct);
 
             var window = Servers.ToDictionary(s => s, _ => a.Start);
             var plan = await QueryTagRollupHashRoute.TryPlanAsync(a.Connection, window, window.Values.Min(), a.End, 120, ct);
@@ -347,6 +342,97 @@ GROUP BY t.server_id, t.query_hash", a.Connection);
             var routedBlocks = await TempBlocksWrittenAsync(routed, transaction);
             Assert.Equal(0, routedBlocks);
             await transaction.RollbackAsync(ct);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await CleanupAsync(a, bodySucceeded);
+        }
+    }
+
+    /// <summary>
+    /// Rows added to the table directly leave the ledger's pairs as they are, so every built hour stays valid and is read from the table:
+    /// about a million rows over 36,000 distinct (server, hash) pairs.
+    /// </summary>
+    private static async Task SeedBulkHourlyAsync(Arranged a, CancellationToken ct) => await ExecAsync(a.Connection, $@"
+INSERT INTO collect.query_store_hash_hourly (hour, wide_rows, mem_max, server_id, query_hash, ec_sum, cpu_wsum, dur_wsum, reads_wsum, writes_wsum)
+SELECT TIMESTAMP '{At(a.HourNow.AddHours(-24))}' + h * interval '1 hour', 2, (q % 5000) + 1, s, 'bulk' || q, q % 7 + 1, q * 3, q * 5, q * 7, q
+FROM generate_series(0, 27) AS h CROSS JOIN generate_series(1, 3) AS s CROSS JOIN generate_series(1, 12000) AS q;
+ANALYZE collect.query_store_hash_hourly", ct);
+
+    /// <summary>
+    /// #7365: the statement keeps its parallel plan and still writes no temp blocks, whether the workers start or not. On the load-test store
+    /// the flat statement (no GROUP BY in the arms, one at the top) failed on the 1 GB <c>temp_file_limit</c> of the mcp and viewer roles when
+    /// no worker could start: the planner hid <c>(server_id, tag_id)</c> behind the <c>UNION ALL</c>, guessed 40,000 groups, and sorted every
+    /// row of the hourly arm. Here the same million-row seed runs under a 1 MB <c>work_mem</c> and a 4 MB <c>temp_file_limit</c> (the seed's
+    /// scale of the role's limit: a sort of the arm writes about 70 MB and the statement would fail) with 4 workers planned. First with the
+    /// workers free to start: the plan must have a Gather with workers planned and write no temp block. Then with <c>max_parallel_workers</c> at
+    /// 0, which leaves every Gather to the leader alone: the same plan, no worker launched, no temp block and no error.
+    /// </summary>
+    [Fact]
+    public async Task TheRoutedStatement_KeepsItsParallelPlan_AndWritesNoTempBlocks_WithFourWorkersAndWithTheLeaderAlone()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ComposeStampLiveSupport.BaseConnectionString), "Set DARLING_TEST_PG to run this.");
+        var ct = TestContext.Current.CancellationToken;
+        var a = await ArrangeAsync(ct);
+        var bodySucceeded = false;
+        try
+        {
+            await SeedBulkHourlyAsync(a, ct);
+            var window = Servers.ToDictionary(s => s, _ => a.Start);
+            var plan = await QueryTagRollupHashRoute.TryPlanAsync(a.Connection, window, window.Values.Min(), a.End, 120, ct);
+            Assert.NotNull(plan);
+
+            /* Every Gather in the plan: (workers planned, workers launched). */
+            static void CollectGathers(JsonElement node, List<(long Planned, long Launched)> into)
+            {
+                if (node.TryGetProperty("Workers Planned", out var planned))
+                {
+                    into.Add((planned.GetInt64(), node.TryGetProperty("Workers Launched", out var launched) ? launched.GetInt64() : -1));
+                }
+
+                if (node.TryGetProperty("Plans", out var children))
+                {
+                    foreach (var child in children.EnumerateArray())
+                    {
+                        CollectGathers(child, into);
+                    }
+                }
+            }
+
+            async Task<(long TempBlocks, List<(long Planned, long Launched)> Gathers)> RunAsync(string label, int maxParallelWorkers)
+            {
+                await using var transaction = await a.Connection.BeginTransactionAsync(ct);
+                await ExecAsync(a.Connection, $"SET LOCAL work_mem = '1MB'; SET LOCAL temp_file_limit = '4MB'; SET LOCAL max_parallel_workers_per_gather = 4; SET LOCAL max_parallel_workers = {maxParallelWorkers}", ct);
+                await using var routed = QueryTagRollupHashRoute.Command(a.Connection, plan, a.End, 120);
+                routed.Transaction = transaction;
+                routed.CommandText = "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + routed.CommandText;
+                string json;
+                try
+                {
+                    json = Convert.ToString(await routed.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture)!;
+                }
+                catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.ConfigurationLimitExceeded)
+                {
+                    throw new Xunit.Sdk.XunitException(label + ": the statement hit the temp_file_limit: " + ex.MessageText);
+                }
+
+                using var document = JsonDocument.Parse(json);
+                var root = document.RootElement[0].GetProperty("Plan");
+                var gathers = new List<(long Planned, long Launched)>();
+                CollectGathers(root, gathers);
+                await transaction.RollbackAsync(ct);
+                return (root.GetProperty("Temp Written Blocks").GetInt64(), gathers);
+            }
+
+            var withWorkers = await RunAsync("four workers", 8);
+            Assert.True(withWorkers.Gathers.Any(g => g.Planned > 0), "four workers: the plan has no Gather with workers planned");
+            Assert.Equal(0, withWorkers.TempBlocks);
+
+            var leaderAlone = await RunAsync("leader alone", 0);
+            Assert.True(leaderAlone.Gathers.Any(g => g.Planned > 0), "leader alone: the plan has no Gather with workers planned");
+            Assert.All(leaderAlone.Gathers, g => Assert.Equal(0, g.Launched));
+            Assert.Equal(0, leaderAlone.TempBlocks);
             bodySucceeded = true;
         }
         finally
@@ -1479,18 +1565,25 @@ WHERE server_id IN (1, 2) AND hour >= TIMESTAMP '{At(day)}' AND hour < TIMESTAMP
     }
 
     /// <summary>
-    /// The flat routed statement (#7365) against the one before it, where every arm grouped by (server, tag) itself and the hourly arm was driven by
-    /// <c>unnest</c> of the ranges. The reference takes the routed command's parameters without its last two (the hourly bounds).
+    /// The routed statement (#7365: one hourly arm for each range, plain bounds) against the one before it (#7358), where the hourly arm was
+    /// driven by <c>unnest</c> of the ranges. The reference takes the routed command's parameters in the old numbering.
     /// </summary>
     private static async Task AssertSameAsThePerArmGroupedStatementAsync(Arranged a, QueryTagRollupHashRoute.Plan plan, CancellationToken ct)
     {
         var groups = plan.WideRanges.Select(r => (r.From, r.To)).Distinct().Count();
         await using var flat = QueryTagRollupHashRoute.Command(a.Connection, plan, a.End, 120);
         await using var reference = new NpgsqlCommand(PerArmGroupedSqlFor(groups, plan.UsesDays), a.Connection) { CommandTimeout = 120 };
-        for (var i = 0; i < flat.Parameters.Count - 2; i++)
+        /* The reference keeps the old numbering: the servers, then the ranges as two arrays, then the gaps, the window end and the rest. The
+           routed command has the servers and gaps first and the ranges as pairs at the end (#7365). */
+        var hourly = QueryTagRollupHashRoute.HourlyReadFor(plan, a.End);
+        var routedCount = flat.Parameters.Count - (2 * Math.Max(1, hourly.RangeFrom.Length));
+        NpgsqlParameter Copy(int index) => new() { NpgsqlDbType = flat.Parameters[index].NpgsqlDbType, Value = flat.Parameters[index].Value };
+        reference.Parameters.Add(Copy(0));
+        reference.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Timestamp, Value = hourly.RangeFrom });
+        reference.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Timestamp, Value = hourly.RangeTo });
+        for (var i = 1; i < routedCount; i++)
         {
-            var source = flat.Parameters[i];
-            reference.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = source.NpgsqlDbType, Value = source.Value });
+            reference.Parameters.Add(Copy(i));
         }
 
         var expected = await ReadFactsAsync(reference, ct);

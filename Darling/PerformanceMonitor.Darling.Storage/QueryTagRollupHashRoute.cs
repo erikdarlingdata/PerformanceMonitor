@@ -409,9 +409,10 @@ AND   f.hour < $2";
     }
 
     /// <summary>
-    /// The routed statement's command (<see cref="QueryTagRollupSql.QueryStoreRoutedSqlFor"/>): the hourly arm's servers, ranges and gaps
-    /// (<see cref="HourlyReadFor"/>, $1 to $6), the window end ($7), the day pairs when the plan has any (two more arrays, $8 and $9), and one (servers, from, to) triple per DISTINCT wide range, each range with the servers that share it. The statement has
-    /// one arm for each, so the planner sees every range's own bounds (#6800 part 2, step 2b).
+    /// The routed statement's command (<see cref="QueryTagRollupSql.QueryStoreRoutedSqlFor"/>): the hourly arms' servers and gaps
+    /// (<see cref="HourlyReadFor"/>, $1 to $4), the window end ($5), the day pairs when the plan has any (two more arrays, $6 and $7), one (servers, from, to) triple per DISTINCT wide range, each range with the servers that share it,
+    /// and one (from, to) pair per hour range of the hourly arms. The statement has one arm for each wide range and each hour range,
+    /// so the planner sees every range's own bounds (#6800 part 2, step 2b, #7365).
     /// </summary>
     public static NpgsqlCommand Command(NpgsqlConnection connection, Plan plan, DateTime windowEnd, int readSeconds)
     {
@@ -422,10 +423,8 @@ AND   f.hour < $2";
             .Select(g => (g.Key.From, g.Key.To, Servers: g.Select(r => r.ServerId).OrderBy(s => s).ToArray()))
             .ToList();
         var hourly = HourlyReadFor(plan, windowEnd);
-        var command = new NpgsqlCommand(QueryTagRollupSql.QueryStoreRoutedSqlFor(groups.Count, plan.UsesDays), connection) { CommandTimeout = readSeconds };
+        var command = new NpgsqlCommand(QueryTagRollupSql.QueryStoreRoutedSqlFor(groups.Count, plan.UsesDays, hourly.RangeFrom.Length), connection) { CommandTimeout = readSeconds };
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer, Value = hourly.Servers });
-        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Timestamp, Value = hourly.RangeFrom });
-        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Timestamp, Value = hourly.RangeTo });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer, Value = hourly.GapServers });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Timestamp, Value = hourly.GapFrom });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Timestamp, Value = hourly.GapTo });
@@ -443,18 +442,19 @@ AND   f.hour < $2";
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(group.To, DateTimeKind.Unspecified) });
         }
 
-        /* The hourly arm's plain bounds (#7365): the first range's start and the last range's end, which let the table read be split
-           across parallel workers. No ranges means NULL bounds, which match no row, the same as the empty range list does. */
-        command.Parameters.Add(new NpgsqlParameter
+        /* One hourly arm for each hour range, its plain bounds last (#7365). With no range the statement keeps one arm and the bounds are
+           NULL, which match no row, the same as an empty range list did. */
+        if (hourly.RangeFrom.Length == 0)
         {
-            NpgsqlDbType = NpgsqlDbType.Timestamp,
-            Value = hourly.RangeFrom.Length == 0 ? DBNull.Value : (object)hourly.RangeFrom.Min(),
-        });
-        command.Parameters.Add(new NpgsqlParameter
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = DBNull.Value });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = DBNull.Value });
+        }
+
+        for (var range = 0; range < hourly.RangeFrom.Length; range++)
         {
-            NpgsqlDbType = NpgsqlDbType.Timestamp,
-            Value = hourly.RangeTo.Length == 0 ? DBNull.Value : (object)hourly.RangeTo.Max(),
-        });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = hourly.RangeFrom[range] });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = hourly.RangeTo[range] });
+        }
 
         return command;
     }
