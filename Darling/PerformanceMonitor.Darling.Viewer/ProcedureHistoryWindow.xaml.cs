@@ -8,14 +8,11 @@
 
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
-using System.Text;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
-using Microsoft.Win32;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Ui;
 
@@ -212,18 +209,9 @@ public partial class ProcedureHistoryWindow : Window
                 MessageBox.Show(this, StoredPlanNotice.Text, "Showing The Newest Plan", MessageBoxButton.OK, MessageBoxImage.Information);
             }
 
-            var dialog = new SaveFileDialog
-            {
-                Filter = "SQL Plan files (*.sqlplan)|*.sqlplan|All files (*.*)|*.*",
-                DefaultExt = ".sqlplan",
-                FileName = read.CollectionTime is { } snapshot
-                    ? $"proc_plan_{_objectName}_{snapshot:yyyyMMdd_HHmmss}Z.sqlplan"
-                    : $"proc_plan_{_objectName}_{DateTime.Now:yyyyMMdd_HHmmss}.sqlplan"
-            };
-
-            if (dialog.ShowDialog() != true) return;
-            File.WriteAllText(dialog.FileName, plan, Encoding.UTF8);
-            btn.Content = "Saved";
+            /* The history window pre-fills the clicked snapshot's own time (UTC), so a plan saved from a fallback or an old row names its source. */
+            var stamp = read!.CollectionTime is { } snapshot ? $"{snapshot:yyyyMMdd_HHmmss}Z" : null;
+            if (FileSaveHelper.SavePlanFile(plan, $"proc_plan_{_objectName}", stamp)) btn.Content = "Saved";
             return;
         }
         catch (Exception ex)

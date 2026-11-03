@@ -397,7 +397,7 @@ AND    dismissed = FALSE";
     }
 
     /* ── Dismiss write path (W2a) ──────────────────────────────────────────────────────────────────
-       Ports Lite's DismissAlertsAsync / DismissAllVisibleAlertsAsync UPDATE semantics (mark
+       Ports Lite's DismissAlertsAsync / DismissAllVisibleAlertsWindowAsync UPDATE semantics (mark
        dismissed = TRUE so the row drops out of the default read). Lite wrapped the update in a
        transaction because it also wrote a dismissed_archive_alerts sidecar for rows that had aged into
        parquet; Darling is a single Postgres store with NO archive tier, so the sidecar is dropped and

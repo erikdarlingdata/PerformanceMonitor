@@ -143,20 +143,6 @@ SELECT $1, $2, $3, 0, $4, $5";
         await command.ExecuteNonQueryAsync();
     }
 
-    /// <summary>Moves a tag under a new parent (null = promote to root). Cycle and depth-cap rejection is the
-    /// caller's job against its in-memory tree, exactly as in the viewer.</summary>
-    public async Task ReparentServerTagAsync(int tagId, int? newParentId)
-    {
-        using var connection = await OpenUserWriteConnectionAsync();
-        ThrowIfTagRestorePending();
-        NotificationRouteCache.Invalidate();
-        using var command = connection.CreateCommand();
-        command.CommandText = "UPDATE server_tags SET parent_id = $2 WHERE id = $1";
-        command.Parameters.Add(new DuckDBParameter { Value = tagId });
-        command.Parameters.Add(new DuckDBParameter { Value = (object?)newParentId ?? DBNull.Value });
-        await command.ExecuteNonQueryAsync();
-    }
-
     /// <summary>
     /// Moves a tag one place up or down among its siblings (the tags under the same parent) and renumbers every
     /// sibling 0 to n-1 with the shared <see cref="TagSiblingOrder"/> rule (#6094). The siblings are read on the
@@ -246,16 +232,6 @@ SELECT id FROM subtree WHERE id <> $1";
             delTags.CommandText = $"DELETE FROM server_tags WHERE id IN ({inList})";
             await delTags.ExecuteNonQueryAsync();
         }
-    }
-
-    /// <summary>Whether a tag has child tags — read immediately before a delete so the confirmation can warn.</summary>
-    public async Task<bool> ServerTagHasChildrenAsync(int tagId)
-    {
-        using var connection = await OpenConnectionAsync();
-        using var command = connection.CreateCommand();
-        command.CommandText = "SELECT COUNT(*) FROM server_tags WHERE parent_id = $1";
-        command.Parameters.Add(new DuckDBParameter { Value = tagId });
-        return Convert.ToInt64(await command.ExecuteScalarAsync()) > 0;
     }
 
     /// <summary>Assigns a tag to servers. Already-assigned servers are no-ops (composite PK + ON CONFLICT).</summary>
