@@ -10,6 +10,7 @@ using System.Windows;
 using System.Windows.Input;
 using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Services;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitorLite.Windows;
 
@@ -55,7 +56,14 @@ public partial class ManageCredentialProfilesDialog : Window
 
     private void EditButton_Click(object sender, RoutedEventArgs e) => EditSelected();
 
-    private void ProfilesGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e) => EditSelected();
+    private void ProfilesGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e)
+    {
+        // A double-click on a column header, the scrollbar or the empty area is not a row (#7210).
+        if (DataGridRowHit.IsOnRow(e.OriginalSource))
+        {
+            EditSelected();
+        }
+    }
 
     private void EditSelected()
     {

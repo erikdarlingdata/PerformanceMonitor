@@ -103,11 +103,12 @@ FROM server_tags";
         {
             insert.CommandText = @"
 INSERT INTO server_tags (id, name, parent_id, sort_order, colour, created_at)
-SELECT $1, $2, $3, 0, $4, now()::TIMESTAMP";
+SELECT $1, $2, $3, 0, $4, $5";
             insert.Parameters.Add(new DuckDBParameter { Value = id });
             insert.Parameters.Add(new DuckDBParameter { Value = name });
             insert.Parameters.Add(new DuckDBParameter { Value = (object?)parentId ?? DBNull.Value });
             insert.Parameters.Add(new DuckDBParameter { Value = TagColorPalette.ForTagId(id) });
+            insert.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow });
             await insert.ExecuteNonQueryAsync();
         }
 

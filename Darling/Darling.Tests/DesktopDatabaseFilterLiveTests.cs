@@ -205,6 +205,77 @@ public sealed class DesktopDatabaseFilterLiveTests
     }
 
     [Fact]
+    public async Task DatabaseSizes_CostShare_IsOfTheWholeServer_NotOfTheFilteredRows()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        await using var viewer = new ViewerDataService(cs!);
+        var bodySucceeded = false;
+        try
+        {
+            using var connection = await SeedAsync(cs!, ct);
+            var t = DateTime.UtcNow.AddMinutes(-5);
+            await InsertSizeAsync(connection, ct, t, DbA, 100m);
+            await InsertSizeAsync(connection, ct, t, DbB, 200m);
+            await InsertSizeAsync(connection, ct, t, DbC, 300m);
+
+            /* #7174: DbA is 100 of the server's 600 MB. One database picked must cost a sixth of the budget, not all of it. */
+            var picked = await viewer.GetDatabaseSizeLatestWithCostShareAsync(ServerId, new[] { DbA }, 600m, cancellationToken: ct);
+            Assert.Equal(100m, Math.Round(Assert.Single(picked).MonthlyCostShare, 6));
+
+            var ab = await viewer.GetDatabaseSizeLatestWithCostShareAsync(ServerId, AB, 600m, cancellationToken: ct);
+            Assert.Equal(new[] { 100m, 200m }, ab.OrderBy(r => r.TotalSizeMb).Select(r => Math.Round(r.MonthlyCostShare, 6)).ToArray());
+
+            var all = await viewer.GetDatabaseSizeLatestWithCostShareAsync(ServerId, null, 600m, cancellationToken: ct);
+            Assert.Equal(600m, Math.Round(all.Sum(r => r.MonthlyCostShare), 6));
+
+            var noCost = await viewer.GetDatabaseSizeLatestWithCostShareAsync(ServerId, new[] { DbA }, 0m, cancellationToken: ct);
+            Assert.Equal(0m, Assert.Single(noCost).MonthlyCostShare);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) => await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    [Fact]
+    public async Task DatabaseSizes_CostShare_UsesOneSnapshot_WhenANewCollectionLandsBetweenTheReads()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        await using var viewer = new ViewerDataService(cs!);
+        var bodySucceeded = false;
+        try
+        {
+            using var connection = await SeedAsync(cs!, ct);
+            var t = DateTime.UtcNow.AddMinutes(-5);
+            await InsertSizeAsync(connection, ct, t, DbA, 100m);
+            await InsertSizeAsync(connection, ct, t, DbB, 200m);
+
+            /* #7174: a newer snapshot (DbA grown to 900 MB) lands after the filtered rows are read and before the server total is.
+               DbA's share stays 100 of 300 MB, not 100 of 900. */
+            var picked = await viewer.GetDatabaseSizeLatestWithCostShareAsync(
+                ServerId, new[] { DbA }, 300m,
+                betweenReads: () => InsertSizeAsync(connection, ct, DateTime.UtcNow.AddMinutes(-1), DbA, 900m),
+                cancellationToken: ct);
+
+            var a = Assert.Single(picked);
+            Assert.Equal(100m, a.TotalSizeMb);
+            Assert.Equal(100m, Math.Round(a.MonthlyCostShare, 6));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) => await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    [Fact]
     public async Task DatabaseSizes_AndStorageGrowth_Filter_KeepTheChosen_NoFilterIsUnchanged_MatchesTheMcpDatabaseSet()
     {
         var cs = ConnectionString;
@@ -381,7 +452,7 @@ public sealed class DesktopDatabaseFilterSourcePinTests
     public void TheFinOpsTab_PassesTheSavedFilterIntoItsNarrowedReads_AndTheShellGivesItTheStore()
     {
         var loaders = ViewerFile("FinOpsTab.Loaders.cs");
-        Assert.Contains("GetDatabaseSizeLatestAsync(_server.ServerId, SelectedDatabaseFilter)", loaders, StringComparison.Ordinal);
+        Assert.Contains("GetDatabaseSizeLatestWithCostShareAsync(_server.ServerId, SelectedDatabaseFilter, _server.MonthlyCostUsd)", loaders, StringComparison.Ordinal);
         Assert.Contains("GetDatabaseSizeSummaryAsync(_server.ServerId, databaseNames: SelectedDatabaseFilter)", loaders, StringComparison.Ordinal);
         Assert.Contains("GetPvsStatsLatestAsync(_server.ServerId, SelectedDatabaseFilter)", loaders, StringComparison.Ordinal);
         Assert.Contains("GetPvsTrendAsync(_server.ServerId, DateTime.UtcNow.AddDays(-7), SelectedDatabaseFilter)", loaders, StringComparison.Ordinal);

@@ -711,20 +711,11 @@ public partial class FinOpsTab : UserControl
         try
         {
             var sizesFilter = SelectedDatabaseFilter();
-            var data = await Task.Run(() => _dataService.GetDatabaseSizeLatestAsync(serverId, sizesFilter));
+            /* Compute proportional cost shares. The share is of the whole server's allocated size, so a database filter narrows the
+               rows without shrinking the total (#7174). */
+            var monthlyCost = _currentServerMonthlyCost;
+            var data = await Task.Run(() => _dataService.GetDatabaseSizeLatestWithCostShareAsync(serverId, sizesFilter, monthlyCost));
             if (_loads.Superseded(nameof(LoadDatabaseSizesAsync), gen)) return;
-
-            // Compute proportional cost shares
-            if (_currentServerMonthlyCost > 0 && data.Count > 0)
-            {
-                /* A row with no allocated size (the Hyperscale log file, in the log service) takes no share. */
-                var totalMb = DatabaseSizeRow.AllocatedTotalMb(data);
-                if (totalMb > 0)
-                {
-                    foreach (var d in data)
-                        d.MonthlyCostShare = ((d.TotalSizeMb ?? 0m) / totalMb) * _currentServerMonthlyCost;
-                }
-            }
 
             _dbSizesFilterMgr!.UpdateData(data);
             _dbSizesNeedReload = data.Count == 0;

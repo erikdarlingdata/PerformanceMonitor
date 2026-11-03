@@ -678,9 +678,7 @@ public sealed class DarlingAnalysisService
                 finding.Remediation =
                     FactRemediation.BuildAction(finding)
                     ?? FactRemediation.BuildRcsiAction(finding)
-                    ?? FactRemediation.BuildClearPlanAction(finding)
                     ?? FactRemediation.BuildFileAutogrowthAction(finding) // WS3: advisory only (no handler -> no Apply); carried for the read-time copy-paste
-                    ?? FactRemediation.BuildServerConfigAction(finding) // WS3: server-level config — MAXDOP/CTFP/memory
                     ?? FactRemediation.BuildMissingIndexAction(finding); // WS4: missing-index CREATE — copy-paste only
             }
 
@@ -1135,6 +1133,27 @@ public sealed class DarlingAnalysisService
 SELECT EXTRACT(EPOCH FROM (MAX(collection_time) - MIN(collection_time))) / 3600.0
 FROM wait_stats
 WHERE server_id = $1";
+
+    /// <summary>
+    /// The table that proves a SQL Server target is being collected: the one <see cref="TotalDataSpanSql"/> measures and
+    /// the SQL Server fact collector stamps its coverage witness from.
+    /// </summary>
+    internal const string SqlServerCoverageTable = "wait_stats";
+
+    /// <summary>
+    /// The table that proves a PostgreSQL target is being collected: the one <see cref="PgTargetDataSpanSql"/> measures and
+    /// the PostgreSQL-target fact collector stamps its coverage witness from (#3665).
+    /// </summary>
+    internal const string PgTargetCoverageTable = "pg_database_stats";
+
+    /// <summary>
+    /// The table "was this window collected at all" is asked of, for a server of <paramref name="engineKind"/> (#7194): the one
+    /// engine mapping of <see cref="EngineFor"/> (<see cref="MonitoredEngineKind.IsPostgres"/>), so a read outside the
+    /// analysis pass (get_analysis_findings, get_analysis_facts) probes the same series the pass reads and cannot call a
+    /// quiet PostgreSQL window "not collected" for lacking a SQL Server table.
+    /// </summary>
+    internal static string CoverageTableFor(string? engineKind) =>
+        MonitoredEngineKind.IsPostgres(engineKind) ? PgTargetCoverageTable : SqlServerCoverageTable;
 
     /// <summary>
     /// The PostgreSQL-target engine set's data-span gate (#3542, D3): the same measurement over

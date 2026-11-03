@@ -136,7 +136,8 @@ export function peopleOutcome(res) {
 const listOnly = (managed, adminWritesOff) => listOnlyNote(managed, "this page lists people only", "To add or change a person", adminWritesOff);
 const CAN_DECIDE =
   "The people the service knows, the sign-ins that map to each one, and what each one may do. A grant names what the person may do and where: " +
-  "one server, one tag, or all servers. Nothing reads a grant yet, and administrators keep every power they have. Every change is recorded with your name.";
+  "one server, one tag, or all servers. An approve grant lets that person approve the actions an agent proposes, only for the kinds and the scope it names. The other grants are not read yet. " +
+  "An administrator sign-in with no person mapped can approve only on a route that lets one person approve alone. Every change is recorded with your name.";
 const KEY_NOTE =
   "Your sign-in key. Give it to an administrator to link this sign-in to your name. It is a hash of your sign-in, and knowing it signs nobody in.";
 const NO_KEY =

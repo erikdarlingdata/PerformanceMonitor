@@ -100,11 +100,7 @@ public partial class WebhookAlertService
                 return error;
             }
 
-            if (_consecutiveGenericFailures > 0)
-                _logger.LogInformation($"Generic webhook recovered after {_consecutiveGenericFailures} failure(s)");
-
-            _consecutiveGenericFailures = 0;
-            _lastGenericError = null;
+            RecordChannelRecovered(ref _consecutiveGenericFailures, ref _lastGenericError, "Generic");
             _logger.LogInformation($"Generic webhook sent for {metricName} on {serverName}");
             return null;
         }
@@ -115,9 +111,7 @@ public partial class WebhookAlertService
         }
         catch (Exception ex)
         {
-            _consecutiveGenericFailures++;
-            _lastGenericError = ex.Message;
-            _logger.LogError($"Generic webhook error: {ex.Message}");
+            RecordChannelException(ref _consecutiveGenericFailures, ref _lastGenericError, "Generic", ex);
             return ex.Message;
         }
     }
@@ -213,18 +207,9 @@ public partial class WebhookAlertService
             || routePath.StartsWith(genericPath + "/", StringComparison.Ordinal);
     }
 
-    /* The Teams/Slack log-throttle shape (loud for the first 3, then every 50th) — factored out only
-       because the generic channel fails from three places (headers, body, transport). */
-    private void RecordGenericFailure(string error)
-    {
-        _consecutiveGenericFailures++;
-        _lastGenericError = error;
-
-        if (_consecutiveGenericFailures <= FailingChannelThreshold)
-            _logger.LogError($"GENERIC WEBHOOK FAILED ({_consecutiveGenericFailures}x): {error}");
-        else if (_consecutiveGenericFailures % 50 == 0)
-            _logger.LogError($"GENERIC WEBHOOK STILL FAILING: {_consecutiveGenericFailures} failures. Last: {error}");
-    }
+    /* The generic channel fails from three places (headers, body, transport); each records through the shared helper. */
+    private void RecordGenericFailure(string error) =>
+        RecordChannelFailure(ref _consecutiveGenericFailures, ref _lastGenericError, "Generic", error);
 
     /// <summary>
     /// Substitutes the alert's values into the operator's JSON body template. Every placeholder expands to

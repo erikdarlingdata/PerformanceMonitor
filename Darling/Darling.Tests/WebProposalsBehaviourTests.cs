@@ -92,6 +92,46 @@ public sealed class WebProposalsBehaviourTests
     }
 
     [Fact]
+    public void APressTheRouteRefuses_ShowsTheServicesSentence_NotTheGenericOne()
+    {
+        var r = Run("routeRefused");
+
+        var text = string.Join("|", r.GetProperty("strips").EnumerateArray().Select(s => s.GetProperty("text").GetString()));
+        Assert.Contains("Your sign-in is no longer mapped to an enabled person", text);
+        Assert.DoesNotContain("The press did not answer.", text);
+    }
+
+    [Fact]
+    public void ADoubleClick_WhileAPressIsInFlight_SendsOnePress_AndTheButtonsComeBack()
+    {
+        var r = Run("doubleClick");
+
+        Assert.All(r.GetProperty("disabledInFlight").EnumerateArray(), d => Assert.True(d.GetBoolean()));
+        Assert.Equal(1, r.GetProperty("postsInFlight").GetInt32());
+        Assert.Equal(1, r.GetProperty("postsAfter").GetInt32());
+        var disabledAfter = r.GetProperty("disabledAfter").EnumerateArray().ToArray();
+        Assert.NotEmpty(disabledAfter);
+        Assert.All(disabledAfter, d => Assert.False(d.GetBoolean()));
+        Assert.Contains("The action ran.", r.GetProperty("strips").EnumerateArray().Select(e => e.GetString()));
+    }
+
+    [Fact]
+    public void ARedrawWhileAPressIsInFlight_KeepsTheButtonsDisabled_AndTheyComeBackWhenTheWriteSettles()
+    {
+        var r = Run("redrawDuringPress");
+
+        var redrawn = r.GetProperty("disabledAfterRedraw").EnumerateArray().ToArray();
+        Assert.NotEmpty(redrawn);
+        Assert.All(redrawn, d => Assert.True(d.GetBoolean()));
+        Assert.Equal(1, r.GetProperty("postsInFlight").GetInt32());
+        Assert.Equal(1, r.GetProperty("postsAfter").GetInt32());
+        var after = r.GetProperty("disabledAfter").EnumerateArray().ToArray();
+        Assert.NotEmpty(after);
+        Assert.All(after, d => Assert.False(d.GetBoolean()));
+        Assert.Contains("These are the facts now.", r.GetProperty("strips").EnumerateArray().Select(e => e.GetString()));
+    }
+
+    [Fact]
     public void AnAdministratorPath_SeesWhyATwoPersonRouteNeedsAMappedPerson_BeforeThePress()
     {
         var r = Run("administrator");

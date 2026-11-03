@@ -18,8 +18,10 @@ using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
+using PerformanceMonitor.Ui;
 using Xunit;
 
 namespace Darling.Tests;
@@ -28,8 +30,40 @@ namespace Darling.Tests;
 /// #6874 part 3: the Viewer's Agent Alerts words as functions of the read. They are the words the web page's Configuration tab shows, so
 /// the assertions are on the values.
 /// </summary>
-public sealed class ViewerAgentAlertsTextTests
+[Collection("viewer-time-statics")]
+public sealed class ViewerAgentAlertsTextTests : IDisposable
 {
+    /* #7343: the capture and scan times follow the display mode; these assertions are on the machine-local words, so the class runs in Local mode. */
+    private readonly TimeDisplayMode _savedMode = ViewerTimeHelper.CurrentDisplayMode;
+
+    public ViewerAgentAlertsTextTests() => ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.LocalTime;
+
+    public void Dispose() => ViewerTimeHelper.CurrentDisplayMode = _savedMode;
+
+    /// <summary>#7343: the picked server's clock (UTC+05:30, no daylight change), so Server mode differs from UTC and from Local on any machine outside India.</summary>
+    private static readonly ServerClock s_india = ServerClock.FixedOffset(330);
+
+    public static TheoryData<TimeDisplayMode> Modes => new() { TimeDisplayMode.ServerTime, TimeDisplayMode.UTC, TimeDisplayMode.LocalTime };
+
+    /// <summary>The time of <paramref name="utc"/> as each display mode words it for the picked server: Server on its clock, UTC as is, Local on this machine.</summary>
+    private static string Worded(DateTime utc, TimeDisplayMode mode) => mode switch
+    {
+        TimeDisplayMode.ServerTime => utc.AddMinutes(330).ToString("g", CultureInfo.CurrentCulture),
+        TimeDisplayMode.UTC => utc.ToString("g", CultureInfo.CurrentCulture),
+        _ => TimeZoneInfo.ConvertTimeFromUtc(utc, TimeZoneInfo.Local).ToString("g", CultureInfo.CurrentCulture),
+    };
+
+    [Theory]
+    [MemberData(nameof(Modes))]
+    public void TheStatusLineCaptureTime_FollowsTheDisplayMode_OnTheServersClock(TimeDisplayMode mode)
+    {
+        ViewerTimeHelper.CurrentDisplayMode = mode;
+        var captured = new DateTime(2026, 10, 28, 12, 0, 0, DateTimeKind.Utc);
+
+        Assert.EndsWith("Captured: " + Worded(captured, mode), ViewerAgentAlertsText.StatusLine(Read(Complete().ToArray()), s_india), StringComparison.Ordinal);
+    }
+
+
     private static AgentAlertFact Alert(int id, string name, int severity = 0, int message = 0, bool enabled = true, int operators = 1, bool? fired = null) =>
         new(id, name, enabled, "MSSQLSERVER", message, severity, null, null, null, 300, new DateTime(2026, 10, 27, 13, 5, 9), null, 4, null,
             operators > 0 ? 1 : 0, operators, null, fired);
@@ -75,8 +109,8 @@ public sealed class ViewerAgentAlertsTextTests
         var read = Read(Complete().Where(a => a.Severity != 21).ToArray());
         var captured = new DateTime(2026, 10, 28, 12, 0, 0, DateTimeKind.Utc).ToLocalTime().ToString("g", CultureInfo.CurrentCulture);
 
-        Assert.Equal($"Alert setup: gaps   Alerts defined: 9   Captured: {captured}", ViewerAgentAlertsText.StatusLine(read));
-        Assert.StartsWith("Alert setup: ok   Alerts defined: 10", ViewerAgentAlertsText.StatusLine(Read(Complete().ToArray())), StringComparison.Ordinal);
+        Assert.Equal($"Alert setup: gaps   Alerts defined: 9   Captured: {captured}", ViewerAgentAlertsText.StatusLine(read, ServerClock.Utc));
+        Assert.StartsWith("Alert setup: ok   Alerts defined: 10", ViewerAgentAlertsText.StatusLine(Read(Complete().ToArray()), ServerClock.Utc), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -124,7 +158,7 @@ public sealed class ViewerAgentAlertsTextTests
         var read = new ViewerAgentAlertsRead(ViewerAgentAlertsRead.NotCollected, "Azure SQL Database does not have this data.", null,
             new AgentAlertRead([], null, null, 0));
 
-        Assert.Equal("Azure SQL Database does not have this data.", ViewerAgentAlertsText.StatusLine(read));
+        Assert.Equal("Azure SQL Database does not have this data.", ViewerAgentAlertsText.StatusLine(read, ServerClock.Utc));
         /* #6907: the status line carries the sentence, so the grid notes must not repeat it. */
         Assert.Equal(ViewerAgentAlertsText.NoData, ViewerAgentAlertsText.GapsEmptyText(read));
         Assert.Equal(ViewerAgentAlertsText.NoData, ViewerAgentAlertsText.AlertsEmptyText(read));
@@ -229,7 +263,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)",
                 Assert.Equal("not_collected", web.GetProperty("status").GetString());
                 Assert.Equal(ViewerAgentAlertsRead.NotCollected, read.Status);
                 Assert.Contains("agent_alerts", read.Message, StringComparison.Ordinal);
-                Assert.Equal(read.Message, ViewerAgentAlertsText.StatusLine(read));
+                Assert.Equal(read.Message, ViewerAgentAlertsText.StatusLine(read, ServerClock.Utc));
                 return 0;
             });
     }

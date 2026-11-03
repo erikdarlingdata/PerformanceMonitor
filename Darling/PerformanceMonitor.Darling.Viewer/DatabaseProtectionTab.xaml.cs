@@ -12,6 +12,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -89,7 +90,10 @@ public partial class DatabaseProtectionTab : UserControl
             var read = await _dataService.ReadDatabaseProtectionAsync(server, DateTime.UtcNow);
             if (_loads.Superseded(nameof(LoadAsync), gen)) return;
 
-            Show(read);
+            var clock = await _dataService.GetServerClockOrMachineAsync(server.ServerId, System.Threading.CancellationToken.None);
+            if (_loads.Superseded(nameof(LoadAsync), gen)) return;
+
+            Show(read, clock);
             LastRefreshedIndicator.Text = "Last refreshed " + ViewerTimeHelper.FormatFleetWide(DateTime.UtcNow, "HH:mm:ss");
         }
         catch (Exception ex)
@@ -100,7 +104,7 @@ public partial class DatabaseProtectionTab : UserControl
         }
     }
 
-    private void Show(ViewerDatabaseProtectionRead? read)
+    private void Show(ViewerDatabaseProtectionRead? read, ServerClock? clock = null)
     {
         if (read is null)
         {
@@ -110,7 +114,7 @@ public partial class DatabaseProtectionTab : UserControl
             return;
         }
 
-        StatusLine.Text = ViewerDatabaseProtectionText.StatusLine(read);
+        StatusLine.Text = ViewerDatabaseProtectionText.StatusLine(read, clock ?? ViewerTimeHelper.ActiveServerClock);
         var rows = ViewerDatabaseProtectionText.Rows(read);
         DatabasesDataGrid.ItemsSource = rows;
         EmptyMessage.Text = ViewerDatabaseProtectionText.EmptyText(read);

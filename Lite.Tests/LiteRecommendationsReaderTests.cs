@@ -304,26 +304,6 @@ public class LiteRecommendationsReaderTests
     }
 
     [Fact]
-    public void BuildCopyPasteSql_ServerConfigTargets_RenderSpConfigureViaTheSharedBuilder()
-    {
-        var action = new RemediationAction(
-            "SERVER_CONFIG", "set", Array.Empty<ForcePlanTarget>(),
-            ServerConfigTargets: new[]
-            {
-                new ServerConfigTarget(ServerConfigSetting.Maxdop, 0, 8),
-                new ServerConfigTarget(ServerConfigSetting.MaxServerMemory, 2147483647, 2147483647),
-            });
-
-        var sql = LiteRecommendationsReader.BuildCopyPasteSql(action);
-
-        Assert.Equal(
-            FactRemediation.BuildSpConfigureStatement(ServerConfigSetting.Maxdop, 8) +
-            Environment.NewLine + Environment.NewLine +
-            FactRemediation.BuildSpConfigureStatement(ServerConfigSetting.MaxServerMemory, 2147483647),
-            sql);
-    }
-
-    [Fact]
     public void BuildCopyPasteSql_RcsiTargets_RenderAlterWithTwoSidedDisclosureHeader()
     {
         // RCSI rides a DB_CONFIG action as a per-database RcsiTarget. It is DESTRUCTIVE, so the
@@ -344,32 +324,6 @@ public class LiteRecommendationsReaderTests
             sql!.IndexOf("*/", StringComparison.Ordinal) <
             sql.IndexOf("ALTER DATABASE", StringComparison.Ordinal),
             "the disclosure comment header must precede the ALTER statement");
-    }
-
-    [Fact]
-    public void BuildCopyPasteSql_ClearPlanTargets_RenderResolveAndFreeScriptWithDisclosureHeader()
-    {
-        // Clear-plan is DESTRUCTIVE: live-resolve the currently-cached plan handle(s) for the abnormal
-        // query hash and free each — with the two-sided disclosure header.
-        var action = new RemediationAction(
-            "CLEAR_PLAN", "clear", Array.Empty<ForcePlanTarget>(),
-            ClearPlanTargets: new[]
-            {
-                new ClearPlanTarget(
-                    "StackOverflow", "0xABCDEF0123456789",
-                    CurrentCpuPerExecMs: 45.0, BaselineCpuPerExecMs: 9.0, AnomalyRatio: 5.0),
-            },
-            ClearPlanFigures: new ClearPlanFigures(45.0, 9.0, 5.0, 62, false, false));
-
-        var sql = LiteRecommendationsReader.BuildCopyPasteSql(action);
-
-        Assert.NotNull(sql);
-        Assert.StartsWith("/*", sql, StringComparison.Ordinal);
-        Assert.Contains("Risks of MAKING this change:", sql!, StringComparison.Ordinal);
-        Assert.Contains("Risks of NOT making this change:", sql!, StringComparison.Ordinal);
-        Assert.Contains("sys.dm_exec_query_stats", sql!, StringComparison.Ordinal);
-        Assert.Contains("0xABCDEF0123456789", sql!, StringComparison.Ordinal);
-        Assert.Contains("DBCC FREEPROCCACHE(@plan_handle);", sql!, StringComparison.Ordinal);
     }
 
     [Fact]
