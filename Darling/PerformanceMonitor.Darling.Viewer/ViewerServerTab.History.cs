@@ -9,6 +9,7 @@
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
 

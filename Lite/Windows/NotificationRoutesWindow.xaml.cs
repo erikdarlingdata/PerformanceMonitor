@@ -18,6 +18,7 @@ using System.Windows.Data;
 using System.Windows.Input;
 using PerformanceMonitorLite.Helpers;
 using PerformanceMonitorLite.Services;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitorLite.Windows;
 
@@ -182,22 +183,10 @@ public partial class NotificationRoutesWindow : Window
     private void RoutesGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e)
     {
         /* Only a double-click on a row edits; one on the header or the empty area does nothing. */
-        if (RoutesGrid.SelectedItem is NotificationRouteRow
-            && e.OriginalSource is DependencyObject source
-            && FindAncestor<DataGridRow>(source) is not null)
+        if (RoutesGrid.SelectedItem is NotificationRouteRow && DataGridRowHit.IsOnRow(e.OriginalSource))
         {
             EditRoute_Click(sender, e);
         }
-    }
-
-    private static T? FindAncestor<T>(DependencyObject from) where T : DependencyObject
-    {
-        for (var current = from; current != null; current = System.Windows.Media.VisualTreeHelper.GetParent(current))
-        {
-            if (current is T match) return match;
-        }
-
-        return null;
     }
 
     private void Close_Click(object sender, RoutedEventArgs e) => Close();

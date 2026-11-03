@@ -458,14 +458,8 @@ public partial class AlertsHistoryTab : UserControl
             return;
         }
 
-        /* Walk up from the click target to the DataGridRow; ignore header / empty-area clicks. */
-        var source = e.OriginalSource as DependencyObject;
-        while (source != null && source is not DataGridRow && source is not DataGridColumnHeader)
-        {
-            source = System.Windows.Media.VisualTreeHelper.GetParent(source);
-        }
-
-        if (source is not DataGridRow row || row.DataContext is not ViewerAlertRow item)
+        /* Ignore header / scrollbar / empty-area clicks (#7210). */
+        if (DataGridRowHit.RowOf(e.OriginalSource) is not { } row || row.DataContext is not ViewerAlertRow item)
         {
             return;
         }

@@ -11,13 +11,13 @@ using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Media;
 
-namespace PerformanceMonitor.Darling.Viewer;
+namespace PerformanceMonitor.Ui;
 
 /// <summary>
 /// Whether a mouse event landed on a grid row (#7210). WPF raises <c>MouseDoubleClick</c> on the grid for a double-click
 /// anywhere inside it: a column header (to auto-size or sort twice), the scrollbar track, the empty area under the rows.
-/// A drill handler that reads <c>SelectedItem</c> would open the selected row's window for those. Same walk as
-/// <c>AlertsHistoryTab.AlertsDataGrid_MouseDoubleClick</c>: up from the click target to a <see cref="DataGridRow"/>.
+/// A drill handler that reads <c>SelectedItem</c> would open the selected row's window for those. Walks up from the click target to a <see cref="DataGridRow"/>;
+/// shared by Lite and the Viewer.
 /// </summary>
 internal static class DataGridRowHit
 {

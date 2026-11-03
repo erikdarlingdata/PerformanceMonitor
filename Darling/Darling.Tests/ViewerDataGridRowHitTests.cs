@@ -13,7 +13,7 @@ using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Data;
 using System.Windows.Media;
-using PerformanceMonitor.Darling.Viewer;
+using PerformanceMonitor.Ui;
 using Xunit;
 
 namespace Darling.Tests;
