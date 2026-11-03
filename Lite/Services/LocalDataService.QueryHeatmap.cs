@@ -70,10 +70,16 @@ public partial class LocalDataService
         int bucketMinutes = ViewerHeatmapBucketMinutes, int maxRows = 500,
         IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null, int previewLength = 120)
     {
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
+
+        /* #7256: a window that starts after the newest archived row of query_stats reads the hot table alone. The view opens every Parquet file of it (one per day) however short the window is. */
+        return await ReadWindowSkippingEmptyArchiveAsync("query_stats", "collection_time", startTime, ReadAsync, CancellationToken.None);
+
+        async Task<List<QueryHeatmapCellRow>> ReadAsync(string relation)
+        {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
         var metricExpr = GetMetricColumn(metric);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
         var bucketIndex = 4 + dbValues.Count;
@@ -124,6 +130,7 @@ FROM binned
 GROUP BY time_bin, bucket_index
 ORDER BY time_bin DESC, bucket_index
 LIMIT ${limitIndex}";
+        command.CommandText = command.CommandText.Replace("v_query_stats", relation, StringComparison.Ordinal);
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
@@ -153,6 +160,7 @@ LIMIT ${limitIndex}";
         }
 
         return rows;
+        }
     }
 
     /// <summary>

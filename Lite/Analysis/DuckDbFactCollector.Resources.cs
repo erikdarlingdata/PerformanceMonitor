@@ -25,6 +25,7 @@ public partial class DuckDbFactCollector
     {
         try
         {
+            var plan = await _duckDb.PlanArchiveReadAsync("memory_stats", "collection_time", context.LatestValueStartFor(MemoryStatsCollector.Instance.Name), context.CancellationToken);
             using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(context.CancellationToken);
@@ -43,6 +44,7 @@ AND   collection_time <= $3
 ORDER BY collection_time DESC
 LIMIT 1";
 
+            cmd.CommandText = plan.Apply(cmd.CommandText);
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.LatestValueStartFor(MemoryStatsCollector.Instance.Name) });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
@@ -100,6 +102,7 @@ FROM newest";
     {
         try
         {
+            var plan = await _duckDb.PlanArchiveReadAsync("cpu_scheduler_stats", "collection_time", context.TimeRangeStart, context.CancellationToken);
             using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(context.CancellationToken);
@@ -107,6 +110,7 @@ FROM newest";
             using var cmd = connection.CreateCommand();
             cmd.CommandText = RunnableTaskStatsSql;
 
+            cmd.CommandText = plan.Apply(cmd.CommandText);
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
@@ -147,6 +151,7 @@ FROM newest";
     {
         try
         {
+            var plan = await _duckDb.PlanArchiveReadAsync("memory_grant_stats", "collection_time", context.TimeRangeStart, context.CancellationToken);
             using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(context.CancellationToken);
@@ -164,6 +169,7 @@ WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3";
 
+            cmd.CommandText = plan.Apply(cmd.CommandText);
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
@@ -214,6 +220,7 @@ AND   collection_time <= $3";
     {
         try
         {
+            var plan = await _duckDb.PlanArchiveReadAsync("memory_clerks", "collection_time", context.LatestValueStartFor(MemoryClerksCollector.Instance.Name), context.CancellationToken);
             using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(context.CancellationToken);
@@ -235,6 +242,7 @@ FROM latest WHERE rn = 1 AND memory_mb > 0
 ORDER BY memory_mb DESC
 LIMIT 10";
 
+            cmd.CommandText = plan.Apply(cmd.CommandText);
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.LatestValueStartFor(MemoryClerksCollector.Instance.Name) });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
@@ -284,6 +292,7 @@ LIMIT 10";
     {
         try
         {
+            var plan = await _duckDb.PlanArchiveReadAsync("cpu_utilization_stats", "collection_time", context.TimeRangeStart, context.CancellationToken);
             using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(context.CancellationToken);
@@ -301,6 +310,7 @@ WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3";
 
+            cmd.CommandText = plan.Apply(cmd.CommandText);
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
@@ -369,6 +379,7 @@ AND   collection_time <= $3";
     {
         try
         {
+            var plan = await _duckDb.PlanArchiveReadAsync("perfmon_stats", "collection_time", context.TimeRangeStart, context.CancellationToken);
             using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(context.CancellationToken);
@@ -393,6 +404,7 @@ WITH latest AS (
 SELECT counter_name, cntr_value, delta_cntr_value, sample_interval_seconds
 FROM latest WHERE rn = 1";
 
+            cmd.CommandText = plan.Apply(cmd.CommandText);
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
@@ -462,6 +474,7 @@ FROM latest WHERE rn = 1";
     {
         try
         {
+            var plan = await _duckDb.PlanArchiveReadAsync("plan_cache_stats", "collection_time", context.LatestValueStartFor(PlanCacheStatsCollector.Instance.Name), context.CancellationToken);
             using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(context.CancellationToken);
@@ -484,6 +497,7 @@ SELECT
 FROM ranked
 WHERE rnk = 1";
 
+            cmd.CommandText = plan.Apply(cmd.CommandText);
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.LatestValueStartFor(PlanCacheStatsCollector.Instance.Name) });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
@@ -545,6 +559,7 @@ WHERE rnk = 1";
     {
         try
         {
+            var plan = await _duckDb.PlanArchiveReadAsync("memory_pressure_events", "collection_time", context.TimeRangeStart, context.CancellationToken);
             using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(context.CancellationToken);
@@ -560,6 +575,7 @@ WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3";
 
+            cmd.CommandText = plan.Apply(cmd.CommandText);
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });

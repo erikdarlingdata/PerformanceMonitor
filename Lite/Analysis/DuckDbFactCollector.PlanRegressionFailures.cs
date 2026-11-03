@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitorLite.Database;
 
 namespace PerformanceMonitorLite.Analysis;
 
@@ -70,7 +71,7 @@ LIMIT {PlanRegressionFailureRule.ReadLimit}";
 
     /// <summary>Reads the queries whose timeouts or errors rose (#6267) on the caller's open connection.</summary>
     private static async Task<List<PlanRegressionFailureRule.Failure>> ReadPlanRegressionFailuresAsync(
-        DuckDBConnection connection, AnalysisContext context)
+        DuckDBConnection connection, AnalysisContext context, ArchiveReadPlan plan)
     {
         var windowStart = context.TimeRangeStart.AddDays(-14);
         var recentStart = context.TimeRangeEnd.AddHours(-PlanRegressionFailureRule.RecentHours);
@@ -82,7 +83,8 @@ LIMIT {PlanRegressionFailureRule.ReadLimit}";
         cmd.Parameters.Add(new DuckDBParameter { Value = recentStart });
         cmd.Parameters.Add(new DuckDBParameter { Value = (double)PlanRegressionFailureRule.RecentHours });
         cmd.Parameters.Add(new DuckDBParameter { Value = baselineHours });
-        cmd.CommandText = SecondaryReplicaScope.Apply(PlanRegressionFailureSql, cmd, context, "PLAN_REGRESSION", "database_name", 6);
+        /* #7256: the plan is the cost read's (query_store_stats from the window start less 14 days, the same lower bound). */
+        cmd.CommandText = plan.Apply(SecondaryReplicaScope.Apply(PlanRegressionFailureSql, cmd, context, "PLAN_REGRESSION", "database_name", 6));
 
         var rows = new List<PlanRegressionFailureRule.Failure>();
         using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
