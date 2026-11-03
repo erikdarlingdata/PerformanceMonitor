@@ -152,13 +152,6 @@
             <PasswordBox x:Name="PasswordBox"/>
         </StackPanel>
 
-        <!-- Entra MFA Credentials -->
-        <StackPanel Grid.Row="10" x:Name="EntraMfaPanel" Visibility="Collapsed" Margin="0,0,0,12">
-            <TextBlock Text="Username (optional)" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
-            <TextBox x:Name="EntraMfaUsernameBox" Margin="0,0,0,8"
-                     ToolTip="Optional: the UPN the service should pre-populate the authentication dialog with."/>
-        </StackPanel>
-
         <!-- Service Principal Credentials -->
         <StackPanel Grid.Row="10" x:Name="ServicePrincipalPanel" Visibility="Collapsed" Margin="0,0,0,12">
             <TextBlock Text="Client (Application) ID" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>

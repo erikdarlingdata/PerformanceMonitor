@@ -335,6 +335,11 @@ export function readErrorStrip(message) {
   return errorStrip(message);
 }
 
+/** #7257: true for the "window too wide" refusal readErrorStrip shows as a notice. Running the same range again shows the same notice. */
+export function isWindowTooWide(message) {
+  return keptHoursOf(message) != null;
+}
+
 /* The M of a "window too wide" refusal (`... exceeds maximum of M hours ...`), or null for any other message.
    A `top` refusal (`exceeds maximum of 1000.`) carries no " hours" and so is never one. */
 function keptHoursOf(message) {
@@ -570,6 +575,18 @@ function localizeWindowNote(res) {
 
 export function loadingStrip(label) {
   return el("div", { class: "strip loading" }, [label || "Loading…"]);
+}
+
+/** #7257: the Retry button under a failed panel read. `onRetry` runs that one panel again. */
+export function retryButton(onRetry) {
+  const btn = el("button", { class: "btn small", type: "button", text: "Retry" });
+  btn.addEventListener("click", () => onRetry());
+  return btn;
+}
+
+/** #7257: what a panel shows while it waits for one of the page's long-read slots (a loading strip, so a poll waits for it too). */
+export function waitingStrip() {
+  return loadingStrip("Waiting for the panels above to finish…");
 }
 
 /* ─────────────────────────── time (UTC -> local) ─────────────────────────── */

@@ -1101,6 +1101,30 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$
         Assert.StartsWith("Invalid summary_date value '01/02/2026'", McpHelpers.ErrorMessageOf(await McpHealthTools.GetDailySummary(_dataService, _serverManager, ServerName, "01/02/2026")), StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #7193: a day inside retention that nothing was collected on (the app was closed all day) answers
+    /// <c>unavailable</c>, not <c>empty</c>: nothing was observed, so it is not a true negative. A day that was
+    /// collected stays a returned band, quiet or not.
+    /// </summary>
+    [Fact]
+    public async Task DailySummary_ADayNothingWasCollected_IsUnavailable_NotEmpty()
+    {
+        var today = DateTime.UtcNow.Date;
+        var collectedDay = today.AddDays(-1);
+        var gapDay = today.AddDays(-2);
+
+        await SeedRunAsync(collectedDay.AddHours(12));
+
+        var gap = Parse(await McpHealthTools.GetDailySummary(_dataService, _serverManager, ServerName, gapDay.ToString("yyyy-MM-dd")));
+        Assert.Equal("unavailable", gap.GetProperty("status").GetString());
+        Assert.Contains("check get_collection_health", gap.GetProperty("message").GetString(), StringComparison.Ordinal);
+
+        var collected = Parse(await McpHealthTools.GetDailySummary(_dataService, _serverManager, ServerName, collectedDay.ToString("yyyy-MM-dd")));
+        Assert.False(collected.TryGetProperty("status", out var status) && status.GetString() is "empty" or "unavailable", collected.ToString());
+        Assert.Equal("collected", collected.GetProperty("data_state").GetString());
+        Assert.Equal("Healthy", collected.GetProperty("health_band").GetString());
+    }
+
     /// <summary>The Lite horizon is the archive retention constant, in months, from the reader's clock, rounded
     /// up to the month start the whole-file archive cleanup actually keeps: the cutoff's own month is deleted
     /// with its file, so a mid-month cutoff holds nothing until the next month begins.</summary>

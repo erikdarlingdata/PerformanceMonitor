@@ -70,7 +70,7 @@ public sealed class McpHealthTools
         }
     }
 
-    [McpServerTool(Name = "get_daily_summary"), Description("Gets one day's health band (Healthy/Warning/Critical/NoData), wait time (sec), top wait, unique queries, deadlocks, blocking, high-CPU samples, memory pressure, errors, alerts for summary_date (UTC day, default today). status empty: no row for that day. Before retention_horizon: status unavailable, data_state purged, zeros are absences, no verdict; past_horizon if a signal table still holds the day (band NoData, non-zero counts real). Inside retention (collected or no_run_record) the band stands on real zeros, no_run_record too; only its collection-error share has no denominator. <<GUIDE>> Gets a daily health summary: overall composite health band (Healthy/Warning/Critical), total wait time, top wait type, unique query count, deadlocks, blocking events, memory pressure (and severe memory pressure), high-CPU samples, collection errors, and actionable alert count for one day. Use this for a quick overview to decide which areas need investigation. A day before the store's retention_horizon (the oldest day the shortest-lived signal table still holds) returns status=unavailable with data_state=purged rather than a health band: its per-signal counts would be COALESCEd zeros, not measurements, and a zero is only a measurement inside retention. A returned day carries data_state=collected (a verdict), past_horizon (before the horizon but some signal table still holds rows — the purge has not reached it; health_band=NoData, non-zero counts real) or no_run_record (inside retention, no collector run recorded — banded on the counts as read, which are measurements there; the collection-error share has no denominator).")]
+    [McpServerTool(Name = "get_daily_summary"), Description("Gets one day's health band (Healthy/Warning/Critical/NoData), wait time (sec), top wait, unique queries, deadlocks, blocking, high-CPU samples, memory pressure, errors, alerts for summary_date (UTC day, default today). status unavailable: nothing collected that day. Before retention_horizon: same, data_state purged, zeros are absences, no verdict; past_horizon if a signal table still holds the day (band NoData, non-zero counts real). Inside retention (collected or no_run_record) the band stands on real zeros, no_run_record too; only its collection-error share has no denominator. <<GUIDE>> Gets a daily health summary: overall composite health band (Healthy/Warning/Critical), total wait time, top wait type, unique query count, deadlocks, blocking events, memory pressure (and severe memory pressure), high-CPU samples, collection errors, and actionable alert count for one day. Use this for a quick overview to decide which areas need investigation. A day before the store's retention_horizon (the oldest day the shortest-lived signal table still holds) returns status=unavailable with data_state=purged rather than a health band: its per-signal counts would be COALESCEd zeros, not measurements, and a zero is only a measurement inside retention. A returned day carries data_state=collected (a verdict), past_horizon (before the horizon but some signal table still holds rows — the purge has not reached it; health_band=NoData, non-zero counts real) or no_run_record (inside retention, no collector run recorded — banded on the counts as read, which are measurements there; the collection-error share has no denominator).")]
     public static async Task<string> GetDailySummary(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -109,9 +109,11 @@ public sealed class McpHealthTools
             if (row == null || !row.HasData)
             {
                 var missDate = row?.SummaryDate ?? date ?? DateTime.UtcNow.Date;
+                /* #7193: a day with no spine row is a day nothing was collected (the app was closed, or the server was
+                   not yet registered), so "unavailable", not "empty": the caller is sent to collection health. */
                 return McpHelpers.Status(
-                    "empty",
-                    $"No data collected for {resolved.DisplayName} on {missDate:yyyy-MM-dd}.",
+                    "unavailable",
+                    $"No data collected for {resolved.DisplayName} on {missDate:yyyy-MM-dd}. Nothing was collected that day, so this is a gap in collection, not a quiet day: check get_collection_health.",
                     new { summary_date = missDate.ToString("yyyy-MM-dd"), overall_health = row?.HealthBand.ToString() });
             }
 
