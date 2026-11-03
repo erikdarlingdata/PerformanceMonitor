@@ -75,17 +75,19 @@ public sealed class ArchiveWindowFactReadScalingTests : IDisposable
 
     private static DateTime Recent => Whole(NowUtc.AddHours(-2));
 
-    private async Task ExecuteAsync(params string[] statements)
+    /* Synchronous on purpose: the database lock is thread-affine (#2463), so no await may sit between taking it and releasing it (#7256). */
+    private Task ExecuteAsync(params string[] statements)
     {
         using var readLock = _duckDb.AcquireReadLock();
         using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync(Ct);
+        connection.Open();
         foreach (var sql in statements)
         {
             using var cmd = connection.CreateCommand();
             cmd.CommandText = sql;
-            await cmd.ExecuteNonQueryAsync(Ct);
+            cmd.ExecuteNonQuery();
         }
+        return Task.CompletedTask;
     }
 
     /// <summary>Moves the rows of <paramref name="table"/> older than a day into a Parquet file, rebuilds the views (which bumps the

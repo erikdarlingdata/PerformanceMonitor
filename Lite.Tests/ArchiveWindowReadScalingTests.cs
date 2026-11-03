@@ -10,7 +10,9 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
+using Darling.Tests;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Services;
 using Xunit;
@@ -65,17 +67,19 @@ public sealed class ArchiveWindowReadScalingTests : IDisposable
 
     private static string Ts(DateTime t) => $"TIMESTAMP '{t:yyyy-MM-dd HH:mm:ss}'";
 
-    private async Task ExecuteAsync(params string[] statements)
+    /* Synchronous on purpose: the database lock is thread-affine (#2463), so no await may sit between taking it and releasing it (#7256). */
+    private Task ExecuteAsync(params string[] statements)
     {
         using var readLock = _duckDb.AcquireReadLock();
         using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        connection.Open();
         foreach (var sql in statements)
         {
             using var cmd = connection.CreateCommand();
             cmd.CommandText = sql;
-            await cmd.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+            cmd.ExecuteNonQuery();
         }
+        return Task.CompletedTask;
     }
 
     private string Row(DateTime collected, string hash, long cpu) =>
@@ -397,14 +401,42 @@ VALUES ({_nextId++}, {Ts(Whole(NowUtc.AddDays(-10)))}, {ServerId}, 'TestSrv', 'D
         /* The second run waits behind the write lock, and the archive view generation moves while it waits: its hot read is thrown away and
            the view is read instead. Each fact still arrives once. */
         var facts = new List<PerformanceMonitor.Analysis.Fact>();
-        Task run;
-        using (_duckDb.AcquireWriteLock())
+        var waitBudget = TimeSpan.FromSeconds(30);
+        var writeLockTaken = new ManualResetEventSlim();
+        var startReader = new ManualResetEventSlim();
+        Task? run = null;
+
+        /* The write lock is thread-affine (#2463): a hold across an await can resume on another thread, throw on dispose and leave the static
+           lock held for every later test. So it is taken, held and released on one dedicated thread, with no await inside. The thread bumps
+           the generation only once the reader is parked on the lock (a deterministic signal, not a sleep) and every wait is bounded. */
+        var holder = DuckDbLockThread.RunAsync(() =>
         {
-            run = Task.Run(() => Collect(facts), TestContext.Current.CancellationToken);
-            await Task.Delay(500, TestContext.Current.CancellationToken);
-            Assert.False(run.IsCompleted, "the read waits behind the write lock");
-            _duckDb.BumpArchiveViewGeneration();
-        }
+            using (_duckDb.AcquireWriteLock(waitBudget))
+            {
+                var waitingBefore = DuckDbInitializer.WaitingReadCountForTests;
+                writeLockTaken.Set();
+                if (!startReader.Wait(waitBudget))
+                {
+                    return "the test never started the reader";
+                }
+                if (!TestWait.TryWaitUntil(() => DuckDbInitializer.WaitingReadCountForTests > waitingBefore, waitBudget, TimeSpan.FromMilliseconds(1)))
+                {
+                    return "the read never reached the lock wait";
+                }
+                if (run!.IsCompleted)
+                {
+                    return "the read finished while the write lock was held";
+                }
+                _duckDb.BumpArchiveViewGeneration();
+                return "";
+            }
+        });
+
+        Assert.True(writeLockTaken.Wait(waitBudget, TestContext.Current.CancellationToken), "the write lock was not taken");
+        run = Task.Run(() => Collect(facts), TestContext.Current.CancellationToken);
+        startReader.Set();
+        var holderResult = await holder.WaitAsync(waitBudget + waitBudget, TestContext.Current.CancellationToken);
+        Assert.Equal("", holderResult);
 
         await run.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
         var fact = Assert.Single(facts);
