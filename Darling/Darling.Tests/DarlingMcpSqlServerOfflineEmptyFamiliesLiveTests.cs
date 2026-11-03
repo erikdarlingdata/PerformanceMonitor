@@ -48,6 +48,13 @@ public sealed class DarlingMcpSqlServerOfflineEmptyFamiliesLiveTests
                 CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(at.AddHours(-1)), serverId, name);
         }
 
+        /* One full Query Store row (a Regular execution), so get_query_store_top's unfiltered top-1 finds data and an Exception filter
+           lands on its measured-zero empty answer rather than the never-collected one. */
+        await DarlingMcpTestData.ExecAsync(c, ct,
+            @"INSERT INTO query_store_stats (collection_id, collection_time, server_id, server_name, database_name, query_id, plan_id, execution_type_desc, query_hash, query_plan_hash, query_text, execution_count, avg_duration_us, avg_cpu_time_us, avg_logical_io_reads, avg_logical_io_writes, avg_physical_io_reads, avg_rowcount, min_dop, max_dop, last_execution_time)
+VALUES ($1, $2, $3, $4, 'nosuchdb', 42, 7, 'Regular', '0xE2EDATAHASH', '0xPLANHASH', 'SELECT 1', 100, 5000, 4000, 800, 0, 40, 250, 1, 4, $2)",
+            CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(at.AddHours(-1)), serverId, name);
+
         /* Three successful runs of each collector that stored no row: the empty-page answers read "the collector looked and nothing ran". */
         foreach (var collector in new[] { "procedure_stats", "query_store", "query_stats" })
         {
@@ -68,7 +75,7 @@ FROM generate_series($4::timestamp - interval '3 hours', $4::timestamp - interva
         "get_active_queries", "get_waiting_tasks", "get_blocking", "get_deadlocks", "get_deadlock_detail", "get_blocked_process_xml",
         "get_long_query_completions", "get_alert_history", "get_analysis_findings", "get_query_store_clutter",
         "finops_application_connections", "finops_database_resources", "finops_high_impact", "finops_optimization",
-        "get_wait_trend", "get_top_queries_by_cpu", "get_top_procedures_by_cpu", "get_query_trend",
+        "get_wait_trend", "get_top_queries_by_cpu", "get_top_procedures_by_cpu", "get_query_store_top", "get_query_trend",
         "get_query_duration_trend", "get_procedure_duration_trend", "get_query_store_duration_trend", "get_lock_wait_trend",
         "get_server_config_changes", "get_database_config_changes", "get_trace_flag_changes",
         "get_query_store_aborts", "get_query_store_query_history", "get_cpu_by_database",
@@ -94,6 +101,7 @@ FROM generate_series($4::timestamp - interval '3 hours', $4::timestamp - interva
         "get_wait_trend" => DarlingMcpDataTools.GetWaitTrend(ds, "PAGEIOLATCH_SH", name, hours_back: 168),
         "get_top_queries_by_cpu" => DarlingMcpDataTools.GetTopQueriesByCpu(ds, name, hours_back: 168),
         "get_top_procedures_by_cpu" => DarlingMcpDataTools.GetTopProceduresByCpu(ds, name, hours_back: 168, database_name: "nosuchdb"),
+        "get_query_store_top" => DarlingMcpDataTools.GetQueryStoreTop(ds, name, hours_back: 168, execution_type: "Exception"),
         "get_query_trend" => DarlingMcpTrendTools.GetQueryTrend(ds, "0x0102030405060708", "nosuchdb", name),
         "get_query_duration_trend" => DarlingMcpTrendTools.GetQueryDurationTrend(ds, name),
         "get_procedure_duration_trend" => DarlingMcpTrendTools.GetProcedureDurationTrend(ds, name),
