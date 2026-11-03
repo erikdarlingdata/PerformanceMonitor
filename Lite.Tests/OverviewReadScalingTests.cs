@@ -565,6 +565,56 @@ VALUES (1, TIMESTAMP '{now}' - INTERVAL 11 DAY, {ServerId}, 'SRV', 'OldEdition',
     }
 
     /// <summary>
+    /// One probe decides the database size relation for a refresh (#7216). A server whose rows are all archived starts being collected
+    /// again between the snapshot lookup and the read at that snapshot: the snapshot came from the archive view, so the read must stay on the
+    /// view and return the archived rows, not re-probe, find the new hot row and look for the archived timestamp in the hot table.
+    /// </summary>
+    [Fact]
+    public async Task DatabaseSizeRead_HotRowLandsAfterTheSnapshotLookup_StillReadsTheArchivedSnapshot()
+    {
+        var dir = Path.Combine(_tempDir, "sizeonce");
+        var archiveDir = Path.Combine(dir, "archive");
+        Directory.CreateDirectory(archiveDir);
+        var dbPath = Path.Combine(dir, "test.duckdb");
+        var initializer = new DuckDbInitializer(dbPath);
+        _initializers.Add(initializer);
+        await initializer.InitializeFromTemplateAsync();
+
+        const string sizeRow = @"INSERT INTO database_size_stats (collection_id, collection_time, server_id, server_name, database_name, database_id, file_id,
+    file_type_desc, file_name, physical_name, total_size_mb, used_size_mb)
+VALUES ({0}, {1}, {2}, 'SRV', 'DbA', 5, 1, 'ROWS', 'DbA_data', 'D:\DbA.mdf', 2000, 400);";
+        var now = DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture);
+
+        using (var connection = new DuckDBConnection($"Data Source={dbPath}"))
+        {
+            await connection.OpenAsync(TestContext.Current.CancellationToken);
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = string.Format(sizeRow, 1, $"TIMESTAMP '{now}' - INTERVAL 10 DAY", ServerId);
+            await cmd.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        }
+
+        var archive = new ArchiveService(initializer, archiveDir);
+        archive.TimestampForTests = DateTime.UtcNow.ToString("yyyyMMdd_HHmm");
+        await archive.ArchiveOldDataAsync(hotDataHours: HotDays * 24);
+
+        var data = new LocalDataService(initializer);
+        var snapshot = await data.GetLatestDatabaseSizeSnapshotAsync(ServerId);
+        Assert.NotNull(snapshot);
+
+        using (var connection = new DuckDBConnection($"Data Source={dbPath}"))
+        {
+            await connection.OpenAsync(TestContext.Current.CancellationToken);
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = string.Format(sizeRow, 2, $"TIMESTAMP '{now}'", ServerId);
+            await cmd.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        }
+
+        var rows = await data.GetDatabaseSizeAtAsync(ServerId, snapshot.Value, null);
+
+        Assert.Equal("DbA", Assert.Single(rows).DatabaseName);
+    }
+
+    /// <summary>
     /// The FinOps server inventory reads the hot memory / size / properties tables for a server that still has rows there and the archive for a
     /// server whose rows are all archived (#7014). Server 1 is collected now, with an older and a newer size snapshot, and must read its NEWEST
     /// snapshot; server 2 stopped being collected 10 days ago, so every row of it is in Parquet, and it must still be listed with its last

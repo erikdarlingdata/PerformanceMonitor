@@ -25,15 +25,15 @@ public partial class LocalDataService
     public async Task<List<DatabaseSizeRow>> GetDatabaseSizeLatestWithCostShareAsync(
         int serverId, IReadOnlyList<string>? databaseNames, decimal monthlyCostUsd, Func<Task>? betweenReads = null)
     {
-        var snapshotTime = await GetLatestDatabaseSizeSnapshotAsync(serverId);
-        if (snapshotTime is null) return new List<DatabaseSizeRow>();
+        var snapshot = await GetLatestDatabaseSizeSnapshotAsync(serverId);
+        if (snapshot is null) return new List<DatabaseSizeRow>();
 
-        var rows = await GetDatabaseSizeAtAsync(serverId, snapshotTime.Value, databaseNames);
+        var rows = await GetDatabaseSizeAtAsync(serverId, snapshot.Value, databaseNames);
         if (betweenReads is not null) await betweenReads();
         if (monthlyCostUsd <= 0m || rows.Count == 0) return rows;
 
         var serverRows = databaseNames is { Count: > 0 }
-            ? await GetDatabaseSizeAtAsync(serverId, snapshotTime.Value, null)
+            ? await GetDatabaseSizeAtAsync(serverId, snapshot.Value, null)
             : rows;
         var totalMb = DatabaseSizeRow.AllocatedTotalMb(serverRows);
         if (totalMb > 0m)
@@ -44,18 +44,23 @@ public partial class LocalDataService
         return rows;
     }
 
-    private async Task<DateTime?> GetLatestDatabaseSizeSnapshotAsync(int serverId)
+    /// <summary>#7216: a server's newest database size snapshot and the relation that answered for it. The one probe that picked
+    /// the relation travels with the timestamp, so the reads at that snapshot cannot probe again and land on the other relation.</summary>
+    internal readonly record struct DatabaseSizeSnapshot(DateTime CollectionTime, string Relation);
+
+    internal async Task<DatabaseSizeSnapshot?> GetLatestDatabaseSizeSnapshotAsync(int serverId)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
         /* #7216: the unbounded MAX through the v_ view read every archived row of database_size_stats. The hot table holds the newest
            snapshot of any server still being collected; the view is read only for a server with no hot row (collection stopped and
-           archival moved every row out), which still shows the last values it had. GetDatabaseSizeAtAsync probes the same way. */
+           archival moved every row out), which still shows the last values it had. This is the refresh's only probe: GetDatabaseSizeAtAsync
+           reads the relation chosen here. */
         var sizeRelation = await HotTableHasServerAsync(connection, "database_size_stats", serverId) ? "database_size_stats" : "v_database_size_stats";
         command.CommandText = $"SELECT MAX(collection_time) FROM {sizeRelation} WHERE server_id = $1";
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         var value = await command.ExecuteScalarAsync();
-        return value is DateTime stamp ? stamp : null;
+        return value is DateTime stamp ? new DatabaseSizeSnapshot(stamp, sizeRelation) : null;
     }
 
     /// <summary>
@@ -66,18 +71,19 @@ public partial class LocalDataService
     /// </summary>
     public async Task<List<DatabaseSizeRow>> GetDatabaseSizeLatestAsync(int serverId, IReadOnlyList<string>? databaseNames = null)
     {
-        var snapshotTime = await GetLatestDatabaseSizeSnapshotAsync(serverId);
-        return snapshotTime is null
+        var snapshot = await GetLatestDatabaseSizeSnapshotAsync(serverId);
+        return snapshot is null
             ? new List<DatabaseSizeRow>()
-            : await GetDatabaseSizeAtAsync(serverId, snapshotTime.Value, databaseNames);
+            : await GetDatabaseSizeAtAsync(serverId, snapshot.Value, databaseNames);
     }
 
-    private async Task<List<DatabaseSizeRow>> GetDatabaseSizeAtAsync(int serverId, DateTime snapshotTime, IReadOnlyList<string>? databaseNames)
+    internal async Task<List<DatabaseSizeRow>> GetDatabaseSizeAtAsync(int serverId, DatabaseSizeSnapshot snapshot, IReadOnlyList<string>? databaseNames)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        /* #7216: the same relation the snapshot lookup chose (hot table when it holds the server, else the view). */
-        var sizeRelation = await HotTableHasServerAsync(connection, "database_size_stats", serverId) ? "database_size_stats" : "v_database_size_stats";
+        /* #7216: the relation the snapshot lookup chose, not a second probe: a hot row that lands between the two reads must not
+           send this read to a table that does not hold the archived snapshot's timestamp. */
+        var sizeRelation = snapshot.Relation;
         var dbClause = BuildDbInClause(databaseNames, "database_name", 3, out var dbValues);
         command.CommandText = $@"
 SELECT
@@ -101,7 +107,7 @@ AND   collection_time = $2{dbClause}
 ORDER BY database_name, file_type_desc, file_name";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
-        command.Parameters.Add(new DuckDBParameter { Value = snapshotTime });
+        command.Parameters.Add(new DuckDBParameter { Value = snapshot.CollectionTime });
         foreach (var db in dbValues)
             command.Parameters.Add(new DuckDBParameter { Value = db });
 
