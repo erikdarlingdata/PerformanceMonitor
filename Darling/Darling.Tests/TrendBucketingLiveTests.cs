@@ -190,12 +190,13 @@ public sealed class TrendBucketingLiveTests
     }
 
     /// <summary>
-    /// The raw duration trend, time-weighted. Recent instants (the raw tier holds four days), aligned to ten
-    /// minutes. In the first bucket: a 60-second collection at 100 ms/s, a 120-second one at 10 ms/s, and a
-    /// restart (stored interval 0) whose fabricated delta must not count. Time-weighted that bucket is
-    /// (6,000 + 1,200) ms over 180 s = 40 ms/s; averaging the two rates would say 55, and letting the restart in
-    /// would say anything. The second bucket holds only a restart; the third a pre-V128 collection rated over
-    /// the gap since the one before.
+    /// The raw duration trend, time-weighted by each collection's gap to the previous one (#7161), not by the longest
+    /// stored interval of any one query in it. Recent instants (the raw tier holds four days), aligned to ten minutes.
+    /// In the first bucket: a collection stored as 60 s but 300 s after the one before it (which lies before the window
+    /// and is read only as its previous), one 120 s after that, and a restart (stored interval 0) whose fabricated
+    /// delta must not count. Time-weighted that bucket is (6,000 + 1,200) ms over (300 + 120) s = 17.142857 ms/s; the
+    /// stored 60 s and 120 s said 7,200 / 180 = 40, and averaging the two rates would say something else again. The
+    /// second bucket holds only a restart; the third a pre-V128 collection rated over the gap since the one before.
     /// </summary>
     [Fact]
     public async Task DurationTrend_IsTimeWeighted_LeavesTheUnknowableOut_AndStampsTheFirstPointAtTheWindowStart()
@@ -221,9 +222,11 @@ public sealed class TrendBucketingLiveTests
             Assert.Equal(3, trend.Length);
 
             Assert.StartsWith(Stamp(end.AddMinutes(-60)), trend[0].GetProperty("time").GetString()!, StringComparison.Ordinal);
-            Assert.Equal(40.0, trend[0].GetProperty("elapsed_ms_per_second").GetDouble(), 9);
-            Assert.Equal(0.4, trend[0].GetProperty("executions_per_second").GetDouble(), 9);
-            Assert.Equal(100.0, trend[0].GetProperty("peak_elapsed_ms_per_second").GetDouble(), 9);
+            /* #7161: (6,000 + 1,200) ms / (300 s gap to the collection before the window + 120 s) = 17.142857;
+               (60 + 12) / 420 = 0.171428571; the peak point is 6,000 / 300 = 20 (the stored 60 s said 100). */
+            Assert.Equal(7200.0 / 420.0, trend[0].GetProperty("elapsed_ms_per_second").GetDouble(), 9);
+            Assert.Equal(72.0 / 420.0, trend[0].GetProperty("executions_per_second").GetDouble(), 9);
+            Assert.Equal(20.0, trend[0].GetProperty("peak_elapsed_ms_per_second").GetDouble(), 9);
 
             /* Nothing rated in the second bucket: an unrated point, never 0. */
             Assert.StartsWith(Stamp(end.AddMinutes(-50)), trend[1].GetProperty("time").GetString()!, StringComparison.Ordinal);
