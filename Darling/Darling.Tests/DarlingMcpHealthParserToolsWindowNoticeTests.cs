@@ -526,6 +526,10 @@ VALUES ($1, $2, $3, $4, $5, 12, 'SUCCESS', 0, $6)",
             await SeedHealthServerAsync(c, "rbstale-" + tool, end.AddDays(-30), end.AddDays(-8), end.AddHours(-4));
             await SeedHealthEventAsync(c, "rbstale-" + tool, tool, end.AddDays(-20));
             await SeedTruncatedRunAsync(c, "rbstale-" + tool, end.AddHours(-3));
+            /* #7167: the health-parser collector is the stale one here, not the server: another collector ran minutes ago, so the server is
+               collecting and the empty read stays a window with a cut claim. With no run in the last 30 minutes the read would answer
+               unavailable (offline) before the cut-window rule is reached. */
+            await WindowFloorLiveHarness.SeedRunAsync(c, HealthName("rbstale-" + tool), "wait_stats", "SUCCESS", end.AddMinutes(-2), TestContext.Current.CancellationToken);
 
             var root = WindowFloorLiveHarness.Parse(await CallHealthAsync(tool, ds, "rbstale-" + tool, 1, end));
 

@@ -55,8 +55,8 @@ FROM generate_series($4::timestamp, $5::timestamp, make_interval(mins => $6)) AS
         }
     }
 
-    /// <summary>#7167: one FAILED run of <paramref name="collector"/> at <paramref name="at"/>: a server the service cannot reach still logs these every cycle.</summary>
-    public static Task SeedFailedRunAsync(NpgsqlConnection connection, string name, string collector, string status, DateTime at, CancellationToken ct) =>
+    /// <summary>#7167: one run of <paramref name="collector"/> at <paramref name="at"/> with <paramref name="status"/>. An ERROR or PERMISSIONS run is what a server the service cannot reach logs every cycle; a SUCCESS run minutes old is what makes a server collecting, whichever collector a test is about.</summary>
+    public static Task SeedRunAsync(NpgsqlConnection connection, string name, string collector, string status, DateTime at, CancellationToken ct) =>
         DarlingMcpTestData.ExecAsync(connection, ct,
             @"INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected)
 SELECT COALESCE(MAX(log_id), 0) + 1, $1, $2, $3, $4, 12, $5, 0 FROM collection_log",

@@ -76,7 +76,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
             var lastSuccess = now.AddDays(-3);
             await WindowFloorLiveHarness.SeedServerAsync(
                 c, Name, now.AddDays(-40), "memory_stats", lastSuccess.AddHours(-3), 30, lastSuccess, Tables, TestContext.Current.CancellationToken);
-            await WindowFloorLiveHarness.SeedFailedRunAsync(c, Name, "memory_stats", "ERROR", DateTime.UtcNow.AddMinutes(-1), TestContext.Current.CancellationToken);
+            await WindowFloorLiveHarness.SeedRunAsync(c, Name, "memory_stats", "ERROR", DateTime.UtcNow.AddMinutes(-1), TestContext.Current.CancellationToken);
             await SeedMemoryAsync(c, Name, lastSuccess);
 
             var root = WindowFloorLiveHarness.Parse(await DarlingMcpTrendTools.GetMemoryTrend(ds, Name, 1));

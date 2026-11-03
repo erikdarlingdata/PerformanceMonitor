@@ -50,7 +50,7 @@ public sealed class DarlingMcpPgOfflineEmptyLiveTests
             var lastSuccess = now.AddDays(-3);
             await WindowFloorLiveHarness.SeedServerAsync(
                 c, Name, now.AddDays(-40), "pg_blocking", lastSuccess.AddHours(-3), 30, lastSuccess, Tables, TestContext.Current.CancellationToken);
-            await WindowFloorLiveHarness.SeedFailedRunAsync(c, Name, "pg_blocking", "ERROR", DateTime.UtcNow.AddMinutes(-1), TestContext.Current.CancellationToken);
+            await WindowFloorLiveHarness.SeedRunAsync(c, Name, "pg_blocking", "ERROR", DateTime.UtcNow.AddMinutes(-1), TestContext.Current.CancellationToken);
 
             var root = WindowFloorLiveHarness.Parse(await ReadAsync(ds, read, Name));
 
