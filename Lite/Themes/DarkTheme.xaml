@@ -75,6 +75,8 @@
 
     <SolidColorBrush x:Key="BorderBrush" Color="{StaticResource BorderColor}"/>
     <SolidColorBrush x:Key="BorderLightBrush" Color="{StaticResource BorderLightColor}"/>
+    <!-- #7218: the Availability Groups cards draw their outline from this key. Same value as the Darling Viewer dark theme. -->
+    <SolidColorBrush x:Key="CardBorderBrush" Color="#3A3D45"/>
 
     <SolidColorBrush x:Key="SuccessBrush" Color="{StaticResource SuccessColor}"/>
     <SolidColorBrush x:Key="WarningBrush" Color="{StaticResource WarningColor}"/>
