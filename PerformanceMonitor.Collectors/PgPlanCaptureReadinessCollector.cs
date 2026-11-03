@@ -381,8 +381,8 @@ SELECT
             THEN 'log_destination lists csvlog, but this PostgreSQL is older than 14 and its csvlog '
                  || 'record has no query_id column, so a captured plan cannot be joined to its statement. '
                  || 'The plan reader reads the csvlog whenever it is listed, so a log_line_prefix with %Q does not '
-                 || 'help while csvlog stays in log_destination. Take csvlog out of log_destination and keep '
-                 || 'stderr, with %Q directly after [%p] in log_line_prefix, or upgrade to PostgreSQL 14 or later.'
+                 || 'help while csvlog stays in log_destination. Take csvlog out of log_destination so the server logs '
+                 || 'to stderr, with %Q directly after [%p] in log_line_prefix, or upgrade to PostgreSQL 14 or later.'
         WHEN p.jsonlog_only
             THEN 'log_destination has jsonlog and no csvlog or stderr. The plan readers read stderr or csvlog and '
                  || 'never jsonlog, so no plan is stored from this target at all. Add csvlog to log_destination '
