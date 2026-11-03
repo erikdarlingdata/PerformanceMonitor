@@ -42,8 +42,7 @@ public partial class LocalDataService
     /// separate from both -- the verdict gates on the blocking AND deadlock series being empty, so leaving
     /// deadlocks out would call a server clear on blocking capture alone. Probing one would report
     /// "never captured" for a server capturing fine through the other, and probing neither would let a
-    /// silent capture gap read as a clean bill of health. Darling's twin is
-    /// <c>DarlingDataReader.HasAnyBlockingCaptureAsync</c>.</para>
+    /// silent capture gap read as a clean bill of health.</para>
     /// <para>Reads the report and deadlock views directly, not through <see cref="StoredEventCopies"/>: a stored
     /// copy cannot change whether a row exists.</para>
     /// </summary>

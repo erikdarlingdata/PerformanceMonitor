@@ -41,8 +41,6 @@ public sealed class DarlingMcpQueryTagTools
     /// <summary>The per-command deadline the write tools use, the same as the server-tag tools'.</summary>
     internal const int WriteCommandSeconds = DarlingMcpServerTagTools.WriteCommandSeconds;
 
-    /// <summary>The longest hash, database, schema or object text one key part takes.</summary>
-
     /// <summary>The most hand assignments one <c>list_query_tags</c> answer carries.</summary>
     internal const int MaxListedAssignments = 2000;
 
@@ -53,7 +51,6 @@ public sealed class DarlingMcpQueryTagTools
     internal const string MapNote = "The tag map is not rebuilt by this write: it takes effect on the collector's next map pass, not at once.";
 
     private const string KindHash = "hash";
-    private const string KindObject = "object";
 
     [McpServerTool(Name = "create_query_tag"), Description(
         "Creates a query tag, at the root or under parent_id. A query tag labels queries (by query_hash or by object, see assign_query_tag) so resource use can be grouped by it; it is not a server tag. Names are trimmed, 1-100 characters, unique among siblings ignoring case (the same name under two different parents is fine); tags nest at most four levels. Needs mcp.allowWrites. The tag map takes effect on the collector's next map pass. The answer carries previous (null) and undo (the delete_query_tag call for the new id).")]

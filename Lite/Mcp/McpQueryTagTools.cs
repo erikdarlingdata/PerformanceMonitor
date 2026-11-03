@@ -50,7 +50,6 @@ public sealed class McpQueryTagTools
     private const string RuleMapNote = "The tag map is rebuilt on the next map pass; this call changed no map row.";
 
     private const string KindHash = "hash";
-    private const string KindObject = "object";
 
     // ------------------------------------------------------------------ tag tools
 

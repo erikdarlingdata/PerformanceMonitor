@@ -252,9 +252,6 @@ public sealed class PerfmonCounterTypeRungTests
         Assert.Contains("SUM(artifacts) AS artifacts_set_aside", viewerTrend, StringComparison.Ordinal);
 
         /* The row shapes: nullable where a gauge stores nothing, the type nullable where the row predates it. */
-        Assert.Equal(typeof(long?), typeof(DarlingTrendReader.PerfmonTrendPoint).GetProperty("DeltaValue")!.PropertyType);
-        Assert.Equal(typeof(long?), typeof(DarlingTrendReader.PerfmonTrendPoint).GetProperty("SampleIntervalSeconds")!.PropertyType);
-        Assert.Equal(typeof(int?), typeof(DarlingTrendReader.PerfmonTrendPoint).GetProperty("CntrType")!.PropertyType);
         Assert.Equal(typeof(long?), typeof(DarlingDataReader.PerfmonRow).GetProperty("DeltaValue")!.PropertyType);
         Assert.Equal(typeof(int?), typeof(DarlingDataReader.PerfmonRow).GetProperty("CntrType")!.PropertyType);
         Assert.Equal(typeof(long?), typeof(PerfmonTrendPoint).GetProperty("DeltaValue")!.PropertyType);
