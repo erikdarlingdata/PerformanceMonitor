@@ -632,7 +632,7 @@ OPTION(RECOMPILE);";
     /// identically on a pre-2016 target.
     /// </summary>
     public override bool AppliesTo(CollectorTargetInfo target) =>
-        target.SqlMajorVersion == 0 || target.SqlMajorVersion >= 13 || target.IsAzureSqlDb || target.IsAzureManagedInstance;
+        target.MeetsMinimumVersion(13, unknownIsNewest: true);
 
     /// <summary>Azure SQL DB scopes dm_exec_query_stats to the connected database.</summary>
     public override bool RunsPerDatabase(CollectorTargetInfo target) => target.IsAzureSqlDb;

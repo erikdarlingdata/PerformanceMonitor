@@ -80,6 +80,29 @@ public static class OverviewCardView
     }
 
     /// <summary>
+    /// Whether the Fleet Health block (heading, toggle, Search box, Sort) is drawn at all (#7354). It follows the
+    /// REGISTERED fleet, not the servers the search left: a search that matches nothing leaves
+    /// <see cref="FleetRollup.TotalServers"/> at 0, and gating on that hid the block with the Search box inside
+    /// it, so the user had no way to clear the term. An empty fleet (nothing registered) still hides it.
+    /// </summary>
+    public static bool ShowsRollup(FleetRollup rollup)
+    {
+        ArgumentNullException.ThrowIfNull(rollup);
+        return (rollup.FilteredOfTotal ?? rollup.TotalServers) > 0;
+    }
+
+    /// <summary>
+    /// Whether the "All N servers healthy" line is shown. A search that matched nothing has no servers to judge,
+    /// and <see cref="FleetRollup.IsAllClear"/> is vacuously true there, which would print "All 0 servers healthy".
+    /// The no-match sentence beside the toggle (<see cref="CountText"/>) is what that state shows instead.
+    /// </summary>
+    public static bool ShowsAllClear(FleetRollup rollup)
+    {
+        ArgumentNullException.ThrowIfNull(rollup);
+        return rollup.TotalServers > 0 && rollup.IsAllClear;
+    }
+
+    /// <summary>
     /// The line beside the toggle, or null when nothing narrows the grid (no toggle, no search): a grid
     /// showing every server needs no arithmetic. A search that emptied the grid says so itself; it must never
     /// fall through to the all-clear, which claims the fleet is healthy.

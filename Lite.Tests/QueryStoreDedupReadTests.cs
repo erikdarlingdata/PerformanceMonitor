@@ -763,6 +763,32 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
     }
 
     /// <summary>
+    /// #7169: the average over several intervals is weighted by each interval's executions, and the grid ranks on
+    /// total duration. Plan 5 has one 10 s execution in one interval and 10,000 executions of 1 ms in another: about
+    /// 2 ms on average and 20 s in total. The old read averaged the two interval averages (about 5 s) and ranked on
+    /// SUM(execution_count) * AVG(avg), about 50,000 s, which put it above plan 6 that really ran 30 s.
+    /// </summary>
+    [Fact]
+    public async Task TopQueries_AverageIsWeightedByExecutions_AndTheRankIsTotalDuration()
+    {
+        await SeedAsync(BucketStart.AddMinutes(5), queryId: 5, planId: 55, FirstExecA,
+            executionCount: 1, avgCpuUs: 10_000_000, avgDurationUs: 10_000_000, avgReads: 100, queryHash: "0xHASH_W5");
+        await SeedAsync(BucketStart.AddMinutes(15), queryId: 5, planId: 55, FirstExecB,
+            executionCount: 10_000, avgCpuUs: 1_000, avgDurationUs: 1_000, avgReads: 1, queryHash: "0xHASH_W5");
+        await SeedAsync(BucketStart.AddMinutes(5), queryId: 6, planId: 66, FirstExecA,
+            executionCount: 10_000, avgCpuUs: 3_000, avgDurationUs: 3_000, avgReads: 1, queryHash: "0xHASH_W6");
+
+        var rows = await new LocalDataService(_duckDb).GetQueryStoreTopQueriesAsync(ServerId, hoursBack: 24);
+
+        Assert.Equal(new long[] { 6, 5 }, rows.Select(r => r.QueryId).ToArray());
+        var skew = Assert.Single(rows, r => r.QueryId == 5);
+        Assert.Equal(10_001L, skew.TotalExecutions);
+        Assert.Equal((10_000_000.0 + 10_000.0 * 1_000.0) / 10_001.0 / 1000.0, skew.AvgDurationMs, precision: 6);
+        Assert.Equal(skew.AvgDurationMs, skew.AvgCpuTimeMs, precision: 6);
+        Assert.Equal((100.0 + 10_000.0) / 10_001.0, skew.AvgLogicalReads, precision: 6);
+    }
+
+    /// <summary>
     /// #1921 (Erik's option 1): the slicer OVERLAY places its points at the hour the work RAN, matching the
     /// bars it is drawn over, not at the hour the collector observed it.
     ///

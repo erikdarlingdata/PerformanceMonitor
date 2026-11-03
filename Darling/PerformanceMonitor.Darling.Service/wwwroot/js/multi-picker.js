@@ -35,11 +35,6 @@ export function pickerState(key) {
   return s;
 }
 
-/** Forget every held state. For tests. */
-export function resetPickerStates() {
-  states.clear();
-}
-
 /**
  * The desktop's default wait set, bounded by `max`: the resource-starvation waits first, then the usual suspects and
  * the PAGELATCH_ family, then the heaviest of what is left, all drawn only from `available` (heaviest first).

@@ -1791,12 +1791,14 @@ public partial class MainWindow : Window
     /// Renders the fleet roll-up above the Overview cards: sets the FleetRollupContainer's DataContext and
     /// toggles the worst-first "Needs Attention" ranking against the all-clear line (there is no
     /// inverse-visibility converter, so the swap is done here). The container shows only when there are
-    /// servers to roll up.
+    /// registered servers to roll up (a search that matches none keeps it, #7354).
     /// </summary>
     private void ApplyFleetRollup(FleetRollup rollup)
     {
         FleetRollupContainer.DataContext = rollup;
-        FleetRollupContainer.Visibility = rollup.TotalServers > 0 ? Visibility.Visible : Visibility.Collapsed;
+        /* #7354: gated on the registered fleet, not the servers the search left, so a search that matches
+           nothing keeps the Search box on screen to be cleared. */
+        FleetRollupContainer.Visibility = OverviewCardView.ShowsRollup(rollup) ? Visibility.Visible : Visibility.Collapsed;
 
         FleetWorstServersList.Visibility = rollup.HasProblems ? Visibility.Visible : Visibility.Collapsed;
         FleetAdditionalProblems.Visibility =
@@ -1805,7 +1807,7 @@ public partial class MainWindow : Window
            summary this cycle at all (IsAllClear, not HasProblems, is the gate) — and that gap gets its own
            line rather than being silently absorbed into either the healthy or the all-clear text. */
         FleetUnknownStatusText.Visibility = rollup.UnknownCount > 0 ? Visibility.Visible : Visibility.Collapsed;
-        FleetAllHealthyText.Visibility = rollup.IsAllClear ? Visibility.Visible : Visibility.Collapsed;
+        FleetAllHealthyText.Visibility = OverviewCardView.ShowsAllClear(rollup) ? Visibility.Visible : Visibility.Collapsed;
     }
 
     /// <summary>Empties the Overview: no cards, no roll-up, and no stale authority left behind for the filter

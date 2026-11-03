@@ -112,8 +112,9 @@ public sealed partial class ViewerDataService
     /// The Query-Store-by-Duration read — Lite's <c>GetQueryStoreTopQueriesAsync</c> ported to Postgres
     /// against the base <c>query_store_stats</c> table (the store name; Lite reads its
     /// <c>v_query_store_stats</c> view). Group by (database, query_id, plan_id, query_hash), average the
-    /// per-interval metrics + carry min/max spreads, rank by <c>SUM(execution_count) *
-    /// AVG(avg_duration_us)</c> (total duration) descending, over-fetch by 5 for the WAITFOR trim, and cap
+    /// per-interval metrics + carry min/max spreads, rank by the plan's total duration,
+    /// <c>SUM(avg_duration_us * execution_count)</c>, descending (every avg column is averaged weighted by
+    /// execution_count), over-fetch by 5 for the WAITFOR trim, and cap
     /// at top. Viewer deviations: <c>SUM(execution_count)</c> CAST to bigint; the query_plan_text column
     /// is not selected (plan surfacing deferred); the forced-plan flag folds through Postgres
     /// <c>bool_or(is_forced_plan)</c> (Postgres has no <c>MAX(boolean)</c> aggregate, unlike DuckDB).
@@ -136,8 +137,8 @@ public sealed partial class ViewerDataService
                per-Query-Store-interval snapshots, and the collector re-fetches the OPEN interval every
                cycle as its last_execution_time advances, so the SAME interval (same first_execution_time)
                is stored repeatedly with a growing execution_count. SUM(execution_count) over the raw rows
-               reports 10 + 25 + 40 for an interval that reached 40, and AVG(avg_*) becomes an avg-of-avgs
-               weighted by how many times each interval happened to be re-collected. Keep the LATEST
+               reports 10 + 25 + 40 for an interval that reached 40, and the execution-weighted
+               averages would count a re-collected interval again at its own execution count. Keep the LATEST
                snapshot per interval. Matches the dedup convention in PgFactCollector.QueryPerf and
                PgDrillDownCollector.Queries, and Lite's GetQueryStoreTopQueriesAsync.
 
@@ -256,12 +257,12 @@ public sealed partial class ViewerDataService
                 execution_type_desc,
                 MAX(module_name) AS module_name,
                 CAST(SUM(execution_count) AS bigint) AS total_executions,
-                AVG(CAST(avg_duration_us AS double precision)) / 1000.0 AS avg_duration_ms,
-                AVG(CAST(avg_cpu_time_us AS double precision)) / 1000.0 AS avg_cpu_time_ms,
-                AVG(CAST(avg_logical_io_reads AS double precision)) AS avg_logical_reads,
-                AVG(CAST(avg_logical_io_writes AS double precision)) AS avg_logical_writes,
-                AVG(CAST(avg_physical_io_reads AS double precision)) AS avg_physical_reads,
-                AVG(CAST(avg_rowcount AS double precision)) AS avg_rowcount,
+                {{QueryStoreWeightedAverage.DurationUs}} / 1000.0 AS avg_duration_ms,
+                {{QueryStoreWeightedAverage.CpuTimeUs}} / 1000.0 AS avg_cpu_time_ms,
+                {{QueryStoreWeightedAverage.LogicalReads}} AS avg_logical_reads,
+                {{QueryStoreWeightedAverage.LogicalWrites}} AS avg_logical_writes,
+                {{QueryStoreWeightedAverage.PhysicalReads}} AS avg_physical_reads,
+                {{QueryStoreWeightedAverage.Rowcount}} AS avg_rowcount,
                 MIN(min_dop) AS min_dop,
                 MAX(max_dop) AS max_dop,
                 MAX(last_execution_time) AS last_execution_time,
@@ -269,9 +270,9 @@ public sealed partial class ViewerDataService
                 bool_or(is_forced_plan) AS is_forced_plan,
                 MAX(plan_forcing_type) AS plan_forcing_type,
                 MIN(first_execution_time) AS first_execution_time,
-                AVG(CAST(avg_clr_time_us AS double precision)) / 1000.0 AS avg_clr_time_ms,
-                AVG(CAST(avg_tempdb_space_used AS double precision)) AS avg_tempdb_space_used,
-                AVG(CAST(avg_log_bytes_used AS double precision)) AS avg_log_bytes_used,
+                {{QueryStoreWeightedAverage.ClrTimeUs}} / 1000.0 AS avg_clr_time_ms,
+                {{QueryStoreWeightedAverage.TempdbSpaceUsed}} AS avg_tempdb_space_used,
+                {{QueryStoreWeightedAverage.LogBytesUsed}} AS avg_log_bytes_used,
                 MAX(plan_type) AS plan_type,
                 MAX(force_failure_count) AS force_failure_count,
                 MAX(last_force_failure_reason) AS last_force_failure_reason,
@@ -294,17 +295,17 @@ public sealed partial class ViewerDataService
                 MAX(CAST(max_log_bytes_used AS double precision)) AS max_log_bytes_used,
                 MIN(CAST(min_tempdb_space_used AS double precision)) AS min_tempdb_space_used,
                 MAX(CAST(max_tempdb_space_used AS double precision)) AS max_tempdb_space_used,
-                AVG(CAST(avg_query_max_used_memory AS double precision)) * 8.0 / 1024.0 AS avg_memory_mb,
+                {{QueryStoreWeightedAverage.QueryMaxUsedMemory}} * 8.0 / 1024.0 AS avg_memory_mb,
                 MIN(CAST(min_query_max_used_memory AS double precision)) * 8.0 / 1024.0 AS min_memory_mb,
                 MAX(CAST(max_query_max_used_memory AS double precision)) * 8.0 / 1024.0 AS max_memory_mb,
-                AVG(CAST(avg_num_physical_io_reads AS double precision)) AS avg_num_physical_io_reads,
+                {{QueryStoreWeightedAverage.NumPhysicalIoReads}} AS avg_num_physical_io_reads,
                 MIN(CAST(min_num_physical_io_reads AS double precision)) AS min_num_physical_io_reads,
                 MAX(CAST(max_num_physical_io_reads AS double precision)) AS max_num_physical_io_reads
             FROM deduped
             WHERE rn = 1
             /*TAG:hash:query_hash*/
             GROUP BY database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
-            ORDER BY SUM(execution_count) * AVG(CAST(avg_duration_us AS double precision)) DESC, database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
+            ORDER BY {{QueryStoreWeightedAverage.RankByDuration}} DESC, database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
             LIMIT $6
         ),
         page AS (
