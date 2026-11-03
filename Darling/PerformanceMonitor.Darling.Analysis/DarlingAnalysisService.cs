@@ -678,9 +678,7 @@ public sealed class DarlingAnalysisService
                 finding.Remediation =
                     FactRemediation.BuildAction(finding)
                     ?? FactRemediation.BuildRcsiAction(finding)
-                    ?? FactRemediation.BuildClearPlanAction(finding)
                     ?? FactRemediation.BuildFileAutogrowthAction(finding) // WS3: advisory only (no handler -> no Apply); carried for the read-time copy-paste
-                    ?? FactRemediation.BuildServerConfigAction(finding) // WS3: server-level config — MAXDOP/CTFP/memory
                     ?? FactRemediation.BuildMissingIndexAction(finding); // WS4: missing-index CREATE — copy-paste only
             }
 
