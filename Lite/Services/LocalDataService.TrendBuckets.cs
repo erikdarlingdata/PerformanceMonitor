@@ -367,16 +367,20 @@ ORDER BY 1";
     {
         var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
 
-        /* #7256: a window that starts after the newest archived row of the relation reads the hot table alone. The view opens every Parquet file of it (one per day) however short the window is. */
-        return await ReadWindowSkippingEmptyArchiveAsync(relation.Substring(2), "collection_time", startTime, ReadAsync, CancellationToken.None);
+        /* #7256: a table whose archive holds nothing at or after the start of what the statement reads is read as the hot table alone. A view opens every Parquet file of its archive (one per day) however short the window is.
+           The statement reads from one gap policy before the window start (so the first point has its previous point), and the procedure form also reads the collection log its axis comes from.
+           The statement is built with the view's name, because the procedure form is chosen by it, and each view is swapped for its hot table afterwards. */
+        var tables = relation == "v_procedure_stats" ? new[] { "procedure_stats", "collection_log" } : new[] { relation.Substring(2) };
+        var readsFrom = startTime.AddSeconds(-PerformanceMonitor.Collectors.CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        return await ReadWindowSkippingEmptyArchivesAsync(tables, "collection_time", readsFrom, ReadAsync, CancellationToken.None);
 
-        async Task<List<QueryTrendPoint>> ReadAsync(string windowRelation)
+        async Task<List<QueryTrendPoint>> ReadAsync(Func<string, string> relationFor)
         {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
         var dbClause = BuildDbInClause(databaseNames, "database_name", 5, out var dbValues);
-        command.CommandText = BucketedDurationTrendSql(windowRelation, dbClause);
+        command.CommandText = SwapViews(BucketedDurationTrendSql(relation, dbClause), tables, relationFor);
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });

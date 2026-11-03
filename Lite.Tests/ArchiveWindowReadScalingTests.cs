@@ -270,4 +270,144 @@ VALUES ({_nextId++}, {Ts(collected)}, {ServerId}, 'TestSrv', 55, 'Db', 'SELECT {
         Assert.Equal(2, expensive.Count);
         Assert.Equal(2, heatmap.Count);
     }
+
+    private string ProcedureRow(DateTime collected, string procedure, long cpu) =>
+        $@"INSERT INTO procedure_stats (collection_id, collection_time, server_id, server_name, database_name, schema_name, object_name, object_type,
+     last_execution_time, delta_execution_count, delta_worker_time, delta_elapsed_time)
+VALUES ({_nextId++}, {Ts(collected)}, {ServerId}, 'TestSrv', 'Db', 'dbo', '{procedure}', 'SQL_STORED_PROCEDURE', {Ts(collected)}, 10, {cpu}, {cpu})";
+
+    private string FileIoRow(DateTime collected, long readBytes) =>
+        $@"INSERT INTO file_io_stats (collection_id, collection_time, server_id, server_name, database_name, file_name, file_type, physical_name, size_mb,
+     delta_reads, delta_writes, delta_read_bytes, delta_write_bytes, delta_stall_read_ms, delta_stall_write_ms, sample_interval_seconds)
+VALUES ({_nextId++}, {Ts(collected)}, {ServerId}, 'TestSrv', 'Db', 'Db_data', 'ROWS', 'D:\\Db.mdf', 100, 5, 0, {readBytes}, 0, 1, 0, 60)";
+
+    [Fact]
+    public async Task ReadsThatNameASecondArchivedView_ReadItsHotTableWhenItsOwnArchiveIsOlderThanTheWindow()
+    {
+        await ExecuteAsync(
+            Row(Whole(NowUtc.AddHours(-2)), "recent", 100),
+            ProcedureRow(Whole(NowUtc.AddDays(-10)), "OldProc", 999),
+            ProcedureRow(Whole(NowUtc.AddHours(-2)), "NewProc", 100),
+            FileIoRow(Whole(NowUtc.AddDays(-10)), 1048576),
+            FileIoRow(Whole(NowUtc.AddHours(-2)), 2097152));
+        /* query_stats has no archive. The other two do, and each file holds nothing from the last 6 hours. */
+        var procedureFile = await ArchiveTableAsync("procedure_stats", NowUtc.AddDays(-1));
+        var fileIoFile = await ArchiveTableAsync("file_io_stats", NowUtc.AddDays(-1));
+        var start = Whole(NowUtc.AddHours(-6));
+        var end = Whole(NowUtc);
+        var reads = new Dictionary<string, Func<Task>>
+        {
+            ["GetCpuByDatabaseAsync"] = () => _service.GetCpuByDatabaseAsync(ServerId, start, end, 10),
+            ["GetDatabaseResourceUsageAsync"] = () => _service.GetDatabaseResourceUsageAsync(ServerId, 6),
+            ["GetTopResourceConsumersAsync"] = () => _service.GetTopResourceConsumersAsync(ServerId, 6),
+            ["GetBucketedProcedureDurationTrendAsync"] = () => _service.GetBucketedProcedureDurationTrendAsync(ServerId, 6, end, 5),
+        };
+
+        /* Each read runs once against real archive files, which caches the span of each archive. */
+        foreach (var read in reads.Values)
+        {
+            await read();
+        }
+
+        File.WriteAllText(procedureFile, "not a parquet file");
+        File.WriteAllText(fileIoFile, "not a parquet file");
+
+        var failed = new List<string>();
+        foreach (var (name, read) in reads)
+        {
+            try
+            {
+                await read();
+            }
+            catch (Exception ex)
+            {
+                failed.Add($"{name}: {ex.GetType().Name}");
+            }
+        }
+
+        Assert.Empty(failed);
+        var cpu = Assert.Single(await _service.GetCpuByDatabaseAsync(ServerId, start, end, 10));
+        Assert.Equal(100, cpu.ProcedureCpuUs);
+    }
+
+    [Fact]
+    public async Task ReadsThatNameASecondArchivedView_StillReadItsArchiveWhenItReachesIntoTheWindow()
+    {
+        await ExecuteAsync(
+            Row(Whole(NowUtc.AddHours(-2)), "recent", 100),
+            ProcedureRow(Whole(NowUtc.AddDays(-10)), "OldProc", 700),
+            ProcedureRow(Whole(NowUtc.AddHours(-2)), "NewProc", 100));
+        await ArchiveTableAsync("procedure_stats", NowUtc.AddDays(-1));
+
+        var row = Assert.Single(await _service.GetCpuByDatabaseAsync(ServerId, Whole(NowUtc.AddDays(-12)), Whole(NowUtc), 10));
+
+        Assert.Equal(800, row.ProcedureCpuUs);
+    }
+
+    [Fact]
+    public async Task TheBucketedQueryTrend_ReadsTheArchivedPointJustBeforeTheWindow_ForTheFirstPointsInterval()
+    {
+        var end = Whole(NowUtc);
+        var start = end.AddHours(-6);
+        /* The statement reads one gap policy before the window start, so the first point has its previous point: 2400 s apart, not the stored 60. */
+        await ExecuteAsync(
+            $@"INSERT INTO query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash, sql_handle,
+     last_execution_time, delta_execution_count, delta_worker_time, delta_elapsed_time, max_dop, sample_interval_seconds)
+VALUES ({_nextId++}, {Ts(start.AddMinutes(-30))}, {ServerId}, 'TestSrv', 'Db', 'h1', 'h1', {Ts(start)}, 1, 1, 1, 1, 60),
+       ({_nextId++}, {Ts(start.AddMinutes(10))}, {ServerId}, 'TestSrv', 'Db', 'h1', 'h1', {Ts(start)}, 2400, 1, 1, 1, 60)");
+        await ArchiveTableAsync("query_stats", start);
+
+        var points = await _service.GetBucketedQueryDurationTrendAsync(ServerId, 6, end, 5);
+
+        var point = Assert.Single(points);
+        Assert.Equal(1.0, point.ExecutionsPerSecond!.Value, 3);
+    }
+
+    [Theory]
+    [InlineData("CollectBadActorFactsAsync", "query_stats")]
+    [InlineData("CollectActiveQueryFactsAsync", "query_snapshots")]
+    public async Task AnArchiveRebuildDuringAFactRead_AddsEachFactOnce(string collectMethod, string table)
+    {
+        var window = Whole(NowUtc.AddHours(-2));
+        await ExecuteAsync(
+            $@"INSERT INTO query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash, sql_handle,
+     last_execution_time, delta_execution_count, delta_worker_time, delta_elapsed_time, max_dop, query_text)
+VALUES ({_nextId++}, {Ts(Whole(NowUtc.AddDays(-10)))}, {ServerId}, 'TestSrv', 'Db', 'old', 'old', {Ts(window)}, 200, 5000000, 5000000, 1, 'SELECT 1'),
+       ({_nextId++}, {Ts(window)}, {ServerId}, 'TestSrv', 'Db', 'busy', 'busy', {Ts(window)}, 200, 5000000, 5000000, 1, 'SELECT 2')",
+            SnapshotRow(Whole(NowUtc.AddDays(-10)), "old"),
+            SnapshotRow(window, "busy"));
+        await ArchiveTableAsync(table, NowUtc.AddDays(-1));
+
+        var collector = new PerformanceMonitorLite.Analysis.DuckDbFactCollector(_duckDb);
+        var method = typeof(PerformanceMonitorLite.Analysis.DuckDbFactCollector).GetMethod(collectMethod, System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
+        var context = new PerformanceMonitor.Analysis.AnalysisContext
+        {
+            ServerId = ServerId,
+            ServerName = "TestSrv",
+            TimeRangeStart = Whole(NowUtc.AddHours(-6)),
+            TimeRangeEnd = Whole(NowUtc),
+        };
+        Task Collect(List<PerformanceMonitor.Analysis.Fact> into) => (Task)method.Invoke(collector, [context, into])!;
+
+        /* The first run caches the archive span. */
+        var warm = new List<PerformanceMonitor.Analysis.Fact>();
+        await Collect(warm);
+        var expected = Assert.Single(warm);
+
+        /* The second run waits behind the write lock, and the archive view generation moves while it waits: its hot read is thrown away and
+           the view is read instead. Each fact still arrives once. */
+        var facts = new List<PerformanceMonitor.Analysis.Fact>();
+        Task run;
+        using (_duckDb.AcquireWriteLock())
+        {
+            run = Task.Run(() => Collect(facts), TestContext.Current.CancellationToken);
+            await Task.Delay(500, TestContext.Current.CancellationToken);
+            Assert.False(run.IsCompleted, "the read waits behind the write lock");
+            _duckDb.BumpArchiveViewGeneration();
+        }
+
+        await run.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        var fact = Assert.Single(facts);
+        Assert.Equal(expected.Key, fact.Key);
+    }
 }

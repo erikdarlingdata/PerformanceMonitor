@@ -36,6 +36,8 @@ public partial class LocalDataService
     /// database BEFORE the cap, so a share is a share of the server and not of the page. The procedure stats ride beside it for the
     /// databases on the page only; they are the SAME work the statement stats count and are never added to them.
     /// </summary>
+    private static readonly string[] CpuByDatabaseTables = ["query_stats", "procedure_stats"];
+
     internal const string CpuByDatabaseSql = @"
 WITH per_hash AS (
     SELECT COALESCE(database_name, '') AS database_name,
@@ -128,15 +130,15 @@ ORDER BY p.rk";
     {
         using var _q = TimeQuery("GetCpuByDatabaseAsync", "v_query_stats per database CPU (MCP)");
 
-        /* #7256: a window that starts after the newest archived row of query_stats reads the hot table alone. The view opens every Parquet file of it (one per day) however short the window is. */
-        return await ReadWindowSkippingEmptyArchiveAsync("query_stats", "collection_time", startUtc, ReadAsync, CancellationToken.None);
+        /* #7256: a table whose archive holds nothing at or after the window start is read as the hot table alone, each of the two on its own. A view opens every Parquet file of its archive (one per day) however short the window is. */
+        return await ReadWindowSkippingEmptyArchivesAsync(CpuByDatabaseTables, "collection_time", startUtc, ReadAsync, CancellationToken.None);
 
-        async Task<List<DatabaseCpuRow>> ReadAsync(string relation)
+        async Task<List<DatabaseCpuRow>> ReadAsync(Func<string, string> relationFor)
         {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
         command.CommandText = CpuByDatabaseSql;
-        command.CommandText = command.CommandText.Replace("v_query_stats", relation, StringComparison.Ordinal);
+        command.CommandText = SwapViews(command.CommandText, CpuByDatabaseTables, relationFor);
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startUtc });
         command.Parameters.Add(new DuckDBParameter { Value = endUtc });

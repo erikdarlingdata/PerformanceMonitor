@@ -15,6 +15,8 @@ namespace PerformanceMonitorLite.Services;
 
 public partial class LocalDataService
 {
+    private static readonly string[] WorkloadAndIoTables = ["query_stats", "file_io_stats"];
+
     /// <summary>
     /// Computes per-database resource usage from query_stats + file_io_stats deltas.
     /// </summary>
@@ -22,10 +24,10 @@ public partial class LocalDataService
     {
         var cutoff = DateTime.UtcNow.AddHours(-hoursBack);
 
-        /* #7256: a window that starts after the newest archived row of query_stats reads the hot table alone. The view opens every Parquet file of it (one per day) however short the window is. */
-        return await ReadWindowSkippingEmptyArchiveAsync("query_stats", "collection_time", cutoff, ReadAsync, CancellationToken.None);
+        /* #7256: a table whose archive holds nothing at or after the cutoff is read as the hot table alone, each of the two on its own. A view opens every Parquet file of its archive (one per day) however short the window is. */
+        return await ReadWindowSkippingEmptyArchivesAsync(WorkloadAndIoTables, "collection_time", cutoff, ReadAsync, CancellationToken.None);
 
-        async Task<List<DatabaseResourceUsageRow>> ReadAsync(string relation)
+        async Task<List<DatabaseResourceUsageRow>> ReadAsync(Func<string, string> relationFor)
         {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
@@ -94,7 +96,7 @@ FROM combined c
 CROSS JOIN totals t
 WHERE c.database_name IS NOT NULL
 ORDER BY c.cpu_time_ms DESC";
-        command.CommandText = command.CommandText.Replace("v_query_stats", relation, StringComparison.Ordinal);
+        command.CommandText = SwapViews(command.CommandText, WorkloadAndIoTables, relationFor);
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = cutoff });
@@ -211,10 +213,10 @@ ORDER BY max_connections DESC";
     {
         var cutoff = DateTime.UtcNow.AddHours(-hoursBack);
 
-        /* #7256: a window that starts after the newest archived row of query_stats reads the hot table alone. The view opens every Parquet file of it (one per day) however short the window is. */
-        return await ReadWindowSkippingEmptyArchiveAsync("query_stats", "collection_time", cutoff, ReadAsync, CancellationToken.None);
+        /* #7256: a table whose archive holds nothing at or after the cutoff is read as the hot table alone, each of the two on its own. A view opens every Parquet file of its archive (one per day) however short the window is. */
+        return await ReadWindowSkippingEmptyArchivesAsync(WorkloadAndIoTables, "collection_time", cutoff, ReadAsync, CancellationToken.None);
 
-        async Task<(List<TopResourceConsumerRow> ByTotal, List<TopResourceConsumerRow> ByAvg)> ReadAsync(string relation)
+        async Task<(List<TopResourceConsumerRow> ByTotal, List<TopResourceConsumerRow> ByAvg)> ReadAsync(Func<string, string> relationFor)
         {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
@@ -269,7 +271,7 @@ SELECT
 FROM combined c
 CROSS JOIN totals t
 ORDER BY c.database_name";
-        command.CommandText = command.CommandText.Replace("v_query_stats", relation, StringComparison.Ordinal);
+        command.CommandText = SwapViews(command.CommandText, WorkloadAndIoTables, relationFor);
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = cutoff });
