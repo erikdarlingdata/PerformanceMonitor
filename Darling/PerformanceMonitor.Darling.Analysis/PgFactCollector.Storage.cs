@@ -431,9 +431,9 @@ WITH latest AS (
     AND   collection_time <= $3
     AND   volume_total_mb > 0
 ),
-/* #7179: the free MB the card quotes is the scoring volume's (the lowest percent free), not the
-   volume with the fewest MB. Ties on percent break on the mount point. */
 tightest AS (
+    /* #7179: the free MB the card quotes is the scoring volume's (the lowest percent free), not the
+       volume with the fewest MB. Ties on percent break on the mount point. */
     SELECT volume_mount_point, volume_free_mb
     FROM latest WHERE rn = 1
     ORDER BY volume_free_mb * 1.0 / volume_total_mb, volume_mount_point
