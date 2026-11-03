@@ -319,12 +319,21 @@ public sealed class QueryStatsCollector : CollectorDefinitionBase<QueryStatsColl
     public const int MaxCandidateRows = 2000;
 
     /// <summary>
-    /// #7156: the most statements one run renders a plan for, in either capture mode: the inline apply hands the first
-    /// this many by recency a plan handle and the rest NULL, and the deferred fetch asks for at most this many misses, in
-    /// the rank <see cref="ReadAsync"/> returns. It is the old outer <c>TOP (200)</c>, which is what bounded the plan work
-    /// before the candidate set stopped being the bound.
+    /// #7156: the most statements one run renders a plan for, in either capture mode. It is the old outer
+    /// <c>TOP (200)</c>, which is what bounded the plan work before the candidate set stopped being the bound.
+    /// #7337: the slots are split, not spent on recency alone (which left a heavy statement that runs now and then with
+    /// no plan for good): <see cref="PlansByRecency"/> go to the newest statements by <c>last_execution_time</c>, so a
+    /// plan that just recompiled or regressed still gets one, and <see cref="PlansByWeight"/> go to the heaviest by
+    /// <c>total_elapsed_time</c>. The inline apply hands each a plan handle and the rest NULL; the deferred fetch picks
+    /// its misses the same way.
     /// </summary>
     public const int MaxPlansPerRun = 200;
+
+    /// <summary>#7337: the plan slots given to the newest statements by <c>last_execution_time</c>.</summary>
+    public const int PlansByRecency = MaxPlansPerRun / 2;
+
+    /// <summary>#7337: the plan slots given to the heaviest statements by <c>total_elapsed_time</c>.</summary>
+    public const int PlansByWeight = MaxPlansPerRun - PlansByRecency;
 
     /* #1959: rank on the CHEAP DMV columns inside the derived table FIRST, and run the text apply, the
        NOT LIKE self-filter, and the (Darling-only) plan-XML render against the survivors ONLY. The optimizer
@@ -337,8 +346,8 @@ public sealed class QueryStatsCollector : CollectorDefinitionBase<QueryStatsColl
        lifetime elapsed time. Ranking by lifetime weight kept a newly regressed or recompiled plan out of the
        store until it out-weighed a plan that had been cached for a week; recency keeps everything that ran in
        the window, and ReadAsync drops the rows whose counters did not move since the last run. The text apply
-       still runs only against the derived table's rows and the plan render only against the first
-       MaxPlansPerRun of them (PLAN_RANK). The same shape as ProcedureStatsCollector's #5449 candidate query. */
+       still runs only against the derived table's rows and the plan render only against the MaxPlansPerRun of
+       them that PLAN_RANK picks (#7337: half newest, half heaviest). The same shape as ProcedureStatsCollector's #5449 candidate query. */
     private static readonly string StandardQueryText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
@@ -397,10 +406,17 @@ ORDER BY
     qs.total_elapsed_time DESC
 OPTION(RECOMPILE);";
 
-    /* #7156: spliced into the derived table only when the main query renders plans inline. The row number is taken over
-       the same ordering as the derived table's TOP, so 1..MaxPlansPerRun are the newest statements. */
-    private const string PlanRankFragment = @",
-        plan_rank = ROW_NUMBER() OVER (ORDER BY qs.last_execution_time DESC, qs.total_elapsed_time DESC)";
+    /* #7156: spliced into the derived table only when the main query renders plans inline. plan_rank is taken over the
+       same ordering as the derived table's TOP, so 1..PlansByRecency are the newest statements: a plan that just
+       recompiled or regressed keeps its plan.
+       #7337: recency alone starved a heavy statement that runs now and then (a report): with more than 200 other
+       statements between its runs it was never in the newest 200, so every row stored for it had no plan. weight_rank
+       is the heaviest by total_elapsed_time, and the apply hands the handle to a row within either half. Both
+       numbers are taken over every row the WHERE keeps, before the TOP trims it to MaxCandidateRows, so when more
+       than MaxCandidateRows statements ran in the window, a heavy one the TOP dropped still holds a weight slot. */
+    private static readonly string PlanRankFragment = @",
+        plan_rank = ROW_NUMBER() OVER (ORDER BY qs.last_execution_time DESC, qs.total_elapsed_time DESC),
+        weight_rank = ROW_NUMBER() OVER (ORDER BY qs.total_elapsed_time DESC, qs.last_execution_time DESC)";
 
     /* Execution-plan capture — spliced into both variants only when the host sets CapturePlanXml
        (Darling); when off the placeholders erase to nothing, so Lite's SQL is byte-identical to the
@@ -426,14 +442,16 @@ OPTION(RECOMPILE);";
     query_plan_xml = CASE WHEN DATALENGTH(tqp.query_plan) > " + QueryPlanXmlCaptureLimits.MaxCapturedPlanXmlBytes + @" THEN NULL ELSE tqp.query_plan END,
     query_plan_xml_bytes = DATALENGTH(tqp.query_plan)";
 
-    /* #7156: the handle is NULL past the first MaxPlansPerRun rows by recency, and sys.dm_exec_text_query_plan returns no
-       row for a NULL handle (the way sp_WhoIsActive applies it to idle sessions). The row set is fixed by the derived
-       table, so the cap holds whatever order the optimizer runs the apply in. */
+    /* #7156: the handle is NULL for a row outside both halves, and sys.dm_exec_text_query_plan returns no row for a NULL
+       handle (the way sp_WhoIsActive applies it to idle sessions). The row set is fixed by the derived table, so the
+       cap holds whatever order the optimizer runs the apply in.
+       #7337: a row gets the handle when it is within the newest PlansByRecency (plan_rank) or the heaviest
+       PlansByWeight (weight_rank). A statement in both takes one slot, so a run can render fewer than MaxPlansPerRun. */
     private static readonly string PlanApplyFragment = @"
 OUTER APPLY
     sys.dm_exec_text_query_plan
     (
-        CASE WHEN qs.plan_rank <= " + MaxPlansPerRun + @" THEN qs.plan_handle END,
+        CASE WHEN qs.plan_rank <= " + PlansByRecency + @" OR qs.weight_rank <= " + PlansByWeight + @" THEN qs.plan_handle END,
         qs.statement_start_offset,
         qs.statement_end_offset
     ) AS tqp";
@@ -858,14 +876,14 @@ OPTION(RECOMPILE);";
             context.ServerId,
             new (string Family, long Current)[]
             {
-                ("query_stats_exec", row.ExecutionCount),
-                ("query_stats_worker", row.TotalWorkerTime),
-                ("query_stats_elapsed", row.TotalElapsedTime),
-                ("query_stats_reads", row.TotalLogicalReads),
-                ("query_stats_writes", row.TotalLogicalWrites),
-                ("query_stats_phys_reads", row.TotalPhysicalReads),
-                ("query_stats_rows", row.TotalRows),
-                ("query_stats_spills", row.TotalSpills),
+                (ExecGroup, row.ExecutionCount),
+                (WorkerGroup, row.TotalWorkerTime),
+                (ElapsedGroup, row.TotalElapsedTime),
+                (ReadsGroup, row.TotalLogicalReads),
+                (WritesGroup, row.TotalLogicalWrites),
+                (PhysReadsGroup, row.TotalPhysicalReads),
+                (RowsGroup, row.TotalRows),
+                (SpillsGroup, row.TotalSpills),
             },
             deltaKey,
             age,
