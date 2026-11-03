@@ -237,7 +237,6 @@ public partial class AddServerDialog : Window
         if (useProfile)
         {
             if (SqlCredentialsPanel is not null) SqlCredentialsPanel.Visibility = Visibility.Collapsed;
-            if (EntraMfaPanel is not null) EntraMfaPanel.Visibility = Visibility.Collapsed;
             if (ServicePrincipalPanel is not null) ServicePrincipalPanel.Visibility = Visibility.Collapsed;
             if (ManagedIdentityPanel is not null) ManagedIdentityPanel.Visibility = Visibility.Collapsed;
         }
@@ -249,14 +248,12 @@ public partial class AddServerDialog : Window
 
     private void AuthMode_Changed(object sender, RoutedEventArgs e)
     {
-        if (SqlCredentialsPanel is null || EntraMfaPanel is null ||
-            ServicePrincipalPanel is null || ManagedIdentityPanel is null)
+        if (SqlCredentialsPanel is null || ServicePrincipalPanel is null || ManagedIdentityPanel is null)
         {
             return;
         }
 
         SqlCredentialsPanel.Visibility = SqlAuthRadio.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
-        EntraMfaPanel.Visibility = EntraMfaAuthRadio.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
         ServicePrincipalPanel.Visibility = ServicePrincipalAuthRadio.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
         ManagedIdentityPanel.Visibility = ManagedIdentityAuthRadio.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
 
