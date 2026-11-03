@@ -377,56 +377,77 @@ FOR SHARE OF p";
         var serverAction = ServerActionForTool(proposal.Tool);
         var now = Now();
 
-        await using var connection = await AgentActionSource.OpenConnectionAsync(cancellationToken);
-        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
-        await ServerActionSwitchLock.AcquireSharedAsync(connection, transaction, proposal.ServerId, serverAction, _commandTimeoutSeconds, cancellationToken);
-        var request = await ReadAgentActionRequestAsync(connection, transaction, proposal.RequestId, cancellationToken);
-        var refusal = request is null
-            ? new AgentActionRefusal(ProposalPressCodes.NotFound, "This proposal's request is gone.")
-            : (await SharedActionConditionsAsync(connection, transaction, request,
-                serverAction, new AgentActionTarget(permit.Permit.ServerId, permit.Permit.ServerName, permit.Permit.Id, permit.Permit.Database),
-                hooks.LoadRoutes, hooks.ReadCredential, lockRow: true, cancellationToken)).Refusal;
-        if (refusal is not null)
+        /* Set just before the tool's write is called. Before that, nothing has been sent to the monitored server. */
+        var writeStarted = false;
+        try
         {
-            await JournalReturningAsync(connection, transaction, now, proposal.RequestId, proposal.ServerId, "action_failed", agent, refusal.Reason,
-                new JsonObject { ["called_id"] = permit.CalledId, ["error"] = refusal.Reason }.ToJsonString(), cancellationToken);
-            await FinishProposalAsync(connection, transaction, proposal.ProposalId, "refused", actor,
-                new JsonObject { ["code"] = refusal.Reason, ["message"] = refusal.Message }, cancellationToken);
+            await using var connection = await AgentActionSource.OpenConnectionAsync(cancellationToken);
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+            await ServerActionSwitchLock.AcquireSharedAsync(connection, transaction, proposal.ServerId, serverAction, _commandTimeoutSeconds, cancellationToken);
+            var request = await ReadAgentActionRequestAsync(connection, transaction, proposal.RequestId, cancellationToken);
+            var refusal = request is null
+                ? new AgentActionRefusal(ProposalPressCodes.NotFound, "This proposal's request is gone.")
+                : (await SharedActionConditionsAsync(connection, transaction, request,
+                    serverAction, new AgentActionTarget(permit.Permit.ServerId, permit.Permit.ServerName, permit.Permit.Id, permit.Permit.Database),
+                    hooks.LoadRoutes, hooks.ReadCredential, lockRow: true, cancellationToken)).Refusal;
+            if (refusal is not null)
+            {
+                await JournalReturningAsync(connection, transaction, now, proposal.RequestId, proposal.ServerId, "action_failed", agent, refusal.Reason,
+                    new JsonObject { ["called_id"] = permit.CalledId, ["error"] = refusal.Reason }.ToJsonString(), cancellationToken);
+                await FinishProposalAsync(connection, transaction, proposal.ProposalId, "refused", actor,
+                    new JsonObject { ["code"] = refusal.Reason, ["message"] = refusal.Message }, cancellationToken);
+                await transaction.CommitAsync(cancellationToken);
+                return new ApprovedRunResult("refused", refusal.Message, refusal.Reason, permit.CalledId, null);
+            }
+
+            ApprovedWriteOutcome outcome;
+            using (var remoteWork = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+            {
+                remoteWork.CancelAfter(RemoteWorkDeadline);
+                try
+                {
+                    writeStarted = true;
+                    outcome = await write(remoteWork.Token);
+                }
+                catch (OperationCanceledException) when (remoteWork.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+                {
+                    outcome = new ApprovedWriteOutcome("unknown", $"The monitored server did not finish within {AgentActionRemoteWorkSeconds} seconds. "
+                        + "Whether the change was made is unknown: check the server before trying again.");
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    outcome = new ApprovedWriteOutcome("failed", ex.Message);
+                }
+            }
+
+            /* A lost reply leaves action_called with no result row, which reads "result unknown", as the agent's write does. */
+            var writeNow = Now();
+            if (outcome.State == "run")
+                await JournalReturningAsync(connection, transaction, writeNow, proposal.RequestId, proposal.ServerId, "action_done", agent, null,
+                    new JsonObject { ["called_id"] = permit.CalledId, ["after"] = outcome.AfterJson is null ? null : JsonNode.Parse(outcome.AfterJson) }.ToJsonString(),
+                    cancellationToken);
+            else if (outcome.State == "failed")
+                await JournalReturningAsync(connection, transaction, writeNow, proposal.RequestId, proposal.ServerId, "action_failed", agent, "error",
+                    new JsonObject { ["called_id"] = permit.CalledId, ["error"] = outcome.Message }.ToJsonString(), cancellationToken);
+            await FinishProposalAsync(connection, transaction, proposal.ProposalId, outcome.State, actor,
+                new JsonObject { ["message"] = outcome.Message, ["called_id"] = permit.CalledId }, cancellationToken);
             await transaction.CommitAsync(cancellationToken);
-            return new ApprovedRunResult("refused", refusal.Message, refusal.Reason, permit.CalledId, null);
+            return new ApprovedRunResult(outcome.State, outcome.Message, null, permit.CalledId, outcome.AfterJson);
         }
-
-        ApprovedWriteOutcome outcome;
-        using (var remoteWork = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+        catch (Exception ex) when (ex is not OperationCanceledException && !writeStarted)
         {
-            remoteWork.CancelAfter(RemoteWorkDeadline);
-            try
-            {
-                outcome = await write(remoteWork.Token);
-            }
-            catch (OperationCanceledException) when (remoteWork.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
-            {
-                outcome = new ApprovedWriteOutcome("unknown", $"The monitored server did not finish within {AgentActionRemoteWorkSeconds} seconds. "
-                    + "Whether the change was made is unknown: check the server before trying again.");
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                outcome = new ApprovedWriteOutcome("failed", ex.Message);
-            }
+            /* The store failed between the approval and the write (a dropped connection, a timeout on the switch lock, a credential read that
+               threw), so no batch was sent and the change never happened: journal the failure on a fresh connection instead of leaving
+               action_called with no result, which reads "result unknown" and would turn the proposal unknown after the sweep (#7206). A
+               failure after the write started stays unknown. A failure to write these rows leaves the old state, as the agent's path does. */
+            await using var failedConnection = await AgentActionSource.OpenConnectionAsync(CancellationToken.None);
+            await using var failedTransaction = await failedConnection.BeginTransactionAsync(CancellationToken.None);
+            await JournalReturningAsync(failedConnection, failedTransaction, Now(), proposal.RequestId, proposal.ServerId, "action_failed", agent, "error",
+                new JsonObject { ["called_id"] = permit.CalledId, ["error"] = ex.Message }.ToJsonString(), CancellationToken.None);
+            await FinishProposalAsync(failedConnection, failedTransaction, proposal.ProposalId, "failed", actor,
+                new JsonObject { ["message"] = ex.Message, ["called_id"] = permit.CalledId }, CancellationToken.None);
+            await failedTransaction.CommitAsync(CancellationToken.None);
+            throw;
         }
-
-        /* A lost reply leaves action_called with no result row, which reads "result unknown", as the agent's write does. */
-        var writeNow = Now();
-        if (outcome.State == "run")
-            await JournalReturningAsync(connection, transaction, writeNow, proposal.RequestId, proposal.ServerId, "action_done", agent, null,
-                new JsonObject { ["called_id"] = permit.CalledId, ["after"] = outcome.AfterJson is null ? null : JsonNode.Parse(outcome.AfterJson) }.ToJsonString(),
-                cancellationToken);
-        else if (outcome.State == "failed")
-            await JournalReturningAsync(connection, transaction, writeNow, proposal.RequestId, proposal.ServerId, "action_failed", agent, "error",
-                new JsonObject { ["called_id"] = permit.CalledId, ["error"] = outcome.Message }.ToJsonString(), cancellationToken);
-        await FinishProposalAsync(connection, transaction, proposal.ProposalId, outcome.State, actor,
-            new JsonObject { ["message"] = outcome.Message, ["called_id"] = permit.CalledId }, cancellationToken);
-        await transaction.CommitAsync(cancellationToken);
-        return new ApprovedRunResult(outcome.State, outcome.Message, null, permit.CalledId, outcome.AfterJson);
     }
 }
