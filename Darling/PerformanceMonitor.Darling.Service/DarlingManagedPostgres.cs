@@ -3190,8 +3190,11 @@ public sealed class DarlingManagedPostgres
                 "folder it points to as it is).");
         }
 
+        /* #7363: a store folder that is a drive root (a data directory at D:\pg) is never locked. The lock protects the
+           folder's ACL and writes entries that every file and folder below it inherits, and on a drive root that is
+           every file and folder on the drive. */
         var viaLink = !string.Equals(storeFolder, storeLink, StringComparison.Ordinal);
-        var storeFolderLocked = TryHardenDirectory(storeFolder, viaLink);
+        var storeFolderLocked = LockStoreFolder(storeFolder, viaLink, _dataDirectory, _logger, TryHardenDirectory);
 
         /* The data directory, pg.log, server.key and the log folder are the names the service writes into and opens
            again on every start: refuse ones another user made first, before initdb or the server touches them. */
@@ -3239,7 +3242,7 @@ public sealed class DarlingManagedPostgres
                 throw new InvalidOperationException(DarlingStoreUpgrade.DescribeDisplacedStore(_dataDirectory, displaced));
             }
 
-            RefuseInitdbOnUnlockedStoreFolder(storeFolder, storeFolderLocked);
+            RefuseInitdbOnUnlockedStoreFolder(storeFolder, storeFolderLocked, _dataDirectory);
             await InitializeClusterAsync(binDirectory, cancellationToken);
 
             /* Read here too, so this first start records the new store's TimescaleDB state under this runtime and
@@ -3959,6 +3962,7 @@ public sealed class DarlingManagedPostgres
     /// nothing is touched. When the move throws, the exception propagates and the marker stays, so the start
     /// fails with the reason and nothing is lost. Does nothing when there is no marker.
     /// </summary>
+    [SupportedOSPlatform("windows")]
     internal static void DiscardInterruptedInitdb(string dataDirectory, ILogger logger)
     {
         var marker = InitdbIncompleteMarkerPath(dataDirectory);
@@ -4022,7 +4026,12 @@ public sealed class DarlingManagedPostgres
                 if (File.Exists(credential))
                 {
                     credentialCopy = aside + InterruptedInitdbCredentialSuffix;
-                    File.Copy(credential, credentialCopy, overwrite: false);
+                    /* Written through the hardened create (#7363): File.Copy gives the copy the access of the folder it
+                       lands in, which under a drive root the service does not lock is the drive's, and this is the superuser
+                       credential. The create refuses an existing file, like the copy it replaces (overwrite: false). */
+                    var credentialBytes = File.ReadAllBytes(credential);
+                    using var copy = DarlingFileSecurity.CreateHardenedFile(credentialCopy, allowInteractiveRead: false);
+                    copy.Write(credentialBytes);
                 }
 
                 logger.LogWarning(
@@ -5561,6 +5570,11 @@ public sealed class DarlingManagedPostgres
     [SupportedOSPlatform("windows")]
     internal static string? StoreFolderProblem(string storeFolder, bool lockedDown)
     {
+        if (IsDriveRoot(storeFolder))
+        {
+            return "it is a drive root, whose permissions are the whole drive's and are never changed by the service";
+        }
+
         if (IsLink(storeFolder))
         {
             return "it is a link (a junction or symbolic link) to another folder";
@@ -5629,7 +5643,7 @@ public sealed class DarlingManagedPostgres
             }
 
             var full = Path.GetFullPath(next.FullName);
-            if (string.Equals(Path.GetPathRoot(full), full, StringComparison.OrdinalIgnoreCase))
+            if (IsDriveRoot(full))
             {
                 return $"{link} is a junction or symbolic link to a drive root, {full}";
             }
@@ -5717,11 +5731,21 @@ public sealed class DarlingManagedPostgres
     /// <summary>The fresh-cluster gate on <see cref="StoreFolderProblem"/>: a startup error that names the folder and
     /// the fix. The worker logs it critical and exits, like every other failure of the managed start.</summary>
     [SupportedOSPlatform("windows")]
-    private void RefuseInitdbOnUnlockedStoreFolder(string storeFolder, bool lockedDown)
+    internal static void RefuseInitdbOnUnlockedStoreFolder(string storeFolder, bool lockedDown, string dataDirectory)
     {
         if (StoreFolderProblem(storeFolder, lockedDown) is not { } reason)
         {
             return;
+        }
+
+        if (IsDriveRoot(storeFolder))
+        {
+            /* takeown and icacls on a drive root would change the whole drive, so the usual fix below is the wrong one. */
+            throw new InvalidOperationException(
+                $"Refusing to initialize a new store at {dataDirectory}: its store folder, {storeFolder}, is a drive root. " +
+                "The service locks the folder that holds the data directory and its credential files, and on a drive root " +
+                "that would change the permissions of every file and folder on the drive, so it never does. " +
+                DriveRootMoveText(storeFolder, dataDirectory));
         }
 
         if (IsLink(storeFolder))
@@ -5887,7 +5911,7 @@ public sealed class DarlingManagedPostgres
     /// four "anyone on this box" groups, or, for a directory, writable by an account beyond the trusted ones. Null
     /// when it is not.</summary>
     [SupportedOSPlatform("windows")]
-    private static string? StoreItemExposure(string path, bool isDirectory)
+    internal static string? StoreItemExposure(string path, bool isDirectory)
     {
         if (DarlingFileSecurity.IsReadableByOrdinaryUsers(path))
         {
@@ -5905,7 +5929,7 @@ public sealed class DarlingManagedPostgres
     /// <summary>The protected ACL on one store item, through a handle opened without following links, the way
     /// <c>--harden-files</c> applies it. Null on success, otherwise why not.</summary>
     [SupportedOSPlatform("windows")]
-    private static string? TightenStoreItem(string path, bool isDirectory, string anchor)
+    internal static string? TightenStoreItem(string path, bool isDirectory, string anchor)
     {
         try
         {
@@ -5999,6 +6023,63 @@ public sealed class DarlingManagedPostgres
         }
 
         return parent;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="folder"/> is the root of a volume: <c>D:\</c>, a UNC share root (<c>\\server\share</c>, which
+    /// <see cref="Path.GetPathRoot(string)"/> returns without the trailing separator the full path has) or a volume
+    /// path (<c>\\?\Volume{...}\</c>, which is what a folder that mounts a volume resolves to). A folder that mounts a
+    /// volume, such as <c>C:\mnt\data</c>, has the root of the drive it sits on as its <c>GetPathRoot</c>, so it is judged
+    /// by its link: <see cref="ResolveStoreFolder"/> refuses a link whose target is a volume root. Pure string work: it
+    /// reads nothing from the disk.
+    /// </summary>
+    internal static bool IsDriveRoot(string folder)
+    {
+        var full = Path.GetFullPath(folder);
+        var root = Path.GetPathRoot(full);
+        return !string.IsNullOrEmpty(root)
+            && string.Equals(root.TrimEnd('\\', '/'), full.TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>What to do about a store whose folder is a drive root, in the words <c>upgrade-darling.ps1</c> uses: move the
+    /// data directory and the files beside it into a folder of its own and point <c>postgres.dataDirectory</c> at it.</summary>
+    internal static string DriveRootMoveText(string storeFolder, string dataDirectory) =>
+        "To use this layout, stop the service, move the data directory and the files beside it (pg.log, server.key, " +
+        "server.crt, the logs folder and the pg-*.dpapi credential files) into a folder of its own such as " +
+        $"{Path.Join(storeFolder, "Darling")} (the data directory becomes " +
+        $"{Path.Join(storeFolder, "Darling", Path.GetFileName(Path.TrimEndingDirectorySeparator(dataDirectory)))}), " +
+        "set postgres.dataDirectory in darling.json to the moved data directory, and start the service again.";
+
+    /// <summary>
+    /// Locks the store folder, except a drive root (#7363). The lock protects the folder's ACL, drops what it inherited and
+    /// writes entries that every file and folder below it inherits, so on a drive root it would rewrite the access of the
+    /// whole drive, again on every start. A drive root is left as it is and is not called locked. For a store that already
+    /// exists the start goes on and logs an error that says so, because the data directory, pg.log, server.key and each
+    /// credential file beside it are still checked and restricted one by one at every start, and the new cluster of a
+    /// major upgrade is restricted as soon as initdb has made it (<c>DarlingStoreUpgrade.InitializeNewClusterAsync</c>).
+    /// A new store under a drive root is refused before initdb by <see cref="RefuseInitdbOnUnlockedStoreFolder"/>.
+    /// </summary>
+    /// <param name="harden">Locks one folder (<see cref="TryHardenDirectory"/> in production); never called for a drive root.</param>
+    /// <returns>Whether the folder was locked.</returns>
+    internal static bool LockStoreFolder(string storeFolder, bool viaLink, string dataDirectory, ILogger logger, Func<string, bool, bool> harden)
+    {
+        if (!IsDriveRoot(storeFolder))
+        {
+            return harden(storeFolder, viaLink);
+        }
+
+        if (File.Exists(Path.Combine(dataDirectory, "PG_VERSION")))
+        {
+            logger.LogError(
+                "The store folder {StoreFolder} is a drive root, so the service did not lock it: that would change the " +
+                "permissions of every file and folder on the drive. The store keeps running. The data directory {DataDirectory}, " +
+                "pg.log, server.key and the credential files beside it are checked and restricted at every start, and the new " +
+                "cluster of a major upgrade is restricted as soon as initdb has made it, but the drive root itself keeps the " +
+                "access it has. {Move}",
+                storeFolder, dataDirectory, DriveRootMoveText(storeFolder, dataDirectory));
+        }
+
+        return false;
     }
 
     /* ================= Opt-in network exposure (darling-network-endpoints) ================= */
