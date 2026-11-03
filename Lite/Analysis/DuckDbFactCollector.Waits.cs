@@ -49,6 +49,7 @@ public partial class DuckDbFactCollector
             return;
         }
 
+        var plan = await _duckDb.PlanArchiveReadAsync("wait_stats", "collection_time", context.TimeRangeStart.AddSeconds(-CollectorDeltaCalculator.DefaultMaxGapSeconds), context.CancellationToken);
         using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
         using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync(context.CancellationToken);
@@ -85,6 +86,7 @@ SELECT
 FROM intervals
 WHERE collection_time >= $2";
 
+        command.CommandText = plan.Apply(command.CommandText);
         command.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
         command.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
         command.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
@@ -166,6 +168,7 @@ WHERE collection_time >= $2";
     {
         if (context.ObservedDurationMs <= 0) return;
 
+        var plan = await _duckDb.PlanArchiveReadAsync("wait_stats", "collection_time", context.TimeRangeStart, context.CancellationToken);
         using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
         using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync(context.CancellationToken);
@@ -187,6 +190,7 @@ AND   delta_wait_time_ms > 0
 GROUP BY rtrim(wait_type)
 ORDER BY SUM(delta_wait_time_ms) DESC";
 
+        command.CommandText = plan.Apply(command.CommandText);
         command.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
         command.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
         command.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
