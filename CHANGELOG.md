@@ -40,6 +40,7 @@ Releases before 3.0.0 are not archived: those entries carry no prose to move.
 
 ### Changed
 
+- **The Darling install guide says where PowerShell is used** ([#7272]) - A new section lists what uses it and what does not. It also gives install, upgrade and uninstall steps that use only `sc.exe`, `icacls`, `net localgroup` and `netsh`.
 - **Write-latency anomalies and the write latency fact now read log files and tempdb data files only** ([#6959]) - user data-file writes are checkpoint and lazy-writer work no session waits on, so databases with several data files no longer trip the gate. The write latency card now says its figure covers log files and tempdb, and a separate sentence gives the user data files' own write latency.
 - **The alert pass no longer reads old chunks to find a server's newest CPU and tempdb sample** ([#6968]) - each read now starts at the newest time the last read returned. Before, each 30-second pass read every chunk between a server's newest sample and now. For a server with an old sample, or no sample, that was many chunks. The change watch's database-scoped configuration check now reads only the databases captured since its last check.
 - **Six more alert-pass reads start from the newest row they last found** ([#7017]) - they use the same start point as the CPU and tempdb reads. These are the PVS pressure, SQL Agent status, volume free space and database state reads, and the two Availability Group state reads. The four database state upkeep statements use the same start point. On a production store, these reads used about 300 seconds of store time a day. The results do not change.
@@ -6366,3 +6367,4 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#7138]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7138
 [#7139]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7139
 [#7253]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7253
+[#7272]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7272
