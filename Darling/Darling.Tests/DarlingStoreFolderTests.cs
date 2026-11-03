@@ -1185,9 +1185,12 @@ public sealed class DarlingStoreFolderScriptTests
         Assert.Contains("rootState=DriveRoot", answers);
         var reason = Assert.Single(answers, line => line.StartsWith("rootReason=", StringComparison.Ordinal));
         Assert.Contains("is a drive root", reason, StringComparison.Ordinal);
-        Assert.Contains("changes the permissions of the whole drive (#7363)", reason, StringComparison.Ordinal);
+        Assert.Contains("changes nothing on it", reason, StringComparison.Ordinal);
+        Assert.Contains("The service does not lock it either: it leaves the permissions of the drive root alone, logs an error at every start, and the store keeps running", reason, StringComparison.Ordinal);
+        Assert.DoesNotContain("still locks", reason, StringComparison.Ordinal);
         Assert.Contains("-Check", reason, StringComparison.Ordinal);
-        Assert.Contains("point postgres.dataDirectory in darling.json at the moved data directory", reason, StringComparison.Ordinal);
+        Assert.Contains("set postgres.dataDirectory in darling.json to the moved data directory", reason, StringComparison.Ordinal);
+        Assert.Contains(Path.Combine(Path.GetPathRoot(Path.GetTempPath())!, "Darling", "pg"), reason, StringComparison.Ordinal);
         Assert.DoesNotContain("icacls ", reason, StringComparison.Ordinal);
         Assert.Contains("rootByHand=False", answers);
         Assert.Contains("rootFindings=0", answers);
@@ -1197,7 +1200,9 @@ public sealed class DarlingStoreFolderScriptTests
 
         Assert.Contains("after=no-fail", answers);
         Assert.Contains(Between(answers, "after-start", "after-end"), line => line.StartsWith("WARNING: ", StringComparison.Ordinal) && line.Contains("is a drive root", StringComparison.Ordinal));
-        Assert.Contains(Between(answers, "after-start", "after-end"), line => line.Contains("(#7363)", StringComparison.Ordinal) && !line.Contains("-Check", StringComparison.Ordinal));
+        Assert.Contains(Between(answers, "after-start", "after-end"), line => line.Contains("The service does not lock it either: it leaves the permissions of the drive root alone, logs an error at every start, and the store keeps running", StringComparison.Ordinal)
+            && line.Contains("set postgres.dataDirectory in darling.json to the moved data directory", StringComparison.Ordinal)
+            && !line.Contains("still locks", StringComparison.Ordinal) && !line.Contains("-Check", StringComparison.Ordinal));
         Assert.DoesNotContain("initialize-was-called", answers);
         Assert.DoesNotContain("adoption-was-called", answers);
         Assert.Contains("rootAclUntouched=True", answers);
