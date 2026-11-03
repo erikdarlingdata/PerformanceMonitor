@@ -30,7 +30,9 @@ namespace PerformanceMonitorLite.Database;
 /// (<see cref="LocalDataService.DefaultWriteLockBudget"/>) for its whole transaction. That lock is process-wide and
 /// covers what the three PostgreSQL locks covered: no two writers of this store interleave, and every max + 1 id is
 /// assigned under it. The lock is NoRecursion, so no method calls another store method while it holds the lock. A read
-/// takes no lock: it assigns no id, and DuckDB gives each connection a consistent snapshot.</para>
+/// takes the read lock before it opens its connection (#7217): it assigns no id and DuckDB gives each connection a
+/// consistent snapshot, but the archive reset takes the write lock to delete and re-create the database, and only a read
+/// that holds the read lock is waited for. An unlocked read would keep its connection open across that reset.</para>
 ///
 /// <para><b>Times.</b> Every time is bound from the injected clock, truncated to the microsecond DuckDB keeps, and read
 /// back with <see cref="DateTimeKind.Utc"/>. DuckDB's <c>current_timestamp</c> is never used: it is local-zone.</para>
@@ -778,6 +780,7 @@ SELECT request_id FROM investigation_requests WHERE state NOT IN ('open', 'claim
     /// <inheritdoc />
     public async Task<string?> ClaimHolderAsync(Guid requestId, Guid claimId, CancellationToken cancellationToken = default)
     {
+        using var readLock = _db.AcquireReadLock(cancellationToken);
         using var connection = await OpenAsync(cancellationToken);
         using var command = Command(connection, ClaimHolderSql, requestId, claimId);
         return await command.ExecuteScalarAsync(cancellationToken) as string;
@@ -787,6 +790,7 @@ SELECT request_id FROM investigation_requests WHERE state NOT IN ('open', 'claim
     public async Task<IReadOnlyDictionary<int, (int LastHour, int LastDay)>> RouteUseAsync(CancellationToken cancellationToken = default)
     {
         var use = new Dictionary<int, (int LastHour, int LastDay)>();
+        using var readLock = _db.AcquireReadLock(cancellationToken);
         using var connection = await OpenAsync(cancellationToken);
         using var command = Command(connection, RouteUseSql, Now());
         using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -851,6 +855,7 @@ SELECT request_id FROM investigation_requests WHERE state NOT IN ('open', 'claim
     /// <inheritdoc />
     public async Task<bool> RequestExistsAsync(Guid requestId, CancellationToken cancellationToken = default)
     {
+        using var readLock = _db.AcquireReadLock(cancellationToken);
         using var connection = await OpenAsync(cancellationToken);
         using var command = Command(connection, RequestExistsSql, requestId);
         return await command.ExecuteScalarAsync(cancellationToken) is not null;
@@ -860,6 +865,7 @@ SELECT request_id FROM investigation_requests WHERE state NOT IN ('open', 'claim
     public async Task<(InvestigationRequestRow Row, string? Brief)?> ReadRequestAsync(Guid requestId,
         CancellationToken cancellationToken = default)
     {
+        using var readLock = _db.AcquireReadLock(cancellationToken);
         using var connection = await OpenAsync(cancellationToken);
         using var command = Command(connection, ReportsRequestsSql, Now(), requestId, null, DateTime.MinValue, 1);
         using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -877,6 +883,7 @@ SELECT request_id FROM investigation_requests WHERE state NOT IN ('open', 'claim
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(limit, 1);
         ArgumentOutOfRangeException.ThrowIfLessThan(journalLimit, 1);
+        using var readLock = _db.AcquireReadLock(cancellationToken);
         using var connection = await OpenAsync(cancellationToken);
         var requests = new List<InvestigationRequestRow>();
         var names = NamesNow();
@@ -967,6 +974,7 @@ SELECT request_id FROM investigation_requests WHERE state NOT IN ('open', 'claim
         string? state, int? serverId, string? family, int limit, CancellationToken cancellationToken = default)
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(limit, 1);
+        using var readLock = _db.AcquireReadLock(cancellationToken);
         using var connection = await OpenAsync(cancellationToken);
         using var command = Command(connection, ListSql, Now(), state, serverId, family, limit);
         using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -985,6 +993,7 @@ SELECT request_id FROM investigation_requests WHERE state NOT IN ('open', 'claim
         DateTime sinceUtc, IReadOnlyCollection<int>? routeIds, int limit, CancellationToken cancellationToken = default)
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(limit, 1);
+        using var readLock = _db.AcquireReadLock(cancellationToken);
         using var connection = await OpenAsync(cancellationToken);
         using var command = Command(connection, OpenedSinceSql,
             Micro(sinceUtc), routeIds is { Count: > 0 } ? routeIds.ToList() : null, limit);
@@ -1182,6 +1191,7 @@ ON CONFLICT (once_key) DO NOTHING";
     /// <inheritdoc />
     public async Task<IReadOnlyList<PendingInvestigationNote>> ListPendingNotesAsync(int limit = 200, CancellationToken cancellationToken = default)
     {
+        using var readLock = _db.AcquireReadLock(cancellationToken);
         using var connection = await OpenAsync(cancellationToken);
         using var command = Command(connection, PendingNotesSql, Math.Clamp(limit, 1, 1000), Now());
         var rows = new List<PendingInvestigationNote>();

@@ -101,6 +101,7 @@ WHERE request_id = $1 AND section = $2 AND state = 'pending'";
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(sectionsByKey);
+        using var readLock = _db.AcquireReadLock(cancellationToken);
         using var connection = await OpenAsync(cancellationToken);
         var raw = new List<(Guid Id, int Server, string Name, string Family, string First, DateTime FirstAt, DateTime Opened, string State, string? Ev)>();
         using (var command = Command(connection, EvidenceCandidatesSql, openedSinceUtc))
@@ -172,6 +173,7 @@ WHERE request_id = $1 AND section = $2 AND state = 'pending'";
     /// <summary>The evidence sections of a request, in the order they were first written.</summary>
     public async Task<IReadOnlyList<LiteEvidenceRow>> ReadEvidenceAsync(Guid requestId, CancellationToken cancellationToken = default)
     {
+        using var readLock = _db.AcquireReadLock(cancellationToken);
         using var connection = await OpenAsync(cancellationToken);
         return await ReadEvidenceRowsAsync(connection, requestId, cancellationToken);
     }
