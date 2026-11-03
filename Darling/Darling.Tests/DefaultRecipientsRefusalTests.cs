@@ -30,7 +30,7 @@ public sealed class DefaultRecipientsRefusalTests
     [InlineData("dba.corp.com")]
     [InlineData("a@x.com, dba.corp.com")]
     [InlineData("Ops Team <ops@example.com>")]
-    public void AnEntryTheSendCannotParse_IsRefused_AndIsTheOneThatBreaksTheSend(string recipients)
+    public void AListTheSendCannotParseOrWouldSendOnlyInPart_IsRefused(string recipients)
     {
         var refusal = EmailSendCore.RecipientsRefusal(recipients);
 
@@ -39,7 +39,7 @@ public sealed class DefaultRecipientsRefusalTests
     }
 
     [Fact]
-    public void ASemicolonWithASpace_IsRefused_BecauseTheSendKeepsOnlyTheSecondAddress()
+    public void ASemicolonWithASpace_ParsesAsOneRecipient_TheSecondAddress()
     {
         using var message = new MailMessage();
         message.To.Add("a@x.com; b@x.com");
