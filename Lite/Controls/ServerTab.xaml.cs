@@ -144,7 +144,8 @@ public partial class ServerTab : UserControl
     private DataGridFilterManager<ServerConfigChangeRow>? _serverConfigChangesFilterMgr;
     private DataGridFilterManager<DatabaseConfigChangeRow>? _databaseConfigChangesFilterMgr;
     private DataGridFilterManager<TraceFlagChangeRow>? _traceFlagChangesFilterMgr;
-    private CancellationTokenSource? _actualPlanCts;
+    /* #7181: owns the Get Actual Plan token so closing the tab stops a re-run that has no command timeout. */
+    private readonly ActualPlanRunScope _actualPlanRun = new();
     private bool _actualPlanRequestOpen;
 
     /// <summary>
@@ -689,6 +690,9 @@ public partial class ServerTab : UserControl
     public void StopRefresh()
     {
         _refreshTimer.Stop();
+        /* #7181: a Get Actual Plan re-run runs with no command timeout; closing the tab (or removing the
+           server) is the last chance to stop it on the monitored server. */
+        _actualPlanRun.CancelForClose();
     }
 
     public void DisposeChartHelpers()
