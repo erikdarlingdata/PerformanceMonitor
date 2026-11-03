@@ -326,6 +326,50 @@ VALUES (@ct, 1, 'dbskew', @q, @q, 'Regular', @ct - interval '10 minutes', @ct, '
         });
     }
 
+    /// <summary>
+    /// #7169: a day built before V240 has NULL <c>*_wsum</c> columns beside a non-NULL <c>execution_count_sum</c>. Read as a
+    /// built day it adds its executions to the divisor and nothing to the numerator, so the average comes out low. The reader
+    /// must treat that day as not built and read it from the wide table. Query 900 on a 72 h window (whole days 12 and 13):
+    /// day 12 is built with weighted sums (2,000 runs at 2 ms and 2,000 at 8 ms, 4,000 runs, 20 s), day 13 is built and then
+    /// has every weighted sum cleared (5,000 runs at 4 ms and 5,000 at 6 ms, 10,000 runs, 50 s) with its raw rows still in
+    /// the wide table. Exact answer: 70 s over 14,000 runs = 5 ms. Day 13 read from the built table would give
+    /// 20 s over 14,000 runs = about 1.43 ms.
+    /// </summary>
+    [Fact]
+    public async Task ABuiltDayWithNullWeightedSums_IsReadFromTheWideTable_SoTheAverageIsExactAcrossOldAndNewDays()
+    {
+        await RunLiveAsync(async (connection, source, ct) =>
+        {
+            var newDay = new DateOnly(2026, 1, 12);
+            var oldDay = new DateOnly(2026, 1, 13);
+            var d12 = newDay.ToDateTime(TimeOnly.MinValue);
+            var d13 = oldDay.ToDateTime(TimeOnly.MinValue);
+            await InsertSkewRowAsync(connection, d12.AddHours(3), 900, 2_000, 2_000, ct);
+            await InsertSkewRowAsync(connection, d12.AddHours(4), 900, 2_000, 8_000, ct);
+            await InsertSkewRowAsync(connection, d13.AddHours(3), 900, 5_000, 4_000, ct);
+            await InsertSkewRowAsync(connection, d13.AddHours(4), 900, 5_000, 6_000, ct);
+            await QueryStoreTopDaily.BuildDayAsync(connection, ServerId, newDay, 2, BuildNow, ct);
+            await QueryStoreTopDaily.BuildDayAsync(connection, ServerId, oldDay, 2, BuildNow, ct);
+
+            /* What a pre-V240 builder wrote: the summary rows and the built row are there, the weighted sums are not. */
+            await ExecAsync(connection, @"
+UPDATE collect.query_store_top_daily
+SET avg_duration_us_wsum = NULL, avg_cpu_time_us_wsum = NULL, avg_logical_io_reads_wsum = NULL,
+    avg_logical_io_writes_wsum = NULL, avg_physical_io_reads_wsum = NULL, avg_rowcount_wsum = NULL
+WHERE server_id = 1 AND day = DATE '2026-01-13'", ct);
+
+            var read = await RouteAsync(source, End.AddHours(-72), End, "dbskew", null, null, ct);
+
+            /* Only day 12 counts as built, so day 13 is not in the summary span. */
+            Assert.Equal(1, read.DailyDaysUsed);
+            Assert.Equal((newDay, oldDay), read.DailySpan);
+            var row = Assert.Single(read.Rows);
+            Assert.Equal(900, row.QueryId);
+            Assert.Equal(14_000, row.TotalExecutions);
+            Assert.Equal(5.0, row.AvgDurationMs);
+        });
+    }
+
     [Fact]
     public async Task AFaultReadingTheBuiltDays_AfterTheGateChoseTheTable_NotesFallbackRaw_AndAnswersFromRaw()
     {
