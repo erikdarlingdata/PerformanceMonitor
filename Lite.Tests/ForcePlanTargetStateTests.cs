@@ -647,8 +647,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
             new(Db, 123, 99, ReplicaRole: "Secondary"),
         };
 
-        var service = new LocalDataService(_duckDb);
-        var states = await service.GetForcePlanTargetStatesAsync(ServerId, targets);
+        var states = await ReadStatesAsync(targets);
 
         Assert.Equal(4, states.Count);
 
@@ -697,6 +696,17 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         Assert.Null(projected[2].StateNote);
     }
 
+    /* The product read: the analysis service's own handle, which the MCP analysis tools use (the force-plan state has no
+       LocalDataService entry point). A failed read comes back as a reason, so an unavailable state fails the test. */
+    private async Task<IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>> ReadStatesAsync(IReadOnlyList<ForcePlanTarget> targets)
+    {
+        var finding = new AnalysisFinding { Remediation = new RemediationAction("PLAN_REGRESSION", "force", targets) };
+        var (states, reason) = await new PerformanceMonitorLite.Analysis.AnalysisService(_duckDb)
+            .TryGetForcePlanTargetStatesAsync(ServerId, [finding]);
+        Assert.Null(reason);
+        return states!;
+    }
+
     [Fact]
     public async Task Reader_CarriesTheRegressedPlanId_AndItReachesTheGuidance()
     {
@@ -708,8 +718,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
 
         var worse = new ForcePlanTarget(Db, 123, 7);
         var noRecommendation = new ForcePlanTarget(Db, 124, 7);
-        var service = new LocalDataService(_duckDb);
-        var states = await service.GetForcePlanTargetStatesAsync(ServerId, new[] { worse, noRecommendation });
+        var states = await ReadStatesAsync(new[] { worse, noRecommendation });
 
         var state = states[ForcePlanTargetKey.Of(worse)];
         Assert.Equal("Active", state.ApcState);
@@ -732,8 +741,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         await SeedPlanCorrectionAsync(now.AddMinutes(-10), "Other", "OFF", null, null, null, null, null, null, null);
         await SeedPlanCorrectionAsync(now.AddHours(-30), "Old", "ON", null, null, null, null, null, null, null);
 
-        var service = new LocalDataService(_duckDb);
-        var states = await service.GetForcePlanTargetStatesAsync(ServerId,
+        var states = await ReadStatesAsync(
             new List<ForcePlanTarget> { new(Db, 1, 1), new("Other", 2, 2), new("Old", 3, 3) });
 
         var earlier = states[new ForcePlanTargetKey(Db, 1, 1)];
@@ -748,9 +756,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
     [Fact]
     public async Task Reader_OnAnEmptyStore_ReturnsAnEmptyStateForEachTarget_SoTheProjectionSaysUnknown()
     {
-        var service = new LocalDataService(_duckDb);
         var t = Target();
-        var states = await service.GetForcePlanTargetStatesAsync(ServerId, new[] { t });
+        var states = await ReadStatesAsync(new[] { t });
         var state = Assert.Single(states).Value;
         Assert.True(state.IsEmpty);
 

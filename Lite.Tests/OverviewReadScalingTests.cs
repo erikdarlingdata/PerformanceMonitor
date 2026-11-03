@@ -271,7 +271,6 @@ FROM slots, range(10) b(c) ORDER BY t;
         ("running jobs snapshot time", d => d.GetLatestRunningJobsSnapshotTimeAsync(ServerId)),
         ("anomalous jobs alert read", d => d.GetAnomalousJobsAsync(ServerId, 2)),
         /* #7216: the "newest server_properties row that carries an offset" reads (the anomalous jobs read above joins the same one). */
-        ("server UTC offset", d => d.GetServerUtcOffsetMinutesAsync(ServerId)),
         ("server clock", d => d.GetServerClockAsync(ServerId)),
         ("tempdb card", d => d.GetTempdbSummaryAsync(ServerId)),
         ("database size latest (FinOps)", d => d.GetDatabaseSizeLatestAsync(ServerId)),
@@ -558,7 +557,6 @@ VALUES (1, TIMESTAMP '{now}' - INTERVAL 11 DAY, {ServerId}, 'SRV', 'OldEdition',
         Assert.Equal(5, await data.GetSqlEngineEditionAsync(ServerId));
 
         /* #7216: the offset reads probe the hot table for a non-NULL offset and fall back to the view; every row is archived, so the view answers. */
-        Assert.Equal(-240, await data.GetServerUtcOffsetMinutesAsync(ServerId));
         var clock = await data.GetServerClockAsync(ServerId);
         Assert.NotNull(clock);
         Assert.Equal(-240, clock.OffsetMinutesAt(DateTime.UtcNow));

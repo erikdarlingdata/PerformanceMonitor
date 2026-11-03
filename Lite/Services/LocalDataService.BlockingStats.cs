@@ -36,34 +36,6 @@ public sealed record BlockingDurationStatsPoint(
 public partial class LocalDataService
 {
     /// <summary>
-    /// Whether ANY of the three capture paths behind the blocking-severity read has ever produced a row.
-    /// <para>Both are checked because either can be off on a given server: the XE blocked-process report
-    /// needs its session running, the DMV snapshot needs its collector enabled, and deadlock capture is
-    /// separate from both -- the verdict gates on the blocking AND deadlock series being empty, so leaving
-    /// deadlocks out would call a server clear on blocking capture alone. Probing one would report
-    /// "never captured" for a server capturing fine through the other, and probing neither would let a
-    /// silent capture gap read as a clean bill of health.</para>
-    /// <para>Reads the report and deadlock views directly, not through <see cref="StoredEventCopies"/>: a stored
-    /// copy cannot change whether a row exists.</para>
-    /// </summary>
-    public async Task<bool> HasAnyBlockingCaptureAsync(int serverId)
-    {
-        using var connection = await OpenConnectionAsync();
-        using var command = connection.CreateCommand();
-
-        command.CommandText = @"
-SELECT 1
-WHERE EXISTS (SELECT 1 FROM v_blocked_process_reports WHERE server_id = $1)
-OR    EXISTS (SELECT 1 FROM v_dmv_blocking_snapshots WHERE server_id = $2)
-OR    EXISTS (SELECT 1 FROM v_deadlocks WHERE server_id = $3)";
-
-        command.Parameters.Add(new DuckDBParameter { Value = serverId });
-        command.Parameters.Add(new DuckDBParameter { Value = serverId });
-        command.Parameters.Add(new DuckDBParameter { Value = serverId });
-        return await command.ExecuteScalarAsync() is not null and not DBNull;
-    }
-
-    /// <summary>
     /// Blocking-duration aggregate per minute — the SEVERITY companion to
     /// <see cref="GetBlockingTrendAsync"/>'s count-only trend, built on the SAME XE-preferred / DMV-fallback
     /// source selection so the two reconcile exactly. XE blocked-process reports
