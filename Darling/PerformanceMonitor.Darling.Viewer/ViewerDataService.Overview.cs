@@ -50,7 +50,10 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// </summary>
 public sealed partial class ViewerDataService
 {
-    /// <summary>Latest SQL + other-process CPU for one server (newest ring-buffer sample). $1 server_id.
+    /// <summary>Latest SQL + other-process CPU for one server (newest ring-buffer sample). $1 server_id, $2 the
+    /// freshness cutoff on <c>collection_time</c> (naive UTC, <c>DarlingPgCpuUtilizationReader.Freshness</c> back
+    /// from now) so a reading from a collector that stopped days ago is not shown as current (#7196). The fleet
+    /// card (<c>DarlingFleetReader.FleetCpuSql</c>) carries the same bound, so the two cards agree.
     /// Ordered on <c>collection_time</c> — the hypertable's partition column, which earns TimescaleDB's
     /// ordered ChunkAppend and so touches ONE chunk instead of appending and top-N sorting the server's whole
     /// retained history — with <c>sample_time</c> as the within-batch tiebreak. Carries no time predicate:
@@ -61,6 +64,7 @@ public sealed partial class ViewerDataService
 SELECT sqlserver_cpu_utilization, other_process_cpu_utilization
 FROM v_cpu_utilization_stats
 WHERE server_id = $1
+AND   collection_time >= $2
 ORDER BY collection_time DESC, sample_time DESC
 LIMIT 1";
 
@@ -341,6 +345,10 @@ LIMIT 1";
         {
             command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
             command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+            command.Parameters.Add(new NpgsqlParameter<DateTime>
+            {
+                TypedValue = DateTime.SpecifyKind(nowUtc - DarlingPgCpuUtilizationReader.Freshness, DateTimeKind.Unspecified),
+            });
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             if (await reader.ReadAsync(cancellationToken))
             {
