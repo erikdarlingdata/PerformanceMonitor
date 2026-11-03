@@ -55,6 +55,19 @@ public sealed class RdsPlanIngestor
     /// </summary>
     private readonly RdsCsvlogCarryBook _csvCarry = new();
 
+    /// <summary>
+    /// The plan a stderr portion ended inside, held for the next portion (#7186). The portion call is consume-once, so a
+    /// plan cut at a portion's end was lost: the first half failed to parse and the second half arrived with no header.
+    /// The same carry the deadlock route keeps (#4735), one book per ingestor.
+    /// </summary>
+    private readonly RdsDeadlockCarryBook _planCarry = new();
+
+    /// <summary>
+    /// Where the parsed rows go: null is the real COPY into the store (<see cref="WriteAsync"/>). A test that has no
+    /// store sets it, so a plan that is stored can be counted without one (#7186). Nothing in the service sets it.
+    /// </summary>
+    internal Func<IReadOnlyList<PgPlanCaptureCollector.Row>, CancellationToken, Task<int>>? RowWriter { get; init; }
+
     public RdsPlanIngestor(NpgsqlDataSource postgres, RdsLogSource? logs = null, ILogger? logger = null, RdsResumeStore? resume = null, RdsEndpointVerifier? verifier = null, AwsRoleCredentialCache? roles = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
@@ -172,9 +185,28 @@ public sealed class RdsPlanIngestor
             ? _csvCarry.CarryFor(chunk.Value.Resume.Key, chunk.Value.StartsAtFileStart)
             : (RdsCsvlogCarry.CsvCarry.Empty, null, 0, null);
 
-        var (written, csvRecordsDiscarded, forgedCaptures, nextCarry) = await StoreAsync(
+        var (heldPlan, planKey, planFileName, abandonedPlan) = pgLogUsesCsvlog
+            ? (string.Empty, null, null, string.Empty)
+            : _planCarry.CarryFor(chunk.Value.Resume.Key);
+
+        if (abandonedPlan.Length > 0)
+        {
+            /* A plan held for a log file that was not read to its end, whose own last portion never came (RDS stopped
+               listing it): nothing can finish it, and Commit replaces it when the carry moves to this file. It is not
+               stored, as an unfinished plan has no complete JSON to parse, but the loss is logged so it is visible (#7186). */
+            _logger?.LogDebug(
+                "RDS plan log for {Server}: a plan held for a log file that was not read to its end can never be "
+                + "finished; dropping it as the read moves on to {File} (#7186)",
+                storageName, planFileName);
+        }
+
+        /* A chunk of a file that is no longer the newest and has nothing more pending is that file's last: a plan it
+           ends inside can never be finished. */
+        var moreCanArrive = !chunk.Value.ReadAgain || chunk.Value.MoreAvailable;
+
+        var (written, csvRecordsDiscarded, forgedCaptures, nextCarry, nextPlan) = await StoreAsync(
             serverId, storageName, chunk.Value.Text, pgLogUsesCsvlog, carry, chunk.Value.MoreAvailable,
-            cancellationToken);
+            heldPlan, moreCanArrive, cancellationToken);
 
         /* THE MARKER MOVES HERE AND NOWHERE ELSE — the same order, and for the same reason, as
            RdsDeadlockIngestor (#3008). Reaching this line means everything the chunk held is either in the
@@ -193,9 +225,21 @@ public sealed class RdsPlanIngestor
             csvRecordsDiscarded += _csvCarry.Commit(carryKey, currentFileName, nextCarry, droppedByRotation);
         }
 
+        /* The held plan moves with the marker, and only when it advanced: on a replay the same chunk comes back, and
+           holding its tail twice would glue it onto itself (#7186). */
+        if (planKey is not null && resumeAdvanced)
+        {
+            _planCarry.Commit(planKey, planFileName, nextPlan);
+        }
+
         /* #4708: the position is saved AFTER the chunk's rows are stored and the in-process position has moved, never
            before, so a crash between the two re-reads a window (rows dedupe on their identity hash) rather than
-           resuming past one. */
+           resuming past one.
+
+           Saved on every pass, also while a plan is held (#7186). This follows the csvlog carry's rule, not
+           RdsDeadlockIngestor's. A deadlock is rarely cut at a portion end, but on a dense auto_explain stderr log nearly
+           every portion ends inside a plan. Holding the position back would then stop it advancing, and a restart would
+           read hours of portions again. The held plan lives in memory only, so a restart loses at most that one plan. */
         if (_resume is not null)
         {
             await _resume.SaveAsync(serverId, kind, chunk.Value.Resume, cancellationToken);
@@ -211,25 +255,28 @@ public sealed class RdsPlanIngestor
     /// threshold was crossed in — is a legitimate zero that loses nothing, and every way it can FAIL leaves
     /// via an exception rather than a zero the caller would have to tell apart from those.
     /// </summary>
-    private async Task<(int Written, int CsvRecordsDiscarded, int ForgedCaptures, RdsCsvlogCarry.CsvCarry NextCarry)> StoreAsync(
+    private async Task<(int Written, int CsvRecordsDiscarded, int ForgedCaptures, RdsCsvlogCarry.CsvCarry NextCarry, string NextPlan)> StoreAsync(
         int serverId,
         string storageName,
         string text,
         bool pgLogUsesCsvlog,
         RdsCsvlogCarry.CsvCarry carry,
         bool additionalDataPending,
+        string heldPlan,
+        bool moreCanArrive,
         CancellationToken cancellationToken)
     {
         var csvRecordsDiscarded = 0;
         var forgedCaptures = 0;
         var nextCarry = RdsCsvlogCarry.CsvCarry.Empty;
+        var nextPlan = string.Empty;
         List<PgPlanCaptureCollector.Row> rows;
 
         if (pgLogUsesCsvlog)
         {
             if (string.IsNullOrEmpty(text) && string.IsNullOrEmpty(carry.Partial))
             {
-                return (0, 0, 0, carry);
+                return (0, 0, 0, carry, nextPlan);
             }
 
             var portion = RdsCsvlogCarry.ParseCsvPortion(carry, text, additionalDataPending);
@@ -242,25 +289,38 @@ public sealed class RdsPlanIngestor
             {
                 /* A csv portion with no plan in it is the ordinary case on a server whose threshold nothing
                    crossed. Not worth a log line every cycle. */
-                return (0, csvRecordsDiscarded, forgedCaptures, nextCarry);
+                return (0, csvRecordsDiscarded, forgedCaptures, nextCarry, nextPlan);
             }
 
             var written = await WriteAsync(serverId, storageName, rows, cancellationToken);
-            return (written, csvRecordsDiscarded, forgedCaptures, nextCarry);
+            return (written, csvRecordsDiscarded, forgedCaptures, nextCarry, nextPlan);
         }
 
-        if (string.IsNullOrEmpty(text))
+        if (string.IsNullOrEmpty(text) && heldPlan.Length == 0)
         {
-            return (0, csvRecordsDiscarded, forgedCaptures, nextCarry);
+            return (0, csvRecordsDiscarded, forgedCaptures, nextCarry, nextPlan);
         }
 
-        var plans = PgPlanLogParser.Extract(text);
+        /* The held plan goes through Step even when the chunk is empty, because the last chunk of a rotated file is often
+           empty and that is the plan's last chance to be stored (#7186, as #4735 for deadlocks). */
+        var stderrPortion = RdsDeadlockCarry.Step(heldPlan, text, moreCanArrive, PgPlanLogParser.UnfinishedTailStart);
+        nextPlan = stderrPortion.Next;
+
+        if (stderrPortion.StoredUnfinished)
+        {
+            _logger?.LogDebug(
+                "RDS plan log for {Server}: a plan is still unfinished after one more chunk, or nothing more can "
+                + "arrive for it; parsing it as it is (#7186)",
+                storageName);
+        }
+
+        var plans = PgPlanLogParser.Extract(stderrPortion.Text);
 
         if (plans.Count == 0)
         {
             /* A log slab with no plans in it is the ordinary case on a server whose threshold nothing
                crossed. Not worth a log line every cycle. */
-            return (0, csvRecordsDiscarded, forgedCaptures, nextCarry);
+            return (0, csvRecordsDiscarded, forgedCaptures, nextCarry, nextPlan);
         }
 
         rows = new List<PgPlanCaptureCollector.Row>(plans.Count);
@@ -277,7 +337,7 @@ public sealed class RdsPlanIngestor
         }
 
         var stderrWritten = await WriteAsync(serverId, storageName, rows, cancellationToken);
-        return (stderrWritten, csvRecordsDiscarded, forgedCaptures, nextCarry);
+        return (stderrWritten, csvRecordsDiscarded, forgedCaptures, nextCarry, nextPlan);
     }
 
     /// <summary>
@@ -290,6 +350,11 @@ public sealed class RdsPlanIngestor
         IReadOnlyList<PgPlanCaptureCollector.Row> rows,
         CancellationToken cancellationToken)
     {
+        if (RowWriter is { } writeRows)
+        {
+            return await writeRows(rows, cancellationToken);
+        }
+
         var definition = PgPlanCaptureCollector.Instance;
 
         /* Naive UTC, the store's convention for every collector timestamp: the columns are `timestamp`
